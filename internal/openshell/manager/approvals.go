@@ -1148,10 +1148,15 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		}
 		// The feed names the port as the approval does, the reply says what
 		// the reject leaves, and the agent's next hook says the user
-		// declined, not a network error (GAP-0236, GAP-0260).
+		// declined, not a network error (GAP-0236, GAP-0260). Only a
+		// host-port ask is a port on this machine; the egress proxy's ask
+		// (proxyAsk, also local) is a destination outside it (GAP-0415).
 		target := host
-		if local {
+		switch {
+		case local && !proxyAsk:
 			target = fmt.Sprintf("port %d on your machine (%s:%d)", port, host, port)
+		case port > 0:
+			target = fmt.Sprintf("%s:%d", host, port)
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 			Host: host, Port: port, Reason: "rejected", Message: "rejected " + target})

@@ -20,6 +20,8 @@ package manager
 
 import (
 	"net/http"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,5 +154,28 @@ func TestProxyRefusalAsksOnlyWhenTheUserDecides(t *testing.T) {
 				t.Fatalf("asks the user can't answer: %+v", asks)
 			}
 		})
+	}
+}
+
+// GAP-0415: the reject of the egress proxy's ask for a public site called
+// it "port 443 on your machine", the words of a host-port ask: both are
+// asks DefenseClaw raises itself. It names the destination.
+func TestProxyAskRejectNamesTheDestination(t *testing.T) {
+	e, _ := managedEnv(t, func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	proxy := startLiveProxyWith(t, e, func(o *egress.Options) { o.Sink = e.m.EgressSink() })
+	e.live(sandboxapi.CreateRequest{Name: "rjbox"})
+	e.register("rjbox")
+	if status, _ := proxy.connect(t, "rjbox", "example.org:443"); status != http.StatusForbidden {
+		t.Fatalf("CONNECT example.org = %d, want the proxy's refusal", status)
+	}
+	asks := e.waitAsks("rjbox", 1)
+	res, err := e.m.DecideApproval(t.Context(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionReject})
+	if err != nil || !strings.HasPrefix(res.Message, "example.org:443 stays closed to rjbox") || strings.Contains(res.Message, "on your machine") {
+		t.Fatalf("reject = %+v, %v", res, err)
+	}
+	if !slices.ContainsFunc(e.events("rjbox", sandboxapi.ActivityApprovalResolved, ""), func(ev sandboxapi.ActivityEvent) bool {
+		return ev.Message == "rejected example.org:443"
+	}) {
+		t.Fatalf("feed = %+v", e.events("rjbox", sandboxapi.ActivityApprovalResolved, ""))
 	}
 }
