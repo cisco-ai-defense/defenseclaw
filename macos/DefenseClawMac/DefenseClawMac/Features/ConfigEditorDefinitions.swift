@@ -62,7 +62,64 @@ struct ConfigDiffEntry: Identifiable {
     var before: String
     var after: String
     var secret: Bool
+    /// Another writer changed this key on disk while the draft was open, so
+    /// saving replaces their value (GAP-0342).
+    var diskChanged = false
     var id: String { key }
+}
+
+/// config_writer.restart_required: the changed keys the gateway reads once
+/// at start, so a save of only hot-reloaded keys offers plain "Save" and
+/// queues no restart (config_diff.py save_label).
+enum ConfigRestartPolicy {
+    static let restartKeys = [
+        "data_dir", "observability.local.path", "observability.local.judge_bodies_path",
+        "gateway", "guardrail.host", "guardrail.port", "guardrail.enabled", "guardrail.connector",
+        "guardrail.scanner_mode", "guardrail.retain_judge_bodies", "guardrail.hook_self_heal",
+        "guardrail.hook_self_heal_debounce_ms", "claw", "agent", "routing", "plugin_dir",
+        "deployment_mode", "enterprise.profile", "enterprise.network", "enterprise.openshell",
+        "environment", "tenant_id", "workspace_id", "discovery_source",
+        "fleet.mqtt_broker_url", "fleet.mqtt_require_tls", "fleet.ota_key_env", "fleet.emergency_key_env",
+        "fleet.device_key_env", "fleet.mqtt_user_env", "fleet.mqtt_pass_env", "fleet.enabled",
+    ]
+
+    /// The paths in `changed` that need a gateway restart.
+    static func restartRequired(_ changed: [String]) -> [String] {
+        changed.filter { path in
+            // List indices ([0], .0) are not key segments.
+            let segments = path.replacingOccurrences(of: "[", with: ".").replacingOccurrences(of: "]", with: "")
+                .split(separator: ".").map(String.init).filter { Int($0) == nil }
+            if segments.prefix(2) == ["gateway", "watcher"] { return false }
+            if segments.prefix(2) == ["gateway", "config_reload"], segments.count > 2, segments[2] != "mode" {
+                return false
+            }
+            return restartKeys.contains { key in
+                let parts = key.split(separator: ".").map(String.init)
+                return zip(parts, segments).allSatisfy { $0 == "*" || $0 == $1 }
+            }
+        }
+    }
+}
+
+/// tui/panels/setup.py _rebase_config_draft: an open draft moved onto a new
+/// disk generation. Untouched fields show the value now on disk; an edited
+/// field keeps the edit, with the on-disk value as its "before"; an edited
+/// key another writer changed meanwhile is recorded so Review says the save
+/// replaces it; an edit now equal to disk is no longer a change.
+enum ConfigDraftRebase {
+    static func rebase(
+        original: [String: String], edited: [String: String], diskChanged: Set<String>,
+        fresh: [String: String]
+    ) -> (edited: [String: String], diskChanged: Set<String>) {
+        var kept: [String: String] = [:]
+        var changed = diskChanged
+        for (key, after) in edited where after != (original[key] ?? "") {
+            let now = fresh[key] ?? ""
+            if now != (original[key] ?? "") { changed.insert(key) }
+            if after != now { kept[key] = after }
+        }
+        return (kept, Set(changed.filter { kept[$0] != nil }))
+    }
 }
 
 // MARK: - Validation (port of setup_state.validate_config_field)
@@ -530,12 +587,23 @@ enum ConfigEditorCatalog {
         var scanners: [ConfigEditorField] = [
             .init(label: ".. Skill Scanner ..", key: "", kind: .header),
             .init(label: "Binary", key: "scanners.skill_scanner.binary", hint: "Path/name of skill-scanner executable."),
+            // scanner/settings.py POLICY_PRESETS (1.0.x): "none" is retired.
             .init(label: "Policy", key: "scanners.skill_scanner.policy", kind: .choice,
-                  options: ["strict", "balanced", "permissive", "none"], hint: "Skill scanner policy."),
+                  options: ["strict", "balanced", "permissive", "low-noise", "quiet"],
+                  hint: "Skill scanner policy (recommended: quiet with the LLM judge)."),
+            .init(label: "Block At", key: "scanners.skill_scanner.fail_on_severity", kind: .choice,
+                  options: ["", "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"],
+                  hint: "Findings at or above this severity block (empty: HIGH)."),
+            .init(label: "Review From", key: "scanners.skill_scanner.review_queue_min", kind: .choice,
+                  options: ["", "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"],
+                  hint: "Findings from here up to Block At go to review (empty: MEDIUM)."),
             .init(label: "Lenient", key: "scanners.skill_scanner.lenient", kind: .bool,
                   hint: "Tolerate malformed skills (off: fail them)."),
             .init(label: "Use LLM", key: "scanners.skill_scanner.use_llm", kind: .bool,
-                  hint: "Enable LLM-assisted classification."),
+                  hint: "Run the LLM judge (recommended)."),
+            .init(label: "Judge Source", key: "scanners.skill_scanner.judge_source", kind: .choice,
+                  options: ["", "inherit", "override"],
+                  hint: "inherit: the top-level llm block; override: the LLM override below."),
             .init(label: "LLM Consensus Runs", key: "scanners.skill_scanner.llm_consensus_runs", kind: .int,
                   hint: "Number of LLM votes."),
             .init(label: "Use Behavioral", key: "scanners.skill_scanner.use_behavioral", kind: .bool,
@@ -549,6 +617,8 @@ enum ConfigEditorCatalog {
                   hint: "Env var NAME for the VirusTotal key (store it with defenseclaw keys set)."),
             .init(label: "Use AI Defense", key: "scanners.skill_scanner.analyzers.aidefense.enabled", kind: .bool,
                   hint: "Chain Cisco AI Defense scan."),
+            .init(label: "Use OSV", key: "scanners.skill_scanner.analyzers.osv.enabled", kind: .bool,
+                  hint: "Optional: check dependencies on OSV.dev."),
         ]
         scanners += llmOverrideFields("Skill Scanner", "scanners.skill_scanner.llm")
         scanners += [

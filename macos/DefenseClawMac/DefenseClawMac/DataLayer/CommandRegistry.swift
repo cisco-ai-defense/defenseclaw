@@ -30,6 +30,39 @@ enum ShellQuoting {
     }
 }
 
+/// `keys set` secret transport. Runtime 1.0.0+ documents `--value-stdin`
+/// ("read the value from the first line of stdin; for scripts and the TUI")
+/// as the non-interactive path; without it the CLI falls into click's hidden
+/// prompt, which reads /dev/tty when the app has a controlling terminal and
+/// only falls back to the stdin pipe otherwise. The flag is appended only when
+/// the installed runtime is known to accept it, so a pre-1.0 runtime keeps
+/// the prompt-fallback path that works for it.
+enum SecretStandardInputTransport {
+    static let flag = "--value-stdin"
+
+    static func supportsValueStandardInput(runtimeVersion: String?) -> Bool {
+        guard let runtimeVersion,
+              let major = runtimeVersion.split(separator: ".").first.flatMap({ Int($0) })
+        else { return false }
+        return major >= 1
+    }
+
+    /// The argv to run for a command whose secret travels over stdin.
+    static func arguments(
+        _ arguments: [String],
+        binary: String,
+        standardInput: String?,
+        runtimeVersion: String?
+    ) -> [String] {
+        guard standardInput != nil, binary == "defenseclaw",
+              arguments.prefix(2) == ["keys", "set"],
+              !arguments.contains(flag),
+              supportsValueStandardInput(runtimeVersion: runtimeVersion)
+        else { return arguments }
+        return arguments + [flag]
+    }
+}
+
 struct CommandDefinition: Identifiable, Hashable, Sendable {
     let title: String
     let binary: String

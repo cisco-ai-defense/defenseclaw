@@ -84,6 +84,7 @@ struct AlertsView: View {
                     title: appState.alertLoadError == nil ? "No alerts" : "Alerts unavailable",
                     message: appState.alertLoadError != nil ? "The runtime could not provide a current alert snapshot." : appState.unackedAlerts.isEmpty
                         ? "No unacknowledged security findings. New blocks, scan findings, and egress bypasses appear here live."
+                            + (detectionOnlyLine.isEmpty ? "" : " \(detectionOnlyLine).")
                         : "No alerts match the current filters.",
                     systemImage: "checkmark.shield"
                 )
@@ -345,6 +346,13 @@ struct AlertsView: View {
                     StatCard(title: sev.rawValue, value: "\(count)", tint: Cisco.severityColor(sev))
                 }
             }
+            if !detectionOnlyLine.isEmpty {
+                // tui/panels/alerts.py: rules that matched calls which then
+                // ran are not alerts, and the panel says there were some.
+                Text(detectionOnlyLine)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             ConnectorFilterChip(names: appState.activeConnectorNames, selection: $state.connectorFilter)
             HStack {
                 FilterChipRow(
@@ -366,6 +374,18 @@ struct AlertsView: View {
             }
         }
         .padding(12)
+    }
+
+    /// "N detection-only findings (24 h) not listed: …", or "".
+    private var detectionOnlyLine: String {
+        Self.detectionOnlyLine(appState.detectionOnlyFindings24h)
+    }
+
+    static func detectionOnlyLine(_ count: Int) -> String {
+        guard count > 0 else { return "" }
+        let what = count == 1 ? "1 detection-only finding" : "\(count) detection-only findings"
+        return "\(what) (24 h) not listed: a rule matched but could not decide the call; "
+            + "defenseclaw audit export --since 24h lists them"
     }
 
     private func isBlock(_ row: AlertRow) -> Bool {

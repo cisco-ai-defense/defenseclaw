@@ -162,9 +162,12 @@ enum ConnectorOnboarding {
         head += [
             "--scanner-mode", scannerMode,
             llmJudge ? "--with-judge" : "--no-judge",
-            "--fail-mode", failMode,
         ]
+        // Fail mode and HITL apply to the action profile only (TUI
+        // FirstRunPanelModel.args): an observe connector keeps failing open
+        // and the CLI preserves any saved setting.
         if profile == "action" {
+            head += ["--fail-mode", failMode]
             head.append(humanApproval ? "--human-approval" : "--no-human-approval")
             if humanApproval { head += ["--hilt-min-severity", hiltSeverity] }
         }
