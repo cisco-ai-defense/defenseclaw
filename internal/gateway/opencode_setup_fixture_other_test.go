@@ -14,7 +14,7 @@ import (
 func prepareOpenCodeSetupAuthorityFixture(_ *testing.T, dataDir string) connector.SetupOpts {
 	return connector.SetupOpts{
 		DataDir:        dataDir,
-		AgentVersion:   "1.18.19",
-		HookContractID: "opencode-hooks-v1",
+		AgentVersion:   "2.1.4",
+		HookContractID: "opencode-hooks-v2",
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"time"
 )
@@ -21,6 +22,59 @@ var privateUnixNPMPackages = map[string]string{
 	"claudecode": "@anthropic-ai/claude-code",
 	"copilot":    "@github/copilot",
 	"codex":      "@openai/codex",
+	// OpenCode: only the V1 package, which cannot run the V2 plugin
+	// (opencode_v1.go). The version probe and enrollment judge V2 copies.
+	"opencode": openCodeV1Package,
+}
+
+// privateUnixAdminPrefixPackages are the packages the scan also looks for
+// in every administrator prefix below /opt (unixAdminPrefixRoots), not only
+// in the prefixes enterprise.enrollment.agent_prefixes names: OpenCode V1
+// in /opt/<name> runs unchecked for every account that has it on its PATH,
+// so it is found the way the gateway finds OpenCode (rel-1-0-6 GAP-0037,
+// GAP-0040). Only package metadata is read.
+var privateUnixAdminPrefixPackages = map[string]string{"opencode": openCodeV1Package}
+
+// privateUnixAdminPrefixMax bounds the folders read below each
+// administrator prefix root.
+const privateUnixAdminPrefixMax = 64
+
+// privateUnixAdminPrefixes are the folders directly below each
+// administrator prefix root, at most privateUnixAdminPrefixMax of each; a
+// link is not followed.
+func privateUnixAdminPrefixes() []string {
+	var out []string
+	for _, root := range unixAdminPrefixRoots {
+		f, err := os.Open(root)
+		if err != nil {
+			continue
+		}
+		names, _ := f.Readdirnames(privateUnixAdminPrefixMax)
+		_ = f.Close()
+		sort.Strings(names)
+		for _, name := range names {
+			dir := filepath.Join(root, name)
+			if info, err := os.Lstat(dir); err == nil && info.IsDir() {
+				out = append(out, dir)
+			}
+		}
+	}
+	return out
+}
+
+// unixAdminPrefixPackagePath reports whether path is the folder of an
+// administrator-prefix package the scan reads (privateUnixAdminPrefixPackages).
+func unixAdminPrefixPackagePath(path string) bool {
+	for _, root := range unixAdminPrefixRoots {
+		for _, pkg := range privateUnixAdminPrefixPackages {
+			for _, modules := range []string{filepath.Join("lib", "node_modules"), "node_modules"} {
+				if ok, _ := filepath.Match(filepath.Join(root, "*", modules, filepath.FromSlash(pkg)), path); ok {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // privateUnixCaskTokens are the Homebrew casks that install each
@@ -117,6 +171,13 @@ func discoverUnixPrivateAgentInstalls(ctx context.Context, home string, wanted [
 	}
 	machine := privateInstallMachinePrefixes()
 	roots = append(roots, machine...)
+	var adminPrefixes []string
+	for _, connector := range wanted {
+		if privateUnixAdminPrefixPackages[connector] != "" {
+			adminPrefixes = privateUnixAdminPrefixes()
+			break
+		}
+	}
 	for _, connector := range wanted {
 		if ctx.Err() != nil {
 			scan.skipAll(wanted, PrivateInstallSkippedHome)
@@ -126,6 +187,9 @@ func discoverUnixPrivateAgentInstalls(ctx context.Context, home string, wanted [
 		// Volta stores each package in its own image, rather than directly
 		// under tools/image. A supported selected image can hide an old one.
 		connectorRoots := append(append([]string{}, roots...), filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg)))
+		if privateUnixAdminPrefixPackages[connector] == pkg {
+			connectorRoots = append(connectorRoots, adminPrefixes...)
+		}
 		for _, root := range connectorRoots {
 			if ctx.Err() != nil {
 				scan.skipAll(wanted, PrivateInstallSkippedHome)
@@ -384,9 +448,13 @@ func unixExecutableWithin(dir string, depth int) bool {
 
 // UnixPrivateInstallPathAllowed reports whether a copy the per-user worker
 // names lies where the scan looks: inside the account's home, in a machine
-// prefix or in the shared Linuxbrew prefix. The root parent turns any other
-// path into an incomplete scan instead of recording it.
+// prefix, in the shared Linuxbrew prefix, or an administrator-prefix package
+// (OpenCode V1 below /opt). The root parent turns any other path into an
+// incomplete scan instead of recording it.
 func UnixPrivateInstallPathAllowed(home, path string) bool {
+	if unixAdminPrefixPackagePath(path) {
+		return true
+	}
 	roots := append([]string{filepath.Clean(home), "/home/linuxbrew/.linuxbrew"}, privateInstallMachinePrefixes()...)
 	for _, root := range roots {
 		if pathInside(root, path) {

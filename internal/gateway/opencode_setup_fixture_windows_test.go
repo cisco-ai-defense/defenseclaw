@@ -31,7 +31,7 @@ func prepareOpenCodeSetupAuthorityFixture(t *testing.T, dataDir string) connecto
 		t.Fatalf("create OpenCode fixture package folder: %v", err)
 	}
 	executable := filepath.Join(packageDir, "opencode.exe")
-	body := []byte("MZ OpenCode 1.18.19 gateway fixture")
+	body := []byte("MZ OpenCode 2.1.4 gateway fixture")
 	if err := os.WriteFile(executable, body, 0o700); err != nil {
 		t.Fatalf("write OpenCode fixture executable: %v", err)
 	}
@@ -45,8 +45,8 @@ func prepareOpenCodeSetupAuthorityFixture(t *testing.T, dataDir string) connecto
 				"connector":          "opencode",
 				"source":             "setup-selected",
 				"executable":         executable,
-				"raw_version":        "1.18.19",
-				"normalized_version": "1.18.19",
+				"raw_version":        "2.1.4",
+				"normalized_version": "2.1.4",
 				"sha256":             fmt.Sprintf("%x", digest[:]),
 				"selected_at":        now.Format(time.RFC3339),
 				"expires_at":         now.Add(15 * time.Minute).Format(time.RFC3339),
@@ -65,8 +65,8 @@ func prepareOpenCodeSetupAuthorityFixture(t *testing.T, dataDir string) connecto
 	t.Cleanup(func() { connector.OpenCodeExecutablePathOverride = previous })
 	return connector.SetupOpts{
 		DataDir:         dataDir,
-		AgentVersion:    "1.18.19",
+		AgentVersion:    "2.1.4",
 		AgentExecutable: executable,
-		HookContractID:  "opencode-hooks-v1",
+		HookContractID:  "opencode-hooks-v2",
 	}
 }

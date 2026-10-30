@@ -3,7 +3,7 @@
 
 # Standalone uninstall and the two directories a standalone install adds under
 # InstallRoot: <InstallRoot>\ipc\ (the sensor helper's AF_UNIX socket, a
-# reparse file on Windows) and <InstallRoot>\share\opencode\defenseclaw.js
+# reparse file on Windows) and <InstallRoot>\share\opencode\index.js
 # (the managed OpenCode plugin the guardian installs from the payload). The
 # install-tree walk must accept exactly those directories and their expected
 # leaves, removal after the services are gone must delete only them (refusing
@@ -73,7 +73,7 @@ try {
             function New-Plugin([hashtable]$Layout) {
                 $directory = [IO.Path]::Combine($Layout.InstallRoot, 'share', 'opencode')
                 [void][IO.Directory]::CreateDirectory($directory)
-                $plugin = [IO.Path]::Combine($directory, 'defenseclaw.js')
+                $plugin = [IO.Path]::Combine($directory, 'index.js')
                 [IO.File]::WriteAllText($plugin, '// defenseclaw-managed-opencode-plugin v1')
                 return $plugin
             }
@@ -189,6 +189,34 @@ try {
             Test-Accepted 'tree without the plugin' $layout
             # Removal with nothing installed is a no-op.
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $layout
+
+            # Uninstall after a V1 upgrade can reach the pre-finalization
+            # boundary with the old artifact alone or both generations. Both
+            # are accepted there and must be removed before retirement.
+            foreach ($withCurrentPlugin in @($false, $true)) {
+                $upgraded = New-TestLayout ('plugin-v1-upgrade-' + $withCurrentPlugin)
+                $upgradePaths = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $upgraded
+                [void][IO.Directory]::CreateDirectory([string]$upgradePaths.PluginDirectory)
+                if ($withCurrentPlugin) { [void](New-Plugin $upgraded) }
+                [IO.File]::WriteAllText([string]$upgradePaths.LegacyPluginPath, '// old managed bridge')
+                Test-Accepted 'standalone tree with the legacy managed plugin' $upgraded
+                try {
+                    Assert-DefenseClawInstallTreeRetirementState -Layout $upgraded -AllowUnretiredAcls
+                }
+                catch {
+                    $failures.Add("committed install-tree check refused the legacy OpenCode plugin before finalization: $($_.Exception.Message)")
+                }
+                $retiredAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist `
+                    -Layout $upgraded `
+                    -RetiredRoot $upgraded.InstallRoot
+                if ([string]$upgradePaths.LegacyPluginPath -in $retiredAllowlist.files) {
+                    $failures.Add('the retired tree permits the legacy managed plugin after finalization')
+                }
+                Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $upgraded
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $upgradePaths.ShareDirectory) {
+                    $failures.Add('the legacy managed OpenCode artifact survived uninstall')
+                }
+            }
 
             # GAP-0270: a 1.0.2 standalone install left lib\defenseclaw for
             # the Fleet compiler this release no longer installs. Uninstall
@@ -618,7 +646,7 @@ try {
 
             $nested = New-TestLayout 'nested'
             [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($nested.ManagedIPCDirectory, 'sensor-helper.sock'))
-            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($nested.InstallRoot, 'share', 'opencode', 'defenseclaw.js'))
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($nested.InstallRoot, 'share', 'opencode', 'index.js'))
             Test-Refused 'directory named like the socket' { Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $nested } 'unexpected managed IPC content'
             Test-Refused 'directory named like the plugin' { Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $nested } 'not a plain file'
 
@@ -630,12 +658,17 @@ try {
                 Test-Refused 'symbolic link named like the socket (walk)' { Assert-DefenseClawManagedInstallTree -Layout $linkedIPC } 'reparse point'
                 Test-Refused 'symbolic link named like the socket (removal)' { Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $linkedIPC } 'unexpected managed IPC content'
             }
-            $linkedPlugin = New-TestLayout 'linked-plugin'
-            $linkedDirectory = [IO.Path]::Combine($linkedPlugin.InstallRoot, 'share', 'opencode')
-            [void][IO.Directory]::CreateDirectory($linkedDirectory)
-            if (New-TestLink ([IO.Path]::Combine($linkedDirectory, 'defenseclaw.js')) $target) {
-                Test-Refused 'symbolic link named like the plugin (walk)' { Assert-DefenseClawManagedInstallTree -Layout $linkedPlugin } 'reparse point'
-                Test-Refused 'symbolic link named like the plugin (removal)' { Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $linkedPlugin } 'not a plain file'
+            foreach ($name in @('index.js', 'defenseclaw.js')) {
+                $linkedPlugin = New-TestLayout ('linked-plugin-' + $name)
+                $linkedDirectory = [IO.Path]::Combine($linkedPlugin.InstallRoot, 'share', 'opencode')
+                [void][IO.Directory]::CreateDirectory($linkedDirectory)
+                if (New-TestLink ([IO.Path]::Combine($linkedDirectory, $name)) $target) {
+                    Test-Refused 'symbolic link named like the plugin (walk)' { Assert-DefenseClawManagedInstallTree -Layout $linkedPlugin } 'reparse point'
+                    Test-Refused 'symbolic link named like the plugin (committed check)' {
+                        Assert-DefenseClawInstallTreeRetirementState -Layout $linkedPlugin -AllowUnretiredAcls
+                    } 'reparse point'
+                    Test-Refused 'symbolic link named like the plugin (removal)' { Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $linkedPlugin } 'not a plain file'
+                }
             }
             if (-not [IO.File]::Exists($target)) {
                 $failures.Add('link target outside the tree was removed')

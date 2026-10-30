@@ -368,7 +368,7 @@ func TestDiscoverWindowsStandalonePerUserAgentVersions(t *testing.T) {
 	}
 	npm := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules")
 	writeWindowsAgentPackageJSON(t, filepath.Join(npm, "@github", "copilot"), "1.0.88")
-	writeWindowsAgentPackageJSON(t, filepath.Join(npm, "opencode-ai"), "1.18.32")
+	writeWindowsAgentPackageJSON(t, filepath.Join(npm, "@opencode", "cli"), "2.1.4")
 	writeWindowsAgentPackageJSON(t, filepath.Join(npm, "@ampcode", "cli"), "0.0.1790438457-ge61352")
 	devin := filepath.Join(home, "AppData", "Local", "devin", "cli", "_versions")
 	write(filepath.Join(devin, "3000.4.25", "bin", "devin.exe"), "MZ")
@@ -383,7 +383,7 @@ func TestDiscoverWindowsStandalonePerUserAgentVersions(t *testing.T) {
 		"I0926 server.go] Language server version: 1.2.9\nI0926 server.go] Language server version: 1.2.11\n")
 	for name, want := range map[string]string{
 		"copilot":     "1.0.88",
-		"opencode":    "1.18.32",
+		"opencode":    "2.1.4",
 		"amp":         "0.0.1790438457-ge61352",
 		"devin":       "3000.11.3",
 		"hermes":      "0.21.5",

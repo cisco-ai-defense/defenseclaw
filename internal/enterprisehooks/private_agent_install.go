@@ -463,11 +463,13 @@ func privateInstallConnectors(names []string, known func(string) bool) []string 
 // bin/claude.exe (from 2.1.113), Codex's bin/codex.js, and Copilot's
 // npm-loader.js (index.js in early releases). The targets of the package's
 // own "bin" field count too: npm links those. A package folder with none of
-// them is leftover metadata, not a copy the account can run.
+// them is leftover metadata, not a copy the account can run. OpenCode V1
+// (opencode-ai) starts from bin/opencode.
 var privateNPMEntryPoints = map[string][]string{
 	"claudecode": {"cli.js", "bin/claude.exe"},
 	"codex":      {"bin/codex.js"},
 	"copilot":    {"npm-loader.js", "index.js"},
+	"opencode":   {"bin/opencode"},
 }
 
 // privateNPMMaxBinTargets bounds the "bin" targets read from one package.

@@ -573,9 +573,13 @@ func inspectToolTrustedShellCWD(dir string) string {
 // short-circuits there exactly as the message lane does; native hook
 // callers reach this through inspectToolPolicy with context.Background().
 func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
+	actionTool := req.Tool
+	if strings.EqualFold(strings.TrimSpace(req.Connector), "opencode") {
+		actionTool = agentHookTrustedActionTool(req.Connector, req.Tool, "")
+	}
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
-			Tool:       req.Tool,
+			Tool:       actionTool,
 			Args:       req.Args,
 			ActiveHome: hookActiveHome(ctx),
 		},

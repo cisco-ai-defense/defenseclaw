@@ -158,11 +158,13 @@ func opencodePresent(opts Options) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("parse OpenCode managed config: %w", err)
 	}
-	value, _ := doc.get("plugin")
-	list, _ := value.([]any)
-	for _, item := range list {
-		if opencodeEntryIsOwned(opts, item) {
-			return true, nil
+	for _, key := range []string{"plugin", "plugins"} {
+		value, _ := doc.get(key)
+		list, _ := value.([]any)
+		for _, item := range list {
+			if opencodeEntryIsOwned(opts, item) {
+				return true, nil
+			}
 		}
 	}
 	return false, nil

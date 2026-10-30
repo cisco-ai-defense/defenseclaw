@@ -23,10 +23,8 @@ import { createInterface } from "node:readline";
 ` + pluginInstallFailureFetch + `
 const notices = [];
 const href = pathToFileURL(process.argv[1]).href;
-const plugin = await (await import(href)).DefenseClaw({ directory: "", client: { tui: { showToast: async (arg) => {
-  notices.push(arg && arg.body ? arg.body.message : "");
-  return { data: true };
-} } } });
+console.warn = (message) => notices.push(String(message));
+const plugin = await fixtureBridge(await import(href), { directory: "/work/repo" });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log("harness-ready");
 let call = 0;

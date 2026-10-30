@@ -932,6 +932,7 @@ _SPECS: dict[str, _AgentSpec] = {
         ),
         "opencode",
         ("--version",),
+        binary_names=("opencode", "opencode2"),
     ),
     "amp": _AgentSpec(
         (
@@ -2325,7 +2326,7 @@ def _version_for_binary(
         os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
     ):
         timeout = 8.0
-    elif binary_name == "opencode":
+    elif binary_name in {"opencode", "opencode2"}:
         # The official WinGet binary is a packaged Bun executable. Windows
         # Defender inspection routinely makes its otherwise trivial
         # ``--version`` probe take 6-8 seconds on first and subsequent runs.

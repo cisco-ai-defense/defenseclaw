@@ -422,13 +422,11 @@ def test_windows_opencode_exact_image_rejects_lookalike_reparse_and_unsafe_acl(
 @pytest.mark.parametrize(
     ("reported", "accepted"),
     [
-        ("opencode 1.18.10", True),
-        ("opencode 1.18.11", True),
-        ("opencode 1.18.19", True),
-        ("opencode 1.18.9", False),
-        ("opencode 1.18.20", True),
-        ("opencode 1.18.31", True),
-        ("opencode 1.19.0", True),
+        ("opencode 1.18.33", False),
+        ("opencode 2.0.0", True),
+        ("opencode 2.1.4", True),
+        ("opencode 2.2.0", True),
+        ("opencode 3.0.0", False),
     ],
 )
 def test_windows_opencode_selection_enforces_validated_version_floor(
@@ -1133,17 +1131,30 @@ def test_windows_hermes_managed_executable_matches_the_gateway_order(tmp_path: P
     assert pick(str(local)) == str(venv)
 
 
-def test_windows_opencode_npm_image_needs_the_opencode_ai_package(tmp_path: Path, monkeypatch) -> None:
+def test_windows_opencode_npm_image_needs_the_v2_package(tmp_path: Path, monkeypatch) -> None:
     # npm OpenCode is admitted like the gateway admits it: the exact native
     # image under the user's npm root, whose package.json names opencode-ai.
     roaming = tmp_path / "Roaming"
     monkeypatch.setattr(agent_selection, "_windows_known_folder", lambda _identifier: str(roaming))
     image = Path(agent_selection._windows_opencode_npm_executable())
-    assert image == roaming / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
+    assert image == roaming / "npm" / "node_modules" / "@opencode" / "cli" / "bin" / "opencode.exe"
     image.parent.mkdir(parents=True)
     image.write_bytes(b"native")
     manifest = image.parent.parent / "package.json"
     manifest.write_text('{"name": "opencode-lookalike"}', encoding="utf-8")
     assert not agent_selection._opencode_npm_package_identity_verified(str(image))
-    manifest.write_text('{"name": "opencode-ai"}', encoding="utf-8")
+    manifest.write_text('{"name": "@opencode/cli"}', encoding="utf-8")
     assert agent_selection._opencode_npm_package_identity_verified(str(image))
+
+
+def test_windows_opencode_v2_npm_image_needs_scoped_package_identity(tmp_path: Path, monkeypatch) -> None:
+    roaming = tmp_path / "Roaming"
+    monkeypatch.setattr(agent_selection, "_windows_known_folder", lambda _identifier: str(roaming))
+    image = Path(agent_selection._windows_opencode_npm_executable())
+    assert image == roaming / "npm" / "node_modules" / "@opencode" / "cli" / "bin" / "opencode.exe"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"native")
+    manifest = image.parent.parent / "package.json"
+    for name, allowed in [("opencode-ai", False), ("@opencode/lookalike", False), ("@opencode/cli", True)]:
+        manifest.write_text(json.dumps({"name": name}))
+        assert agent_selection._opencode_npm_package_identity_verified(str(image)) is allowed

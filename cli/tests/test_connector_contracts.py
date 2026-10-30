@@ -847,15 +847,15 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")
         self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
-    def test_opencode_11819_is_exactly_supported(self) -> None:
-        resolved = resolve_connector_contract("opencode", "opencode 1.18.19")
+    def test_opencode_v2_is_exactly_supported(self) -> None:
+        resolved = resolve_connector_contract("opencode", "opencode 2.1.4")
         self.assertEqual(resolved.status, STATUS_KNOWN)
-        self.assertEqual(resolved.contract.contract_id, "opencode-hooks-v1")
+        self.assertEqual(resolved.contract.contract_id, "opencode-hooks-v2")
 
         with (
             patch(
                 "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-                return_value=_discovery("opencode", installed=True, version="opencode 1.18.19"),
+                return_value=_discovery("opencode", installed=True, version="opencode 2.1.4"),
             ),
             patch(
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",
@@ -874,14 +874,24 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.save_calls, 1)
         self.assertEqual(self.app.cfg.guardrail.connector, "opencode")
 
-    def test_opencode_version_guidance_distinguishes_old_from_new(self) -> None:
-        old = _connector_contract_upgrade_guidance("opencode", "OpenCode", "1.18.9")
-        current = _connector_contract_upgrade_guidance("opencode", "OpenCode", "1.19.0")
+    def test_opencode_guidance_only_offers_v2(self) -> None:
+        for version in ("1.18.9", "1.19.0", "3.0.0"):
+            guidance = _connector_contract_upgrade_guidance("opencode", "OpenCode", version)
+            self.assertIn("Install OpenCode V2", guidance)
+            self.assertIn("@opencode/cli@2", guidance)
 
-        self.assertIn("Upgrade OpenCode", old)
-        self.assertIn("older than the validated minimum", old)
-        self.assertNotIn("Upgrade OpenCode", current)
-        self.assertIn("newer than DefenseClaw's validated range", current)
+    def test_opencode_v1_is_refused_even_with_the_drift_override(self) -> None:
+        for mode in ("observe", "action"):
+            with (
+                patch("defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                      return_value=_discovery("opencode", installed=True, version="1.18.33")),
+                patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="linux"),
+                patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "1"}),
+            ):
+                ok = _apply_hook_connector_setup(self.app, connector="opencode", mode=mode, restart=False)
+            self.assertFalse(ok)
+            self.assertEqual(self.save_calls, 0)
+            self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
     def test_opencode_below_floor_is_refused_before_save_and_roster_mutation(self) -> None:
         with (

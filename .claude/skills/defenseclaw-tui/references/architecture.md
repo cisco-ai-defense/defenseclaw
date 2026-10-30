@@ -53,6 +53,11 @@ it with generation checks. Any direct `_render_chrome` bumps
 Widget ids: `#header #tabs #body-scroll #body #panel-table #detail-panel
 #<panel>-controls #command-input #command-palette #command-progress #hint #status #toasts`.
 
+The acknowledgement path uses `_set_widget_hidden` for visibility. The hidden
+selectors affect only the node, so it matches styles for that node without
+restyling all descendants of metrics and control bars. If a future hidden
+selector affects descendants, use Textual's normal recursive style update there.
+
 ## Key routing (`DefenseClawTUI.on_key`)
 
 1. A modal is open (`len(self.screen_stack) > 1`): the modal owns keys. The one

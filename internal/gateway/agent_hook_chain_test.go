@@ -2328,7 +2328,7 @@ func openCodeToolEvent(event, session, invocation, command string) map[string]in
 		"hook_event_name": event,
 		"session_id":      session,
 		"tool_call_id":    invocation,
-		"tool_name":       "bash",
+		"tool_name":       "shell",
 		"tool_input":      map[string]interface{}{"command": command},
 	}
 }
@@ -2336,8 +2336,8 @@ func openCodeToolEvent(event, session, invocation, command string) map[string]in
 func openCodeToolResult(session, invocation, command string) map[string]interface{} {
 	payload := openCodeToolEvent("tool.execute.after", session, invocation, command)
 	payload["tool_response"] = map[string]interface{}{
-		"output":   "",
-		"metadata": map[string]interface{}{"exit": 0},
+		"opencode_v2_status": "completed",
+		"output":             map[string]interface{}{"output": "", "exit": 0},
 	}
 	return payload
 }

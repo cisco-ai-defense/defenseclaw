@@ -20,7 +20,7 @@ import { basePath } from '@/lib/site';
 type ConnectorRow = {
   id: string;
   label: string;
-  windowsSupport: 'supported' | 'degraded' | 'unsupported';
+  windowsSupport: 'supported' | 'preview' | 'degraded' | 'unsupported';
   windowsNote: string;
   family: 'proxy' | 'hooks';
   toolInspection: string;
@@ -399,6 +399,10 @@ export function buildCommand(
   const lines: string[] = ['defenseclaw setup guardrail', '--non-interactive'];
   const preExports: string[] = [];
   const warnings: string[] = [];
+
+  if (shell === 'powershell' && connectorRow?.windowsSupport === 'preview') {
+    warnings.push(`${connectorRow.label} is a native Windows preview. ${connectorRow.windowsNote}`);
+  }
 
   if (shell === 'powershell' && connectorRow?.windowsSupport === 'degraded') {
     warnings.push(

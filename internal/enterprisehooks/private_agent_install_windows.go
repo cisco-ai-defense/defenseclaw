@@ -62,7 +62,9 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	wanted := privateInstallConnectors(names, func(name string) bool { return name == "claudecode" || name == "codex" || name == "copilot" })
+	wanted := privateInstallConnectors(names, func(name string) bool {
+		return name == "claudecode" || name == "codex" || name == "copilot" || name == "opencode"
+	})
 	if len(wanted) == 0 {
 		return nil
 	}
@@ -108,6 +110,11 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 			return scan.result()
 		}
 		packages := windowsStandaloneNPMPackages[name]
+		if name == "opencode" {
+			// Only OpenCode V1, which cannot run the V2 plugin (opencode_v1.go);
+			// the version probe and enrollment judge V2 copies.
+			packages = []string{openCodeV1Package}
+		}
 		packageRoots := append([]string(nil), roots...)
 		for _, packageName := range packages {
 			// Volta gives each package an image below AppData\Local, outside

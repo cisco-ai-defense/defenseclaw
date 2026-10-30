@@ -130,8 +130,8 @@ func conflictingKeysCases() []conflictingKeysCase {
 	for _, harness := range []struct{ connector, tool, key string }{
 		{"claudecode", "Bash", "Command"},
 		{"claudecode", "Bash", "COMMAND"},
-		{"opencode", "bash", "COMMAND"},
-		{"opencode", "bash", "Command"},
+		{"opencode", "shell", "COMMAND"},
+		{"opencode", "shell", "Command"},
 	} {
 		for _, command := range []struct {
 			text string
@@ -224,9 +224,9 @@ func conflictingKeysProjectedAndAliasCases() []conflictingKeysCase {
 		cases = append(cases, conflictingKeysCase{connector + conflictingKeysControl + name, connector, tool, args, block, rules})
 	}
 	// A case twin of an argument the projection takes out.
-	add("workdir+Workdir", "opencode", "bash", shell(wipe, `"workdir":"{PROJ}"`, `"Workdir":"{PROJ}"`))
-	add("workdir+WORKDIR", "opencode", "bash", shell(wipe, `"workdir":"{PROJ}"`, `"WORKDIR":"{PROJ}"`))
-	add("workdir+Workdir-other", "opencode", "bash", shell(wipe, `"workdir":"{PROJ}"`, `"Workdir":"/tmp"`))
+	add("workdir+Workdir", "opencode", "shell", shell(wipe, `"workdir":"{PROJ}"`, `"Workdir":"{PROJ}"`))
+	add("workdir+WORKDIR", "opencode", "shell", shell(wipe, `"workdir":"{PROJ}"`, `"WORKDIR":"{PROJ}"`))
+	add("workdir+Workdir-other", "opencode", "shell", shell(wipe, `"workdir":"{PROJ}"`, `"Workdir":"/tmp"`))
 	add("working_dir+Working_dir", "kiro", "execute_bash", shell(wipe, `"working_dir":"{PROJ}"`, `"Working_dir":"{PROJ}"`))
 	add("description+Description", "kiro", "execute_bash", shell(wipe, `"description":"d"`, `"Description":"d"`))
 	add("timeout+Timeout", "kiro", "execute_bash", shell(wipe, `"timeout":5000`, `"Timeout":5000`))
@@ -238,7 +238,7 @@ func conflictingKeysProjectedAndAliasCases() []conflictingKeysCase {
 	// A second key ActionFacts reads as the command.
 	for _, harness := range []struct{ connector, tool, workdir string }{
 		{"devin", "exec", "workdir"}, {"kiro", "execute_bash", "working_dir"}, {"hermes", "terminal", "workdir"},
-		{"opencode", "bash", "workdir"}, {"claudecode", "Bash", ""},
+		{"opencode", "shell", "workdir"}, {"claudecode", "Bash", ""},
 	} {
 		add("command+cmd", harness.connector, harness.tool, shell(wipe, `"cmd":"true"`))
 		add("command+cmd-value", harness.connector, harness.tool, shell("true", `"cmd":`+conflictingKeysQuote(wipe)))
@@ -286,7 +286,7 @@ func TestConflictingToolArgumentKeysBlockInActionMode(t *testing.T) {
 // mode records the conservative block as would_block and allows the call.
 func TestConflictingToolArgumentKeysWouldBlockInObserveMode(t *testing.T) {
 	home, project := conflictingKeysHome(t)
-	resp := conflictingKeysHook(t, "observe", "opencode", "bash", home, project, `{"command":"ls -la","COMMAND":"true"}`)
+	resp := conflictingKeysHook(t, "observe", "opencode", "shell", home, project, `{"command":"ls -la","COMMAND":"true"}`)
 	raw, _ := json.Marshal(resp)
 	if resp["action"] == "block" || resp["would_block"] != true ||
 		!strings.Contains(string(raw), conflictingToolArgumentsRuleID) {

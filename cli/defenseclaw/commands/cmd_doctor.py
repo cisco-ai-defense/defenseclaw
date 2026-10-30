@@ -9220,6 +9220,38 @@ def _cursor_health_row(document: str) -> dict[str, object] | None:
     return _connector_health_row(document, "cursor")
 
 
+_OPENCODE_V1_REMEDY = (
+    "install OpenCode V2 (`npm uninstall -g opencode-ai && npm install -g @opencode/cli@2`), "
+    "then run `opencode service restart`"
+)
+
+
+def _opencode_v1_problem(cfg) -> str:
+    """Why the registered OpenCode plugin protects nothing: the account runs OpenCode V1.
+
+    The V2 plugin file stays after OpenCode is downgraded, and OpenCode V1
+    loads it without ever registering its hooks, so every tool call runs
+    unchecked. That is a failure, not a skipped row (rel-1-0-6 GAP-0069).
+    Empty when the installed OpenCode is V2 or cannot be determined.
+    """
+    from defenseclaw.connector_contracts import opencode_requires_v2_upgrade
+    from defenseclaw.migrations import _installed_opencode
+
+    try:
+        found = _installed_opencode(str(getattr(cfg, "data_dir", "") or ""))
+    except Exception:  # noqa: BLE001 - no answer is no verdict; the other rows still report
+        return ""
+    if found is None:
+        return ""
+    raw, executable = found
+    if not opencode_requires_v2_upgrade(raw):
+        return ""
+    return (
+        f"OpenCode {raw.strip() or '(unknown version)'} at {executable} is OpenCode V1, which cannot run the "
+        "DefenseClaw OpenCode V2 plugin, so its tool calls run unchecked; the hooks are NOT protected"
+    )
+
+
 def _opencode_runtime_remediation(status: str, runtime_detail: str) -> str:
     """Next step for the OpenCode hooks row's runtime-load warning."""
     if status != "warn":
@@ -9232,62 +9264,6 @@ def _opencode_runtime_remediation(status: str, runtime_detail: str) -> str:
 
 # OpenCode loads every {plugin,plugins}/*.{js,ts} file of a config folder.
 _OPENCODE_PLUGIN_SUFFIXES = (".js", ".ts")
-
-
-def _opencode_sibling_plugins(path: str) -> list[str]:
-    """Other OpenCode plugin files in the config folder of DefenseClaw's plugin *path*."""
-    own = os.path.realpath(path)
-    config_dir = os.path.dirname(os.path.dirname(os.path.abspath(path)))
-    found: list[str] = []
-    for folder in ("plugin", "plugins"):
-        directory = os.path.join(config_dir, folder)
-        try:
-            names = sorted(os.listdir(directory))
-        except OSError:
-            continue
-        for name in names:
-            candidate = os.path.join(directory, name)
-            if (
-                name.endswith(_OPENCODE_PLUGIN_SUFFIXES)
-                and os.path.realpath(candidate) != own
-                and os.path.isfile(candidate)
-            ):
-                found.append(candidate)
-    return found
-
-
-def _check_opencode_later_plugins(cfg, path: str, r: _DoctorResult) -> None:
-    """Warn in action mode when another plugin can load after DefenseClaw's.
-
-    OpenCode runs plugin hooks in load order and a later plugin can change a
-    tool call's arguments after DefenseClaw checked them, so in action mode
-    the bridge refuses every tool call while one is loaded (bridge v7). The
-    refusal reason is in the plugin's toast and in the failed tool, but
-    OpenCode's TUI shows only that the command was blocked (GAP-0469,
-    GAP-0465).
-    """
-
-    if _doctor_effective_guardrail_mode(getattr(cfg, "guardrail", None), "opencode") != "action":
-        return
-    others = _opencode_sibling_plugins(path)
-    if not others:
-        return
-    names = ", ".join(os.path.basename(other) for other in others)
-    _emit(
-        "warn",
-        "OpenCode plugin order",
-        f"other OpenCode plugins beside {path}: {names}. When OpenCode loads one after "
-        "defenseclaw.js, action mode refuses every tool call (\"later plugin argument mutations "
-        "are not observable\") and OpenCode shows only that the command was blocked",
-        r=r,
-        remediation=(
-            "move "
-            + " ".join(shlex.quote(other) for other in others)
-            + " out of the OpenCode plugin folder (a project's .opencode/plugins counts too), "
-            "or keep them and use `defenseclaw guardrail mode observe --connector opencode`; "
-            "then restart OpenCode"
-        ),
-    )
 
 
 def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
@@ -10535,7 +10511,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     probe_runtime=not r.passive,
                 )
             elif connector == "opencode":
-                if drift := _managed_plugin_drift(cfg, path):
+                if v1 := _opencode_v1_problem(cfg):
+                    _emit("fail", label, v1, r=r, remediation=_OPENCODE_V1_REMEDY)
+                elif drift := _managed_plugin_drift(cfg, path):
                     _emit("fail", label, drift, r=r)
                 else:
                     status, runtime_detail = _opencode_load_heartbeat_status(cfg)
@@ -10558,7 +10536,6 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                             r=r,
                             remediation=_opencode_runtime_remediation(status, runtime_detail),
                         )
-                _check_opencode_later_plugins(cfg, path, r)
             elif connector == "hermes":
                 problem = _hermes_registered_execution_problem(cfg, path)
                 refused = problem == _HERMES_PROOF_NAMESPACE_REFUSED

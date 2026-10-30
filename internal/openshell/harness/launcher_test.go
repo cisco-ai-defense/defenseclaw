@@ -303,6 +303,8 @@ func TestLaunchersRefuseUnsafeArguments(t *testing.T) {
 		{OpenCode, []argCase{
 			{[]string{"--pure"}, "DefenseClaw policy plugin"}, {[]string{"run", "--pure", "hi"}, "DefenseClaw policy plugin"},
 			{[]string{"--pure=true"}, "DefenseClaw policy plugin"},
+			{[]string{"--server", "http://127.0.0.1:4096"}, "outside this sandbox"},
+			{[]string{"run", "--server=http://127.0.0.1:4096", "hi"}, "outside this sandbox"},
 		}},
 		{Amp, []argCase{
 			{[]string{"--settings-file", "/tmp/s.json"}, "--settings-file is not supported"},
@@ -574,10 +576,10 @@ func TestOpenCodeLauncherRefusesForeignPlugins(t *testing.T) {
 		}},
 		"what OpenCode writes into a config directory": {files: map[string]string{
 			"home/.config/opencode/opencode.jsonc":                               `{"$schema":"https://opencode.ai/config.json"}`,
-			"home/.config/opencode/package.json":                                 `{"dependencies":{"@opencode-ai/plugin":"1.18.31"}}`,
+			"home/.config/opencode/package.json":                                 `{"dependencies":{"@opencode-ai/plugin":"2.1.4"}}`,
 			"home/.config/opencode/.gitignore":                                   "node_modules\n",
 			"home/.config/opencode/node_modules/@opencode-ai/plugin/index.js":    plugin,
-			"work/proj/.opencode/package.json":                                   `{"dependencies":{"@opencode-ai/plugin":"1.18.31"}}`,
+			"work/proj/.opencode/package.json":                                   `{"dependencies":{"@opencode-ai/plugin":"2.1.4"}}`,
 			"work/proj/.opencode/node_modules/@opencode-ai/plugin/dist/index.js": plugin,
 			"work/proj/.opencode/plugins/README.md":                              "notes\n",
 		}},

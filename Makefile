@@ -103,7 +103,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint go-lint-analyzers go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog skill-check check-managed-paths check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
+        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-opencode-plugins skill-check check-managed-paths check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-acp-refresh source-restart-gateway \
         proto proto-check proto-tools \
@@ -1211,7 +1211,11 @@ test-file: pycli
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7 check-observability-v8-hard-cut check-grafana-dashboards check-provider-coverage check-llm-catalog check-guardrail-catalog skill-check check-managed-paths
+check: check-v7 check-observability-v8-hard-cut check-grafana-dashboards check-provider-coverage check-llm-catalog check-guardrail-catalog check-opencode-plugins skill-check check-managed-paths
+
+# The dependency-free v2 adapter is inlined into both shipped bridges.
+check-opencode-plugins:
+	$(HOST_PYTHON) scripts/generate_opencode_plugins.py --check
 
 check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."

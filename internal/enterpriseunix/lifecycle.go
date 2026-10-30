@@ -2735,10 +2735,18 @@ const packageUserUnitDir = "/usr/lib/systemd/user"
 // install: the binaries, the system and user units, and the OpenCode plugin.
 // The lifecycle records them and never removes them. The macOS agents are
 // not here: the lifecycle writes those itself on every channel.
+//
+// On Linux the plugin file the previous release shipped
+// (share/opencode/defenseclaw.js) is the package's too: the upgrade's own
+// cleanup of the old package removes it right after this run, and removing
+// it here first made rpm print "remove failed: No such file or directory"
+// (rel-1-0-6 GAP-0073). A macOS pkg has no cleanup, so the lifecycle still
+// removes it there. Remove with the 1.0.x upgrade path.
 func (e *Env) packageOwns(path string) bool {
 	return strings.HasPrefix(path, e.Layout.BinDir+"/") || strings.HasPrefix(path, packageUnitDir+"/") ||
 		(e.GOOS == "linux" && strings.HasPrefix(path, packageUserUnitDir+"/")) ||
-		path == enterprisepolicy.OpenCodeManagedPluginPath(e.Layout)
+		path == enterprisepolicy.OpenCodeManagedPluginPath(e.Layout) ||
+		(e.GOOS == "linux" && path == filepath.Join(filepath.Dir(enterprisepolicy.OpenCodeManagedPluginPath(e.Layout)), "defenseclaw.js"))
 }
 
 // socketsToRestart lists the listening sockets whose definition changed in

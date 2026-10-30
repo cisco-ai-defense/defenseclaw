@@ -124,9 +124,13 @@ func TestTrustedShellArgs(t *testing.T) {
 		name, connector, tool, args, want, cwd string
 		ok                                     bool
 	}{
-		{"opencode-bash", "opencode", "bash", `{"command":"echo hi > /tmp/x","timeout":120000,"workdir":"/work/app/sub"}`,
+		{"opencode-shell", "opencode", "shell", `{"command":"echo hi > /tmp/x","timeout":120000,"workdir":"/work/app/sub","background":false}`,
 			`{"command":"echo hi > /tmp/x","timeout":120000}`, "/work/app/sub", true},
-		{"opencode-relative", "opencode", "bash", `{"command":"ls","workdir":"sub"}`, `{"command":"ls"}`, "sub", true},
+		{"opencode-relative", "opencode", "shell", `{"command":"ls","workdir":"sub"}`, `{"command":"ls"}`, "sub", true},
+		{"opencode-background", "opencode", "shell", `{"command":"ls","background":true}`, `{"command":"ls"}`, "", true},
+		{"opencode-directory-case-twin", "opencode", "shell", `{"command":"ls","workdir":"/w","Workdir":"/w"}`, "", "", false},
+		{"opencode-directory-case-twin-trimmed", " OpenCode ", " shell ", `{"command":"ls","workdir":"/w","Workdir":"/w"}`, "", "", false},
+		{"opencode-invalid-background", "opencode", "shell", `{"command":"ls","background":"yes"}`, "", "", false},
 		{"hermes-terminal", "hermes", "terminal", `{"command":"ls","workdir":"/tmp","background":false}`,
 			`{"command":"ls"}`, "/tmp", true},
 		{"hermes-controls", "hermes", "terminal",
@@ -159,13 +163,13 @@ func TestTrustedShellArgs(t *testing.T) {
 		{"devin-exec", "devin", "exec", `{"command":"ls","workdir":"/w"}`, `{"command":"ls"}`, "/w", true},
 		{"kiro-shell", "kiro", "shell", `{"command":"ls","working_dir":"/w"}`, `{"command":"ls"}`, "/w", true},
 		{"kiro-execute-bash", "kiro", "execute_bash", `{"command":"ls","working_dir":"/w"}`, `{"command":"ls"}`, "/w", true},
-		{"null-dir", "opencode", "bash", `{"command":"ls","workdir":null}`, `{"command":"ls"}`, "", true},
-		{"operators-kept", "opencode", "bash", `{"command":"a && b > c","workdir":"/w"}`, `{"command":"a && b > c"}`, "/w", true},
+		{"null-dir", "opencode", "shell", `{"command":"ls","workdir":null}`, `{"command":"ls"}`, "", true},
+		{"operators-kept", "opencode", "shell", `{"command":"a && b > c","workdir":"/w"}`, `{"command":"a && b > c"}`, "/w", true},
 		// Refused: the arguments are left for the parser to judge.
-		{"no-dir", "opencode", "bash", `{"command":"ls"}`, "", "", false},
-		{"dir-not-string", "opencode", "bash", `{"command":"ls","workdir":["/w"]}`, "", "", false},
-		{"duplicate-key", "opencode", "bash", `{"command":"ls","workdir":"/a","workdir":"/b"}`, "", "", false},
-		{"not-an-object", "opencode", "bash", `"ls"`, "", "", false},
+		{"no-dir", "opencode", "shell", `{"command":"ls"}`, "", "", false},
+		{"dir-not-string", "opencode", "shell", `{"command":"ls","workdir":["/w"]}`, "", "", false},
+		{"duplicate-key", "opencode", "shell", `{"command":"ls","workdir":"/a","workdir":"/b"}`, "", "", false},
+		{"not-an-object", "opencode", "shell", `"ls"`, "", "", false},
 		{"other-key", "kiro", "shell", `{"command":"ls","workdir":"/w"}`, "", "", false},
 		{"other-tool", "opencode", "read", `{"filePath":"/x","workdir":"/w"}`, "", "", false},
 		// Shell tools that name no directory are left alone.
@@ -222,7 +226,7 @@ func TestShellCommandArgs(t *testing.T) {
 	for _, tc := range []struct {
 		name, connector, tool, args, want string
 	}{
-		{"unlisted", "opencode", "bash", `{"command":"echo hi > /tmp/x","workdir":"/w","dc_unlisted_arg":"x"}`, `{"command":"echo hi > /tmp/x"}`},
+		{"unlisted", "opencode", "shell", `{"command":"echo hi > /tmp/x","workdir":"/w","dc_unlisted_arg":"x"}`, `{"command":"echo hi > /tmp/x"}`},
 		{"mistyped", "hermes", "terminal", `{"command":"ls","background":"yes"}`, `{"command":"ls"}`},
 		{"no-listed", "copilot", "bash", `{"command":"ls","dc_unlisted_arg":1}`, `{"command":"ls"}`},
 		{"exact", "devin", "exec", `{"command":"ls"}`, `{"command":"ls"}`},
@@ -232,18 +236,18 @@ func TestShellCommandArgs(t *testing.T) {
 		{"claudecode", "claudecode", "Bash", `{"command":"ls","dc_unlisted_arg":1}`, `{"command":"ls"}`},
 		{"connector-case", " Cursor ", "Shell", `{"command":"ls","cwd":7}`, `{"command":"ls"}`},
 		// A case twin of the command key stays, for the conflict check.
-		{"case-twin", "opencode", "bash", `{"command":"true","Command":"rm -rf ~/","extra":"x"}`, `{"Command":"rm -rf ~/","command":"true"}`},
+		{"case-twin", "opencode", "shell", `{"command":"true","Command":"rm -rf ~/","extra":"x"}`, `{"Command":"rm -rf ~/","command":"true"}`},
 		// Refused.
-		{"blank", "opencode", "bash", `{"command":"  ","dc_unlisted_arg":1}`, ""},
-		{"null", "opencode", "bash", `{"command":null}`, ""},
-		{"not-text", "opencode", "bash", `{"command":7}`, ""},
-		{"empty-argv", "opencode", "bash", `{"command":[]}`, ""},
-		{"argv-not-text", "opencode", "bash", `{"command":["ls",1]}`, ""},
-		{"no-command", "opencode", "bash", `{"workdir":"/w"}`, ""},
-		{"case-twin-only", "opencode", "bash", `{"Command":"ls","extra":"x"}`, ""},
+		{"blank", "opencode", "shell", `{"command":"  ","dc_unlisted_arg":1}`, ""},
+		{"null", "opencode", "shell", `{"command":null}`, ""},
+		{"not-text", "opencode", "shell", `{"command":7}`, ""},
+		{"empty-argv", "opencode", "shell", `{"command":[]}`, ""},
+		{"argv-not-text", "opencode", "shell", `{"command":["ls",1]}`, ""},
+		{"no-command", "opencode", "shell", `{"workdir":"/w"}`, ""},
+		{"case-twin-only", "opencode", "shell", `{"Command":"ls","extra":"x"}`, ""},
 		{"other-key", "antigravity", "run_command", `{"command":"ls"}`, ""},
-		{"not-an-object", "opencode", "bash", `"ls"`, ""},
-		{"invalid-json", "opencode", "bash", `{"command":"ls"`, ""},
+		{"not-an-object", "opencode", "shell", `"ls"`, ""},
+		{"invalid-json", "opencode", "shell", `{"command":"ls"`, ""},
 		{"other-tool", "opencode", "read", `{"command":"ls"}`, ""},
 		{"tool-case", "cursor", "shell", `{"command":"ls"}`, ""},
 		{"other-connector", "zed", "bash", `{"command":"ls"}`, ""},

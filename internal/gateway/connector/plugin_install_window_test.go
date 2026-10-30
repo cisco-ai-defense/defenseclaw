@@ -135,7 +135,7 @@ import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 ` + pluginInstallFailureFetch + `
 const href = pathToFileURL(process.argv[1]).href;
-const plugin = await (await import(href)).DefenseClaw({ directory: "", client: { tui: { showToast: async () => true } } });
+const plugin = await fixtureBridge(await import(href), { directory: "", client: { tui: { showToast: async () => true } } });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log("harness-ready");
 for await (const _ of createInterface({ input: process.stdin })) {

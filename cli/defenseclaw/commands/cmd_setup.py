@@ -118,6 +118,7 @@ from defenseclaw.connector_contracts import (
     openclaw_bedrock_plugin_missing,
     openclaw_lacks_plugin_approvals,
     openclaw_needs_interception_advisory,
+    opencode_requires_v2_upgrade,
     resolve_connector_contract,
     stable_agent_version,
 )
@@ -6061,10 +6062,15 @@ def _connector_contract_upgrade_guidance(
 
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
+    if key == "opencode":
+        return f"Install OpenCode V2 with 'npm install -g @opencode/cli@2', then run: {rerun}."
     broken, _ = known_broken_entry(key, normalized_version)
     if broken is not None:
         return f"Install a {label} release that is not known broken ({broken['issue']}), then run: {rerun}."
     contracts = HOOK_CONTRACTS.get(key, ())
+    if key == "opencode" and normalized_version:
+        major = normalized_version.split(".", 1)[0]
+        contracts = tuple(c for c in contracts if c.min_agent_version.split(".", 1)[0] == major)
     if key == "kiro":
         return f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then run: {rerun}."
     if not contracts:
@@ -6476,6 +6482,12 @@ def _check_connector_version_supported_for_setup(
     # OpenCode needs a validated plugin contract, and a kiro-cli below the
     # floor has a surface that sends no hooks (GAP-0227): their messages say so.
     strict_unknown = connector in {"opencode", "kiro"}
+    if connector == "opencode" and opencode_requires_v2_upgrade(compatibility.raw_version):
+        detail = f"OpenCode V2 is required; detected {version_display}. {upgrade_guidance}"
+        if emit:
+            ux.err(detail)
+        _refuse_in_every_mode(_refusal_scope, detail)
+        return False
     if compatibility.status == STATUS_UNKNOWN and not allow_drift:
         if emit:
             ux.err(detail)
