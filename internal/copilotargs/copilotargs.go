@@ -200,7 +200,20 @@ func LocalActionTool(toolName string) string {
 // is the apply_patch call its own preToolUse names, so it is judged as one:
 // {"patch": text}, like the CLI dialect's (CLIToolArgs). Any other string
 // input keeps its native value and stays unread.
+//
+// The CLI names its create and edit tools Write and Edit there and sends
+// their native arguments as tool_input (Copilot CLI 1.0.91: Write
+// {"path", "file_text"}, GAP-2605). Exactly that argument set is the CLI
+// call its own preToolUse names, so it is judged as that call: create or
+// edit, the arguments unchanged. Any other object keeps LocalToolArgs.
 func LocalCall(toolName string, input any) (string, json.RawMessage) {
+	if args, ok := input.(map[string]any); ok {
+		if native, ok := cliWriteAliases[strings.TrimSpace(toolName)]; ok && cliWriteArgs(native, args) {
+			if raw, err := marshal(args); err == nil {
+				return native, raw
+			}
+		}
+	}
 	if text, ok := input.(string); ok {
 		switch strings.TrimSpace(toolName) {
 		case "Edit", "apply_patch":
@@ -213,6 +226,26 @@ func LocalCall(toolName string, input any) (string, json.RawMessage) {
 		}
 	}
 	return toolName, LocalToolArgs(toolName, input)
+}
+
+// cliWriteAliases maps the Local hook tool names the Copilot CLI gives its
+// create and edit tools onto the CLI names.
+var cliWriteAliases = map[string]string{"Write": "create", "Edit": "edit"}
+
+// cliWriteArgs reports a Copilot CLI create or edit argument object: every
+// reviewed field present as a string, and otherwise only the display-only
+// metadata field (writeMetadata).
+func cliWriteArgs(tool string, args map[string]any) bool {
+	shape, ok := writeMetadata[tool]
+	if !ok || !onlyKeys(args, append([]string{shape.metadata}, shape.reviewed...)...) {
+		return false
+	}
+	for _, key := range shape.reviewed {
+		if _, ok := args[key].(string); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // LocalToolArgs projects a known tool's arguments onto canonical names. An
