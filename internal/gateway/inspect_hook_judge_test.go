@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -379,5 +380,40 @@ func TestHookJudgeUsesGenerationJudgeDuringReload(t *testing.T) {
 	got := a.runHookJudge(ctx, "prompt", "prompt", "hermes", "hello there, lovely weather today", "", nil)
 	if got == nil || len(mock.captured) == 0 {
 		t.Fatal("new generation was served before its hook judge")
+	}
+}
+
+// GAP-2623: a Claude Code FileChanged note on a state or settings file the
+// agent keeps for itself (~/.claude.json, a .claude folder) is not sent to
+// the LLM judge, which read the bare path as sensitive file access. The same
+// event on any other file still goes to the judge.
+func TestHookJudge_ClaudeCodeOwnStateFileChangedSkipsJudge(t *testing.T) {
+	exfilHit := `{"Sensitive File Access": {"reasoning": "r", "label": true}, "Exfiltration Channel": {"reasoning": "n", "label": false}}`
+	home := t.TempDir()
+	for _, tc := range []struct {
+		path      string
+		wantJudge bool
+	}{
+		{filepath.Join(home, ".claude.json"), false},
+		{filepath.Join(home, ".claude.json.backup.1761800000"), false},
+		{filepath.Join(home, ".claude", "settings.json"), false},
+		{filepath.Join(home, "project", "notes.txt"), true},
+		{filepath.Join(home, "claude.json.txt"), true},
+	} {
+		mock := &mockLLMProvider{response: &ChatResponse{
+			Model:   "test-model",
+			Choices: []ChatChoice{{Message: &ChatMessage{Content: exfilHit}}},
+			Usage:   &ChatUsage{PromptTokens: 30, CompletionTokens: 18},
+		}}
+		a := newHookJudgeAPIServer(t,
+			config.JudgeConfig{Enabled: true, Exfil: true, HookConnectors: []string{"claudecode"}},
+			"judge_first", mock)
+		a.scannerCfg.Guardrail.Connector = "claudecode"
+		resp := a.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+			HookEventName: "FileChanged", SessionID: "s-2623", CWD: home, FilePath: tc.path,
+		})
+		if got := len(mock.captured) > 0; got != tc.wantJudge {
+			t.Errorf("%s: judge called = %v, want %v (resp %+v)", tc.path, got, tc.wantJudge, resp)
+		}
 	}
 }

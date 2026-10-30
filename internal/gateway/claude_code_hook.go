@@ -242,9 +242,13 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "InstructionsLoaded", "ConfigChange", "FileChanged":
 		verdict = a.scanClaudeCodeEventFile(ctx, req)
 		if verdict == nil {
-			verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
-				claudeCodeEventContent(req), "prompt",
-			))
+			inspectReq := claudeCodeContentInspectRequest(claudeCodeEventContent(req), "prompt")
+			// A FileChanged note on a state or settings file Claude Code keeps
+			// for itself is housekeeping: the path is the only text, the event
+			// cannot block, and the judge read it as sensitive file access
+			// (GAP-2623). Rules and AID still scan it; the event is recorded.
+			inspectReq.skipJudge = req.HookEventName == "FileChanged" && claudeCodeOwnStateFile(req.FilePath)
+			verdict = a.inspectMessageContent(ctx, inspectReq)
 		}
 	case "SubagentStart", "CwdChanged", "DirectoryAdded", "WorktreeRemove",
 		"TaskCreated", "TaskCompleted", "TeammateIdle",
@@ -849,6 +853,27 @@ func claudeCodePromptContent(req claudeCodeHookRequest) string {
 func claudeCodeToolOutput(req claudeCodeHookRequest) string {
 	parts := []string{claudeCodeString(req.ToolResponse), claudeCodeString(req.ToolCalls), req.Error, req.ErrorDetails}
 	return strings.Join(nonEmptyStrings(parts...), "\n")
+}
+
+// claudeCodeOwnStateFile reports whether path is a file Claude Code keeps
+// for itself: ~/.claude.json (and its backups) or a file under a .claude
+// folder (settings, sessions, todos). It looks at the name only; nothing
+// here trusts the file contents.
+func claudeCodeOwnStateFile(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	clean := filepath.ToSlash(filepath.Clean(path))
+	if strings.HasPrefix(strings.ToLower(filepath.Base(clean)), ".claude.json") {
+		return true
+	}
+	for _, part := range strings.Split(filepath.ToSlash(filepath.Dir(clean)), "/") {
+		if strings.EqualFold(part, ".claude") {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeCodeEventContent(req claudeCodeHookRequest) string {
