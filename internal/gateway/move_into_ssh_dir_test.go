@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -52,6 +53,13 @@ func TestR105MoveIntoSSHDirectoryBlocksOnManaged(t *testing.T) {
 		for _, connector := range []string{"claudecode", "codex"} {
 			installDefaultProfileConnector(t, connector)
 			for _, row := range rows {
+				if runtime.GOOS == "windows" && row.id == "B06" {
+					// A Windows gateway follows the link the move lands on
+					// (ext/k -> authorized_keys) and blocks: the safe side of
+					// the GAP-2559 link-entry reading, which is POSIX-only
+					// (native preflight, T11 integrator note in classifier-c.md).
+					continue
+				}
 				home := filepath.Join(t.TempDir(), "home")
 				ext := filepath.Join(t.TempDir(), "ext")
 				cwd := filepath.Join(home, "w", "p")
@@ -98,7 +106,7 @@ func TestR105MoveIntoSSHDirectoryBlocksOnManaged(t *testing.T) {
 					}
 				}
 				t.Setenv("HOME", home)
-				command := strings.NewReplacer("{E}", ext).Replace(row.command)
+				command := strings.NewReplacer("{E}", filepath.ToSlash(ext)).Replace(row.command)
 				payload, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": cwd,
 					"tool_name": "Bash", "tool_input": map[string]string{"command": command}})
 				targets, ok := hookpaths.Decode(hookpaths.Resolve(payload))
