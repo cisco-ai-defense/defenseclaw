@@ -1972,6 +1972,8 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("routing", oldCfg.Routing, newCfg.Routing)
 	add("llm_providers", oldCfg.LLMProviders, newCfg.LLMProviders)
 	add("update", oldCfg.Update, newCfg.Update)
+	// connectors.agent_gateway registers a route at start: restart-required.
+	add("connectors", oldCfg.Connectors, newCfg.Connectors)
 	add("environment", oldCfg.Environment, newCfg.Environment)
 	add("tenant_id", oldCfg.TenantID, newCfg.TenantID)
 	add("workspace_id", oldCfg.WorkspaceID, newCfg.WorkspaceID)
@@ -2199,6 +2201,8 @@ func holdRestartRequired(running, next *config.Config, restart []string) *config
 			held.Enterprise.Inspection = inspection
 		case "plugin_dir":
 			held.PluginDir = running.PluginDir
+		case "connectors":
+			held.Connectors = running.Connectors
 		default:
 			return nil
 		}

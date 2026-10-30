@@ -403,6 +403,9 @@ type Config struct {
 	// Update holds the self-update settings (config_version 9).
 	Update UpdateConfig `mapstructure:"update" yaml:"update,omitempty"`
 	Fleet  FleetConfig  `mapstructure:"fleet"            yaml:"fleet,omitempty"`
+	// Connectors holds settings of connectors that install nothing into an
+	// agent, such as the agent-gateway hook route (trusted_connectors.go).
+	Connectors ConnectorsConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -1907,6 +1910,9 @@ type GuardrailConfig struct {
 	ProfileAssignments []ProfileAssignment         `mapstructure:"profile_assignments" yaml:"profile_assignments,omitempty"`
 	DefaultProfile     string                      `mapstructure:"default_profile"     yaml:"default_profile,omitempty"`
 
+	// Chains tunes tool-call chain evaluation (trusted_connectors.go).
+	Chains GuardrailChainsConfig `mapstructure:"chains" yaml:"chains,omitempty"`
+
 	// profileConnectors is set only on a configuration DerivedForProfile
 	// returns: the profile's own connectors map, keyed by normalized
 	// connector name. policyOverride layers it over Connectors so a profile
@@ -3158,6 +3164,12 @@ func loadConfigSourceCheckedWithLayout(
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	if err := cfg.ValidateIdentityChainSettings(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "connectors_invalid")
+		}
+		return nil, err
 	}
 	if err := cfg.Scanners.Validate(); err != nil {
 		if ReportConfigLoadError != nil {

@@ -333,6 +333,12 @@ func resolveConnectorInstanceForRequest(
 ) (audit.ConnectorInstance, error) {
 	binding, sandboxed := sandboxauth.FromContext(ctx)
 	if !sandboxed {
+		if af, ok := actingForFromContext(ctx); ok {
+			// One instance per (trusted connector account, person): their
+			// cursors, pending operations and chain partitions never mix.
+			return repo.ResolveScopedConnectorInstance(ctx, trustedConnectorInstanceID(af),
+				connectorName, profileVersion, custody)
+		}
 		return repo.ResolveConnectorInstance(ctx, connectorName, profileVersion, custody)
 	}
 	if sandboxauth.CanonicalConnector(connectorName) != binding.Connector {

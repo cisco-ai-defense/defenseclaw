@@ -47,6 +47,9 @@ type EnterpriseConfig struct {
 	// OpenShell is how the lifecycle provides and pins OpenShell for
 	// managed sandboxes. Every key is lifecycle (restart-required).
 	OpenShell EnterpriseOpenShellConfig `mapstructure:"openshell" yaml:"openshell,omitempty"`
+	// Identity names trusted connectors (trusted_connectors.go). Lifecycle
+	// (restart-required); honoured only from a signed bundle.
+	Identity EnterpriseIdentityConfig `mapstructure:"identity" yaml:"identity,omitempty"`
 }
 
 // enterprise.openshell values.
@@ -1364,7 +1367,8 @@ func enterpriseBlockEmpty(e EnterpriseConfig) bool {
 		strings.TrimSpace(e.Coexistence.PerUserInstall) == "" && e.Coexistence.DisableSelfUpdate == nil &&
 		strings.TrimSpace(e.Network.HTTPSProxy) == "" && strings.TrimSpace(e.Network.NoProxy) == "" &&
 		tetragonEmpty(e.Tetragon) &&
-		e.OpenShell == (EnterpriseOpenShellConfig{})
+		e.OpenShell == (EnterpriseOpenShellConfig{}) &&
+		len(e.Identity.TrustedConnectors) == 0
 }
 
 // standaloneInlineSecrets lists the inline secret keys cfg sets.
@@ -1535,6 +1539,9 @@ func validateEnterpriseConfig(cfg *Config) error {
 				"enterprise.inspection.llm.credential (the LLM key) or enterprise.inspection.ai_defense.credential " +
 				"(the AI Defense key); the lifecycle provisions the gateway token",
 		}
+	}
+	if err := ValidateTrustedConnectors(e.Identity); err != nil {
+		return err
 	}
 	en := e.Enrollment
 	if err := oneOf("enterprise.enrollment.mode", en.Mode, EnterpriseEnrollmentAuto, EnterpriseEnrollmentManifest); err != nil {

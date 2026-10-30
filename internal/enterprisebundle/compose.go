@@ -67,6 +67,9 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := CheckKeyProductFloor(cfg, in.MinProductVersion); err != nil {
+		return nil, nil, err
+	}
 	names, err := ConfigCredentials(b.Files[ConfigName])
 	if err != nil {
 		return nil, nil, err

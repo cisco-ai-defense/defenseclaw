@@ -345,6 +345,9 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 	if connectorName == "" {
 		return denyManagedHook(http.StatusForbidden, managedHookReasonConnectorUnknown)
 	}
+	if connectorName == connector.AgentGatewayConnectorName {
+		return z.decideAgentGateway(peer)
+	}
 	if peer.UID == 0 {
 		if strings.EqualFold(strings.TrimSpace(z.enrollment.Root), config.EnterpriseRootDeny) {
 			return denyManagedHook(http.StatusForbidden, managedHookReasonRootDenied)
@@ -391,6 +394,31 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 		return allowManagedHook()
 	}
 	return denyManagedHook(http.StatusForbidden, managedHookReasonUIDUnregistered)
+}
+
+// decideAgentGateway authorizes a call to the agent-gateway route, which no
+// agent install registers: the caller must be the service account of a
+// trusted connector (honoured from a signed bundle) or an enrolled user
+// calling for themselves. Anything else, root included, is refused as an
+// unknown connector.
+func (z *managedHookAuthorizer) decideAgentGateway(peer managedHookPeer) managedHookDecision {
+	if peer.UID == 0 {
+		return denyManagedHook(http.StatusForbidden, managedHookReasonConnectorUnknown)
+	}
+	if trustedConnectorAccountListed(strconv.Itoa(peer.UID)) {
+		return allowManagedHook()
+	}
+	if z.loadLedger == nil {
+		return denyManagedHook(http.StatusServiceUnavailable, managedHookReasonLedgerUnavailable)
+	}
+	ledger, err := z.loadLedger()
+	if err != nil {
+		return denyManagedHook(http.StatusServiceUnavailable, managedHookReasonLedgerUnavailable)
+	}
+	if ledger.enrolledAny(peer) {
+		return allowManagedHook()
+	}
+	return denyManagedHook(http.StatusForbidden, managedHookReasonConnectorUnknown)
 }
 
 // managedHookLedgerLoader reads the root-owned authorization ledger with
@@ -564,6 +592,9 @@ func managedHookPeerIdentityMiddleware(next http.Handler) http.Handler {
 // managedHookRouteScope maps a hook-socket request to the connector whose
 // authority it uses and the context marker the handlers expect.
 func (a *APIServer) managedHookRouteScope(r *http.Request) (connectorName string, inspect bool) {
+	if r.URL.Path == connector.AgentGatewayHookPath {
+		return connector.AgentGatewayConnectorName, false
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") {
 		name := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
 		if name == "" || a.connectorRegistry == nil {
@@ -779,6 +810,7 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	inspectMux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
 	mux.Handle("/api/v1/inspect/", limiter(a.guardrailProfileInspectMiddleware(inspectMux)))
 	a.registerConnectorHookRoutes(mux, limiter)
+	a.registerAgentGatewayRoute(mux, true, limiter)
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
 	mux.HandleFunc(managedGuardianRepairAuditPath, a.handleManagedGuardianRepairAudit)

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.defenseclaw.dev/connectors/agent-gateway-hook.json",
+  "title": "DefenseClaw agent-gateway hook event",
+  "description": "Body of POST /api/v1/agent-gateway/hook. The route is off by default (connectors.agent_gateway.enabled). Unknown fields are refused. acting_for and root_session_id are honoured only for a trusted connector's service account on a managed device and are ignored, and audited, for every other caller. The caller enforces the answer: treat an unanswered call as a deny on managed and strict devices.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event", "session_id"],
+  "properties": {
+    "event": {
+      "type": "string",
+      "enum": ["session_start", "session_end", "user_prompt", "pre_tool", "post_tool", "subagent_start", "subagent_stop"]
+    },
+    "session_id": {"$ref": "#/$defs/id"},
+    "tool_use_id": {"$ref": "#/$defs/id"},
+    "traceparent": {"type": "string", "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"},
+    "parent_session_id": {"$ref": "#/$defs/id"},
+    "cwd": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "Absolute working directory of the tool call."},
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\s]+$"},
+        "kind": {"type": "string", "enum": ["shell", "file_read", "file_write", "fetch", "mcp", "other"]},
+        "input": {"description": "shell: a command string or {\"command\": string}; file_read: a path or an object with path; file_write: an object with path and content; fetch: a URL or an object with url; mcp and other: any JSON."}
+      }
+    },
+    "tool_response": {"description": "The tool's result (post_tool only); any JSON."},
+    "prompt": {"type": "string", "description": "The user's prompt (user_prompt only)."},
+    "acting_for": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user"],
+      "properties": {
+        "user": {"type": "string", "minLength": 1, "maxLength": 256, "description": "Account name, uid or SID of the person the trusted connector acts for."}
+      }
+    },
+    "root_session_id": {"$ref": "#/$defs/id"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"event": {"enum": ["pre_tool", "post_tool"]}}},
+      "then": {"required": ["tool", "tool_use_id"]},
+      "else": {"not": {"anyOf": [{"required": ["tool"]}, {"required": ["tool_use_id"]}]}}
+    },
+    {
+      "if": {"properties": {"event": {"const": "post_tool"}}},
+      "then": {"required": ["tool_response"]},
+      "else": {"not": {"required": ["tool_response"]}}
+    },
+    {
+      "if": {"properties": {"event": {"const": "user_prompt"}}},
+      "then": {"required": ["prompt"]},
+      "else": {"not": {"required": ["prompt"]}}
+    },
+    {
+      "if": {"properties": {"event": {"enum": ["subagent_start", "subagent_stop"]}}},
+      "then": {"required": ["parent_session_id"]},
+      "else": {"not": {"required": ["parent_session_id"]}}
+    }
+  ],
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^\\S(.*\\S)?$"}
+  }
+}

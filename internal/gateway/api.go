@@ -1275,6 +1275,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc(cliObservabilityV8Path, a.handleCLIObservabilityV8)
 	mux.HandleFunc(alertAcknowledgementV8Path, a.handleAlertAcknowledgementV8)
 	a.registerConnectorHookRoutes(mux, hookLimiter)
+	a.registerAgentGatewayRoute(mux, false, hookLimiter)
 	// OTLP-HTTP receiver for the three signal types codex
 	// (via [otel.exporter.otlp-http]) and Claude Code (via
 	// OTEL_EXPORTER_OTLP_ENDPOINT) post telemetry to. Body shape is

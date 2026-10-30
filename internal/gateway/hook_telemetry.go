@@ -91,6 +91,8 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		caller := auditCallerIdentity(ctx)
 		env.UserID, env.UserIDKind, env.UserName = caller.ID, caller.IDKind, caller.Name
 	}
+	// A trusted connector's call for a person names both in the local audit.
+	env.Extra = mergeHookEnvelopeExtra(env.Extra, agentGatewayAuditExtra(ctx))
 	if a.managedAIDOnly() {
 		env.SecureClientRulePackDir = env.RulePackDir
 	}
