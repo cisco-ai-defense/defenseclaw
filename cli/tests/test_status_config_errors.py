@@ -99,7 +99,9 @@ def test_status_with_a_refused_config_still_shows_the_running_gateway(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # GAP-0006: the gateway keeps its last good config; status names it and the rejected reload.
-    from defenseclaw import gateway, logger
+    from types import SimpleNamespace
+
+    from defenseclaw import logger
     from defenseclaw.main import cli
 
     monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
@@ -115,7 +117,12 @@ def test_status_with_a_refused_config_still_shows_the_running_gateway(
         "effective_digest": "sha256:" + "7" * 64, "config_generation": 5,
         "last_reload_error": "config_version 9: guardrail.block_at is invalid",
     }}
-    monkeypatch.setattr(gateway.OrchestratorClient, "health", lambda _self: health)
+    from defenseclaw.commands import cmd_doctor
+
+    trusted = SimpleNamespace(trusted=True)
+    monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", lambda _cfg, api_port: trusted)
+    reply = MagicMock(json=lambda: health, raise_for_status=lambda: None)
+    monkeypatch.setattr("requests.Session.get", lambda _self, url, **_kw: reply)
     result = CliRunner().invoke(cli, ["status"])
     text = result.output + (result.stderr or "")
     assert result.exit_code == 1, text

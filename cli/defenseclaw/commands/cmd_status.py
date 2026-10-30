@@ -1139,18 +1139,33 @@ def print_gateway_while_config_unloadable(config_error: str, *, as_json: bool = 
     printed only the load error: the gateway state, the digest it enforces
     and the reload it rejected were in /health alone. The live process's own
     runtime record (gateway-api.json in the data directory, bound to the PID
-    in gateway.pid) names its listener without config.yaml, and the client
-    checks that this account owns that listener before it reads /health.
+    in gateway.pid) names its listener without config.yaml. Doctor's
+    process and listener proof, run over the built-in defaults with that
+    data directory, checks that this account's gateway holds the listener
+    before the unauthenticated /health is read; no token is sent.
     """
     from defenseclaw import config as cfg_mod
-    from defenseclaw.gateway import OrchestratorClient, policy_reload_rejection
+    from defenseclaw.gateway import policy_reload_rejection
     from defenseclaw.logger import _running_gateway_address
 
-    address = _running_gateway_address(str(cfg_mod.default_data_path()))
+    data_dir = str(cfg_mod.default_data_path())
+    address = _running_gateway_address(data_dir)
     health = None
     if address is not None:
         try:
-            health = OrchestratorClient(host=address[0], port=address[1], timeout=3).health()
+            import requests
+
+            from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
+
+            defaults = cfg_mod.default_config()
+            defaults.data_dir = data_dir
+            if _trusted_gateway_listener(defaults, api_port=address[1]).trusted:
+                with requests.Session() as session:
+                    session.trust_env = False  # never through a proxy
+                    shown = f"[{address[0]}]" if ":" in address[0] else address[0]
+                    response = session.get(f"http://{shown}:{address[1]}/health", timeout=3, allow_redirects=False)
+                    response.raise_for_status()
+                    health = response.json()
         except Exception:  # noqa: BLE001 - any transport or ownership failure: not answering
             health = None
     policy = _policy_status(health if isinstance(health, dict) else None)
