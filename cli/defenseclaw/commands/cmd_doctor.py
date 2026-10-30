@@ -12064,7 +12064,13 @@ def _check_regional_provider_config(cfg, r: _DoctorResult) -> None:
         b = llm.bedrock
         region = (b.region or llm.region or "").strip()
         if not region:
-            _emit("fail", label, "bedrock configured without a region", r=r)
+            _emit(
+                "fail",
+                label,
+                "bedrock configured without a region",
+                r=r,
+                remediation="defenseclaw setup llm --provider bedrock --bedrock-region <region>",
+            )
             return
         mode = (b.auth_mode or "").strip().lower() or "api_key"
         if mode == "iam_credentials" and not (b.access_key_env and b.secret_key_env):
