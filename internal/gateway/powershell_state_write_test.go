@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -223,19 +224,32 @@ func TestR105WindowsPowerShellStateReaderIsLinear(t *testing.T) {
 	}
 	const size = 180 << 10
 	for _, unit := range []string{"<#a#> ", "${a} ", "\"$(", "[IO.File]::WriteAllText(", "(", "@'\n'@\n", "x 2>$null; "} {
-		for _, tail := range []string{"\nClear-Content $HOME\\.defenseclaw\\config.yaml", "\nRemove-Item $HOME\\.defenseclaw\\config.yaml"} {
-			command := strings.Repeat(unit, size/len(unit)) + tail
-			args, _ := json.Marshal(map[string]string{"command": command})
-			input := actionfacts.Input{Tool: "PowerShell", Args: args, CWD: home + `\project`, ActiveHome: home,
-				DialectHint: actionfacts.DialectPowerShell}
-			start := time.Now()
-			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-				Input: input, LegacyText: string(args), Connector: connectorName,
-				EnforcementCapable: true, ResolvedWriteTargets: resolved,
-			})
-			took := time.Since(start)
-			if took > 3*time.Second {
-				t.Errorf("unit %q: %d bytes judged in %s", unit, len(command), took)
+		for index, tail := range []string{"\nClear-Content $HOME\\.defenseclaw\\config.yaml", "\nRemove-Item $HOME\\.defenseclaw\\config.yaml"} {
+			judge := func(n int) ([]RuleFinding, time.Duration) {
+				command := strings.Repeat(unit, n/len(unit)) + tail
+				args, _ := json.Marshal(map[string]string{"command": command})
+				input := actionfacts.Input{Tool: "PowerShell", Args: args, CWD: home + `\project`, ActiveHome: home,
+					DialectHint: actionfacts.DialectPowerShell}
+				start := time.Now()
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: input, LegacyText: string(args), Connector: connectorName,
+					EnforcementCapable: true, ResolvedWriteTargets: resolved,
+				})
+				return findings, time.Since(start)
+			}
+			findings, took := judge(size)
+			if index == 0 {
+				// The tail does not change the reading cost: one ratio per unit (GAP-2545).
+				assertLinearReaderTime(t, fmt.Sprintf("unit %q", unit), took, func(full bool) time.Duration {
+					n := size / 2
+					if full {
+						n = size
+					}
+					_, d := judge(n)
+					return d
+				})
+			} else if !hookAnswerRaceBuild && took > linearReaderHookBudget {
+				t.Errorf("unit %q tail %q: %d bytes judged in %s", unit, tail, size, took)
 			}
 			if verdict := buildVerdict(findings, "tool_call"); verdict.Action != "block" {
 				t.Errorf("unit %q tail %q: action %q, want block", unit, tail, verdict.Action)
@@ -261,28 +275,40 @@ func TestR105WindowsPowerShellBalancedNestingIsLinear(t *testing.T) {
 		return strings.Repeat(`"$(`, n) + inner + strings.Repeat(`)"`, n)
 	}
 	body := `powershell -c '` + nested(200, "Get-Content "+state) + `'; `
+	clear := func(n int) string { return nested(n, "Clear-Content "+state) }
+	bodies := func(n int) string { return strings.Repeat(body, n) + "Clear-Content " + state }
 	for _, tc := range []struct {
-		name, command string
+		name  string
+		n     int
+		build func(n int) string
 	}{
-		{"T1c-400", nested(400, "Clear-Content "+state)},
-		{"T1d-1500", nested(1500, "Clear-Content "+state)},
-		{"T2s-20x200-read-then-clear", strings.Repeat(body, 20) + "Clear-Content " + state},
-		{"T2w-50x200-then-clear", strings.Repeat(body, 50) + "Clear-Content " + state},
+		{"T1c-400", 400, clear},
+		{"T1d-1500", 1500, clear},
+		{"T2s-20x200-read-then-clear", 20, bodies},
+		{"T2w-50x200-then-clear", 50, bodies},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
-			args, _ := json.Marshal(map[string]string{"command": tc.command})
-			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
-			input.DialectHint = agentHookWindowsShellDialect(input)
-			start := time.Now()
-			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-				Input: input, LegacyText: string(args), Connector: connectorName,
-				EnforcementCapable: true, ResolvedWriteTargets: resolved,
-			})
-			took := time.Since(start)
-			t.Logf("%s %s: %d bytes in %s", tc.name, tool, len(tc.command), took)
-			if took > 2*time.Second {
-				t.Errorf("%s %s: %d bytes judged in %s", tc.name, tool, len(tc.command), took)
+			judge := func(n int) ([]RuleFinding, time.Duration) {
+				args, _ := json.Marshal(map[string]string{"command": tc.build(n)})
+				input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
+				input.DialectHint = agentHookWindowsShellDialect(input)
+				start := time.Now()
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: input, LegacyText: string(args), Connector: connectorName,
+					EnforcementCapable: true, ResolvedWriteTargets: resolved,
+				})
+				return findings, time.Since(start)
 			}
+			findings, took := judge(tc.n)
+			t.Logf("%s %s: %d bytes in %s", tc.name, tool, len(tc.build(tc.n)), took)
+			assertLinearReaderTime(t, tc.name+" "+tool, took, func(full bool) time.Duration {
+				n := tc.n / 2
+				if full {
+					n = tc.n
+				}
+				_, d := judge(n)
+				return d
+			})
 			if verdict := buildVerdict(findings, "tool_call"); verdict.Action != "block" {
 				t.Errorf("%s %s: action %q, want block", tc.name, tool, verdict.Action)
 			}

@@ -247,12 +247,16 @@ func TestR105WindowsCMDStateDirectoryRemove(t *testing.T) {
 func TestR105WindowsCMDBodyReaderIsLinear(t *testing.T) {
 	const size = 64 << 10
 	for _, unit := range []string{"'a' ", "cmd x 'a' ", "cmd /c x ", "\"$(", "cmd -args 'a' ", "a; "} {
-		command := "cmd x " + strings.Repeat(unit, size/len(unit))
-		start := time.Now()
-		cmdInvocationReadings(command, true)
-		if took := time.Since(start); took > 2*time.Second {
-			t.Errorf("unit %q: %d bytes read in %s", unit, len(command), took)
+		read := func(full bool) time.Duration {
+			n := size / 2
+			if full {
+				n = size
+			}
+			start := time.Now()
+			cmdInvocationReadings("cmd x "+strings.Repeat(unit, n/len(unit)), true)
+			return time.Since(start)
 		}
+		assertLinearReaderTime(t, fmt.Sprintf("unit %q", unit), read(true), read)
 	}
 	const state = `%USERPROFILE%\.defenseclaw\config.yaml`
 	request := trustedActionRequest{Input: actionfacts.Input{
@@ -290,23 +294,31 @@ func TestR105WindowsCMDHeredocReceiverReadIsLinear(t *testing.T) {
 		{"{ cat <<'A'\nx\nA\n", "} | cmd /c type nul > " + state, true},
 		{"cat >> notes.md <<'A'\nsome note\nA\n", "git status", false},
 	} {
-		command := strings.Repeat(tc.unit, size/len(tc.unit)) + tc.tail
-		args, _ := json.Marshal(map[string]string{"command": command})
-		input := actionfacts.Input{Tool: "Bash", Args: args, CWD: home + `\project`, ActiveHome: home}
-		input.DialectHint = agentHookWindowsShellDialect(input)
-		start := time.Now()
-		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-			Input: input, LegacyText: string(args), Connector: connectorName,
-			EnforcementCapable: true, ResolvedWriteTargets: resolved,
-		})
-		took := time.Since(start)
+		judge := func(n int) ([]RuleFinding, time.Duration) {
+			command := strings.Repeat(tc.unit, n/len(tc.unit)) + tc.tail
+			args, _ := json.Marshal(map[string]string{"command": command})
+			input := actionfacts.Input{Tool: "Bash", Args: args, CWD: home + `\project`, ActiveHome: home}
+			input.DialectHint = agentHookWindowsShellDialect(input)
+			start := time.Now()
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: connectorName,
+				EnforcementCapable: true, ResolvedWriteTargets: resolved,
+			})
+			return findings, time.Since(start)
+		}
+		findings, took := judge(size)
 		verdict := buildVerdict(findings, "tool_call")
 		if got := verdict.Action == "block"; got != tc.block {
 			t.Errorf("unit %q tail %q: action %q, want block=%t", tc.unit, tc.tail, verdict.Action, tc.block)
 		}
-		if took > 2*time.Second {
-			t.Errorf("unit %q: %d bytes read in %s", tc.unit, len(command), took)
-		}
+		assertLinearReaderTime(t, fmt.Sprintf("unit %q", tc.unit), took, func(full bool) time.Duration {
+			n := size / 2
+			if full {
+				n = size
+			}
+			_, d := judge(n)
+			return d
+		})
 	}
 }
 
