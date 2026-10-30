@@ -1938,6 +1938,32 @@
           "pattern": "^(|[a-z0-9][a-z0-9_-]{0,63})$",
           "default": "",
           "description": "Profile for subjects no assignment selects. Empty keeps the guardrail.* configuration."
+        },
+        "protected_files": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Protected-file watch. Unset alerts on a change to an SSH authorized keys file, shell startup file or user autostart entry made while an agent tool call ran for that user; restore also puts back the last accepted content (opt-in, strict); off turns the watch off.",
+          "properties": {
+            "on_change": {
+              "type": "string",
+              "enum": [
+                "",
+                "alert",
+                "restore",
+                "off"
+              ],
+              "default": "alert"
+            },
+            "paths": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            }
+          }
         }
       }
     },

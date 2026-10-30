@@ -478,6 +478,7 @@ Defaults from the loader. Omitted keys take these values.
 | `guardrail.judge_sweep` | `true` | Run the full judge on content the regex triage found no signal in. |
 | `guardrail.retain_judge_bodies`, `.judge_persist_queue_depth` | `true`, `1024` | Keep raw judge bodies in `judge_bodies.db`, and the async write queue depth. Restart required. |
 | `guardrail.hook_self_heal`, `.hook_self_heal_debounce_ms` | `true`, `500` | Re-install a deleted DefenseClaw hook block while the gateway runs. Restart required. |
+| `guardrail.protected_files.on_change`, `.paths` | `alert`, built-in list | The [protected-file watch](/docs/guardrail/protected-files): alert on an agent's change to SSH authorized keys, shell startup files and autostart entries; `restore` (opt-in) puts the content back; `off` turns it off. Restart required. |
 
 When `gateway.api_bind` is empty the sidecar uses `127.0.0.1` ([bind address](/docs/reference/gateway-api#bind-address)). The `openshell:` block is under [OpenShell sandbox settings](#openshell-sandbox-settings).
 

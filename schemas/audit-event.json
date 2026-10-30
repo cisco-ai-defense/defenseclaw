@@ -188,6 +188,7 @@
             "policy-delete",
             "policy-reload",
             "policy-update",
+            "protected-file-changed",
             "quarantine",
             "ready",
             "registry-add",

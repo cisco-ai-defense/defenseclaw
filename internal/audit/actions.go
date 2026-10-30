@@ -138,6 +138,13 @@ const (
 	ActionConnectorHookTampered Action = "connector-hook-tampered"
 	ActionConnectorHookRepaired Action = "connector-hook-repaired"
 
+	// ActionProtectedFileChanged records a change to a protected file (SSH
+	// authorized keys, shell startup files, user autostart entries) that the
+	// gateway's protected-file watch saw while an agent tool call was
+	// running for that user: HIGH, with the agent session it can name, and
+	// whether the file was restored (guardrail.protected_files.on_change).
+	ActionProtectedFileChanged Action = "protected-file-changed"
+
 	// ActionEnterpriseExemptUser records that a standalone enterprise hook
 	// call came from an account enterprise.enrollment.exempt_users lists: it
 	// is allowed and inspected but not enrolled. At most one row per account
@@ -441,6 +448,7 @@ func AllActions() []Action {
 		ActionAssetPolicy,
 		ActionConnectorHookTampered,
 		ActionConnectorHookRepaired,
+		ActionProtectedFileChanged,
 		ActionEnterpriseExemptUser,
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,

@@ -75,6 +75,7 @@ classes:
       ActionAssetPolicy: "asset-policy"
       ActionConnectorHookTampered: "connector-hook-tampered"
       ActionConnectorHookRepaired: "connector-hook-repaired"
+      ActionProtectedFileChanged: "protected-file-changed"
       ActionEnterpriseExemptUser: "enterprise-exempt-user"
       ActionCodexNotify: "codex.notify"
       ActionCodexNotifyAgentTurnComplete: "codex.notify.agent-turn-complete"

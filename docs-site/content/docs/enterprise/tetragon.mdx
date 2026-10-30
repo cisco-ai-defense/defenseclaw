@@ -1042,6 +1042,15 @@ enterprise:
 
 Each computer enforces with whichever digest its build ships, and the approval reads `approved` when its digest is in the list. Drop the old value once the last ring has upgraded.
 
+1.0.6 is the first release since 1.0.1 that changes the digest: it adds `kernel.ssh_authorized_keys_write`. The 1.0.1 to 1.0.5 digest is `sha256:08b71155b713` and the 1.0.6 digest is `sha256:40d66b85f4b8`. Push both before the upgrade and enforcement continues with no monitor window. Without the new value, an upgraded computer runs in monitor mode (`kernel_enforce_ack_stale`) until you add it. `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce` on an upgraded computer prints the digest of its build.
+
+```yaml
+enterprise:
+  tetragon:
+    mode: enforce
+    enforce_ack: [sha256:08b71155b713, sha256:40d66b85f4b8]   # 1.0.5, 1.0.6
+```
+
 **Tetragon.** A restart drops policies added with `tetra`; DefenseClaw's load again within a minute. A Tetragon minor outside the supported window (1.8, for example) makes the helper fall back to `cn_proc` and `fanotify` and warn `tetragon_unsupported_version`; the `DefenseClawTetragonFallback` alert fires on it.
 
 **Kernel.** A kernel change can change BPF LSM. `verify --ready-for enforce` checks it again.
@@ -1100,6 +1109,8 @@ reports in its load-error or error state is the problem
 | Burn-in does not advance | Time accrues only while an anchored agent of that user is running, every live session of that user is in the controls policy, and the stream is connected. A new session waits a minute or two (`kernel_session_policy_pending`), more than four live sessions pause it (`kernel_roots_over_limit`), a pause stops it, and a hit resets the window | Read the user's row and reason in `status` and the estimate in `verify --ready-for enforce`; end the extra sessions, or wait |
 | "Events lost" reads unknown | Tetragon's metrics listener is not on loopback, or Tetragon is 1.6.x | Set `metrics-server` to `127.0.0.1:2112` in [Harden Tetragon](#harden-tetragon) |
 | The ack went stale after an upgrade | The release changed a control, so the digest changed | Push the list form of `enforce_ack` with the old and the new digest |
+| `protected_file_extra_links:<path>` | A protected file has a second hard link | Remove the other name (`find ~ -samefile <path>`) |
+| `kernel_link_rename_not_covered:<path>` | The home is not on the root mount | The open control and the protected-file watch still cover the file |
 | Tetragon restarted and my own policies are gone | A restart drops policies added with `tetra` | Put the policies you keep in `/etc/tetragon/tetragon.tp.d` |
 | A pause is still on | The default pause is 4 hours | `tetragon status` shows who set it and when it ends; `tetragon resume` ends it |
 | An enforced user's running agent session is not denied (`kernel_sessions_predate_controls`) | The session started before the controls policy loaded: enforce turned on or Tetragon restarted | Restart the session; the restarted session is denied. An agent's own update keeps the old controls policy enforcing for running sessions until they exit |
@@ -1183,12 +1194,24 @@ config blocks unrelated changes on a managed computer:
 
 ### The kernel controls
 
-Two controls exist. There are no per-control settings.
+Three controls exist. There are no per-control settings.
 
 | Control | Denies | Does not deny |
 | --- | --- | --- |
 | `kernel.ssh_private_key_read` | Opening `~/.ssh/id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa` | `.pub` files and certificates. `ssh`, `ssh-keygen` and `ssh-add` are exempt, so SSH commit signing and `ssh-add` keep working |
 | `kernel.persistence_write` | Opening for write `~/.bashrc`, `~/.bash_profile`, `~/.profile`, `~/.zshrc`, and files under `~/.config/systemd/user/` and `~/.config/autostart/`, including truncation, which is denied before it happens | Reading. Replacing or removing a file by rename or unlink |
+| `kernel.ssh_authorized_keys_write` (rule `persistence.ssh_authorized_keys_write`) | Opening `~/.ssh/authorized_keys` or `authorized_keys2` for write; a new hard link to them or at their names; a rename onto them, away from them, or of `~/.ssh` itself | Reading. Removing a file, and making a symlink at the name: the [protected-file watch](/docs/guardrail/protected-files) alerts on those |
+
+The control sees the file, not the command, so it also covers a write by a
+script, `xargs`, `find -exec`, `make` or a git option the hook could not read.
+Each user's own `ssh-copy-id`, outside an agent, is never in scope.
+
+A hard link to `authorized_keys` made before the policy loaded is another name
+for the file, and no path selector can match it. The helper reports each such
+file as `protected_file_extra_links:<path>` in `tetragon status`; remove the
+other name. The link and rename selectors need the home on the root mount
+(Tetragon names a dentry within its own mount); a home on another mount keeps
+the open control and reports `kernel_link_rename_not_covered:<path>`.
 
 Who a control applies to is deliberately narrow. Each control covers only:
 

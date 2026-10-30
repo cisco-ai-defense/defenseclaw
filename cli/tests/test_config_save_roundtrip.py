@@ -494,6 +494,34 @@ class TestConfigVersion9KeysRoundTrip(unittest.TestCase):
             original["guardrail"]["rules"]["disable"] = ["ENT-DATA-EMPLOYEE-ID"]
             self.assertEqual(persisted, original)
 
+    def test_protected_files_survive_an_unrelated_save_and_stay_absent_when_unset(self):
+        """guardrail.protected_files is Go-owned (#1172): a CLI save keeps a set
+        value as written and never adds the key to a config that lacks it, so a
+        rollback to a release without the key still validates the file."""
+        for block in ({"on_change": "restore", "paths": [".ssh/authorized_keys"]}, None):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config_path = os.path.join(tmpdir, "config.yaml")
+                original = {
+                    "config_version": 8,
+                    "data_dir": tmpdir,
+                    "environment": "linux",
+                    "claw": {"mode": "codex"},
+                    "guardrail": {"rule_pack": "strict"},
+                    "observability": {},
+                }
+                if block is not None:
+                    original["guardrail"]["protected_files"] = block
+                with open(config_path, "w", encoding="utf-8") as stream:
+                    yaml.safe_dump(original, stream, sort_keys=False)
+                with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                    os.environ.pop("DEFENSECLAW_CONFIG", None)
+                    cfg = load()
+                    cfg.guardrail.rules.disable = ["ENT-DATA-EMPLOYEE-ID"]
+                    cfg.save()
+                with open(config_path, encoding="utf-8") as stream:
+                    persisted = yaml.safe_load(stream)
+                self.assertEqual(persisted["guardrail"].get("protected_files"), block)
+
 class TestConfigSaveExpandsHomePolicyDir(unittest.TestCase):
     def test_a_save_writes_a_home_policy_dir_as_the_folder_it_names(self):
         """The gateway reads policy_dir as written, so a migrated or hand-set

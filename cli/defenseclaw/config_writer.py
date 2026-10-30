@@ -112,6 +112,7 @@ RESTART_KEYS = (
     "guardrail.retain_judge_bodies",
     "guardrail.hook_self_heal",
     "guardrail.hook_self_heal_debounce_ms",
+    "guardrail.protected_files",
     "claw",
     "agent",
     "routing",

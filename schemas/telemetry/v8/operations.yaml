@@ -16682,6 +16682,22 @@ producer_mappings:
     bucket: security.finding
     compatibility_only: true
 - producer: audit_action
+  key: protected-file-changed
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.security_finding
+  severity_policy: finding_required
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.protected.file.changed
+    bucket: security.finding
+    compatibility_only: true
+- producer: audit_action
   key: deploy
   source: internal/audit/actions.go
   event_name_policy: context_optional
