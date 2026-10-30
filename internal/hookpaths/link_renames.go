@@ -270,6 +270,76 @@ func (l shellLinks) dotDotPastLinksClear(command, cwd, home string) bool {
 	return true
 }
 
+// diskLinkDotDotReachesState is dotDotPastLinksClear for the links already
+// on disk: a word that steps through a disk link and then up with .. is
+// walked from the link target, so cd p/../.ssh with p -> ../proj reaches
+// ~/.ssh. Only the user view of the disk shows the link; behind ProtectHome
+// the gateway reads this walk from ActionDecisionKey (GAP-2600 pod).
+func diskLinkDotDotReachesState(command, cwd, home string) bool {
+	if home == "" || !strings.Contains(command, "..") {
+		return false
+	}
+	start, ok := ResolveWriteTarget(cwd)
+	if !ok {
+		return false
+	}
+	state := newStateReach(home)
+	words := commandWords(command)
+	physical := slices.Contains(words, "-P") || strings.Contains(command, "physical")
+	for w, word := range words {
+		if !strings.Contains(word, "..") {
+			continue
+		}
+		base, rest := start, word
+		if strings.HasPrefix(word, "~") {
+			expanded, known := tildeWordPath(word, cwd, home)
+			if !known {
+				continue
+			}
+			rest = expanded
+		}
+		if filepath.IsAbs(rest) {
+			base = string(filepath.Separator)
+		}
+		parts := strings.Split(filepath.ToSlash(rest), "/")
+		path := base
+		for i, part := range parts {
+			if part == "" || part == "." {
+				continue
+			}
+			if part == ".." {
+				path = filepath.Dir(path)
+				continue
+			}
+			path = filepath.Join(path, part)
+			info, err := os.Lstat(path)
+			if err != nil {
+				break
+			}
+			if info.Mode()&os.ModeSymlink == 0 {
+				continue
+			}
+			if !slices.Contains(parts[i+1:], "..") {
+				break
+			}
+			target, resolved := ResolveWriteTarget(path)
+			if !resolved {
+				break
+			}
+			end, through := state.physicalWalk(target, parts[i+1:])
+			if through {
+				return true
+			}
+			cdOperand := w > 0 && (words[w-1] == "cd" || words[w-1] == "pushd")
+			if state.hits(end) && (physical || !cdOperand || !logicalDirExists(absolutePath(word, cwd), cwd)) {
+				return true
+			}
+			break
+		}
+	}
+	return false
+}
+
 // physicalWalk follows steps from a link target as the kernel does, through
 // the disk links it can read; through is true when a step is at or in
 // state.

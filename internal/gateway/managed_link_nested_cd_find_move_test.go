@@ -54,6 +54,12 @@ func TestManagedLinkThenNestedCdOrFindMoveReadsTheUserView(t *testing.T) {
 		// names a missing project directory: benign.
 		{"F5e", `ln -s ../proj p; sh -c "cd p/.. && cd .ssh && echo k >> authorized_keys"`, false},
 		{"F5g", `ln -s src/sub d; bash -c "cd d/.. && ls"`, false},
+		// The same through a link already on disk (dp -> .., ds -> src/sub);
+		// only the user view of the disk shows it.
+		{"D1", `bash -c "cd dp/../.ssh && echo k >> authorized_keys"`, true},
+		{"D2", `cd dp/../.ssh && echo k >> authorized_keys`, true},
+		{"D5", `bash -c "cd ds/../../../.ssh && echo k >> authorized_keys"`, true},
+		{"D6", `bash -c "cd ds/.. && ls > list.txt"`, false},
 	}
 	for _, managed := range []bool{false, true} {
 		for _, connector := range []string{"claudecode", "codex"} {
@@ -72,6 +78,13 @@ func TestManagedLinkThenNestedCdOrFindMoveReadsTheUserView(t *testing.T) {
 					filepath.Join(home, ".defenseclaw", "config.yaml")} {
 					if err := os.WriteFile(name, []byte("x\n"), 0o600); err != nil {
 						t.Fatal(err)
+					}
+				}
+				if strings.HasPrefix(row.id, "D") {
+					for name, target := range map[string]string{"dp": "../proj", "ds": "src/sub"} {
+						if err := os.Symlink(target, filepath.Join(cwd, name)); err != nil {
+							t.Fatal(err)
+						}
 					}
 				}
 				if row.id == "A04" {

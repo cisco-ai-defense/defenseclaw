@@ -127,6 +127,11 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 			return true
 		}
 	}
+	// A cd or path through a disk link and up with .. is read from the
+	// link target; a managed gateway cannot see the link (GAP-2600).
+	if !windowsHome && (len(writes) > 0 || strings.Contains(command, ">")) && diskLinkDotDotReachesState(command, cwd, home) {
+		return true
+	}
 	if file, ok := parseShell(command); ok {
 		values := actionValues{"HOME": home, "PWD": cwd}
 		for _, stmt := range file.Stmts {
