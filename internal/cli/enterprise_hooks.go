@@ -2912,7 +2912,11 @@ func previousEnterpriseHookProtection(
 	var protection enterpriseHookPreviousProtection
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	userName = strings.TrimSpace(userName)
-	userHome = filepath.Clean(strings.TrimSpace(userHome))
+	// An unresolved profile has no home; filepath.Clean would turn "" into
+	// "." and the SID match would then never find the ledger row.
+	if userHome = strings.TrimSpace(userHome); userHome != "" {
+		userHome = filepath.Clean(userHome)
+	}
 	sid = strings.TrimSpace(sid)
 	if dataDir == "" || connectorName == "" {
 		return protection, nil

@@ -11681,10 +11681,12 @@ function Initialize-DefenseClawCodexMachinePolicyParent {
             if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory -PathType Container)) {
                 throw "Codex machine-policy ancestor is occupied by a non-directory: $directory"
             }
-            # Existing shared directories keep their ACL unless it gives an
-            # untrusted principal write authority or ownership, or lacks the
-            # SYSTEM or Administrators full-control rights; only then is the
-            # canonical descriptor re-stamped (see the assertion).
+            # Existing shared directories keep their ACL unless it is unsafe:
+            # for example an untrusted principal with write authority or
+            # ownership, a null DACL, or missing SYSTEM or Administrators
+            # full-control rights (including rights removed by a deny ACE).
+            # The assertion lists every condition that re-stamps the
+            # canonical descriptor.
             Assert-DefenseClawCodexMachinePolicyDirectory -Path $directory
             continue
         }

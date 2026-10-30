@@ -1717,3 +1717,35 @@ func TestEnterpriseHooksClaudeEffectivePolicyVerified(t *testing.T) {
 		})
 	}
 }
+
+// A SID-only target whose profile no longer resolves has no home. Its ledger
+// row must still be found by SID, so the target keeps its protection.
+func TestPreviousEnterpriseHookSuccessMatchesSIDWithUnresolvedHome(t *testing.T) {
+	originalOwnershipSetter := enterpriseHookAuthorizationOwnershipSetter
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	t.Cleanup(func() { enterpriseHookAuthorizationOwnershipSetter = originalOwnershipSetter })
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	dir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod state dir: %v", err)
+	}
+	const sid = "S-1-5-21-111-222-333-1001"
+	rows := []enterpriseHookReconcileRow{{
+		SID:       sid,
+		UserHome:  "/home/alice",
+		Connector: "codex",
+		OK:        true,
+		Result:    &enterprisehooks.InstallResult{Connector: "codex", UserHome: "/home/alice"},
+	}}
+	if err := writeEnterpriseHookGuardianState(dir, "manifest.yaml", testEnterpriseHookManifestSHA256, rows, 0, true); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	protected, err := previousEnterpriseHookSuccess(dir, "", "", sid, "codex")
+	if err != nil {
+		t.Fatalf("previousEnterpriseHookSuccess: %v", err)
+	}
+	if !protected {
+		t.Fatal("SID-only target with an unresolved home lost its protection")
+	}
+}
