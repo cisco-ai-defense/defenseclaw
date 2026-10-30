@@ -28,6 +28,12 @@ func TestActionPwshCommandPrintBodyQuotedTildeIsText(t *testing.T) {
 		{q(`pwsh -NoProfile -c "Write-Output @~/.ssh/authorized_keys@"`), ""},
 		{q(`powershell -NoLogo -NonInteractive -Command "echo @~/.ssh/authorized_keys@"`), ""},
 		{q(`pwsh -ExecutionPolicy Bypass -Command "Write-Host @see ~/.ssh/authorized_keys@; git status"`), ""},
+		// git -c with an author identity key still only records the message
+		// (GAP-1473 VD row); any other -c key may run a command (GAP-2090).
+		{q(`pwsh -NoProfile -Command "git -c user.name=vd commit --allow-empty -m @Document ~/.ssh/authorized_keys@"`), ""},
+		{q(`pwsh -NoProfile -Command "git -c user.name=vd -c user.email=vd.example.test commit --allow-empty -m @Document ~/.ssh/authorized_keys@"`), ""},
+		{q(`pwsh -Command "git -c user.name=vd -c @alias.x=!cp k.pub ~/.ssh/authorized_keys@ x"`), "protected-target"},
+		{q(`pwsh -Command "git -c user.name=vd -c core.pager=less log --grep @~/.ssh/authorized_keys@"`), "protected-target"},
 		{q(`pwsh -Command "Copy-Item k.pub @~/.ssh/authorized_keys@"`), "protected-target"},
 		{q(`pwsh -Command "Write-Output k >> @~/.ssh/authorized_keys@"`), "protected-target"},
 		{q(`pwsh -Command "Write-Output k | Out-File -Append @~/.ssh/authorized_keys@"`), "protected-target"},
@@ -55,6 +61,8 @@ func TestActionPwshCommandPrintBodyQuotedTildeIsTextOnWindowsHome(t *testing.T) 
 		{q(`pwsh -Command "Write-Output @~/.ssh/authorized_keys@"`), ""},
 		{q(`pwsh -NoProfile -c "echo @~/.ssh/authorized_keys@"`), ""},
 		{q(`powershell.exe -NoLogo -Command "Write-Host @see ~/.ssh/authorized_keys@; git status"`), ""},
+		{q(`pwsh -NoProfile -Command "git -c user.name=vd -c user.email=vd.example.test commit --allow-empty -m @Document ~/.ssh/authorized_keys@"`), ""},
+		{q(`pwsh -Command "git -c user.name=vd -c @alias.x=!cp k.pub ~/.ssh/authorized_keys@ x"`), "protected-target"},
 		{q(`pwsh -Command "Copy-Item k.pub @~/.ssh/authorized_keys@"`), "protected-target"},
 		{q(`pwsh -Command "Write-Output k >> @~/.ssh/authorized_keys@"`), "protected-target"},
 		{q(`pwsh -Command "Write-Output k | Out-File -Append @~/.ssh/authorized_keys@"`), "protected-target"},

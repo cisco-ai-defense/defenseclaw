@@ -1078,8 +1078,9 @@ func actionLiteralEnvironmentName(name string) bool {
 
 // actionLiteralGitWords reports whether a git command only reads or records
 // its message text. Global options that only move or scope the repository
-// are skipped; -c, --config-env, --exec-path and similar can install a
-// command that runs later, and grep -O runs its value through a shell.
+// and -c with an author identity key are skipped; any other -c,
+// --config-env, --exec-path and similar can install a command that runs
+// later, and grep -O runs its value through a shell.
 func actionLiteralGitWords(words []*syntax.Word, home string) bool {
 	for len(words) > 0 {
 		option, fixed := StaticWord(words[0], home)
@@ -1089,6 +1090,17 @@ func actionLiteralGitWords(words []*syntax.Word, home string) bool {
 		switch option {
 		case "-C":
 			if len(words) < 2 {
+				return false
+			}
+			words = words[2:]
+			continue
+		case "-c":
+			// -c user.name=NAME only records text (GAP-1473); any other key
+			// may install a command.
+			if len(words) < 2 {
+				return false
+			}
+			if value, fixed := StaticWord(words[1], home); !fixed || !gitIdentityConfigOption(value) {
 				return false
 			}
 			words = words[2:]
@@ -2819,13 +2831,17 @@ func actionWindowsTextProgram(word string) bool {
 // global option that changes what git runs.
 func actionWindowsGitSubcommand(words []string) (int, bool) {
 	// Global options that only place the command (-C dir, --git-dir,
-	// --work-tree) or change its output do not change what git runs; -c,
-	// --config-env, --exec-path and any other option do (RV5-4).
+	// --work-tree), change its output or set the author identity
+	// (-c user.name=NAME) do not change what git runs; any other -c,
+	// --config-env, --exec-path and any other option do (RV5-4, GAP-1473).
 	sub := 1
 	for sub < len(words) && strings.HasPrefix(words[sub], "-") {
 		option := words[sub]
 		switch {
 		case option == "-C" || option == "--git-dir" || option == "--work-tree" || option == "--namespace":
+			sub += 2
+			continue
+		case option == "-c" && sub+1 < len(words) && gitIdentityConfigOption(words[sub+1]):
 			sub += 2
 			continue
 		case strings.HasPrefix(option, "--git-dir=") || strings.HasPrefix(option, "--work-tree=") ||
@@ -2842,6 +2858,20 @@ func actionWindowsGitSubcommand(words []string) (int, bool) {
 		return 0, false
 	}
 	return sub, true
+}
+
+// gitIdentityConfigOption reports a git -c value that only sets the author
+// or committer name or email of the command (-c user.name=NAME): git keeps
+// those as text, so the command still only reads or records its words. Every
+// other key (an alias, the pager, the editor, a hook path ...) may name a
+// command git runs, and keeps the statement out of the text class (GAP-2090).
+func gitIdentityConfigOption(value string) bool {
+	key, _, _ := strings.Cut(value, "=")
+	switch strings.ToLower(key) {
+	case "user.name", "user.email", "author.name", "author.email", "committer.name", "committer.email":
+		return true
+	}
+	return false
 }
 
 // actionWindowsGitPathspecWord reports a word of a git text statement that

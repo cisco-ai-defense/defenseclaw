@@ -30,6 +30,8 @@ func TestActionWindowsGitConfigValueIsNotText(t *testing.T) {
 		{"RV5-4 -C before a message", "git -C proj commit -m 'Document ~/.ssh/authorized_keys'", ""},
 		{"RV5-4 --no-pager before a log search", "git --no-pager log --grep '~/.ssh/authorized_keys'", ""},
 		{"RV5-4 -C before -c still runs", "git -C proj -c 'core.pager=cp k.pub ~/.ssh/authorized_keys' log", "protected-target"},
+		{"GAP-1473 -c identity before a message", "git -c user.name=vd -c user.email=vd@example.test commit -m 'Document ~/.ssh/authorized_keys'", ""},
+		{"GAP-1473 -c identity then alias still runs", "git -c user.name=vd -c 'alias.x=!cp k.pub ~/.ssh/authorized_keys' x", "protected-target"},
 		{"GAP-1473 git message", "git commit -m 'Document ~/.ssh/authorized_keys'", ""},
 		{"GAP-1473 git log search", "git log --grep '~/.ssh/authorized_keys'", ""},
 		{"GAP-1473 printed quoted tilde path", "Write-Output '~/.ssh/authorized_keys'", ""},
