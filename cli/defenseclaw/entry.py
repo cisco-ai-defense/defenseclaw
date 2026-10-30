@@ -97,6 +97,15 @@ def main() -> None:
         from defenseclaw.upgrade_shim import run
 
         sys.exit(run(argv))
+    if argv == ["--version"]:
+        # Click's --version answer for the root group, without importing
+        # every command module first (about 330 ms).
+        from defenseclaw import __version__
+
+        sys.stdout.write(f"defenseclaw, version {__version__}\n")
+        sys.stdout.flush()
+        _notice(argv)
+        sys.exit(0)
 
     from defenseclaw.main import main as cli_main
 
