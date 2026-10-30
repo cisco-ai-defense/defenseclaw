@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -163,6 +164,28 @@ func auditDBPlatformSidecarNeedsHardening(file *os.File) (bool, error) {
 
 func auditDBPlatformHardeningNeedsCapabilityReopen() bool { return true }
 
+// auditDBPlatformProcessCannotRestamp reports whether this is the gateway
+// service and file is not owned by its service SID. The gateway's
+// write-restricted token holds WRITE_DAC only through ownership of a file it
+// created, so any other file is left to the guardian.
+func auditDBPlatformProcessCannotRestamp(file *os.File) bool {
+	if !auditDBWindowsCurrentProcessIsGateway() {
+		return false
+	}
+	gatewayServiceSID, err := auditDBWindowsPinnedGatewayServiceSID()
+	if err != nil || gatewayServiceSID == nil || file == nil {
+		return true
+	}
+	sd, err := windows.GetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return true
+	}
+	owner, _, err := sd.Owner()
+	return err != nil || owner == nil || !owner.Equals(gatewayServiceSID)
+}
+
+var auditDBWindowsCurrentProcessIsGateway = managed.WindowsCurrentProcessIsGatewayService
+
 func validateAuditDBPlatformTrust(path string, _ os.FileInfo, directory, protectChildren bool) error {
 	pathPtr, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -182,6 +205,15 @@ func validateAuditDBPlatformTrust(path string, _ os.FileInfo, directory, protect
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil {
+		if !protectChildren && errors.Is(err, windows.ERROR_ACCESS_DENIED) && managed.PlatformInstallerOwnedPath(path) {
+			// An installer-owned ancestor whose DACL no longer grants this
+			// process READ_CONTROL is permission drift, not structure; its
+			// type and reparse state were checked above.
+			if relaxErr := managed.RelaxAncestorTrustVerdict(true, path, "audit store ancestor",
+				managed.NewTrustVerdict("audit: security descriptor is not readable: %v", err)); relaxErr == nil {
+				return nil
+			}
+		}
 		return fmt.Errorf("audit: inspect Windows security descriptor: %w", err)
 	}
 	return validateAuditDBWindowsSecurityDescriptor(path, sd, directory, protectChildren)
@@ -204,7 +236,10 @@ func validateAuditDBWindowsSecurityDescriptor(
 	if err != nil {
 		return fmt.Errorf("audit: inspect Windows owner: %w", err)
 	}
-	if !auditDBWindowsTrustedPrincipal(owner, gatewayServiceSID) {
+	if !auditDBWindowsTrustedPrincipal(owner, gatewayServiceSID) && auditDBWindowsAcceptAdminPrincipal(path, "owner", owner) {
+		// An administrator account or domain admin group owns the object:
+		// accepted and logged.
+	} else if !auditDBWindowsTrustedPrincipal(owner, gatewayServiceSID) {
 		// AIFW-34262 ancestor-advisory: an untrusted OWNER on a path under
 		// managed.PlatformInstallerOwnedPath is a permission-shaped verdict,
 		// not a structural failure. Under `protectChildren=false` (an
@@ -316,10 +351,15 @@ func secureAuditDBPlatformFile(file *os.File, directory bool) error {
 		return fmt.Errorf("audit: verify protected Windows file DACL by handle: %w", err)
 	}
 	if needsHardening {
-		return errors.New("audit: protected Windows file DACL remains noncanonical after hardening")
+		return errAuditDBNoncanonicalAfterHardening
 	}
 	return nil
 }
+
+// errAuditDBNoncanonicalAfterHardening: the re-stamp went through but the
+// descriptor is still not the canonical form (a TrustedInstaller owner is
+// trusted but never canonical). Trusted drift, accepted for an existing file.
+var errAuditDBNoncanonicalAfterHardening = errors.New("audit: protected Windows file DACL remains noncanonical after hardening")
 
 func auditDBWindowsProtectedDACL(directory bool) (*windows.ACL, error) {
 	return auditDBWindowsProtectedDACLForOwner(directory, nil)
@@ -548,7 +588,8 @@ func rejectUntrustedAuditDBWindowsACEs(
 		}
 		readExposesSidecars := protectChildren && (!directory || inheritsToChildren) &&
 			auditDBWindowsReadLikeAccess(ace.Mask)
-		if !auditDBWindowsWriteLikeAccess(ace.Mask, protectChildren) && !readExposesSidecars {
+		writeLike := auditDBWindowsWriteLikeAccess(ace.Mask, protectChildren)
+		if !writeLike && !readExposesSidecars {
 			continue
 		}
 		switch ace.Header.AceType {
@@ -562,6 +603,28 @@ func rejectUntrustedAuditDBWindowsACEs(
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		if sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) ||
 			inheritOnly && sid.IsWellKnown(windows.WinCreatorOwnerSid) {
+			continue
+		}
+		if !auditDBWindowsTrustedPrincipal(sid, gatewayServiceSID) &&
+			auditDBWindowsAcceptAdminPrincipal(path, fmt.Sprintf("entry mask 0x%x", uint32(ace.Mask)), sid) {
+			continue
+		}
+		if writeLike && directory &&
+			managed.AcceptInheritedCreateChild(path, "audit store", ace.Header.AceFlags, ace.Mask, sid) {
+			// The folder inherits C:\ProgramData's container-only Users
+			// create-child entry after a reset. It adds files and folders but
+			// cannot change, rename or delete an existing one, and files do
+			// not inherit it. Accepted and logged; the guardian re-stamps.
+			continue
+		}
+		if !writeLike && !managed.TrustStrictAncestors() && !auditDBWindowsTrustedPrincipal(sid, gatewayServiceSID) {
+			// A foreign read-only entry (a backup or DLP agent, an inherited
+			// Users read after a reset) can disclose audit content but cannot
+			// change it. Accept and log it; the guardian re-stamps the
+			// canonical descriptor. Only write authority stays fatal, and
+			// strict mode keeps every foreign entry fatal.
+			auditDBWindowsReportAccept(path, fmt.Sprintf(
+				"principal %s has read-only access mask 0x%x", auditDBWindowsSID(sid), uint32(ace.Mask)))
 			continue
 		}
 		if !auditDBWindowsTrustedPrincipal(sid, gatewayServiceSID) {
@@ -589,6 +652,46 @@ func rejectUntrustedAuditDBWindowsACEs(
 		}
 	}
 	return nil
+}
+
+// auditDBWindowsAcceptAdminPrincipal accepts and logs an administrator
+// principal outside the core trusted set as an owner or writer, unless strict
+// mode is pinned.
+func auditDBWindowsAcceptAdminPrincipal(path, what string, sid *windows.SID) bool {
+	if managed.TrustStrictAncestors() || !auditDBWindowsAdminEquivalent(sid) {
+		return false
+	}
+	auditDBWindowsReportAccept(path, fmt.Sprintf("%s %s is an administrator principal", what, auditDBWindowsSID(sid)))
+	return true
+}
+
+var auditDBWindowsAdminEquivalent = managed.WindowsAdminEquivalentPrincipal
+
+var auditDBWindowsAcceptedOnce sync.Map
+
+// auditDBWindowsReportAccept logs one accepted drift per (path, reason) per
+// process; validation runs again after every migration and readiness write.
+func auditDBWindowsReportAccept(path, reason string) {
+	if _, seen := auditDBWindowsAcceptedOnce.LoadOrStore(path+"\x00"+reason, struct{}{}); seen {
+		return
+	}
+	managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+		"path":   path,
+		"object": "audit store",
+		"reason": reason,
+	})
+}
+
+// auditDBPlatformHardeningFailureIsDrift reports whether a failure to
+// re-stamp a trusted-but-noncanonical descriptor is the gateway token's
+// missing right (access denied), which a privileged component repairs, rather
+// than a real failure.
+func auditDBPlatformHardeningFailureIsDrift(err error) bool {
+	return errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, errAuditDBNoncanonicalAfterHardening)
+}
+
+func auditDBPlatformReportAccept(path, reason string) {
+	auditDBWindowsReportAccept(path, reason)
 }
 
 func auditDBWindowsReadLikeAccess(mask windows.ACCESS_MASK) bool {

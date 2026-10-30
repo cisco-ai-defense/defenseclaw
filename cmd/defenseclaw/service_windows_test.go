@@ -977,15 +977,25 @@ func TestWindowsLifecycleUsesProtectedFileLockNotSquattableGlobalObject(t *testi
 		"[IO.FileMode]::CreateNew",
 		"[IO.FileShare]::None",
 		"Assert-DefenseClawNoReparsePath -Path $path",
+		"Clear-DefenseClawRestrictiveFileAttributes -Path $path",
 		"Assert-DefenseClawPathAcl `",
-		"if (-not $lockAcl.AreAccessRulesProtected)",
-		"-AllowInheritance",
-		"Set-DefenseClawPathAcl `",
-		"-Kind AdminFile",
+		"-RejectUntrustedRead",
+		"-SelfHealKind AdminFile",
+		"-SelfHealGatewayServiceSID $script:AdministratorsSID",
 	} {
 		if !strings.Contains(lock, contract) {
 			t.Fatalf("protected lifecycle file lock missing %q", contract)
 		}
+	}
+	// The verdict engine flags an inheriting DACL unless the caller passes
+	// -AllowInheritance, so the lock must not pass it: an inherited
+	// descriptor is re-stamped to the protected admin-file form, not adopted.
+	if strings.Contains(lock, "-AllowInheritance") {
+		t.Fatal("protected lifecycle file lock accepts an inheriting DACL instead of re-stamping it")
+	}
+	engine := windowsPowerShellFunction(t, module, "Get-DefenseClawPathAclVerdicts")
+	if !strings.Contains(engine, "if (-not $AllowInheritance -and -not $acl.AreAccessRulesProtected)") {
+		t.Fatal("ACL verdict engine no longer flags an unprotected DACL")
 	}
 	transaction := windowsPowerShellFunction(t, module, "New-DefenseClawTransaction")
 	stopGuardian := strings.Index(transaction, "Stop-DefenseClawService -Name $GuardianServiceName")

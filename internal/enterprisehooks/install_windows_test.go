@@ -1951,9 +1951,16 @@ func TestVerifyWindowsClaudeRejectsAndInstallRepairsTamperedSharedHook(t *testin
 		t.Fatalf("tamper shared hook: %v", err)
 	}
 
-	if _, err := Verify(context.Background(), opts); err == nil ||
-		!strings.Contains(err.Error(), "shared hook script digest mismatch") {
-		t.Fatalf("Verify after shared-hook tamper = %v, want digest rejection", err)
+	// A digest mismatch is repaired by republishing the generated scripts,
+	// then verified again; it no longer fails the user.
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify after shared-hook tamper = %v, want republish and success", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("Verify did not republish the tampered shared hook: err=%v", err)
+	}
+	if err := os.WriteFile(path, []byte("tampered shared hook\n"), 0o600); err != nil {
+		t.Fatalf("tamper shared hook again: %v", err)
 	}
 
 	opts.AllowMissingHookConfigRepair = true
@@ -2017,9 +2024,11 @@ func TestVerifyWindowsClaudeRepairsAtomicSharedHookReplacementWithoutAdvancingCo
 		t.Fatalf("atomically replace managed hook: %v", err)
 	}
 
-	if _, err := Verify(context.Background(), opts); err == nil ||
-		!strings.Contains(err.Error(), "shared hook script digest mismatch") {
-		t.Fatalf("Verify after atomic replacement = %v, want digest rejection", err)
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify after atomic replacement = %v, want republish and success", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("Verify did not republish the replaced shared hook: err=%v", err)
 	}
 	opts.AllowMissingHookConfigRepair = true
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2047,7 +2056,10 @@ func TestVerifyWindowsClaudeRepairsAtomicSharedHookReplacementWithoutAdvancingCo
 	}
 }
 
-func TestVerifyWindowsClaudeRejectsNoncanonicalSharedHookProtection(t *testing.T) {
+// Shared-hook descriptor drift (here an Everyone write grant) is repaired by
+// an elevated verifier and accepted with a log by an unprivileged one; the
+// script bytes stay bound by the contract digest either way.
+func TestVerifyWindowsClaudeRepairsNoncanonicalSharedHookProtection(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2056,13 +2068,38 @@ func TestVerifyWindowsClaudeRejectsNoncanonicalSharedHookProtection(t *testing.T
 	path := filepath.Join(fixture.home, ".defenseclaw", "hooks", "inspect-tool.sh")
 	setWindowsTestUntrustedWriteDACL(t, path, fixture.targetSID)
 
-	if _, err := Verify(context.Background(), opts); err == nil ||
-		!strings.Contains(err.Error(), "shared hook protection is noncanonical") {
-		t.Fatalf("Verify with noncanonical shared-hook DACL = %v, want protection rejection", err)
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify with noncanonical shared-hook DACL = %v, want repair or accepted drift", err)
 	}
 }
 
-func TestManagedSharedHookVerifierRejectsNoncanonicalContractLockProtection(t *testing.T) {
+// Structure is still reported: a hard-linked shared hook is never adopted,
+// whatever its descriptor.
+func TestVerifyWindowsClaudeRejectsHardLinkedSharedHook(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	opts := windowsManagedInstallOptions(fixture)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("initial Install: %v", err)
+	}
+	path := filepath.Join(fixture.home, ".defenseclaw", "hooks", "inspect-tool.sh")
+	if err := os.Link(path, filepath.Join(fixture.home, "inspect-tool-alias.sh")); err != nil {
+		t.Fatalf("hard-link shared hook: %v", err)
+	}
+	_, err := Verify(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Verify accepted a hard-linked shared hook")
+	}
+	if errors.Is(err, connector.ErrManagedSharedHookScriptDigestMismatch) {
+		t.Fatalf("hard-linked shared hook reported as a digest mismatch: %v", err)
+	}
+}
+
+// Contract-lock descriptor drift (here an Everyone write grant) is permission
+// drift: an elevated verifier re-stamps the canonical protection on the held
+// file and an unprivileged one accepts and logs it. The contract bytes stay
+// bound by their digests either way; a hard-linked shared hook is still
+// refused (TestVerifyWindowsClaudeRejectsHardLinkedSharedHook).
+func TestManagedSharedHookVerifierRepairsNoncanonicalContractLockProtection(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -2075,8 +2112,18 @@ func TestManagedSharedHookVerifierRejectsNoncanonicalContractLockProtection(t *t
 	if err := connector.VerifyManagedSharedHookScriptDigests(
 		dataDir,
 		fixture.targetSID.String(),
-	); err == nil || !strings.Contains(err.Error(), "protection is noncanonical") {
-		t.Fatalf("shared-hook verifier with noncanonical contract-lock DACL = %v, want protection rejection", err)
+	); err != nil {
+		t.Fatalf("shared-hook verifier with noncanonical contract-lock DACL = %v, want repair or accepted drift", err)
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		return
+	}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if windowsTestDACLGrants(lockPath, everyone, windows.FILE_WRITE_DATA) {
+		t.Fatal("elevated verifier left the Everyone write grant on the contract lock")
 	}
 }
 
@@ -2423,7 +2470,44 @@ func TestValidateWindowsManagedPolicyDirectoryProtectionRejectsUnprotectedLeaf(t
 	}
 }
 
-func TestWindowsClaudeManagedPolicyTransactionRejectsHostilePrecreatedLock(t *testing.T) {
+// An administrator-owned lock whose DACL drifted (here an Everyone write
+// grant) is re-stamped before the transaction opens it.
+func TestWindowsClaudeManagedPolicyTransactionRepairsDriftedLock(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("repairing an Administrators-owned lock needs an elevated token")
+	}
+	fixture := newWindowsManagedInstallFixture(t, nil)
+	lockPath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedLockFile)
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsManagedPolicyProtection(lockPath, false, false); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestUntrustedWriteDACL(t, lockPath, fixture.targetSID)
+	// Own the lock by BUILTIN\Administrators, not the fixture's canonical
+	// owner, so the repair's owner admission is exercised for a real
+	// administrator owner whatever account runs the test.
+	if err := setWindowsAdministratorsOwnerForTest(lockPath); err != nil {
+		t.Skipf("set Administrators owner: %v", err)
+	}
+	called := false
+	if err := withWindowsClaudeManagedPolicyTransaction(func() error {
+		called = true
+		return nil
+	}); err != nil {
+		t.Fatalf("transaction with drifted lock: %v", err)
+	}
+	if !called {
+		t.Fatal("transaction callback did not run after the lock was repaired")
+	}
+	if err := windowsManagedPolicyFileTrustCheck(lockPath); err != nil {
+		t.Fatalf("lock still untrusted after repair: %v", err)
+	}
+}
+
+// Structure stays fatal: a hard-linked lock is never adopted.
+func TestWindowsClaudeManagedPolicyTransactionRejectsHardLinkedLock(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, nil)
 	lockPath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedLockFile)
 	if err := os.WriteFile(lockPath, []byte("hostile"), 0o600); err != nil {
@@ -2433,16 +2517,59 @@ func TestWindowsClaudeManagedPolicyTransactionRejectsHostilePrecreatedLock(t *te
 		t.Fatal(err)
 	}
 	setWindowsTestUntrustedWriteDACL(t, lockPath, fixture.targetSID)
+	if err := os.Link(lockPath, filepath.Join(fixture.home, "lock-alias")); err != nil {
+		t.Fatal(err)
+	}
 	called := false
 	err := withWindowsClaudeManagedPolicyTransaction(func() error {
 		called = true
 		return nil
 	})
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "lock is untrusted") {
-		t.Fatalf("transaction error = %v, want hostile lock refusal", err)
+		t.Fatalf("transaction error = %v, want hard-linked lock refusal", err)
 	}
 	if called {
-		t.Fatal("transaction callback ran with hostile precreated lock")
+		t.Fatal("transaction callback ran with a hard-linked lock")
+	}
+}
+
+// setWindowsAdministratorsOwnerForTest makes BUILTIN\Administrators the
+// owner, leaving the drifted DACL in place.
+func setWindowsAdministratorsOwnerForTest(path string) error {
+	owner, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return err
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil)
+}
+
+func TestWindowsClaudeManagedPolicyLockOpensReadOnlyLockFile(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), windowsClaudeManagedLockFile)
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pointer, err := windows.UTF16PtrFromString(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetFileAttributes(pointer, windows.FILE_ATTRIBUTE_READONLY); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = windows.SetFileAttributes(pointer, windows.FILE_ATTRIBUTE_NORMAL) })
+	held, err := openWindowsClaudeManagedPolicyLockFile(lockPath)
+	if err != nil {
+		t.Fatalf("open ReadOnly lock file: %v", err)
+	}
+	defer windows.CloseHandle(held)
+	if second, err := openWindowsClaudeManagedPolicyLockFile(lockPath); err == nil {
+		_ = windows.CloseHandle(second)
+		t.Fatal("second open of a held lock succeeded, want a sharing violation")
+	} else if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("second open error = %v, want a sharing violation", err)
 	}
 }
 
@@ -2980,5 +3107,51 @@ func TestWindowsEnterpriseManagedAgentVersionIsNotAnInstallPrerequisite(t *testi
 				)
 			}
 		})
+	}
+}
+
+// Alternate quarantine slots are bounded: an absent or target-owned slot is
+// used, a slot held by another owner is skipped and left alone, and when every
+// slot is held the quarantine is refused instead of creating another one.
+func TestWindowsManagedObstructionAlternateSlotIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "obstruction")
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := current.User.Sid
+	if got, err := windowsManagedObstructionAlternateSlot(path, self); err != nil ||
+		got != windowsManagedObstructionAlternatePath(path, 1) {
+		t.Fatalf("first slot = %q, %v; want slot 1", got, err)
+	}
+	for index := 1; index <= windowsManagedObstructionAlternateSlots; index++ {
+		if err := os.WriteFile(windowsManagedObstructionAlternatePath(path, index), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Slots this process created are reusable for their owner as target (the
+	// test user, or Administrators on an elevated token).
+	fileOwner, err := windowsPathOwnerNoFollow(windowsManagedObstructionAlternatePath(path, 1))
+	if err != nil || fileOwner == nil {
+		t.Fatalf("slot owner: %v", err)
+	}
+	if got, err := windowsManagedObstructionAlternateSlot(path, fileOwner); err != nil ||
+		got != windowsManagedObstructionAlternatePath(path, 1) {
+		t.Fatalf("target-owned slot = %q, %v; want slot 1 reused", got, err)
+	}
+	// For any other target every slot is held by another owner.
+	other, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := windowsManagedObstructionAlternateSlot(path, other); err == nil {
+		t.Fatalf("slot = %q with every slot held by another owner, want refusal", got)
+	}
+	if err := os.Remove(windowsManagedObstructionAlternatePath(path, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := windowsManagedObstructionAlternateSlot(path, other); err != nil ||
+		got != windowsManagedObstructionAlternatePath(path, 3) {
+		t.Fatalf("freed slot = %q, %v; want slot 3", got, err)
 	}
 }

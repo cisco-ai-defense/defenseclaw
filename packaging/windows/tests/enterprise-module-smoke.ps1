@@ -953,9 +953,12 @@ if ($elevated) {
                 throw 'legacy residual lifecycle lock did not inherit before reinstall'
             }
 
+            # The drifted descriptor is repaired, and the repair is reported
+            # on the warning stream. Keep it off stdout, which carries only the
+            # JSON report; a failed repair still throws.
             $lock = Enter-DefenseClawLifecycleLock `
                 -Layout $lockLayout `
-                -TimeoutSeconds 2
+                -TimeoutSeconds 2 3>$null
             try {
                 if ($null -eq $lock) {
                     throw 'persistent lifecycle file lock was not reusable'
@@ -985,9 +988,10 @@ if ($elevated) {
                 throw 'persistent lifecycle file lock was not canonically repaired in place for reinstall'
             }
 
-            # The compatibility repair must not turn into ACL seizure. Even an
-            # otherwise well-formed inherited lock remains untrusted when a
-            # standard user can write it.
+            # The lock holds no data, so a standard user's write entry and
+            # re-enabled inheritance are drift to repair in place, not a
+            # reason to fail every lifecycle action: the next acquisition
+            # re-stamps the canonical protected descriptor on the same inode.
             $unsafeLockAcl = Get-Acl `
                 -LiteralPath $lockLayout.LifecycleLockPath `
                 -ErrorAction Stop
@@ -1005,31 +1009,32 @@ if ($elevated) {
                 -LiteralPath $lockLayout.LifecycleLockPath `
                 -AclObject $unsafeLockAcl `
                 -ErrorAction Stop
-            $unsafeLock = $null
-            $unsafeRejected = $false
+            $repairedLock = $null
             try {
-                $unsafeLock = Enter-DefenseClawLifecycleLock `
+                $repairedLock = Enter-DefenseClawLifecycleLock `
                     -Layout $lockLayout `
-                    -TimeoutSeconds 2
-            }
-            catch {
-                if ([string]$_.Exception.Message -notmatch
-                    'untrusted principal .* has write-like access') {
-                    throw
-                }
-                $unsafeRejected = $true
+                    -TimeoutSeconds 2 3>$null
             }
             finally {
-                if ($null -ne $unsafeLock) {
-                    Exit-DefenseClawLifecycleLock -Lock $unsafeLock
+                if ($null -ne $repairedLock) {
+                    Exit-DefenseClawLifecycleLock -Lock $repairedLock
                 }
-                Set-Acl `
-                    -LiteralPath $lockLayout.LifecycleLockPath `
-                    -AclObject $afterAcl `
-                    -ErrorAction Stop
             }
-            if (-not $unsafeRejected) {
-                throw 'writable inherited lifecycle lock was silently adopted'
+            $repairedAcl = Get-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -ErrorAction Stop
+            $usersEntries = @($repairedAcl.GetAccessRules(
+                    $true,
+                    $true,
+                    [Security.Principal.SecurityIdentifier]
+                ) | Where-Object {
+                    $_.IdentityReference.Value -eq $script:UsersSID
+                })
+            if ($null -eq $repairedLock -or
+                -not $repairedAcl.AreAccessRulesProtected -or
+                $usersEntries.Count -ne 0 -or
+                (Get-Item -LiteralPath $lockLayout.LifecycleLockPath -Force).Length -ne 0) {
+                throw 'writable inherited lifecycle lock was not repaired in place'
             }
         }
         finally {

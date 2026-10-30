@@ -38,7 +38,7 @@ type windowsTargetRuntimeOptions struct {
 }
 
 var (
-	windowsTargetRuntimeManifestTrust = managed.ValidateTrustedFilePath
+	windowsTargetRuntimeManifestTrust = managed.ValidateTrustedPolicyFilePath
 	windowsTargetRuntimeRequestTrust  = managed.ValidateTrustedFilePath
 	windowsTargetRuntimeAdminValidate = enterprisehooks.ValidateWindowsManagedRuntimeAdminFile
 	windowsTargetRuntimeManifestLoad  = enterprisehooks.LoadManifest

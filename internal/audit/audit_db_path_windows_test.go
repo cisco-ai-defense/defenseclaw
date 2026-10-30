@@ -448,7 +448,9 @@ func TestAuditDBWindowsRejectsUntrustedWriteACL(t *testing.T) {
 	assertAuditDBPathError(t, filepath.Join(directory, "audit.db"), "untrusted Windows principal")
 }
 
-func TestAuditDBWindowsRejectsInheritedReadAccessForSQLiteSidecars(t *testing.T) {
+// A foreign read-only entry can disclose audit content but cannot change it:
+// it is accepted and logged, and the guardian re-stamps the descriptor.
+func TestAuditDBWindowsAcceptsInheritedReadAccessForSQLiteSidecars(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "protected")
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
@@ -457,7 +459,41 @@ func TestAuditDBWindowsRejectsInheritedReadAccessForSQLiteSidecars(t *testing.T)
 		t.Fatal(err)
 	}
 	grantEveryoneAuditDBWindowsAccess(t, directory, windows.GENERIC_READ, true)
-	assertAuditDBPathError(t, filepath.Join(directory, "audit.db"), "untrusted Windows principal")
+	db, err := openHardenedAuditSQLite(filepath.Join(directory, "audit.db"), auditDBPathHooks{})
+	if err != nil {
+		t.Fatalf("inheritable read entry on the audit directory refused: %v", err)
+	}
+	_ = db.Close()
+}
+
+// After an ACL reset the audit folder inherits C:\ProgramData's
+// container-only Users create-child entry. It cannot replace a child, so the
+// gateway keeps its audit store.
+func TestAuditDBWindowsAcceptsInheritedContainerOnlyCreateChild(t *testing.T) {
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const createChild windows.ACCESS_MASK = 0x116
+	parent := filepath.Join(t.TempDir(), "parent")
+	directory := filepath.Join(parent, "audit")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureAuditDBPlatformPath(parent, true); err != nil {
+		t.Fatal(err)
+	}
+	addJudgeBodyWindowsContainerOnlyGrant(t, parent, users, createChild)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(directory, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAuditDBWindowsSecurityDescriptor(directory, sd, true, true); err != nil {
+		t.Fatalf("inherited container-only create-child entry refused: %v", err)
+	}
 }
 
 func TestAuditDBWindowsRejectsMutableAncestor(t *testing.T) {
@@ -493,7 +529,7 @@ func TestAuditDBWindowsRejectsPermissiveExistingLeaf(t *testing.T) {
 	assertAuditDBPathError(t, path, "untrusted Windows principal")
 }
 
-func TestAuditDBWindowsRejectsStaleSidecarReadACL(t *testing.T) {
+func TestAuditDBWindowsAcceptsStaleSidecarReadACLButRejectsWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	db, err := openHardenedAuditSQLite(path, auditDBPathHooks{})
 	if err != nil {
@@ -514,8 +550,17 @@ func TestAuditDBWindowsRejectsStaleSidecarReadACL(t *testing.T) {
 	if prepared != nil {
 		prepared.close()
 	}
+	if err != nil {
+		t.Fatalf("read-only entry on a stale sidecar refused: %v", err)
+	}
+	// Write authority on the sidecar stays fatal.
+	grantEveryoneAuditDBWindowsAccess(t, sidecar, windows.GENERIC_WRITE, false)
+	prepared, err = prepareAuditDatabasePath(path, auditDBPathHooks{})
+	if prepared != nil {
+		prepared.close()
+	}
 	if err == nil || !strings.Contains(err.Error(), "SQLite sidecar -journal") {
-		t.Fatalf("stale sidecar ACL error = %v", err)
+		t.Fatalf("stale sidecar write ACL error = %v", err)
 	}
 }
 

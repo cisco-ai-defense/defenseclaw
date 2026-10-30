@@ -32,6 +32,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const activeConnectorFile = "active_connector.json"
@@ -1224,6 +1226,47 @@ func managedHookScriptDigests(
 	return out, nil
 }
 
+// ErrManagedSharedHookScriptDigestMismatch reports that a shared generated
+// hook script no longer matches the digest pinned in the protected contract.
+// Its text keeps the historical "managed shared hook script digest mismatch".
+var ErrManagedSharedHookScriptDigestMismatch = errors.New("managed shared hook script digest mismatch")
+
+// RepublishManagedSharedHookScripts rewrites the shared generated hook scripts
+// and helpers under dataDir/hooks from the embedded templates through the
+// managed per-user runtime writer, which publishes the canonical descriptor
+// and is a no-op for bytes that already match. It is the repair for
+// ErrManagedSharedHookScriptDigestMismatch: run it as (or impersonating) the
+// target user, then verify again. apiAddr must be the address the contract
+// was written with, since it is the only install-wide template input.
+func RepublishManagedSharedHookScripts(dataDir, apiAddr string) error {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" || !filepath.IsAbs(dataDir) {
+		return errors.New("managed shared hook data directory is not absolute")
+	}
+	hookDir := filepath.Join(filepath.Clean(dataDir), "hooks")
+	if err := writeHookHelpersForMode(hookDir, true); err != nil {
+		return err
+	}
+	writeFile := hookRuntimeFileWriter(true)
+	sharedData := templateData{APIAddr: apiAddr, Managed: true}
+	for _, name := range genericHookScripts {
+		content, err := hookFS.ReadFile("hooks/" + name)
+		if err != nil {
+			return fmt.Errorf("read hook template %s: %w", name, err)
+		}
+		rendered, err := renderTemplate(string(content), sharedData)
+		if err != nil {
+			return fmt.Errorf("render hook %s: %w", name, err)
+		}
+		hookPath := filepath.Join(hookDir, name)
+		if err := writeFile(hookPath, []byte(rendered), 0o700); err != nil {
+			return fmt.Errorf("republish hook %s: %w", name, err)
+		}
+	}
+	emitManagedResilience(managed.MarkerRepair, hookDir, "republished managed shared hook scripts", nil)
+	return nil
+}
+
 // VerifyManagedSharedHookScriptDigests verifies the one authenticated digest
 // set shared by every connector in a managed target runtime. It is deliberately
 // separate from HookContractLockDrifted: compatibility drift should reach the
@@ -1280,7 +1323,15 @@ func VerifyManagedSharedHookScriptDigests(dataDir, expectedOwnerSID string) erro
 			return fmt.Errorf("managed shared hook script is missing: %s", path)
 		}
 		if actualDigest != expectedDigest {
-			return fmt.Errorf("managed shared hook script digest mismatch: %s", path)
+			// A code-integrity finding: logged with both hashes, and returned
+			// as ErrManagedSharedHookScriptDigestMismatch so the caller
+			// republishes the generated scripts (RepublishManagedSharedHookScripts)
+			// instead of failing the user. This check never re-pins, so it
+			// cannot bless modified bytes.
+			emitManagedResilience(managed.MarkerBoundary, path,
+				"managed shared hook script differs from its contract digest",
+				map[string]string{"pinned_sha256": expectedDigest, "live_sha256": actualDigest})
+			return fmt.Errorf("%w: %s", ErrManagedSharedHookScriptDigestMismatch, path)
 		}
 	}
 	after, err := loadManagedHookContractLockForOwner(dataDir, expectedOwnerSID)

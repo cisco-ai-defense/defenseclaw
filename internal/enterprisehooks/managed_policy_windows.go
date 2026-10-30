@@ -1002,9 +1002,11 @@ func validateWindowsClaudeManagedRuntime(target windowsClaudeManagedPolicyTarget
 	); err != nil {
 		return fmt.Errorf("enterprise hooks: current managed Claude runtime sidecars are invalid: %w", err)
 	}
-	if err := connector.VerifyManagedSharedHookScriptDigests(
+	if err := verifyWindowsManagedSharedHookScriptsWithRepair(
+		filepath.Dir(target.dataDir),
 		target.dataDir,
-		target.targetSID.String(),
+		target.gatewayAddr,
+		target.targetSID,
 	); err != nil {
 		return fmt.Errorf(
 			"enterprise hooks: current managed Claude shared hook runtime is invalid: %w",
@@ -1343,7 +1345,7 @@ func withWindowsClaudeManagedPolicyTransaction(fn func() error) error {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("enterprise hooks: refusing non-regular managed policy transaction lock: %s", lockPath)
 		}
-		if err := windowsManagedPolicyFileTrustCheck(lockPath); err != nil {
+		if _, err := repairWindowsManagedMachineFile(lockPath, false, windowsManagedPolicyFileTrustCheck); err != nil {
 			return fmt.Errorf("enterprise hooks: managed policy transaction lock is untrusted: %w", err)
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -1391,9 +1393,13 @@ func openWindowsClaudeManagedPolicyLockFile(path string) (windows.Handle, error)
 	if err != nil {
 		return 0, err
 	}
+	// Exclusivity comes from the zero share mode, not the access mask; the
+	// lock's content is never written. Read-only access also opens a lock
+	// file that carries the ReadOnly attribute, which a write open refuses
+	// with access denied.
 	return windows.CreateFile(
 		pathPtr,
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.GENERIC_READ,
 		0,
 		nil,
 		windows.OPEN_ALWAYS,
@@ -1975,7 +1981,16 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 			// Validate before creating anything. The production trust check
 			// validates this directory and its complete existing ancestor chain.
 			if err := windowsManagedPolicyAncestorTrustCheck(current); err != nil {
-				return fmt.Errorf("enterprise hooks: managed policy ancestor is untrusted: %w", err)
+				// The policy folder itself, or a vendor folder directly under
+				// ProgramData or Program Files, may have been created by MDM,
+				// the vendor installer, or a standard user before DefenseClaw.
+				// An elevated caller takes it over; anything else stays fatal.
+				if !windowsManagedPolicyFolderRepairable(current, path) {
+					return fmt.Errorf("enterprise hooks: managed policy ancestor is untrusted: %w", err)
+				}
+				if repairErr := repairWindowsManagedPolicyFolder(current, windowsManagedPolicyAncestorTrustCheck); repairErr != nil {
+					return fmt.Errorf("enterprise hooks: managed policy ancestor is untrusted: %w", errors.Join(err, repairErr))
+				}
 			}
 			break
 		}
@@ -1990,7 +2005,12 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 		current = parent
 	}
 	if len(missing) == 0 {
-		return windowsManagedPolicyDirTrustCheck(path)
+		if err := windowsManagedPolicyDirTrustCheck(path); err != nil {
+			if repairErr := repairWindowsManagedPolicyFolder(path, windowsManagedPolicyDirTrustCheck); repairErr != nil {
+				return errors.Join(err, repairErr)
+			}
+		}
+		return nil
 	}
 	attributes, err := windowsManagedPolicyDirectorySecurityAttributes()
 	if err != nil {
@@ -2044,12 +2064,83 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 		}
 		if concurrentlyCreated {
 			if err := validateWindowsManagedPolicyDirectoryProtection(directory); err != nil {
-				return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, err))
+				if repairErr := repairWindowsManagedPolicyFolder(directory, validateWindowsManagedPolicyDirectoryProtection); repairErr != nil {
+					return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, errors.Join(err, repairErr)))
+				}
 			}
 		} else if err := windowsManagedPolicyDirTrustCheck(directory); err != nil {
 			return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, err))
 		}
 	}
+	return nil
+}
+
+// windowsManagedPolicyFolderRepairable limits folder takeover to the policy
+// folder being prepared and vendor folders one level below ProgramData or
+// Program Files. Those system roots themselves are never touched.
+func windowsManagedPolicyFolderRepairable(folder, policyDir string) bool {
+	if sameWindowsEnterprisePath(folder, policyDir) {
+		return true
+	}
+	parent := filepath.Dir(filepath.Clean(folder))
+	for _, resolve := range []func() (string, error){winpath.TrustedProgramData, winpath.TrustedProgramFiles} {
+		root, err := resolve()
+		if err == nil && sameWindowsEnterprisePath(parent, root) &&
+			isWindowsManagedPolicyAncestorOf(folder, policyDir) {
+			return true
+		}
+	}
+	return false
+}
+
+func isWindowsManagedPolicyAncestorOf(folder, path string) bool {
+	folder = strings.ToLower(filepath.Clean(folder))
+	path = strings.ToLower(filepath.Clean(path))
+	return strings.HasPrefix(path, folder+`\`)
+}
+
+// repairWindowsManagedPolicyFolder takes ownership of a machine-policy folder
+// and re-stamps the canonical protected DACL. It runs only for an elevated
+// caller, and only after the structural checks pass: a real directory with no
+// reparse point anywhere on its path. Ownership is taken whatever the current
+// owner, because a folder squatted by a standard user would otherwise block
+// every user's enforcement. Files inside are still validated individually.
+func repairWindowsManagedPolicyFolder(path string, validate func(string) error) error {
+	drift := validate(path)
+	if drift == nil {
+		return nil
+	}
+	if err := requireWindowsEnterpriseAdministrator(); err != nil {
+		return fmt.Errorf("repair requires an elevated caller: %w", err)
+	}
+	if err := rejectWindowsReparseChain(path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("managed policy folder is not a plain directory: %s", path)
+	}
+	previousOwner, _ := windowsPathOwnerNoFollow(path)
+	// The re-stamp goes through one no-follow handle whose type and reparse
+	// state are re-checked, never through the path checked above: a folder
+	// squatted by a standard user could otherwise be swapped for a junction
+	// between the check and the write.
+	if err := RunWithWindowsOwnerRestorePrivilege(func() error {
+		return setWindowsManagedPolicyProtectionNoFollow(path, true, true, nil)
+	}); err != nil {
+		return fmt.Errorf("re-stamp managed policy folder: %w", err)
+	}
+	if err := validate(path); err != nil {
+		return fmt.Errorf("managed policy folder still untrusted after repair: %w", err)
+	}
+	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+		"path":           path,
+		"previous_owner": windowsSIDString(previousOwner),
+		"reason":         "machine policy folder protection drifted or folder was pre-created: " + drift.Error(),
+	})
 	return nil
 }
 
@@ -2084,6 +2175,12 @@ func validateWindowsManagedPolicyDirectoryProtection(path string) error {
 	if err := windowsManagedPolicyDirTrustCheck(path); err != nil {
 		return err
 	}
+	return validateWindowsManagedPolicyDirectoryDescriptor(path)
+}
+
+// validateWindowsManagedPolicyDirectoryDescriptor checks only the folder's
+// own owner, protection and exact DACL, without walking its ancestors.
+func validateWindowsManagedPolicyDirectoryDescriptor(path string) error {
 	owner, err := windowsManagedPolicyOwnerSID()
 	if err != nil || owner == nil {
 		return errors.New("enterprise hooks: managed policy directory owner SID is unavailable")
@@ -2249,17 +2346,127 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 }
 
 func setWindowsManagedPolicyProtection(path string, directory, userReadable bool) error {
-	owner, err := windowsManagedPolicyOwnerSID()
+	owner, acl, err := windowsManagedPolicyProtectionACL(directory, userReadable)
 	if err != nil {
 		return err
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+}
+
+// setWindowsManagedPolicyProtectionNoFollow applies the same owner and
+// protected DACL as setWindowsManagedPolicyProtection through one handle
+// opened without following a reparse point. The object type, reparse state
+// and, for a file, the link count are checked on that handle, and admit (when
+// set) judges the current owner read from it, so a rename-and-junction swap
+// after a path-based check can never redirect the re-stamp to another tree.
+func setWindowsManagedPolicyProtectionNoFollow(
+	path string,
+	directory, userReadable bool,
+	admit func(owner *windows.SID) error,
+) error {
+	owner, acl, err := windowsManagedPolicyProtectionACL(directory, userReadable)
+	if err != nil {
+		return err
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	name, err := windows.UTF16PtrFromString(extended)
+	if err != nil {
+		return err
+	}
+	access := uint32(windows.WRITE_DAC | windows.WRITE_OWNER | windows.FILE_READ_ATTRIBUTES)
+	if admit != nil {
+		access |= windows.READ_CONTROL
+	}
+	handle, err := windows.CreateFile(
+		name,
+		access,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return fmt.Errorf("open for owner and DACL change: %w", err)
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("managed policy object became a reparse point: %s", path)
+	}
+	if (info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0) != directory {
+		return fmt.Errorf("managed policy object changed type: %s", path)
+	}
+	if !directory && info.NumberOfLinks != 1 {
+		return errors.New("managed machine file has more than one hard link")
+	}
+	if admit != nil {
+		descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+		if err != nil || descriptor == nil {
+			return fmt.Errorf("inspect managed policy object owner: %w", err)
+		}
+		current, _, err := descriptor.Owner()
+		if err != nil {
+			return fmt.Errorf("inspect managed policy object owner: %w", err)
+		}
+		if err := admit(current); err != nil {
+			return err
+		}
+	}
+	// SetKernelObjectSecurity writes only this object's descriptor.
+	// SetSecurityInfo would also push the new inheritable entries into every
+	// existing child, and a vendor folder holds files DefenseClaw neither
+	// owns nor may rewrite; one child it can't open fails the whole call.
+	descriptor, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		return fmt.Errorf("build security descriptor: %w", err)
+	}
+	if err := descriptor.SetOwner(owner, false); err != nil {
+		return fmt.Errorf("build security descriptor owner: %w", err)
+	}
+	if err := descriptor.SetDACL(acl, true, false); err != nil {
+		return fmt.Errorf("build security descriptor DACL: %w", err)
+	}
+	if err := descriptor.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
+		return fmt.Errorf("build security descriptor control: %w", err)
+	}
+	if err := windows.SetKernelObjectSecurity(handle, windows.OWNER_SECURITY_INFORMATION, descriptor); err != nil {
+		return fmt.Errorf("set owner %s: %w", windowsSIDString(owner), err)
+	}
+	if err := windows.SetKernelObjectSecurity(handle, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, descriptor); err != nil {
+		return fmt.Errorf("set protected DACL: %w", err)
+	}
+	return nil
+}
+
+// windowsManagedPolicyProtectionACL builds the canonical machine-policy owner
+// and DACL: owner and SYSTEM full control, Users read (and traverse for a
+// directory) when the object is a directory or user-readable.
+func windowsManagedPolicyProtectionACL(directory, userReadable bool) (*windows.SID, *windows.ACL, error) {
+	owner, err := windowsManagedPolicyOwnerSID()
+	if err != nil {
+		return nil, nil, err
 	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	inheritance := uint32(windows.NO_INHERITANCE)
 	if directory {
@@ -2288,16 +2495,9 @@ func setWindowsManagedPolicyProtection(path string, directory, userReadable bool
 	}
 	acl, err := windows.ACLFromEntries(entries, nil)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	extended, err := winpath.Extended(path)
-	if err != nil {
-		return err
-	}
-	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
-		return err
-	}
-	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+	return owner, acl, nil
 }
 
 func verifyWindowsClaudeManagedPolicy(path string, expected []byte) error {

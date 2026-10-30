@@ -41,6 +41,40 @@ func TestAlignEnterpriseWindowsTokenOwnerRejectsReparseChainBeforeACLWrites(t *t
 	}
 }
 
+// The token folder is the hooks directory the Guardian's data-path repair
+// keeps at the RuntimeDirectory descriptor; token publishing must ask the same
+// repair instead of stamping its own generic-rights form, or the two rewrite
+// each other on every tick.
+func TestEnterpriseWindowsTokenDirectoryUsesCanonicalRuntimeRepair(t *testing.T) {
+	original := enterpriseWindowsManagedDataPathsRepair
+	t.Cleanup(func() { enterpriseWindowsManagedDataPathsRepair = original })
+	const dir = `C:\managed\hooks`
+	for _, tc := range []struct {
+		outcome managed.CanonicalOutcome
+		want    bool
+	}{
+		{managed.CanonicalOK, true},
+		{managed.CanonicalRepaired, true},
+		{managed.CanonicalAccepted, false},
+		{managed.CanonicalBoundary, false},
+	} {
+		var got managed.ManagedDataPaths
+		enterpriseWindowsManagedDataPathsRepair = func(
+			paths managed.ManagedDataPaths,
+			_ managed.CanonicalOptions,
+		) []managed.CanonicalResult {
+			got = paths
+			return []managed.CanonicalResult{{Path: dir, Kind: managed.ObjectRuntimeDirectory, Outcome: tc.outcome}}
+		}
+		if canonical := enterpriseWindowsTokenDirectoryCanonical(dir); canonical != tc.want {
+			t.Fatalf("outcome %s: canonical = %v, want %v", tc.outcome, canonical, tc.want)
+		}
+		if got.DataDir != "" || len(got.RuntimeDirs) != 1 || got.RuntimeDirs[0] != dir {
+			t.Fatalf("outcome %s: repair asked for %+v, want only the runtime directory %s", tc.outcome, got, dir)
+		}
+	}
+}
+
 // TestRepairEnterpriseHookManagedRuntimePlatformWrapsPrivilegedWrite pins the
 // managed runtime repair contract: the reparse-chain refusal still runs before
 // any ACL write, the write goes through the shared runtime-protection helper
@@ -70,6 +104,16 @@ func TestRepairEnterpriseHookManagedRuntimePlatformWrapsPrivilegedWrite(t *testi
 
 	driftedDir := func(t *testing.T) string {
 		t.Helper()
+		originalShared := enterpriseWindowsManagedDataPathsRepair
+		t.Cleanup(func() { enterpriseWindowsManagedDataPathsRepair = originalShared })
+		// Exercise the legacy fallback: the shared repair reports that it
+		// could not fix the directory.
+		enterpriseWindowsManagedDataPathsRepair = func(
+			paths managed.ManagedDataPaths,
+			_ managed.CanonicalOptions,
+		) []managed.CanonicalResult {
+			return []managed.CanonicalResult{{Path: paths.DataDir, Outcome: managed.CanonicalAccepted}}
+		}
 		dir := t.TempDir()
 		if err := managed.ValidateTrustedServiceRuntimeDir(dir, "managed data_dir", serviceAccount); err == nil {
 			t.Skip("temp directory already satisfies the managed runtime contract")

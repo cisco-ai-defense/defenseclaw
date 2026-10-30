@@ -21,6 +21,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 var managedTransportTestMu sync.Mutex
@@ -414,3 +416,29 @@ type managedTransportTestError struct {
 }
 
 func (e *managedTransportTestError) Error() string { return e.message }
+
+// A service security descriptor that denies the user a status query is
+// permission drift: the hook follows its fail mode instead of failing closed,
+// reports its own reason, and never dials the port.
+func TestManagedEnterpriseTransportUnreadableServiceFollowsFailMode(t *testing.T) {
+	managedTransportTestMu.Lock()
+	defer managedTransportTestMu.Unlock()
+	restoreManagedTransportSeams(t,
+		func(string) (uint32, error) { return 0, windows.ERROR_ACCESS_DENIED },
+		func(net.Conn) (uint32, error) { return 0, errors.New("must not resolve a connection") },
+	)
+	client, err := managedEnterpriseHTTPClient(time.Second, "127.0.0.1:18970", "DefenseClawGateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Post("http://127.0.0.1:18970/api/v1/hook", "application/json", strings.NewReader(`{}`))
+	if !errors.Is(err, errManagedGatewayPeerUnverified) || !errors.Is(err, errManagedGatewayServiceUnreadable) {
+		t.Fatalf("unreadable service error = %v", err)
+	}
+	if got := managedPeerFailureReason(err); got != managedGatewayServiceUnreadableReason {
+		t.Fatalf("reason = %q", got)
+	}
+	if managedPeerFailMode("open", err) != "open" || managedPeerFailMode("closed", err) != "closed" {
+		t.Fatal("unreadable service did not follow the hook's fail mode")
+	}
+}

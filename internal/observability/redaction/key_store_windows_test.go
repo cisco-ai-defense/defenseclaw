@@ -1020,7 +1020,7 @@ func setWindowsCorrelationTrustedUnprotectedDACL(t *testing.T, path string) {
 	}
 }
 
-func TestWindowsCorrelationKeyDoesNotRepairUntrustedUnprotectedDACL(t *testing.T) {
+func TestWindowsCorrelationKeyAcceptsUnprotectedReadOnlyDriftWithoutRepair(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
 		t.Fatal(err)
@@ -1072,8 +1072,10 @@ func TestWindowsCorrelationKeyDoesNotRepairUntrustedUnprotectedDACL(t *testing.T
 	}
 	beforeSDDL := before.String()
 
-	if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafePermissions) {
-		t.Fatalf("error = %v, want unsafe permissions", err)
+	// A foreign read-only entry is accepted (logged) without a repair: the
+	// key cannot be rewritten by Everyone, and the descriptor is left alone.
+	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
+		t.Fatalf("error = %v, want the read-only drift accepted", err)
 	}
 	after, err := windows.GetNamedSecurityInfo(
 		path,
@@ -1095,7 +1097,7 @@ func TestWindowsCorrelationKeyDoesNotRepairUntrustedUnprotectedDACL(t *testing.T
 	}
 }
 
-func TestWindowsCorrelationKeyRejectsUntrustedReadACL(t *testing.T) {
+func TestWindowsCorrelationKeyAcceptsReadACLButRejectsWriteACL(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
 		t.Fatal(err)
@@ -1121,8 +1123,24 @@ func TestWindowsCorrelationKeyRejectsUntrustedReadACL(t *testing.T) {
 		nil, nil, dacl, nil); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
+		t.Fatalf("error = %v, want the read-only drift accepted", err)
+	}
+	// Write authority for Everyone stays fatal.
+	dacl, err = windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsCorrelationAccess(current.User.Sid, windows.GENERIC_ALL),
+		windowsCorrelationAccess(everyone, windows.GENERIC_READ|windows.GENERIC_WRITE),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafePermissions) {
-		t.Fatalf("error = %v, want unsafe permissions", err)
+		t.Fatalf("error = %v, want unsafe permissions for an untrusted writer", err)
 	}
 }
 

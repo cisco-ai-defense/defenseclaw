@@ -15,6 +15,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -306,7 +307,20 @@ func TestManagedWindowsFileLockDescriptorNamesEffectiveUserNotTokenDefaultOwner(
 	}
 }
 
-func TestManagedWindowsFileLockRejectsExistingForeignOwner(t *testing.T) {
+// assertWindowsManagedLockRepairedForTest proves an accepted drifted lock was
+// re-stamped canonical when this process is allowed to repair (an elevated
+// administrator or LocalSystem). A standard-user run only accepts and logs.
+func assertWindowsManagedLockRepairedForTest(t *testing.T, file *os.File, target *windows.SID) {
+	t.Helper()
+	if !windowsManagedCanRepair() {
+		return
+	}
+	if err := validateWindowsManagedFileLockHandleForTarget(windows.Handle(file.Fd()), target); err != nil {
+		t.Fatalf("privileged open left the drifted lock noncanonical: %v", err)
+	}
+}
+
+func TestManagedWindowsFileLockRepairsExistingForeignOwner(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hook_contract_lock.json.lock")
 	file, parent, err := openWindowsManagedFileLock(path)
 	if err != nil {
@@ -328,16 +342,18 @@ func TestManagedWindowsFileLockRejectsExistingForeignOwner(t *testing.T) {
 		t.Skip("fixture SID collides with process user")
 	}
 	pinWindowsEffectiveUserSIDForTest(t, foreign)
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	captureManagedResilienceEvents(t)
+	// A lock owned by someone other than the target is permission drift: the
+	// open repairs it in place (or accepts and logs it without privilege)
+	// instead of failing every reconcile for this user.
 	file, parent, err = openWindowsManagedFileLock(path)
-	if file != nil {
-		_ = file.Close()
+	if err != nil {
+		t.Fatalf("foreign-owner managed lock error=%v, want repaired or accepted", err)
 	}
-	if parent != nil {
-		_ = parent.Close()
-	}
-	if err == nil || !strings.Contains(err.Error(), "owner does not match") {
-		t.Fatalf("foreign-owner managed lock error=%v, want owner rejection", err)
-	}
+	defer parent.Close()
+	defer file.Close()
+	assertWindowsManagedLockRepairedForTest(t, file, foreign)
 }
 
 func TestManagedWindowsFileLockDeniesRenameWhileHeld(t *testing.T) {
@@ -356,7 +372,7 @@ func TestManagedWindowsFileLockDeniesRenameWhileHeld(t *testing.T) {
 	}
 }
 
-func TestManagedWindowsFileLockRejectsNoncanonicalDACL(t *testing.T) {
+func TestManagedWindowsFileLockRepairsNoncanonicalDACL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".hookcfg.lock")
 	target := windowsProcessUserSIDForTest(t)
 	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf(
@@ -391,16 +407,17 @@ func TestManagedWindowsFileLockRejectsNoncanonicalDACL(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	captureManagedResilienceEvents(t)
+	// An extra Everyone read entry is drift on a data-free lock: it is
+	// re-stamped to the canonical descriptor on the same file.
 	file, parent, err := openWindowsManagedFileLock(path)
-	if file != nil {
-		_ = file.Close()
+	if err != nil {
+		t.Fatalf("noncanonical managed lock error=%v, want repaired or accepted", err)
 	}
-	if parent != nil {
-		_ = parent.Close()
-	}
-	if err == nil || !strings.Contains(err.Error(), "DACL") {
-		t.Fatalf("noncanonical managed lock error=%v, want DACL rejection", err)
-	}
+	defer parent.Close()
+	defer file.Close()
+	assertWindowsManagedLockRepairedForTest(t, file, target)
 }
 
 func TestManagedWindowsFileLockRejectsHardLink(t *testing.T) {

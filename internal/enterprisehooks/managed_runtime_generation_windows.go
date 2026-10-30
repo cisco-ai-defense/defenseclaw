@@ -250,6 +250,24 @@ func commitWindowsManagedRuntimeGenerationPlatform(
 			}
 			return nil
 		}
+		if !currentExists && len(selector.Targets) >= windowsManagedRuntimeSelectorMaxTargets {
+			// The selector is full. Skip only this user, with a clear
+			// reason; every already enrolled user keeps working and the
+			// Guardian reports this one as failed and retries it.
+			managed.EmitResilienceEvent(managed.MarkerSkip, map[string]string{
+				"unit": desired.Connector + "@" + strings.ToUpper(desired.TargetSID),
+				"reason": fmt.Sprintf(
+					"managed runtime selector already enrolls %d users, the maximum",
+					windowsManagedRuntimeSelectorMaxTargets,
+				),
+			})
+			return fmt.Errorf(
+				"enterprise hooks: %s managed runtime selector is full (%d users); target %s skipped",
+				desired.Connector,
+				windowsManagedRuntimeSelectorMaxTargets,
+				desired.TargetSID,
+			)
+		}
 		selector = setWindowsManagedRuntimeSelectorTarget(selector, &entry)
 		if err := publishWindowsManagedRuntimeSelector(selector); err != nil {
 			return err
@@ -760,18 +778,19 @@ func readWindowsManagedRuntimeSelectorCASPlatform(
 
 func restoreWindowsManagedRuntimeSelectorCASPlatform(
 	opts WindowsManagedRuntimeSelectorFullRestoreOptions,
-) error {
+) (WindowsManagedRuntimeSelectorCAS, error) {
+	var published WindowsManagedRuntimeSelectorCAS
 	snapshot, restored, err := validateWindowsManagedRuntimeSelectorSnapshotFull(opts.Snapshot)
 	if err != nil {
-		return err
+		return published, err
 	}
 	if err := validateWindowsManagedRuntimeSelectorCAS(opts.ExpectedCurrent); err != nil {
-		return fmt.Errorf("enterprise hooks: invalid expected full selector CAS: %w", err)
+		return published, fmt.Errorf("enterprise hooks: invalid expected full selector CAS: %w", err)
 	}
 	if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
-		return err
+		return published, err
 	}
-	return withWindowsManagedRuntimeSelectorTransaction(snapshot.Connector, func() error {
+	err = withWindowsManagedRuntimeSelectorTransaction(snapshot.Connector, func() error {
 		_, currentData, currentExists, err := readWindowsManagedRuntimeSelector(
 			snapshot.Connector,
 			true,
@@ -803,21 +822,54 @@ func restoreWindowsManagedRuntimeSelectorCASPlatform(
 			}
 			return nil
 		}
+		// One user's missing or drifted bundle (profile deleted, antivirus,
+		// ACL drift) drops only that user's entry. The others are restored,
+		// and the Guardian republishes the dropped user on its next pass.
+		kept := make([]windowsManagedRuntimeSelectorTarget, 0, len(restored.Targets))
 		for _, entry := range restored.Targets {
 			target, err := validateWindowsEnterpriseTargetSID(entry.SID)
 			if err != nil {
 				return err
 			}
 			if _, _, _, err := loadWindowsManagedRuntimeBundle(entry, target); err != nil {
-				return fmt.Errorf(
-					"enterprise hooks: refusing full selector restore with invalid %s bundle: %w",
-					entry.SID,
-					err,
-				)
+				managed.EmitResilienceEvent(managed.MarkerSkip, map[string]string{
+					"connector": snapshot.Connector,
+					"sid":       entry.SID,
+					"path":      entry.DataDir,
+					"reason":    "selector_restore_entry_dropped: " + err.Error(),
+				})
+				continue
 			}
+			kept = append(kept, entry)
 		}
-		return publishWindowsManagedRuntimeSelector(*restored)
+		reduced := *restored
+		reduced.Targets = kept
+		if err := publishWindowsManagedRuntimeSelector(reduced); err != nil {
+			return err
+		}
+		// Recapture what was actually published: a dropped entry makes it
+		// differ from the snapshot, and a compensating restore must expect
+		// this CAS, not the snapshot's.
+		_, publishedData, publishedExists, err := readWindowsManagedRuntimeSelector(
+			snapshot.Connector,
+			true,
+		)
+		if err != nil {
+			return err
+		}
+		if !publishedExists {
+			return errors.New("enterprise hooks: restored selector is missing after publication")
+		}
+		published = WindowsManagedRuntimeSelectorCAS{
+			Exists: true,
+			SHA256: windowsManagedRuntimeSHA256(publishedData),
+		}
+		return nil
 	})
+	if err != nil {
+		return WindowsManagedRuntimeSelectorCAS{}, err
+	}
+	return published, nil
 }
 
 func discardWindowsManagedRuntimeGenerationPublicationPlatform(
@@ -953,6 +1005,12 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		if err != nil {
 			return err
 		}
+		// Collection is housekeeping. One bundle that cannot be authenticated
+		// or deleted (an admin owner after a backup restore, a retired
+		// contract, ACL drift) is logged and left in place; it never stops
+		// the remaining bundles from being collected or fails the caller. A
+		// folder with more candidates than the bound collects the first
+		// batch and leaves the rest for the next pass.
 		candidates := 0
 		for _, directoryEntry := range entries {
 			connectorName, generationID, ok := parseWindowsManagedRuntimeBundleLeaf(
@@ -963,7 +1021,16 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			}
 			candidates++
 			if candidates > windowsManagedRuntimeGenerationGCMaxCandidates {
-				return errors.New("enterprise hooks: managed runtime generation GC candidate limit exceeded")
+				managed.EmitResilienceEvent(managed.MarkerSkip, map[string]string{
+					"connector": validated.Connector,
+					"sid":       validated.TargetSID,
+					"path":      hookDir,
+					"reason": fmt.Sprintf(
+						"runtime_generation_gc_skipped: more than %d bundles; the rest are left for the next pass",
+						windowsManagedRuntimeGenerationGCMaxCandidates,
+					),
+				})
+				break
 			}
 			if _, keep := preserve[generationID]; keep {
 				continue
@@ -973,11 +1040,17 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 				target,
 				generationID,
 			)
-			if err != nil {
-				return err
+			if err == nil {
+				err = deleteWindowsManagedRuntimeBundle(entry, target, data)
 			}
-			if err := deleteWindowsManagedRuntimeBundle(entry, target, data); err != nil {
-				return err
+			if err != nil {
+				managed.EmitResilienceEvent(managed.MarkerSkip, map[string]string{
+					"connector": validated.Connector,
+					"sid":       validated.TargetSID,
+					"path":      filepath.Join(hookDir, directoryEntry.Name()),
+					"reason":    "runtime_generation_gc_skipped: " + err.Error(),
+				})
+				continue
 			}
 			removed++
 		}
@@ -1794,7 +1867,7 @@ func readWindowsManagedRuntimeSelector(
 			"enterprise hooks: managed runtime selector is not a bounded regular file",
 		)
 	}
-	if err := validateWindowsManagedRuntimeMachineFileProtection(path, true); err != nil {
+	if err := validateWindowsManagedRuntimeSelectorForRead(path); err != nil {
 		return selector, nil, false, err
 	}
 	data, err := connector.ReadManagedHookRuntimeFile(
@@ -1805,7 +1878,7 @@ func readWindowsManagedRuntimeSelector(
 	if err != nil {
 		return selector, nil, false, err
 	}
-	if err := validateWindowsManagedRuntimeMachineFileProtection(path, true); err != nil {
+	if err := validateWindowsManagedRuntimeSelectorForRead(path); err != nil {
 		return selector, nil, false, err
 	}
 	selector, err = decodeWindowsManagedRuntimeSelector(data, connectorName)
@@ -1813,6 +1886,35 @@ func readWindowsManagedRuntimeSelector(
 		return selector, nil, false, err
 	}
 	return selector, data, true, nil
+}
+
+// validateWindowsManagedRuntimeSelectorForRead judges a selector read outside
+// the selector transaction (prepare, verify, resolve, compare-and-swap). The
+// exact canonical descriptor is preferred; a drifted one (inheritance switched
+// back on by icacls /reset, an extra reader, another trusted owner) is
+// re-stamped when the caller holds the privileges to do so, and otherwise
+// accepted and logged as long as no untrusted principal can write the file.
+// The next selector transaction re-stamps it under the lock. Structure and an
+// untrusted writer stay fatal.
+func validateWindowsManagedRuntimeSelectorForRead(path string) error {
+	exactErr := validateWindowsManagedRuntimeMachineFileProtection(path, true)
+	if exactErr == nil {
+		return nil
+	}
+	if err := rejectWindowsReparseChain(path); err != nil {
+		return err
+	}
+	if repaired, err := repairWindowsManagedRuntimeMachineFile(path, true); err == nil && repaired {
+		return nil
+	}
+	if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
+		return errors.Join(exactErr, err)
+	}
+	managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+		"path":   path,
+		"reason": "managed runtime selector descriptor is not canonical but grants no untrusted write: " + exactErr.Error(),
+	})
+	return nil
 }
 
 func marshalWindowsManagedRuntimeSelector(
@@ -2157,7 +2259,7 @@ func withWindowsManagedRuntimeSelectorTransaction(
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("enterprise hooks: managed runtime selector lock is not a regular file")
 		}
-		if err := validateWindowsManagedRuntimeMachineFileProtection(lockPath, false); err != nil {
+		if _, err := repairWindowsManagedRuntimeMachineFile(lockPath, false); err != nil {
 			return fmt.Errorf("enterprise hooks: managed runtime selector lock is untrusted: %w", err)
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -2174,6 +2276,16 @@ func withWindowsManagedRuntimeSelectorTransaction(
 			}
 			if err := validateWindowsManagedRuntimeMachineFileProtection(lockPath, false); err != nil {
 				return fmt.Errorf("enterprise hooks: verify managed runtime selector lock: %w", err)
+			}
+			// Repair a drifted selector under the lock before anything reads
+			// it. One ACE added by a tool, an owner reset by a restore, or
+			// inheritance switched back on otherwise breaks every enrolled
+			// user of this connector until someone fixes it by hand.
+			if info, statErr := os.Lstat(path); statErr == nil && info.Mode().IsRegular() &&
+				info.Mode()&os.ModeSymlink == 0 {
+				if _, err := repairWindowsManagedRuntimeMachineFile(path, true); err != nil {
+					return fmt.Errorf("enterprise hooks: managed runtime selector is untrusted: %w", err)
+				}
 			}
 			return fn()
 		}
@@ -2194,6 +2306,61 @@ func withWindowsManagedRuntimeSelectorTransaction(
 	}
 }
 
+// repairWindowsManagedRuntimeMachineFile re-stamps the canonical protection
+// on a selector or selector lock whose owner or DACL drifted, under the owner
+// and structure rules of repairWindowsManagedMachineFile. It reports whether a
+// repair was made. Only elevated callers reach it.
+func repairWindowsManagedRuntimeMachineFile(path string, userReadable bool) (bool, error) {
+	return repairWindowsManagedMachineFile(path, userReadable, func(path string) error {
+		return validateWindowsManagedRuntimeMachineFileProtection(path, userReadable)
+	})
+}
+
+// repairWindowsManagedMachineFile re-stamps the canonical machine-policy
+// protection on one administrator-owned file (a selector, a selector lock, a
+// Claude or Cursor transaction lock) when validate rejects it. Structure stays
+// fatal: a reparse point anywhere on the path or a hard-linked file is never
+// adopted. The owner must be SYSTEM, Administrators, TrustedInstaller or an
+// administrator principal the trust walk already accepts as drift (the
+// built-in Administrator, Domain or Enterprise Admins, a local Administrators
+// member, which an elevated takeown or manual edit leaves behind); a
+// standard-user owner is never adopted. It reports whether a repair was made.
+// Only elevated callers reach it.
+func repairWindowsManagedMachineFile(
+	path string,
+	userReadable bool,
+	validate func(string) error,
+) (bool, error) {
+	drift := validate(path)
+	if drift == nil {
+		return false, nil
+	}
+	if err := rejectWindowsReparseChain(path); err != nil {
+		return false, err
+	}
+	// Type, link count and owner are judged on the same no-follow handle
+	// that carries the re-stamp, so nothing is resolved by path in between.
+	err := RunWithWindowsOwnerRestorePrivilege(func() error {
+		return setWindowsManagedPolicyProtectionNoFollow(path, false, userReadable, func(owner *windows.SID) error {
+			if !windowsEnterpriseAdminIdentity(owner) && !managed.WindowsAdminEquivalentPrincipal(owner) {
+				return fmt.Errorf("managed machine file owner %s is not trusted", owner)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return false, errors.Join(drift, fmt.Errorf("repair refused: %w", err))
+	}
+	if err := validate(path); err != nil {
+		return false, errors.Join(drift, fmt.Errorf("still untrusted after repair: %w", err))
+	}
+	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+		"path":   path,
+		"reason": "managed machine file protection drifted: " + drift.Error(),
+	})
+	return true, nil
+}
+
 func validateWindowsManagedRuntimeMachineFileProtection(
 	path string,
 	userReadable bool,
@@ -2204,6 +2371,12 @@ func validateWindowsManagedRuntimeMachineFileProtection(
 	if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
 		return err
 	}
+	return validateWindowsManagedMachineFileDescriptor(path, userReadable)
+}
+
+// validateWindowsManagedMachineFileDescriptor checks only the file's own
+// owner, protection and exact DACL, without walking its ancestors.
+func validateWindowsManagedMachineFileDescriptor(path string, userReadable bool) error {
 	extended, err := winpath.Extended(path)
 	if err != nil {
 		return err

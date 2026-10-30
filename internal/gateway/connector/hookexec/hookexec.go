@@ -65,6 +65,11 @@ var (
 	// never writes bytes to the port.
 	errManagedGatewayNotRunning = errors.New("enterprise managed gateway service is not running")
 	errManagedGatewayPortHeld   = errors.New("another process holds the enterprise managed gateway API port")
+	// errManagedGatewayServiceUnreadable: the service control manager denied
+	// the hook a status query on the gateway service, which a hardened
+	// service security descriptor does. It also wraps
+	// errManagedGatewayPeerUnverified, so nothing is sent to the port.
+	errManagedGatewayServiceUnreadable = errors.New("enterprise managed gateway service status is not readable")
 )
 
 const managedGatewayPeerUnverifiedReason = "enterprise_managed_gateway_peer_unverified"
@@ -77,6 +82,10 @@ const managedGatewayNotRunningReason = "enterprise_managed_gateway_not_running"
 // port, whether or not the gateway service runs.
 const managedGatewayPortHeldReason = "enterprise_managed_gateway_port_held"
 
+// managedGatewayServiceUnreadableReason: the gateway service's security
+// descriptor no longer lets the user query it; Repair re-applies it.
+const managedGatewayServiceUnreadableReason = "enterprise_managed_gateway_service_unreadable"
+
 // ManagedSIDUnregisteredReason is the resolver failure of an account that is
 // not in the protected target set yet (enterprisehooks.
 // WindowsManagedSIDUnregisteredReason).
@@ -85,11 +94,16 @@ const ManagedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
 // managedPeerFailMode is the fail mode of a managed peer-verification
 // failure. A gateway service that is not running, with nothing else on its
 // port, is an outage: no peer answered, and a standard user cannot stop the
-// LocalSystem service, so the hook's fail mode decides. Every other peer
-// failure (another process on the port, a service or listener table the hook
-// cannot read) fails closed.
+// LocalSystem service, so the hook's fail mode decides. A service whose
+// security descriptor denies the user a status query is permission drift,
+// not evidence of another peer, so the fail mode decides there too. Every
+// other peer failure (another process on the port, a changed service PID, a
+// listener table the hook cannot read) fails closed.
 func managedPeerFailMode(failMode string, err error) string {
-	if errors.Is(err, errManagedGatewayNotRunning) && !errors.Is(err, errManagedGatewayPortHeld) {
+	if errors.Is(err, errManagedGatewayPortHeld) {
+		return "closed"
+	}
+	if errors.Is(err, errManagedGatewayNotRunning) || errors.Is(err, errManagedGatewayServiceUnreadable) {
 		return failMode
 	}
 	return "closed"
@@ -103,6 +117,8 @@ func managedPeerFailureReason(err error) string {
 		return managedGatewayPortHeldReason
 	case errors.Is(err, errManagedGatewayNotRunning):
 		return managedGatewayNotRunningReason
+	case errors.Is(err, errManagedGatewayServiceUnreadable):
+		return managedGatewayServiceUnreadableReason
 	}
 	return managedGatewayPeerUnverifiedReason
 }

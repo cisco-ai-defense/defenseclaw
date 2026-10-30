@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -1488,6 +1489,29 @@ func validateWindowsManagedHooksTeardownEnrollment(
 	return nil
 }
 
+// acceptWindowsManagedHooksActivationDrift logs, and tolerates, an
+// activation record whose manifest digest or target count no longer matches
+// the live manifest. The enumerator republishes the manifest for agent
+// version bumps and new users after the installer pinned it; the deployment
+// generation and the Guardian's row-level evidence still authenticate
+// teardown.
+func acceptWindowsManagedHooksActivationDrift(
+	activation windowsManagedHooksActivationRecord,
+	manifestSHA256 string,
+	targetCount int,
+) {
+	if activation.ManifestSHA256 == manifestSHA256 && activation.TargetCount == targetCount {
+		return
+	}
+	managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+		"reason":           "managed-hook activation evidence predates the current manifest",
+		"pinned_sha256":    activation.ManifestSHA256,
+		"manifest_sha256":  manifestSHA256,
+		"pinned_targets":   strconv.Itoa(activation.TargetCount),
+		"manifest_targets": strconv.Itoa(targetCount),
+	})
+}
+
 func validateWindowsManagedHooksTeardownActivation(
 	record *windowsManagedHooksActivationRecord,
 	manifestSHA256 string,
@@ -1504,14 +1528,14 @@ func validateWindowsManagedHooksTeardownActivation(
 		(activation.State != windowsManagedHooksNeverActivated &&
 			activation.State != windowsManagedHooksActivated) ||
 		!validEnterpriseHookHex(activation.ManifestSHA256, sha256.Size) ||
-		activation.ManifestSHA256 != manifestSHA256 ||
 		activation.TargetCount < 0 ||
 		activation.TargetCount > windowsManagedHooksTeardownTargetMax ||
-		activation.TargetCount != targetCount {
+		targetCount < 0 || targetCount > windowsManagedHooksTeardownTargetMax {
 		return windowsManagedHooksActivationRecord{}, errors.New(
 			"protected managed-hook activation evidence does not match the current manifest",
 		)
 	}
+	acceptWindowsManagedHooksActivationDrift(activation, manifestSHA256, targetCount)
 	return activation, nil
 }
 

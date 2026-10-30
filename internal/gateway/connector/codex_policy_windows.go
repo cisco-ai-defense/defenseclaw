@@ -62,7 +62,7 @@ func readCodexSystemRequirements(path string, managedEnterprise bool) ([]byte, b
 	if info.Size() > codexPolicyMessageLimit {
 		return nil, false, fmt.Errorf("exceeds %d bytes", codexPolicyMessageLimit)
 	}
-	if err := managed.ValidateTrustedFilePath(path, "managed Codex requirements source"); err != nil {
+	if err := managed.ValidateTrustedPolicyFilePath(path, "managed Codex requirements source"); err != nil {
 		return nil, false, fmt.Errorf("managed Codex requirements source is untrusted: %w", err)
 	}
 	return readBoundedCodexSystemRequirements(path)

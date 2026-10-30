@@ -142,3 +142,11 @@ func writeEnterpriseHookAdminOnlyFile(path string, data []byte) error {
 	}
 	return nil
 }
+
+// repairEnterpriseHookManifestACL re-stamps targets.yaml with the installer's
+// AdminFile descriptor. It succeeds only for a privileged caller (the
+// LocalSystem guardian or enumerator, or the elevated installer); the
+// protect helper refuses a reparse point or multiply-linked file first.
+func repairEnterpriseHookManifestACL(path string) error {
+	return enterprisehooks.ProtectWindowsManagedRuntimeAdminFile(path)
+}

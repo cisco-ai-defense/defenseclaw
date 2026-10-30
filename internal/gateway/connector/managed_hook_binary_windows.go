@@ -43,7 +43,7 @@ func managedEnterpriseWindowsHookBinary(executable string) string {
 	if !stableNativeWindowsPE(hook) {
 		return ""
 	}
-	if err := managed.ValidateTrustedFilePath(hook, "enterprise hook executable"); err != nil {
+	if err := managed.ValidateExecutableFilePath(hook, "enterprise hook executable"); err != nil {
 		return ""
 	}
 	return hook

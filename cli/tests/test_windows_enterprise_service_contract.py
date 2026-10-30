@@ -3716,7 +3716,7 @@ def test_certification_accepts_only_the_canonical_persistent_lifecycle_lock() ->
         "persistent lifecycle file lock was not canonically repaired in place for reinstall"
         in smoke
     )
-    assert "writable inherited lifecycle lock was silently adopted" in smoke
+    assert "writable inherited lifecycle lock was not repaired in place" in smoke
     assert "lifecycle_file_lock_reuse_stable = $elevated" in smoke
 
 
@@ -3790,6 +3790,13 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
             "function Write-DefenseClawJsonAtomic"
         )
     ]
+    helpers = ""
+    for helper in (
+        "Clear-DefenseClawRestrictiveFileAttributes",
+        "Invoke-DefenseClawTransientFileRetry",
+    ):
+        start = module.index(f"\nfunction {helper} ") + 1
+        helpers += module[start : module.index("\nfunction ", start) + 1]
     probe = tmp_path / f"atomic-file-replacement-{Path(engine).stem}.ps1"
     probe.write_text(
         "Set-StrictMode -Version Latest\n"
@@ -3811,6 +3818,10 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
         "    param([Parameter(Mandatory)][string]$Path)\n"
         "    [void][IO.Directory]::CreateDirectory($Path)\n"
         "}\n"
+        "function Write-DefenseClawResilienceEvent {\n"
+        "    param([string]$Marker, [hashtable]$Fields)\n"
+        "}\n"
+        + helpers
         + atomic_install
         + r'''
 $root = [IO.Path]::Combine(

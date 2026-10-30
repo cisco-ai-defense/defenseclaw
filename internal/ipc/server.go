@@ -283,6 +283,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() {
 		serveErrCh <- s.grpcSrv.Serve(lis)
 	}()
+	gateway.MarkIPCServing(ctx)
 
 	select {
 	case <-ctx.Done():

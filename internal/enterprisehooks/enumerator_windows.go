@@ -27,6 +27,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -297,6 +298,11 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 					err, revalidateErr,
 				)
 			}
+			managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+				"path":   path,
+				"object": string(managed.ObjectAdminFile),
+				"reason": "re-stamped the canonical hook guardian manifest descriptor after: " + err.Error(),
+			})
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return false, fmt.Errorf("enterprise hooks: inspect existing manifest %s: %w", path, statErr)
@@ -364,6 +370,9 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return false, fmt.Errorf("enterprise hooks: inspect hook guardian manifest immediately before replace: %w", statErr)
 	}
+	if err := clearWindowsTargetsManifestRestrictiveAttributes(path); err != nil {
+		return false, err
+	}
 	if err := windowsTargetsManifestReplace(tmpPath, path); err != nil {
 		return false, fmt.Errorf("enterprise hooks: atomic replace %s: %w", path, err)
 	}
@@ -371,6 +380,36 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 		return true, fmt.Errorf("enterprise hooks: validate published hook guardian manifest %s: %w", path, err)
 	}
 	return true, nil
+}
+
+// clearWindowsTargetsManifestRestrictiveAttributes clears ReadOnly, Hidden
+// and System on an existing manifest, which make ReplaceFileW fail with
+// access denied that has nothing to do with the ACL. The destination was just
+// validated as a regular non-reparse AdminFile.
+func clearWindowsTargetsManifestRestrictiveAttributes(path string) error {
+	pointer, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	attributes, err := windows.GetFileAttributes(pointer)
+	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect hook guardian manifest attributes: %w", err)
+	}
+	const restrictive = windows.FILE_ATTRIBUTE_READONLY | windows.FILE_ATTRIBUTE_HIDDEN | windows.FILE_ATTRIBUTE_SYSTEM
+	if attributes&restrictive == 0 {
+		return nil
+	}
+	if err := windows.SetFileAttributes(pointer, attributes&^restrictive); err != nil {
+		return fmt.Errorf("enterprise hooks: clear hook guardian manifest attributes: %w", err)
+	}
+	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+		"path":   path,
+		"reason": fmt.Sprintf("cleared file attributes 0x%x before replacing the manifest", attributes&restrictive),
+	})
+	return nil
 }
 
 // ensureWindowsTargetsManifestParentProtected is deliberately repair-on-drift,
@@ -400,6 +439,11 @@ func ensureWindowsTargetsManifestParentProtected(path string) error {
 			errors.Join(err, driftErr),
 		)
 	}
+	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+		"path":   path,
+		"object": string(managed.ObjectAdminDirectory),
+		"reason": "re-stamped the canonical hook guardian manifest folder descriptor after: " + driftErr.Error(),
+	})
 
 	return nil
 }

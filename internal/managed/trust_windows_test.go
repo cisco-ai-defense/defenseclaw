@@ -498,7 +498,6 @@ func TestWindowsUnsupportedAllowACETypesStayFatalInAdvisoryScope(t *testing.T) {
 
 	for name, aceType := range map[string]uint8{
 		"allow object":          0x5,
-		"allow callback":        0x9,
 		"allow callback object": 0xB,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -521,6 +520,36 @@ func TestWindowsUnsupportedAllowACETypesStayFatalInAdvisoryScope(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A callback (conditional) allow entry shares the ACCESS_ALLOWED_ACE layout, so
+// its trustee and mask are judged like a plain entry instead of refusing it.
+func TestWindowsCallbackAllowACEIsJudgedByTrustee(t *testing.T) {
+	for _, tc := range []struct {
+		sddl    string
+		wantErr bool
+	}{
+		{sddl: "D:P(A;;GA;;;BA)", wantErr: false},
+		{sddl: "D:P(A;;GA;;;BU)", wantErr: true},
+	} {
+		descriptor, err := windows.SecurityDescriptorFromString(tc.sddl)
+		if err != nil {
+			t.Fatalf("SecurityDescriptorFromString: %v", err)
+		}
+		dacl, _, err := descriptor.DACL()
+		if err != nil || dacl == nil {
+			t.Fatalf("DACL: %v", err)
+		}
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, 0, &ace); err != nil {
+			t.Fatalf("GetAce: %v", err)
+		}
+		ace.Header.AceType = 0x9
+		err = rejectUntrustedWindowsWriteACEsWithWriter(`C:\x`, "managed file", dacl, nil, windowsTrustLeaf)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("%s callback entry error = %v, want error %t", tc.sddl, err, tc.wantErr)
+		}
 	}
 }
 

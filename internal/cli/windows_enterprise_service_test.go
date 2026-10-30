@@ -1061,6 +1061,9 @@ func TestFindWindowsEnterpriseInstallerRejectsUserControlledScriptAndModule(t *t
 		if err := os.WriteFile(path, []byte("# fixture"), 0o600); err != nil {
 			t.Fatalf("WriteFile(%s): %v", path, err)
 		}
+		// The process user can be an administrator principal, which the
+		// trust walk accepts as drift; a standard-user writer must refuse.
+		grantUntrustedWriterForTest(t, path)
 	}
 	if _, err := findWindowsEnterpriseInstaller(installer); err == nil {
 		t.Fatal("user-controlled installer and adjacent module were accepted")

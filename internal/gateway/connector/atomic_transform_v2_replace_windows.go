@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -948,7 +949,15 @@ func convergeAtomicTransformV2ExistingProtection(
 		return false, fmt.Errorf("resolve current user while converging config protection: %w", err)
 	}
 	if owner == nil || !owner.Equals(userSID) {
-		return false, fmt.Errorf("refusing to rewrite protection on a config not owned by the current user")
+		// An agent once run elevated, a backup restore or a provisioning
+		// script leaves the config owned by Administrators. The installer or
+		// the LocalSystem guardian transfers ownership back to the user on the
+		// exact inode this handle holds; then the DACL convergence below runs
+		// as the owner. A foreign user owner, or a caller that cannot repair,
+		// stays an error with the reason spelled out.
+		if transferErr := transferAtomicTransformV2ConfigOwner(path, handle, owner, userSID); transferErr != nil {
+			return false, transferErr
+		}
 	}
 	private, err := atomicTransformPrivateSecurityDescriptor()
 	if err != nil {
@@ -986,4 +995,58 @@ func convergeAtomicTransformV2ExistingProtection(
 		return false, fmt.Errorf("config name changed after handle-bound protection convergence")
 	}
 	return before.protectionDigest != after.protectionDigest, nil
+}
+
+// transferAtomicTransformV2ConfigOwner re-owns an administrator-owned config
+// to the current (impersonated) user from a privileged thread. The repair
+// handle is bound to the held handle's file identity, so a concurrent rename
+// cannot redirect it.
+func transferAtomicTransformV2ConfigOwner(
+	path string, held windows.Handle, owner, user *windows.SID,
+) error {
+	ownerText := "<nil>"
+	if owner != nil {
+		ownerText = owner.String()
+	}
+	if owner == nil || !managed.IsWindowsTrustedAdminOwner(owner) {
+		return fmt.Errorf(
+			"config %s is owned by %s, not the current user %s; refusing to rewrite its protection",
+			path, ownerText, user.String(),
+		)
+	}
+	want, err := windowsManagedHandleIdentity(held)
+	if err != nil {
+		return fmt.Errorf("read config identity before owner transfer: %w", err)
+	}
+	repairErr := runWindowsManagedPrivilegedRepair(func() error {
+		handle, openErr := openWindowsManagedRepairHandle(path, false, windows.READ_CONTROL|windows.WRITE_OWNER)
+		if openErr != nil {
+			return openErr
+		}
+		defer windows.CloseHandle(handle)
+		got, idErr := windowsManagedHandleIdentity(handle)
+		if idErr != nil {
+			return idErr
+		}
+		if got != want {
+			return errors.New("config path no longer names the held config")
+		}
+		return windows.SetSecurityInfo(
+			handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION,
+			user, nil, nil, nil,
+		)
+	})
+	if errors.Is(repairErr, errWindowsManagedRepairUnprivileged) {
+		return fmt.Errorf(
+			"config %s is owned by %s, not the current user %s; the DefenseClaw installer or guardian transfers it on the next reconcile",
+			path, ownerText, user.String(),
+		)
+	}
+	if repairErr != nil {
+		return fmt.Errorf("transfer config %s ownership from %s to %s: %w", path, ownerText, user.String(), repairErr)
+	}
+	emitManagedResilience(managed.MarkerRepair, path,
+		fmt.Sprintf("transferred config ownership from %s to the target user", ownerText),
+		map[string]string{"sid": user.String()})
+	return nil
 }

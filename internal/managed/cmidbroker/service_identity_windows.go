@@ -47,36 +47,48 @@ func ValidateBrokerServiceIdentity(config ServerConfig) error {
 		return errors.New("resolve CMID broker executable")
 	}
 	// Permission drift on the executable is reported and accepted; the
-	// installer owns its ACL. Structural failures stay fatal.
-	if err := managed.ValidateTrustedFilePathTolerant(executable, "CMID broker executable"); err != nil {
+	// installer owns its ACL. An untrusted writer is logged as a boundary
+	// finding. Structural failures stay fatal.
+	if err := managed.ValidateExecutableFilePath(executable, "CMID broker executable"); err != nil {
 		return err
 	}
+	// The SCM configuration checks below are defense in depth. The trust
+	// boundary is requireLocalSystem above and the pipe client's token check
+	// on every connection, so a hardened service security descriptor that
+	// denies the query, or a transiently locked SCM database, degrades these
+	// checks to a log line instead of stopping the broker. The installer
+	// re-applies the service descriptors.
 	broker, err := queryService(config.BrokerServiceName, true)
 	if err != nil {
-		return errors.New("query configured CMID broker service")
-	}
-	if broker.pid != uint32(os.Getpid()) ||
-		broker.state != windows.SERVICE_START_PENDING && broker.state != windows.SERVICE_RUNNING {
-		return errors.New("CMID broker process is not the active configured service")
-	}
-	if !strings.EqualFold(broker.startName, "LocalSystem") &&
-		!strings.EqualFold(broker.startName, `NT AUTHORITY\SYSTEM`) {
-		return errors.New("CMID broker service is not configured as LocalSystem")
-	}
-	if broker.sidType != windows.SERVICE_SID_TYPE_UNRESTRICTED {
-		return errors.New("CMID broker service SID type is not unrestricted")
-	}
-	arguments, err := windows.DecomposeCommandLine(broker.binaryPath)
-	if err != nil || len(arguments) == 0 || !sameExecutablePath(arguments[0], executable) {
-		return errors.New("CMID broker executable does not match SCM configuration")
+		reportIdentityDegraded("broker service configuration unreadable", err)
+	} else {
+		if broker.pid != uint32(os.Getpid()) ||
+			broker.state != windows.SERVICE_START_PENDING && broker.state != windows.SERVICE_RUNNING {
+			return errors.New("CMID broker process is not the active configured service")
+		}
+		if !strings.EqualFold(broker.startName, "LocalSystem") &&
+			!strings.EqualFold(broker.startName, `NT AUTHORITY\SYSTEM`) {
+			return errors.New("CMID broker service is not configured as LocalSystem")
+		}
+		if broker.sidType != windows.SERVICE_SID_TYPE_UNRESTRICTED {
+			// A hardening script changed the SID type. The broker still runs
+			// as LocalSystem; the installer re-applies the SID type.
+			managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+				"object": "CMID broker service",
+				"reason": fmt.Sprintf("service SID type %d is not unrestricted", broker.sidType),
+			})
+		}
+		arguments, err := windows.DecomposeCommandLine(broker.binaryPath)
+		if err != nil || len(arguments) == 0 || !sameExecutablePath(arguments[0], executable) {
+			return errors.New("CMID broker executable does not match SCM configuration")
+		}
 	}
 
+	expectedGatewayAccount := `NT SERVICE\` + config.GatewayServiceName
 	gateway, err := queryService(config.GatewayServiceName, true)
 	if err != nil {
-		return errors.New("query configured DefenseClaw gateway service")
-	}
-	expectedGatewayAccount := `NT SERVICE\` + config.GatewayServiceName
-	if !gatewayServiceAccountAccepted(gateway.startName, config.GatewayServiceName) {
+		reportIdentityDegraded("gateway service configuration unreadable", err)
+	} else if !gatewayServiceAccountAccepted(gateway.startName, config.GatewayServiceName) {
 		return errors.New("DefenseClaw gateway service account is unexpected")
 	}
 	// The service SID exists for the gateway whichever account it logs on as;
@@ -85,6 +97,15 @@ func ValidateBrokerServiceIdentity(config ServerConfig) error {
 		return errors.New("DefenseClaw gateway virtual service SID is unavailable")
 	}
 	return nil
+}
+
+// reportIdentityDegraded logs one SCM query the broker could not make. The
+// checks it would have fed are skipped; the token checks still run.
+func reportIdentityDegraded(what string, err error) {
+	managed.EmitResilienceEvent(managed.MarkerDegraded, map[string]string{
+		"subsystem": "broker-identity",
+		"reason":    what + ": " + err.Error(),
+	})
 }
 
 func authenticatePipeClient(pipe windows.Handle, gatewayServiceName string) (uint32, error) {
@@ -115,7 +136,11 @@ func authenticatePipeClient(pipe windows.Handle, gatewayServiceName string) (uin
 	// cheap.
 	gateway, err := queryService(gatewayServiceName, false)
 	if err != nil {
-		return clientPID, errors.New("DefenseClaw gateway status is unavailable")
+		// The token check above is the boundary. A service descriptor that
+		// denies the status query, or a busy SCM, must not reject every
+		// gateway connection.
+		reportIdentityDegraded("gateway service status unreadable", err)
+		return clientPID, nil
 	}
 	if gateway.state != windows.SERVICE_RUNNING || gateway.pid == 0 || gateway.pid != clientPID {
 		return clientPID, errors.New("CMID broker pipe client is not the active DefenseClaw gateway")
@@ -303,9 +328,79 @@ func queryServiceConfiguration(service windows.Handle) (*windows.QUERY_SERVICE_C
 	return configuration, nil
 }
 
+// sameExecutablePath reports whether the SCM ImagePath and the running
+// executable name the same file. A path spelled differently (8.3 short name,
+// \??\ or \\?\ prefix, environment variables) is compared by volume and file
+// identity, which keeps the code-identity check without depending on spelling.
 func sameExecutablePath(left, right string) bool {
+	left = normalizeImagePath(left)
 	leftAbsolute, leftErr := filepath.Abs(left)
 	rightAbsolute, rightErr := filepath.Abs(right)
-	return leftErr == nil && rightErr == nil &&
-		strings.EqualFold(filepath.Clean(leftAbsolute), filepath.Clean(rightAbsolute))
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	if strings.EqualFold(filepath.Clean(leftAbsolute), filepath.Clean(rightAbsolute)) {
+		return true
+	}
+	same, err := sameFileIdentity(leftAbsolute, rightAbsolute)
+	return err == nil && same
+}
+
+// normalizeImagePath expands environment variables and strips the NT and
+// Win32 namespace prefixes an ImagePath may carry.
+func normalizeImagePath(path string) string {
+	if expanded, err := registryExpand(path); err == nil {
+		path = expanded
+	}
+	for _, prefix := range []string{`\??\`, `\\?\`} {
+		if len(path) > len(prefix) && strings.EqualFold(path[:len(prefix)], prefix) {
+			path = path[len(prefix):]
+		}
+	}
+	return path
+}
+
+func registryExpand(path string) (string, error) {
+	if !strings.Contains(path, "%") {
+		return path, nil
+	}
+	source, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", err
+	}
+	buffer := make([]uint16, windows.MAX_LONG_PATH)
+	count, err := windows.ExpandEnvironmentStrings(source, &buffer[0], uint32(len(buffer)))
+	if err != nil || count == 0 || int(count) > len(buffer) {
+		return "", fmt.Errorf("expand %q: %w", path, err)
+	}
+	return windows.UTF16ToString(buffer[:count]), nil
+}
+
+func sameFileIdentity(left, right string) (bool, error) {
+	open := func(path string) (windows.Handle, error) {
+		pointer, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return windows.InvalidHandle, err
+		}
+		return windows.CreateFile(
+			pointer,
+			windows.FILE_READ_ATTRIBUTES,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			nil,
+			windows.OPEN_EXISTING,
+			windows.FILE_FLAG_OPEN_REPARSE_POINT,
+			0,
+		)
+	}
+	leftHandle, err := open(left)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = windows.CloseHandle(leftHandle) }()
+	rightHandle, err := open(right)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = windows.CloseHandle(rightHandle) }()
+	return sameFile(leftHandle, rightHandle)
 }

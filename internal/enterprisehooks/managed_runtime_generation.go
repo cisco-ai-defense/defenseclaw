@@ -201,6 +201,13 @@ func (p WindowsManagedRuntimeGenerationPublication) String() string {
 
 func (p WindowsManagedRuntimeGenerationPublication) GoString() string { return p.String() }
 
+// WindowsManagedRuntimeRetirePreviousGenerationAllowed, when set, reports
+// whether a successful per-user install may delete the bundle it replaced.
+// The Guardian sets it to "no lifecycle transaction is pending", because a
+// pending Upgrade or Repair may still roll its selector snapshot back to that
+// bundle. Nil (the default) never retires.
+var WindowsManagedRuntimeRetirePreviousGenerationAllowed func() bool
+
 // WindowsManagedRuntimeSelectorCommit is a target-granular CAS receipt. It
 // contains no token material and can restore only the exact selector entry
 // changed by its transaction while preserving concurrent peer-SID updates.
@@ -360,10 +367,12 @@ func ReadWindowsManagedRuntimeSelectorCAS(
 
 // RestoreWindowsManagedRuntimeSelectorCAS restores a complete connector
 // selector only when the current full-selector CAS matches the protected
-// lifecycle journal.
+// lifecycle journal. It returns the CAS of the selector it actually left in
+// place, which differs from the snapshot's when an entry whose bundle no
+// longer loads was dropped; a later compensating restore must expect it.
 func RestoreWindowsManagedRuntimeSelectorCAS(
 	opts WindowsManagedRuntimeSelectorFullRestoreOptions,
-) error {
+) (WindowsManagedRuntimeSelectorCAS, error) {
 	return restoreWindowsManagedRuntimeSelectorCASPlatform(opts)
 }
 

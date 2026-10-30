@@ -477,7 +477,12 @@ func withAtomicTransformBoundProtocolLock(
 	if err := validateAtomicTransformWindowsHandleType(handle, false); err != nil {
 		return err
 	}
-	if err := validateAtomicTransformBoundFilePrivatePlatform(file); err != nil {
+	// The protocol lock holds no data, so its protection is repaired in place
+	// (or rewritten by its owner) rather than failing every config transform
+	// for this data directory; drift that cannot be repaired is harmless for
+	// a mutex and is accepted and logged.
+	driftAccepted, err := ensureAtomicTransformBoundProtocolLockProtection(dir, name, handle)
+	if err != nil {
 		return err
 	}
 	info, err := file.Stat()
@@ -505,6 +510,9 @@ func withAtomicTransformBoundProtocolLock(
 	}
 	namedIdentity, identityErr := atomicTransformOpenFileIdentity(named)
 	namedPrivateErr := validateAtomicTransformBoundFilePrivatePlatform(named)
+	if driftAccepted {
+		namedPrivateErr = nil
+	}
 	namedCloseErr := named.Close()
 	if identityErr != nil || namedPrivateErr != nil || namedCloseErr != nil {
 		return errors.Join(identityErr, namedPrivateErr, namedCloseErr)
@@ -513,4 +521,31 @@ func withAtomicTransformBoundProtocolLock(
 		return fmt.Errorf("bound V2 protocol lock path does not name the held lock inode")
 	}
 	return fn()
+}
+
+func ensureAtomicTransformBoundProtocolLockProtection(
+	dir *atomicTransformBoundDirectory, name string, handle windows.Handle,
+) (bool, error) {
+	validate := func(h windows.Handle) error {
+		if err := validateAtomicTransformWindowsPrivateHandle(h); err != nil {
+			return managedDriftError{err: err}
+		}
+		return nil
+	}
+	userSID, err := windowsEffectiveUserSID()
+	if err != nil || userSID == nil {
+		return false, fmt.Errorf("resolve current user for bound V2 protocol lock: %w", err)
+	}
+	if err := ensureWindowsManagedLockProtection(windowsManagedLockRepair{
+		Label:      "bound V2 protocol lock",
+		Path:       filepath.Join(dir.path, name),
+		Handle:     handle,
+		Validate:   validate,
+		Canonical:  atomicTransformPrivateSecurityDescriptor,
+		Policy:     managedDriftPolicy{Canonical: managedPrivateCanonicalModel(userSID.String()), ExtraTrusted: []string{userSID.String()}},
+		SelfRepair: true,
+	}); err != nil {
+		return false, err
+	}
+	return validate(handle) != nil, nil
 }

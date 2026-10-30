@@ -14,12 +14,32 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 type windowsDeferredPolicyTarget struct {
 	manifest ManifestTarget
 	sid      string
 	dataDir  string
+}
+
+func validateWindowsDeferredPolicyTarget(target ManifestTarget) (windowsDeferredPolicyTarget, error) {
+	if err := requireWindowsEnterpriseDeferredTargetPendingPlatform(target); err != nil {
+		return windowsDeferredPolicyTarget{}, err
+	}
+	home, sid, err := validateWindowsEnterpriseHome(target.UserHome, target.SID)
+	if err != nil {
+		return windowsDeferredPolicyTarget{}, err
+	}
+	dataDir, err := resolveWindowsEnterpriseDataDir(home, target.DataDir)
+	if err != nil {
+		return windowsDeferredPolicyTarget{}, err
+	}
+	return windowsDeferredPolicyTarget{
+		manifest: target,
+		sid:      sid.String(),
+		dataDir:  dataDir,
+	}, nil
 }
 
 func stageWindowsEnterpriseDeferredPoliciesPlatform(
@@ -77,22 +97,24 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			return errors.New("enterprise hooks: duplicate deferred machine-policy target")
 		}
 		seen[key] = struct{}{}
-		if err := requireWindowsEnterpriseDeferredTargetPendingPlatform(target); err != nil {
-			return err
-		}
-		home, sid, err := validateWindowsEnterpriseHome(target.UserHome, target.SID)
+		// One pending user whose profile drifted, vanished or still carries a
+		// stale selector entry is skipped; the other deferred users are
+		// still staged. The Guardian reports the skipped one as pending and
+		// retries it on its next pass.
+		validatedTarget, err := validateWindowsDeferredPolicyTarget(target)
 		if err != nil {
-			return err
+			managed.EmitResilienceEvent(managed.MarkerSkip, map[string]string{
+				"connector": strings.ToLower(strings.TrimSpace(target.Connector)),
+				"sid":       strings.TrimSpace(target.SID),
+				"path":      strings.TrimSpace(target.UserHome),
+				"reason":    "deferred_target_skipped: " + err.Error(),
+			})
+			continue
 		}
-		dataDir, err := resolveWindowsEnterpriseDataDir(home, target.DataDir)
-		if err != nil {
-			return err
-		}
-		validated = append(validated, windowsDeferredPolicyTarget{
-			manifest: target,
-			sid:      sid.String(),
-			dataDir:  dataDir,
-		})
+		validated = append(validated, validatedTarget)
+	}
+	if len(validated) == 0 {
+		return nil
 	}
 
 	registry := newWindowsEnterpriseConnectorRegistry()

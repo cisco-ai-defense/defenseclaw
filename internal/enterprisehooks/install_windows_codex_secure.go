@@ -273,6 +273,7 @@ func installWindowsCodexManagedResult(
 			rollbackErr,
 		)
 	}
+	retireWindowsManagedRuntimePreviousGeneration(generationCommit)
 	return InstallResult{
 		Connector:                  "codex",
 		UserHome:                   target.home,

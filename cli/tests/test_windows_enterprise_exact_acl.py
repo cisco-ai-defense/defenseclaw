@@ -119,19 +119,28 @@ def test_canonical_setter_replaces_the_entire_protected_dacl() -> None:
     assert "$ownerSID -cne $expectedOwnerSID" in assertion
     assert "$groupSID -cne $expectedGroupSID" in assertion
     assert "Invoke-DefenseClawNative" not in setter
-    # icacls is permitted ONLY inside Assert-DefenseClawCanonicalRawPathAcl's
-    # one-shot self-heal (restores PROTECTED_DACL_SECURITY_INFORMATION that
-    # Set-Acl occasionally drops silently on Windows 10/11). It must not
-    # appear anywhere else in the canonical setter: the setter still writes
-    # bytes via Set-Acl and verifies via native GetFileSecurityDescriptor.
+    # Validation never mutates: icacls is gone from the canonical setter and
+    # verifier. A stamping caller's one re-stamp goes through the privileged
+    # no-follow native writer, and a descriptor that is not byte-exact is
+    # judged by write authority outside the strict pin.
     raw_verifier = setter[
         setter.index("function Assert-DefenseClawCanonicalRawPathAcl") : setter.index(
             "function Test-DefenseClawCanonicalRawPathAcl"
         )
     ]
-    assert "$script:IcaclsExe" in raw_verifier
-    setter_without_raw_verifier = setter.replace(raw_verifier, "")
-    assert "$script:IcaclsExe" not in setter_without_raw_verifier
+    assert "$script:IcaclsExe" not in setter
+    assert "inheritance:r" not in setter
+    assert "SetPathSecurityDescriptorPrivilegedNoFollow" in raw_verifier
+    assert "if ($AllowSelfHeal)" in raw_verifier
+    assert "Get-DefenseClawRawDescriptorFindings" in raw_verifier
+    assert "Test-DefenseClawTrustStrictAncestors" in raw_verifier
+    assert "defenseclaw_accept" in raw_verifier
+    # The path-based setter falls back to the privileged writer when Set-Acl
+    # cannot write another principal's owner or lacks WRITE_DAC.
+    path_setter = setter[setter.index("function Set-DefenseClawPathAcl") :]
+    assert "SetPathSecurityDescriptorPrivilegedNoFollow" in path_setter
+    assert "UninstallFilePrivilegeScope(true)" in source
+    assert "SeTakeOwnershipPrivilege" in source
 
 
 def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None:
@@ -490,3 +499,133 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
         "retained_runtime_secret_hash_preserved": True,
         "retained_runtime_secret_identity_preserved": True,
     }
+
+
+def test_nuclear_purge_is_bounded_scoped_and_truthful() -> None:
+    """The purge never deadlocks, never hard-codes a drive and reports leftovers."""
+    source = MODULE.read_text(encoding="utf-8")
+    silent = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawNuclearSilentExec",
+        "function Get-DefenseClawNuclearServicePresence",
+    )
+    # Both streams drain concurrently and every child has a timeout.
+    assert "ReadToEndAsync()" in silent
+    assert "WaitForExit($TimeoutSeconds * 1000)" in silent
+    assert "$process.Kill()" in silent
+    assert "RedirectStandardInput  = $true" in silent
+
+    nuclear = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawNuclearUninstall",
+        "function Invoke-DefenseClawUninstallLifecycle",
+    )
+    # Locale-independent ownership: no takeown prompt answer anywhere.
+    assert "takeown" not in nuclear
+    assert "'C:\\" not in nuclear
+    assert "$script:ProgramFiles" in nuclear
+    assert "$script:ProgramData" in nuclear
+    # The shared lifecycle folder keeps other scopes' receipts and the lock.
+    assert "Get-DefenseClawStableScopeSHA256" in nuclear
+    assert '"*-$purgeScope.*"' in nuclear
+    assert ".retired-" in nuclear
+    assert "Get-DefenseClawNuclearUserDataPaths" in nuclear
+    assert "ok                                       = ($incomplete.Count -eq 0)" in nuclear
+    assert "reboot_required" in nuclear
+    assert "1072" in nuclear
+
+    remover = _extract_function_body(
+        source,
+        "function Remove-DefenseClawNuclearPath",
+        "function Get-DefenseClawNuclearUserDataPaths",
+    )
+    assert "DeleteTreePrivileged" in remover
+    assert "/setowner" in remover
+    assert "ScheduleDeleteOnRestart" in remover
+    assert "/reset" not in remover
+    assert "public static string[] DeleteTreePrivileged(string root)" in source
+
+
+def test_fresh_install_prunes_orphaned_runtime_selectors() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    wrapper = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand",
+        "function Get-DefenseClawManagedHooksLegacyActivationClassification",
+    )
+    assert "'prune-orphaned-selectors'" in wrapper
+    for phase in ("'pruned'", "'none_present'", "'skipped_recorded_state'", "'skipped_machine_policy'"):
+        assert phase in wrapper
+    prune = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawOrphanedSelectorPrune",
+        "function Get-DefenseClawTransactionFileSnapshotEntry",
+    )
+    assert "Test-DefenseClawTrustStrictAncestors" in prune
+    assert "selector_paths" in prune
+    assert "'.defenseclaw-managed-runtime-selector.state'" in prune
+    assert "fallback=raw-delete" in prune
+    assert "pruned-selectors.json" in prune
+    install_like = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawInstallLikeLifecycle",
+        "function Invoke-DefenseClawNuclearSilentExec",
+    )
+    call = install_like.index("Invoke-DefenseClawOrphanedSelectorPrune")
+    assert install_like.rfind("-not $priorDeploymentActive", 0, call) > install_like.rfind(
+        "policy staging: $requiredPath", 0, call
+    )
+    assert call < install_like.index("$targetRuntimePlan = Invoke-DefenseClawTargetRuntimePreparation")
+
+
+def test_install_recovers_from_leftover_state_and_reconcile_repairs_services() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    lifecycle = source[source.index("function Invoke-DefenseClawEnterpriseLifecycle {") :]
+    # Only an Install on the real managed roots, outside the strict pin and
+    # never over a live deployment, clears leftover state and runs again.
+    assert "$installAutoRecoveryEligible = [bool](" in lifecycle
+    assert "$Action -eq 'Install' -and" in lifecycle
+    assert "-not $installLiveDeployment" in lifecycle
+    loop = lifecycle[lifecycle.index("$installRecoveryAttempted = $false") :]
+    assert loop.index("Invoke-DefenseClawInstallAutoRecovery") < loop.index(
+        "$preLayoutRecovery = Invoke-DefenseClawPreLayoutRecovery"
+    )
+    assert loop.index("return Invoke-DefenseClawInstallLikeLifecycle") < loop.index(
+        "$installRecoveryReason = [string]$_.Exception.Message"
+    )
+    recovery = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawInstallAutoRecovery",
+        "function Invoke-DefenseClawEnterpriseLifecycle",
+    )
+    assert "Invoke-DefenseClawNuclearUninstall" in recovery
+    assert "defenseclaw_recover" in recovery
+    assert "Get-DefenseClawInstallLeftoverState" in recovery
+
+    # A rollback that cannot finish keeps the pending transaction for the
+    # next recovery and reports the error that failed the action.
+    install_like = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawInstallLikeLifecycle",
+        "function Invoke-DefenseClawNuclearSilentExec",
+    )
+    assert "rollback did not complete; the pending transaction is kept for recovery" in install_like
+    assert "outside a fresh Install" not in source
+
+    reconcile = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawReconcileLifecycle",
+        "function Get-DefenseClawInstallLeftoverState",
+    )
+    assert reconcile.index("Repair-DefenseClawManagedServiceConfiguration") < reconcile.index(
+        "Assert-DefenseClawEnterpriseDeployment"
+    )
+    config = _extract_function_body(
+        source,
+        "function Assert-DefenseClawServiceConfiguration",
+        "function Get-DefenseClawServiceDacl",
+    )
+    assert "Test-DefenseClawServiceImageSameFile" in config
+    assert "ConvertTo-DefenseClawServiceAccountSID" in config
+    assert "Assert-DefenseClawServiceRegistryAcl -Name $Name -Repair" in config
+    assert "Assert-DefenseClawServiceSecurityDescriptor -Name $Name" in config
