@@ -204,8 +204,13 @@ def litellm_model(llm: LLMConfig) -> str:
     passed through unchanged (the caller should handle that).
     """
     model = llm.model or ""
-    if model and llm.provider and "/" not in model:
-        model = f"{llm.provider}/{model}"
+    if model and "/" not in model:
+        # provider_prefix() is llm.provider, or "bedrock" for an unprefixed
+        # Bedrock id, which LiteLLM then signs for Bedrock instead of failing
+        # with "Authentication failed" (GAP-2640).
+        provider = llm.provider_prefix()
+        if provider:
+            model = f"{provider}/{model}"
     return _with_bedrock_inference_profile(llm, model)
 
 

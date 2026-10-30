@@ -49,8 +49,13 @@ var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 // (the caller should handle that case).
 func liteLLMModel(llm config.LLMConfig) string {
 	model := llm.Model
-	if model != "" && llm.Provider != "" && !strings.Contains(model, "/") {
-		model = llm.Provider + "/" + model
+	if model != "" && !strings.Contains(model, "/") {
+		// ProviderPrefix is llm.Provider, or bedrock for an unprefixed
+		// Bedrock id: LiteLLM then signs for Bedrock instead of failing
+		// with "Authentication failed" (GAP-2640).
+		if provider := llm.ProviderPrefix(); provider != "" {
+			model = provider + "/" + model
+		}
 	}
 	return withBedrockInferenceProfile(llm, model)
 }

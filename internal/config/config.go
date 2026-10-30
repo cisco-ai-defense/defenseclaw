@@ -28,6 +28,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -1060,7 +1061,27 @@ func (l LLMConfig) ProviderPrefix() string {
 	if idx := strings.Index(l.Model, "/"); idx > 0 {
 		return strings.ToLower(l.Model[:idx])
 	}
+	if IsBedrockModelID(l.Model) {
+		return "bedrock"
+	}
 	return ""
+}
+
+// bedrockModelIDPattern matches Amazon Bedrock model ids and cross-region
+// inference profile ids: "<vendor>.<model>" or "<geo>.<vendor>.<model>", for
+// example "anthropic.claude-haiku-4-5-20251001-v1:0",
+// "us.anthropic.claude-haiku-4-5-20251001-v1:0", "us.openai.gpt-5.6-luna" or
+// "amazon.nova-pro-v1:0". Ids of the other providers never start with a
+// vendor name and a dot ("gpt-4o", "claude-haiku-4-5", "gemini-2.5-pro").
+// Mirrors BEDROCK_MODEL_ID_RE in cli/defenseclaw/config.py.
+var bedrockModelIDPattern = regexp.MustCompile(`^(?:(?:us|eu|apac|jp|au|ca|global|us-gov)\.)?(?:anthropic|amazon|meta|mistral|cohere|ai21|openai|deepseek|qwen|writer|twelvelabs|stability|luma|google|nvidia|minimax|moonshot|moonshotai)\.[a-z0-9]`)
+
+// IsBedrockModelID reports whether model, written without a provider
+// prefix, is a Bedrock model or inference profile id. An unprefixed Bedrock
+// id then resolves to the bedrock provider everywhere (gateway judge,
+// scanners, credential injection) instead of to no provider (GAP-2640).
+func IsBedrockModelID(model string) bool {
+	return bedrockModelIDPattern.MatchString(strings.ToLower(strings.TrimSpace(model)))
 }
 
 // IsLocalProvider returns true when the resolved provider prefix points

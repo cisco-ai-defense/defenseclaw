@@ -25,24 +25,9 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
-// bedrockModelIDPattern matches Amazon Bedrock model ids and cross-region
-// inference profile ids: "<vendor>.<model>" or "<geo>.<vendor>.<model>", for
-// example "anthropic.claude-haiku-4-5-20251001-v1:0",
-// "us.anthropic.claude-haiku-4-5-20251001-v1:0", "us.openai.gpt-5.6-luna" or
-// "amazon.nova-pro-v1:0". Ids of the other providers never start with a
-// vendor name and a dot ("gpt-4o", "claude-haiku-4-5", "gemini-2.5-pro").
-// Mirrors BEDROCK_MODEL_ID_RE in cli/defenseclaw/config.py.
-var bedrockModelIDPattern = regexp.MustCompile(`^(?:(?:us|eu|apac|jp|au|ca|global|us-gov)\.)?(?:anthropic|amazon|meta|mistral|cohere|ai21|openai|deepseek|qwen|writer|twelvelabs|stability|luma|google|nvidia|minimax|moonshot|moonshotai)\.[a-z0-9]`)
-
 // bedrockOpenAIProfilePattern matches an OpenAI-family model behind a Bedrock
 // cross-region inference profile ("us.openai.gpt-5.6-luna").
 var bedrockOpenAIProfilePattern = regexp.MustCompile(`^(?:us|eu|apac|jp|au|ca|global|us-gov)\.openai\.[a-z0-9]`)
-
-// isBedrockModelID reports whether model (without a provider prefix) is
-// shaped like a Bedrock model or inference profile id.
-func isBedrockModelID(model string) bool {
-	return bedrockModelIDPattern.MatchString(strings.ToLower(strings.TrimSpace(model)))
-}
 
 // isBedrockOpenAIProfileID reports whether model is an OpenAI-family model
 // named through a Bedrock cross-region inference profile.
