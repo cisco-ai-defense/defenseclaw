@@ -8,6 +8,11 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.7
+
+### Fixed
+- **Codex no longer spawns notifiers without end when computer-use wraps DefenseClaw's notifier.** Re-running `setup codex` after the Codex computer-use plugin wrapped `notify` saved the wrapped command as the original, so each turn end started computer-use and `defenseclaw-hook notify` in turn until Codex quit. Setup and the notifier now drop DefenseClaw's own notifier from the original, so a backup saved by an earlier release stops looping without re-running setup.
+
 ## [Unreleased] — 1.0.6
 
 ### Changed
