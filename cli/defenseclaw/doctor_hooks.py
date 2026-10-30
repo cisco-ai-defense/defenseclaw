@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -456,6 +457,71 @@ def _windows_system_powershell_path() -> str:
             "powershell.exe",
         )
     )
+
+
+def _windows_system_cmd_path() -> str:
+    """Return the system cmd.exe path the direct Codex hook command names
+    (windowsSystemCmdExe in internal/gateway/connector/helpers.go)."""
+    powershell = _windows_system_powershell_path()
+    if not powershell:
+        return ""
+    return ntpath.join(ntpath.dirname(ntpath.dirname(ntpath.dirname(powershell))), "cmd.exe")
+
+
+# The direct Codex hook command Setup writes since GAP-1908
+# (windowsCmdDirectHookCommand in internal/gateway/connector/helpers.go):
+#
+#   <system>\cmd.exe /d /v:off /c "<launcher>" <arguments>
+#
+# Setup writes it only for a launcher path of letters, digits, spaces and
+# \ : . _ - ~ and bare arguments of letters, digits and . _ -, so neither
+# PowerShell nor cmd.exe can expand, split or redirect anything in it; any
+# other launcher path keeps the encoded PowerShell bridge.
+_CMD_DIRECT_SWITCHES = ("/d", "/v:off", "/c")
+_CMD_DIRECT_TOKEN = re.compile(r"[A-Za-z0-9._-]+")
+_CMD_DIRECT_FORBIDDEN = frozenset("\r\n\x00|<>&^%!()@$`\x27;,=")
+
+
+def _cmd_direct_path(path: str) -> bool:
+    """Report a launcher path the direct form carries (windowsCmdDirectPath, quoted)."""
+    if len(path) >= 4 and path[0].isascii() and path[0].isalpha() and path[1:3] == ":\\":
+        rest, separator, allowed = path[3:], "\\", "\\._-~ "
+    elif os.name != "nt" and path.startswith("/"):
+        # POSIX fixture paths of the non-Windows unit tests; a Windows
+        # registration always names a drive path.
+        rest, separator, allowed = path[1:], "/", "/._-~ "
+    else:
+        return False
+    if not rest or rest.endswith(separator) or separator * 2 in rest:
+        return False
+    return all(char.isalpha() or unicodedata.category(char) == "Nd" or char in allowed for char in rest)
+
+
+def _codex_cmd_direct_parts(command: str) -> tuple[str, list[str]] | None:
+    """The launcher and arguments of an exact direct Codex hook command, or None.
+
+    The command must be byte for byte what Setup renders for its launcher and
+    arguments, so a lookalike (another cmd.exe, other switches, an unquoted
+    or differently quoted launcher, shell metacharacters) stays foreign.
+    """
+    value = command.strip()
+    if any(char in _CMD_DIRECT_FORBIDDEN for char in value):
+        return None
+    try:
+        parts = _split_windows(value)
+    except _InspectionError:
+        return None
+    if len(parts) < 6 or tuple(parts[1:4]) != _CMD_DIRECT_SWITCHES:
+        return None
+    system_cmd = _windows_system_cmd_path()
+    if not system_cmd or parts[0].casefold() != system_cmd.casefold():
+        return None
+    target, args = parts[4], parts[5:]
+    if not _cmd_direct_path(target) or not all(_CMD_DIRECT_TOKEN.fullmatch(arg) for arg in args):
+        return None
+    if value != parts[0] + " /d /v:off /c \"" + target + "\" " + " ".join(args):
+        return None
+    return target, args
 
 
 def _repair_detail(connector: str, detail: str, *, configured_mode: str = "") -> str:
@@ -1672,7 +1738,10 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
         return ""
 
     first_base = ntpath.basename(parts[0]).casefold()
-    if first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+    direct = _codex_cmd_direct_parts(command) if connector == "codex" and first_base in {"cmd", "cmd.exe"} else None
+    if direct is not None:
+        target, args = direct
+    elif first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
         lowered = [part.casefold() for part in parts]
         owned_target = ""
         if "-encodedcommand" in lowered:
@@ -3029,7 +3098,18 @@ def _command_target(
         raise _InspectionError("malformed", "registered hook command has no target")
 
     first_base = ntpath.basename(parts[0]).casefold()
-    if first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+    if connector == "codex" and first_base in {"cmd", "cmd.exe"}:
+        # The direct Codex command (GAP-1908): only its exact rendered form
+        # is DefenseClaw-owned; any other cmd.exe line stays foreign.
+        direct = None if call_operator else _codex_cmd_direct_parts(command)
+        if direct is None:
+            raise _InspectionError(
+                "malformed",
+                "cmd.exe hook differs from the exact direct DefenseClaw command form",
+            )
+        target, args = direct
+        kind = "direct"
+    elif first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
         lowered = [part.casefold() for part in parts]
         if "-encodedcommand" in lowered:
             if connector in {"antigravity", "devin"}:

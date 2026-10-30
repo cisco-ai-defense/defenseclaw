@@ -4922,7 +4922,10 @@ function Protect-BackupsFolder {
             Set-DirectoryAcl $backups $acl
         }
     } catch { Write-Warn "Could not make $backups private: $($_.Exception.Message)"; return }
-    foreach ($file in @(Get-ChildItem -LiteralPath $backups -File -Force -Filter "claudecode-settings.before-rollback*.json" -ErrorAction SilentlyContinue)) {
+    # The Codex config copy (GAP-2553) is kept beside the Claude Code ones.
+    $kept = @(Get-ChildItem -LiteralPath $backups -File -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "claudecode-settings.before-rollback*.json" -or $_.Name -like "codex-config.before-rollback*.toml" })
+    foreach ($file in $kept) {
         try {
             if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
             if (-not (Test-OwnedByCurrentUser $file.FullName)) { continue }

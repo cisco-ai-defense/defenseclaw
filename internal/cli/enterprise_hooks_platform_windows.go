@@ -127,17 +127,7 @@ func enterpriseHookTargetIssueAccount(row enterpriseHookReconcileRow) string {
 // enterpriseHookWindowsAccountLabel is "user (SID)", looking the account up
 // when the row carries only its SID.
 func enterpriseHookWindowsAccountLabel(row enterpriseHookReconcileRow) string {
-	user, sid := strings.TrimSpace(row.User), strings.TrimSpace(row.SID)
-	if user == "" && sid != "" {
-		if parsed, err := windows.StringToSid(sid); err == nil {
-			if account, domain, _, err := parsed.LookupAccount(""); err == nil {
-				user = account
-				if domain != "" {
-					user = domain + `\` + account
-				}
-			}
-		}
-	}
+	user, sid := enterpriseHookWindowsAccountName(row.User, row.SID), strings.TrimSpace(row.SID)
 	switch {
 	case user == "":
 		return sid
@@ -145,6 +135,26 @@ func enterpriseHookWindowsAccountLabel(row enterpriseHookReconcileRow) string {
 		return user
 	}
 	return user + " (" + sid + ")"
+}
+
+// enterpriseHookWindowsAccountName is the account name a row or manifest
+// target carries, else DOMAIN\account looked up from its SID, else "".
+func enterpriseHookWindowsAccountName(user, sid string) string {
+	if user = strings.TrimSpace(user); user != "" {
+		return user
+	}
+	parsed, err := windows.StringToSid(strings.TrimSpace(sid))
+	if err != nil {
+		return ""
+	}
+	account, domain, _, err := parsed.LookupAccount("")
+	if err != nil || account == "" {
+		return ""
+	}
+	if domain != "" {
+		return domain + `\` + account
+	}
+	return account
 }
 
 // enterpriseHookManifestCatchUpAllowed reports a standalone deployment,

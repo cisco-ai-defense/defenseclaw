@@ -5023,9 +5023,9 @@ function Get-NativeHookArguments([string]$RegisteredEvent) {
             throw "Codex registration is unavailable while resolving the hook contract: $config"
         }
         $command = Get-CodexWindowsHookCommand ([IO.File]::ReadAllText($config))
-        # Read the contract from the launcher arguments of the exact awaited
-        # bridge, not from the quoting of one PowerShell statement.
-        $bridge = Get-AwaitedHookBridge $command.Script
+        # Read the contract from the launcher arguments of the exact direct
+        # command or awaited bridge, not from the quoting of one statement.
+        $bridge = $command.Bridge
         $bridgeArguments = [string[]]@(if ($null -ne $bridge) { $bridge.Arguments })
         $contractIndex = [Array]::IndexOf($bridgeArguments, '--hook-contract')
         if ($contractIndex -lt 0 -or $contractIndex + 1 -ge $bridgeArguments.Count -or
@@ -5572,11 +5572,46 @@ function Get-CodexWindowsHookCommand([string]$Config) {
         try { $command = $literal | ConvertFrom-Json -ErrorAction Stop }
         catch { throw "Codex command_windows is not a valid TOML basic string: $($_.Exception.Message)" }
     }
+    # Setup writes the direct cmd.exe command (GAP-1908), or the encoded
+    # PowerShell bridge for a launcher path that form cannot carry.
+    $direct = Get-DirectCodexHookCommand $command
+    if ($null -ne $direct) {
+        return [pscustomobject]@{ Command = $command; Literal = $literal; Encoded = ''; Script = ''; Bridge = $direct }
+    }
     $encoded = [regex]::Match($command, '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)')
-    if (-not $encoded.Success) { throw 'Codex command_windows does not use the managed EncodedCommand form' }
+    if (-not $encoded.Success) {
+        throw 'Codex command_windows uses neither the direct cmd.exe command nor the EncodedCommand form'
+    }
     try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
     catch { throw "Codex command_windows has invalid encoded content: $($_.Exception.Message)" }
-    return [pscustomobject]@{ Command = $command; Encoded = $encoded.Groups[1].Value; Script = $script }
+    return [pscustomobject]@{
+        Command = $command
+        Literal = $literal
+        Encoded = $encoded.Groups[1].Value
+        Script = $script
+        Bridge = Get-AwaitedHookBridge $script
+    }
+}
+
+# Get-DirectCodexHookCommand parses the direct Codex hook command Setup writes
+# for a launcher path neither shell can expand (windowsCmdDirectHookCommand,
+# GAP-1908): <system>\cmd.exe /d /v:off /c "<launcher>" <arguments>. It returns
+# the launcher and its arguments, or $null when the command is not exactly that
+# form with the system cmd.exe.
+function Get-DirectCodexHookCommand([string]$Command) {
+    $match = [regex]::Match(
+        $Command,
+        '^(?<cmd>[A-Za-z]:\\[A-Za-z0-9\\._~-]+) /d /v:off /c "(?<file>[A-Za-z]:\\[\p{L}\p{Nd} \\._~-]+)"(?<arguments>(?: [A-Za-z0-9._-]+)+)$'
+    )
+    if (-not $match.Success) { return $null }
+    $systemCmd = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+    if (-not [string]::Equals($match.Groups['cmd'].Value, $systemCmd, [StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    return [pscustomobject]@{
+        File = $match.Groups['file'].Value
+        Arguments = [string[]]@($match.Groups['arguments'].Value.Substring(1).Split(' '))
+    }
 }
 
 # Get-AwaitedHookBridge parses a decoded hook bridge script: the launcher is
@@ -5608,7 +5643,7 @@ function Get-AwaitedHookBridge([string]$Script) {
 }
 
 function Assert-CodexSynchronousWindowsHookCommand([object]$CodexCommand, [string]$Context) {
-    $bridge = Get-AwaitedHookBridge $CodexCommand.Script
+    $bridge = $CodexCommand.Bridge
     $arguments = @(if ($null -ne $bridge) { $bridge.Arguments })
     $file = if ($null -ne $bridge) { $bridge.File } else { '' }
     $contractEvents = @{
@@ -7041,9 +7076,14 @@ function Assert-DoctorWindowsHookRegistration {
     Invoke-Tool 'defenseclaw-gateway' @('stop') @(0, 1) -Timeout 60 | Out-Null
     if ($Connector -eq 'codex') {
         $codexCommand = Get-CodexWindowsHookCommand $config
-        $tamperedScript = [regex]::Replace($codexCommand.Script, '(?i)defenseclaw-hook\.exe', 'defenseclaw-gateway.exe')
-        $tamperedEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($tamperedScript))
-        $tamperedConfig = $config.Replace($codexCommand.Encoded, $tamperedEncoded)
+        if ($codexCommand.Encoded) {
+            $tamperedScript = [regex]::Replace($codexCommand.Script, '(?i)defenseclaw-hook\.exe', 'defenseclaw-gateway.exe')
+            $tamperedEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($tamperedScript))
+            $tamperedConfig = $config.Replace($codexCommand.Encoded, $tamperedEncoded)
+        } else {
+            $tamperedLiteral = [regex]::Replace($codexCommand.Literal, '(?i)defenseclaw-hook\.exe', 'defenseclaw-gateway.exe')
+            $tamperedConfig = $config.Replace($codexCommand.Literal, $tamperedLiteral)
+        }
     } elseif ($Connector -eq 'devin') {
         $document = $config | ConvertFrom-Json -ErrorAction Stop
         $command = [string]@($document.hooks.PreToolUse)[0].hooks[0].command
