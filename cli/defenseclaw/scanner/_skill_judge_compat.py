@@ -148,10 +148,10 @@ def install() -> bool:
     def _repair_optional_taxonomy(self: Any, analysis_result: dict[str, Any]) -> None:
         changes = normalize_primary_answer(analysis_result)
         if changes:
-            _log.warning("normalized %d optional or unknown field(s) in the skill judge answer", changes)
+            _log.debug("normalized %d optional or unknown field(s) in the skill judge answer", changes)
         repaired = repair_truncated_evidence_ids(analysis_result, getattr(self, "_allowed_evidence_ids", ()))
         if repaired:
-            _log.warning("mapped %d cut evidence id(s) in the skill judge answer to the id each one starts", repaired)
+            _log.debug("mapped %d cut evidence id(s) in the skill judge answer to the id each one starts", repaired)
         original(self, analysis_result)
 
     setattr(_repair_optional_taxonomy, _MARKER, True)

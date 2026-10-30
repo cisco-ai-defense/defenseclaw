@@ -41,6 +41,7 @@ from defenseclaw.config import (
 from defenseclaw.models import Finding, ScanResult
 from defenseclaw.scanner import settings
 from defenseclaw.scanner._llm_env import (
+    drop_unsupported_litellm_params,
     inject_llm_env,
     litellm_model,
     llm_analyzer_ready,
@@ -250,6 +251,7 @@ class SkillScannerWrapper:
 
         # Accept a well-formed answer from any judge model (GAP-2609).
         install_judge_compat()
+        drop_unsupported_litellm_params()
         cfg = self.config
         policy = _scan_policy(ScanPolicy, cfg)
 

@@ -68,6 +68,7 @@ from defenseclaw.registries.ssrf import (
 )
 from defenseclaw.scanner import settings
 from defenseclaw.scanner._llm_env import (
+    drop_unsupported_litellm_params,
     inject_llm_env,
     litellm_model,
     llm_analyzer_ready,
@@ -1463,6 +1464,7 @@ class MCPScannerWrapper:
 
         if not is_local:
             self._inject_env()
+        drop_unsupported_litellm_params()
 
         # ``llm_model`` must be LiteLLM-shaped (``provider/model``) —
         # the mcp-scanner SDK passes it straight through to LiteLLM.
