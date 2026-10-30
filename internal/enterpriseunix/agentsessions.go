@@ -416,6 +416,62 @@ func parseElapsed(text string) (time.Duration, bool) {
 	return time.Duration(days)*24*time.Hour + time.Duration(total)*time.Second, true
 }
 
+// connectorActivations dates the machine-policy connectors this run places
+// that the previous record did not have: a config change that enables one
+// gives running sessions of that agent no hooks. A first or staged install
+// has none (the deployment activation covers it); a connector still placed
+// keeps its date; a run that does not start the services dates nothing new.
+func connectorActivations(previous *Deployment, placed []string, started bool, now string) map[string]string {
+	if previous == nil || previous.NoStart {
+		return nil
+	}
+	before := map[string]bool{}
+	for _, name := range previous.MachinePolicyConnectors {
+		before[name] = true
+	}
+	out := map[string]string{}
+	for _, name := range placed {
+		switch {
+		case !before[name] && started:
+			out[name] = now
+		case before[name] && previous.ConnectorActivatedAt[name] != "":
+			out[name] = previous.ConnectorActivatedAt[name]
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// describeAgentSessionsBeforeConnector warns about the sessions of each
+// connector a config change enabled after the activation that started
+// before that change (GAP-0018).
+func (l *lifecycle) describeAgentSessionsBeforeConnector(ctx context.Context, record *Deployment, activated time.Time) {
+	names := make([]string, 0, len(record.ConnectorActivatedAt))
+	for name := range record.ConnectorActivatedAt {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		raw := record.ConnectorActivatedAt[name]
+		at, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil || !at.After(activated) {
+			continue
+		}
+		var stale []agentSession
+		for _, session := range l.env.agentSessionsStartedBefore(ctx, at, record.ServiceUID) {
+			if session.Unknown || agentConnectors[session.Agent] != name || session.Started.Before(activated) {
+				continue
+			}
+			stale = append(stale, session)
+		}
+		l.warnAgentSessions(stale, func(sessions string) string {
+			return fmt.Sprintf("runs %s, started before its connector was enabled at %s; an agent reads its hooks when it starts, so ask that user to restart these sessions", sessions, raw)
+		})
+	}
+}
+
 // describeAgentSessionsBeforeActivation warns, per account, about agent
 // sessions that started before this deployment was activated, about
 // sessions that started before the guardian put back hooks a user changed or
@@ -444,6 +500,7 @@ func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, r
 	l.warnAgentSessions(known, func(sessions string) string {
 		return fmt.Sprintf("runs %s, started before DefenseClaw was activated on this computer at %s; an agent reads its hooks when it starts, so these sessions run without DefenseClaw until they are restarted: ask that user to restart them", sessions, activationTime)
 	})
+	l.describeAgentSessionsBeforeConnector(ctx, record, activated)
 	if l.env.GOOS == "darwin" {
 		// An unreadable record is reported by
 		// describeAgentSessionsBeforeGuardianRestore below.

@@ -2273,6 +2273,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		ServiceUser: account.Name, ServiceUID: account.UID, ServiceGID: account.GID,
 		ConfigSHA256: p.config.SHA, SecretsSHA256: p.secretsSHA, Files: map[string]string{},
 		MachinePolicyConnectors: append([]string{}, p.machinePolicy...),
+		ConnectorActivatedAt:    connectorActivations(record, p.machinePolicy, !l.opts.NoStart, env.Now().UTC().Format(time.RFC3339Nano)),
 		RulePacks:               copyStringMap(p.config.RulePacks),
 	}
 	if record != nil {

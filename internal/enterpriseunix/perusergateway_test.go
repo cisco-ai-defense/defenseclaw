@@ -198,6 +198,47 @@ func TestStatusNamesClaudeSessionsOpenWhileTheDropInWasChanged(t *testing.T) {
 	}
 }
 
+// GAP-0018: an ensure that enables a machine-policy connector after the
+// activation gives its running sessions no hooks. Status names the sessions
+// of that agent started before the change, not newer ones, as Windows does.
+func TestStatusNamesSessionsStartedBeforeTheirConnectorWasEnabled(t *testing.T) {
+	h := newTestHost(t, "linux")
+	offset := time.Duration(0)
+	h.env.Now = func() time.Time { return time.Now().Add(offset) }
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	record, err := h.env.loadDeployment()
+	if err != nil || record == nil {
+		t.Fatalf("no deployment: %v", err)
+	}
+	activated, err := time.Parse(time.RFC3339Nano, record.ActivatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, h, "/proc/stat", fmt.Sprintf("cpu 0 0 0 0\nbtime %d\n", activated.Unix()))
+	codex := func(pid string, ticks int64) {
+		writeHostFile(t, h, "/proc/"+pid+"/cmdline", "codex\x00")
+		writeHostFile(t, h, "/proc/"+pid+"/stat", fmt.Sprintf("%s (codex) S 1 %s %s%d 0 0", pid, pid, strings.Repeat("0 ", 16), ticks))
+	}
+	codex("5101", 5*60*100) // five minutes after the activation, Codex not enabled yet
+	offset = 10 * time.Minute
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: machinePolicyConfig(t, h, "claudecode", "codex")}))
+	codex("5102", 11*60*100) // after Codex was enabled
+	offset = 12 * time.Minute
+	result := h.run(Options{Action: ActionStatus})
+	got := messagesOf(result.Warnings, codeAgentSessionsRestart)
+	if !strings.Contains(got, "codex (pid 5101)") || !strings.Contains(got, "started before its connector was enabled") || strings.Contains(got, "5102") {
+		t.Fatalf("status does not name exactly the Codex session older than the connector: %q", got)
+	}
+	if p := result.EnforcementPending; p == nil || p.Count != 1 || strings.Join(p.Connectors, ",") != "codex" {
+		t.Fatalf("enforcement_pending = %+v, want one codex session", p)
+	}
+	// A later ensure that changes nothing keeps the date.
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart); !strings.Contains(got, "codex (pid 5101)") {
+		t.Fatalf("a no-op ensure lost the connector date: %q", got)
+	}
+}
+
 // startClockServices runs onStart before each service start.
 type startClockServices struct {
 	ServiceManager
