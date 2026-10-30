@@ -580,10 +580,19 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	if err != nil {
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(EventHistoryHealthProjectionRejected, err)
 	}
-	contentDigest := sha256.Sum256(projectedEnvelope)
+	// The row keeps the projection with its field classes named by set
+	// (field_class_sets.go); the hash and the signature cover those bytes.
+	storedEnvelope, err := writer.store.storedProjection(ctx, tx, projectedEnvelope)
+	if err != nil {
+		return eventHistoryAppendOutcome{}, eventHistoryFailure(
+			EventHistoryHealthWriteFailed,
+			&eventHistoryWriteError{cause: err},
+		)
+	}
+	contentDigest := sha256.Sum256(storedEnvelope)
 	projectionHash := ProjectionHashAlgorithm + ":" + hex.EncodeToString(contentDigest[:])
 
-	payloadHMAC, integrityAlgorithm, integrityKeyID, unsigned, err := writer.integrity(ctx, projectedEnvelope)
+	payloadHMAC, integrityAlgorithm, integrityKeyID, unsigned, err := writer.integrity(ctx, storedEnvelope)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return eventHistoryAppendOutcome{}, err
@@ -732,7 +741,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		nullStr(correlation.AgentID), nullStr(correlation.SidecarInstanceID),
 		nullStr(record.Connector()), legacyStepIndex, legacyEnforced, legacyRulePackDir,
 		string(record.Bucket()), string(record.EventName()), string(record.Source()), string(record.Signal()),
-		record.BucketCatalogVersion(), string(payloadJSON), string(projectedEnvelope),
+		record.BucketCatalogVersion(), string(payloadJSON), string(storedEnvelope),
 		record.SchemaVersion(), projectionHash,
 		metadata.RedactionProfile, boolInt(record.Mandatory()),
 		nullStr(correlation.EvaluationID), nullStr(correlation.ScanID),
@@ -1660,6 +1669,16 @@ func (writer *EventHistoryWriter) verifyStoredProjection(
 	wantHash := ProjectionHashAlgorithm + ":" + hex.EncodeToString(digest[:])
 	result.ProjectionHashValid = subtle.ConstantTimeCompare([]byte(projectionHash), []byte(wantHash)) == 1
 	if !result.ProjectionHashValid {
+		result.Status = EventHistoryHashMismatch
+		return result, nil
+	}
+	// A projection that names its field class set is whole only with that
+	// set, unchanged (field_class_sets.go).
+	if err := writer.store.checkFieldClassSet(ctx, projected); err != nil {
+		if !errors.Is(err, errFieldClassSetMissing) {
+			return EventHistoryVerification{}, err
+		}
+		result.ProjectionHashValid = false
 		result.Status = EventHistoryHashMismatch
 		return result, nil
 	}

@@ -329,3 +329,44 @@ def test_serve_rejects_one_shot_paths(tmp_path: Path) -> None:
     )
     assert completed.returncode == 2
     assert "--serve takes the audit database and output from each request" in completed.stderr
+
+
+def _with_field_class_set(path: Path, classes: str, *, alter: bool = False) -> str:
+    """Rewrite the fixture row as a 1.0.6 standalone store keeps it (#1384)."""
+    digest = hashlib.sha256(classes.encode()).hexdigest()
+    connection = sqlite3.connect(path)
+    (raw,) = connection.execute("SELECT projected_record_json FROM audit_events").fetchone()
+    record = json.loads(raw)
+    record["field_classes"] = json.loads(classes)
+    full = json.dumps(record, separators=(",", ":"), sort_keys=True)
+    stored = full.replace('"field_classes":' + classes, '"field_classes":{"$set":"' + digest + '"}')
+    assert stored != full
+    connection.execute(
+        "UPDATE audit_events SET projected_record_json = ?, projection_hash = ?",
+        (stored, "sha256:" + hashlib.sha256(stored.encode()).hexdigest()),
+    )
+    connection.execute("CREATE TABLE audit_field_class_sets (digest TEXT PRIMARY KEY, classes_json TEXT NOT NULL)")
+    connection.execute(
+        "INSERT INTO audit_field_class_sets VALUES (?, ?)",
+        (digest, classes.replace("metadata", "content") if alter else classes),
+    )
+    connection.commit()
+    connection.close()
+    return full
+
+
+def test_expands_a_named_field_class_set(tmp_path: Path) -> None:
+    database = tmp_path / "audit.db"
+    _database(database)
+    full = _with_field_class_set(database, '{"/message":"content","/count":"metadata"}')
+
+    assert PROJECTOR._read_projected_records(database) == [full]
+
+
+def test_altered_field_class_set_fails_closed(tmp_path: Path) -> None:
+    database = tmp_path / "audit.db"
+    _database(database)
+    _with_field_class_set(database, '{"/message":"content","/count":"metadata"}', alter=True)
+
+    with pytest.raises(ValueError, match="field class set"):
+        PROJECTOR._read_projected_records(database)
