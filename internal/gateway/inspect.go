@@ -1639,23 +1639,71 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 			connector, strategyDirection)
 		return nil
 	}
-	defer func() { <-a.hookJudgeSem }()
-
-	jctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	jctx = withJudgeSuppressionPack(jctx, a.connectorRulePack(ctx, connector))
-
 	if strings.EqualFold(toolName, "message") {
 		toolName = ""
 	}
-	var v *ScanVerdict
-	resume := yieldHookRunSlot(ctx)
-	if strings.EqualFold(strategyDirection, "tool_call") {
-		v = judge.RunToolJudge(jctx, toolName, content)
-	} else {
-		v = judge.RunJudges(jctx, judgeDirection, content, toolName)
+	pack := a.connectorRulePack(ctx, connector)
+	call := func(callCtx context.Context) *ScanVerdict {
+		jctx, cancel := context.WithTimeout(callCtx, timeout)
+		defer cancel()
+		jctx = withJudgeSuppressionPack(jctx, pack)
+		if strings.EqualFold(strategyDirection, "tool_call") {
+			return judge.RunToolJudge(jctx, toolName, content)
+		}
+		return judge.RunJudges(jctx, judgeDirection, content, toolName)
 	}
-	resume()
+
+	answerEnd, bounded := hookJudgeAnswerEnd(ctx)
+	if !bounded {
+		defer func() { <-a.hookJudgeSem }()
+		resume := yieldHookRunSlot(ctx)
+		v := call(ctx)
+		resume()
+		return hookJudgeLaneVerdict(cfg, connector, strategyDirection, v)
+	}
+
+	// A bounded hook fails closed when its answer is late (GAP-2625). The
+	// judge runs apart from the answer and records its verdict (the judge
+	// event) when it arrives. In observe mode the answer does not wait for
+	// it: nothing is enforced, and a benign call must never be denied for a
+	// slow judge. In action mode the answer waits for the judge only up to
+	// hookJudgeAnswerWindow, then keeps the rule/AID verdict: a rule block
+	// stays a block, and a judge that is late cannot make one.
+	done := make(chan *ScanVerdict, 1)
+	go func() {
+		defer func() { <-a.hookJudgeSem }()
+		done <- call(context.WithoutCancel(ctx))
+	}()
+	if sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) != "action" {
+		fmt.Fprintf(os.Stderr, "[inspect] hook judge runs after the answer (observe) connector=%s direction=%s; its verdict is recorded when it arrives\n",
+			connector, strategyDirection)
+		return nil
+	}
+	left := time.Until(answerEnd)
+	if left <= 0 {
+		fmt.Fprintf(os.Stderr, "[inspect] hook judge late (hook answer window spent) connector=%s direction=%s; keeping regex/AID verdict\n",
+			connector, strategyDirection)
+		return nil
+	}
+	wait := time.NewTimer(left)
+	defer wait.Stop()
+	resume := yieldHookRunSlot(ctx)
+	defer resume()
+	select {
+	case v := <-done:
+		return hookJudgeLaneVerdict(cfg, connector, strategyDirection, v)
+	case <-wait.C:
+	case <-ctx.Done():
+	}
+	fmt.Fprintf(os.Stderr, "[inspect] hook judge late (over the %s hook answer window) connector=%s direction=%s; keeping regex/AID verdict, the judge verdict is recorded when it arrives\n",
+		hookJudgeAnswerWindow, connector, strategyDirection)
+	return nil
+}
+
+// hookJudgeLaneVerdict is the hook-lane verdict of judge result v: nil when
+// the judge gave none (the caller keeps the regex/AID verdict), else v with
+// its action set by the connector block_at / alert_at.
+func hookJudgeLaneVerdict(cfg *config.Config, connector, strategyDirection string, v *ScanVerdict) *ScanVerdict {
 	if v == nil || v.JudgeFailed {
 		// Degrade LOUD: surface the judge unavailability so operators
 		// can see the lane fell back to the regex/AID verdict rather
