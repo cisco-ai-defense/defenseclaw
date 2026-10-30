@@ -4184,11 +4184,22 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 		if dest != "" {
 			l.record(source, dest, literal, symbolic, cwd)
 		}
-		if dir != "" {
+		if dir != "" && lnEntryName(source) {
 			l.record(source, filepath.Join(dir, filepath.Base(filepath.Clean(source))), literal, symbolic, cwd)
 		}
 	}
 	return true
+}
+
+// lnEntryName reports a source whose last component can name a new entry in
+// a target directory. ln names the link after the source's last component as
+// written; for ., .. or / that entry is the directory itself or its parent,
+// which always exists, so ln refuses and makes no link there. Reading it as a
+// link at dir/.. made ln -s ../.. sub/l alias sub itself (GAP-0329).
+func lnEntryName(source string) bool {
+	trimmed := strings.TrimRight(source, "/")
+	last := trimmed[strings.LastIndexByte(trimmed, '/')+1:]
+	return last != "" && last != "." && last != ".."
 }
 
 // record adds the alias that a link at name to source creates, under the
