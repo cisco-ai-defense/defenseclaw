@@ -223,6 +223,7 @@ func TestShellToolGateJudgeAnswersInsideTheHookBudget(t *testing.T) {
 		`,"tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"git log --oneline -n 20 -- ./internal"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(hookexec.HookAnswerWithinHeader, "2600") // the helper's wait after the shell's own start
 	if h := hookpaths.ResolveConnector("claudecode", "", "PreToolUse", []byte(body)); h != "" {
 		req.Header.Set(hookpaths.Header, h)
 	}
@@ -230,8 +231,8 @@ func TestShellToolGateJudgeAnswersInsideTheHookBudget(t *testing.T) {
 	start := time.Now()
 	api.handleAgentHook("claudecode").ServeHTTP(w, req)
 	elapsed := time.Since(start)
-	if elapsed > hookJudgeAnswerWindow+time.Second {
-		t.Fatalf("PreToolUse answered after %s with a 6 s judge; the shell hook gives up at 4 s", elapsed)
+	if elapsed > 2600*time.Millisecond {
+		t.Fatalf("PreToolUse answered after %s with a 6 s judge; the hook waits 2.6 s", elapsed)
 	}
 	if strings.Contains(w.Body.String(), `"deny"`) || strings.Contains(w.Body.String(), `"block"`) {
 		t.Fatalf("benign call denied: %s", w.Body.String())
@@ -241,5 +242,29 @@ func TestShellToolGateJudgeAnswersInsideTheHookBudget(t *testing.T) {
 	}
 	if last, _ := judgeHealth.details()["judge_last_fallback"].(string); last != "late (claudecode)" {
 		t.Fatalf("last fallback = %q, want late (claudecode)", last)
+	}
+}
+
+func TestShellToolGateWindowFollowsTheHookWait(t *testing.T) {
+	start := time.Now()
+	base := context.WithValue(context.Background(), hookRequestStartKey{}, start)
+	for _, tc := range []struct {
+		header string
+		want   time.Duration
+	}{
+		{"", shellToolGateDefaultWindow},
+		{"junk", shellToolGateDefaultWindow},
+		{"2600", 2300 * time.Millisecond},
+		{"200", 0},
+		{"30000", hookJudgeAnswerWindow}, // a hook cannot stretch the window
+	} {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		if tc.header != "" {
+			r.Header.Set(hookexec.HookAnswerWithinHeader, tc.header)
+		}
+		end, bounded := hookJudgeAnswerEnd(withShellToolGateBound(base, r))
+		if !bounded || end.Sub(start) != tc.want {
+			t.Errorf("header %q: window %s bounded=%v, want %s", tc.header, end.Sub(start), bounded, tc.want)
+		}
 	}
 }

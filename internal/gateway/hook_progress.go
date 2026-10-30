@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -70,14 +71,34 @@ func shellHookBoundsToolGate(connector, event string, r *http.Request) bool {
 	return event == "PreToolUse" || event == "PermissionRequest"
 }
 
+// shellToolGateDefaultWindow is how long such a call's judge may hold the
+// answer when the hook did not say how long it waits (the curl transport,
+// an older helper): the 4 s of the hook less its own start, the helper's
+// 1 s reserve and the answer's way back.
+const shellToolGateDefaultWindow = 2 * time.Second
+
+// shellToolGateAnswerMargin is kept from the wait the hook names for the
+// rest of the decision and the answer's way back.
+const shellToolGateAnswerMargin = 300 * time.Millisecond
+
 // withShellToolGateBound marks ctx as such a call. Its hook-lane judge then
-// answers within hookJudgeAnswerWindow of the call's arrival, as for a
-// bounded native hook. It used to hold the answer for the judge's whole
-// hook_timeout (8 s), past the hook's own 4 s, and the hook then failed the
-// benign call closed whenever a slow or queued judge took more than about
-// 4 s (#1395).
-func withShellToolGateBound(ctx context.Context) context.Context {
-	return context.WithValue(ctx, shellToolGateKey{}, true)
+// answers inside the hook's wait (HookAnswerWithinHeader less a margin,
+// shellToolGateDefaultWindow without it, never over hookJudgeAnswerWindow),
+// as for a bounded native hook. It used to hold the answer for the judge's
+// whole hook_timeout (8 s), past the hook's own 4 s, and the hook then failed
+// the benign call closed whenever a slow or queued judge took longer than
+// the hook waited (#1395).
+func withShellToolGateBound(ctx context.Context, r *http.Request) context.Context {
+	start, ok := ctx.Value(hookRequestStartKey{}).(time.Time)
+	if !ok || start.IsZero() {
+		start = time.Now()
+	}
+	window := shellToolGateDefaultWindow
+	if ms, err := strconv.Atoi(strings.TrimSpace(r.Header.Get(hookexec.HookAnswerWithinHeader))); err == nil && ms > 0 {
+		window = time.Duration(ms)*time.Millisecond - shellToolGateAnswerMargin
+	}
+	window = min(max(window, 0), hookJudgeAnswerWindow)
+	return context.WithValue(ctx, shellToolGateKey{}, start.Add(window))
 }
 
 // reportHookProgress sends the request's 102 report, if it asked for one.
@@ -113,10 +134,8 @@ func hookJudgeAnswerEnd(ctx context.Context) (time.Time, bool) {
 	if ok && progress != nil && !progress.start.IsZero() {
 		return progress.start.Add(hookJudgeAnswerWindow), true
 	}
-	if bounded, _ := ctx.Value(shellToolGateKey{}).(bool); bounded {
-		if start, ok := ctx.Value(hookRequestStartKey{}).(time.Time); ok && !start.IsZero() {
-			return start.Add(hookJudgeAnswerWindow), true
-		}
+	if end, ok := ctx.Value(shellToolGateKey{}).(time.Time); ok && !end.IsZero() {
+		return end, true
 	}
 	return time.Time{}, false
 }

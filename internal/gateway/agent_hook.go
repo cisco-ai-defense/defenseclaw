@@ -821,7 +821,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		ctx = withHookJudgeFallbackNote(ctx)
 		if cfg := a.decisionConfig(ctx); shellHookBoundsToolGate(connectorName, req.HookEventName, r) &&
 			(cfg == nil || !cfg.SecureClientIntegration()) {
-			ctx = withShellToolGateBound(ctx)
+			ctx = withShellToolGateBound(ctx, r)
 		}
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
