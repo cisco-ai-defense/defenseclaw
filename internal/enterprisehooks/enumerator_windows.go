@@ -300,7 +300,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	judged := map[string]bool{}
 	// visited holds the manifest subjects ProfileList listed.
 	visited := map[string]bool{}
-	signedIn := windowsSignedInCheck(opts.Logger)
+	signedIn, sessionListed := windowsSignedInCheck(opts.Logger)
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for profileIndex, profile := range profiles {
 		// Leave time to write the manifest and coverage record. A timed-out
@@ -368,6 +368,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		sessionActive = sessionActive || unreadSessions[canonicalManifestTargetSID(profile.SID)]
 		rowContext := windowsStandaloneRowContext{
 			sessionActive: sessionActive,
+			signedIn:      sessionActive || sessionListed(profile.SID),
 			user:          filepath.Base(filepath.Clean(profile.Home)),
 			report:        opts.ReportUnprotected,
 		}
@@ -675,10 +676,13 @@ func windowsRunsConnector(running map[string]string, connectors []string) bool {
 // active or disconnected. The sessions are read once per cycle, at the first
 // check; when they cannot be read, or a session's user cannot be identified,
 // every user counts as signed in, so no warning is suppressed on a guess.
-func windowsSignedInCheck(logf EnumerationLogger) func(sid string) bool {
+// The second check (listed) counts only the users a session list named: a
+// read of a user's files under their session token is tried only when that
+// token exists.
+func windowsSignedInCheck(logf EnumerationLogger) (signedIn func(sid string) bool, listed func(sid string) bool) {
 	var users map[string]bool
 	read, unreadable := false, false
-	return func(sid string) bool {
+	load := func() {
 		if !read {
 			read = true
 			var err error
@@ -687,8 +691,16 @@ func windowsSignedInCheck(logf EnumerationLogger) func(sid string) bool {
 				logfSafely(logf, "sessions", fmt.Sprintf("signed-in sessions are unreadable; disabled accounts keep their unprotected-agent warnings this cycle: %v", err))
 			}
 		}
+	}
+	signedIn = func(sid string) bool {
+		load()
 		return unreadable || users[canonicalManifestTargetSID(sid)]
 	}
+	listed = func(sid string) bool {
+		load()
+		return users[canonicalManifestTargetSID(sid)]
+	}
+	return signedIn, listed
 }
 
 // windowsUnknownOwnerUser names the owner of a running agent whose account
