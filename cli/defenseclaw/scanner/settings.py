@@ -36,9 +36,7 @@ from typing import Any
 SKILL_SCANNER_DIST = "cisco-ai-skill-scanner"
 SKILL_SCANNER_VERSION = "2.3.2"
 MCP_SCANNER_DIST = "cisco-ai-mcp-scanner"
-# TODO(mcp-scanner 4.8.x): 4.8.x pins litellm==1.93.0 (CVE-2026-84377);
-# move when upstream relaxes that pin (see pyproject.toml).
-MCP_SCANNER_VERSION = "4.3.0"
+MCP_SCANNER_VERSION = "4.8.7"
 # The LiteLLM both scanners call (pyproject.toml: >=1.103.10,<1.104.0). 1.103.10
 # carries the CVE-2026-84377, GHSA-g5ff-637f-6q2m and CVE-2026-114612 fixes.
 LITELLM_DIST = "litellm"
