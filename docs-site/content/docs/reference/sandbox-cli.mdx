@@ -235,7 +235,8 @@ supported OpenShell older than 0.1.5 in place) and `openshell_install_version`
 detail and fix, the OpenShell and Docker versions found, and the compute driver. When a burst of sandbox commands hit the request limit while doctor read the organization policy, that row warns and asks you to run doctor again; it does not report a failed policy;
 the TUI's Setup wizard reads these fields. When sandboxes are on
 (`openshell.enabled: true`), `defenseclaw doctor` shows the same checks in its
-Sandbox section; otherwise that section is one skipped row.
+Sandbox section; otherwise that section is one skipped row. There, on a per-user install, the **Gateway** row for an
+OpenShell release DefenseClaw runs no sandbox on (older than 0.1.5) is a warning with the same fix, since no agent has to run in a sandbox.
 
 ```bash
 defenseclaw sandbox doctor
