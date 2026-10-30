@@ -235,39 +235,37 @@ def test_a_stopped_gateway_is_one_root_cause_and_unused_sandboxes_only_warn(tmp_
     assert result.failed == 0
 
 
-def test_an_openshell_release_without_sandboxes_warns_per_user_and_fails_managed(tmp_path: Path, monkeypatch) -> None:
-    # GAP-0059: a 1.0.2 -> 1.0.5 upgrade over OpenShell 0.1.3 left doctor red
-    # on a per-user install whose gateway and hooks are healthy.
+def test_the_upgrade_names_the_openshell_floor_and_doctor_still_fails(tmp_path: Path, monkeypatch) -> None:
+    # GAP-0059: an upgrade over OpenShell 0.1.3 with sandboxes on says what
+    # doctor's Gateway FAIL means and how to clear it.
     refused = (
         "OpenShell 0.1.3 runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's "
         "connections bypass the sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494); "
         "upgrade OpenShell to 0.1.5 in place"
     )
     fix = {"summary": "upgrade OpenShell to 0.1.5 in place", "command": "defenseclaw sandbox setup --install-openshell"}
-    report = {"checks": [
+    binary = _gateway(tmp_path, json.dumps({"checks": [
         {"id": "gateway-version", "title": "Gateway", "status": "fail", "detail": refused, "fix": fix},
-        {"id": "defenseclaw-daemon", "title": "DefenseClaw daemon", "status": "fail",
-         "detail": "running, but sandboxes are unavailable: " + refused},
-        {"id": "legacy-sandbox", "title": "Legacy sandboxes", "status": "fail",
-         "detail": "old: legacy sandbox running, not protected by the 1.0.4 egress policy"},
-    ]}
-    binary = _gateway(tmp_path, json.dumps(report))
+    ]}))
     monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: binary)
-
+    assert cmd_doctor.openshell_floor_upgrade_notice(_cfg(True)) == (
+        f"Sandboxes: {refused}. Until then DefenseClaw starts no sandbox and `defenseclaw doctor` fails its "
+        "Gateway check. Stop running sandboxes first, then run: defenseclaw sandbox setup --install-openshell"
+    )
     result = _DoctorResult()
     _check_sandbox(_cfg(True), result)
-    gateway, daemon, legacy = result.checks
-    assert (gateway["status"], daemon["status"], legacy["status"]) == ("warn", "skip", "fail")
-    assert gateway["detail"].startswith(refused) and "blocks only sandbox runs" in gateway["detail"]
-    assert gateway["remediation"] == "upgrade OpenShell to 0.1.5 in place: defenseclaw sandbox setup --install-openshell"
-    assert daemon["detail"] == "depends on: OpenShell gateway (the daemon is running)"
+    assert [row["status"] for row in result.checks] == ["fail"]
+    assert cmd_doctor.openshell_floor_upgrade_notice(_cfg(False)) == ""
 
-    managed = _cfg(True)
-    managed.deployment_mode = "managed_enterprise"
-    result = _DoctorResult()
-    _check_sandbox(managed, result)
-    assert [row["status"] for row in result.checks] == ["fail", "skip", "fail"]
-    assert result.checks[0]["detail"] == refused
+    _gateway(tmp_path, json.dumps({"checks": [
+        {"id": "gateway-version", "title": "Gateway", "status": "fail", "detail": "the gateway is not answering: refused"},
+    ]}))
+    assert cmd_doctor.openshell_floor_upgrade_notice(_cfg(True)) == ""
+
+    install_sh = (Path(__file__).resolve().parents[2] / "scripts" / "install.sh").read_text(encoding="utf-8")
+    upgraded = install_sh.split('if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then', 1)[1].split("\nfi\n", 1)[0]
+    assert 'FLOOR_NOTICE="$(openshell_floor_notice)"' in upgraded
+    assert "openshell_floor_upgrade_notice as notice" in install_sh
 
 
 def test_local_policy_digest_refuses_untrusted_gateway(monkeypatch: pytest.MonkeyPatch) -> None:

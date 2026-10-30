@@ -1133,16 +1133,51 @@ def sandbox_doctor_report(binary: str) -> tuple[dict | None, str]:
     return report, ""
 
 
+# The Gateway row's words for an OpenShell release DefenseClaw starts no
+# sandbox on (openshell.ErrSandboxRelease: older than 0.1.5, or a prerelease).
+_SANDBOX_RELEASE_REFUSED = "runs no DefenseClaw sandbox"
+_OPENSHELL_UPGRADE_COMMAND = "defenseclaw sandbox setup --install-openshell"
+
+
+def openshell_floor_upgrade_notice(cfg) -> str:
+    """The line an upgrade prints while sandboxes are on and OpenShell is below the floor.
+
+    install.sh prints it after ``Upgraded from`` (GAP-0059): DefenseClaw
+    starts no sandbox on an OpenShell older than 0.1.5, and the Gateway row
+    of ``defenseclaw doctor`` fails until OpenShell is upgraded, so the
+    upgrade names the floor and the fix right away. "" when sandboxes are
+    off, on Windows, or when the gateway's OpenShell runs sandboxes.
+    """
+    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.platform_support import host_os
+
+    if host_os() == "windows" or getattr(getattr(cfg, "openshell", None), "enabled", False) is not True:
+        return ""
+    binary = resolve_gateway_binary()
+    report = sandbox_doctor_report(binary)[0] if binary else None
+    row = next(
+        (c for c in (report or {}).get("checks", []) if isinstance(c, dict) and c.get("id") == "gateway-version"),
+        {},
+    )
+    detail = str(row.get("detail") or "").strip()
+    if str(row.get("status") or "").strip().lower() != "fail" or _SANDBOX_RELEASE_REFUSED not in detail:
+        return ""
+    fix = row.get("fix") if isinstance(row.get("fix"), dict) else {}
+    # An OpenShell installed another way names no command: its upgrade is the user's.
+    command = str(fix.get("command") or "").strip() or _OPENSHELL_UPGRADE_COMMAND
+    return (
+        f"Sandboxes: {detail}. Until then DefenseClaw starts no sandbox and `defenseclaw doctor` fails its "
+        f"Gateway check. Stop running sandboxes first, then run: {command}"
+    )
+
+
 _SANDBOX_GATEWAY_DEPENDENCY = "depends on: OpenShell gateway"
 # Services that are simply not running; an install or policy problem stays a
 # failure even before the first sandbox run.
 _SANDBOX_RUNTIME_CHECKS = frozenset({"docker", "gateway-service", "defenseclaw-daemon"})
-# The Gateway row's words for an OpenShell release DefenseClaw starts no
-# sandbox on (openshell.SandboxReleaseError: older than 0.1.5, or a prerelease).
-_SANDBOX_RELEASE_REFUSED = "runs no DefenseClaw sandbox"
 
 
-def _sandbox_checks_by_root_cause(checks: list, *, managed: bool = False) -> list[dict]:
+def _sandbox_checks_by_root_cause(checks: list) -> list[dict]:
     """Report one root cause once, and keep unused sandboxes from failing doctor.
 
     When the OpenShell gateway does not answer, the gateway service and the
@@ -1150,14 +1185,6 @@ def _sandbox_checks_by_root_cause(checks: list, *, managed: bool = False) -> lis
     become skips that name the dependency. Until a harness image is built no
     sandbox has ever run, so a service that is not running only blocks the
     first run: it is a warning with the same next step.
-
-    A healthy gateway on an OpenShell release DefenseClaw runs no sandbox on
-    (an upgrade from a DefenseClaw release that ran them on 0.1.3) is a
-    warning with the upgrade as its fix on a per-user install, where no agent
-    has to run in a sandbox: DefenseClaw still starts none there, and the
-    hooks keep guarding agents on this computer (GAP-0059). On a managed
-    computer, where a profile can require sandboxes, and in
-    ``defenseclaw sandbox doctor``, it stays a failure.
     """
     rows = [dict(check) for check in checks if isinstance(check, dict)]
     by_id = {str(row.get("id") or ""): row for row in rows}
@@ -1182,7 +1209,6 @@ def _sandbox_checks_by_root_cause(checks: list, *, managed: bool = False) -> lis
         and status("sandbox-hooks") in {"", "pass"}
         and detail("sandbox-hooks") in {"", "no sandbox is running"}
     )
-    release_refused = status("gateway-version") == "fail" and _SANDBOX_RELEASE_REFUSED in detail("gateway-version")
     for row in rows:
         row_id = str(row.get("id") or "")
         row_status = str(row.get("status") or "").strip().lower()
@@ -1201,23 +1227,6 @@ def _sandbox_checks_by_root_cause(checks: list, *, managed: bool = False) -> lis
             row["status"] = "skip"
             row["detail"] = f"{_SANDBOX_GATEWAY_DEPENDENCY} ({reason})" if reason else _SANDBOX_GATEWAY_DEPENDENCY
             row.pop("fix", None)
-        elif (
-            release_refused
-            and row_id == "defenseclaw-daemon"
-            and row_status == "fail"
-            and row_detail.startswith("running, but sandboxes are unavailable")
-            and _SANDBOX_RELEASE_REFUSED in row_detail
-        ):
-            # The daemon repeats the Gateway row's reason: counted once.
-            row["status"] = "skip"
-            row["detail"] = f"{_SANDBOX_GATEWAY_DEPENDENCY} (the daemon is running)"
-            row.pop("fix", None)
-        elif release_refused and not managed and row_id == "gateway-version":
-            row["status"] = "warn"
-            row["detail"] = (
-                f"{row_detail}; no agent has to run in a sandbox on a per-user install, "
-                "so this blocks only sandbox runs until OpenShell is upgraded"
-            )
         elif (
             unused
             and row_status == "fail"
@@ -1292,7 +1301,7 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
             remediation="run 'defenseclaw sandbox doctor' for the full output",
         )
         return
-    for check in _sandbox_checks_by_root_cause(report["checks"], managed=_doctor_managed(cfg)):
+    for check in _sandbox_checks_by_root_cause(report["checks"]):
         status = str(check.get("status") or "").strip().lower()
         tag = status if status in _SANDBOX_DOCTOR_STATUSES else "warn"
         check_id = str(check.get("id") or "").strip()
