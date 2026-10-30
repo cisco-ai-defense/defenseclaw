@@ -254,6 +254,12 @@ type SandboxDaemon struct {
 	// -> struct{}): the policy poll reports them running, not the stopped
 	// phase OpenShell lists until a resumed MicroVM is up (#1204).
 	starting sync.Map
+	// startsEnded counts the Starts that ended, and startEnded holds, per
+	// sandbox name, the count its last Start ended at: a poll whose phase
+	// list predates a Start's end reports nothing for that sandbox, since
+	// the Start's own final report stands (GAP-0433).
+	startsEnded atomic.Uint64
+	startEnded  sync.Map
 }
 
 // NewSandboxDaemon prepares the daemon: the sandbox runtime in forwarding
@@ -1177,6 +1183,9 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 	var revoked []daemonRegistration
 	var answered []policyAnswer
 	moved := false
+	// The count of ended Starts before the phases are listed: a Start that
+	// ends after it was taken may have listed its sandbox stopped (GAP-0433).
+	listedAt := d.startsEnded.Load()
 	phases, listed := d.sandboxPhases(ctx)
 	for _, r := range d.regs.list() {
 		if r.Revoked {
@@ -1188,6 +1197,11 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 			// until it is up, and a stopped report then refused the agent's
 			// first hooks (403) right after `sandbox connect` (#1204).
 			running, report = true, true
+		} else if d.startEndedSince(r.Sandbox, listedAt) {
+			// A Start of it ended after the phases were listed, and its own
+			// last report said whether it runs: a report from the older
+			// list would undo it (GAP-0433). The next poll reports it.
+			running, report = false, false
 		}
 		// With report, tell the gateway whether the sandbox runs: a stopped
 		// one's registration authorizes no relayed call (GAP-0505).
@@ -1284,6 +1298,13 @@ func (d *SandboxDaemon) adoptRunningFloor(phases map[string]string) bool {
 		d.rt.manager.RefreshPolicies()
 	}
 	return changed
+}
+
+// startEndedSince reports whether a Start of the sandbox name ended after
+// the count of ended Starts was at (pollRegistrations).
+func (d *SandboxDaemon) startEndedSince(name string, at uint64) bool {
+	v, ok := d.startEnded.Load(name)
+	return ok && v.(uint64) > at
 }
 
 // sandboxPhases is the phase of each of the user's sandboxes by name; ok is
@@ -2717,6 +2738,9 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 	if err == nil {
 		d.starting.Store(name, struct{}{})
 		defer func() {
+			// Ended before the marker goes: a poll that no longer sees the
+			// marker sees the end (GAP-0433).
+			d.startEnded.Store(name, d.startsEnded.Add(1))
 			d.starting.Delete(name)
 			if err != nil {
 				d.reportStopped(context.WithoutCancel(ctx), name)
