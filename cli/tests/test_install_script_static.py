@@ -2681,6 +2681,17 @@ def test_a_rollback_to_an_older_release_drops_the_hook_helper_the_newer_install_
     assert not run(newer, newer).exists()
     assert run(older, newer).read_bytes() == older
     assert run(newer, None).read_bytes() == newer
+    # rel-1-0-4:GAP-2626: the newer install's fail-mode refresh appended a
+    # block to the older helper before its snapshot, so the restored helper
+    # is neither the older release's nor the newer one's. It goes too, with
+    # or without the newer helper in previous/; an older helper without the
+    # block, or one naming a marker only in its text, stays.
+    for marker in ("install-window-text", "listener-check"):
+        refreshed = older + f"# defenseclaw-legacy-{marker}-v1 (GAP-x): written by the upgrade's fail-mode refresh;\n".encode()
+        assert not run(refreshed, newer).exists()
+        assert not run(refreshed, None).exists()
+    quoted = older + b"echo '# defenseclaw-legacy-listener-check-v1 '\n"
+    assert run(quoted, newer).read_bytes() == quoted
     text = INSTALL_SH.read_text(encoding="utf-8")
     rollback = text[text.index("if [[ \"${ROLLBACK}\" == true ]]; then") : text.index("# ── Stage: nothing live changes")]
     drop = rollback.index("drop_newer_hook_helper \"${PREVIOUS}/data\"")

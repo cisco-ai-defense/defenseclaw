@@ -3135,10 +3135,19 @@ convert_hooks_for_rollback() {
 # as "the gateway is running but did not answer" (rel-1-0-4:GAP-2503). The
 # older gateway writes its own helper when it starts. Until 1.1: remove with
 # the 1.0.2, 1.0.3 and 1.0.4 rollback paths.
+# A live helper with a block the newer install's fail-mode refresh appended
+# before its snapshot (the "# defenseclaw-legacy-...-v1" markers of
+# nameInstallInLegacyHardening and keepListenerCheckInLegacyHardening) goes
+# too: the restored older gateway keeps that file, and every Claude hook call
+# was refused with the gateway healthy until it was removed and the gateway
+# restarted (rel-1-0-4:GAP-2626).
 drop_newer_hook_helper() {
     local live="${DEFENSECLAW_HOME}/hooks/_hardening.sh" left="$1/hooks/_hardening.sh"
-    [[ -f "${live}" && ! -L "${live}" && -f "${left}" && ! -L "${left}" ]] || return 0
-    [[ "$(sha256_of "${live}")" == "$(sha256_of "${left}")" ]] || return 0
+    [[ -f "${live}" && ! -L "${live}" ]] || return 0
+    if ! grep -q -E '^# defenseclaw-legacy-(install-window-text|listener-check)-v1 ' "${live}" 2>/dev/null; then
+        [[ -f "${left}" && ! -L "${left}" ]] || return 0
+        [[ "$(sha256_of "${live}")" == "$(sha256_of "${left}")" ]] || return 0
+    fi
     rm -f -- "${live}" \
         || warn "Could not remove the newer hook helper ${live}; if hook calls are refused after the rollback, remove it and run: defenseclaw-gateway restart"
 }
