@@ -1250,6 +1250,39 @@ func persistError(err error) error {
 	return &sandboxapi.Error{Code: sandboxapi.CodeInternal, Message: "save the decision to config.yaml", Detail: err.Error()}
 }
 
+// endStoppedAsks ends the asks of a sandbox that stopped. Its session's
+// asks can't be answered any more (a managed gateway refuses the answer as
+// sandbox_registration_stopped, an unmanaged one has no gateway to apply it
+// to), yet status and approvals went on saying they waited for the user
+// (GAP-0508). Each ends as expired, in the audit and the activity feed; the
+// next session asks again if it still needs the destination.
+func (m *Manager) endStoppedAsks(ctx context.Context, b *box, sandbox, bindingID string) {
+	m.mu.Lock()
+	var ended []*approval
+	for id, a := range m.approvals {
+		if a.sandbox == sandbox && a.status == sandboxapi.ApprovalPending {
+			a.status, a.resolvedAt = sandboxapi.ApprovalFailed, m.now().UTC()
+			ended = append(ended, a)
+			delete(m.approvals, id)
+		}
+	}
+	ident := b.identity()
+	m.mu.Unlock()
+	for _, a := range ended {
+		m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalExpired, actorAutomatic)
+		target := a.decision.Host
+		if a.decision.Port > 0 {
+			target = fmt.Sprintf("%s:%d", a.decision.Host, a.decision.Port)
+		}
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: sandbox, ApprovalID: a.id,
+			Host: a.decision.Host, Port: a.decision.Port, Reason: "expired",
+			Message: "the ask for " + target + " ended: sandbox " + sandbox + " stopped"})
+		if bindingID != "" {
+			m.refusals.forgetNote(bindingID, triage.NormalizeHost(a.decision.Host), a.decision.Port, NoteAsked)
+		}
+	}
+}
+
 func (m *Manager) dropApprovals(sandbox string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -179,3 +179,31 @@ func TestProxyAskRejectNamesTheDestination(t *testing.T) {
 		t.Fatalf("feed = %+v", e.events("rjbox", sandboxapi.ActivityApprovalResolved, ""))
 	}
 }
+
+// GAP-0508: a sandbox stopped with an ask waiting kept it: approvals listed
+// it and status counted it, though nothing could answer it any more. The
+// stop ends it as expired.
+func TestStoppedSandboxEndsItsAsks(t *testing.T) {
+	e, _ := managedEnv(t, func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	proxy := startLiveProxyWith(t, e, func(o *egress.Options) { o.Sink = e.m.EgressSink() })
+	e.live(sandboxapi.CreateRequest{Name: "stbox"})
+	e.register("stbox")
+	if status, _ := proxy.connect(t, "stbox", "example.org:443"); status != http.StatusForbidden {
+		t.Fatalf("CONNECT example.org = %d, want the proxy's refusal", status)
+	}
+	asks := e.waitAsks("stbox", 1)
+	if _, err := e.m.Stop(t.Context(), "stbox"); err != nil {
+		t.Fatalf("stop = %v", err)
+	}
+	if left, _ := e.m.Approvals(t.Context(), "stbox"); len(left) != 0 {
+		t.Fatalf("asks of the stopped sandbox = %+v", left)
+	}
+	if v := e.get("stbox"); v.PendingApprovals != 0 {
+		t.Fatalf("status counts %d waiting asks", v.PendingApprovals)
+	}
+	if !slices.ContainsFunc(e.events("stbox", sandboxapi.ActivityApprovalResolved, ""), func(ev sandboxapi.ActivityEvent) bool {
+		return ev.ApprovalID == asks[0].ID && ev.Reason == "expired"
+	}) {
+		t.Fatalf("feed = %+v", e.events("stbox", sandboxapi.ActivityApprovalResolved, ""))
+	}
+}
