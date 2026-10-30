@@ -66,7 +66,7 @@ func runInstalled(args []string, stdout, stderr io.Writer) int {
 	case "prepare", "prune":
 		return 0
 	case "skill-scanner":
-		script, scriptArgs = consoleEntryPointScript, append([]string{"skill-scanner"}, args[1:]...)
+		script, scriptArgs = skillScannerScript, args[1:]
 	case "plugin-scan":
 		script, scriptArgs = pluginScanScript, args[1:]
 	case "mcp-scan":

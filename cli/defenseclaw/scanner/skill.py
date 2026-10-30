@@ -246,6 +246,10 @@ class SkillScannerWrapper:
             )
             raise SystemExit(1)
 
+        from defenseclaw.scanner._skill_judge_compat import install as install_judge_compat
+
+        # Accept a well-formed answer from any judge model (GAP-2609).
+        install_judge_compat()
         cfg = self.config
         policy = _scan_policy(ScanPolicy, cfg)
 
