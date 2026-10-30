@@ -1166,10 +1166,14 @@ refresh_hook_fail_modes() {
     local probe=0
     hook_fail_mode_refresh_probe || probe=$?
     case ${probe} in
-        0) "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes ;;
+        0) ;;
         1) return 0 ;;
         *) return 1 ;;
     esac
+    local rc=0
+    "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes || rc=$?
+    [[ ${rc} -eq 0 ]] || warn "The new gateway's 'connector refresh-fail-modes' failed (exit ${rc})"
+    return ${rc}
 }
 
 HOLD_PID=""
@@ -1196,7 +1200,18 @@ hold_hook_fail_modes() {
     HOLD_PID=$!
     while ! grep -q "Holding the hook fail modes" "${HOLD_LOG}" 2>/dev/null; do
         if ! kill -0 "${HOLD_PID}" 2>/dev/null; then
-            finish_hook_fail_mode_hold || true
+            # It has exited. With nothing to hold (no hooks folder, as after
+            # an init without a connector, or a managed install) it prints
+            # the marker and exits at once, which can fall between the grep
+            # above and this check: its exit code is the answer then. The
+            # 1.0.5 release run died here with nothing printed (rel-1-0-5
+            # GAP-0058).
+            if grep -q "Holding the hook fail modes" "${HOLD_LOG}" 2>/dev/null; then
+                finish_hook_fail_mode_hold
+                return
+            fi
+            finish_hook_fail_mode_hold || return 1
+            warn "The new gateway's 'connector refresh-fail-modes' exited before it held the hooks' fail modes"
             return 1
         fi
         if [[ ${waited} -ge 600 ]]; then
@@ -1220,6 +1235,7 @@ finish_hook_fail_mode_hold() {
         grep -v "Holding the hook fail modes" "${HOLD_LOG}" || true
     else
         cat "${HOLD_LOG}" >&2 || true
+        warn "The new gateway's 'connector refresh-fail-modes' failed (exit ${rc})"
     fi
     return ${rc}
 }
