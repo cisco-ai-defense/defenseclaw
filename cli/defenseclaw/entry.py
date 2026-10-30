@@ -68,11 +68,18 @@ def use_bundled_litellm_cost_map(environ=None) -> None:
     env.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 
+# The machine-wide deployment pins (``config._DEPLOYMENT_PIN_ENVS``).
+_DEPLOYMENT_PIN_ENVS = ("DEFENSECLAW_DEPLOYMENT_MODE", "DEFENSECLAW_ENTERPRISE_PROFILE")
+
+
 def ignore_stray_deployment_pins() -> None:
     """Drop a deployment mode exported in a user's shell (see
     ``config.ignore_unmanaged_deployment_pins``). A CLI that cannot import its
     config module must still upgrade and roll back, so a failure here is
-    ignored."""
+    ignored. With no pin set there is nothing to drop, and the config module
+    (about 60 ms to import) is not loaded for it."""
+    if not any(os.environ.get(name, "").strip() for name in _DEPLOYMENT_PIN_ENVS):
+        return
     try:
         from defenseclaw.config import ignore_unmanaged_deployment_pins
 
