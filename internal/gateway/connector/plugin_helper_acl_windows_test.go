@@ -6,6 +6,7 @@
 package connector
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"os/user"
@@ -37,6 +38,7 @@ import (
 // code page decodes it.
 func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 	node := nodeForTest(t)
+	startWindowsPowerShellOnce(t)
 	profile, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
@@ -274,5 +276,23 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// startWindowsPowerShellOnce starts the system Windows PowerShell once
+// before the plugin's checks are timed. The plugin gives its ACL check 5 s,
+// and the first Windows PowerShell process of a hosted runner's job can take
+// longer than that to start: when a shard split left no earlier test that
+// starts one, the first fixture's check timed out at 5.26 s and read as an
+// untrusted owner or DACL (r106 CI, Windows shard gw14). Every verdict still
+// runs under the plugin's own 5 s budget.
+func startWindowsPowerShellOnce(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, windowsSystemPowerShellExe(), "-NoLogo", "-NoProfile", "-NonInteractive",
+		"-Command", "[Console]::Out.Write('ready')").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "ready" {
+		t.Fatalf("system Windows PowerShell did not start within %v: %v\n%s", nodeHarnessTimeout, err, out)
 	}
 }
