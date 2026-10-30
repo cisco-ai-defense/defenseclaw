@@ -611,6 +611,38 @@ def test_detect_classifies_guarded_direct_and_client_registry_entries(tmp_path, 
     assert "cursor" not in zed["installable"]
 
 
+def test_detect_does_not_offer_an_agent_a_guarded_entry_already_launches(tmp_path, monkeypatch):
+    # GAP-2629: detect runs without the runtime record, so the guarded entry
+    # setup wrote is not attributed to its pair; its agent still must not be
+    # listed as "installed but not configured here".
+    _isolate_client_config(monkeypatch, tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps(
+            {
+                "agent_servers": {
+                    "DefenseClaw · Opencode": {
+                        "command": "/opt/bin/defenseclaw-acp",
+                        "args": ["--client", "zed", "--agent", "opencode", "--", "/usr/bin/opencode", "acp"],
+                    },
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "defenseclaw.commands.cmd_acp.shutil.which",
+        lambda name, *a, **k: f"/usr/bin/{name}" if name in {"opencode", "hermes"} else None,
+    )
+    result = CliRunner().invoke(acp_cmd, ["detect", "--json-output"])
+    assert result.exit_code == 0, result.output
+    clients = {item["client"]: item for item in json.loads(result.output)["clients"]}
+    assert [item["entry"] for item in clients["zed"]["guarded"]] == ["DefenseClaw · Opencode"]
+    assert clients["zed"]["installable"] == ["hermes"]
+    # A client without that guarded entry still offers it.
+    assert "opencode" in clients["jetbrains"]["installable"]
+
+
 def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch):
     _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
