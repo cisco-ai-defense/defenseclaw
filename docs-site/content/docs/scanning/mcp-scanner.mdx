@@ -314,8 +314,10 @@ until they sign in. See
   </Step>
   <Step>
     **Act on the verdict.** The top severity maps through `admission.mcp` (below):
-    with the built-in defaults, MEDIUM and above block the install and disable
-    the server.
+    with the built-in defaults, only CRITICAL blocks the install and disables
+    the server. A HIGH, MEDIUM or LOW verdict admits the server with an
+    install-warning audit row, and its tool calls go ahead. Set
+    `admission.mcp.actions.high: quarantine` for strict admission.
   </Step>
   <Step>
     **Rescan.** The gateway re-checks configured servers on a schedule
