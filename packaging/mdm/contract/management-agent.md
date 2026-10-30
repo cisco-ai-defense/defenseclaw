@@ -403,6 +403,7 @@ member; use these fallbacks on it:
 | Windows secret locks and JSON | Windows `secret set` / `remove` take `--lock-wait`, `bundle.lock` then `lifecycle.lock`, and print a JSON document on every outcome | do **not** pass `--lock-wait` (exit 1); the set takes no lock and can collide with an apply's confirm step or an installer run; failures print no JSON |
 | Linux and macOS secret failure JSON | `secret set` / `remove` / `status` print the schema-1 failure document for an argument, flag, privilege, value or stdin read error | those failures print one line on stderr and no JSON: classify them by the exit code (2 fix the call, 1 failed) |
 | Anchors command (Linux, macOS) | `enterprise bundle anchors install` | install the file as the MDM kit does (section 4.8) |
+| `--trust-anchors`, `--device-group` (from 1.0.6, Linux and macOS) | `bundle apply --trust-anchors F` installs anchors and applies the bundle in one transaction; `anchors install --device-group G` pins the device (4.8) | an unknown flag: exit 2 with no JSON; run `anchors install`, then `apply`, and restore by hand on a failure (4.8) |
 | `secret_set_bundle` (from 1.0.4) | `secret set --bundle` stores a credential a newer signed bundle signs (4.7) | an unknown flag: leave it out; the build binds no credential value, so store the credential without it |
 | Optional status v2 members (from 1.0.3) | `bundle verify` `secret_refs_missing` and `restart_prediction` (4.2); `status` / `verify` `connectors`, `openshell` and `identity` (4.4.1); each only when present | absent: preflight by verifying and reading the refusal, and treat every apply as one that can restart the gateway |
 
@@ -1173,6 +1174,7 @@ off the device. The agent does not read `/health` itself (section 7); the
   in every case. A Windows build without `management_contract` reports `ok`
   from gateway readiness alone, which does not prove the key.
 
+
 The agent holds the value in its own memory and writes it to the child's
 stdin; the examples stand that in with a variable of the agent process
 (`key`, `$key`), never an environment variable, which the child would
@@ -1232,8 +1234,13 @@ is still the one owner.
   MDM kit and Windows `--trust-anchors`): any valid root-owned file is
   installed, an older one included, so the agent tracks which anchor file
   it last installed. The confirmed bundle version floor still applies.
-- stdout: `anchors-install.schema.json` (`sha256`, `previous_sha256` and
-  `key_ids` for the agent's own report). The change is audited as
+- `--device-group <group>` (from 1.0.6) pins the device to one group: the
+  source must list that group or no group (else `anchor_invalid`, nothing
+  written) and the installed file lists it alone, so a bundle for another
+  group is refused `target_mismatch`. A source that already lists only that
+  group keeps its bytes. A pin only narrows what the file trusts.
+- stdout: `anchors-install.schema.json` (`sha256`, `previous_sha256`,
+  `device_groups` and `key_ids` for the agent's own report). The change is audited as
   `config.trust_anchors.changed` (section 0).
   Exit: 0; 1; 2; 75.
 
@@ -1279,6 +1286,23 @@ else
   rm -f "$ETC/trust/bundle-anchors.json"
 fi
 ```
+
+**Anchors and the first bundle in one transaction on Linux and macOS (from
+1.0.6): `enterprise bundle apply --bundle B --trust-anchors F [--device-group G]
+--json`.** As Windows `ensure --trust-anchors F --bundle B` below: under the
+lifecycle lock the file is checked like `anchors install` checks it, written,
+and the bundle is verified against it. The file stays only when the bundle is
+confirmed, or applied and waiting for the gateway to report its policy (the
+next run settles it against the same file). A bundle that fails puts the
+previous file back, or removes the new one when there was none, so the agent
+no longer restores by hand; the failed change is audited as
+`config.trust_anchors.changed` with outcome `failed`. A successful run lists
+`installed trust anchors in <path>` or `replaced the trust anchors in <path>`
+in `changes` and is not a no-op, also when the bundle is the confirmed one.
+`--trust-anchors` goes with `--bundle`, not `--inbox`; `--device-group` goes
+with `--trust-anchors`. stdout: `lifecycle-result.schema.json`. Builds before
+1.0.6 refuse the flags (exit 2); use `anchors install`, then `apply`, and the
+restore recipe below.
 
 **Windows: `enterprise windows ensure --profile standalone --trust-anchors F
 [--bundle B] --json`** (every build). It takes `bundle.lock`, checks the source

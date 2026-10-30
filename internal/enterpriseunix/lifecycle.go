@@ -108,6 +108,12 @@ type Options struct {
 	// DeliveryID is the opaque `bundle apply --delivery-id` the bundle
 	// receipt records ("" for none; enterprisestatus.CheckDeliveryID).
 	DeliveryID string
+	// TrustAnchors is an anchor file (an absolute path) that a bundle apply
+	// installs in the same transaction: the bundle is verified against it,
+	// and it stays only when the bundle is confirmed or applied and waiting
+	// for the gateway; a bundle that fails puts the previous file back
+	// (bundleanchors_stage.go). Needs Bundle.
+	TrustAnchors string
 	// Interrupted is closed when the command got SIGTERM or an interrupt.
 	// A transaction then finishes the step it is in and rolls back at the
 	// next safe point (before it stops the services, before it writes the
@@ -1053,6 +1059,14 @@ func (l *lifecycle) validateOptions() int {
 			return bad("--bundle must be an absolute path")
 		case o.ConfigFile != "" || o.PayloadDir != "" || o.FromPackage || o.NoStart || o.AdoptExisting || o.Mutate != nil:
 			return bad("a policy bundle carries the config: --config, --payload, --from-package, --no-start and --adopt-existing do not apply")
+		}
+	}
+	if o.TrustAnchors != "" {
+		switch {
+		case o.Bundle == "":
+			return bad("--trust-anchors applies only to a policy bundle apply with --bundle")
+		case !filepath.IsAbs(o.TrustAnchors):
+			return bad("--trust-anchors must be an absolute path")
 		}
 	}
 	if o.DeliveryID != "" {
