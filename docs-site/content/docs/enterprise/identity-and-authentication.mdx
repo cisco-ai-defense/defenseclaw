@@ -14,6 +14,12 @@ keywords:
 
 DefenseClaw ties each agent action to the person who ran it and to the agent that did it. Guardrail profiles can then give a group, a user, a connector or a single agent its own policy, and every decision records which profile applied.
 
+<VideoEmbed
+  src="https://app.vidcast.io/share/embed/5340c0c5-2bc1-437a-b1d3-db8238d7fd73"
+  title="Identity-based sandboxes and guardrails with DefenseClaw"
+  caption="Identity-based sandboxes and guardrails (about 17 minutes). Active Directory users run Claude Code and Codex in OpenShell sandboxes with defenseclaw sandbox run. The guardrail profile of each user's AD group decides what the sandbox may reach: with one profile the agent clones from github.com and installs packages while a request to pastebin.com is refused, and a stricter profile refuses github.com too. A Grafana dashboard then shows the blocked requests by rule. Recorded on an earlier 1.0 build, so some screens and messages differ from the current release."
+/>
+
 ## Attribution, not authentication
 
 DefenseClaw reads identity only from the operating system the agent runs on.
