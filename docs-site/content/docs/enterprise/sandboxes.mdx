@@ -81,7 +81,7 @@ These are lifecycle settings: `ensure` applies a change and restarts the user da
 - **Copy mode only.** A managed sandbox always works on a copy of the project, and `sandbox run` has no flag that asks for a live mount. A pack or repository policy with `workspace.mode: mount` is clamped to copy, `--context` is refused, and the changes come back with `defenseclaw sandbox pull`. Skip-permissions mode is the default; a profile with `allow_yolo: false` keeps the agent's own prompts (the same as `--safe`). Mount mode through the relay is not available on managed hosts; it may come in a later release.
 - **One sandbox account per host at a time.** The first account to run a sandbox holds the sandbox ports. Another account is told that sandboxes are not available for it right now, without the name of the first.
 - **Docker is root-equivalent.** On Linux, a member of the `docker` group, which sandboxes need with either driver, can do anything root can, the protected credentials included. DefenseClaw keeps honest users inside the policy; it does not stop a hostile local user, who can also run an agent in a plain container and bypass `required_for`. Where `required_for` must hold against deliberate users, do not give them Docker access.
-- **Processes of one account share a trust boundary.** A registration vouches for the account, not for a VM. A user can deliberately present a running-sandbox registration for their own account. It never reaches another account's policy, and the audit record names the account.
+- **Processes of one account share a trust boundary.** A registration vouches for the account, not for a VM. A user can deliberately create a registration for their own account. It never reaches another account's policy, the audit record names the account, and the registration tripwire flags one that no guest backs. A stopped sandbox's registration stays stopped: starting the sandbox registers it again under a new id.
 - **No bundling.** DefenseClaw never ships OpenShell in its packages. You provide it (`prerequisite`) or let each user's daemon download NVIDIA's release at first use (`setup`).
 
 ## How it works
@@ -96,7 +96,7 @@ A sandbox run goes through five steps.
 
 1. The user runs `defenseclaw sandbox run claude`. The root-owned `defenseclaw` launcher starts the user's sandbox daemon if it is not running.
 2. The daemon asks the managed gateway, as the user, for the policy of this run. The gateway reads the peer's uid from the kernel, matches the profile with the same rules as the guardrails, combines the floor and the profile (tighten only), and answers with the resolved policy. Nothing the daemon or the sandbox sends is trusted as identity.
-3. The daemon creates the sandbox and binds it to the registration the gateway made. A stopped sandbox's registration, or one the daemon has not reported running for five minutes, admits no relayed hook until the sandbox starts again.
+3. The daemon creates the sandbox and binds it to the registration the gateway made. A stopped sandbox's registration, or one the daemon has not reported running for five minutes, admits no relayed hook until the sandbox starts again. Once the daemon reports a sandbox stopped, that registration never runs again: `defenseclaw sandbox start` registers the sandbox again under a new registration id, with the same policy after any re-match that is due. A sandbox that only missed reports (a lost connection, a sleeping computer, a restarted daemon) keeps its registration.
 4. Every hook the agent sends inside the sandbox goes to the user's daemon, then unchanged to the managed gateway, which judges it under the person's verified identity and profile. A broken relay or an unreachable gateway fails the hook closed.
 5. When the config or the person's group changes, the gateway re-matches the live registrations (see [Changes while sandboxes run](#changes-while-sandboxes-run)).
 
@@ -457,7 +457,7 @@ Need an exception? Contact it-security@example.com
 
 - **It is a policy control, not an exec deny.** It covers the connectors that have a machine-owned hook (Claude Code, Codex, Cursor and Copilot). For a non-exempt account, a host run is refused even when it claims to be nested in a sandbox, unless sandboxes are unavailable to the account and the effective `when_unavailable` is `alert`. An agent without a machine-owned hook is not stopped. `ensure` warns about a `required_for` connector with no machine-owned hook on the OS.
 - **Root is refused** on every sandbox route, including when you inspect.
-- **Registration tripwire.** The managed gateway records `log.sandbox.registration_without_guest` (reason `relay_without_guest` or `running_without_guest`) when a watched registration is used or reported running without a guest sighting, five minutes after bind. The Sandboxes dashboard stat **Sandbox registrations without a guest** counts these records. It is a tripwire for the simple case, not proof.
+- **Registration tripwire.** The managed gateway records `log.sandbox.registration_without_guest` (reason `relay_without_guest` or `running_without_guest`) when a watched registration is used or reported running without a guest sighting, five minutes after bind, and (reason `running_after_stop`) when it refuses a running report for a registration whose sandbox was reported stopped. A start registers the sandbox again with a new watch. The Sandboxes dashboard stat **Sandbox registrations without a guest** counts these records. It is a tripwire for the simple case, not proof.
 
 ### How the host refusal works
 
@@ -696,6 +696,7 @@ When a sandbox can't run for a person, the refusal says why in words and the rec
 | Reason code | Record | Meaning |
 | --- | --- | --- |
 | `relay_without_guest`, `running_without_guest` | `log.sandbox.registration_without_guest` | A watched registration was used on an admitted relay call or reported running after the guest grace without an accepted guest record since bind. The record names the account, connector, registration and sandbox; it changes no decision. |
+| `running_after_stop` | `log.sandbox.registration_without_guest` | A running report for a registration whose sandbox was reported stopped was refused; the registration stays stopped. The daemon registers a sandbox it sees running again under a new registration, so one record can also follow a sandbox started outside `defenseclaw sandbox start`. At most one record per registration an hour. |
 
 ### What `ensure`, `status` and `verify` report
 
@@ -723,7 +724,7 @@ The sandbox routes answer with an HTTP status and a `sandbox_*` reason. The user
 | Reason (status) | Meaning | What to do |
 | --- | --- | --- |
 | `sandbox_registration_unknown` (404), `sandbox_registration_revoked`, `sandbox_registration_expired` (410) | The registration is gone, revoked, or the 30-minute pending window passed (a registration that was never bound to a sandbox) | Start the sandbox again |
-| `sandbox_registration_stopped` (403) | The sandbox is not running: its daemon reported it stopped, or has not reported it running for five minutes | `defenseclaw sandbox start` |
+| `sandbox_registration_stopped` (403) | The sandbox is not running: its daemon reported it stopped, or has not reported it running for five minutes. Also the answer to a running report after a reported stop | `defenseclaw sandbox start` |
 | `sandbox_subject_changed` (409) | The account behind the uid was renamed or recycled | Start the sandbox again |
 | `sandbox_relay_files_unsupported` (400) | A client sent mount-mode file bytes; managed hosts are copy-only | Use copy mode |
 | `sandbox_connector_mismatch` (403) | A hook arrived for an agent other than the one the registration was made for | Run the agent only through `defenseclaw sandbox run` for its own sandbox |

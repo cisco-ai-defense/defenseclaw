@@ -70,8 +70,6 @@ func (a *APIServer) sandboxGuestSignal(ctx context.Context, auth *sandboxAuthori
 	if now.Before(reg.BoundAt.Add(sandboxGuestGrace)) {
 		return
 	}
-	key := sandboxGuestSignalKey{uid: reg.UID, id: reg.ID, reason: reason}
-	signals := &auth.guestSignals
 	current, ok, err := auth.store.Get(reg.UID, reg.ID)
 	if err != nil {
 		sandboxRecordFailed("guest signal lookup", err)
@@ -80,13 +78,34 @@ func (a *APIServer) sandboxGuestSignal(ctx context.Context, auth *sandboxAuthori
 	if !ok || !current.GuestWatch || !current.GuestSeenAt.IsZero() || current.State == sandboxreg.StateRevoked {
 		return
 	}
-	reg = current
-	identity := sandboxRecordIdentity(reg)
-	if sandboxreg.EffectiveState(reg, now) == sandboxreg.StateLive {
-		identity.Phase = audit.SandboxPhaseReady
-	} else {
-		identity.Phase = audit.SandboxPhaseStopped
+	phase := audit.SandboxPhaseStopped
+	if sandboxreg.EffectiveState(current, now) == sandboxreg.StateLive {
+		phase = audit.SandboxPhaseReady
 	}
+	a.sandboxGuestEmit(ctx, auth, current, reason, phase)
+}
+
+// sandboxStoppedReportSignal records a running report the gateway refused
+// for reg, a registration whose daemon reported its sandbox stopped
+// (sandboxreg.ErrStopped): something of the account claimed a stopped
+// sandbox runs again without starting it (GAP-0673). Rate-limited like the
+// guest signal, per registration.
+func (a *APIServer) sandboxStoppedReportSignal(ctx context.Context, auth *sandboxAuthority, reg sandboxreg.Registration) {
+	if reg.BoundAt.IsZero() || reg.SandboxName == "" || reg.State != sandboxreg.StateStopped {
+		return
+	}
+	a.sandboxGuestEmit(ctx, auth, reg, audit.SandboxGuestRunningAfterStop, audit.SandboxPhaseStopped)
+}
+
+// sandboxGuestEmit records one registration-without-guest alert for reg
+// with reason, at most once per sandboxGuestSignalEvery per registration
+// and reason, off the request path.
+func (a *APIServer) sandboxGuestEmit(ctx context.Context, auth *sandboxAuthority, reg sandboxreg.Registration, reason string, phase audit.SandboxPhase) {
+	now := auth.clock()
+	key := sandboxGuestSignalKey{uid: reg.UID, id: reg.ID, reason: reason}
+	signals := &auth.guestSignals
+	identity := sandboxRecordIdentity(reg)
+	identity.Phase = phase
 	event := audit.SandboxRegistrationWithoutGuestEvent{
 		Sandbox: identity, Subject: sandboxRecordSubject(reg), Reason: reason, Timestamp: now,
 	}

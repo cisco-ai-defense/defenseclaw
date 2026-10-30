@@ -65,6 +65,7 @@ func (a *APIServer) registerSandboxAuthorityRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+sandboxrelay.PathRegistrations+"{id}"+sandboxrelay.RegistrationBindSub, a.handleSandboxBind)
 	mux.HandleFunc("POST "+sandboxrelay.PathRegistrations+"{id}"+sandboxrelay.RegistrationDelSub, a.handleSandboxDeleted)
 	mux.HandleFunc("POST "+sandboxrelay.PathRegistrations+"{id}"+sandboxrelay.RegistrationStateSub, a.handleSandboxState)
+	mux.HandleFunc("POST "+sandboxrelay.PathRegistrations+"{id}"+sandboxrelay.RegistrationRestartSub, a.handleSandboxRestart)
 	mux.HandleFunc("GET "+sandboxrelay.PathPolicyCurrent, a.handleSandboxCurrent)
 	mux.HandleFunc("POST "+sandboxrelay.PathPolicyExplain, a.handleSandboxExplain)
 	mux.HandleFunc("POST "+sandboxrelay.PathPolicyTest, a.handleSandboxPolicyTest)
@@ -803,6 +804,55 @@ func (a *APIServer) handleSandboxState(w http.ResponseWriter, r *http.Request) {
 	a.serveSandboxCurrent(w, r, r.PathValue("id"), true)
 }
 
+// handleSandboxRestart answers POST registrations/{id}/restart: the
+// caller's daemon starts the sandbox of its bound registration id again,
+// which runs from now under a new registration (sandboxreg.FileStore.Restart)
+// and id ends. The policy is id's after a re-match that is due; one that
+// revokes id answers the revocation instead. A state report never revives a
+// registration whose sandbox was reported stopped (GAP-0673).
+func (a *APIServer) handleSandboxRestart(w http.ResponseWriter, r *http.Request) {
+	r, peer, auth, ok := a.sandboxRouteStart(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		V int `json:"v"`
+	}
+	if !decodeSandboxJSON(w, r, sandboxSmallBodyMax, &body) {
+		return
+	}
+	if body.V != sandboxrelay.WireVersion {
+		writeSandboxRefusal(w, http.StatusBadRequest, "invalid_request", sandboxTextBadRequest)
+		return
+	}
+	reg, ok := a.sandboxRegistrationFor(w, auth, peer, r.PathValue("id"), false, false)
+	if !ok || !a.sandboxDecide(w, r, peer, reg.Connector) || !a.sandboxCheckSubject(w, auth, peer, reg) {
+		return
+	}
+	if reg = a.sandboxRematchIfDue(r.Context(), auth, peer, reg); reg.State == sandboxreg.StateRevoked {
+		writeSandboxReason(w, sandboxrelay.ReasonRegistrationRevoked, sandboxRevokedText(auth, reg))
+		return
+	}
+	fresh, err := auth.store.Restart(peer.UID, reg.ID)
+	switch {
+	case err == nil:
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] restart uid=%d registration=%s new=%s\n", peer.UID, reg.ID, fresh.ID)
+		sandboxRecordResolved(a, fresh)
+		a.writeJSON(w, http.StatusOK, sandboxRegistrationView(fresh))
+	case errors.Is(err, sandboxreg.ErrRevoked):
+		writeSandboxReason(w, sandboxrelay.ReasonRegistrationRevoked, sandboxRevokedText(auth, fresh))
+	case errors.Is(err, sandboxreg.ErrNotPending):
+		writeSandboxReason(w, sandboxrelay.ReasonNotAllowed, sandboxTextNotBound)
+	case errors.Is(err, sandboxreg.ErrNotFound):
+		writeSandboxReason(w, sandboxrelay.ReasonRegistrationUnknown, sandboxTextRegistrationUnkn)
+	case errors.Is(err, sandboxreg.ErrFull):
+		writeSandboxReason(w, sandboxrelay.ReasonUnavailable, "Too many sandboxes are registered for your account; delete the ones you no longer use.")
+	default:
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] restart uid=%d registration=%s: %v\n", peer.UID, reg.ID, err)
+		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
+	}
+}
+
 // serveSandboxCurrent answers policy/current for the caller's registration
 // id, after recording the daemon's state report when report is set.
 func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, id string, report bool) {
@@ -873,6 +923,14 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		switch {
 		case err == nil, errors.Is(err, sandboxreg.ErrRevoked):
 			reg = next
+		case errors.Is(err, sandboxreg.ErrStopped):
+			// A report only moves a registration toward stopped: after a
+			// stop its daemon reported, the sandbox runs again only under
+			// a new registration (handleSandboxRestart, GAP-0673).
+			fmt.Fprintf(os.Stderr, "[sandbox-authority] running report refused uid=%d registration=%s: reported stopped\n", peer.UID, reg.ID)
+			a.sandboxStoppedReportSignal(r.Context(), auth, next)
+			writeSandboxReason(w, sandboxrelay.ReasonRegistrationStopped, sandboxTextStopped)
+			return
 		default:
 			fmt.Fprintf(os.Stderr, "[sandbox-authority] state report uid=%d registration=%s: %v\n", peer.UID, reg.ID, err)
 			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)

@@ -43,7 +43,7 @@ const (
 	PathPrefix          = "/api/v1/sandbox/"
 	PathSettings        = "/api/v1/sandbox/settings"
 	PathPolicyResolve   = "/api/v1/sandbox/policy/resolve"
-	PathRegistrations   = "/api/v1/sandbox/registrations/" // + {id}/bind, {id}/state, {id}/deleted
+	PathRegistrations   = "/api/v1/sandbox/registrations/" // + {id}/bind, {id}/state, {id}/restart, {id}/deleted
 	PathPolicyCurrent   = "/api/v1/sandbox/policy/current" // ?registration=ID
 	PathPolicyExplain   = "/api/v1/sandbox/policy/explain"
 	PathPolicyTest      = "/api/v1/sandbox/policy/test"
@@ -59,7 +59,12 @@ const (
 	// RegistrationStateSub is POST registrations/{id}/state: a StateReport
 	// answered with the CurrentPolicy policy/current gives.
 	RegistrationStateSub = "/state"
-	RegistrationQuery    = "registration"
+	// RegistrationRestartSub is POST registrations/{id}/restart: the
+	// stopped sandbox of a bound registration starts again under a new
+	// registration, answered with its RegistrationView. A state report
+	// never revives a registration whose sandbox was reported stopped.
+	RegistrationRestartSub = "/restart"
+	RegistrationQuery      = "registration"
 )
 
 // Header names and the values the relay sets.

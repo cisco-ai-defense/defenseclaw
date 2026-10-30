@@ -324,13 +324,20 @@ func TestManagedSandboxSessionUnblockEndsWithItsSession(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The daemon's reports of a stop and a start (sandboxreg.FileStore.Report).
+	// The daemon's report of a stop, then a start, which runs the sandbox
+	// under a new registration (sandboxreg.FileStore.Restart, GAP-0673).
 	stopAndStart := func() {
 		t.Helper()
-		for _, running := range []bool{false, true} {
-			if _, err := gw.auth.store.Report(relayTestPeer.UID, reg.ID, running); err != nil {
-				t.Fatal(err)
-			}
+		if _, err := gw.auth.store.Report(relayTestPeer.UID, reg.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		fresh, err := gw.auth.store.Restart(relayTestPeer.UID, reg.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reg = fresh
+		if _, err := gw.auth.store.Report(relayTestPeer.UID, reg.ID, true); err != nil {
+			t.Fatal(err)
 		}
 	}
 	unblock(sandboxrelay.DecisionScopeSession)

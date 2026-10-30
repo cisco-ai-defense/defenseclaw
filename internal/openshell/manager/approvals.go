@@ -1327,6 +1327,23 @@ func (m *Manager) registrationOf(b *box) string {
 	return registration
 }
 
+// SetRegistration records registration as the managed registration of
+// sandbox name in place of the one its record keeps: a start runs a
+// stopped sandbox under a new registration (GAP-0673).
+func (m *Manager) SetRegistration(name, registration string) {
+	m.mu.Lock()
+	b, ok := m.boxes[name]
+	if !ok || b.deleted || b.rec.RegistrationID == registration {
+		m.mu.Unlock()
+		return
+	}
+	b.rec.RegistrationID = registration
+	m.mu.Unlock()
+	if err := m.saveRecord(b); err != nil {
+		m.logf("record the registration of sandbox %s: %v", name, err)
+	}
+}
+
 // liveBoxes are the sandboxes the manager holds that are neither deleted
 // nor kept as a snapshot.
 func (m *Manager) liveBoxes() []*box {

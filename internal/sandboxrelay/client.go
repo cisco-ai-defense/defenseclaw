@@ -187,6 +187,20 @@ func (c *UnixClient) Report(ctx context.Context, registration string, running bo
 	return out, err
 }
 
+// Restart is POST registrations/{id}/restart: the registration's sandbox
+// starts again under the new registration it answers.
+func (c *UnixClient) Restart(ctx context.Context, registration string) (RegistrationView, error) {
+	if err := validRegistration(registration); err != nil {
+		return RegistrationView{}, err
+	}
+	body := struct {
+		V int `json:"v"`
+	}{WireVersion}
+	var out RegistrationView
+	err := c.call(ctx, http.MethodPost, PathRegistrations+url.PathEscape(registration)+RegistrationRestartSub, nil, nil, body, &out)
+	return out, err
+}
+
 // Current is GET policy/current.
 func (c *UnixClient) Current(ctx context.Context, registration string) (CurrentPolicy, error) {
 	if err := validRegistration(registration); err != nil {
