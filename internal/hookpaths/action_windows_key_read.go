@@ -14,12 +14,20 @@ import "strings"
 // is read as a command of its own: Write-Output (Get-Content key),
 // "$(gc key)", [IO.File]::ReadAllText(key) (GAP-2397, GAP-1779).
 func actionWindowsPrivateKeyRead(command, cwd, home string) bool {
-	if actionWindowsKeyReadStatements(command, cwd, home) {
+	return actionWindowsPrivateKeyReadIn(command, cwd, home, false)
+}
+
+// actionWindowsPrivateKeyReadIn is actionWindowsPrivateKeyRead for a command
+// a POSIX shell (Git Bash) runs when posix is set: there cat and type read
+// their stdin, so a listing piped to them prints names, not keys (GAP-2400
+// B26).
+func actionWindowsPrivateKeyReadIn(command, cwd, home string, posix bool) bool {
+	if actionWindowsKeyReadStatements(command, cwd, home, posix) {
 		return true
 	}
 	for _, plain := range []bool{false, true} {
 		for _, body := range actionWindowsExpressionBodies(command, plain, false, nil) {
-			if actionWindowsKeyReadStatements(body, cwd, home) {
+			if actionWindowsKeyReadStatements(body, cwd, home, posix) {
 				return true
 			}
 		}
@@ -27,7 +35,7 @@ func actionWindowsPrivateKeyRead(command, cwd, home string) bool {
 	return false
 }
 
-func actionWindowsKeyReadStatements(command, cwd, home string) bool {
+func actionWindowsKeyReadStatements(command, cwd, home string, posix bool) bool {
 	for _, grammar := range []actionWindowsGrammar{0, actionWindowsPlainGrammar} {
 		scan := actionWindowsScan(command, grammar)
 		if !scan.ok {
@@ -81,7 +89,7 @@ func actionWindowsKeyReadStatements(command, cwd, home string) bool {
 			if piped {
 				for _, stage := range readings {
 					for _, dir := range dirs[certain:] {
-						if actionWindowsPipedKeyDirectoryRead(pipeHead, stage, dir, home) {
+						if actionWindowsPipedKeyDirectoryRead(pipeHead, stage, dir, home, posix) {
 							return true
 						}
 					}

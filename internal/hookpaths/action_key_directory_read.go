@@ -167,7 +167,12 @@ func actionKeyDirectory(value, cwd, home string, windows bool) bool {
 // not) and whose stage reads each listed file's content (Select-String,
 // Get-Content): Get-ChildItem $HOME\.ssh | Select-String . prints every key
 // (RV22-1, GAP-0281).
-func actionWindowsPipedKeyDirectoryRead(head, reader []string, cwd, home string) bool {
+//
+// A content reader given its own path operand (Get-Content -Raw -Path
+// notes.txt, Get-Content notes.txt) reads that file, not the piped items, and
+// in a POSIX shell cat and type read the listing text on stdin (the GAP-2400
+// reader rules, actionIndirectBarePSReader).
+func actionWindowsPipedKeyDirectoryRead(head, reader []string, cwd, home string, posix bool) bool {
 	if len(head) == 0 || len(reader) == 0 {
 		return false
 	}
@@ -175,7 +180,15 @@ func actionWindowsPipedKeyDirectoryRead(head, reader []string, cwd, home string)
 		return strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(word, `\`, "/"))), ".exe")
 	}
 	switch base(reader[0]) {
-	case "select-string", "sls", "get-content", "gc", "cat", "type", "format-hex", "fhx":
+	case "select-string", "sls", "format-hex", "fhx":
+	case "cat", "type":
+		if posix || !actionIndirectBarePSReader(reader) {
+			return false
+		}
+	case "get-content", "gc":
+		if !actionIndirectBarePSReader(reader) {
+			return false
+		}
 	default:
 		return false
 	}

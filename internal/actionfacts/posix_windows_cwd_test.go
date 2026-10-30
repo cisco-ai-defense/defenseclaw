@@ -64,12 +64,19 @@ func TestPOSIXRelativeOperandResolvesUnderAWindowsCWD(t *testing.T) {
 			t.Errorf("%q in %q: no path fact %q in %#v", row.command, row.cwd, row.value, facts.Paths)
 		}
 	}
-	// The action itself (no moved directory) keeps its reading.
+	// The action itself (no moved directory) keeps the train's reading: a
+	// relative Git Bash operand under a Windows cwd inside the trusted home
+	// resolves there (classifier-ps cd52e3d987 + d6868f00a2, which is what
+	// blocks the managed Windows junction rows J01/J02; classifier-c
+	// iteration 20 merge note). It is never placed anywhere else.
 	facts := Analyze(Input{Tool: "Bash", Command: "cp a.txt ../.defenseclaw/config.yaml", CWD: `C:\Users\u\project`,
 		ActiveHome: `C:\Users\u`, DialectHint: DialectPOSIX})
 	for _, fact := range facts.Paths {
-		if fact.Resolved != "" {
-			t.Errorf("unmoved %s resolved %q, want unresolved", fact.Value, fact.Resolved)
+		if fact.Value != "../.defenseclaw/config.yaml" {
+			continue
+		}
+		if got := slash(fact.Resolved); got != "" && got != "C:/Users/u/.defenseclaw/config.yaml" {
+			t.Errorf("unmoved %s resolved %q, want unresolved or the home path", fact.Value, fact.Resolved)
 		}
 	}
 }

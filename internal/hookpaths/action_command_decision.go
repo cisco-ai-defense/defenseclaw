@@ -201,7 +201,8 @@ func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfa
 		}
 	}
 	if actionWindowsHome(home) {
-		return actionWindowsPrivateKeyRead(command, cwd, home) || actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect)
+		return actionWindowsPrivateKeyReadIn(command, cwd, home, dialect == actionfacts.DialectPOSIX) ||
+			actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect)
 	}
 	if actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect) {
 		return true
