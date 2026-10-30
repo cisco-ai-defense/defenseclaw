@@ -466,6 +466,36 @@ func TestAuditDBWindowsAcceptsInheritedReadAccessForSQLiteSidecars(t *testing.T)
 	_ = db.Close()
 }
 
+// After an ACL reset the audit folder inherits C:\ProgramData's
+// container-only Users create-child entry. It cannot replace a child, so the
+// gateway keeps its audit store.
+func TestAuditDBWindowsAcceptsInheritedContainerOnlyCreateChild(t *testing.T) {
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const createChild windows.ACCESS_MASK = 0x116
+	parent := filepath.Join(t.TempDir(), "parent")
+	directory := filepath.Join(parent, "audit")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureAuditDBPlatformPath(parent, true); err != nil {
+		t.Fatal(err)
+	}
+	addJudgeBodyWindowsContainerOnlyGrant(t, parent, users, createChild)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(directory, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAuditDBWindowsSecurityDescriptor(directory, sd, true, true); err != nil {
+		t.Fatalf("inherited container-only create-child entry refused: %v", err)
+	}
+}
+
 func TestAuditDBWindowsRejectsMutableAncestor(t *testing.T) {
 	grandparent := filepath.Join(t.TempDir(), "shared")
 	parent := filepath.Join(grandparent, "defenseclaw")

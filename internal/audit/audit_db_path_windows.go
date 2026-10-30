@@ -164,6 +164,28 @@ func auditDBPlatformSidecarNeedsHardening(file *os.File) (bool, error) {
 
 func auditDBPlatformHardeningNeedsCapabilityReopen() bool { return true }
 
+// auditDBPlatformProcessCannotRestamp reports whether this is the gateway
+// service and file is not owned by its service SID. The gateway's
+// write-restricted token holds WRITE_DAC only through ownership of a file it
+// created, so any other file is left to the guardian.
+func auditDBPlatformProcessCannotRestamp(file *os.File) bool {
+	if !auditDBWindowsCurrentProcessIsGateway() {
+		return false
+	}
+	gatewayServiceSID, err := auditDBWindowsPinnedGatewayServiceSID()
+	if err != nil || gatewayServiceSID == nil || file == nil {
+		return true
+	}
+	sd, err := windows.GetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return true
+	}
+	owner, _, err := sd.Owner()
+	return err != nil || owner == nil || !owner.Equals(gatewayServiceSID)
+}
+
+var auditDBWindowsCurrentProcessIsGateway = managed.WindowsCurrentProcessIsGatewayService
+
 func validateAuditDBPlatformTrust(path string, _ os.FileInfo, directory, protectChildren bool) error {
 	pathPtr, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -585,6 +607,14 @@ func rejectUntrustedAuditDBWindowsACEs(
 		}
 		if !auditDBWindowsTrustedPrincipal(sid, gatewayServiceSID) &&
 			auditDBWindowsAcceptAdminPrincipal(path, fmt.Sprintf("entry mask 0x%x", uint32(ace.Mask)), sid) {
+			continue
+		}
+		if writeLike && directory &&
+			managed.AcceptInheritedCreateChild(path, "audit store", ace.Header.AceFlags, ace.Mask, sid) {
+			// The folder inherits C:\ProgramData's container-only Users
+			// create-child entry after a reset. It adds files and folders but
+			// cannot change, rename or delete an existing one, and files do
+			// not inherit it. Accepted and logged; the guardian re-stamps.
 			continue
 		}
 		if !writeLike && !managed.TrustStrictAncestors() && !auditDBWindowsTrustedPrincipal(sid, gatewayServiceSID) {

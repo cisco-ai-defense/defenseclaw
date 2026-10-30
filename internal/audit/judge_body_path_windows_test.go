@@ -55,7 +55,10 @@ func TestJudgeBodyWindowsRejectsPermissiveExistingLeaf(t *testing.T) {
 	}
 }
 
-func TestJudgeBodyWindowsRejectsInheritedReadAccessForSQLiteSidecars(t *testing.T) {
+// A foreign read-only entry can disclose judge bodies but cannot change them:
+// it is accepted and logged, as for the audit store, and the guardian
+// re-stamps the descriptor.
+func TestJudgeBodyWindowsAcceptsInheritedReadAccessForSQLiteSidecars(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "protected")
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
@@ -69,8 +72,75 @@ func TestJudgeBodyWindowsRejectsInheritedReadAccessForSQLiteSidecars(t *testing.
 	if store != nil {
 		_ = store.Close()
 	}
-	if err == nil || !strings.Contains(err.Error(), "untrusted Windows principal") {
-		t.Fatalf("NewJudgeBodyStore error = %v, want inherited read rejection", err)
+	if err != nil {
+		t.Fatalf("inheritable read entry on the judge-body directory refused: %v", err)
+	}
+}
+
+// After an ACL reset the store's folder inherits C:\ProgramData's
+// container-only Users create-child entry; it cannot replace a child, so the
+// store opens.
+func TestJudgeBodyWindowsAcceptsInheritedCreateChildOnFolder(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "parent")
+	directory := filepath.Join(parent, "store")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureJudgeBodyPlatformPath(parent, true); err != nil {
+		t.Fatal(err)
+	}
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const createChild windows.ACCESS_MASK = 0x116
+	addJudgeBodyWindowsContainerOnlyGrant(t, parent, users, createChild)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewJudgeBodyStore(filepath.Join(directory, "judge_bodies.db"))
+	if store != nil {
+		_ = store.Close()
+	}
+	if err != nil {
+		t.Fatalf("inherited container-only create-child entry refused: %v", err)
+	}
+}
+
+func addJudgeBodyWindowsContainerOnlyGrant(t *testing.T, path string, sid *windows.SID, mask windows.ACCESS_MASK) {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: mask,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.SUB_CONTAINERS_ONLY_INHERIT,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}}, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -106,7 +176,7 @@ func TestJudgeBodyWindowsRejectsMutableAncestor(t *testing.T) {
 	}
 }
 
-func TestJudgeBodyWindowsRejectsStaleWALReadACL(t *testing.T) {
+func TestJudgeBodyWindowsAcceptsStaleWALReadACLButRejectsWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "judge_bodies.db")
 	first, err := NewJudgeBodyStore(path)
 	if err != nil {
@@ -128,8 +198,17 @@ func TestJudgeBodyWindowsRejectsStaleWALReadACL(t *testing.T) {
 	if second != nil {
 		_ = second.Close()
 	}
+	if err != nil {
+		t.Fatalf("read-only entry on a stale WAL refused: %v", err)
+	}
+	// Write authority on the sidecar stays fatal.
+	grantEveryoneWindowsAccess(t, walPath, windows.GENERIC_WRITE, false)
+	third, err := NewJudgeBodyStore(path)
+	if third != nil {
+		_ = third.Close()
+	}
 	if err == nil || !strings.Contains(err.Error(), "SQLite sidecar -wal") {
-		t.Fatalf("NewJudgeBodyStore error = %v, want stale WAL ACL rejection", err)
+		t.Fatalf("NewJudgeBodyStore error = %v, want stale WAL write ACL rejection", err)
 	}
 }
 

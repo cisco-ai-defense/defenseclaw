@@ -1954,7 +1954,7 @@ func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) err
 		if repairErr := repairWindowsCodexMachineFileProtection(path); repairErr != nil {
 			reason += "; repair failed: " + repairErr.Error()
 		} else if recheckErr := windowsCodexMachineTrustedFileCheck(path, label); recheckErr == nil {
-			emitManagedResilience(managedDriftMarker(drift, true, true), path,
+			emitManagedRepairResilience(drift, true, path,
 				"re-stamped canonical protection: "+reason, map[string]string{"label": label})
 			return nil
 		} else {

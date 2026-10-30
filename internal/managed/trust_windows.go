@@ -1010,6 +1010,14 @@ const windowsCreateChildOnlyMask windows.ACCESS_MASK = 0x001201bf
 
 var acceptedCreateChild sync.Map
 
+// AcceptInheritedCreateChild is acceptInheritedCreateChild for the gateway's
+// own trust walks (audit store, judge-body store, hook token folders), so a
+// folder reset to inherit from C:\ProgramData is judged the same way
+// everywhere. It reports whether the entry is accepted, logging it once.
+func AcceptInheritedCreateChild(path, label string, flags uint8, mask windows.ACCESS_MASK, sid *windows.SID) bool {
+	return acceptInheritedCreateChild(path, label, flags, mask, sid)
+}
+
 // acceptInheritedCreateChild accepts, and logs once per path, an inherited
 // create-child-only entry for Users or Authenticated Users on a directory:
 // the shape a folder takes after its protection is reset to inherit from

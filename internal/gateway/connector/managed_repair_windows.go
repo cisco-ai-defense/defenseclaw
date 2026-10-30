@@ -511,7 +511,7 @@ func ensureWindowsManagedLockProtection(lock windowsManagedLockRepair) error {
 	repairErr := repairWindowsManagedHeldLock(lock)
 	if repairErr == nil {
 		if recheck := lock.Validate(lock.Handle); recheck == nil {
-			emitManagedResilience(managedDriftMarker(drift, true, lock.PolicyOrCode), lock.Path,
+			emitManagedRepairResilience(drift, lock.PolicyOrCode, lock.Path,
 				"re-stamped canonical lock protection: "+reason, map[string]string{"label": lock.Label})
 			return nil
 		} else {

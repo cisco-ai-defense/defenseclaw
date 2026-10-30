@@ -504,6 +504,13 @@ func hookAPIRejectUntrustedWindowsWriteACEsWith(
 		if !protectChildren && hookAPIWindowsStockAncestorGrant(ace.Mask, sid) {
 			continue
 		}
+		if wantDir && managed.AcceptInheritedCreateChild(path, hookAPITrustLabel, ace.Header.AceFlags, ace.Mask, sid) {
+			// C:\ProgramData's container-only Users create-child entry,
+			// inherited after a reset: it cannot change, rename or delete an
+			// existing token file, and files do not inherit it. Accepted and
+			// logged; the guardian re-stamps the folder.
+			continue
+		}
 		if !hookAPIWindowsTrustedPrincipal(sid) {
 			verdict := fmt.Errorf(
 				"untrusted Windows principal %s has write-like access mask 0x%x on %s",

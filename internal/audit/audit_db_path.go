@@ -372,6 +372,13 @@ func pinAndSecureAuditDBSQLiteSidecars(
 // descriptor stays noncanonical, the drift is accepted and logged; the hook
 // guardian repairs it with its own privileges.
 func hardenExistingAuditDBFile(path string, pinned *os.File, hooks auditDBPathHooks, label string) error {
+	if auditDBPlatformProcessCannotRestamp(pinned) {
+		// The gateway service's write-restricted token cannot re-ACL a file
+		// it does not own; the guardian repairs it. Accept and log instead of
+		// trying.
+		auditDBPlatformReportAccept(path, "descriptor is trusted but not canonical; the gateway service does not re-stamp a file it does not own")
+		return nil
+	}
 	hardening := pinned
 	closeHardening := false
 	if auditDBPlatformHardeningNeedsCapabilityReopen() {

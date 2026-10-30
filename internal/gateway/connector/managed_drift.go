@@ -389,6 +389,17 @@ func (r managedTransientRetry) run(
 // object. Accepts are reported once per process for the same path and reason
 // so a long-running guardian or a hot hook path does not repeat the line on
 // every pass; repairs and boundary findings are actions and always logged.
+// emitManagedRepairResilience logs a completed repair. The re-stamp itself is
+// always a MarkerRepair line, so every repair is visible under one marker; an
+// untrusted writer on policy or code is additionally reported as a boundary
+// finding first, as managedDriftMarker decides.
+func emitManagedRepairResilience(drift managedDrift, policyOrCode bool, path, reason string, extra map[string]string) {
+	if marker := managedDriftMarker(drift, true, policyOrCode); marker != managed.MarkerRepair {
+		emitManagedResilience(marker, path, reason, extra)
+	}
+	emitManagedResilience(managed.MarkerRepair, path, reason, extra)
+}
+
 func emitManagedResilience(marker, path, reason string, extra map[string]string) {
 	if marker == managed.MarkerAccept && !managedAcceptDedupe.first(path, reason) {
 		return

@@ -298,6 +298,11 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 					err, revalidateErr,
 				)
 			}
+			managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+				"path":   path,
+				"object": string(managed.ObjectAdminFile),
+				"reason": "re-stamped the canonical hook guardian manifest descriptor after: " + err.Error(),
+			})
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return false, fmt.Errorf("enterprise hooks: inspect existing manifest %s: %w", path, statErr)
@@ -434,6 +439,11 @@ func ensureWindowsTargetsManifestParentProtected(path string) error {
 			errors.Join(err, driftErr),
 		)
 	}
+	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+		"path":   path,
+		"object": string(managed.ObjectAdminDirectory),
+		"reason": "re-stamped the canonical hook guardian manifest folder descriptor after: " + driftErr.Error(),
+	})
 
 	return nil
 }

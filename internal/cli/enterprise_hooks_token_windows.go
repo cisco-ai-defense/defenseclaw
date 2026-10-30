@@ -205,13 +205,39 @@ func alignEnterpriseWindowsTokenOwner(dataDir, path, label string) error {
 	if err != nil {
 		return err
 	}
-	if err := setEnterpriseWindowsRuntimeProtection(filepath.Dir(path), owner, serviceSID, true); err != nil {
-		return fmt.Errorf("enterprise hooks: harden %s directory: %w", label, err)
+	// The token folder is the gateway's hooks directory, which the Guardian's
+	// data-path repair keeps at the installer's RuntimeDirectory descriptor.
+	// Stamp that same descriptor here, and only when it drifted, so the two
+	// writers agree and a healthy folder is never rewritten. The generic-rights
+	// stamp below is the fallback when the canonical repair cannot fix it;
+	// NTFS splits its inheritable entries, which the canonical check reads as
+	// a missing gateway write entry.
+	dir := filepath.Dir(path)
+	if !enterpriseWindowsTokenDirectoryCanonical(dir) {
+		if err := setEnterpriseWindowsRuntimeProtection(dir, owner, serviceSID, true); err != nil {
+			return fmt.Errorf("enterprise hooks: harden %s directory: %w", label, err)
+		}
 	}
 	if err := setEnterpriseWindowsRuntimeProtection(path, owner, serviceSID, false); err != nil {
 		return fmt.Errorf("enterprise hooks: harden %s: %w", label, err)
 	}
 	return validateEnterpriseWindowsTokenLocation(dataDir, path, label)
+}
+
+// enterpriseWindowsTokenDirectoryCanonical runs the shared canonical repair
+// on a token folder and reports whether it now holds the RuntimeDirectory
+// descriptor, already or after a logged repair.
+func enterpriseWindowsTokenDirectoryCanonical(dir string) bool {
+	for _, result := range enterpriseWindowsManagedDataPathsRepair(
+		managed.ManagedDataPaths{RuntimeDirs: []string{dir}},
+		managed.CanonicalOptions{GatewayServiceAccount: os.Getenv(managed.WindowsServiceAccountEnv)},
+	) {
+		if !sameWindowsEnterprisePathCLI(result.Path, dir) {
+			continue
+		}
+		return result.Outcome == managed.CanonicalOK || result.Outcome == managed.CanonicalRepaired
+	}
+	return false
 }
 
 func enterpriseWindowsPathOwner(path string) (*windows.SID, error) {

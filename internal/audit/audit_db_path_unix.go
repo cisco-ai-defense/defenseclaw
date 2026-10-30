@@ -40,6 +40,8 @@ func auditDBPlatformSidecarNeedsHardening(*os.File) (bool, error) { return true,
 
 func auditDBPlatformHardeningNeedsCapabilityReopen() bool { return false }
 
+func auditDBPlatformProcessCannotRestamp(*os.File) bool { return false }
+
 // validateAuditDBPlatformTrust judges the ownership + permission posture of an
 // audit-DB path element.
 //
