@@ -65,7 +65,7 @@ Turning it on adds one network call per judged tool call, to the URL you configu
 
 ### During `defenseclaw init`
 
-The init wizard asks one optional question, **Do you want to use a decision model?** The default is no. Yes asks for the endpoint URL, the model name, the token variable and, hidden, the token.
+The init wizard asks one optional question, **Do you want to use a decision model?**, after the LLM judge step and only when you turned the judge on for a connector. The default is no. Yes asks for the endpoint URL, the model name, the token variable and, hidden, the token.
 
 In scripts, pass the flags; `--yes` alone leaves it off:
 

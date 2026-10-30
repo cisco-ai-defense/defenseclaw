@@ -255,6 +255,57 @@ def test_init_request_from_flags():
         _decision_model_request(None, "http://10.0.0.1/x", "m", "X")
 
 
+@pytest.mark.parametrize("judge_connectors", [[], ["claudecode"]])
+def test_init_wizard_asks_only_when_a_judge_is_configured(judge_connectors):
+    from unittest.mock import patch
+
+    from defenseclaw.commands import cmd_init
+
+    answer: dict = {}
+    with patch.object(cmd_init, "_prompt_connector_selection", return_value=["claudecode"]), \
+            patch.object(cmd_init.terminal_checkbox, "restore_line_prompt_mode"), \
+            patch.object(cmd_init.click, "prompt", return_value="local"), \
+            patch.object(cmd_init.click, "confirm", return_value=True), \
+            patch.object(cmd_init, "_prompt_action_connectors", return_value=["claudecode"]), \
+            patch.object(cmd_init, "_current_action_connectors", return_value=[]), \
+            patch.object(cmd_init, "_supported_action_connectors", return_value=["claudecode"]), \
+            patch.object(cmd_init, "_prompt_action_policy", return_value=(None, None, None)), \
+            patch.object(cmd_init, "_current_judge_connectors", return_value=[]), \
+            patch.object(cmd_init, "_prompt_first_run_judge_connectors", return_value=judge_connectors), \
+            patch.object(cmd_init, "_prompt_first_run_decision_model", return_value={"enabled": True}) as dm_prompt:
+        cmd_init._prompt_first_run(
+            connector=None, profile=None, scanner_mode="local", with_judge=False, fail_mode=None,
+            human_approval=None, hilt_min_severity=None, start_gateway=True, verify=True,
+            rescan_agents=False, data_dir=None, decision_model_answer=answer,
+        )
+    if judge_connectors:
+        dm_prompt.assert_called_once()
+        assert answer["request"] == {"enabled": True}
+    else:
+        dm_prompt.assert_not_called()
+        assert answer.get("request") is None
+
+    # A flag already answered the question: the wizard never asks it again.
+    flagged = {"asked": True}
+    with patch.object(cmd_init, "_prompt_connector_selection", return_value=["claudecode"]), \
+            patch.object(cmd_init.terminal_checkbox, "restore_line_prompt_mode"), \
+            patch.object(cmd_init.click, "prompt", return_value="local"), \
+            patch.object(cmd_init.click, "confirm", return_value=True), \
+            patch.object(cmd_init, "_prompt_action_connectors", return_value=["claudecode"]), \
+            patch.object(cmd_init, "_current_action_connectors", return_value=[]), \
+            patch.object(cmd_init, "_supported_action_connectors", return_value=["claudecode"]), \
+            patch.object(cmd_init, "_prompt_action_policy", return_value=(None, None, None)), \
+            patch.object(cmd_init, "_current_judge_connectors", return_value=[]), \
+            patch.object(cmd_init, "_prompt_first_run_judge_connectors", return_value=["claudecode"]), \
+            patch.object(cmd_init, "_prompt_first_run_decision_model") as dm_prompt:
+        cmd_init._prompt_first_run(
+            connector=None, profile=None, scanner_mode="local", with_judge=False, fail_mode=None,
+            human_approval=None, hilt_min_severity=None, start_gateway=True, verify=True,
+            rescan_agents=False, data_dir=None, decision_model_answer=flagged,
+        )
+    dm_prompt.assert_not_called()
+
+
 def test_init_step_saves_and_reports(home, system_one):
     from defenseclaw.bootstrap import FirstRunReport
     from defenseclaw.commands.cmd_init import _apply_first_run_decision_model

@@ -2086,7 +2086,10 @@ def _prompt_first_run(
         judge_hook_connectors = []
         ux.subhead("LLM judge: skipped because no selected connector is in action mode.")
     with_judge = bool(judge_hook_connectors)
-    if decision_model_answer is not None and not decision_model_answer.get("asked"):
+    # The decision model sits in front of the LLM judge, so the question is
+    # asked only when a judge is being configured (GAP-0053). A flag already
+    # answered it ("asked"), and the flag path never reaches this prompt.
+    if with_judge and decision_model_answer is not None and not decision_model_answer.get("asked"):
         decision_model_answer["request"] = _prompt_first_run_decision_model(data_dir or "")
 
     connector_settings: list[dict] = []
