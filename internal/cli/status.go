@@ -1197,6 +1197,10 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 	if judge != "" {
 		fmt.Printf("             %s %s\n", Dim("problem:"), asciiText(judge))
 	}
+	fallbacks := judgeFallbackNote(h.Details)
+	if fallbacks != "" {
+		fmt.Printf("             %s %s\n", Dim("judge:"), asciiText(fallbacks))
+	}
 	if len(h.Details) > 0 {
 		keys := make([]string, 0, len(h.Details))
 		for k := range h.Details {
@@ -1211,6 +1215,9 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 				continue // already said in plain words above
 			}
 			if judge != "" && strings.HasPrefix(k, "judge_") {
+				continue
+			}
+			if fallbacks != "" && strings.HasPrefix(k, "judge_") && strings.Contains(k, "fallback") {
 				continue
 			}
 			line, ok := formatDetailValue(h.Details[k])
@@ -1270,6 +1277,34 @@ func judgeProblem(details map[string]interface{}) string {
 		return lead + "; " + judgeNetworkNextStep
 	}
 	return lead + "; run 'defenseclaw doctor' and 'defenseclaw setup llm --role judge'"
+}
+
+// judgeFallbackNote says how many hook checks the rules decided because the
+// LLM judge gave no verdict in time, per connector (gateway judge_fallbacks
+// details, #1395), or returns "".
+func judgeFallbackNote(details map[string]interface{}) string {
+	total, ok := formatDetailValue(details["judge_fallbacks"])
+	if !ok || total == "" || total == "0" {
+		return ""
+	}
+	note := "the rules decided " + total + " hook check(s) because the LLM judge gave no verdict in time"
+	if byConnector, ok := details["judge_fallbacks_by_connector"].(map[string]interface{}); ok && len(byConnector) > 0 {
+		names := make([]string, 0, len(byConnector))
+		for name := range byConnector {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		parts := make([]string, 0, len(names))
+		for _, name := range names {
+			n, _ := formatDetailValue(byConnector[name])
+			parts = append(parts, name+" "+n)
+		}
+		note += " (" + strings.Join(parts, ", ") + ")"
+	}
+	if last, _ := details["judge_last_fallback"].(string); last != "" {
+		note += "; last: " + last
+	}
+	return note + "; a slow judge model: set guardrail.judge.max_parallel (see the LLM judge docs)"
 }
 
 // judgeNetworkNextStep is the next step for a judge that cannot reach its

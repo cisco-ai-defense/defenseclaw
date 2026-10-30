@@ -369,6 +369,43 @@ What you get and what you give up:
   mistake. Raising the timeout gives the judge more time, and each tool call
   can then wait that long.
 
+### Let tool calls go first
+
+To keep the prompt judges and still not make tool calls wait, tell DefenseClaw
+how many requests your model server runs at once (for Ollama, its
+`OLLAMA_NUM_PARALLEL`; 1 when you are not sure):
+
+```bash
+defenseclaw config set guardrail.judge.max_parallel 1
+defenseclaw-gateway restart
+```
+
+DefenseClaw then sends at most that many judge calls at a time. A tool-call
+judge goes ahead of every waiting prompt or tool-output judge, and with 2 or
+more it always has one slot kept for it. A tool call then waits at most for
+the one judge call already running. Prompt and tool-output judges wait their
+turn within their own timeout. Verdicts do not change. The default, 0, sends
+every call at once, as before.
+
+Releases before 1.0.6 refuse this key. Remove it before you go back to one:
+`defenseclaw config unset guardrail.judge.max_parallel`.
+
+### When the judge did not answer
+
+When the rules decide a hook check because the judge gave no verdict in
+time, DefenseClaw reports it. The verdict stays the rule verdict. The reason is
+one of `timeout`, `error`, `late` (the hook answer could not wait longer; the
+judge verdict is still recorded when it comes), `busy` (too many hook judge
+calls at once) or `budget` (earlier judge calls of the same hook used its
+time). You see it in these places:
+
+- the hook's audit row (`judge_fallback` in its extra fields) and its
+  `hook.decision` record (`defenseclaw.guardrail.judge_fallback`);
+- the counter `defenseclaw.guardrail.judge.fallbacks`, by connector and reason;
+- `defenseclaw status` (Judge fallbacks), `defenseclaw-gateway status`, the
+  TUI overview and the `Detection` row of `defenseclaw doctor`, per connector,
+  counted since the gateway started its judge.
+
 ## Every flag
 
 The table follows `defenseclaw setup guardrail --help`.

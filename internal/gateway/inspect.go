@@ -1626,6 +1626,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		if left < time.Second {
 			fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (hook judge budget spent) connector=%s direction=%s; keeping regex/AID verdict\n",
 				connector, strategyDirection)
+			a.recordHookJudgeFallback(ctx, connector, judgeFallbackBudget)
 			return nil
 		}
 		timeout = min(timeout, left)
@@ -1637,20 +1638,33 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	default:
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (at capacity) connector=%s direction=%s\n",
 			connector, strategyDirection)
+		a.recordHookJudgeFallback(ctx, connector, judgeFallbackBusy)
 		return nil
 	}
 	if strings.EqualFold(toolName, "message") {
 		toolName = ""
 	}
 	pack := a.connectorRulePack(ctx, connector)
+	// One judge run reports at most one fallback (#1395): a late answer and
+	// the failure of the same run that arrives after it are one fallback.
+	var fallbackOnce sync.Once
+	fallback := func(reason string) {
+		fallbackOnce.Do(func() { a.recordHookJudgeFallback(context.WithoutCancel(ctx), connector, reason) })
+	}
 	call := func(callCtx context.Context) *ScanVerdict {
 		jctx, cancel := context.WithTimeout(callCtx, timeout)
 		defer cancel()
 		jctx = withJudgeSuppressionPack(jctx, pack)
+		var v *ScanVerdict
 		if strings.EqualFold(strategyDirection, "tool_call") {
-			return judge.RunToolJudge(jctx, toolName, content)
+			v = judge.RunToolJudge(jctx, toolName, content)
+		} else {
+			v = judge.RunJudges(jctx, judgeDirection, content, toolName)
 		}
-		return judge.RunJudges(jctx, judgeDirection, content, toolName)
+		if reason := hookJudgeCallFallback(v, jctx); reason != "" {
+			fallback(reason)
+		}
+		return v
 	}
 
 	answerEnd, bounded := hookJudgeAnswerEnd(ctx)
@@ -1683,6 +1697,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	if left <= 0 {
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge late (hook answer window spent) connector=%s direction=%s; keeping regex/AID verdict\n",
 			connector, strategyDirection)
+		fallback(judgeFallbackLate)
 		return nil
 	}
 	wait := time.NewTimer(left)
@@ -1697,6 +1712,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	}
 	fmt.Fprintf(os.Stderr, "[inspect] hook judge late (over the %s hook answer window) connector=%s direction=%s; keeping regex/AID verdict, the judge verdict is recorded when it arrives\n",
 		hookJudgeAnswerWindow, connector, strategyDirection)
+	fallback(judgeFallbackLate)
 	return nil
 }
 

@@ -17132,6 +17132,14 @@ def _check_connector_inventory(
                 )
         if judge_enabled and judge_failing:
             detail += "; judge failing: all recent calls failed, so only the rules decide"
+        by_connector = judge_details.get("judge_fallbacks_by_connector") if isinstance(judge_details, dict) else None
+        fallbacks = by_connector.get(connector) if isinstance(by_connector, dict) else None
+        if judge_enabled and isinstance(fallbacks, int) and not isinstance(fallbacks, bool) and fallbacks > 0:
+            # Hook checks the rules decided without a judge verdict (#1395).
+            detail += (
+                f"; the rules decided {fallbacks} hook check(s) because the judge gave no verdict in time"
+                " (a slow judge model: set guardrail.judge.max_parallel)"
+            )
         _emit("warn" if judge_enabled and judge_failing else "pass", "Detection", detail, r=r)
 
 

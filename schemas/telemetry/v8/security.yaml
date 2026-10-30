@@ -584,6 +584,27 @@ attributes:
     id: identity-v1
     notes: boolean
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.guardrail.judge_fallback
+  type: string
+  brief: Why the rules decided a check the LLM judge was asked to review
+  examples:
+  - timeout
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - timeout
+      - error
+      - late
+      - busy
+      - budget
+    notes: timeout|error|late|busy|budget
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.guardrail.enforced
   type: boolean
   brief: Control actually imposed
@@ -2355,6 +2376,8 @@ groups:
   - ref: defenseclaw.evaluation.id
     requirement_level: recommended
   - ref: defenseclaw.guardrail.rule_ids
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.judge_fallback
     requirement_level: recommended
   x-defenseclaw:
     legacy_bindings:
@@ -4362,6 +4385,45 @@ groups:
       mappings:
       - ref: defenseclaw.connector.source
         label: guardrail.connector
+  x-defenseclaw:
+    bucket: guardrail.evaluation
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.guardrail.judge.fallbacks
+  type: metric
+  brief: Hook checks the rules decided because the LLM judge gave no verdict in time
+  stability: stable
+  introduced_in: telemetry-registry-v3
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.metric.reason
+    requirement_level: required
+    constraints:
+      enum:
+      - timeout
+      - error
+      - late
+      - busy
+      - budget
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.guardrail.judge.fallbacks
+    instrument_type: counter
+    value_type: int64
+    unit: '{fallback}'
+    description: Hook checks the rules decided because the LLM judge timed out, failed, was late for the answer, was at capacity or had no budget left
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: guardrail.connector
+      - ref: defenseclaw.metric.reason
+        label: reason
   x-defenseclaw:
     bucket: guardrail.evaluation
     family_schema_version: 1

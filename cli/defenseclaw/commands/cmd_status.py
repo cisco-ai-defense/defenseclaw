@@ -1671,6 +1671,33 @@ def gateway_audit_write_failure(cfg) -> str:
         return ""
 
 
+def judge_fallback_summary(details: dict) -> str:
+    """Hook checks the rules decided because the judge gave no verdict in time (#1395), or ""."""
+    try:
+        total = int(details.get("judge_fallbacks") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if total <= 0:
+        return ""
+    text = f"the rules decided {total} hook check(s) because the judge gave no verdict in time"
+    by_connector = details.get("judge_fallbacks_by_connector")
+    if isinstance(by_connector, dict) and by_connector:
+        text += " (" + ", ".join(f"{name} {by_connector[name]}" for name in sorted(by_connector)) + ")"
+    last = str(details.get("judge_last_fallback") or "").strip()
+    if last:
+        text += f"; last: {last}"
+    return text
+
+
+def _print_judge_fallbacks(details: dict) -> None:
+    summary = judge_fallback_summary(details)
+    if summary:
+        _status_row(
+            "Judge fallbacks",
+            ux._style(summary + "; a slow judge model: set guardrail.judge.max_parallel", fg="yellow"),
+        )
+
+
 def _print_llm_judge(health: dict | None) -> None:
     """Show the LLM judge row when the gateway has made judge calls.
 
@@ -1679,7 +1706,10 @@ def _print_llm_judge(health: dict | None) -> None:
     """
     guardrail = health.get("guardrail") if isinstance(health, dict) else None
     details = guardrail.get("details") if isinstance(guardrail, dict) else None
-    if not isinstance(details, dict) or not details.get("judge_state"):
+    if not isinstance(details, dict):
+        return
+    _print_judge_fallbacks(details)
+    if not details.get("judge_state"):
         return
     state = str(details.get("judge_state"))
     total = details.get("judge_recent_calls", 0)

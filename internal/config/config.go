@@ -2400,6 +2400,13 @@ type JudgeConfig struct {
 	// gateway applies a 5s default when unset.
 	HookTimeout float64 `mapstructure:"hook_timeout" yaml:"hook_timeout,omitempty"`
 
+	// MaxParallel bounds how many judge calls the gateway sends to the
+	// judge model at once; 0 (the default) sets no bound. With a bound,
+	// tool-call judging goes ahead of prompt judging and keeps one of the
+	// slots when there are two or more, so a slow local model does not
+	// queue a pending tool call behind a turn's prompt checks (#1395).
+	MaxParallel int `mapstructure:"max_parallel" yaml:"max_parallel,omitempty"`
+
 	// LLM overrides the top-level llm: block for the LLM judge. Prefer
 	// Config.ResolveLLM("guardrail.judge") over reading LLM / legacy
 	// Model directly.
