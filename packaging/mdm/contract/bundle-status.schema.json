@@ -95,6 +95,10 @@
           "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/sessionRestartStatus",
           "description": "Agent sessions that must restart to pick up the confirmed bundle. A status refused before the live session scan (not_managed, state_invalid) reports state unknown, count 0 and no entries."
         },
+        "enforcement_pending": {
+          "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/enforcementPending",
+          "description": "sessions_restart_required as a count and connector names, without user names. Omitted when the scan found none or is unknown."
+        },
         "alert_only_rule_count": {
           "type": "integer",
           "minimum": 0

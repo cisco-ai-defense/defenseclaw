@@ -194,6 +194,10 @@ type Result struct {
 	// enforces; nil (omitted) when neither exists.
 	Bundle      *BundleState   `json:"bundle,omitempty"`
 	LastRefusal *BundleRefusal `json:"last_refusal,omitempty"`
+	// EnforcementPending counts the running agent sessions this result
+	// names as not enforced until they restart, with their connector names;
+	// omitted when there are none (enforcement_pending.go).
+	EnforcementPending *EnforcementPending `json:"enforcement_pending,omitempty"`
 	// Scanners is the standalone Windows scanner runtime (skill, MCP and
 	// plugin scanners); nil (omitted) everywhere else.
 	Scanners *ScannerRuntime `json:"scanners,omitempty"`
@@ -221,6 +225,9 @@ type Result struct {
 	// coverage_complete are false (MarkSecurityIncomplete,
 	// MarkCoverageIncomplete); Finish names them on Linux and macOS.
 	securityBy, coverageBy []string
+	// pendingSessions are the sessions NotePendingSession recorded, by
+	// process id.
+	pendingSessions map[int]string
 }
 
 // CodeSecurityIncomplete is the warning that names why security_complete
@@ -506,9 +513,15 @@ func (r *Result) AddWarning(code, message string) {
 // not verify an enrolled target's hooks, so a script that read the flag
 // was told the host was protected (GAP-0664).
 func (r *Result) Finish(goos string, failureCode int) int {
+	var scan *SessionRestartStatus
 	if r.Bundle != nil && r.Bundle.SessionsRestartRequired != nil && r.Bundle.SessionsRestartRequired.Count > 0 {
-		code, _ := SessionWarning(*r.Bundle.SessionsRestartRequired)
+		scan = r.Bundle.SessionsRestartRequired
+		code, _ := SessionWarning(*scan)
 		r.MarkCoverageIncomplete(code)
+	}
+	// A result read back from another process keeps the summary it carried.
+	if pending := summarizePending(r.pendingSessions, scan); pending != nil {
+		r.EnforcementPending = pending
 	}
 	r.OK = len(r.Errors) == 0
 	if !r.OK {

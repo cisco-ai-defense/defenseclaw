@@ -707,6 +707,16 @@ Exit 0.
   connector names can be incomplete when `count` is above 20. The integer
   `sessions_restart_required` of a receipt file (4.9) is the count at
   confirmation, not a live value.
+
+  The apply result, `<os> status` and `bundle status` also carry
+  `enforcement_pending` (`count` and `connectors`, never a user name or a
+  pid) when they name such sessions; it is omitted when there are none. In a
+  lifecycle result it also counts the sessions of the
+  `agent_sessions_restart_required` warnings (sessions that started before
+  the deployment, a newly enabled connector, an enrollment or a guardian
+  restore gave them hooks), each session once. It is safe to forward as it
+  is. An unknown scan is not in it: read `sessions_restart_required.state`
+  for that.
 - **The agent's own receipt id** (for its list, section 2.6):
   `bundle.receipt_id` when `bundle.bundle_id` is the submitted id and the
   apply was not a repeat of the current bundle (a confirmed or failed

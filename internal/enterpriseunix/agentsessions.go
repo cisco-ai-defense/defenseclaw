@@ -519,6 +519,11 @@ func (l *lifecycle) warnAgentSessions(sessions []agentSession, reason func(sessi
 			server[session.UID] = true
 		}
 		byUID[session.UID] = append(byUID[session.UID], label)
+		connector := ""
+		if !session.Unknown {
+			connector = agentConnectors[session.Agent]
+		}
+		l.result.NotePendingSession(connector, session.PID)
 	}
 	uids := make([]int, 0, len(byUID))
 	for uid := range byUID {
