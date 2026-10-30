@@ -27,12 +27,12 @@ import (
 	"net/http"
 	"net/url"
 	pathpkg "path"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -320,7 +320,7 @@ func (c *UnixClient) Events(ctx context.Context, batch EventBatch) error {
 }
 
 // connectorTarget is a connector name in a relayed path.
-var connectorTarget = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+var connectorTarget = lazyregexp.New(`^[a-z][a-z0-9-]{0,31}$`)
 
 // inspectTargets are the inspect kinds of a relayed inspect call.
 var inspectTargets = map[string]bool{"tool": true, "request": true, "response": true, "tool-response": true}

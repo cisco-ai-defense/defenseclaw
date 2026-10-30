@@ -17,10 +17,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
 )
 
@@ -409,7 +409,7 @@ func (a *dsclAccounts) Remove(ctx context.Context, name string) error {
 
 // dsclOpenDirectoryError finds the Open Directory error name in dscl output
 // ("DS Error: -14120 (eDSPermissionError)").
-var dsclOpenDirectoryError = regexp.MustCompile(`\beDS[A-Za-z]+\b`)
+var dsclOpenDirectoryError = lazyregexp.New(`\beDS[A-Za-z]+\b`)
 
 // errNoFullDiskAccess is why macOS refuses to delete a user record with
 // eDSPermissionError (see dsclDeleteError).

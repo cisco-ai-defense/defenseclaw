@@ -12,9 +12,9 @@ package enterprisestatus
 
 import (
 	"encoding/json"
-	"regexp"
 	"sort"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -34,7 +34,7 @@ const (
 	identitySourceMaxSeconds = 1 << 40
 )
 
-var identitySourcePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+var identitySourcePattern = lazyregexp.New(`^[a-z][a-z0-9_]{0,31}$`)
 
 // identityDirectories are the useridentity.Directory values a source may
 // name.

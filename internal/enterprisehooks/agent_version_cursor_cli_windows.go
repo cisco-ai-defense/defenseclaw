@@ -11,9 +11,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -37,7 +37,7 @@ const windowsCursorAgentMaxVersionEntries = 256
 // windowsCursorAgentBuildName is the launcher's build-directory filter: the
 // YYYY.MM.DD-commit form and the newer YYYY.MM.DD-HH-MM-SS-commit form. The
 // launcher matches case-insensitively.
-var windowsCursorAgentBuildName = regexp.MustCompile(`^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:-\d{2}-\d{2}-\d{2})?-[0-9A-Fa-f]+$`)
+var windowsCursorAgentBuildName = lazyregexp.New(`^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:-\d{2}-\d{2}-\d{2})?-[0-9A-Fa-f]+$`)
 
 // windowsCursorAgentBuildDate is the launcher's sort key for a build name:
 // the date as the number YYYYMMDD.

@@ -23,8 +23,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -46,7 +47,7 @@ const (
 	MaxDeliveryIDBytes = 128
 )
 
-var receiptIDPattern = regexp.MustCompile(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+var receiptIDPattern = lazyregexp.New(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
 
 // PublicReceipt is receipt.json. Decoding is lenient so an older gateway
 // reads the file of a newer lifecycle; readers validate every field again.

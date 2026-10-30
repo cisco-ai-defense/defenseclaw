@@ -10,14 +10,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const devinPinnedCLIVersion = "3000.4.25"
 
-var devinVersionTokens = regexp.MustCompile(`v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?`)
+var devinVersionTokens = lazyregexp.New(`v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?`)
 
 func verifyDevinExecutableAdmission(executable string) error {
 	expected, err := defaultDevinExecutable()

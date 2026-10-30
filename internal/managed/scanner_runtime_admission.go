@@ -14,9 +14,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // StandaloneWindowsScannerRuntimeAdmissionName is the record, in the scanner
@@ -52,7 +53,7 @@ const (
 // maxScannerRuntimeAdmissionBytes bounds the record read.
 const maxScannerRuntimeAdmissionBytes = 4 << 10
 
-var scannerRuntimeDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var scannerRuntimeDigestPattern = lazyregexp.New(`^[0-9a-f]{64}$`)
 
 // ErrScannerRuntimeNotAdmitted marks an installed scanner runtime that is not
 // the one the lifecycle admitted.

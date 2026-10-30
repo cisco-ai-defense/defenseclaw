@@ -7,13 +7,13 @@ import (
 	"context"
 	"errors"
 	"math"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -23,7 +23,7 @@ import (
 
 const judgeV8Producer = "gateway.llm_judge"
 
-var judgeV8IdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+var judgeV8IdentifierPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
 type judgeTraceV8Runtime interface {
 	StartJudgeTrace(context.Context, observability.SpanGuardrailJudgeInput) (context.Context, *observabilityruntime.JudgeTrace, error)

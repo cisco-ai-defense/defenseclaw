@@ -6,13 +6,13 @@ package gateway
 import (
 	"context"
 	"math"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -29,7 +29,7 @@ const (
 	hookLifecycleV8Failed
 )
 
-var hookV8IdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+var hookV8IdentifierPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
 const hookLifecycleV8Producer = "gateway.hook.lifecycle"
 

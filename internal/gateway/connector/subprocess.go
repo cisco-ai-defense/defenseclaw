@@ -25,12 +25,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"text/template"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -1582,8 +1582,8 @@ func refreshHookFailModesLocked(hookDir string, mode func(connector string) stri
 // (peer.inc _dc_shim_transport_failure), shimOutageConnectorRE the connector
 // whose outage mode the shim asks at call time.
 var (
-	shimInstalledModeRE   = regexp.MustCompile(`( ts mode=")(open|closed)(" now="")`)
-	shimOutageConnectorRE = regexp.MustCompile(`hook-outage-mode --connector ([a-z][a-z0-9-]*) `)
+	shimInstalledModeRE   = lazyregexp.New(`( ts mode=")(open|closed)(" now="")`)
+	shimOutageConnectorRE = lazyregexp.New(`hook-outage-mode --connector ([a-z][a-z0-9-]*) `)
 )
 
 // refreshShimFailModes sets the installed outage mode of each PATH shim in
@@ -2687,7 +2687,7 @@ func ResolveSubprocessPolicy(preferred SubprocessPolicy) SubprocessPolicy {
 }
 
 // shimConnectorNameRE is a connector name a shim can carry unquoted.
-var shimConnectorNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+var shimConnectorNameRE = lazyregexp.New(`^[a-z][a-z0-9-]*$`)
 
 // SetupSubprocessEnforcement wires the appropriate subprocess enforcement
 // tier based on the resolved policy. connectorName is the installing

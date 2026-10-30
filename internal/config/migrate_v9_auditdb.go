@@ -27,7 +27,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -35,14 +34,16 @@ import (
 	// The audit store's driver; every binary that links this package links
 	// it already.
 	_ "modernc.org/sqlite"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Automatic scan reasons have fixed formats. Operator reasons are arbitrary
 // text, so match the watcher's complete stem and its known suffix separators.
 // Scanner and quarantine failure reasons carry an arbitrary error after their
 // distinctive prefixes; these are also automatic journal rows.
-var v9AutomaticReasonPattern = regexp.MustCompile(`^(?:post-scan: |post-install scan: |scan: )[0-9]+ findings, max=[A-Z]+$`)
-var v9WatchReasonPattern = regexp.MustCompile(`^auto-block: watch detected [A-Z]+ findings(?: \(scanner=[^)]+\))?(?:$|: |; )`)
+var v9AutomaticReasonPattern = lazyregexp.New(`^(?:post-scan: |post-install scan: |scan: )[0-9]+ findings, max=[A-Z]+$`)
+var v9WatchReasonPattern = lazyregexp.New(`^auto-block: watch detected [A-Z]+ findings(?: \(scanner=[^)]+\))?(?:$|: |; )`)
 
 func v9AutomaticInstallReason(reason string) bool {
 	reason = strings.TrimSpace(reason)

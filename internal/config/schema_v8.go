@@ -22,6 +22,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
 	"gopkg.in/yaml.v3"
@@ -39,8 +40,8 @@ var (
 )
 
 var (
-	observabilityV8AdditionalPropertyPattern = regexp.MustCompile(`additionalProperties ((?:'(?:\\'|[^'])+'(?:, )?)+) not allowed`)
-	observabilityV8QuotedPropertyPattern     = regexp.MustCompile(`'((?:\\'|[^'])+)'`)
+	observabilityV8AdditionalPropertyPattern = lazyregexp.New(`additionalProperties ((?:'(?:\\'|[^'])+'(?:, )?)+) not allowed`)
+	observabilityV8QuotedPropertyPattern     = lazyregexp.New(`'((?:\\'|[^'])+)'`)
 )
 
 type V8SchemaError struct {
@@ -621,8 +622,8 @@ func v8SchemaPatternWords(value any) string {
 }
 
 var (
-	v8SchemaAnyCaseWord = regexp.MustCompile(`^(?:\[[A-Za-z][A-Za-z]\])+$`)
-	v8SchemaPlainWord   = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	v8SchemaAnyCaseWord = lazyregexp.New(`^(?:\[[A-Za-z][A-Za-z]\])+$`)
+	v8SchemaPlainWord   = lazyregexp.New(`^[A-Za-z0-9_-]+$`)
 )
 
 // v8SchemaSizeExpectation words a length, item or key count limit: "a string

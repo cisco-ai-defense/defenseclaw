@@ -34,7 +34,6 @@ import (
 	"fmt"
 	"os"
 	"os/user"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -854,7 +854,7 @@ func gatewayUnavailableError(err error) error {
 
 // dialAddress is the address a gRPC "Error while dialing: dial tcp ADDR:"
 // failure names.
-var dialAddress = regexp.MustCompile(`dial tcp ([^\s"]+?):\s`)
+var dialAddress = lazyregexp.New(`dial tcp ([^\s"]+?):\s`)
 
 // gatewayUnavailableText says in words why the OpenShell gateway does not
 // answer; known is false for a failure it cannot name.

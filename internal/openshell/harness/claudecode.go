@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
@@ -147,7 +148,7 @@ const ClaudeCodeMantleDefaultModel = "anthropic.claude-sonnet-5"
 // bedrockRuntimeClaudeModel matches an Amazon Bedrock Runtime Claude model
 // id: an optional inference-profile prefix (us., eu., global., ...) and an
 // optional -YYYYMMDD-vN:M version, around the Mantle id.
-var bedrockRuntimeClaudeModel = regexp.MustCompile(`^(?:[a-z]{2,6}(?:-[a-z]+)?\.)?(anthropic\.claude-[a-z0-9-]+?)(?:-[0-9]{8}-v[0-9]+(?::[0-9]+)?)?$`)
+var bedrockRuntimeClaudeModel = lazyregexp.New(`^(?:[a-z]{2,6}(?:-[a-z]+)?\.)?(anthropic\.claude-[a-z0-9-]+?)(?:-[0-9]{8}-v[0-9]+(?::[0-9]+)?)?$`)
 
 // MantleClaudeModel returns the Mantle id of a Bedrock Runtime Claude model
 // id (us.anthropic.claude-haiku-4-5-20251001-v1:0 is

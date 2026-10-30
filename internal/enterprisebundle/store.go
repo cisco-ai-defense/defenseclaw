@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -97,7 +98,7 @@ const (
 )
 
 var (
-	receiptIDPattern  = regexp.MustCompile(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	receiptIDPattern  = lazyregexp.New(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
 	versionDirPattern = regexp.MustCompile(`^v[1-9][0-9]{0,15}-[0-9A-HJKMNP-TV-Z]{8}(?:-[br]-[0-7][0-9A-HJKMNP-TV-Z]{25})?$`)
 )
 

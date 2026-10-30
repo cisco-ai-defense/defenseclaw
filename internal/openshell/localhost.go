@@ -17,9 +17,10 @@
 package openshell
 
 import (
-	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // localhostLookupRE matches a program's report that it could not resolve
@@ -27,7 +28,7 @@ import (
 // 127.0.0.53:53: server misbehaving" and "lookup localhost: no such host",
 // Node's "getaddrinfo EAI_AGAIN localhost" and curl's "Could not resolve
 // host: localhost".
-var localhostLookupRE = regexp.MustCompile(`(?i)(\blookup ([a-z0-9_-]+\.)*localhost(\.localdomain)?(:| on )` +
+var localhostLookupRE = lazyregexp.New(`(?i)(\blookup ([a-z0-9_-]+\.)*localhost(\.localdomain)?(:| on )` +
 	`|\bgetaddrinfo E[A-Z_]+ ([a-z0-9_-]+\.)*localhost\b` +
 	`|\bcould not resolve host:? '?([a-z0-9_-]+\.)*localhost\b)`)
 

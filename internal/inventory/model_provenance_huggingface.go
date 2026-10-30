@@ -24,11 +24,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -45,7 +46,7 @@ const (
 	huggingFaceHubStaleGrace        = 7 * 24 * time.Hour
 )
 
-var huggingFaceRepoSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?$`)
+var huggingFaceRepoSegmentPattern = lazyregexp.New(`^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?$`)
 
 type huggingFaceModelInfo struct {
 	ID         string

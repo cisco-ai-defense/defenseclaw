@@ -29,7 +29,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -40,6 +39,7 @@ import (
 
 	toml "github.com/pelletier/go-toml/v2"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -1087,7 +1087,7 @@ func (g *GatewayConfigurator) Plan(ctx context.Context, ch GatewayChanges) (*Gat
 }
 
 // unitUMask is a umask as systemd's UMask= takes it.
-var unitUMask = regexp.MustCompile(`^0?[0-7]{3}$`)
+var unitUMask = lazyregexp.New(`^0?[0-7]{3}$`)
 
 // unitDropInPath is the drop-in DefenseClaw gives the gateway's user unit
 // (the unit file itself is left alone, wherever it is: the package's
@@ -2563,7 +2563,7 @@ func readGatewayFileOf(path string, foreign bool) ([]byte, fs.FileInfo, error) {
 // set up, the gateway (one runs on a machine) is that account's.
 var ErrForeignGatewayConfig = errors.New("this account may not read another account's gateway configuration")
 
-var envAssignment = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$`)
+var envAssignment = lazyregexp.New(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$`)
 
 // parseEnvFile reads systemd EnvironmentFile syntax: KEY=VALUE lines,
 // '#' and ';' comments, optional single or double quotes. Later
@@ -2600,7 +2600,7 @@ func unquoteEnvValue(v string) string {
 	return v
 }
 
-var plainEnvValue = regexp.MustCompile(`^[A-Za-z0-9_./:,@%+=-]*$`)
+var plainEnvValue = lazyregexp.New(`^[A-Za-z0-9_./:,@%+=-]*$`)
 
 func quoteEnvValue(v string) string {
 	if plainEnvValue.MatchString(v) {

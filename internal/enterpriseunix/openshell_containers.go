@@ -17,10 +17,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 )
@@ -39,9 +39,9 @@ const (
 )
 
 var (
-	sandboxContainerIDRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	openshellSandboxIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	sandboxVolumeNameRE  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$`)
+	sandboxContainerIDRE = lazyregexp.New(`^[0-9a-f]{64}$`)
+	openshellSandboxIDRE = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	sandboxVolumeNameRE  = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$`)
 )
 
 // purgeDockerNamespaces are the sandbox namespaces the managed gateways keep

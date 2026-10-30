@@ -12,14 +12,15 @@ package config
 
 import (
 	"errors"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
-var observabilityV8SemanticPathPattern = regexp.MustCompile(`^(observability(?:\.[A-Za-z0-9_.-]+|\[[0-9]+\])*)`)
+var observabilityV8SemanticPathPattern = lazyregexp.New(`^(observability(?:\.[A-Za-z0-9_.-]+|\[[0-9]+\])*)`)
 
 type V8SemanticError struct {
 	Source        string

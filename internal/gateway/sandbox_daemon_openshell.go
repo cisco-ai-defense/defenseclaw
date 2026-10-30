@@ -29,7 +29,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -38,6 +37,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -884,7 +884,7 @@ func (o *accountOpenShell) launchDomain(ctx context.Context) string {
 	return domain
 }
 
-var launchdLastExit = regexp.MustCompile(`last exit code = (\d+)`)
+var launchdLastExit = lazyregexp.New(`last exit code = (\d+)`)
 
 // unitState says what the gateway unit is doing, for a start that timed out.
 // Exit status 78 is the exec shim's: a prerequisite of the account is missing.
@@ -1051,7 +1051,7 @@ func firstOutputLine(s string) string {
 
 // driftFieldInvalid is what an event's settings field may not hold
 // (defenseclaw.openshell.settings.field is ^[a-z][a-z0-9_.]{0,63}$).
-var driftFieldInvalid = regexp.MustCompile(`[^a-z0-9_.]+`)
+var driftFieldInvalid = lazyregexp.New(`[^a-z0-9_.]+`)
 
 // driftEventField is a drift's field as the settings_drift record names it:
 // "gateway listener" is gateway_listener.

@@ -19,9 +19,9 @@ package audit
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -41,7 +41,7 @@ const (
 
 // sandboxExecIDPattern is a Tetragon execution id (standard base64), as the
 // registry declares defenseclaw.sandbox.process.exec_id.
-var sandboxExecIDPattern = regexp.MustCompile(`^[A-Za-z0-9+/]{4,252}={0,2}$`)
+var sandboxExecIDPattern = lazyregexp.New(`^[A-Za-z0-9+/]{4,252}={0,2}$`)
 
 // Bounds of a process record, as the registry declares them.
 const (

@@ -10,13 +10,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -27,19 +27,19 @@ import (
 // action and its fallback handling unchanged.
 
 var (
-	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"]`)
-	trustedPathlibWriteText              = regexp.MustCompile(`\bp\.write_text\s*\(`)
-	trustedPathlibSafeReassignment       = regexp.MustCompile(`^\s*;\s*p\s*=\s*(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*;\s*$`)
-	trustedPythonSimpleChdir             = regexp.MustCompile(`^os\.chdir\s*\(\s*(?:Path\.home\(\)\s*/\s*['"]\.ssh['"]|['"][^'"\\]*['"])\s*\)$`)
-	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
-	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
-	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+(?:/d\s+)?/c\s+(.+)$`)
-	trustedSoleCMDInvoke                 = regexp.MustCompile("^(?i:cmd(?:\\.exe)?)[ \t]+(?i:/d[ \t]+)?(?i:/c)[ \t]+\"[^\"$`\r\n]*\"[ \t]*$")
-	trustedOutFileAppend                 = regexp.MustCompile(`(?is)^\s*(?:"[^"\r\n]*"|'[^'\r\n]*')\s*\|\s*out-file\s+-append\s+-filepath\s+(.+?)\s*$`)
-	trustedInterpreterKeysPath           = regexp.MustCompile(`(?:~|\$HOME|\$ENV\{HOME\}|/[A-Za-z0-9_./ -]+)/\.ssh/authorized_keys(?:2)?`)
-	trustedInterpreterOpenCall           = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync)\s*\(`)
-	trustedInterpreterWriteMode          = regexp.MustCompile(`['"](?:[awx](?:[bt]?\+?|\+[bt]?)|r(?:[bt]?\+|\+[bt]?)|>>|>)['"]`)
-	trustedInterpreterWriteCall          = regexp.MustCompile(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
+	trustedPathlibAuthorizedKeysWrite    = lazyregexp.New(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"]`)
+	trustedPathlibWriteText              = lazyregexp.New(`\bp\.write_text\s*\(`)
+	trustedPathlibSafeReassignment       = lazyregexp.New(`^\s*;\s*p\s*=\s*(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*;\s*$`)
+	trustedPythonSimpleChdir             = lazyregexp.New(`^os\.chdir\s*\(\s*(?:Path\.home\(\)\s*/\s*['"]\.ssh['"]|['"][^'"\\]*['"])\s*\)$`)
+	trustedPythonPathAuthorizedKeysWrite = lazyregexp.New(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
+	trustedPerlAuthorizedKeysWrite       = lazyregexp.New(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
+	trustedCMDInvoke                     = lazyregexp.New(`(?is)^cmd(?:\.exe)?\s+(?:/d\s+)?/c\s+(.+)$`)
+	trustedSoleCMDInvoke                 = lazyregexp.New("^(?i:cmd(?:\\.exe)?)[ \t]+(?i:/d[ \t]+)?(?i:/c)[ \t]+\"[^\"$`\r\n]*\"[ \t]*$")
+	trustedOutFileAppend                 = lazyregexp.New(`(?is)^\s*(?:"[^"\r\n]*"|'[^'\r\n]*')\s*\|\s*out-file\s+-append\s+-filepath\s+(.+?)\s*$`)
+	trustedInterpreterKeysPath           = lazyregexp.New(`(?:~|\$HOME|\$ENV\{HOME\}|/[A-Za-z0-9_./ -]+)/\.ssh/authorized_keys(?:2)?`)
+	trustedInterpreterOpenCall           = lazyregexp.New(`\b(?:open|File\.open|fs\.openSync)\s*\(`)
+	trustedInterpreterWriteMode          = lazyregexp.New(`['"](?:[awx](?:[bt]?\+?|\+[bt]?)|r(?:[bt]?\+|\+[bt]?)|>>|>)['"]`)
+	trustedInterpreterWriteCall          = lazyregexp.New(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
 )
 
 // soleCMDInvocation reports a PowerShell command line that is nothing but one

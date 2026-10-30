@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -29,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
@@ -57,7 +57,7 @@ const (
 	maxWireValueBytes = 512
 )
 
-var secretReferencePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,255}$`)
+var secretReferencePattern = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]{0,255}$`)
 
 type ErrorCode string
 

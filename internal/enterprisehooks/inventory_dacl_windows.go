@@ -10,12 +10,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -108,7 +108,7 @@ var inventoryDACLProfileFiles = []string{
 // gatewayServiceNamePattern matches the certification-scoped gateway service
 // name. The scope suffix (10 lowercase hex chars) is generated at install time
 // and shared across CertGateway/CertGuardian/CertEnumerator/CertCMIDBroker.
-var gatewayServiceNamePattern = regexp.MustCompile(`^DefenseClawCertGateway_[a-f0-9]{10}$`)
+var gatewayServiceNamePattern = lazyregexp.New(`^DefenseClawCertGateway_[a-f0-9]{10}$`)
 
 // productionGatewayServiceName is the un-scoped gateway service name used by
 // production installs (no cert suffix).

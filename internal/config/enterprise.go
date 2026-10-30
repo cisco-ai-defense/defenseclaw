@@ -17,7 +17,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -28,6 +27,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 )
@@ -443,8 +443,8 @@ const (
 const MaxTetragonEnforceAcks = 4
 
 var (
-	tetragonBurnInPattern     = regexp.MustCompile(`^[0-9]{1,4}h$`)
-	tetragonEnforceAckPattern = regexp.MustCompile(`^sha256:[0-9a-f]{12}$`)
+	tetragonBurnInPattern     = lazyregexp.New(`^[0-9]{1,4}h$`)
+	tetragonEnforceAckPattern = lazyregexp.New(`^sha256:[0-9a-f]{12}$`)
 )
 
 // TetragonEnforceAcks is enterprise.tetragon.enforce_ack: the kernel_policy
@@ -808,8 +808,8 @@ func (e EnterpriseCoexistenceConfig) SelfUpdateDisabled() bool {
 }
 
 var (
-	enterpriseConnectorNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
-	enterpriseSHA256Pattern        = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	enterpriseConnectorNamePattern = lazyregexp.New(`^[a-z][a-z0-9_-]{0,63}$`)
+	enterpriseSHA256Pattern        = lazyregexp.New(`^[0-9a-f]{64}$`)
 )
 
 const secureClientFleetUnsupported = "fleet.enabled is unsupported for the Secure Client enterprise profile: its managed installers do not ship the Fleet policy compiler and Python runtime; disable Fleet or deploy the standalone profile on a separate host"
@@ -922,8 +922,8 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 }
 
 var (
-	enterpriseOpenShellExactVersion = regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.([0-9]+)$`)
-	enterpriseOpenShellVersionRange = regexp.MustCompile(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9]+\.[0-9]+))?$`)
+	enterpriseOpenShellExactVersion = lazyregexp.New(`^([0-9]+)\.([0-9]+)\.([0-9]+)$`)
+	enterpriseOpenShellVersionRange = lazyregexp.New(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9]+\.[0-9]+))?$`)
 )
 
 // validateEnterpriseOpenShell checks enterprise.openshell (standalone only;

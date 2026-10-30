@@ -6,13 +6,13 @@ package gateway
 import (
 	"context"
 	"math"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -87,7 +87,7 @@ func apiAuthenticationFailureFactsFor(ctx context.Context, route, connectorName 
 }
 
 // authFailureRefPattern is the shape the family's *_ref fields accept.
-var authFailureRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+var authFailureRefPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
 func (f apiAuthenticationFailureFacts) principalRef() observability.Optional[string] {
 	if f.Principal == "" || len(f.Principal) > 256 || !authFailureRefPattern.MatchString(f.Principal) {

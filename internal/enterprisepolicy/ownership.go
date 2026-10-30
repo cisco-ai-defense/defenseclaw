@@ -18,12 +18,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const ownershipSchemaVersion = 1
@@ -58,7 +58,7 @@ type ownershipRecord struct {
 	RestoredAt string `json:"restored_at,omitempty"`
 }
 
-var recordNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+var recordNamePattern = lazyregexp.New(`^[a-z][a-z0-9_-]{0,63}$`)
 
 func recordPath(opts Options, connector string) (string, error) {
 	if opts.StateDir == "" {

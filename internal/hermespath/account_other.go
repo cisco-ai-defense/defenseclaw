@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -24,6 +23,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // accountHomeDir is the account's ~/.hermes. VerifyAccountHome proves that
@@ -244,7 +245,7 @@ func expandAccountHome(value, userHome string) string {
 }
 
 // hermesHomeName matches the variable name HERMES_HOME, not a longer name.
-var hermesHomeName = regexp.MustCompile(`(^|[^A-Za-z0-9_])HERMES_HOME($|[^A-Za-z0-9_])`)
+var hermesHomeName = lazyregexp.New(`(^|[^A-Za-z0-9_])HERMES_HOME($|[^A-Za-z0-9_])`)
 
 // startupFileEvidence reports a shell startup file that names HERMES_HOME
 // outside a comment: only the shell can tell what it sets.

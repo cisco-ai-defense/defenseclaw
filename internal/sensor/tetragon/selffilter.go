@@ -18,10 +18,10 @@ package tetragon
 
 import (
 	"path"
-	"regexp"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	pb "github.com/defenseclaw/defenseclaw/third_party/tetragon/api/v1/tetragon"
 )
 
@@ -178,7 +178,7 @@ func isShell(binary string) bool { return shells[path.Base(binary)] }
 
 // hookToken is a connector, event or contract token of the native hook's
 // command line (the shape internal/enterprisepolicy validates).
-var hookToken = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+var hookToken = lazyregexp.New(`^[A-Za-z0-9._:-]{1,64}$`)
 
 // classify decides a newly exec'd process's role.
 func (m *Mapper) classify(info *procInfo) {

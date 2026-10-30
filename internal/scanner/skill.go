@@ -25,12 +25,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -39,7 +39,7 @@ import (
 // accepts a well-formed judge answer from any supported model (GAP-2609).
 const judgeCompatSkillScanner = "defenseclaw-skill-scanner"
 
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+var ansiRe = lazyregexp.New(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // liteLLMModel returns the model string shaped for LiteLLM /
 // provider-native routers. LiteLLM accepts “"provider/model-id"“

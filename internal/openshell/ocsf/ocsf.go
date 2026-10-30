@@ -35,9 +35,10 @@ import (
 	"errors"
 	"net"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // ErrNotShorthand reports a message that is not an OCSF shorthand line.
@@ -233,7 +234,7 @@ func IsShorthand(level, target string) bool {
 
 // head matches "<CLASS>[:<ACTIVITY>] [<SEV>]" with an optional leading
 // "HH:MM:SS.mmm " timestamp. Activities may contain spaces ("NO ACTION").
-var head = regexp.MustCompile(`^(?:\d{2}:\d{2}:\d{2}\.\d{3} )?([A-Z]+)(?::([^\[\]]*?))? \[(INFO|LOW|MED|HIGH|CRIT|FATAL)\]`)
+var head = lazyregexp.New(`^(?:\d{2}:\d{2}:\d{2}\.\d{3} )?([A-Z]+)(?::([^\[\]]*?))? \[(INFO|LOW|MED|HIGH|CRIT|FATAL)\]`)
 
 // Parse parses one shorthand message. It returns ErrNotShorthand, together
 // with a Record that has only Raw set, when msg does not begin with a class
@@ -483,7 +484,7 @@ func cutLast(s, sep string) (before, after string, found bool) {
 
 // actorPattern parses "name(pid)": the greedy name leaves the pid of the
 // last parenthesized number, so a binary named "x(1)" cannot choose it.
-var actorPattern = regexp.MustCompile(`^(.+)\((-?\d+)\)$`)
+var actorPattern = lazyregexp.New(`^(.+)\((-?\d+)\)$`)
 
 // setActor parses "name(pid)"; it reports false when s is not an actor.
 func (r *Record) setActor(s string) bool {

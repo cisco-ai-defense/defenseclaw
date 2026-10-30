@@ -24,12 +24,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/gitsafe"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // gitIdentity is the author/committer of every commit this package writes.
@@ -228,7 +228,7 @@ func splitNUL(b []byte) []string {
 	return parts
 }
 
-var oidRE = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
+var oidRE = lazyregexp.New(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 
 func isOID(s string) bool { return oidRE.MatchString(s) }
 
@@ -241,7 +241,7 @@ func (v gitVersion) atLeast(major, minor int) bool {
 
 func (v gitVersion) String() string { return fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch) }
 
-var gitVersionRE = regexp.MustCompile(`git version (\d+)\.(\d+)(?:\.(\d+))?`)
+var gitVersionRE = lazyregexp.New(`git version (\d+)\.(\d+)(?:\.(\d+))?`)
 
 // gitVersionCache remembers the host git version once a probe succeeds. A
 // failed probe is not remembered: it may only mean that the caller's

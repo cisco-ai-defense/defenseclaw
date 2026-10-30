@@ -25,13 +25,13 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -114,11 +114,11 @@ const maxStoreFileBytes = 16 << 20
 const expiredPendingKeep = time.Hour
 
 var (
-	idPattern          = regexp.MustCompile(`^` + IDPrefix + `[a-z2-7]{26}$`)
-	bindingIDPattern   = regexp.MustCompile(`^sb_[0-9a-f]{32}$`)
-	sandboxIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	sandboxNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	uidFilePattern     = regexp.MustCompile(`^(0|[1-9][0-9]{0,9})\.json$`)
+	idPattern          = lazyregexp.New(`^` + IDPrefix + `[a-z2-7]{26}$`)
+	bindingIDPattern   = lazyregexp.New(`^sb_[0-9a-f]{32}$`)
+	sandboxIDPattern   = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	sandboxNamePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	uidFilePattern     = lazyregexp.New(`^(0|[1-9][0-9]{0,9})\.json$`)
 	idEncoding         = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 )
 

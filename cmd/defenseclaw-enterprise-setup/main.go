@@ -17,7 +17,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +24,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 )
 
@@ -87,8 +87,8 @@ type enterpriseSetupInvalidArguments struct{ error }
 
 func (err enterpriseSetupInvalidArguments) Unwrap() error { return err.error }
 
-var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var sourceCommitPattern = lazyregexp.New(`^[0-9a-f]{40}$`)
+var sha256Pattern = lazyregexp.New(`^[0-9a-f]{64}$`)
 
 var requiredPayloadFiles = []string{
 	"DefenseClawEnterprise.psm1",
@@ -1060,7 +1060,7 @@ func writeEnterpriseSetupUsageForFlavor(output io.Writer, standalone bool) {
 
 // standaloneSetupUsageProperty matches a property row of
 // writeStandaloneSetupUsage: its name and the value it shows.
-var standaloneSetupUsageProperty = regexp.MustCompile(`(?m)^  ([A-Z]+)=(\S*)`)
+var standaloneSetupUsageProperty = lazyregexp.New(`(?m)^  ([A-Z]+)=(\S*)`)
 
 // standaloneSetupPropertyHint lists the properties /? prints, read from
 // writeStandaloneSetupUsage itself, so the unknown-property hint cannot miss

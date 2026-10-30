@@ -9,7 +9,6 @@ import (
 	"os"
 	osuser "os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -555,7 +555,7 @@ func payloadNamesSubagent(source, agentID string, payload map[string]interface{}
 	return strings.TrimSpace(reported) == agentID
 }
 
-var agentIdentityIDPattern = regexp.MustCompile(`^agt-[0-9a-f]{16}$`)
+var agentIdentityIDPattern = lazyregexp.New(`^agt-[0-9a-f]{16}$`)
 
 // agentIdentityV8 is defenseclaw.agent.identity.id for a generated record,
 // absent unless id has the registered shape.

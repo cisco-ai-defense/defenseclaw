@@ -14,12 +14,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -417,13 +417,13 @@ func windowsCodexRenderedGroupShapes(event, contractID string) []codexHookGroup 
 // windowsCodexBoundArgumentsPattern finds the event and hook contract in the
 // decoded script of a bound managed Codex command: both the awaited and the
 // Start-Process forms quote the launcher's argument list.
-var windowsCodexBoundArgumentsPattern = regexp.MustCompile(
+var windowsCodexBoundArgumentsPattern = lazyregexp.New(
 	`'--event'[ ,]'((?:[^']|'')*)'[ ,]'--hook-contract'[ ,]'((?:[^']|'')*)'`,
 )
 
 // windowsCodexDirectBoundArgumentsPattern finds the event and hook contract
 // at the end of a direct bound managed command (windowsCmdDirectHookCommand).
-var windowsCodexDirectBoundArgumentsPattern = regexp.MustCompile(
+var windowsCodexDirectBoundArgumentsPattern = lazyregexp.New(
 	` --event ([A-Za-z0-9._-]+) --hook-contract ([A-Za-z0-9._-]+)$`,
 )
 

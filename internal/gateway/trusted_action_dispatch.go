@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
@@ -1010,7 +1011,7 @@ func provenBashAggregateStateWrite(request trustedActionRequest) bool {
 // %ComSpec% and PowerShell's $env:ComSpec / ${env:ComSpec}, at the start of
 // the command or of a statement, after the PowerShell call operator & or a
 // pipe.
-var cmdProgramWord = regexp.MustCompile(`(?i)(?:^|[\s;|&(){}])(?:"[^"\r\n]*?[\\/]|'[^'\r\n]*?[\\/]|"|'|[^\s"';|&(){}]*[\\/])?(?:cmd(?:\.exe)?|\$\{?env:comspec\}?|%comspec%)["']?`)
+var cmdProgramWord = lazyregexp.New(`(?i)(?:^|[\s;|&(){}])(?:"[^"\r\n]*?[\\/]|'[^'\r\n]*?[\\/]|"|'|[^\s"';|&(){}]*[\\/])?(?:cmd(?:\.exe)?|\$\{?env:comspec\}?|%comspec%)["']?`)
 
 // cmdOuterReading is a grammar the outer shell may read a command with. A
 // Windows tool call does not say which shell runs it (Codex names its
@@ -1346,14 +1347,14 @@ func cmdHeredocFeeds(line string, op int, trust bool) (runs, cmdFeed bool) {
 	return runs, cmdFeed
 }
 
-var cmdAssignmentWord = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
+var cmdAssignmentWord = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
 
 // cmdRedefinesCommand matches a function definition, name() or "name"()
 // (the quoted name is blanked by cmdCodeOutsideText), on the code outside
 // here-document bodies, quoted words and comments: prose in a body or a
 // title is no definition (GAP-2530 checker it2). An empty ( ) after =, $,
 // <, > or an extglob operator is an array or a substitution.
-var cmdRedefinesCommand = regexp.MustCompile(`(^|[^=$<>@!*+?])\s*\(\s*\)`)
+var cmdRedefinesCommand = lazyregexp.New(`(^|[^=$<>@!*+?])\s*\(\s*\)`)
 
 // cmdRedefiningCommands are the command words that can make a text
 // consumer's name run something else (alias, function, hash -p, enable) or
@@ -2418,7 +2419,7 @@ func cmdShellWord(word string) string {
 	return ""
 }
 
-var cmdShellRunFlag = regexp.MustCompile(`^-[a-zA-Z]*c[a-zA-Z]*$`)
+var cmdShellRunFlag = lazyregexp.New(`^-[a-zA-Z]*c[a-zA-Z]*$`)
 
 func cmdArgumentListWord(word string) bool {
 	word = strings.TrimSuffix(word, ":")
@@ -2577,11 +2578,11 @@ func cmdSubexpressions(inner string, reading cmdOuterReading) []string {
 }
 
 var (
-	cmdSwitchWord = regexp.MustCompile(`(?i)^/{1,2}[a-z](?::\S*)?$`)
-	cmdRunWord    = regexp.MustCompile(`(?i)^/{1,2}[ck]`)
+	cmdSwitchWord = lazyregexp.New(`(?i)^/{1,2}[a-z](?::\S*)?$`)
+	cmdRunWord    = lazyregexp.New(`(?i)^/{1,2}[ck]`)
 	// cmdStartProcessWord: Start-Process (or its aliases) right before the
 	// program word cmd.
-	cmdStartProcessWord = regexp.MustCompile(`(?i)(?:^|[\s;|&(){}])(?:start-process|saps|start)\s+(?:-filepath\s+)?["']?$`)
+	cmdStartProcessWord = lazyregexp.New(`(?i)(?:^|[\s;|&(){}])(?:start-process|saps|start)\s+(?:-filepath\s+)?["']?$`)
 )
 
 // cmdSwitchRunBody reads the switch run of a cmd.exe command line (after the
@@ -4979,10 +4980,10 @@ const (
 var (
 	trustedPerlInlineRegexp                   = regexp.MustCompile(trustedPerlInlinePattern)
 	trustedRubyInlineRegexp                   = regexp.MustCompile(trustedRubyInlinePattern)
-	trustedPythonSocketAssignmentPattern      = regexp.MustCompile(`(?is)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*socket\s*\.\s*socket\s*\(\s*([^)]*)\)`)
-	trustedPythonStaticShellLaunchPattern     = regexp.MustCompile(`(?is)\b(?:pty\s*\.\s*spawn|subprocess\s*\.\s*(?:Popen|call|run)|os\s*\.\s*(?:system|execl|execle|execlp|execv|execve))\s*\(\s*(?:\[\s*)?["'](?:(?:/usr)?/bin/(?:ba|z|k|da)?sh|(?:cmd|powershell)(?:\.exe)?)["']`)
-	trustedPythonStaticHostnamePattern        = regexp.MustCompile(`(?i)^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$`)
-	trustedRemotePayloadExecuteCleanupPattern = regexp.MustCompile(
+	trustedPythonSocketAssignmentPattern      = lazyregexp.New(`(?is)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*socket\s*\.\s*socket\s*\(\s*([^)]*)\)`)
+	trustedPythonStaticShellLaunchPattern     = lazyregexp.New(`(?is)\b(?:pty\s*\.\s*spawn|subprocess\s*\.\s*(?:Popen|call|run)|os\s*\.\s*(?:system|execl|execle|execlp|execv|execve))\s*\(\s*(?:\[\s*)?["'](?:(?:/usr)?/bin/(?:ba|z|k|da)?sh|(?:cmd|powershell)(?:\.exe)?)["']`)
+	trustedPythonStaticHostnamePattern        = lazyregexp.New(`(?i)^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$`)
+	trustedRemotePayloadExecuteCleanupPattern = lazyregexp.New(
 		`(?is)\b(?:curl|wget)\b[^;\r\n]*https?://(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?/[^\s;]+(?:;|\s{2,})[^\r\n]*?\bchmod\s+(?:\+x|[0-7]*7[0-7]*)\s+\S+(?:;|\s{2,})[^\r\n]*?(?:\./|(?:ba)?sh\s+)\S+(?:[ \t][^;\r\n \t]+)*(?:;|[ \t]{2,})[^\r\n]*?(?:rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(?:\*|[A-Za-z0-9_.-]+\*)|history\s+-c)`,
 	)
 )

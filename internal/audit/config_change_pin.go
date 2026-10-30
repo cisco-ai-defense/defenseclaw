@@ -17,10 +17,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 )
@@ -50,8 +50,8 @@ type ConfigChangePin struct {
 const maxConfigChangePinBytes = 4096
 
 var (
-	configChangePinKey    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
-	configChangePinDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	configChangePinKey    = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
+	configChangePinDigest = lazyregexp.New(`^[0-9a-f]{64}$`)
 )
 
 func (pin ConfigChangePin) valid() bool {
