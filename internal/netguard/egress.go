@@ -38,6 +38,9 @@ type EgressProxy struct {
 // administrator add this advice once.
 const ProxyURLAdvice = "use http://host:port or https://host:port, without a user name, password or path"
 
+// egressProxyURLForm is the shape enterprise.network.https_proxy accepts.
+const egressProxyURLForm = "http://host[:port] or https://host[:port]"
+
 // ParseEgressProxyURL validates an enterprise.network.https_proxy value.
 // Credentials are refused because the managed config is readable by every
 // user on the device; an authenticating proxy must accept the device's
@@ -47,12 +50,14 @@ func ParseEgressProxyURL(raw string) (*url.URL, error) {
 	if raw == "" {
 		return nil, errors.New("proxy URL is empty")
 	}
+	// Both refusals name the accepted form: "needs a scheme" alone left the
+	// administrator to guess what to write for 127.0.0.1:3128 (GAP-0666).
 	if !strings.Contains(raw, "://") {
-		return nil, errors.New("proxy URL needs a scheme")
+		return nil, errors.New("proxy URL needs a scheme: use " + egressProxyURLForm)
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, errors.New("proxy URL is malformed")
+		return nil, errors.New("proxy URL is malformed: use " + egressProxyURLForm)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("proxy URL scheme %q must be http or https", u.Scheme)
