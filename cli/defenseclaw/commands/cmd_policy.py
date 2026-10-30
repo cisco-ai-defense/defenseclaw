@@ -1228,6 +1228,8 @@ def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
         result = app.cfg.save_verified(lambda _path: _write_opa_data(*opa_update))
     else:
         result = app.cfg.save()
+    if not secure_client:
+        policy_catalog.record_activated_policy(app.cfg, name)
     for note in first_party_notes + webhook_notes:
         click.echo(f"  {note}")
     return path, list(getattr(result, "restart_required", None) or [])
