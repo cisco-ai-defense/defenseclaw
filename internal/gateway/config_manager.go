@@ -1431,7 +1431,9 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	// fail-mode table, and reports not ok with a HIGH alert.
 	var startupFallback *enterprisebundle.SignedVersion
 	startupRefused := false
-	if !assets && !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
+	// A gateway with policy assets reconciles its start with ReloadAssets
+	// (assets set), so the check does not depend on that flag.
+	if !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
 		sha256.Sum256(source.raw) == m.startupSource && (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) {
 		if refusal := m.startupActivationRefusal(source.raw); refusal != nil {
 			startupRefused = true
