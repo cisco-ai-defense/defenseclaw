@@ -1164,7 +1164,12 @@ administrator's command: the gateway binary, not the Python CLI. It answers
 managed and exits `1`. With `--help` they print that note with their usage and
 exit `0`. `config set` prints `This device is managed: change config.yaml in the admin config (MDM or management plane); config set did not change it`
 (`config unset` says `config unset`) and exits `3`; the `block`, `allow` and
-`unblock` writers are refused with exit `3` too. It has no `guardrail` group,
+`unblock` writers are refused with exit `3` too. These answers name the
+administrator's next command: `skill`, `mcp`, `plugin` and `tool` name
+`policy show`, `setup` names `enterprise windows status --profile standalone`,
+and `sandbox` (sandboxes do not run on Windows, exit `3`) names
+`defenseclaw-gateway.exe enterprise windows sandbox list --user NAME`, each from
+an elevated PowerShell prompt. It has no `guardrail` group,
 no `version` command (run `defenseclaw.exe --version`) and no `policy activate`
 or `policy edit`: these return an unknown-command error and exit `2`. Its
 `policy` group has `digest`, `evaluate`, `reload`, `show`, `test` and `validate`.

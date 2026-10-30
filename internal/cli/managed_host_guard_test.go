@@ -100,6 +100,9 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	}{
 		{configCmd, "set", []string{"guardrail.mode", "observe"}, "admin config"},
 		{root, "skill", []string{"block", "dc-x"}, "asset_policy.skill"},
+		// GAP-0523: the refusals name the administrator's view of the rules.
+		{root, "skill", []string{"list"}, "defenseclaw.exe' policy show`. Nothing was changed."},
+		{root, "mcp", []string{"allow", "x"}, "mcp allow did not change it. The admission policy"},
 		{root, "plugin", []string{"scan", "--json", `C:\p`}, "defenseclaw scan plugin <path>"},
 	} {
 		child, _, err := tc.parent.Find([]string{tc.name})
@@ -123,7 +126,8 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	for _, args := range [][]string{{"setup"}, {"setup", "claude-code"}, {"setup", "codex"}, {"setup", "guardrail", "--disable"}, {"setup", "llm"}, {"setup", "kiro"}, {"setup", "trusted-paths"}} {
 		root.SetArgs(args)
 		if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "per-user setup commands are not available") ||
-			strings.Contains(err.Error(), "Rotating") || !strings.HasSuffix(err.Error(), "Nothing was changed.") {
+			strings.Contains(err.Error(), "Rotating") || !strings.HasSuffix(err.Error(), "Nothing was changed.") ||
+			!strings.Contains(err.Error(), "checks your account's connectors from an elevated PowerShell prompt with `& '") {
 			t.Fatalf("%v on a managed Windows computer: %v", args, err)
 		}
 	}

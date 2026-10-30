@@ -120,10 +120,13 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 				return withExitCode(fmt.Errorf("This device is managed: scan a %s with `defenseclaw scan %s %s`, "+
 					"which runs the gateway's %s scanner", kind, kind, target, kind), 3)
 			}
+			// The refusal named no next step (GAP-0523): the compiled
+			// admission policy is the administrator's view of these rules.
+			next := windowsManagedStandardUserViewAnswer("The admission policy", "policy show")
 			if len(args) == 0 || (args[0] != "block" && args[0] != "allow" && args[0] != "unblock") {
-				return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane)", kind), 3)
+				return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane). %s", kind, next), 3)
 			}
-			return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it", kind, kind, args[0]), 3)
+			return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it. %s", kind, kind, args[0], next), 3)
 		})
 	}
 }
@@ -451,9 +454,10 @@ func managedWindowsSetupRefusal(where string, args []string) error {
 			"users in a folder that only administrators can change, such as one under Program Files (Node.js installs npx in " +
 			"C:\\Program Files\\nodejs), so an administrator installs it there. "
 	}
+	// It named no command to run next (GAP-0523).
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so per-user setup "+
 		"commands are not available; your administrator manages its connectors and credentials. "+
-		"%sNothing was changed.", where, detail)
+		"%sYour administrator checks your account's connectors %s. Nothing was changed.", where, detail, managedWindowsAdminStatusHint())
 }
 
 func managedHostUnixRecord(warn io.Writer) (string, bool) {
