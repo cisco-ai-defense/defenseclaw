@@ -358,7 +358,7 @@ def _with_field_class_set(path: Path, classes: str, *, alter: bool = False) -> s
 def test_expands_a_named_field_class_set(tmp_path: Path) -> None:
     database = tmp_path / "audit.db"
     _database(database)
-    full = _with_field_class_set(database, '{"/message":"content","/count":"metadata"}')
+    full = _with_field_class_set(database, '{"/count":"metadata","/message":"content"}')
 
     assert PROJECTOR._read_projected_records(database) == [full]
 
@@ -366,7 +366,7 @@ def test_expands_a_named_field_class_set(tmp_path: Path) -> None:
 def test_altered_field_class_set_fails_closed(tmp_path: Path) -> None:
     database = tmp_path / "audit.db"
     _database(database)
-    _with_field_class_set(database, '{"/message":"content","/count":"metadata"}', alter=True)
+    _with_field_class_set(database, '{"/count":"metadata","/message":"content"}', alter=True)
 
     with pytest.raises(ValueError, match="field class set"):
         PROJECTOR._read_projected_records(database)
