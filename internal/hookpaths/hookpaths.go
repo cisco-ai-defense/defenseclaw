@@ -1913,6 +1913,18 @@ func literalShellBody(program string, words []string, static []bool) string {
 	return words[body]
 }
 
+// bodyOnlyChangesDirectory reports that the only directory change of command
+// is inside the literal shell body of call: nothing else in the command moves
+// the directory before it, so the body is read from the starting directory and
+// its own cd statements are placed by its own statement walk (GAP-2602).
+func bodyOnlyChangesDirectory(command string, call *syntax.CallExpr) bool {
+	from, to := call.Pos().Offset(), call.End().Offset()
+	if from > to || to > uint(len(command)) {
+		return false
+	}
+	return !tactics.RunsProgram(command[:from]+" "+command[to:], cdPrograms...)
+}
+
 // unknown marks the links unknown, and opaque when a link may be created.
 func (l *shellLinks) unknown(opaque bool) {
 	l.known = false
@@ -2211,10 +2223,11 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			if call == linkCall {
 				workingDirectories = []string{linkCWD}
 			}
-			if movedDir != "" {
+			if movedDir != "" || nested && changesDirectory {
 				workingDirectories = callDirs
 				// An operand that names SSH or DefenseClaw state read from the
-				// moved directory keeps the wrapper reading (RV-p1c A09).
+				// moved directory, or from the directory a shell body changes
+				// to first, keeps the wrapper reading (RV-p1c A09).
 				state := newStateReach(home)
 				for i, word := range words[1:] {
 					if !static[i+1] || strings.HasPrefix(word, "-") {
@@ -2333,7 +2346,8 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			}
 		case slices.Contains(cdPrograms, program):
 			cds = true
-		case !changesDirectory && literalShellBody(program, words, static) != "":
+		case literalShellBody(program, words, static) != "" &&
+			(!changesDirectory || bodyOnlyChangesDirectory(command, call)):
 			// sh -c "ln -s build/out bin" makes the link the plain ln makes,
 			// in the same directory: read the body as that command, so its
 			// links are known (or opaque) exactly as they would be written
@@ -2345,7 +2359,10 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			links.merge(inner)
 			renames = renames || inner.renames
 			cds = cds || inner.cds
-			wrappedCds = wrappedCds || inner.wrappedCds
+			// A directory change that only this body makes is read by the
+			// body own statement walk; the disk checks of a nested directory
+			// change still guard the links made outside it (GAP-2533).
+			wrappedCds = wrappedCds || inner.wrappedCds || changesDirectory
 			copyScopes = append(copyScopes, inner.copyScopes...)
 			renameOps = append(renameOps, inner.renameOps...)
 			findMoves = append(findMoves, inner.findMoves...)

@@ -163,3 +163,29 @@ func TestSelfProtCmdMklinkIsALink(t *testing.T) {
 		{"HT5", `cmd //c "mklink /H hk ../.ssh/authorized_keys & echo" ; printf y >> hk`, "block"},
 	}, "claudecode", "codex")
 }
+
+// A directory change that only a literal shell body makes is read by the
+// body own statement walk: a link made after it is placed in the directory
+// it names, as the plain list is (GAP-2602). A link made outside the body, a
+// dynamic directory and every write through a link to state keep blocking.
+func TestSelfProtShellBodyDirectoryChange(t *testing.T) {
+	checkSelfProtRows(t, []selfProtRow{
+		{"W01", `bash -lc 'cd ~/project && ln -s README.md docs.md; mv a.txt e.txt; ls'`, "allow"},
+		{"W02", `bash -c 'cd ~/project && ln -s README.md docs.md; mv a.txt e.txt; ls'`, "allow"},
+		{"W04", `bash -lc 'cd ~/project && ln -s README.md docs.md; ls'`, "allow"},
+		{"W05", `bash -lc 'cd ~/project && mv a.txt e.txt'`, "allow"},
+		{"Y02", `bash -c 'cd src && ln -s ../a.txt b'`, "allow"},
+		{"Y03", `bash -c 'cd ~/project/src && ln -s ../a.txt b'`, "allow"},
+		{"Y06", `bash -c 'cd build && ln -s out bin'`, "allow"},
+		{"W07", `bash -lc 'cd ~/project && ln -s ../.ssh ks; mv a.txt e.txt; cp b.txt ks/authorized_keys'`, "block"},
+		{"W08", `bash -lc 'ln -s ../.ssh/authorized_keys k; echo x >> k'`, "block"},
+		{"W09", `bash -c 'cd ~/project && ln -s README.md docs.md; mv keylink k2; echo x >> k2'`, "block"},
+		{"X01", `bash -c 'cd src && ln -s ../../.ssh k && cp ../a.txt k/authorized_keys'`, "block"},
+		{"X02", `ln -s ../.ssh k; bash -lc 'cd src && echo x >> ../k/authorized_keys'`, "block"},
+		{"X03", `bash -c 'cd src && ln -s ../../.ssh/authorized_keys k; echo x >> k'`, "block"},
+		{"X05", `bash -c 'cd ~ && ln -s .ssh/authorized_keys project/k7'`, "block"},
+		{"X07", `bash -c 'cd ~/project && ln -s ../.ssh ks'; echo x >> ks/authorized_keys`, "block"},
+		{"X08", `cd src && bash -c 'cd .. && ln -s ../.ssh k'; echo x >> ../k/authorized_keys`, "block"},
+		{"X09", `bash -c "cd $X && ln -s ../.ssh k; echo x >> k/authorized_keys"`, "block"},
+	}, "claudecode", "codex")
+}

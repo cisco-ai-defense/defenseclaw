@@ -476,6 +476,14 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 				} else if tail != nil {
 					walk(&syntax.Stmt{Cmd: tail}, &child)
 				}
+			} else if body := literalShellCallBody(cmd, home); body != "" {
+				// A literal sh -c body runs in a subshell: its directory
+				// changes end with it and its writes are read in the
+				// directories it stands in (GAP-2602).
+				if file, ok := parseShell(body); ok {
+					child := s.clone()
+					walkList(file.Stmts, &child)
+				}
 			}
 			write(stmt, s)
 		default:
@@ -556,6 +564,20 @@ func shellCommandWord(call *syntax.CallExpr, home string) (program string, arg i
 		}
 	}
 	return program, arg, ok
+}
+
+// literalShellCallBody is the literal command body of a static sh -c call
+// (bash -lc BODY too), or "" for any other call.
+func literalShellCallBody(call *syntax.CallExpr, home string) string {
+	words := make([]string, len(call.Args))
+	static := make([]bool, len(call.Args))
+	for i, arg := range call.Args {
+		words[i], static[i] = StaticWord(arg, home)
+	}
+	if len(words) == 0 || !static[0] {
+		return ""
+	}
+	return literalShellBody(programBase(words[0]), words, static)
 }
 
 func shellAuthorizedKeysBase(name string) bool {
