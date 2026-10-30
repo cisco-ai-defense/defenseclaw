@@ -1194,8 +1194,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// creates in the user's home. The managed hook client walked the
 			// same links as the user and keyed its answer by this operand; a
 			// resolved answer decides it, so an ordinary hard link is not a
-			// key write (GAP-1440). An empty answer stays unknown.
-			if !ok && request.ProtectedHomeHook && links.Known() {
+			// key write (GAP-1440). An empty answer stays unknown. Links unknown
+			// only inside copy scopes that cannot reach the operand are read
+			// by the client as known ones (GAP-2582).
+			if !ok && request.ProtectedHomeHook && links.KnownOutsideScopes(target, ownCopy, opaqueFacts) {
 				if resolved := clientTargets[target]; resolved != "" {
 					return isProtected(resolved)
 				}
@@ -1286,8 +1288,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
-		for _, operand := range hookpaths.LiteralWriteOperands(input.Command, input.CWD, input.ActiveHome) {
-			if writeTarget(operand, false, false) {
+		// A plain cp writes its own destination: only that write may skip the
+		// own copy scope of the cp, as the path facts below read it (GAP-2582).
+		literals, copies := hookpaths.LiteralWriteOperandsWithCopies(input.Command, input.CWD, input.ActiveHome)
+		ownCopies := make(map[string]int, len(copies))
+		for _, operand := range copies {
+			ownCopies[operand]++
+		}
+		for _, operand := range literals {
+			ownCopy := ownCopies[operand] > 0
+			if ownCopy {
+				ownCopies[operand]--
+			}
+			if writeTarget(operand, false, ownCopy) {
 				return true
 			}
 		}
@@ -1330,7 +1343,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return true
 		}
 		for _, operand := range directoryOperands {
-			if writeTarget(operand.Path, operand.Safe, false) {
+			if writeTarget(operand.Path, operand.Safe, operand.OwnCopy) {
 				return true
 			}
 		}
@@ -1391,13 +1404,29 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
 				target = raw
 			}
+			// The own destination of the copy, also after a directory change
+			// that the path facts follow (GAP-2579).
 			ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
-				target == hookpaths.CopyDestination(command.Argv, clientCWD)
+				(target == hookpaths.CopyDestination(command.Argv, clientCWD) ||
+					candidate.Value != "" && candidate.Value == hookpaths.CopyDestinationOperand(command.Argv))
 			if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
 				continue
 			}
 			if replacedBySed[target] && !isProtected(target) {
 				continue
+			}
+			if ownCopy && !links.IsCopyDestination(target) {
+				// A copy after a directory change writes its destination where
+				// the statement walk placed the call; the path fact read in the
+				// starting directory names no write of it (GAP-2579).
+				if placed := links.PlacedCopyDestinations(candidate.Value); len(placed) > 0 {
+					for _, destination := range placed {
+						if writeTarget(destination, false, true) {
+							return true
+						}
+					}
+					continue
+				}
 			}
 			if writeTarget(target, false, ownCopy) {
 				return true

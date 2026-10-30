@@ -139,7 +139,11 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			redirectIndex += len(redirects)
 			return
 		}
-		literals := LiteralWriteOperands(statement, s.logical, home)
+		literals, literalCopies := LiteralWriteOperandsWithCopies(statement, s.logical, home)
+		ownCopies := make(map[string]int, len(literalCopies))
+		for _, literal := range literalCopies {
+			ownCopies[literal]++
+		}
 		inner := actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home}
 		facts := actionfacts.Analyze(inner)
 		writes := make([]RedirectOccurrence, 0, len(redirects)+len(literals))
@@ -154,7 +158,11 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			writes = append(writes, occurrence)
 		}
 		for _, literal := range literals {
-			writes = append(writes, RedirectOccurrence{Path: literal})
+			own := ownCopies[literal] > 0
+			if own {
+				ownCopies[literal]--
+			}
+			writes = append(writes, RedirectOccurrence{Path: literal, OwnCopy: own})
 		}
 		for _, candidate := range facts.Paths {
 			if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
@@ -176,7 +184,16 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 				if slices.Contains(redirects, target) && pathFactIsRedirect(candidate, facts.Commands) {
 					continue
 				}
-				writes = append(writes, RedirectOccurrence{Path: target})
+				// A copy call writing its own destination, as the gateway reads
+				// the path facts of the whole command (GAP-2579).
+				own := false
+				for _, command := range facts.Commands {
+					if command.ID == candidate.CommandID {
+						own = IsCopyProgram(command.Argv) && target == CopyDestination(command.Argv, s.logical)
+						break
+					}
+				}
+				writes = append(writes, RedirectOccurrence{Path: target, OwnCopy: own})
 			}
 		}
 		if s.known {

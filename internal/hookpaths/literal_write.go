@@ -35,22 +35,36 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 	return literalWriteOperandsDepth(command, cwd, home, 0)
 }
 
-func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands []string) {
+// LiteralWriteOperandsWithCopies is LiteralWriteOperands that also lists,
+// once for each call, the operands a plain cp call of the command names as
+// its own destination. Only that write of the cp may skip the own copy
+// scope of the cp, as the path facts of the same call do (GAP-2582).
+func LiteralWriteOperandsWithCopies(command, cwd, home string) (operands, copies []string) {
+	return literalWriteOperandsWithCopies(command, cwd, home, 0)
+}
+
+func literalWriteOperandsDepth(command, cwd, home string, depth int) []string {
+	operands, _ := literalWriteOperandsWithCopies(command, cwd, home, depth)
+	return operands
+}
+
+func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (operands, copies []string) {
 	if depth > 4 {
-		return nil
+		return nil, nil
 	}
 	file, ok := parseShell(command)
 	if !ok {
-		return nil
+		return nil, nil
 	}
-	add := func(name string) {
+	add := func(name string) bool {
 		if name == "" || strings.ContainsAny(name, "\x00\r\n") {
-			return
+			return false
 		}
 		if !filepath.IsAbs(name) && !filepath.IsAbs(cwd) {
-			return
+			return false
 		}
 		operands = append(operands, OperandPath(name, cwd))
+		return true
 	}
 	boundName, boundValue := boundedProgramAssignment(file, home)
 	// The values the command assigns before each top-level statement, so an
@@ -124,14 +138,33 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 				return true
 			}
 		}
-		for _, name := range literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1) {
-			add(name)
+		names := literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1)
+		// A plain cp call lists only its own destination; a literal shell
+		// body (sh -c BODY) lists the own destinations of its cp calls.
+		var own []string
+		switch program := programBase(words[0]); program {
+		case "cp", "gcp":
+			own = names
+		case "sh", "bash", "dash", "ash", "zsh", "ksh":
+			if body, ok := shellCommandBodyIndex(words); ok {
+				_, own = literalWriteOperandsWithCopies(words[body], cwd, home, depth+1)
+			}
+		}
+		credit := make(map[string]int, len(own))
+		for _, name := range own {
+			credit[OperandPath(name, cwd)]++
+		}
+		for _, name := range names {
+			if add(name) && credit[operands[len(operands)-1]] > 0 {
+				credit[operands[len(operands)-1]]--
+				copies = append(copies, operands[len(operands)-1])
+			}
 		}
 		return true
 	})
 	operands = append(operands, literalPipelineOperands(file, called, cwd, home, depth)...)
 	operands = append(operands, literalGeneratedScriptOperands(file, cwd, home, depth)...)
-	return operands
+	return operands, copies
 }
 
 // SedReplacedOperands names sed -i operands whose directory entry is
