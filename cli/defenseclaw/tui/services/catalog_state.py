@@ -634,10 +634,16 @@ class CatalogListModel(Generic[RowT]):
             return ("Connector", *base)
         return base
 
-    def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
+    def data_table_rows(self, width: int = 0) -> tuple[tuple[str, ...], ...]:
+        """Table rows; ``width`` (cells, 0 = unknown) keeps the Actions column on screen."""
+
         if self.show_connector_column:
-            return tuple((self.connector_cell(row), *catalog_row_cells(row)) for row in self.filtered)
-        return tuple(catalog_row_cells(row) for row in self.filtered)
+            rows = tuple((self.connector_cell(row), *catalog_row_cells(row)) for row in self.filtered)
+        else:
+            rows = tuple(catalog_row_cells(row) for row in self.filtered)
+        # Fit against the base column order the cells are built in; a
+        # subclass that reorders columns (Plugins) does so after this.
+        return _fit_catalog_rows(CatalogListModel.data_table_columns(self), rows, width)
 
     def connector_cell(self, row: RowT) -> str:
         return self.row_connector(row) or "—"
@@ -892,8 +898,8 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
         # screen at 80 columns (GAP-1905).
         return _verdict_before_source(super().data_table_columns())
 
-    def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
-        return tuple(_verdict_before_source(row) for row in super().data_table_rows())
+    def data_table_rows(self, width: int = 0) -> tuple[tuple[str, ...], ...]:
+        return tuple(_verdict_before_source(row) for row in super().data_table_rows(width))
 
     def __init__(self, *, connector: str = "") -> None:
         # Without filter fields the filter matched every row (GAP-1520).
@@ -2027,7 +2033,7 @@ def _plugin_status(row: PluginRow) -> str:
 
 def catalog_row_cells(row: object) -> tuple[str, str, str, str, str]:
     if isinstance(row, SkillRow):
-        source = " ".join(part for part in (row.source, row.registry_badge) if part)
+        source = " ".join(part for part in (_source_path_cell(row.source), row.registry_badge) if part)
         detail = row.reason or row.description or row.verdict or row.severity
         return (row.name, row.status, source, row.actions, _truncate(detail, 72))
     if isinstance(row, MCPRow):
@@ -2036,7 +2042,13 @@ def catalog_row_cells(row: object) -> tuple[str, str, str, str, str]:
         return (row.name, row.status, source, row.actions, _truncate(detail, 72))
     if isinstance(row, PluginRow):
         detail = row.description or row.origin or row.verdict
-        return (row.display_name, _plugin_status(row), row.origin, row.verdict or "-", _truncate(detail, 72))
+        return (
+            row.display_name,
+            _plugin_status(row),
+            _source_path_cell(row.origin),
+            row.verdict or "-",
+            _truncate(detail, 72),
+        )
     if isinstance(row, ToolRow):
         return (row.name, row.status, row.display_scope, "-", _truncate(row.reason, 72))
     return ("", "", "", "", "")
@@ -2405,6 +2417,67 @@ def _mcp_action_legend(status: str) -> str:
 
 def _plugin_action_legend(verdict: str, status: str, enabled: bool) -> str:
     return _action_legend(plugin_actions(verdict, status, enabled))
+
+
+# A skill or plugin source is often a full directory path; at 80x24 a
+# /home/<user>/... path pushed the Actions column off screen (GAP-2624).
+# The table shows the home directory as ~ and keeps the tail of a longer
+# path (the part that tells sources apart); the detail pane keeps the
+# full path.
+SOURCE_CELL_WIDTH = 24
+
+
+def _source_path_cell(value: str, width: int = SOURCE_CELL_WIDTH) -> str:
+    text = str(value or "")
+    home = os.path.expanduser("~").rstrip("/\\")
+    if home and len(home) > 1 and (text == home or text.startswith((home + "/", home + "\\"))):
+        text = "~" + text[len(home) :]
+    if len(text) <= width:
+        return text
+    return "\u2026" + text[-(width - 1) :]
+
+
+_MIN_FIT_CELLS = 12
+
+
+def _fit_catalog_rows(
+    columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...], width: int
+) -> tuple[tuple[str, ...], ...]:
+    """Rows whose columns up to Actions fit ``width`` cells (GAP-2624).
+
+    At 80x24 a long skill name or source path pushed the Actions column off
+    screen. The widest of Name and Source gives up cells first (a name keeps
+    its head, a path keeps its tail); Details, the last column, may still be
+    cut. The detail pane keeps every value in full.
+    """
+
+    if width <= 0 or not rows or "Source" not in columns or "Name" not in columns:
+        return rows
+    last = len(columns) - 1
+    # Every column through the one before Details must fit (DataTable pads
+    # each cell by one column on each side).
+    upto = last - 1 if columns[last] == "Details" else last
+    name_i, source_i = columns.index("Name"), columns.index("Source")
+
+    def cells(i: int) -> int:
+        return max(len(columns[i]), *(len(row[i]) for row in rows))
+
+    over = sum(cells(i) + 2 for i in range(upto + 1)) - width
+    caps = {name_i: cells(name_i), source_i: cells(source_i)}
+    while over > 0:
+        i = max(caps, key=lambda k: caps[k])
+        if caps[i] <= _MIN_FIT_CELLS:
+            break
+        caps[i] -= 1
+        over -= 1
+
+    def cut(i: int, value: str) -> str:
+        cap = caps.get(i, 0)
+        if not cap or len(value) <= cap:
+            return value
+        return "\u2026" + value[-(cap - 1) :] if i == source_i else value[: cap - 1] + "\u2026"
+
+    return tuple(tuple(cut(i, value) for i, value in enumerate(row)) for row in rows)
 
 
 def _truncate(value: str, width: int) -> str:

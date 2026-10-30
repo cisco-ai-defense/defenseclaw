@@ -32,7 +32,6 @@ from defenseclaw.tui.panels.tools import (
 )
 from defenseclaw.tui.services.catalog_state import (
     connector_source_label,
-    friendly_connector_name,
     parse_mcp_list_json,
     parse_plugin_list_json,
     parse_skill_list_json,
@@ -1105,3 +1104,41 @@ def test_catalog_load_intent_for_targets_connector_and_restores(model_factory, b
     # Prior single-connector state is untouched.
     assert model.connector == "codex"
     assert model.connector_focus_enabled is False
+
+
+def test_skills_source_path_keeps_the_actions_column_inside_80_columns(monkeypatch) -> None:
+    """GAP-2624: a full /home/<user>/... skill source or a long skill name pushed Actions off an 80x24 screen."""
+
+    monkeypatch.setenv("HOME", "/home/fcd-u3")
+    panel = SkillsPanelModel()
+    names = ("imagegen", "openai-docs", "skill-installer", "a-very-long-hermes-skill-name-xyz")
+    panel.apply_loaded(
+        [
+            SkillRow(
+                name=name,
+                status="active",
+                source="/home/fcd-u3/.codex/skills/.system",
+                connector="codex",
+                description="x" * 60,
+            )
+            for name in names
+        ]
+        + [SkillRow(name="deep", status="active", source="/opt/vendor/agents/shared/skills/library/deep", connector="codex")]
+    )
+    panel.show_connector_column = True
+    panel.refresh()
+
+    columns = panel.data_table_columns()
+    assert panel.data_table_rows()[0][columns.index("Source")] == "~/.codex/skills/.system"
+    body = 80 - 9  # app.py: the body less borders, padding and the scrollbar
+    rows = panel.data_table_rows(body)
+    actions = columns.index("Actions")
+    used = sum(max(len(columns[i]), *(len(row[i]) for row in rows)) + 2 for i in range(actions + 1))
+    assert used <= body
+    assert all(row[actions] == "-" for row in rows)
+    assert rows[1][columns.index("Name")] == "openai-docs"
+    assert rows[-1][columns.index("Source")].startswith("\u2026")
+    assert rows[-1][columns.index("Source")].endswith("library/deep")
+    assert rows[3][columns.index("Name")].endswith("\u2026")
+    # A wide terminal keeps every value whole.
+    assert panel.data_table_rows(200)[3][columns.index("Name")] == names[3]

@@ -5287,7 +5287,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             model = self.catalog_models[self.active_panel]
             self._sync_catalog_connector_filters()
             self._table_columns = model.data_table_columns()
-            self._table_rows = model.data_table_rows()
+            # The table spans the body less its borders, padding and the
+            # vertical scrollbar a long list shows (9 columns, GAP-2624).
+            width = int(getattr(self.size, "width", 0) or 0)
+            self._table_rows = model.data_table_rows(max(0, width - 9))
             detail = catalog_detail_text(model.selected()) if model.detail_open else ""
             message = model.message or model.empty_state()
             suffix = f"\n\n{rich_escape(message)}" if message and not detail and not model.filtered else ""
