@@ -2040,12 +2040,17 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 	// enter or leave marks where a subshell starts or ends.
 	var statements []*syntax.Stmt
 	enter, leave := map[int]int{}, map[int]int{}
+	// join holds the && or || after a statement (zero for ; and newline).
+	join := map[int]syntax.BinCmdOperator{}
 	var flatten func(*syntax.Stmt)
 	flatten = func(stmt *syntax.Stmt) {
 		plain := len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated
 		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && plain &&
 			(pair.Op == syntax.AndStmt || pair.Op == syntax.OrStmt) {
 			flatten(pair.X)
+			if len(statements) > 0 {
+				join[len(statements)-1] = pair.Op
+			}
 			flatten(pair.Y)
 			return
 		}
@@ -2096,6 +2101,23 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 	var saved, pushed, savedOldpwd []string
 	var savedPushed [][]string
 	usedPushd := false
+	// oldpwdSure stays true while every directory change before the call is
+	// sure to have run: bash leaves OLDPWD (and the directory) as they were
+	// when a cd fails, and a ; / newline / || list still runs the call
+	// (RV-i6-1, GAP-2586).
+	oldpwdSure := true
+	changeIsSure := func(index int) bool {
+		if index > 0 && join[index-1] == syntax.OrStmt {
+			return false
+		}
+		switch join[index] {
+		case syntax.AndStmt:
+			return true
+		case syntax.OrStmt:
+			return index+1 < len(statements) && exitsTheShell(statements[index+1], home)
+		}
+		return false
+	}
 	for index, stmt := range statements {
 		for n := leave[index]; n > 0; n-- {
 			dir, saved = saved[len(saved)-1], saved[:len(saved)-1]
@@ -2123,6 +2145,7 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 			// reading.
 			if programBase(program) == "popd" && len(call.Args) == 1 && len(call.Assigns) == 0 && len(pushed) > 0 {
 				oldpwd, dir, pushed = dir, pushed[len(pushed)-1], pushed[:len(pushed)-1]
+				oldpwdSure = oldpwdSure && changeIsSure(index)
 				continue
 			}
 			if (programBase(program) != "cd" && programBase(program) != "pushd") || len(call.Args) != 2 || len(call.Assigns) != 0 {
@@ -2137,6 +2160,7 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 				usedPushd = true
 			}
 			oldpwd, dir = dir, OperandPath(target, dir)
+			oldpwdSure = oldpwdSure && changeIsSure(index)
 			continue
 		}
 		// A link after a pushd keeps the conservative reading: the
@@ -2163,7 +2187,7 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 				stack = append(stack, pushed[i])
 			}
 			placed := directoryStack{dirs: stack}
-			if oldpwdKnown {
+			if oldpwdKnown && oldpwdSure {
 				placed.oldpwd = oldpwd
 			}
 			stacks[call] = placed
@@ -2177,9 +2201,24 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 var variableWriters = []string{"builtin", "declare", "enable", "eval", "export", "getopts", "let", "local", "mapfile",
 	"printf", "read", "readarray", "readonly", "set", "shopt", "source", "trap", "typeset", "unset", "."}
 
+// oldpwdHiders are words that may run a cd the walk does not see as one
+// (command cd, an alias that runs cd) (RV-i6-1, GAP-2586).
+var oldpwdHiders = []string{"alias", "command"}
+
+// exitsTheShell reports a plain exit or return statement.
+func exitsTheShell(stmt *syntax.Stmt, home string) bool {
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 || stmt.Background {
+		return false
+	}
+	program, static := StaticWord(call.Args[0], home)
+	return static && (program == "exit" || program == "return")
+}
+
 // mayWriteOldPWD reports a command that may set OLDPWD other than by a cd,
-// pushd or popd: any word or assignment that names OLDPWD, or any word that
-// names a builtin that writes variables. ~- then stays unexpanded.
+// pushd or popd the walk places: any word or assignment that names OLDPWD or
+// CDPATH (cd then may go elsewhere), or any word that names a builtin that
+// writes variables, alias or command. ~- then stays unexpanded.
 func mayWriteOldPWD(file *syntax.File, home string) bool {
 	writes := false
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -2188,10 +2227,11 @@ func mayWriteOldPWD(file *syntax.File, home string) bool {
 		}
 		switch node := node.(type) {
 		case *syntax.Lit:
-			writes = strings.Contains(node.Value, "OLDPWD")
+			writes = strings.Contains(node.Value, "OLDPWD") || strings.Contains(node.Value, "CDPATH")
 		case *syntax.CallExpr:
 			for _, arg := range node.Args {
-				if word, static := StaticWord(arg, home); static && slices.Contains(variableWriters, programBase(word)) {
+				if word, static := StaticWord(arg, home); static &&
+					(slices.Contains(variableWriters, programBase(word)) || slices.Contains(oldpwdHiders, programBase(word))) {
 					writes = true
 				}
 			}

@@ -135,6 +135,17 @@ func TestPushdRecursiveCopyReadsSourcesInTheNewDirectory(t *testing.T) {
 		{"cd src && printf -v OLD$x %s $HOME/linked && cp -a ~- lb7 && echo k >> lb7/lnk", true},
 		{"( cd ~/linked ) && cp -a ~- lb8 && echo k >> lb8/lnk", true},
 		{"cp -a ~- lb9 && echo k >> lb9/lnk", true},
+		// RV-i6-1: a failed, hidden or CDPATH cd leaves OLDPWD unknown.
+		{"cd ~/linked && cd ~/project && cd /nonexistent-zz || cp -a ~- lb10 && echo k >> lb10/lnk", true},
+		{"cd ~/linked && cd ~/project && cd /nonexistent-zz ; cp -a ~- lb11 && echo k >> lb11/lnk", true},
+		{"cd ~/linked && cd ~/project && cd /nonexistent-zz\ncp -a ~- lb12 && echo k >> lb12/lnk", true},
+		{"cd ~/linked && cd ~/project && cd a.txt || cp -a ~- lb13 && echo k >> lb13/lnk", true},
+		{"cd src && command cd ~/linked && cd ~/project && cp -a ~- lb14 && echo k >> lb14/lnk", true},
+		{"alias c=\"cd ~/linked\"\ncd src\nc\ncd ~/project\ncp -a ~- lb15 && echo k >> lb15/lnk", true},
+		{"cd src && CDPATH=$HOME && cd linked && cd ~/project && cp -a ~- lb16 && echo k >> lb16/lnk", true},
+		{"true || cd ~/linked && cd ~/project && cp -a ~- lb17 && echo k >> lb17/lnk", true},
+		{"cd src || exit 1\ncp -r ~-/ordinary ord18", false},
+		{"pushd src && rsync -a ~-/ordinary/ out4/ && popd", false},
 	}
 	for _, mode := range []string{"action"} {
 		for _, row := range rows {
