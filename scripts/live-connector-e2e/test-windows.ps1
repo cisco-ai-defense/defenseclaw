@@ -2828,7 +2828,7 @@ threading.Event().wait()
         $invokeHookFunction -notmatch 'Start-Sleep -Milliseconds 800') `
         'hook evidence uses session, event, and tool-scoped bounded polling instead of a fixed 800ms delay'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
-    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'package-verify', 'packaged-acceptance', 'connector-contract')) {
+    foreach ($job in @('windows-go', 'windows-python', 'windows-telemetry-registry', 'powershell-static', 'package-artifact', 'package-verify', 'packaged-acceptance', 'connector-contract')) {
         Assert-True ($nativeWorkflowText -match "(?m)^\s{6}- $([regex]::Escape($job))\s*$") "aggregate depends on $job"
         $requiredJob = [regex]::Match(
             $nativeWorkflowText,
@@ -2842,10 +2842,11 @@ threading.Event().wait()
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
         '(?m)^\s*run: \./scripts/initialize-windows-native-ci-paths\.ps1 '
-    ).Count -eq 7) 'every native Windows job uses the shared isolated-path initializer'
+    ).Count -eq 8) 'every native Windows job uses the shared isolated-path initializer'
     foreach ($leafContract in @(
         '-Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}"',
         "-Leaf ('py-' + `$env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + `$env:PYTHON_SHARD)",
+        "-Leaf ('tr-' + `$env:TELEMETRY_SUITE) -DiagnosticsLeaf ('windows-native-diagnostics-telemetry-' + `$env:TELEMETRY_SUITE)",
         '-Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell',
         '-Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist',
         '-Leaf pkv -DiagnosticsLeaf windows-native-diagnostics-package-verify -ArtifactLeaf windows-native-dist',
