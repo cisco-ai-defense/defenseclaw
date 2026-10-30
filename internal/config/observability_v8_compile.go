@@ -248,7 +248,20 @@ func compileObservabilityV8Local(source ObservabilityV8LocalSource) (Observabili
 			ObservabilityV8MaxRetentionDays,
 		)
 	}
-	return ObservabilityV8EffectiveLocal{Path: source.Path, JudgeBodiesPath: source.JudgeBodiesPath, RetentionDays: retentionDays}, nil
+	maxStoreMB := 0
+	if source.MaxStoreMB != nil {
+		maxStoreMB = *source.MaxStoreMB
+	}
+	if maxStoreMB != 0 && (maxStoreMB < ObservabilityV8MinStoreMB || maxStoreMB > ObservabilityV8MaxStoreMB) {
+		return ObservabilityV8EffectiveLocal{}, fmt.Errorf(
+			"observability.local.max_store_mb: got %d, want 0 (no size cap) or %d to %d",
+			maxStoreMB, ObservabilityV8MinStoreMB, ObservabilityV8MaxStoreMB,
+		)
+	}
+	return ObservabilityV8EffectiveLocal{
+		Path: source.Path, JudgeBodiesPath: source.JudgeBodiesPath, RetentionDays: retentionDays,
+		MaxStoreMB: maxStoreMB,
+	}, nil
 }
 
 func compileObservabilityV8TracePolicy(
@@ -1800,6 +1813,11 @@ func compileObservabilityV8Provenance(
 		ObservabilityV8Provenance{Path: "observability.local.judge_bodies_path", Origin: originObservabilityV8Path(source.Local.JudgeBodiesPath, source.judgePathDefaulted)},
 		ObservabilityV8Provenance{Path: "observability.local.retention_days", Origin: originObservabilityV8Pointer(source.Local.RetentionDays)},
 	)
+	if source.Local.MaxStoreMB != nil {
+		result = append(result, ObservabilityV8Provenance{
+			Path: "observability.local.max_store_mb", Origin: originObservabilityV8Pointer(source.Local.MaxStoreMB),
+		})
+	}
 	resourceNames := make([]string, 0, len(source.Resource.Attributes))
 	for name := range source.Resource.Attributes {
 		resourceNames = append(resourceNames, name)

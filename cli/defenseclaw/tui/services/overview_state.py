@@ -1866,7 +1866,7 @@ class OverviewPanelModel:
             health_state, health_failure = retention_health_from_gateway(
                 {"details": self.health.telemetry.details} if self.health is not None else None
             )
-        retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+        retention = status.retention_label
         return ObservabilityStorageStatus(
             retention=retention,
             judge_capture="enabled" if status.judge_bodies_enabled else "disabled",

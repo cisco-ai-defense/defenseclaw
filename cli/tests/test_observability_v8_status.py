@@ -1413,3 +1413,24 @@ def test_destination_display_reason_hides_routine_healthy_codes() -> None:
     assert V8DestinationHealth(name="g", state="healthy", reason="activated").display_reason == ""
     assert V8DestinationHealth(name="g", state="degraded", reason="queue_full").display_reason == "queue_full"
     assert V8DestinationHealth(name="g", state="healthy", reason="origin_loop").display_reason == "origin_loop"
+
+
+def test_max_store_mb_is_off_by_default_and_shown_when_set() -> None:
+    """#1384: the opt-in audit.db size cap is shown next to the retention days."""
+    effective = _effective()
+    status = operator_status_from_effective(effective, source="x", data_dir="y", plan_digest="z")
+    assert status.max_store_mb == 0
+    assert status.retention_label == "90 days"
+
+    capped = copy.deepcopy(effective)
+    capped["local"]["max_store_mb"] = 2048
+    status = operator_status_from_effective(capped, source="x", data_dir="y", plan_digest="z")
+    assert status.max_store_mb == 2048
+    assert status.retention_label == "90 days, size cap 2048 MiB"
+
+    capped["local"]["retention_days"] = 0
+    status = operator_status_from_effective(capped, source="x", data_dir="y", plan_digest="z")
+    assert status.retention_label == "size cap 2048 MiB"
+    capped["local"].pop("max_store_mb")
+    status = operator_status_from_effective(capped, source="x", data_dir="y", plan_digest="z")
+    assert status.retention_label == "unbounded"

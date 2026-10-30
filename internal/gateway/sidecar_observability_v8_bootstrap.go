@@ -309,9 +309,18 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
-	retention, err := observabilityruntime.NewRetentionController(
-		reaper, observabilityruntime.RetentionControllerOptions{Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration()},
-	)
+	// The size cap is known from the start, as the age is, so a cap with
+	// retention_days 0 also waits the startup delay.
+	if err := reaper.UpdateMaxStoreMB(int64(snapshot.Local.MaxStoreMB)); err != nil {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
+	}
+	retentionOptions := observabilityruntime.RetentionControllerOptions{
+		Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration(),
+	}
+	if !retentionOptions.SecureClient {
+		retentionOptions.StartupDelay = observabilityruntime.RetentionStartupDelay
+	}
+	retention, err := observabilityruntime.NewRetentionController(reaper, retentionOptions)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}

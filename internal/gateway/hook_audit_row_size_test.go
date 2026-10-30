@@ -25,8 +25,11 @@ import (
 // decision in a long single-session flood. At fc6794381d a decision wrote
 // about 44 KB: each native row stored its body three times, in the signed
 // envelope, payload_json and an identical structured_json (GAP-0614: audit.db
-// grew 79.7 MiB to 1,556.6 MiB over 18,000 decisions on Windows).
-const hookAuditRowBytesBudget = 42 << 10
+// grew 79.7 MiB to 1,556.6 MiB over 18,000 decisions on Windows). At
+// 54ad050a00 it wrote about 39 KB: 2 of its 5 native rows were
+// correlation.relationship.changed copies of correlation_relationships rows
+// (#1384); without them it writes about 29 KB.
+const hookAuditRowBytesBudget = 32 << 10
 
 // hookAuditMaxRowBytes bounds one audit row whatever the size of the tool
 // input: the hook body is not stored whole in any row.
@@ -108,6 +111,16 @@ func TestClaudeCodePreToolUseAuditRowsBounded(t *testing.T) {
 		float64(rowsAfter-rowsBefore)/measured, perDecision)
 	if perDecision > hookAuditRowBytesBudget {
 		t.Errorf("a benign PreToolUse adds %.0f audit_events bytes; the budget is %d", perDecision, hookAuditRowBytesBudget)
+	}
+
+	// A relationship change is exported, not stored again (#1384).
+	var relationshipRows int
+	if err := reader.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE event_name = ?`,
+		"correlation.relationship.changed").Scan(&relationshipRows); err != nil {
+		t.Fatal(err)
+	}
+	if relationshipRows != 0 {
+		t.Errorf("%d correlation.relationship.changed rows in audit_events, want none", relationshipRows)
 	}
 
 	// No native row repeats its payload in structured_json.
