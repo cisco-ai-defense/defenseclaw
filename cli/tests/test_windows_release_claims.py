@@ -29,6 +29,12 @@ RETIRED_CONNECTORS = {"openhands", "omnigent"}
 # Connectors section next to the connector pages.
 _CONNECTOR_SECTION_REFERENCE_PAGES = {"capability-matrix", "compatibility", "openclaw-integration"}
 
+# Hook routes a gateway calls (1.0.6 agent-gateway, #1394). They sit with the
+# connector pages but install nothing and have no setup connector, so they
+# carry no per-OS setup status row; the route test below checks their own
+# Windows statement instead.
+_CONNECTOR_SECTION_ROUTE_PAGES = {"agent-gateway"}
+
 
 def _active_connector_docs() -> dict[str, Path]:
     """The per-connector reference pages, which carry the platform status table."""
@@ -41,7 +47,12 @@ def _active_connector_docs() -> dict[str, Path]:
             # A sidebar group folder: its meta.json lists the pages as "../<id>".
             group = json.loads((connectors_dir / item / "meta.json").read_text(encoding="utf-8"))
             connector_ids.extend(page.removeprefix("../") for page in group["pages"])
-        elif item != "index" and not item.startswith("---") and item not in _CONNECTOR_SECTION_REFERENCE_PAGES:
+        elif (
+            item != "index"
+            and not item.startswith("---")
+            and item not in _CONNECTOR_SECTION_REFERENCE_PAGES
+            and item not in _CONNECTOR_SECTION_ROUTE_PAGES
+        ):
             connector_ids.append(item)
     return {connector_id: reference_dir / f"{connector_id}.mdx" for connector_id in connector_ids}
 
@@ -86,6 +97,19 @@ def test_windows_guide_has_unambiguous_platform_claims_and_powershell_examples()
     assert text.count("```powershell") >= 8
     assert "OpenShell sandboxes run on Linux and macOS only" in text
     assert "enterprise hooks status" in enterprise_deployment
+
+
+def test_connector_route_pages_are_listed_and_state_their_windows_limit() -> None:
+    connectors_dir = ROOT / "docs-site/content/docs/connectors"
+    navigation = json.loads((connectors_dir / "meta.json").read_text(encoding="utf-8"))["pages"]
+    for route in sorted(_CONNECTOR_SECTION_ROUTE_PAGES):
+        assert route in navigation, route
+        # A route is not a setup connector: no Windows setup status to keep in parity.
+        assert route not in WINDOWS_CONNECTOR_SUPPORT, route
+        assert route.replace("-", "_") not in WINDOWS_CONNECTOR_SUPPORT, route
+        text = " ".join((connectors_dir / f"{route}.mdx").read_text(encoding="utf-8").split())
+        assert "## Platform support" not in text, route
+        assert "**Windows managed devices** have no hook socket, so the route is not served there" in text, route
 
 
 def test_connector_pages_are_the_canonical_cross_platform_support_source() -> None:
