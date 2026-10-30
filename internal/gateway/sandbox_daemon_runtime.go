@@ -1192,10 +1192,23 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 		// With report, tell the gateway whether the sandbox runs: a stopped
 		// one's registration authorizes no relayed call (GAP-0505).
 		ans := d.askPolicy(ctx, r, report, running)
+		if report && running && registrationStopped(ans.err) && d.tryLockLifecycle() {
+			// It runs again, but not by a start of this daemon (one
+			// started outside it, or a stop listed while it ran): it runs
+			// under a new registration from now, as after a start. A
+			// start under way registers it itself.
+			next, err := d.restartRegistration(ctx, r)
+			d.unlockLifecycle()
+			if err == nil && next.ID != r.ID {
+				r = next
+				ans = d.askPolicy(ctx, r, report, running)
+			}
+		}
 		if ans.gone {
 			// A status's confirmation (confirmRunningView) that marked it
-			// first stops it.
-			if d.regs.markRevokedText(r.Sandbox, ans.reason, ans.stopText) {
+			// first stops it. An answer for a registration a start
+			// replaced meanwhile changes nothing.
+			if d.regs.markRevokedIfID(r.Sandbox, r.ID, ans.reason, ans.stopText) {
 				r.Revoked, r.RevokedReason, r.StopText = true, ans.reason, ans.stopText
 				revoked = append(revoked, r)
 			}
@@ -1318,6 +1331,52 @@ func sandboxStateReport(phases map[string]string, listed bool, name string) (run
 		return false, false
 	}
 	return sandboxMayRun(phase), true
+}
+
+// restartRegistration registers the sandbox of r again before it runs
+// (registrations/{id}/restart): the managed gateway ends r and answers the
+// new registration the sandbox runs under from now, which the daemon and
+// the manager keep in its place. A state report never revives a
+// registration whose sandbox was reported stopped (GAP-0673). A managed
+// gateway without the route (an older one after a rollback) keeps r, whose
+// running report starts the sandbox as before.
+func (d *SandboxDaemon) restartRegistration(ctx context.Context, r daemonRegistration) (daemonRegistration, error) {
+	view, err := d.relay.Restart(ctx, r.ID)
+	if restartUnsupported(err) {
+		return r, nil
+	}
+	if err != nil {
+		return r, err
+	}
+	if view.ID == "" || view.ID == r.ID {
+		return r, errors.New("managed gateway answered a restart without a new registration")
+	}
+	next := r
+	next.ID, next.UpdatedAt = view.ID, time.Now().UTC()
+	if err := d.regs.put(next); err != nil {
+		return r, err
+	}
+	if d.rt != nil && d.rt.manager != nil {
+		d.rt.manager.SetRegistration(r.Sandbox, next.ID)
+	}
+	d.logf("sandbox %s: registered again as %s for its start", r.Sandbox, next.ID)
+	return next, nil
+}
+
+// restartUnsupported reports the answer of a managed gateway that has no
+// restart route: not found or method not allowed, without a refusal
+// reason (an unknown registration names one).
+func restartUnsupported(err error) bool {
+	var refused *sandboxrelay.Error
+	return errors.As(err, &refused) && refused.Reason == "" &&
+		(refused.Status == http.StatusNotFound || refused.Status == http.StatusMethodNotAllowed)
+}
+
+// registrationStopped reports the managed gateway's refusal of a running
+// report for a registration whose sandbox was reported stopped.
+func registrationStopped(err error) bool {
+	var refused *sandboxrelay.Error
+	return errors.As(err, &refused) && refused.Reason == sandboxrelay.ReasonRegistrationStopped
 }
 
 // reportStopped tells the managed gateway that name's sandbox stopped, so
@@ -2640,6 +2699,16 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
 			Message: "your organization's policy no longer covers sandbox " + name + "; delete it and start it again with defenseclaw sandbox run"}
 	}
+	// A start runs the sandbox under a new registration: a stopped
+	// registration never runs again (GAP-0673).
+	if r, err = d.restartRegistration(ctx, r); err != nil {
+		if reason, gone := registrationGone(err); gone {
+			d.regs.markRevokedIfID(name, r.ID, reason, "")
+			return nil, &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
+				Message: "your organization's policy no longer covers sandbox " + name + "; delete it and start it again with defenseclaw sandbox run"}
+		}
+		return nil, managedRelayError(err)
+	}
 	// Reported running before the start, so the agent's first hooks are
 	// admitted; a start that fails reports it stopped again. Its answer is
 	// applied in the order of the registration's requests (applyOrdered).
@@ -3259,6 +3328,22 @@ func (r *daemonRegistrations) drop(name string) error {
 }
 
 func (r *daemonRegistrations) markRevoked(name, reason string) { r.markRevokedText(name, reason, "") }
+
+// markRevokedIfID is markRevokedText for registration id of sandbox name
+// only: a sandbox a start registered again keeps its new registration
+// when an answer for the one it replaced comes late.
+func (r *daemonRegistrations) markRevokedIfID(name, id, reason, text string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reg, ok := r.byName[name]
+	if !ok || reg.ID != id || reg.Revoked {
+		return false
+	}
+	reg.Revoked, reg.RevokedReason, reg.StopText, reg.UpdatedAt = true, reason, text, time.Now().UTC()
+	r.byName[name] = reg
+	_ = r.saveLocked()
+	return true
+}
 
 // markRevokedText is markRevoked with the managed gateway's words for the
 // revoke (daemonRegistration.StopText), "" when it gave none.

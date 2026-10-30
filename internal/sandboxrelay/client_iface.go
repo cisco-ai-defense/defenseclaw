@@ -94,6 +94,9 @@ type Client interface {
 	// Report is POST registrations/{id}/state: whether the sandbox runs
 	// now, answered like Current.
 	Report(ctx context.Context, registration string, running bool) (CurrentPolicy, error)
+	// Restart is POST registrations/{id}/restart: the sandbox starts again
+	// under the new registration it answers.
+	Restart(ctx context.Context, registration string) (RegistrationView, error)
 	// Explain is POST policy/explain.
 	Explain(ctx context.Context, req ExplainRequest) (sandboxapi.ManagedExplain, error)
 	// PolicyTest is POST policy/test for the registration's sandbox or, with

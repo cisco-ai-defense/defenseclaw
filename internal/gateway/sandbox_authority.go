@@ -127,6 +127,9 @@ type sandboxRegistrationStore interface {
 	// the daemon reported foreign.
 	Report(uid int, id string, running bool) (sandboxreg.Registration, error)
 	RevokeSandbox(uid int, sandboxID, sandboxName, reason string) ([]sandboxreg.Registration, error)
+	// Restart runs a bound registration's sandbox again under a new
+	// registration (GAP-0673).
+	Restart(uid int, id string) (sandboxreg.Registration, error)
 }
 
 func (s *sandboxAuthority) clock() time.Time {

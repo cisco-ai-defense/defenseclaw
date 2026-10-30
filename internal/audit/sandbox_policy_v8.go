@@ -79,6 +79,9 @@ const (
 	SandboxManagedRemove            = "remove"
 	SandboxGuestRelayWithoutGuest   = "relay_without_guest"
 	SandboxGuestRunningWithoutGuest = "running_without_guest"
+	// SandboxGuestRunningAfterStop: a running report for a registration
+	// whose daemon reported its sandbox stopped, refused (GAP-0673).
+	SandboxGuestRunningAfterStop = "running_after_stop"
 )
 
 // Bounds of the managed attributes, as the registry declares them.
@@ -1171,7 +1174,7 @@ func (recorder *SandboxRecorder) RecordSandboxRegistrationWithoutGuest(ctx conte
 		return fmt.Errorf("audit: sandbox registration without guest requires a registration id")
 	}
 	switch input.Reason {
-	case SandboxGuestRelayWithoutGuest, SandboxGuestRunningWithoutGuest:
+	case SandboxGuestRelayWithoutGuest, SandboxGuestRunningWithoutGuest, SandboxGuestRunningAfterStop:
 	default:
 		return fmt.Errorf("audit: sandbox registration without guest reason %q is not registered", input.Reason)
 	}
