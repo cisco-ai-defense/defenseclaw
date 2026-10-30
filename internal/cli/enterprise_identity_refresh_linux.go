@@ -28,6 +28,7 @@ const identityRefreshSSSCacheNoMatch = 2
 
 var (
 	identityRefreshSSSCache    = "/usr/sbin/sss_cache"
+	identityRefreshGetent      = "/usr/bin/getent"
 	identityRefreshNSSwitch    = "/etc/nsswitch.conf"
 	identityRefreshSSSDBackend = identityRefreshUsesSSSD
 )
@@ -81,6 +82,11 @@ func identityRefreshPlatformFlushOSCache(name string) (identityRefreshFlush, *en
 	if err != nil {
 		flush.Reason = "failed"
 		return flush, &enterprisestatus.Message{Code: "os_cache_flush_failed", Message: "sss_cache failed: " + err.Error() + "; the facts were re-read from the SSSD cache as it is"}
+	}
+	if name != "" {
+		// Resolve the account again as root, so SSSD holds it before the
+		// gateway, with its shorter lookup budget, re-reads it.
+		_ = identityRefreshRun(identityRefreshGetent, "initgroups", name)
 	}
 	flush.Flushed, flush.Method = scope, "sss_cache"
 	return flush, nil

@@ -237,16 +237,37 @@ func identityRefreshConnectors(set *guardrailProfileSet) []string {
 	return connectors
 }
 
+// identityRefreshRetryDelay is how long a failed lookup waits before its one
+// retry: past identityExplainFresh, so the retry starts a lookup of its own.
+// Right after an OS cache flush a directory account resolves cold (SSSD asks
+// the domain controller), and the first lookup can exceed its budget while
+// SSSD goes on and caches the answer. Tests replace it.
+var identityRefreshRetryDelay = identityExplainFresh + 500*time.Millisecond
+
 // refreshIdentity re-reads one account and returns its profile changes.
 func refreshIdentity(set *guardrailProfileSet, key string, connectors []string) (account identityRefreshAccount, changes []identityRefreshChange, failure string, pending bool) {
 	account.UserID = key
 	before, _, hadFacts := cachedDirectoryFacts(key)
-	subject, err := profileExplainSubjectLookup(key)
+	// A lookup that failed while older facts are cached still answers with
+	// those facts; it is a failure too: nothing was re-read.
+	lookup := func() (profileSubject, bool) {
+		subject, err := profileExplainSubjectLookup(key)
+		failed := err != nil || subject.UserID == "" || subject.LookupError != ""
+		if !failed {
+			_, _, failed = cachedDirectoryRefreshFailure(subject.UserID)
+		}
+		return subject, failed
+	}
+	subject, failed := lookup()
+	if failed && !subject.accountUnresolved {
+		time.Sleep(identityRefreshRetryDelay)
+		subject, failed = lookup()
+	}
 	account.UserName = subject.UserName
 	switch {
 	case subject.accountUnresolved:
 		return account, nil, identityRefreshAccountUnresolved, false
-	case err != nil || subject.UserID == "" || subject.LookupError != "":
+	case failed:
 		return account, nil, identityRefreshLookupFailed, false
 	}
 	account.UserID = subject.UserID
