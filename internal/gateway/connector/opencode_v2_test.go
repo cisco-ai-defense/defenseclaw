@@ -131,7 +131,6 @@ func TestOpenCodeV2OutageAndCredentialFailures(t *testing.T) {
 			server := openCodeStubGateway(t)
 			data := openCodePluginTestData(t, server)
 			data.FailMode = tc.mode
-			data.OutageFailMode = tc.mode
 			if tc.missingToken {
 				data.TokenFileJS = javaScriptStringContent(filepath.Join(t.TempDir(), "missing.token"))
 			} else {
@@ -160,7 +159,12 @@ import childProcess from "node:child_process";
 import {syncBuiltinESMExports} from "node:module";
 const nativeStatus = Number(process.argv[2]);
 if (nativeStatus) {
- childProcess.execFileSync = () => { throw Object.assign(new Error("fixture native process result"), {status:nativeStatus}); };
+ // The per-user outage mode comes from the helper's hook-outage-mode answer
+ // (1.0.5 runtime config), every other native call returns the fixture status.
+ childProcess.execFileSync = (_bin, args) => {
+  if (args && args[0] === "hook-outage-mode") return process.argv[3] + "\n";
+  throw Object.assign(new Error("fixture native process result"), {status:nativeStatus});
+ };
  syncBuiltinESMExports();
 }
 const {default: plugin} = await import(pathToFileURL(process.argv[1]));
@@ -172,7 +176,7 @@ const cleanup = await plugin.setup({location,
 });
 try { await before({tool:"shell",input:{command:"echo test"},id:"call_1",sessionID:"ses_1"}); console.log("allow"); }
 catch { console.log("block"); }
-await cleanup();`, plugin, fmt.Sprint(tc.nativeStatus))
+await cleanup();`, plugin, fmt.Sprint(tc.nativeStatus), tc.mode)
 			if got := lines[len(lines)-1] == "block"; got != tc.wantBlock {
 				t.Fatalf("block=%v, want %v", got, tc.wantBlock)
 			}
