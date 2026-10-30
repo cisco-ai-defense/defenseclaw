@@ -157,9 +157,9 @@ lost until the agent is restarted.
 
 ## Roll back
 
-On Linux and macOS with bundle trust anchors, DefenseClaw 1.0.4 and later
-refuse to install a release below the confirmed bundle's `min_product_version`
-(`product_floor_refused`). The rollback marker, `--allow-downgrade` and
+With bundle trust anchors, DefenseClaw refuses to install a release below the
+confirmed bundle's `min_product_version` (`product_floor_refused`): on Linux
+and macOS from 1.0.4, in Windows Setup from 1.0.6. The rollback marker, `--allow-downgrade` and
 `uninstall --keep-state` do not lift this floor. A package older than 1.0.4
 does not check the floor itself and can complete below it. A floor that cannot
 be read refuses the install too. Install a release that meets the floor; to go
@@ -250,10 +250,26 @@ packages installed through `apt` or `apt-get`.
 
 Packages older than 1.0.4 installed through `rpm`, `dnf`, `dpkg -i` or the
 macOS Installer run their own older scripts, which do not check the floor.
-`dpkg -i` does not run the apt hook. Windows Setup does not check the floor.
-Keep package deployment under administrator control, and check that the
-release you install meets the floor first. To go below the floor, contact your
-administrator. See [Roll back](/docs/enterprise/lifecycle#roll-back) for
+`dpkg -i` does not run the apt hook.
+
+**Windows.** From 1.0.6, Setup `/install`, `/upgrade`, `/repair` and `/ensure`
+check the floor before they change anything, with the Setup's own verified
+copy of DefenseClaw, and refuse a release below it (`product_floor_refused`,
+exit `1603`). A floor that cannot be read refuses too. The check reads the
+bundle store, so it also works after an uninstall that kept the state. A
+1.0.5 or older Setup does not check the floor and can install below it.
+
+On every OS, a 1.0.6 or later release that finds itself below the floor
+reports `product_below_floor` in `status`, `verify` and `bundle status`. It is
+a warning only: the policy keeps enforcing and nothing is repaired or
+reinstalled. `bundle status` shows the floor as `current.min_product_version`;
+check it before you deploy an older release.
+
+To roll back to 1.0.4, the confirmed floor must be unset or 1.0.4 or lower.
+If it is higher, deliver a bundle signed with a lower `--min-product-version`
+first. Keep package deployment under administrator control, and check that
+the release you install meets the floor first. To go below the floor, contact
+your administrator. See [Roll back](/docs/enterprise/lifecycle#roll-back) for
 the supported procedure.
 
 ### The kept version 8 config
