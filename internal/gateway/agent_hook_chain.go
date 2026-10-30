@@ -25,7 +25,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -220,14 +219,16 @@ func (a *APIServer) applyAgentHookToolChains(
 		if structuredAction {
 			projectSQLValuePersistenceSink(ctx, req, &projection)
 		}
+		decision := a.decisionConfig(ctx)
 		projection = toolChainProjectionForPolicyPosture(
-			a.decisionConfig(ctx),
+			decision,
 			req.ConnectorName,
 			projection,
 		)
-		if a.userRequestedRemoteDownload(ctx, req) {
-			// The user asked for this download and for running it: the
-			// download does not start the download-then-execute chain.
+		if a.expectedRemoteDownload(ctx, decision, req) {
+			// A download from an internal domain, or one the user asked for
+			// and asked to run, does not start the download-then-execute
+			// chain.
 			clearToolChainStep(&projection, guardrail.ToolChainDownloadThenExecuteSameArtifact, 1)
 		}
 	}
@@ -1758,15 +1759,16 @@ func projectRemoteArtifactChainSteps(
 	}
 }
 
-// userRequestedRemoteDownload reports a call whose remote download comes from
-// a host that one of the user's recent prompts (this turn's or the two before
-// it, as in "download X and run it" then "yes, go ahead") names, together with
-// a request to run, execute or install it (#1390): the only false positive of
-// chain.download_then_execute_same_artifact in an external A/B run was such a
-// download. The prompts are the ones the tool judge weighs
-// (SESSION_USER_INTENT, #1397); without a judge there are none and nothing
-// changes.
-func (a *APIServer) userRequestedRemoteDownload(ctx context.Context, req agentHookRequest) bool {
+// expectedRemoteDownload reports a call whose remote download (#1390) comes
+// from a host under guardrail.internal_domains, or from a host that one of
+// the user's recent prompts (this turn's or the two before it, as in
+// "download X and run it" then "yes, go ahead") names together with a
+// request to run, execute or install it: the only false positive of
+// chain.download_then_execute_same_artifact in an external A/B run was such
+// a download. userDownloadRequests records the prompts at the connector's
+// turn-start event, with or without the LLM judge. Either can only lower
+// this detection-only alert.
+func (a *APIServer) expectedRemoteDownload(ctx context.Context, decision *config.Config, req agentHookRequest) bool {
 	capture := req.toolChain
 	if a == nil || capture == nil || !capture.recorded {
 		return false
@@ -1775,43 +1777,10 @@ func (a *APIServer) userRequestedRemoteDownload(ctx context.Context, req agentHo
 	if !ok {
 		return false
 	}
-	for _, intent := range a.judgeFor(ctx).SessionUserIntents(ctx) {
-		if userIntentRequestsDownloadAndRun(intent, host) {
-			return true
-		}
+	if decision != nil && decision.Guardrail.IsInternalDomainHost(host) {
+		return true
 	}
-	return false
-}
-
-var userIntentRunWord = regexp.MustCompile(`(?i)\b(run|runs|running|execute|executes|executing|exec|install|installs|installing|launch|launches|launching|invoke|invokes)\b`)
-
-// userIntentRequestsDownloadAndRun reports an intent that names host as a
-// whole name (not a part of a longer one) and asks to run, execute or install.
-func userIntentRequestsDownloadAndRun(intent, host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
-	intent = strings.ToLower(intent)
-	if host == "" || !userIntentRunWord.MatchString(intent) {
-		return false
-	}
-	nameByte := func(c byte) bool {
-		return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '.'
-	}
-	for offset := 0; offset < len(intent); {
-		found := strings.Index(intent[offset:], host)
-		if found < 0 {
-			return false
-		}
-		start, end := offset+found, offset+found+len(host)
-		before := start == 0 || !nameByte(intent[start-1])
-		// A sentence may end the name with a period.
-		after := end == len(intent) || !nameByte(intent[end]) ||
-			intent[end] == '.' && (end+1 == len(intent) || !nameByte(intent[end+1]))
-		if before && after {
-			return true
-		}
-		offset = start + 1
-	}
-	return false
+	return a.userDownloads.requested(sandboxSessionStateKey(ctx, SessionIDFromContext(ctx)), host, time.Now())
 }
 
 // clearToolChainStep removes one step of chainID from the call's projection,

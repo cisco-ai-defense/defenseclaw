@@ -259,6 +259,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			if judge := a.judgeFor(ctx); judge != nil {
 				judge.ObserveSessionPrompt(ctx, req.Prompt)
 			}
+			a.observeUserDownloadRequest(ctx, req.Prompt)
 		}
 		// Secure Client keeps the prompt of main, so AI Defense is sent the
 		// text it was sent before (issue #1092).

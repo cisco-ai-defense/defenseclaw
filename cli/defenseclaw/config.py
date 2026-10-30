@@ -2534,6 +2534,10 @@ class GuardrailConfig:
     custom_packs: dict[str, CustomRulePack] = field(default_factory=dict)
     rules: GuardrailRulesConfig = field(default_factory=GuardrailRulesConfig)
     cisco_trust_level: str = ""  # full | advisory | none ("" = full)
+    # The organization's own domains: a download from a host equal to or
+    # under one does not start the download-then-execute alert (#1390).
+    # Mirrors ``GuardrailConfig.InternalDomains`` in internal/config/config.go.
+    internal_domains: list[str] = field(default_factory=list)
     # Lowest severity a tool call is blocked / alerted at (``CRITICAL``
     # | ``HIGH`` | ``MEDIUM`` | ``LOW``). Empty keeps the rule pack's
     # profile levels (strict: MEDIUM / LOW, permissive: CRITICAL / HIGH,
@@ -5029,6 +5033,8 @@ def _serialize_v9_guardrail_keys(guardrail: Any) -> None:
     _prune_v9_block(guardrail, "custom_packs")
     if not guardrail.get("cisco_trust_level"):
         guardrail.pop("cisco_trust_level", None)
+    if not guardrail.get("internal_domains"):
+        guardrail.pop("internal_domains", None)
     judge = guardrail.get("judge")
     if isinstance(judge, dict) and not judge.get("trace"):
         judge.pop("trace", None)
@@ -6292,6 +6298,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
         rules=_merge_guardrail_rules(raw.get("rules")) or GuardrailRulesConfig(),
         cisco_trust_level=str(raw.get("cisco_trust_level", "") or ""),
+        internal_domains=_string_list(raw.get("internal_domains")),
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
         connector=raw.get("connector", ""),
