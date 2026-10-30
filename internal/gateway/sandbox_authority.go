@@ -310,7 +310,7 @@ type sandboxRouteAuthorizerKey struct{}
 func (a *APIServer) serveSandboxRoute(authorizer *managedHookAuthorizer, peer managedHookPeer, route string, w http.ResponseWriter, r *http.Request, next http.Handler) {
 	if r.Header.Get(sandboxrelay.ClientHeader) == "" {
 		a.emitHTTPAuthFailure(r.Context(), r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch")
-		http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+		writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 		return
 	}
 	if peer.UID == 0 {
