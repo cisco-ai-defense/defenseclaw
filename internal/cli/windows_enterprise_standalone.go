@@ -4355,7 +4355,7 @@ func defaultWindowsEnterpriseEnsurePayload(opts *windowsEnterpriseLifecycleOptio
 	// The running image can never replace itself: a CLI launched from the
 	// installed bin directory leaves the installed CLI in place.
 	if executable, err := windowsEnterpriseExecutableResolver(); err == nil && opts.cliBinary != "" {
-		if conflict, err := windowsEnterpriseSelfUpgradeConflict("upgrade", opts.installRoot, executable, opts.cliBinary); err != nil || conflict {
+		if conflict, err := windowsEnterpriseSelfUpgradeConflict("upgrade", opts.installRoot, windowsEnterpriseStandalone(opts), executable, opts.cliBinary); err != nil || conflict {
 			opts.cliBinary = ""
 		}
 	}

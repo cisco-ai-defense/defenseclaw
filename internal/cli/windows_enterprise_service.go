@@ -662,6 +662,7 @@ func runWindowsEnterpriseLifecycle(
 		selfUpgradeConflict, conflictErr := windowsEnterpriseSelfUpgradeConflict(
 			action,
 			opts.installRoot,
+			windowsEnterpriseStandalone(opts),
 			executable,
 			opts.cliBinary,
 		)
@@ -757,9 +758,13 @@ func writeWindowsEnterpriseLifecyclePreflightFailure(
 	return cause
 }
 
+// windowsEnterpriseSelfUpgradeConflict reports an upgrade whose running CLI
+// is the installed one it would replace. standalone selects the resolved
+// profile's default install root when installRoot is empty.
 func windowsEnterpriseSelfUpgradeConflict(
 	action string,
 	installRoot string,
+	standalone bool,
 	executable string,
 	cliBinary string,
 ) (bool, error) {
@@ -767,7 +772,7 @@ func windowsEnterpriseSelfUpgradeConflict(
 		strings.TrimSpace(cliBinary) == "" {
 		return false, nil
 	}
-	resolvedInstallRoot, err := resolveWindowsEnterpriseSelfUpgradeInstallRoot(installRoot)
+	resolvedInstallRoot, err := resolveWindowsEnterpriseSelfUpgradeInstallRoot(installRoot, standalone)
 	if err != nil {
 		return false, err
 	}
@@ -812,7 +817,7 @@ func windowsEnterpriseSelfUpgradeConflict(
 	return os.SameFile(executableInfo, expectedInfo), nil
 }
 
-func resolveWindowsEnterpriseSelfUpgradeInstallRoot(explicit string) (string, error) {
+func resolveWindowsEnterpriseSelfUpgradeInstallRoot(explicit string, standalone bool) (string, error) {
 	root := strings.TrimSpace(explicit)
 	if root != "" {
 		if !filepath.IsAbs(root) {
@@ -838,7 +843,16 @@ func resolveWindowsEnterpriseSelfUpgradeInstallRoot(explicit string) (string, er
 				"the trusted default Windows Program Files directory is not an absolute path",
 			)
 		}
-		root = filepath.Join(programFiles, "Cisco", "DefenseClaw")
+		// The installer's default InstallRoot for the resolved profile. A
+		// different literal here leaves the guard checking a directory
+		// nothing is installed in: the two profiles install side by side
+		// under Cisco, so one profile's root is a plausible-looking miss for
+		// the other.
+		relative := winpath.ManagedInstallRelativeDir
+		if standalone {
+			relative = winpath.StandaloneManagedInstallRelativeDir
+		}
+		root = filepath.Join(programFiles, relative)
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {
