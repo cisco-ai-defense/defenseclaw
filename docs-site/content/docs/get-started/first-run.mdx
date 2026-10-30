@@ -53,7 +53,8 @@ defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 | `--with-judge` / `--no-judge` | The LLM judge. |
 | `--llm-provider`, `--llm-model`, `--llm-api-key-env`, `--llm-base-url` | The unified LLM key settings. |
 | `--llm-api-key` | LLM key to save into `.env`; the config stores only the env name. Other local users can see a command-line value, so prefer `DEFENSECLAW_INIT_LLM_API_KEY`. |
-| `--decision-model-url`, `--decision-model-name`, `--decision-model-key-env` | Turn on the [decision model](/docs/guardrail/decision-model) at this endpoint. Without them the wizard asks **Do you want to use a decision model?** (default no) and `--yes` leaves it off. `--no-decision-model` turns it off. `quickstart` takes the same three flags. |
+| `--decision-model-url`, `--decision-model-name`, `--decision-model-key-env` | Turn on the [decision model](/docs/guardrail/decision-model) at this endpoint. Without them the wizard asks **Do you want to use a decision model?** (default no) and `--yes` leaves it off. `quickstart` takes the same three flags. |
+| `--decision-model` / `--no-decision-model` | `--no-decision-model` turns the decision model off; `--decision-model` needs the URL and name flags. |
 | `--cisco-endpoint`, `--cisco-api-key-env` | Cisco AI Defense. |
 | `--cisco-api-key` | Cisco AI Defense key to save into `.env`. Prefer `DEFENSECLAW_INIT_CISCO_API_KEY`, for the same reason. |
 | `--enable-guardrail` | Configure the LLM guardrail during `init`. |

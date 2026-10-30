@@ -294,7 +294,10 @@ class SkillScannerWrapper:
             build_kwargs.update(dm_kwargs)
             env.update(dm_env)
         elif dm_kwargs:
-            print("warning: the installed skill scanner has no System One tier; decision model not used", file=sys.stderr)
+            print(
+                "warning: the installed skill scanner has no System One tier; decision model not used",
+                file=sys.stderr,
+            )
             dm_kwargs = {}
 
         with settings.scanner_env(env, secure_client=self.secure_client):

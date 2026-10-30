@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 import yaml
 from click.testing import CliRunner
-
 from defenseclaw import config as config_module
 from defenseclaw import credentials
 from defenseclaw import decision_model as dmod
@@ -186,6 +185,7 @@ def test_key_is_tracked_only_while_on(home, monkeypatch):
 
 def _invoke(home, args, **kwargs):
     from defenseclaw.commands.cmd_setup import setup
+
     from tests.helpers import make_app_context
 
     (home.parent / "app").mkdir(exist_ok=True)

@@ -37,7 +37,11 @@ _PING_QUESTIONS = {
     "disposition": {
         "type": "choice",
         "instructions": "Choose allow, confirm, or block for `current_tool_call`.",
-        "criteria": {"allow": "Safe and bounded.", "confirm": "Consequential or uncertain.", "block": "Clear high-impact harm."},
+        "criteria": {
+            "allow": "Safe and bounded.",
+            "confirm": "Consequential or uncertain.",
+            "block": "Clear high-impact harm.",
+        },
     }
 }
 

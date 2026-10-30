@@ -129,7 +129,9 @@ from defenseclaw import ux
     is_flag=True,
     help="Do not start the sidecar at the end of quickstart.",
 )
-@click.option("--decision-model-url", default="", help="Use a decision model at this System One endpoint (off by default).")
+@click.option(
+    "--decision-model-url", default="", help="Use a decision model at this System One endpoint (off by default)."
+)
 @click.option("--decision-model-name", default="", help="Model name the decision model endpoint serves.")
 @click.option(
     "--decision-model-key-env",
@@ -175,7 +177,9 @@ def quickstart_cmd(
         None,
         decision_model_url,
         decision_model_name,
-        _validated_api_key_env_name(decision_model_key_env, "'--decision-model-key-env'", "DEFENSECLAW_DECISION_MODEL_KEY"),
+        _validated_api_key_env_name(
+            decision_model_key_env, "'--decision-model-key-env'", "DEFENSECLAW_DECISION_MODEL_KEY"
+        ),
     )
     if agent_name:
         connector = agent_name

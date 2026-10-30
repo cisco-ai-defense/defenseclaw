@@ -1426,15 +1426,21 @@ def setup_llm(
     help="Env var holding the bearer token (default DEFENSECLAW_DECISION_MODEL_KEY; local servers need none).",
 )
 @click.option("--timeout", type=float, default=None, help="Seconds one call may take (default 3).")
-@click.option("--allow-threshold", type=float, default=None, help="Risk at or below this skips the judge (default 0.30).")
-@click.option("--block-threshold", type=float, default=None, help="Risk at or above this is a confident block (default 0.75).")
+@click.option(
+    "--allow-threshold", type=float, default=None, help="Risk at or below this skips the judge (default 0.30)."
+)
+@click.option(
+    "--block-threshold", type=float, default=None, help="Risk at or above this is a confident block (default 0.75)."
+)
 @click.option(
     "--on-confident-block",
     type=click.Choice(["escalate", "decide"], case_sensitive=False),
     default=None,
     help="escalate (default): the judge still checks a confident block. decide: the block stands without the judge.",
 )
-@click.option("--ping/--no-ping", "run_ping", default=False, help="After saving, send one benign request to check the endpoint.")
+@click.option(
+    "--ping/--no-ping", "run_ping", default=False, help="After saving, send one benign request to check the endpoint."
+)
 @click.option("--non-interactive", "--accept-defaults", is_flag=True, help="Use flags instead of prompts.")
 @pass_ctx
 def setup_decision_model(
