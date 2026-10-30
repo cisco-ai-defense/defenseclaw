@@ -39,10 +39,51 @@ const (
 	ObjectConfigFile ObjectKind = "ConfigFile"
 	// ObjectConfigDirectory is the config directory: gateway read and traverse.
 	ObjectConfigDirectory ObjectKind = "ConfigDirectory"
+	// ObjectInstallDirectory is libexec: Users read and execute, inheritable.
+	ObjectInstallDirectory ObjectKind = "InstallDirectory"
+	// ObjectInstallFile is an installed file the gateway does not run: the
+	// CLI, hook and broker executables, the installer script and module.
+	ObjectInstallFile ObjectKind = "InstallFile"
+	// ObjectServiceInstallDirectory is InstallRoot and bin: Users and the
+	// gateway service read and execute, inheritable.
+	ObjectServiceInstallDirectory ObjectKind = "ServiceInstallDirectory"
+	// ObjectServiceInstallFile is the gateway executable.
+	ObjectServiceInstallFile ObjectKind = "ServiceInstallFile"
+	// ObjectStateDirectory is StateRoot: gateway read and traverse.
+	ObjectStateDirectory ObjectKind = "StateDirectory"
+	// ObjectAdminDirectory is a SYSTEM and Administrators only directory: the
+	// guardian and install-state folders, the guardian and broker log folders.
+	ObjectAdminDirectory ObjectKind = "AdminDirectory"
+	// ObjectAdminFile is a SYSTEM and Administrators only file: targets.yaml,
+	// deployment.json and the other install-state records, admin logs.
+	ObjectAdminFile ObjectKind = "AdminFile"
+	// ObjectAuthorizationDirectory is the broker state folder: gateway read
+	// and traverse.
+	ObjectAuthorizationDirectory ObjectKind = "AuthorizationDirectory"
+	// ObjectLogDirectory is the logs root: SYSTEM and Administrators only.
+	ObjectLogDirectory ObjectKind = "LogDirectory"
+	// ObjectManagedIPCDirectory is the IPC socket folder: the gateway service
+	// full control, Authenticated Users read and traverse, nothing inheritable.
+	ObjectManagedIPCDirectory ObjectKind = "ManagedIPCDirectory"
 )
 
 // Directory reports whether the kind describes a directory.
 func (kind ObjectKind) Directory() bool {
+	switch kind {
+	case ObjectRuntimeDirectory, ObjectConfigDirectory, ObjectInstallDirectory,
+		ObjectServiceInstallDirectory, ObjectStateDirectory, ObjectAdminDirectory,
+		ObjectAuthorizationDirectory, ObjectLogDirectory, ObjectManagedIPCDirectory:
+		return true
+	}
+	return false
+}
+
+// propagatesRepair reports whether a repair of this directory kind also
+// pushes its inheritable entries into existing children. Only the gateway's
+// data and config folders do, as they always have; every other folder holds
+// children DefenseClaw stamps one by one (or does not own), so only the
+// folder's own descriptor is written.
+func (kind ObjectKind) propagatesRepair() bool {
 	return kind == ObjectRuntimeDirectory || kind == ObjectConfigDirectory
 }
 
@@ -176,7 +217,9 @@ type descriptorACE struct {
 
 // objectDescriptor is the owner, protection and DACL of one object.
 type objectDescriptor struct {
-	Owner     string
+	Owner string
+	// Group is read only where a canonical form pins it (service keys).
+	Group     string
 	Protected bool
 	// NullDACL means the object has no DACL at all: everyone has full access.
 	NullDACL bool
@@ -200,17 +243,25 @@ type canonicalForm struct {
 // repair stamps.
 type canonicalSpec struct {
 	Forms []canonicalForm
+	// GatewayNeedsAccess: the forms name the gateway service, so its entry
+	// is required. Kinds the gateway never opens leave it unset.
+	GatewayNeedsAccess bool
 	// GatewayNeedsWrite: the gateway must hold write access (runtime kinds);
 	// otherwise read access.
 	GatewayNeedsWrite bool
+	// GatewayInherit is the inheritance a gateway write entry must carry to
+	// count: object and container inherit for an inheritable runtime folder,
+	// none for a file or the IPC folder.
+	GatewayInherit uint8
 }
 
 // canonicalSpecFor builds the spec for kind with the gateway SID filled in.
 // gatewaySID may be empty when the identity cannot be resolved; the spec then
-// carries no gateway entry and the gateway access check is skipped.
+// carries no gateway entry and the gateway access check is skipped. The forms
+// mirror the installer module's New-DefenseClawCanonicalPathAcl.
 func canonicalSpecFor(kind ObjectKind, gatewaySID string) canonicalSpec {
 	inherit := uint8(0)
-	if kind.Directory() {
+	if kind.Directory() && kind != ObjectManagedIPCDirectory {
 		inherit = aceFlagObjectInherit | aceFlagContainerInherit
 	}
 	base := []canonicalACE{
@@ -224,11 +275,23 @@ func canonicalSpecFor(kind ObjectKind, gatewaySID string) canonicalSpec {
 		}
 		return aces
 	}
+	withUsers := func(aces []canonicalACE) []canonicalACE {
+		return append(append([]canonicalACE(nil), aces...),
+			canonicalACE{SID: sidUsers, Mask: maskReadAndExecute, Flags: inherit})
+	}
+	gatewayRead := func(aces []canonicalACE) canonicalSpec {
+		return canonicalSpec{
+			Forms:              []canonicalForm{{Owner: sidAdministrators, ACEs: aces}},
+			GatewayNeedsAccess: true,
+		}
+	}
 	switch kind {
 	case ObjectRuntimeDirectory:
 		return canonicalSpec{
-			Forms:             []canonicalForm{{Owner: sidAdministrators, ACEs: withGateway(maskModify)}},
-			GatewayNeedsWrite: true,
+			Forms:              []canonicalForm{{Owner: sidAdministrators, ACEs: withGateway(maskModify)}},
+			GatewayNeedsAccess: true,
+			GatewayNeedsWrite:  true,
+			GatewayInherit:     inherit,
 		}
 	case ObjectRuntimeFile:
 		forms := []canonicalForm{{Owner: sidAdministrators, ACEs: withGateway(maskModify)}}
@@ -240,18 +303,40 @@ func canonicalSpecFor(kind ObjectKind, gatewaySID string) canonicalSpec {
 			owned := append([]canonicalACE{{SID: sidOwnerRights, Mask: maskReadControl}}, withGateway(maskModify)...)
 			forms = append(forms, canonicalForm{Owner: gatewaySID, ACEs: owned})
 		}
-		return canonicalSpec{Forms: forms, GatewayNeedsWrite: true}
+		return canonicalSpec{Forms: forms, GatewayNeedsAccess: true, GatewayNeedsWrite: true}
 	case ObjectRuntimeSecretFile:
 		owner := gatewaySID
 		if owner == "" {
 			owner = sidAdministrators
 		}
 		aces := append([]canonicalACE{{SID: sidOwnerRights, Mask: maskReadControl}}, withGateway(maskRead)...)
-		return canonicalSpec{Forms: []canonicalForm{{Owner: owner, ACEs: aces}}}
+		return canonicalSpec{Forms: []canonicalForm{{Owner: owner, ACEs: aces}}, GatewayNeedsAccess: true}
 	case ObjectConfigFile:
-		return canonicalSpec{Forms: []canonicalForm{{Owner: sidAdministrators, ACEs: withGateway(maskRead)}}}
-	case ObjectConfigDirectory:
-		return canonicalSpec{Forms: []canonicalForm{{Owner: sidAdministrators, ACEs: withGateway(maskReadAndExecute)}}}
+		return gatewayRead(withGateway(maskRead))
+	case ObjectConfigDirectory, ObjectStateDirectory, ObjectAuthorizationDirectory:
+		return gatewayRead(withGateway(maskReadAndExecute))
+	case ObjectServiceInstallDirectory, ObjectServiceInstallFile:
+		return gatewayRead(withUsers(withGateway(maskReadAndExecute)))
+	case ObjectInstallDirectory, ObjectInstallFile:
+		return canonicalSpec{Forms: []canonicalForm{{Owner: sidAdministrators, ACEs: withUsers(base)}}}
+	case ObjectAdminDirectory, ObjectAdminFile, ObjectLogDirectory:
+		return canonicalSpec{Forms: []canonicalForm{{Owner: sidAdministrators, ACEs: base}}}
+	case ObjectManagedIPCDirectory:
+		aces := append(withGateway(maskFullControl),
+			canonicalACE{SID: sidAuthenticatedUser, Mask: maskReadAndExecute})
+		forms := []canonicalForm{{Owner: sidAdministrators, ACEs: aces}}
+		if gatewaySID != "" {
+			// The gateway re-applies its own IPC baseline at every bind, with
+			// generic full control for the trusted principals. That shape is
+			// equivalent and is not drift.
+			forms = append(forms, canonicalForm{Owner: sidAdministrators, ACEs: []canonicalACE{
+				{SID: sidLocalSystem, Mask: maskGenericAll},
+				{SID: sidAdministrators, Mask: maskGenericAll},
+				{SID: gatewaySID, Mask: maskGenericAll},
+				{SID: sidAuthenticatedUser, Mask: maskReadAndExecute},
+			}})
+		}
+		return canonicalSpec{Forms: forms, GatewayNeedsAccess: true, GatewayNeedsWrite: true}
 	}
 	return canonicalSpec{}
 }
@@ -437,8 +522,7 @@ func assessCanonicalDescriptor(
 		}
 		if ace.SID == gatewaySID && gatewaySID != "" {
 			if spec.GatewayNeedsWrite {
-				if grantsWrite(ace.Mask) && (!kind.Directory() || ace.Flags&(aceFlagObjectInherit|aceFlagContainerInherit) ==
-					aceFlagObjectInherit|aceFlagContainerInherit) {
+				if grantsWrite(ace.Mask) && ace.Flags&spec.GatewayInherit == spec.GatewayInherit {
 					gatewayHas = true
 				}
 			} else if grantsRead(ace.Mask) {
@@ -468,7 +552,7 @@ func assessCanonicalDescriptor(
 	if !systemHas {
 		a.Drift = append(a.Drift, "SYSTEM full access is missing")
 	}
-	if gatewaySID != "" && !gatewayHas {
+	if gatewaySID != "" && spec.GatewayNeedsAccess && !gatewayHas {
 		a.GatewayAccessMissing = true
 		if spec.GatewayNeedsWrite {
 			a.Drift = append(a.Drift, "gateway service write entry is missing")

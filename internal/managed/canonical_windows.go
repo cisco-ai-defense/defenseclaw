@@ -57,7 +57,10 @@ func AssessCanonical(path string, kind ObjectKind, opts CanonicalOptions) (Canon
 func (kind ObjectKind) valid() bool {
 	switch kind {
 	case ObjectRuntimeDirectory, ObjectRuntimeFile, ObjectRuntimeSecretFile,
-		ObjectConfigFile, ObjectConfigDirectory:
+		ObjectConfigFile, ObjectConfigDirectory, ObjectInstallDirectory,
+		ObjectInstallFile, ObjectServiceInstallDirectory, ObjectServiceInstallFile,
+		ObjectStateDirectory, ObjectAdminDirectory, ObjectAdminFile,
+		ObjectAuthorizationDirectory, ObjectLogDirectory, ObjectManagedIPCDirectory:
 		return true
 	}
 	return false
@@ -176,7 +179,7 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 		return result, nil
 	}
 	spec := canonicalSpecFor(kind, gatewaySID)
-	if gatewaySID == "" && kind != ObjectConfigFile && kind != ObjectConfigDirectory {
+	if gatewaySID == "" && spec.GatewayNeedsAccess && kind != ObjectConfigFile && kind != ObjectConfigDirectory {
 		// Every runtime form names the gateway service; stamping without it
 		// would lock the gateway out.
 		result.RepairError = "gateway service identity is unavailable"
@@ -415,6 +418,23 @@ func stampCanonicalDescriptor(readHandle windows.Handle, path string, kind Objec
 			return errors.New("object changed between inspection and repair")
 		}
 		dataInfo := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+		if kind.Directory() && !kind.propagatesRepair() {
+			// SetKernelObjectSecurity writes only this folder's descriptor.
+			// SetSecurityInfo would also push the inheritable entries into
+			// every existing child, rewriting files DefenseClaw stamps on
+			// their own or does not own, and fail on the first child it
+			// cannot open.
+			if ownerToo {
+				info := dataInfo | windows.OWNER_SECURITY_INFORMATION | windows.GROUP_SECURITY_INFORMATION
+				if err := windows.SetKernelObjectSecurity(handle, info, descriptor); err == nil {
+					return nil
+				}
+			}
+			if err := windows.SetKernelObjectSecurity(handle, dataInfo, descriptor); err != nil {
+				return fmt.Errorf("apply canonical DACL: %w", err)
+			}
+			return nil
+		}
 		if ownerToo {
 			info := dataInfo | windows.OWNER_SECURITY_INFORMATION | windows.GROUP_SECURITY_INFORMATION
 			if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, info, owner, group, dacl, nil); err == nil {

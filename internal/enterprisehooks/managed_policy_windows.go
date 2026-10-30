@@ -2175,6 +2175,12 @@ func validateWindowsManagedPolicyDirectoryProtection(path string) error {
 	if err := windowsManagedPolicyDirTrustCheck(path); err != nil {
 		return err
 	}
+	return validateWindowsManagedPolicyDirectoryDescriptor(path)
+}
+
+// validateWindowsManagedPolicyDirectoryDescriptor checks only the folder's
+// own owner, protection and exact DACL, without walking its ancestors.
+func validateWindowsManagedPolicyDirectoryDescriptor(path string) error {
 	owner, err := windowsManagedPolicyOwnerSID()
 	if err != nil || owner == nil {
 		return errors.New("enterprise hooks: managed policy directory owner SID is unavailable")

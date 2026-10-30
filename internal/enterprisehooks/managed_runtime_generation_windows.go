@@ -2371,6 +2371,12 @@ func validateWindowsManagedRuntimeMachineFileProtection(
 	if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
 		return err
 	}
+	return validateWindowsManagedMachineFileDescriptor(path, userReadable)
+}
+
+// validateWindowsManagedMachineFileDescriptor checks only the file's own
+// owner, protection and exact DACL, without walking its ancestors.
+func validateWindowsManagedMachineFileDescriptor(path string, userReadable bool) error {
 	extended, err := winpath.Extended(path)
 	if err != nil {
 		return err

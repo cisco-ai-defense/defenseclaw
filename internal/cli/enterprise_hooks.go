@@ -1871,6 +1871,9 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		// Repair the gateway's data objects at start and on every pass. The
 		// results are logged by the helper and never fail the pass.
 		repairEnterpriseHookGatewayDataPathsPlatform()
+		// Then the install tree, StateRoot records, policy folders and
+		// service descriptors, so later drift heals without Setup Repair.
+		repairEnterpriseHookManagedInstallPlatform()
 		run, err := runEnterpriseHookReconcileOnce(cmd.Context())
 		if err != nil {
 			repairRetryNeeded = true
