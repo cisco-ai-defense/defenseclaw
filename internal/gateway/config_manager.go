@@ -244,6 +244,12 @@ type ConfigManager struct {
 	permissionRetry         bool
 	permissionRetryInterval time.Duration
 
+	// activationCache holds the bundle manifests whose signature verified
+	// (memory only); lastActivationAlert keys the last refused activation
+	// alerted, so a refused change alerts once. Guarded by mu.
+	activationCache     enterprisebundle.SignatureCache
+	lastActivationAlert [sha256.Size]byte
+
 	current atomic.Value // *config.Config
 	gen     atomic.Uint64
 	mu      sync.Mutex
@@ -1093,19 +1099,137 @@ func (m *ConfigManager) savedWriteNotApplied(raw []byte) bool {
 // cases the record must bind these config bytes and advance the applied
 // generation; a watched hand edit has neither proof.
 func (m *ConfigManager) pendingManagedGeneration(raw []byte) bool {
+	ok, _ := m.managedGenerationAdmission(raw)
+	return ok
+}
+
+// managedGenerationAdmission is pendingManagedGeneration with the reason a
+// record that names a bundle was refused. Once trust anchors are installed,
+// naming a bundle is not enough (the record and config.yaml are root-written
+// files): the bytes must be what a signed bundle in the store renders
+// (enterprisebundle.CheckSignedActivation, private #7). Without anchors
+// (CONFIG= installs) the lifecycle-record rule is unchanged.
+func (m *ConfigManager) managedGenerationAdmission(raw []byte) (bool, *enterprisebundle.ActivationRefusal) {
 	state, err := configwrite.ReadGenerationState(m.path)
 	if err != nil || !m.appliedGenerationKnown || state.Generation <= m.appliedGeneration ||
 		(raw != nil && !strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw))) {
-		return false
+		return false, nil
 	}
 	if state.BundleID != "" {
-		return true
+		in, anchored := m.activationInput()
+		if !anchored {
+			return true, nil
+		}
+		if raw == nil {
+			if raw, err = os.ReadFile(m.path); err != nil {
+				return false, &enterprisebundle.ActivationRefusal{Cause: enterprisebundle.ActivationConfig,
+					BundleID: state.BundleID, Version: state.BundleVersion, Detail: "config.yaml cannot be read"}
+			}
+		}
+		if _, refusal := enterprisebundle.CheckSignedActivation(in, state.BundleID, state.BundleVersion, state.SignerKeyID, raw); refusal != nil {
+			return false, refusal
+		}
+		return true, nil
 	}
 	if state.Actor != configwrite.ActorLifecycle || state.BundleVersion != 0 || state.SignerKeyID != "" {
-		return false
+		return false, nil
 	}
-	_, err = os.Lstat(filepath.Join(filepath.Dir(m.path), "trust", enterprisebundle.AnchorsName))
-	return errors.Is(err, fs.ErrNotExist)
+	_, anchored := m.activationInput()
+	return !anchored, nil
+}
+
+// activationInput is the signed-activation input of this config path: the
+// bundles directory and the trust anchors next to config.yaml. anchored is
+// false only when no anchor file exists; an anchor file the gateway cannot
+// read or decode leaves Anchors nil, so every bundle is refused (signature).
+func (m *ConfigManager) activationInput() (enterprisebundle.ActivationInput, bool) {
+	dir := filepath.Dir(m.path)
+	anchorsPath := filepath.Join(dir, "trust", enterprisebundle.AnchorsName)
+	if _, err := os.Lstat(anchorsPath); errors.Is(err, fs.ErrNotExist) {
+		return enterprisebundle.ActivationInput{}, false
+	}
+	in := enterprisebundle.ActivationInput{BundlesDir: filepath.Join(dir, enterprisebundle.BundlesDirName),
+		Platform: runtime.GOOS, Cache: &m.activationCache}
+	if anchors, raw, err := enterprisebundle.ReadAnchorsFile(anchorsPath, nil); err == nil {
+		in.Anchors, in.AnchorsRaw = anchors, raw
+	}
+	return in, true
+}
+
+// startupActivationRefusal checks the boot bytes of a managed standalone
+// computer with trust anchors: they must be what a signed bundle in the
+// store renders for the bundle the generation record names. A computer that
+// has trust anchors but holds no signed bundle yet runs its lifecycle config
+// (nothing signed exists to run instead). nil admits the boot bytes.
+func (m *ConfigManager) startupActivationRefusal(raw []byte) *enterprisebundle.ActivationRefusal {
+	in, anchored := m.activationInput()
+	if !anchored {
+		return nil
+	}
+	state, err := configwrite.ReadGenerationState(m.path)
+	if err == nil && state.BundleID != "" {
+		_, refusal := enterprisebundle.CheckSignedActivation(in, state.BundleID, state.BundleVersion, state.SignerKeyID, raw)
+		return refusal
+	}
+	if len(enterprisebundle.SignedVersions(in)) == 0 {
+		return nil
+	}
+	return &enterprisebundle.ActivationRefusal{Cause: enterprisebundle.ActivationNotStored,
+		Detail: "the installed config.yaml names no signed policy bundle while this computer holds one"}
+}
+
+// startupFallbackVersion is the signed bundle a gateway whose boot bytes
+// failed startupActivationRefusal runs in memory: the bundle the generation
+// record names when the store holds it signed, else the newest signed
+// bundle in the store; nil when none passes. config.yaml is never rewritten
+// here; the next lifecycle run repairs it.
+func (m *ConfigManager) startupFallbackVersion() *enterprisebundle.SignedVersion {
+	in, anchored := m.activationInput()
+	if !anchored {
+		return nil
+	}
+	versions := enterprisebundle.SignedVersions(in)
+	if len(versions) == 0 {
+		return nil
+	}
+	if state, err := configwrite.ReadGenerationState(m.path); err == nil && state.BundleID != "" {
+		for _, v := range versions {
+			if v.Manifest.BundleID == state.BundleID && v.Manifest.Version == state.BundleVersion {
+				return v
+			}
+		}
+	}
+	return versions[0]
+}
+
+// alertActivation records a refused activation once per refused byte set:
+// a HIGH alert that names the cause and the bundle the record named, never
+// file content, and the config.reload.rejected event.
+func (m *ConfigManager) alertActivation(ctx context.Context, class string, raw []byte, refusal *enterprisebundle.ActivationRefusal, fallback *enterprisebundle.SignedVersion) {
+	if refusal == nil {
+		return
+	}
+	m.recordLoadError(ctx, "activation_not_signed", refusal)
+	key := sha256.Sum256(append([]byte(class+"\x00"+refusal.Cause+"\x00"), raw...))
+	if m.logger == nil || key == m.lastActivationAlert {
+		return
+	}
+	m.lastActivationAlert = key
+	details := map[string]any{
+		"event":            "config.activation.refused",
+		"path_class":       class,
+		"cause":            refusal.Cause,
+		"record_bundle_id": refusal.BundleID,
+		"record_version":   refusal.Version,
+	}
+	summary := "policy activation refused: the change is not a signed policy bundle this computer holds; the live policy is unchanged"
+	if fallback != nil {
+		details["running_bundle_id"], details["running_version"] = fallback.Manifest.BundleID, fallback.Manifest.Version
+		summary = "policy activation refused at start: config.yaml is not a signed policy bundle; running the stored signed bundle in memory"
+	} else if class == "startup" {
+		summary = "policy activation refused at start: config.yaml is not a signed policy bundle and no stored signed bundle passes; running the installed config, repair with enterprise ensure"
+	}
+	_ = m.logger.LogAlert("config", "HIGH", summary, details)
 }
 
 // startupSourceUnchanged reports whether config.yaml still holds the bytes
@@ -1205,8 +1329,15 @@ func (m *ConfigManager) recordedGenerationAdmission() (load, repeat bool, err er
 	if err != nil {
 		return refuse("config.yaml could not be read: %v", err)
 	}
-	if m.pendingManagedGeneration(snapshot.raw) {
+	load, activation := m.managedGenerationAdmission(snapshot.raw)
+	if load {
 		return true, false, nil
+	}
+	if activation != nil && (m.appliedRaw == nil || !bytes.Equal(m.appliedRaw, snapshot.raw)) {
+		// A record that names a bundle the store does not hold signed, or
+		// bytes no signed bundle renders (private #7).
+		m.alertActivation(context.Background(), "config", snapshot.raw, activation, nil)
+		return refuse("%v", activation)
 	}
 	if m.appliedRaw == nil || !bytes.Equal(m.appliedRaw, snapshot.raw) {
 		return refuse("config.yaml differs from the applied generation and no lifecycle-recorded generation binds it")
@@ -1283,6 +1414,41 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		oldCfg.EnterpriseProfile() != next.EnterpriseProfile() {
 		m.recordLoadError(ctx, "enterprise_profile_change", nil)
 		return fmt.Errorf("config reload cannot change the enterprise profile from %q to %q; reinstall through the lifecycle", oldCfg.EnterpriseProfile(), next.EnterpriseProfile())
+	}
+	// private #7: once trust anchors are installed, the boot bytes of a
+	// managed standalone computer must be a signed bundle in the store. When
+	// they are not, the gateway runs that signed bundle in memory (never
+	// rewriting config.yaml) and reports the refusal; when no signed bundle
+	// passes, it keeps the boot config it already runs, so hooks keep their
+	// fail-mode table, and reports not ok with a HIGH alert.
+	var startupFallback *enterprisebundle.SignedVersion
+	startupRefused := false
+	if !assets && !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
+		sha256.Sum256(source.raw) == m.startupSource && (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) {
+		if refusal := m.startupActivationRefusal(source.raw); refusal != nil {
+			startupRefused = true
+			bootRaw := source.raw
+			if v := m.startupFallbackVersion(); v != nil {
+				if fallbackNext, fallbackSource, fallbackErr := m.buildCandidate(v.Rendered); fallbackErr == nil &&
+					fallbackNext.StandaloneEnterprise() && oldCfg.EnterpriseProfile() == fallbackNext.EnterpriseProfile() {
+					exportCandidateKey = takeCandidateKeyExport(fallbackNext)
+					next, source, startupFallback = fallbackNext, fallbackSource, v
+				}
+			}
+			m.alertActivation(ctx, "startup", bootRaw, refusal, startupFallback)
+			defer func() {
+				// After the reload's own health report: the computer does
+				// not run its installed config.yaml as a signed bundle.
+				recordGenerationBuildError(refusal)
+				if m.health != nil {
+					detail := map[string]interface{}{"path": m.path, "generation": m.gen.Load(), "reason": reason, "cause": refusal.Cause}
+					if startupFallback != nil {
+						detail["running_bundle_id"], detail["running_version"] = startupFallback.Manifest.BundleID, startupFallback.Manifest.Version
+					}
+					m.setConfigHealth(StateError, refusal.Error(), detail)
+				}
+			}()
+		}
 	}
 	// AVC env_config.json overlay. When present and well-formed the
 	// endpoint from env_config wins over whatever the installer wrote
@@ -1405,9 +1571,12 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	// bundle. A watcher or API call cannot activate hand-edited bytes/assets.
 	// The boot bytes are already the running snapshot and may be reconciled
 	// once before the manager has an applied generation.
-	startupBoot := !assets && !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
+	startupBoot := startupFallback != nil || !assets && !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
 		sha256.Sum256(source.raw) == m.startupSource
-	pendingGeneration := m.pendingManagedGeneration(source.raw)
+	pendingGeneration, activationRefusal := m.managedGenerationAdmission(source.raw)
+	if startupFallback != nil {
+		pendingGeneration, activationRefusal = false, nil
+	}
 	// A watched asset can be checked without a new bundle only when the
 	// config bytes are the ones already running. At startup those are the
 	// exact boot bytes; later they are the last applied bytes. The same proof
@@ -1421,6 +1590,14 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		!pendingGeneration && !proveUnchanged &&
 		(assets || m.rejected || !bytes.Equal(m.appliedRaw, source.raw) || len(diff.Changed) > 0) {
 		err := fmt.Errorf("config reload refused: this managed computer requires a lifecycle-recorded generation, or a signed policy bundle when trust anchors are installed; run enterprise ensure or apply a new signed bundle")
+		if activationRefusal != nil {
+			err = fmt.Errorf("config reload refused: %w; the live policy is unchanged; run enterprise ensure or apply a new signed bundle", activationRefusal)
+			class := "config"
+			if assets {
+				class = "asset"
+			}
+			m.alertActivation(ctx, class, source.raw, activationRefusal, nil)
+		}
 		m.rejected = true
 		recordGenerationBuildError(err)
 		m.recordLoadError(ctx, "managed_unbundled_reload", err)
@@ -1602,7 +1779,9 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		m.v8Plan = source.compiledV8.Plan
 	}
 	version.SetContentHash(source.raw)
-	if next.StandaloneEnterprise() && !bytes.Equal(m.appliedRaw, source.raw) {
+	if next.StandaloneEnterprise() && !bytes.Equal(m.appliedRaw, source.raw) && !startupRefused {
+		// The start fallback's bytes are in memory only, and refused boot
+		// bytes are not the recorded ones: no record will bind them.
 		awaitRecordedConfigBytes(ctx, m.path, source.raw)
 	}
 	activity, appliedGeneration, recorded := configChangeActivity(m.path, m.appliedRaw, source.raw, diff.Changed,
@@ -1674,38 +1853,7 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 			}
 			return nil, configReloadSource{}, beforeErr
 		}
-		defaultDataDir, secureClient := "", false
-		if current := m.Current(); current != nil {
-			defaultDataDir, secureClient = current.DataDir, current.SecureClientIntegration()
-		}
-		if defaultDataDir != "" && !secureClient {
-			// A destination key added to .env after the gateway started (by
-			// `setup galileo --persist-api-key` or `keys set`) must resolve
-			// when the config that references it reloads (GAP-0017). Secure
-			// Client reads .env only at start (issue #1092).
-			config.LoadDotEnv(filepath.Join(defaultDataDir, ".env"))
-		}
-		compileRaw := before.raw
-		var compileErr error
-		if !secureClient && config.NeedsMigrationV9(compileRaw) {
-			// The runtime loader migrates v8 read-only as well. Validate the
-			// same candidate here, rather than rejecting its legacy keys before
-			// that loader can run. Do not export candidate secrets before apply.
-			compileRaw, _, compileErr = config.MigrateV8InMemoryCandidate(m.path, compileRaw, guardrail.RulePackDigest)
-			if compileErr != nil {
-				compileErr = config.InMemoryMigrationError(m.path, compileErr)
-			}
-		}
-		var compiled *config.ObservabilityV8CompiledConfig
-		if compileErr == nil {
-			compiled, compileErr = config.ParseCompileObservabilityV8(m.path, compileRaw,
-				config.ObservabilityV8CompileOptions{DefaultDataDir: defaultDataDir})
-		}
-		var next *config.Config
-		var loadErr error
-		if compileErr == nil {
-			next, loadErr = m.loadSnapshot(m.path, before.raw)
-		}
+		next, source, buildErr := m.buildCandidate(before.raw)
 		after, afterErr := m.readSnapshot(m.path)
 		if afterErr != nil {
 			if isConfigSnapshotChanged(afterErr) {
@@ -1716,52 +1864,87 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 		if !sameConfigFileSnapshot(before, after) {
 			continue
 		}
-		if compileErr != nil {
-			return nil, configReloadSource{}, compileErr
+		if buildErr != nil {
+			return nil, configReloadSource{}, buildErr
 		}
-		if loadErr != nil {
-			return nil, configReloadSource{}, loadErr
-		}
-		if next == nil {
-			return nil, configReloadSource{}, fmt.Errorf("config reload loader returned no candidate")
-		}
-		source := configReloadSource{
-			sourceName: m.path,
-			raw:        append([]byte(nil), before.raw...),
-		}
-		if !config.CurrentSchemaVersion(next.ConfigVersion) {
-			return nil, configReloadSource{}, fmt.Errorf("config reload: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
-		}
-		if compiled == nil || compiled.Plan == nil {
-			return nil, configReloadSource{}, fmt.Errorf("config reload v8 compiler returned no effective plan")
-		}
-		snapshot := compiled.Plan.Snapshot()
-		if strings.TrimSpace(snapshot.Local.Path) == "" || strings.TrimSpace(snapshot.Local.JudgeBodiesPath) == "" {
-			return nil, configReloadSource{}, fmt.Errorf("config reload v8 local store paths are incomplete")
-		}
-		next.DataDir = compiled.DataDir
-		if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(next, m.path, before.raw, compiled.DataDir); err != nil {
-			return nil, configReloadSource{}, err
-		}
-		next.AuditDB = snapshot.Local.Path
-		next.JudgeBodiesDB = snapshot.Local.JudgeBodiesPath
-		// NOTE: the release-owned managed-enterprise destination is NOT
-		// injected here. `next.CiscoAIDefense.Endpoint` at this point is
-		// the raw config.yaml value; the AVC env_config.json overlay
-		// (Reload, below) may replace it before the plan is applied. If
-		// we baked the pre-overlay endpoint into compiled.Plan now, the
-		// Sidecar apply boundary would recompute the managed dest with
-		// the overlaid endpoint, WithObservabilityV8ManagedAIDDestination
-		// would see the two endpoints disagree, and the reload would
-		// fail with "generated managed-enterprise destination rejected".
-		// Reload applies the transform post-overlay instead.
-		source.compiledV8 = compiled
 		return next, source, nil
 	}
 	return nil, configReloadSource{}, fmt.Errorf(
 		"config reload source changed during capture after %d attempts; retry after the writer is idle",
 		configReloadSnapshotAttempts,
 	)
+}
+
+// buildCandidate compiles and loads raw as config.yaml at the manager's
+// path: the candidate of a reload of the file, or of bytes the gateway runs
+// in memory (the start fallback of a signed bundle).
+func (m *ConfigManager) buildCandidate(raw []byte) (*config.Config, configReloadSource, error) {
+	defaultDataDir, secureClient := "", false
+	if current := m.Current(); current != nil {
+		defaultDataDir, secureClient = current.DataDir, current.SecureClientIntegration()
+	}
+	if defaultDataDir != "" && !secureClient {
+		// A destination key added to .env after the gateway started (by
+		// `setup galileo --persist-api-key` or `keys set`) must resolve
+		// when the config that references it reloads (GAP-0017). Secure
+		// Client reads .env only at start (issue #1092).
+		config.LoadDotEnv(filepath.Join(defaultDataDir, ".env"))
+	}
+	compileRaw := raw
+	if !secureClient && config.NeedsMigrationV9(compileRaw) {
+		// The runtime loader migrates v8 read-only as well. Validate the
+		// same candidate here, rather than rejecting its legacy keys before
+		// that loader can run. Do not export candidate secrets before apply.
+		var err error
+		compileRaw, _, err = config.MigrateV8InMemoryCandidate(m.path, compileRaw, guardrail.RulePackDigest)
+		if err != nil {
+			return nil, configReloadSource{}, config.InMemoryMigrationError(m.path, err)
+		}
+	}
+	compiled, err := config.ParseCompileObservabilityV8(m.path, compileRaw,
+		config.ObservabilityV8CompileOptions{DefaultDataDir: defaultDataDir})
+	if err != nil {
+		return nil, configReloadSource{}, err
+	}
+	next, err := m.loadSnapshot(m.path, raw)
+	if err != nil {
+		return nil, configReloadSource{}, err
+	}
+	if next == nil {
+		return nil, configReloadSource{}, fmt.Errorf("config reload loader returned no candidate")
+	}
+	source := configReloadSource{
+		sourceName: m.path,
+		raw:        append([]byte(nil), raw...),
+	}
+	if !config.CurrentSchemaVersion(next.ConfigVersion) {
+		return nil, configReloadSource{}, fmt.Errorf("config reload: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
+	}
+	if compiled == nil || compiled.Plan == nil {
+		return nil, configReloadSource{}, fmt.Errorf("config reload v8 compiler returned no effective plan")
+	}
+	snapshot := compiled.Plan.Snapshot()
+	if strings.TrimSpace(snapshot.Local.Path) == "" || strings.TrimSpace(snapshot.Local.JudgeBodiesPath) == "" {
+		return nil, configReloadSource{}, fmt.Errorf("config reload v8 local store paths are incomplete")
+	}
+	next.DataDir = compiled.DataDir
+	if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(next, m.path, raw, compiled.DataDir); err != nil {
+		return nil, configReloadSource{}, err
+	}
+	next.AuditDB = snapshot.Local.Path
+	next.JudgeBodiesDB = snapshot.Local.JudgeBodiesPath
+	// NOTE: the release-owned managed-enterprise destination is NOT
+	// injected here. `next.CiscoAIDefense.Endpoint` at this point is
+	// the raw config.yaml value; the AVC env_config.json overlay
+	// (Reload, below) may replace it before the plan is applied. If
+	// we baked the pre-overlay endpoint into compiled.Plan now, the
+	// Sidecar apply boundary would recompute the managed dest with
+	// the overlaid endpoint, WithObservabilityV8ManagedAIDDestination
+	// would see the two endpoints disagree, and the reload would
+	// fail with "generated managed-enterprise destination rejected".
+	// Reload applies the transform post-overlay instead.
+	source.compiledV8 = compiled
+	return next, source, nil
 }
 
 func cloneConfigReloadSource(source configReloadSource) configReloadSource {
