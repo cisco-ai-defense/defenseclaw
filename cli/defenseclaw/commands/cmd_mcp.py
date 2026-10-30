@@ -508,6 +508,34 @@ def _mcp_list_verdict(action_entry, scan_entry, policy) -> tuple[str, str]:
     return "warning", "yellow"
 
 
+def _mcp_scan_findings_verdict(app: AppContext, pe, result, *, name: str, connector: str) -> str:
+    """The scan line glyph for a server with findings (GAP-2616).
+
+    BLOCKED (and the Summary blocked=) only when the admission policy
+    refuses the server at this severity (install block, runtime disable or
+    quarantine), as mcp list reads it "rejected"; a balanced HIGH verdict
+    (warn) reads WARN, an INFO-only result INFO. An allow-listed server is
+    not refused. A policy that cannot be read keeps BLOCKED, so a failure
+    never reads milder than before.
+    """
+    from defenseclaw.commands import _scan_ui
+
+    severity = str(result.max_severity() or "").upper()
+    milder = _scan_ui.VERDICT_INFO if severity == "INFO" else _scan_ui.VERDICT_WARN
+    try:
+        if pe is not None and pe.is_allowed_for_connector("mcp", name, connector):
+            return milder
+        from defenseclaw.enforce.admission import action_blocks, compile_admission, effective_action_for
+
+        policy = compile_admission(app.cfg, "mcp")
+        action, allow = effective_action_for(policy, severity=severity, scanner="mcp-scanner")
+    except Exception:  # noqa: BLE001 - an unreadable policy keeps the strict label.
+        return _scan_ui.VERDICT_BLOCKED
+    if action_blocks(action) and not allow:
+        return _scan_ui.VERDICT_BLOCKED
+    return milder
+
+
 def _mcp_list_json_items(
     servers: list[MCPServerEntry],
     scan_map: dict[str, dict],
@@ -1431,7 +1459,7 @@ def _scan_all_mcp(
     )
     _scan_ui.render_preamble(ctx, target_count=len(scan_targets))
 
-    clean = blocked = errored = 0
+    clean = warned = blocked = errored = 0
     private_refused: list[MCPServerEntry] = []
     json_rows: list[dict] = list(source_error_rows)
     started = time.monotonic()
@@ -1469,11 +1497,15 @@ def _scan_all_mcp(
                     ctx, target=s.name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
                 )
             else:
-                blocked += 1
+                verdict = _mcp_scan_findings_verdict(app, pe, result, name=s.name, connector=connector)
+                if verdict == _scan_ui.VERDICT_BLOCKED:
+                    blocked += 1
+                else:
+                    warned += 1
                 _scan_ui.render_per_target_status(
                     ctx,
                     target=s.name,
-                    verdict=_scan_ui.VERDICT_BLOCKED,
+                    verdict=verdict,
                     detail=f"max severity: {result.max_severity()}",
                     findings=len(result.findings),
                 )
@@ -1484,13 +1516,14 @@ def _scan_all_mcp(
         _scan_ui.render_summary(
             ctx,
             clean=clean,
+            warning=warned,
             blocked=blocked,
             errored=errored,
-            total=clean + blocked + errored,
+            total=clean + warned + blocked + errored,
             duration_ms=duration_ms,
         )
         from defenseclaw.commands import hint
-        if blocked:
+        if blocked or warned:
             hint("View alerts:  defenseclaw alerts")
         if private_refused:
             # GAP-2498: a loopback/private URL is refused without the opt-in.
@@ -1755,15 +1788,19 @@ def _scan_one_resolved(
         _print_scan_result(result, as_json, connector=connector)
         return "clean" if result.is_clean() else "findings"
 
+    verdict = _scan_ui.VERDICT_CLEAN
     if result.is_clean():
         _scan_ui.render_per_target_status(
             ctx, target=target, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
         )
     else:
+        verdict = _mcp_scan_findings_verdict(
+            app, pe, result, name=entry.name if entry else target, connector=connector,
+        )
         _scan_ui.render_per_target_status(
             ctx,
             target=target,
-            verdict=_scan_ui.VERDICT_BLOCKED,
+            verdict=verdict,
             detail=f"max severity: {result.max_severity()}",
             findings=len(result.findings),
         )
@@ -1772,7 +1809,8 @@ def _scan_one_resolved(
     _scan_ui.render_summary(
         ctx,
         clean=1 if result.is_clean() else 0,
-        blocked=0 if result.is_clean() else 1,
+        warning=0 if verdict in (_scan_ui.VERDICT_CLEAN, _scan_ui.VERDICT_BLOCKED) else 1,
+        blocked=1 if verdict == _scan_ui.VERDICT_BLOCKED else 0,
         errored=0,
         total=1,
         duration_ms=duration_ms,
