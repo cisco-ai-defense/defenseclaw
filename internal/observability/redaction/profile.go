@@ -351,21 +351,25 @@ func detectorGroupIndex(group DetectorGroup) (int, bool) {
 	return 0, false
 }
 
+// profileFingerprint hashes the profile's name, base, modes and detector
+// groups. validProfile computes it for every projection, so the bytes are
+// built in a stack buffer (a strings.Builder and its []byte copy cost four
+// allocations per call); the hashed bytes are unchanged.
 func profileFingerprint(profile Profile) [32]byte {
-	var builder strings.Builder
-	builder.WriteString(string(profile.name))
-	builder.WriteByte(0)
-	builder.WriteString(string(profile.base))
+	buffer := make([]byte, 0, 160)
+	buffer = append(buffer, profile.name...)
+	buffer = append(buffer, 0)
+	buffer = append(buffer, profile.base...)
 	for _, mode := range profile.modes {
-		builder.WriteByte(0)
-		builder.WriteString(string(mode))
+		buffer = append(buffer, 0)
+		buffer = append(buffer, mode...)
 	}
 	for _, enabled := range profile.groups {
 		if enabled {
-			builder.WriteByte(1)
+			buffer = append(buffer, 1)
 		} else {
-			builder.WriteByte(0)
+			buffer = append(buffer, 0)
 		}
 	}
-	return sha256.Sum256([]byte(builder.String()))
+	return sha256.Sum256(buffer)
 }
