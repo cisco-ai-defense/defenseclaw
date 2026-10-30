@@ -14,11 +14,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// judgeCompatSkillScanner is the entry point the DefenseClaw CLI wheel
-// installs beside skill-scanner. It runs skill-scanner with the fix that
-// accepts a well-formed judge answer from any supported model (GAP-2609).
-const judgeCompatSkillScanner = "defenseclaw-skill-scanner"
-
 var lookSkillScanner = exec.LookPath
 
 // resolveDefaultSkillScanner runs the skill-scanner of a per-user install
