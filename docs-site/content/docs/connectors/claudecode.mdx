@@ -210,6 +210,7 @@ On every host install, setup removes the native exporter settings it can prove D
 - `PostToolUse`, `PostToolUseFailure` and `PermissionDenied` are advisory: they cannot undo a finished tool.
 - `ConfigChange` is blockable, except when `source=policy_settings`, where Claude Code ignores blocking decisions.
 - `Setup` and `WorktreeCreate` are not registered.
+- In action mode, the first prompt or tool call of a session whose `SessionStart` never reached the gateway waits up to 1 second for that start, so a start that is blocked still blocks the session. A session whose `SessionStart` reached the gateway does not wait, and later calls of a session never wait.
 - Keep the gateway running while Claude Code runs. Give each account on a shared computer its own gateway port. Per-user hooks verify the connected gateway account before sending an event. What an outage does is in [What it can block or ask](#what-it-can-block-or-ask).
 - Per-user hooks live in a file you own. The [enterprise standalone profile](/docs/enterprise/machine-policy) puts them in machine policy instead.
 
