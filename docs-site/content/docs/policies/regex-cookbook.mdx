@@ -88,12 +88,13 @@ an alert and does not block the call:
 ### Prompt injection
 
 Plain-language injection is the hardest shape to match precisely, so the shipped rules
-anchor the phrase to the start of a sentence, a list item or a role label. That keeps a
-sentence that merely mentions the phrase from matching:
+anchor the phrase to the start of a sentence, a list item or a role label. A line can also
+start with an agent timestamp envelope such as `[Thu 2026-10-29 09:40 UTC] `, which OpenClaw
+puts before the user text. That keeps a sentence that merely mentions the phrase from matching:
 
 ```yaml title="policies/guardrail/strict/rules/trust-exploit.yaml (excerpt)"
 - id: TRUST-IGNORE-PREVIOUS
-  pattern: '(?im)(?:^|[.!?;,:]\s*|(?:[-*>•]|<!--|["''])\s*|\b(?:task|instruction|system|assistant)\s*:\s*)(?:(?:please,?|(?:can|could|will|would)\s+you(?:\s+please)?|i\s+(?:want|need)\s+you\s+to(?:\s+please)?|now,?|next,?|you\s+(?:must|should|need\s+to))\s+)?ignore\s+(?:all\s+)?(?:previous|prior|above|earlier)\s+(?:instructions|rules|guidelines|context)'
+  pattern: '(?im)(?:^|^\[[^\]\n]{0,64}\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}[^\]\n]{0,32}\]\s*|[.!?;,:]\s*|(?:[-*>•]|<!--|["''])\s*|\b(?:task|instruction|system|assistant)\s*:\s*)(?:(?:please,?|(?:can|could|will|would)\s+you(?:\s+please)?|i\s+(?:want|need)\s+you\s+to(?:\s+please)?|now,?|next,?|you\s+(?:must|should|need\s+to))\s+)?ignore\s+(?:all\s+)?(?:previous|prior|above|earlier)\s+(?:instructions|rules|guidelines|context)'
   title: "Ignore previous instructions"
   severity: CRITICAL
   confidence: 0.90
