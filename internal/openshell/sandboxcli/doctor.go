@@ -224,7 +224,7 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 				rep.Checks = append(rep.Checks, *c)
 			}
 			if a.GOOS == "darwin" {
-				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed))
+				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed, st.elsewhere))
 			}
 			if c := managedDockerGroupCheck(a.GOOS, st.managed, dockerGroup); c != nil {
 				rep.Checks = append(rep.Checks, *c)
@@ -294,7 +294,10 @@ type statusProbe struct {
 	daemonUID *int
 	// managed is the managed part of the daemon's status (managed computers).
 	managed *sandboxapi.ManagedStatus
-	check   openshell.Check
+	// elsewhere: another account holds this computer's sandbox ports
+	// (sandboxapi.Status.GatewayElsewhere).
+	elsewhere bool
+	check     openshell.Check
 }
 
 // isAre is " is" for one name, " are" for more.
@@ -687,6 +690,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			p.ingressListening = st.IngressAddr != ""
 			p.egressListening = st.EgressAddr != ""
 			p.listenersProven = st.ListenersProven
+			p.elsewhere = st.GatewayElsewhere != ""
 		}
 		managed = managed || (serr == nil && st.Managed != nil)
 		switch {
