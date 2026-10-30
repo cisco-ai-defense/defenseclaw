@@ -147,7 +147,7 @@ spec:
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-c1ed59d9
+  name: defenseclaw-controls-7c118e4f
 spec:
   options:
     - name: policy-mode
@@ -402,13 +402,50 @@ spec:
             - action: Override
               argError: -1
             - action: Post
+    - hook: path_symlink
+      args:
+        - index: 1
+          type: dentry
+        - index: 0
+          type: path
+        - index: 0
+          type: uint32
+          resolve: dentry.d_inode.i_uid.val
+          label: owner_uid
+      selectors:
+        - matchBinaries:
+            - operator: In
+              values:
+                - /home/alice/.local/bin/claude
+                - /home/alice/.local/share/claude/versions/2.1.100
+                - /home/alice/.local/share/claude/versions/2.1.101
+              followChildren: true
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /home/alice/.ssh/authorized_keys
+                - /home/alice/.ssh/authorized_keys2
+            - args: [2]
+              operator: Equal
+              values:
+                - "1001"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
 ---
 # defenseclaw-derived: tetragon-policy family=controls-burnin kernel_policy=sha256:720bcdb296c7
 # Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-burnin-e318e62c
+  name: defenseclaw-controls-burnin-e5c4eb9d
 spec:
   options:
     - name: policy-mode
@@ -646,6 +683,42 @@ spec:
               operator: Equal
               values:
                 - /home/bob/.ssh
+                - /home/bob/.ssh/authorized_keys
+                - /home/bob/.ssh/authorized_keys2
+            - args: [2]
+              operator: InMap
+              values:
+                - "1002"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+    - hook: path_symlink
+      args:
+        - index: 1
+          type: dentry
+        - index: 0
+          type: path
+        - index: 0
+          type: uint32
+          resolve: dentry.d_inode.i_uid.val
+          label: owner_uid
+      selectors:
+        - matchPIDs:
+            - operator: In
+              followForks: true
+              isNamespacePID: false
+              values:
+                - 5001
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
                 - /home/bob/.ssh/authorized_keys
                 - /home/bob/.ssh/authorized_keys2
             - args: [2]

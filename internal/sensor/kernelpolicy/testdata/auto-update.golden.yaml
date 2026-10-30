@@ -3,7 +3,7 @@
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-c1ed59d9
+  name: defenseclaw-controls-7c118e4f
 spec:
   options:
     - name: policy-mode
@@ -248,6 +248,43 @@ spec:
               operator: Equal
               values:
                 - /home/alice/.ssh
+                - /home/alice/.ssh/authorized_keys
+                - /home/alice/.ssh/authorized_keys2
+            - args: [2]
+              operator: Equal
+              values:
+                - "1001"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+    - hook: path_symlink
+      args:
+        - index: 1
+          type: dentry
+        - index: 0
+          type: path
+        - index: 0
+          type: uint32
+          resolve: dentry.d_inode.i_uid.val
+          label: owner_uid
+      selectors:
+        - matchBinaries:
+            - operator: In
+              values:
+                - /home/alice/.local/bin/claude
+                - /home/alice/.local/share/claude/versions/2.1.100
+                - /home/alice/.local/share/claude/versions/2.1.101
+              followChildren: true
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
                 - /home/alice/.ssh/authorized_keys
                 - /home/alice/.ssh/authorized_keys2
             - args: [2]
