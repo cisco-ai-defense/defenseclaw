@@ -26819,12 +26819,22 @@ function Invoke-DefenseClawNuclearUninstall {
     # no deployment.
     if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $nuclearLifecycleDir -PathType Container) -and
         $nuclearLifecycleDir -match $safeRootPattern) {
-        $remaining = @(Microsoft.PowerShell.Management\Get-ChildItem `
-                -LiteralPath $nuclearLifecycleDir `
-                -Force `
-                -ErrorAction SilentlyContinue |
-            Microsoft.PowerShell.Core\Where-Object { [string]$_.Name -cne 'lifecycle.lock' })
-        if ($remaining.Count -eq 0) {
+        # A listing that fails must not look empty: the folder could still
+        # hold another scope's receipt.
+        $remaining = $null
+        try {
+            $remaining = @(Microsoft.PowerShell.Management\Get-ChildItem `
+                    -LiteralPath $nuclearLifecycleDir `
+                    -Force `
+                    -ErrorAction Stop |
+                Microsoft.PowerShell.Core\Where-Object { [string]$_.Name -cne 'lifecycle.lock' })
+        }
+        catch {
+            $warnings.Add(
+                "nuclear uninstall could not enumerate lifecycle directory: $($_.Exception.Message)"
+            )
+        }
+        if ($null -ne $remaining -and $remaining.Count -eq 0) {
             $leftover = Remove-DefenseClawNuclearPath `
                 -Path $nuclearLifecycleDir `
                 -Role 'LifecycleDir' `
