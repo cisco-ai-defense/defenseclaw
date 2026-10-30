@@ -68,7 +68,7 @@ type identityRefreshFlush struct {
 	Flushed string `json:"flushed"`
 	// Method is the command that ran: sss_cache or dscacheutil.
 	Method string `json:"method,omitempty"`
-	// Reason says why nothing was flushed: not_sssd, no_per_user_flush,
+	// Reason says why nothing was flushed: not_sssd, not_in_sssd_cache (a local account), no_per_user_flush,
 	// windows_token_groups or failed.
 	Reason string `json:"reason,omitempty"`
 }

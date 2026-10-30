@@ -14,11 +14,17 @@ package cli
 
 import (
 	"bufio"
+	"errors"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
+
+// identityRefreshSSSCacheNoMatch is the sss_cache exit code for "No cache
+// object matched the specified search".
+const identityRefreshSSSCacheNoMatch = 2
 
 var (
 	identityRefreshSSSCache    = "/usr/sbin/sss_cache"
@@ -65,7 +71,14 @@ func identityRefreshPlatformFlushOSCache(name string) (identityRefreshFlush, *en
 	if name != "" {
 		args, scope = []string{"-u", name}, "user"
 	}
-	if err := identityRefreshRun(identityRefreshSSSCache, args...); err != nil {
+	err := identityRefreshRun(identityRefreshSSSCache, args...)
+	var exit *exec.ExitError
+	if name != "" && errors.As(err, &exit) && exit.ExitCode() == identityRefreshSSSCacheNoMatch {
+		// A local (files) account is not in the SSSD cache: nothing to flush.
+		flush.Reason = "not_in_sssd_cache"
+		return flush, nil
+	}
+	if err != nil {
 		flush.Reason = "failed"
 		return flush, &enterprisestatus.Message{Code: "os_cache_flush_failed", Message: "sss_cache failed: " + err.Error() + "; the facts were re-read from the SSSD cache as it is"}
 	}

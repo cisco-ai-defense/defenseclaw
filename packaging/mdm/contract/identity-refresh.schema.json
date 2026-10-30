@@ -175,6 +175,7 @@
         "reason": {
           "enum": [
             "not_sssd",
+            "not_in_sssd_cache",
             "no_per_user_flush",
             "windows_token_groups",
             "failed"
