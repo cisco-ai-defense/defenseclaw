@@ -161,10 +161,10 @@ func validateOpenCodeExecutableEvidence(selected string, authority openCodeExecu
 		return errors.New("selected executable is not a regular non-reparse file")
 	}
 	if err := hookAPIValidateDirectory(filepath.Dir(selected)); err != nil {
-		return fmt.Errorf("validate selected executable directory custody: %w", err)
+		return agentInstallNotTrusted(fmt.Errorf("validate selected executable directory custody: %w", err))
 	}
 	if err := hookAPIValidateOwner(selected, before); err != nil {
-		return fmt.Errorf("validate selected executable custody: %w", err)
+		return agentInstallNotTrusted(fmt.Errorf("validate selected executable custody: %w", err))
 	}
 	stablePath, digest, ok := setupSelectedAgentExecutableEvidence(selected)
 	if !ok || !sameCodexExecutablePath(stablePath, selected) {
@@ -177,7 +177,7 @@ func validateOpenCodeExecutableEvidence(selected string, authority openCodeExecu
 		return errors.New("selected executable changed during custody validation")
 	}
 	if err := hookAPIValidateOwner(selected, after); err != nil {
-		return fmt.Errorf("revalidate selected executable custody: %w", err)
+		return agentInstallNotTrusted(fmt.Errorf("revalidate selected executable custody: %w", err))
 	}
 	if !strings.EqualFold(digest, authority.digest) {
 		return errors.New("selected executable digest does not match protected evidence")

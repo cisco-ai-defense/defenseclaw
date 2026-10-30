@@ -416,6 +416,61 @@ func TestValidateCodexPolicyExecutableRejectsReplacement(t *testing.T) {
 	}
 }
 
+// A Codex executable in a folder another account can write is refused as an
+// untrusted install, so the refusal names the install as the fix and never
+// closing the agent (GAP-2479).
+func TestValidateCodexPolicyExecutableMarksAWritableInstallFolderUntrusted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits; the Windows ACL leg is the live cell")
+	}
+	dir := testenv.PrivateTempDir(t)
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(bin, "codex.exe")
+	if err := atomicWriteFile(executable, []byte("original-codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, digest, ok := setupSelectedAgentExecutableEvidence(executable)
+	if !ok {
+		t.Fatal("cannot hash fixture executable")
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	body, err := json.Marshal(agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     now.Format(time.RFC3339),
+		Selections: map[string]agentSelectionEvidence{"codex": {
+			Connector: "codex", Source: "setup-selected", Executable: executable,
+			RawVersion: "codex 0.144.3", NormalizedVersion: "0.144.3", SHA256: digest,
+			SelectedAt: now.Format(time.RFC3339), ExpiresAt: now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{DataDir: dir, AgentVersion: "codex 0.144.3", AgentExecutable: executable}
+	if _, err := validateCodexPolicyExecutable(opts); err != nil {
+		t.Fatalf("valid protected executable rejected: %v", err)
+	}
+	if err := os.Chmod(bin, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	_, err = validateCodexPolicyExecutable(opts)
+	if err == nil || !strings.Contains(err.Error(), "validate selected Codex executable ancestry") {
+		t.Fatalf("writable install folder error = %v, want the ancestry refusal", err)
+	}
+	if !errors.Is(err, ErrAgentInstallNotTrusted) {
+		t.Fatalf("writable install folder error = %v, want ErrAgentInstallNotTrusted", err)
+	}
+	if strings.Contains(err.Error(), ErrAgentInstallNotTrusted.Error()) {
+		t.Fatalf("error = %q, the marker must not change the message", err)
+	}
+}
+
 func TestInspectCodexPolicyPreservesRPCErrorDuringCleanup(t *testing.T) {
 	original := codexAppServerCommand
 	t.Cleanup(func() { codexAppServerCommand = original })

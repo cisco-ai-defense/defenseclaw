@@ -59,6 +59,28 @@ func executableAdmissionRefused(err error) error {
 	return executableAdmissionError{err: err}
 }
 
+// ErrAgentInstallNotTrusted marks a setup refusal because the selected agent
+// executable, or a folder above it, can be written by an account other than
+// administrators and this account. Closing the agent does not change that, so
+// a refusal names the install as the fix (GAP-2479).
+var ErrAgentInstallNotTrusted = errors.New("agent install path is writable by another account")
+
+type agentInstallNotTrustedError struct{ err error }
+
+func (e agentInstallNotTrustedError) Error() string { return e.err.Error() }
+func (e agentInstallNotTrustedError) Unwrap() []error {
+	return []error{e.err, ErrAgentInstallNotTrusted}
+}
+
+// agentInstallNotTrusted marks err as ErrAgentInstallNotTrusted and keeps its
+// message and chain.
+func agentInstallNotTrusted(err error) error {
+	if err == nil {
+		return nil
+	}
+	return agentInstallNotTrustedError{err: err}
+}
+
 // ErrSetupRefusedUnchanged marks a Setup refusal raised before Setup wrote
 // anything, such as an unsupported Hermes profile topology. Rolling back
 // after it would tear down the hooks an earlier setup installed, so a gateway
