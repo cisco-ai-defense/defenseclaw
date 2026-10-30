@@ -651,7 +651,7 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
         feature="decision_model",
         description=(
             "Bearer token for the decision model endpoint (decision_model.base_url). "
-            "Optional: a local System One server needs none."
+            "Optional: a System One server on this machine needs none."
         ),
         required=_decision_model_key,
         effective_env_name=_decision_model_env,
