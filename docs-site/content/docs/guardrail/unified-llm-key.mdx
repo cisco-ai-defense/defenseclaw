@@ -600,7 +600,7 @@ defenseclaw setup llm \
   --non-interactive
 ```
 
-When you write a Bedrock model into a config file yourself (`llm.model`, `guardrail.judge.llm.model` or a scanner's `llm.model`), give it the `bedrock/` prefix, for example `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`. In 1.0.5 an id without the prefix makes the administrator's `scan skill` report `Authentication failed` and `scan mcp` report an analyzer DNS error.
+When you write a Bedrock model into a config file yourself (`llm.model`, `guardrail.judge.llm.model` or a scanner's `llm.model`), the `bedrock/` prefix is optional: `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` and `us.anthropic.claude-haiku-4-5-20251001-v1:0` both use Bedrock. In 1.0.5 an id without the prefix made the administrator's `scan skill` report `Authentication failed` and `scan mcp` report an analyzer DNS error.
 
 Auth modes:
 

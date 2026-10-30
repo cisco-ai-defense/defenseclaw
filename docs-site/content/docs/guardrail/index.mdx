@@ -314,11 +314,11 @@ defenseclaw setup guardrail --non-interactive --connector claudecode --mode acti
   --judge-bedrock-inference-profile us. --restart
 ```
 
-In 1.0.5, give `defenseclaw setup llm --provider bedrock` the full Bedrock model id, for example `us.anthropic.claude-haiku-4-5-20251001-v1:0`, and `--bedrock-region`. A short alias such as `haiku-4.5` fails the ping (`Unknown provider=None`), and `defenseclaw doctor` reports a missing region unless you pass `--bedrock-region`.
+Give `defenseclaw setup llm --provider bedrock` the full Bedrock model id, for example `us.anthropic.claude-haiku-4-5-20251001-v1:0`. The short names `haiku-4.5` and `luna` become their full ids, and setup refuses any other name that is not a Bedrock model id. Without `--bedrock-region`, setup saves `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`, and prints which one it used.
 
-When you write a Bedrock model into a config file yourself, for example `llm.model` or `guardrail.judge.llm.model` in the managed admin config, give it the `bedrock/` prefix: `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`. In 1.0.5 a Bedrock id without the prefix makes the administrator's `scan skill` report `Authentication failed` and `scan mcp` report an analyzer DNS error; neither message names the missing prefix.
+When you write a Bedrock model into a config file yourself, for example `llm.model` or `guardrail.judge.llm.model` in the managed admin config, write it with or without the `bedrock/` prefix: `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` and `us.anthropic.claude-haiku-4-5-20251001-v1:0` both use Bedrock. In 1.0.5 an id without the prefix made the administrator's `scan skill` report `Authentication failed` and `scan mcp` report an analyzer DNS error.
 
-The hook judge needs an Anthropic model on Bedrock in 1.0.5. With GPT-5.6 Luna the hook-time judge fails (Bedrock 502): hooks keep the rule verdict, so nothing is blocked by mistake, and `verify` warns `judge_failing`. Luna works for the skill and MCP scans.
+The hook judge works with GPT-5.6 Luna on Bedrock (`us.openai.gpt-5.6-luna`) as well as with the Anthropic models: it calls Luna through the Bedrock Converse API, as the skill and MCP scans do, and leaves out the sampling temperature the model refuses. In 1.0.5 every hook-time judge call with Luna failed (Bedrock 502) and `verify` warned `judge_failing`; hooks kept the rule verdict.
 
 Use `--judge-provider vertex_ai` with the `--judge-vertex-*` flags, or `--judge-provider azure` with the `--judge-azure-*` flags. For a self-signed endpoint add `--judge-tls-ca-cert-file`. If the settings are already on a custom provider entry, `--judge-instance-name <name>` inherits them; role-level flags win field by field. See [LLM providers](/docs/guardrail/unified-llm-key).
 
