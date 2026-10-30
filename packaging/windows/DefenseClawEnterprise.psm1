@@ -26850,10 +26850,21 @@ function Invoke-DefenseClawNuclearUninstall {
             $GatewayServiceName,
             $GuardianServiceName
         )
-        foreach ($scoped in @(Microsoft.PowerShell.Management\Get-ChildItem `
-                -LiteralPath $nuclearLifecycleDir `
-                -Force `
-                -ErrorAction SilentlyContinue)) {
+        # A listing that fails must not look like "no receipts": this
+        # scope's receipts may still be there, so the purge is incomplete.
+        $lifecycleEntries = @()
+        try {
+            $lifecycleEntries = @(Microsoft.PowerShell.Management\Get-ChildItem `
+                    -LiteralPath $nuclearLifecycleDir `
+                    -Force `
+                    -ErrorAction Stop)
+        }
+        catch {
+            $incomplete.Add(
+                "LifecycleDir $nuclearLifecycleDir could not be listed for this scope's receipts: $($_.Exception.Message)"
+            )
+        }
+        foreach ($scoped in $lifecycleEntries) {
             if ([string]$scoped.Name -like "*-$purgeScope.*") {
                 $treeEntries.Add(@{ Role = 'lifecycle receipt'; Path = [string]$scoped.FullName })
             }
