@@ -8,6 +8,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package kernelpolicy
 
 import (
@@ -78,6 +80,14 @@ func TestAuthorizedKeysSelectors(t *testing.T) {
 	if rename := hookValues(p, "path_rename"); !slices.Contains(rename, keys) || !slices.Contains(rename, "/home/alice/.ssh") {
 		t.Fatalf("path_rename values = %v", rename)
 	}
+	if symlink := hookValues(p, "path_symlink"); !slices.Contains(symlink, keys) || slices.Contains(symlink, "/home/alice/.ssh") {
+		t.Fatalf("path_symlink values = %v", symlink)
+	}
+	for _, h := range p.tp.Spec.LsmHooks {
+		if h.Hook == "path_symlink" && (len(h.Selectors) != 1 || h.Args[2].Resolve != "dentry.d_inode.i_uid.val") {
+			t.Fatalf("path_symlink = %+v", h)
+		}
+	}
 	for _, path := range []string{keys, "/home/alice/.ssh/authorized_keys2", "/home/alice/.ssh"} {
 		if got := p.Paths.ControlOf(path); got != kernel.ControlSSHAuthorizedKeysWrite {
 			t.Errorf("ControlOf(%s) = %q", path, got)
@@ -124,7 +134,7 @@ func TestDentryOffRootMountIsLeftOut(t *testing.T) {
 	if !slices.Contains(hookValues(p, "file_open"), keys) {
 		t.Fatal("file_open lost the authorized keys file")
 	}
-	if hookCount(p, "path_link")+hookCount(p, "path_rename") != 0 {
+	if hookCount(p, "path_link")+hookCount(p, "path_rename")+hookCount(p, "path_symlink") != 0 {
 		t.Fatalf("link/rename hooks kept with unmatched names: %s", p.YAML)
 	}
 	if !slices.Contains(c.Notes, NoteDentryMount+":"+keys) {

@@ -93,7 +93,7 @@ func isNoPost(sel tpSelector) bool {
 //  4. no hook runtime, provider credential, agent state root or repository
 //     path in an Override selector;
 //  5. no exec hook, no kprobe Override, nothing but file_open, path_link,
-//     path_rename and tcp_connect;
+//     path_rename, path_symlink and tcp_connect;
 //  6. every path is absolute, clean, inside an enrolled home (or a listed
 //     system path) and free of symlinks;
 //  7. one entry per LSM hook name (Tetragon 1.7.0 keeps only the last one,
@@ -330,12 +330,12 @@ func lintSelectors(h int, args []tpArg, selectors []tpSelector, lsm, enforcing b
 }
 
 // allowedLSMHooks are the LSM hooks a DefenseClaw policy may name.
-var allowedLSMHooks = map[string]bool{"file_open": true, "path_link": true, "path_rename": true}
+var allowedLSMHooks = map[string]bool{"file_open": true, "path_link": true, "path_rename": true, "path_symlink": true}
 
 // uidResolves are the argument resolutions that read a uid: the opener of a
 // file (file_open) and the owner of a linked or renamed inode (path_link,
 // path_rename carry no credentials).
-var uidResolves = map[string]bool{"f_cred.uid.val": true, "d_inode.i_uid.val": true}
+var uidResolves = map[string]bool{"f_cred.uid.val": true, "d_inode.i_uid.val": true, "dentry.d_inode.i_uid.val": true}
 
 // numericArg reports whether a hook argument is a number, which Tetragon
 // matches from values written into the selector itself.

@@ -313,7 +313,7 @@ Each line is a pass (`✓`), a warning (`!`), a failure (`✗`) or information (
 #     defenseclaw_tetragon_burn_in: 40h
 #   group_vars/defenseclaw_ring_broad.yml
 #     defenseclaw_tetragon_mode: enforce
-#     defenseclaw_tetragon_enforce_ack: sha256:08b71155b713   # from `tetragon verify --ready-for enforce`
+#     defenseclaw_tetragon_enforce_ack: sha256:720bcdb296c7   # from `tetragon verify --ready-for enforce`
 #     defenseclaw_guardrail_mode: action   # the kernel controls deny only for connectors in action mode
 #
 # Run one ring at a time, and stop at the first host that fails its checks:
@@ -613,7 +613,7 @@ It checks everything `observe` checks, plus `keep-sensors-on-exit`, BPF LSM, an 
 
 ```yaml title="group_vars/defenseclaw_ring_broad.yml"
 defenseclaw_tetragon_mode: enforce
-defenseclaw_tetragon_enforce_ack: sha256:08b71155b713   # the value `verify` prints for your build
+defenseclaw_tetragon_enforce_ack: sha256:720bcdb296c7   # the value `verify` prints for your build
 defenseclaw_guardrail_mode: action   # the kernel controls deny only for connectors in action mode
 ```
 
@@ -684,7 +684,7 @@ Once a ring enforces, `status` shows each user's state: enforcing, in monitor mo
     { type: "out", text: "    enterprise:" },
     { type: "out", text: "      tetragon:" },
     { type: "out", text: "        mode: enforce" },
-    { type: "out", text: "        enforce_ack: sha256:08b71155b713" },
+    { type: "out", text: "        enforce_ack: sha256:720bcdb296c7" },
     { type: "out", text: "Ready for enforce: 0 of 13 users would be enforced now; 13 stay in monitor until" },
     { type: "out", text: "their burn-in completes." },
     { type: "out", text: "Set the approve block above in your admin config and apply it with your config" },
@@ -1042,13 +1042,13 @@ enterprise:
 
 Each computer enforces with whichever digest its build ships, and the approval reads `approved` when its digest is in the list. Drop the old value once the last ring has upgraded.
 
-1.0.6 is the first release since 1.0.1 that changes the digest: it adds `kernel.ssh_authorized_keys_write`. The 1.0.1 to 1.0.5 digest is `sha256:08b71155b713` and the 1.0.6 digest is `sha256:40d66b85f4b8`. Push both before the upgrade and enforcement continues with no monitor window. Without the new value, an upgraded computer runs in monitor mode (`kernel_enforce_ack_stale`) until you add it. `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce` on an upgraded computer prints the digest of its build.
+1.0.6 is the first release since 1.0.1 that changes the digest: it adds `kernel.ssh_authorized_keys_write`. The 1.0.1 to 1.0.5 digest is `sha256:08b71155b713` and the 1.0.6 digest is `sha256:720bcdb296c7`. Push both before the upgrade and enforcement continues with no monitor window. Without the new value, an upgraded computer runs in monitor mode (`kernel_enforce_ack_stale`) until you add it. `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce` on an upgraded computer prints the digest of its build.
 
 ```yaml
 enterprise:
   tetragon:
     mode: enforce
-    enforce_ack: [sha256:08b71155b713, sha256:40d66b85f4b8]   # 1.0.5, 1.0.6
+    enforce_ack: [sha256:08b71155b713, sha256:720bcdb296c7]   # 1.0.5, 1.0.6
 ```
 
 **Tetragon.** A restart drops policies added with `tetra`; DefenseClaw's load again within a minute. A Tetragon minor outside the supported window (1.8, for example) makes the helper fall back to `cn_proc` and `fanotify` and warn `tetragon_unsupported_version`; the `DefenseClawTetragonFallback` alert fires on it.
@@ -1200,7 +1200,7 @@ Three controls exist. There are no per-control settings.
 | --- | --- | --- |
 | `kernel.ssh_private_key_read` | Opening `~/.ssh/id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa` | `.pub` files and certificates. `ssh`, `ssh-keygen` and `ssh-add` are exempt, so SSH commit signing and `ssh-add` keep working |
 | `kernel.persistence_write` | Opening for write `~/.bashrc`, `~/.bash_profile`, `~/.profile`, `~/.zshrc`, and files under `~/.config/systemd/user/` and `~/.config/autostart/`, including truncation, which is denied before it happens | Reading. Replacing or removing a file by rename or unlink |
-| `kernel.ssh_authorized_keys_write` (rule `persistence.ssh_authorized_keys_write`) | Opening `~/.ssh/authorized_keys` or `authorized_keys2` for write; a new hard link to them or at their names; a rename onto them, away from them, or of `~/.ssh` itself | Reading. Removing a file, and making a symlink at the name: the [protected-file watch](/docs/guardrail/protected-files) alerts on those |
+| `kernel.ssh_authorized_keys_write` (rule `persistence.ssh_authorized_keys_write`) | Opening `~/.ssh/authorized_keys` or `authorized_keys2` for write, including creating them; a new hard link to them or at their names; a symlink at their names; a rename onto them, away from them, or of `~/.ssh` itself | Reading. Removing the file (anything put at the name afterwards is denied) |
 
 The control sees the file, not the command, so it also covers a write by a
 script, `xargs`, `find -exec`, `make` or a git option the hook could not read.

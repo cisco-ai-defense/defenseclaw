@@ -89,7 +89,7 @@ func DefaultPaths(goos string) []string {
 func ClassOf(rel string) string {
 	rel = filepath.ToSlash(rel)
 	switch {
-	case strings.HasPrefix(rel, ".ssh/authorized_keys") || strings.HasSuffix(rel, "administrators_authorized_keys"):
+	case strings.HasPrefix(rel, ".ssh/authorized_keys"):
 		return ClassAuthorizedKeys
 	case strings.HasPrefix(rel, ".config/systemd/user/") || strings.HasPrefix(rel, ".config/autostart/") ||
 		strings.HasPrefix(rel, "Library/LaunchAgents/"):
@@ -123,9 +123,6 @@ type Options struct {
 	Restore bool
 	// Paths are home-relative names (DefaultPaths when empty).
 	Paths []string
-	// System are absolute paths watched once, attributed to any home's
-	// agent (Windows administrators_authorized_keys on a managed host).
-	System []string
 	// StateDir keeps the accepted digests (and, with Restore, copies).
 	// Empty keeps them in memory only.
 	StateDir string
@@ -171,11 +168,6 @@ func New(opts Options) *Watcher {
 	}
 	w := &Watcher{opts: opts, homes: map[string]bool{}, files: map[string]*entry{}, dirs: map[string]entry{}, stored: map[string]string{}}
 	w.readState()
-	for _, p := range opts.System {
-		if filepath.IsAbs(p) {
-			w.track(filepath.Clean(p), "", ClassAuthorizedKeys)
-		}
-	}
 	return w
 }
 

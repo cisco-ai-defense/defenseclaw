@@ -109,7 +109,7 @@ func TestEnforcingControlsDenyTheKeyReadInTheirOnlyHook(t *testing.T) {
 	p := policyOf(t, c, FamilyControls)
 	// One file_open entry, then one entry each of path_link and
 	// path_rename (the authorized keys names).
-	if hookCount(p, "file_open") != 1 || hookCount(p, "path_link") != 1 || hookCount(p, "path_rename") != 1 || len(p.tp.Spec.LsmHooks) != 3 {
+	if hookCount(p, "file_open") != 1 || hookCount(p, "path_link") != 1 || hookCount(p, "path_rename") != 1 || hookCount(p, "path_symlink") != 1 || len(p.tp.Spec.LsmHooks) != 4 {
 		t.Fatalf("%d hook entries, want one per hook name:\n%s", len(p.tp.Spec.LsmHooks), p.YAML)
 	}
 	hook := p.tp.Spec.LsmHooks[0]

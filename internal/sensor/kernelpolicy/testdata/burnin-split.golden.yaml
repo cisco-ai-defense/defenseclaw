@@ -1,4 +1,4 @@
-# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:40d66b85f4b8
+# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:720bcdb296c7
 # Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
@@ -142,7 +142,7 @@ spec:
               rateLimit: 1m
               rateLimitScope: process
 ---
-# defenseclaw-derived: tetragon-policy family=controls kernel_policy=sha256:40d66b85f4b8
+# defenseclaw-derived: tetragon-policy family=controls kernel_policy=sha256:720bcdb296c7
 # Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
@@ -403,7 +403,7 @@ spec:
               argError: -1
             - action: Post
 ---
-# defenseclaw-derived: tetragon-policy family=controls-burnin kernel_policy=sha256:40d66b85f4b8
+# defenseclaw-derived: tetragon-policy family=controls-burnin kernel_policy=sha256:720bcdb296c7
 # Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy

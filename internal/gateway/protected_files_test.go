@@ -87,13 +87,12 @@ func TestProtectedFileWatchOffBuildsNothing(t *testing.T) {
 	(&APIServer{}).noteProtectedFileActivity(context.Background(), "codex", agentHookRequest{HookEventName: "PreToolUse"}, "")
 }
 
-// A managed gateway runs as a service account: it watches no home of its
-// own, only the homes of hook callers.
-func TestManagedProtectedFileWatchStartsWithNoHome(t *testing.T) {
+// A managed gateway's service account cannot read users' homes, so it
+// runs no watch (the kernel control is the managed Linux layer).
+func TestManagedGatewayRunsNoProtectedFileWatch(t *testing.T) {
 	protectedFilesHome(t)
-	watch := newProtectedFileWatch(&config.Config{DataDir: t.TempDir()}, true, nil)
-	if watch == nil || len(watch.watcher.Homes()) != 0 {
-		t.Fatalf("managed watch homes = %v", watch.watcher.Homes())
+	if watch := newProtectedFileWatch(&config.Config{DataDir: t.TempDir()}, true, nil); watch != nil {
+		t.Fatal("a managed gateway built a watch it cannot read")
 	}
 }
 

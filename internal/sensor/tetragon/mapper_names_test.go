@@ -46,6 +46,7 @@ func TestMapperNamesTheProtectedPathOfALinkOrRename(t *testing.T) {
 		{"rename away", "security_path_rename", []*pb.KprobeArgument{pathArg(keys), pathArg(fixtureHome + "/old")}, keys},
 		{"ssh dir replaced", "security_path_rename", []*pb.KprobeArgument{pathArg(fixtureHome + "/x"), pathArg(fixtureHome + "/.ssh")}, fixtureHome + "/.ssh"},
 		{"hard link", "security_path_link", []*pb.KprobeArgument{pathArg(keys), pathArg("/tmp/k")}, keys},
+		{"symlink at the name", "security_path_symlink", []*pb.KprobeArgument{pathArg(keys), pathArg(fixtureHome + "/.ssh")}, keys},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			batch := mapper.Map(lsmOf(tc.function, tc.args...))

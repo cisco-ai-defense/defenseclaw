@@ -125,7 +125,7 @@ func (a *Activity) End(home string, s Session) {
 
 // Attribute returns the agent tool call that ran for home at some time in
 // [from, to]: one still running, or one that ended at most endedGrace
-// before from. An empty home matches every home (a system path).
+// before from.
 func (a *Activity) Attribute(home string, from, to time.Time) (Session, bool) {
 	if a == nil {
 		return Session{}, false
@@ -138,7 +138,7 @@ func (a *Activity) Attribute(home string, from, to time.Time) (Session, bool) {
 	var bestAt time.Time
 	found := false
 	for key, call := range a.open {
-		if (home == "" || key.home == home) && !call.begin.After(to) && (!found || call.begin.After(bestAt)) {
+		if key.home == home && !call.begin.After(to) && (!found || call.begin.After(bestAt)) {
 			best, bestAt, found = call.session, call.begin, true
 		}
 	}
@@ -147,7 +147,7 @@ func (a *Activity) Attribute(home string, from, to time.Time) (Session, bool) {
 	}
 	for i := len(a.ended) - 1; i >= 0; i-- {
 		call := a.ended[i]
-		if (home == "" || call.home == home) && !call.begin.After(to) && !call.end.Before(from.Add(-endedGrace)) {
+		if call.home == home && !call.begin.After(to) && !call.end.Before(from.Add(-endedGrace)) {
 			return call.session, true
 		}
 	}

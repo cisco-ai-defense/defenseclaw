@@ -35,8 +35,8 @@ func validControls(t *testing.T) (tracingPolicy, LintOptions, *world) {
 	// own (TestLintNameChangeHooks).
 	tp := cloneTP(t, p.tp)
 	binTP := cloneTP(t, bin.tp)
-	if hookNames(tp) != "file_open,path_link,path_rename" || hookNames(binTP) != "file_open,path_link,path_rename" {
-		t.Fatalf("hooks = %s and %s, want file_open, path_link, path_rename", hookNames(tp), hookNames(binTP))
+	if hookNames(tp) != "file_open,path_link,path_rename,path_symlink" || hookNames(binTP) != "file_open,path_link,path_rename,path_symlink" {
+		t.Fatalf("hooks = %s and %s, want file_open, path_link, path_rename, path_symlink", hookNames(tp), hookNames(binTP))
 	}
 	tp.Spec.LsmHooks, binTP.Spec.LsmHooks = tp.Spec.LsmHooks[:1], binTP.Spec.LsmHooks[:1]
 	tp.Spec.LsmHooks[0].Selectors = []tpSelector{

@@ -518,10 +518,12 @@ func writeFlags(flags string) bool {
 	return false
 }
 
-// nameChange reports whether an LSM function is a hard link or a rename
-// (path_link, path_rename), whose events name a source and a target.
+// nameChange reports whether an LSM function makes or changes a name
+// (path_link, path_rename, path_symlink), whose events name more than one
+// path.
 func nameChange(function string) bool {
-	return strings.HasSuffix(function, "path_link") || strings.HasSuffix(function, "path_rename")
+	return strings.HasSuffix(function, "path_link") || strings.HasSuffix(function, "path_rename") ||
+		strings.HasSuffix(function, "path_symlink")
 }
 
 // protectedName is the path of a link or rename event the authorized keys

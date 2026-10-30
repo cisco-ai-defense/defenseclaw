@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -35,16 +34,25 @@ type protectedFileWatch struct {
 	watcher  *protectedfiles.Watcher
 }
 
-// newProtectedFileWatch builds the watch for cfg, or nil when
-// guardrail.protected_files.on_change is off. A per-user gateway watches
-// its own user's home; a managed gateway, which runs as a service account,
-// adds each user's home at that user's first hook call.
+// newProtectedFileWatch builds the watch of a per-user gateway for its own
+// user's home, or nil when guardrail.protected_files.on_change is off.
+//
+// A managed gateway gets none: its service account is kept out of users'
+// homes (ProtectHome on Linux, _defenseclaw on macOS, a virtual service
+// account on Windows), so it cannot read the files. On managed Linux the
+// kernel control is the layer for these files, and its monitor-mode
+// records (observe, burn-in, a stale ack) report the same writes, links
+// and renames with the process tree.
 func newProtectedFileWatch(cfg *config.Config, managed bool, emit func(protectedfiles.Change)) *protectedFileWatch {
-	if cfg == nil {
+	if cfg == nil || managed {
 		return nil
 	}
 	mode := cfg.Guardrail.ProtectedFiles.EffectiveOnChange()
 	if mode == config.ProtectedFilesOff {
+		return nil
+	}
+	home := trustedSameHostHome()
+	if home == "" {
 		return nil
 	}
 	stateDir := ""
@@ -54,29 +62,18 @@ func newProtectedFileWatch(cfg *config.Config, managed bool, emit func(protected
 			stateDir = ""
 		}
 	}
-	var system []string
-	if managed && runtime.GOOS == "windows" {
-		if programData := os.Getenv("ProgramData"); programData != "" {
-			system = append(system, filepath.Join(programData, "ssh", "administrators_authorized_keys"))
-		}
-	}
 	activity := protectedfiles.NewActivity(nil)
 	watch := &protectedFileWatch{
 		activity: activity,
 		watcher: protectedfiles.New(protectedfiles.Options{
 			Restore:  mode == config.ProtectedFilesRestore,
 			Paths:    cfg.Guardrail.ProtectedFiles.Paths,
-			System:   system,
 			StateDir: stateDir,
 			Activity: activity,
 			Emit:     emit,
 		}),
 	}
-	if !managed {
-		if home := trustedSameHostHome(); home != "" {
-			watch.watcher.AddHome(home)
-		}
-	}
+	watch.watcher.AddHome(home)
 	return watch
 }
 
@@ -155,7 +152,6 @@ func (a *APIServer) noteProtectedFileActivity(ctx context.Context, connectorName
 	if home == "" || home == unresolvedCallerHome {
 		return
 	}
-	watch.watcher.AddHome(home)
 	session := protectedfiles.Session{
 		Connector: connectorName, SessionID: req.SessionID, ToolInvocationID: req.ToolInvocationID,
 		AgentIdentityID: agentIdentityID,

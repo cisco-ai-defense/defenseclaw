@@ -265,26 +265,6 @@ func TestChangeWhileStoppedIsReportedAtStart(t *testing.T) {
 	}
 }
 
-func TestSystemPathIsAttributedToAnyHome(t *testing.T) {
-	f := newFixture(t, false)
-	admin := filepath.Join(t.TempDir(), "administrators_authorized_keys")
-	if err := os.WriteFile(admin, []byte("a\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	w := New(Options{System: []string{admin}, Activity: f.act, Now: f.clock.now,
-		Emit: func(c Change) { f.changes = append(f.changes, c) }})
-	f.act.Begin(f.home, agent)
-	if err := os.WriteFile(admin, []byte("b\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	f.changes = nil
-	f.clock.tick(DefaultInterval)
-	w.Scan()
-	if len(f.changes) != 1 || !f.changes[0].Attributed || f.changes[0].Class != ClassAuthorizedKeys {
-		t.Fatalf("changes = %+v", f.changes)
-	}
-}
-
 func TestOpenCallsExpire(t *testing.T) {
 	c := &clock{t: time.Unix(1_800_000_000, 0)}
 	a := NewActivity(c.now)

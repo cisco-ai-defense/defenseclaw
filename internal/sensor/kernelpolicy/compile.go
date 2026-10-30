@@ -666,7 +666,8 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	// A write through another name of an authorized keys file is not an
 	// open of that name. path_link refuses a new hard link to the files or
 	// at their names; path_rename refuses a rename onto or away from them
-	// and of the .ssh directory. Both read dentries, which Tetragon names
+	// and of the .ssh directory; path_symlink refuses a symlink made at
+	// their names (after an unlink). They read dentries, which Tetragon names
 	// within their own mount only, so a path on a home that is not on the
 	// root mount is left out and said so (the gateway's watch still alerts).
 	if keys.Links {
@@ -675,16 +676,19 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		notes = append(notes, n5...)
 		notes = append(notes, n6...)
 		for _, h := range []struct {
-			name  string
-			paths []string
-			args  []tpArg
+			name    string
+			paths   []string
+			args    []tpArg
+			targets []int
 		}{
-			{"path_link", linkFiles, dentryArgs(0, 2)},
-			{"path_rename", renamePaths, dentryArgs(1, 3)},
+			{"path_link", linkFiles, dentryArgs(0, 2), []int{0, 1}},
+			{"path_rename", renamePaths, dentryArgs(1, 3), []int{0, 1}},
+			{"path_symlink", linkFiles, symlinkArgs(), []int{0}},
 		} {
 			lsm := tpLsm{Hook: h.name, Args: h.args}
-			lsm.Selectors = append(lsm.Selectors, anchoredAt(0, "Equal", h.paths, false)...)
-			lsm.Selectors = append(lsm.Selectors, anchoredAt(1, "Equal", h.paths, false)...)
+			for _, at := range h.targets {
+				lsm.Selectors = append(lsm.Selectors, anchoredAt(at, "Equal", h.paths, false)...)
+			}
 			if len(lsm.Selectors) > 0 {
 				tp.Spec.LsmHooks = append(tp.Spec.LsmHooks, lsm)
 			}
@@ -723,6 +727,17 @@ func dentryArgs(source, target int) []tpArg {
 		{Index: source, Type: "dentry"},
 		{Index: target, Type: "dentry"},
 		{Index: source, Type: "uint32", Resolve: "d_inode.i_uid.val", Label: "owner_uid"},
+	}
+}
+
+// symlinkArgs are the arguments of a path_symlink hook: the new name, the
+// directory it is made in, and that directory's owner (the new name has no
+// inode yet).
+func symlinkArgs() []tpArg {
+	return []tpArg{
+		{Index: 1, Type: "dentry"},
+		{Index: 0, Type: "path"},
+		{Index: 0, Type: "uint32", Resolve: "dentry.d_inode.i_uid.val", Label: "owner_uid"},
 	}
 }
 

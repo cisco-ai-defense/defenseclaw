@@ -14,9 +14,15 @@ checks a short list of files that let a change outlive the session.
 
 ## What it watches
 
+The watch runs in the per-user gateway on Linux, macOS and Windows. A
+managed gateway runs as a service account that cannot read users' homes, so
+it has no watch; on managed Linux the
+[kernel control](/docs/enterprise/tetragon#the-kernel-controls) covers these
+files, and in monitor mode it records the same writes, links and renames.
+
 | Class | Files (in your home) | Systems |
 | --- | --- | --- |
-| `authorized_keys` | `.ssh/authorized_keys`, `.ssh/authorized_keys2` | All. On a managed Windows host also `%ProgramData%\ssh\administrators_authorized_keys` |
+| `authorized_keys` | `.ssh/authorized_keys`, `.ssh/authorized_keys2` | All |
 | `shell_rc` | `.bashrc`, `.bash_profile`, `.profile`, `.zshrc` | Linux, macOS |
 | `autostart` | Entries of `.config/systemd/user/` and `.config/autostart/` (Linux), `Library/LaunchAgents/` (macOS) | Linux, macOS |
 
@@ -54,10 +60,9 @@ guardrail:
 | `guardrail.protected_files.paths` | the list above | Home-relative names, at most 64. A trailing `/` watches the entries of a folder. Restart required. |
 
 `restore` is meant for the strict setups only, and is off in every pack. It
-writes only where the gateway's own account owns the folder, so a per-user
-gateway restores its user's files and a managed gateway, which runs as a
-service account, only alerts. Configuration tools that rewrite these files
-during an agent session would be undone; leave `restore` off on those hosts.
+writes only into a folder the gateway's own account owns. Configuration tools
+that rewrite these files during an agent session would be undone; leave
+`restore` off on those hosts.
 
 ## Limits
 

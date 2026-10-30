@@ -15329,6 +15329,9 @@ producer_identity_sets:
   - event_name: legacy.audit.gateway.tool.call.judge.flagged
     bucket: security.finding
     compatibility_only: true
+  - event_name: legacy.audit.protected.file.changed
+    bucket: security.finding
+    compatibility_only: true
   - event_name: legacy.audit.scan.finding
     bucket: security.finding
     compatibility_only: true
@@ -15519,6 +15522,9 @@ producer_identity_sets:
     compatibility_only: true
   - event_name: legacy.audit.llm.judge.response
     bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.protected.file.changed
+    bucket: security.finding
     compatibility_only: true
   - event_name: legacy.audit.scan.finding
     bucket: security.finding
