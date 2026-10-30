@@ -13,12 +13,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -29,17 +31,30 @@ import (
 )
 
 const (
-	enterpriseSetupStagePrefix = "DefenseClaw-Enterprise-Setup-"
+	enterpriseSetupStagePrefix = managed.SetupStagePrefix
 	enterpriseSetupStageSDDL   = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 	// enterpriseSetupScratchDirName is a dedicated subdirectory under
 	// stageRoot pointed at by TEMP/TMP/LOCALAPPDATA/APPDATA/USERPROFILE/HOME
-	// so PowerShell and the lifecycle can create scratch files WITHOUT
-	// polluting the strict payload-file allowlist cleanupEnterpriseSetupStage
-	// enforces on stageRoot itself. Removed recursively before the outer
-	// stage cleanup runs.
+	// so PowerShell and the lifecycle can create scratch files beside, not
+	// among, the staged payload files. Cleanup removes the whole stage.
 	enterpriseSetupScratchDirName = "scratch"
-	maximumLifecycleOutput        = 2 << 20
 )
+
+// enterpriseSetupStage is one run's protected staging directory. The
+// directory is held open without delete sharing, and each staged file is held
+// open for reading only from its digest check until the lifecycle child
+// exits, so nothing can rename, replace or rewrite what was verified.
+type enterpriseSetupStage struct {
+	root     string
+	parent   string
+	rootPin  *managed.SetupPin
+	filePins []*managed.SetupPin
+	cleaned  bool
+	// refused marks a stage path that cleanup will not touch at all: it is
+	// outside the staging roots or no longer names the directory this run
+	// created, so nothing is scheduled for removal either.
+	refused bool
+}
 
 func executeEnterpriseSetup(
 	parent context.Context,
@@ -79,57 +94,58 @@ func executeEnterpriseSetup(
 		*input.value = canonical
 	}
 
-	stageRoot, cleanup, err := stageEnterprisePayload(payload)
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		return 0, fmt.Errorf("resolve trusted ProgramData for enterprise Setup staging: %w", err)
+	}
+	// No machine-wide lock is taken, so only leftovers older than any run
+	// can last are swept; a concurrent run's stage is always younger.
+	managed.SweepSetupLeftovers(
+		managed.SetupStagingRoots(programData),
+		managed.SetupLeftoverPrefixes(),
+		time.Now(),
+	)
+	stage, err := stageEnterprisePayload(payload, programData)
 	if err != nil {
 		return 0, err
 	}
-	cleaned := false
-	defer func() {
-		if cleaned {
-			return
-		}
-		if cleanupErr := cleanup(); cleanupErr != nil {
-			exitCode = enterpriseFailureExitCode
-			returnErr = errors.Join(returnErr, cleanupErr)
-		}
-	}()
+	// Cleanup never changes the exit code: the lifecycle's own result is
+	// what the deployment system acts on, and a stage that cannot be removed
+	// now is scheduled for removal at the next restart.
+	defer stage.cleanupAndAccept()
 
-	arguments := enterpriseLifecycleArguments(stageRoot, opts)
-	childEnvironment, err := trustedEnterpriseSetupEnvironment(stageRoot)
+	arguments := enterpriseLifecycleArguments(stage.root, opts)
+	childEnvironment, err := trustedEnterpriseSetupEnvironment(stage.root)
 	if err != nil {
 		return 0, err
 	}
 	ctx, cancel := context.WithTimeout(parent, opts.LifecycleTimeout)
 	defer cancel()
-	cliPath := filepath.Join(stageRoot, "defenseclaw.exe")
+	cliPath := filepath.Join(stage.root, "defenseclaw.exe")
 	child := processutil.CommandContext(ctx, cliPath, arguments...)
-	child.Dir = stageRoot
+	child.Dir = stage.root
 	child.Env = childEnvironment
-	output, runErr := processutil.CombinedOutputTree(child, false)
-	if len(output) > maximumLifecycleOutput {
-		return 0, fmt.Errorf("enterprise lifecycle output exceeded %d bytes", maximumLifecycleOutput)
-	}
-	cleanupErr := cleanup()
-	cleaned = true
-	if cleanupErr != nil {
-		if runErr != nil && len(output) != 0 {
-			return 0, fmt.Errorf(
-				"enterprise lifecycle failed and protected staging cleanup also failed; lifecycle output=%s: %w",
-				strings.TrimSpace(string(output)),
-				cleanupErr,
-			)
-		}
-		return 0, cleanupErr
-	}
-	if len(output) != 0 {
+	// Standard output carries the lifecycle's machine-readable result and is
+	// republished on Setup's stdout; standard error carries diagnostics and
+	// resilience markers and goes to Setup's stderr, so stdout stays JSON-only
+	// under --json.
+	childStdout, childStderr, runErr := processutil.OutputTree(child, false)
+	stage.releaseFiles()
+	childStdout = boundLifecycleStream(childStdout, "stdout")
+	childStderr = boundLifecycleStream(childStderr, "stderr")
+	if len(childStdout) != 0 {
 		destination := stdout
 		if runErr != nil && !opts.JSON {
 			destination = stderr
 		}
-		if _, err := destination.Write(output); err != nil {
+		if _, err := destination.Write(childStdout); err != nil {
 			return 0, fmt.Errorf("publish enterprise lifecycle output: %w", err)
 		}
 	}
+	if len(childStderr) != 0 {
+		_, _ = stderr.Write(childStderr)
+	}
+	stage.cleanupAndAccept()
 	if ctx.Err() != nil {
 		return 0, fmt.Errorf("enterprise %s exceeded the bounded %s timeout: %w", opts.Action, opts.LifecycleTimeout, ctx.Err())
 	}
@@ -144,6 +160,22 @@ func executeEnterpriseSetup(
 	// unexpected child status to the same fatal-install code so AVC never
 	// mistakes a partial transaction for reboot-required success.
 	return enterpriseFailureExitCode, nil
+}
+
+// boundLifecycleStream keeps the tail of an oversized lifecycle stream and
+// logs that the head was dropped.
+func boundLifecycleStream(output []byte, stream string) []byte {
+	bounded, truncated := boundedLifecycleTail(output, maximumLifecycleOutput)
+	if truncated {
+		managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+			"object": "enterprise lifecycle " + stream,
+			"reason": fmt.Sprintf(
+				"lifecycle %s was %d bytes; republishing only its last %d bytes, which hold the result",
+				stream, len(output), len(bounded),
+			),
+		})
+	}
+	return bounded
 }
 
 func validateEnterpriseSetupInput(value, label string) (string, error) {
@@ -168,81 +200,149 @@ func validateEnterpriseSetupInput(value, label string) (string, error) {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("%s is not a regular non-link file: %s", label, full)
 	}
-	if err := managed.ValidateTrustedFilePath(full, label); err != nil {
+	// The administrator who ran Setup legitimately owns the files they were
+	// handed (a download, a share copy), so that account is trusted as the
+	// owner and writer of --config and --manifest; the installer re-stamps
+	// the canonical descriptor on the copies it installs.
+	invoker, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || invoker == nil || invoker.User.Sid == nil {
+		return "", fmt.Errorf("resolve the elevated administrator account for %s: %w", label, err)
+	}
+	if err := managed.ValidateSetupPathWithWriter(full, label, managed.SetupPathFile, invoker.User.Sid); err != nil {
 		return "", fmt.Errorf("refusing untrusted %s: %w", label, err)
 	}
 	return filepath.Clean(full), nil
 }
 
-func stageEnterprisePayload(payload enterprisePayload) (string, func() error, error) {
-	programData, err := winpath.TrustedProgramData()
+// stageEnterprisePayload stages the payload under ProgramData. When
+// Controlled Folder Access or an endpoint product refuses that with access
+// denied, it stages once more under an existing ProgramData\Cisco (never
+// created here) and, if that is refused too, fails with a prerequisite that
+// names the block and its remedy.
+func stageEnterprisePayload(payload enterprisePayload, programData string) (*enterpriseSetupStage, error) {
+	stage, err := stageEnterprisePayloadUnder(payload, programData)
+	if err == nil || !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		return stage, err
+	}
+	parents := []string{filepath.Clean(programData)}
+	firstErr := err
+	if fallback, ok := managed.SetupStagingFallbackRoot(programData); ok {
+		parents = append(parents, fallback)
+		stage, fallbackErr := stageEnterprisePayloadUnder(payload, fallback)
+		if fallbackErr == nil {
+			managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+				"path":   stage.root,
+				"object": "enterprise Setup staging directory",
+				"reason": "ProgramData refused the staging directory (" + firstErr.Error() + "); staged under " + fallback,
+			})
+			return stage, nil
+		}
+		if !errors.Is(fallbackErr, windows.ERROR_ACCESS_DENIED) {
+			return nil, fallbackErr
+		}
+		firstErr = errors.Join(firstErr, fallbackErr)
+	}
+	setupPath, _ := os.Executable()
+	prereq := stagingBlockedPrereq(setupPath, parents, firstErr)
+	log.Print(prereq)
+	return nil, errors.New(prereq)
+}
+
+func stageEnterprisePayloadUnder(payload enterprisePayload, parent string) (*enterpriseSetupStage, error) {
+	stage, err := createEnterpriseSetupStage(parent)
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve trusted ProgramData for enterprise Setup staging: %w", err)
+		return nil, err
 	}
-	stageRoot, err := createEnterpriseSetupStage(programData)
-	if err != nil {
-		return "", nil, err
+	fail := func(cause error) (*enterpriseSetupStage, error) {
+		if cleanupErr := stage.cleanup(); cleanupErr != nil {
+			stage.scheduleAtRestart(cleanupErr)
+		}
+		return nil, cause
 	}
-	// Create a dedicated scratch subdirectory that TEMP/TMP/LOCALAPPDATA/
-	// APPDATA/USERPROFILE/HOME all point at, so PowerShell and the
-	// lifecycle can write scratch files without breaking the strict
-	// payload-file allowlist that cleanupEnterpriseSetupStage enforces
-	// on stageRoot itself.
-	scratchDir := filepath.Join(stageRoot, enterpriseSetupScratchDirName)
-	if err := os.Mkdir(scratchDir, 0o700); err != nil {
-		return "", nil, errors.Join(fmt.Errorf("create enterprise Setup scratch directory: %w", err), cleanupEnterpriseSetupStage(stageRoot, programData))
+	scratchDir := filepath.Join(stage.root, enterpriseSetupScratchDirName)
+	if err := managed.CreateSetupDirectory(scratchDir); err != nil {
+		return fail(fmt.Errorf("create enterprise Setup scratch directory: %w", err))
 	}
-	cleanup := func() error { return cleanupEnterpriseSetupStage(stageRoot, programData) }
 	for _, name := range requiredPayloadFiles {
 		expected, ok := payload.Files[name]
 		if !ok {
-			return "", nil, errors.Join(fmt.Errorf("validated enterprise payload is missing manifest entry %s", name), cleanup())
+			return fail(fmt.Errorf("validated enterprise payload is missing manifest entry %s", name))
 		}
-		path := filepath.Join(stageRoot, name)
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		pin, err := stageEnterprisePayloadFile(payload, stage.root, name, expected)
 		if err != nil {
-			return "", nil, errors.Join(fmt.Errorf("create staged enterprise payload %s: %w", name, err), cleanup())
+			return fail(err)
 		}
-		source, sourceErr := payload.PayloadFS.Open("payload/" + name)
-		if sourceErr != nil {
-			_ = file.Close()
-			return "", nil, errors.Join(fmt.Errorf("open embedded enterprise payload %s: %w", name, sourceErr), cleanup())
-		}
-		written, writeErr := io.Copy(file, io.LimitReader(source, maximumPayloadFileBytes+1))
-		sourceCloseErr := source.Close()
-		syncErr := file.Sync()
-		closeErr := file.Close()
-		if err := errors.Join(writeErr, sourceCloseErr, syncErr, closeErr); err != nil {
-			return "", nil, errors.Join(fmt.Errorf("write staged enterprise payload %s: %w", name, err), cleanup())
-		}
-		if written <= 0 || written > maximumPayloadFileBytes {
-			return "", nil, errors.Join(fmt.Errorf("staged enterprise payload has invalid size: %s", name), cleanup())
-		}
-		if err := managed.ValidateTrustedFilePath(path, "staged enterprise payload "+name); err != nil {
-			return "", nil, errors.Join(err, cleanup())
-		}
-		readback, err := os.Open(path)
-		if err != nil {
-			return "", nil, errors.Join(fmt.Errorf("open staged enterprise payload for verification %s: %w", name, err), cleanup())
-		}
-		hasher := sha256.New()
-		verifiedBytes, verifyErr := io.Copy(hasher, io.LimitReader(readback, maximumPayloadFileBytes+1))
-		readCloseErr := readback.Close()
-		if err := errors.Join(verifyErr, readCloseErr); err != nil {
-			return "", nil, errors.Join(fmt.Errorf("verify staged enterprise payload %s: %w", name, err), cleanup())
-		}
-		if verifiedBytes != written || verifiedBytes != expected.Size ||
-			!strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), expected.SHA256) {
-			return "", nil, errors.Join(fmt.Errorf("staged enterprise payload digest mismatch: %s", name), cleanup())
-		}
+		stage.filePins = append(stage.filePins, pin)
 	}
-	return stageRoot, cleanup, nil
+	return stage, nil
 }
 
-func createEnterpriseSetupStage(programData string) (string, error) {
+// stageEnterprisePayloadFile writes one payload file Administrators-owned,
+// reopens it read-share-only, proves the reopened handle is the file just
+// written, applies the Setup trust rule and verifies the digest through the
+// pinned handle. The pin stays open until the lifecycle child exits.
+func stageEnterprisePayloadFile(
+	payload enterprisePayload,
+	stageRoot, name string,
+	expected enterprisePayloadManifestFile,
+) (*managed.SetupPin, error) {
+	path := filepath.Join(stageRoot, name)
+	file, err := managed.CreateSetupFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("create staged enterprise payload %s: %w", name, err)
+	}
+	source, sourceErr := payload.PayloadFS.Open("payload/" + name)
+	if sourceErr != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("open embedded enterprise payload %s: %w", name, sourceErr)
+	}
+	written, writeErr := io.Copy(file, io.LimitReader(source, maximumPayloadFileBytes+1))
+	sourceCloseErr := source.Close()
+	syncErr := file.Sync()
+	writtenID, idErr := managed.SetupFileIDOfFile(file)
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, sourceCloseErr, syncErr, idErr, closeErr); err != nil {
+		return nil, fmt.Errorf("write staged enterprise payload %s: %w", name, err)
+	}
+	if written <= 0 || written > maximumPayloadFileBytes {
+		return nil, fmt.Errorf("staged enterprise payload has invalid size: %s", name)
+	}
+	pin, err := managed.PinSetupPath(path, managed.SetupPathFile)
+	if err != nil {
+		return nil, fmt.Errorf("open staged enterprise payload for verification %s: %w", name, err)
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			_ = pin.Close()
+		}
+	}()
+	if pin.ID() != writtenID {
+		return nil, fmt.Errorf("staged enterprise payload %s changed between write and verification", name)
+	}
+	if err := managed.ValidateSetupPath(path, "staged enterprise payload "+name, managed.SetupPathFile); err != nil {
+		return nil, err
+	}
+	if err := pin.Rewind(); err != nil {
+		return nil, fmt.Errorf("verify staged enterprise payload %s: %w", name, err)
+	}
+	hasher := sha256.New()
+	verifiedBytes, verifyErr := io.Copy(hasher, io.LimitReader(pin, maximumPayloadFileBytes+1))
+	if verifyErr != nil {
+		return nil, fmt.Errorf("verify staged enterprise payload %s: %w", name, verifyErr)
+	}
+	if verifiedBytes != written || verifiedBytes != expected.Size ||
+		!strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), expected.SHA256) {
+		return nil, fmt.Errorf("staged enterprise payload digest mismatch: %s", name)
+	}
+	keep = true
+	return pin, nil
+}
+
+func createEnterpriseSetupStage(parent string) (*enterpriseSetupStage, error) {
 	descriptor, err := windows.SecurityDescriptorFromString(enterpriseSetupStageSDDL)
 	if err != nil {
-		return "", fmt.Errorf("build enterprise Setup staging DACL: %w", err)
+		return nil, fmt.Errorf("build enterprise Setup staging DACL: %w", err)
 	}
 	attributes := &windows.SecurityAttributes{
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
@@ -251,72 +351,154 @@ func createEnterpriseSetupStage(programData string) (string, error) {
 	for attempt := 0; attempt < 4; attempt++ {
 		capability := make([]byte, 16)
 		if _, err := rand.Read(capability); err != nil {
-			return "", fmt.Errorf("generate enterprise Setup staging capability: %w", err)
+			return nil, fmt.Errorf("generate enterprise Setup staging capability: %w", err)
 		}
-		path := filepath.Join(programData, enterpriseSetupStagePrefix+hex.EncodeToString(capability))
+		path := filepath.Join(parent, enterpriseSetupStagePrefix+hex.EncodeToString(capability))
 		pathPointer, err := winpath.UTF16Ptr(path)
 		if err != nil {
-			return "", fmt.Errorf("encode enterprise Setup staging path: %w", err)
+			return nil, fmt.Errorf("encode enterprise Setup staging path: %w", err)
 		}
 		if err := windows.CreateDirectory(pathPointer, attributes); err != nil {
 			if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 				continue
 			}
-			return "", fmt.Errorf("create protected enterprise Setup staging directory: %w", err)
+			return nil, fmt.Errorf("create protected enterprise Setup staging directory: %w", err)
 		}
-		if err := managed.ValidateTrustedRuntimeDir(path, "enterprise Setup staging directory"); err != nil {
+		pin, err := managed.PinSetupPath(path, managed.SetupPathDirectory)
+		if err != nil {
 			_ = os.Remove(path)
-			return "", err
+			return nil, fmt.Errorf("hold enterprise Setup staging directory: %w", err)
 		}
-		return filepath.Clean(path), nil
+		stage := &enterpriseSetupStage{root: filepath.Clean(path), parent: filepath.Clean(parent), rootPin: pin}
+		if err := managed.ValidateSetupPath(path, "enterprise Setup staging directory", managed.SetupPathDirectory); err != nil {
+			if cleanupErr := stage.cleanup(); cleanupErr != nil {
+				stage.scheduleAtRestart(cleanupErr)
+			}
+			return nil, err
+		}
+		return stage, nil
 	}
-	return "", errors.New("create enterprise Setup staging directory: random path collisions exhausted")
+	return nil, errors.New("create enterprise Setup staging directory: random path collisions exhausted")
 }
 
-func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
-	cleanStage := filepath.Clean(stageRoot)
-	cleanProgramData := filepath.Clean(programData)
-	relative, err := filepath.Rel(cleanProgramData, cleanStage)
-	if err != nil || filepath.Dir(relative) != "." ||
-		!strings.HasPrefix(filepath.Base(relative), enterpriseSetupStagePrefix) {
-		return fmt.Errorf("refusing unsafe enterprise Setup staging cleanup: %s", cleanStage)
+// releaseFiles closes the staged-file pins once the lifecycle child exited.
+func (stage *enterpriseSetupStage) releaseFiles() {
+	for _, pin := range stage.filePins {
+		_ = pin.Close()
 	}
-	if _, err := os.Lstat(cleanStage); errors.Is(err, os.ErrNotExist) {
+	stage.filePins = nil
+}
+
+// cleanup removes the stage through a no-follow walk after proving the path
+// still names the directory this run created and holds. Entries the
+// lifecycle left beside the payload are accepted, logged and removed.
+func (stage *enterpriseSetupStage) cleanup() error {
+	if stage == nil || stage.cleaned {
 		return nil
-	} else if err != nil {
-		return err
 	}
-	if err := managed.ValidateTrustedRuntimeDir(cleanStage, "enterprise Setup staging cleanup"); err != nil {
-		return fmt.Errorf("refusing enterprise Setup cleanup after trust drift: %w", err)
+	stage.releaseFiles()
+	defer func() { _ = stage.rootPin.Close() }()
+	if !isEnterpriseSetupStagingChild(stage.root, stage.parent) {
+		stage.refused = true
+		return fmt.Errorf("refusing unsafe enterprise Setup staging cleanup: %s", stage.root)
 	}
-	// Delete the scratch subdirectory (recursively) first. PowerShell and
-	// the child lifecycle may have created arbitrary temp files under it
-	// via TEMP/TMP/LOCALAPPDATA/etc.; the strict allowlist below refuses
-	// anything except payload files at the top of stageRoot.
-	scratchDir := filepath.Join(cleanStage, enterpriseSetupScratchDirName)
-	if err := os.RemoveAll(scratchDir); err != nil {
-		return fmt.Errorf("remove enterprise Setup scratch directory: %w", err)
+	if stage.rootPin == nil {
+		return fmt.Errorf("enterprise Setup staging directory is not held: %s", stage.root)
 	}
-	entries, err := os.ReadDir(cleanStage)
+	same, err := stage.rootPin.Matches(stage.root)
 	if err != nil {
+		return fmt.Errorf("inspect enterprise Setup staging directory before cleanup: %w", err)
+	}
+	if !same {
+		stage.refused = true
+		return fmt.Errorf("refusing enterprise Setup cleanup: %s no longer names the staged directory", stage.root)
+	}
+	stage.acceptUnexpectedEntries()
+	id := stage.rootPin.ID()
+	// The removal walk needs delete access to the stage itself, which the
+	// pin's sharing denies; the file-ID check above and the one inside the
+	// walk bracket the release.
+	_ = stage.rootPin.Close()
+	if err := managed.RemoveSetupTreeIfSame(stage.root, id); err != nil {
 		return err
 	}
-	allowed := make(map[string]bool, len(requiredPayloadFiles))
-	for _, name := range requiredPayloadFiles {
-		allowed[name] = true
+	stage.cleaned = true
+	return nil
+}
+
+func (stage *enterpriseSetupStage) acceptUnexpectedEntries() {
+	entries, err := os.ReadDir(stage.root)
+	if err != nil {
+		return
 	}
+	expected := map[string]bool{enterpriseSetupScratchDirName: true}
+	for _, name := range requiredPayloadFiles {
+		expected[strings.ToLower(name)] = true
+	}
+	var unexpected []string
 	for _, entry := range entries {
-		if !allowed[entry.Name()] || entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing enterprise Setup cleanup with unexpected staged object: %s", entry.Name())
+		if !expected[strings.ToLower(entry.Name())] {
+			unexpected = append(unexpected, entry.Name())
 		}
 	}
-	for _, name := range requiredPayloadFiles {
-		path := filepath.Join(cleanStage, name)
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+	if len(unexpected) == 0 {
+		return
+	}
+	sort.Strings(unexpected)
+	managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+		"path":    stage.root,
+		"object":  "enterprise Setup staging directory",
+		"entries": strings.Join(unexpected, ";"),
+		"reason":  "the lifecycle left entries beside the staged payload; removing them with the stage",
+	})
+}
+
+// cleanupAndAccept runs cleanup once and, when it fails, schedules what is
+// left for removal at the next restart and logs the acceptance. It never
+// fails the run.
+func (stage *enterpriseSetupStage) cleanupAndAccept() {
+	if stage == nil || stage.cleaned {
+		return
+	}
+	if err := stage.cleanup(); err != nil {
+		stage.scheduleAtRestart(err)
+	}
+}
+
+func (stage *enterpriseSetupStage) scheduleAtRestart(cause error) {
+	stage.cleaned = true
+	fields := map[string]string{
+		"path":   stage.root,
+		"object": "enterprise Setup staging directory",
+		"reason": "staging cleanup failed; the lifecycle result stands: " + cause.Error(),
+	}
+	if !stage.refused && isEnterpriseSetupStagingChild(stage.root, stage.parent) {
+		if err := managed.ScheduleSetupTreeRemovalAtReboot(stage.root); err != nil {
+			fields["restart_removal"] = "not scheduled: " + err.Error()
+		} else {
+			fields["restart_removal"] = "scheduled"
 		}
 	}
-	return os.Remove(cleanStage)
+	managed.EmitResilienceEvent(managed.MarkerAccept, fields)
+}
+
+// isEnterpriseSetupStagingChild reports whether stageRoot is a capability
+// directory directly under parent, and parent is ProgramData or
+// ProgramData\Cisco.
+func isEnterpriseSetupStagingChild(stageRoot, parent string) bool {
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		return false
+	}
+	roots := []string{filepath.Clean(programData), filepath.Join(filepath.Clean(programData), "Cisco")}
+	allowedParent := false
+	for _, root := range roots {
+		if strings.EqualFold(filepath.Clean(parent), root) {
+			allowedParent = true
+		}
+	}
+	return allowedParent &&
+		managed.IsSetupStagingChild(stageRoot, []string{parent}, []string{enterpriseSetupStagePrefix})
 }
 
 func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions) []string {
@@ -397,8 +579,7 @@ func trustedEnterpriseSetupEnvironment(stageRoot string) ([]string, error) {
 	}
 	system32 := filepath.Join(windowsDirectory, "System32")
 	// Point the child's scratch env vars at a dedicated subdirectory so
-	// PowerShell/CLR scratch writes don't collide with the strict payload
-	// allowlist enforced on stageRoot itself.
+	// PowerShell/CLR scratch writes stay out of the staged payload files.
 	scratchDir := filepath.Join(stageRoot, enterpriseSetupScratchDirName)
 	allowed := map[string]string{
 		"SystemRoot": windowsDirectory, "windir": windowsDirectory,

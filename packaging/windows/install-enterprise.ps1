@@ -93,6 +93,77 @@ param(
 Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Everything below uses .NET types that a constrained language session cannot
+# reach, and the first failure would leave the caller without a JSON verdict.
+# This guard uses only cmdlets, hashtables and ConvertTo-Json, names the policy
+# that constrained this host, and reports it in the standard failure shape.
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+    $defenseClawLanguageMode = [string]$ExecutionContext.SessionState.LanguageMode
+    $defenseClawLanguagePolicies = @()
+    try {
+        $defenseClawLockdown = Microsoft.PowerShell.Management\Get-ItemProperty `
+            -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' `
+            -Name '__PSLockdownPolicy' `
+            -ErrorAction Stop
+        if ("$($defenseClawLockdown.__PSLockdownPolicy)" -ne '') {
+            $defenseClawLanguagePolicies += 'ps_lockdown_policy'
+        }
+    }
+    catch {
+    }
+    try {
+        $defenseClawAppLocker = Microsoft.PowerShell.Management\Get-ItemProperty `
+            -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\SrpV2\Script' `
+            -Name 'EnforcementMode' `
+            -ErrorAction Stop
+        if ("$($defenseClawAppLocker.EnforcementMode)" -eq '1') {
+            $defenseClawLanguagePolicies += 'applocker'
+        }
+    }
+    catch {
+    }
+    try {
+        $defenseClawDeviceGuard = CimCmdlets\Get-CimInstance `
+            -Namespace 'root\Microsoft\Windows\DeviceGuard' `
+            -ClassName 'Win32_DeviceGuard' `
+            -ErrorAction Stop
+        if ("$($defenseClawDeviceGuard.UsermodeCodeIntegrityPolicyEnforcementStatus)" -eq '2') {
+            $defenseClawLanguagePolicies += 'wdac'
+        }
+    }
+    catch {
+    }
+    if ($defenseClawLanguagePolicies.Count -eq 0) {
+        $defenseClawLanguagePolicies += 'unknown'
+    }
+    $defenseClawLanguageFailure = (
+        'defenseclaw_prereq check="powershell_language_mode" ' +
+        'language_mode="{0}" policy="{1}" ' +
+        'remedy="allow the signed DefenseClaw installer scripts to run in FullLanguage mode"'
+    ) -f $defenseClawLanguageMode, ($defenseClawLanguagePolicies -join ',')
+    if ($Json) {
+        # An ordered hashtable, not a custom-object cast: constrained language
+        # refuses that conversion.
+        [ordered]@{
+            schema_version = 1
+            ok = $false
+            action = ([string]$Action).ToLowerInvariant()
+            error = $defenseClawLanguageFailure
+            errors = @($defenseClawLanguageFailure)
+        } | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 6 -Compress
+    }
+    else {
+        Microsoft.PowerShell.Utility\Write-Error `
+            -ErrorAction Continue `
+            -Message (
+                'DefenseClaw Windows enterprise {0} failed: {1}' -f
+                ([string]$Action).ToLowerInvariant(),
+                $defenseClawLanguageFailure
+            )
+    }
+    exit 1
+}
+
 function ConvertTo-DefenseClawTrustedMachineRoot {
     param(
         [Parameter(Mandatory)][string]$Value,
@@ -216,6 +287,209 @@ if (-not [IO.Directory]::Exists($trustedEngineModules)) {
 )
 
 $script:DefenseClawBootstrapPathProbe = $null
+# Drift the bootstrap accepts before the module is imported. Write-Warning
+# would reach stdout ahead of the JSON verdict, so these lines go into the
+# error text on failure and, on success, into an existing warnings[] or to
+# stderr; the success JSON never gains a field.
+$script:DefenseClawBootstrapResilienceEvents =
+    [Collections.Generic.List[string]]::new()
+$script:DefenseClawBootstrapAdminEquivalentMembers = $null
+
+# Same line format as the module and the Go components: marker, then
+# key="value" fields in key order, values quoted like Go's strconv.Quote.
+function Format-DefenseClawBootstrapResilienceEvent {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet(
+            'defenseclaw_repair',
+            'defenseclaw_accept',
+            'defenseclaw_skip',
+            'defenseclaw_boundary',
+            'defenseclaw_prereq',
+            'defenseclaw_recover',
+            'defenseclaw_degraded'
+        )]
+        [string]$Marker,
+        [hashtable]$Fields = @{}
+    )
+    $line = [Text.StringBuilder]::new($Marker)
+    $keys = [string[]]@(
+        $Fields.Keys | Microsoft.PowerShell.Core\ForEach-Object { [string]$_ }
+    )
+    [Array]::Sort($keys, [StringComparer]::Ordinal)
+    foreach ($key in $keys) {
+        $value = [string]$Fields[$key]
+        $quoted = [Text.StringBuilder]::new($value.Length + 2)
+        [void]$quoted.Append('"')
+        foreach ($character in $value.ToCharArray()) {
+            switch ($character) {
+                '\' { [void]$quoted.Append('\\'); continue }
+                '"' { [void]$quoted.Append('\"'); continue }
+                "`n" { [void]$quoted.Append('\n'); continue }
+                "`r" { [void]$quoted.Append('\r'); continue }
+                "`t" { [void]$quoted.Append('\t'); continue }
+                default {
+                    if ([int]$character -lt 0x20 -or [int]$character -eq 0x7f) {
+                        [void]$quoted.AppendFormat(
+                            [Globalization.CultureInfo]::InvariantCulture,
+                            '\x{0:x2}',
+                            [int]$character
+                        )
+                    }
+                    else {
+                        [void]$quoted.Append($character)
+                    }
+                }
+            }
+        }
+        [void]$quoted.Append('"')
+        [void]$line.Append(' ').Append($key).Append('=').Append($quoted.ToString())
+    }
+    return $line.ToString()
+}
+
+function Add-DefenseClawBootstrapResilienceEvent {
+    param(
+        [Parameter(Mandatory)][string]$Marker,
+        [hashtable]$Fields = @{}
+    )
+    $line = Format-DefenseClawBootstrapResilienceEvent -Marker $Marker -Fields $Fields
+    if (-not $script:DefenseClawBootstrapResilienceEvents.Contains($line) -and
+        $script:DefenseClawBootstrapResilienceEvents.Count -lt 256) {
+        $script:DefenseClawBootstrapResilienceEvents.Add($line)
+    }
+}
+
+# Names the policy that stopped Add-Type from compiling. Only numeric codes and
+# error IDs are read, never localized text: 1260 is AppLocker or Software
+# Restriction Policies, 4551 is WDAC or Smart App Control, 225 is Defender or
+# an ASR rule, ScriptContainedMaliciousContent is AMSI, and 112 or another
+# IOException means the compiler's temporary directory is unusable.
+function Get-DefenseClawBootstrapAddTypeFailure {
+    param(
+        [Parameter(Mandatory)]$ErrorRecord,
+        [string]$Check = 'powershell_add_type',
+        # The blocked file; empty names the compiler Add-Type runs.
+        [string]$Path = ''
+    )
+    $policy = ''
+    $win32 = ''
+    $ioFailure = $false
+    $ids = @()
+    if ($null -ne $ErrorRecord.PSObject.Properties['FullyQualifiedErrorId']) {
+        $ids += [string]$ErrorRecord.FullyQualifiedErrorId
+    }
+    $exception = $ErrorRecord
+    if ($null -ne $ErrorRecord.PSObject.Properties['Exception']) {
+        $exception = $ErrorRecord.Exception
+    }
+    for ($depth = 0; $null -ne $exception -and $depth -lt 12; $depth++) {
+        if ($null -ne $exception.PSObject.Properties['ErrorRecord'] -and
+            $null -ne $exception.ErrorRecord) {
+            $ids += [string]$exception.ErrorRecord.FullyQualifiedErrorId
+        }
+        $codes = @()
+        if ($exception -is [ComponentModel.Win32Exception]) {
+            $codes += [int64]$exception.NativeErrorCode
+        }
+        $codes += [int64]([int64]$exception.HResult -band 0xffffffffL)
+        foreach ($code in $codes) {
+            switch ($code) {
+                1260 { $win32 = '1260'; $policy = 'applocker_or_srp' }
+                2147943660 { $win32 = '1260'; $policy = 'applocker_or_srp' } # 0x800704EC
+                4551 { $win32 = '4551'; $policy = 'wdac_or_smart_app_control' }
+                2147946951 { $win32 = '4551'; $policy = 'wdac_or_smart_app_control' } # 0x800711C7
+                225 { $win32 = '225'; $policy = 'defender_or_asr' }
+                2147942625 { $win32 = '225'; $policy = 'defender_or_asr' } # 0x800700E1
+                112 { if ($policy -eq '') { $win32 = '112'; $ioFailure = $true } }
+                2147942512 { if ($policy -eq '') { $win32 = '112'; $ioFailure = $true } } # 0x80070070
+            }
+        }
+        if ($exception -is [IO.IOException]) {
+            $ioFailure = $true
+        }
+        $exception = $exception.InnerException
+    }
+    if ($policy -eq '' -and
+        @($ids | Microsoft.PowerShell.Core\Where-Object {
+                $_ -like '*ScriptContainedMaliciousContent*'
+            }).Count -gt 0) {
+        $policy = 'amsi'
+    }
+    if ($policy -eq '' -and $ioFailure) {
+        $policy = 'compiler_temp_unusable'
+    }
+    if ($policy -eq '') {
+        return $null
+    }
+    $compiler = $Path
+    if ([string]::IsNullOrWhiteSpace($compiler)) {
+        try {
+            $compiler = [IO.Path]::Combine(
+                [Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory(),
+                'csc.exe'
+            )
+        }
+        catch {
+            $compiler = 'csc.exe'
+        }
+    }
+    $fields = @{
+        check  = $Check
+        path   = $compiler
+        policy = $policy
+        win32  = $win32
+    }
+    $logEvent = Get-DefenseClawBootstrapPolicyBlockEvent -Policy $policy
+    if (-not [string]::IsNullOrWhiteSpace($logEvent)) {
+        $fields['event'] = $logEvent
+    }
+    return (Format-DefenseClawBootstrapResilienceEvent `
+        -Marker defenseclaw_prereq `
+        -Fields $fields)
+}
+
+# Best effort: the most recent matching block in the last two minutes, named by
+# log and event ID. Never throws and never decides the verdict.
+function Get-DefenseClawBootstrapPolicyBlockEvent {
+    param([string]$Policy)
+    $candidates = switch ($Policy) {
+        'applocker_or_srp' {
+            @(
+                @('Microsoft-Windows-AppLocker/EXE and DLL', 8004),
+                @('Application', 866)
+            )
+        }
+        'wdac_or_smart_app_control' {
+            @(, @('Microsoft-Windows-CodeIntegrity/Operational', 3077))
+        }
+        'defender_or_asr' {
+            @(
+                @('Microsoft-Windows-Windows Defender/Operational', 1121),
+                @('Microsoft-Windows-Windows Defender/Operational', 1116)
+            )
+        }
+        default { @() }
+    }
+    foreach ($candidate in @($candidates)) {
+        try {
+            $found = @(Microsoft.PowerShell.Diagnostics\Get-WinEvent `
+                -FilterHashtable @{
+                    LogName   = [string]$candidate[0]
+                    Id        = [int]$candidate[1]
+                    StartTime = [DateTime]::Now.AddMinutes(-2)
+                } `
+                -MaxEvents 1 `
+                -ErrorAction Stop)
+            if ($found.Count -gt 0) {
+                return ('{0} {1}' -f $candidate[0], $candidate[1])
+            }
+        }
+        catch {
+        }
+    }
+    return ''
+}
 
 function Initialize-DefenseClawBootstrapNativePath {
     if ($null -ne $script:DefenseClawBootstrapPathProbe) {
@@ -227,7 +501,10 @@ function Initialize-DefenseClawBootstrapNativePath {
     # from preloading a class with the name trusted by this invocation.
     $nativeNamespace =
         'DefenseClaw.Windows.Bootstrap_' + [Guid]::NewGuid().ToString('N')
-    $compiledTypes = @(Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @"
+    # A compiler blocked by application control fails here; name the policy
+    # from its numeric code so the verdict says what to allow.
+    try {
+        $compiledTypes = @(Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @"
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -317,6 +594,70 @@ namespace $nativeNamespace
 
         [DllImport("wtsapi32.dll")]
         private static extern void WTSFreeMemory(IntPtr memory);
+
+        [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+        private static extern int NetLocalGroupGetMembers(
+            string serverName,
+            string localGroupName,
+            int level,
+            out IntPtr buffer,
+            int preferredMaximumLength,
+            out int entriesRead,
+            out int totalEntries,
+            ref IntPtr resumeHandle);
+
+        [DllImport("netapi32.dll")]
+        private static extern int NetApiBufferFree(IntPtr buffer);
+
+        // Direct members of the local group with the given (localized) name,
+        // as SIDs. Level 0 returns only the member SID.
+        public static string[] GetLocalGroupMemberSIDs(string groupName)
+        {
+            const int ERROR_MORE_DATA = 234;
+            const int MAX_PREFERRED_LENGTH = -1;
+            if (String.IsNullOrWhiteSpace(groupName))
+                throw new ArgumentException("local group name is required", "groupName");
+            List<string> members = new List<string>();
+            IntPtr resume = IntPtr.Zero;
+            while (true)
+            {
+                IntPtr buffer;
+                int read;
+                int total;
+                int status = NetLocalGroupGetMembers(
+                    null,
+                    groupName,
+                    0,
+                    out buffer,
+                    MAX_PREFERRED_LENGTH,
+                    out read,
+                    out total,
+                    ref resume);
+                try
+                {
+                    if (status != 0 && status != ERROR_MORE_DATA)
+                        throw new Win32Exception(
+                            status,
+                            "NetLocalGroupGetMembers failed for " + groupName);
+                    for (int index = 0; index < read; index++)
+                    {
+                        IntPtr sid = Marshal.ReadIntPtr(
+                            buffer,
+                            index * IntPtr.Size);
+                        if (sid != IntPtr.Zero)
+                            members.Add(new SecurityIdentifier(sid).Value);
+                    }
+                }
+                finally
+                {
+                    if (buffer != IntPtr.Zero)
+                        NetApiBufferFree(buffer);
+                }
+                if (status != ERROR_MORE_DATA)
+                    break;
+            }
+            return members.ToArray();
+        }
 
         private static string QueryDevice(string deviceName)
         {
@@ -591,6 +932,14 @@ namespace $nativeNamespace
     }
 }
 "@ -Language CSharp -PassThru -ErrorAction Stop)
+    }
+    catch {
+        $classified = Get-DefenseClawBootstrapAddTypeFailure -ErrorRecord $_
+        if (-not [string]::IsNullOrWhiteSpace($classified)) {
+            throw $classified
+        }
+        throw
+    }
     $expectedTypeName = "$nativeNamespace.NativePath"
     $nativeType = @(
         $compiledTypes | Microsoft.PowerShell.Core\Where-Object {
@@ -871,6 +1220,140 @@ function ConvertTo-DefenseClawBootstrapSID {
     }
 }
 
+$script:DefenseClawBootstrapCoreTrustedSIDs = @(
+    'S-1-5-18',
+    'S-1-5-32-544',
+    'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+)
+
+# An administrator principal outside SYSTEM, Administrators and
+# TrustedInstaller: the built-in Administrator account, Domain Admins,
+# Enterprise Admins, or a direct member of local Administrators. It can already
+# do anything an owner can, so owner drift to one is accepted and logged, the
+# same rule the module and the Go components apply.
+function Test-DefenseClawBootstrapAdminEquivalentSID {
+    param([AllowEmptyString()][string]$SID)
+    if ([string]::IsNullOrWhiteSpace($SID)) {
+        return $false
+    }
+    if ($SID -cmatch '^S-1-5-21-[0-9-]+-(500|512|519)$') {
+        return $true
+    }
+    if ($null -eq $script:DefenseClawBootstrapAdminEquivalentMembers) {
+        $members = @()
+        try {
+            $groupName = [Security.Principal.SecurityIdentifier]::new(
+                'S-1-5-32-544'
+            ).Translate([Security.Principal.NTAccount]).Value
+            $groupName = $groupName.Substring($groupName.LastIndexOf('\') + 1)
+            $nativePathType = Initialize-DefenseClawBootstrapNativePath
+            $members = @($nativePathType::GetLocalGroupMemberSIDs($groupName))
+        }
+        catch {
+            $members = @()
+        }
+        $script:DefenseClawBootstrapAdminEquivalentMembers = [string[]]$members
+    }
+    return ($SID -in $script:DefenseClawBootstrapAdminEquivalentMembers)
+}
+
+# One trust rule for every path the bootstrap must trust before the module is
+# imported. The leaf is strict: a null DACL, an untrusted owner or an untrusted
+# principal with the leaf's unsafe rights is fatal. Ancestors belong to the
+# operating system or the platform installer; their owner and ACL verdicts are
+# advisory, accepted and logged. Structure (reparse points, object type) is
+# checked by the callers and is always fatal. SIDs are read directly, so no
+# account name round-trip can turn an unresolvable principal into a verdict.
+function Assert-DefenseClawBootstrapTrustedPath {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Subject,
+        [Parameter(Mandatory)][bool]$Leaf,
+        [switch]$LeafWriteLike
+    )
+    $acl = Microsoft.PowerShell.Security\Get-Acl `
+        -LiteralPath $Path `
+        -ErrorAction Stop
+    $findings = [Collections.Generic.List[string]]::new()
+    $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
+        [Security.AccessControl.AccessControlSections]::Access
+    )
+    if ([string]::IsNullOrWhiteSpace($accessSDDL) -or
+        -not $accessSDDL.StartsWith(
+            'D:',
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        $findings.Add("$Subject has an absent or null DACL: $Path")
+    }
+    $ownerSID = ''
+    try {
+        $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier])
+        if ($null -ne $owner) {
+            $ownerSID = [string]$owner.Value
+        }
+    }
+    catch {
+        $ownerSID = ''
+    }
+    if ($ownerSID -notin $script:DefenseClawBootstrapCoreTrustedSIDs) {
+        if (Test-DefenseClawBootstrapAdminEquivalentSID -SID $ownerSID) {
+            Add-DefenseClawBootstrapResilienceEvent `
+                -Marker defenseclaw_accept `
+                -Fields @{
+                    path   = $Path
+                    reason = "owner $ownerSID is an administrator principal"
+                }
+        }
+        else {
+            $findings.Add("$Subject has untrusted owner $ownerSID`: $Path")
+        }
+    }
+    $strictWriteLike = $Leaf -and $LeafWriteLike
+    foreach ($rule in @($acl.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+        ))) {
+        if ($rule.AccessControlType -ne
+            [Security.AccessControl.AccessControlType]::Allow -or
+            (([int]$rule.PropagationFlags -band
+                [int][Security.AccessControl.PropagationFlags]::InheritOnly) -ne
+                0)) {
+            continue
+        }
+        $sid = [string]$rule.IdentityReference.Value
+        if ($sid -in $script:DefenseClawBootstrapCoreTrustedSIDs) {
+            continue
+        }
+        $unsafe = if ($strictWriteLike) {
+            Test-DefenseClawBootstrapWriteLikeRights -Rights $rule.FileSystemRights
+        }
+        else {
+            Test-DefenseClawBootstrapReplacementRights -Rights $rule.FileSystemRights
+        }
+        if ($unsafe) {
+            $kind = if ($strictWriteLike) { 'write-like' } else { 'replacement' }
+            $findings.Add(
+                "untrusted principal $sid has $kind access to $Subject`: $Path"
+            )
+        }
+    }
+    if ($findings.Count -eq 0) {
+        return
+    }
+    if ($Leaf) {
+        throw $findings[0]
+    }
+    foreach ($finding in $findings) {
+        Add-DefenseClawBootstrapResilienceEvent `
+            -Marker defenseclaw_accept `
+            -Fields @{
+                path   = $Path
+                reason = "ancestor drift is advisory: $finding"
+            }
+    }
+}
+
 function Test-DefenseClawBootstrapReplacementRights {
     param([Parameter(Mandatory)][Security.AccessControl.FileSystemRights]$Rights)
     $replacement = [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles `
@@ -1002,11 +1485,11 @@ function Assert-DefenseClawBootstrapExternalParentTrust {
     # outer signed DefenseClawSetup EXE hands its own protected
     # %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch path here
     # (SDDL O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)); this validator
-    # rejects anything whose ancestor chain grants an untrusted principal
-    # replacement rights, so an attacker cannot redirect the bootstrap into
-    # a directory they can retake. Mirrors the ancestor-walk rule the
-    # module's Assert-DefenseClawTrustedAncestor applies to managed content
-    # later, so if this passes, the later content-trust check also passes.
+    # rejects a parent that grants an untrusted principal replacement rights
+    # or has an untrusted owner, so an attacker cannot redirect the bootstrap
+    # into a directory they can retake. Reparse points anywhere in the chain
+    # are fatal; owner and ACL drift on the ancestors is accepted and logged,
+    # the same rule the module's Assert-DefenseClawTrustedAncestor applies.
     param([Parameter(Mandatory)][string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path) -or
         $Path.Contains('"') -or
@@ -1046,11 +1529,6 @@ function Assert-DefenseClawBootstrapExternalParentTrust {
         throw "-BootstrapParent must be on a local fixed NTFS volume: $full"
     }
 
-    $trustedSIDs = @(
-        'S-1-5-18',
-        'S-1-5-32-544',
-        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
-    )
     $chain = [Collections.Generic.List[string]]::new()
     $current = $full
     while (-not [string]::IsNullOrWhiteSpace($current)) {
@@ -1066,6 +1544,8 @@ function Assert-DefenseClawBootstrapExternalParentTrust {
         }
         $current = $parent
     }
+    # Structure first across the whole chain, so a junction fails as such even
+    # when a higher ancestor carries advisory drift.
     for ($index = $chain.Count - 1; $index -ge 0; $index--) {
         $candidate = $chain[$index]
         $item = Microsoft.PowerShell.Management\Get-Item `
@@ -1078,47 +1558,126 @@ function Assert-DefenseClawBootstrapExternalParentTrust {
         if (-not $item.PSIsContainer) {
             throw "-BootstrapParent path ancestor is not a directory: $candidate"
         }
-        $acl = Microsoft.PowerShell.Security\Get-Acl `
-            -LiteralPath $candidate `
-            -ErrorAction Stop
-        $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
-            [Security.AccessControl.AccessControlSections]::Access
-        )
-        if ([string]::IsNullOrWhiteSpace($accessSDDL) -or
-            -not $accessSDDL.StartsWith(
-                'D:',
-                [StringComparison]::OrdinalIgnoreCase
-            )) {
-            throw "-BootstrapParent path has an absent or null DACL: $candidate"
-        }
-        $ownerSID = ConvertTo-DefenseClawBootstrapSID -Identity $acl.Owner
-        if ($ownerSID -notin $trustedSIDs) {
-            throw "-BootstrapParent path has untrusted owner $ownerSID`: $candidate"
-        }
-        foreach ($rule in $acl.Access) {
-            if ($rule.AccessControlType -ne
-                [Security.AccessControl.AccessControlType]::Allow -or
-                (($rule.PropagationFlags -band
-                    [Security.AccessControl.PropagationFlags]::InheritOnly) -ne
-                    0)) {
-                continue
-            }
-            $sid = ConvertTo-DefenseClawBootstrapSID `
-                -Identity $rule.IdentityReference
-            if ($sid -in $trustedSIDs) {
-                continue
-            }
-            if (Test-DefenseClawBootstrapReplacementRights `
-                    -Rights $rule.FileSystemRights) {
-                throw (
-                    "-BootstrapParent path has untrusted principal $sid " +
-                    "with replacement rights: $candidate"
-                )
-            }
-        }
+    }
+    # The supplied parent itself is strict: nobody else may delete, rename or
+    # re-ACL the capability directory created inside it. Its ancestors are the
+    # operating system's and are advisory.
+    for ($index = $chain.Count - 1; $index -ge 0; $index--) {
+        Assert-DefenseClawBootstrapTrustedPath `
+            -Path $chain[$index] `
+            -Subject '-BootstrapParent path' `
+            -Leaf ($index -eq 0)
     }
     $nativePathType::AssertCanonicalDriveRoot($driveRoot, $driveID)
     return $full
+}
+
+function Set-DefenseClawBootstrapDirectorySecurity {
+    param(
+        [Parameter(Mandatory)][IO.DirectoryInfo]$Directory,
+        [Parameter(Mandatory)]
+        [Security.AccessControl.DirectorySecurity]$Security
+    )
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [IO.FileSystemAclExtensions]::SetAccessControl($Directory, $Security)
+        return
+    }
+    $Directory.SetAccessControl($Security)
+}
+
+# Compares a one-shot bootstrap directory with the descriptor it was created
+# with. Boundary is fatal, Repair is fixed by one re-stamp, Accept is logged.
+function Get-DefenseClawBootstrapOneShotRootDrift {
+    param(
+        [Parameter(Mandatory)]
+        [Security.AccessControl.FileSystemSecurity]$Actual,
+        [Parameter(Mandatory)]
+        [Security.AccessControl.FileSystemSecurity]$Expected
+    )
+    $repair = [Collections.Generic.List[string]]::new()
+    $accept = [Collections.Generic.List[string]]::new()
+    $boundary = ''
+    $expectedOwner = [string]$Expected.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    ).Value
+    $allowedOwners = @('S-1-5-18', 'S-1-5-32-544', $expectedOwner)
+    $expectedAccess = @(
+        @($Expected.GetAccessRules(
+                $true,
+                $true,
+                [Security.Principal.SecurityIdentifier]
+            )) |
+            Microsoft.PowerShell.Core\ForEach-Object {
+                [string]$_.IdentityReference.Value
+            }
+    )
+    $ownerSID = ''
+    try {
+        $owner = $Actual.GetOwner([Security.Principal.SecurityIdentifier])
+        if ($null -ne $owner) {
+            $ownerSID = [string]$owner.Value
+        }
+    }
+    catch {
+        $ownerSID = ''
+    }
+    if ($ownerSID -notin $allowedOwners) {
+        $boundary = "untrusted owner $ownerSID"
+    }
+    elseif ($ownerSID -cne $expectedOwner) {
+        $accept.Add("owner is $ownerSID instead of $expectedOwner")
+    }
+    $accessSDDL = $Actual.GetSecurityDescriptorSddlForm(
+        [Security.AccessControl.AccessControlSections]::Access
+    )
+    if ([string]::IsNullOrWhiteSpace($accessSDDL) -or
+        -not $accessSDDL.StartsWith(
+            'D:',
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        $repair.Add('the DACL is absent or null')
+    }
+    if (-not $Actual.AreAccessRulesProtected) {
+        $repair.Add('the DACL is not protected from inheritance')
+    }
+    $fullControl = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($rule in @($Actual.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+        ))) {
+        $sid = [string]$rule.IdentityReference.Value
+        if ($rule.AccessControlType -ne
+            [Security.AccessControl.AccessControlType]::Allow) {
+            $accept.Add("extra deny entry for $sid")
+            continue
+        }
+        if ($sid -in $expectedAccess) {
+            if ((([int64]$rule.FileSystemRights -band 0x1F01FF) -eq 0x1F01FF) -and
+                -not $rule.IsInherited) {
+                [void]$fullControl.Add($sid)
+            }
+            continue
+        }
+        if (Test-DefenseClawBootstrapWriteLikeRights -Rights $rule.FileSystemRights) {
+            $repair.Add("untrusted principal $sid has write-like access")
+        }
+        else {
+            $accept.Add("extra read entry for $sid")
+        }
+    }
+    foreach ($sid in $expectedAccess) {
+        if (-not $fullControl.Contains($sid)) {
+            $repair.Add("expected principal $sid lacks full control")
+        }
+    }
+    return [pscustomobject]@{
+        Boundary = $boundary
+        Repair = @($repair.ToArray())
+        Accept = @($accept.ToArray())
+    }
 }
 
 function Assert-DefenseClawBootstrapOneShotRoot {
@@ -1152,18 +1711,51 @@ function Assert-DefenseClawBootstrapOneShotRoot {
     $sections = [Security.AccessControl.AccessControlSections]::Owner `
         -bor [Security.AccessControl.AccessControlSections]::Group `
         -bor [Security.AccessControl.AccessControlSections]::Access
-    $actual = Get-DefenseClawBootstrapDirectorySecurity `
-        -Directory ([IO.DirectoryInfo]::new($full)) `
-        -Sections $sections
-    $actualSDDL = Get-DefenseClawBootstrapSecuritySDDL -Security $actual
     $expectedSDDL = Get-DefenseClawBootstrapSecuritySDDL `
         -Security $ExpectedSecurity
-    if ($actualSDDL -cne $expectedSDDL -or
-        -not $actual.AreAccessRulesProtected) {
-        throw (
-            'bootstrap environment security descriptor mismatch: ' +
-            "$full; got $actualSDDL; expected $expectedSDDL"
-        )
+    # Judged by meaning, not by exact SDDL: a protected DACL, an allowed owner
+    # and no writer outside the expected principals. Extra read or deny
+    # entries (an EDR or a backup agent stamping its own ACE) are accepted and
+    # logged. An unprotected DACL, a foreign writer or a missing expected entry
+    # gets one re-stamp and a re-check. A foreign owner is never re-stamped:
+    # it means someone else created this capability directory.
+    for ($pass = 0; $pass -lt 2; $pass++) {
+        $actual = Get-DefenseClawBootstrapDirectorySecurity `
+            -Directory ([IO.DirectoryInfo]::new($full)) `
+            -Sections $sections
+        $drift = Get-DefenseClawBootstrapOneShotRootDrift `
+            -Actual $actual `
+            -Expected $ExpectedSecurity
+        if (-not [string]::IsNullOrEmpty($drift.Boundary)) {
+            throw (
+                'bootstrap environment security descriptor mismatch: ' +
+                "$full; $($drift.Boundary); got " +
+                (Get-DefenseClawBootstrapSecuritySDDL -Security $actual) +
+                "; expected $expectedSDDL"
+            )
+        }
+        if ($drift.Repair.Count -eq 0) {
+            foreach ($reason in $drift.Accept) {
+                Add-DefenseClawBootstrapResilienceEvent `
+                    -Marker defenseclaw_accept `
+                    -Fields @{ path = $full; reason = $reason }
+            }
+            break
+        }
+        if ($pass -eq 1) {
+            throw (
+                'bootstrap environment security descriptor mismatch: ' +
+                "$full; $($drift.Repair[0]) after re-stamp; got " +
+                (Get-DefenseClawBootstrapSecuritySDDL -Security $actual) +
+                "; expected $expectedSDDL"
+            )
+        }
+        Set-DefenseClawBootstrapDirectorySecurity `
+            -Directory ([IO.DirectoryInfo]::new($full)) `
+            -Security $ExpectedSecurity
+        Add-DefenseClawBootstrapResilienceEvent `
+            -Marker defenseclaw_repair `
+            -Fields @{ path = $full; reason = $drift.Repair[0] }
     }
     if ($RequireEmpty) {
         $enumerator = [IO.Directory]::EnumerateFileSystemEntries(
@@ -1179,6 +1771,38 @@ function Assert-DefenseClawBootstrapOneShotRoot {
         }
     }
     return $full
+}
+
+# A file the installer renders inherits the bootstrap directory's DACL but
+# takes the creator's default owner, which a "created by Administrators group
+# members" policy makes the administrator's own account. The module trusts
+# only SYSTEM, Administrators or TrustedInstaller owners on policy inputs, so
+# an elevated installer names Administrators explicitly.
+function Set-DefenseClawBootstrapRenderedFileOwner {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Context
+    )
+    if (-not [bool]$Context.Elevated) {
+        return
+    }
+    $file = [IO.FileInfo]::new($Path)
+    $security = Get-DefenseClawBootstrapFileSecurity `
+        -File $file `
+        -Sections ([Security.AccessControl.AccessControlSections]::Owner)
+    $administrators =
+        [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $owner = $security.GetOwner([Security.Principal.SecurityIdentifier])
+    if ($null -ne $owner -and [string]$owner.Value -ceq $administrators.Value) {
+        return
+    }
+    $security.SetOwner($administrators)
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [IO.FileSystemAclExtensions]::SetAccessControl($file, $security)
+    }
+    else {
+        $file.SetAccessControl($security)
+    }
 }
 
 function Test-DefenseClawBootstrapPathExists {
@@ -1605,6 +2229,19 @@ function New-DefenseClawBootstrapEnvironment {
     }
 }
 
+$script:DefenseClawBootstrapModuleHandle = $null
+
+function Close-DefenseClawBootstrapModuleHandle {
+    if ($null -ne $script:DefenseClawBootstrapModuleHandle) {
+        try {
+            $script:DefenseClawBootstrapModuleHandle.Dispose()
+        }
+        finally {
+            $script:DefenseClawBootstrapModuleHandle = $null
+        }
+    }
+}
+
 function Assert-DefenseClawBootstrapModuleTrust {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -1648,11 +2285,6 @@ function Assert-DefenseClawBootstrapModuleTrust {
         $current = $parent
     }
 
-    $trustedSIDs = @(
-        'S-1-5-18',
-        'S-1-5-32-544',
-        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
-    )
     # Inspect object type and reparse state across the complete chain before
     # ACL evaluation. This makes a junction/symlink fail as such even when a
     # higher ancestor is independently untrusted.
@@ -1676,43 +2308,30 @@ function Assert-DefenseClawBootstrapModuleTrust {
         }
     }
 
-    for ($index = $chain.Count - 1; $index -ge 0; $index--) {
-        $candidate = $chain[$index]
-        $leaf = $index -eq 0
-        $acl = Microsoft.PowerShell.Security\Get-Acl `
-            -LiteralPath $candidate `
-            -ErrorAction Stop
-        $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
-            [Security.AccessControl.AccessControlSections]::Access
+    # Pin the module from this check until Import-Module returns: a handle
+    # that shares only read access keeps every writer, rename and delete out,
+    # so the bytes judged below are the bytes PowerShell imports.
+    Close-DefenseClawBootstrapModuleHandle
+    try {
+        $script:DefenseClawBootstrapModuleHandle = [IO.FileStream]::new(
+            $full,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
         )
-        if ([string]::IsNullOrWhiteSpace($accessSDDL) -or
-            -not $accessSDDL.StartsWith('D:', [StringComparison]::OrdinalIgnoreCase)) {
-            throw "DefenseClaw enterprise installer module path has an absent or null DACL: $candidate"
-        }
-        $ownerSID = ConvertTo-DefenseClawBootstrapSID -Identity $acl.Owner
-        if ($ownerSID -notin $trustedSIDs) {
-            throw "DefenseClaw enterprise installer module path has untrusted owner $ownerSID`: $candidate"
-        }
-        foreach ($rule in $acl.Access) {
-            if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
-                (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)) {
-                continue
-            }
-            $sid = ConvertTo-DefenseClawBootstrapSID -Identity $rule.IdentityReference
-            if ($sid -in $trustedSIDs) {
-                continue
-            }
-            $unsafe = if ($leaf) {
-                Test-DefenseClawBootstrapWriteLikeRights -Rights $rule.FileSystemRights
-            }
-            else {
-                Test-DefenseClawBootstrapReplacementRights -Rights $rule.FileSystemRights
-            }
-            if ($unsafe) {
-                $kind = if ($leaf) { 'write-like' } else { 'replacement' }
-                throw "untrusted principal $sid has $kind access to DefenseClaw enterprise installer module path: $candidate"
-            }
-        }
+    }
+    catch {
+        throw "DefenseClaw enterprise installer module could not be pinned for import: $full; $($_.Exception.Message)"
+    }
+
+    # The module file is strict; its ancestors are advisory (see
+    # Assert-DefenseClawBootstrapTrustedPath).
+    for ($index = $chain.Count - 1; $index -ge 0; $index--) {
+        Assert-DefenseClawBootstrapTrustedPath `
+            -Path $chain[$index] `
+            -Subject 'DefenseClaw enterprise installer module path' `
+            -Leaf ($index -eq 0) `
+            -LeafWriteLike
     }
 
     if (-not $AllowUnsignedModule) {
@@ -3233,6 +3852,11 @@ try {
                 -Connectors $deferredConnectors -Profiles @()),
             [Text.UTF8Encoding]::new($false)
         )
+        foreach ($renderedPath in @($deferredConfigPath, $deferredManifestPath)) {
+            Set-DefenseClawBootstrapRenderedFileOwner `
+                -Path $renderedPath `
+                -Context $bootstrapEnvironment
+        }
         $Config = $deferredConfigPath
         $Manifest = $deferredManifestPath
     }
@@ -3254,6 +3878,11 @@ try {
         [IO.File]::WriteAllText(
             $renderedManifestPath, $renderedManifestBody, [Text.UTF8Encoding]::new($false)
         )
+        foreach ($renderedPath in @($renderedConfigPath, $renderedManifestPath)) {
+            Set-DefenseClawBootstrapRenderedFileOwner `
+                -Path $renderedPath `
+                -Context $bootstrapEnvironment
+        }
         $Config = $renderedConfigPath
         $Manifest = $renderedManifestPath
     }
@@ -3273,10 +3902,27 @@ try {
         $importRoot,
         $importDrive
     )
-    Microsoft.PowerShell.Core\Import-Module `
-        -Name $modulePath `
-        -Force `
-        -ErrorAction Stop
+    try {
+        Microsoft.PowerShell.Core\Import-Module `
+            -Name $modulePath `
+            -Force `
+            -ErrorAction Stop
+    }
+    catch {
+        # AMSI or a code-integrity policy can refuse the module itself; name
+        # it from the error ID or code rather than from localized text.
+        $classified = Get-DefenseClawBootstrapAddTypeFailure `
+            -ErrorRecord $_ `
+            -Check 'powershell_module_import' `
+            -Path $modulePath
+        if (-not [string]::IsNullOrWhiteSpace($classified)) {
+            throw $classified
+        }
+        throw
+    }
+    finally {
+        Close-DefenseClawBootstrapModuleHandle
+    }
 
     $arguments = @{
         Action = $Action
@@ -3318,6 +3964,11 @@ catch {
     $exitCode = 1
 }
 finally {
+    try {
+        Close-DefenseClawBootstrapModuleHandle
+    }
+    catch {
+    }
     if ($null -ne $bootstrapEnvironment) {
         $cleanupFailures = [Collections.Generic.List[string]]::new()
         # Restore TEMP/TMP and cache env vars BEFORE the tree they still
@@ -3359,6 +4010,11 @@ finally {
     }
 }
 
+# Drift the bootstrap accepted before the module took over travels in the
+# verdict: appended to errors[] on failure, and on success to a warnings[]
+# the result already carries. A result without one keeps its exact shape;
+# the events go to stderr, which Setup keeps off its JSON stdout.
+$bootstrapResilienceEvents = @($script:DefenseClawBootstrapResilienceEvents.ToArray())
 if (-not [string]::IsNullOrWhiteSpace($failureMessage)) {
     if ($Json) {
         [pscustomobject]@{
@@ -3366,7 +4022,7 @@ if (-not [string]::IsNullOrWhiteSpace($failureMessage)) {
             ok = $false
             action = $Action.ToLowerInvariant()
             error = $failureMessage
-            errors = @($failureMessage)
+            errors = @(@($failureMessage) + $bootstrapResilienceEvents)
         } | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 6 -Compress
     }
     else {
@@ -3380,6 +4036,21 @@ if (-not [string]::IsNullOrWhiteSpace($failureMessage)) {
     }
 }
 elseif ($Json) {
+    if ($bootstrapResilienceEvents.Count -gt 0 -and $null -ne $result) {
+        $warningsProperty = $result.PSObject.Properties['warnings']
+        if ($null -ne $warningsProperty -and $null -ne $warningsProperty.Value) {
+            $result | Microsoft.PowerShell.Utility\Add-Member `
+                -MemberType NoteProperty `
+                -Name warnings `
+                -Value @(@($warningsProperty.Value) + $bootstrapResilienceEvents) `
+                -Force
+        }
+        else {
+            foreach ($bootstrapEvent in $bootstrapResilienceEvents) {
+                [Console]::Error.WriteLine([string]$bootstrapEvent)
+            }
+        }
+    }
     $result | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 12 -Compress
 }
 else {
@@ -3394,6 +4065,9 @@ else {
         "DefenseClaw Windows enterprise {0}: {1}" -f
         $Action.ToLowerInvariant(), $resultState
     )
+    foreach ($line in $bootstrapResilienceEvents) {
+        Microsoft.PowerShell.Utility\Write-Warning -Message ([string]$line)
+    }
     if ($resultState -eq 'INCOMPLETE') {
         foreach ($message in @($result.errors)) {
             if (-not [string]::IsNullOrWhiteSpace([string]$message)) {

@@ -66,6 +66,12 @@ func newHookCmd() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if enterpriseManaged {
+				// Keep managed diagnostics off the agent-visible streams when
+				// the hook runs through this binary instead of
+				// defenseclaw-hook.exe (which installed them already).
+				hookexec.InstallManagedHookDiagnosticSinks()
+			}
 			if enterpriseManaged && enterpriseManagedHookRuntimeNoop(connector) {
 				return nil
 			}
@@ -320,13 +326,18 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 }
 
 // managedRuntimeFailureDelivery returns the fail mode and strict availability
-// of a managed runtime resolver failure: closed and strict, except for an
-// account that is not enrolled yet. That account has no runtime state of its
-// own to tamper with, so it takes the managed open default; strict
-// availability in the agent's environment can still close it.
+// of a managed runtime resolver failure: closed and strict for an integrity
+// boundary. An account that is not enrolled yet has no runtime state of its
+// own to tamper with, so it takes the managed open default. Drifted runtime
+// state takes the configured mode recovered from authenticated state, closed
+// when none could be established. Strict availability in the agent's
+// environment can still close either; hookexec records every decision.
 func managedRuntimeFailureDelivery(reason string) (failMode string, strict bool) {
-	if reason == hookexec.ManagedSIDUnregisteredReason {
+	switch reason {
+	case hookexec.ManagedSIDUnregisteredReason:
 		return "open", hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY"))
+	case hookexec.ManagedRuntimeDriftReason:
+		return enterpriseManagedHookRuntimeDriftFailMode(), hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY"))
 	}
 	return "closed", true
 }

@@ -70,9 +70,23 @@ var (
 	// service security descriptor does. It also wraps
 	// errManagedGatewayPeerUnverified, so nothing is sent to the port.
 	errManagedGatewayServiceUnreadable = errors.New("enterprise managed gateway service status is not readable")
+	// errManagedGatewayPeerUnconfirmed: the hook could not confirm the
+	// listener's owner within its retries (the owner-PID table was
+	// unreadable, the connection's row had not appeared yet, or the service
+	// PID moved between queries) and found no other owner either. It also
+	// wraps errManagedGatewayPeerUnverified, so nothing is sent to the port.
+	errManagedGatewayPeerUnconfirmed = errors.New("enterprise managed gateway listener owner is unconfirmed")
 )
 
 const managedGatewayPeerUnverifiedReason = "enterprise_managed_gateway_peer_unverified"
+
+// managedGatewayPeerUnconfirmedReason: the listener owner could not be
+// confirmed within the hook's retries, and no foreign owner was identified.
+const managedGatewayPeerUnconfirmedReason = "enterprise_managed_gateway_peer_unconfirmed"
+
+// managedGatewayEndpointInvalidReason: the authenticated runtime's gateway
+// address or service name could not build a verified transport.
+const managedGatewayEndpointInvalidReason = "enterprise_managed_gateway_endpoint_invalid"
 
 // managedGatewayNotRunningReason: the gateway service is stopped, crashed or
 // still starting, and nothing else listens on its port.
@@ -91,19 +105,31 @@ const managedGatewayServiceUnreadableReason = "enterprise_managed_gateway_servic
 // WindowsManagedSIDUnregisteredReason).
 const ManagedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
 
+// ManagedRuntimeDriftReason is the resolver failure of runtime state that
+// drifted (permissions, size, a stale selector or generation, a short-path
+// invocation, a Cursor adapter mode, a busy lock) without any integrity
+// finding (enterprisehooks.WindowsManagedRuntimeDriftReason).
+const ManagedRuntimeDriftReason = "enterprise_managed_runtime_drift"
+
+// missingGatewayTokenReason prefixes the missing-token failure reason.
+const missingGatewayTokenReason = "missing gateway token"
+
 // managedPeerFailMode is the fail mode of a managed peer-verification
 // failure. A gateway service that is not running, with nothing else on its
 // port, is an outage: no peer answered, and a standard user cannot stop the
 // LocalSystem service, so the hook's fail mode decides. A service whose
 // security descriptor denies the user a status query is permission drift,
-// not evidence of another peer, so the fail mode decides there too. Every
-// other peer failure (another process on the port, a changed service PID, a
-// listener table the hook cannot read) fails closed.
+// not evidence of another peer, so the fail mode decides there too, as it
+// does for a listener owner the hook could not confirm within its retries.
+// Only a positively identified foreign owner of the port, and a peer that
+// failed the structural checks, fail closed.
 func managedPeerFailMode(failMode string, err error) string {
 	if errors.Is(err, errManagedGatewayPortHeld) {
 		return "closed"
 	}
-	if errors.Is(err, errManagedGatewayNotRunning) || errors.Is(err, errManagedGatewayServiceUnreadable) {
+	if errors.Is(err, errManagedGatewayNotRunning) ||
+		errors.Is(err, errManagedGatewayServiceUnreadable) ||
+		errors.Is(err, errManagedGatewayPeerUnconfirmed) {
 		return failMode
 	}
 	return "closed"
@@ -119,17 +145,21 @@ func managedPeerFailureReason(err error) string {
 		return managedGatewayNotRunningReason
 	case errors.Is(err, errManagedGatewayServiceUnreadable):
 		return managedGatewayServiceUnreadableReason
+	case errors.Is(err, errManagedGatewayPeerUnconfirmed):
+		return managedGatewayPeerUnconfirmedReason
 	}
 	return managedGatewayPeerUnverifiedReason
 }
 
 // managedRuntimeFailureMode is the fail mode of a managed runtime resolver
 // failure. An account that is not enrolled yet is an availability gap that
-// only an administrator's enrollment closes, so the hook's fail mode decides.
-// Every other resolver failure can come from target-owned state under the
-// account's own profile and fails closed.
+// only an administrator's enrollment closes, and drifted runtime state with
+// no integrity finding is repairable drift, so the hook's fail mode decides
+// both; the CLI supplies the authenticated configured mode, or closed when
+// none can be established. Every other resolver failure is an integrity
+// boundary and fails closed.
 func managedRuntimeFailureMode(reason, failMode string) string {
-	if reason == ManagedSIDUnregisteredReason {
+	if reason == ManagedSIDUnregisteredReason || reason == ManagedRuntimeDriftReason {
 		return failMode
 	}
 	return "closed"
@@ -240,7 +270,7 @@ func Run(ctx context.Context, opts Options) int {
 				opts,
 				sp,
 				"closed",
-				"enterprise_managed_runtime_home_missing",
+				managedRuntimeHomeMissingReason,
 			)
 		}
 		return handleUnavailableHome(opts, sp, "DefenseClaw home is unavailable")
@@ -251,7 +281,7 @@ func Run(ctx context.Context, opts Options) int {
 				opts,
 				sp,
 				"closed",
-				"enterprise_managed_runtime_disable_sentinel_forbidden",
+				managedRuntimeDisableSentinelReason,
 			)
 		}
 		return handleUnavailableHome(opts, sp, "DefenseClaw home is disabled")
@@ -279,7 +309,10 @@ func Run(ctx context.Context, opts Options) int {
 				opts.ManagedGatewayServiceName,
 			)
 			if err != nil {
-				return failUnreachable(opts, sp, "closed", managedGatewayPeerUnverifiedReason)
+				// The address and service name come from the authenticated
+				// runtime generation, so a build failure cannot select another
+				// peer; no request is sent and the fail mode decides.
+				return failUnreachable(opts, sp, failMode, managedGatewayEndpointInvalidReason)
 			}
 		} else {
 			opts.HTTPClient = defaultHTTPClient(requestTimeout)
@@ -311,7 +344,7 @@ func Run(ctx context.Context, opts Options) int {
 				opts,
 				sp,
 				"closed",
-				"authenticated managed runtime token is empty",
+				managedRuntimeTokenEmptyReason,
 			)
 		}
 	} else {
@@ -336,14 +369,14 @@ func Run(ctx context.Context, opts Options) int {
 				// the token sidecar is present but unreadable, malformed, or fails a
 				// stability/identity check. Fail closed so unauthenticated loopback
 				// requests never sneak past connector-side auth.
-				return failUnreachable(opts, sp, "closed", "managed hook token unreadable")
+				return failUnreachable(opts, sp, "closed", managedHookTokenUnreadableReason)
 			}
 			if opts.ManagedEnterprise && strings.TrimSpace(loaded) == "" {
 				// An empty sidecar parses without error but sendHookRequest would
 				// then omit Authorization entirely and the connector-side loopback
 				// path would accept the credential-less request. Managed mode has
 				// no no-auth path, so fail closed here.
-				return failUnreachable(opts, sp, "closed", "managed hook token empty")
+				return failUnreachable(opts, sp, "closed", managedHookTokenEmptyReason)
 			}
 			token = loaded
 		}
@@ -521,14 +554,20 @@ func (sp spec) decide(opts Options, body []byte) int {
 	}
 
 	action, ok := rawString(fields, "action")
+	output := compactField(fields, sp.outputField)
 	if !ok || (action != "allow" && action != "block" && action != "confirm") {
 		if sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr {
 			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid or missing action in gateway response")
 		}
+		if output == "" {
+			// The gateway always sends an action. A body carrying neither a
+			// decision nor a connector-native hook output is not a verdict, so
+			// it follows the fail mode instead of reading as an allow.
+			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "missing action and hook output in gateway response")
+		}
 		action = "allow"
 	}
 	reason := rawStringOr(fields, "reason", "")
-	output := compactField(fields, sp.outputField)
 
 	switch sp.style {
 	case styleClaudeCode:
@@ -604,7 +643,7 @@ func (sp spec) decide(opts Options, body []byte) int {
 // always fatal there regardless of the caller-supplied fail mode.
 // No connector-specific JSON body is emitted on this path.
 func handleMissingToken(opts Options, sp spec, failMode string) int {
-	const reason = "missing gateway token (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
+	const reason = missingGatewayTokenReason + " (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
 	blocked := opts.ManagedEnterprise || opts.StrictAvailability || failMode == "closed"
 	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
 	if blocked {
@@ -623,9 +662,15 @@ func handleUnavailableHome(opts Options, sp spec, reason string) int {
 	return emit(opts.Stdout, sp.openAllow)
 }
 
-// handleOversized mirrors the per-connector oversized-payload branch.
+// handleOversized mirrors the per-connector oversized-payload branch. The
+// agent's payload is caller-controlled, so an open fail mode would make an
+// oversized event a deterministic inspection bypass; a managed hook always
+// blocks it and records the boundary.
 func handleOversized(opts Options, sp spec, failMode string) int {
-	logHookFailure(opts, sp, "stdin body exceeded cap", "transport", failMode, failMode == "closed")
+	if opts.ManagedEnterprise {
+		failMode = "closed"
+	}
+	logHookFailure(opts, sp, managedHookOversizedReason, "transport", failMode, failMode == "closed")
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
 	if failMode == "closed" {
 		return emit(opts.Stdout, sp.oversizedClosed)

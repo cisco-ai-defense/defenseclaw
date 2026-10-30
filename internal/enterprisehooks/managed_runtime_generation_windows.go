@@ -2077,11 +2077,13 @@ func validateWindowsManagedRuntimeSelectorTargetAgainstRemoval(
 		// defenseclaw-hook.exe). The connector+SID match confirms the
 		// entry is ours by role; allow the removal so the install reconcile
 		// can retire the orphan entry and publish a fresh one.
-		fmt.Fprintf(os.Stderr,
-			"[enterprise-hooks] reclaiming stale managed runtime selector for "+
-				"%s/%s: entry HookExecutable=%q, current install's HookExecutable=%q\n",
-			opts.Connector, opts.TargetSID,
-			entry.HookExecutable, opts.HookExecutable)
+		managed.EmitResilienceEvent(managed.MarkerRecover, map[string]string{
+			"connector":               opts.Connector,
+			"target_sid":              opts.TargetSID,
+			"entry_hook_executable":   entry.HookExecutable,
+			"current_hook_executable": opts.HookExecutable,
+			"reason":                  "reclaiming stale managed runtime selector entry: hook executable differs from the current install",
+		})
 	}
 	if opts.DataDir != "" && (entry.DataDir != opts.DataDir ||
 		!sameWindowsEnterprisePath(entry.DataDir, opts.DataDir)) {
@@ -2097,11 +2099,13 @@ func validateWindowsManagedRuntimeSelectorTargetAgainstRemoval(
 		// stale DataDir from a prior install's per-user runtime path does
 		// not block removal; the install reconcile replaces it with the
 		// current scope's DataDir.
-		fmt.Fprintf(os.Stderr,
-			"[enterprise-hooks] reclaiming stale managed runtime selector for "+
-				"%s/%s: entry DataDir=%q, current install's DataDir=%q\n",
-			opts.Connector, opts.TargetSID,
-			entry.DataDir, opts.DataDir)
+		managed.EmitResilienceEvent(managed.MarkerRecover, map[string]string{
+			"connector":        opts.Connector,
+			"target_sid":       opts.TargetSID,
+			"entry_data_dir":   entry.DataDir,
+			"current_data_dir": opts.DataDir,
+			"reason":           "reclaiming stale managed runtime selector entry: data directory differs from the current install",
+		})
 	}
 	return nil
 }

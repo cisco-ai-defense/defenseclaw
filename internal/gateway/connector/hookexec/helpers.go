@@ -103,8 +103,13 @@ func isTracestateChar(c byte) bool {
 
 // logHookFailure appends one JSON line to Home/logs/hook-failures.jsonl,
 // mirroring defenseclaw_log_hook_failure. Best-effort: any error is ignored so
-// a read-only home or full disk never changes the hook's decision.
+// a read-only home or full disk never changes the hook's decision. A managed
+// hook may have no Home at all, so it also leaves a durable platform record
+// (recordManagedHookDecision).
 func logHookFailure(opts Options, sp spec, reason, category, failMode string, blocked bool) {
+	if opts.ManagedEnterprise {
+		recordManagedHookDecision(opts, sp, reason, category, failMode, blocked)
+	}
 	outcome := "fail_closed"
 	if !blocked {
 		outcome = "fail_open"

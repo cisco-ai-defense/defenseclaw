@@ -162,9 +162,10 @@ func ReconcileWindowsCodexMachineRequirements(
 				// as adoptable and seed fresh ownership from the current
 				// wire shape. Same posture as the ownership-absent branch
 				// below.
-				fmt.Fprintf(os.Stderr,
-					"[enterprise-hooks] reclaiming unparseable Codex ownership at %s: %v\n",
-					opts.OwnershipPath, err)
+				managed.EmitResilienceEvent(managed.MarkerRecover, map[string]string{
+					"path":   opts.OwnershipPath,
+					"reason": "reclaiming unparseable Codex ownership: " + err.Error(),
+				})
 				ownershipAdopted = true
 				state = windowsCodexMachineOwnership{}
 			} else if err := validateWindowsCodexMachineOwnership(state, opts); err != nil {
@@ -188,11 +189,11 @@ func ReconcileWindowsCodexMachineRequirements(
 				// to the fresh-ownership seed path below, which also
 				// surgically removes any orphan managed-hook entries from
 				// the preimage.
-				fmt.Fprintf(os.Stderr,
-					"[enterprise-hooks] reclaiming identity-drifted Codex "+
-						"ownership at %s (prior install's layout does not "+
-						"match current scope): %v\n",
-					opts.OwnershipPath, err)
+				managed.EmitResilienceEvent(managed.MarkerRecover, map[string]string{
+					"path": opts.OwnershipPath,
+					"reason": "reclaiming identity-drifted Codex ownership " +
+						"(prior install's layout does not match current scope): " + err.Error(),
+				})
 				ownershipAdopted = true
 				state = windowsCodexMachineOwnership{}
 			}
