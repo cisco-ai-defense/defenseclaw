@@ -40,7 +40,14 @@ func appendTrustedPrivateKeyReaderFinding(
 		if command == "" {
 			command, _ = trustedBashCommandInput(request.Input)
 		}
-		proved = hookpaths.ActionPrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome) ||
+		dialect := request.Input.DialectHint
+		switch {
+		case strings.EqualFold(request.Input.Tool, "Bash") && !strings.EqualFold(request.Connector, "codex"):
+			dialect = actionfacts.DialectPOSIX
+		case strings.EqualFold(request.Input.Tool, "PowerShell"):
+			dialect = actionfacts.DialectPowerShell
+		}
+		proved = hookpaths.ActionPrivateKeyReadWithDialect(command, request.Input.CWD, request.Input.ActiveHome, dialect) ||
 			hookpaths.ActionMakePrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome)
 	}
 	if !proved {

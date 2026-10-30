@@ -181,11 +181,27 @@ func ActionCommandAuditReason(command, cwd, home string) string {
 // ActionPrivateKeyRead recognizes a command that reads an active SSH private
 // key. It is separate from the authorized-keys persistence decision.
 func ActionPrivateKeyRead(command, cwd, home string) bool {
+	return ActionPrivateKeyReadWithDialect(command, cwd, home, "")
+}
+
+// ActionPrivateKeyReadWithDialect uses the executing shell to distinguish
+// PowerShell pipeline path binding from POSIX stdin readers.
+func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfacts.Dialect) bool {
 	if command == "" || home == "" {
 		return false
 	}
+	if dialect == "" {
+		if actionWindowsHome(home) {
+			dialect = actionfacts.DialectPowerShell
+		} else {
+			dialect = actionfacts.DialectPOSIX
+		}
+	}
 	if actionWindowsHome(home) {
-		return actionWindowsPrivateKeyRead(command, cwd, home)
+		return actionWindowsPrivateKeyRead(command, cwd, home) || actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect)
+	}
+	if actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect) {
+		return true
 	}
 	file, ok := parseShell(command)
 	if !ok {
