@@ -176,7 +176,7 @@ DefenseClaw Doctor
 
 Close your agent sessions first. A session that stays open goes on without DefenseClaw: its hooks fail and nothing checks its tool calls. The plan says so before it asks to proceed.
 
-If you set up an editor with `defenseclaw acp setup` or `defenseclaw setup acp`, run `defenseclaw acp remove --client <client> --agent <agent>` for each editor and agent first. In 1.0.5 `defenseclaw uninstall` leaves the guarded ACP entries in the editor's settings and the contract locks in `~/.defenseclaw/acp`, and the editor's next start of that agent fails. `defenseclaw acp detect` lists the guarded entries.
+If you set up an editor with `defenseclaw acp setup` or `defenseclaw setup acp`, run `defenseclaw acp remove --client <client> --agent <agent>` for each editor and agent first. In 1.0.5 `defenseclaw uninstall` leaves the guarded ACP entries in the editor's settings, an empty `settings.json.defenseclaw.lock` file next to Zed's `settings.json`, and the contract locks in `~/.defenseclaw/acp`. The default uninstall keeps `~/.defenseclaw` and the `defenseclaw-acp` program, so an agent set up in observe mode still starts but runs unchecked, and an agent set up with `--activate` refuses every message. After `defenseclaw uninstall --binaries` or `--all` the editor cannot start that agent. `defenseclaw acp detect` lists the guarded entries.
 
 1. See what would be removed. Nothing changes.
 

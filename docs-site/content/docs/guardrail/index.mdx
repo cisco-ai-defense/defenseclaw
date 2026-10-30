@@ -316,6 +316,8 @@ defenseclaw setup guardrail --non-interactive --connector claudecode --mode acti
 
 In 1.0.5, give `defenseclaw setup llm --provider bedrock` the full Bedrock model id, for example `us.anthropic.claude-haiku-4-5-20251001-v1:0`, and `--bedrock-region`. A short alias such as `haiku-4.5` fails the ping (`Unknown provider=None`), and `defenseclaw doctor` reports a missing region unless you pass `--bedrock-region`.
 
+When you write a Bedrock model into a config file yourself, for example `llm.model` or `guardrail.judge.llm.model` in the managed admin config, give it the `bedrock/` prefix: `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`. In 1.0.5 a Bedrock id without the prefix makes the administrator's `scan skill` report `Authentication failed` and `scan mcp` report an analyzer DNS error; neither message names the missing prefix.
+
 The hook judge needs an Anthropic model on Bedrock in 1.0.5. With GPT-5.6 Luna the hook-time judge fails (Bedrock 502): hooks keep the rule verdict, so nothing is blocked by mistake, and `verify` warns `judge_failing`. Luna works for the skill and MCP scans.
 
 Use `--judge-provider vertex_ai` with the `--judge-vertex-*` flags, or `--judge-provider azure` with the `--judge-azure-*` flags. For a self-signed endpoint add `--judge-tls-ca-cert-file`. If the settings are already on a custom provider entry, `--judge-instance-name <name>` inherits them; role-level flags win field by field. See [LLM providers](/docs/guardrail/unified-llm-key).
