@@ -51,6 +51,12 @@ class SkillJudgeCompatTest(unittest.TestCase):
     def setUp(self):
         self._original = LLMAnalyzer._repair_optional_taxonomy
         self.addCleanup(setattr, LLMAnalyzer, "_repair_optional_taxonomy", self._original)
+        # Start from the pinned scanner's own method, whatever an earlier test
+        # in this process installed (r106 CI GAP-0055).
+        pinned = self._original
+        while getattr(pinned, compat._MARKER, False):
+            pinned = pinned.__wrapped__
+        LLMAnalyzer._repair_optional_taxonomy = pinned
         self.analyzer = object.__new__(LLMAnalyzer)
         self.analyzer._allowed_evidence_ids = set(_IDS)
         self.analyzer.taxonomy_repairs = 0
