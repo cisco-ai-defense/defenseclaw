@@ -518,8 +518,12 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 		if (strings.TrimSpace(opts.Bundle) != "" || strings.TrimSpace(opts.TrustAnchors) != "") && opts.Action != "ensure" {
 			return opts, false, errors.New("BUNDLE= and TRUSTANCHORS= are valid only with /ensure")
 		}
-		if strings.TrimSpace(opts.Bundle) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
-			return opts, false, errors.New("BUNDLE= cannot be combined with CONFIG= (or --mode/--connector): the signed bundle carries the config")
+		// CONFIG= with BUNDLE= is the single-app form: CONFIG= stages a
+		// first install that no service runs on, and the bundle is the first
+		// enforced policy (first_bundle.go). The --mode shorthand renders a
+		// config to enforce, so it stays refused.
+		if strings.TrimSpace(opts.Bundle) != "" && modeSupplied {
+			return opts, false, errors.New("BUNDLE= cannot be combined with --mode/--connector: the signed bundle carries the config")
 		}
 		if opts.RefuseCapabilityLoss && strings.TrimSpace(opts.Bundle) == "" {
 			return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE=; nothing was changed: deliver both with Setup /ensure")
@@ -1091,8 +1095,8 @@ func writeStandaloneSetupUsage(output io.Writer) {
 	fmt.Fprintln(output, "Properties (case-insensitive, dashes ignored):")
 	fmt.Fprintln(output, "  CONFIG=<path>                  administrator config; required for the first install")
 	fmt.Fprintln(output, "  MANIFEST=<path>                target manifest you publish yourself; required for /install")
-	fmt.Fprintln(output, "  BUNDLE=<path>                  with /ensure on an installed computer: apply this signed policy bundle (not with CONFIG=)")
-	fmt.Fprintln(output, "  TRUSTANCHORS=<path>            with /ensure: install this administrator-only bundle trust anchor file first (not with CONFIG=)")
+	fmt.Fprintln(output, "  BUNDLE=<path>                  with /ensure: apply this signed policy bundle; with CONFIG= on a new computer, the first install starts on the bundle")
+	fmt.Fprintln(output, "  TRUSTANCHORS=<path>            with /ensure BUNDLE=: install this administrator-only bundle trust anchor file with the bundle")
 	fmt.Fprintln(output, "  REFUSECAPABILITYLOSS=1         with /ensure: refuse a bundle that disables an enforced capability")
 	fmt.Fprintln(output, "  JSON=1                         print the result document on standard output")
 	fmt.Fprintln(output, "  NOSTART=1                      install or update with the services stopped and disabled")
