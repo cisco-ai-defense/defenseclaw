@@ -136,3 +136,15 @@ func TestSelfProtCopyAfterDirectoryChange(t *testing.T) {
 		{"E05", `env -C ~ cp -a project/keylink kl2; echo key >> ~/kl2`, "block"},
 	}, "claudecode", "codex")
 }
+
+// cmd /c "mklink ..." makes the link ln makes, so a hard link of an
+// ordinary file and a write through it are ordinary (GAP-2229, GAP-1266)
+// and a link to the keys stays a key write.
+func TestSelfProtCmdMklinkIsALink(t *testing.T) {
+	checkSelfProtRows(t, []selfProtRow{
+		{"H03", `cmd //c "mklink /H alias.md SOUL.md" ; printf y >> alias.md`, "allow"},
+		{"HT3", `cmd //c "mklink /H hk ../.ssh/authorized_keys" ; printf y >> hk`, "block"},
+		{"HT4", `cmd //c "mklink /D d ..\.ssh" ; printf y >> d/authorized_keys`, "block"},
+		{"HT5", `cmd //c "mklink /H hk ../.ssh/authorized_keys & echo" ; printf y >> hk`, "block"},
+	}, "claudecode", "codex")
+}

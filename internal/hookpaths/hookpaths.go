@@ -2078,7 +2078,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		}
 		return links
 	}
-	if opaqueLinkText(file, command, home) {
+	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) {
 		links.unknown(true)
 		return links
 	}
@@ -2183,10 +2183,26 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			links.unknown(true)
 			return true
 		}
+		mklink, isMklink := cmdMklinkArgs(words, static)
 		switch {
 		case program == "":
 			// A program named by a parameter or a substitution may be ln.
 			links.unknown(false)
+		case isMklink:
+			// cmd /c "mklink [/H|/D|/J] LINK TARGET" makes the link ln makes
+			// (GAP-2229).
+			workingDirectories := []string{cwd}
+			if placed, ok := linkDirs[call]; ok {
+				workingDirectories = placed
+			} else {
+				unplacedLinks = true
+			}
+			links.linkTexts = append(links.linkTexts, command[call.Pos().Offset():call.End().Offset()])
+			for _, workingDirectory := range workingDirectories {
+				if !links.add("ln", mklink, workingDirectory) {
+					links.unknown(true)
+				}
+			}
 		case slices.Contains(linkPrograms, program):
 			workingDirectories := []string{cwd}
 			if placed, ok := linkDirs[call]; ok {
@@ -3983,6 +3999,69 @@ func tarScan(args []string, static []bool, cwd string) (string, []string, bool, 
 		}
 	}
 	return destination, members, extract, true
+}
+
+// cmdMklinkPattern is the one mklink call of a static cmd /c body: an
+// optional /H, /D or /J, then the link and the target, with no cmd
+// metacharacter, quote or variable.
+var cmdMklinkPattern = regexp.MustCompile(`(?i)^\s*mklink(?:\.exe)?\s+(?:(/[hdj])\s+)?([^\s&|<>^%!()"]+)\s+([^\s&|<>^%!()"]+)\s*$`)
+
+// cmdMklinkArgs reads cmd /c "mklink [/H|/D|/J] LINK TARGET" (Git Bash
+// passes //c) as the ln arguments that make the same link: a hard link for
+// /H, a symbolic link otherwise (a junction is a link to a directory).
+// ok is false for any other call, which keeps the opaque reading.
+func cmdMklinkArgs(words []string, static []bool) (args []string, ok bool) {
+	if len(words) < 3 || slices.Contains(static[:len(words)], false) {
+		return nil, false
+	}
+	program := strings.ToLower(programBase(strings.ReplaceAll(words[0], `\`, "/")))
+	if program != "cmd" && program != "cmd.exe" {
+		return nil, false
+	}
+	if option := strings.ToLower(words[1]); option != "/c" && option != "//c" {
+		return nil, false
+	}
+	match := cmdMklinkPattern.FindStringSubmatch(strings.Join(words[2:], " "))
+	if match == nil {
+		return nil, false
+	}
+	link := filepath.FromSlash(strings.ReplaceAll(match[2], `\`, "/"))
+	target := filepath.FromSlash(strings.ReplaceAll(match[3], `\`, "/"))
+	if strings.HasPrefix(link, "-") || strings.HasPrefix(target, "-") {
+		return nil, false
+	}
+	if strings.EqualFold(match[1], "/h") {
+		return []string{target, link}, true
+	}
+	return []string{"-s", target, link}, true
+}
+
+// maskCmdMklinkCalls blanks the cmd /c mklink calls that cmdMklinkArgs
+// reads, so the opaque link text scan sees only the others.
+func maskCmdMklinkCalls(file *syntax.File, command, home string) string {
+	if !strings.Contains(strings.ToLower(command), "mklink") {
+		return command
+	}
+	masked := []byte(command)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, isCall := node.(*syntax.CallExpr)
+		if !isCall || len(call.Args) == 0 {
+			return true
+		}
+		words := make([]string, len(call.Args))
+		static := make([]bool, len(call.Args))
+		for i, arg := range call.Args {
+			words[i], static[i] = StaticWord(arg, home)
+		}
+		if _, ok := cmdMklinkArgs(words, static); ok {
+			start, end := int(call.Pos().Offset()), int(call.End().Offset())
+			for i := start; i < end && i < len(masked); i++ {
+				masked[i] = " "[0]
+			}
+		}
+		return true
+	})
+	return string(masked)
 }
 
 // opaqueProgram is a Windows program that creates links from operands this
