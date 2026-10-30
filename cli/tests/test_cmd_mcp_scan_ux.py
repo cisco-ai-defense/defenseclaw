@@ -25,7 +25,7 @@ Coverage:
 
 * Single-target preamble: count, label ("MCP server"), connector,
   default categories
-* Single-target verdict: ``[ok]`` / ``[BLOCKED]`` glyph + finding
+* Single-target verdict: ``[ok]`` / ``[WARN]`` / ``[BLOCKED]`` glyph + finding
   count + max severity detail
 * Single-target summary: clean / blocked counts + duration
 * ``--all`` preamble: target count and source URLs
@@ -92,6 +92,17 @@ class _MCPScanUXBase(unittest.TestCase):
             ],
         )
 
+    @staticmethod
+    def _critical_result(target: str) -> ScanResult:
+        return ScanResult(
+            scanner="mcp-scanner",
+            target=target,
+            timestamp=datetime.now(timezone.utc),
+            findings=[
+                Finding(id="f2", severity="CRITICAL", title="Shell exec", scanner="mcp-scanner"),
+            ],
+        )
+
 
 class TestSingleTargetUX(_MCPScanUXBase):
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
@@ -129,10 +140,13 @@ class TestSingleTargetUX(_MCPScanUXBase):
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_blocked_target_shows_severity(self, mock_scan) -> None:
+        # GAP-2616: balanced MCP admission warns on HIGH, so the scan line
+        # reads WARN and the summary counts it under warning=, not blocked=.
         mock_scan.return_value = self._blocked_result("http://localhost:3000")
         result = self.invoke(["scan", "http://localhost:3000"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("[BLOCKED] http://localhost:3000", result.output)
+        self.assertIn("[WARN] http://localhost:3000", result.output)
+        self.assertNotIn("[BLOCKED]", result.output)
         self.assertIn("max severity: HIGH", result.output)
         self.assertIn("(1 finding)", result.output)
         # Detailed finding still appears.
@@ -141,6 +155,38 @@ class TestSingleTargetUX(_MCPScanUXBase):
         # Summary.
         self.assertIn("Summary: 1 MCP server scanned", result.output)
         self.assertIn("clean=0", result.output)
+        self.assertIn("warning=1", result.output)
+        self.assertIn("blocked=0", result.output)
+
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_target_the_policy_refuses_reads_blocked(self, mock_scan) -> None:
+        # GAP-2616: CRITICAL is quarantined by the default MCP admission.
+        mock_scan.return_value = self._critical_result("http://localhost:3000")
+        result = self.invoke(["scan", "http://localhost:3000"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[BLOCKED] http://localhost:3000", result.output)
+        self.assertIn("max severity: CRITICAL", result.output)
+        self.assertIn("warning=0", result.output)
+        self.assertIn("blocked=1", result.output)
+
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_high_reads_blocked_when_the_admin_blocks_high(self, mock_scan) -> None:
+        # GAP-2616: the label follows the configured action, not the severity.
+        from defenseclaw.enforce.admission import SeverityAction
+
+        mock_scan.return_value = self._blocked_result("http://localhost:3000")
+        quarantine = (SeverityAction(file="quarantine", runtime="disable", install="block"), False)
+        real = __import__("defenseclaw.enforce.admission", fromlist=["compile_admission"]).compile_admission
+
+        def strict(cfg, target_type):
+            out = real(cfg, target_type)
+            out.actions["HIGH"] = quarantine
+            return out
+
+        with patch("defenseclaw.enforce.admission.compile_admission", side_effect=strict):
+            result = self.invoke(["scan", "http://localhost:3000"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[BLOCKED] http://localhost:3000", result.output)
         self.assertIn("blocked=1", result.output)
 
 
@@ -176,25 +222,30 @@ class TestScanAllUX(_MCPScanUXBase):
             ("alpha", "http://a.example/mcp"),
             ("beta", "http://b.example/mcp"),
             ("gamma", "http://c.example/mcp"),
+            ("delta", "http://d.example/mcp"),
         ])
         responses = {
             "http://a.example/mcp": self._clean_result("http://a.example/mcp"),
             "http://b.example/mcp": self._blocked_result("http://b.example/mcp"),
             "http://c.example/mcp": self._clean_result("http://c.example/mcp"),
+            "http://d.example/mcp": self._critical_result("http://d.example/mcp"),
         }
         mock_scan.side_effect = lambda target, server_entry=None, **kwargs: responses[target]
 
         result = self.invoke(["scan", "--all"])
         self.assertEqual(result.exit_code, 0, result.output)
         # Plural preamble.
-        self.assertIn("Scanning 3 MCP servers on ", result.output)
-        # Per-target glyphs.
+        self.assertIn("Scanning 4 MCP servers on ", result.output)
+        # Per-target glyphs: HIGH warns under balanced admission, CRITICAL
+        # is refused (GAP-2616).
         self.assertIn("[ok] alpha", result.output)
-        self.assertIn("[BLOCKED] beta", result.output)
+        self.assertIn("[WARN] beta", result.output)
         self.assertIn("[ok] gamma", result.output)
+        self.assertIn("[BLOCKED] delta", result.output)
         # Summary.
-        self.assertIn("Summary: 3 MCP servers scanned", result.output)
+        self.assertIn("Summary: 4 MCP servers scanned", result.output)
         self.assertIn("clean=2", result.output)
+        self.assertIn("warning=1", result.output)
         self.assertIn("blocked=1", result.output)
         self.assertNotIn("Scan skills:", result.output)
 
