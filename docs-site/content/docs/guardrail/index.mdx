@@ -742,6 +742,14 @@ The message reads `<connector>'s agent changed`.
 
 **Check.** The matrix lists the agent's ask support.
 
+### The judge blocks an agent-run configuration command
+
+**Cause.** With the LLM judge on and the connector in action mode, the judge can block a configuration command the agent runs for you, such as `claude mcp add --transport http <name> <url>` for a remote MCP server. The judge reads the call as a change to a security control, and the audit log shows a `judge-tool-injection` block. The judge in action mode is an option you turn on, not the default; with the defaults the command runs. The same command typed in your own terminal is not an agent tool call, so the hook does not check it.
+
+**Fix.** Add the server outside the agent session: type the same command in your own terminal, or use `defenseclaw mcp set <name> --url <url>`, which scans the server before it adds it ([MCP scanner](/docs/scanning/mcp-scanner)). If agents must change their own configuration, take the connector off the judge: `defenseclaw guardrail judge remove <agent>`. The connector keeps its mode and its rule checks. On a managed computer the administrator makes this change.
+
+**Check.** `defenseclaw mcp list` lists the server.
+
 ## Nothing is blocked
 
 **Cause.** The agent is in observe mode, or the finding is below the block level. The default blocks CRITICAL and only alerts on HIGH and MEDIUM.

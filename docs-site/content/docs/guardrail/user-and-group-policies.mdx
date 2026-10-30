@@ -225,6 +225,33 @@ profile is listed as a candidate for diagnosis. Windows needs nothing: the 1.0.x
 IDs of a SID are unchanged. A per-user (non-managed) gateway keeps its own
 account's entries.
 
+On Linux, a local account without a SID is proven by its home directory, and
+the gateway takes that proof only while the local account database has not
+changed since the guardian last read it. Any change to `/etc/passwd`
+(`useradd`, `userdel`, `usermod`, or a standard user's own `chfn` or `chsh`,
+which are setuid and rewrite the file) therefore refuses the requests of every
+local account whose profile comes from such a 1.0.3 `agents` entry, with
+`ownership of a pre-upgrade agent identity is unconfirmed`, until the
+guardian's next pass, at most about a minute later. A clock that is ahead
+when the file changes does not make the refusal last longer. Workaround: wait
+about a minute and retry.
+
+On Linux, for up to one guardian pass (about a minute) after an account
+without a SID (a local, SSSD or LDAP account) is deleted and created again
+under the same uid, name and home path, the new account's agent requests can
+still be recorded under the earlier account's agent identity, and a directory
+account can still get the earlier holder's pre-upgrade `agents` assignment.
+Workaround: wait one minute before the new account's first agent session, or
+give the new account another uid.
+
+After an upgrade from 1.0.3 or 1.0.4 on a managed Linux host, a local account
+that was deleted and created again under the same uid and name more than seven
+days before the first agent request after the upgrade, and that has run no
+agent since, or whose home is on a file system that keeps no creation time
+(some NFS mounts), can be taken for the earlier holder of a 1.0.3 `agents`
+assignment. Workaround: give a recreated account another uid, or remove the
+earlier holder's 1.0.3 `agents` entry.
+
 How the keys combine:
 
 - **Keys AND, values OR.** Inside one `match`, every key you list must match.
