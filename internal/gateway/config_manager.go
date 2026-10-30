@@ -1171,6 +1171,14 @@ func (m *ConfigManager) startupActivationRefusal(raw []byte) *enterprisebundle.A
 		_, refusal := enterprisebundle.CheckSignedActivation(in, state.BundleID, state.BundleVersion, state.SignerKeyID, raw)
 		return refusal
 	}
+	if err == nil && state.Actor == configwrite.ActorLifecycle && state.BundleVersion == 0 && state.SignerKeyID == "" &&
+		strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)) {
+		// The lifecycle installed these bytes without a bundle: a computer
+		// that took anchors before its first bundle, or the rollback of a
+		// first bundle that did not confirm. Running a stored bundle instead
+		// could run the one that failed; the start keeps today's rule.
+		return nil
+	}
 	if len(enterprisebundle.SignedVersions(in)) == 0 {
 		return nil
 	}

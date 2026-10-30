@@ -359,3 +359,27 @@ func liveReloadErrorText() string {
 	}
 	return ""
 }
+
+// A start on lifecycle-recorded bytes with trust anchors and a signed bundle
+// in the store (anchors installed before the first bundle, or the rollback
+// of a first bundle that did not confirm) keeps the boot config: running the
+// stored bundle could run one that failed.
+func TestManagedStartupKeepsLifecycleRecordedBootBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	source, _ := os.ReadFile(path)
+	store := newSignedStore(t, dir)
+	store.store(t, "b-01J9ZZZZZZZZZZZZZZZZZZZZZ1", 1, bytes.Replace(source, []byte("mode: observe"), []byte("mode: action"), 1))
+	raw := append([]byte("# base\n"), source...)
+	if _, err := configwrite.ReplaceDocument(t.Context(), path, raw, configwrite.Options{Actor: configwrite.ActorLifecycle, Lifecycle: true, Reason: "enterprise ensure"}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := &ConfigManager{path: path}
+	if refusal := mgr.startupActivationRefusal(raw); refusal != nil {
+		t.Fatalf("lifecycle-recorded boot bytes refused: %v", refusal)
+	}
+	if refusal := mgr.startupActivationRefusal(append([]byte("# edited while stopped\n"), raw...)); refusal == nil {
+		t.Fatal("unrecorded boot bytes with a signed bundle in the store were admitted")
+	}
+}
