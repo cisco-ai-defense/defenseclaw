@@ -424,8 +424,9 @@ type floodWrite struct {
 	took    time.Duration
 }
 
-// floodTheStore commits an audit row every millisecond until the returned stop
-// runs, so the store never has an idle gap. writes returns every write made.
+// floodTheStore commits an audit row every walFloodInterval until the
+// returned stop runs, so the store never has an idle gap. writes returns
+// every write made.
 func floodTheStore(t *testing.T, store *Store) (stop func(), writes func() []floodWrite) {
 	t.Helper()
 	done := make(chan struct{})
@@ -450,7 +451,7 @@ func floodTheStore(t *testing.T, store *Store) (stop func(), writes func() []flo
 			mu.Lock()
 			made = append(made, floodWrite{started: started, took: took})
 			mu.Unlock()
-			time.Sleep(time.Millisecond)
+			time.Sleep(walFloodInterval)
 		}
 	}()
 	var once sync.Once
@@ -460,6 +461,17 @@ func floodTheStore(t *testing.T, store *Store) (stop func(), writes func() []flo
 		return append([]floodWrite(nil), made...)
 	}
 }
+
+// walFloodInterval paces floodTheStore at about 100 commits a second: ten
+// times the sustained 10 Hz hook flood GAP-1303 sizes the emergency hold for,
+// with commits well inside walIdleWindow (20 ms) apart, so no idle gap opens. A
+// commit every millisecond (up to about 1 kHz on a hosted Windows runner, a hundred
+// times that flood) left so much unsynced log behind each copy that the
+// runner's own write and sync of it under the writer, on top of the injected
+// 300 ms copy, outran the fixed 1 s emergency hold on two passes in a row
+// (r106 CI, Windows shard pk3: deferred at 1.0004 s and 1.0013 s, the log
+// growing fourfold between them).
+const walFloodInterval = 10 * time.Millisecond
 
 // longestFloodWrite is the longest of writes that started in [from, to].
 func longestFloodWrite(writes []floodWrite, from, to time.Time) time.Duration {
@@ -478,9 +490,9 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 	// What an ordinary commit takes on this runner under this flood, before
-	// any WAL pass runs.
+	// any WAL pass runs, over about a hundred commits.
 	stopOrdinary, ordinaryWrites := floodTheStore(t, store)
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(time.Second)
 	stopOrdinary()
 	ordinary := longestFloodWrite(ordinaryWrites(), time.Time{}, time.Now())
 	logWALGuardEvents(t, store, 200)
