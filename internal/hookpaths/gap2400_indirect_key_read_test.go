@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -42,6 +43,9 @@ func TestGAP2400BarePipelineReaderDialect(t *testing.T) {
 }
 
 func TestGAP2400PowerShellTypeOnPOSIXHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a POSIX home needs POSIX path semantics; a Windows host always has a Windows home")
+	}
 	command := `$k = "$HOME\.ssh\` + "id_ed25519" + `"; type $k`
 	if !ActionPrivateKeyReadWithDialect(command, "/home/u/project", "/home/u", actionfacts.DialectPowerShell) {
 		t.Errorf("PowerShell type did not read assigned private key path: %q", command)
@@ -53,6 +57,11 @@ func TestGAP2400LiteralPrivateKeyReadBindings(t *testing.T) {
 		{"windows", `C:\Users\u`, `C:\Users\u\project`},
 		{"posix", `/home/u`, `/home/u/project`},
 	} {
+		if env.name == "posix" && runtime.GOOS == "windows" {
+			// A POSIX home needs POSIX path semantics; a Windows host always
+			// has a Windows home (the windows rows run there).
+			continue
+		}
 		key := "~/.ssh/" + "id_ed25519"
 		glob := "~/.ssh/" + "id_*"
 		project := "~/project/" + "notes*"

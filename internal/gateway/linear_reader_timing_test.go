@@ -18,7 +18,7 @@ const linearReaderHookBudget = 3500 * time.Millisecond
 // again. The full size must take at most 2.5x the half size (best of up to
 // 3 tries, 50 ms for timer noise), so the reading grows linearly; a quadratic
 // reading takes 4x. Outside -race the full size must also stay within the
-// hook budget; -race costs about 10x and hosted runners vary, so a single
+// hook budget (best of up to 3 runs); -race costs about 10x and hosted runners vary, so a single
 // wall-clock figure is no pass criterion there.
 func assertLinearReaderTime(t *testing.T, label string, full time.Duration, run func(full bool) time.Duration) {
 	t.Helper()
@@ -35,6 +35,11 @@ func assertLinearReaderTime(t *testing.T, label string, full time.Duration, run 
 		}
 		if linear() {
 			break
+		}
+	}
+	for try := 1; !hookAnswerRaceBuild && bestFull > linearReaderHookBudget && try < 3; try++ {
+		if again := run(true); again < bestFull {
+			bestFull = again
 		}
 	}
 	t.Logf("%s: full size %s, half size %s", label, bestFull, bestHalf)
