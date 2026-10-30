@@ -5,6 +5,8 @@ package hookpaths
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -122,7 +124,7 @@ func TestResolveConnectorDeepPatchBodyIsNotShell(t *testing.T) {
 		if !ok || targets[TruncatedKey] == "1" {
 			t.Errorf("%s: targets %v, want complete evidence", row.name, targets)
 		}
-		if _, listed := targets[row.path]; !listed {
+		if !targetListed(targets, row.path) {
 			t.Errorf("%s: targets %v, want %s", row.name, targets, row.path)
 		}
 	}
@@ -132,4 +134,20 @@ func TestResolveConnectorDeepPatchBodyIsNotShell(t *testing.T) {
 	if targets, _ := Decode(ResolveConnector("codex", "", "PreToolUse", payload)); targets[TruncatedKey] != "1" {
 		t.Errorf("deep Bash: targets %v, want incomplete evidence", targets)
 	}
+}
+
+// targetListed reports path among the resolved targets in the spelling the
+// resolver uses on this OS: on Windows a t.TempDir home has backslashes and
+// the resolver lists the cleaned, case-insensitive path.
+func targetListed(targets map[string]string, path string) bool {
+	if _, ok := targets[path]; ok {
+		return true
+	}
+	for key := range targets {
+		if filepath.Clean(key) == filepath.Clean(path) ||
+			runtime.GOOS == "windows" && strings.EqualFold(filepath.Clean(key), filepath.Clean(path)) {
+			return true
+		}
+	}
+	return false
 }
