@@ -975,7 +975,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// (GAP-2404 pod check20).
 				if strings.Contains(command, "%") {
 					root := filepath.Join(home, ".defenseclaw")
-					sourceFacts[StateRootSiblingsPrefix+root] = StateRootSiblings(root)
+					sourceFacts[StateRootSiblingsPrefix+root] = StateRootSiblingsForFinds(root, fallbackFacts)
 				}
 				// A home find's name tests are judged against the state
 				// tree, which such a gateway cannot read either.

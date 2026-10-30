@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"path"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -780,7 +782,7 @@ func findStripDirectoriesStayOff(
 		return false
 	}
 	if lineStaysOff == nil {
-		return hookpaths.StateRootSiblings(root) == "0"
+		return hookpaths.StateRootSiblingsForFinds(root, facts) == "0"
 	}
 	return lineStaysOff()
 }
@@ -792,13 +794,22 @@ func findStripDirectoriesStayOff(
 // listing would refuse every home find (GAP-2404 pod check20). Without
 // the client's fact only a gateway that may read the home lists it.
 func findStripSiblingsStayOff(request trustedActionRequest, root string) bool {
-	if value, present := request.ResolvedWriteTargets[hookpaths.StateRootSiblingsPrefix+root]; present {
-		return value == "0"
+	if runtime.GOOS == "windows" && strings.HasPrefix(root, "/") && actionfacts.DriveSlashPath(root[1:]) {
+		// A Git Bash drive view root (/C:/Users/x/.defenseclaw, GAP-2577)
+		// is the drive path the hook client listed (GAP-2597).
+		root = root[1:]
+	}
+	for _, key := range []string{root, filepath.FromSlash(root)} {
+		if value, present := request.ResolvedWriteTargets[hookpaths.StateRootSiblingsPrefix+key]; present {
+			return value == "0"
+		}
 	}
 	if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
 		return false
 	}
-	return hookpaths.StateRootSiblings(root) == "0"
+	// Only a name the find's name tests pass is handed to the script
+	// (GAP-2597), as the hook client reads it.
+	return hookpaths.StateRootSiblingsForFinds(root, actionfacts.Analyze(request.Input)) == "0"
 }
 
 // findStripStdinFilters read their standard input and print to standard

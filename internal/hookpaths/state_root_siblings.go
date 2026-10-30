@@ -44,6 +44,80 @@ func StateRootSiblings(root string) string {
 	return "0"
 }
 
+// StateRootSiblingsForFinds is StateRootSiblings narrowed by the find
+// commands of facts (GAP-2597): a find hands its entries to -exec only
+// when they pass the -name and -iname tests before the action, so a name
+// beside the state root that fails one of them (~/.defenseclaw.bak for
+// find ~ -name "*.zip") is never stripped to the root. A sibling counts
+// when it passes every name test of one find, in any letter case; a find
+// with no name test before its first action, or with -o, !, -not, a comma
+// or parentheses there, counts every sibling, as StateRootSiblings does.
+func StateRootSiblingsForFinds(root string, facts actionfacts.Facts) string {
+	var finds [][]string
+	for _, command := range facts.Commands {
+		if !strings.EqualFold(filepath.Base(command.Program), "find") {
+			continue
+		}
+		var tests []string
+		usable := true
+		for index := 1; index < len(command.Argv); index++ {
+			word := command.Argv[index]
+			if slices.Contains(findActionWords, word) {
+				break
+			}
+			switch word {
+			case "-o", "-or", "!", "-not", ",", "(", ")", "\\(", "\\)":
+				usable = false
+			case "-name", "-iname":
+				if index+1 < len(command.Argv) {
+					tests = append(tests, command.Argv[index+1])
+					index++
+				}
+			}
+		}
+		if !usable || len(tests) == 0 || !command.ArgvComplete {
+			return StateRootSiblings(root)
+		}
+		finds = append(finds, tests)
+	}
+	if len(finds) == 0 {
+		return StateRootSiblings(root)
+	}
+	root = filepath.Clean(root)
+	name := strings.ToLower(filepath.Base(root))
+	entries, err := os.ReadDir(filepath.Dir(root))
+	if err != nil || name == "." || name == string(filepath.Separator) {
+		return "1"
+	}
+	for _, entry := range entries {
+		other := strings.ToLower(entry.Name())
+		if other == name || !strings.HasPrefix(other, name) {
+			continue
+		}
+		for _, tests := range finds {
+			passes := true
+			for _, test := range tests {
+				// In any letter case: a case-insensitive file system
+				// (macOS, Windows) may hand on or create the other spelling.
+				candidate, pattern := strings.ToLower(entry.Name()), strings.ToLower(test)
+				if matched, err := path.Match(pattern, candidate); err == nil && !matched {
+					passes = false
+					break
+				}
+			}
+			if passes {
+				return "1"
+			}
+		}
+	}
+	return "0"
+}
+
+// findActionWords end the tests a find applies before it acts on an entry.
+var findActionWords = []string{
+	"-exec", "-execdir", "-ok", "-okdir", "-delete", "-print", "-print0", "-printf", "-fprint", "-fprint0", "-fprintf", "-ls", "-fls",
+}
+
 // StateTreeNamePrefix + StateTreeNameKey carries the hook client's answer,
 // read as the user, to whether a file or directory of the protected state
 // under a root has a name a find -name (or -iname) pattern matches:
