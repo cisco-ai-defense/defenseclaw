@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -565,6 +566,9 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			if acceptAdminEquivalent(scope, path, label, fmt.Sprintf("writer mask 0x%x", uint32(ace.Mask)), sid) {
 				continue
 			}
+			if acceptInheritedCreateChild(path, label, ace.Header.AceFlags, ace.Mask, sid) {
+				continue
+			}
 			if scope.code {
 				reportCodeIntegrityFinding(path, label, sidString(sid), fmt.Sprintf("write-like access mask 0x%x", uint32(ace.Mask)))
 			}
@@ -947,6 +951,41 @@ func windowsTokenRunsAsService(token windowsTokenIdentity, serviceSID *windows.S
 
 func sameWindowsSID(left, right *windows.SID) bool {
 	return left != nil && right != nil && left.Equals(right)
+}
+
+// windowsCreateChildOnlyMask is what an inherited ProgramData entry grants
+// BUILTIN\Users on a folder (0x116 plus read and traverse): list, read, add
+// files and subfolders, and set the folder's own attributes. None of it can
+// change, rename or delete anything already in the folder.
+const windowsCreateChildOnlyMask windows.ACCESS_MASK = 0x001201bf
+
+var acceptedCreateChild sync.Map
+
+// acceptInheritedCreateChild accepts, and logs once per path, an inherited
+// create-child-only entry for Users or Authenticated Users on a directory:
+// the shape a folder takes after its protection is reset to inherit from
+// C:\ProgramData. Strict mode keeps it fatal.
+func acceptInheritedCreateChild(path, label string, flags uint8, mask windows.ACCESS_MASK, sid *windows.SID) bool {
+	if trustStrictAncestors() || flags&windows.INHERITED_ACE == 0 || mask&^windowsCreateChildOnlyMask != 0 {
+		return false
+	}
+	if sid == nil || !(sid.IsWellKnown(windows.WinBuiltinUsersSid) || sid.IsWellKnown(windows.WinAuthenticatedUserSid)) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	key := strings.ToLower(filepath.Clean(path)) + "\x00" + sidString(sid)
+	if _, seen := acceptedCreateChild.LoadOrStore(key, struct{}{}); !seen {
+		EmitResilienceEvent(MarkerAccept, map[string]string{
+			"path":      path,
+			"label":     label,
+			"principal": sidString(sid),
+			"reason":    fmt.Sprintf("inherited create-child-only access mask 0x%x on a folder", uint32(mask)),
+		})
+	}
+	return true
 }
 
 func windowsWriteLikeAccess(mask windows.ACCESS_MASK) bool {

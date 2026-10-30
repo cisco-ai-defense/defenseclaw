@@ -2387,7 +2387,7 @@ func setWindowsManagedPolicyProtectionNoFollow(
 		0,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("open for owner and DACL change: %w", err)
 	}
 	defer func() { _ = windows.CloseHandle(handle) }()
 	var info windows.ByHandleFileInformation
@@ -2417,9 +2417,12 @@ func setWindowsManagedPolicyProtectionNoFollow(
 		}
 	}
 	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
-		return err
+		return fmt.Errorf("set owner %s: %w", windowsSIDString(owner), err)
 	}
-	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+		return fmt.Errorf("set protected DACL: %w", err)
+	}
+	return nil
 }
 
 // windowsManagedPolicyProtectionACL builds the canonical machine-policy owner

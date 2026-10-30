@@ -26840,7 +26840,9 @@ function Invoke-DefenseClawNuclearUninstall {
                 -Role 'LifecycleDir' `
                 -RebootRequired ([ref]$rebootRequired)
             if (-not [string]::IsNullOrEmpty($leftover)) {
-                $incomplete.Add($leftover)
+                # Install recovery purges while it holds the shared lock, so
+                # the folder is legitimately in use; it holds no state.
+                $warnings.Add($leftover)
             }
         }
     }
