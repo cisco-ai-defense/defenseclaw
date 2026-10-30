@@ -36,7 +36,7 @@ npm install -g @opencode/cli@2
 
 On a shared computer where you cannot write npm's global prefix, install it for your account instead (`npm install -g --prefix ~/.npm-global @opencode/cli@2`, with `~/.npm-global/bin` first on your `PATH`).
 
-On a new DefenseClaw install, run `defenseclaw init --connector opencode` first. Then:
+On a new DefenseClaw install, run `defenseclaw init --connector opencode` first. Until initialized, setup stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.` Then:
 
 ```bash
 defenseclaw setup opencode                # first setup defaults to observe: record only
@@ -72,7 +72,7 @@ Earlier releases guard OpenCode V1 only, and OpenCode V2 cannot load their plugi
 
 - **OpenCode V1 still installed:** `defenseclaw upgrade` (and the one-line installer) stops before it changes anything and says to install V2. Your current DefenseClaw keeps guarding OpenCode V1. Install V2, then upgrade again. To upgrade without OpenCode, run `defenseclaw setup remove opencode` first.
 - **OpenCode V2 installed:** the upgrade selects V2 and writes the V2 plugin; no setup run is needed. Restart OpenCode's background server afterwards.
-- **Rollback:** `defenseclaw rollback` to 1.0.5 or earlier refuses while OpenCode V2 is set up, because that release cannot guard it. Run `defenseclaw setup remove opencode` first to roll back anyway.
+- **Rollback:** `defenseclaw rollback` to 1.0.5 or earlier refuses while OpenCode V2 is installed and set up, because that release cannot guard it and its gateway does not start. The rollback restores that release's own configuration, so put OpenCode V1 back first to roll back, or stay on this release.
 - Install V2 and upgrade DefenseClaw together: DefenseClaw 1.0.5 still lists OpenCode as protected when V2 is installed, but V2 does not load its plugin.
 
 ## What it can block or ask
@@ -89,7 +89,7 @@ What a gateway outage does to an OpenCode call, per install and fail mode, is in
 
 Can fail closed: yes, for the awaited `execute.before` only. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes).
 
-On a per-user install with no saved mode, a gateway that is not running follows the policy tier: the default and permissive policies run with one warning per session and a `hook-failures.jsonl` record, and the strict policy blocks the call ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). The warning appears under the first unchecked tool call of the session. A listener the plugin cannot verify, an error or unusable answer and an install in progress block the call in every tier. Under Secure Client an administrator can choose outage-only open; on a managed standalone host OpenCode blocks the outage under either mode. Unlike under Secure Client, a managed standalone OpenCode plugin stays closed and blocks the outage even when the administrator selects open. An unverified listener never receives the bearer or payload.
+On a per-user install with no saved mode, a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning per session and a `hook-failures.jsonl` record, and the strict policy blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). The warning appears under the first unchecked tool call of the session. A listener the plugin cannot verify, an error or unusable answer and an install in progress block the call in every tier. Under Secure Client an administrator can choose outage-only open; on a managed standalone host OpenCode blocks the outage under either mode. Unlike under Secure Client, a managed standalone OpenCode plugin stays closed and blocks the outage even when the administrator selects open. An unverified listener never receives the bearer or payload.
 
 A call whose arguments are larger than the gateway's 1 MiB limit is reviewed in a bounded form: observe mode lets it run and records it, action mode blocks it.
 
@@ -151,4 +151,4 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-Disabling removes DefenseClaw's plugin and keeps your other OpenCode settings; `defenseclaw guardrail enable` puts it back. To remove the connector, run `defenseclaw setup remove opencode --yes` (add `--force` if it is the last one). On a multi-connector install, add `--connector opencode` to `guardrail disable` and `guardrail enable`. Restart OpenCode's background server afterwards (`opencode service restart`).
+Disabling removes DefenseClaw's plugin and preserves your other OpenCode settings. `defenseclaw guardrail enable` reinstalls DefenseClaw's plugin. To remove the connector, run `defenseclaw setup remove opencode --yes` (add `--force` if it is the last one). If you modified the plugin, `guardrail disable` and `setup remove` refuse before saving; run `defenseclaw setup opencode --yes --restart` to restore it, then retry. On a multi-connector install, add `--connector opencode` to `guardrail disable` and `guardrail enable`. Restart OpenCode's background server afterwards (`opencode service restart`).
