@@ -2014,13 +2014,17 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 	}
 	dirs = make(map[*syntax.CallExpr]string)
 	dir := cwd
-	var saved []string
+	var saved, pushed []string
+	var savedPushed [][]string
+	usedPushd := false
 	for index, stmt := range statements {
 		for n := leave[index]; n > 0; n-- {
 			dir, saved = saved[len(saved)-1], saved[:len(saved)-1]
+			pushed, savedPushed = savedPushed[len(savedPushed)-1], savedPushed[:len(savedPushed)-1]
 		}
 		for n := enter[index]; n > 0; n-- {
 			saved = append(saved, dir)
+			savedPushed = append(savedPushed, slices.Clone(pushed))
 		}
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
@@ -2031,15 +2035,38 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syn
 			return nil, false
 		}
 		if slices.Contains(cdPrograms, programBase(program)) {
-			if programBase(program) != "cd" || len(call.Args) != 2 || len(call.Assigns) != 0 {
+			// A plain popd returns to the directory a pushd in this list
+			// saved; pushd DIR moves like cd DIR and saves the directory it
+			// left (GAP-2586). Any other spelling (pushd +N, popd -N, a bare
+			// pushd, a popd with no pushd before it) keeps the conservative
+			// reading.
+			if programBase(program) == "popd" && len(call.Args) == 1 && len(call.Assigns) == 0 && len(pushed) > 0 {
+				dir, pushed = pushed[len(pushed)-1], pushed[:len(pushed)-1]
+				continue
+			}
+			if (programBase(program) != "cd" && programBase(program) != "pushd") || len(call.Args) != 2 || len(call.Assigns) != 0 {
 				return nil, false
 			}
 			target, static := StaticWord(call.Args[1], home)
-			if !static || target == "" || strings.HasPrefix(target, "-") || !filepath.IsAbs(dir) {
+			if !static || target == "" || strings.HasPrefix(target, "-") || strings.HasPrefix(target, "+") || !filepath.IsAbs(dir) {
 				return nil, false
+			}
+			if programBase(program) == "pushd" {
+				pushed = append(pushed, dir)
+				usedPushd = true
 			}
 			dir = OperandPath(target, dir)
 			continue
+		}
+		// A link after a pushd keeps the conservative reading: the
+		// link-name proof covers cd only (GAP-1742), so a link call (or a
+		// call that names a link program) after pushd is not placed.
+		if usedPushd {
+			for _, arg := range call.Args {
+				if word, static := StaticWord(arg, home); !static || slices.Contains(linkPrograms, programBase(word)) {
+					return nil, false
+				}
+			}
 		}
 		// Every other call starts in dir; a wrapper that moves the
 		// directory (env -C) moves it from there.
