@@ -126,7 +126,7 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
         # MCP scans run the SDK in this environment (defenseclaw mcp scan),
         # so doctor checks its installed version, not a mcp-scanner launcher.
         self.assertEqual(result.checks[1]["status"], "pass")
-        self.assertIn("cisco-ai-mcp-scanner 4.3.0", result.checks[1]["detail"])
+        self.assertIn("cisco-ai-mcp-scanner 4.8.7", result.checks[1]["detail"])
         # GAP-0073: the LiteLLM both scanners call has its own row.
         litellm_row = next(check for check in result.checks if check["label"] == "Scanner: litellm")
         self.assertEqual(litellm_row["status"], "pass")

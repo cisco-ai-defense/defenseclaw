@@ -2994,7 +2994,7 @@ threading.Event().wait()
         $nativeWorkflowText -notmatch 'test_app_shell') `
         'Windows Python suite balances every test file, the TUI suite included, across twelve time-weighted shards'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Local Splunk certification regressions') 'native Windows workflow has a required Local Splunk regression step'
-    Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
+    Assert-True ($nativeHarnessText -match 'check_python_dependency_metadata\.py' -and $nativeHarnessText -match '\$DependencyMetadataChecker\) -Timeout') 'managed environment runs the explicit dependency metadata check'
     Assert-True ($nativeHarnessText -match 'function Initialize-WindowsNativeTestEnvironment' -and
         $nativeHarnessText -match '\$env:TEMP = \$temp') `
         'native test harness provides a private current-user-owned temp root'

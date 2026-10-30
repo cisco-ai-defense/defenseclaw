@@ -463,8 +463,11 @@ def test_builder_pins_a_project_supported_embedded_python_and_checks_metadata() 
     assert '$PythonVersion = "3.13.15"' in build
     assert '$PythonTargetVersion = "3.13"' in build
     assert '$PythonEmbedSha256 = "D1F04D990AEE1253D8569E8E5104E30FA9F5FA830899F14843448872D936A2CF"' in build
-    assert "dist.metadata.get('Requires-Python')" in build
-    assert "SpecifierSet(requires_python).contains(platform.python_version(), prereleases=True)" in build
+    # The metadata check is the shared checker (GAP-0020 LiteLLM override allowance).
+    assert "Invoke-CheckedProcess $validationPython @('-I', $DependencyMetadataChecker)" in build
+    checker = (ROOT / "scripts" / "check_python_dependency_metadata.py").read_text(encoding="utf-8")
+    assert 'dist.metadata.get("Requires-Python")' in checker
+    assert "SpecifierSet(requires_python).contains(python_version, prereleases=True)" in checker
     assert "if not magika_result.ok or not magika_result.output.is_text:" in build
 
 

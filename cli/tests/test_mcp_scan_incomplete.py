@@ -155,8 +155,41 @@ def test_the_real_sdk_reports_custom_rule_names_the_check_expects() -> None:
     tool = SimpleNamespace(
         name="ping",
         description="Returns a harmless ping response.",
-        model_dump_json=lambda: '{"name": "ping", "description": "Returns a harmless ping response."}',
+        model_dump_json=lambda **_kwargs: '{"name": "ping", "description": "Returns a harmless ping response."}',
     )
     result = asyncio.run(scanner._analyze_tool(tool, [AnalyzerEnum.YARA]))
+    # 4.8 folds a custom name equal to a built-in value into the built-in
+    # entry, so the bundled pack must carry its own name to be seen.
+    assert [r.name for r in rules] == ["DefenseClaw YARA"]
     assert all(getattr(r, "name", "") in [str(getattr(a, "value", a)) for a in result.analyzers] for r in rules)
     mcp._raise_if_analysis_incomplete("benign", [], [result], scanner)
+
+
+@pytest.mark.parametrize(
+    ("message", "label"),
+    [
+        # MCP Scanner 4.8 log lines (enum value or custom analyzer name).
+        ("api analysis failed on description: TimeoutError", "Cisco AI Defense API analyzer"),
+        ("yara analysis failed on description: Error", "YARA analyzer"),
+        ("readiness analysis failed on description: ValueError", "readiness analyzer"),
+        ("DefenseClaw YARA analysis failed on description: Error", "DefenseClaw YARA rules"),
+        ("DefenseClaw YARA extra analysis failed on prompt: Error", "DefenseClaw YARA rules"),
+    ],
+)
+def test_scanner_4_8_failure_logs_have_no_verdict(message: str, label: str) -> None:
+    with pytest.raises(mcp.MCPScanIncompleteError, match=label):
+        mcp._raise_if_analysis_incomplete("decoy", [(_SDK_LOGGER, message)], [], SimpleNamespace())
+
+
+def test_llm_failure_logs_of_both_scanner_lines_degrade() -> None:
+    assert mcp._is_llm_failure_log("LLM analysis failed: tool=x")
+    assert mcp._is_llm_failure_log("llm analysis failed on description: APIConnectionError")
+    mcp._raise_if_analysis_incomplete(
+        "benign", [(_SDK_LOGGER, "llm analysis failed on description: APIConnectionError")], [], SimpleNamespace()
+    )
+
+
+def test_defenseclaw_yara_findings_keep_the_yara_scanner_label() -> None:
+    finding = SimpleNamespace(severity="HIGH", analyzer="DefenseClaw YARA", summary="x", details={})
+    result = mcp.MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))._convert([finding], "t", 0.1)
+    assert [f.scanner for f in result.findings] == ["mcp-scanner/YARA"]
