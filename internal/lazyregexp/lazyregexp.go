@@ -26,16 +26,19 @@
 // shared after that; a Regexp is safe for concurrent use.
 //
 // MustCompile panicked at start for a pattern that does not compile; a
-// lazy pattern would panic at first use instead. In a test binary New
-// compiles at once, so every package's tests still fail at start on a bad
-// pattern, as before.
+// lazy pattern would panic at first use instead. The package's own tests
+// compile every New pattern of the module from the source
+// (TestEveryModulePatternCompiles), so a bad pattern still fails the tests.
+// Tests behave as production does: a pattern compiles on first use. A test
+// that needs every registered pattern compiled first calls CompileAll, as
+// the gateway does in the background at start. This package does not import
+// testing, so release binaries do not link it.
 package lazyregexp
 
 import (
 	"io"
 	"regexp"
 	"sync"
-	"testing"
 )
 
 // Regexp is a *regexp.Regexp compiled on first use.
@@ -53,9 +56,6 @@ var (
 // New returns the lazily compiled form of regexp.MustCompile(str).
 func New(str string) *Regexp {
 	lr := &Regexp{str: str}
-	if testing.Testing() {
-		lr.Regexp()
-	}
 	registryMu.Lock()
 	registry = append(registry, lr)
 	registryMu.Unlock()
