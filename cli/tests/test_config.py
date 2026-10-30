@@ -499,6 +499,30 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         self.assertEqual(reloaded.guardrail.judge.hook_timeout, 7.0)
         self.assertEqual(reloaded.gateway.port, 19999)
 
+    def test_agent_gateway_survives_a_cli_save(self):
+        # connectors.agent_gateway (1.0.6) is a gateway setting the CLI does
+        # not model: an unrelated CLI save keeps it.
+        fresh = self._fresh_config()
+        data_dir = fresh.data_dir
+        fresh.save()
+        cfg_path = os.path.join(data_dir, "config.yaml")
+        import yaml as _yaml
+
+        with open(cfg_path) as f:
+            raw = _yaml.safe_load(f)
+        raw["connectors"] = {"agent_gateway": {"enabled": True, "instance_name": "gas"}}
+        with open(cfg_path, "w") as f:
+            _yaml.safe_dump(raw, f, sort_keys=False)
+
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            cfg = config_mod.load()
+            cfg.gateway.port = 19998
+            cfg.save()
+        with open(cfg_path) as f:
+            saved = _yaml.safe_load(f)
+        self.assertEqual(saved["connectors"], {"agent_gateway": {"enabled": True, "instance_name": "gas"}})
+        self.assertEqual(saved["gateway"]["port"], 19998)
+
     def test_dotted_literal_unknown_key_is_rejected_by_v8_schema(self):
         # v8 is closed-world: a dotted literal is not an extension escape
         # hatch and must not be confused with the modeled nested path.

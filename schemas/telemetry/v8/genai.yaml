@@ -929,7 +929,8 @@ attributes:
       enum:
       - verified
       - claimed
-    notes: verified only when the gateway or root enumerator resolved the facts for a kernel- or credential-verified uid or SID; anything the hook reports is claimed
+      - verified_by_connector
+    notes: verified only when the gateway or root enumerator resolved the facts for a kernel- or credential-verified uid or SID; verified_by_connector when a trusted connector named the person and the gateway resolved the facts itself; anything the hook reports is claimed
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.user.enrollment
   type: string

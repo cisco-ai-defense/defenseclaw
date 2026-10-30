@@ -289,6 +289,8 @@ func (contract ToolCallLifecycleContract) ClassifyTerminalOutcome(
 		return ToolLifecycleOutcomeSuccess
 	case "amp":
 		return classifyAmpResult(payload)
+	case AgentGatewayConnectorName:
+		return classifyAgentGatewayResult(payload)
 	default:
 		return ToolLifecycleOutcomeUnknown
 	}

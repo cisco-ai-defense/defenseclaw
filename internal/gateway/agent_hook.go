@@ -3925,6 +3925,11 @@ func (a *APIServer) agentHookEnabled(ctx context.Context, name string) bool {
 	if cfg.ConnectorHookConfig(name).Enabled {
 		return true
 	}
+	// The agent-gateway route exists only while connectors.agent_gateway is
+	// on (agent_gateway_hook.go); every call that reaches it is evaluated.
+	if name == connector.AgentGatewayConnectorName && cfg.Connectors.AgentGateway.Enabled && !cfg.SecureClientIntegration() {
+		return true
+	}
 	if a.health != nil && a.health.HasConnectorSource(name, "automatic") && cfg.ApplicationProtection.EffectiveEnabled(name) {
 		return true
 	}

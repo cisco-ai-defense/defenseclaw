@@ -409,6 +409,9 @@ type Config struct {
 	// Update holds the self-update settings (config_version 9).
 	Update UpdateConfig `mapstructure:"update" yaml:"update,omitempty"`
 	Fleet  FleetConfig  `mapstructure:"fleet"            yaml:"fleet,omitempty"`
+	// Connectors holds settings of connectors that install nothing into an
+	// agent, such as the agent-gateway hook route (trusted_connectors.go).
+	Connectors ConnectorsConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -3170,6 +3173,12 @@ func loadConfigSourceCheckedWithLayout(
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	if err := cfg.ValidateIdentityChainSettings(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "connectors_invalid")
+		}
+		return nil, err
 	}
 	if err := cfg.Scanners.Validate(); err != nil {
 		if ReportConfigLoadError != nil {

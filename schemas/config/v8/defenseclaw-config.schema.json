@@ -217,6 +217,9 @@
     },
     "fleet": {
       "$ref": "#/$defs/fleet"
+    },
+    "connectors": {
+      "$ref": "#/$defs/connectors"
     }
   },
   "$defs": {
@@ -5285,6 +5288,67 @@
               "maxLength": 4096
             }
           }
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Standalone only. Trusted connectors: service accounts that may name the person they act for on the agent-gateway route. Empty by default (off); honoured only when the live configuration is a signed bundle. Requires min_product_version 1.0.6 in a bundle.",
+          "properties": {
+            "trusted_connectors": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "account",
+                  "may_act_for"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+                  },
+                  "account": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "route": {
+                    "type": "string",
+                    "enum": [
+                      "agent-gateway"
+                    ]
+                  },
+                  "may_act_for": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "groups": {
+                        "type": "array",
+                        "maxItems": 256,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        }
+                      },
+                      "users": {
+                        "type": "array",
+                        "maxItems": 256,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -5990,6 +6054,29 @@
         "policy_compiler_path": {
           "type": "string",
           "maxLength": 4096
+        }
+      }
+    },
+    "connectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Connectors that install nothing into an agent. Off by default.",
+      "properties": {
+        "agent_gateway": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The agent-gateway hook route (/api/v1/agent-gateway/hook) for gateways that call DefenseClaw for an agent. Off by default; on a managed device only the lifecycle or a signed bundle sets it. Requires min_product_version 1.0.6 in a bundle.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "instance_name": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+              "description": "Label of the calling gateway in audit on a per-user install."
+            }
+          }
         }
       }
     }
