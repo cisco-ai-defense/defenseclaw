@@ -45,6 +45,12 @@ Gateway outages now let calls run with a warning (the default and permissive pol
 
 Releases before 1.0.4 blocked those calls. The line is not printed when a fail mode is saved (globally or for a connector), in the strict tier, or on a managed install. How the saved mode and the policy tier combine is in [Fail modes](/docs/reference/fail-modes).
 
+When sandboxes are on (`openshell.enabled: true`) and your OpenShell gateway runs a release older than 0.1.5, the upgrade also prints, after `Upgraded from`, why no sandbox runs and the fix. `defenseclaw doctor` fails its **Gateway** check until OpenShell is upgraded:
+
+```text
+Sandboxes: OpenShell 0.1.3 runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's connections bypass the sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to 0.1.5 in place. Until then DefenseClaw starts no sandbox and `defenseclaw doctor` fails its Gateway check. Stop running sandboxes first, then run: defenseclaw sandbox setup --install-openshell
+```
+
 End every running agent session before upgrading. Quit OpenCode and Amp
 processes completely, then start a new agent process after the installer
 reports the gateway healthy. OpenCode and Amp load their DefenseClaw plugin

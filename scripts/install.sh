@@ -1879,6 +1879,13 @@ except Exception:
     pass
 PY
 }
+openshell_floor_notice() {
+    # Sandboxes on and the OpenShell gateway older than 0.1.5: this release
+    # starts no sandbox on it and doctor fails its Gateway check, so the
+    # upgrade names the floor and the fix (GAP-0059).
+    [[ -x "${VENV}/bin/python" ]] || return 0
+    "${VENV}/bin/python" -I -c 'from defenseclaw import config; from defenseclaw.commands.cmd_doctor import openshell_floor_upgrade_notice as notice; print(notice(config.load()))' 2>/dev/null || true
+}
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then
     changed="Upgraded from ${PREV_VERSION}"
@@ -1888,6 +1895,8 @@ if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then
     if version_lt "${PREV_VERSION}" 1.0.4 && version_lt "${PREV_VERSION}" "${VERSION}" && [[ "$(outage_open_notice)" == notice ]]; then
         printf '  %s\n' 'Gateway outages now let calls run with a warning (the default and permissive policies). Run `defenseclaw guardrail fail-mode closed` to keep blocking them.'
     fi
+    FLOOR_NOTICE="$(openshell_floor_notice)"
+    [[ -z "${FLOOR_NOTICE}" ]] || warn "${FLOOR_NOTICE}"
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
         printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
     fi

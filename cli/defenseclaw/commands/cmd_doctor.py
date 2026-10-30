@@ -1133,6 +1133,44 @@ def sandbox_doctor_report(binary: str) -> tuple[dict | None, str]:
     return report, ""
 
 
+# The Gateway row's words for an OpenShell release DefenseClaw starts no
+# sandbox on (openshell.ErrSandboxRelease: older than 0.1.5, or a prerelease).
+_SANDBOX_RELEASE_REFUSED = "runs no DefenseClaw sandbox"
+_OPENSHELL_UPGRADE_COMMAND = "defenseclaw sandbox setup --install-openshell"
+
+
+def openshell_floor_upgrade_notice(cfg) -> str:
+    """The line an upgrade prints while sandboxes are on and OpenShell is below the floor.
+
+    install.sh prints it after ``Upgraded from`` (GAP-0059): DefenseClaw
+    starts no sandbox on an OpenShell older than 0.1.5, and the Gateway row
+    of ``defenseclaw doctor`` fails until OpenShell is upgraded, so the
+    upgrade names the floor and the fix right away. "" when sandboxes are
+    off, on Windows, or when the gateway's OpenShell runs sandboxes.
+    """
+    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.platform_support import host_os
+
+    if host_os() == "windows" or getattr(getattr(cfg, "openshell", None), "enabled", False) is not True:
+        return ""
+    binary = resolve_gateway_binary()
+    report = sandbox_doctor_report(binary)[0] if binary else None
+    row = next(
+        (c for c in (report or {}).get("checks", []) if isinstance(c, dict) and c.get("id") == "gateway-version"),
+        {},
+    )
+    detail = str(row.get("detail") or "").strip()
+    if str(row.get("status") or "").strip().lower() != "fail" or _SANDBOX_RELEASE_REFUSED not in detail:
+        return ""
+    fix = row.get("fix") if isinstance(row.get("fix"), dict) else {}
+    # An OpenShell installed another way names no command: its upgrade is the user's.
+    command = str(fix.get("command") or "").strip() or _OPENSHELL_UPGRADE_COMMAND
+    return (
+        f"Sandboxes: {detail}. Until then DefenseClaw starts no sandbox and `defenseclaw doctor` fails its "
+        f"Gateway check. Stop running sandboxes first, then run: {command}"
+    )
+
+
 _SANDBOX_GATEWAY_DEPENDENCY = "depends on: OpenShell gateway"
 # Services that are simply not running; an install or policy problem stays a
 # failure even before the first sandbox run.
