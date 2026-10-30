@@ -1773,7 +1773,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				}
 				backup.OriginalOtel = raw
 			}
-			if existing, ok := cfg["notify"]; ok {
+			if existing, ok := codexOriginalNotifyValue(cfg, opts); ok {
 				backup.HadNotify = true
 				raw, err := json.Marshal(existing)
 				if err != nil {
@@ -1791,6 +1791,9 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				if err != nil {
 					return fmt.Errorf("load original Codex notifier: %w", err)
 				}
+				// A wrapper around our notifier keeps chaining the original
+				// ours displaced, not ours.
+				argv = stripCodexSelfNotify(argv, codexOriginalNotifyCommand(loaded, opts), opts)
 				raw, err := json.Marshal(argv)
 				if err != nil {
 					return fmt.Errorf("capture replaced Codex notify config: %w", err)
@@ -2628,6 +2631,47 @@ func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 		(isDefenseClawHookExecutable(argv[0]) || isRenamedDefenseClawHookExecutable(argv[0]))
 }
 
+// codexOriginalNotifyValue returns the notify value to back up, with any
+// DefenseClaw notifier self-reference removed (see stripCodexSelfNotify).
+func codexOriginalNotifyValue(cfg map[string]interface{}, opts SetupOpts) (interface{}, bool) {
+	existing, ok := cfg["notify"]
+	if !ok {
+		return nil, false
+	}
+	argv, isArgv := codexNotifyArgv(existing)
+	if !isArgv {
+		return existing, true
+	}
+	argv = stripCodexSelfNotify(argv, nil, opts)
+	return argv, len(argv) > 0
+}
+
+// stripCodexSelfNotify removes DefenseClaw's own notifier from argv so the
+// chained original never calls back into us. Codex computer-use wraps the
+// current notifier as `--previous-notify <json argv>`; when that is ours, it is
+// replaced by previous (the notifier ours was chaining) or dropped. An argv
+// that is ours outright becomes previous.
+func stripCodexSelfNotify(argv, previous []string, opts SetupOpts) []string {
+	if codexNotifyLooksManaged(argv, opts) {
+		return previous
+	}
+	out := make([]string, 0, len(argv))
+	for i := 0; i < len(argv); i++ {
+		if argv[i] == "--previous-notify" && i+1 < len(argv) {
+			var nested []string
+			if json.Unmarshal([]byte(argv[i+1]), &nested) == nil && codexNotifyLooksManaged(nested, opts) {
+				i++
+				if raw, err := json.Marshal(previous); err == nil && len(previous) > 0 {
+					out = append(out, "--previous-notify", string(raw))
+				}
+				continue
+			}
+		}
+		out = append(out, argv[i])
+	}
+	return out
+}
+
 func restoreCodexNotify(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) error {
 	if !codexNotifyLooksManaged(cfg["notify"], opts) {
 		return nil
@@ -2679,10 +2723,28 @@ func codexOriginalNotifyCommand(backup codexConfigBackup, opts SetupOpts) []stri
 	}
 	var command []string
 	if err := json.Unmarshal(backup.OriginalNotify, &command); err != nil || len(command) == 0 ||
-		strings.TrimSpace(command[0]) == "" || codexNotifyLooksManaged(command, opts) {
+		strings.TrimSpace(command[0]) == "" {
+		return nil
+	}
+	// Backups written before self-references were stripped may still hold one.
+	if command = stripCodexSelfNotify(command, nil, opts); len(command) == 0 {
 		return nil
 	}
 	return command
+}
+
+// CodexOriginalNotify returns the operator notifier the native Windows
+// notifier chains to, read from the Codex config backup in dataDir, or nil.
+func CodexOriginalNotify(dataDir string) []string {
+	data, err := os.ReadFile(filepath.Join(dataDir, "codex_config_backup.json"))
+	if err != nil || len(data) > 1<<20 {
+		return nil
+	}
+	var backup codexConfigBackup
+	if json.Unmarshal(data, &backup) != nil {
+		return nil
+	}
+	return codexOriginalNotifyCommand(backup, SetupOpts{DataDir: dataDir})
 }
 
 func writeCodexNotifyBridge(opts SetupOpts, chained ...[]string) error {

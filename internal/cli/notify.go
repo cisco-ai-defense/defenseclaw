@@ -17,14 +17,11 @@
 package cli
 
 import (
-	"encoding/json"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
@@ -57,19 +54,8 @@ func newNotifyCmd() *cobra.Command {
 // The native Windows notifier keeps the user program that setup displaced.
 // Its argv is the pre-DefenseClaw snapshot, never a shell command.
 func runOriginalCodexNotify(dataDir, payload string) {
-	data, err := os.ReadFile(filepath.Join(dataDir, "codex_config_backup.json"))
-	if err != nil || len(data) > 1<<20 {
-		return
-	}
-	var backup struct {
-		OriginalNotify []string `json:"original_notify"`
-	}
-	if json.Unmarshal(data, &backup) != nil || len(backup.OriginalNotify) == 0 ||
-		strings.TrimSpace(backup.OriginalNotify[0]) == "" {
-		return
-	}
-	argv := backup.OriginalNotify
-	if filepath.Base(argv[0]) == "defenseclaw-hook.exe" && len(argv) > 1 && argv[1] == "notify" {
+	argv := connector.CodexOriginalNotify(dataDir)
+	if len(argv) == 0 {
 		return
 	}
 	command := exec.Command(argv[0], append(argv[1:], payload)...)
