@@ -1438,7 +1438,11 @@ const r105Rows: DocRow[] = [
   // GAP-2502 (docs pod, 2026-10-29, live OSS RHEL rc.9 action mode): a local credential read alerts; only an SSH private key read is denied.
   { gap: "GAP-2502", page: "segmentation.mdx", section: "Credential files", has: ["| Hook rules in action mode: an SSH private key read is denied, other credential reads alert (see below) |", "A plain local read of another credential file, for example `cat ~/.aws/credentials` (`PATH-AWS-CREDS`), is a `MEDIUM` alert and the command goes ahead"], lacks: ["`PATH-AWS-CREDS`) | Hook rules in action mode |"] },
   // GAP-2491 (docs pod, 2026-10-29, live managed RHEL rc.9 -> 1.0.3 dnf downgrade, 1.4 GB audit.db): hooks deny for minutes after the rollback.
-  { gap: "GAP-2491", page: "enterprise/lifecycle.mdx", section: "Roll back", has: ["**Rollback to 1.0.3 with a large audit store (Linux):**", "On RHEL with a 1.4 GB store this lasted 3.5 to 7.5 minutes after `dnf downgrade` finished.", "Roll back while agents are idle"] },
+  { gap: "GAP-2491", page: "enterprise/lifecycle.mdx", section: "Roll back", has: ["**Rollback to 1.0.3 or 1.0.4 with a large audit store (Linux):**", "On RHEL with a 1.4 GB store this lasted 3.5 to 7.5 minutes after `dnf downgrade` finished.", "Roll back while agents are idle"] },
+  // GAP-2592 (docs-t11 pod, 2026-10-30, live managed RHEL T11 -> published 1.0.4 dnf downgrade, 1.5 GB audit.db): 1.0.4 denies hooks for minutes too.
+  { gap: "GAP-2592", page: "enterprise/lifecycle.mdx", section: "Roll back", has: ["When the 1.0.3 or 1.0.4 gateway first starts on a large audit store", "Rolling back to the published 1.0.4 with a 1.5 GB store, it lasted about 4 minutes."], lacks: ["**Rollback to 1.0.3 with a large audit store (Linux):**"] },
+  // GAP-2599 (docs-t11 pod, 2026-10-30, live OSS Ubuntu T11, no judge): a --path folder outside connector dirs prints the not-installed policy note; judge off without --no-use-llm.
+  { gap: "GAP-2599", page: "scanning/skill-scanner.mdx", section: "One-shot scan", has: ["policy: rejected - the policy would refuse this skill at install.", "Accept it: defenseclaw skill allow risky-skill", "Verdict: CRITICAL (2 critical, 1 high, 1 medium, 1 info)", "`judge off` shows because no judge is configured"], lacks: ["Block it: defenseclaw skill block risky-skill --connector openclaw", "`judge off` shows because this run used `--no-use-llm`."] },
   { gap: "GH #1101 p0:GAP-0777", page: "policies/rulepack-validation.mdx", has: ["Adding or editing that file changes the digest, so validate the pack again and pin the new digest"] },
   // 1.0.5 docs sync (2026-10-28): fixed 1.0.4 known issues left the page; open ones stay.
   { gap: "1.0.4 known issues fixed in 1.0.5", page: "support-matrix.mdx", section: "Known issues", lacks: ["These are bugs in 1.0.4.", "**Changing the fail mode with Setup `/ensure`:**", "hot-config-undo-closed", "**No skill, MCP or plugin scanner:**"] },
@@ -2551,6 +2555,15 @@ describe('edge-connector IPv6 allowlist entries are written without brackets (GA
     const bad = ['docs-site/content/docs/edge-connector/architecture.mdx', 'docs-site/content/docs/edge-connector/policies.mdx', 'edge-connector/README.md', 'edge-connector/INSTALL.md']
       .filter((f) => /bracketed globally scoped IPv6/.test(source(f).split(/\s+/).join(' ')));
     assert.deepEqual(bad, []);
+  });
+});
+
+// GAP-2599: skill-scanner.mdx shows the not-installed policy note and judge off with no judge configured.
+describe('skill scan --path policy note and judge default match the page (GAP-2599)', () => {
+  it('cmd_skill.py still prints the not-installed note and turns the judge on only when a model resolves', () => {
+    const py = source('cli/defenseclaw/commands/cmd_skill.py');
+    assert.ok(py.includes('"the policy would refuse this skill at install.",\n                ("Block it", "block"),\n                ("Accept it", "allow"),'), 'not-installed policy note changed: re-check scanning/skill-scanner.mdx One-shot scan');
+    assert.ok(py.includes("effective = (cfg.use_llm and (secure_client or bool(litellm_model(llm)))) if use_llm is None else use_llm"), 'judge default changed: re-check the judge-off sentence in scanning/skill-scanner.mdx');
   });
 });
 
