@@ -49,3 +49,48 @@ def test_installed_opencode_uses_the_discovery_probe_outside_trusted_prefixes(mo
     monkeypatch.setattr(agent_discovery, "discover_with_probes", discover)
     assert migrations._installed_opencode(str(tmp_path)) == ("1.18.34", "/opt/agents/bin/opencode")
     assert calls["connectors"] == ["opencode"] and calls["persist_cache"] is False and calls["use_cache"] is False
+
+
+def _v2_package(prefix, version="2.2.4"):
+    import json
+
+    package = prefix / "lib" / "node_modules" / "@opencode" / "cli"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(json.dumps({"name": "@opencode/cli", "version": version}))
+
+
+def test_rollback_check_finds_a_v2_outside_the_callers_path(opencode, monkeypatch, tmp_path):
+    """GAP-0067: the shell's PATH has only V1 (or nothing), the account's V2 sits in another prefix."""
+    import json
+
+    home = tmp_path / "home"
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("APPDATA", raising=False)
+    opencode["value"] = ("1.18.34", "/opt/dc-agents/bin/opencode")  # the PATH of this shell: V1
+    migrations.check_opencode_rollback(str(data), "1.0.5")  # nothing else known: no refusal
+
+    # 1. setup recorded the V2 binary in a prefix this shell does not have on PATH
+    binary = tmp_path / "custom-prefix" / "bin" / "opencode"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    record = {"agents": {"opencode": {"installed": True, "version": "2.2.4", "binary_path": str(binary)}}}
+    (data / "agent_discovery.json").write_text(json.dumps(record))
+    with pytest.raises(MigrationError, match=r"1\.0\.5 guards OpenCode V1 only.*V2 \(2\.2\.4\).*nothing was changed"):
+        migrations.check_opencode_rollback(str(data), "1.0.5")
+    binary.unlink()  # V2 uninstalled since: the record no longer counts
+    migrations.check_opencode_rollback(str(data), "1.0.5")
+
+    # 2. package metadata under a usual prefix
+    _v2_package(home / ".npm-global")
+    with pytest.raises(MigrationError, match=r"V2 \(2\.2\.4\)"):
+        migrations.check_opencode_rollback(str(data), "1.0.5")
+    # a V1 package there is not V2
+    (home / ".npm-global" / "lib" / "node_modules" / "@opencode" / "cli" / "package.json").write_text(
+        json.dumps({"version": "1.18.34"})
+    )
+    migrations.check_opencode_rollback(str(data), "1.0.5")
+    # and a rollback to 1.0.6 or later never looks
+    _v2_package(home / ".local", "2.2.4")
+    migrations.check_opencode_rollback(str(data), "1.0.6")

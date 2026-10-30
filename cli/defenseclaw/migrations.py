@@ -3341,6 +3341,62 @@ def _check_opencode_v2(data_dir: str, version: str) -> None:
     )
 
 
+def _opencode_v2_in_known_places(data_dir: str) -> tuple[str, str] | None:
+    """``(version, path)`` of an OpenCode V2 this account has outside the caller's PATH, or None.
+
+    Reads files only; nothing runs. Two sources: the binary the discovery
+    record of this install (written by setup) names, if it is still there, and
+    the ``@opencode/cli`` package metadata under the usual npm prefixes (the
+    account's home, version managers, Homebrew and the machine prefixes
+    below ``/opt``).
+    """
+    import glob
+    import json
+
+    from defenseclaw.connector_contracts import normalize_agent_version
+
+    try:
+        with open(os.path.join(data_dir, "agent_discovery.json"), encoding="utf-8") as fh:
+            recorded = json.load(fh)["agents"]["opencode"]
+        binary = str(recorded.get("binary_path") or "")
+        version = str(recorded.get("version") or "")
+        if (
+            recorded.get("installed") is True
+            and binary
+            and os.path.exists(binary)
+            and normalize_agent_version(version).split(".", 1)[0] == "2"
+        ):
+            return version, binary
+    except (OSError, ValueError, KeyError, AttributeError, TypeError):
+        pass
+    home = os.path.expanduser("~")
+    prefixes = [
+        os.path.join(home, ".npm-global"),
+        os.path.join(home, ".local"),
+        os.path.join(home, "npm"),
+        "/usr/local",
+        "/usr",
+        "/opt/homebrew",
+        "/home/linuxbrew/.linuxbrew",
+        *sorted(glob.glob(os.path.join(home, ".nvm", "versions", "node", "*")))[:16],
+        *sorted(glob.glob("/opt/*"))[:64],
+    ]
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        prefixes.append(os.path.join(appdata, "npm"))
+    for prefix in prefixes:
+        for modules in (os.path.join(prefix, "lib", "node_modules"), os.path.join(prefix, "node_modules")):
+            meta = os.path.join(modules, "@opencode", "cli", "package.json")
+            try:
+                with open(meta, encoding="utf-8") as fh:
+                    version = str(json.load(fh).get("version") or "")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if normalize_agent_version(version).split(".", 1)[0] == "2":
+                return version, os.path.dirname(meta)
+    return None
+
+
 def check_opencode_rollback(data_dir: str, back_to: str) -> None:
     """Refuse a rollback to a release that cannot guard the OpenCode V2 here (rel-1-0-6 GAP-0028).
 
@@ -3350,13 +3406,19 @@ def check_opencode_rollback(data_dir: str, back_to: str) -> None:
     """
     if not _version_before(back_to, _OPENCODE_V2_SINCE) or not _opencode_configured(data_dir):
         return
-    found = _installed_opencode(data_dir)
-    if found is None:
-        return
     from defenseclaw.connector_contracts import normalize_agent_version
 
-    raw, _executable = found
-    if normalize_agent_version(raw).split(".", 1)[0] != "2":
+    # The caller's PATH is not the agent's: a V2 in an npm prefix that this
+    # shell does not have on PATH still runs unguarded under the earlier
+    # release (rel-1-0-6 GAP-0067), so the known install places count too.
+    raw = ""
+    found = _installed_opencode(data_dir)
+    if found is not None and normalize_agent_version(found[0]).split(".", 1)[0] == "2":
+        raw = found[0]
+    else:
+        elsewhere = _opencode_v2_in_known_places(data_dir)
+        raw = elsewhere[0] if elsewhere else ""
+    if not raw:
         return
     raise MigrationError(
         f"DefenseClaw {back_to} guards OpenCode V1 only and the OpenCode here is V2 ({raw.strip()}): its gateway "
