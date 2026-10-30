@@ -8407,7 +8407,10 @@ def _capture_protected_setup_file(
                 if extra_bits:
                     if skip_if_untrusted:
                         return False, b"", None
-                    raise OSError(f"{label} rollback source is not private")
+                    raise OSError(
+                        f"{label} rollback source is not private; "
+                        "make it owner-only (chmod 600) and run the command again"
+                    )
         body = bytearray()
         size = 0
         while size <= maximum:
@@ -9059,6 +9062,11 @@ def _capture_setup_desired_snapshot_once(cfg, *, capture_codex_backup: bool = Fa
             os.path.abspath(os.fspath(config_path_for_data_dir(data_dir))),
             _SETUP_CONFIG_MAX_BYTES,
             "config.yaml",
+            # An owner-only config.yaml that is merely group/other-readable
+            # (0644 from an older restore or a loose umask) is tightened to
+            # 0600 instead of refusing every setup (GAP-2603). Writable or
+            # foreign-owned files still refuse.
+            repair_owned_read_bits=True,
         )
     existed = False
     body = b""
