@@ -1741,6 +1741,52 @@ func validateEnterpriseHomeRoot(root string) error {
 	return nil
 }
 
+// policyInputInspectError words a policy input the gateway cannot even
+// stat. A folder above it that the gateway's account cannot traverse (a
+// custom pack folder made with mkdir -p under a umask 077 root shell is 0700)
+// failed every later reload with a bare "lstat ...: permission denied" that
+// named neither the folder nor the fix (GAP-0757); it now names the folder,
+// its mode and the chmod that fixes it, as ensure does.
+func policyInputInspectError(label, dir string, err error) error {
+	if runtime.GOOS != "windows" && errors.Is(err, os.ErrPermission) {
+		if folder, mode, ok := untraversableAncestor(dir); ok {
+			return fmt.Errorf("config: inspect %s %s: %s is %04o, so the gateway cannot reach the folders below it; "+
+				"make it traversable (for example: chmod o+x %s): %w", label, dir, folder, mode.Perm(), folder, os.ErrPermission)
+		}
+	}
+	return fmt.Errorf("config: inspect %s %s: %w", label, dir, err)
+}
+
+// untraversableAncestor returns the deepest folder above path that this
+// process can stat but not pass through: stat of its child fails with
+// permission denied.
+func untraversableAncestor(path string) (string, os.FileMode, bool) {
+	path = filepath.Clean(path)
+	var chain []string
+	for current := path; ; {
+		chain = append(chain, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	for i := len(chain) - 1; i > 0; i-- {
+		folder, child := chain[i], chain[i-1]
+		info, err := os.Lstat(folder)
+		if err != nil || !info.IsDir() {
+			return "", 0, false
+		}
+		if _, err := os.Lstat(child); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				return folder, info.Mode(), true
+			}
+			return "", 0, false
+		}
+	}
+	return "", 0, false
+}
+
 // validateManagedStandalonePolicyInputs requires every policy input the
 // standalone local engine reads to be unwritable by standard users. The
 // Secure Client profile never consults these (its local detectors are off),
@@ -1762,7 +1808,7 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
-			return fmt.Errorf("config: inspect %s %s: %w", label, dir, err)
+			return policyInputInspectError(label, dir, err)
 		}
 		if err := validate(dir, label, serviceAccount); err != nil {
 			return fmt.Errorf("config: managed standalone %s is not administrator-controlled: %w", label, err)
