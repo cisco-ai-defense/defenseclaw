@@ -669,7 +669,7 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	// and of the .ssh directory; path_symlink refuses a symlink made at
 	// their names (after an unlink). They read dentries, which Tetragon names
 	// within their own mount only, so a path on a home that is not on the
-	// root mount is left out and said so (the gateway's watch still alerts).
+	// root mount is left out and said so (its open control still applies).
 	if keys.Links {
 		linkFiles, n5 := dentryPaths(fsys, keyFiles)
 		renamePaths, n6 := dentryPaths(fsys, dedupe(append(append([]string(nil), keyFiles...), keyDirs...)))
