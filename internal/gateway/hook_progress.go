@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
@@ -26,6 +27,9 @@ type hookProgressContextKey struct{}
 // final status or the first body byte, or after the handler returned.
 type hookProgressWriter struct {
 	http.ResponseWriter
+	// start is when the gateway got the call: the hook waits for its
+	// answer up to about the hookexec progress ceiling from then.
+	start time.Time
 	mu    sync.Mutex
 	final bool
 	sent  bool
@@ -37,7 +41,7 @@ func withHookProgress(w http.ResponseWriter, r *http.Request) (http.ResponseWrit
 	if r.Header.Get(hookexec.HookProgressHeader) != "1" {
 		return w, r, func() {}
 	}
-	progress := &hookProgressWriter{ResponseWriter: w}
+	progress := &hookProgressWriter{ResponseWriter: w, start: time.Now()}
 	ctx := context.WithValue(r.Context(), hookProgressContextKey{}, progress)
 	return progress, r.WithContext(ctx), progress.close
 }
@@ -52,6 +56,30 @@ func reportHookProgress(ctx context.Context) {
 	if progress, ok := ctx.Value(hookProgressContextKey{}).(*hookProgressWriter); ok {
 		progress.report()
 	}
+}
+
+// hookJudgeAnswerWindow is how long after the gateway got a bounded hook
+// call a hook-lane judge may hold its answer. The hook waits about 4 s from
+// its own start once the gateway reported progress (hookexec
+// hookProgressCeiling) and then fails closed, so a judge that took longer
+// turned a benign prompt into enterprise_managed_gateway_no_answer, even in
+// observe mode (GAP-2625). The window leaves the hook start, the rest of the
+// decision and the answer about 600 ms of that ceiling.
+const hookJudgeAnswerWindow = 3400 * time.Millisecond
+
+// hookJudgeAnswerEnd is the latest time a hook-lane judge may hold the
+// answer of the call on ctx, and false when the call has no bounded answer
+// (its hook did not ask for progress reports: Secure Client, session events,
+// in-process callers).
+func hookJudgeAnswerEnd(ctx context.Context) (time.Time, bool) {
+	if ctx == nil {
+		return time.Time{}, false
+	}
+	progress, ok := ctx.Value(hookProgressContextKey{}).(*hookProgressWriter)
+	if !ok || progress == nil || progress.start.IsZero() {
+		return time.Time{}, false
+	}
+	return progress.start.Add(hookJudgeAnswerWindow), true
 }
 
 func (w *hookProgressWriter) report() {
