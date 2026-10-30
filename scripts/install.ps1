@@ -1147,7 +1147,7 @@ function Assert-NoLoadedPluginAgents {
         if (("$($owner.Domain)\$($owner.User)") -ieq $current) { $loaded += "$agent (PID $($process.ProcessId))" }
     }
     if ($loaded.Count) {
-        Die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: $($loaded -join ', ')"
+        Die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw (OpenCode V2 keeps a background server after its window closes: stop it with 'opencode service stop'), then run this installer again; gateway still running: $($loaded -join ', ')"
     }
 }
 
@@ -5189,6 +5189,12 @@ function Invoke-Rollback {
     }
     Assert-NoActiveConnectorRecovery "Rollback to $backTo"
     if (-not $rollForward) {
+        # rel-1-0-6 GAP-0028: a release that cannot guard an agent here
+        # (OpenCode V2 before 1.0.6) says so before anything changes.
+        $rollbackCli = Join-Path $Venv "Scripts\defenseclaw.exe"
+        if ((Test-Path -LiteralPath $rollbackCli) -and ((Invoke-Native $rollbackCli @("migrate", "--check-rollback-to", $backTo)) -eq 1)) {
+            Die "Rollback cancelled; nothing was changed (see above)"
+        }
         Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
         $stale = @(Get-StaleAgentEvidence (Join-Path $Previous "data"))
         if ($stale.Count -and $backTo -match '^(?:0\.8\.10|1\.0\.[0-3])$') {

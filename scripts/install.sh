@@ -1116,7 +1116,7 @@ loaded_plugin_agents() {
 assert_no_loaded_plugin_agents() {
     local agents
     agents="$(loaded_plugin_agents)"
-    [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: ${agents//$'\n'/, }"
+    [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw (OpenCode V2 keeps a background server after its window closes: stop it with 'opencode service stop'), then run this installer again; gateway still running: ${agents//$'\n'/, }"
 }
 
 stop_gateway() {
@@ -1412,6 +1412,14 @@ if [[ "${ROLLBACK}" == true ]]; then
     # the saved data before anything of this install changes.
     AUDIT_DAMAGED=""
     if version_lt "${back_to}" 1.0.0; then check_rollback_data; fi
+    # rel-1-0-6 GAP-0028: a release that cannot guard an agent here (OpenCode
+    # V2 before 1.0.6) says so before anything changes. A CLI without the
+    # check (a roll forward runs the older CLI) answers 2: no refusal.
+    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}" && [[ -x "${BIN_DIR}/defenseclaw" ]]; then
+        rollback_check_rc=0
+        "${BIN_DIR}/defenseclaw" migrate --check-rollback-to "${back_to}" || rollback_check_rc=$?
+        [[ ${rollback_check_rc} -ne 1 ]] || die "Rollback cancelled; nothing was changed (see above)"
+    fi
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true
     # The swap overwrites previous/GATEWAY_WAS_RUNNING with this install's state.

@@ -3273,6 +3273,87 @@ def _remove_or_replace_hint(removable: list[str], *, force: bool, can_remove: bo
     return f"remove it ({remove}) or set up another connector ({setup})"
 
 
+# DefenseClaw guards OpenCode V2 only since this release (#1373); earlier
+# releases guard V1 only. Remove both checks with the 1.0.x upgrade path.
+_OPENCODE_V2_SINCE = (1, 0, 6)
+_OPENCODE_V2_INSTALL = "npm uninstall -g opencode-ai && npm install -g @opencode/cli@2"
+
+
+def _opencode_configured(data_dir: str) -> bool:
+    """Whether this per-user install guards OpenCode (managed installs are the administrator's)."""
+    from defenseclaw import config as config_module
+
+    try:
+        cfg = config_module.load(data_dir=data_dir)
+        if config_module._is_managed_enterprise_mode(getattr(cfg, "deployment_mode", "")) or (
+            config_module._is_managed_enterprise_mode(os.environ.get(config_module.DEPLOYMENT_MODE_ENV))
+        ):
+            return False
+        return "opencode" in cfg.active_connectors()
+    except Exception:  # noqa: BLE001 - an unreadable config is reported by the other checks
+        return False
+
+
+def _installed_opencode(data_dir: str) -> tuple[str, str] | None:
+    """``(raw_version, executable)`` of the OpenCode setup would select now, or None."""
+    from defenseclaw.agent_selection import _select_agent_executable
+
+    try:
+        selection = _select_agent_executable(os.path.abspath(data_dir), "opencode")
+    except (OSError, KeyError):
+        return None
+    return selection.raw_version, selection.executable
+
+
+def _check_opencode_v2(data_dir: str, version: str) -> None:
+    """Fail ``migrate --check`` while the guarded OpenCode is V1 (rel-1-0-6 GAP-0021).
+
+    This release's gateway refuses OpenCode V1, so the upgrade would roll back
+    and leave the earlier gateway stopped: OpenCode then ran unguarded. Before
+    the swap the earlier install still runs and guards V1, so stop here.
+    """
+    if not _opencode_configured(data_dir):
+        return
+    found = _installed_opencode(data_dir)
+    if found is None:
+        return
+    from defenseclaw.connector_contracts import opencode_requires_v2_upgrade
+
+    raw, executable = found
+    if not opencode_requires_v2_upgrade(raw):
+        return
+    raise MigrationError(
+        f"OpenCode {raw.strip() or '(unknown version)'} at {executable} is OpenCode V1, and DefenseClaw {version} "
+        "guards OpenCode V2 only; nothing was changed, and the DefenseClaw you have keeps guarding it. Install "
+        f"OpenCode V2 ({_OPENCODE_V2_INSTALL}), then upgrade again. To upgrade without OpenCode instead, run "
+        "'defenseclaw setup remove opencode' first."
+    )
+
+
+def check_opencode_rollback(data_dir: str, back_to: str) -> None:
+    """Refuse a rollback to a release that cannot guard the OpenCode V2 here (rel-1-0-6 GAP-0028).
+
+    Such a release's gateway does not start with OpenCode V2 (the rollback
+    undid itself with an unrelated message), and OpenCode V2 cannot load its
+    plugin, so it would run unguarded.
+    """
+    if not _version_before(back_to, _OPENCODE_V2_SINCE) or not _opencode_configured(data_dir):
+        return
+    found = _installed_opencode(data_dir)
+    if found is None:
+        return
+    from defenseclaw.connector_contracts import normalize_agent_version
+
+    raw, _executable = found
+    if normalize_agent_version(raw).split(".", 1)[0] != "2":
+        return
+    raise MigrationError(
+        f"DefenseClaw {back_to} guards OpenCode V1 only and the OpenCode here is V2 ({raw.strip()}): its gateway "
+        "would not start, and OpenCode would run unguarded; nothing was changed. To roll back anyway, run "
+        "'defenseclaw setup remove opencode' first, and set OpenCode up again after you upgrade."
+    )
+
+
 def _check_connector_roster(
     config_path: str,
     data_dir: str,
@@ -3852,6 +3933,7 @@ def migrate(
         _check_connector_roster(
             config_path, data_dir, __version__, gateway_binary=gateway_binary, from_version=from_version or ""
         )
+        _check_opencode_v2(data_dir, __version__)
         # The v8 conversion reads the config as it is now, so the preflight is
         # only meaningful when no earlier 0.x step would change it first; the
         # real migration still validates and the installer rolls back on failure.

@@ -81,9 +81,25 @@ def _validate_from_version(_ctx, _param, value):
 # agent that updated itself since its setup (GAP-2513). Through this entry,
 # not 'python -c', so its warning gets the CLI's console stream setup.
 @click.option("--reselect-updated-agents", "reselect_only", is_flag=True, hidden=True)
-def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as_json, reselect_only) -> None:
+# install.sh / install.ps1 rollback only: refuse a rollback to a release that
+# cannot guard the agents here (rel-1-0-6 GAP-0028), before anything changes.
+@click.option("--check-rollback-to", "rollback_to", default=None, metavar="X.Y.Z", hidden=True,
+              callback=_validate_from_version)
+def migrate_cmd(
+    check, from_version, data_dir, openclaw_home, gateway_binary, as_json, reselect_only, rollback_to
+) -> None:
     """Bring config and data to this version's schema."""
     from defenseclaw.migrations import ConfigTooNewError, MigrationError, display_step_name, migrate
+
+    if rollback_to:
+        from defenseclaw.migrations import check_opencode_rollback
+
+        try:
+            check_opencode_rollback(data_dir or _default_data_dir(), rollback_to)
+        except MigrationError as exc:
+            ux.err(str(exc))
+            raise SystemExit(EXIT_FAILED) from None
+        return
 
     if reselect_only:
         from defenseclaw.migrations import reselect_updated_windows_agents
