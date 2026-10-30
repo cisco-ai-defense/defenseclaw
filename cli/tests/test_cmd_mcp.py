@@ -1338,6 +1338,39 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertNotIn("claudecode", result.output)
         mock_unset.assert_not_called()
 
+    @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
+    def test_unset_of_a_listed_local_scope_server_names_the_claude_remove(self, mock_unset):
+        # GAP-2594: claude mcp add (local scope of the cwd) puts a server that
+        # mcp list shows, but unset reads only the scope it writes and said
+        # "not configured ... nothing to remove" while the server stayed.
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_source_locations = (  # type: ignore[method-assign]
+            lambda connector=None, **_: ["/home/u/.claude.json"]
+        )
+        local = MCPServerEntry(name="t11-agent", command="npx", args=["-y", "pkg"])
+
+        def _servers(connector=None, *, infer_workspace_from_cwd=False, **_):
+            return [local] if infer_workspace_from_cwd else []
+
+        self.app.cfg.mcp_servers = _servers  # type: ignore[method-assign]
+        self.app.cfg.connector_workspace_dir = lambda: "/home/u/proj"  # type: ignore[method-assign]
+
+        result = self.invoke(["unset", "t11-agent", "--connector", "claudecode"])
+
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("nothing to remove", result.output)
+        self.assertIn("not removed [claudecode]", result.output)
+        self.assertIn("local scope of /home/u/proj", result.output)
+        self.assertIn("claude mcp remove t11-agent -s local", result.output)
+        self.assertIn("(projects of ", result.output)
+        self.assertIn("was not removed from: claudecode", result.output)
+        mock_unset.assert_not_called()
+
+        # A project .mcp.json server names the project scope.
+        local.source = "/home/u/proj/.mcp.json"
+        result = self.invoke(["unset", "t11-agent", "--connector", "claudecode"])
+        self.assertIn("claude mcp remove t11-agent -s project", result.output)
+
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     def test_set_skips_unsupported_connector_and_applies_to_rest(self, mock_set):
         # Fan-out resilience: a connector with no MCP write surface

@@ -3095,6 +3095,45 @@ def set_server(
         hint(f"Scan it now:  {_mcp_scan_command(name, scan_connector, url)}")
 
 
+def _mcp_entries_unset_does_not_write(
+    app: AppContext, connectors: list[str], name: str,
+) -> list[tuple[str, MCPServerEntry]]:
+    """Return the *name* entries ``mcp list`` shows that ``mcp unset`` skips.
+
+    ``mcp list`` also reads the project and local scopes of the current
+    folder; ``mcp unset`` only removes from the scope DefenseClaw writes.
+    """
+    out: list[tuple[str, MCPServerEntry]] = []
+    for c in connectors:
+        try:
+            listed = [s for s in _collect_mcps_for_connector(app, c) if s.name == name]
+        except Exception:  # noqa: BLE001 - a hint must never fail the command
+            continue
+        out.extend((c, s) for s in listed)
+    return out
+
+
+def _mcp_remove_elsewhere_hint(app: AppContext, connector: str, name: str, entry: MCPServerEntry) -> str:
+    where = entry.source or "a project config"
+    if connector_paths.normalize(connector) == "claudecode":
+        # Local entries live under projects[<folder>] of the Claude state file.
+        where = entry.source or f"projects of {connector_paths.claude_mcp_state_path()}"
+        scope = "project" if os.path.basename(entry.source or "") == ".mcp.json" else "local"
+        try:
+            folder = app.cfg.connector_workspace_dir() or ""
+        except Exception:  # noqa: BLE001
+            folder = ""
+        folder = folder or os.getcwd()
+        return (
+            f"{name!r} is in the Claude Code {scope} scope of {folder} ({where}), which mcp unset "
+            f"does not write; remove it there with: claude mcp remove {name} -s {scope}"
+        )
+    return (
+        f"{name!r} is listed in {where}, which mcp unset does not write; "
+        f"remove it there or with the {connector} MCP command"
+    )
+
+
 @mcp.command("unset")
 @click.argument("name")
 @click.option(
@@ -3164,6 +3203,22 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
             raise click.ClickException(
                 f"MCP server {name!r} is present but not removable on: "
                 f"{', '.join(skipped)} (no writable MCP surface)."
+            )
+        elsewhere = _mcp_entries_unset_does_not_write(app, connectors, name)
+        if elsewhere:
+            # GAP-2594: mcp list showed the server (a project or local scope
+            # read from the cwd, such as claude mcp add without -s), but unset
+            # writes only the scope DefenseClaw manages. Say where it is and
+            # how to remove it instead of calling it not configured.
+            for c, entry in elsewhere:
+                click.secho(f"  not removed [{c}]: {_mcp_remove_elsewhere_hint(app, c, name, entry)}", fg="red")
+            kept = sorted({c for c, _ in elsewhere})
+            if app.logger:
+                saved_change_audit(app.logger).log_action(
+                    "mcp-unset", name, f"result=not-removed connectors={','.join(kept)}"
+                )
+            raise click.ClickException(
+                f"MCP server {name!r} was not removed from: {', '.join(kept)}."
             )
         click.secho(
             f"MCP server {name!r} not configured on: {', '.join(connectors)}; "
