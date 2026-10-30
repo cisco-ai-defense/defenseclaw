@@ -89,6 +89,12 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 		t.Fatalf("a host without a standalone deployment got %v", root.Commands())
 	}
 	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	// GAP-2639: a refused writer is reported for the managed audit log; a
+	// reader, a scan and help are not.
+	var reported []string
+	restoreReport := reportManagedCommandRefusal
+	t.Cleanup(func() { reportManagedCommandRefusal = restoreReport })
+	reportManagedCommandRefusal = func(command, reason string) { reported = append(reported, command+"/"+reason) }
 	addManagedWindowsSetupAnswer(root)
 	// The installed managed Windows binary answers the documented writer
 	// commands before Cobra can fall through to generic usage.
@@ -161,6 +167,23 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 		}
 	}
 	root.SetOut(io.Discard)
+	reported = nil
+	for _, args := range [][]string{
+		{"guardrail", "disable"}, {"guardrail", "status"}, {"setup", "codex", "--yes"},
+		{"skill", "block", "dc-x"}, {"skill", "list"}, {"plugin", "scan", `C:\p`}, {"doctor"}, {"doctor", "--help"},
+	} {
+		root.SetArgs(args)
+		err := root.Execute()
+		if args[0] == "guardrail" && (commandExitCode(err) != 3 || !strings.Contains(err.Error(), "This device is managed")) {
+			t.Fatalf("%v on a managed Windows computer: %v", args, err)
+		}
+	}
+	if set, _, err := configCmd.Find([]string{"set"}); err == nil {
+		_ = set.RunE(set, []string{"guardrail.mode", "observe"})
+	}
+	if want := []string{"guardrail disable/", "setup/", "skill block/", "config set/"}; strings.Join(reported, ",") != strings.Join(want, ",") {
+		t.Fatalf("reported refusals %v, want %v", reported, want)
+	}
 	// GAP-1719: `upgrade` was a bare unknown command.
 	root.SetArgs([]string{"upgrade"})
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "upgrades are installed by your organization") {

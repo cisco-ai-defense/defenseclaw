@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -518,6 +519,8 @@ func runWindowsEnterpriseLifecycle(
 				}
 			}
 		}
+		// The refusal left no audit row (GAP-2639).
+		reportManagedCommandRefusal("enterprise windows "+action, refusalpipe.ReasonElevationRequired)
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts,
 			errors.New("elevation_required: "+windowsEnterpriseStandardUserMutationAnswer(action, windowsEnterpriseRequestedAttestations(opts)...)))
 	}

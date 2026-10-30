@@ -69,6 +69,20 @@ func TestRefusalPipeIdentifiesTheClientToken(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no report received")
 	}
+	// GAP-2639: a CLI command report travels the same pipe and is named by
+	// the same token.
+	command := Report{Command: "enterprise windows repair", Reason: ReasonElevationRequired}
+	if err := Send(context.Background(), command); err != nil {
+		t.Fatalf("send command report: %v", err)
+	}
+	select {
+	case r := <-got:
+		if r.sid != user.User.Sid.String() || r.report != command {
+			t.Fatalf("received %+v, want %s %+v", r, user.User.Sid, command)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no command report received")
+	}
 
 	gatewayServerPID = func() (uint32, error) { return uint32(os.Getpid()) + 4, nil }
 	if err := Send(context.Background(), report); err == nil {

@@ -1169,8 +1169,9 @@ administrator's next command: `skill`, `mcp`, `plugin` and `tool` name
 `policy show`, `setup` names `enterprise windows status --profile standalone`,
 and `sandbox` (sandboxes do not run on Windows, exit `3`) names
 `defenseclaw-gateway.exe enterprise windows sandbox list --user NAME`, each from
-an elevated PowerShell prompt. It has no `guardrail` group,
-no `version` command (run `defenseclaw.exe --version`) and no `policy activate`
+an elevated PowerShell prompt. Its `guardrail` commands are
+refused with exit `3` like `config set` (`guardrail disable` prints `This device is managed: change config.yaml in the admin config (MDM or management plane); guardrail disable did not change it`).
+It has no `version` command (run `defenseclaw.exe --version`) and no `policy activate`
 or `policy edit`: these return an unknown-command error and exit `2`. Its
 `policy` group has `digest`, `evaluate`, `reload`, `show`, `test` and `validate`.
 Commands that read a per-user gateway, such as `status`, `audit findings` and

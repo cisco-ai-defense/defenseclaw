@@ -107,6 +107,15 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 			return withExitCode(fmt.Errorf("This device is managed: change config.yaml in the admin config (MDM or management plane); config %s did not change it", verb), 3)
 		})
 	}
+	// The guardrail writers were an unknown command here, so a refused
+	// `guardrail disable` left no audit row (GAP-2639).
+	addManagedWindowsAnswer(root, "guardrail", func(args []string) error {
+		if command, ok := launcherAuditedWriter(append([]string{"guardrail"}, args...)); ok {
+			return withExitCode(fmt.Errorf("This device is managed: change config.yaml in the admin config (MDM or management plane); %s did not change it", command), 3)
+		}
+		return withExitCode(fmt.Errorf("This device is managed: the guardrail is set in the admin config (MDM or management plane). %s",
+			windowsManagedStandardUserViewAnswer("The admission policy and guardrail thresholds", "policy show")), 3)
+	})
 	for _, kind := range []string{"skill", "mcp", "plugin", "tool"} {
 		kind := kind
 		addManagedWindowsAnswer(root, kind, func(args []string) error {
@@ -154,6 +163,13 @@ func addManagedWindowsAnswer(root *cobra.Command, name string, answer func(args 
 			if rest, help := managedAnswerHelpArgs(args); help {
 				cmd.Long = answer(rest).Error()
 				return cmd.Help()
+			}
+			// A refused writer is a row in the managed audit log, as on
+			// Linux and macOS (GAP-2639). The words come from the
+			// writer table, never from the arguments.
+			words := append(strings.Fields(cmd.CommandPath())[1:], args...)
+			if command, ok := launcherAuditedWriter(words); ok {
+				reportManagedCommandRefusal(command, "")
 			}
 			return answer(args)
 		},

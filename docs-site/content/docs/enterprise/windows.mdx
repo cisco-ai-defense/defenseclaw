@@ -475,6 +475,17 @@ and reason `enterprise_managed_sid_unregistered` or
 Windows token of the refused process. Repeated refusals of one account and agent
 are one row a minute.
 
+A command `defenseclaw.exe` refuses an account is in the export as well: the
+`setup`, `upgrade`, `rollback`, `config set` and `config unset` answers, the
+`guardrail` writers, `skill`, `mcp`, `plugin` and `tool` `block`, `allow` and
+`unblock`, and a standard account's `enterprise windows` lifecycle commands and
+`enterprise secret set` or `remove`. Each is an `action` row whose target is the
+command, with `outcome=refused`, the reason (`managed_device`, or
+`elevation_required` for a command only an administrator runs), the account's
+SID and name, and the number of attempts. The gateway takes the account from the
+Windows token of the refusing process, and repeated refusals of one account and
+command are one row a minute. Arguments are never recorded.
+
 ## Review AI Discovery
 
 With `ai_discovery.enabled: true` in the config, the gateway scans each user

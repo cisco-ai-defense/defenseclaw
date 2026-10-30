@@ -2810,6 +2810,21 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 	// Never reach a real lifecycle if the refusal regresses.
 	windowsEnterpriseScriptFinder = func(string) (string, error) { return "", errors.New("test: no installer") }
 	windowsEnterpriseInstalledConfigPath = func() (string, error) { return installed, nil }
+	// GAP-2639: each standard-account refusal is reported for the managed
+	// audit log; the argument error is not.
+	var reported []string
+	restoreReport := reportManagedCommandRefusal
+	t.Cleanup(func() { reportManagedCommandRefusal = restoreReport })
+	reportManagedCommandRefusal = func(command, reason string) { reported = append(reported, command+"/"+reason) }
+	t.Cleanup(func() {
+		want := "enterprise windows repair/elevation_required,enterprise windows repair/elevation_required," +
+			"enterprise windows uninstall/elevation_required,enterprise windows uninstall/elevation_required," +
+			"enterprise windows reconcile/elevation_required,enterprise windows reconcile/elevation_required," +
+			"enterprise windows ensure/elevation_required,enterprise windows ensure/elevation_required"
+		if got := strings.Join(reported, ","); got != want {
+			t.Errorf("reported refusals %s, want %s", got, want)
+		}
+	})
 
 	for _, tc := range []struct {
 		action, profile, code, text, config string
