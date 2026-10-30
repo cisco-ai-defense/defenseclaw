@@ -3041,6 +3041,146 @@ class TestConnectorEnabled(unittest.TestCase):
         self.assertTrue(_connector_enabled(cfg, "codex"))
 
 
+
+class TestDisabledGuardrailDoctorRows(unittest.TestCase):
+    """GAP-2511: after setup guardrail --disable doctor says the hooks are removed.
+
+    The disable removes every connector hook and lock entry; doctor reported
+    no readable fail mode, no lock entry and FAIL rows for the missing hooks.
+    """
+
+    def _cfg(self, enabled):
+        from defenseclaw import config
+
+        cfg = config.default_config()
+        cfg.guardrail.enabled = enabled
+        return cfg
+
+    def test_disabled_guardrail_is_recognised(self):
+        from defenseclaw.commands.cmd_doctor import _guardrail_disabled
+
+        self.assertTrue(_guardrail_disabled(self._cfg(False)))
+        self.assertFalse(_guardrail_disabled(self._cfg(True)))
+        cfg = MagicMock()
+        cfg.guardrail = None
+        self.assertFalse(_guardrail_disabled(cfg))
+
+    def test_removed_hooks_after_a_disable_are_a_skip_not_a_failure(self):
+        from defenseclaw.commands import cmd_doctor
+
+        def missing(cfg, connector, r):
+            cmd_doctor._emit("fail", "Claude Code hooks", "missing: hook registration has no hooks table", r=r)
+
+        r = _DoctorResult()
+        with patch.object(cmd_doctor, "_check_connector_hooks", side_effect=missing):
+            cmd_doctor._check_disabled_guardrail_hooks(self._cfg(False), "claudecode", r)
+        self.assertEqual((r.failed, r.warned), (0, 0))
+        self.assertEqual([c["status"] for c in r.checks], ["skip"])
+        self.assertIn("hooks removed (guardrail disabled", r.checks[0]["detail"])
+
+    def test_hooks_still_registered_after_a_disable_warn_with_a_restart(self):
+        from defenseclaw.commands import cmd_doctor
+
+        def present(cfg, connector, r):
+            cmd_doctor._emit("pass", "Claude Code hooks", "registered", r=r)
+
+        r = _DoctorResult()
+        with patch.object(cmd_doctor, "_check_connector_hooks", side_effect=present):
+            cmd_doctor._check_disabled_guardrail_hooks(self._cfg(False), "claudecode", r)
+        self.assertEqual(r.warned, 1)
+        self.assertIn("still registered", r.checks[0]["detail"])
+        self.assertIn("defenseclaw-gateway restart", r.checks[0]["remediation"])
+
+    def _openclaw_cfg(self, home):
+        cfg = self._cfg(False)
+        cfg.claw.home_dir = home
+        return cfg
+
+    def test_openclaw_after_a_disable_reads_its_plugin_not_its_gateway(self):
+        # Review row of GAP-2511: the OpenClaw Services check probes the
+        # OpenClaw gateway, which a disable leaves running. A healthy gateway
+        # with the plugin removed is SKIP, not "hooks still registered".
+        import tempfile
+
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as home:
+            cfg = self._openclaw_cfg(home)
+            r = _DoctorResult()
+            with (
+                patch.object(cmd_doctor, "openclaw_implied_but_not_installed", return_value=False),
+                patch.object(cmd_doctor, "_http_probe", return_value=(200, b"")),
+            ):
+                cmd_doctor._check_disabled_guardrail_hooks(cfg, "openclaw", r)
+            self.assertEqual((r.failed, r.warned), (0, 0))
+            self.assertEqual([c["status"] for c in r.checks], ["pass", "skip"])
+            self.assertIn("DefenseClaw plugin removed", r.checks[1]["detail"])
+
+            os.makedirs(os.path.join(home, "extensions", "defenseclaw"))
+            r = _DoctorResult()
+            with (
+                patch.object(cmd_doctor, "openclaw_implied_but_not_installed", return_value=False),
+                patch.object(cmd_doctor, "_http_probe", return_value=(200, b"")),
+            ):
+                cmd_doctor._check_disabled_guardrail_hooks(cfg, "openclaw", r)
+            self.assertEqual(r.warned, 1)
+            self.assertIn("plugin is still installed", r.checks[1]["detail"])
+            self.assertIn("defenseclaw-gateway restart", r.checks[1]["remediation"])
+
+    def test_a_disabled_guardrail_does_not_require_the_openclaw_plugin(self):
+        from defenseclaw.commands import cmd_doctor
+
+        disabled = {"guardrail": {"state": "disabled"}}
+        with (
+            patch.object(cmd_doctor, "openclaw_implied_but_not_installed", return_value=False),
+            patch.object(cmd_doctor, "_live_gateway_health", return_value=disabled),
+        ):
+            self.assertFalse(cmd_doctor._openclaw_plugin_required(self._cfg(False), {"openclaw"}))
+            self.assertTrue(cmd_doctor._openclaw_plugin_required(self._cfg(True), {"openclaw"}))
+
+    def test_guardrail_enabled_false_alone_still_requires_the_openclaw_plugin(self):
+        # guardrail.enabled=false is also the default of a config that never
+        # enabled the guardrail: only a verified gateway that reports its
+        # guardrail disabled proves the teardown removed the plugin on purpose.
+        from defenseclaw.commands import cmd_doctor
+
+        for health in (None, {}, {"guardrail": {"state": "running"}}, {"guardrail": {"state": "error"}}):
+            with (
+                patch.object(cmd_doctor, "openclaw_implied_but_not_installed", return_value=False),
+                patch.object(cmd_doctor, "_live_gateway_health", return_value=health),
+            ):
+                self.assertTrue(cmd_doctor._openclaw_plugin_required(self._cfg(False), {"openclaw"}), health)
+
+    def test_the_enable_hint_names_setup_for_a_proxy_connector_without_a_model(self):
+        # guardrail enable refuses OpenClaw with no guardrail.model, so the
+        # doctor hint after a disable names the setup command instead.
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._cfg(False)
+        cfg.guardrail.model = ""
+        cfg.llm.model = ""
+        self.assertEqual(cmd_doctor._guardrail_enable_command(cfg, "openclaw"), "defenseclaw setup openclaw")
+        self.assertEqual(cmd_doctor._guardrail_enable_command(cfg, "claudecode"), "defenseclaw guardrail enable")
+        cfg.guardrail.model = "anthropic/claude-haiku-4-5"
+        self.assertEqual(cmd_doctor._guardrail_enable_command(cfg, "openclaw"), "defenseclaw guardrail enable")
+
+    def test_an_unreachable_openclaw_gateway_still_fails_after_a_disable(self):
+        import tempfile
+
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as home:
+            r = _DoctorResult()
+            with (
+                patch.object(cmd_doctor, "openclaw_implied_but_not_installed", return_value=False),
+                patch.object(cmd_doctor, "_http_probe", return_value=(0, b"")),
+            ):
+                cmd_doctor._check_disabled_guardrail_hooks(self._openclaw_cfg(home), "openclaw", r)
+            self.assertEqual(r.failed, 1)
+            self.assertEqual(r.checks[0]["label"], "OpenClaw gateway")
+            self.assertEqual(r.checks[1]["status"], "skip")
+
+
 class TestDetectionStrategyRow(unittest.TestCase):
     """N3 — read-only per-connector detection-strategy / judge-gating row."""
 

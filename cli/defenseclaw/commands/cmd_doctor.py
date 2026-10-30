@@ -3951,6 +3951,13 @@ def _openclaw_plugin_required(cfg, enabled_connectors) -> bool:
     """
     if "openclaw" not in enabled_connectors:
         return False
+    if _guardrail_disabled(cfg) and _gateway_reports_guardrail_disabled(cfg):
+        # setup guardrail --disable restarts the gateway, whose teardown
+        # removes the plugin on purpose: its missing version evidence is not a
+        # reinstall (GAP-2511 review row). guardrail.enabled=false alone is
+        # also the default of a config that never enabled the guardrail, so
+        # only the running gateway's own disabled state proves the teardown.
+        return False
     return not openclaw_implied_but_not_installed(cfg)
 
 
@@ -14330,7 +14337,23 @@ def doctor(
     inventory_health = None
     if not _config_validation_failed(r) and _trusted_gateway_listener(cfg).trusted:
         inventory_health = _live_gateway_health(cfg)
+    guardrail_off = _guardrail_disabled(cfg)
     for _c in inventory_connectors:
+        if guardrail_off:
+            # setup guardrail --disable: the gateway removed the hooks and the
+            # lock entry of every connector, so the Mode, Hook contract and
+            # runtime rows below would warn about a fail mode and a lock that a
+            # disabled guardrail does not have (GAP-2511). Services checks the
+            # hooks.
+            with _doctor_label_suffix(f"[{_c}]"):
+                _emit(
+                    "skip",
+                    "Connector",
+                    f"{_CONNECTOR_LABELS.get(_c, _c)} — guardrail disabled; "
+                    f"enable with: {_guardrail_enable_command(cfg, _c)}",
+                    r=r,
+                )
+            continue
         if not _connector_enabled(cfg, _c):
             # Operator-disabled (guardrail disable --connector X): the Go boot
             # loop drops it from the active set and tears its hooks down, so
@@ -14419,6 +14442,10 @@ def doctor(
     # Observe mode mutes approvals the same way for every connector: one row.
     _hilt_observe_only: list[tuple[str, str]] = []
     for _conn in hook_connectors:
+        if guardrail_off and _connector_enabled(cfg, _conn):
+            with _doctor_label_suffix(f"[{_conn}]" if _multi_hooks else ""):
+                _check_disabled_guardrail_hooks(cfg, _conn, r)
+            continue
         if not _connector_enabled(cfg, _conn):
             # Disabled connector: hooks were torn down, so probing hook health
             # / HILT would FAIL spuriously. Mark it disabled and move on,
@@ -16258,6 +16285,110 @@ def _fleet_uplink_unused(cfg) -> bool:
     """True when connectors are configured and none of them is a proxy connector."""
     names = set(_doctor_active_connectors(cfg))
     return bool(names) and not (names & _FLEET_PROXY_CONNECTORS)
+
+
+def _guardrail_disabled(cfg) -> bool:
+    """Whether ``guardrail.enabled`` is false (``setup guardrail --disable``)."""
+    gc = getattr(cfg, "guardrail", None)
+    return gc is not None and getattr(gc, "enabled", True) is False
+
+
+def _gateway_reports_guardrail_disabled(cfg) -> bool:
+    """Whether the verified running gateway reports its guardrail disabled.
+
+    A gateway that booted with ``guardrail.enabled=false`` ran the connector
+    teardown before it published that state. No verified gateway, or any
+    other state, is not proof (GAP-2511).
+    """
+    health = _live_gateway_health(cfg)
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    state = guardrail.get("state") if isinstance(guardrail, dict) else None
+    return isinstance(state, str) and state.strip().lower() == "disabled"
+
+
+def _guardrail_enable_command(cfg, connector: str) -> str:
+    """The command that turns a disabled guardrail back on for *connector*.
+
+    ``guardrail enable`` refuses a proxy connector (OpenClaw, ZeptoClaw) with
+    no ``guardrail.model``: it would forward model traffic to an unset
+    upstream. Their setup command asks for it (docs guardrail/disabling).
+    """
+    from defenseclaw.platform_support import is_proxy_connector
+
+    gc = getattr(cfg, "guardrail", None)
+    llm = getattr(cfg, "llm", None)
+    if is_proxy_connector(connector) and not (getattr(gc, "model", "") or getattr(llm, "model", "")):
+        return f"defenseclaw setup {connector}"
+    return "defenseclaw guardrail enable"
+
+
+def _check_disabled_guardrail_hooks(cfg, connector: str, r: _DoctorResult) -> None:
+    """Report the hooks of a disabled guardrail: removed is expected (GAP-2511).
+
+    The disable restarts the gateway, which removes the connector hooks.
+    The usual hook check then fails on every missing entry, so it runs
+    quietly: any problem means the hooks are gone (SKIP); a clean pass means
+    DefenseClaw hooks are still registered and still call the gateway (WARN).
+    """
+    if connector == "openclaw":
+        _check_disabled_openclaw_plugin(cfg, r)
+        return
+    probe = _DoctorResult(passive=True, quiet=True)
+    probe.set_section("services")
+    try:
+        _check_connector_hooks(cfg, connector, probe)
+    except Exception:  # noqa: BLE001 - an unreadable registration is not a registered hook.
+        probe.failed += 1
+    label = _CONNECTOR_LABELS.get(connector, connector)
+    if probe.passed and not probe.failed and not probe.warned:
+        _emit(
+            "warn",
+            "Connector hooks",
+            f"{label} — guardrail disabled, but its DefenseClaw hooks are still registered",
+            r=r,
+            remediation="defenseclaw-gateway restart (removes them), or defenseclaw guardrail enable",
+        )
+        return
+    _emit(
+        "skip",
+        "Connector hooks",
+        f"{label} — hooks removed (guardrail disabled; expected after a disable)",
+        r=r,
+    )
+
+
+def _check_disabled_openclaw_plugin(cfg, r: _DoctorResult) -> None:
+    """OpenClaw after a disable: its gateway row stays, the plugin decides.
+
+    OpenClaw has no hook registration. Its Services check probes the OpenClaw
+    gateway, which a disable leaves running, so a clean pass there does not
+    mean DefenseClaw still guards it. What the teardown removes is the
+    DefenseClaw plugin in ``<openclaw home>/extensions/defenseclaw``. The
+    gateway row runs as usual (an unreachable OpenClaw gateway still FAILs)
+    and the plugin directory reads removed (SKIP) or still installed (WARN).
+    """
+    _check_openclaw_gateway(cfg, r)
+    if openclaw_implied_but_not_installed(cfg):
+        return
+    claw = getattr(cfg, "claw", None)
+    home = os.path.expanduser(str(getattr(claw, "home_dir", "") or "~/.openclaw"))
+    plugin_dir = os.path.join(home, "extensions", "defenseclaw")
+    label = _CONNECTOR_LABELS.get("openclaw", "OpenClaw")
+    if os.path.lexists(plugin_dir):
+        _emit(
+            "warn",
+            "Connector hooks",
+            f"{label} — guardrail disabled, but the DefenseClaw plugin is still installed ({plugin_dir})",
+            r=r,
+            remediation=f"defenseclaw-gateway restart (removes it), or {_guardrail_enable_command(cfg, 'openclaw')}",
+        )
+        return
+    _emit(
+        "skip",
+        "Connector hooks",
+        f"{label} — DefenseClaw plugin removed (guardrail disabled; expected after a disable)",
+        r=r,
+    )
 
 
 def _connector_enabled(cfg, connector: str) -> bool:
