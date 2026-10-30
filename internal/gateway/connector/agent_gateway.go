@@ -282,7 +282,7 @@ func validTraceparent(value string) bool {
 	}
 	for _, part := range parts {
 		for _, c := range part {
-			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 				return false
 			}
 		}
