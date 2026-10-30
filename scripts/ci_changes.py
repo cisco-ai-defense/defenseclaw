@@ -127,6 +127,15 @@ RULES: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
     # The Unix connector harness: connector-live-e2e.yml selects its full
     # matrix for it and the tests that pin it run through references.
     (("scripts/live-connector-e2e/",), frozenset({"connector"})),
+    # Static upstream analysis is Python tooling, outside agent installations,
+    # release packaging and the Go gateway. Include prompt/manifest edits too.
+    (
+        (
+            "scripts/connector_delta_monitor.py",
+            "scripts/connector_delta/",
+        ),
+        frozenset({"python"}),
+    ),
     (("scripts/",), frozenset({"go", "python", "packaging", "checks"})),
     (("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt"), frozenset({"packaging"})),
     ((".claude/", ".agents/", ".devin/"), frozenset()),
