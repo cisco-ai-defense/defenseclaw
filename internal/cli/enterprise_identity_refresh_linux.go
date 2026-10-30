@@ -1,0 +1,74 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build linux
+
+package cli
+
+import (
+	"bufio"
+	"os"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+)
+
+var (
+	identityRefreshSSSCache    = "/usr/sbin/sss_cache"
+	identityRefreshNSSwitch    = "/etc/nsswitch.conf"
+	identityRefreshSSSDBackend = identityRefreshUsesSSSD
+)
+
+// identityRefreshUsesSSSD reports SSSD as an account backend: sss_cache is
+// installed and the passwd line of nsswitch.conf names sss.
+func identityRefreshUsesSSSD() bool {
+	if _, err := os.Stat(identityRefreshSSSCache); err != nil {
+		return false
+	}
+	file, err := os.Open(identityRefreshNSSwitch)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "passwd:") {
+			continue
+		}
+		for _, source := range strings.Fields(strings.TrimPrefix(line, "passwd:")) {
+			if source == "sss" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// identityRefreshPlatformFlushOSCache drops the SSSD cache: of the named
+// account only (sss_cache -u) when name is set, else every entry
+// (sss_cache -E).
+func identityRefreshPlatformFlushOSCache(name string) (identityRefreshFlush, *enterprisestatus.Message) {
+	flush := identityRefreshFlush{Flushed: "none"}
+	if !identityRefreshSSSDBackend() {
+		flush.Reason = "not_sssd"
+		return flush, nil
+	}
+	args, scope := []string{"-E"}, "all"
+	if name != "" {
+		args, scope = []string{"-u", name}, "user"
+	}
+	if err := identityRefreshRun(identityRefreshSSSCache, args...); err != nil {
+		flush.Reason = "failed"
+		return flush, &enterprisestatus.Message{Code: "os_cache_flush_failed", Message: "sss_cache failed: " + err.Error() + "; the facts were re-read from the SSSD cache as it is"}
+	}
+	flush.Flushed, flush.Method = scope, "sss_cache"
+	return flush, nil
+}

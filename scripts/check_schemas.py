@@ -150,6 +150,7 @@ MDM_CONTRACT_SCHEMAS = (
     "bundle-refused.schema.json",
     "bundle-status.schema.json",
     "bundle-verify.schema.json",
+    "identity-refresh.schema.json",
     "lifecycle-result.schema.json",
     "secret-result.schema.json",
     "version.schema.json",
@@ -250,6 +251,12 @@ def _refused_status_with_go_zero_value(document: dict) -> None:
 # Contract rules a schema edit must not loosen (or tighten): label, schema,
 # document builder, whether the document must validate.
 MANAGEMENT_CONTRACT_RULES = (
+    ("identity refresh with an unknown member", "identity-refresh.schema.json",
+     _from_example("identity-refresh.schema.json", 0, _set(principal="eng2@corp.example.com")), False),
+    ("identity refresh success with an error", "identity-refresh.schema.json",
+     _from_example("identity-refresh.schema.json", 0, _set(errors=[{"code": "lookup_failed", "message": "m"}])), False),
+    ("identity refresh refusal with exit 0", "identity-refresh.schema.json",
+     _from_example("identity-refresh.schema.json", 2, _set(exit_code=0)), False),
     ("version without management_contract (a build before the contract)", "version.schema.json",
      _from_example("version.schema.json", 0, lambda d: None), True),
     ("version with a features list", "version.schema.json",

@@ -1245,6 +1245,8 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// Secure Client serves none of the identity routes (issue #1092).
 	if !a.managedAIDOnly() {
 		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", awaitConfigReload(a.handleGuardrailProfileResolve))
+		// enterprise identity refresh (root or SYSTEM, managed only).
+		mux.HandleFunc(identityRefreshPath, awaitConfigReload(a.handleIdentityRefresh))
 	}
 	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
 	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)

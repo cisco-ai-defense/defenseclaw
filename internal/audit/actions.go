@@ -144,6 +144,12 @@ const (
 	// and connector each ten minutes (GAP-0832).
 	ActionEnterpriseExemptUser Action = "enterprise-exempt-user"
 
+	// ActionIdentityRefreshCompleted records one `enterprise identity
+	// refresh` run of a managed gateway: how many accounts it re-read,
+	// changed, failed or skipped, its duration and the OS cache flush.
+	// It never names an account.
+	ActionIdentityRefreshCompleted Action = "identity-refresh-completed"
+
 	// Codex notify webhook (agent-turn-complete et al.). The
 	// notify-bridge.sh shim installed by the codex connector POSTs
 	// codex's raw JSON arg to /api/v1/codex/notify after every
@@ -442,6 +448,7 @@ func AllActions() []Action {
 		ActionConnectorHookTampered,
 		ActionConnectorHookRepaired,
 		ActionEnterpriseExemptUser,
+		ActionIdentityRefreshCompleted,
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,
 		ActionCodexNotifyMalformed,

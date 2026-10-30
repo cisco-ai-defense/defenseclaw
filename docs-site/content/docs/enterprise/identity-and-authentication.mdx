@@ -366,6 +366,22 @@ sudo dscacheutil -flushcache; sudo dsmemberutil flushcache
 sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user alice
 ```
 
+### Refresh every account now
+
+To apply a directory change to every account the gateway has cached, without
+waiting up to 15 minutes, run as root (Windows: elevated, or as SYSTEM):
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise identity refresh --flush-os-cache --json
+```
+
+`changes[]` lists each account whose profile changed, with the old and the new
+profile; its hooks use the new one from their next call. Add `--user alice` to
+refresh one account (on Linux it then flushes only that account from SSSD). On
+Windows, signed-in accounts keep their sign-in groups until they sign in again
+and are listed in `windows_token_groups_pending`. See
+[`enterprise identity refresh`](/docs/reference/cli#re-read-directory-facts-enterprise-identity-refresh).
+
 ## Next steps
 
 <Cards>

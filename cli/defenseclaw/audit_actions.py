@@ -117,6 +117,10 @@ ACTION_CONNECTOR_HOOK_REPAIRED: Final[str]     = "connector-hook-repaired"
 # internal/audit/actions.go::ActionEnterpriseExemptUser.
 ACTION_ENTERPRISE_EXEMPT_USER: Final[str]      = "enterprise-exempt-user"
 
+# One `enterprise identity refresh` run of a managed gateway (counts only).
+# Mirrors internal/audit/actions.go::ActionIdentityRefreshCompleted.
+ACTION_IDENTITY_REFRESH_COMPLETED: Final[str]  = "identity-refresh-completed"
+
 # Codex notify webhook (agent-turn-complete et al.). The notify
 # bridge POSTs codex's JSON arg to /api/v1/codex/notify; the
 # gateway derives the action key from the payload's `type` field.
@@ -382,6 +386,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_CONNECTOR_HOOK_TAMPERED,
     ACTION_CONNECTOR_HOOK_REPAIRED,
     ACTION_ENTERPRISE_EXEMPT_USER,
+    ACTION_IDENTITY_REFRESH_COMPLETED,
     ACTION_CODEX_NOTIFY,
     ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE,
     ACTION_CODEX_NOTIFY_MALFORMED,

@@ -76,6 +76,7 @@ classes:
       ActionConnectorHookTampered: "connector-hook-tampered"
       ActionConnectorHookRepaired: "connector-hook-repaired"
       ActionEnterpriseExemptUser: "enterprise-exempt-user"
+      ActionIdentityRefreshCompleted: "identity-refresh-completed"
       ActionCodexNotify: "codex.notify"
       ActionCodexNotifyAgentTurnComplete: "codex.notify.agent-turn-complete"
       ActionCodexNotifyMalformed: "codex.notify.malformed"

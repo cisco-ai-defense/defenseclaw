@@ -605,6 +605,29 @@ func (c *identityCache[T]) refreshSoon(key string) {
 	}
 }
 
+// accounts returns the keys (uid or SID) of the accounts the cache holds
+// facts for or whose lookups failed, sorted, at most limit of them (no limit
+// when limit is 0), and how many it left out. `enterprise identity refresh`
+// re-reads these accounts.
+func (c *identityCache[T]) accounts(limit int) (keys []string, skipped int) {
+	if c == nil {
+		return nil, 0
+	}
+	c.mu.Lock()
+	for key, entry := range c.entries {
+		if entry.ok || !entry.failedSince.IsZero() {
+			keys = append(keys, key)
+		}
+	}
+	c.mu.Unlock()
+	sort.Strings(keys)
+	if limit > 0 && len(keys) > limit {
+		skipped = len(keys) - limit
+		keys = keys[:limit]
+	}
+	return keys, skipped
+}
+
 // forget drops key's entry, so the next get resolves it afresh. A lookup in
 // flight finishes on the dropped entry.
 func (c *identityCache[T]) forget(key string) {

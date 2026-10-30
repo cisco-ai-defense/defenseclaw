@@ -36,6 +36,10 @@
     "secret_set_bundle": {
       "const": true,
       "description": "Optional, from 1.0.4: `enterprise secret set` takes --bundle (management-agent.md section 4.7). A build without the member refuses the flag; store the credential without it."
+    },
+    "identity_refresh": {
+      "const": true,
+      "description": "Optional, from 1.0.6: `enterprise identity refresh` re-reads directory facts on demand (management-agent.md section 4.10). A build without the member has no such command."
     }
   },
   "examples": [
@@ -62,6 +66,16 @@
       "built": "2026-11-06T18:00:00Z",
       "management_contract": 1,
       "secret_set_bundle": true
+    },
+    {
+      "schema_version": 1,
+      "name": "defenseclaw-gateway",
+      "version": "1.0.6",
+      "commit": "0123456789",
+      "built": "2026-11-06T18:00:00Z",
+      "management_contract": 1,
+      "secret_set_bundle": true,
+      "identity_refresh": true
     }
   ]
 }
