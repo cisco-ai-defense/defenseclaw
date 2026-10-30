@@ -25,6 +25,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -50,7 +51,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 
 	parser := syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
 	parsedSource := source
-	file, err := parser.Parse(strings.NewReader(source), "")
+	file, err := parser.Parse(shellparse.Reader(source), "")
 	if err != nil {
 		normalized, valid := normalizePOSIXAggregateRedirects(source, true)
 		if !valid {
@@ -59,7 +60,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		}
 		parsedSource = normalized
 		parser = syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
-		file, err = parser.Parse(strings.NewReader(normalized), "")
+		file, err = parser.Parse(shellparse.Reader(normalized), "")
 		if err != nil {
 			out.markInvalid(IssueInvalidSyntax)
 			return out
@@ -202,7 +203,7 @@ func collectExactPOSIXAbsoluteCDFallback(
 // rewritten.
 func normalizePOSIXAggregateRedirects(source string, nullOnly bool) (string, bool) {
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
-	file, err := parser.Parse(strings.NewReader(source), "")
+	file, err := parser.Parse(shellparse.Reader(source), "")
 	if err != nil {
 		return "", false
 	}

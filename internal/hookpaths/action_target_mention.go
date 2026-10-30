@@ -160,6 +160,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		found := false
 		effectiveCWD := cwd
 		var directoryStack []string
+		var movedOntoLinks []*syntax.Word
 		checkWord := func(word *syntax.Word) bool {
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
@@ -214,7 +215,24 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						return false
 					}
 				}
+				var moved *syntax.Word
+				var movedEntry string
+				if !stateOnly {
+					// A plain mv onto a link replaces the link: judge its
+					// entry, not the file it names (GAP-2559).
+					if word, entry, ok := actionPlainMoveOntoLink(call, values, effectiveCWD, home); ok {
+						moved, movedEntry = word, entry
+						movedOntoLinks = append(movedOntoLinks, word)
+					}
+				}
 				for _, word := range call.Args {
+					if moved != nil && word == moved {
+						if protectedEntry(movedEntry, protected, ssh) {
+							found = true
+							return false
+						}
+						continue
+					}
 					if checkWord(word) {
 						found = true
 						return false
@@ -227,6 +245,8 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		if found {
 			return true
 		}
+		// The text scan below would follow the link the move replaces.
+		nestedBodies = append(nestedBodies, movedOntoLinks...)
 	}
 	text := actionBlankPatchBodies(command, actionMaskLiteralMetacharacters(command))
 	if parsed && actionLiteralArgumentProgramsOnly(file, home) {
@@ -841,7 +861,7 @@ func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 			// print their arguments as written, and no POSIX shell has
 			// them (GAP-1473).
 			"write-output", "write-host",
-			"pushd", "popd", "pwd", "true", "false", "test", "[", "basename", "dirname",
+			"pushd", "popd", "dirs", "pwd", "true", "false", "test", "[", "basename", "dirname",
 			// File writers take their operands as written: a quoted "~/" is
 			// a directory named "~" below the cwd, not the home (round l).
 			"cp", "mv", "touch", "mkdir", "rm", "ln", "install", "tee", "dd":
@@ -1646,6 +1666,21 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	if err == nil && actionProtectedStateRelative(filepath.ToSlash(relative)) {
 		return true
 	}
+	// The entry itself is state even when it is a link the user made to a
+	// file elsewhere: a move or rename onto it replaces the state entry.
+	// Its directory is followed and its name kept, so mv a.txt /ext/y/
+	// config.yaml with y -> ~/.defenseclaw names the entry when config.yaml
+	// links out of the tree, as it does when config.yaml is a file (GAP-2560).
+	if actionStateEntryMayDiffer(value) {
+		if name := filepath.Base(value); name != "." && name != ".." && name != string(filepath.Separator) {
+			if parent, ok := ResolveWriteTarget(filepath.Dir(value)); ok {
+				relative, err := filepath.Rel(activeHome, filepath.Join(parent, name))
+				if err == nil && actionProtectedStateRelative(filepath.ToSlash(relative)) {
+					return true
+				}
+			}
+		}
+	}
 	// Only an existing regular file with a second link can alias the state.
 	// A missing or ordinary target costs one stat here, not a second walk.
 	info, err := os.Stat(resolved)
@@ -2048,6 +2083,8 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 			if len(call.Args) > 3 {
 				safe = false
 			}
+		case "dirs":
+			// dirs prints or clears the directory stack (GAP-2552).
 		case "less":
 			for _, arg := range call.Args[1:] {
 				option, known := StaticWord(arg, home)
@@ -3267,4 +3304,20 @@ func actionSpelledWindowsTarget(value string, tilde bool, base, home string, sta
 	}
 	protected, _ := actionWindowsProtected(value, base, home, false)
 	return resolved == root+"/.ssh" || protected
+}
+
+// actionStateEntryMayDiffer reports that the entry reading of value (its
+// directory followed, its name kept) can name another file than its full
+// walk: only when the last name is itself a link. An absolute value whose
+// last name is missing or not a link costs one Lstat, not a second walk
+// (GAP-2279 answer budget); a relative value is always read.
+func actionStateEntryMayDiffer(value string) bool {
+	if !filepath.IsAbs(value) {
+		return true
+	}
+	info, err := os.Lstat(value)
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	return info.Mode()&os.ModeSymlink != 0
 }

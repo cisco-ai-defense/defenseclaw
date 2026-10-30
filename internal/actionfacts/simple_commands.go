@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -214,6 +215,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			// writes the previous ~/f (GAP-2476). The prefixes set only the
 			// environment of the program (effective, used for nested scripts).
 			if resolved, ok := simpleResolvedVariables(text, state.vars); ok {
+				text = resolved
+				changed = true
+			}
+			if resolved, ok := simpleResolvedDirectoryStackTildes(text, &state); ok {
 				text = resolved
 				changed = true
 			}
@@ -1037,6 +1042,98 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 		if start >= 0 && end > start && end <= len(source) {
 			replacements = append(replacements, replacement{start, end,
 				"'" + strings.ReplaceAll(value, "'", "'\\''") + "'"})
+		}
+		return false
+	})
+	if len(replacements) == 0 {
+		return "", false
+	}
+	for i := len(replacements) - 1; i >= 0; i-- {
+		r := replacements[i]
+		source = source[:r.start] + r.text + source[r.end:]
+	}
+	return source, true
+}
+
+// simpleResolvedDirectoryStackTildes writes the bash directory-stack
+// tildes of source (~+, ~-, ~N, ~+N and ~-N at a word start, alone or
+// before a slash) as the directories they name in state: ~+ is PWD, ~- is
+// OLDPWD and ~N / ~+N / ~-N index the dirs list (the current directory,
+// then the pushed directories, last pushed first). After pushd ~/.ssh;
+// pushd /tmp the word ~1 is ~/.ssh, and grep -r . ~1 read the keys while
+// the reading saw a literal ~1 (GAP-2480). A tilde whose directory is not
+// known, or whose index is outside the list (bash keeps it literal), is
+// left as written.
+func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState) (string, bool) {
+	if !strings.Contains(source, "~") {
+		return "", false
+	}
+	file, parsed := shellparse.Parse(source)
+	if !parsed {
+		return "", false
+	}
+	directory := func(prefix string) (string, bool) {
+		switch prefix {
+		case "~+":
+			dir, known := state.vars["PWD"]
+			return dir, known && dir != ""
+		case "~-":
+			dir, known := state.vars["OLDPWD"]
+			return dir, known && dir != ""
+		}
+		digits := strings.TrimLeft(prefix[1:], "+-")
+		if digits == "" || len(digits) > 3 || strings.Trim(digits, "0123456789") != "" ||
+			len(prefix)-1-len(digits) > 1 || state.cwd == "" || state.cwdUnknown {
+			return "", false
+		}
+		index, err := strconv.Atoi(digits)
+		if err != nil {
+			return "", false
+		}
+		list := []string{state.cwd}
+		for at := len(state.dirStack) - 1; at >= 0; at-- {
+			list = append(list, state.dirStack[at])
+		}
+		if strings.HasPrefix(prefix, "~-") {
+			index = len(list) - 1 - index
+		}
+		if index < 0 || index >= len(list) || list[index] == "" {
+			return "", false
+		}
+		return list[index], true
+	}
+	type replacement struct {
+		start, end int
+		text       string
+	}
+	var replacements []replacement
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if redirect, ok := node.(*syntax.Redirect); ok &&
+			(redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc) {
+			return false
+		}
+		word, ok := node.(*syntax.Word)
+		if !ok || len(word.Parts) == 0 {
+			return true
+		}
+		lit, ok := word.Parts[0].(*syntax.Lit)
+		if !ok || !strings.HasPrefix(lit.Value, "~") || len(lit.Value) < 2 {
+			return false
+		}
+		prefix, _, slash := strings.Cut(lit.Value, "/")
+		if !slash && len(word.Parts) > 1 {
+			// A quoted part inside the tilde-prefix stops the expansion.
+			return false
+		}
+		dir, known := directory(prefix)
+		if !known {
+			return false
+		}
+		start := int(word.Pos().Offset())
+		end := start + len(prefix)
+		if start >= 0 && end <= len(source) && source[start:end] == prefix {
+			replacements = append(replacements, replacement{start, end,
+				"'" + strings.ReplaceAll(dir, "'", "'\\''") + "'"})
 		}
 		return false
 	})

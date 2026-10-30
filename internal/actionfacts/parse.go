@@ -288,6 +288,10 @@ func (o parseOutput) facts(tool, cwd string) Facts {
 }
 
 func (o parseOutput) factsWithContext(tool, cwd, activeHome string) Facts {
+	return o.factsWithWindowsShellCWD(tool, cwd, activeHome, false)
+}
+
+func (o parseOutput) factsWithWindowsShellCWD(tool, cwd, activeHome string, windowsShellCWD bool) Facts {
 	status := o.status
 	if status == "" {
 		status = StatusNotApplicable
@@ -298,7 +302,7 @@ func (o parseOutput) factsWithContext(tool, cwd, activeHome string) Facts {
 	}
 	commands := cloneCommands(o.commands)
 	paths := cloneSlice(o.paths)
-	normalizePathFactsForCommands(paths, cwd, activeHome, commands)
+	normalizePathFactsForCommandsInShell(paths, cwd, activeHome, commands, windowsShellCWD)
 	reconcileNormalizedDeviceWrites(commands, paths)
 	network := cloneSlice(o.network)
 	normalizeNetworkFacts(network)

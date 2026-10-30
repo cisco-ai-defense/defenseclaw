@@ -51,6 +51,25 @@ const (
 // (ls /*/*/*/*/*/.defenseclaw/x) walked the whole filesystem past the hook
 // answer budget (RV-pod2-1). ok is false when no pattern matched.
 func StateGlobTwin(command, activeHome string) (twin string, ok bool) {
+	return stateGlobTwin(command, activeHome, nil)
+}
+
+// StateGlobTwinNamed is StateGlobTwin for a gateway that may not list the
+// user's home (a managed gateway behind ProtectHome, GAP-2544): a pattern
+// component directly under .defenseclaw is expanded against stateNames,
+// the names of the protected state files and trees, as if each existed; a
+// deeper pattern component stays as written, since any name the shell
+// writes there (a match or the pattern itself) lies in that tree. Nothing
+// is read from the filesystem. A pattern that names no state name adds
+// nothing, so cp a.txt ~/.defenseclaw/*.bak keeps its plain reading.
+func StateGlobTwinNamed(command, activeHome string, stateNames []string) (twin string, ok bool) {
+	if len(stateNames) == 0 {
+		return "", false
+	}
+	return stateGlobTwin(command, activeHome, stateNames)
+}
+
+func stateGlobTwin(command, activeHome string, stateNames []string) (twin string, ok bool) {
 	defer func() {
 		if recover() != nil {
 			twin, ok = "", false
@@ -93,7 +112,7 @@ func StateGlobTwin(command, activeHome string) (twin string, ok bool) {
 			!strings.ContainsAny(pattern, "*?[") {
 			return false
 		}
-		matches, complete := stateGlobMatches(pattern, home, deadline)
+		matches, complete := stateGlobMatches(pattern, home, deadline, stateNames)
 		if !complete || len(matches) == 0 {
 			return false
 		}
@@ -197,8 +216,10 @@ func statePatternWord(word *syntax.Word, home string) (string, bool) {
 // match the home itself (no directory above it is read), the next one must
 // match .defenseclaw, and only directories of that tree are listed. A
 // longer listing, more matches or the deadline end the expansion
-// (complete is false); the reading then adds nothing.
-func stateGlobMatches(pattern, home string, deadline time.Time) (matches []string, complete bool) {
+// (complete is false); the reading then adds nothing. With stateNames
+// (StateGlobTwinNamed) nothing is read: the .defenseclaw directory holds
+// exactly those names and a deeper pattern component is kept as written.
+func stateGlobMatches(pattern, home string, deadline time.Time, stateNames []string) (matches []string, complete bool) {
 	// A drive home is on a Windows file system, which opens a name spelled
 	// in any case (~/.DefenseClaw/conf*.yaml lists the state); a wildcard
 	// component is still matched by the shell as written.
@@ -223,7 +244,8 @@ func stateGlobMatches(pattern, home string, deadline time.Time) (matches []strin
 	if !match(patternParts[stateIndex], ".defenseclaw") {
 		return nil, false
 	}
-	current := []string{home + "/.defenseclaw"}
+	stateRoot := home + "/.defenseclaw"
+	current := []string{stateRoot}
 	for _, component := range patternParts[stateIndex+1:] {
 		if literal, isLiteral := stateGlobLiteral(component); isLiteral {
 			for index := range current {
@@ -236,7 +258,17 @@ func stateGlobMatches(pattern, home string, deadline time.Time) (matches []strin
 			if time.Now().After(deadline) {
 				return nil, false
 			}
-			names, listed := stateGlobDirNames(dir)
+			var names []string
+			listed := true
+			switch {
+			case stateNames == nil:
+				names, listed = stateGlobDirNames(dir)
+			case dir == stateRoot:
+				names = stateNames
+			default:
+				next = append(next, dir+"/"+component)
+				continue
+			}
 			if !listed {
 				return nil, false
 			}
@@ -250,6 +282,9 @@ func stateGlobMatches(pattern, home string, deadline time.Time) (matches []strin
 			}
 		}
 		current = next
+	}
+	if stateNames != nil {
+		return current, true
 	}
 	for _, candidate := range current {
 		if _, err := os.Lstat(candidate); err == nil {

@@ -24,6 +24,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -48,7 +49,7 @@ func POSIXPowerShellCommandFacts(input Input, facts Facts) []Facts {
 	default:
 		return nil
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(input.Command), "")
 	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 ||
 		file.Stmts[0].Background || file.Stmts[0].Negated {
 		return nil

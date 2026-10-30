@@ -314,7 +314,9 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		return add(names)
 	case program == "cp" || program == "gcp":
 		if len(words) < 3 {
-			return nil // A cp with no destination writes nothing (GAP-2528).
+			// cp with fewer than two operands fails on its own and writes
+			// nothing (GAP-2528).
+			return nil
 		}
 		for _, option := range words[1:] {
 			if option == "--recursive" || strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "--") &&

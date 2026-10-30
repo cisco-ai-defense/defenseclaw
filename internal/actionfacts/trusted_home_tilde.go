@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -52,7 +53,7 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 		return trustedPOSIXHomeRewrite{}, false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
-		Parse(strings.NewReader(source), "")
+		Parse(shellparse.Reader(source), "")
 	if err != nil || len(file.Stmts) == 0 {
 		return trustedPOSIXHomeRewrite{}, false
 	}
@@ -65,7 +66,7 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 		if !ok {
 			return trustedPOSIXHomeRewrite{}, false
 		}
-		file, err = syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(source), "")
+		file, err = syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(source), "")
 		if err != nil || len(file.Stmts) != len(inert) {
 			return trustedPOSIXHomeRewrite{}, false
 		}
@@ -322,7 +323,7 @@ func ShellRedirectTargets(command, activeHome string) ([]string, bool) {
 	}
 	windows := !strings.HasPrefix(home, "/")
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).
-		Parse(strings.NewReader(command), "")
+		Parse(shellparse.Reader(command), "")
 	if err != nil || len(file.Stmts) == 0 {
 		return nil, false
 	}
@@ -671,7 +672,7 @@ func homeValueSetByCall(args []*syntax.Word, home string, windows bool, depth in
 // eval or trap text. Text that does not parse runs nothing the shell could
 // finish, so it sets nothing.
 func homeValueSetByText(text, home string, windows bool, depth int) homeNames {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(text), "")
 	if err != nil {
 		return 0
 	}
@@ -893,7 +894,7 @@ func normalizeTrustedHomeInertList(file *syntax.File) (string, []bool, bool) {
 	}
 	source := strings.Join(parts, "; ")
 	// The mask must line up with the statements the result parses into.
-	reparsed, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(source), "")
+	reparsed, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(source), "")
 	if err != nil || len(reparsed.Stmts) != len(inert) {
 		return "", nil, false
 	}
@@ -901,7 +902,7 @@ func normalizeTrustedHomeInertList(file *syntax.File) (string, []bool, bool) {
 }
 
 func normalizeTrustedHomeInertListSource(source string) (string, []bool, bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(source), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(source), "")
 	if err != nil || file == nil || len(file.Stmts) == 0 {
 		return "", nil, false
 	}

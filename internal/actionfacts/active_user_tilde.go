@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -64,7 +65,7 @@ func ActiveUserTildeTwin(command, activeHome string, logins ...string) (twin str
 		return false
 	}
 	homeFree := !strings.Contains(withoutShellComments(command, syntax.LangBash), "HOME")
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(command), "")
 	if err != nil {
 		return "", nil, false
 	}
@@ -186,7 +187,7 @@ func MSYSDrivePathTwin(command, activeHome string) (string, bool) {
 	if !strings.Contains(command, "/") {
 		return unchanged()
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(command), "")
 	if err != nil {
 		return "", false
 	}
@@ -310,7 +311,7 @@ func windowsProfileHomeTwin(command string) (string, bool) {
 	if !strings.Contains(scan, name) || strings.Contains(scan, "HOME") {
 		return command, false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(command), "")
 	if err != nil {
 		return command, false
 	}
