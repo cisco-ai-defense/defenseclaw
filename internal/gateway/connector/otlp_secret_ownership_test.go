@@ -274,20 +274,31 @@ func codexSecretOwnershipAcrossWriters(t *testing.T, goos string) {
 // collector recorded on a published 1.0.2 upgrade subject (also the 1.0.3
 // shape) and the rest of the released product env.
 //
-// The Linux, Darwin and Windows tests run the table for one fixture GOOS
-// each: the whole table is too long for one CI shard (about 18 minutes on
-// a Windows runner), and the shard scripts split only top-level tests.
-func TestClaudeSecretOwnershipAcrossWritersLinux(t *testing.T) {
-	claudeSecretOwnershipAcrossWriters(t, "linux")
+// Each test runs the table for one fixture GOOS and one released subject:
+// the whole table is too long for one CI shard (about 18 minutes on a
+// Windows runner), one GOOS alone took 422 s of a shard's 660 s timeout and
+// timed out on a slower runner (rel-1-0-6:GAP-0030), and the shard scripts
+// split only top-level tests.
+func TestClaudeSecretOwnershipAcrossWritersLinux102(t *testing.T) {
+	claudeSecretOwnershipAcrossWriters(t, "linux", "1.0.2")
 }
-func TestClaudeSecretOwnershipAcrossWritersDarwin(t *testing.T) {
-	claudeSecretOwnershipAcrossWriters(t, "darwin")
+func TestClaudeSecretOwnershipAcrossWritersLinux103(t *testing.T) {
+	claudeSecretOwnershipAcrossWriters(t, "linux", "1.0.3")
 }
-func TestClaudeSecretOwnershipAcrossWritersWindows(t *testing.T) {
-	claudeSecretOwnershipAcrossWriters(t, "windows")
+func TestClaudeSecretOwnershipAcrossWritersDarwin102(t *testing.T) {
+	claudeSecretOwnershipAcrossWriters(t, "darwin", "1.0.2")
+}
+func TestClaudeSecretOwnershipAcrossWritersDarwin103(t *testing.T) {
+	claudeSecretOwnershipAcrossWriters(t, "darwin", "1.0.3")
+}
+func TestClaudeSecretOwnershipAcrossWritersWindows102(t *testing.T) {
+	claudeSecretOwnershipAcrossWriters(t, "windows", "1.0.2")
+}
+func TestClaudeSecretOwnershipAcrossWritersWindows103(t *testing.T) {
+	claudeSecretOwnershipAcrossWriters(t, "windows", "1.0.3")
 }
 
-func claudeSecretOwnershipAcrossWriters(t *testing.T, goos string) {
+func claudeSecretOwnershipAcrossWriters(t *testing.T, goos, release string) {
 	fixture, err := os.ReadFile(filepath.Join("testdata", "claudecode_operator_1.0.2_1.0.3.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -296,117 +307,115 @@ func claudeSecretOwnershipAcrossWriters(t *testing.T, goos string) {
 	if err := json.Unmarshal(fixture, &operator); err != nil {
 		t.Fatal(err)
 	}
-	for _, release := range []string{"1.0.2", "1.0.3"} {
-		for _, row := range otlpSecretRows() {
-			for _, writer := range []string{"setup", "managed_cleanup"} {
-				t.Run(release+"/"+goos+"/"+row.name+"/"+writer, func(t *testing.T) {
-					dir := t.TempDir()
-					pinClaudeUpgradeTestOwner(t, dir)
-					settingsPath := filepath.Join(dir, "settings.json")
-					prior := ClaudeCodeSettingsPathOverride
-					ClaudeCodeSettingsPathOverride = settingsPath
-					t.Cleanup(func() { ClaudeCodeSettingsPathOverride = prior })
-					conn := NewClaudeCodeConnector()
-					earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", GOOS: goos, sandboxNativeOTLP: true}
-					if err := conn.Setup(context.Background(), earlier); err != nil {
-						t.Fatalf("released %s setup: %v", release, err)
+	for _, row := range otlpSecretRows() {
+		for _, writer := range []string{"setup", "managed_cleanup"} {
+			t.Run(release+"/"+goos+"/"+row.name+"/"+writer, func(t *testing.T) {
+				dir := t.TempDir()
+				pinClaudeUpgradeTestOwner(t, dir)
+				settingsPath := filepath.Join(dir, "settings.json")
+				prior := ClaudeCodeSettingsPathOverride
+				ClaudeCodeSettingsPathOverride = settingsPath
+				t.Cleanup(func() { ClaudeCodeSettingsPathOverride = prior })
+				conn := NewClaudeCodeConnector()
+				earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", GOOS: goos, sandboxNativeOTLP: true}
+				if err := conn.Setup(context.Background(), earlier); err != nil {
+					t.Fatalf("released %s setup: %v", release, err)
+				}
+				token, err := LoadOTLPPathToken(dir, OTLPScopeClaude)
+				if err != nil || token == "" {
+					t.Fatalf("released scoped token: present=%t err=%v", token != "", err)
+				}
+				data, err := os.ReadFile(settingsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var settings map[string]interface{}
+				if err := json.Unmarshal(data, &settings); err != nil {
+					t.Fatal(err)
+				}
+				env := settings["env"].(map[string]interface{})
+				for key, value := range operator {
+					env[key] = value
+				}
+				route := row.base + "/"
+				if row.scoped {
+					route += "otlp/claudecode/" + token + "/"
+				}
+				if row.scopedHex {
+					route += "otlp/claudecode/" + otlpSecretOperatorHex + "/"
+				}
+				route += "v1/logs" + row.query
+				var parts []string
+				if row.auth != "" {
+					for _, line := range strings.Split(otlpSecretAuth(row.auth, token), "\n") {
+						name, value, _ := strings.Cut(line, " = ")
+						parts = append(parts, name+"="+strings.Trim(value, "'"))
 					}
-					token, err := LoadOTLPPathToken(dir, OTLPScopeClaude)
-					if err != nil || token == "" {
-						t.Fatalf("released scoped token: present=%t err=%v", token != "", err)
-					}
-					data, err := os.ReadFile(settingsPath)
-					if err != nil {
+				}
+				switch row.markers {
+				case "keep":
+					parts = append(parts, "x-defenseclaw-source=claudecode", "x-defenseclaw-client=claudecode-otel/1.0")
+				case "caps":
+					parts = append(parts, "X-DefenseClaw-Source=claudecode", "X-DefenseClaw-Client=claudecode-otel/1.0")
+				}
+				headers := strings.Join(append(parts, "x-tenant=logs"), ",")
+				env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] = route
+				env["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] = headers
+				env["OTEL_LOGS_EXPORTER"] = "otlp"
+				writeClaudeUpgradeSettings(t, settingsPath, settings)
+				if row.dropToken {
+					if err := RemoveOTLPPathToken(dir, OTLPScopeClaude); err != nil {
 						t.Fatal(err)
 					}
-					var settings map[string]interface{}
-					if err := json.Unmarshal(data, &settings); err != nil {
+					if err := os.Remove(filepath.Join(dir, "claudecode_backup.json")); err != nil {
 						t.Fatal(err)
 					}
-					env := settings["env"].(map[string]interface{})
-					for key, value := range operator {
-						env[key] = value
-					}
-					route := row.base + "/"
-					if row.scoped {
-						route += "otlp/claudecode/" + token + "/"
-					}
-					if row.scopedHex {
-						route += "otlp/claudecode/" + otlpSecretOperatorHex + "/"
-					}
-					route += "v1/logs" + row.query
-					var parts []string
-					if row.auth != "" {
-						for _, line := range strings.Split(otlpSecretAuth(row.auth, token), "\n") {
-							name, value, _ := strings.Cut(line, " = ")
-							parts = append(parts, name+"="+strings.Trim(value, "'"))
-						}
-					}
-					switch row.markers {
-					case "keep":
-						parts = append(parts, "x-defenseclaw-source=claudecode", "x-defenseclaw-client=claudecode-otel/1.0")
-					case "caps":
-						parts = append(parts, "X-DefenseClaw-Source=claudecode", "X-DefenseClaw-Client=claudecode-otel/1.0")
-					}
-					headers := strings.Join(append(parts, "x-tenant=logs"), ",")
-					env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] = route
-					env["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] = headers
-					env["OTEL_LOGS_EXPORTER"] = "otlp"
-					writeClaudeUpgradeSettings(t, settingsPath, settings)
-					if row.dropToken {
-						if err := RemoveOTLPPathToken(dir, OTLPScopeClaude); err != nil {
-							t.Fatal(err)
-						}
-						if err := os.Remove(filepath.Join(dir, "claudecode_backup.json")); err != nil {
-							t.Fatal(err)
-						}
-					}
+				}
 
-					if writer == "setup" {
-						upgrade := earlier
-						upgrade.sandboxNativeOTLP = false
-						upgrade.APIAddr = "127.0.0.1:19082"
-						if err := conn.Setup(context.Background(), upgrade); err != nil {
-							t.Fatalf("upgrade: %v", err)
-						}
-					} else if _, err := RemoveUserNativeOTLP("claudecode", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err != nil {
-						t.Fatalf("managed cleanup: %v", err)
+				if writer == "setup" {
+					upgrade := earlier
+					upgrade.sandboxNativeOTLP = false
+					upgrade.APIAddr = "127.0.0.1:19082"
+					if err := conn.Setup(context.Background(), upgrade); err != nil {
+						t.Fatalf("upgrade: %v", err)
 					}
-					raw, err := os.ReadFile(settingsPath)
-					if err != nil {
-						t.Fatal(err)
+				} else if _, err := RemoveUserNativeOTLP("claudecode", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err != nil {
+					t.Fatalf("managed cleanup: %v", err)
+				}
+				raw, err := os.ReadFile(settingsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if row.product && otlpSecretLeaked(string(raw), token) {
+					t.Fatal("product credential survived")
+				}
+				got := readClaudeUpgradeEnv(t, settingsPath)
+				for key, value := range operator {
+					if got[key] != value {
+						t.Errorf("operator %s = %q, want %q", key, got[key], value)
 					}
-					if row.product && otlpSecretLeaked(string(raw), token) {
-						t.Fatal("product credential survived")
+				}
+				if row.recorded {
+					if _, kept := got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]; kept || got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] != headers {
+						t.Fatalf("recorded product route kept=%t or operator headers changed", kept)
 					}
-					got := readClaudeUpgradeEnv(t, settingsPath)
-					for key, value := range operator {
-						if got[key] != value {
-							t.Errorf("operator %s = %q, want %q", key, got[key], value)
-						}
+				} else if row.product {
+					if _, kept := got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]; kept {
+						t.Fatal("product logs route survived")
 					}
-					if row.recorded {
-						if _, kept := got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]; kept || got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] != headers {
-							t.Fatalf("recorded product route kept=%t or operator headers changed", kept)
-						}
-					} else if row.product {
-						if _, kept := got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]; kept {
-							t.Fatal("product logs route survived")
-						}
-						// Headers that carry no credential (the scoped-path row)
-						// are the operator's bytes.
-						if _, kept := got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"]; kept == (row.auth != "") {
-							t.Fatalf("logs headers kept=%t, want %t", kept, row.auth == "")
-						}
-					} else if got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != route || got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] != headers || got["OTEL_LOGS_EXPORTER"] != "otlp" {
-						t.Fatalf("operator logs route changed: endpoint=%t headers=%t gate=%q",
-							got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] == route, got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] == headers, got["OTEL_LOGS_EXPORTER"])
+					// Headers that carry no credential (the scoped-path row)
+					// are the operator's bytes.
+					if _, kept := got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"]; kept == (row.auth != "") {
+						t.Fatalf("logs headers kept=%t, want %t", kept, row.auth == "")
 					}
-					if left := otlpSecretResidue(t, "claudecode", dir, "settings.json"); len(left) != 0 {
-						t.Fatalf("residue after %s: %v", writer, left)
-					}
-				})
-			}
+				} else if got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != route || got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] != headers || got["OTEL_LOGS_EXPORTER"] != "otlp" {
+					t.Fatalf("operator logs route changed: endpoint=%t headers=%t gate=%q",
+						got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] == route, got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] == headers, got["OTEL_LOGS_EXPORTER"])
+				}
+				if left := otlpSecretResidue(t, "claudecode", dir, "settings.json"); len(left) != 0 {
+					t.Fatalf("residue after %s: %v", writer, left)
+				}
+			})
 		}
 	}
 }
