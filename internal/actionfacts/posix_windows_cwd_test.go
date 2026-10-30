@@ -75,7 +75,7 @@ func TestPOSIXRelativeOperandResolvesUnderAWindowsCWD(t *testing.T) {
 		if fact.Value != "../.defenseclaw/config.yaml" {
 			continue
 		}
-		if got := slash(fact.Resolved); got != "" && got != "C:/Users/u/.defenseclaw/config.yaml" {
+		if got := slash(fact.Resolved); got != "" && got != "c:/users/u/.defenseclaw/config.yaml" {
 			t.Errorf("unmoved %s resolved %q, want unresolved or the home path", fact.Value, fact.Resolved)
 		}
 	}
