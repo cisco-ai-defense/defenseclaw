@@ -2416,10 +2416,27 @@ func setWindowsManagedPolicyProtectionNoFollow(
 			return err
 		}
 	}
-	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
+	// SetKernelObjectSecurity writes only this object's descriptor.
+	// SetSecurityInfo would also push the new inheritable entries into every
+	// existing child, and a vendor folder holds files DefenseClaw neither
+	// owns nor may rewrite; one child it can't open fails the whole call.
+	descriptor, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		return fmt.Errorf("build security descriptor: %w", err)
+	}
+	if err := descriptor.SetOwner(owner, false); err != nil {
+		return fmt.Errorf("build security descriptor owner: %w", err)
+	}
+	if err := descriptor.SetDACL(acl, true, false); err != nil {
+		return fmt.Errorf("build security descriptor DACL: %w", err)
+	}
+	if err := descriptor.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
+		return fmt.Errorf("build security descriptor control: %w", err)
+	}
+	if err := windows.SetKernelObjectSecurity(handle, windows.OWNER_SECURITY_INFORMATION, descriptor); err != nil {
 		return fmt.Errorf("set owner %s: %w", windowsSIDString(owner), err)
 	}
-	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+	if err := windows.SetKernelObjectSecurity(handle, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, descriptor); err != nil {
 		return fmt.Errorf("set protected DACL: %w", err)
 	}
 	return nil

@@ -399,6 +399,16 @@ namespace $nativeNamespace
             IntPtr dacl,
             IntPtr sacl);
 
+        // Writes only the object's own descriptor. SetSecurityInfo on a
+        // directory also pushes inheritable entries into every existing
+        // child, and fails when one child can't be opened.
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetKernelObjectSecurity(
+            IntPtr handle,
+            uint securityInformation,
+            IntPtr securityDescriptor);
+
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetSecurityDescriptorOwner(
@@ -1521,17 +1531,34 @@ namespace $nativeNamespace
                                 Marshal.GetLastWin32Error(),
                                 "query managed path identity failed: " + path);
                         ValidateRepairTarget(before, directory, path);
-                        uint result = SetSecurityInfo(
-                            handle,
-                            SE_FILE_OBJECT,
-                            OWNER_SECURITY_INFORMATION |
-                                GROUP_SECURITY_INFORMATION |
-                                DACL_SECURITY_INFORMATION |
-                                PROTECTED_DACL_SECURITY_INFORMATION,
-                            owner,
-                            group,
-                            dacl,
-                            IntPtr.Zero);
+                        uint result = 0;
+                        if (directory)
+                        {
+                            // A repaired folder can hold files DefenseClaw
+                            // doesn't own; only the folder is re-stamped.
+                            if (!SetKernelObjectSecurity(
+                                    handle,
+                                    OWNER_SECURITY_INFORMATION |
+                                        GROUP_SECURITY_INFORMATION |
+                                        DACL_SECURITY_INFORMATION |
+                                        PROTECTED_DACL_SECURITY_INFORMATION,
+                                    descriptor))
+                                result = checked((uint)Marshal.GetLastWin32Error());
+                        }
+                        else
+                        {
+                            result = SetSecurityInfo(
+                                handle,
+                                SE_FILE_OBJECT,
+                                OWNER_SECURITY_INFORMATION |
+                                    GROUP_SECURITY_INFORMATION |
+                                    DACL_SECURITY_INFORMATION |
+                                    PROTECTED_DACL_SECURITY_INFORMATION,
+                                owner,
+                                group,
+                                dacl,
+                                IntPtr.Zero);
+                        }
                         if (result != 0)
                             throw new Win32Exception(
                                 checked((int)result),
