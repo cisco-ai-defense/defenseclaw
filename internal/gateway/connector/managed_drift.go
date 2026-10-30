@@ -388,7 +388,10 @@ func (r managedTransientRetry) run(
 // emitManagedResilience logs one resilience event for a managed connector
 // object. Accepts are reported once per process for the same path and reason
 // so a long-running guardian or a hot hook path does not repeat the line on
-// every pass; repairs and boundary findings are actions and always logged.
+// every pass. A boundary finding for the same path and reason is logged at
+// most once per managedBoundaryWindow, so a writer that keeps coming back does
+// not flood the log while a new path or reason is still logged at once.
+// Repairs are actions and always logged.
 // emitManagedRepairResilience logs a completed repair. The re-stamp itself is
 // always a MarkerRepair line, so every repair is visible under one marker; an
 // untrusted writer on policy or code is additionally reported as a boundary
@@ -402,6 +405,9 @@ func emitManagedRepairResilience(drift managedDrift, policyOrCode bool, path, re
 
 func emitManagedResilience(marker, path, reason string, extra map[string]string) {
 	if marker == managed.MarkerAccept && !managedAcceptDedupe.first(path, reason) {
+		return
+	}
+	if marker == managed.MarkerBoundary && !managedBoundaryDedupe.due(marker, path, reason) {
 		return
 	}
 	fields := map[string]string{"path": path, "reason": reason}
@@ -433,6 +439,65 @@ func (d *managedResilienceDedupe) first(path, reason string) bool {
 	}
 	d.seen[key] = struct{}{}
 	return true
+}
+
+const (
+	managedBoundaryWindow     = time.Hour
+	managedBoundaryDedupeSize = 1024
+)
+
+// managedWindowedDedupe remembers when each (marker, path, reason) was last
+// logged. It holds at most max entries: expired entries are dropped first and
+// then the oldest one, so memory stays bounded however many paths drift.
+type managedWindowedDedupe struct {
+	mu     sync.Mutex
+	window time.Duration
+	max    int
+	now    func() time.Time
+	last   map[string]time.Time
+}
+
+var managedBoundaryDedupe = &managedWindowedDedupe{
+	window: managedBoundaryWindow,
+	max:    managedBoundaryDedupeSize,
+	now:    time.Now,
+}
+
+func (d *managedWindowedDedupe) due(marker, path, reason string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.last == nil {
+		d.last = map[string]time.Time{}
+	}
+	now := d.now()
+	key := marker + "\x00" + strings.ToLower(path) + "\x00" + reason
+	if at, ok := d.last[key]; ok && now.Sub(at) < d.window {
+		return false
+	}
+	if _, ok := d.last[key]; !ok && len(d.last) >= d.max {
+		d.evict(now)
+	}
+	d.last[key] = now
+	return true
+}
+
+func (d *managedWindowedDedupe) evict(now time.Time) {
+	for key, at := range d.last {
+		if now.Sub(at) >= d.window {
+			delete(d.last, key)
+		}
+	}
+	if len(d.last) < d.max {
+		return
+	}
+	var oldestKey string
+	var oldest time.Time
+	for key, at := range d.last {
+		if oldestKey == "" || at.Before(oldest) {
+			oldestKey, oldest = key, at
+		}
+	}
+	delete(d.last, oldestKey)
 }
 
 // managedPinMismatch reports an advisory content-hash pin mismatch. Pins never

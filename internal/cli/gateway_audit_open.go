@@ -23,7 +23,9 @@ import (
 // A managed gateway that can't open its audit store usually lost its write
 // entry to permission drift; the LocalSystem guardian puts it back within a
 // tick. Waiting here keeps the service up instead of exiting into a restart
-// loop. Outside managed mode the first failure is returned as before.
+// loop. Only the long-running gateway (the root sidecar command) waits;
+// short-lived subcommands and non-managed deployments return the first
+// failure as before.
 var (
 	gatewayAuditOpenBudget       = 3 * time.Minute
 	gatewayAuditOpenInitialDelay = 5 * time.Second
@@ -31,9 +33,9 @@ var (
 	gatewayAuditOpenAttempt      = openGatewayAuditStoreOnce
 )
 
-func openGatewayAuditStore(ctx context.Context, deploymentMode, path string) (*audit.Store, error) {
+func openGatewayAuditStore(ctx context.Context, deploymentMode, path string, waitForRepair bool) (*audit.Store, error) {
 	store, err := gatewayAuditOpenAttempt(deploymentMode, path)
-	if err == nil || !managed.IsManagedEnterprise(deploymentMode) {
+	if err == nil || !waitForRepair || !managed.IsManagedEnterprise(deploymentMode) {
 		return store, err
 	}
 	if ctx == nil {

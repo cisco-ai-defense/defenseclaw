@@ -289,6 +289,59 @@ func TestEmitManagedResilienceDedupesAcceptsOnly(t *testing.T) {
 	}
 }
 
+func TestEmitManagedResilienceDedupesBoundaryPerWindow(t *testing.T) {
+	original := managed.ReportResilienceEvent
+	originalNow := managedBoundaryDedupe.now
+	clock := time.Unix(1_700_000_000, 0)
+	managedBoundaryDedupe.now = func() time.Time { return clock }
+	t.Cleanup(func() {
+		managed.ReportResilienceEvent = original
+		managedBoundaryDedupe.now = originalNow
+	})
+	var events []string
+	managed.ReportResilienceEvent = func(marker string, fields map[string]string) {
+		events = append(events, marker+" "+fields["reason"])
+	}
+	path := fmt.Sprintf(`C:\drift-test\%d`, time.Now().UnixNano())
+	emitManagedResilience(managed.MarkerBoundary, path, "untrusted writer", nil)
+	emitManagedResilience(managed.MarkerBoundary, path, "untrusted writer", nil)
+	emitManagedResilience(managed.MarkerBoundary, path, "untrusted owner", nil)
+	emitManagedResilience(managed.MarkerBoundary, path+`\other`, "untrusted writer", nil)
+	emitManagedResilience(managed.MarkerRepair, path, "untrusted writer", nil)
+	clock = clock.Add(managedBoundaryWindow)
+	emitManagedResilience(managed.MarkerBoundary, path, "untrusted writer", nil)
+	want := []string{
+		managed.MarkerBoundary + " untrusted writer",
+		managed.MarkerBoundary + " untrusted owner",
+		managed.MarkerBoundary + " untrusted writer",
+		managed.MarkerRepair + " untrusted writer",
+		managed.MarkerBoundary + " untrusted writer",
+	}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+func TestManagedWindowedDedupeStaysBounded(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0)
+	d := &managedWindowedDedupe{window: time.Hour, max: 3, now: func() time.Time { return clock }}
+	for i := 0; i < 5; i++ {
+		clock = clock.Add(time.Second)
+		if !d.due(managed.MarkerBoundary, fmt.Sprintf("p%d", i), "r") {
+			t.Fatalf("first sighting of p%d suppressed", i)
+		}
+		if len(d.last) > 3 {
+			t.Fatalf("dedupe holds %d entries, want at most 3", len(d.last))
+		}
+	}
+	if d.due(managed.MarkerBoundary, "p4", "r") {
+		t.Fatal("recent entry was evicted instead of the oldest")
+	}
+	if !d.due(managed.MarkerBoundary, "p0", "r") {
+		t.Fatal("evicted oldest entry still suppressed")
+	}
+}
+
 func TestIsManagedPermissionDrift(t *testing.T) {
 	drift := managedPermissionDrift("owner %s is not trusted", driftTestAdminUser)
 	if !IsManagedPermissionDrift(drift) || !IsManagedPermissionDrift(fmt.Errorf("read token: %w", drift)) {

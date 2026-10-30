@@ -542,7 +542,9 @@ func assessCanonicalDescriptor(
 			// OWNER RIGHTS write only extends what the owner already holds.
 			continue
 		}
-		if kind.Directory() && ace.Flags&aceFlagInherited != 0 &&
+		// An object-inheritable entry would pass these bits to new files,
+		// where add-file and add-subfolder mean write data and append data.
+		if kind.Directory() && ace.Flags&aceFlagInherited != 0 && ace.Flags&aceFlagObjectInherit == 0 &&
 			(ace.SID == sidUsers || ace.SID == sidAuthenticatedUser) && createChildOnlyMask(ace.Mask) {
 			a.Drift = append(a.Drift, fmt.Sprintf("inherited create-child entry for %s", ace.SID))
 			continue

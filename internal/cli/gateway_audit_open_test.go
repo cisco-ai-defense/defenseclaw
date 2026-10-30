@@ -45,7 +45,7 @@ func stubGatewayAuditOpen(t *testing.T, failures int) *int {
 
 func TestOpenGatewayAuditStoreWaitsForRepairInManagedMode(t *testing.T) {
 	attempts := stubGatewayAuditOpen(t, 3)
-	store, err := openGatewayAuditStore(context.Background(), "managed_enterprise", "audit.db")
+	store, err := openGatewayAuditStore(context.Background(), "managed_enterprise", "audit.db", true)
 	if err != nil || store == nil {
 		t.Fatalf("open = %v, %v; want the store once the guardian repaired it", store, err)
 	}
@@ -56,7 +56,7 @@ func TestOpenGatewayAuditStoreWaitsForRepairInManagedMode(t *testing.T) {
 
 func TestOpenGatewayAuditStoreFailsFastOutsideManagedMode(t *testing.T) {
 	attempts := stubGatewayAuditOpen(t, 3)
-	if _, err := openGatewayAuditStore(context.Background(), "", "audit.db"); err == nil {
+	if _, err := openGatewayAuditStore(context.Background(), "", "audit.db", true); err == nil {
 		t.Fatal("unmanaged open succeeded after a failure")
 	}
 	if *attempts != 1 {
@@ -68,7 +68,17 @@ func TestOpenGatewayAuditStoreStopsWhenCancelled(t *testing.T) {
 	stubGatewayAuditOpen(t, 1000)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := openGatewayAuditStore(ctx, "managed_enterprise", "audit.db"); err == nil {
+	if _, err := openGatewayAuditStore(ctx, "managed_enterprise", "audit.db", true); err == nil {
 		t.Fatal("cancelled open succeeded")
+	}
+}
+
+func TestOpenGatewayAuditStoreFailsFastForSubcommandsInManagedMode(t *testing.T) {
+	attempts := stubGatewayAuditOpen(t, 3)
+	if _, err := openGatewayAuditStore(context.Background(), "managed_enterprise", "audit.db", false); err == nil {
+		t.Fatal("subcommand open succeeded after a failure")
+	}
+	if *attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", *attempts)
 	}
 }

@@ -16,14 +16,6 @@ import (
 	"strings"
 )
 
-// The canonical service descriptors, exactly as the installer module applies
-// them: $script:ServiceSDDL for the SCM object (sc sdset) and the
-// Set-DefenseClawServiceRegistryAcl descriptor for the service key.
-const (
-	managedServiceSDDL         = "D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;BU)"
-	managedServiceRegistrySDDL = "O:BAG:BAD:P(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KR;;;BU)"
-)
-
 // Service and registry access masks used by the canonical forms.
 const (
 	maskServiceAll          uint32 = 0x000f01ff // CCDCLCSWRPWPDTLOCRSDRCWDWO

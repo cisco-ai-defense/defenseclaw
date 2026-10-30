@@ -21,6 +21,14 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
+// The canonical service descriptors, exactly as the installer module applies
+// them: $script:ServiceSDDL for the SCM object (sc sdset) and the
+// Set-DefenseClawServiceRegistryAcl descriptor for the service key.
+const (
+	managedServiceSDDL         = "D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;BU)"
+	managedServiceRegistrySDDL = "O:BAG:BAD:P(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KR;;;BU)"
+)
+
 // RepairWindowsManagedServiceSecurity keeps the SCM descriptor and the service
 // registry key of each named service at the installer's canonical form. Each
 // descriptor is read first and written only when it is not exactly canonical,

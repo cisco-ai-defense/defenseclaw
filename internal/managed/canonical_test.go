@@ -86,6 +86,10 @@ func TestAssessCanonicalDescriptorRuntimeDirectoryDrift(t *testing.T) {
 			d.Protected = false
 			d.ACEs = append(d.ACEs, descriptorACE{Type: aceTypeAllowed, Flags: aceFlagInherited | aceFlagContainerInherit, Mask: maskAppendData | maskWriteData, SID: sidUsers})
 		}, want: CanonicalAccepted},
+		{name: "inherited object-inheritable users create-child", mutate: func(d *objectDescriptor) {
+			d.Protected = false
+			d.ACEs = append(d.ACEs, descriptorACE{Type: aceTypeAllowed, Flags: aceFlagInherited | oici, Mask: maskAppendData | maskWriteData, SID: sidUsers})
+		}, want: CanonicalBoundary},
 		{name: "deny entry for unrelated principal", mutate: func(d *objectDescriptor) {
 			d.ACEs = append(d.ACEs, descriptorACE{Type: aceTypeDenied, Mask: maskWriteData, SID: sidUsers})
 		}, want: CanonicalAccepted},

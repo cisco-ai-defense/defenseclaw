@@ -138,7 +138,9 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	version.SetBinaryVersion(appVersion)
-	auditStore, err = openGatewayAuditStore(cmd.Context(), cfg.DeploymentMode, cfg.AuditDB)
+	// Only the root sidecar command (the gateway service) waits out an audit
+	// store repair; subcommands fail fast.
+	auditStore, err = openGatewayAuditStore(cmd.Context(), cfg.DeploymentMode, cfg.AuditDB, cmd.Parent() == nil)
 	if err != nil {
 		return err
 	}
