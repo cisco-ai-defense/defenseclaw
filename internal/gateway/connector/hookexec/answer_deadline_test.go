@@ -257,6 +257,62 @@ func TestBusyResendsEndWithinTheAnswerBudget(t *testing.T) {
 	}
 }
 
+// GAP-0050: a busy gateway never denies a tool call before the answer
+// budget ends (owner ruling: in action or closed mode a deny only after the
+// full hook budget). A 429 for the account's own budget is sent again soon,
+// so a call whose account slot frees within the budget is answered; a full
+// gateway keeps its Retry-After, and a resend that no longer fits waits for
+// the budget to end before the call is denied.
+func TestBusyGatewayNeverDeniesBeforeTheAnswerBudget(t *testing.T) {
+	const budget = 2200 * time.Millisecond
+	busy := func(w http.ResponseWriter, reason string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate_limited","reason":"` + reason + `"}`))
+	}
+	t.Run("the account slot frees inside the budget", func(t *testing.T) {
+		shortAnswerBudget(t, budget)
+		started := time.Now()
+		var calls atomic.Int32
+		addr := gatewayAt(t, func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			// Free after 1.4 s: a resend after the whole second of
+			// Retry-After comes before, and the next one would not fit.
+			if time.Since(started) < 1400*time.Millisecond {
+				busy(w, "enterprise_managed_rate_limited")
+				return
+			}
+			_, _ = w.Write([]byte(`{"action":"allow"}`))
+		})
+		result, elapsed := runAgainstGateway(t, "claudecode", addr, managedCodex)
+		if blocked(result) {
+			t.Fatalf("after %s and %d calls: code=%d stdout=%q stderr=%q, want the allow once the account slot freed",
+				elapsed, calls.Load(), result.code, result.stdout, result.stderr)
+		}
+	})
+	for _, reason := range []string{"enterprise_managed_rate_limited", "enterprise_managed_overloaded"} {
+		t.Run("always busy "+reason, func(t *testing.T) {
+			shortAnswerBudget(t, budget)
+			var calls atomic.Int32
+			addr := gatewayAt(t, func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				busy(w, reason)
+			})
+			result, elapsed := runAgainstGateway(t, "claudecode", addr, managedCodex)
+			if !blocked(result) || !strings.Contains(result.stdout+result.stderr, managedGatewayNoAnswerReason) {
+				t.Fatalf("code=%d stdout=%q stderr=%q, want a block naming the slow gateway", result.code, result.stdout, result.stderr)
+			}
+			if elapsed < budget-50*time.Millisecond || elapsed > budget+500*time.Millisecond {
+				t.Fatalf("the busy call was denied after %s, want at the end of the %s budget", elapsed, budget)
+			}
+			if reason == "enterprise_managed_overloaded" && calls.Load() > 2 {
+				t.Fatalf("a full gateway saw %d calls, want its Retry-After kept (at most 2)", calls.Load())
+			}
+		})
+	}
+}
+
 func TestToolGateEvents(t *testing.T) {
 	for _, test := range []struct {
 		connector, event string

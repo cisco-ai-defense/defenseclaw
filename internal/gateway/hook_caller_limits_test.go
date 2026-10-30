@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -497,5 +498,70 @@ func TestAnsweredRequestDoesNotTakeTheRunSlotBackFromTheNextHook(t *testing.T) {
 	releaseNext()
 	if budget.inFlight != 0 || len(budget.running) != 0 {
 		t.Fatalf("in-flight = %d, running = %d, want 0 and 0", budget.inFlight, len(budget.running))
+	}
+}
+
+// GAP-0050: the calls of one parallel tool turn whose sessions the gateway
+// has not seen all wait for their session starts at the same time. A call
+// that waits for its start uses no gateway CPU, so it is parked and does not
+// hold back the turn's next calls at the caller's in-flight cap; before,
+// those were refused until the first calls' arrival wait ended, then paid
+// their own, and a 60-way turn ran past the managed answer budget. Parking
+// stays bounded: the caller's parked calls never exceed its in-flight cap.
+func TestCallsWaitingForTheirSessionStartsDoNotHoldBackTheTurnsOtherCalls(t *testing.T) {
+	const route = "/api/v1/inspect/tool"
+	api := &APIServer{}
+	api.hookCallerLimits = hookCallerLimiter{rate: 1000, burst: 1000, inFlight: 2, running: 4}
+	gate := &sessionStartGate{}
+	allowed := func(context.Context) (bool, string) { return false, "" }
+	sessions := []string{"s0", "s1", "s2", "s3", "s4"}
+	waiting := make(chan struct{}, len(sessions))
+	var wg sync.WaitGroup
+	call := func(i int) bool {
+		r, release := api.admitHookCaller(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, route, nil), "1001", route)
+		if release == nil {
+			return false
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer release()
+			waiting <- struct{}{}
+			if reason, refused := gate.await(r.Context(), "claudecode\x00user:1001\x00"+sessions[i], 5*time.Second,
+				400*time.Millisecond, allowed); refused {
+				t.Errorf("call %d refused: %q", i, reason)
+			}
+		}()
+		return true
+	}
+	for i := range 2 {
+		if !call(i) {
+			t.Fatalf("call %d of the turn was refused inside the caller's in-flight cap", i)
+		}
+	}
+	<-waiting
+	<-waiting
+	admitted := 0
+	for next, deadline := 2, time.Now().Add(300*time.Millisecond); next < 4 && time.Now().Before(deadline); {
+		if call(next) {
+			next++
+			admitted++
+			continue
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if admitted != 2 {
+		wg.Wait()
+		t.Fatalf("admitted %d of the turn's next 2 calls while its first 2 waited for their session starts, want 2", admitted)
+	}
+	if call(4) {
+		t.Error("a fifth call was admitted past the caller's in-flight and parked bounds")
+	}
+	wg.Wait()
+	limits := &api.hookCallerLimits
+	limits.mu.Lock()
+	defer limits.mu.Unlock()
+	if budget := limits.callers["1001"]; budget.inFlight != 0 || len(budget.running) != 0 || limits.total != 0 {
+		t.Fatalf("after the turn in-flight = %d, running = %d, total = %d, want 0", budget.inFlight, len(budget.running), limits.total)
 	}
 }

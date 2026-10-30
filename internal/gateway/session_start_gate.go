@@ -250,7 +250,7 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 			// The wait uses no gateway CPU: the call gives up its caller's
 			// run slot for it, so unseen sessions of one account do not
 			// queue behind each other's windows (GAP-1822).
-			resume := waitWithoutHookRunSlot(ctx)
+			resume := parkHookCaller(ctx)
 			window := time.NewTimer(min(arrival, wait))
 			timedOut := false
 			select {
@@ -297,7 +297,7 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 		}
 		// Waiting for another call's start verdict uses no gateway CPU
 		// either: the slot is given up for it and taken back after (GAP-0050).
-		resume := waitWithoutHookRunSlot(ctx)
+		resume := parkHookCaller(ctx)
 		select {
 		case <-entry.done:
 			resume()
