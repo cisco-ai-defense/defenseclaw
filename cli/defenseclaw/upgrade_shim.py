@@ -361,7 +361,9 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
         except BaseException:
             shutil.rmtree(workdir, ignore_errors=True)
             raise
-    newer = installed if _key(version) < _key(installed) else None
+    # Only a downgrade to a release that keeps the newer hook helper waits
+    # for its installer and drops the helper (rel-1-0-4:GAP-2503).
+    newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
     return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer)
 
 
@@ -753,6 +755,12 @@ def _wait_for_installer(argv: list[str]) -> int:
 
 
 HOOK_HELPER = os.path.join("hooks", "_hardening.sh")
+# A gateway of 1.0.4 or older keeps the newer hooks/_hardening.sh. 1.0.5 and
+# later ship the same helper (schema v10), and a gateway with only plugin
+# connectors (OpenCode) set up never writes one: once the shim dropped it,
+# that gateway refused to start (rel-1-0-6:GAP-0047). A release that changes
+# the helper's schema line must revisit this floor and install.sh's.
+HOOK_HELPER_KEPT_BEFORE = (1, 0, 5)
 _HOOK_HELPER_MAX_BYTES = 4 << 20
 
 

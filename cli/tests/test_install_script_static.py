@@ -2698,6 +2698,12 @@ def test_a_rollback_to_an_older_release_drops_the_hook_helper_the_newer_install_
     # After the swap brought the older data back, before its gateway starts.
     assert rollback.index("swap_with_previous || swapped=$?") < drop < rollback.index("start_gateway || rollback_rc=$?")
     assert "version_lt \"${back_to}\" \"${current}\"" in rollback[drop - 200 : drop]
+    # rel-1-0-6:GAP-0047: only back to 1.0.4 or older. 1.0.5 and later ship
+    # the same helper, and their gateway with only OpenCode set up never
+    # writes one, so it refused to start and the rollback undid itself.
+    assert 'version_lt "${back_to}" "${current}" && version_lt "${back_to}" 1.0.5; then' in rollback[drop - 200 : drop]
+    helper = (ROOT / "internal" / "gateway" / "connector" / "hooks" / "_hardening.sh").read_text(encoding="utf-8")
+    assert helper.splitlines()[1] == "# defenseclaw-managed-hook v10", "a new helper schema must revisit the 1.0.5 floor"
 
 
 def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_path: Path) -> None:
