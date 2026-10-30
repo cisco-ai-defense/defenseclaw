@@ -54,10 +54,7 @@ const (
 	projectionIntegrityDomain = "defenseclaw-observability-projection-integrity-v1"
 )
 
-const (
-	maxEventHistoryVerificationRange          = 1000
-	maxCanonicalLogCorrelationIdentifierBytes = 256
-)
+const maxCanonicalLogCorrelationIdentifierBytes = 256
 
 // EventHistoryVerificationStatus is a bounded, machine-readable local
 // integrity result. No status embeds persisted record content or database
@@ -82,13 +79,6 @@ type EventHistoryVerification struct {
 	ProjectionHashValid bool                           `json:"projection_hash_valid"`
 	IntegrityVerified   bool                           `json:"integrity_verified"`
 	IntegrityKeyID      string                         `json:"integrity_key_id,omitempty"`
-}
-
-// EventHistoryVerificationRange is explicit about bounded output. Callers must
-// not treat a truncated page as a complete range attestation.
-type EventHistoryVerificationRange struct {
-	Records   []EventHistoryVerification `json:"records"`
-	Truncated bool                       `json:"truncated"`
 }
 
 // ErrIntegrityKeyUnavailable lets a signer report expected boot-order or key
@@ -1595,71 +1585,6 @@ func (writer *EventHistoryWriter) VerifyEventHistoryRecord(
 		return EventHistoryVerification{}, fmt.Errorf("audit: read v8 event-history verification fields: %w", err)
 	}
 	return writer.verifyStoredProjection(ctx, recordID, []byte(projected), projectionHash, payloadHMAC, algorithm, keyID)
-}
-
-// VerifyEventHistoryRange verifies a half-open UTC timestamp range. The result
-// order is stable and contains no record content.
-func (writer *EventHistoryWriter) VerifyEventHistoryRange(
-	ctx context.Context,
-	from, until time.Time,
-	limit int,
-) (EventHistoryVerificationRange, error) {
-	if writer == nil || writer.store == nil || writer.store.db == nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: v8 event-history writer is not initialized")
-	}
-	if ctx == nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: v8 event-history context is required")
-	}
-	if from.IsZero() || until.IsZero() || !from.Before(until) {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: v8 event-history verification range is invalid")
-	}
-	if limit <= 0 || limit > maxEventHistoryVerificationRange {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: v8 event-history verification limit is invalid")
-	}
-	rows, err := writer.store.db.QueryContext(ctx, `
-		SELECT id, COALESCE(projected_record_json,''), COALESCE(projection_hash,''),
-		       COALESCE(payload_hmac,''), COALESCE(integrity_algorithm,''),
-		       COALESCE(integrity_key_id,'')
-		FROM audit_events
-		WHERE julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)
-		ORDER BY julianday(timestamp) ASC, id ASC LIMIT ?`,
-		from.UTC().Format(time.RFC3339Nano), until.UTC().Format(time.RFC3339Nano), limit+1,
-	)
-	if err != nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: read v8 event-history verification range: %w", err)
-	}
-	defer rows.Close()
-	// The rows are read first: verifying a row that names a field class set
-	// reads the set, and the store has one connection.
-	type storedRow struct{ recordID, projected, projectionHash, payloadHMAC, algorithm, keyID string }
-	stored := make([]storedRow, 0, limit+1)
-	for rows.Next() {
-		var row storedRow
-		if err := rows.Scan(&row.recordID, &row.projected, &row.projectionHash, &row.payloadHMAC, &row.algorithm, &row.keyID); err != nil {
-			return EventHistoryVerificationRange{}, fmt.Errorf("audit: scan v8 event-history verification range")
-		}
-		stored = append(stored, row)
-	}
-	if err := rows.Err(); err != nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: iterate v8 event-history verification range: %w", err)
-	}
-	rows.Close()
-	results := make([]EventHistoryVerification, 0, len(stored))
-	for _, row := range stored {
-		result, err := writer.verifyStoredProjection(
-			ctx, row.recordID, []byte(row.projected), row.projectionHash, row.payloadHMAC, row.algorithm, row.keyID,
-		)
-		if err != nil {
-			return EventHistoryVerificationRange{}, err
-		}
-		results = append(results, result)
-	}
-	page := EventHistoryVerificationRange{Records: results}
-	if len(page.Records) > limit {
-		page.Records = page.Records[:limit]
-		page.Truncated = true
-	}
-	return page, nil
 }
 
 func (writer *EventHistoryWriter) verifyStoredProjection(

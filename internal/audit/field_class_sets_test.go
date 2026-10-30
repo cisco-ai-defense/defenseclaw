@@ -6,7 +6,6 @@ package audit
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -105,7 +104,7 @@ func TestFieldClassSetStoredOnceAndRowsVerify(t *testing.T) {
 		if verification.Status != EventHistoryVerified || !verification.IntegrityVerified {
 			t.Fatalf("row %s verification = %#v", id, verification)
 		}
-		expanded, err := store.ExpandStoredProjection(t.Context(), []byte(projected))
+		expanded, err := expandStoredProjection(store, []byte(projected))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -114,38 +113,6 @@ func TestFieldClassSetStoredOnceAndRowsVerify(t *testing.T) {
 		}
 		if !strings.Contains(payload, `"message":"wide `+id+`"`) {
 			t.Fatalf("row %s payload_json = %s", id, payload)
-		}
-	}
-}
-
-// A range verification reads rows that name sets without waiting on the
-// store's one connection.
-func TestFieldClassSetRangeVerification(t *testing.T) {
-	store := newV8HistoryStore(t)
-	signer := &testProjectionSigner{key: bytes.Repeat([]byte{0x34}, 32), keyID: "integrity-key-v1"}
-	writer, err := NewEventHistoryWriter(store, signer, nil, testLocalProfileResolver{profile: observabilityredaction.ProfileNone})
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
-	for index := 0; index < 3; index++ {
-		record := newWideV8HistoryRecord(t, fmt.Sprintf("fcs-range-%d", index), base.Add(time.Duration(index)*time.Second))
-		if err := writer.Append(record, projectV8HistoryRecord(t, record, observabilityredaction.ProfileNone)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	page, err := writer.VerifyEventHistoryRange(ctx, base, base.Add(time.Minute), 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page.Records) != 3 {
-		t.Fatalf("range = %#v", page)
-	}
-	for _, result := range page.Records {
-		if result.Status != EventHistoryVerified {
-			t.Fatalf("range verification = %#v", result)
 		}
 	}
 }
@@ -182,7 +149,7 @@ func TestFieldClassSetTamperFailsVerification(t *testing.T) {
 	if verification.Status != EventHistoryHashMismatch {
 		t.Fatalf("missing set verification = %#v", verification)
 	}
-	if _, err := store.ExpandStoredProjection(t.Context(), []byte(`{"field_classes":{"$set":"zz"}}`)); err == nil {
+	if _, err := expandStoredProjection(store, []byte(`{"field_classes":{"$set":"zz"}}`)); err == nil {
 		t.Fatal("a malformed set reference expanded")
 	}
 }
@@ -356,4 +323,26 @@ func TestFieldClassSetsOnStoreWrittenByPublished103(t *testing.T) {
 		verification.Status != EventHistoryUnsigned || !verification.ProjectionHashValid {
 		t.Fatalf("verification = %#v, %v", verification, err)
 	}
+}
+
+// expandStoredProjection puts a row's field class set back inline, as the
+// live-connector E2E projector does: the bytes are the projection the record
+// had.
+func expandStoredProjection(store *Store, projected []byte) ([]byte, error) {
+	digest, ok := fieldClassSetReference(projected)
+	if !ok {
+		return nil, errFieldClassSetMissing
+	}
+	if digest == "" {
+		return projected, nil
+	}
+	var classes string
+	if err := store.db.QueryRow(`SELECT classes_json FROM audit_field_class_sets WHERE digest = ?`, digest).Scan(&classes); err != nil {
+		return nil, err
+	}
+	member := fieldClassSetMember(digest)
+	if bytes.Count(projected, member) != 1 {
+		return nil, errFieldClassSetMissing
+	}
+	return bytes.Replace(projected, member, append([]byte(`"field_classes":`), classes...), 1), nil
 }

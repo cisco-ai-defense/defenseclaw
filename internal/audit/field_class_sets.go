@@ -92,8 +92,8 @@ func (s *Store) storedProjection(ctx context.Context, tx *sql.Tx, projectedEnvel
 		return projectedEnvelope, nil
 	}
 	// Only the member's value changes: the bytes before and after it stay as
-	// the projection wrote them, so ExpandStoredProjection gives the
-	// projection back byte for byte.
+	// the projection wrote them, so putting the set back gives the projection
+	// byte for byte (scripts/live-connector-e2e/project-audit-events.py).
 	member := append([]byte(`"field_classes":`), classes...)
 	if bytes.Count(projectedEnvelope, member) != 1 {
 		return projectedEnvelope, nil
@@ -169,29 +169,4 @@ func (s *Store) checkFieldClassSet(ctx context.Context, projected []byte) error 
 		return errFieldClassSetMissing
 	}
 	return nil
-}
-
-// ExpandStoredProjection returns a stored projection with the field classes
-// of its set inline, as the record had them; a projection that holds its
-// classes inline is returned unchanged.
-func (s *Store) ExpandStoredProjection(ctx context.Context, projected []byte) ([]byte, error) {
-	digest, ok := fieldClassSetReference(projected)
-	if !ok {
-		return nil, errFieldClassSetMissing
-	}
-	if digest == "" {
-		return projected, nil
-	}
-	if err := s.checkFieldClassSet(ctx, projected); err != nil {
-		return nil, err
-	}
-	var classes string
-	if err := s.db.QueryRowContext(ctx, `SELECT classes_json FROM audit_field_class_sets WHERE digest = ?`, digest).Scan(&classes); err != nil {
-		return nil, fmt.Errorf("audit: read field class set: %w", err)
-	}
-	member := fieldClassSetMember(digest)
-	if bytes.Count(projected, member) != 1 {
-		return nil, errFieldClassSetMissing
-	}
-	return bytes.Replace(projected, member, append([]byte(`"field_classes":`), classes...), 1), nil
 }
