@@ -234,15 +234,16 @@ func (l shellLinks) dotDotPastLinksClear(command, cwd, home string) bool {
 		return true
 	}
 	state := newStateReach(home)
-	words := commandWords(command)
+	words, programs := commandWordPrograms(command)
 	for _, text := range l.linkTexts {
 		for _, word := range commandWords(text) {
 			if i := slices.Index(words, word); i >= 0 {
 				words = slices.Delete(words, i, i+1)
+				programs = slices.Delete(programs, i, i+1)
 			}
 		}
 	}
-	physical := slices.Contains(words, "-P") || strings.Contains(command, "physical")
+	physical := physicalDirectoryMode(words, programs)
 	for w, word := range words {
 		parts := strings.Split(filepath.ToSlash(word), "/")
 		for i, part := range parts {
@@ -261,6 +262,10 @@ func (l shellLinks) dotDotPastLinksClear(command, cwd, home string) bool {
 					continue
 				}
 				cdOperand := w > 0 && (words[w-1] == "cd" || words[w-1] == "pushd")
+				if !cdOperand && readsOnly(programs[w]) && !state.within(end) {
+					// A listing of the home or / names no state (GAP-2611).
+					continue
+				}
 				if physical || !cdOperand || !logicalDirExists(absolutePath(word, cwd), cwd) {
 					return false
 				}
@@ -284,8 +289,8 @@ func diskLinkDotDotReachesState(command, cwd, home string) bool {
 		return false
 	}
 	state := newStateReach(home)
-	words := commandWords(command)
-	physical := slices.Contains(words, "-P") || strings.Contains(command, "physical")
+	words, programs := commandWordPrograms(command)
+	physical := physicalDirectoryMode(words, programs)
 	for w, word := range words {
 		if !strings.Contains(word, "..") {
 			continue
@@ -331,10 +336,73 @@ func diskLinkDotDotReachesState(command, cwd, home string) bool {
 				return true
 			}
 			cdOperand := w > 0 && (words[w-1] == "cd" || words[w-1] == "pushd")
+			if !cdOperand && readsOnly(programs[w]) && !state.within(end) {
+				// A listing of the home or / names no state (GAP-2611).
+				break
+			}
 			if state.hits(end) && (physical || !cdOperand || !logicalDirExists(absolutePath(word, cwd), cwd)) {
 				return true
 			}
 			break
+		}
+	}
+	return false
+}
+
+// readOnlyLinkWordPrograms read the paths they are given and write none,
+// so a word of theirs that ends at a directory holding state (the home or
+// /) through LINK/.. reaches no state; a word that passes through or ends
+// in state still does (GAP-2611).
+var readOnlyLinkWordPrograms = []string{
+	"ls", "cat", "head", "tail", "less", "more", "stat", "du", "wc", "file", "tree", "readlink", "realpath",
+	"grep", "egrep", "fgrep", "rg", "diff", "cmp", "md5sum", "sha1sum", "sha256sum", "dirname", "basename",
+}
+
+func readsOnly(program string) bool {
+	return slices.Contains(readOnlyLinkWordPrograms, program)
+}
+
+// linkWordShells start a nested shell; their -c script names the program.
+var linkWordShells = []string{"bash", "sh", "dash", "ksh", "zsh"}
+
+// commandWordPrograms is commandWords(command) with, for each word, the
+// program of the statement it is in (the script's first word for sh -c).
+func commandWordPrograms(command string) (words, programs []string) {
+	statements := strings.FieldsFunc(command, func(r rune) bool { return strings.ContainsRune(";&|()\n\r", r) })
+	for _, statement := range statements {
+		statementWords := commandWords(statement)
+		program := ""
+		if len(statementWords) > 0 {
+			program = filepath.Base(statementWords[0])
+			if slices.Contains(linkWordShells, program) {
+				if c := slices.Index(statementWords, "-c"); c >= 0 && c+1 < len(statementWords) {
+					program = filepath.Base(statementWords[c+1])
+				}
+			}
+		}
+		for _, word := range statementWords {
+			words = append(words, word)
+			programs = append(programs, program)
+		}
+	}
+	return words, programs
+}
+
+// physicalDirectoryMode reports a statement that turns on the physical
+// directory reading: cd -P, pushd -P, set -P, set -o physical, or a shell
+// started with -P. A -P or the word physical of any other program (grep -P,
+// cp -P, echo physical) does not (GAP-2611).
+func physicalDirectoryMode(words, programs []string) bool {
+	for i, word := range words {
+		program := programs[i]
+		if !slices.Contains([]string{"cd", "pushd", "set"}, program) && !slices.Contains(linkWordShells, program) {
+			continue
+		}
+		if word == "physical" && i > 0 && words[i-1] == "-o" {
+			return true
+		}
+		if len(word) > 1 && word[0] == '-' && word[1] != '-' && strings.ContainsRune(word[1:], 'P') {
+			return true
 		}
 	}
 	return false

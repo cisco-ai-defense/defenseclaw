@@ -60,6 +60,19 @@ func TestManagedLinkThenNestedCdOrFindMoveReadsTheUserView(t *testing.T) {
 		{"D2", `cd dp/../.ssh && echo k >> authorized_keys`, true},
 		{"D5", `bash -c "cd ds/../../../.ssh && echo k >> authorized_keys"`, true},
 		{"D6", `bash -c "cd ds/.. && ls > list.txt"`, false},
+		// A read through LINK/.. that ends at the home or / names no state,
+		// and only cd, pushd, set or a shell turn on the physical reading:
+		// grep -P or the word physical elsewhere do not (GAP-2611).
+		{"N1", `ln -s ../shared sh; ls sh/..`, false},
+		{"N3", `ln -s ../proj p; ls -la p/../ > list.txt`, false},
+		{"D9", `ls dw/.. > out.txt`, false},
+		{"P1", `ln -s ../proj p; cd p/.. && grep -P "x" a.txt`, false},
+		{"P2", `ln -s ../proj p; cd p/.. && echo physical > notes.txt`, false},
+		{"P3", `ln -s ../proj p; cd -P p/.. && echo k >> .ssh/authorized_keys`, true},
+		{"P4", `ln -s ../proj p; set -o physical; cd p/.. && echo k >> .ssh/authorized_keys`, true},
+		{"P5", `ln -s ../proj p; bash -c "set -P; cd p/.. && echo k >> .ssh/authorized_keys"`, true},
+		{"N5", `ln -s ../proj p; cat p/../.ssh/authorized_keys > keys.txt`, true},
+		{"D10", `cp a.txt dp/../.ssh/authorized_keys`, true},
 	}
 	for _, managed := range []bool{false, true} {
 		for _, connector := range []string{"claudecode", "codex"} {
@@ -68,7 +81,7 @@ func TestManagedLinkThenNestedCdOrFindMoveReadsTheUserView(t *testing.T) {
 				home := filepath.Join(t.TempDir(), "home")
 				cwd := filepath.Join(home, "proj")
 				for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(home, ".defenseclaw"),
-					filepath.Join(cwd, "src", "sub"), filepath.Join(cwd, "build"), filepath.Join(cwd, "bigp")} {
+					filepath.Join(cwd, "src", "sub"), filepath.Join(cwd, "build"), filepath.Join(cwd, "bigp"), filepath.Join(home, "shared")} {
 					if err := os.MkdirAll(dir, 0o700); err != nil {
 						t.Fatal(err)
 					}
@@ -81,7 +94,7 @@ func TestManagedLinkThenNestedCdOrFindMoveReadsTheUserView(t *testing.T) {
 					}
 				}
 				if strings.HasPrefix(row.id, "D") {
-					for name, target := range map[string]string{"dp": "../proj", "ds": "src/sub"} {
+					for name, target := range map[string]string{"dp": "../proj", "ds": "src/sub", "dw": os.TempDir()} {
 						if err := os.Symlink(target, filepath.Join(cwd, name)); err != nil {
 							t.Fatal(err)
 						}
