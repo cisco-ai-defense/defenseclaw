@@ -1446,6 +1446,144 @@ class UpdateConfig:
     source: str = ""
 
 
+DECISION_MODEL_KEY_ENV = "DEFENSECLAW_DECISION_MODEL_KEY"
+DECISION_MODEL_DEFAULT_ALLOW_THRESHOLD = 0.30
+DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD = 0.75
+DECISION_MODEL_DEFAULT_TIMEOUT = 1.0
+DECISION_MODEL_ON_CONFIDENT_BLOCK = ("escalate", "decide")
+
+
+@dataclass
+class DecisionModelConfig:
+    """``decision_model:``, the unified decision model.
+
+    A small, fast model that speaks the System One protocol (``POST
+    {model, state, questions}``; answers carry calibrated probabilities).
+    The guardrail runs it in front of the LLM judge on tool calls and the
+    skill scanner records its advisory score. Off by default.
+
+    Shaped like the unified ``llm:`` block: ``api_key_env`` names the
+    variable holding the bearer token (``DEFENSECLAW_DECISION_MODEL_KEY``
+    when empty) and the value lives in the environment or
+    ``~/.defenseclaw/.env``, never in config.yaml. ``credential`` names the
+    protected credential a standalone managed host reads instead. Mirrors
+    internal/config/decision_model.go::DecisionModelConfig.
+    """
+
+    enabled: bool = False
+    model: str = ""
+    base_url: str = ""
+    api_key_env: str = ""
+    credential: str = ""
+    timeout: float = 0.0
+    allow_threshold: float = 0.0
+    block_threshold: float = 0.0
+    on_confident_block: str = ""
+
+    def active(self) -> bool:
+        return bool(self.enabled and self.base_url.strip() and self.model.strip())
+
+    def effective_api_key_env(self) -> str:
+        return self.api_key_env.strip() or DECISION_MODEL_KEY_ENV
+
+    def effective_timeout(self) -> float:
+        return self.timeout if self.timeout > 0 else DECISION_MODEL_DEFAULT_TIMEOUT
+
+    def effective_allow_threshold(self) -> float:
+        return self.allow_threshold if self.allow_threshold > 0 else DECISION_MODEL_DEFAULT_ALLOW_THRESHOLD
+
+    def effective_block_threshold(self) -> float:
+        return self.block_threshold if self.block_threshold > 0 else DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD
+
+    def effective_on_confident_block(self) -> str:
+        return (self.on_confident_block or "").strip().lower() or "escalate"
+
+    def resolved_api_key(self, data_dir: str) -> str:
+        """The bearer token from the environment, then ``<data_dir>/.env``
+        (the shared credential resolver); "" when unset."""
+        from defenseclaw import credentials
+
+        return credentials.resolve(self.effective_api_key_env(), data_dir).value.strip()
+
+    def validation_error(self) -> str:
+        """Return "" when the block is valid, else the first problem.
+        Mirrors DecisionModelConfig.Validate in Go."""
+        for name, value in (("allow_threshold", self.allow_threshold), ("block_threshold", self.block_threshold)):
+            if not 0 <= value <= 1:
+                return f"{name} must be between 0 and 1, got {value}"
+        if self.effective_allow_threshold() >= self.effective_block_threshold():
+            return (
+                f"allow_threshold ({self.effective_allow_threshold()}) must be lower than "
+                f"block_threshold ({self.effective_block_threshold()})"
+            )
+        if not 0 <= self.timeout <= 30:
+            return f"timeout must be between 0 and 30 seconds, got {self.timeout}"
+        if self.effective_on_confident_block() not in DECISION_MODEL_ON_CONFIDENT_BLOCK:
+            return f"on_confident_block must be escalate or decide, got {self.on_confident_block!r}"
+        if self.base_url.strip():
+            err = decision_model_url_error(self.base_url)
+            if err:
+                return err
+        if self.enabled:
+            if not self.base_url.strip():
+                return "enabled needs base_url (the decision model endpoint, e.g. http://127.0.0.1:8791/v1/systemone)"
+            if not self.model.strip():
+                return "enabled needs model (the model name the endpoint serves)"
+        return ""
+
+
+def decision_model_url_error(raw: str) -> str:
+    """https anywhere, plain http only to loopback, no credentials in the URL.
+    Mirrors config.ValidateDecisionModelURL in Go."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    try:
+        parsed = urlsplit(raw.strip())
+    except ValueError:
+        return "base_url must be an absolute http(s) URL"
+    if not parsed.netloc or not parsed.hostname:
+        return "base_url must be an absolute http(s) URL"
+    if parsed.username or parsed.password:
+        return f"base_url must not carry credentials; put the token in {DECISION_MODEL_KEY_ENV}"
+    scheme = parsed.scheme.lower()
+    if scheme == "https":
+        return ""
+    if scheme != "http":
+        return f"base_url must use http or https, not {parsed.scheme!r}"
+    host = parsed.hostname
+    if host.lower() == "localhost":
+        return ""
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return ""
+    except ValueError:
+        pass
+    return "base_url must use https, or plain http only to a loopback host (127.0.0.1, ::1, localhost)"
+
+
+def _merge_decision_model(raw: Any) -> DecisionModelConfig:
+    raw = raw if isinstance(raw, dict) else {}
+
+    def _num(key: str) -> float:
+        try:
+            return float(raw.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return DecisionModelConfig(
+        enabled=raw.get("enabled") is True or str(raw.get("enabled", "")).strip().lower() == "true",
+        model=str(raw.get("model", "") or ""),
+        base_url=str(raw.get("base_url", "") or ""),
+        api_key_env=str(raw.get("api_key_env", "") or ""),
+        credential=str(raw.get("credential", "") or ""),
+        timeout=_num("timeout"),
+        allow_threshold=_num("allow_threshold"),
+        block_threshold=_num("block_threshold"),
+        on_confident_block=str(raw.get("on_confident_block", "") or ""),
+    )
+
+
 @dataclass
 class SkillScannerVirusTotal:
     enabled: bool = False
@@ -4077,6 +4215,8 @@ class Config:
     fleet: FleetConfig = field(default_factory=FleetConfig)
     llm_providers: LLMProvidersConfig = field(default_factory=LLMProvidersConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
+    # The unified decision model (decision_model:); off by default.
+    decision_model: DecisionModelConfig = field(default_factory=DecisionModelConfig)
     # enterprise.openshell as loaded. Load only: Python never writes the
     # enterprise block (the lifecycle owns it), so saves leave it alone.
     enterprise_openshell: EnterpriseOpenShellConfig = field(
@@ -4959,6 +5099,9 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         _prune_asset_policy_rules(d["asset_policy"])
     for key in ("admission", "llm_providers", "update"):
         _prune_v9_block(d, key)
+    # An untouched decision_model block (off, nothing set) is omitted so
+    # configs from earlier releases stay byte-identical on a round trip.
+    _prune_v9_block(d, "decision_model", drop_false=True)
     # Per-connector observability (D5b): drop the empty block (omitempty),
     # or serialize it with inherited (None) dimensions + webhook omitempty
     # stripped. Mirrors the asset_policy.connectors handling.
@@ -7648,6 +7791,7 @@ def load(
         admission=_merge_admission(raw.get("admission")),
         llm_providers=_merge_llm_providers(raw.get("llm_providers")),
         update=_merge_update(raw.get("update")),
+        decision_model=_merge_decision_model(raw.get("decision_model")),
         enterprise_openshell=_merge_enterprise_openshell(raw.get("enterprise")),
         enterprise_profile=str((raw.get("enterprise") or {}).get("profile") or "")
         if isinstance(raw.get("enterprise"), dict)

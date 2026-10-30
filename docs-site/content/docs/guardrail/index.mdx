@@ -296,7 +296,7 @@ defenseclaw setup guardrail --non-interactive --connector claudecode --mode acti
   --judge-api-key-env DEFENSECLAW_LLM_KEY --restart
 ```
 
-Regex runs first and the judge adjudicates what regex flags. `--detection-strategy judge_first` flips the order. Hook connectors are judged only in action mode; `--judge-hook-connectors` chooses which. A judge verdict goes through `block_at` and `alert_at` like a rule finding.
+Regex runs first and the judge adjudicates what regex flags. `--detection-strategy judge_first` flips the order. To cut judge calls on tool calls, put a [decision model](/docs/guardrail/decision-model) in front of the judge. Hook connectors are judged only in action mode; `--judge-hook-connectors` chooses which. A judge verdict goes through `block_at` and `alert_at` like a rule finding.
 
 </Tab>
 

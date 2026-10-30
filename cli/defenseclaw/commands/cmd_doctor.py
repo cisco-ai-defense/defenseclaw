@@ -11908,6 +11908,42 @@ def _llm_identity(llm) -> tuple[str, str, str, str]:
     )
 
 
+def _check_decision_model(cfg, r: _DoctorResult) -> None:
+    """``Decision model`` row: one benign System One request when
+    ``decision_model`` is on. Silent while it is off (the default). An
+    unreachable model warns, never fails: the LLM judge then decides alone,
+    as it does without one."""
+    dm = getattr(cfg, "decision_model", None)
+    if dm is None or not dm.enabled:
+        return
+    from defenseclaw import decision_model as dmod
+
+    problem = dm.validation_error()
+    if problem:
+        _emit("fail", "Decision model", problem, r=r, remediation="defenseclaw setup decision-model")
+        return
+    if dmod.managed_host(cfg) and dm.credential:
+        detail = f"{dm.model}: token from the managed credential {dm.credential} (the gateway checks it)"
+        _emit("pass", "Decision model", detail, r=r)
+        return
+    result = dmod.ping(dm, cfg.data_dir, send_token=not dmod.managed_host(cfg))
+    if not result.ok:
+        _emit(
+            "warn",
+            "Decision model",
+            f"{dm.model}: {result.detail}; the LLM judge decides alone until it answers",
+            r=r,
+            remediation="defenseclaw setup decision-model --show --ping",
+        )
+        return
+    detail = f"{dm.model}: {result.detail}"
+    note = dmod.judge_note(cfg)
+    if note:
+        _emit("warn", "Decision model", detail + "; " + note, r=r)
+        return
+    _emit("pass", "Decision model", detail, r=r)
+
+
 def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     """One-shot ``llm.ping`` against the guardrail's resolved LLM.
 
@@ -12137,14 +12173,24 @@ def _check_judge_calls(cfg, r: _DoctorResult) -> None:
         _emit("skip", label, "no judge calls since the gateway started", r=r)
         return
     errors: list[str] = []
+    total = 0
     for (raw,) in rows:
         try:
             payload = json.loads(raw or "{}")
         except ValueError:
             continue
-        if isinstance(payload, dict) and str(payload.get("defenseclaw.judge.action", "")).lower() == "error":
+        if not isinstance(payload, dict):
+            continue
+        # The decision model logs its own rows (kind decision_model); its
+        # health has its own "Decision model" row and is not the judge's.
+        if payload.get("defenseclaw.judge.kind") == "decision_model":
+            continue
+        total += 1
+        if str(payload.get("defenseclaw.judge.action", "")).lower() == "error":
             errors.append(str(payload.get("defenseclaw.judge.error_summary") or "no error summary"))
-    total = len(rows)
+    if not total:
+        _emit("skip", label, "no judge calls since the gateway started", r=r)
+        return
     if not errors:
         _emit("pass", label, f"last {total} judge call(s) completed", r=r)
         return
@@ -14598,6 +14644,7 @@ def doctor(
     r.set_section("credentials")
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
+    _check_decision_model(cfg, r)
     _check_private_upstream_refusals(cfg, r)
     if not _check_judge_running(sidecar_health, r):
         _check_judge_calls(cfg, r)

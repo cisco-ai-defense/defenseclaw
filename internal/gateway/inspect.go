@@ -1648,6 +1648,9 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		defer cancel()
 		jctx = withJudgeSuppressionPack(jctx, pack)
 		if strings.EqualFold(strategyDirection, "tool_call") {
+			// A rule finding is a floor: the decision model cannot skip the
+			// judge on a call the rules flagged (escalate-on-confirm).
+			jctx = withDecisionRuleFloor(jctx, rulesFlagged(current))
 			return judge.RunToolJudge(jctx, toolName, content)
 		}
 		return judge.RunJudges(jctx, judgeDirection, content, toolName)

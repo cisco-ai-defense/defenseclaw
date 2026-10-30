@@ -225,9 +225,13 @@ class SkillScannerWrapper:
         *,
         llm: LLMConfig | None = None,
         secure_client: bool = False,
+        decision_model: tuple[dict, dict[str, str]] | None = None,
     ) -> None:
         self.config = config
         self.secure_client = secure_client
+        # (build_analyzers kwargs, env) for the scanner's advisory System One
+        # tier, from defenseclaw.decision_model.skill_scanner_options.
+        self.decision_model = decision_model or ({}, {})
         self.inspect_llm = inspect_llm or InspectLLMConfig()
         self.cisco_ai_defense = cisco_ai_defense or CiscoAIDefenseConfig()
         self._llm: LLMConfig = llm if llm is not None else _inspect_to_llm(self.inspect_llm)
@@ -298,6 +302,16 @@ class SkillScannerWrapper:
             env["AI_DEFENSE_API_URL"] = self.cisco_ai_defense.endpoint or ""
         if settings.osv_enabled(cfg):
             build_kwargs["use_osv"] = True
+        dm_kwargs, dm_env = self.decision_model
+        if dm_kwargs and _supports_system_one(build_analyzers):
+            build_kwargs.update(dm_kwargs)
+            env.update(dm_env)
+        elif dm_kwargs:
+            print(
+                "warning: the installed skill scanner has no System One tier; decision model not used",
+                file=sys.stderr,
+            )
+            dm_kwargs = {}
 
         with settings.scanner_env(env, secure_client=self.secure_client):
             self._inject_env()
@@ -320,6 +334,8 @@ class SkillScannerWrapper:
             _raise_on_judge_failure(result)
         # The scan says which policy and judge model it ran with (GAP-0047).
         result.settings = {"policy": settings.effective_policy(cfg), "judge": judge.get("llm_model") or "off"}
+        if dm_kwargs:
+            result.settings["decision_model"] = _system_one_record(analyzers, dm_kwargs["system_one_model"])
         return result
 
     def _judge(self) -> dict:
@@ -439,6 +455,36 @@ class SkillScannerWrapper:
             findings=findings,
             duration=timedelta(seconds=elapsed),
         )
+
+
+def _supports_system_one(build_analyzers: object) -> bool:
+    """Whether the installed skill scanner has the System One tier (2.3+)."""
+    import inspect
+
+    try:
+        return "system_one_endpoint" in inspect.signature(build_analyzers).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _system_one_record(analyzers: list, model: str) -> dict:
+    """The decision model's advisory answer for this scan.
+
+    The skill scanner's System One tier records a calibrated probability and
+    never emits a finding, so the decision model cannot change the verdict
+    here; the record is for triage and observability only.
+    """
+    for analyzer in analyzers:
+        if getattr(analyzer, "get_name", lambda: "")() == "system_one":
+            last = dict(getattr(analyzer, "last_result", None) or {})
+            if not last:
+                last = {"status": "error", "reason": getattr(analyzer, "last_error", None) or "no answer"}
+            last.setdefault("model", model)
+            last["advisory_only"] = True
+            if isinstance(last.get("probability"), float):
+                last["probability"] = round(last["probability"], 4)
+            return last
+    return {"status": "off", "model": model, "advisory_only": True}
 
 
 def _snippet_file_line(target: str, file_path: str, line: int, snippet: object) -> int:

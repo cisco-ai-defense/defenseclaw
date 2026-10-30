@@ -204,6 +204,23 @@ def refuse_first_run_when_managed() -> None:
     show_default=True,
     help="Env var name for Cisco AI Defense key.",
 )
+@click.option(
+    "--decision-model/--no-decision-model",
+    "decision_model",
+    default=None,
+    help=(
+        "Use a decision model (System One protocol) in front of the LLM judge and in skill scans. "
+        "Off unless asked; needs --decision-model-url and --decision-model-name."
+    ),
+)
+@click.option("--decision-model-url", default="", help="Decision model endpoint, e.g. http://127.0.0.1:8791/v1/systemone.")
+@click.option("--decision-model-name", default="", help="Model name the decision model endpoint serves.")
+@click.option(
+    "--decision-model-key-env",
+    default="DEFENSECLAW_DECISION_MODEL_KEY",
+    show_default=True,
+    help="Env var holding the decision model token (a local server needs none).",
+)
 @click.option("--start-gateway/--no-start-gateway", default=None, help="Start the gateway sidecar after setup.")
 @click.option("--verify/--no-verify", default=None, help="Run targeted readiness checks before exiting.")
 @click.option("--json-summary", is_flag=True, help="Emit the final first-run report as JSON.")
@@ -234,6 +251,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     cisco_endpoint: str,
     cisco_api_key: str,
     cisco_api_key_env: str,
+    decision_model: bool | None,
+    decision_model_url: str,
+    decision_model_name: str,
+    decision_model_key_env: str,
     start_gateway: bool | None,
     verify: bool | None,
     json_summary: bool,
@@ -273,6 +294,12 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     cisco_api_key_env = _validated_api_key_env_name(cisco_api_key_env, "'--cisco-api-key-env'")
     # GAP-2593: the LLM key's env var name too.
     llm_api_key_env = _validated_api_key_env_name(llm_api_key_env, "'--llm-api-key-env'", "DEFENSECLAW_LLM_KEY")
+    decision_model_key_env = _validated_api_key_env_name(
+        decision_model_key_env, "'--decision-model-key-env'", "DEFENSECLAW_DECISION_MODEL_KEY"
+    )
+    decision_model_request = _decision_model_request(
+        decision_model, decision_model_url, decision_model_name, decision_model_key_env
+    )
     connector = _single_connector_option(connector)
     _refuse_unknown_action_connectors(action_connectors, supplied=_option_supplied("action_connectors"))
     requested_connectors = []
@@ -348,6 +375,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         llm_base_url=llm_base_url,
         cisco_endpoint=cisco_endpoint,
         cisco_api_key=cisco_api_key,
+        decision_model=decision_model_request,
         start_gateway=start_gateway,
         verify=verify,
         json_summary=json_summary,
@@ -376,6 +404,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
                 cisco_endpoint=cisco_endpoint,
                 cisco_api_key=cisco_api_key,
                 cisco_api_key_env=cisco_api_key_env,
+                decision_model=decision_model_request,
                 start_gateway=start_gateway,
                 verify=verify,
                 json_summary=json_summary,
@@ -577,6 +606,8 @@ def _use_guided_first_run(**kwargs) -> bool:
         return True
     if kwargs.get("with_judge"):
         return True
+    if kwargs.get("decision_model") is not None:
+        return True
     # Explicit --fail-mode means the operator opted into the
     # guided flow even if no other flags were passed.
     if kwargs.get("fail_mode"):
@@ -628,6 +659,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     cisco_endpoint: str,
     cisco_api_key: str,
     cisco_api_key_env: str,
+    decision_model: dict | None = None,
     start_gateway: bool | None,
     verify: bool | None,
     json_summary: bool,
@@ -670,6 +702,9 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         and _stdin_is_tty()
     ):
         interactive_wizard = True
+        # The wizard asks the decision-model question only when no flag
+        # answered it; its answer comes back in this holder.
+        decision_model_answer: dict = {} if decision_model is None else {"asked": True}
         if not connector:
             # GAP-2455: the wizard sets up hook connectors only.
             _confirm_replacing_guarded_proxy()
@@ -692,6 +727,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             verify=verify,
             rescan_agents=rescan_agents,
             data_dir=data_dir,
+            decision_model_answer=decision_model_answer,
         )
         if with_judge:
             (
@@ -709,6 +745,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
                 llm_api_key_env=llm_api_key_env,
                 llm_base_url=llm_base_url,
             )
+        if decision_model is None:
+            decision_model = decision_model_answer.get("request")
         # The wizard's trusted-paths prompts write config.yaml. Take the
         # snapshot again so the init transaction keeps what was just trusted
         # and setup can run that agent in the same run (GAP-1058).
@@ -825,6 +863,10 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         else:
             _render_first_run_report(report, CLIRenderer())
         raise SystemExit(1)
+
+    if decision_model is not None:
+        _apply_first_run_decision_model(report, decision_model, data_dir)
+        report.status = _rollup_status(report.setup, report.readiness)
 
     first_run_failed = report.status == "needs_attention"
     activated = [] if primary["connector"] == "none" or first_run_failed else [primary["connector"]]
@@ -1956,6 +1998,7 @@ def _prompt_first_run(
     verify: bool | None,
     rescan_agents: bool,
     data_dir: str | os.PathLike[str] | None = None,
+    decision_model_answer: dict | None = None,
 ) -> tuple[list[dict], str, bool, list[str] | None, bool, bool]:
     ux.section("DefenseClaw First-Run Setup")
     ux.subhead(
@@ -2043,6 +2086,11 @@ def _prompt_first_run(
         judge_hook_connectors = []
         ux.subhead("LLM judge: skipped because no selected connector is in action mode.")
     with_judge = bool(judge_hook_connectors)
+    # The decision model sits in front of the LLM judge, so the question is
+    # asked only when a judge is being configured (GAP-0053). A flag already
+    # answered it ("asked"), and the flag path never reaches this prompt.
+    if with_judge and decision_model_answer is not None and not decision_model_answer.get("asked"):
+        decision_model_answer["request"] = _prompt_first_run_decision_model(data_dir or "")
 
     connector_settings: list[dict] = []
     for c in connectors:
@@ -2111,6 +2159,100 @@ def _configured_judge_llm(data_dir: str | os.PathLike[str] | None) -> str:
         return (llm.model or llm.provider or "").strip()
     except Exception:  # noqa: BLE001 - an unreadable config means nothing configured
         return ""
+
+
+def _decision_model_request(
+    enabled: bool | None, url: str, name: str, key_env: str
+) -> dict | None:
+    """The decision model init was asked for on the command line, or None
+    to ask (interactive) or leave it alone (--yes: the default is no)."""
+    url, name = (url or "").strip(), (name or "").strip()
+    if enabled is False:
+        return {"enabled": False}
+    if enabled is None and not url and not name:
+        return None
+    if not url or not name:
+        raise click.UsageError(
+            "a decision model needs both --decision-model-url and --decision-model-name"
+        )
+    from defenseclaw.config import decision_model_url_error
+
+    problem = decision_model_url_error(url)
+    if problem:
+        raise click.UsageError(f"--decision-model-url: {problem}")
+    return {"enabled": True, "base_url": url, "model": name, "api_key_env": key_env, "token": ""}
+
+
+def _prompt_first_run_decision_model(data_dir: str | os.PathLike[str]) -> dict | None:
+    """The one optional decision-model question of the init wizard."""
+    from defenseclaw import decision_model as dmod
+    from defenseclaw.config import decision_model_url_error
+
+    click.echo()
+    ux.section("Decision model (optional)")
+    ux.subhead("A fast model in front of the LLM judge: it allows clear benign tool calls itself")
+    ux.subhead("and sends the rest to the judge. Off by default. Benchmarks: " + dmod.BENCHMARK_URL)
+    if not click.confirm(f"  {dmod.INIT_QUESTION}", default=False):
+        return None
+    while True:
+        url = click.prompt("  Endpoint URL", default=dmod.DEFAULT_BASE_URL).strip()
+        problem = decision_model_url_error(url)
+        if not problem:
+            break
+        ux.warn(problem)
+    name = click.prompt("  Model name").strip()
+    key_env = click.prompt("  Token env var", default=dmod.DECISION_MODEL_KEY_ENV).strip()
+    token = click.prompt(
+        f"  {key_env} value (hidden; Enter to skip for a local server)",
+        default="",
+        show_default=False,
+        hide_input=True,
+    ).strip()
+    return {"enabled": True, "base_url": url, "model": name, "api_key_env": key_env, "token": token}
+
+
+def _apply_first_run_decision_model(report, request: dict, data_dir: str | os.PathLike[str]) -> None:
+    """Save the decision model init was asked for and report it as a step."""
+    from defenseclaw import config as config_module
+    from defenseclaw import decision_model as dmod
+    from defenseclaw.bootstrap import StepResult
+
+    try:
+        cfg = config_module.load()
+        if request.get("token"):
+            from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
+
+            _save_secret_to_dotenv(request["api_key_env"], request["token"], str(data_dir))
+        updated = dmod.apply_settings(
+            cfg,
+            enabled=request["enabled"],
+            base_url=request.get("base_url"),
+            model=request.get("model"),
+            api_key_env=request.get("api_key_env"),
+        )
+        cfg.save()
+    except Exception as exc:  # noqa: BLE001 - init reports each step; one failure must not hide the rest.
+        report.setup.append(StepResult("Decision Model", "fail", str(exc), "defenseclaw setup decision-model"))
+        return
+    if not updated.enabled:
+        report.setup.append(StepResult("Decision Model", "skip", "off"))
+        return
+    detail = updated.model
+    result = dmod.ping(updated, str(data_dir))
+    if not result.ok:
+        report.setup.append(StepResult(
+            "Decision Model",
+            "warn",
+            f"{detail} saved but not reachable ({result.detail}); the LLM judge decides alone until it is",
+            "defenseclaw setup decision-model --show --ping",
+        ))
+        return
+    note = dmod.judge_note(cfg)
+    report.setup.append(StepResult(
+        "Decision Model",
+        "pass",
+        f"{detail}: {result.detail}" + (f". {note}" if note else ""),
+    ))
 
 
 def _prompt_first_run_judge_llm_config(

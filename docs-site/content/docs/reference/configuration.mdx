@@ -465,6 +465,8 @@ Defaults from the loader. Omitted keys take these values.
 | `watch.debounce_ms`, `watch.auto_block` | `500`, `true` | Debounce for file events, and whether a rejected install is blocked. |
 | `watch.rescan_enabled`, `watch.rescan_interval_min`, `watch.rescan_content_gated` | `true`, `60`, `true` | Periodic rescan of installed assets; content gating skips a target whose content did not change. |
 | `llm.timeout`, `llm.max_retries` | `30`, `2` | Seconds and retries for the unified LLM block. |
+| `decision_model.enabled` | `false` | The [decision model](/docs/guardrail/decision-model) in front of the LLM judge on tool calls. Needs `decision_model.base_url` and `.model`; the token is in `DEFENSECLAW_DECISION_MODEL_KEY` (`.api_key_env`), or `.credential` on a managed device. |
+| `decision_model.timeout`, `.allow_threshold`, `.block_threshold`, `.on_confident_block` | `1`, `0.30`, `0.75`, `escalate` | Seconds per call; risk at or below which an allow skips the judge; risk at or above which a block answer is confident; whether the judge still checks a confident block. Hot reload. |
 | `cisco_ai_defense.endpoint` | `https://us.api.inspect.aidefense.security.cisco.com` | The AI Defense inspection endpoint. |
 | `cisco_ai_defense.api_key_env`, `.timeout_ms` | `CISCO_AI_DEFENSE_API_KEY`, `3000` | The key variable, and the request timeout. |
 | `notifications.enabled` | `true` on macOS and native Windows, else `false` | Desktop notifications master switch (`defenseclaw setup notifications`). |

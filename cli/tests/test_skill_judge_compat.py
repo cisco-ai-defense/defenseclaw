@@ -47,6 +47,8 @@ def _luna_answer() -> dict:
     }
 
 
+
+
 class SkillJudgeCompatTest(unittest.TestCase):
     def setUp(self):
         self._original = LLMAnalyzer._repair_optional_taxonomy

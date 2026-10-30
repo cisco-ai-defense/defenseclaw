@@ -59,6 +59,9 @@
     "llm_providers": {
       "$ref": "#/$defs/llmProviders"
     },
+    "decision_model": {
+      "$ref": "#/$defs/decisionModel"
+    },
     "data_dir": {
       "$ref": "#/$defs/pathString"
     },
@@ -418,6 +421,57 @@
         },
         "extra_headers": {
           "$ref": "#/$defs/stringMap"
+        }
+      }
+    },
+    "decisionModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Unified decision model (System One protocol): a fast first pass in front of the LLM judge on tool calls, and the skill scanner's advisory score. Off by default.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "model": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "base_url": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "api_key_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        },
+        "credential": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "timeout": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 30,
+          "default": 1
+        },
+        "allow_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.3
+        },
+        "block_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.75
+        },
+        "on_confident_block": {
+          "type": "string",
+          "enum": [
+            "",
+            "escalate",
+            "decide"
+          ],
+          "default": "escalate"
         }
       }
     },

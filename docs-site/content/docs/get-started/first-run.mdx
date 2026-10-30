@@ -19,7 +19,8 @@ On a terminal, `init` runs local agent discovery, prints the **Agent discovery**
 2. **Scanner mode** (`local`, `remote` or `both`, default `local`).
 3. **Select connector(s) for action enforcement**: the agents you tick block; every other selected agent runs in `observe`.
 4. Only when you ticked an agent in step 3: **Require human approval for risky actions?** (default no; yes also asks the minimum severity), asked once and shared by every action agent, then **Select action connector(s) for LLM judge** (leave it clear for rules-only scanning; a ticked agent asks for the judge LLM settings).
-5. **Start gateway after setup?** (default yes), then **Run targeted readiness checks?** (default yes).
+5. **Do you want to use a decision model?** (default no). A [decision model](/docs/guardrail/decision-model) is an optional fast model in front of the LLM judge; yes asks for its endpoint and model name.
+6. **Start gateway after setup?** (default yes), then **Run targeted readiness checks?** (default yes).
 
 `init` does not ask for an outage mode and saves none: while the gateway is not running, the default and permissive policies let a call run with a warning and strict blocks it. Pass `--fail-mode` to save a choice; a saved choice wins over the policy, also over `use-pack strict`. When a saved `open` decides, the `Next` lines say `While the gateway is not running, hooks let calls run with a warning (your saved fail mode; to block them: ...)` and name the command that saves `closed` instead. A later `init` run keeps the fail modes already saved for your connectors.
 
@@ -52,6 +53,8 @@ defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 | `--with-judge` / `--no-judge` | The LLM judge. |
 | `--llm-provider`, `--llm-model`, `--llm-api-key-env`, `--llm-base-url` | The unified LLM key settings. |
 | `--llm-api-key` | LLM key to save into `.env`; the config stores only the env name. Other local users can see a command-line value, so prefer `DEFENSECLAW_INIT_LLM_API_KEY`. |
+| `--decision-model-url`, `--decision-model-name`, `--decision-model-key-env` | Turn on the [decision model](/docs/guardrail/decision-model) at this endpoint. Without them the wizard asks **Do you want to use a decision model?** (default no) and `--yes` leaves it off. `quickstart` takes the same three flags. |
+| `--decision-model` / `--no-decision-model` | `--no-decision-model` turns the decision model off; `--decision-model` needs the URL and name flags. |
 | `--cisco-endpoint`, `--cisco-api-key-env` | Cisco AI Defense. |
 | `--cisco-api-key` | Cisco AI Defense key to save into `.env`. Prefer `DEFENSECLAW_INIT_CISCO_API_KEY`, for the same reason. |
 | `--enable-guardrail` | Configure the LLM guardrail during `init`. |

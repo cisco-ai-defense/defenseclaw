@@ -239,6 +239,10 @@ The rules, which the validator enforces: `inherit` with a filled `llm` block is 
 When one of these cross-key rules fails, `config set` names the key and the rule and leaves the file as it was, for example `config.yaml was not changed: scanners.skill_scanner.llm.model: judge_source: override needs a model. Correct the value, then run again.` The `inherit` case names `scanners.skill_scanner.llm` instead. Follow the order above and it goes through.
 </Callout>
 
+### Decision model score
+
+With the [decision model](/docs/guardrail/decision-model) on, `defenseclaw skill scan` also asks it whether the skill is unsafe to install and prints the score (`Decision model: ... scored 0.12 unsafe`). The score is advisory: it never adds a finding or changes the verdict, because the skill scanner's own measurements found it does not separate malicious from benign skills. The judge above still decides.
+
 ## No LLM configured
 
 Start with a judge. Run `defenseclaw setup llm` and pick a provider, or serve a local model and point DefenseClaw at it.
@@ -457,10 +461,10 @@ DefenseClaw pins the scanner versions below. `defenseclaw doctor` compares the i
 
 | Package | Pinned | Needs |
 | --- | --- | --- |
-| `cisco-ai-skill-scanner` | 2.2.1 | Python 3.11 to 3.13 |
+| `cisco-ai-skill-scanner` | 2.3.2 | Python 3.11 to 3.13 |
 | `cisco-ai-mcp-scanner` | 4.3.0 | Python 3.11 or newer; see [MCP scanner](/docs/scanning/mcp-scanner#pinned-version) |
 
-`cisco-ai-skill-scanner` 2.2.1 ships platform wheels only, each bundling a native helper, so there is no pure-Python wheel. DefenseClaw pins the wheel for macOS 13 or newer (Apple silicon and Intel), Linux with glibc (x86_64 and aarch64) and Windows x64. There is no wheel for Windows on ARM or for musl-based Linux, and DefenseClaw does not ship for either.
+`cisco-ai-skill-scanner` 2.3.2 ships platform wheels only, each bundling a native helper, so there is no pure-Python wheel. DefenseClaw pins the wheel for macOS 13 or newer (Apple silicon and Intel), Linux with glibc (x86_64 and aarch64) and Windows x64. There is no wheel for Windows on ARM or for musl-based Linux, and DefenseClaw does not ship for either.
 
 DefenseClaw needs Python 3.11 to 3.13 (the package refuses Python 3.10), so every supported runtime includes the scanner. The installers ship Python 3.12 or 3.13.
 
