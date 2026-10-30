@@ -65,7 +65,7 @@ func testManagedNativeAllowReceiptOverUnixSocket(t *testing.T, lookupDelay time.
 		})),
 	}
 	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(func() { _ = server.Close() })
+	t.Cleanup(func() { closeHookTestServer(server) })
 	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", path)
@@ -92,6 +92,18 @@ func testManagedNativeAllowReceiptOverUnixSocket(t *testing.T, lookupDelay time.
 			t.Fatalf("native Unix audit = %q, want acknowledged allow", got)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// closeHookTestServer waits for the handlers still running after the hook
+// answer (the early receipt lets the client return before the handler ends),
+// so none outlives its test and races a later test on a package-level seam
+// such as hookStagePanicHook. Close is the fallback after the timeout.
+func closeHookTestServer(server *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		_ = server.Close()
 	}
 }
 
@@ -124,7 +136,7 @@ func TestManagedEarlyReceiptKeepsFinalPeerRefusal(t *testing.T) {
 				})),
 			}
 			go func() { _ = server.Serve(listener) }()
-			t.Cleanup(func() { _ = server.Close() })
+			t.Cleanup(func() { closeHookTestServer(server) })
 			client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true,
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 					return (&net.Dialer{}).DialContext(ctx, "unix", path)
