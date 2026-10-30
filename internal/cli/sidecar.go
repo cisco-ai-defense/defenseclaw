@@ -397,6 +397,10 @@ func watcherBannerLines(cfg *config.Config) []string {
 		return []string{"  Watcher:      disabled"}
 	case !gateway.WatcherWatchesDirs(cfg):
 		return []string{"  Watcher:      idle (no directories to watch)"}
+	case gateway.WatcherAdmitsOnlyHookReportedMCP(cfg):
+		// The service cannot read the users homes; it scans the MCP servers
+		// their hooks report (GAP-2591), so no skill folder line.
+		return []string{"  Watcher:      enabled (MCP servers the hooks report)"}
 	default:
 		lines = []string{"  Watcher:      enabled"}
 	}

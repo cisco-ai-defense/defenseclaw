@@ -82,6 +82,10 @@ def test_managed_hook_docs_name_the_measured_burst_capacity() -> None:
     assert "8 vCPUs" in timing and "60 tool calls at once" in timing
     assert "per vCPU" in timing and "observe mode" in timing
     assert "`enterprise_managed_gateway_no_answer`" in timing
+    # Linux agents-per-vCPU figure (T11 C09, LEAD 11:52): next to the Windows burst figure.
+    assert "3 interactive agents per vCPU" in timing and "4 vCPUs" in timing
+    linux = _flat("support-matrix.mdx").split("## Many agents on one Linux host", 1)[1].split("## ", 1)[0]
+    assert "3 interactive agents per vCPU" in linux and "613 tool calls" in linux
 
 
 def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check() -> None:

@@ -125,6 +125,11 @@ type Config struct {
 	TLS            TLSConfig
 	NetworkSafety  NetworkSafety
 	Batch          BatchConfig
+	// ManagedService is a managed enterprise gateway: a system service
+	// whose account never runs the bundled local stack, so a destination
+	// with the bundled stack name is the administrator collector and dials
+	// like any operator destination (GAP-2608).
+	ManagedService bool
 }
 
 type Dependencies struct {
@@ -239,7 +244,7 @@ func Prepare(ctx context.Context, config Config, dependencies Dependencies) (*Fa
 		resolved.canary = dependencies.CanaryObserver
 		resolved.health = dependencies.HealthObserver
 		resolved.tracker = &dialOutcomeTracker{}
-		resolved.bundledStack = bundledLocalStackDestination(config.Destination)
+		resolved.bundledStack = !config.ManagedService && bundledLocalStackDestination(config.Destination)
 		signals[signal] = resolved
 	}
 	for signal := range config.SignalOverride {

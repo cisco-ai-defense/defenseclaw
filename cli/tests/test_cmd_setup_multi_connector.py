@@ -3099,6 +3099,34 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         snapshot = cmd_setup._capture_setup_desired_snapshot_once(self.app.cfg)
         self.assertFalse(snapshot.picked_connector_existed)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit repair test")
+    def test_setup_snapshot_repairs_owner_readable_config_yaml_gap2603(self):
+        config_path = os.path.abspath(os.fspath(cmd_setup.config_path_for_data_dir(self.app.cfg.data_dir)))
+        with open(config_path, "w", encoding="utf-8") as fh:
+            fh.write("config_version: 9\n")
+        os.chmod(config_path, 0o644)
+
+        snapshot = cmd_setup._capture_setup_desired_snapshot_once(self.app.cfg)
+
+        self.assertTrue(snapshot.config_existed)
+        self.assertEqual(snapshot.config_bytes, b"config_version: 9\n")
+        self.assertEqual(os.stat(config_path).st_mode & 0o777, 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit rejection test")
+    def test_setup_snapshot_refuses_group_writable_config_yaml_and_names_the_fix(self):
+        config_path = os.path.abspath(os.fspath(cmd_setup.config_path_for_data_dir(self.app.cfg.data_dir)))
+        with open(config_path, "w", encoding="utf-8") as fh:
+            fh.write("config_version: 9\n")
+        os.chmod(config_path, 0o664)
+
+        with self.assertRaises(OSError) as raised:
+            cmd_setup._capture_setup_desired_snapshot_once(self.app.cfg)
+
+        self.assertIn("config.yaml rollback source is not private", str(raised.exception))
+        self.assertIn("chmod 600", str(raised.exception))
+        self.assertNotIn(config_path, str(raised.exception))
+        self.assertEqual(os.stat(config_path).st_mode & 0o777, 0o664)
+
     def test_name_stable_failed_registration_path_cannot_report_exact_success(self):
         prior_path = os.path.abspath(os.path.join(self.tmp_dir, "registrations", "prior-a.json"))
         failed_path = os.path.abspath(os.path.join(self.tmp_dir, "private-profile", "failed-b.json"))

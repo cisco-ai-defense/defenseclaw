@@ -55,7 +55,9 @@ var errBundledCollectorUnverified = errors.New("OTLP collector listener is not p
 // proves its listener. When the stack is stopped, another account can bind
 // its collector port and would otherwise receive every trace, metric and log
 // (GAP-1087). Other destinations dial as before: an operator's own local
-// agent may run as its own service account.
+// agent may run as its own service account. A managed gateway runs as a
+// service account that never runs the bundled stack, so it skips the check
+// (Config.ManagedService, GAP-2608).
 func checkBundledCollector(
 	config signalConfig,
 	dial func(context.Context, string, string) (net.Conn, error),

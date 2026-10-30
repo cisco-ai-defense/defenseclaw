@@ -190,9 +190,11 @@ func TestSidecarBannerManagedShowsNoWatcherOrFleet(t *testing.T) {
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}}
 	cfg.Gateway.Host, cfg.Gateway.Port = "127.0.0.1", 18789
 	cfg.Gateway.Watcher.Enabled, cfg.Gateway.Watcher.Skill.Enabled = true, true
-	watcher := "Watcher:      idle (no directories to watch)"
+	// Linux and macOS: the watcher admits the MCP servers the hooks report
+	// (GAP-2591); Windows watches the enrolled users folders.
+	watcher := "Watcher:      enabled (MCP servers the hooks report)"
 	if runtime.GOOS == "windows" {
-		watcher = "Watcher:      enabled"
+		watcher = "Watcher:      enabled\n    Skill:"
 	}
 	got := fleetBannerLine(cfg) + "\n" + strings.Join(watcherBannerLines(cfg), "\n")
 	if strings.Contains(got, "18789") || !strings.Contains(got, "Gateway:      none") || !strings.Contains(got, watcher) {

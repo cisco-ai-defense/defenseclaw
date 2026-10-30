@@ -71,18 +71,19 @@ These `defenseclaw skill` steps are for a per-user installation. On managed Linu
    ```text
      Source: ~/code/risky-skill
        [WARN] risky-skill (5 findings) — max severity: CRITICAL
-           policy: rejected - the policy refuses this skill at install; the copy already on disk stays loaded until you act.
-             Block it: defenseclaw skill block risky-skill --connector openclaw
+           policy: rejected - the policy would refuse this skill at install.
+             Block it: defenseclaw skill block risky-skill
+             Accept it: defenseclaw skill allow risky-skill
      Skill:    risky-skill
      Scanner:  policy quiet, judge off
-     Verdict:  CRITICAL (2 critical, 1 high, 1 low, 1 info)
+     Verdict:  CRITICAL (2 critical, 1 high, 1 medium, 1 info)
        [CRITICAL] PROMPT INJECTION detected by YARA
-         Location: SKILL.md:5
+         Location: SKILL.md:6
          Generic prompt injection patterns: Ignore all previous instructions
      …
    ```
 
-   `judge off` shows because this run used `--no-use-llm`. With a judge, the line reads `judge on`. `defenseclaw skill scan --all` scans every skill of every configured connector.
+   `judge off` shows because no judge is configured, so the scan ran the static rules only. With a judge, the line reads `judge on`; `--no-use-llm` turns the judge off for one run. A folder that no connector loads reads `would refuse this skill at install`. For an installed skill the line adds that the copy already on disk stays loaded until you act, and `Block it` names the skill's `--connector`. `defenseclaw skill scan --all` scans every skill of every configured connector.
 
 2. Read the verdict.
 
