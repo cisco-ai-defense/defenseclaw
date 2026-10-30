@@ -270,6 +270,12 @@ class UninstallPlan:
     # the agents' folders (data_dir/quarantine/<kind>/<connector>/<name>):
     # often the only copy, which `--all` deletes with data_dir (GAP-0422).
     quarantined: tuple[str, ...] = ()
+    # acp_entries are the guarded ACP editor entries `defenseclaw acp setup`
+    # wrote for this account, as (client, agent, editor settings file). They
+    # go with their contract locks, as `defenseclaw acp remove` takes them
+    # out; until 1.0.6 they stayed and kept starting defenseclaw-acp
+    # (GAP-2632). A managed computer's enrollment owns its entries.
+    acp_entries: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1053,7 +1059,62 @@ def _build_plan(
         sigstore_cache=_legacy_sigstore_cache(data_dir) if wipe_data and binaries else "",
         hook_temp_dirs=_hook_temp_dirs(platform_name) if wipe_data and not preserve_data_entries else (),
         quarantined=_quarantined_copies(data_dir) if wipe_data and not preserve_data_entries else (),
+        acp_entries=_acp_editor_entries(cfg, data_dir),
     )
+
+
+def _acp_editor_entries(cfg, data_dir: str) -> tuple[tuple[str, str, str], ...]:
+    """The guarded editor entries this runtime can prove `acp setup` wrote (GAP-2632).
+
+    The proof is the one `defenseclaw acp remove` uses, so a foreign or
+    adopted entry is never named. An editor file that cannot be read is left
+    as it is.
+    """
+    if getattr(cfg, "deployment_mode", "") == "managed_enterprise":
+        return ()
+    from defenseclaw.commands import cmd_acp
+
+    records = cmd_acp._owned_entry_records(data_dir)
+    entries: list[tuple[str, str, str]] = []
+    for client in sorted(cmd_acp._CLIENTS):
+        try:
+            path = cmd_acp._client_path(client)
+            servers = cmd_acp._read_json_object(path).get("agent_servers")
+        except (OSError, ValueError, RuntimeError, click.ClickException):
+            continue
+        if not isinstance(servers, dict):
+            continue
+        entries.extend(
+            (client, agent, str(path))
+            for agent in sorted(cmd_acp._AGENTS)
+            if cmd_acp._pair_entry_names(servers, client, agent, records)
+        )
+    return tuple(entries)
+
+
+def _remove_acp_editor_entries(plan: UninstallPlan) -> None:
+    """Take out the plan's ACP editor entries, their contract locks and their records."""
+    from defenseclaw.commands import cmd_acp
+
+    records = cmd_acp._owned_entry_records(plan.data_dir)
+    paths = {client: cmd_acp._remove_client_entry(client, agent, records) for client, agent, _ in plan.acp_entries}
+    # A linked acp directory holds another runtime's locks and records.
+    if cmd_acp._acp_dir_is_redirected(plan.data_dir):
+        return
+    pairs = {(client, agent) for client, agent, _path in plan.acp_entries}
+    for client, agent in pairs:
+        lock = cmd_acp._contract_lock_path(plan.data_dir, client, agent)
+        if lock.is_file() and not lock.is_symlink():
+            lock.unlink()
+    for client, path in paths.items():
+        try:
+            # Another entry this runtime wrote in the same file keeps a current pin.
+            cmd_acp._refresh_client_contract_digests(plan.data_dir, client, path)
+        except click.ClickException as exc:
+            ux.warn(f"{exc.message}; `defenseclaw acp verify` names what to repair")
+    remaining = {key: digest for key, digest in records.items() if key[:2] not in pairs}
+    if remaining != records:
+        cmd_acp._write_entry_records(plan.data_dir, remaining)
 
 
 def _quarantined_copies(data_dir: str) -> tuple[str, ...]:
@@ -2304,6 +2365,10 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         # An open Codex session ran on after the uninstall with every hook
         # failing, and its next marker command ran (GAP-0255).
         ux.echo(f"      {ux.dim('·')} {_OPEN_SESSION_NOTE}")
+    if plan.acp_entries:
+        ux.echo(f"  • {ux.bold('ACP editor entries:')}  removed with their contract locks")
+        for client, agent, path in plan.acp_entries:
+            ux.echo(f"      {ux.dim('·')} {client}/{agent} in {path}")
     if plan.platform_name == "win32" and not plan.sandbox_teardown:
         ux.echo(f"  • {ux.bold('sandbox teardown:')}    no (OpenShell sandboxes do not run on Windows)")
     elif plan.sandbox_teardown:
@@ -2489,6 +2554,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
         if not plan.remove_data_dir:
             _turn_guardrail_off(plan.data_dir)
+    if plan.acp_entries:
+        # Before data removal: the records that prove the entries are there.
+        run_phase("ACP editor entries", lambda: _remove_acp_editor_entries(plan))
     # until 1.1: read what a removed connector left before its backups move:
     # their records name the agent configs outside the data folder.
     from defenseclaw.removed_connectors import backup_dirs, leftovers
