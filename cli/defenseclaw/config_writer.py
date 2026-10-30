@@ -1019,6 +1019,47 @@ def _check_destination_index(document: Any, path: str, parts: tuple[str | int, .
         )
 
 
+def _check_scalar_parent(document: Any, path: str, parts: tuple[str | int, ...], value: Any) -> None:
+    """Refuse a field under a key that config.yaml stores as one value.
+
+    ``admission.skill.actions.high: block`` is a shorthand, not a set of
+    fields, so ``admission.skill.actions.high.install`` has nowhere to go.
+    The YAML patcher refused it with unreachable_mutation_path and named
+    neither the stored value nor the form that works (GAP-0943): setting the
+    whole key with --json.
+    """
+    current = document
+    for depth, part in enumerate(parts[:-1]):
+        if isinstance(part, int):
+            if not isinstance(current, list) or part >= len(current):
+                return
+        elif not isinstance(current, dict) or part not in current:
+            return
+        current = current[part]
+        if isinstance(current, (dict, list)):
+            continue
+        parent = format_path(parts[: depth + 1])
+        rest = parts[depth + 1 :]
+        from defenseclaw.enforce.admission import shorthand_fields
+
+        fields = shorthand_fields(current) if len(rest) == 1 else None
+        if fields is not None and rest[0] in fields:
+            # The shorthand's own install/file/runtime, with this one changed.
+            example: Any = {**fields, rest[0]: value}
+            leftover = ""
+        else:
+            example = value
+            for item in reversed(rest):
+                example = {item: example} if isinstance(item, str) else [example]
+            leftover = " (the fields you leave out take their defaults)"
+        stored = "an empty value" if current is None else f"the single value {json.dumps(current)}"
+        raise ConfigWriteError(
+            f"{parent} is stored as {stored}, not as separate fields, so {path} cannot be set on its own. "
+            f"Set the whole {parent} instead{leftover}: "
+            f"defenseclaw config set --json {parent} '{json.dumps(example)}'"
+        )
+
+
 def _same_config_value(before: Any, after: Any) -> bool:
     """Treat a value as unchanged only when its types match throughout."""
     if type(before) is not type(after):
@@ -1096,6 +1137,7 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
             if before is not _MISSING and _same_config_value(before, change.value):
                 continue
             _check_destination_index(document, change.path, parts)
+            _check_scalar_parent(document, change.path, parts, change.value)
             mutations.append(V8YAMLMutation.set(parts, change.value))
             # A later unset of this batch prunes against the document as this
             # set leaves it: 'guardrail rule enable R' sets rules.enable and
