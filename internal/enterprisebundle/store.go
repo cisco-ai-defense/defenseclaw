@@ -46,6 +46,11 @@ const (
 	// BundlesDirName is the store directory under the configuration
 	// directory.
 	BundlesDirName = "bundles"
+	// StoreDirMode is the mode of the store directory on Linux and macOS:
+	// other accounts can open the public receipt.json and receipt-events/
+	// by name but cannot list the version, staging or inbox names
+	// (GAP-0082). Windows uses the store ACL instead.
+	StoreDirMode = 0o711
 	// StateFileName is the store state in the lifecycle directory.
 	StateFileName = "bundle-state.json"
 	// ReceiptsDirName holds one receipt per bundle in the lifecycle
@@ -852,7 +857,7 @@ func (s *Store) publishReceipt(out enterprisestatus.PublicReceipt) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.BundlesDir, 0o755); err != nil {
+	if err := os.MkdirAll(s.BundlesDir, StoreDirMode); err != nil {
 		return err
 	}
 	if err := configwrite.WriteFileDurable(s.PublicReceiptPath(), append(data, '\n'), 0o644); err != nil {
@@ -1100,7 +1105,7 @@ func (s *Store) Stage(r *Receipt, b *Bundle) (string, error) {
 	if err := removeTree(dir); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(s.BundlesDir, 0o755); err != nil {
+	if err := os.MkdirAll(s.BundlesDir, StoreDirMode); err != nil {
 		return "", err
 	}
 	if s.EnsureStageDirectory != nil {

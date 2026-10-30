@@ -77,6 +77,12 @@ type Deployment struct {
 	// last transaction left in place in vendor machine policy; the runtime
 	// descriptor records exactly this set.
 	MachinePolicyConnectors []string `json:"machine_policy_connectors"`
+	// ConnectorActivatedAt dates, per machine-policy connector, the run that
+	// placed its hooks after the deployment was activated (a config change
+	// that enabled it); status names its agent sessions started before then
+	// (GAP-0018, as Windows does). Absent for connectors placed at the
+	// activation, which the activation time covers.
+	ConnectorActivatedAt map[string]string `json:"connector_activated_at,omitempty"`
 	// RulePacks are the rule packs the applied config resolved to, keyed by
 	// setting (validatedConfig.RulePacks).
 	RulePacks map[string]string `json:"rule_packs,omitempty"`

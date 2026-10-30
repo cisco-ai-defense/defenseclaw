@@ -97,6 +97,7 @@
     "policy": { "$ref": "#/$defs/policyState", "description": "Effective policy state; omitted under the Secure Client integration." },
     "bundle": { "$ref": "#/$defs/bundleState", "description": "Last bundle receipt that reached staging and the confirmed bundle that enforces. Omitted when none reached staging and no bundle is confirmed." },
     "last_refusal": { "$ref": "#/$defs/bundleRefusal", "description": "Latest bundle delivery refused before staging; the receipt remains in the root-only history." },
+    "enforcement_pending": { "$ref": "#/$defs/enforcementPending", "description": "Running agent sessions this result names as not enforced until they restart (agent_sessions_restart_required, bundle.sessions_restart_required), as a count and connector names. Omitted when there are none." },
     "scanners": {
       "type": "object", "additionalProperties": false, "required": ["state"],
       "description": "Standalone Windows scanner runtime; omitted everywhere else.",
@@ -298,6 +299,16 @@
         { "if": { "properties": { "state": { "const": "confirmed" } } }, "then": { "required": ["effective_policy_digest", "confirmed_at"] } },
         { "if": { "properties": { "bundle_id": { "const": "" } } }, "then": { "properties": { "state": { "enum": ["received", "failed"] } } } }
       ]
+    },
+    "enforcementPending": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "connectors"],
+      "description": "Count and connector names only, never a user name or a process id. unknown names a session whose agent could not be identified.",
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "connectors": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
     },
     "sessionRestartStatus": {
       "type": "object",

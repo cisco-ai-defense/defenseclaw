@@ -52,7 +52,10 @@ type bundleStatusResult struct {
 	LastRefusal             *enterprisestatus.BundleRefusal       `json:"last_refusal,omitempty"`
 	Bundle                  *enterprisestatus.BundleState         `json:"bundle,omitempty"`
 	SessionsRestartRequired enterprisestatus.SessionRestartStatus `json:"sessions_restart_required"`
-	AlertOnlyRuleCount      int                                   `json:"alert_only_rule_count"`
+	// EnforcementPending is the count and connector names of the sessions
+	// above, without user names; omitted when there are none.
+	EnforcementPending *enterprisestatus.EnforcementPending `json:"enforcement_pending,omitempty"`
+	AlertOnlyRuleCount int                                  `json:"alert_only_rule_count"`
 	// GatewayChecked says whether the running gateway was asked; then
 	// GatewayDigest is the digest it enforces and Applied says it is the
 	// current bundle digest with no rejected reload.
@@ -169,6 +172,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		res.Bundle = summary
 	}
 	res.SessionsRestartRequired = bundleSessionStatus(ctx)
+	res.EnforcementPending = enterprisestatus.PendingFromScan(res.SessionsRestartRequired)
 	if res.Bundle != nil {
 		res.Bundle.SessionsRestartRequired = &res.SessionsRestartRequired
 	}

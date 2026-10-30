@@ -62,7 +62,7 @@ func TestBundleSessionsCountAnNpmCodexSessionOnce(t *testing.T) {
 
 // The agent_sessions_restart_required scan of status, verify and ensure
 // names one pid per session for an agent with a launcher (OpenCode from npm
-// here; Codex itself reads its requirements per turn), and keeps the Codex
+// here), and keeps the Codex
 // background server and another user apart.
 func TestAgentSessionsStartedBeforeNameALauncherSessionOnce(t *testing.T) {
 	if os.Geteuid() == 0 {

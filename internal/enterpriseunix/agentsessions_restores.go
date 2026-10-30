@@ -74,8 +74,7 @@ func (e *Env) guardianRestores() (map[guardianRestoreKey]time.Time, error) {
 // DefenseClaw, and security_complete is false until it restarts
 // (GAP-0499). Sessions older than the activation are named by the
 // activation warning already. The connectors whose hooks are vendor machine
-// policy, and Codex (it reads the managed requirements per turn), need no
-// restart after a per-user restore.
+// policy (Codex, Claude Code) need no restart after a per-user restore.
 func (l *lifecycle) describeAgentSessionsBeforeGuardianRestore(ctx context.Context, record *Deployment, activated time.Time) {
 	machine := map[string]bool{}
 	for _, name := range record.MachinePolicyConnectors {
@@ -102,7 +101,7 @@ func (l *lifecycle) describeAgentSessionsBeforeGuardianRestore(ctx context.Conte
 	held := map[group][]agentSession{}
 	for _, session := range l.env.agentSessionsStartedBefore(ctx, latest, record.ServiceUID) {
 		connector := agentConnectors[session.Agent]
-		if connector == "" || agentsReadingHooksLive[session.Agent] || machine[connector] || session.Started.Before(activated) {
+		if connector == "" || machine[connector] || session.Started.Before(activated) {
 			continue
 		}
 		at, ok := restores[guardianRestoreKey{session.UID, connector}]
@@ -141,7 +140,7 @@ func (l *lifecycle) warnGuardianRestoresUnknown(ctx context.Context, record *Dep
 	var unknown []agentSession
 	for _, session := range l.env.agentSessionsStartedBefore(ctx, l.env.Now(), record.ServiceUID) {
 		connector := agentConnectors[session.Agent]
-		if connector == "" || agentsReadingHooksLive[session.Agent] || machine[connector] || session.Started.Before(activated) {
+		if connector == "" || machine[connector] || session.Started.Before(activated) {
 			continue
 		}
 		unknown = append(unknown, session)
