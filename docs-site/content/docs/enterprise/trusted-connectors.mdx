@@ -26,6 +26,7 @@ enterprise:
 
 - Sign the bundle with `--min-product-version 1.0.6` or later; `bundle sign` refuses the key otherwise, and older builds refuse it as unknown.
 - `account` must not be root, an administrator, SYSTEM, LOCAL SERVICE, NETWORK SERVICE, an `NT SERVICE` account or a member of an admin group (`wheel`, `sudo`, `admin`, `Administrators`, `Domain Admins`). This is checked at start and every five minutes; an entry that becomes an administrator is disabled. Grants in sudoers outside these groups are not visible to DefenseClaw: do not give the service account sudo.
+- On a host joined to a directory, a bare account name that the directory could also hold is ambiguous: the entry is disabled and logged as `account_ambiguous_user`. Name a local service account by its uid (`account: "990"`) and directory accounts by their qualified name (`svc-gas@corp.example.com`).
 - `may_act_for` names groups and users. They resolve to ids at start and on every refresh; an ambiguous name or one that does not resolve is dropped with a warning. A connector cannot act for its own account or another connector's account.
 - Group membership always comes from the directory, never from the request.
 
