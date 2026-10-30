@@ -39,7 +39,8 @@ func ExactPOSIXDownloadSubstitution(facts Facts, input Input) bool {
 		}
 		source = extracted.command
 	}
-	if facts.Parse.Dialect != DialectPOSIX || source == "" || len(source) > maxCommandBytes ||
+	if !IsImmediateShellExecutionTool(facts.Tool) || facts.Parse.Dialect != DialectPOSIX ||
+		source == "" || len(source) > maxCommandBytes ||
 		(facts.Parse.Status != StatusComplete && facts.Parse.Status != StatusPartial) ||
 		len(facts.Commands) != 2 {
 		return false

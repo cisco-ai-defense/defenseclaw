@@ -25,7 +25,8 @@ import (
 // ExactPythonExternalSocketConnect accepts one literal Python -c program with
 // a static socket constructor and connect call. Other code stays unresolved.
 func ExactPythonExternalSocketConnect(facts Facts) bool {
-	if facts.Parse.Dialect != DialectPOSIX || facts.Parse.Status != StatusPartial ||
+	if !IsImmediateShellExecutionTool(facts.Tool) || facts.Parse.Dialect != DialectPOSIX ||
+		facts.Parse.Status != StatusPartial ||
 		len(facts.Parse.Issues) != 1 || facts.Parse.Issues[0] != IssueOpaqueArtifact ||
 		len(facts.Commands) != 1 {
 		return false

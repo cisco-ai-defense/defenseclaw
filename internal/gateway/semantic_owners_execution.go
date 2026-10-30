@@ -40,6 +40,9 @@ const (
 )
 
 func curlDownloadExecPrerequisite(facts actionfacts.Facts) bool {
+	if !actionfacts.IsImmediateShellExecutionTool(facts.Tool) {
+		return false
+	}
 	if powerShellDownloadExecPrerequisite(facts) {
 		return true
 	}
@@ -75,6 +78,9 @@ func provesPOSIXCurlShellSink(sink actionfacts.CommandFact) bool {
 }
 
 func wgetDownloadExecPrerequisite(facts actionfacts.Facts) bool {
+	if !actionfacts.IsImmediateShellExecutionTool(facts.Tool) {
+		return false
+	}
 	return stdinInterpreterPipelineFallbackProof(
 		facts,
 		actionfacts.OperationFetch,
@@ -84,7 +90,7 @@ func wgetDownloadExecPrerequisite(facts actionfacts.Facts) bool {
 }
 
 func wrappedDownloadExecProof(facts actionfacts.Facts) bool {
-	if !facts.Authoritative() {
+	if !actionfacts.IsImmediateShellExecutionTool(facts.Tool) || !facts.Authoritative() {
 		return false
 	}
 	for _, source := range facts.Commands {

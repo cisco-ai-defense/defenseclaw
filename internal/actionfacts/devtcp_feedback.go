@@ -21,7 +21,8 @@ import "net/netip"
 // ExactPOSIXDescriptorFeedbackShell proves a closed descriptor-to-shell
 // feedback loop after the parser resolves literal descriptor duplications.
 func ExactPOSIXDescriptorFeedbackShell(facts Facts) bool {
-	if facts.Parse.Dialect != DialectPOSIX || facts.Parse.Status != StatusPartial ||
+	if !IsImmediateShellExecutionTool(facts.Tool) || facts.Parse.Dialect != DialectPOSIX ||
+		facts.Parse.Status != StatusPartial ||
 		len(facts.Commands) != 3 {
 		return false
 	}
