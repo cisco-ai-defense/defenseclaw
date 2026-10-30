@@ -2091,6 +2091,10 @@ class Store:
                        ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
                          source_path = excluded.source_path,
                          actions_json = json_remove(actions_json, '$.file'),
+                         reason = CASE
+                           WHEN json_remove(actions_json, '$.file') = '{}' THEN ''
+                           ELSE reason
+                         END,
                          updated_at = excluded.updated_at""",
                     (
                         str(uuid.uuid4()),

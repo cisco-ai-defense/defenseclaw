@@ -2351,9 +2351,11 @@ class TestSkillList(SkillCommandTestBase):
             str(uuid.uuid4()), "skill-scanner", "/h/.claude/skills/held-skill",
             datetime.now(timezone.utc), 500, 1, "CRITICAL", "{}",
         )
+        held = os.path.join(self.tmp_dir, "quarantine", "skills", "amp", "held-skill")
+        os.makedirs(held)
         self.app.store.create_quarantine_record(
             "skill", "held-skill", "/h/.claude/skills/held-skill",
-            "/h/.defenseclaw/quarantine/skills/amp/held-skill", "sha256:x",
+            held, "sha256:x",
             "watcher enforcement", "amp", state="active",
         )
 
