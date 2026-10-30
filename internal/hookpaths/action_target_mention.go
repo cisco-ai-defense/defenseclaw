@@ -1093,6 +1093,16 @@ func actionLiteralGitWords(words []*syntax.Word, home string) bool {
 			}
 			words = words[2:]
 			continue
+		case "-c":
+			// An identity or display setting runs nothing (GAP-1473).
+			if len(words) < 2 {
+				return false
+			}
+			if setting, fixed := StaticWord(words[1], home); !fixed || !actionGitInertConfig(setting) {
+				return false
+			}
+			words = words[2:]
+			continue
 		case "--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs", "--glob-pathspecs",
 			"--noglob-pathspecs", "--icase-pathspecs", "--no-replace-objects":
 			words = words[1:]
@@ -2828,6 +2838,10 @@ func actionWindowsGitSubcommand(words []string) (int, bool) {
 		case option == "-C" || option == "--git-dir" || option == "--work-tree" || option == "--namespace":
 			sub += 2
 			continue
+		case option == "-c" && sub+1 < len(words) && actionGitInertConfig(words[sub+1]):
+			// An identity or display setting runs nothing (GAP-1473).
+			sub += 2
+			continue
 		case strings.HasPrefix(option, "--git-dir=") || strings.HasPrefix(option, "--work-tree=") ||
 			strings.HasPrefix(option, "--namespace="):
 		case option == "--no-pager" || option == "-P" || option == "--no-optional-locks" || option == "--bare" ||
@@ -2842,6 +2856,23 @@ func actionWindowsGitSubcommand(words []string) (int, bool) {
 		return 0, false
 	}
 	return sub, true
+}
+
+// actionGitInertConfig reports a git -c NAME=VALUE setting that only names
+// the committer or changes the output, so git runs nothing it names: any
+// other setting may name a program (an alias, the pager, the editor, a hook
+// path, gpg.program) and keeps the statement out of the text reading.
+func actionGitInertConfig(setting string) bool {
+	name, _, ok := strings.Cut(setting, "=")
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(name) {
+	case "user.name", "user.email", "author.name", "author.email", "committer.name", "committer.email",
+		"color.ui", "core.quotepath", "init.defaultbranch", "advice.detachedhead":
+		return true
+	}
+	return false
 }
 
 // actionWindowsGitPathspecWord reports a word of a git text statement that

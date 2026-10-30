@@ -137,6 +137,21 @@ func TestSelfProtCopyAfterDirectoryChange(t *testing.T) {
 	}, "claudecode", "codex")
 }
 
+// git -c with an identity or display setting runs nothing, so the message
+// stays text in a pwsh -Command body (GAP-1473); any other setting does not.
+// The per-user gateway reads the quoted ~ of the body itself.
+func TestSelfProtGitInertConfigIsText(t *testing.T) {
+	for _, r := range []selfProtRow{
+		{"P03", "pwsh -NoProfile -Command \"git -c user.name=vd commit --allow-empty -m \x27Document ~/.ssh/authorized_keys\x27\"", "allow"},
+		{"P04", "pwsh -NoProfile -Command \"git -c user.name=vd -c user.email=vd@example.test commit --allow-empty -m \x27Document ~/.ssh/authorized_keys\x27\"", "allow"},
+		{"PT2", "pwsh -NoProfile -Command \"git -c core.pager=x commit --allow-empty -m \x27Document ~/.ssh/authorized_keys\x27\"", "block"},
+	} {
+		if got := selfProtVerdict(t, r, false, "claudecode"); got != r.want {
+			t.Errorf("%s per-user: %q = %s, want %s", r.id, r.cmd, got, r.want)
+		}
+	}
+}
+
 // cmd /c "mklink ..." makes the link ln makes, so a hard link of an
 // ordinary file and a write through it are ordinary (GAP-2229, GAP-1266)
 // and a link to the keys stays a key write.
