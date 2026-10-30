@@ -905,3 +905,41 @@ func TestTrustedActionArgvRuleBlocksBehindPrefixOrEnvWrapper(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0935: a PowerShell if, elseif or while body under a condition that is
+// not a literal ($true/$false) was never judged, so the delete in it ran
+// with no finding. The body is judged as one that runs, as a POSIX if body
+// is, and a plain condition is a statement of its own. Benign bodies and
+// conditions stay quiet.
+func TestTrustedActionJudgesPowerShellConditionalBodies(t *testing.T) {
+	const connector = "powershell-conditional-body-test"
+	installDefaultProfileConnector(t, connector)
+	for _, test := range []struct {
+		command, rule string
+		blocks        bool
+	}{
+		{"if (Test-Path x) { Remove-Item -Recurse -Force C:/ }", "CMD-RM-RF", true},
+		{"if ($env:CI) { Remove-Item -Recurse -Force C:/ }", "CMD-RM-RF", true},
+		{"if (Test-Path x) { Get-ChildItem } elseif (Test-Path y) { Remove-Item -Recurse -Force C:/ }", "CMD-RM-RF", true},
+		{"while ($i -lt 3) { Remove-Item -Recurse -Force C:/ }", "CMD-RM-RF", true},
+		{"if (Get-Content ~/.ssh/id_rsa) { Write-Output ok }", "PATH-SSH-KEY", true},
+		{"if (Test-Path x) { Remove-Item -Recurse -Force C:/tmp/dc-x }", "CMD-RM-RF", false},
+		{"if (Test-Path C:/x) { Write-Output yes } else { Write-Output no }", "CMD-RM-RF", false},
+		{"if ($env:CI) { npm test }", "CMD-RM-RF", false},
+		{"while ($i -lt 3) { $i++ }", "CMD-RM-RF", false},
+	} {
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: actionfacts.Input{Tool: "powershell", Command: test.command, CWD: `C:/Users/alice/project`,
+				ActiveHome: `C:/Users/alice`, DialectHint: actionfacts.DialectPowerShell},
+			LegacyText:         test.command,
+			Connector:          connector,
+			EnforcementCapable: true,
+		})
+		if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != test.blocks {
+			t.Errorf("%q: block = %t, want %t; findings=%v", test.command, got, test.blocks, FindingStrings(findings))
+		}
+		if finding := findingWithID(findings, test.rule); test.blocks && (finding == nil || !finding.contributesToEnforcement()) {
+			t.Errorf("%q: %s does not block; findings=%v", test.command, test.rule, FindingStrings(findings))
+		}
+	}
+}
