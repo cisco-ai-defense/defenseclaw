@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -122,9 +123,16 @@ type LLMJudge struct {
 
 type toolJudgeSessionContext struct {
 	userIntent string
-	events     []toolJudgeContextEvent
-	lastSeen   time.Time
+	// earlierIntents are the session's previous user tasks, newest last
+	// (at most maxEarlierUserIntents). Only SessionUserIntents reads them:
+	// a user often asks for an action and confirms it in the next turn.
+	earlierIntents []string
+	events         []toolJudgeContextEvent
+	lastSeen       time.Time
 }
+
+// maxEarlierUserIntents bounds the previous user tasks kept per session.
+const maxEarlierUserIntents = 2
 
 type toolJudgeContextEvent struct {
 	toolName string
@@ -2195,10 +2203,51 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 	if len(j.toolContext) >= maxToolJudgeContextSessions {
 		j.pruneToolJudgeContextLocked(now)
 	}
-	j.toolContext[sessionID] = toolJudgeSessionContext{
-		userIntent: toolJudgeUserIntentExcerpt(content),
-		lastSeen:   now,
+	var earlier []string
+	if previous, ok := j.toolContext[sessionID]; ok && now.Sub(previous.lastSeen) < toolJudgeContextTTL {
+		earlier = previous.earlierIntents
+		if previous.userIntent != "" {
+			earlier = append(slices.Clone(earlier), previous.userIntent)
+		}
+		if len(earlier) > maxEarlierUserIntents {
+			earlier = earlier[len(earlier)-maxEarlierUserIntents:]
+		}
 	}
+	j.toolContext[sessionID] = toolJudgeSessionContext{
+		userIntent:     toolJudgeUserIntentExcerpt(content),
+		earlierIntents: earlier,
+		lastSeen:       now,
+	}
+}
+
+// SessionUserIntents returns the user tasks ObserveSessionPrompt recorded for
+// the session in ctx, newest first: the current turn's task and up to
+// maxEarlierUserIntents earlier ones (a request, then "yes, go ahead"). It
+// is empty when there is none or it expired. The values are untrusted text:
+// callers may only use them to lower a detection-only finding, never to
+// allow a call (#1390).
+func (j *LLMJudge) SessionUserIntents(ctx context.Context) []string {
+	if j == nil {
+		return nil
+	}
+	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
+	if sessionID == "" {
+		return nil
+	}
+	j.toolContextMu.Lock()
+	defer j.toolContextMu.Unlock()
+	entry, ok := j.toolContext[sessionID]
+	if !ok || time.Since(entry.lastSeen) >= toolJudgeContextTTL {
+		return nil
+	}
+	intents := make([]string, 0, 1+len(entry.earlierIntents))
+	if entry.userIntent != "" {
+		intents = append(intents, entry.userIntent)
+	}
+	for index := len(entry.earlierIntents) - 1; index >= 0; index-- {
+		intents = append(intents, entry.earlierIntents[index])
+	}
+	return intents
 }
 
 // ResetToolJudgeSession drops bounded in-memory context when a connector
