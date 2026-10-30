@@ -916,6 +916,10 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	w.addWatch = func(dir string) { addDirWatches(fsw, dir, 0, watchedDirs) }
 	w.addContentWatch = func(dir string) { addSkillContentWatches(fsw, dir, watchedDirs) }
 	var deferredDirs [][2]string // {dir, kind} not created because an agent installer owns them
+	// missingDirs are configured roots the watcher could not create (an
+	// admin-only parent made later, GAP-2628). Each tick checks them again;
+	// once one exists it is watched and what it already holds is admitted.
+	var missingDirs [][2]string
 	watchKey := func(dir string) (string, string) {
 		absolute, absErr := filepath.Abs(dir)
 		if absErr != nil {
@@ -991,6 +995,11 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 		}
 		if err != nil {
+			if errors.Is(err, errWatchDirNotCreated) {
+				missingDirs = append(missingDirs, [2]string{dir, kind})
+				fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (watching it once it exists)\n", kind, dir, err)
+				return false
+			}
 			fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (skipping)\n", kind, dir, err)
 			return false
 		}
@@ -1024,7 +1033,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		}
 	}
 
-	if watched == 0 && !w.admitNewMCP {
+	if watched == 0 && len(missingDirs) == 0 && !w.admitNewMCP {
 		return fmt.Errorf("watcher: no directories to watch — check claw.mode and claw.home_dir")
 	}
 
@@ -1161,6 +1170,20 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 					if watchOnce(entry[0], entry[1]) && entry[1] == "plugin" {
 						w.watchExistingPluginFolders(entry[0])
+					}
+				}
+			}
+			if len(missingDirs) > 0 {
+				waiting := missingDirs
+				missingDirs = nil
+				for _, entry := range waiting {
+					if info, statErr := os.Stat(entry[0]); statErr != nil || !info.IsDir() {
+						missingDirs = append(missingDirs, entry)
+						continue
+					}
+					if watchOnce(entry[0], entry[1]) {
+						fmt.Printf("[watch] %s dir %s exists now; admitting what it holds\n", entry[1], entry[0])
+						w.admitReplacedRoot(ctx, fsw, entry[0], entry[1], watchedDirs)
 					}
 				}
 			}
@@ -3894,6 +3917,10 @@ func underVendorSystemRoot(absolute string) bool {
 	return false
 }
 
+// errWatchDirNotCreated reads "create dir": the watcher could not create a
+// missing root (for example under a parent only an administrator may write).
+var errWatchDirNotCreated = errors.New("create dir")
+
 // ensureAndWatch creates dir when it is missing and watches it. It returns
 // the absolute paths of the folders it created: dir and any missing parents.
 func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
@@ -3915,7 +3942,7 @@ func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
 		}
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create dir: %w", err)
+		return nil, fmt.Errorf("%w: %w", errWatchDirNotCreated, err)
 	}
 
 	if err := fsw.Add(dir); err != nil {
