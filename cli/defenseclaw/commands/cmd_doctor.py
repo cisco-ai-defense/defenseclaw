@@ -3803,8 +3803,8 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         else:
             size_remediation = (
                 f"nothing to reclaim yet; the {retention_days}-day retention deletes older events as they "
-                "age out. To keep less history, lower observability.local.retention_days in config.yaml "
-                "and run 'defenseclaw-gateway restart'"
+                "age out. To keep less history, lower observability.local.retention_days (or set an "
+                "observability.local.max_store_mb size cap) in config.yaml and run 'defenseclaw-gateway restart'"
             )
         _emit(
             "warn",
@@ -13755,7 +13755,7 @@ def _check_observability_v8_status(
         retention_health_from_gateway,
     )
 
-    retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+    retention = status.retention_label
     local_path = status.local_path or "built-in data directory"
     write_failure, write_next_step, disk_freed = _audit_write_failure(live_health, audit_db)
     local_detail = f"retention={retention}; path={local_path}"

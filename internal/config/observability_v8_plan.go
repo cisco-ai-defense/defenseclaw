@@ -67,6 +67,9 @@ type ObservabilityV8EffectiveLocal struct {
 	Path            string `json:"path,omitempty"`
 	JudgeBodiesPath string `json:"judge_bodies_path,omitempty"`
 	RetentionDays   int    `json:"retention_days"`
+	// MaxStoreMB is omitted at 0, so a config without the key keeps the plan
+	// digest of 1.0.5.
+	MaxStoreMB int `json:"max_store_mb,omitempty"`
 }
 
 type ObservabilityV8EffectiveTracePolicy struct {

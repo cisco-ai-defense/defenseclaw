@@ -3422,7 +3422,14 @@
           "minimum": 0,
           "maximum": 106751,
           "default": 7,
-          "description": "Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff after startup readiness and every six hours. The same window bounds AI discovery scan history in <data_dir>/inventory.db, which the gateway prunes about hourly (always keeping the latest scan) and compacts. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the audit database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration."
+          "description": "Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff a minute after startup readiness and every six hours. The same window bounds AI discovery scan history in <data_dir>/inventory.db, which the gateway prunes about hourly (always keeping the latest scan) and compacts. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the audit database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration."
+        },
+        "max_store_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "default": 0,
+          "description": "Opt-in size cap for the audit database in MiB. 0 (the default) keeps retention by days only. A value from 64 to 1048576 (1 to 63 are refused) makes each retention run also delete the oldest history, through the same path as retention_days, until the used pages of the audit database are under the cap; the newest hour is always kept. Releases before 1.0.6 refuse this key: remove it before going back with defenseclaw upgrade --version (defenseclaw rollback restores the previous configuration)."
         }
       },
       "x-defenseclaw-semantic-constraint": "The two database paths must be distinct from each other and every other configured file after lexical, real-path, symlink, hard-link, and inode checks."

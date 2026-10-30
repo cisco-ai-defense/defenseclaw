@@ -668,7 +668,7 @@ Omissions compile to an explicit effective policy; inspect it with `defenseclaw 
 - An enabled destination without `send` or `routes` takes every bucket, every signal it supports, and profile `none`. A logs-only kind sends all logs; a general OTLP kind sends logs, traces and metrics. The Galileo preset generates one traces-only `capability-default` route restricted to its available family membership.
 - An explicit `send` or `routes` block replaces the generated route. A selected nonmember of the Galileo family is rejected as `unsupported_shape` and reported through destination failure accounting.
 - Destinations are independent fan-out legs; one failing does not stop another. For advanced routes the first matching route wins per destination and signal, and an unmatched record is not delivered. Selectors AND across fields and OR within one: `buckets`, `sources`, `connectors`, `actions`, `event_names`, `min_severity`. Collection happens first, so routing cannot recreate a disabled signal.
-- Exactly one generated local SQLite destination is mandatory. It is configured only through `observability.local`, cannot be disabled or filtered, and keeps `retention_days` (default 7; `0` retains forever and warns about capacity). The same window bounds AI discovery history in `<data_dir>/inventory.db`.
+- Exactly one generated local SQLite destination is mandatory. It is configured only through `observability.local`, cannot be disabled or filtered, and keeps `retention_days` (default 7; `0` retains forever and warns about capacity). The same window bounds AI discovery history in `<data_dir>/inventory.db`. `max_store_mb` (default `0`, off) is an opt-in size cap for `audit.db` in MiB, 64 or more.
 
 ### Destination transport and queue limits
 
