@@ -1706,10 +1706,10 @@ func TestEnumerateUnixUnresolvedIncludeGroupKeepsRowsAndAddsNone(t *testing.T) {
 		groupNames: map[int]string{5001: "ai-devs@corp.example"},
 	}
 	writeTestManifest(t, manifestPath,
-		ManifestTarget{User: "dev", UserHome: filepath.Join(homes, "dev"), UID: intPointer(2001), GID: intPointer(2001), Connector: "opencode", AgentVersion: "1.18.33", HomeInode: 42},
+		ManifestTarget{User: "dev", UserHome: filepath.Join(homes, "dev"), UID: intPointer(2001), GID: intPointer(2001), Connector: "opencode", AgentVersion: "2.1.4", HomeInode: 42},
 	)
 	discover := func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
-		return map[string]string{"opencode": "1.18.33"}, nil, nil
+		return map[string]string{"opencode": "2.1.4"}, nil, nil
 	}
 	cfg := enumeratorConfig("opencode")
 	cfg.Enterprise.Enrollment.IncludeGroups = []string{"ai-devs"}
