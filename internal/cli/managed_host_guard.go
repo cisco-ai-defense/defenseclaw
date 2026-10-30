@@ -208,13 +208,7 @@ func managedWindowsVersionChangeAnswer(where, command, done string) error {
 // Windows standalone computer. Setup puts no DefenseClaw command on PATH and
 // the docs name this path, so a hint naming a bare `defenseclaw-gateway` was
 // "not recognized" (GAP-1183). A seam for tests.
-var managedWindowsAdminCLI = func() string {
-	root := strings.TrimRight(strings.TrimSpace(os.Getenv("ProgramFiles")), `\`)
-	if root == "" {
-		root = `C:\Program Files`
-	}
-	return root + `\Cisco\DefenseClaw\bin\defenseclaw.exe`
-}
+var managedWindowsAdminCLI = managed.WindowsStandaloneAdminCLI
 
 // managedWindowsAdminStatusHint is the administrator's status check on a
 // managed Windows computer, as a PowerShell command that runs as typed.

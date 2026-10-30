@@ -626,7 +626,9 @@ by name, change its `asset_policy.skill.denied` rule.
 An administrator scans a folder or remote MCP server with the same scanners,
 policy and judge. The gateway reads the folder as LocalSystem and refuses any
 folder inside a user profile, so copy what you want to scan to a folder outside
-profiles such as `C:\DefenseClawReview`. Variables like `SKILL_SCANNER_LLM_MODEL`
+profiles such as `C:\DefenseClawReview`. That refusal (HTTP 403) prints the
+`Copy-Item` and `scan` commands for the folder. Standard accounts cannot run
+managed scans. Variables like `SKILL_SCANNER_LLM_MODEL`
 in your shell are ignored.
 
 ```powershell title="Elevated Administrator prompt"
