@@ -104,17 +104,17 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 	for _, verb := range []string{"set", "unset"} {
 		verb := verb
 		addManagedWindowsAnswer(configCmd, verb, func([]string) error {
-			return withExitCode(fmt.Errorf("This device is managed: change config.yaml in the admin config (MDM or management plane); config %s did not change it", verb), 3)
+			return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: change config.yaml in the admin config (MDM or management plane); config %s did not change it", verb)), 3)
 		})
 	}
 	// The guardrail writers were an unknown command here, so a refused
 	// `guardrail disable` left no audit row (GAP-2639).
 	addManagedWindowsAnswer(root, "guardrail", func(args []string) error {
 		if command, ok := launcherAuditedWriter(append([]string{"guardrail"}, args...)); ok {
-			return withExitCode(fmt.Errorf("This device is managed: change config.yaml in the admin config (MDM or management plane); %s did not change it", command), 3)
+			return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: change config.yaml in the admin config (MDM or management plane); %s did not change it", command)), 3)
 		}
-		return withExitCode(fmt.Errorf("This device is managed: the guardrail is set in the admin config (MDM or management plane). %s",
-			windowsManagedStandardUserViewAnswer("The admission policy and guardrail thresholds", "policy show")), 3)
+		return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: the guardrail is set in the admin config (MDM or management plane). %s",
+			windowsManagedStandardUserViewAnswer("The admission policy and guardrail thresholds", "policy show"))), 3)
 	})
 	for _, kind := range []string{"skill", "mcp", "plugin", "tool"} {
 		kind := kind
@@ -126,19 +126,25 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 				if kind == "mcp" {
 					target = "<url>"
 				}
-				return withExitCode(fmt.Errorf("This device is managed: scan a %s with `defenseclaw scan %s %s`, "+
-					"which runs the gateway's %s scanner", kind, kind, target, kind), 3)
+				return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: scan a %s with `defenseclaw scan %s %s`, "+
+					"which runs the gateway's %s scanner", kind, kind, target, kind)), 3)
 			}
 			// The refusal named no next step (GAP-0523): the compiled
 			// admission policy is the administrator's view of these rules.
 			next := windowsManagedStandardUserViewAnswer("The admission policy", "policy show")
 			if len(args) == 0 || (args[0] != "block" && args[0] != "allow" && args[0] != "unblock") {
-				return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane). %s", kind, next), 3)
+				return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane). %s", kind, next)), 3)
 			}
-			return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it. %s", kind, kind, args[0], next), 3)
+			return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it. %s", kind, kind, args[0], next)), 3)
 		})
 	}
 }
+
+// managedDeviceAnswer is a managed Windows answer: a sentence that starts
+// like the per-user CLI's "This device is managed" refusal.
+type managedDeviceAnswer string
+
+func (a managedDeviceAnswer) Error() string { return string(a) }
 
 // addManagedWindowsAnswer adds a hidden root command name that only returns
 // answer, unless root already has that command. The answer needs no per-user
