@@ -8311,6 +8311,26 @@
         }
       ],
       "since": "1.0.4"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_POST_STARTUP_HELPER",
+      "category": "test_fixture",
+      "purpose": "Marks the child process TestHookPostStartupInitBudget starts from its own test binary, so the child only reports package init cost (GODEBUG=inittrace=1) and does not start another child (GAP-1225, GAP-1283).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-hook-post/main_init_test.go",
+          "description": "TestHookPostStartupInitBudget sets it on the child test process it measures"
+        }
+      ],
+      "since": "1.0.5"
     }
   ]
 }

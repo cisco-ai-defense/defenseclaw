@@ -355,7 +355,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 146 test-only variables">
+<Accordion title="Show the 147 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -398,6 +398,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_HOOK_FLOOD_OUT`<br/>Default: `unset`<br/>Values: `temporary directory path`, `unset`<br/>Managed host: `ignore` | Selects the output directory for probe profiles.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
 | `DEFENSECLAW_HOOK_FLOOD_PROBE`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Enables the opt-in hook flood probe test.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
 | `DEFENSECLAW_HOOK_FLOOD_RATE`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets hook calls per second in the probe.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
+| `DEFENSECLAW_HOOK_POST_STARTUP_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marks the child process TestHookPostStartupInitBudget starts from its own test binary, so the child only reports package init cost (GODEBUG=inittrace=1) and does not start another child (GAP-1225, GAP-1283).<br/>**Read by:** `cmd/defenseclaw-hook-post/main_init_test.go` |
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the connector hook-token cross-process lock fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_PATH`<br/>Default: `unset`<br/>Values: `absolute test lock path`, `unset`<br/>Managed host: `ignore` | Lock path passed to the connector hook-token cross-process fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_READY`<br/>Default: `unset`<br/>Values: `absolute test marker path`, `unset`<br/>Managed host: `ignore` | Ready-signal path shared with the connector hook-token cross-process fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |
