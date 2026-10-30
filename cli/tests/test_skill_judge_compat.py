@@ -47,10 +47,17 @@ def _luna_answer() -> dict:
     }
 
 
+# The scanner's own hook, read at import (collection) time, before any other
+# test in the run can have installed the DefenseClaw patch on the class.
+_SHIPPED_HOOK = LLMAnalyzer._repair_optional_taxonomy
+
+
 class SkillJudgeCompatTest(unittest.TestCase):
     def setUp(self):
         self._original = LLMAnalyzer._repair_optional_taxonomy
         self.addCleanup(setattr, LLMAnalyzer, "_repair_optional_taxonomy", self._original)
+        # Start from the shipped scanner whatever ran before (cli/tests/test_scanners.py installs the patch).
+        LLMAnalyzer._repair_optional_taxonomy = _SHIPPED_HOOK
         self.analyzer = object.__new__(LLMAnalyzer)
         self.analyzer._allowed_evidence_ids = set(_IDS)
         self.analyzer.taxonomy_repairs = 0
