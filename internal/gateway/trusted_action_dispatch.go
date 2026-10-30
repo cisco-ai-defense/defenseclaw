@@ -894,7 +894,9 @@ func withActiveStateTargetMention(
 	}
 	// A managed call whose cwd the gateway cannot see is also judged for
 	// links in the directory the hook client walked its words from
-	// (GAP-2569).
+	// (GAP-2569), and its relative patterns are walked from there through
+	// the cd, pushd and popd of the call (GAP-2485, T11 managed RHEL: the
+	// nested-cd rows Y5 and Y6 started nowhere and proved nothing).
 	linkFacts, linkRequest, placed := managedLinkWalkView(request)
 	throughLink := func(check func(actionfacts.Facts, trustedActionRequest) bool) bool {
 		return check(facts, request) || placed && check(linkFacts, linkRequest) ||
@@ -904,7 +906,8 @@ func withActiveStateTargetMention(
 	// the link reading: the mention scan and the whole-action proof do not
 	// follow the new link (GAP-2522), nor read sed -i --follow-symlinks
 	// (GAP-2529).
-	if !hereStringMutates && !xargsMutates && !globbedStateMutation(facts) && !throughLink(globbedStateMutationThroughLink) &&
+	if !hereStringMutates && !xargsMutates && !globbedStateMutation(facts) &&
+		(!placed || !globbedStateMutation(linkFacts)) && !throughLink(globbedStateMutationThroughLink) &&
 		!findGlobTwinStateMutation(facts, request) &&
 		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) &&
 		!provenFollowedInPlaceStateWrite(facts, request) {
