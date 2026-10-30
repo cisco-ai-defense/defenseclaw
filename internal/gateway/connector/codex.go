@@ -2618,6 +2618,9 @@ func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	if codexValueMatches(v, codexShellNotifyCommand(opts)) {
 		return true
 	}
+	if codexNotifyRunsDefenseClawNotify(v) {
+		return true
+	}
 	argv, ok := codexNotifyArgv(v)
 	if !ok || len(argv) != 2 {
 		return false
@@ -2638,6 +2641,17 @@ func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	// our exact argv, so teardown removes it instead of leaving Codex pointing at
 	// a program that does not exist (GAP-1248).
 	return argv[1] == "notify" &&
+		(isDefenseClawHookExecutable(argv[0]) || isRenamedDefenseClawHookExecutable(argv[0]))
+}
+
+// codexNotifyRunsDefenseClawNotify recognizes DefenseClaw's notify launcher
+// called with more arguments after "notify" (an older form, or one edited by
+// hand). It runs DefenseClaw's own executable, which an uninstall removes, so
+// teardown removes the entry rather than leave Codex calling a program that
+// is gone (GAP-0376).
+func codexNotifyRunsDefenseClawNotify(v interface{}) bool {
+	argv, ok := codexNotifyArgv(v)
+	return ok && len(argv) > 2 && argv[1] == "notify" &&
 		(isDefenseClawHookExecutable(argv[0]) || isRenamedDefenseClawHookExecutable(argv[0]))
 }
 

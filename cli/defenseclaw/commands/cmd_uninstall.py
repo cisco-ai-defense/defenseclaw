@@ -2139,12 +2139,47 @@ def _teardown_connectors(
     for name in _removed_connectors_in_active_state(data_dir):
         add(name)
 
+    # The agent's own config is evidence too: a Codex config.toml or Claude
+    # Code settings.json that still names DefenseClaw (a notify entry or
+    # hooks from an install whose data folder and backups are gone) is torn
+    # down even when that connector is not active, and its teardown removes
+    # only the entries DefenseClaw owns (GAP-0376).
+    for name, path in _agent_config_wiring_files():
+        if _names_defenseclaw(path):
+            add(name)
+
     if include_openclaw and openclaw_config_file:
         pristine = _expand(openclaw_config_file) + ".pristine"
         if os.path.isfile(pristine):
             add("openclaw")
 
     return tuple(out)
+
+
+def _agent_config_wiring_files() -> list[tuple[str, str]]:
+    """(connector, user config file) whose DefenseClaw wiring outlives its backup markers."""
+    return [
+        ("codex", os.path.join(codex_home(), "config.toml")),
+        ("claudecode", claude_settings_paths()[0]),
+    ]
+
+
+def _names_defenseclaw(path: str) -> bool:
+    """Whether a regular, not linked, agent config file carries DefenseClaw wiring (first 1 MiB)."""
+    try:
+        if not os.path.isfile(path) or os.path.islink(path) or _is_reparse_path(path):
+            return False
+        with open(path, "rb") as stream:
+            text = stream.read(1 << 20).lower()
+    except OSError:
+        return False
+    return any(marker in text for marker in _DEFENSECLAW_WIRING_MARKERS)
+
+
+#: What DefenseClaw writes into an agent config, never a bare project path
+#: that merely contains the word: its hook launcher, its data folder (hook
+#: scripts, notify bridge) and its telemetry header names.
+_DEFENSECLAW_WIRING_MARKERS = (b"defenseclaw-hook", b".defenseclaw/", b".defenseclaw\\", b"x-defenseclaw-")
 
 
 _DATA_REMOVED_LEFTOVER_NOTE = (
