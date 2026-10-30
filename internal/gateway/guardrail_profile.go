@@ -1055,7 +1055,11 @@ func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res ident
 	}
 	decision := set.selectProfile(subject, res, source, connectorName, scans, path, agent)
 	if decision.Refused == "" {
-		set.matches.put(key, decision)
+		userID := ""
+		if subject != nil {
+			userID = subject.UserID
+		}
+		set.matches.put(key, userID, decision)
 	}
 	return decision
 }

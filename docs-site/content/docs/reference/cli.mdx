@@ -1476,6 +1476,18 @@ Names use lowercase letters, digits, and dashes. Every action takes `--json`.
 
 Install first, then store the key. See [AI Defense key](/docs/enterprise/ai-defense-key).
 
+### Re-read directory facts (`enterprise identity refresh`)
+
+`defenseclaw-gateway enterprise identity refresh [--user U] [--flush-os-cache] [--max-users N] [--json]` re-reads groups and UPN now, for one account or for every account the managed gateway has cached (default at most 500), and lists the accounts whose guardrail profile changed. Hook calls use the new facts from their next call. Root, or an elevated prompt or SYSTEM on Windows; anyone else gets `not_admin`. Standalone managed deployments only.
+
+| Flag | Effect |
+| --- | --- |
+| `--user U` | Only this account (name, uid or SID) |
+| `--flush-os-cache` | First flush the OS cache: Linux with SSSD `sss_cache -u` (with `--user`) or `sss_cache -E`; macOS `dscacheutil -flushcache` and `dsmemberutil flushcache`, without `--user` only (macOS has no per-account flush); Windows nothing |
+| `--max-users N` | Re-read at most N cached accounts (1 to 4096) |
+
+On Windows an account takes its groups from its sign-in token, so a signed-in account gets a directory group change at its next sign-in; the result lists it in `windows_token_groups_pending`. Account names appear only in the output; the audit row `identity-refresh-completed` and its telemetry carry counts. Exit codes: `0`, `1` (`1603`), `2` (`1639`), `75` (`1618`) when another refresh is running. Schema: `packaging/mdm/contract/identity-refresh.schema.json`.
+
 ### Per-user hooks (`enterprise hooks`)
 
 The guardian and the enumerator services run these commands. Administrators

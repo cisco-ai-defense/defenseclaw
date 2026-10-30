@@ -131,6 +131,7 @@
             "guardrail-tool-call-parse-error",
             "guardrail-verdict",
             "guardrail-warn",
+            "identity-refresh-completed",
             "init",
             "init-gateway",
             "init-guardrail",

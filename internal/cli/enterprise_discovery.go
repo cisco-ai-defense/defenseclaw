@@ -11,6 +11,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -371,6 +372,31 @@ var enterpriseDiscoveryLoadConfig = loadGatewayCommandConfigFor
 // status; a connection that fails does. Secure Client keeps the one error of
 // main for both (issue #1092).
 func enterpriseGatewayGet(path string, out any) (string, error) {
+	return enterpriseGatewayRequest(http.MethodGet, path, nil, out)
+}
+
+// enterpriseGatewayRefusal is a gateway answer other than 200 to a POST:
+// its status and the code and message of its JSON body.
+type enterpriseGatewayRefusal struct {
+	status        int
+	code, message string
+}
+
+func (e *enterpriseGatewayRefusal) Error() string {
+	if e.message == "" {
+		return fmt.Sprintf("the gateway answered %d", e.status)
+	}
+	return e.message
+}
+
+// enterpriseGatewayPost posts body (JSON) to one route of the local gateway
+// API of the managed deployment and decodes its answer into out, as
+// enterpriseGatewayGet does; a refusal is an *enterpriseGatewayRefusal.
+func enterpriseGatewayPost(path string, body []byte, out any) (string, error) {
+	return enterpriseGatewayRequest(http.MethodPost, path, body, out)
+}
+
+func enterpriseGatewayRequest(method, path string, body []byte, out any) (string, error) {
 	if err := enterpriseDiscoveryPinManagedEnv(); err != nil {
 		return "", err
 	}
@@ -384,9 +410,18 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 	host := net.JoinHostPort(gatewayClientHost(cfg), strconv.Itoa(cfg.Gateway.APIPort))
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+path, nil)
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "http://"+host+path, reader)
 	if err != nil {
 		return "", err
+	}
+	if method != http.MethodGet {
+		// The API refuses a POST without its CSRF tag and a JSON body.
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DefenseClaw-Client", "defenseclaw-gateway-cli")
 	}
 	token := daemonGatewayToken(cfg)
 	if token == "" {
@@ -410,6 +445,14 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if method != http.MethodGet {
+			var refusal struct {
+				Error string `json:"error"`
+				Code  string `json:"code"`
+			}
+			_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&refusal)
+			return "", &enterpriseGatewayRefusal{status: resp.StatusCode, code: refusal.Code, message: refusal.Error}
+		}
 		if !secureClient && resp.StatusCode == http.StatusBadRequest {
 			var refusal struct {
 				Error string `json:"error"`

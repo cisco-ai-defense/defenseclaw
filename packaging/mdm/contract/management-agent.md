@@ -93,6 +93,7 @@ gateway.
 | `anchors-install.schema.json` | `.../enterprise/management/anchors-install-v1.json` | `enterprise bundle anchors install --json` (Linux, macOS) |
 | `bundle-receipt.schema.json` | `.../enterprise/management/bundle-receipt-v1.json` | the files `<etc>/bundles/receipt.json` and `<etc>/bundles/receipt-events/<receipt_id>.json` |
 | `bundle-anchors.schema.json` | `.../enterprise/management/bundle-anchors-v1.json` | the trust anchor file the agent supplies (input) |
+| `identity-refresh.schema.json` | `.../enterprise/management/identity-refresh-v1.json` | `enterprise identity refresh --json` (from 1.0.6) |
 
 Every `$id` starts with `https://defenseclaw.cisco.com/schemas/enterprise/`.
 The schemas are Draft 2020-12 and closed (`additionalProperties: false`), so
@@ -432,6 +433,7 @@ member; use these fallbacks on it:
 | Windows secret locks and JSON | Windows `secret set` / `remove` take `--lock-wait`, `bundle.lock` then `lifecycle.lock`, and print a JSON document on every outcome | do **not** pass `--lock-wait` (exit 1); the set takes no lock and can collide with an apply's confirm step or an installer run; failures print no JSON |
 | Linux and macOS secret failure JSON | `secret set` / `remove` / `status` print the schema-1 failure document for an argument, flag, privilege, value or stdin read error | those failures print one line on stderr and no JSON: classify them by the exit code (2 fix the call, 1 failed) |
 | Anchors command (Linux, macOS) | `enterprise bundle anchors install` | install the file as the MDM kit does (section 4.8) |
+| `identity_refresh` (from 1.0.6) | `enterprise identity refresh` re-reads directory facts now (4.10) | no such command: directory facts refresh within 15 minutes, or at the next sign-in on Windows |
 | `secret_set_bundle` (from 1.0.4) | `secret set --bundle` stores a credential a newer signed bundle signs (4.7) | an unknown flag: leave it out; the build binds no credential value, so store the credential without it |
 | Optional status v2 members (from 1.0.3) | `bundle verify` `secret_refs_missing` and `restart_prediction` (4.2); `status` / `verify` `connectors`, `openshell` and `identity` (4.4.1); each only when present | absent: preflight by verifying and reading the refusal, and treat every apply as one that can restart the gateway |
 
@@ -1395,6 +1397,43 @@ ls -1 /etc/defenseclaw/bundles/receipt-events/        # macOS: /opt/cisco/defens
 ```
 ```powershell
 Get-ChildItem 'C:\ProgramData\Cisco\DefenseClaw\etc\bundles\receipt-events' -Filter *.json
+```
+
+### 4.10 Re-read directory facts: `enterprise identity refresh`
+
+- argv: `enterprise identity refresh [--user <name|uid|SID>] [--flush-os-cache] [--max-users N] --json`.
+  Optional, from 1.0.6 (`identity_refresh` in `--version-json`).
+- Privilege: root, or an elevated administrator or SYSTEM on Windows. Any
+  other caller gets `not_admin` (exit 1, 1603 on Windows) before any account
+  is resolved. Standalone managed devices only (`not_managed` otherwise).
+- What it does: the gateway re-reads the directory facts (groups, UPN) of the
+  `--user` account, or of every account it has cached (at most `--max-users`,
+  default 500, 8 lookups at a time), and lists in `changes[]` the accounts
+  whose guardrail profile changed. Hook calls use the new facts from their
+  next call. Nothing else changes: no config, policy or default decision.
+- `--flush-os-cache`: Linux with SSSD runs `sss_cache -u <account>` with
+  `--user`, `sss_cache -E` without it. macOS runs `dscacheutil -flushcache`
+  and `dsmemberutil flushcache` without `--user` only (macOS has no
+  per-account flush; with `--user` it reports `reason: no_per_user_flush`).
+  Windows flushes nothing.
+- Windows: an account takes its groups from its sign-in token. A signed-in
+  account gets a directory group change at its next sign-in; such accounts
+  are listed in `windows_token_groups_pending` (warning of the same code).
+- Lock: one run at a time; a second run gets `refresh_busy`, exit 75 (1618).
+- Privacy: account names and ids are in this output only. The audit row
+  `identity-refresh-completed` and its telemetry carry counts, duration and
+  the flush scope.
+- Exit codes: 0 done (also when some accounts of an all-account run failed:
+  warning `accounts_failed`); 1 / 1603 `lookup_failed` for a failed `--user`
+  account, `not_admin`, `not_managed`, `gateway_unavailable`; 2 / 1639
+  `invalid_arguments`, `account_unresolved`; 75 / 1618 `refresh_busy`.
+- Schema `identity-refresh.schema.json`.
+
+```sh
+"$GW" enterprise identity refresh --user eng2@corp.example.com --flush-os-cache --json
+```
+```powershell
+& $GW enterprise identity refresh --json
 ```
 
 ## 5. The agent loop

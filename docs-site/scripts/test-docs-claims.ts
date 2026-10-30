@@ -1019,6 +1019,19 @@ describe('1.0.4 operator routes and limits', () => {
     }
   });
 
+  it('documents enterprise identity refresh as root-only, per-user flush and Windows sign-in pending', () => {
+    const cli = page('reference/cli.mdx');
+    assert.match(cli, /enterprise identity refresh \[--user U\] \[--flush-os-cache\]/);
+    assert.match(cli, /anyone else gets `not_admin`/);
+    assert.match(cli, /`sss_cache -u` \(with `--user`\) or `sss_cache -E`/);
+    assert.match(cli, /without `--user` only \(macOS has no per-account flush\)/);
+    assert.match(cli, /windows_token_groups_pending/);
+    assert.match(cli, /audit row `identity-refresh-completed` and its telemetry carry counts/);
+    const identity = page('enterprise/identity-and-authentication.mdx');
+    assert.match(identity, /### Refresh every account now/);
+    assert.match(identity, /enterprise identity refresh --flush-os-cache --json/);
+  });
+
   it('gives a working managed restart route without promising it in the refusal', () => {
     const lifecycle = page('enterprise/lifecycle.mdx');
     assert.match(lifecycle, /Windows \| Run the installed release's Setup with `\/repair JSON=1`/);
