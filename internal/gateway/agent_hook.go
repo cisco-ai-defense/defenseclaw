@@ -3548,21 +3548,20 @@ func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 }
 
 // agentHookTrustedActionTool preserves the official connector tool label for
-// policy and telemetry while selecting the host shell grammar used for trusted
-// action facts. OpenCode calls its built-in terminal tool "bash" on every
-// platform, while Copilot calls the same Windows surface "powershell" even for
-// ordinary native executables such as az.cmd. Treat those labels as a generic
-// shell only at this server-owned boundary so dialect inference can recognize
-// exact PowerShell/CMD syntax and bare native commands without trusting a
-// payload-supplied dialect hint or changing the recorded tool identity.
+// policy and telemetry while selecting the parser used for trusted action
+// facts. OpenCode V2's native patch tool uses the reviewed apply_patch envelope.
+// Copilot calls its Windows shell surface "powershell" even for ordinary native
+// executables such as az.cmd; its generic shell label lets dialect inference
+// recognize exact PowerShell/CMD syntax and bare native commands. Both mappings
+// belong at this server-owned boundary, without trusting a payload-supplied
+// dialect hint or changing the recorded tool identity.
 func agentHookTrustedActionTool(connectorName, toolName, platformName string) string {
+	if strings.EqualFold(strings.TrimSpace(connectorName), "opencode") && toolName == "patch" {
+		return "apply_patch"
+	}
 	if strings.EqualFold(strings.TrimSpace(platformName), "windows") {
 		connectorName = strings.TrimSpace(connectorName)
 		toolName = strings.TrimSpace(toolName)
-		if strings.EqualFold(connectorName, "opencode") &&
-			strings.EqualFold(toolName, "bash") {
-			return "shell"
-		}
 		if strings.EqualFold(connectorName, "copilot") &&
 			strings.EqualFold(toolName, "powershell") {
 			return "shell"

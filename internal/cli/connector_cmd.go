@@ -748,6 +748,9 @@ func reconcileConnectorRuntime(
 		opts.AgentVersion = previous.RawAgentVersion
 	}
 	resolution := connector.ResolveHookContract(name, opts.AgentVersion)
+	if err := connector.RequireOpenCodeV2(name, opts.AgentVersion); err != nil {
+		return err
+	}
 	opts.HookContractID = resolution.Contract.ContractID
 	actionMode := cfg != nil && strings.EqualFold(
 		strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name)), "action",

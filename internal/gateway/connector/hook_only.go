@@ -1086,6 +1086,9 @@ func (c *hookOnlyConnector) checkAgentSettings(opts SetupOpts) error {
 var hermesSetupWarningOutput io.Writer = os.Stderr
 
 func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	if err := RequireOpenCodeV2(c.name, opts.AgentVersion); err != nil {
+		return setupRefusedUnchanged{err: err}
+	}
 	if err := c.checkAgentSettings(opts); err != nil {
 		return err
 	}

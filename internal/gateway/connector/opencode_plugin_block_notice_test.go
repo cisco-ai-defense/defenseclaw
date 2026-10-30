@@ -35,22 +35,13 @@ func TestOpenCodePluginBlockAndConfirmAreVisible(t *testing.T) {
 	if lines[1] != "allow" {
 		t.Fatalf("a confirm verdict still runs the call here: %q", lines[1])
 	}
-	var toasts []struct {
-		Message string `json:"message"`
-		Variant string `json:"variant"`
+	var notices []string
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(lines[2], "notices:")), &notices); err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal([]byte(strings.TrimPrefix(lines[2], "toasts:")), &toasts); err != nil {
-		t.Fatalf("toasts %q: %v", lines[2], err)
-	}
-	// The block is also shown as an error notice: some OpenCode versions show
-	// a failed tool with no text.
-	if len(toasts) != 2 || toasts[0].Variant != "error" ||
-		toasts[0].Message != strings.TrimPrefix(lines[0], "block:") {
-		t.Fatalf("block notice = %+v", toasts)
-	}
-	if toasts[1].Variant != "warning" ||
-		!strings.HasPrefix(toasts[1].Message, "DefenseClaw flagged this tool call for review (HIGH): matched: TEST-CONFIRM-MARKER.") {
-		t.Fatalf("confirm notice = %+v", toasts)
+	if len(notices) != 2 || notices[0] != strings.TrimPrefix(lines[0], "block:") ||
+		!strings.HasPrefix(notices[1], "DefenseClaw flagged this tool call for review (HIGH): matched: TEST-CONFIRM-MARKER.") {
+		t.Fatalf("V2 server notices = %q", notices)
 	}
 }
 
@@ -60,7 +51,7 @@ func TestOpenCodePluginKeepsDefenseClawReasons(t *testing.T) {
 	server := openCodeStubGateway(t, `{"action":"block","mode":"action","hook_output":{"decision":"deny","reason":"DefenseClaw blocked the command under policy."}}`)
 	lines := runOpenCodePluginHarness(t, openCodePluginTestData(t, server), 1)
 	if len(lines) != 2 || lines[0] != "block:DefenseClaw blocked the command under policy." ||
-		lines[1] != `toasts:[{"title":"DefenseClaw","message":"DefenseClaw blocked the command under policy.","variant":"error","duration":15000}]` {
+		lines[1] != `notices:["DefenseClaw blocked the command under policy."]` {
 		t.Fatalf("harness output = %q", lines)
 	}
 }
@@ -75,7 +66,7 @@ func TestOpenCodePluginSecureClientRenderRefusesMissingServiceVerifier(t *testin
 	if len(lines) != 3 ||
 		!strings.Contains(lines[0], "no service peer verifier") ||
 		!strings.Contains(lines[1], "no service peer verifier") ||
-		lines[2] != "toasts:[]" {
+		lines[2] != "notices:[]" {
 		t.Fatalf("harness output = %q", lines)
 	}
 }

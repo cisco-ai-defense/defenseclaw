@@ -43,7 +43,7 @@ func windowsStandalonePerUserAgentVersionCandidatePaths(profileHome, connectorNa
 	yarnGlobal := filepath.Join(appDataLocal, "Yarn", "Data", "global", "node_modules")
 	packages := map[string][]string{
 		"copilot":  {filepath.Join("@github", "copilot")},
-		"opencode": {"opencode-ai"},
+		"opencode": {filepath.Join("@opencode", "cli")},
 		"amp":      {filepath.Join("@ampcode", "cli"), filepath.Join("@sourcegraph", "amp")},
 	}[connectorName]
 	candidates := make([]string, 0, len(packages)*3)

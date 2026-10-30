@@ -133,7 +133,7 @@ func TestRegistry(t *testing.T) {
 	// hooks.json is root-owned and its deny wins over user and project hooks.
 	for spec, want := range map[*Spec][2]string{
 		ClaudeCode: {connector.SandboxTamperTierManaged, VerifiedLive}, Codex: {connector.SandboxTamperTierManaged, VerifiedLive},
-		OpenCode: {connector.SandboxTamperTierUser, VerifiedLive}, Copilot: {connector.SandboxTamperTierManaged, VerifiedLive},
+		OpenCode: {connector.SandboxTamperTierUser, Unverified}, Copilot: {connector.SandboxTamperTierManaged, VerifiedLive},
 		Amp: {connector.SandboxTamperTierUser, Unverified}, Cursor: {connector.SandboxTamperTierManaged, Unverified},
 		Devin: {connector.SandboxTamperTierUser, Unverified}, Kiro: {connector.SandboxTamperTierUser, VerifiedLive},
 	} {
@@ -167,10 +167,10 @@ func TestInstallStepsPinContract(t *testing.T) {
 		{"codex-range", Codex, ">=0.146", nil, nil},
 		// Inside the contract, but DefenseClaw pinned no digests for it.
 		{"codex-unpinned-digest", Codex, "0.150.0", nil, nil},
-		{"opencode-pin", OpenCode, "", []string{"'opencode-ai@1.18.31'"}, nil},
+		{"opencode-pin", OpenCode, "", []string{"'@opencode/cli@2.1.4'"}, nil},
 		{"opencode-base-1.2.18", OpenCode, "1.2.18", nil, ErrUnknownContract},
-		{"opencode-above-range", OpenCode, "1.19.2", nil, ErrUnknownContract},
-		{"opencode-unpinned-digest", OpenCode, "1.18.20", nil, nil},
+		{"opencode-above-range", OpenCode, "2.2.0", nil, ErrUnknownContract},
+		{"opencode-unpinned-digest", OpenCode, "2.1.5", nil, nil},
 		{"copilot-pin", Copilot, "", []string{"'@github/copilot@1.0.88'"}, nil},
 		{"copilot-base-1.0.16", Copilot, "1.0.16", nil, ErrUnknownContract},
 		{"copilot-unpinned-digest", Copilot, "1.0.90", nil, nil},
@@ -252,11 +252,15 @@ func TestNpmPinnedInstallChecksDigests(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			link := "ln -sfn \"$root/bin/" + tc.spec.Command + "\" /usr/local/bin/" + tc.spec.Command
+			if tc.spec == OpenCode {
+				link = `ln -sfn "$bin" /usr/local/bin/opencode`
+			}
 			for _, want := range append([]string{
 				`npm pack "$pkg"`, `sha512sum "$tgz"`, shellQuote(sum),
 				`npm install -g --no-fund --no-audit --prefix "$root" "$tgz"`,
 				"aarch64) bin=", "x86_64) bin=", shellQuote(tc.pin.Native["aarch64"].SHA256), shellQuote(tc.pin.Native["x86_64"].SHA256),
-				`sha256sum "$bin"`, "ln -sfn \"$root/bin/" + tc.spec.Command + "\" /usr/local/bin/" + tc.spec.Command,
+				`sha256sum "$bin"`, link,
 			}, tc.extra...) {
 				if !strings.Contains(run, want) {
 					t.Errorf("install steps lack %q:\n%s", want, run)
@@ -451,11 +455,11 @@ func TestLaunchArgv(t *testing.T) {
 				"-c", `model_providers.mantle.base_url="https://bedrock-mantle.us-west-2.api.aws/openai/v1"`,
 				"-c", `model_providers.mantle.env_key="BEDROCK_MANTLE_API_KEY"`, "-c", `model_providers.mantle.wire_api="responses"`,
 				"--disable", "multi_agent", "-c", `web_search="disabled"`, "-m", "openai.gpt-5.4", "p"}},
-		{"opencode-interactive-yolo", OpenCode, LaunchOptions{Mode: Interactive, Yolo: true}, []string{OpenCodeLauncherPath, "--auto"}},
-		{"opencode-interactive-safe", OpenCode, LaunchOptions{Mode: Interactive, Args: []string{"-m", "anthropic/claude-haiku-4-5"}},
-			[]string{OpenCodeLauncherPath, "-m", "anthropic/claude-haiku-4-5"}},
+		{"opencode-interactive-yolo", OpenCode, LaunchOptions{Mode: Interactive, Yolo: true}, []string{OpenCodeLauncherPath, "--standalone", "--auto"}},
+		{"opencode-interactive-safe", OpenCode, LaunchOptions{Mode: Interactive, Args: []string{"--session", "ses_test"}},
+			[]string{OpenCodeLauncherPath, "--standalone", "--session", "ses_test"}},
 		{"opencode-headless-mantle", OpenCode, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "fix it", CredentialProfile: profiles.OpenCodeBedrockMantleID, Args: []string{"--format", "json"}},
-			[]string{OpenCodeLauncherPath, "run", "--auto", "--format", "json", "fix it"}},
+			[]string{OpenCodeLauncherPath, "run", "--standalone", "--auto", "--format", "json", "fix it"}},
 		{"copilot-interactive-yolo", Copilot, LaunchOptions{Mode: Interactive, Yolo: true}, []string{CopilotLauncherPath, "--yolo"}},
 		{"copilot-interactive-safe", Copilot, LaunchOptions{Mode: Interactive}, []string{CopilotLauncherPath}},
 		{"copilot-headless-yolo", Copilot, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "fix it", Args: []string{"--no-color"}},
@@ -633,7 +637,7 @@ func TestProbeVersionPatterns(t *testing.T) {
 	}{
 		{ClaudeCode, "2.1.156 (Claude Code)\n", "2.1.156"},
 		{Codex, "codex-cli 0.146.0\n", "0.146.0"},
-		{OpenCode, "1.18.31", "1.18.31"},
+		{OpenCode, "2.1.4", "2.1.4"},
 		// The probe keeps only [A-Za-z0-9 ._()+-] of the first line.
 		{Copilot, "GitHub Copilot CLI 1.0.88.", "1.0.88"},
 		{Amp, "0.0.1785334225-g9abe75 (released 2026-07-29T141025.000Z 1mo ago)", "0.0.1785334225-g9abe75"},

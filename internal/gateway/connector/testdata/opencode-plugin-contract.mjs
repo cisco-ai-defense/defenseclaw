@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { fixtureBridge } from "../../../opencodebridge/testdata/fixture.mjs";
 import { unlink } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
@@ -65,7 +66,7 @@ async function runScenario({
   const moduleURL = `${pathToFileURL(pluginPath).href}?scenario=${serial++}`;
   const module = await import(moduleURL);
   if (removePluginAfterImport) await unlink(pluginPath);
-  const hooks = await module.DefenseClaw({ directory: "fixture workspace" });
+  const hooks = await fixtureBridge(module, { directory: "fixture workspace" });
   const origins = [{ spec: moduleURL }];
   if (laterPlugin) origins.push({ spec: "file:///fixture-later-plugin.mjs" });
   await hooks.config({ plugin_origins: origins, mcp });
@@ -154,7 +155,7 @@ try {
     name: "later-plugin-observe",
     laterPlugin: true,
     verify(payload) {
-      assert.equal(payload.arguments_authoritative, false);
+      assert.equal(payload.arguments_authoritative, true);
     },
   });
   await runScenario({
@@ -162,9 +163,9 @@ try {
     mode: "action",
     laterPlugin: true,
     response: { action: "allow", mode: "action", would_block: false },
-    expectBlocked: true,
+    expectBlocked: false,
     verify(payload) {
-      assert.equal(payload.arguments_authoritative, false);
+      assert.equal(payload.arguments_authoritative, true);
     },
   });
   await runScenario({

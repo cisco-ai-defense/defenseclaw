@@ -22,14 +22,9 @@ import { pathToFileURL } from "node:url";
 const toasts = [];
 const durations = [];
 let attempts = 0;
+console.warn = (message) => { attempts++; toasts.push(String(message)); };
 const href = pathToFileURL(process.argv[1]).href;
-const plugin = await (await import(href)).DefenseClaw({ directory: "", client: { tui: { showToast: async (arg) => {
-  attempts++;
-  if (process.env.DC_TOAST_FAIL_FIRST === "1" && attempts === 1) return { error: { message: "TUI unavailable" } };
-  toasts.push(arg && arg.body ? arg.body.message : "");
-  durations.push(arg && arg.body ? arg.body.duration : 0);
-  return { data: true };
-} } } });
+const plugin = await fixtureBridge(await import(href), { directory: "/work/repo" });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 let verdict = "allow";
 try {
@@ -403,7 +398,7 @@ func TestPerUserPluginOutageOpenOnlyForAnOutage(t *testing.T) {
 					if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 						t.Fatal(err)
 					}
-					cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", plugin.harness, path)
+					cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", withOpenCodeV2Fixture(t, plugin.harness), path)
 					cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 					out, err := cmd.Output()
 					if err != nil {

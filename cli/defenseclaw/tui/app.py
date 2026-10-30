@@ -35,6 +35,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
 from defenseclaw import __version__
@@ -3082,7 +3083,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except NoMatches:
             return
 
-        activity.set_class(panel != "activity" or self.activity_model.shows_finished_output, "hidden")
+        self._set_widget_hidden(activity, panel != "activity" or self.activity_model.shows_finished_output)
         overview_visible = panel == "overview"
         scroller.set_class(overview_visible or self.help_open, "overview-scroll")
         # The acknowledgement frame is intentionally cheap, but any control
@@ -3126,10 +3127,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # generation is preparing. If the retained table already belongs to
         # this panel, reveal it immediately without clear/add_row churn.
         if cached_panel is not None and expected_table_panel == panel and cached_panel.table_columns:
-            table.remove_class("hidden")
+            self._set_widget_hidden(table, False)
         else:
-            table.add_class("hidden")
-        detail.add_class("hidden")
+            self._set_widget_hidden(table, True)
+        self._set_widget_hidden(detail, True)
         self._hide_panel_split_parts(panel)
 
         if not overview_visible:
@@ -3660,12 +3661,23 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         finally:
             self._applying_panel_snapshot = False
 
+    def _set_widget_hidden(self, widget: Widget, hidden: bool) -> None:
+        """Apply the node-only hidden rules without restyling its children."""
+
+        if widget.has_class("hidden") == hidden:
+            return
+        # Our hidden selectors affect only the node's display. Textual's
+        # default class update also matches every descendant, repeating the
+        # work for whole metric tiles and control bars during a tab switch.
+        widget.set_class(hidden, "hidden", update=False)
+        self.stylesheet.update_nodes([widget], animate=False)
+
     def _set_overview_metrics_visible(self, visible: bool) -> None:
         try:
             metrics = self.query_one("#overview-metrics", OverviewMetrics)
         except NoMatches:
             return
-        metrics.set_class(not visible, "hidden")
+        self._set_widget_hidden(metrics, not visible)
 
     def _apply_overview_metric_snapshot(self, metrics_data: tuple[MetricDatum, ...]) -> None:
         try:
@@ -3683,7 +3695,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except NoMatches:
             return
         visible = self.active_panel == "overview" and not self.help_open and bool(text)
-        scope.set_class(not visible, "hidden")
+        self._set_widget_hidden(scope, not visible)
         if visible:
             scope.update(self._safe_body_renderable(text))
 
@@ -5560,47 +5572,47 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         mcps = self.query_one("#mcps-controls", Horizontal)
         plugins = self.query_one("#plugins-controls", Horizontal)
         tools = self.query_one("#tools-controls", Horizontal)
-        overview.set_class(self.active_panel != "overview" or self.help_open, "hidden")
-        alerts.set_class(self.active_panel != "alerts" or self.help_open, "hidden")
-        audit.set_class(self.active_panel != "audit" or self.help_open, "hidden")
-        inventory.set_class(self.active_panel != "inventory" or self.help_open, "hidden")
-        inventory_filters.set_class(
+        self._set_widget_hidden(overview, self.active_panel != "overview" or self.help_open)
+        self._set_widget_hidden(alerts, self.active_panel != "alerts" or self.help_open)
+        self._set_widget_hidden(audit, self.active_panel != "audit" or self.help_open)
+        self._set_widget_hidden(inventory, self.active_panel != "inventory" or self.help_open)
+        self._set_widget_hidden(
+            inventory_filters,
             self.active_panel != "inventory"
             or self.help_open
             or self.inventory_model.active_sub not in {"skills", "plugins"}
             or self._inventory_detail_short(),
-            "hidden",
         )
-        logs.set_class(self.active_panel != "logs" or self.help_open, "hidden")
-        logs_filters.set_class(self.active_panel != "logs" or self.help_open, "hidden")
-        registries.set_class(self.active_panel != "registries" or self.help_open, "hidden")
+        self._set_widget_hidden(logs, self.active_panel != "logs" or self.help_open)
+        self._set_widget_hidden(logs_filters, self.active_panel != "logs" or self.help_open)
+        self._set_widget_hidden(registries, self.active_panel != "registries" or self.help_open)
         # Each Setup bar shows only when the current Setup view uses one of
         # its buttons (first-run and the goal menu use none).
         setup_buttons = (
             self._setup_visible_buttons() if self.active_panel == "setup" and not self.help_open else frozenset()
         )
-        setup.set_class(not setup_buttons.intersection(setup_keys.SETUP_BUTTON_IDS), "hidden")
-        setup_wizard.set_class(not setup_buttons.intersection(setup_keys.SETUP_WIZARD_BUTTON_IDS), "hidden")
-        activity.set_class(self.active_panel != "activity" or self.help_open, "hidden")
-        ai.set_class(self.active_panel != "ai" or self.help_open, "hidden")
-        runtime.set_class(self.active_panel != "runtime" or self.help_open, "hidden")
+        self._set_widget_hidden(setup, not setup_buttons.intersection(setup_keys.SETUP_BUTTON_IDS))
+        self._set_widget_hidden(setup_wizard, not setup_buttons.intersection(setup_keys.SETUP_WIZARD_BUTTON_IDS))
+        self._set_widget_hidden(activity, self.active_panel != "activity" or self.help_open)
+        self._set_widget_hidden(ai, self.active_panel != "ai" or self.help_open)
+        self._set_widget_hidden(runtime, self.active_panel != "runtime" or self.help_open)
         # Under 100 columns the KEYS line carries the Sandboxes keys and the
         # rows get the bar's rows.
-        sandboxes.set_class(
+        self._set_widget_hidden(
+            sandboxes,
             self.active_panel != "sandboxes"
             or self.help_open
             or self._sandbox_button_bar_collapsed()
             or not self._sandbox_supported(),
-            "hidden",
         )
-        policies.set_class(self.active_panel != "policies" or self.help_open, "hidden")
-        skills.set_class(self.active_panel != "skills" or self.help_open, "hidden")
-        mcps.set_class(self.active_panel != "mcps" or self.help_open, "hidden")
+        self._set_widget_hidden(policies, self.active_panel != "policies" or self.help_open)
+        self._set_widget_hidden(skills, self.active_panel != "skills" or self.help_open)
+        self._set_widget_hidden(mcps, self.active_panel != "mcps" or self.help_open)
         # Keep the plugins bar panel-scoped. When a connector cannot
         # load plugins, the body renders an explanatory notice and the
         # buttons naturally disable because no row is selected.
-        plugins.set_class(self.active_panel != "plugins" or self.help_open, "hidden")
-        tools.set_class(self.active_panel != "tools" or self.help_open, "hidden")
+        self._set_widget_hidden(plugins, self.active_panel != "plugins" or self.help_open)
+        self._set_widget_hidden(tools, self.active_panel != "tools" or self.help_open)
 
     def _render_panel_controls(self) -> None:
         self._render_panel_control_visibility()
@@ -11603,11 +11615,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             detail = self.query_one("#detail-panel", VerticalScroll)
         except NoMatches:
             return
-        split.set_class(panel == "overview" or self.help_open, "hidden")
-        split.remove_class("with-nav", "aside-below", "narrow-aside")
-        nav.add_class("hidden")
+        split.update_classes(
+            {
+                "hidden": panel == "overview" or self.help_open,
+                "with-nav": False,
+                "aside-below": False,
+                "narrow-aside": False,
+            },
+            animate=False,
+        )
+        self._set_widget_hidden(nav, True)
         nav.clear_items()
-        aside_widget.add_class("hidden")
+        self._set_widget_hidden(aside_widget, True)
         aside_widget.border_title = None
         table.border_title = None
         detail.border_title = None

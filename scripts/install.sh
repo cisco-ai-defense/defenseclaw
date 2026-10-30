@@ -884,10 +884,12 @@ npm_config_prefixes() {
 
 # The installer's entry evidence: native fixed locations and npm/Bun
 # launcher symlinks to their exact entry: the Node script, or the native
-# bin/opencode.exe that current opencode-ai links (GAP-1356). The links are
-# looked for in the usual prefixes, npm's configured prefix and each PATH
-# folder. A folder name, manifest or plain command on PATH is not an entry
-# record: only a launcher link to the package's own entry is.
+# bin/opencode.exe the package links (GAP-1356). The links are looked for in
+# the usual prefixes, npm's configured prefix and each PATH folder. A folder
+# name, manifest or plain command on PATH is not an entry record: only a
+# launcher link to the package's own entry is. The V1 opencode-ai entries
+# remain only to stop a running V1 install safely during an upgrade
+# (setup requires V2); remove them with the 1.0.x upgrade path.
 installed_agent_programs() {
     local agent name path target base link prefix seen=":"
     local -a bases folders
@@ -913,7 +915,8 @@ installed_agent_programs() {
             [[ -L "${link}" ]] || continue
             target="$(resolved_agent_path "${link}")" || continue
             case "${agent}:${target}" in
-                OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+                OpenCode:*/node_modules/@opencode/cli/bin/opencode | OpenCode:*/node_modules/@opencode/cli/bin/opencode.exe | \
+                    OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
                     Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                     printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
             esac
@@ -933,7 +936,8 @@ runtime_agent_programs() {
         [[ -L "${link}" ]] || continue
         target="$(resolved_agent_path "${link}")" || continue
         case "${agent}:${target}" in
-            OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+            OpenCode:*/node_modules/@opencode/cli/bin/opencode | OpenCode:*/node_modules/@opencode/cli/bin/opencode.exe | \
+                OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
                 Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                 printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
         esac

@@ -4101,14 +4101,14 @@ package main
 import "fmt"
 
 func main() {
-	fmt.Println("opencode 1.18.11")
+	fmt.Println("opencode 2.1.4")
 }
 "@
             } else { @"
 using System;
 public static class OpenCodeVersionFixture {
     public static int Main(string[] arguments) {
-        Console.WriteLine("opencode 1.18.11");
+        Console.WriteLine("opencode 2.1.4");
         return 0;
     }
 }
@@ -4170,7 +4170,7 @@ public static class OpenCodeVersionFixture {
         # starts slowly under on-access scanning), so a tighter fixture-side
         # deadline would assert a start-up speed the product never requires.
         $openCodeVersion = Invoke-WindowsNativeProcess $openCodePath @('--version') -TimeoutSeconds 30
-        if ($openCodeVersion.StdOut.Trim() -ne 'opencode 1.18.11') {
+        if ($openCodeVersion.StdOut.Trim() -ne 'opencode 2.1.4') {
             throw "OpenCode fixture returned an unexpected version: $($openCodeVersion.StdOut)"
         }
         Assert-WizardCodexPolicyFixture $codexPath
@@ -6598,9 +6598,9 @@ function Get-WindowsReleaseClientSpecifications {
         },
         [pscustomobject]@{
             Connector = 'opencode'
-            Version = '1.18.11'
-            Package = 'opencode-ai'
-            Manifest = 'node_modules\opencode-ai\package.json'
+            Version = '2.1.4'
+            Package = '@opencode/cli'
+            Manifest = 'node_modules\@opencode\cli\package.json'
             Command = 'opencode.cmd'
         }
     )

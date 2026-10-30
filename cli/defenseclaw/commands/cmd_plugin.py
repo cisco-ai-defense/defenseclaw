@@ -2595,6 +2595,8 @@ def _plugin_status(p: dict[str, Any], action_entry: Any = None) -> str:
             return "blocked"
         if a.runtime == "disable":
             return "disabled"
+    if p.get("activation_unverified"):
+        return "unverified"
     if not p.get("enabled"):
         return "disabled"
     return "enabled"
@@ -2609,6 +2611,8 @@ def _plugin_status_display(p: dict[str, Any], action_entry: Any = None) -> str:
             return "\u2717 quarantined"
         if a.runtime == "disable":
             return "\u2717 disabled"
+    if p.get("activation_unverified"):
+        return "? activation unverified"
     if p.get("enabled"):
         return "\u2713 enabled"
     return "\u2717 disabled"
@@ -2644,6 +2648,9 @@ def _plugin_list_json_items(
         }
         if connector:
             item["connector"] = connector
+        if p.get("activation_unverified"):
+            item["activation_verified"] = False
+            item["activation_reason"] = p.get("activation_reason", "Plugin activation is unverified.")
         for field in (
             "scope",
             "project_path",

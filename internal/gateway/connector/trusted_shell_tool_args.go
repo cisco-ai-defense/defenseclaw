@@ -64,8 +64,8 @@ var copilotShellArgs = map[string]trustedShellArg{
 // named to hooks), the arguments TrustedShellArgs takes out, from the
 // installed harnesses' tool schemas:
 //
-//   - OpenCode 1.18 bash: workdir, absolute or relative to the project
-//     (timeout is part of the shell shape the parser proves).
+//   - OpenCode V2 shell: workdir, absolute or relative to the project,
+//     and background (timeout is part of the shell shape the parser proves).
 //   - Hermes 0.21 terminal: workdir; background, timeout, pty, notify, and
 //     the legacy notify_on_complete and watch_patterns.
 //   - Amp shell_command: workdir; timeout_ms.
@@ -87,7 +87,7 @@ var copilotShellArgs = map[string]trustedShellArg{
 // hook resolves its workdir before proving the command. Agy's run_command
 // and Hermes' process have their own projections.
 var trustedShellTools = map[string]map[string]map[string]trustedShellArg{
-	"opencode": {"bash": {"workdir": trustedShellWorkdir}},
+	"opencode": {"shell": {"workdir": trustedShellWorkdir, "background": trustedShellFlag}},
 	"hermes": {"terminal": {
 		"workdir": trustedShellWorkdir, "background": trustedShellFlag, "timeout": trustedShellNumber,
 		"pty": trustedShellFlag, "notify": trustedShellNotify,
@@ -132,13 +132,32 @@ var trustedShellTools = map[string]map[string]map[string]trustedShellArg{
 // listed arguments, or unless the arguments are a JSON object whose keys
 // are unique and every listed argument has its JSON value.
 func TrustedShellArgs(connectorName, toolName string, args json.RawMessage) (projected json.RawMessage, cwd string, ok bool) {
-	known := trustedShellTools[strings.ToLower(strings.TrimSpace(connectorName))][strings.TrimSpace(toolName)]
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	toolName = strings.TrimSpace(toolName)
+	known := trustedShellTools[connectorName][toolName]
 	if len(known) == 0 || antigravityValidateUniqueJSON(args) != nil {
 		return args, "", false
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(args, &fields); err != nil || fields == nil {
 		return args, "", false
+	}
+	if connectorName == "opencode" && toolName == "shell" {
+		// Preserve case-twin control fields for the conflicting-arguments
+		// check. Projecting one away can otherwise make a V2 shell call look
+		// complete even though its original directory/control key was ambiguous.
+		seen := make(map[string]string, len(fields))
+		for key := range fields {
+			folded := strings.ToLower(key)
+			if previous, exists := seen[folded]; exists {
+				_, previousKnown := known[previous]
+				_, currentKnown := known[key]
+				if previousKnown || currentKnown {
+					return args, "", false
+				}
+			}
+			seen[folded] = key
+		}
 	}
 	taken := false
 	for key, raw := range fields {
@@ -198,7 +217,7 @@ func trustedShellArgValue(kind trustedShellArg, raw json.RawMessage) bool {
 // trustedShellTools lists, agy's run_command, Claude Code's Bash, and
 // Codex's Bash and exec_command.
 var shellCommandKeys = map[string]map[string]string{
-	"opencode":    {"bash": "command"},
+	"opencode":    {"shell": "command"},
 	"hermes":      {"terminal": "command"},
 	"amp":         {"shell_command": "command"},
 	"cursor":      {"Shell": "command"},

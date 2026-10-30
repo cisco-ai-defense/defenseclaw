@@ -7,12 +7,13 @@
 //
 //   node opencode-managed-plugin-contract.mjs <plugin> <fake-dir>
 //
-// <plugin> is <root>/share/opencode/defenseclaw.js; <root>/bin/defenseclaw-hook
+// <plugin> is <root>/share/opencode/index.js; <root>/bin/defenseclaw-hook
 // is a fake that logs its argv and stdin to <fake-dir>/calls.jsonl and answers
 // from <fake-dir>/event.json (per-event calls) or <fake-dir>/guard.json
 // (--foreign-hook-check): {"stdout": "...", "exit": N}.
 
 import assert from "node:assert/strict";
+import { fixtureBridge } from "../../opencodebridge/testdata/fixture.mjs";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -51,8 +52,9 @@ async function load({ guard = JSON.stringify({ deny: false }), guardExit = 0, or
   serial += 1;
   const url = pathToFileURL(pluginPath).href + "?instance=" + serial;
   const mod = await import(url);
-  assert.deepEqual(Object.keys(mod), ["DefenseClawManaged"]);
-  const hooks = await mod.DefenseClawManaged({ client, directory: "/work/repo", worktree: "/work/repo" });
+  assert.deepEqual(Object.keys(mod), ["default"]);
+  assert.equal(mod.default.server, undefined);
+  const hooks = await fixtureBridge(mod, { client, directory: "/work/repo", worktree: "/work/repo" });
   answer("event.json", JSON.stringify({ action: "allow", mode: "observe", hook_output: { decision: "allow" } }));
   await hooks.config({
     plugin_origins: origins || [{ spec: "file:///other/plugin.js" }, { spec: pluginPath }],
@@ -95,14 +97,15 @@ async function before(hooks, tool = "bash", args = { command: "ls" }) {
 // instead of running silently.
 {
   const toasts = [];
-  const client = { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body : arg); return true; } } };
+  console.warn = (message) => toasts.push(String(message));
+  const client = {};
   const hooks = await load({ client });
   answer("event.json", JSON.stringify({ action: "block", mode: "action", hook_output: { decision: "deny", reason: "policy marker rule" } }));
   await assert.rejects(before(hooks), /under your organization's policy, so it did not run: policy marker rule/);
   answer("event.json", JSON.stringify({ action: "alert", raw_action: "confirm", mode: "action", severity: "HIGH", reason: "DefenseClaw flagged this action for review under your organization's policy (rule TEST-MARKER)." }));
   await before(hooks);
   await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.ok(toasts.some((toast) => toast.variant === "warning" && /^DefenseClaw flagged this action for review .*\(rule TEST-MARKER\)\. OpenCode cannot ask/.test(toast.message)), JSON.stringify(toasts));
+  assert.ok(toasts.some((toast) => /^DefenseClaw flagged this action for review .*\(rule TEST-MARKER\)\. OpenCode cannot ask/.test(toast)), JSON.stringify(toasts));
 }
 
 // Every failure of the hook blocks.
@@ -166,7 +169,8 @@ for (const response of [
 // notice is shown. The empty answer above stays closed.
 {
   const toasts = [];
-  const client = { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body : arg); return true; } } };
+  console.warn = (message) => toasts.push(String(message));
+  const client = {};
   const hooks = await load({ client });
   answer("event.json", JSON.stringify({
     action: "allow", hook_output: { decision: "allow" }, fail_open: true,
@@ -174,16 +178,15 @@ for (const response of [
   }));
   assert.equal(await before(hooks), undefined);
   await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.ok(toasts.some((toast) => toast.variant === "warning" && /could not check this tool call, and the fail mode is open/.test(toast.message)), JSON.stringify(toasts));
+  assert.ok(toasts.some((toast) => /could not check this tool call, and the fail mode is open/.test(toast)), JSON.stringify(toasts));
   console.log("case ok: a fail-open allow runs the tool and shows its notice");
 }
 
-// Action mode needs authoritative arguments: a plugin after this one could
-// still rewrite them.
+// V2 pins the event before inspection, independently of registration order.
 {
   const hooks = await load({ origins: [{ spec: pathToFileURL(pluginPath).href }, { spec: "file:///later/plugin.js" }] });
   answer("event.json", JSON.stringify({ action: "allow", mode: "action", hook_output: { decision: "allow" } }));
-  await assert.rejects(before(hooks), /later plugin argument mutations/);
+  await before(hooks);
   answer("event.json", JSON.stringify({ action: "allow", mode: "observe", hook_output: { decision: "allow" } }));
   await before(hooks);
 }
@@ -269,7 +272,7 @@ console.log("case ok: a reported foreign plugin is named once");
   const events = eventCalls().map((call) => call.args[call.args.length - 1]);
   assert.deepEqual(events, ["tool.execute.after", "session.idle"]);
   const after = JSON.parse(eventCalls()[0].stdin);
-  assert.deepEqual(after.tool_response, { title: "t", output: "o", metadata: {} });
+  assert.deepEqual(after.tool_response, { title: "t", output: "o", metadata: {}, opencode_v2_status: "completed" });
 }
 
 // A hook binary that cannot run blocks while DefenseClaw is installed, and

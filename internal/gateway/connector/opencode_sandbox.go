@@ -36,7 +36,7 @@ import (
 const (
 	OpenCodeSandboxManagedConfigPath = "/etc/opencode/opencode.json"
 	// OpenCodeSandboxPluginPath is the root-owned bridge plugin.
-	OpenCodeSandboxPluginPath = SandboxLibDir + "/opencode/defenseclaw.js"
+	OpenCodeSandboxPluginPath = SandboxLibDir + "/opencode/index.js"
 )
 
 // openCodeSandboxStartupEnv must be real process environment (OpenShell does
@@ -83,7 +83,7 @@ func renderOpenCodeSandboxArtifacts(c *hookOnlyConnector, rt resolvedSandboxTarg
 
 // openCodeSandboxPluginURL is how the managed config names the plugin.
 func openCodeSandboxPluginURL() string {
-	return "file://" + path.Clean(OpenCodeSandboxPluginPath)
+	return "file://" + path.Dir(OpenCodeSandboxPluginPath)
 }
 
 func renderOpenCodeSandboxManagedConfig() ([]byte, error) {
