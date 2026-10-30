@@ -51,8 +51,11 @@ const codeGuardianTargetAccountRemoved = "guardian_target_account_removed"
 
 // codeGuardianTargetUserPath names a guardian target the guardian refused
 // because of a path in that account's own home: a symbolic link, a file
-// where a folder belongs (or a folder where a file belongs), or a folder the
-// account made unreadable. Only that account is affected, and it could have
+// where a folder belongs (or a folder where a file belongs), a folder the
+// account made unreadable, or the agent's own config folder the account has
+// not created yet, or its config file (it has not set the agent up,
+// GAP-2593). Only that account
+// is affected, and it could have
 // made the change itself, so it is a warning: verify, MDM detection and
 // security_complete do not fail on it. The guardian protects the target
 // again at its next reconcile after the path is fixed.
@@ -666,11 +669,18 @@ func targetHomeUnavailableError(message string) bool {
 // folder belongs or a folder where a file belongs ("hook config parent is
 // not a directory: <path>", "hook config path is a directory: <path>"), and
 // a folder the worker, which runs as the account, cannot search ("inspect
-// hook config parent <path>: lstat <path>: permission denied"). The last
-// group is the refused path.
+// hook config parent <path>: lstat <path>: permission denied"), and a hook
+// config, or a folder above it, that does not exist ("hook config parent
+// missing: <path>", "hook config file missing: <path>"): the agent keeps its
+// config there (~/.hermes/config.yaml for Hermes), and an account that has
+// not set the agent up has none yet. A managed ensure
+// failed with guardian_target_failed for every such account of a shared
+// Hermes install (enrollment.agent_prefixes), although the change was
+// applied and only those accounts were affected (GAP-2593). The last group
+// is the refused path.
 var userHomePathRefusalPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^refusing symlink (?:in )?[a-z][a-z ]*: (/.+)$`),
-	regexp.MustCompile(`^[a-z][a-z ]* (?:is not a directory|path is a directory): (/.+)$`),
+	regexp.MustCompile(`^[a-z][a-z ]* (?:is not a directory|path is a directory|parent missing|file missing): (/.+)$`),
 	regexp.MustCompile(`^inspect [a-z][a-z ]* /.+: lstat (/.+): (?:permission denied|not a directory)$`),
 }
 
