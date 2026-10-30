@@ -7829,6 +7829,14 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 			previouslyActive: true,
 			previousLock:     lockState.RawEntry(name),
 		}
+		if dropRemovedConnectorWithNothingInstalled(conn, opts, point.previousLock) {
+			// No lock and no registration: retrying its teardown on every
+			// start can never succeed and only keeps a connector the config
+			// no longer names in the active roster (GAP-2617).
+			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s has no hook contract lock and nothing installed — removed its hook credential and dropped it from the active roster\n", name)
+			s.auditDroppedConnectorState(name, "removed-unregistered")
+			continue
+		}
 		priorOpts, err := priorConnectorSetupOpts(point)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s has incomplete rollback evidence — retaining for teardown retry: %v\n", name, err)
@@ -7847,6 +7855,28 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 		candidates = append(candidates, point)
 	}
 	return candidates, failed
+}
+
+// dropRemovedConnectorWithNothingInstalled reports whether a connector that
+// left the configuration can leave the active roster without a teardown: it
+// has no hook contract lock entry and a clean VerifyClean (no hooks, plugin or
+// env DefenseClaw wrote in the agent's files). The per-user hook credential an
+// older release may have issued for it is the only thing left; it is removed
+// first (what Teardown does), so no route accepts it once the name is gone.
+// Any lock, registration or a credential that cannot be removed keeps the
+// strict retain-for-retry path.
+func dropRemovedConnectorWithNothingInstalled(conn connector.Connector, opts connector.SetupOpts, lock connector.HookContractLockEntry) bool {
+	if conn == nil || strings.TrimSpace(lock.Connector) != "" {
+		return false
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		return false
+	}
+	if err := connector.RemoveHookAPIToken(opts.DataDir, conn.Name()); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s: remove its hook credential: %v — retaining for teardown retry\n", conn.Name(), err)
+		return false
+	}
+	return true
 }
 
 // teardownRemovedConnectorCandidates removes only connectors for which the
