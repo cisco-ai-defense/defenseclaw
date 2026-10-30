@@ -1685,7 +1685,7 @@ func TestMultiConnectorPublicationFailureRestoresSuccessfullyRemovedConnector(t 
 		t.Fatal(err)
 	}
 	seed := multiConnectorSetupTransaction{activeState: activeState, hookLockState: hookLockState}
-	candidates, unavailable := s.removedConnectorRollbackCandidates(
+	candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
 		registry, []string{"cursor"}, []string{"claudecode"},
 		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
 		hookLockState,
@@ -1811,7 +1811,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 		t.Fatal(err)
 	}
 	seed := multiConnectorSetupTransaction{activeState: activeState, hookLockState: hookLockState}
-	candidates, unavailable := s.removedConnectorRollbackCandidates(
+	candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
 		registry, []string{"cursor"}, []string{"claudecode"},
 		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
 		hookLockState,
@@ -1869,7 +1869,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidates, unavailable = s.removedConnectorRollbackCandidates(
+	candidates, unavailable, _ = s.removedConnectorRollbackCandidates(
 		registry, connector.LoadActiveConnectors(s.cfg.DataDir), []string{"claudecode"},
 		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
 		retryLock,
