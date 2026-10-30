@@ -167,7 +167,7 @@ def test_packaged_loader_reads_the_checked_generated_artifact() -> None:
     audit_selector = next(
         selector for selector in selection.exporter_selectors("audit_sink", "logs") if selector.actions
     )
-    assert len(audit_selector.actions) == 238
+    assert len(audit_selector.actions) == 239
     assert "fleet.device.credential_provision_authorized" in audit_selector.actions
     assert "fleet.device.decommission_authorized" in audit_selector.actions
     assert "setup-redaction-policy" in audit_selector.actions
