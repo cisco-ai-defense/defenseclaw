@@ -607,7 +607,7 @@ func TestStatefulBenchmarkFirewallTrustExpansionFixtures(t *testing.T) {
 
 // #1390: the download-then-execute chain joins a download from a public IP
 // or an external hostname, into an absolute or a relative path, to a later
-// run of the same file, and stays alert-only in every profile. Internal,
+// run of the same file (also after a chmod), and stays alert-only in every profile. Internal,
 // reserved, loopback and private sources, another file, another directory,
 // an overwrite, a read, a failed download and a gap past the window do not.
 func TestStatefulBenchmarkDownloadThenExecuteFixtures(t *testing.T) {
@@ -623,8 +623,8 @@ func TestStatefulBenchmarkDownloadThenExecuteFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cases) != 18 {
-		t.Fatalf("fixture cases=%d want 18", len(cases))
+	if len(cases) != 20 {
+		t.Fatalf("fixture cases=%d want 20", len(cases))
 	}
 	positive := make(map[string]bool, len(cases))
 	for _, benchmarkCase := range cases {
