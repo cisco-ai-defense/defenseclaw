@@ -517,6 +517,14 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			)
 		}
 	}
+	// A config.toml that went missing after DefenseClaw managed it gets the
+	// account's settings back before the hooks go in (GAP-0581). The
+	// runtime snapshot was taken before, so a rollback removes it again.
+	if err := seedMissingPerUserSettings(c.Name(), opts); err != nil {
+		return c.rollbackSetupAfterSnapshot(
+			opts, runtimeSnapshot, fmt.Errorf("codex config.toml put back: %w", err), false, false,
+		)
+	}
 	if err := c.patchCodexConfig(opts, hookScript); err != nil {
 		return c.rollbackSetupAfterSnapshot(
 			opts,
@@ -551,6 +559,8 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			)
 		}
 	}
+	// The file as it is now is the last known good copy.
+	recordPerUserSettingsCopy(c.Name(), opts)
 
 	return nil
 }
@@ -599,6 +609,9 @@ func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) err
 	}
 	if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
 		return fmt.Errorf("codex teardown: revoke scoped OTLP token: %w", err)
+	}
+	if err := removePerUserSettingsCopies(c.Name(), opts.DataDir); err != nil {
+		return fmt.Errorf("codex teardown: remove the config copy: %w", err)
 	}
 	return nil
 }
