@@ -219,7 +219,11 @@ func TestPrepareLauncherRootKeepsOnlyTheSandboxTree(t *testing.T) {
 	prepareLauncherRoot(root)
 	var names []string
 	for _, command := range root.Commands() {
-		names = append(names, command.Name())
+		// The hidden guardrail tree holds only the user's own profile
+		// explain (GAP-0431, GAP-0422).
+		if !command.Hidden {
+			names = append(names, command.Name())
+		}
 	}
 	if !reflect.DeepEqual(names, []string{"sandbox"}) {
 		t.Fatalf("commands = %v, want [sandbox]", names)

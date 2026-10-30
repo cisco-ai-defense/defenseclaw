@@ -90,6 +90,10 @@ func launcherOffers(args []string) bool {
 	switch args[0] {
 	case "sandbox", "-h", "--help", "--version":
 		return true
+	case "guardrail":
+		// The user's own guardrail profile (GAP-0431, GAP-0422), and nothing
+		// else of the guardrail tree.
+		return len(args) >= 3 && args[1] == "profile" && args[2] == "explain"
 	case "help":
 		// `help` explains the sandbox tree; cobra would answer `help status`
 		// with the root help, as if status existed. `help --help` is the
@@ -118,6 +122,9 @@ func prepareLauncherRoot(root *cobra.Command) {
 		}
 	}
 	root.RemoveCommand(others...)
+	if guardrail := newLauncherGuardrailCommand(); guardrail != nil {
+		root.AddCommand(guardrail)
+	}
 	root.Use = launcherCommand
 	root.Short = "Run coding agents in sandboxes on this managed computer"
 	root.Long = `Your organization manages DefenseClaw on this computer. Here defenseclaw runs
@@ -127,7 +134,8 @@ your coding agents in sandboxes under the policy your organization set for you:
   defenseclaw sandbox status         show your sandbox and managed policy state
   defenseclaw sandbox policy explain show the policy that applies to you
 
-Every other DefenseClaw command is for administrators.`
+"defenseclaw guardrail profile explain" shows the guardrail profile that
+applies to your agents. Every other DefenseClaw command is for administrators.`
 	root.CompletionOptions.DisableDefaultCmd = true
 	// The gateway's own flags (--host, --port, --version-json, ...) belong to
 	// the commands removed above; the launcher refuses them, so its help does

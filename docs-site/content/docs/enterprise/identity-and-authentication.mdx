@@ -274,7 +274,7 @@ defenseclaw agent ide-plugins --user alice --ai-only
 
 `subject` shows the user ID, the principal, the UPN and the groups as the gateway resolves them, the same way it does for a live request. `--user` takes the account name as `getent passwd` (or `id`) shows it, a uid or a SID, in any case.
 
-On a managed install, `defenseclaw` runs only `sandbox` commands. As root, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --connector codex` (macOS: `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ...`; Windows: `defenseclaw.exe enterprise windows ...` from an elevated prompt). The full set is under [Check a user on a managed install](#check-a-user-on-a-managed-install). For troubleshooting, see [Troubleshooting identity](/docs/enterprise/identity-and-authentication#troubleshooting).
+On a managed install, `defenseclaw` runs only `sandbox` commands and `defenseclaw guardrail profile explain`. On Linux and macOS a standard user runs that command to see the guardrail profile that applies to their own account; it explains only the account that runs it, and another account's profile stays an administrator view. As root, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --connector codex` (macOS: `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ...`; Windows: `defenseclaw.exe enterprise windows ...` from an elevated prompt). The full set is under [Check a user on a managed install](#check-a-user-on-a-managed-install). For troubleshooting, see [Troubleshooting identity](/docs/enterprise/identity-and-authentication#troubleshooting).
 
 #### Check a user on a managed install
 
