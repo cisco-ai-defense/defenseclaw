@@ -72,18 +72,6 @@ const (
 	actingForRefusedUnsupported       = "acting_for_unsupported_platform"
 )
 
-// Local-audit causes behind acting_for_not_allowed. The caller gets one code
-// for an unknown person, a person outside may_act_for and an administrator,
-// so the route is no directory oracle; the local audit keeps the cause.
-const (
-	actingForCauseUnknownUser    = "unknown_user"
-	actingForCauseAmbiguousUser  = "ambiguous_user"
-	actingForCauseOutOfSet       = "out_of_set"
-	actingForCauseAdminTarget    = "admin_target"
-	actingForCauseConnectorSelf  = "connector_account"
-	actingForCauseUntrustedRealm = "untrusted_domain"
-)
-
 // Reasons trusted_connectors is configured but not honoured (status).
 const (
 	trustedConnectorsNotManaged      = "not_managed_standalone"

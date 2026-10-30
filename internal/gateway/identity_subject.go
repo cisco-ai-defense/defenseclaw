@@ -65,10 +65,8 @@ const (
 	subjectSourcePeerCredentials = "peer_credentials"
 	subjectSourceUserCredential  = "user_scoped_credential"
 	subjectSourceProcessOwner    = "process_owner"
-	// subjectSourceTrustedConnector marks the person a trusted connector
-	// acts for (trusted_connector.go). It is never a request's
-	// VerifiedSubject: only profile selection and attribution read it.
-	subjectSourceTrustedConnector = "trusted_connector"
+	// subjectSourceTrustedConnector (trusted_connector_unix.go) marks the
+	// person a trusted connector acts for, on the platforms that honour one.
 )
 
 type verifiedSubjectContextKey struct{}

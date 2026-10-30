@@ -23,6 +23,24 @@ import (
 // exists on Linux and macOS.
 func trustedConnectorPlatformSupported() bool { return true }
 
+// Local-audit causes behind acting_for_not_allowed. The caller gets one code
+// for an unknown person, a person outside may_act_for and an administrator,
+// so the route is no directory oracle; the local audit keeps the cause. Only
+// the hook socket honours acting_for, so they exist on Linux and macOS.
+const (
+	actingForCauseUnknownUser    = "unknown_user"
+	actingForCauseAmbiguousUser  = "ambiguous_user"
+	actingForCauseOutOfSet       = "out_of_set"
+	actingForCauseAdminTarget    = "admin_target"
+	actingForCauseConnectorSelf  = "connector_account"
+	actingForCauseUntrustedRealm = "untrusted_domain"
+)
+
+// subjectSourceTrustedConnector is the subject source (identity_subject.go)
+// of the person a trusted connector acts for. It is never a request's
+// VerifiedSubject: only profile selection and attribution read it.
+const subjectSourceTrustedConnector = "trusted_connector"
+
 // trustedConnectorLookupBudget bounds one resolution (the service account
 // with its groups, or one asserted person).
 const trustedConnectorLookupBudget = identityDirectoryBudget
