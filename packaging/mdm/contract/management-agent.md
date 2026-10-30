@@ -1575,12 +1575,10 @@ The rollback marker and `--allow-downgrade` do not lift it. Windows Setup
 `/repair` and `/ensure`, before it changes anything; a 1.0.5 or older Setup
 does not check the floor.
 
-Check the floor first, the package refusal is the second line: `bundle
-status` reports it as `current.min_product_version` (absent when the bundle
-sets none and on builds before 1.0.6). Compare it with the target version
-before you dispatch a downgrade; for a rollback to 1.0.4 it must be unset or
-at most 1.0.4, else deliver a bundle signed with a lower
-`--min-product-version` first. On a 1.0.4 or 1.0.5 device, `bundle status`
+Check the floor before you dispatch a downgrade; the package refusal is the
+second line. `bundle status` reports it as `current.min_product_version`
+(absent when the bundle sets none and on builds before 1.0.6). For a rollback
+to 1.0.4 it must be unset or at most 1.0.4. On a 1.0.4 or 1.0.5 device, `bundle status`
 has no such member and its `floor` is the bundle version floor, not the
 release floor: keep the release floor you signed and compare it with
 `--version-json` yourself. A 1.0.6 or later release that runs below the floor
