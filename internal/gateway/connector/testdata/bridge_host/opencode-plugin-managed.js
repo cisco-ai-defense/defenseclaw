@@ -1193,6 +1193,21 @@ function defenseclawV2Result(event) {
   return { ...event.result, opencode_v2_status: "completed" };
 }
 
+// defenseclawV2AppendNotice adds the call's DefenseClaw notices to its
+// completed result as one more text part (V2 results carry content parts);
+// a result in another shape is left as it is.
+function defenseclawV2AppendNotice(event, pending) {
+  try {
+    const result = event && event.status === "completed" && event.result;
+    if (!result || typeof result !== "object") return;
+    const note = pending.join("\n");
+    if (Array.isArray(result.content)) event.result = { ...result, content: [...result.content, { type: "text", text: note }] };
+    else if (typeof result.content === "string") event.result = { ...result, content: result.content + "\n\n" + note };
+  } catch (_) {
+    // A notice never changes the outcome of a call that already ran.
+  }
+}
+
 function defenseclawV2SameLocation(ctx, location) {
   return location?.directory === ctx.location?.directory && location?.workspaceID === ctx.location?.workspaceID;
 }
@@ -1235,9 +1250,21 @@ async function defenseclawV2Lifecycle(ctx, event, sessions, hooks) {
 }
 
 async function defenseclawV2Setup(ctx, createHooks) {
-  // V2 server plugins have no TUI toast API. Preserve notices in the host's
-  // log/stderr and return blocking reasons through the rejected tool Promise.
-  const client = { tui: { showToast: ({ body }) => { console.warn(String(body.message).startsWith("DefenseClaw") ? body.message : (body.title || "DefenseClaw") + ": " + body.message); } } };
+  // V2 server plugins have no TUI toast API, and the TUI never shows their
+  // console output. A notice raised while a tool call is checked (a gateway
+  // outage that let the call run, a confirm verdict, a foreign-hook warning)
+  // is appended to that call's result, which the TUI shows under the tool;
+  // blocking reasons travel in the rejected tool Promise. The log line stays.
+  const noticeScope = new AsyncLocalStorage();
+  const notices = new Map();
+  const client = { tui: { showToast: ({ body }) => {
+    const text = String(body.message).startsWith("DefenseClaw") ? body.message : (body.title || "DefenseClaw") + ": " + body.message;
+    console.warn(text);
+    const pending = noticeScope.getStore();
+    if (!pending) return false;
+    pending.push(text);
+    return true;
+  } } };
   const hooks = await createHooks({ client, directory: ctx.location?.directory });
   const registrations = [];
   const sessions = new Map();
@@ -1247,20 +1274,27 @@ async function defenseclawV2Setup(ctx, createHooks) {
     controller.abort();
     sessions.clear();
     calls.clear();
+    notices.clear();
     await Promise.allSettled(registrations.map((registration) => registration.dispose()));
   };
   try {
     registrations.push(await ctx.tool.hook("execute.before", async (event) => {
       calls.delete(event?.id);
+      notices.delete(event?.id);
       defenseclawPinV2Event(event);
       const input = await defenseclawV2Context(ctx, event);
       defenseclawV2Remember(sessions, input.sessionID, ctx.location);
-      await hooks["tool.execute.before"](input, { args: event.input });
+      const pending = [];
+      await noticeScope.run(pending, () => hooks["tool.execute.before"](input, { args: event.input }));
+      if (pending.length) defenseclawV2Remember(notices, event.id, pending);
       // Retain only verified metadata, never the potentially large tool input.
       const { args, ...context } = input;
       defenseclawV2Remember(calls, event.id, context);
     }));
     registrations.push(await ctx.tool.hook("execute.after", async (event) => {
+      const pending = notices.get(event?.id);
+      notices.delete(event?.id);
+      if (pending) defenseclawV2AppendNotice(event, pending);
       // A telemetry failure cannot undo an already executed tool.
       try {
         const cached = calls.get(event?.id);

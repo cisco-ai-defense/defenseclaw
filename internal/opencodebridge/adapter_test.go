@@ -18,7 +18,7 @@ func TestV2AdapterContextCacheAndLifecycleIdentity(t *testing.T) {
 		t.Skip("Node.js is required for the OpenCode adapter contract")
 	}
 	module := filepath.Join(t.TempDir(), "adapter.mjs")
-	const sanitizer = "function defenseclawSanitizeMCPName(name) { return name.replace(/[^a-zA-Z0-9_-]/g, '_'); }\n"
+	const sanitizer = "import { AsyncLocalStorage } from \"node:async_hooks\";\nfunction defenseclawSanitizeMCPName(name) { return name.replace(/[^a-zA-Z0-9_-]/g, '_'); }\n"
 	if err := os.WriteFile(module, []byte(sanitizer+Adapter+"\nexport { defenseclawV2Setup };\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

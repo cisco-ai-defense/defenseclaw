@@ -40,9 +40,13 @@ export async function fixtureBridge(module, { directory } = {}) {
         .map(([name]) => ({ name }));
     },
     "tool.execute.before": (input, output) => callbacks.get("execute.before")(native(input, output?.args)),
-    "tool.execute.after": (input, output) => callbacks.get("execute.after")({
-      ...native(input, input.args), status: "completed", result: output,
-    }),
+    // Resolves to the native event, so a test can read the result the
+    // plugin handed back to OpenCode.
+    "tool.execute.after": async (input, output) => {
+      const event = { ...native(input, input.args), status: "completed", result: output };
+      await callbacks.get("execute.after")(event);
+      return event;
+    },
     event: ({ event }) => new Promise((resolve) => {
       const properties = event.properties || {};
       const sessionID = properties.sessionID || properties.info?.id || "fixture-session";

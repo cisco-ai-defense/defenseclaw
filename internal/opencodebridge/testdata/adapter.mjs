@@ -88,3 +88,34 @@ await invokeAfter(event("bounded-4096"));
 assert.equal(sessionCalls, count, "recent invocation must remain cached");
 await cleanup();
 assert.equal(handlers.size, 0, "unload disposes every hook");
+
+// V2 has no toast and the TUI never shows plugin console output: a notice the
+// bridge raises while a call is checked reaches the user in that call's result.
+{
+  const hooks2 = new Map();
+  const ctx2 = { ...ctx, tool: { hook: async (name, callback) => { hooks2.set(name, callback); return { dispose: async () => hooks2.delete(name) }; } },
+    event: { subscribe: async function* () {} } };
+  let shown;
+  const warn = console.warn; console.warn = () => {};
+  const cleanup2 = await defenseclawV2Setup(ctx2, async ({ client }) => ({
+    initialize: async () => {},
+    "tool.execute.before": async (input) => {
+      if (input.callID === "noticed") shown = client.tui.showToast({ body: { title: "DefenseClaw", message: "DefenseClaw is not checking this session: fixture outage" } });
+    },
+    "tool.execute.after": async () => {},
+    event: async () => {},
+  }));
+  const run = async (id) => {
+    const call = event(id, { tool: "shell", input: { command: "echo fixture" } });
+    await hooks2.get("execute.before")(call);
+    const done = { ...call, status: "completed", result: { output: { exit: 0 }, content: [{ type: "text", text: "fixture\n" }] } };
+    await hooks2.get("execute.after")(done);
+    return done.result.content;
+  };
+  const noticed = await run("noticed");
+  assert.equal(shown, true, "a notice raised during a call is delivered");
+  assert.deepEqual(noticed.at(-1), { type: "text", text: "DefenseClaw is not checking this session: fixture outage" });
+  assert.equal((await run("quiet")).length, 1, "a call with no notice keeps its result");
+  console.warn = warn;
+  await cleanup2();
+}

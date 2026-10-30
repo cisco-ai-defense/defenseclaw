@@ -20,17 +20,20 @@ import (
 const openCodeOutageHarness = `
 import { pathToFileURL } from "node:url";
 const toasts = [];
-const durations = [];
-let attempts = 0;
-console.warn = (message) => { attempts++; toasts.push(String(message)); };
+const results = [];
+console.warn = (message) => { toasts.push(String(message)); };
 const href = pathToFileURL(process.argv[1]).href;
 const plugin = await fixtureBridge(await import(href), { directory: "/work/repo" });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 let verdict = "allow";
 try {
-  await plugin["tool.execute.before"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C" }, { args: { command: "echo marker" } });
-  if (process.env.DC_TWO_CALLS === "1") {
-    await plugin["tool.execute.before"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C2" }, { args: { command: "echo marker" } });
+  for (const callID of process.env.DC_TWO_CALLS === "1" ? ["C", "C2"] : ["C"]) {
+    const call = { tool: "bash", sessionID: "S", messageID: "M", callID };
+    await plugin["tool.execute.before"](call, { args: { command: "echo marker" } });
+    if (process.env.DC_AFTER === "1") {
+      const done = await plugin["tool.execute.after"]({ ...call, args: { command: "echo marker" } }, { content: [{ type: "text", text: "marker\\n" }] });
+      results.push(done.result.content.map((part) => part.text));
+    }
   }
 } catch (error) {
   verdict = "block:" + String(error && error.message || error);
@@ -38,10 +41,13 @@ try {
 
 
 await new Promise((resolve) => setTimeout(resolve, 50));
-console.log(JSON.stringify({ verdict, notices: toasts, durations, attempts }));
+console.log(JSON.stringify({ verdict, notices: toasts, results }));
 `
 
-func TestOpenCodeOutageToastOncePerSessionAndAuditEveryCall(t *testing.T) {
+// OpenCode V2 has no toast and its TUI never shows plugin console output: the
+// one outage warning of a session reaches the user in the first unchecked
+// call's result, which the TUI shows under the tool (rel-1-0-6 GAP-0008).
+func TestOpenCodeOutageWarningOncePerSessionInTheResultAndAuditEveryCall(t *testing.T) {
 	nodeForTest(t)
 	home := t.TempDir()
 	binDir := filepath.Join(home, ".local", "bin")
@@ -70,49 +76,36 @@ func TestOpenCodeOutageToastOncePerSessionAndAuditEveryCall(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, failFirst := range []bool{false, true} {
-		t.Run(map[bool]string{false: "delivered", true: "retry rejected toast"}[failFirst], func(t *testing.T) {
-			cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", openCodeOutageHarness, path)
-			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DC_TWO_CALLS=1", "DEFENSECLAW_GATEWAY_AUTOSTART=0")
-			if failFirst {
-				cmd.Env = append(cmd.Env, "DC_TOAST_FAIL_FIRST=1")
-			}
-			// The helper's refused-connection diagnostics stay out of the
-			// agent's terminal: the one warning is all the user sees (GAP-1314).
-			var stderr strings.Builder
-			cmd.Stderr = &stderr
-			out, err := cmd.Output()
-			if err != nil {
-				t.Fatalf("node: %v\n%s", err, out)
-			}
-			if strings.Contains(stderr.String(), "defenseclaw-hook-post") {
-				t.Fatalf("the helper's diagnostics reached the agent's terminal:\n%s", stderr.String())
-			}
-			var result struct {
-				Verdict   string   `json:"verdict"`
-				Notices   []string `json:"notices"`
-				Durations []int    `json:"durations"`
-				Attempts  int      `json:"attempts"`
-			}
-			if err := json.Unmarshal(out, &result); err != nil {
-				t.Fatalf("harness output %q: %v", out, err)
-			}
-			wantAttempts := 1
-			if failFirst {
-				wantAttempts = 2
-			}
-			if result.Verdict != "allow" || len(result.Notices) != 1 || result.Attempts != wantAttempts ||
-				len(result.Durations) != 1 || result.Durations[0] != 15000 ||
-				!strings.Contains(result.Notices[0], "defenseclaw-gateway start") {
-				t.Fatalf("one visible warning for two unchecked calls: %+v", result)
-			}
-			if rows := hookFailureRecords(t, dataDir); len(rows) != 2 || rows[0]["call_id"] != "C" || rows[1]["call_id"] != "C2" {
-				t.Fatalf("two correlated audit rows: %+v", rows)
-			}
-			if err := os.Remove(filepath.Join(dataDir, "logs", "hook-failures.jsonl")); err != nil {
-				t.Fatal(err)
-			}
-		})
+	cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", withOpenCodeV2Fixture(t, openCodeOutageHarness), path)
+	cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DC_TWO_CALLS=1", "DC_AFTER=1", "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+	// The helper's refused-connection diagnostics stay out of the agent's
+	// terminal: the one warning is all the user sees (GAP-1314).
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	if strings.Contains(stderr.String(), "defenseclaw-hook-post") {
+		t.Fatalf("the helper's diagnostics reached the agent's terminal:\n%s", stderr.String())
+	}
+	var result struct {
+		Verdict string     `json:"verdict"`
+		Notices []string   `json:"notices"`
+		Results [][]string `json:"results"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("harness output %q: %v", out, err)
+	}
+	if result.Verdict != "allow" || len(result.Notices) != 1 || !strings.Contains(result.Notices[0], "defenseclaw-gateway start") {
+		t.Fatalf("one logged warning for two unchecked calls: %+v", result)
+	}
+	if len(result.Results) != 2 || len(result.Results[0]) != 2 || !strings.Contains(result.Results[0][1], "defenseclaw-gateway start") ||
+		len(result.Results[1]) != 1 {
+		t.Fatalf("the first unchecked call's result carries the warning, the second's does not: %+v", result.Results)
+	}
+	if rows := hookFailureRecords(t, dataDir); len(rows) != 2 || rows[0]["call_id"] != "C" || rows[1]["call_id"] != "C2" {
+		t.Fatalf("two correlated audit rows: %+v", rows)
 	}
 }
 
