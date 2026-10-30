@@ -2484,3 +2484,23 @@ func TestWindowsSIDGroupAssignmentIgnoresSIDShapedNames(t *testing.T) {
 		t.Fatalf("assigned SID selected %+v, want tooling group assignment", got)
 	}
 }
+
+// GAP-0495: the policy matcher compares group names without case, so an
+// assignment written DC-R102-OKTA-DEV selects the members of dc-r102-okta-dev.
+// A host whose group lookup is case-sensitive (an Okta LDAP domain in SSSD)
+// answers "no such group" for the uppercase spelling; the advisory must not
+// say the assignment selects nobody then.
+func TestUnknownAssignmentGroupsAgreeWithCaseInsensitiveMatcher(t *testing.T) {
+	previousHealth := directoryCacheHealth
+	t.Cleanup(func() { directoryCacheHealth = previousHealth })
+	directoryCacheHealth = func() identityCacheHealth { return identityCacheHealth{} }
+	assignments := []config.ProfileAssignment{
+		{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"DC-R102-OKTA-DEV"}}},
+		{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"DC-R102-GONE"}}},
+	}
+	exists := func(_ context.Context, name string) (bool, error) { return name == "dc-r102-okta-dev", nil }
+	got := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, nil, nil, "linux")
+	if len(got) != 1 || !strings.HasPrefix(got[0], `assignment 2: group "DC-R102-GONE" is not known`) {
+		t.Fatalf("warnings = %q, want only the group no spelling of which exists", got)
+	}
+}

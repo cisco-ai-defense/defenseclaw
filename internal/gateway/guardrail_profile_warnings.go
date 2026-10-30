@@ -662,6 +662,15 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 					continue
 				}
 				known, err := exists(ctx, norm.NFC.String(group))
+				if err == nil && !known && platform != "windows" {
+					// The matcher folds case; a host whose lookup does not
+					// still knows the group by its lower-case name (GAP-0495).
+					if lower := strings.ToLower(norm.NFC.String(group)); lower != norm.NFC.String(group) {
+						if folded, ferr := exists(ctx, lower); ferr == nil && folded {
+							known = true
+						}
+					}
+				}
 				if err != nil && ctx.Err() != nil {
 					// The lookup ran out of time: not an answer, so the group
 					// is named as not checked (GAP-2434).

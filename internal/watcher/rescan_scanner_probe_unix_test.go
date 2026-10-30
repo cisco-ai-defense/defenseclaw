@@ -75,3 +75,22 @@ echo 'scanner-fixture 1.2.3'
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// The --version probe is not a scan, but it starts the same scanner, so it
+// gets the scan allowlist instead of the gateway service environment: an
+// ambient AI_DEFENSE_API_KEY (or any provider key) must not reach it
+// (GAP-0246). Secure Client keeps the inherited v8 environment.
+func TestScannerVersionProbeDoesNotInheritServiceSecrets(t *testing.T) {
+	t.Setenv("AI_DEFENSE_API_KEY", "ambient-probe-key")
+	t.Setenv("OPENAI_API_KEY", "ambient-openai-key")
+	t.Setenv("DEFENSECLAW_LLM_KEY", "ambient-llm-key")
+	binary := filepath.Join(t.TempDir(), "scanner-fixture")
+	script := "#!/bin/sh\necho \"v:${AI_DEFENSE_API_KEY}|${OPENAI_API_KEY}|${DEFENSECLAW_LLM_KEY}|${HOME:+home}\"\n"
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got := (&InstallWatcher{}).probeScannerBinaryVersion(binary)
+	if got != "v:|||home" {
+		t.Fatalf("probe environment = %q, want only allowlisted variables (no keys, HOME kept)", got)
+	}
+}
