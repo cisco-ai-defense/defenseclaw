@@ -67,14 +67,68 @@ func TestWindowsBundleApplyWithoutLockWaitFailsAtOnce(t *testing.T) {
 
 // A4: --lock-wait waits for bundle.lock and then runs.
 func TestWindowsBundleApplyLockWaitTakesTheReleasedLock(t *testing.T) {
+	saved := windowsBundleDeploymentInstalled
+	t.Cleanup(func() { windowsBundleDeploymentInstalled = saved })
+	windowsBundleDeploymentInstalled = func() bool { return true }
 	opts, out, done, err := prepareWithHeldBundleLock(t, 30*time.Second, 300*time.Millisecond)
 	if done || err != nil || opts.bundle == nil || opts.bundle.prepared == nil {
 		t.Fatalf("--lock-wait 30s with the lock released after 300ms: done=%v err=%v out=%s", done, err, out)
 	}
 }
 
+// GAP-2438: a run that waited for bundle.lock while Setup /uninstall PURGE=1
+// held it reads the deployment record again and refuses not_managed before
+// it creates or runs anything; the uninstall then finishes. A run that did
+// not wait, and one whose deployment is still installed, are unchanged.
+func TestWindowsBundleApplyLockWaitRefusesAfterAnUninstall(t *testing.T) {
+	saved := windowsBundleDeploymentInstalled
+	t.Cleanup(func() { windowsBundleDeploymentInstalled = saved })
+	installed := false
+	windowsBundleDeploymentInstalled = func() bool { return installed }
+	// opts.bundle stays nil: the run refused before it took the store
+	// (no directory prepared, no anchors staged, no ensure).
+	opts, out, done, err := prepareWithHeldBundleLock(t, 30*time.Second, 300*time.Millisecond)
+	if !done || opts.bundle != nil || !strings.Contains(out, `"not_managed"`) ||
+		!strings.Contains(out, "uninstalled while this run waited for the policy bundle lock") {
+		t.Fatalf("waited out an uninstall: done=%v err=%v exit=%d out=%s", done, err, commandExitCode(err), out)
+	}
+	// The uninstall commits long before it frees the lock: the wait ends
+	// at the commit, not at the release, so this process (the installed
+	// gateway binary) no longer keeps the uninstall from removing it.
+	start := time.Now()
+	opts, out, done, err = prepareWithHeldBundleLock(t, 30*time.Second, 5*time.Second)
+	if elapsed := time.Since(start); !done || opts.bundle != nil || !strings.Contains(out, `"not_managed"`) || elapsed >= 4*time.Second {
+		t.Fatalf("uninstall committed while the lock is held: done=%v err=%v elapsed=%s out=%s", done, err, elapsed, out)
+	}
+	// Still installed after the wait: the run goes on.
+	installed = true
+	if opts, out, done, err := prepareWithHeldBundleLock(t, 30*time.Second, 300*time.Millisecond); done || err != nil || opts.bundle == nil {
+		t.Fatalf("waited, still installed: done=%v err=%v out=%s", done, err, out)
+	}
+	// No wait (the lock was free): the record is not read again.
+	installed = false
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "v5.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	stubWindowsBundleHost(t)
+	cmd, buf := windowsBundleCommand()
+	free := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true, bundleLockWait: 30 * time.Second}
+	done, err = prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", free)
+	cleanupPreparedWindowsBundle(t, free)
+	if done || err != nil || free.bundle == nil {
+		t.Fatalf("free lock: done=%v err=%v out=%s", done, err, buf.String())
+	}
+}
+
 // A4: a wait that expires is lifecycle_busy 1618 and names the wait.
 func TestWindowsBundleApplyLockWaitExpiresBusy(t *testing.T) {
+	saved := windowsBundleDeploymentInstalled
+	t.Cleanup(func() { windowsBundleDeploymentInstalled = saved })
+	windowsBundleDeploymentInstalled = func() bool { return true }
 	_, out, done, err := prepareWithHeldBundleLock(t, 300*time.Millisecond, 0)
 	if !done || commandExitCode(err) != enterprisestatus.WindowsExitBusy || !strings.Contains(out, `"lifecycle_busy"`) ||
 		!strings.Contains(out, "still held after --lock-wait 300ms") {

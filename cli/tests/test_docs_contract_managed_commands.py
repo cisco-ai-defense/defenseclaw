@@ -184,3 +184,28 @@ def test_setup_time_budget_names_the_recovery_after_timeoutseconds():
     windows = (DOCS / "enterprise/windows.mdx").read_text(encoding="utf-8")
     row = next(line for line in windows.splitlines() if line.startswith("| `TIMEOUTSECONDS=<n>`"))
     assert f"`TIMEOUTSECONDS` plus {minutes} minutes" in row, row
+    # The limit counts from Setup's start (opts.Started), so the budget holds
+    # when the payload checks and unpacking are slow (GAP-2509 review row).
+    assert "opts.Started.Add(opts.LifecycleTimeout)" in source, "deadline no longer counts from Setup's start"
+    assert "counted from when Setup starts" in time_bullet, time_bullet
+    assert "counted from when Setup starts" in row, row
+    # A change counted from Setup's start needs the payload checks (11-26 s
+    # live) plus the lifecycle start minimum (minimumEnterpriseLifecycleStart,
+    # about 67 s for /ensure), so 60-90 never starts one; the pages that give
+    # the 60 to 7200 range name the effective minimum (GAP-2509 checker P4).
+    assert "const minimumEnterpriseLifecycleStart = 60 * time.Second" in source, "lifecycle start minimum moved"
+    cli = (DOCS / "reference/cli.mdx").read_text(encoding="utf-8")
+    cli_row = next(line for line in cli.splitlines() if line.startswith("| `TIMEOUTSECONDS=<n>`"))
+    mdm_row = next(line for line in mdm.splitlines() if line.startswith("| `TIMEOUTSECONDS=`"))
+    for text in (time_bullet, row, mdm_row, cli_row):
+        assert "at least about 2 minutes" in text or "at least about 120" in text, text
+        assert "only `/verify` and `/status`" in text, text
+    # 120 only lets a change start; the MDM allowance stays TIMEOUTSECONDS
+    # plus the recovery, and the repo setup guide names the same minimum
+    # (GAP-2509 checker iter-5 P4).
+    assert "Allow at least that long in your MDM" not in time_bullet, time_bullet
+    assert "only lets a change start" in time_bullet, time_bullet
+    guide = (REPO / "docs/WINDOWS-ENTERPRISE-SETUP.md").read_text(encoding="utf-8")
+    guide_row = next(line for line in guide.splitlines() if line.startswith("| `TIMEOUTSECONDS=`"))
+    assert "at least about 120" in guide_row, guide_row
+    assert "counted from when Setup starts" in guide_row, guide_row
