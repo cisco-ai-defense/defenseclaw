@@ -4120,10 +4120,11 @@ def _unused_pin_changes(cfg, after: dict[str, str]) -> tuple[list, list[str]]:
 
     gc = cfg.guardrail
     selected = {path: pack for path, (_c, _p, pack) in _scope_pack_selections(cfg).items()}
-    selected.update(after)
     # An automatic-protection pack keeps its pin; the gateway refuses a pack
-    # name that is neither built in nor a custom_packs key.
+    # name that is neither built in nor a custom_packs key. Only a deleted
+    # pack folder moves it off (_deleted_pack_scope_changes, in *after*).
     selected.update({path: pack for path, (_c, pack, _on) in _app_protection_pack_selections(cfg).items()})
+    selected.update(after)
     used = {str(name or "").strip() for name in selected.values()}
     dropped = sorted(name for name in (getattr(gc, "custom_packs", None) or {}) if name not in used)
     return [config_writer.Change(f"guardrail.custom_packs.{name}", unset=True) for name in dropped], dropped
@@ -4134,6 +4135,69 @@ def _dropped_pins_note(dropped: list[str]) -> str:
         return ""
     names = ", ".join(f"guardrail.custom_packs.{name}" for name in dropped)
     return f" Removed the pin no connector uses any more: {names}."
+
+
+def _deleted_pack_scope_changes(
+    cfg, written: set[str], global_dir: str
+) -> tuple[list, dict[str, str], list[str], list[str]]:
+    """Move every scope outside *written* off a custom pack whose folder is gone.
+
+    A pack folder deleted while scopes still select it fails every config
+    save, the one that moves a single connector off it included, so moving
+    connectors back one at a time never saved (GAP-2631). Each such scope
+    falls back: a connector or profile scope and automatic protection drop
+    their pack (they use the pack above them), the global scope takes the
+    default preset. *global_dir* is the global pack after this write; rule
+    references the new pack of a moved connector lacks are dropped as a
+    switch drops them. Returns ``(changes, after, moved, dropped)``: writer
+    changes, config path -> new ``rule_pack`` ("" when unset) for
+    :func:`_unused_pin_changes`, one phrase per moved scope, and the dropped
+    rule references.
+    """
+    from defenseclaw import config_writer, policy_catalog
+
+    packs = getattr(cfg.guardrail, "custom_packs", None) or {}
+
+    def _gone(name: str) -> bool:
+        pin = packs.get(name) if name else None
+        path = policy_catalog.normalize_pack_path(str(getattr(pin, "path", "") or "")) if pin is not None else ""
+        return bool(path) and not os.path.isdir(path)
+
+    changes: list = []
+    after: dict[str, str] = {}
+    moved: list[str] = []
+    dropped: list[str] = []
+    selections = _scope_pack_selections(cfg)
+    if "guardrail" not in written and _gone(selections["guardrail"][2]):
+        changes.append(config_writer.Change("guardrail.rule_pack", "default"))
+        after["guardrail"] = "default"
+        moved.append("the global pack (now default)")
+        global_dir = policy_catalog.preset_pack_dir(cfg, "default")
+    for path, (connector, profile, selected) in selections.items():
+        if path == "guardrail" or path in written or not _gone(selected):
+            continue
+        prune = _rule_prune_scope(connector, profile, cfg)
+        changes.append(config_writer.Change(f"{path}.rule_pack", unset=True, prune_empty_to=prune))
+        after[path] = ""
+        moved.append(_scope_words(connector, profile))
+        if connector and not profile:
+            stale, lost = _stale_rule_changes(cfg, global_dir, connector)
+            changes.extend(stale)
+            dropped.extend(lost)
+    for path, (connector, selected, _on) in _app_protection_pack_selections(cfg).items():
+        if _gone(selected):
+            changes.append(config_writer.Change(f"{path}.rule_pack", unset=True))
+            after[path] = ""
+            words = f"automatic protection for {_connector_label(connector)}" if connector else "automatic protection"
+            moved.append(words)
+    return changes, after, moved, dropped
+
+
+def _moved_scopes_note(moved: list[str]) -> str:
+    if not moved:
+        return ""
+    names = ", ".join(moved)
+    return f" Also moved off the deleted pack folder: {names}."
 
 
 def _scope_words(connector_key: str | None, profile: str | None) -> str:
@@ -4439,6 +4503,7 @@ def use_pack_cmd(
         cleared: list[str] | None = None,
         dropped: list[str] | None = None,
         dropped_pins: list[str] | None = None,
+        moved: list[str] | None = None,
         validation: dict | None = None,
         warning: str = "",
     ) -> None:
@@ -4455,6 +4520,7 @@ def use_pack_cmd(
                         "cleared_overrides": list(cleared or []),
                         "dropped_pins": list(dropped_pins or []),
                         "dropped_rule_references": list(dropped or []),
+                        "moved_off_deleted_packs": list(moved or []),
                         "validation": validation,
                         "message": message,
                     },
@@ -4510,8 +4576,17 @@ def use_pack_cmd(
             return
         _preflight_config_write(app)
         key = _scope_key(connector_key, None)
-        pin_changes, dropped_pins = _unused_pin_changes(app.cfg, {key: ""})
+        moved_changes, moved_after, moved, moved_dropped = _deleted_pack_scope_changes(app.cfg, {key}, fallback.path)
+        if "guardrail" in moved_after:
+            fallback = policy_catalog.ConnectorPack(
+                connector="global",
+                pack="default",
+                path=policy_catalog.preset_pack_dir(app.cfg, "default"),
+                source="global",
+            )
+        pin_changes, dropped_pins = _unused_pin_changes(app.cfg, {key: "", **moved_after})
         stale, dropped = _stale_rule_changes(app.cfg, fallback.path, connector_key)
+        dropped = [*dropped, *moved_dropped]
         result = _write_guardrail_config(
             app,
             [
@@ -4520,6 +4595,7 @@ def use_pack_cmd(
                 config_writer.Change(
                     f"{key}.rule_pack", unset=True, prune_empty_to=_rule_prune_scope(connector_key, None, app.cfg)
                 ),
+                *moved_changes,
                 *pin_changes,
                 *stale,
             ],
@@ -4529,7 +4605,10 @@ def use_pack_cmd(
         previous_name = policy_catalog.pack_name_for_path(app.cfg, previous)[0]
         _refresh_hook_outage_modes(app)
         _log_guardrail_change(
-            app, "guardrail-use-pack", f"scope={connector_key} pack={fallback.pack} previous={previous_name}"
+            app,
+            "guardrail-use-pack",
+            f"scope={connector_key} pack={fallback.pack} previous={previous_name}"
+            + (f" moved_off_deleted={';'.join(moved)}" if moved else ""),
         )
         _finish(
             ok=True,
@@ -4538,10 +4617,11 @@ def use_pack_cmd(
             path=fallback.path,
             dropped=dropped,
             dropped_pins=dropped_pins,
+            moved=moved,
             message=(
                 f"{_connector_label(connector_key)} now uses the global rule pack '{fallback.pack}'."
                 + (f" Dropped rule references the pack does not have: {'; '.join(dropped)}." if dropped else "")
-                + f"{_dropped_pins_note(dropped_pins)} {_applied_note(app, result)}"
+                + f"{_moved_scopes_note(moved)}{_dropped_pins_note(dropped_pins)} {_applied_note(app, result)}"
             ),
         )
         return
@@ -4756,13 +4836,19 @@ def use_pack_cmd(
                 other_key = _scope_key(other, None)
                 changes.append(config_writer.Change(f"{other_key}.rule_pack", unset=True))
                 cleared.append(other)
+    written = {key, *(_scope_key(other, None) for other in cleared)}
+    moved_changes, moved_after, moved, moved_dropped = _deleted_pack_scope_changes(
+        app.cfg, written, path if connector_key is None else policy_catalog.global_pack(app.cfg).path
+    )
+    changes.extend(moved_changes)
     pin_changes, dropped_pins = _unused_pin_changes(
-        app.cfg, {key: name, **{_scope_key(other, None): "" for other in cleared}}
+        app.cfg, {key: name, **{_scope_key(other, None): "" for other in cleared}, **moved_after}
     )
     changes.extend(pin_changes)
     # Rule references the new pack does not ship would fail the whole save (GAP-0258, GAP-0261).
     stale, dropped = _stale_rule_changes(app.cfg, path, connector_key)
     changes.extend(stale)
+    dropped = [*dropped, *moved_dropped]
     if repinned is not None:
         # Every edit the write makes, from the one read it is bound to.
         planned = _planned_change_lines(changes)
@@ -4812,13 +4898,15 @@ def use_pack_cmd(
         message += f" Dropped rule references the pack does not have: {'; '.join(dropped)}."
     if repinned is not None:
         message += f" Re-pinned {name!r} from {repinned[0] or 'none'} to {repinned[1]}.{shared_note}"
+    message += _moved_scopes_note(moved)
     _log_guardrail_change(
         app,
         "guardrail-use-pack",
         f"scope={connector_key or scope} pack={name} previous={previous_pack}"
         + (f" cleared={','.join(cleared)}" if cleared else "")
         + (f" repinned={repinned[0] or 'none'}->{repinned[1]}" if repinned is not None else "")
-        + (f" repin_shared={';'.join(shared)}" if shared else ""),
+        + (f" repin_shared={';'.join(shared)}" if shared else "")
+        + (f" moved_off_deleted={';'.join(moved)}" if moved else ""),
     )
     _finish(
         ok=True,
@@ -4828,6 +4916,7 @@ def use_pack_cmd(
         cleared=cleared,
         dropped=dropped,
         dropped_pins=dropped_pins,
+        moved=moved,
         validation=validation,
         warning=warning,
         message=f"{message}{_dropped_pins_note(dropped_pins)} {_applied_note(app, result)}",

@@ -1064,3 +1064,49 @@ def test_use_pack_does_not_refresh_after_a_refused_write(env, monkeypatch):
     calls = _refresh_calls(monkeypatch)
     assert _run(app, ["use-pack", "no-such-pack"]).exit_code == 1
     assert calls == [] and writes == []
+
+
+def test_switching_one_connector_moves_the_others_off_a_deleted_pack(env, tmp_path):
+    """GAP-2631: with a pack folder gone, use-pack default --connector X saves.
+
+    Every scope that still selected the deleted pack failed the save, so no
+    single connector could be moved back. The others now fall back to the
+    global pack and the pin goes; a connector on a pack that still exists
+    keeps it (hard negative)."""
+    import shutil
+
+    app, _root, custom, writes = env
+    kept = tmp_path / "packs" / "ops"
+    (kept / "rules").mkdir(parents=True)
+    _multi(app, {"codex": str(custom), "hermes": str(custom), "opencode": str(custom), "copilot": str(kept)})
+    shutil.rmtree(custom)
+
+    result = _run(app, ["use-pack", "default", "--connector", "codex", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["moved_off_deleted_packs"] == [cmd_guardrail._connector_label(c) for c in ("hermes", "opencode")]
+    paths = {(c.path, c.unset) for c in writes[-1]}
+    assert ("guardrail.connectors.codex.rule_pack", False) in paths
+    assert ("guardrail.connectors.hermes.rule_pack", True) in paths
+    assert ("guardrail.connectors.opencode.rule_pack", True) in paths
+    assert ("guardrail.custom_packs.team", True) in paths
+    assert not any(c.path.startswith(("guardrail.connectors.copilot", "guardrail.custom_packs.ops")) for c in writes[-1])
+    assert "Also moved off the deleted pack folder" in payload["message"]
+
+    # The global pack on the deleted folder goes back to default with --clear too.
+    app.cfg.guardrail.rule_pack = "team"
+    app.cfg.guardrail.connectors = {"copilot": PerConnectorGuardrailConfig(rule_pack="ops")}
+    result = _run(app, ["use-pack", "--clear", "--connector", "copilot", "--json"])
+    assert result.exit_code == 0, result.output
+    assert config_writer.Change("guardrail.rule_pack", "default") in writes[-1]
+    assert json.loads(result.output)["pack"] == "default"
+
+    # Nothing gone: nothing else moves.
+    app.cfg.guardrail.rule_pack = "default"
+    app.cfg.guardrail.connectors = {
+        "codex": PerConnectorGuardrailConfig(),
+        "copilot": PerConnectorGuardrailConfig(rule_pack="ops"),
+    }
+    result = _run(app, ["use-pack", "strict", "--connector", "codex", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["moved_off_deleted_packs"] == []
