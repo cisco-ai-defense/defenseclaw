@@ -239,3 +239,29 @@ func TestAgentGatewayDownloadThenExecuteChain(t *testing.T) {
 		t.Fatalf("the chain did not complete in its session: %+v", got)
 	}
 }
+
+// On the managed hook socket the route is not found while the setting is
+// off, whoever calls; with it on, an unknown caller is refused by the
+// authorizer, not served.
+func TestManagedSocketAgentGatewayRouteAbsentUnlessEnabled(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	api := &APIServer{scannerCfg: cfg}
+	z := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{}, nil, func() (managedHookLedger, error) { return managedHookLedger{}, nil })
+	call := func() int {
+		mux := http.NewServeMux()
+		api.registerAgentGatewayRoute(mux, true)
+		req := httptest.NewRequest(http.MethodPost, connector.AgentGatewayHookPath, strings.NewReader(`{"event":"session_start","session_id":"s"}`))
+		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{UID: 4242, GID: 4242, Name: "nobody-here"}))
+		w := httptest.NewRecorder()
+		api.managedHookPeerAuth(z, mux).ServeHTTP(w, req)
+		return w.Code
+	}
+	if code := call(); code != http.StatusNotFound {
+		t.Fatalf("setting off: status %d, want 404", code)
+	}
+	cfg.Connectors.AgentGateway.Enabled = true
+	if code := call(); code != http.StatusForbidden {
+		t.Fatalf("setting on, unknown caller: status %d, want 403", code)
+	}
+}

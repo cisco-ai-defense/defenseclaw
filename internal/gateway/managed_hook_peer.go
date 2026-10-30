@@ -633,6 +633,11 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		if route == "" {
 			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
+		if r.URL.Path == connector.AgentGatewayHookPath && !a.agentGatewayEnabled() {
+			// The route is absent while connectors.agent_gateway is off.
+			http.NotFound(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, sandboxrelay.PathPrefix) {
 			// The managed sandbox routes refuse uid 0 outright, take their
 			// class's budget, and decide once the registration or the
