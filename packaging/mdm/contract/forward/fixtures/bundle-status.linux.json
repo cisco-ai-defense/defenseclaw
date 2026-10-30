@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "command": "status",
+  "ok": true,
+  "bundle_mode": true,
+  "anchors": "/etc/defenseclaw/trust/bundle-anchors.json",
+  "anchors_summary": {
+    "tenant_id": "acme",
+    "min_version": 0,
+    "sha256": "abababababababababababababababababababababababababababababababab",
+    "keys": [
+      {
+        "key_id": "acme-2026a",
+        "alg": "ed25519",
+        "status": "active"
+      }
+    ]
+  },
+  "current": {
+    "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+    "version": 13,
+    "manifest_sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "dir": "v13-0V1WYZ-b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+    "signer_key_id": "acme-2026a",
+    "effective_policy_digest": "sha256:4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f",
+    "config_generation": 41,
+    "confirmed_at": "2026-10-30T10:00:05Z",
+    "delivery_id": "agent-7:delivery-12",
+    "min_product_version": "1.0.6"
+  },
+  "last_good": {
+    "bundle_id": "b-01JA9Z3K9QX4M2N8P6R5T0V1WY",
+    "version": 12,
+    "manifest_sha256": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+    "dir": "v12-1WY"
+  },
+  "floor": 13,
+  "last_receipt": {
+    "receipt_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+    "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+    "version": 13,
+    "state": "confirmed",
+    "actor": "root",
+    "principal": "control-plane:acme/dcad-alice@dclab.test",
+    "change_summary": "Block HIGH for dcad-bob",
+    "signer_key_id": "acme-2026a",
+    "effective_policy_digest": "sha256:4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f",
+    "config_generation": 41,
+    "confirmed_at": "2026-10-30T10:00:05Z"
+  },
+  "bundle": {
+    "receipt_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+    "delivery_id": "agent-7:delivery-12",
+    "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+    "version": 13,
+    "state": "confirmed",
+    "disabled_by_bundle": [],
+    "warning_codes": [
+      "bundle_confirmed_after_interrupt"
+    ],
+    "effective_policy_digest": "sha256:4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f",
+    "config_generation": 41,
+    "applied_at": "2026-10-30T10:00:00Z",
+    "confirmed_at": "2026-10-30T10:00:05.123Z",
+    "restart": true,
+    "sessions_restart_required": {
+      "state": "known",
+      "count": 2,
+      "reason": "user dcad-r102-eng1 restarted nothing",
+      "entries": [
+        {
+          "agent": "claudecode",
+          "user": "dcad-r102-eng1",
+          "pid": 4242,
+          "started_at": "2026-10-30T10:00:00Z"
+        },
+        {
+          "agent": "codex",
+          "user": "1001",
+          "pid": 4343,
+          "started_at": "2026-10-30T10:01:00Z"
+        }
+      ]
+    },
+    "current_bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+    "current_version": 13
+  },
+  "sessions_restart_required": {
+    "state": "known",
+    "count": 2,
+    "reason": "user dcad-r102-eng1 restarted nothing",
+    "entries": [
+      {
+        "agent": "claudecode",
+        "user": "dcad-r102-eng1",
+        "pid": 4242,
+        "started_at": "2026-10-30T10:00:00Z"
+      },
+      {
+        "agent": "codex",
+        "user": "1001",
+        "pid": 4343,
+        "started_at": "2026-10-30T10:01:00Z"
+      }
+    ]
+  },
+  "alert_only_rule_count": 2,
+  "gateway_checked": true,
+  "gateway_digest": "sha256:4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f",
+  "applied": true,
+  "warnings": [
+    {
+      "code": "product_below_floor",
+      "message": "this DefenseClaw 1.0.5 is below 1.0.6"
+    },
+    {
+      "code": "agent_sessions_restart_required",
+      "subject": "dcad-r102-eng1",
+      "message": "restart for dcad-r102-eng1"
+    }
+  ],
+  "errors": []
+}

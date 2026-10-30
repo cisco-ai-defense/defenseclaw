@@ -206,6 +206,19 @@ func CheckCredentialChange(confirmed, rotation *Manifest, name string, value []b
 	return nil
 }
 
+// SecretRefState is what bundle verify reports for one secret_refs entry on
+// a device: its credential name, whether the bundle requires it, whether the
+// device stores a value for it and whether that value is the one the bundle
+// signs. Every listed entry binds a value (CheckSecretRefs refuses one that
+// does not), so there is no separate bound flag. It never carries a value
+// or any digest.
+type SecretRefState struct {
+	Name       string `json:"name"`
+	Required   bool   `json:"required"`
+	Present    bool   `json:"present"`
+	ValueMatch bool   `json:"value_match"`
+}
+
 // CheckSecretRefs refuses a bundle whose config.yaml names a credential that
 // secret_refs does not list (manifest_invalid) and a secret_refs entry that
 // binds no value (secret_ref_unbound). The device-side checks that every
