@@ -497,6 +497,25 @@ def test_entry_dispatches_upgrade_before_importing_the_cli(monkeypatch: pytest.M
     assert "defenseclaw.main" not in sys.modules
 
 
+def test_entry_version_matches_click_without_importing_the_cli(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    from click.testing import CliRunner
+    from defenseclaw.main import cli
+
+    expected = CliRunner().invoke(cli, ["--version"], prog_name="defenseclaw").output
+    notices: list[list[str]] = []
+    monkeypatch.setattr(sys, "argv", ["defenseclaw", "--version"])
+    monkeypatch.setattr(entry, "_notice", lambda argv: notices.append(argv))
+    monkeypatch.delitem(sys.modules, "defenseclaw.main", raising=False)
+
+    with pytest.raises(SystemExit) as exc:
+        entry.main()
+
+    assert exc.value.code == 0
+    assert "defenseclaw.main" not in sys.modules
+    assert notices == [["--version"]]
+    assert capsys.readouterr().out == expected
+
+
 def test_entry_pin_names_match_config() -> None:
     from defenseclaw import config
 
