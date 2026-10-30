@@ -51,13 +51,7 @@ rules:
     tags: [execution, reverse-shell]
   - id: CMD-PIPE-CURL
     tool_call_only: true
-    expression: >-
-      f.commands.exists(c, c.argv_complete &&
-      c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] &&
-      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations ||
-      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))
-    # Candidate discovery covers POSIX curl pipelines and PowerShell web-cmdlet
-    # aliases. The exact fallback contract proves stdout-to-interpreter flow.
+    expression: 'false'
     pattern: 'a^'
     title: "curl piped to shell"
     severity: HIGH
@@ -65,12 +59,8 @@ rules:
     tags: [execution, download-exec]
   - id: CMD-PIPE-WGET
     tool_call_only: true
-    expression: >-
-      f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] &&
-      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations ||
-      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))
-    # Backport of default pack (parity with CMD-PIPE-CURL above).
-    pattern: '(?i)\bwget\b\s+[^|]*\|\s*(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\b'
+    expression: 'false'
+    pattern: 'a^'
     title: "wget piped to shell"
     severity: HIGH
     confidence: 0.95

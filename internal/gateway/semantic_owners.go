@@ -129,10 +129,12 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	"CMD-PIPE-CURL": {
 		prerequisite:     curlDownloadExecPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		alertOnly:        true,
 	},
 	"CMD-PIPE-WGET": {
 		prerequisite:     wgetDownloadExecPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		alertOnly:        true,
 	},
 	"CMD-PYTHON-SOCKET-CONNECT": {
 		prerequisite: func(facts actionfacts.Facts) bool {

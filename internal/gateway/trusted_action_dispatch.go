@@ -740,9 +740,6 @@ func dispatchTrustedActionWith(
 			if request.EnforcementCapable && candidate.owner.alertOnly {
 				finding.enforcement = findingEnforcementAlertOnly
 			}
-			if downloadPipelineQuiet(candidate.rule.ID, candidate.rule.Severity) {
-				finding.enforcement = findingEnforcementDetectionOnly
-			}
 			finding = finding.withTrustedActionProof(
 				newActionFactsSemanticFindingProof(
 					candidate.rule.ID,
@@ -4774,6 +4771,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return curlDownloadExecPrerequisite(facts) ||
 				powerShellDownloadExecPrerequisite(facts)
 		},
+		alertOnly: true,
 	},
 	"CMD-WRAPPED-DOWNLOAD-EXEC": {
 		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -4818,6 +4816,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 				"wget.exe",
 			)
 		},
+		alertOnly: true,
 	},
 	"CMD-PIPE-BASE64": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -5082,11 +5081,6 @@ func stdinInterpreterPipelineFallbackProof(
 		}
 	}
 	return false
-}
-
-func downloadPipelineQuiet(ruleID, severity string) bool {
-	return (ruleID == "CMD-PIPE-CURL" || ruleID == "CMD-PIPE-WGET") &&
-		strings.EqualFold(severity, "HIGH")
 }
 
 func exactPipelineSourceStdout(command actionfacts.CommandFact) bool {
@@ -5584,9 +5578,7 @@ func filterExactFallbackFindings(
 			)
 		}
 		proven = proven || boundedSubgraphProven
-		if downloadPipelineQuiet(finding.RuleID, finding.Severity) {
-			finding.enforcement = findingEnforcementDetectionOnly
-		} else if contract.alertOnly && enforcementCapable && matched {
+		if contract.alertOnly && enforcementCapable && matched {
 			finding.enforcement = findingEnforcementAlertOnly
 		} else if contract.detectionOnly || !enforcementCapable || !proven {
 			finding.enforcement = findingEnforcementDetectionOnly

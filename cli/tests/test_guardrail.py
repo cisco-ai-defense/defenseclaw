@@ -3849,16 +3849,15 @@ class BalancedPermissiveNoisePosture(unittest.TestCase):
                 commands = _load_profile_rules(profile, "commands.yaml")
                 paths = _load_profile_rules(profile, "sensitive-paths.yaml")
 
-                # Generic installer pipelines are recorded without a default-pack refusal.
-                self.assertIn("OPERATION_KIND_FETCH", commands["CMD-PIPE-CURL"]["expression"])
-                self.assertEqual(commands["CMD-PIPE-CURL"]["pattern"], "a^")
-                self.assertEqual(commands["CMD-PIPE-CURL"]["severity"], "HIGH")
-                self.assertEqual(commands["CMD-PIPE-WGET"]["severity"], "HIGH")
+                # Generic installer pipelines are off in both balanced packs.
+                for rule_id in ("CMD-PIPE-CURL", "CMD-PIPE-WGET"):
+                    self.assertEqual(commands[rule_id]["expression"], "false")
+                    self.assertEqual(commands[rule_id]["pattern"], "a^")
+                    self.assertEqual(commands[rule_id]["severity"], "HIGH")
                 self.assertEqual(paths["PATH-ENV-FILE"]["expression"], "false")
                 self.assertEqual(paths["PATH-ENV-FILE"]["pattern"], "a^")
 
-                for rule_id in ("CMD-PIPE-WGET", "CMD-PIPE-BASE64"):
-                    self.assertEqual(commands[rule_id]["severity"], "HIGH")
+                self.assertEqual(commands["CMD-PIPE-BASE64"]["severity"], "HIGH")
 
 
 if __name__ == "__main__":

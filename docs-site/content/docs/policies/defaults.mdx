@@ -114,9 +114,8 @@ Scopes and precedence are in [thresholds](/docs/policies/thresholds).
 
 All three have the same eight rule files (`c2`, `cognitive`, `commands`, `enterprise-data`, `local-patterns`, `secrets`, `sensitive-paths`, `trust-exploit`) and the same six sensitive-tool definitions. The counts are what `defenseclaw guardrail validate-pack` reports for the shipped packs. Switching packs does not turn the LLM judge on; that is `guardrail.judge.enabled` (default `false`).
 
-Parsed `curl` and `wget` pipelines into a shell have the same action in each
-profile: HIGH recorded finding without an alert in `default` and `permissive`,
-CRITICAL block in `strict`.
+Generic `curl` and `wget` pipelines into a shell are off in `default` and
+`permissive`. Both produce a CRITICAL alert without a block in `strict`.
 
 In `default` and `permissive`, a world-writable `chmod` and a Windows Run-key addition produce HIGH alerts and do not block. Writes to the active user's `authorized_keys` are blocked in action mode when a direct command, a file tool or a supported literal interpreter form proves the target; in observe mode the same write raises a CRITICAL would-block alert and runs. A plain read of `authorized_keys` (`grep`, `wc`, `ssh-keygen -l`) is allowed; a redirect, a pipe into a writer or an in-place flag makes the use a write. A write to an instruction file the session loaded is CRITICAL: the default and strict packs block it in action mode and the permissive pack reports it ([details](/docs/policies/deterministic-detection#instruction-files)). Computed interpreter paths are outside that proof. A symlink in the gateway's local filesystem is resolved for write targets; sandbox filesystems are evaluated without local symlink resolution.
 
