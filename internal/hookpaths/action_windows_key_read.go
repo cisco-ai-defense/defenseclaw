@@ -5,7 +5,7 @@ package hookpaths
 
 import "strings"
 
-// actionWindowsPrivateKeyRead is ActionPrivateKeyRead on a Windows home. The
+// actionWindowsPrivateKeyReadIn is ActionPrivateKeyRead on a Windows home. The
 // command is read as PowerShell and as a plain shell (Git Bash, cmd; GAP-1500
 // refix 2). A statement is a reader after an assignment or a block keyword
 // is set aside ($k = Get-Content key, do cat "$f"), and a Git Bash for loop
@@ -13,14 +13,9 @@ import "strings"
 // expression the shell evaluates first, and the path of a .NET file read,
 // is read as a command of its own: Write-Output (Get-Content key),
 // "$(gc key)", [IO.File]::ReadAllText(key) (GAP-2397, GAP-1779).
-func actionWindowsPrivateKeyRead(command, cwd, home string) bool {
-	return actionWindowsPrivateKeyReadIn(command, cwd, home, false)
-}
-
-// actionWindowsPrivateKeyReadIn is actionWindowsPrivateKeyRead for a command
-// a POSIX shell (Git Bash) runs when posix is set: there cat and type read
-// their stdin, so a listing piped to them prints names, not keys (GAP-2400
-// B26).
+// With posix the command is one a POSIX shell (Git Bash) runs: there cat and
+// type read their stdin, so a listing piped to them prints names, not keys
+// (GAP-2400 B26).
 func actionWindowsPrivateKeyReadIn(command, cwd, home string, posix bool) bool {
 	if actionWindowsKeyReadStatements(command, cwd, home, posix) {
 		return true
