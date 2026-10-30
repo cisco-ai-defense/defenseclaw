@@ -576,7 +576,8 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 
 	if !record.NoStart {
 		for _, unit := range env.Services.Units() {
-			if unit.Required && !env.Services.Active(ctx, unit) && !l.backFromRestart(ctx, unit) {
+			if unit.Required && !env.Services.Active(ctx, unit) && !l.backFromRestart(ctx, unit) &&
+				(unit.Name != unitApplyPath || !l.packageHoldsApplyTrigger()) {
 				add("%s is not active", unit.Name)
 			}
 		}
@@ -1039,6 +1040,16 @@ func (l *lifecycle) ledgerProblem() string {
 // it holds the config-apply trigger for the transaction; the postinstall
 // removes it after its ensure.
 const packageTransactionMarker = "/run/defenseclaw-enterprise-apply-path.held"
+
+// packageHoldsApplyTrigger reports the package's own ensure (--from-package
+// --reason package) while the package scripts hold the config-apply trigger
+// (packageTransactionMarker): the postinstall starts it again after this
+// run, so it being stopped is not drift. It made an identical reinstall
+// (dpkg -i, dnf reinstall of the installed package) run a transaction that
+// restarted the gateway and reported noop false (GAP-0542).
+func (l *lifecycle) packageHoldsApplyTrigger() bool {
+	return l.opts.FromPackage && l.opts.Reason == "package" && l.env.packageTransactionInProgress()
+}
 
 // packageTransactionInProgress reports a package transaction that started
 // less than half an hour ago (an older marker is from an interrupted one).
