@@ -3541,6 +3541,22 @@ func runWindowsEnterpriseStandaloneEnsure(
 	return err
 }
 
+// windowsEnterpriseStagedNotStarted reports a deployment installed with
+// NOSTART=1 that never started: no pending transaction, the gateway not
+// ready, and the gateway and hook guardian services both disabled. Nothing
+// enforces a policy there yet.
+func windowsEnterpriseStagedNotStarted(report *windowsEnterpriseInstallerReport) bool {
+	if report == nil || !report.Installed || report.TransactionPending || report.GatewayReady || report.probeFailed {
+		return false
+	}
+	for _, name := range []string{report.GatewayService, report.GuardianService} {
+		if strings.TrimSpace(name) == "" || !strings.EqualFold(strings.TrimSpace(report.ServiceStartModes[name]), "disabled") {
+			return false
+		}
+	}
+	return true
+}
+
 var windowsEnterpriseRestoreStartModes = restoreWindowsEnterpriseStartModes
 var windowsEnterpriseRestoreServiceName = lazyregexp.New(`^DefenseClaw[A-Za-z0-9_]+$`)
 
@@ -3937,7 +3953,15 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 
 	keptConfig := ""
 	var startOnlyKeys []string
-	if plan.Action == "upgrade" && (plan.Reason == "drift:config" || plan.Reason == "drift:bundle") {
+	if plan.Action == "upgrade" && (plan.Reason == "drift:config" || plan.Reason == "drift:bundle") &&
+		opts.bundle != nil && windowsEnterpriseStagedNotStarted(statusReport) {
+		// A deployment staged with NOSTART=1 runs no gateway, so a signed
+		// bundle has no hot path there: the transaction that starts the
+		// services applies it, and finish confirms it against the running
+		// gateway. This is how a single-app first install (Setup /ensure
+		// CONFIG= BUNDLE=) starts on the signed config.
+		keptConfig = keepInstalledWindowsEnterpriseEditedConfig()
+	} else if plan.Action == "upgrade" && (plan.Reason == "drift:config" || plan.Reason == "drift:bundle") {
 		applied, keys := windowsEnterpriseHotConfigApply(ctx, cmd, opts, script, statusReport, result)
 		if applied || opts.hotConfigRestoreFailed {
 			// A failed apply whose restore could not be proven stops here:
