@@ -26813,6 +26813,27 @@ function Invoke-DefenseClawNuclearUninstall {
             $incomplete.Add($leftover)
         }
     }
+    # The shared lifecycle folder goes too once nothing of another scope is
+    # left in it: only this scope's receipts were removed above, and an
+    # empty folder (or one holding just the shared lock file) belongs to
+    # no deployment.
+    if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $nuclearLifecycleDir -PathType Container) -and
+        $nuclearLifecycleDir -match $safeRootPattern) {
+        $remaining = @(Microsoft.PowerShell.Management\Get-ChildItem `
+                -LiteralPath $nuclearLifecycleDir `
+                -Force `
+                -ErrorAction SilentlyContinue |
+            Microsoft.PowerShell.Core\Where-Object { [string]$_.Name -cne 'lifecycle.lock' })
+        if ($remaining.Count -eq 0) {
+            $leftover = Remove-DefenseClawNuclearPath `
+                -Path $nuclearLifecycleDir `
+                -Role 'LifecycleDir' `
+                -RebootRequired ([ref]$rebootRequired)
+            if (-not [string]::IsNullOrEmpty($leftover)) {
+                $incomplete.Add($leftover)
+            }
+        }
+    }
     foreach ($userData in $userDataPaths) {
         $leftover = Remove-DefenseClawNuclearPath `
             -Path ([string]$userData) `
