@@ -5191,8 +5191,9 @@ function Invoke-Rollback {
     if (-not $rollForward) {
         # rel-1-0-6 GAP-0028: a release that cannot guard an agent here
         # (OpenCode V2 before 1.0.6) says so before anything changes.
-        $rollbackCli = Join-Path $Venv "Scripts\defenseclaw.exe"
-        if ((Test-Path -LiteralPath $rollbackCli) -and ((Invoke-Native $rollbackCli @("migrate", "--check-rollback-to", $backTo)) -eq 1)) {
+        $rollbackVenv = Get-Variable -Name Venv -ValueOnly -ErrorAction SilentlyContinue
+        $rollbackCli = if ($rollbackVenv) { Join-Path $rollbackVenv "Scripts\defenseclaw.exe" } else { "" }
+        if ($rollbackCli -and (Test-Path -LiteralPath $rollbackCli) -and ((Invoke-Native $rollbackCli @("migrate", "--check-rollback-to", $backTo)) -eq 1)) {
             Die "Rollback cancelled; nothing was changed (see above)"
         }
         Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")

@@ -3295,14 +3295,25 @@ def _opencode_configured(data_dir: str) -> bool:
 
 
 def _installed_opencode(data_dir: str) -> tuple[str, str] | None:
-    """``(raw_version, executable)`` of the OpenCode setup would select now, or None."""
-    from defenseclaw.agent_selection import _select_agent_executable
+    """``(raw_version, executable)`` of the OpenCode this account runs now, or None.
+
+    The fresh discovery probe setup and the gateway's version check use
+    (rel-1-0-6 GAP-0040: the setup trusted-prefix selection alone missed an
+    npm prefix such as /opt/agents or ~/.npm-global, so the checks did
+    nothing). It never writes the discovery cache.
+    """
+    from defenseclaw.inventory import agent_discovery
 
     try:
-        selection = _select_agent_executable(os.path.abspath(data_dir), "opencode")
-    except (OSError, KeyError):
+        disc = agent_discovery.discover_with_probes(
+            ["opencode"], use_cache=False, refresh=True, data_dir=data_dir, persist_cache=False,
+        )
+        signal = disc.agents.get("opencode")
+    except Exception:  # noqa: BLE001 - no answer is no refusal; the gateway start still checks
         return None
-    return selection.raw_version, selection.executable
+    if signal is None or not signal.installed or not (signal.version or "").strip():
+        return None
+    return signal.version, signal.binary_path
 
 
 def _check_opencode_v2(data_dir: str, version: str) -> None:
@@ -3349,8 +3360,9 @@ def check_opencode_rollback(data_dir: str, back_to: str) -> None:
         return
     raise MigrationError(
         f"DefenseClaw {back_to} guards OpenCode V1 only and the OpenCode here is V2 ({raw.strip()}): its gateway "
-        "would not start, and OpenCode would run unguarded; nothing was changed. To roll back anyway, run "
-        "'defenseclaw setup remove opencode' first, and set OpenCode up again after you upgrade."
+        "would not start, and OpenCode would run unguarded; nothing was changed. The rollback restores that "
+        "release's own configuration, so removing OpenCode here does not help: to roll back, put OpenCode V1 back "
+        "first (npm uninstall -g @opencode/cli && npm install -g opencode-ai@1.18), or stay on this release."
     )
 
 
