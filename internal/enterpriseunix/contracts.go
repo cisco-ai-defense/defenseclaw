@@ -463,6 +463,12 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		// scan (GAP-1454): pending until the current enumerator publishes.
 		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordFromEarlierInstall(written))
 	}
+	// One machine-wide OpenCode V1 copy is one warning with the user count,
+	// not one per account (GAP-0071); every account still counts below.
+	sharedLines, sharedEntry := enterprisehooks.CollapseSharedOpenCodeV1(agents)
+	for _, line := range sharedLines {
+		r.AddWarning(line.Code, line.Message())
+	}
 	for _, agent := range agents {
 		if enterprisehooks.UnprotectedCodeLeavesCoverageIncomplete(agent.Code) {
 			// The deployment does not cover it: no contract, an incomplete
@@ -476,7 +482,9 @@ func (l *lifecycle) describeUnprotectedAgents() {
 			r.AddError(agent.Code, agent.Message())
 			continue
 		}
-		r.AddWarning(agent.Code, agent.Message())
+		if !sharedEntry(agent) {
+			r.AddWarning(agent.Code, agent.Message())
+		}
 		if agent.InstallPath != "" && (l.opts.Action == ActionStatus || l.opts.Action == ActionVerify) && env.ReportLaunchCoverage != nil && agent.UID != nil {
 			reason := "unsupported_installed_version"
 			if agent.Version == "" {

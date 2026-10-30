@@ -100,3 +100,28 @@ func TestOpenCodeV2ManagedConfigUpgrade(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0072: a downgrade to 1.0.5 leaves the 1.0.6 folder entry in the managed
+// config next to 1.0.5's own defenseclaw.js entry (1.0.5 does not know the
+// folder entry). The next 1.0.6 ensure or repair owns both and rewrites the
+// file to the single folder entry; the operator's entries stay.
+func TestOpenCodeManagedConfigAfterADowngradeIsReconciled(t *testing.T) {
+	opts := Options{GOOS: "linux", OpenCodePluginPath: testOpenCodePlugin}
+	folder := openCodePluginSpec(opts)
+	legacy := strings.Replace(testOpenCodePlugin, "index.js", "defenseclaw.js", 1)
+	residue := `{"plugin":["company","` + folder + `","` + legacy + `"],"mcp":{"servers":{}}}`
+
+	merged, exact, err := mergeOpenCodeConfig(opts, []byte(residue))
+	if err != nil || exact {
+		t.Fatalf("the residue must be rewritten: exact=%v err=%v", exact, err)
+	}
+	if strings.Count(string(merged), folder) != 1 || strings.Contains(string(merged), "defenseclaw.js") ||
+		!strings.Contains(string(merged), "company") || !strings.Contains(string(merged), `"servers"`) {
+		t.Fatalf("not reconciled to the single folder entry: %s", merged)
+	}
+	stripped, changed, err := stripOpenCodeConfig(opts, []byte(residue))
+	if err != nil || !changed || strings.Contains(string(stripped), "defenseclaw.js") || strings.Contains(string(stripped), folder) ||
+		!strings.Contains(string(stripped), "company") {
+		t.Fatalf("removal left a DefenseClaw entry or lost the operator's: %s, %v", stripped, err)
+	}
+}

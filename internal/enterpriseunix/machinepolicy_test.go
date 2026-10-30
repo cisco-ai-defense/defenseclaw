@@ -1103,6 +1103,39 @@ func TestOpenCodeV2UpgradeRemovesTheRecordedV1Artifact(t *testing.T) {
 	}
 }
 
+// On a Linux package upgrade the previous release's plugin file is left to
+// the package manager (rpm removes it after the new package's postinstall and
+// printed "remove failed: No such file or directory" when the lifecycle had
+// removed it first, rel-1-0-6 GAP-0073). The macOS pkg has no such cleanup,
+// so the lifecycle still owns removing the file there.
+func TestPackageUpgradeLeavesTheV1PluginFileToTheLinuxPackageManager(t *testing.T) {
+	h := newTestHost(t, "linux")
+	stagePackage(t, h, "1.0.0")
+	requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package", ConfigFile: machinePolicyConfig(t, h, "opencode")}))
+	current := enterprisepolicy.OpenCodeManagedPluginPath(h.env.Layout)
+	legacy := filepath.Join(filepath.Dir(current), "defenseclaw.js")
+	writeHostFile(t, h, legacy, "// 1.0.5 plugin\n")
+	record, err := h.env.loadDeployment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Files[legacy] = sha256Bytes([]byte("// 1.0.5 plugin\n"))
+	if err := h.env.saveDeployment(record); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}))
+	if _, err := os.Lstat(h.env.P(legacy)); err != nil {
+		t.Fatalf("the lifecycle removed the previous plugin file before the package manager did: %v", err)
+	}
+	if !h.env.packageOwns(legacy) {
+		t.Fatal("linux: the previous plugin file is not package-owned")
+	}
+	mac := newTestHost(t, "darwin")
+	if mac.env.packageOwns(filepath.Join(filepath.Dir(enterprisepolicy.OpenCodeManagedPluginPath(mac.env.Layout)), "defenseclaw.js")) {
+		t.Fatal("darwin: a pkg has no cleanup, so the lifecycle must still remove the previous plugin file")
+	}
+}
+
 func TestInstallShipsTheManagedOpenCodePlugin(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {

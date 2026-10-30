@@ -2287,6 +2287,12 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 		result.CoverageComplete, result.SecurityComplete = false, false
 		return
 	}
+	// One machine-wide OpenCode V1 copy is one warning with the user count
+	// (GAP-0071); every account still counts below.
+	sharedLines, sharedEntry := enterprisehooks.CollapseSharedOpenCodeV1(agents)
+	for _, line := range sharedLines {
+		result.AddWarning(line.Code, line.Message())
+	}
 	for _, agent := range agents {
 		if enterprisehooks.UnprotectedCodeLeavesCoverageIncomplete(agent.Code) {
 			// The deployment does not cover it: no contract, an incomplete
@@ -2299,7 +2305,7 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
 			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor) {
 			result.AddError(agent.Code, agent.Message())
-		} else {
+		} else if !sharedEntry(agent) {
 			result.AddWarning(agent.Code, agent.Message())
 		}
 		result.SecurityComplete = false

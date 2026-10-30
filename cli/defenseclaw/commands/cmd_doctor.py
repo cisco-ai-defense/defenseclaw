@@ -9101,6 +9101,38 @@ def _cursor_health_row(document: str) -> dict[str, object] | None:
     return _connector_health_row(document, "cursor")
 
 
+_OPENCODE_V1_REMEDY = (
+    "install OpenCode V2 (`npm uninstall -g opencode-ai && npm install -g @opencode/cli@2`), "
+    "then run `opencode service restart`"
+)
+
+
+def _opencode_v1_problem(cfg) -> str:
+    """Why the registered OpenCode plugin protects nothing: the account runs OpenCode V1.
+
+    The V2 plugin file stays after OpenCode is downgraded, and OpenCode V1
+    loads it without ever registering its hooks, so every tool call runs
+    unchecked. That is a failure, not a skipped row (rel-1-0-6 GAP-0069).
+    Empty when the installed OpenCode is V2 or cannot be determined.
+    """
+    from defenseclaw.connector_contracts import opencode_requires_v2_upgrade
+    from defenseclaw.migrations import _installed_opencode
+
+    try:
+        found = _installed_opencode(str(getattr(cfg, "data_dir", "") or ""))
+    except Exception:  # noqa: BLE001 - no answer is no verdict; the other rows still report
+        return ""
+    if found is None:
+        return ""
+    raw, executable = found
+    if not opencode_requires_v2_upgrade(raw):
+        return ""
+    return (
+        f"OpenCode {raw.strip() or '(unknown version)'} at {executable} is OpenCode V1, which cannot run the "
+        "DefenseClaw OpenCode V2 plugin, so its tool calls run unchecked; the hooks are NOT protected"
+    )
+
+
 def _opencode_runtime_remediation(status: str, runtime_detail: str) -> str:
     """Next step for the OpenCode hooks row's runtime-load warning."""
     if status != "warn":
@@ -10360,7 +10392,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     probe_runtime=not r.passive,
                 )
             elif connector == "opencode":
-                if drift := _managed_plugin_drift(cfg, path):
+                if v1 := _opencode_v1_problem(cfg):
+                    _emit("fail", label, v1, r=r, remediation=_OPENCODE_V1_REMEDY)
+                elif drift := _managed_plugin_drift(cfg, path):
                     _emit("fail", label, drift, r=r)
                 else:
                     status, runtime_detail = _opencode_load_heartbeat_status(cfg)

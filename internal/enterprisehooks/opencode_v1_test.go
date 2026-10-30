@@ -93,3 +93,40 @@ func TestUnprotectedCodeLeavesCoverageIncomplete(t *testing.T) {
 		}
 	}
 }
+
+// A machine-wide OpenCode V1 copy is one combined line with the number of
+// users; a copy one account owns keeps its per-account line (rel-1-0-6
+// GAP-0071).
+func TestCollapseSharedOpenCodeV1(t *testing.T) {
+	machine := "/opt/dc-agents/lib/node_modules/opencode-ai"
+	var agents []UnprotectedAgent
+	for _, user := range []string{"alice", "bob", "carol", "dave", "erin"} {
+		agents = append(agents, UnprotectedAgent{User: user, Connector: "opencode", Version: "1.18.34", InstallPath: machine, Code: UnprotectedCodeOpenCodeV1, Reason: openCodeV1Reason})
+	}
+	own := UnprotectedAgent{User: "frank", Connector: "opencode", Version: "1.18.34", InstallPath: "/home/frank/.npm-global/lib/node_modules/opencode-ai", Code: UnprotectedCodeOpenCodeV1, Reason: openCodeV1Reason}
+	other := UnprotectedAgent{User: "alice", Connector: "claudecode", Version: "9.9.9", Code: UnprotectedCodeHookContractUnverified, Reason: "unverified"}
+	agents = append(agents, own, other)
+
+	lines, collapsed := CollapseSharedOpenCodeV1(agents)
+	if len(lines) != 1 || len(lines[0].Members) != 5 {
+		t.Fatalf("want one line for the 5 accounts, got %+v", lines)
+	}
+	message := lines[0].Message()
+	for _, want := range []string{"opencode 1.18.34 at " + machine, "machine-wide copy", "5 users", "alice, bob, carol and 2 more", "npm install -g @opencode/cli@2", "opencode service restart"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("combined line %q lacks %q", message, want)
+		}
+	}
+	for _, agent := range agents[:5] {
+		if !collapsed(agent) {
+			t.Fatalf("%s is not covered by the combined line", agent.User)
+		}
+	}
+	if collapsed(own) || collapsed(other) {
+		t.Fatal("a per-user copy or another connector was folded into the machine-wide line")
+	}
+	// One account with the copy keeps its own line.
+	if lines, _ := CollapseSharedOpenCodeV1(agents[:1]); len(lines) != 0 {
+		t.Fatalf("a copy only one account has must not be combined: %+v", lines)
+	}
+}

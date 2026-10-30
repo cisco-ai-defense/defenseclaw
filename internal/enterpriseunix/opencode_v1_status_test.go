@@ -86,3 +86,56 @@ func TestOpenCodeV1MakesManagedStatusVerifyAndEnsureIncomplete(t *testing.T) {
 		})
 	}
 }
+
+// GAP-0071: a machine-wide OpenCode V1 gives one warning with the count of
+// users, not one per account; a copy under one account's home keeps its own
+// line; coverage_complete stays false and every account is still audited.
+func TestMachineWideOpenCodeV1IsOneWarningWithTheUserCount(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	machine := "/opt/dc-agents/lib/node_modules/opencode-ai"
+	var agents []enterprisehooks.UnprotectedAgent
+	for i, user := range []string{"alice", "bob", "carol", "dave", "erin", "frank"} {
+		uid := 1001 + i
+		agents = append(agents, enterprisehooks.UnprotectedAgent{User: user, UID: &uid, Connector: "opencode", Version: "1.18.34", InstallPath: machine,
+			Code: enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "version 1.18.34 is not verified against a known hook contract"})
+	}
+	uid := 1100
+	agents = append(agents, enterprisehooks.UnprotectedAgent{User: "gina", UID: &uid, Connector: "opencode", Version: "1.18.34",
+		InstallPath: "/home/gina/.npm-global/lib/node_modules/opencode-ai",
+		Code:        enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "version 1.18.34 is not verified against a known hook contract"})
+	data, err := enterprisehooks.MarshalUnprotectedAgents(agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	audited := 0
+	h.env.ReportLaunchCoverage = func(context.Context, managed.LaunchCoverageReport) error { audited++; return nil }
+	writeFreshLedger(t, h)
+
+	result := h.run(Options{Action: ActionStatus})
+	requireOK(t, result)
+	var lines []string
+	for _, m := range result.Warnings {
+		if m.Code == enterprisehooks.UnprotectedCodeOpenCodeV1 {
+			lines = append(lines, m.Message)
+		}
+	}
+	if len(lines) != 2 {
+		t.Fatalf("want one machine-wide line and one per-user line, got %d: %q", len(lines), lines)
+	}
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"machine-wide copy and is not protected for 6 users", machine, "for user gina is not protected"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("warnings lack %q: %q", want, lines)
+		}
+	}
+	if result.CoverageComplete || result.SecurityComplete {
+		t.Fatalf("coverage=%v security=%v with OpenCode V1 installed", result.CoverageComplete, result.SecurityComplete)
+	}
+	if audited != 7 {
+		t.Fatalf("every account must still be audited: %d of 7", audited)
+	}
+}

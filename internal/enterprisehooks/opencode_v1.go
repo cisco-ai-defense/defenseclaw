@@ -4,7 +4,9 @@
 package enterprisehooks
 
 import (
+	"fmt"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -53,4 +55,96 @@ func classifyOpenCodeV1(agent UnprotectedAgent) UnprotectedAgent {
 		agent.Code, agent.Reason = UnprotectedCodeOpenCodeV1, openCodeV1Reason
 	}
 	return agent
+}
+
+// UnprotectedAgentLine is one status warning for OpenCode V1 copies that
+// several accounts share: a machine-wide install (/opt/<name>, a machine npm
+// prefix) is the same copy for every account that has it on its PATH, so it
+// is reported once with the count of affected users instead of once per
+// account (rel-1-0-6 GAP-0071). The per-account entries stay in the record:
+// the install audit and coverage_complete still count every account.
+type UnprotectedAgentLine struct {
+	Code    string
+	Members []UnprotectedAgent
+}
+
+// openCodeV1UsersNamed bounds how many accounts the combined line names.
+const openCodeV1UsersNamed = 3
+
+func unprotectedAccount(agent UnprotectedAgent) string {
+	if sid := strings.TrimSpace(agent.SID); sid != "" {
+		return strings.ToLower(sid)
+	}
+	return strings.TrimSpace(agent.User)
+}
+
+func sharedOpenCodeV1Key(agent UnprotectedAgent) string {
+	return agent.Code + "\x00" + strings.ToLower(agent.Connector) + "\x00" + agent.InstallPath + "\x00" + agent.Version
+}
+
+func unprotectedAgentIdentity(agent UnprotectedAgent) string {
+	return unprotectedAccount(agent) + "\x00" + sharedOpenCodeV1Key(agent)
+}
+
+// Message is the combined status line: the copy, the number of users and the
+// remedy the per-account lines carry.
+func (l UnprotectedAgentLine) Message() string {
+	first := l.Members[0]
+	name := strings.TrimSpace(first.Connector)
+	if version := strings.TrimSpace(first.Version); version != "" {
+		name += " " + version
+	}
+	name += " at " + strings.TrimSpace(first.InstallPath)
+	users := make([]string, 0, len(l.Members))
+	for _, member := range l.Members {
+		if who := strings.TrimSpace(member.User); who != "" {
+			users = append(users, who)
+		} else {
+			users = append(users, strings.TrimSpace(member.SID))
+		}
+	}
+	sort.Strings(users)
+	listed := users
+	more := ""
+	if len(listed) > openCodeV1UsersNamed {
+		more = fmt.Sprintf(" and %d more", len(listed)-openCodeV1UsersNamed)
+		listed = listed[:openCodeV1UsersNamed]
+	}
+	return fmt.Sprintf("%s is a machine-wide copy and is not protected for %d users (%s%s): %s",
+		name, len(l.Members), strings.Join(listed, ", "), more, strings.TrimSpace(first.Reason))
+}
+
+// CollapseSharedOpenCodeV1 returns one line for each OpenCode V1 copy
+// (same path and version) that two or more accounts can run, and a test for
+// the entries those lines stand for. A copy only one account has, such as one
+// under that account's home, keeps its own per-account entry.
+func CollapseSharedOpenCodeV1(agents []UnprotectedAgent) (lines []UnprotectedAgentLine, collapsed func(UnprotectedAgent) bool) {
+	groups := map[string][]UnprotectedAgent{}
+	var order []string
+	seen := map[string]bool{}
+	for _, agent := range agents {
+		if agent.Code != UnprotectedCodeOpenCodeV1 || strings.TrimSpace(agent.InstallPath) == "" || unprotectedAccount(agent) == "" {
+			continue
+		}
+		id := unprotectedAgentIdentity(agent)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		key := sharedOpenCodeV1Key(agent)
+		if _, ok := groups[key]; !ok {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], agent)
+	}
+	shared := map[string]bool{}
+	for _, key := range order {
+		if members := groups[key]; len(members) >= 2 {
+			lines = append(lines, UnprotectedAgentLine{Code: UnprotectedCodeOpenCodeV1, Members: members})
+			shared[key] = true
+		}
+	}
+	return lines, func(agent UnprotectedAgent) bool {
+		return agent.Code == UnprotectedCodeOpenCodeV1 && shared[sharedOpenCodeV1Key(agent)]
+	}
 }
