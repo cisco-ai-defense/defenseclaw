@@ -3058,9 +3058,10 @@ func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} 
 
 // withScannerSettings adds the scanner settings a scan ran with (policy,
 // analyzers and judge model, never a key) so `defenseclaw scan skill|mcp`
-// reports them as the per-user `skill scan` does. The Secure Client
-// integration keeps its response unchanged.
-func withScannerSettings(cfg *config.Config, kind string, envelope map[string]interface{}) map[string]interface{} {
+// reports them as the per-user `skill scan` does. For MCP it names the
+// analyzers that ran and adds a warning when the LLM judge did not run
+// (GAP-2621). The Secure Client integration keeps its response unchanged.
+func withScannerSettings(cfg *config.Config, kind string, result *scanner.ScanResult, envelope map[string]interface{}) map[string]interface{} {
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return envelope
 	}
@@ -3072,11 +3073,61 @@ func withScannerSettings(cfg *config.Config, kind string, envelope map[string]in
 			settings["judge_model"] = cfg.ResolveLLM("scanners.skill").Model
 		}
 	case "mcp":
-		settings["analyzers"] = cfg.Scanners.MCPScanner.AnalyzersArg()
-		settings["judge_model"] = cfg.ResolveLLM("scanners.mcp").Model
+		model := cfg.ResolveLLM("scanners.mcp").Model
+		var warnings []string
+		if result != nil {
+			warnings = append(warnings, result.Warnings...)
+		}
+		ran, llmRan, warning := mcpAnalyzersRan(cfg.Scanners.MCPScanner.EffectiveAnalyzers(), model, len(warnings) > 0)
+		settings["analyzers"] = ran
+		if llmRan {
+			settings["judge_model"] = model
+		}
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
+		if len(warnings) > 0 {
+			envelope["warnings"] = warnings
+		}
 	}
 	envelope["scanner_settings"] = settings
 	return envelope
+}
+
+// mcpAnalyzersRan is the analyzer label an MCP scan reports: the explicit
+// list, or auto (YARA, plus the LLM judge when a model is configured), less
+// the LLM when the scanner said it skipped it. It also returns whether the
+// judge ran and a warning when auto ran without a judge model.
+func mcpAnalyzersRan(names []string, model string, llmSkipped bool) (string, bool, string) {
+	auto := len(names) == 0
+	if auto {
+		names = []string{"yara"}
+		if model != "" {
+			names = append(names, "llm")
+		}
+	}
+	ran := make([]string, 0, len(names))
+	llmRan := false
+	for _, name := range names {
+		if name == "llm" {
+			if llmSkipped {
+				continue
+			}
+			llmRan = true
+		}
+		ran = append(ran, name)
+	}
+	label := strings.Join(ran, ", ")
+	if label == "" {
+		label = "none"
+	}
+	if auto {
+		label = "auto (" + label + ")"
+	}
+	if auto && model == "" {
+		return label, false, "LLM judge did not run: no LLM model is configured for the MCP scanner"
+	}
+	return label, llmRan, ""
 }
 
 // ---------------------------------------------------------------------------
@@ -3156,7 +3207,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", scanCorrelationWithJudge(r.Context(), result))
 	}
 
-	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", scanAPIResponseEnvelope(result)))
+	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", result, scanAPIResponseEnvelope(result)))
 }
 
 // rejectUnreadableScanTarget answers with one plain line when the folder to
@@ -3428,7 +3479,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "mcp", scanAPIResponseEnvelope(result)))
+	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "mcp", result, scanAPIResponseEnvelope(result)))
 }
 
 // ---------------------------------------------------------------------------

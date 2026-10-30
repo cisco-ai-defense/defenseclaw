@@ -162,6 +162,11 @@ type ScanResult struct {
 	// JudgeModel is the LLM judge model the scan ran with ("" without a
 	// judge). Process-local, never part of scanner JSON.
 	JudgeModel string `json:"-"`
+	// Warnings are the scanner notes that an analyzer did not run (the LLM
+	// judge skipped for a missing key or an unreachable backend), so a
+	// gateway scan reports the skip (GAP-2621). Process-local, never part of
+	// scanner JSON.
+	Warnings []string `json:"-"`
 }
 
 // EffectiveTargetType returns TargetType when set, otherwise InferTargetType(Scanner).

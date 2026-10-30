@@ -654,6 +654,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		}
 		result.Findings = findings
 	}
+	result.Warnings = mcpAnalyzerWarnings(stderrStr)
 
 	// hardening (S2.scanners): fail closed on any non-zero
 	// scanner exit, even when stdout was parseable. Previously a
@@ -699,6 +700,30 @@ type mcpFinding struct {
 	Remediation string   `json:"remediation"`
 	Tags        []string `json:"tags"`
 	Suppressed  bool     `json:"suppressed"`
+}
+
+// mcpAnalyzerWarnings returns the "warning: LLM ... skipped" lines the
+// Python scanner prints on stderr when the LLM judge did not run (no key, or
+// the backend failed), so the gateway scan response carries the skip the
+// per-user scan prints (GAP-2621). At most four lines of 300 bytes.
+func mcpAnalyzerWarnings(stderr string) []string {
+	var out []string
+	for _, line := range strings.Split(ansiRe.ReplaceAllString(stderr, ""), "\n") {
+		line = strings.TrimSpace(line)
+		lower := strings.ToLower(line)
+		if !strings.HasPrefix(lower, "warning: llm") || !strings.Contains(lower, "skipped") {
+			continue
+		}
+		line = strings.TrimSpace(line[len("warning:"):])
+		if len(line) > 300 {
+			line = line[:297] + "..."
+		}
+		out = append(out, line)
+		if len(out) == 4 {
+			break
+		}
+	}
+	return out
 }
 
 func parseMCPOutput(data []byte) ([]Finding, error) {

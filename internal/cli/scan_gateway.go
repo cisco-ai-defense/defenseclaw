@@ -84,6 +84,7 @@ type gatewayScanResponse struct {
 	Verdict  string         `json:"verdict"`
 	BySev    map[string]int `json:"findings_count_by_severity"`
 	Settings map[string]any `json:"scanner_settings"`
+	Warnings []string       `json:"warnings"`
 	Result   struct {
 		Target   string `json:"target"`
 		Duration int64  `json:"duration"`
@@ -169,6 +170,9 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 			value = "(none)"
 		}
 		fmt.Fprintf(out, "  %-12s %s\n", strings.ReplaceAll(key, "_", " ")+":", value)
+	}
+	for _, warning := range parsed.Warnings {
+		fmt.Fprintf(out, "  %-12s %s\n", "warning:", warning)
 	}
 	verdict := parsed.Verdict
 	if len(parsed.Result.Findings) == 0 {
