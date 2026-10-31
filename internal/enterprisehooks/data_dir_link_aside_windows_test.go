@@ -19,6 +19,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
+// stubWindowsStandaloneProcess sets the profile the enrollment reads.
+func stubWindowsStandaloneProcess(t *testing.T, standalone bool) {
+	t.Helper()
+	previous := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return standalone }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
+}
+
 // plantWindowsAccountJunction makes link a junction to target, owned by the
 // account as a standard user's own junction would be.
 func plantWindowsAccountJunction(t *testing.T, link, target string, owner *windows.SID) {
@@ -124,7 +132,10 @@ func TestWindowsClaudeEnrollmentMovesAccountOwnDataDirJunctionAside(t *testing.T
 		outside, canary = outsideDataDirTree(t, home)
 		plantWindowsAccountJunction(t, filepath.Join(home, ".defenseclaw"), outside, targetSID)
 	})
-	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+	stubWindowsStandaloneProcess(t, true)
+	opts := windowsManagedInstallOptions(fixture)
+	opts.WindowsDeferredFirstEnrollment = true
+	if _, err := Install(context.Background(), opts); err != nil {
 		t.Fatalf("Install with the account's own .defenseclaw junction: %v", err)
 	}
 	dataDir := filepath.Join(fixture.home, ".defenseclaw")
@@ -139,6 +150,7 @@ func TestWindowsClaudeEnrollmentMovesAccountOwnDataDirJunctionAside(t *testing.T
 // a link anywhere else in the profile is left for the checks that refuse it.
 func TestWindowsDataDirLinkAsideLeavesOtherLinks(t *testing.T) {
 	stubWindowsAuthorizedRepairIdentityChecks(t)
+	stubWindowsStandaloneProcess(t, true)
 	targetSID := currentWindowsTestSID(t)
 	home := filepath.Join(t.TempDir(), "home")
 	if err := os.MkdirAll(home, 0o700); err != nil {
@@ -148,7 +160,7 @@ func TestWindowsDataDirLinkAsideLeavesOtherLinks(t *testing.T) {
 	outside, canary := outsideDataDirTree(t, home)
 	other := filepath.Join(home, ".codex")
 	plantWindowsAccountJunction(t, other, outside, targetSID)
-	if err := moveWindowsTargetOwnedDataDirLinksAside(home, other, targetSID); err != nil {
+	if err := moveWindowsTargetOwnedDataDirLinksAside(home, other, targetSID, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := prepareWindowsGenericPath(home, other, targetSID, true, false, false, "footprint directory"); err == nil ||
@@ -167,7 +179,7 @@ func TestWindowsDataDirLinkAsideLeavesOtherLinks(t *testing.T) {
 	if err := prepareWindowsGenericPath(home, dataDir, targetSID, true, false, false, "data dir"); err == nil {
 		t.Fatal("the first-enrollment check accepted a junction at the DefenseClaw folder")
 	}
-	if err := moveWindowsTargetOwnedDataDirLinksAside(home, dataDir, targetSID); err != nil {
+	if err := moveWindowsTargetOwnedDataDirLinksAside(home, dataDir, targetSID, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(dataDir); !errors.Is(err, os.ErrNotExist) {
@@ -188,7 +200,7 @@ func TestWindowsDataDirLinkAsideLeavesOtherLinks(t *testing.T) {
 	setWindowsTestPathExactOwner(t, dataDir, targetSID)
 	hooks := filepath.Join(dataDir, "hooks")
 	plantWindowsAccountJunction(t, hooks, outside, targetSID)
-	if err := moveWindowsTargetOwnedDataDirLinksAside(home, dataDir, targetSID); err != nil {
+	if err := moveWindowsTargetOwnedDataDirLinksAside(home, dataDir, targetSID, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(hooks); !errors.Is(err, os.ErrNotExist) {
@@ -200,4 +212,61 @@ func TestWindowsDataDirLinkAsideLeavesOtherLinks(t *testing.T) {
 		t.Fatal("the hooks quarantine slot survived its cleanup")
 	}
 	requireOutsideDataDirTreeUnchanged(t, outside, canary)
+}
+
+// Only the first enrollment of a standalone deferred account (it stayed
+// pending while signed out) moves the account's own link aside (GAP-0193).
+// The same link at any other install (an administrator install, a repair of
+// a protected account), a link another principal owns, and any link on the
+// Secure Client profile are refused as reparse points, and neither the link
+// nor what it names changes.
+func TestInstallWindowsClaudeRefusesDataDirLinkOutsideTheDeferredEnrollment(t *testing.T) {
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name       string
+		foreign    bool
+		deferred   bool
+		standalone bool
+	}{
+		{name: "own junction outside the profile, not a deferred first enrollment", standalone: true},
+		{name: "foreign-owned junction at a deferred first enrollment", foreign: true, deferred: true, standalone: true},
+		{name: "own junction at a deferred first enrollment on Secure Client", deferred: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var linked, canary string
+			fixture := newWindowsManagedInstallFixtureWithHomeSetup(t, nil, func(home string, targetSID *windows.SID) {
+				if err := setWindowsUserPathProtection(home, targetSID, true); err != nil {
+					t.Fatalf("harden test home: %v", err)
+				}
+				linked, canary = outsideDataDirTree(t, home)
+				owner := targetSID
+				if tc.foreign {
+					owner = system
+				}
+				plantWindowsAccountJunction(t, filepath.Join(home, ".defenseclaw"), linked, owner)
+			})
+			stubWindowsStandaloneProcess(t, tc.standalone)
+			opts := windowsManagedInstallOptions(fixture)
+			opts.WindowsDeferredFirstEnrollment = tc.deferred
+			_, err := Install(context.Background(), opts)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "reparse") {
+				t.Fatalf("Install error = %v, want reparse refusal", err)
+			}
+			dataDir := filepath.Join(fixture.home, ".defenseclaw")
+			ptr, err := winpath.UTF16Ptr(dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if attributes, err := windows.GetFileAttributes(ptr); err != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+				t.Fatalf("the refused link at the DefenseClaw folder is gone or changed: attributes 0x%x, %v", attributes, err)
+			}
+			if _, err := os.Lstat(windowsManagedObstructionQuarantinePath(dataDir)); err == nil {
+				t.Fatal("a refused link was moved aside")
+			}
+			requireOutsideDataDirTreeUnchanged(t, linked, canary)
+		})
+	}
 }
