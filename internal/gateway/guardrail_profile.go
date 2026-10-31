@@ -1426,10 +1426,39 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 	return r.set.lazyRules(r.decision.Name, r.derived, connectorName, key)
 }
 
+// rulePack is the composed pack behind the profile's rules for
+// connectorName (ruleGeneration), whose judge suppressions and sensitive
+// tools the request applies; nil sends the caller to the base
+// configuration's pack. A scope the preload listed reads set.packs (or its
+// retry); one it did not list loads lazily, as its rules do, so a lazily
+// loaded scope no longer applied the base pack's suppressions (GAP-1526).
+func (r *resolvedGuardrailProfile) rulePack(connectorName string) *guardrail.RulePack {
+	if r == nil || r.set == nil || r.derived == nil {
+		return nil
+	}
+	key := effectiveRulePackKey(r.derived, connectorName)
+	if key == "" {
+		return nil
+	}
+	if pack := r.set.packs[key]; pack != nil {
+		return pack
+	}
+	if retry := r.set.missing[key]; retry != nil {
+		return retry.rulePack(time.Now())
+	}
+	if _, listed := r.set.rules[key]; listed || r.set.base == nil || key == effectiveRulePackKey(r.set.base, connectorName) {
+		return nil
+	}
+	return r.set.lazyPack(r.decision.Name, r.derived, connectorName, key)
+}
+
 // profileLazyScope is a profile rule-pack scope loaded on its first request.
 type profileLazyScope struct {
 	once  sync.Once
 	rules *compiledRulePackCategories
+	// pack is the composed pack behind rules: its judge suppressions and
+	// sensitive tools apply to the request (connectorRulePack, GAP-1526).
+	pack  *guardrail.RulePack
 	retry *profileRulePackRetry
 }
 
@@ -1439,6 +1468,26 @@ type profileLazyScope struct {
 // first requests wait for the one load. A pack that does not load is retried
 // like one that did not load at start (GAP-0333).
 func (set *guardrailProfileSet) lazyRules(profile string, cfg *config.Config, connectorName, key string) *compiledRulePackCategories {
+	entry := set.lazyScope(profile, cfg, connectorName, key)
+	if entry.rules != nil {
+		return entry.rules
+	}
+	return entry.retry.rules(time.Now())
+}
+
+// lazyPack is the composed pack behind lazyRules' rules for the same scope,
+// loading the scope on first use: a lazily loaded scope applied the
+// profile's rules but the base pack's judge suppressions (GAP-1526).
+func (set *guardrailProfileSet) lazyPack(profile string, cfg *config.Config, connectorName, key string) *guardrail.RulePack {
+	entry := set.lazyScope(profile, cfg, connectorName, key)
+	if entry.pack != nil {
+		return entry.pack
+	}
+	return entry.retry.rulePack(time.Now())
+}
+
+// lazyScope is the entry of a scope the preload did not list, loaded once.
+func (set *guardrailProfileSet) lazyScope(profile string, cfg *config.Config, connectorName, key string) *profileLazyScope {
 	value, _ := set.lazy.LoadOrStore(key, &profileLazyScope{})
 	entry := value.(*profileLazyScope)
 	entry.once.Do(func() {
@@ -1449,7 +1498,7 @@ func (set *guardrailProfileSet) lazyRules(profile string, cfg *config.Config, co
 			compiled, err = compileRulePackCategories(rp)
 		}
 		if err == nil {
-			entry.rules = compiled
+			entry.rules, entry.pack = compiled, rp
 			return
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] profile %s: %v; it scans with the base rule set until the pack loads (retried every %s)\n",
@@ -1457,10 +1506,7 @@ func (set *guardrailProfileSet) lazyRules(profile string, cfg *config.Config, co
 		entry.retry = &profileRulePackRetry{profile: profile, cfg: cfg, scope: scope,
 			lastErr: err.Error(), nextTry: time.Now().Add(profileRulePackRetryInterval)}
 	})
-	if entry.rules != nil {
-		return entry.rules
-	}
-	return entry.retry.rules(time.Now())
+	return entry
 }
 
 // proxyProfileFor returns the profile resolution the guardrail proxy applies
