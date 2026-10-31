@@ -99,15 +99,8 @@ func TestAuthenticatedToolResourceAuthorityAndSeparation(t *testing.T) {
 		ctx context.Context
 		req agentHookRequest
 	}{
-		"no scoped authentication":   {context.Background(), base},
-		"wrong scoped connector":     {withAuthenticatedHookConnector(context.Background(), "claudecode"), base},
-		"missing connector instance": {authenticated, func() agentHookRequest { value := base; value.ConnectorInstanceID = ""; return value }()},
-		"non-v7 connector instance": {authenticated, func() agentHookRequest {
-			value := base
-			value.ConnectorInstanceID = "0198f0c2-7b31-4a42-8c51-123456789abc"
-			return value
-		}()},
-		"degraded correlation": {authenticated, func() agentHookRequest { value := base; value.SuppressCorrelationEmit = true; return value }()},
+		"no scoped authentication": {context.Background(), base},
+		"wrong scoped connector":   {withAuthenticatedHookConnector(context.Background(), "claudecode"), base},
 		"server disagreement": {authenticated, func() agentHookRequest {
 			value := base
 			value.Payload = map[string]interface{}{"mcp_server_name": "other"}
@@ -119,6 +112,40 @@ func TestAuthenticatedToolResourceAuthorityAndSeparation(t *testing.T) {
 			t.Parallel()
 			if _, accepted := authenticatedToolResource(test.ctx, test.req); accepted {
 				t.Fatal("untrusted resource metadata was accepted")
+			}
+		})
+	}
+}
+
+// Without a fresh correlated occurrence of the exact connector instance no
+// resource identity is minted, but the authenticated call keeps its action
+// tool: an exact redelivery or a degraded correlation ledger gets the
+// decision of the first delivery (rel-1-0-6:GAP-0140).
+func TestAuthenticatedToolResourceKeepsActionToolWithoutIdentity(t *testing.T) {
+	base := agentHookRequest{
+		ConnectorName: "codex", ConnectorInstanceID: syntheticToolResourceConnectorID,
+		ToolName: "mcp__sqlite__read_query",
+		Payload:  map[string]interface{}{"mcp_server_name": "sqlite"},
+	}
+	authenticated := withAuthenticatedHookConnector(context.Background(), "codex")
+	for name, req := range map[string]agentHookRequest{
+		"missing connector instance": func() agentHookRequest { value := base; value.ConnectorInstanceID = ""; return value }(),
+		"non-v7 connector instance": func() agentHookRequest {
+			value := base
+			value.ConnectorInstanceID = "0198f0c2-7b31-4a42-8c51-123456789abc"
+			return value
+		}(),
+		"replay or degraded correlation": func() agentHookRequest { value := base; value.SuppressCorrelationEmit = true; return value }(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			projection, accepted := authenticatedToolResource(authenticated, req)
+			if !accepted || projection.actionTool != "read_query" || projection.resourceIdentity != "" {
+				t.Fatalf("projection=%+v accepted=%v, want action tool read_query and no identity", projection, accepted)
+			}
+			ctx := withAuthenticatedToolResource(authenticated, req, []byte(`{"tool_name":"synthetic"}`))
+			tool, identity := trustedToolActionFromContext(ctx, "codex", req.ToolName, req.ToolName)
+			if tool != "read_query" || identity != "" {
+				t.Fatalf("trusted action tool=%q identity=%q", tool, identity)
 			}
 		})
 	}

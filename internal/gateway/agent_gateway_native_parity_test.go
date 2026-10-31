@@ -135,3 +135,28 @@ func TestAgentGatewayMatchesNativeHookPerKind(t *testing.T) {
 		}
 	}
 }
+
+// An exact redelivery of a call (a gateway that retries a pre_tool, a hook
+// delivered twice) gets the first delivery's decision on the route and on
+// the native hook (rel-1-0-6:GAP-0140).
+func TestAgentGatewayAndNativeHookRedeliveryKeepsDecision(t *testing.T) {
+	installToolCallCorpusProfileConnector(t, connector.AgentGatewayConnectorName, "default")
+	installToolCallCorpusProfileConnector(t, "claudecode", "default")
+	api := testAPIServerWithConfig(t, "action")
+	api.scannerCfg.Connectors.AgentGateway.Enabled = true
+	body := `{"event":"pre_tool","session_id":"redeliver-1","tool_use_id":"t-1","cwd":"/work","tool":{"name":"mcp__files__read","kind":"mcp","input":{"path":"~/.ssh/id_rsa"}}}`
+	hook := testAPIServerWithConfig(t, "action")
+	hook.scannerCfg.Guardrail.Connector = "claudecode"
+	payload := map[string]interface{}{
+		"hook_event_name": "PreToolUse", "session_id": "redeliver-1", "tool_use_id": "t-1",
+		"cwd": "/work", "tool_name": "mcp__files__read", "tool_input": map[string]interface{}{"path": "~/.ssh/id_rsa"},
+	}
+	for delivery := 1; delivery <= 2; delivery++ {
+		if _, routed := postAgentGatewayFrom(t, api, context.Background(), body); routed["raw_action"] != "block" {
+			t.Fatalf("route delivery %d: %v", delivery, verdictFields(routed))
+		}
+		if _, direct := postNativeHook(t, hook, "claudecode", payload); direct["raw_action"] != "block" {
+			t.Fatalf("native delivery %d: %v", delivery, verdictFields(direct))
+		}
+	}
+}
