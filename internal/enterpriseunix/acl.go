@@ -75,6 +75,14 @@ type aclTarget struct {
 	gatewayRead   bool
 	requireList   bool
 	ancestor      bool
+	// serviceRead marks the administrator policy folder (policy_dir) and
+	// what is in it, which the gateway reads as its service account: an
+	// entry that denies that account a right it needs there is wrong, and
+	// an entry for another account is not (GAP-1323). serviceOnly targets
+	// are checked for that alone: the deployment does not install them.
+	serviceRead bool
+	serviceOnly bool
+	dir         bool
 }
 
 // aclFinding is a path with the ACL entries that are wrong for it and their
@@ -107,6 +115,10 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 		published[path] = true
 	}
 	var targets []aclTarget
+	policyRoot := e.P(e.Layout.PolicyDir)
+	inPolicyDir := func(rooted string) bool {
+		return rooted == policyRoot || strings.HasPrefix(rooted, policyRoot+string(filepath.Separator))
+	}
 	// private is nil to take it from the current mode.
 	add := func(rooted string, private *bool) {
 		if seen[rooted] {
@@ -126,6 +138,7 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 			publishedDir: info.IsDir() && published[rooted], publishedFile: info.Mode().IsRegular() && published[rooted],
 			gatewayRead: rooted == e.P(e.Layout.ConfigPath) || rooted == e.P(e.Layout.ConfigDir),
 			requireList: filepath.Base(rooted) == "managed-settings.d" || filepath.Base(rooted) == "policy.d",
+			serviceRead: inPolicyDir(rooted), dir: info.IsDir(),
 		})
 	}
 	yes := true
@@ -182,6 +195,24 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 	for _, file := range e.configStateFiles(Account{}) {
 		add(e.P(file.path), &yes)
 	}
+	// The rest of the policy folder: the administrator's rule packs and
+	// policies, checked only for entries that deny the gateway reading them.
+	walked := 0
+	_ = filepath.WalkDir(policyRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || seen[path] {
+			return nil
+		}
+		if walked++; walked > rulePackTreeMaxEntries {
+			return fs.SkipAll
+		}
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+			return nil
+		}
+		seen[path] = true
+		targets = append(targets, aclTarget{path: path, serviceRead: true, serviceOnly: true, dir: info.IsDir()})
+		return nil
+	})
 	// Last, so a folder the deployment also installs keeps its stricter check.
 	for _, dir := range e.machinePolicyAncestors(policyPaths) {
 		if seen[dir] {
@@ -287,7 +318,23 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 				continue
 			}
 			finding := aclFinding{path: e.canonical(target.path), rooted: target.path, ancestor: target.ancestor}
+			serviceDenied := map[int]bool{}
+			if target.serviceRead {
+				needs := []string{"read"}
+				if target.dir {
+					needs = []string{"list", "read", "search"}
+				}
+				serviceDenied = e.darwinACLServiceDenials(entries, needs)
+			}
 			for _, entry := range entries {
+				if target.serviceOnly {
+					if serviceDenied[entry.Index] {
+						finding.entries = append(finding.entries, entry.Text)
+						finding.indexes = append(finding.indexes, entry.Index)
+						finding.deny = true
+					}
+					continue
+				}
 				if target.ancestor {
 					if entry.GrantsWrite() && !darwinACLAdminPrincipal(entry) {
 						finding.entries = append(finding.entries, entry.Text)
@@ -297,7 +344,7 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 					continue
 				}
 				deny := ((target.publishedDir || target.gatewayRead) && entry.DeniesDirectoryAccess(target.requireList)) ||
-					((target.publishedFile || target.gatewayRead) && entry.DeniesFileRead())
+					((target.publishedFile || target.gatewayRead) && entry.DeniesFileRead()) || serviceDenied[entry.Index]
 				if entry.GrantsWrite() || (target.private && entry.GrantsAccess()) || deny {
 					finding.entries = append(finding.entries, entry.Text)
 					finding.indexes = append(finding.indexes, entry.Index)
@@ -562,6 +609,26 @@ func (e *Env) darwinACLDeniesService(entries []managed.DarwinACLEntry, rights []
 		}
 	}
 	return "", false
+}
+
+// darwinACLServiceDenials are the indexes of the entries, of entries in ACL
+// order, that deny the gateway service account one of rights, by the rule of
+// darwinACLDeniesService: for each right the first applicable entry naming
+// it decides, so a deny after an allow for the same right denies nothing.
+func (e *Env) darwinACLServiceDenials(entries []managed.DarwinACLEntry, rights []string) map[int]bool {
+	denied := map[int]bool{}
+	for _, right := range rights {
+		for _, entry := range entries {
+			if !e.darwinACLAppliesToService(entry) || !slices.Contains(entry.Rights, right) {
+				continue
+			}
+			if !entry.Allow {
+				denied[entry.Index] = true
+			}
+			break
+		}
+	}
+	return denied
 }
 
 // darwinACLAppliesToService reports an entry that governs the path itself
