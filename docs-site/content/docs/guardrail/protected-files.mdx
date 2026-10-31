@@ -19,6 +19,9 @@ managed gateway runs as a service account that cannot read users' homes, so
 it has no watch; on managed Linux the
 [kernel control](/docs/enterprise/tetragon#the-kernel-controls) covers these
 files, and in monitor mode it records the same writes, links and renames.
+Managed macOS and Windows have neither: the hook rules still check an agent
+command that names these files (and block it in action mode), but a write
+through a script or another hard link of the file is not seen there.
 
 | Class | Files (in your home) | Systems |
 | --- | --- | --- |
