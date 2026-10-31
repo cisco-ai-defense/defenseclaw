@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -35,6 +37,7 @@ func actionMovedDiskLinkWrite(command, cwd, home string, writes []string) bool {
 	placed, placedKnown := topLevelLinkDirectories(file, cwd, home)
 	// moved maps a new name to the protected path its link names.
 	moved := map[string]string{}
+	var backups []movedBackup
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) < 3 {
@@ -73,9 +76,27 @@ func actionMovedDiskLinkWrite(command, cwd, home string, writes []string) bool {
 					moved[filepath.Clean(dest)] = target
 				}
 			}
+			// A move with a backup option onto an existing link keeps
+			// the link as a backup entry beside it (rel-1-0-6:GAP-0144).
+			if op.backup && op.dest != "" && op.targetDir == "" && len(op.sources) == 1 {
+				dest := absolutePath(op.dest, dir)
+				if info, err := os.Lstat(dest); err == nil && info.Mode()&os.ModeSymlink != 0 {
+					if protectedReachPath(dest, protected, keysDir) {
+						backups = append(backups, movedBackup{dest: dest, suffix: op.suffix})
+					}
+				}
+			}
 		}
 		return true
 	})
+	for _, write := range writes {
+		path := filepath.Clean(OperandPath(write, cwd))
+		for _, backup := range backups {
+			if backup.names(path) {
+				return true
+			}
+		}
+	}
 	if len(moved) == 0 {
 		return false
 	}
@@ -104,3 +125,28 @@ func actionMovedDiskLinkWrite(command, cwd, home string, writes []string) bool {
 	}
 	return false
 }
+
+// movedBackup is the backup entry a mv with a backup option makes of an
+// existing destination link to the keys file or the .ssh directory.
+type movedBackup struct{ dest, suffix string }
+
+// names reports a write path that is that backup entry or lies below it:
+// the destination name with the suffix, with the default ~ or with a
+// numbered .~N~ suffix.
+func (b movedBackup) names(path string) bool {
+	dir, base := filepath.Dir(b.dest), filepath.Base(b.dest)
+	for filepath.Dir(path) != dir {
+		parent := filepath.Dir(path)
+		if parent == path {
+			return false
+		}
+		path = parent
+	}
+	rest, ok := strings.CutPrefix(filepath.Base(path), base)
+	if !ok || rest == "" {
+		return false
+	}
+	return rest == "~" || b.suffix != "" && rest == b.suffix || movedBackupNumbered.MatchString(rest)
+}
+
+var movedBackupNumbered = lazyregexp.New(`^\.~[0-9]+~$`)

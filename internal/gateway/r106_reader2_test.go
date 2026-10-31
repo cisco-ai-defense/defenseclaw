@@ -106,3 +106,25 @@ func TestR106DiscardRedirectKeepsAReadOnlyCommand(t *testing.T) {
 		{"copy onto the keys file", "home", `cp project/README.md .*/authorized_keys 2>/dev/null`, "block"},
 	})
 }
+
+// TestR106MoveWithBackupOntoKeysLinkReplacesTheLink: a GNU mv with a backup
+// option onto an existing project link to the keys file renames the link
+// to its backup name and writes nothing to the keys file, as a plain mv onto
+// the link does (rel-1-0-6:GAP-0144). A write through the link, or through
+// its backup name, still writes the keys file.
+func TestR106MoveWithBackupOntoKeysLinkReplacesTheLink(t *testing.T) {
+	r106Reader2Check(t, []r106Reader2Row{
+		{"plain mv onto the link", "project", `mv a.txt keylink`, "allow"},
+		{"backup=simple", "project", `mv --backup=simple a.txt keylink`, "allow"},
+		{"backup=numbered with a suffix", "project", `mv --backup=numbered --suffix=.old a.txt keylink`, "allow"},
+		{"-b with -S", "project", `mv -b -S .bak a.txt keylink`, "allow"},
+		{"-b", "project", `mv -b a.txt keylink`, "allow"},
+		{"backup onto the keys file", "project", `mv --backup=simple a.txt ~/.ssh/authorized_keys`, "block"},
+		{"backup into .ssh", "project", `mv -b a.txt ~/.ssh/`, "block"},
+		{"backup into .ssh with -t", "project", `mv --backup=simple -t ~/.ssh a.txt`, "block"},
+		{"move the link then write", "project", `mv -b keylink k2; echo x >> k2`, "block"},
+		{"write through the default backup name", "project", `mv -b a.txt keylink; echo x >> keylink~`, "block"},
+		{"write through a suffix backup name", "project", `mv --backup=simple --suffix=.bak a.txt keylink; echo x >> keylink.bak`, "block"},
+		{"write through a numbered backup name", "project", `mv --backup=numbered a.txt keylink; echo x >> keylink.~1~`, "block"},
+	})
+}
