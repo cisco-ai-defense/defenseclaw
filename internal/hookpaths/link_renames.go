@@ -162,7 +162,14 @@ func (op renameOp) destinations(source string) []string {
 // hold links) or a name this process cannot read is not one. So
 // ln -s build/out bin; mv bin build/ in a project without build/ keeps the
 // links known (rel-1-0-6:GAP-0219, the GAP-0091 shape W07).
-func (l *shellLinks) plainRenameSource(from string) bool {
+//
+// userView: this gateway cannot open the command directory (ProtectHome)
+// and the user-side hook, which ran the same rename reading on the user
+// view of the disk, found every link stable (LinksStableKey). A source this
+// process may not read is then judged by that reading, as the disk walks
+// are, so a managed gateway answers mv a.txt build as a per-user one does
+// (rel-1-0-6:GAP-0091, the managed W07 leg).
+func (l *shellLinks) plainRenameSource(from string, userView bool) bool {
 	for _, alias := range l.aliases {
 		if samePathName(from, alias.name) {
 			return true
@@ -170,7 +177,7 @@ func (l *shellLinks) plainRenameSource(from string) bool {
 	}
 	info, err := pathLstat(from)
 	if err != nil {
-		return errors.Is(err, fs.ErrNotExist)
+		return errors.Is(err, fs.ErrNotExist) || userView && errors.Is(err, fs.ErrPermission)
 	}
 	return info.Mode().IsRegular()
 }
@@ -198,7 +205,9 @@ func pathAtOrUnder(path, prefix string) bool {
 // p && mv a.txt p) replaces that link entry, or moves the entry into the
 // directory the link names: the link keeps its alias, so the caller still
 // judges its target, and nothing else changes name (rel-1-0-6:GAP-0195).
-func (l *shellLinks) followRenames(ops []renameOp) bool {
+// userView is the plainRenameSource reading of a source this process may
+// not read.
+func (l *shellLinks) followRenames(ops []renameOp, userView bool) bool {
 	for _, op := range ops {
 		before := append([]linkAlias(nil), l.aliases...)
 		// onto is the destination of a one-source move onto a name a link
@@ -227,7 +236,7 @@ func (l *shellLinks) followRenames(ops []renameOp) bool {
 						}
 					case pathsOverlap(dest, alias.name):
 						return false
-					case pathsOverlap(dest, alias.target) && !l.plainRenameSource(from):
+					case pathsOverlap(dest, alias.target) && !l.plainRenameSource(from, userView):
 						return false
 					}
 					if _, through := cutPathPrefix(from, alias.name); through && !samePathName(from, alias.name) {

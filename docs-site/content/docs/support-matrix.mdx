@@ -206,6 +206,18 @@ Shell can express the same write in many ways, and some unusual forms are not re
 - **A socket opened from an interpreter command line.** The deterministic socket rule recognises the minimal one-liner form only. Other spellings are left to the LLM judge.
 - **PowerShell text sent to the Claude Code Bash tool on Windows.** The Bash tool runs Git Bash, so DefenseClaw reads the call as Git Bash and PowerShell cmdlet text with a comment that names a protected path is blocked. Run PowerShell commands through PowerShell.
 
+A few harmless commands are blocked because their text matches a protected write and the hook cannot see what they do when they run:
+
+- a link to the SSH folder or to DefenseClaw's state made in a project, and a move in the same command as such a link;
+- a move inside a linked folder whose entries are links to the SSH folder or to DefenseClaw's state;
+- `find -exec mv` into a link that the same command makes;
+- a project script run by a relative path after `cd`, in a command that also makes a link;
+- `cp -s` with a source built by command substitution;
+- `rsync` of the whole SSH folder (`cp -a` and `tar` of it block too);
+- a `~` path after the command sets `HOME`.
+
+Run such a step yourself, or give the agent a command of its own that names the real path.
+
 The LLM judge (the LLM guardrail) is the second layer for protected-file access. If you need more than the command reader gives, turn it on; see [Optional LLM judge](/docs/policies/deterministic-detection#optional-llm-judge).
 
 On a managed install DefenseClaw's own state is owned by root or SYSTEM, so these commands cannot change it. A user's own files, such as `authorized_keys`, are as exposed as on a per-user install. The managed gateway cannot read the user's home, so it judges links there from what the hook reports: a few link forms of a write to `authorized_keys` (an existing link moved and then written through, a relative link made from the home) and some PowerShell writes to it that a per-user gateway blocks can run on a managed install. The LLM judge is the second layer for them. Check for links in repositories you pull. For what DefenseClaw repairs afterwards and what to protect yourself, see **Protected files in action mode** under [Security](#security).

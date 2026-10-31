@@ -90,7 +90,8 @@ const ReplacedLinkFactPrefix = "\x00replaced-link:"
 // its links stay known. "1" is the only value. Only a gateway that cannot
 // open the command directory itself (ProtectHome) reads it, in place of
 // those walks of the user home; the rename and link reading itself is still
-// its own (GAP-2564, GAP-2600).
+// its own, except whether a move source it may not read is a plain file
+// (GAP-2564, GAP-2600, GAP-0091).
 const LinksStableKey = "\x00links-stable"
 
 // GlobFactPrefix keys the hook client's expansion of one pathname pattern
@@ -2679,7 +2680,8 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		// answer from the user-side hook, which ran the same walks on the
 		// user view of the disk (LinksStableKey, GAP-2564); for a nested
 		// cd or a find -exec mv too (GAP-2600). The rename reading is
-		// always the gateway own.
+		// the gateway own; only a move source it may not read is judged
+		// by that user-side reading (GAP-0091).
 		stable := true
 		moves := len(renameOps) > 0 || len(findMoves) > 0
 		walked := moves || wrappedCds
@@ -2691,7 +2693,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			// statement walk placed it and every link (GAP-2602).
 			stable = false
 		case moves:
-			stable = links.followRenames(renameOps)
+			stable = links.followRenames(renameOps, userView)
 		}
 		// LINK/.. resolves from the link target, which no lexical reading
 		// places; both gateways read it, so a LinksStableKey cannot hide it.
