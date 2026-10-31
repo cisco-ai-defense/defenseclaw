@@ -2103,8 +2103,10 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		switch programBase(program) {
 		case "cat", "head", "tail", "ls", "dir", "stat",
 			// Search and count programs only read their operands (owner
-			// decision 2, TGT-0194; GAP-2168).
-			"grep", "egrep", "fgrep", "wc":
+			// decision 2, TGT-0194; GAP-2168). So do the size and path
+			// readers: du reports sizes, readlink and realpath print a
+			// resolved name; none has an output option.
+			"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath":
 		case "ssh-keygen":
 			if !actionSSHKeygenListsOnly(call.Args[1:], home) {
 				safe = false
@@ -3049,8 +3051,9 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 		// cmd type, and the search and select filters, only read (GAP-2168).
 		"type", "findstr", "select-string", "sls", "select-object", "select",
 		// Git Bash search and count programs read their operands as on a
-		// POSIX home (actionKnownReadOnlyShell, GAP-2168 Windows leg).
-		"grep", "egrep", "fgrep", "wc":
+		// POSIX home (actionKnownReadOnlyShell, GAP-2168 Windows leg); so do
+		// the size and path readers (GAP-0091).
+		"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath":
 		return true
 	case "ssh-keygen":
 		return actionSSHKeygenListsOnlyWords(words[1:])

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -128,6 +129,11 @@ func (op renameOp) destinations(source string) []string {
 		return []string{absolutePath(op.dest, op.wd)}
 	}
 	dest := absolutePath(op.dest, op.wd)
+	if info, err := os.Lstat(dest); err == nil && info.IsDir() {
+		// A move onto an existing directory (not a link to one) goes inside
+		// it; the name itself is not replaced.
+		return []string{filepath.Join(dest, base)}
+	}
 	return []string{dest, filepath.Join(dest, base)}
 }
 
@@ -1052,4 +1058,156 @@ func resolveMissingDotDot(path string) (string, bool) {
 		}
 	}
 	return ResolveWriteTarget(filepath.Clean(path))
+}
+
+// enteredOnlyLinkNames keeps the names of the link calls that no other word of
+// command names, but for a cd or pushd operand that enters them: the call
+// writes the name where the statement walk placed it. The rest of the command
+// must be known readers alone, so nothing it runs after the entering cd can
+// write through the link. A command with an expansion, a pattern or a tilde
+// word keeps none, nor does a link to SSH or DefenseClaw state (GAP-0091).
+func enteredOnlyLinkNames(file *syntax.File, command, cwd, home string, names []string, aliases []linkAlias, linkTexts []string, placed map[*syntax.CallExpr]bool) map[string]bool {
+	if len(names) == 0 || strings.ContainsAny(command, "$`*?[{\\") || !readersBesides(file, home, placed, 0) {
+		return nil
+	}
+	words, programs := commandWordPrograms(command)
+	for _, text := range linkTexts {
+		for _, word := range commandWords(text) {
+			if i := slices.Index(words, word); i >= 0 {
+				words = slices.Delete(words, i, i+1)
+				programs = slices.Delete(programs, i, i+1)
+			}
+		}
+	}
+	cdOperand := func(i int) bool {
+		return i > 0 && (words[i-1] == "cd" || words[i-1] == "pushd") && (programs[i] == "cd" || programs[i] == "pushd")
+	}
+	for i, word := range words {
+		// A tilde word may name any path; as the operand of the cd that
+		// enters it nothing is written through it.
+		if strings.HasPrefix(word, "~") && !cdOperand(i) {
+			return nil
+		}
+	}
+	// A link that names SSH or DefenseClaw state is never exempt.
+	state := newStateReach(home)
+	var kept map[string]bool
+	for _, name := range names {
+		entered := true
+		for _, alias := range aliases {
+			if alias.name != name {
+				continue
+			}
+			if state.within(filepath.Clean(alias.target)) {
+				entered = false
+			} else if resolved, ok := ResolveWriteTarget(alias.target); ok && state.within(resolved) {
+				entered = false
+			}
+		}
+		for i, word := range words {
+			named := slices.Contains(strings.Split(filepath.ToSlash(word), "/"), filepath.Base(name))
+			if !named && !filepath.IsAbs(word) {
+				continue
+			}
+			if !named {
+				_, named = cutPathPrefix(filepath.Clean(word), name)
+			}
+			if named && !cdOperand(i) {
+				entered = false
+				break
+			}
+		}
+		if entered {
+			if kept == nil {
+				kept = make(map[string]bool)
+			}
+			kept[filepath.Clean(name)] = true
+		}
+	}
+	return kept
+}
+
+// readerPrograms only read their operands; none has an output file option
+// once actionReadOptionMayWrite has refused the output spellings.
+var readerPrograms = []string{
+	"cat", "head", "tail", "ls", "dir", "stat", "grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath",
+}
+
+// readerDirectories are the places a reader program may be named from.
+var readerDirectories = []string{"/bin", "/usr/bin", "/usr/local/bin"}
+
+// readersBesides reports that file holds nothing but the skipped link calls,
+// directory changes and known reader programs, also inside a literal shell
+// body: no redirect, assignment, expansion, loop or function, and a program
+// named by a path only from a standard directory.
+func readersBesides(file *syntax.File, home string, skip map[*syntax.CallExpr]bool, depth int) bool {
+	if depth > 2 {
+		return false
+	}
+	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
+	safe := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if !safe {
+			return false
+		}
+		switch n := node.(type) {
+		case nil:
+		case *syntax.File, *syntax.BinaryCmd, *syntax.Subshell, *syntax.Lit, *syntax.SglQuoted, *syntax.DblQuoted:
+		case *syntax.Stmt:
+			if n.Coprocess || len(n.Redirs) > 0 {
+				safe = false
+			}
+		case *syntax.Word:
+		case *syntax.CallExpr:
+			if len(n.Assigns) > 0 || len(n.Args) == 0 {
+				safe = false
+				return false
+			}
+			if skip[n] {
+				return true
+			}
+			words := make([]string, len(n.Args))
+			static := make([]bool, len(n.Args))
+			for i, arg := range n.Args {
+				words[i], static[i] = staticShellWord(arg, env, home != "")
+			}
+			if !static[0] {
+				safe = false
+				return false
+			}
+			program := programBase(words[0])
+			if slices.Contains(cdPrograms, program) || program == "dirs" {
+				// A directory change writes nothing, whatever it names (a
+				// tilde word of an unknown user is not static).
+				safe = len(words) <= 3
+				return false
+			}
+			if slices.Contains(static, false) {
+				safe = false
+				return false
+			}
+			if strings.Contains(words[0], "/") && !slices.Contains(readerDirectories, filepath.Dir(words[0])) {
+				safe = false
+				return false
+			}
+			switch {
+			case slices.Contains(readerPrograms, program):
+				for _, option := range words[1:] {
+					if actionReadOptionMayWrite(option) {
+						safe = false
+					}
+				}
+			case literalShellBody(program, words, static) != "":
+				inner, parsed := parseShell(literalShellBody(program, words, static))
+				safe = parsed && readersBesides(inner, home, nil, depth+1)
+			default:
+				safe = false
+			}
+			return false
+		default:
+			safe = false
+		}
+		return safe
+	})
+	return safe
 }
