@@ -2352,18 +2352,20 @@ publish_link() {
 # ModuleNotFoundError, or had the shell run the entry script (rel-1-0-6
 # GAP-0105). A process that keeps running (the TUI) is not waited for longer.
 wait_cli_calls_done() {
-    local deadline=$((SECONDS + 15)) pid argv0 busy
+    local deadline=$((SECONDS + 15)) pid command busy
     [[ -d "${VENV}" ]] || return 0
     while (( SECONDS < deadline )); do
         busy=""
-        for pid in $(pgrep -u "$(id -u)" 2>/dev/null); do
+        # One ps per poll and a here-string, no process substitution: macOS
+        # /bin/bash 3.2 keeps the pipe of every process substitution a function opens, and a
+        # substitution per process ran it out of file descriptors until bash
+        # aborted (rel-1-0-6 GAP-0185).
+        while read -r pid command; do
             [[ "${pid}" == "$$" ]] && continue
-            argv0=""
-            IFS= read -r -d '' argv0 < <(process_argv "${pid}" 2>/dev/null) || [[ -n "${argv0}" ]] || continue
-            case "${argv0}" in
+            case "${command}" in
                 "${VENV}"/bin/*) busy=1; break ;;
             esac
-        done
+        done <<< "$(ps -U "$(id -u)" -o pid= -o command= 2>/dev/null)"
         [[ -z "${busy}" ]] && return 0
         sleep 0.2
     done
