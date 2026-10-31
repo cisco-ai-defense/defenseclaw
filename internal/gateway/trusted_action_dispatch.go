@@ -351,6 +351,11 @@ func dispatchTrustedAction(
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
+	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {
 		// Two argument keys name one field: judge each candidate (GAP-0678).
 		return dispatchConflictingToolArguments(parent, request, conflict)
