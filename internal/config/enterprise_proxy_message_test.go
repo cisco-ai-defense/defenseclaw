@@ -25,8 +25,9 @@ func TestEnterpriseProxyRefusalStatesTheSchemeRule(t *testing.T) {
 			t.Fatalf("%s: refusal %q does not state the scheme rule", proxy, text)
 		}
 		// The parse error says what is wrong and the Action says what to
-		// write, so the joined refusal gives the advice once.
-		if n := strings.Count(err.Error(), "http://host:port"); n != 1 {
+		// write, so the joined refusal gives the advice once, in whichever
+		// spelling names it (GAP-0114).
+		if n := strings.Count(err.Error(), "http://host"); n != 1 {
 			t.Fatalf("%s: refusal gives the advice %d times, want once: %v", proxy, n, err)
 		}
 		if strings.Contains(err.Error(), "proxy.example.test") || strings.Contains(err.Error(), "hunter2") {

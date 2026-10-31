@@ -36,3 +36,26 @@ func TestParseEgressProxyURLNamesTheForm(t *testing.T) {
 		t.Fatalf("valid proxy refused: %v", err)
 	}
 }
+
+// GAP-0114: the refusal says the accepted form once, with the advice a caller
+// adds only to the errors that do not name it.
+func TestProxyURLRefusalNamesTheFormOnce(t *testing.T) {
+	_, err := ParseEgressProxyURL("127.0.0.1:3128")
+	if err == nil {
+		t.Fatal("scheme-less proxy accepted")
+	}
+	shown := err.Error()
+	if advice := ProxyURLAdviceFor(err); advice != "" {
+		shown += "; " + advice
+	}
+	if got := strings.Count(shown, "http://"); got != 1 {
+		t.Fatalf("the form appears %d times: %s", got, shown)
+	}
+	if !strings.Contains(shown, "without a user name, password or path") {
+		t.Fatalf("the form lost its limits: %s", shown)
+	}
+	_, err = ParseEgressProxyURL("http://user:pw@proxy.example.com:3128")
+	if err == nil || ProxyURLAdviceFor(err) != ProxyURLAdvice {
+		t.Fatalf("a refusal that does not name the form keeps the advice: %v", err)
+	}
+}

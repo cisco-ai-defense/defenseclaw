@@ -111,6 +111,8 @@ def test_windows_status_reports_a_missing_pre_tool_use_hook(tmp_path, monkeypatc
 
     monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
     monkeypatch.setattr(hook_integrity, "hook_launcher_problems", lambda cfg, connector: [])
+    # The native verdict is healthy here; the file scan below is what is tested.
+    monkeypatch.setattr(hook_integrity, "_windows_native_problem", lambda cfg, connector: None)
     data_dir = tmp_path / ".defenseclaw"
     data_dir.mkdir()
     launcher = "C:\\Users\\dcw\\.defenseclaw\\bin\\defenseclaw-hook.exe hook --connector claudecode"
@@ -132,3 +134,43 @@ def test_windows_status_reports_a_missing_pre_tool_use_hook(tmp_path, monkeypatc
     assert problems and "PreToolUse" in problems[0] and "tool calls are not inspected" in problems[0]
     suffix = cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
     assert "DEGRADED" in suffix and "PreToolUse" in suffix
+
+
+def test_windows_status_asks_doctors_registration_check_for_claude_code_gap0645(tmp_path, monkeypatch):
+    """GAP-0645: status and Doctor judge the per-user Windows registration with one function.
+
+    The lock names no hook file here, as on the failing host, so the file scan
+    finds nothing; the native verdict is what makes status say DEGRADED.
+    """
+    from defenseclaw import hook_integrity
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.doctor_hooks import WindowsHookCheck
+
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    monkeypatch.setattr(hook_integrity, "hook_launcher_problems", lambda cfg, connector: [])
+    data_dir = tmp_path / ".defenseclaw"
+    data_dir.mkdir()
+    cfg = SimpleNamespace(data_dir=str(data_dir))
+    verdict = {
+        "check": WindowsHookCheck(
+            "missing",
+            "Claude Code DefenseClaw hook event PreToolUse is missing; run 'defenseclaw setup claude-code --yes --restart'",
+            repair="run `defenseclaw setup claude-code --yes --restart`",
+        )
+    }
+    monkeypatch.setattr(cmd_doctor, "_windows_native_hook_check", lambda cfg, connector: verdict["check"])
+
+    problems = hook_registration_problems(cfg, "claudecode")
+    assert problems and "PreToolUse is missing" in problems[0] and "not current" in problems[0]
+    suffix = cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+    assert "DEGRADED" in suffix and "PreToolUse" in suffix and "setup claude-code --yes --restart" in suffix
+
+    verdict["check"] = WindowsHookCheck("healthy", "healthy Windows-native executable registration")
+    assert hook_registration_problems(cfg, "claudecode") == []
+    assert cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode") == ""
+
+    def broken(cfg, connector):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(cmd_doctor, "_windows_native_hook_check", broken)
+    assert "inspection failed" in hook_registration_problems(cfg, "claudecode")[0]
