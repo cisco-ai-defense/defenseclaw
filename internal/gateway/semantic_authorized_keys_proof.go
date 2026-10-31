@@ -1182,7 +1182,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				// loop, a chain past the kernel limit or an unreadable
 				// component). Resolve it here, or fail closed.
 				if cannotResolveLocally {
-					return !windowsLocationOrdinaryWriteTarget(target)
+					unresolved := !windowsLocationOrdinaryWriteTarget(target)
+					if unresolved && request.unresolvedTarget != nil {
+						*request.unresolvedTarget = true
+					}
+					return unresolved
 				}
 			case truncated && cannotResolveLocally:
 				// The bounded map omits this operand, which may be a link
