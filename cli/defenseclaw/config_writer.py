@@ -911,6 +911,12 @@ def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -
     if code == "pattern":
         if name == "openshell.trusted_ca_bundle":
             return f"{name} must be an absolute path or start with ~/ (for example, ~/proxy-root-ca.pem)."
+        if name == "update.source":
+            # http:// is refused on purpose: release files come over TLS only (GAP-1065).
+            return (
+                f"{name} must be an https:// URL (for example, https://mirror.example.com/defenseclaw), "
+                "or empty for the official releases."
+            )
         hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
         # A pattern of plain words (block_at) names them in the corrective action.
         allowed = text if text.startswith("use one of ") else ""

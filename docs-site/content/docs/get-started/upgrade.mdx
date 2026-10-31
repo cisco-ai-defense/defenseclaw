@@ -114,7 +114,7 @@ defenseclaw config set update.source https://mirror.example.com/defenseclaw
 
 The mirror must serve the paths GitHub serves: `releases/latest` (a redirect to the newest tag) and `releases/download/<tag>/` with the installer, the release files, `checksums.txt` and `checksums.txt.bundle`.
 
-`update.source` changes only where files come from. The certificate identity that signed the official releases is built into DefenseClaw, so a mirror must serve the official signed `checksums.txt` and its bundle, and the machine needs `cosign` 2.0 or later. Without it, the upgrade stops before it runs anything. `DEFENSECLAW_REPO` is the deprecated alias; `update.source` wins when both are set. A first install has no `config.yaml`, so use `DEFENSECLAW_REPO` for the installer there ([Installer](/docs/reference/setup-commands)).
+`update.source` changes only where files come from. The certificate identity that signed the official releases is built into DefenseClaw, so a mirror must serve the official signed `checksums.txt` and its bundle, and the machine needs `cosign` 2.0 or later. Without it, the upgrade stops before it runs anything. `update.source` must be an `https://` URL: `defenseclaw config set` refuses an `http://` one and asks for an `https://` URL. `DEFENSECLAW_REPO` is the deprecated alias and takes a GitHub `owner/name` or an `https://` URL, with the same refusal for anything else; `update.source` wins when both are set. A first install has no `config.yaml`, so use `DEFENSECLAW_REPO` for the installer there ([Installer](/docs/reference/setup-commands)).
 
 ## Upgrading from 0.x to 1.0
 

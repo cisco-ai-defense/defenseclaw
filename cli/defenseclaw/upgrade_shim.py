@@ -52,6 +52,15 @@ import urllib.request
 DEFAULT_REPO = "cisco-ai-defense/defenseclaw"
 # Deprecated alias of config.yaml update.source: a GitHub owner/name.
 REPO_ENV = "DEFENSECLAW_REPO"
+# DEFENSECLAW_REPO is a GitHub owner/name or an https:// mirror base URL. Any
+# other value (an http:// URL, a path) used to be appended to github.com and
+# ended in an HTTP 404 (GAP-1065). The value is never echoed: a mirror URL can
+# carry credentials.
+_VALID_REPO_ENV = re.compile(r"^(https://\S+|[^\s/:@]+/[^\s/:@]+)$")
+REPO_ENV_REFUSAL = (
+    f"{REPO_ENV} must be a GitHub owner/name or an https:// mirror URL (an http:// URL is not accepted). "
+    f"Fix or unset {REPO_ENV}, or set update.source to an https:// URL"
+)
 OFFICIAL_SOURCE = "https://github.com/" + DEFAULT_REPO
 # The release signing identity is compiled in. update.source and
 # DEFENSECLAW_REPO only change where release bytes are fetched from; a
@@ -289,6 +298,8 @@ def release_source() -> str:
         return configured.rstrip("/")
     repo = os.environ.get(REPO_ENV, "").strip()
     if repo:
+        if not _VALID_REPO_ENV.match(repo):
+            raise ShimUsageError(REPO_ENV_REFUSAL)
         return _source_url(repo)
     return OFFICIAL_SOURCE
 
