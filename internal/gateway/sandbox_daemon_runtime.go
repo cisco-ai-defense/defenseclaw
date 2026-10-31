@@ -404,7 +404,7 @@ func (d *SandboxDaemon) decisionsClient() *sandboxDecisionsClient {
 		if !ok || r.Revoked {
 			return "", false
 		}
-		return r.Profile, true
+		return sandboxapi.PinnedProfileLabel(r.PinnedProfile, r.Profile), true
 	}
 	return c
 }
@@ -1647,7 +1647,8 @@ func (c *managedSandboxController) registrationView(v *sandboxapi.Sandbox) {
 		v.StopReason = managedStopReason(r.StopText)
 		return
 	}
-	v.OrganizationProfile, v.PolicyDigest, v.Provisional = sandboxapi.DisplayText(r.Profile), sandboxapi.DisplayText(r.Digest), r.Provisional
+	v.OrganizationProfile, v.PolicyDigest, v.Provisional = sandboxapi.DisplayText(sandboxapi.PinnedProfileLabel(r.PinnedProfile, r.Profile)),
+		sandboxapi.DisplayText(r.Digest), r.Provisional
 }
 
 // notePolicyStop says in the activity feed why the organization's policy
@@ -3201,13 +3202,16 @@ func managedPolicyUnloadable(err error) error {
 // daemonRegistration is one sandbox's managed registration as the daemon
 // keeps it.
 type daemonRegistration struct {
-	ID          string                      `json:"id"`
-	Sandbox     string                      `json:"sandbox"`
-	Profile     string                      `json:"profile,omitempty"`
-	Provisional bool                        `json:"provisional,omitempty"`
-	Digest      string                      `json:"digest,omitempty"`
-	Generation  uint64                      `json:"generation,omitempty"`
-	Floor       config.OpenShellAdminConfig `json:"floor"`
+	ID      string `json:"id"`
+	Sandbox string `json:"sandbox"`
+	Profile string `json:"profile,omitempty"`
+	// PinnedProfile is CurrentPolicy.PinnedProfile: the profile the sandbox
+	// was created under while its floor is still pinned to it (GAP-0285).
+	PinnedProfile string                      `json:"pinned_profile,omitempty"`
+	Provisional   bool                        `json:"provisional,omitempty"`
+	Digest        string                      `json:"digest,omitempty"`
+	Generation    uint64                      `json:"generation,omitempty"`
+	Floor         config.OpenShellAdminConfig `json:"floor"`
 	// Driver and DriverReason are the compute driver the sandbox was
 	// created on and why (openshell.DriverReason*); it never switches.
 	Driver        string `json:"driver,omitempty"`
@@ -3512,10 +3516,16 @@ func (r *daemonRegistrations) applyLiveLocked(name string, cp sandboxrelay.Curre
 	if cp.Provisional != nil {
 		provisional = *cp.Provisional
 	}
-	changed := !reflect.DeepEqual(before, reg.Floor) || (digest != "" && digest != reg.Digest) || (profile != "" && profile != reg.Profile) ||
-		provisional != reg.Provisional
+	pinned := reg.PinnedProfile
 	if profile != "" {
-		reg.Profile = profile
+		// The same answer says whether the floor is still pinned to the
+		// profile of the create (GAP-0285).
+		pinned = strings.TrimSpace(cp.PinnedProfile)
+	}
+	changed := !reflect.DeepEqual(before, reg.Floor) || (digest != "" && digest != reg.Digest) || (profile != "" && profile != reg.Profile) ||
+		provisional != reg.Provisional || pinned != reg.PinnedProfile
+	if profile != "" {
+		reg.Profile, reg.PinnedProfile = profile, pinned
 	}
 	reg.Provisional = provisional
 	if !changed {

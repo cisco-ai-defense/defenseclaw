@@ -1304,6 +1304,11 @@ type ManagedExplain struct {
 	// default_lookup_failed, none) and MatchedGroup the caller's group
 	// that matched.
 	Profile string `json:"profile"`
+	// PinnedProfile is, for a registered sandbox, the profile it was created
+	// under while its floor is still pinned to it
+	// (sandboxrelay.CurrentPolicy.PinnedProfile); Description is then that
+	// profile's (GAP-0285).
+	PinnedProfile string `json:"pinned_profile,omitempty"`
 	// Workspace is the copy policy of a new run, as the managed gateway
 	// resolves it with the organization's pack (nil for a registration).
 	Workspace    *WorkspacePolicy `json:"workspace,omitempty"`

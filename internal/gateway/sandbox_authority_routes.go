@@ -946,7 +946,8 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 	provisional := reg.Provisional
 	current := sandboxrelay.CurrentPolicy{
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
-		Floor: &floor, RequiredPack: requiredPack, Digest: reg.EffectiveDigest, Profile: sandboxUserProfile(cfg, reg), Provisional: &provisional,
+		Floor: &floor, RequiredPack: requiredPack, Digest: reg.EffectiveDigest, Profile: sandboxUserProfile(cfg, reg),
+		PinnedProfile: sandboxPinnedProfile(cfg, reg), Provisional: &provisional,
 		UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
 	minProfile := floor.MinProfile
@@ -1143,8 +1144,16 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		}
 		profile, label, description = strings.TrimSpace(cfg.Guardrail.DefaultProfile), profileMeetLabel, sandboxTextProfileWithheld
 	}
+	pinned := ""
+	if scope.registered {
+		// The floor still pinned to the profile the sandbox was created
+		// under is that profile's rules: name it, and describe it (GAP-0285).
+		if pinned = sandboxPinnedProfile(cfg, scope.reg); pinned != "" {
+			description = sandboxProfileDescription(cfg, *scope.reg.CreateProfile)
+		}
+	}
 	out := sandboxapi.ManagedExplain{
-		Profile: label, Description: description,
+		Profile: label, PinnedProfile: pinned, Description: description,
 		Match: scope.match.decision.Match, MatchedGroup: scope.match.decision.MatchedGroup,
 		Provisional: scope.match.provisional, Allowed: floor.Allowed == nil || *floor.Allowed,
 		RequiredFor: slices.Clone(floor.RequiredFor), WhenUnavailable: floor.WhenUnavailable,
@@ -1543,7 +1552,8 @@ func (a *APIServer) handleSandboxDecide(w http.ResponseWriter, r *http.Request) 
 			// (GAP-0632).
 			sandboxRecordAskDecided(r.Context(), a, reg, req, sandboxAskOutcome{Refused: true})
 			writeSandboxRefusal(w, http.StatusForbidden, sandboxrelay.ReasonDecisionRefused,
-				sandboxapi.AccessRefusedWhy(refused.Message, refused.Rule, req.Host, sandboxUserProfile(cfg, reg), reg.SandboxName, floor.RequestAccess))
+				sandboxapi.AccessRefusedWhy(refused.Message, refused.Rule, req.Host,
+					sandboxapi.PinnedProfileLabel(sandboxPinnedProfile(cfg, reg), sandboxUserProfile(cfg, reg)), reg.SandboxName, floor.RequestAccess))
 			return
 		}
 		fmt.Fprintf(os.Stderr, "[sandbox-authority] decision check uid=%d: %v\n", peer.UID, err)
