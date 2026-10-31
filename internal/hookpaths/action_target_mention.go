@@ -90,7 +90,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			return true
 		}
 	}
-	protected := newProtectedFiles(home)
+	protected := newProtectedFiles(home).keysOnly(home)
 	ssh := filepath.Join(home, ".ssh")
 	stateHome := &actionStateHome{home: home}
 	// base places a relative value: the effective cwd for a parsed word,
