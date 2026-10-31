@@ -3158,7 +3158,7 @@ func provenStateCandidateMatches(
 				physical, _ = hookpaths.WalkFactTarget(request.ResolvedWriteTargets, candidate.Resolved)
 			}
 		} else {
-			physical, _ = hookpaths.ResolveWriteTarget(driveFSPath(request, candidate.Resolved))
+			physical, _ = hookpaths.ResolveWriteTarget(driveFSPath(request, gitBashOperandSpelling(candidate)))
 			physical = driveViewPath(request, physical)
 		}
 	}
@@ -3399,6 +3399,26 @@ func driveViewPath(request trustedActionRequest, value string) string {
 	return value
 }
 
+// gitBashOperandSpelling is the local file system path of a POSIX operand.
+// On a native Windows host the POSIX reading of a Git Bash call leaves a
+// drive path (C:/x, C:\x) unresolved and keeps an MSYS drive mount (/c/x)
+// as written, while Git Bash opens the drive path: a write through a disk
+// link or junction outside the home to ~/.defenseclaw was not placed in the
+// state, though its ~/.ssh twin was (rel-1-0-6:GAP-0213). Elsewhere, and for
+// any other operand, it is the resolved path.
+func gitBashOperandSpelling(candidate actionfacts.PathFact) string {
+	if runtime.GOOS != "windows" || candidate.Flavor != actionfacts.PathFlavorPOSIX {
+		return candidate.Resolved
+	}
+	if candidate.Resolved == "" {
+		if value := filepath.ToSlash(candidate.Value); actionfacts.DriveSlashPath(value) {
+			return path.Clean(value)
+		}
+		return ""
+	}
+	return actionfacts.MSYSDrivePath(candidate.Resolved)
+}
+
 // stateRootOf returns the physical state root and a test for a path in it.
 func stateRootOf(home string, resolve func(string) (string, bool)) (string, func(string) bool) {
 	spelled, separator := filepath.Join(home, ".defenseclaw"), string(filepath.Separator)
@@ -3579,7 +3599,7 @@ func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionReque
 		default:
 			continue
 		}
-		value := candidate.Resolved
+		value := gitBashOperandSpelling(candidate)
 		drive := request.gitBashDrive && candidate.Flavor == actionfacts.PathFlavorPOSIX && path.IsAbs(value)
 		if !filepath.IsAbs(value) && !drive || inState(value) {
 			continue

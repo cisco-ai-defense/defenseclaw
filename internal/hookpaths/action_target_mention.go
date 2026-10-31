@@ -3510,8 +3510,11 @@ func actionWindowsWordNamesTarget(word, cwd, home string, stateOnly, sshDirector
 				return true
 			}
 			if runtime.GOOS == "windows" {
-				_, same := ResolveActiveStateHardlinkTarget(filepath.FromSlash(resolved), home)
-				return same
+				// The word's links and junctions are followed, as for the
+				// keys files (actionWindowsLinkReachesKeyFile): a write
+				// through a disk link to ~\.defenseclaw writes the state
+				// (rel-1-0-6:GAP-0213). A hard link is still matched.
+				return actionProtectedStatePath(filepath.FromSlash(resolved), &actionStateHome{home: home})
 			}
 			return false
 		}
