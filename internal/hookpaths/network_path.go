@@ -77,7 +77,8 @@ func networkPathUnanswered(path string) bool {
 	if root == "" {
 		return false
 	}
-	key := strings.ToLower(root)
+	// One probe per share, whichever slashes the path spells it with.
+	key := strings.ToLower(filepath.ToSlash(root))
 	now := time.Now()
 	networkShares.mu.Lock()
 	probe := networkShares.probes[key]

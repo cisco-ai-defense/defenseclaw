@@ -25,8 +25,12 @@ func fakeNetworkShare(t *testing.T, prefix string, wait, deadAfter time.Duration
 	networkShares.probes = nil
 	networkShares.mu.Unlock()
 	var probes atomic.Int64
+	// A test names its share with "/". On Windows a path below it may carry
+	// either separator, and a scan spells the host of a URL as \\host\...
+	slashed := func(path string) string { return "/" + strings.TrimLeft(filepath.ToSlash(path), "/") }
+	share := slashed(prefix)
 	networkShareRootOf = func(path string) string {
-		if path == prefix || strings.HasPrefix(path, prefix+string(filepath.Separator)) {
+		if path := slashed(path); path == share || strings.HasPrefix(path, share+"/") {
 			return prefix
 		}
 		return ""
