@@ -104,6 +104,32 @@ func serviceGrantPrincipal(serviceAccount string) string {
 	return account
 }
 
+// ServiceReadGrantPowerShell is the PowerShell command that gives the gateway
+// service Read & execute on path (and what it contains) by its service SID.
+// icacls refuses every SID Windows cannot map yet, also in the *S-1-5-80-...
+// form, with error 1332, and the service SID maps only once the service
+// exists; Set-Acl with a SecurityIdentifier accepts it before (GAP-0087). It
+// is empty for an account that is not an NT SERVICE name.
+func ServiceReadGrantPowerShell(path, serviceAccount string) string {
+	script := serviceReadGrantScript(path, serviceAccount)
+	if script == "" {
+		return ""
+	}
+	return "powershell -NoProfile -Command \"" + script + "\""
+}
+
+// serviceReadGrantScript is the script of ServiceReadGrantPowerShell.
+func serviceReadGrantScript(path, serviceAccount string) string {
+	sid, ok := strings.CutPrefix(serviceGrantPrincipal(serviceAccount), "*")
+	if !ok {
+		return ""
+	}
+	quoted := strings.ReplaceAll(path, "'", "''")
+	return "$p = '" + quoted + "'; $a = Get-Acl -LiteralPath $p; " +
+		"$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('" + sid + "'), " +
+		"'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')); Set-Acl -LiteralPath $p -AclObject $a"
+}
+
 // StandardUserReadersOf returns the SIDs of the groups every standard user is in (Users,
 // Authenticated Users, Everyone, INTERACTIVE, a domain's Domain Users) that
 // an allow entry of path lets list or read it. A rule pack is one profile's
