@@ -172,6 +172,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		effectiveCWD := cwd
 		var directoryStack []string
 		var judgedWords []*syntax.Word
+		// replacedEntries: the link entries plain mv calls replaced so far,
+		// in the order the walk reads the statements.
+		var replacedEntries []string
 		checkWord := func(word *syntax.Word) bool {
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
@@ -243,7 +246,15 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// is not a target of the call (GAP-2169).
 				inert := actionInertMakeEvals(call, effectiveCWD, home)
 				judgedWords = append(judgedWords, inert...)
+				// A read-only call after a plain mv replaced a link reads the
+				// moved file under that name (rel-1-0-6:GAP-0217).
+				readsReplaced := len(replacedEntries) > 0 && !stateOnly &&
+					actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home)
 				for _, word := range call.Args {
+					if readsReplaced && actionReplacedEntryWord(word, values, effectiveCWD, home, replacedEntries) {
+						judgedWords = append(judgedWords, word)
+						continue
+					}
 					if moved != nil && word == moved {
 						if protectedEntry(movedEntry, protected, ssh) {
 							found = true
@@ -266,6 +277,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						found = true
 						return false
 					}
+				}
+				if moved != nil {
+					replacedEntries = append(replacedEntries, movedEntry)
 				}
 				actionPosixAdvanceDirectory(call, values, home, &effectiveCWD, &directoryStack)
 			}

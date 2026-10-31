@@ -193,6 +193,36 @@ func actionPlainRemovedLinks(call *syntax.CallExpr, values actionValues, cwd, ho
 	return removed
 }
 
+// actionReplacedEntryWord reports a word that names one of entries, the
+// link entries a plain mv earlier in the command replaced (its directory
+// followed, its own name kept). After the move the name holds the moved
+// file, so a read-only call on it reads that file, not the one the link
+// named (rel-1-0-6:GAP-0217). A name with a trailing slash, a pattern or a
+// value the scan cannot place is not read so.
+func actionReplacedEntryWord(word *syntax.Word, values actionValues, cwd, home string, entries []string) bool {
+	if len(entries) == 0 {
+		return false
+	}
+	value, known := actionWordValue(word, values, cwd, home)
+	if !known || value == "" || strings.ContainsAny(value, "*?[]") ||
+		strings.HasSuffix(value, "/") || strings.HasSuffix(value, "/.") {
+		return false
+	}
+	path := OperandPath(PlainMovePath(value), cwd)
+	name := filepath.Base(path)
+	parent, resolved := ResolveWriteTarget(filepath.Dir(path))
+	if !filepath.IsAbs(path) || !resolved || name == "." || name == ".." {
+		return false
+	}
+	entry := filepath.Join(parent, name)
+	for _, replaced := range entries {
+		if samePathName(entry, replaced) {
+			return true
+		}
+	}
+	return false
+}
+
 // protectedEntry reports an entry that is itself one of the protected
 // authorized-keys names or the .ssh directory, each read with its own
 // directory followed and its name kept; the file a link entry names is not
