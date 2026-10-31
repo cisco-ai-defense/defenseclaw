@@ -210,6 +210,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	purgeSkip := runEnterpriseHookPendingCleanups(cmd, &report, jobs, enterpriseHookRehomedRowCleanups(rows)...)
 	if enterpriseHooksRemoveAllPurge {
 		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, rows, purgeSkip)...)
+		addEnterpriseHookLegacyStatePurges(jobs, rows, accounts, purgeSkip)
 	}
 	addEnterpriseHookOwnInstallRestores(jobs, purgeSkip)
 	runs := retryTimedOutWorkers(cmd.Context(), runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism))
@@ -1175,6 +1176,62 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []
 	return out
 }
 
+// addEnterpriseHookLegacyStatePurges ends the job of every eligible account
+// the manifest does not name (the machine policy covered it without a
+// per-user enrollment) with the purge of its ~/.defenseclaw, when that
+// folder holds no DefenseClaw install of the account's own: only what
+// DefenseClaw wrote there, such as the hook script, hook token, hook config
+// and connector backups an earlier failed install left (rel-1-0-2
+// GAP-0576). The purge, as the account, first restores the files those
+// backups belong to. A folder with the account's own per-user install
+// (enterprisehooks.HoldsPerUserInstall), one that is not a plain folder, or
+// one that cannot be read is left as it is, and the uninstall names it
+// (rel-1-0-6 GAP-0178).
+func addEnterpriseHookLegacyStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []enterpriseHookRemoveRow, accounts []enterprisehooks.UnixEligibleAccount, skip map[int]string) {
+	named := map[int]bool{}
+	for _, row := range rows {
+		if row.target.UID != nil {
+			named[*row.target.UID] = true
+		}
+	}
+	index := 0
+	for _, job := range jobs {
+		for _, target := range job.Request.Targets {
+			index = max(index, target.Index+1)
+		}
+	}
+	for _, account := range accounts {
+		if account.UID <= 0 || named[account.UID] {
+			continue
+		}
+		if _, skipped := skip[account.UID]; skipped {
+			continue
+		}
+		job := jobs[account.UID]
+		home := filepath.Clean(strings.TrimSpace(account.Home))
+		if job == nil || job.Account.Home != home || slices.ContainsFunc(job.Request.Targets, func(target enterpriseHookWorkerTarget) bool {
+			return target.Mode == enterpriseHookWorkerModePurge
+		}) {
+			continue
+		}
+		dataDir := filepath.Join(home, ".defenseclaw")
+		if !enterpriseHookLegacyStateOnly(dataDir) {
+			continue
+		}
+		job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
+			Index: index,
+			Mode:  enterpriseHookWorkerModePurge,
+			Options: enterpriseHookWorkerOptions{
+				UserHome: job.Account.Home,
+				OwnerUID: job.Account.UID,
+				OwnerGID: job.Account.GID,
+				DataDir:  dataDir,
+			},
+		})
+		index++
+	}
+}
+
 // addEnterpriseHookOwnInstallRestores ends the job of every account, purge
 // or not, with the put-back of the own per-user install files the
 // enrollment changed (enterprisehooks.RestoreOwnInstall); a job without a
@@ -1203,6 +1260,18 @@ func addEnterpriseHookOwnInstallRestores(jobs map[int]*enterpriseHookWorkerJob, 
 		})
 		index++
 	}
+}
+
+// enterpriseHookLegacyStateOnly reports whether dataDir is a plain folder
+// that holds no per-user DefenseClaw install. The worker checks the folder
+// again as the account before it removes anything.
+func enterpriseHookLegacyStateOnly(dataDir string) bool {
+	info, err := os.Lstat(dataDir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	own, err := enterprisehooks.HoldsPerUserInstall(dataDir)
+	return err == nil && !own
 }
 
 // workerErrorMaxBytes bounds one worker error in the remove-all report.
