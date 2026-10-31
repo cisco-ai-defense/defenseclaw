@@ -81,7 +81,6 @@ func TestR104Loop1WindowsCMDSoleInvocation(t *testing.T) {
 // Dynamic ordinary operands remain allowed. A protected link named inside an
 // interpreter argument is protected named even if its output is ordinary.
 func TestR104Loop1DynamicOperandDecisions(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	for _, tc := range []struct {
 		name, command string

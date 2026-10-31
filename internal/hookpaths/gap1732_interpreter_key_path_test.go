@@ -14,7 +14,6 @@ import (
 // and is a protected target in action mode, as the literal and expanduser
 // forms already are. Code with no such path stays allowed.
 func TestActionInterpreterBuiltKeyPathIsProtected(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	for _, code := range []string{
@@ -31,8 +30,8 @@ func TestActionInterpreterBuiltKeyPathIsProtected(t *testing.T) {
 		`h="` + home + `"; open("%s/.ssh/%s" % (h, "authorized_keys"),"a").write("x")`,
 	} {
 		for _, command := range []string{"python3 -c '" + code + "'", "python3 -c '" + code + "' one two"} {
-			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
-				t.Errorf("ActionCommandDecision(%q) = %q, want protected-target", command, got)
+			if got := posixShellDecision(command, cwd, home); got != "protected-target" {
+				t.Errorf("posixShellDecision(%q) = %q, want protected-target", command, got)
 			}
 		}
 	}
@@ -42,8 +41,8 @@ func TestActionInterpreterBuiltKeyPathIsProtected(t *testing.T) {
 		`perl -e 'my $h="` + home + `"; open(my $f, ">>", $h . "/.ssh/" . "authorized_keys"); print $f "x"'`,
 		`ruby -e 'h="` + home + `"; File.open(File.join(h, ".ssh", "authorized_keys"), "a") { |f| f.write("x") }'`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
-			t.Errorf("ActionCommandDecision(%q) = %q, want protected-target", command, got)
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("posixShellDecision(%q) = %q, want protected-target", command, got)
 		}
 	}
 	for _, command := range []string{
@@ -53,8 +52,8 @@ func TestActionInterpreterBuiltKeyPathIsProtected(t *testing.T) {
 		// an ordinary file.
 		`python3 -c 'from pathlib import Path; print((Path.home() / ".ssh" / "authorized_keys").read_text()); Path("notes.txt").write_text("x")'`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "" {
-			t.Errorf("ActionCommandDecision(%q) = %q, want allow", command, got)
+		if got := posixShellDecision(command, cwd, home); got != "" {
+			t.Errorf("posixShellDecision(%q) = %q, want allow", command, got)
 		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -30,6 +31,11 @@ func r104ReviewProtectedWrite(t *testing.T, command, cwd, home string) []bool {
 	targets, ok := hookpaths.Decode(hookpaths.Resolve(payload))
 	if !ok {
 		t.Fatal("client proof did not decode")
+	}
+	if runtime.GOOS == "windows" {
+		// A Windows hook client sends no write evidence (hookexec
+		// setHookRequestFacts): the managed gateway judges the call alone.
+		targets = nil
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		request := trustedActionRequest{Input: input, Connector: connector,
@@ -61,7 +67,6 @@ func r104ReviewHome(t *testing.T) (home, cwd string) {
 }
 
 func TestR104ReviewFixDecisions(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	for _, dir := range []string{filepath.Join(cwd, "sub"), filepath.Join(home, ".ssh", "sub")} {
 		if err := os.Mkdir(dir, 0o700); err != nil {

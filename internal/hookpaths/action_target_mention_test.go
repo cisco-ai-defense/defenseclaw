@@ -352,7 +352,6 @@ func TestR104WindowsNestedProtectedMention(t *testing.T) {
 }
 
 func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -367,7 +366,7 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 		`stat ~/.ssh`,
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := ActionCommandDecision(command, cwd, home); got != "" {
+			if got := posixShellDecision(command, cwd, home); got != "" {
 				t.Fatalf("directory-only decision = %q, want allow", got)
 			}
 		})
@@ -378,7 +377,7 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 		`cd ~/.ssh && pwd`,
 		`ls ~/.ssh && echo done`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("directory named outside read-only list %q: %q", command, got)
 		}
 	}
@@ -422,9 +421,6 @@ func TestR104LessOutputProtectedMention(t *testing.T) {
 }
 
 func TestR104DirectoryScopedWriteSurvivesDirectoryMentionExemption(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX directory write proof uses native POSIX paths")
-	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	ssh := filepath.Join(home, ".ssh")
@@ -444,15 +440,15 @@ func TestR104DirectoryScopedWriteSurvivesDirectoryMentionExemption(t *testing.T)
 		"cd dirlink && echo marker >> authorized_keys",
 		"env -C dirlink python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"marker\")\nPY",
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			writes, unknown := ShellDirectoryWriteOperands(command, cwd, home, nil, false, false)
 			t.Errorf("directory-scoped write %q decision = %q, directory writes=%v unknown=%v", command, got, writes, unknown)
 		}
 	}
-	if got := ActionCommandDecision("cd dirlink && cat authorized_keys", cwd, home); got != "" {
+	if got := posixShellDecision("cd dirlink && cat authorized_keys", cwd, home); got != "" {
 		t.Errorf("read-only directory command decision = %q", got)
 	}
-	if got := ActionCommandDecision("env -C build python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"marker\")\nPY", cwd, home); got != "" {
+	if got := posixShellDecision("env -C build python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"marker\")\nPY", cwd, home); got != "" {
 		t.Errorf("ordinary directory write decision = %q", got)
 	}
 }

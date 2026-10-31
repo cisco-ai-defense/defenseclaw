@@ -19,7 +19,6 @@ import (
 // Parse uncertainty describes coverage. It does not prove a persistence
 // target. These rows exercise both the gateway-only and client-header routes.
 func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "disklink")); err != nil {
 		t.Fatal(err)

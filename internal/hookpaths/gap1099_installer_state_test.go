@@ -5,7 +5,6 @@ package hookpaths
 
 import (
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -14,9 +13,6 @@ import (
 // a move or rename (ActionStateTargetMention) names them, as it names hooks
 // and policies. A project look-alike is not state.
 func TestActionStateTargetMentionNamesTheSavedInstaller(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX command rows")
-	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	for _, command := range []string{

@@ -697,6 +697,16 @@ var clientLogin = sync.OnceValue(func() string {
 	return name
 })
 
+// hookShellDialect is the shell a hook body's command tool runs, where only
+// the tool tells it: a Bash tool other than Codex's runs a POSIX shell, Git
+// Bash on Windows (as the gateway's private-key read proof reads it).
+func hookShellDialect(connector, tool string) actionfacts.Dialect {
+	if strings.EqualFold(strings.TrimSpace(tool), "Bash") && !strings.EqualFold(strings.TrimSpace(connector), "codex") {
+		return actionfacts.DialectPOSIX
+	}
+	return ""
+}
+
 // ResolveConnector is Resolve for a hook body of connector, read as the
 // gateway's profile for that connector reads it. surface and event are the
 // hook command's --hook-surface value and bound event, the values the hook
@@ -949,7 +959,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					command = twin
 				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
-					unprovenReason = ActionCommandAuditReason(command, cwd, home)
+					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
 				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
 					protectedDecision = actionConcreteProtectedWrite(command, cwd, home)
