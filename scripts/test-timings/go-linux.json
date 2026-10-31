@@ -1755,6 +1755,7 @@
    "TestR105WindowsPowerShellStateWriteSpellings": 7.8,
    "TestR106CopyBeforeARuntimeWordCopyStaysAllowed": 47.4,
    "TestR106DirectoryStackCopyAfterPushdStaysAllowed": 28.4,
+   "TestR106ManagedPrivateKeyReadMatchesPerUser": 40.0,
    "TestR106MoveOntoKeysLinkAfterCDReplacesTheLink": 18.7,
    "TestRateLimitMiddleware": 4.2,
    "TestRawForwardNonStreamingInspectsToolCalls": 2.1,
