@@ -315,8 +315,9 @@ How the keys combine:
   not a local account `alice` that someone created on the host: that account
   is another person and gets the next assignment or the default profile.
   Select a local account by its uid or SID, or as `.\alice`. Requests and
-  `guardrail profile explain` build the user the same way, and `status`,
-  `verify` and the gateway log warn (`profile_assignment_unmatched`) when a
+  `guardrail profile explain` build the user the same way, and `config validate`,
+  `ensure`, `status`, `verify` and the gateway log warn
+  (`profile_assignment_unmatched`) when a
   bare entry names a local account of the host. A name whose domain the
   directory does not confirm, such as an `nss_ldap` or plain LDAP account
   named `bob@corp.example.com` or `CORP\bob`, is not matched by name at all,
