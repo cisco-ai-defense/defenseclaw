@@ -15,7 +15,10 @@ package hookexec
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +49,11 @@ func activationSocket(t *testing.T, path string, gone bool) {
 
 func activationFailureRun(t *testing.T, socket, failMode string) runResult {
 	t.Helper()
+	return activationFailureRunWith(t, socket, failMode, time.Now(), nil)
+}
+
+func activationFailureRunWith(t *testing.T, socket, failMode string, startedAt time.Time, client *http.Client) runResult {
+	t.Helper()
 	previous := standaloneGatewayServiceProbe
 	standaloneGatewayServiceProbe = func(context.Context) (gatewayServiceState, error) {
 		return gatewayServiceState{Active: "inactive", Sub: "dead"}, nil
@@ -67,7 +75,8 @@ func activationFailureRun(t *testing.T, socket, failMode string) runResult {
 		ManagedStandalone: true,
 		ManagedUnixSocket: socket,
 		ManagedServiceUID: os.Getuid(),
-		StartedAt:         time.Now(),
+		StartedAt:         startedAt,
+		HTTPClient:        client,
 	})
 	return runResult{stdout: out.String(), stderr: errb.String(), code: code}
 }
@@ -107,5 +116,51 @@ func TestManagedDroppedCallOnASocketThatStaysFailsClosedInOpenMode(t *testing.T)
 	if result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
 		strings.Contains(result.stdout+result.stderr, managedGatewayNotRunningReason) {
 		t.Fatalf("stale socket: exit %d stdout=%q stderr=%q, want a closed deny", result.code, result.stdout, result.stderr)
+	}
+}
+
+// rel-1-0-6 GAP-0216: on a slow host the last try of an outage call, the one
+// that proves the hook socket missing in its trusted folder, can end at or
+// after the restart budget, when the restart watch has already ended the
+// call as restarting (CI macOS darwin paths: the open mode denied as
+// "restarting"). The proof decides: the call follows the administrator's
+// mode, open allows and closed denies, both with the not-running reason.
+func TestManagedSocketProvenMissingAfterTheRestartWatchFiredFollowsTheAdminMode(t *testing.T) {
+	previousInterval := gatewayStartWatchInterval
+	gatewayStartWatchInterval = 10 * time.Millisecond
+	t.Cleanup(func() { gatewayStartWatchInterval = previousInterval })
+	for _, tc := range []struct {
+		mode      string
+		wantAllow bool
+	}{{"open", true}, {"closed", false}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			socket := filepath.Join(shortSocketDir(t), "hook.sock")
+			causes := make(chan error, 4)
+			// The try proves the socket missing only once the restart
+			// watch ended the call: a slow host, deterministically.
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				<-r.Context().Done()
+				causes <- context.Cause(r.Context())
+				return nil, standaloneGatewayStoppedError(fmt.Errorf("hook socket: %w: %w", errStandaloneSocketMissing, os.ErrNotExist))
+			})}
+			// Most of the restart budget is spent before the call: the
+			// watch ends it within a few hundred milliseconds.
+			startedAt := time.Now().Add(-gatewayRestartBudget + 300*time.Millisecond)
+			result := activationFailureRunWith(t, socket, tc.mode, startedAt, client)
+			select {
+			case cause := <-causes:
+				if !errors.Is(cause, errGatewayRestarting) {
+					t.Fatalf("mode %s: the try ended with cause %v, want the restart watch (%v)", tc.mode, cause, errGatewayRestarting)
+				}
+			default:
+				t.Fatalf("mode %s: the hook never tried the gateway: stdout=%q stderr=%q", tc.mode, result.stdout, result.stderr)
+			}
+			out := result.stdout + result.stderr
+			denied := strings.Contains(result.stdout, `"permissionDecision":"deny"`)
+			if result.code != 0 || denied == tc.wantAllow || !strings.Contains(out, managedGatewayNotRunningReason) {
+				t.Fatalf("mode %s: exit %d stdout=%q stderr=%q, want allow=%t with %s",
+					tc.mode, result.code, result.stdout, result.stderr, tc.wantAllow, managedGatewayNotRunningReason)
+			}
+		})
 	}
 }

@@ -1124,8 +1124,12 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 		case errors.Is(cause, errGatewayStartFailing):
 			reason = errGatewayStartFailing.Error()
-		case errors.Is(cause, errGatewayRestarting):
+		case errors.Is(cause, errGatewayRestarting) && !errors.Is(err, errManagedGatewayNotRunning):
 			// A restart does not prove that the gateway service is stopped.
+			// A last try that proved the hook socket missing in its trusted
+			// folder does, even when it ended after the restart budget on a
+			// slow host: that call follows the administrator's mode like
+			// every other call of the outage (rel-1-0-6 GAP-0216).
 			return failUnreachable(opts, sp, "closed", managedGatewayRestartingReason)
 		}
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
