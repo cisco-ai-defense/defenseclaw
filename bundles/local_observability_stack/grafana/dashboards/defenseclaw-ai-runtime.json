@@ -38,8 +38,10 @@
         },
         "definition": "label_values({service_name=\"defenseclaw\"}, host_name)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\"}, host_name)",
-          "refId": "LokiVariableQueryEditor-VariableQuery"
+          "label": "host_name",
+          "refId": "LokiVariableQueryEditor-VariableQuery",
+          "stream": "{service_name=\"defenseclaw\"}",
+          "type": 1
         },
         "refresh": 2,
         "sort": 1,

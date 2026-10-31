@@ -1397,8 +1397,8 @@ def _loki_queries(node: object, datasource: object = None):
         for key, value in node.items():
             if key == "expr" and isinstance(value, str) and is_loki:
                 yield node.get("refId", "?"), value
-            elif key == "query" and isinstance(value, dict) and is_loki and isinstance(value.get("query"), str):
-                yield node.get("name", "?"), value["query"]
+            elif key == "query" and isinstance(value, dict) and is_loki and "stream" in value:
+                yield node.get("name", "?"), f"label_values({value['stream']}, {value['label']})"
             else:
                 yield from _loki_queries(value, datasource)
     elif isinstance(node, list):
@@ -1442,6 +1442,39 @@ BODY_FIELD_TEXT_BOXES = {
 _LABEL_VALUES = re.compile(r"^label_values\((\{[^{}|]*\}), ([A-Za-z_][A-Za-z0-9_]*)\)$")
 
 
+def _loki_variable_query(selector: str, label: str) -> dict[str, object]:
+    # The query Grafana's own Loki variable editor saves: type 1 is
+    # LokiVariableQueryType.LabelValues. Grafana 11 reads only this form.
+    return {
+        "label": label,
+        "refId": "LokiVariableQueryEditor-VariableQuery",
+        "stream": selector,
+        "type": 1,
+    }
+
+
+def test_loki_boxes_use_the_query_form_grafana_runs() -> None:
+    # GAP-0221: a Loki variable saved as {"query": "label_values(...)"} makes
+    # Grafana 11.3 send no request at all, so the Environment box on the
+    # Sandboxes board listed only All although Loki indexed local-dev. Only the
+    # structured form (type, label, stream) is run. `definition` keeps the text
+    # for the inventory scripts and the variable editor.
+    checked = 0
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        board = json.loads(path.read_text(encoding="utf-8"))
+        for variable in board.get("templating", {}).get("list", []):
+            if (variable.get("datasource") or {}).get("type") != "loki" or variable.get("type") != "query":
+                continue
+            query = variable["query"]
+            assert isinstance(query, dict), f"{path.name} ${variable['name']}: query must be an object"
+            assert set(query) == {"type", "label", "stream", "refId"}, f"{path.name} ${variable['name']}"
+            assert query["type"] == 1, f"{path.name} ${variable['name']}: type 1 lists label values"
+            assert query["refId"] == "LokiVariableQueryEditor-VariableQuery"
+            assert variable["definition"] == f"label_values({query['stream']}, {query['label']})"
+            checked += 1
+    assert checked == 6
+
+
 def test_loki_boxes_list_index_labels_with_a_matcher_only_selector() -> None:
     # Grafana sends label_values(selector, label) to Loki's label API. Loki
     # refuses a selector with a pipeline (HTTP 400, "only label matchers are
@@ -1453,11 +1486,11 @@ def test_loki_boxes_list_index_labels_with_a_matcher_only_selector() -> None:
         for variable in board.get("templating", {}).get("list", []):
             if (variable.get("datasource") or {}).get("type") != "loki" or variable.get("type") != "query":
                 continue
-            query = variable["query"]["query"] if isinstance(variable["query"], dict) else variable["query"]
+            query = variable["definition"]
             match = _LABEL_VALUES.match(query)
             assert match, f"{path.name} ${variable['name']}: {query} is not label_values(<matchers>, <label>)"
             selector, label = match.groups()
-            assert variable.get("definition") == query, f"{path.name} ${variable['name']}"
+            assert variable["query"] == _loki_variable_query(selector, label), f"{path.name} ${variable['name']}"
             assert label in SHIPPED_LOKI_INDEX_LABELS, f"{path.name} ${variable['name']}: {label}"
             assert set(_MATCHER.findall(selector)) <= SHIPPED_LOKI_INDEX_LABELS, f"{path.name} ${variable['name']}"
             checked += 1
@@ -1506,14 +1539,14 @@ def test_sandbox_board_filters_environment_after_the_selector() -> None:
             assert '{service_name="defenseclaw"} | deployment_environment_name' in query, where
     boxes = {variable["name"]: variable for variable in board["templating"]["list"]}
     selector = 'service_name="defenseclaw", deployment_environment_name=~"$environment"'
-    assert boxes["environment"]["query"]["query"] == (
-        'label_values({service_name="defenseclaw"}, deployment_environment_name)'
+    assert boxes["environment"]["query"] == _loki_variable_query(
+        '{service_name="defenseclaw"}', "deployment_environment_name"
     )
-    assert boxes["host"]["query"]["query"] == f"label_values({{{selector}}}, host_name)"
-    assert boxes["sandbox"]["query"]["query"] == (
-        f'label_values({{{selector}, host_name=~"$host"}}, defenseclaw_sandbox_name)'
+    assert boxes["host"]["query"] == _loki_variable_query(f"{{{selector}}}", "host_name")
+    assert boxes["sandbox"]["query"] == _loki_variable_query(
+        f'{{{selector}, host_name=~"$host"}}', "defenseclaw_sandbox_name"
     )
-    assert boxes["os"]["query"]["query"] == f'label_values({{{selector}, host_name=~"$host"}}, os_type)'
+    assert boxes["os"]["query"] == _loki_variable_query(f'{{{selector}, host_name=~"$host"}}', "os_type")
 
 
 def test_live_inventory_does_not_report_non_finite_samples_as_zero() -> None:
