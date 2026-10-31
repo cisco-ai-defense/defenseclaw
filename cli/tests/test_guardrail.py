@@ -3849,11 +3849,22 @@ class BalancedPermissiveNoisePosture(unittest.TestCase):
                 commands = _load_profile_rules(profile, "commands.yaml")
                 paths = _load_profile_rules(profile, "sensitive-paths.yaml")
 
-                # Generic installer pipelines are off in both balanced packs.
+                # Generic installer pipelines: permissive keeps them off;
+                # default detects them at HIGH with the strict rule body. The
+                # gateway owner is alert-only, so the call runs (GAP-0081).
+                strict = _load_profile_rules("strict", "commands.yaml")
                 for rule_id in ("CMD-PIPE-CURL", "CMD-PIPE-WGET"):
-                    self.assertEqual(commands[rule_id]["expression"], "false")
-                    self.assertEqual(commands[rule_id]["pattern"], "a^")
                     self.assertEqual(commands[rule_id]["severity"], "HIGH")
+                    if profile == "permissive":
+                        self.assertEqual(commands[rule_id]["expression"], "false")
+                        self.assertEqual(commands[rule_id]["pattern"], "a^")
+                    else:
+                        self.assertNotEqual(commands[rule_id]["expression"], "false")
+                        self.assertNotEqual(commands[rule_id]["pattern"], "a^")
+                        self.assertIn(rule_id.rsplit("-", 1)[1].lower(), commands[rule_id]["expression"])
+                        # POSIX only: PowerShell web cmdlets keep CMD-WIN-IWR-IEX.
+                        self.assertNotIn("invoke-webrequest", commands[rule_id]["expression"])
+                        self.assertIn(commands[rule_id]["pattern"].replace("(?i)", ""), strict[rule_id]["pattern"])
                 self.assertEqual(paths["PATH-ENV-FILE"]["expression"], "false")
                 self.assertEqual(paths["PATH-ENV-FILE"]["pattern"], "a^")
 
