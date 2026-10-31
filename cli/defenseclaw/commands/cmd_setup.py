@@ -6332,6 +6332,13 @@ def _check_connector_version_supported_for_setup(
     contract = compatibility.contract.contract_id if compatibility.contract else "none"
 
     if not installed:
+        from defenseclaw.agent_selection import agent_did_not_run_message, probe_error_means_agent_did_not_run
+
+        # Discovery found the agent but it failed its version probe: name that
+        # and its step, not "not installed" (GAP-2479).
+        did_not_run = ""
+        if probe_error_means_agent_did_not_run(probe_error):
+            did_not_run = agent_did_not_run_message(label, probe_error)
         # Kiro is not version-gated, but nothing proves a protected Kiro form
         # on this host, so action mode refuses it like a gated connector.
         if action_mode and (compatibility.status != STATUS_NOT_GATED or connector == "kiro") and not allow_drift:
@@ -6352,11 +6359,14 @@ def _check_connector_version_supported_for_setup(
                     )
                 return True
             if emit:
+                if did_not_run:
+                    ux.err(f"{did_not_run}; refusing action-mode hook setup.")
+                    return False
                 ux.err(f"{label}: connector was not detected locally; refusing action-mode hook setup.")
                 ux.subhead("Install the connector locally, or use observe mode until it is available.")
             return False
         if emit:
-            ux.warn(_connector_not_detected_message(label))
+            ux.warn(did_not_run or _connector_not_detected_message(label))
         return True
 
     if compatibility.status == STATUS_KNOWN:
