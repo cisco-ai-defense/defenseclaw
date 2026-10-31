@@ -993,3 +993,46 @@ func TestUninstallKeepsTheRecordWhenAStateFolderStays(t *testing.T) {
 		t.Fatalf("the rerun did not finish the removal (noop %v)", retry.Noop)
 	}
 }
+
+// GAP-1440: an uninstall that could not remove a machine-state folder failed
+// after it had removed the binaries of a payload install (the CLI with
+// them), so it could not be rerun. A state folder the uninstall cannot empty
+// is found before anything changes: the binaries, the deployment record and
+// the config stay, and the rerun after the cause is cleared finishes.
+func TestUninstallChangesNothingWhileAStateFolderCannotBeEmptied(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can remove the entries of a read-only folder")
+	}
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	stuck := filepath.Join(h.env.P(h.env.Layout.DataDir), "stuck")
+	if err := os.MkdirAll(stuck, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stuck, "file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stuck, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(stuck, 0o755) })
+	gateway := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
+	failed := h.run(Options{Action: ActionUninstall})
+	requireError(t, failed, codeUninstall)
+	got := messagesOf(failed.Errors, codeUninstall)
+	if !strings.Contains(got, filepath.Join(h.env.Layout.DataDir, "stuck")) || !strings.Contains(got, "nothing was changed") ||
+		!strings.Contains(got, h.env.lifecycleCommand(ActionUninstall)) {
+		t.Fatalf("the refusal does not name the folder and the rerun: %s", got)
+	}
+	if !exists(gateway) || !exists(h.env.deploymentPath()) || !exists(h.env.P(h.env.Layout.ConfigPath)) {
+		t.Fatal("the failed uninstall removed the binaries, the deployment record or the config")
+	}
+	if err := os.Chmod(stuck, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	retry := h.run(Options{Action: ActionUninstall})
+	requireOK(t, retry)
+	if retry.Noop || exists(gateway) || exists(h.env.deploymentPath()) || exists(h.env.P(h.env.Layout.DataDir)) {
+		t.Fatalf("the rerun did not finish the removal (noop %v)", retry.Noop)
+	}
+}
