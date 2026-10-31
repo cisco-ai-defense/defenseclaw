@@ -494,8 +494,12 @@ close this limit. Keys, recipes and what people see are in
 
 On a computer with `/etc/defenseclaw/managed-runtime.json` the per-user product
 refuses to run: `install.sh` refuses and changes nothing, `defenseclaw upgrade`
-refuses, and the per-user gateway refuses to start. Nothing migrates a per-user
-install. Before you deploy, have each user run
+refuses, and the per-user gateway refuses to start. Installers from 0.8.x predate
+the managed marker and do not check for it, so a user can still install one after
+you deploy; the managed gateway keeps enforcing and the per-user copy cannot start
+its own gateway. If such an installer says "existing installation detected" and
+points to the upgrade resolver, that text is not meant for managed computers.
+Nothing migrates a per-user install. Before you deploy, have each user run
 `defenseclaw uninstall --binaries --yes` (add `--all` to delete `~/.defenseclaw`;
 [Uninstall](/docs/get-started/download)).
 
