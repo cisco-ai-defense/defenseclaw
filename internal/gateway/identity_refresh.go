@@ -237,6 +237,13 @@ func identityRefreshConnectors(set *guardrailProfileSet) []string {
 	return connectors
 }
 
+// identityRefreshReread re-reads key's facts in the cache hook calls read
+// with a lookup that starts now (identityCache.reread), after the OS answers
+// it takes are made current (identityRefreshPrepare). Tests replace it.
+var identityRefreshReread = func(key string) {
+	peerDirectoryCache().reread(identityRefreshPrepare(key), identityExplainWait)
+}
+
 // identityRefreshRetryDelay is how long a failed lookup waits before its one
 // retry: past identityExplainFresh, so the retry starts a lookup of its own.
 // Right after an OS cache flush a directory account resolves cold (SSSD asks
@@ -248,6 +255,7 @@ var identityRefreshRetryDelay = identityExplainFresh + 500*time.Millisecond
 func refreshIdentity(set *guardrailProfileSet, key string, connectors []string) (account identityRefreshAccount, changes []identityRefreshChange, failure string, pending bool) {
 	account.UserID = key
 	before, _, hadFacts := cachedDirectoryFacts(key)
+	identityRefreshReread(key)
 	// A lookup that failed while older facts are cached still answers with
 	// those facts; it is a failure too: nothing was re-read.
 	lookup := func() (profileSubject, bool) {

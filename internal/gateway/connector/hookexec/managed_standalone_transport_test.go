@@ -183,6 +183,20 @@ func TestStandaloneUnenrolledAccountGetsEnrollmentDecision(t *testing.T) {
 	}
 }
 
+// identity-round GAP-1181: an account the policy excludes is not told to
+// wait for its enrollment and try again; it is told the policy excludes it.
+func TestStandaloneExcludedAccountIsToldThePolicyExcludesIt(t *testing.T) {
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
+	startStandaloneHookServer(t, socket, `{"enrollment":"excluded","error":"forbidden","reason":"enterprise_managed_uid_unregistered"}`, http.StatusForbidden)
+	result := standaloneRun(t, socket, os.Getuid())
+	if result.code != 0 || !strings.Contains(result.stdout, "policy excludes this account on this computer") ||
+		!strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
+		strings.Contains(result.stdout, "within about five minutes") || strings.Contains(result.stdout, "try again then") ||
+		strings.Contains(result.stdout+result.stderr, "HTTP 403") {
+		t.Fatalf("excluded refusal: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
 // GAP-0556: root's call under enrollment.root: deny said "the DefenseClaw
 // gateway returned an answer DefenseClaw could not use". It names the policy
 // and the code.

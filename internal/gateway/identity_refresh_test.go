@@ -80,10 +80,50 @@ func identityRefreshTestCache(t *testing.T, groups *[]string) (*identityDirector
 		return useridentity.DirectoryFacts{Groups: append([]string(nil), (*groups)...), ResolvedAt: clock}, nil
 	})
 	cache.now = func() time.Time { return clock }
-	saved := identityRefreshAccounts
+	saved, savedReread := identityRefreshAccounts, identityRefreshReread
 	identityRefreshAccounts = cache.accounts
-	t.Cleanup(func() { identityRefreshAccounts = saved })
+	identityRefreshReread = func(key string) { cache.reread(key, time.Second) }
+	t.Cleanup(func() { identityRefreshAccounts, identityRefreshReread = saved, savedReread })
 	return cache, &clock
+}
+
+// A refresh run seconds after a group change, while explain's lookup from
+// before the change is still fresh enough for explain to reuse, re-reads the
+// account anyway: it lists the change and the next hook call gets the new
+// profile (rel-1-0-6 GAP-0143).
+func TestIdentityRefreshRereadsAChangeMadeSecondsAfterTheLastLookup(t *testing.T) {
+	groups := []string{"dc-sbx-devs"}
+	cache, _ := identityRefreshTestCache(t, &groups)
+	api, set := identityRefreshTestAPI(t)
+	if _, ok := cache.get("1201", true); !ok {
+		t.Fatal("seeding the cache failed")
+	}
+	explainProfileFromCache(t, cache, "1201", "eng2")
+	// An explain right before the change; the clock does not move, so its
+	// lookup is inside identityExplainFresh when the refresh runs.
+	if _, err := explainDirectoryFacts(cache, "1201"); err != nil {
+		t.Fatal(err)
+	}
+	groups = []string{"dc-sbx-contractors"}
+	status, answer, refusal := identityRefreshCall(t, api, `{"user":"1201"}`)
+	if status != http.StatusOK {
+		t.Fatalf("refresh status %d %v", status, refusal)
+	}
+	if answer.Refreshed != 1 || answer.Changed != 1 || len(answer.Changes) != 1 ||
+		answer.Changes[0].PreviousProfile != "engineering" || answer.Changes[0].Profile != "contractors" {
+		t.Fatalf("answer %+v: want eng2 listed engineering -> contractors", answer)
+	}
+	if got := hookProfileOf(t, set, cache, "1201", "eng2"); got != "contractors" {
+		t.Fatalf("hook profile after the refresh = %q, want contractors", got)
+	}
+	// An account the cache holds nothing for gets no lookup of its own.
+	cache.reread("1299", time.Second)
+	if _, _, ok := cache.peek("1299"); ok {
+		t.Fatal("reread of an unknown account cached facts")
+	}
+	if keys, _ := cache.accounts(0); len(keys) != 1 {
+		t.Fatalf("cache accounts %v after reread of an unknown account, want only 1201", keys)
+	}
 }
 
 // The refresh re-reads every cached account, lists the one whose

@@ -3396,6 +3396,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 		}
 		// dirEntries: dir path -> manifest entries inside that dir.
 		dirEntries := map[string][]pkgManifestEntry{}
+		realRoot := macOSResolvedScanRoot(root)
 		walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			// Cancellation check on every entry — large monorepo
 			// walks otherwise block shutdown for tens of seconds.
@@ -3428,7 +3429,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 			}
 			if d.IsDir() {
 				if path != root && (shouldSkipDiscoveryDir(d.Name()) || modelPathInSet(path, ownDataDirs)) ||
-					s.macOSTCCSkipped(path) {
+					s.macOSTCCSkipped(path) || s.macOSTCCSkippedBelow(root, realRoot, path) {
 					return filepath.SkipDir
 				}
 				return nil

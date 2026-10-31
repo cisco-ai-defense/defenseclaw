@@ -146,14 +146,23 @@ func resolveWindowsDirectoryFacts(
 		// Linux; LookupAccountSid gives only the NetBIOS name.
 		facts.Directory = DirectoryActiveDirectory
 		facts.Domain = strings.ToLower(domain)
-		if upn != "" && strings.EqualFold(provider, entraProviderName) {
-			// A hybrid user signed in to Entra: the identity store has the
-			// cloud UPN, which is the synced AD UPN.
-			facts.UPN = upn
+		hybrid := upn != "" && strings.EqualFold(provider, entraProviderName)
+		if hybrid {
+			// A hybrid user signed in to Entra: the device's tenant is theirs.
 			facts.TenantID = join.TenantID
-			facts.Source = SourceWindowsIdentityStore
-		} else if adUPN != nil && account != "" {
+		}
+		// The domain controller's answer (TranslateNameW) is the account's
+		// UPN. The identity store keeps the cloud UPN of the user's last Entra
+		// sign-in, the synced AD UPN only until that is renamed; it came first,
+		// so the old UPN went on selecting the old users assignment after the
+		// rename and after `enterprise identity refresh` (identity-round
+		// GAP-1238). It stands in only while the directory has not answered.
+		if adUPN != nil && account != "" {
 			facts.UPN = NormalizeUPN(adUPN(sid, domain+`\`+account))
+		}
+		if facts.UPN == "" && hybrid {
+			facts.UPN = upn
+			facts.Source = SourceWindowsIdentityStore
 		}
 		if join.DNSDomain != "" && strings.EqualFold(domain, join.ADDomain) {
 			// LSA identifies the joined AD domain, even when the computer
@@ -302,6 +311,21 @@ func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
 		return c.entries[key].upn
 	case <-timer.C:
 		return entry.upn
+	}
+}
+
+// expire makes the cached answers of sid due, so its next lookup starts a
+// translation; a translation already running answers that lookup. The last
+// good answer stays until a translation replaces it.
+func (c *adUPNCache) expire(sid string) {
+	prefix := strings.ToUpper(strings.TrimSpace(sid)) + "\x00"
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, entry := range c.entries {
+		if strings.HasPrefix(key, prefix) && entry.done == nil {
+			entry.expires = time.Time{}
+			c.entries[key] = entry
+		}
 	}
 }
 
