@@ -253,8 +253,9 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 					t.Fatalf("private fixture with the system PowerShell outside C:\\Windows: %q", got)
 				}
 				render(filepath.Join(base, "missing", "powershell.exe"))
-				if got := check(); !strings.HasPrefix(got, "rejected:") {
-					t.Fatalf("private fixture with a missing system PowerShell: %q, want rejected", got)
+				// A PowerShell that does not start says so, not DACL (rel-1-0-6 GAP-0025).
+				if got := check(); !strings.HasPrefix(got, "rejected:") || !strings.Contains(got, "did not start for the per-user gateway helper ACL check") {
+					t.Fatalf("private fixture with a missing system PowerShell: %q, want rejected because PowerShell did not start", got)
 				}
 				render(windowsSystemPowerShellExe())
 				if tc.changes != nil {
@@ -270,8 +271,9 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 					if tc.trusted && got != "trusted" {
 						t.Fatalf("%s%s: %q, want trusted", tc.name, run.name, got)
 					}
-					if !tc.trusted && !strings.HasPrefix(got, "rejected:") {
-						t.Fatalf("%s%s: %q, want rejected", tc.name, run.name, got)
+					// An owner or writer the script finds keeps the DACL refusal (GAP-0025).
+					if !tc.trusted && (!strings.HasPrefix(got, "rejected:") || !strings.Contains(got, "untrusted Windows owner or DACL")) {
+						t.Fatalf("%s%s: %q, want rejected as an untrusted owner or DACL", tc.name, run.name, got)
 					}
 				}
 			})

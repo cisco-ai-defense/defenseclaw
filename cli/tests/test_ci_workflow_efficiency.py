@@ -166,7 +166,12 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     race = "go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m "
     assert workflow.count("go test -race") == 0
     assert workflow.count(race) == 3
-    assert workflow.count("python3 scripts/go_test_report.py --timings") == 3
+    # The three Linux race jobs and the darwin connector parts.
+    assert workflow.count("python3 scripts/go_test_report.py --timings") == 4
+    assert workflow.count("label: macos-latest darwin connector ") == 4
+    assert "--timings scripts/test-timings/go-darwin.json \\\n            --shard-count 4 \\" in workflow
+    assert "name: go-test-timings-darwin-connector-${{ matrix.shard }}" in workflow
+    assert "DC_TEST_NATIVE_GATEWAY" in workflow
     assert "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]" in workflow
     assert 'test "$AUDIT_RESULT" = success' in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow

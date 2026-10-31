@@ -388,9 +388,17 @@ def uninstall_cmd(
         ux.subhead("Cancelled.")
         raise SystemExit(1)
 
+    from defenseclaw import opencode_service
+
+    # Found before the teardown: --binaries removes the CLI's own files.
+    opencode_binary = opencode_service.account_binary() if "opencode" in plan.connectors else ""
     gateway_ports = _configured_gateway_ports()
     _execute_plan(plan)
     _remove_marked_native_otel_left(gateway_ports)
+    if opencode_binary:
+        # OpenCode V2's background server kept the plugin it loaded (rel-1-0-6 GAP-0026).
+        outcome = opencode_service.restart_if_running(opencode_binary)
+        opencode_service.report(outcome, what="drops the DefenseClaw plugin")
     if plan.connectors:
         # The plan said so; the end says it again, once it is true (GAP-0255).
         ux.warn("Close any agent session still open: it runs without DefenseClaw's hooks now.")

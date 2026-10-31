@@ -85,17 +85,24 @@ def _validate_from_version(_ctx, _param, value):
 # cannot guard the agents here (rel-1-0-6 GAP-0028), before anything changes.
 @click.option("--check-rollback-to", "rollback_to", default=None, metavar="X.Y.Z", hidden=True,
               callback=_validate_from_version)
+# install.sh / install.ps1 for an older release (--version), the same check
+# for a downgrade, which keeps this install's configuration (rel-1-0-6 GAP-0128).
+@click.option("--check-downgrade-to", "downgrade_to", default=None, metavar="X.Y.Z", hidden=True,
+              callback=_validate_from_version)
 def migrate_cmd(
-    check, from_version, data_dir, openclaw_home, gateway_binary, as_json, reselect_only, rollback_to
+    check, from_version, data_dir, openclaw_home, gateway_binary, as_json, reselect_only, rollback_to,
+    downgrade_to,
 ) -> None:
     """Bring config and data to this version's schema."""
     from defenseclaw.migrations import ConfigTooNewError, MigrationError, display_step_name, migrate
 
-    if rollback_to:
+    if rollback_to or downgrade_to:
         from defenseclaw.migrations import check_opencode_rollback
 
         try:
-            check_opencode_rollback(data_dir or _default_data_dir(), rollback_to)
+            check_opencode_rollback(
+                data_dir or _default_data_dir(), downgrade_to or rollback_to, downgrade=bool(downgrade_to)
+            )
         except MigrationError as exc:
             ux.err(str(exc))
             raise SystemExit(EXIT_FAILED) from None

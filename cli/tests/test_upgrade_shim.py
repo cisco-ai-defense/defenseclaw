@@ -1010,6 +1010,53 @@ def test_downgrade_sets_aside_the_connectors_block(
     }
 
 
+
+def test_a_downgrade_that_would_leave_opencode_v2_unguarded_is_refused_before_anything_changes(
+    home: Path,
+    execs: list[list[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """rel-1-0-6 GAP-0128: 'upgrade --version 1.0.5' runs the check 'defenseclaw rollback' runs."""
+    from defenseclaw import migrations
+
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    monkeypatch.setattr(migrations, "_opencode_configured", lambda data_dir: seen.append(("configured", data_dir)) or True)
+    monkeypatch.setattr(migrations, "_installed_opencode", lambda _data_dir: ("opencode v2.2.5", "/u/.npm/bin/opencode"))
+    (home / "config.yaml").write_text(_DOMAINS_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.5")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.5", "--yes"]) == 1
+
+    assert execs == []
+    assert seen == [("configured", str(home))]
+    assert (home / "config.yaml").read_text(encoding="utf-8") == _DOMAINS_CONFIG
+    assert not _set_aside(home).exists()
+    err = capsys.readouterr().err
+    assert "DefenseClaw 1.0.5 guards OpenCode V1 only and the OpenCode here is V2 (opencode v2.2.5)" in err
+    assert "opencode-ai@1.18" in err and "Nothing was changed." in err
+    assert "Installing DefenseClaw" not in err
+
+    # The same OpenCode V2 and a release that guards it: no refusal.
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.7")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.6")))
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.6", "--yes"]) == 0
+    assert len(execs) == 1
+
+
+def test_a_downgrade_goes_on_when_the_check_cannot_load(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The way back from a broken install stays open (the shim runs before the rest of the CLI)."""
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    monkeypatch.setitem(sys.modules, "defenseclaw.migrations", None)
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.5")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.5", "--yes"]) == 0
+    assert len(execs) == 1
+
 @pytest.mark.parametrize(("installed", "target"), [("1.0.3", "1.0.4"), ("1.0.4", "1.0.3")])
 def test_upgrade_keeps_keys_the_target_release_has(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: str, target: str

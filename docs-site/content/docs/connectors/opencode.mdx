@@ -45,7 +45,7 @@ defenseclaw setup opencode --mode action  # reject blocked calls before they run
 
 A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell.
 
-**Restart OpenCode afterwards, including its background server.** OpenCode V2 keeps a background server running after its window closes, and that server keeps the plugin it loaded. Run `opencode service restart` (or `opencode service stop`) after setup, a mode change, an upgrade or an uninstall. Until OpenCode starts, `defenseclaw status` shows it as `IDLE`, which is normal.
+**OpenCode's background server.** OpenCode V2 keeps a background server running after its window closes, and that server keeps the plugin it loaded. On Linux and macOS, `defenseclaw setup opencode` (also with `--mode`) and `defenseclaw uninstall` restart your account's own server when it runs, and say so; an open OpenCode window reconnects to it. After an upgrade, on Windows, or when setup says it could not, run `opencode service restart` yourself. Until OpenCode starts, `defenseclaw status` shows it as `IDLE`, which is normal.
 
 ### Check it
 
@@ -73,6 +73,7 @@ Earlier releases guard OpenCode V1 only, and OpenCode V2 cannot load their plugi
 - **OpenCode V1 still installed:** `defenseclaw upgrade` (and the one-line installer) stops before it changes anything and says to install V2. Your current DefenseClaw keeps guarding OpenCode V1. Install V2, then upgrade again. To upgrade without OpenCode, run `defenseclaw setup remove opencode` first.
 - **OpenCode V2 installed:** the upgrade selects V2 and writes the V2 plugin; no setup run is needed. Restart OpenCode's background server afterwards.
 - **Rollback:** `defenseclaw rollback` to 1.0.5 or earlier refuses while OpenCode V2 is installed and set up, because that release cannot guard it and its gateway does not start. The rollback restores that release's own configuration, so put OpenCode V1 back first to roll back, or stay on this release.
+- **Downgrade:** `defenseclaw upgrade --version 1.0.5` (or earlier, and the installers with an older `--version`) is refused the same way, before anything changes. A downgrade keeps this install's configuration, so `defenseclaw setup remove opencode` first is the other way through; OpenCode then runs without DefenseClaw.
 - Install V2 and upgrade DefenseClaw together: DefenseClaw 1.0.5 still lists OpenCode as protected when V2 is installed, but V2 does not load its plugin.
 
 ## What it can block or ask
@@ -142,6 +143,7 @@ The image pins OpenCode 2.1.4 from the official `@opencode/cli` package, with pa
 - There is no native approval: a confirm verdict runs with a notice.
 - Running OpenCode with `--pure` turns external plugins off, and DefenseClaw sees nothing.
 - The default background-server port (49374) is shared by every account on a computer: on a shared host, give each account its own with `opencode service set port <port>`.
+- OpenCode keeps runtime files in `/tmp/opencode`, which belongs to the first account that ran it; another account's OpenCode then fails with `EACCES`. Point `TMPDIR` at a folder of your own before you start OpenCode (for example `export TMPDIR=$HOME/.cache/tmp`, after `mkdir -p` of it). Both are OpenCode's own behavior.
 
 ## Disable
 
