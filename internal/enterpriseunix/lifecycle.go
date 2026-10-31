@@ -4131,6 +4131,13 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			// as an unmanaged layout. With it, rerunning uninstall finishes
 			// the removal and ensure restores the deployment.
 			err = fmt.Errorf("%w; the deployment record is kept: fix the cause and rerun uninstall (or run ensure to restore the deployment)", err)
+		} else if record != nil && exists(env.deploymentPath()) {
+			// The state removal itself failed on what the pre-check cannot
+			// see (an append-only file, a race, a full disk, a busy mount):
+			// the services are stopped (and the binaries of a payload install
+			// or a macOS pkg are gone), the record stays, and the rerun
+			// finishes the removal (GAP-1440).
+			err = fmt.Errorf("%w; the deployment record is kept: fix the cause and rerun `%s`", err, l.uninstallCommand())
 		}
 		r.AddError(codeUninstall, err.Error())
 		return 0
