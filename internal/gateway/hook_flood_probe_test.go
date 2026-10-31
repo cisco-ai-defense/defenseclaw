@@ -619,12 +619,12 @@ func TestHookFloodProbe(t *testing.T) {
 }
 
 // hookFloodResidentSet is the process's resident set split by kind (anonymous
-// memory, mapped files such as the audit.db mmap window), on Linux; empty
-// elsewhere.
+// memory, mapped files such as the audit.db mmap window), on Linux; the
+// working set on Windows; empty elsewhere.
 func hookFloodResidentSet() string {
 	status, err := os.ReadFile("/proc/self/status")
 	if err != nil {
-		return ""
+		return hookFloodWorkingSet()
 	}
 	var parts []string
 	for _, line := range bytes.Split(status, []byte("\n")) {
