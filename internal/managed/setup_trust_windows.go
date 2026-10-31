@@ -13,6 +13,7 @@
 package managed
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -542,13 +544,16 @@ func removeSetupObject(handle windows.Handle, path string, info *windows.ByHandl
 	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 	isReparse := info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0
 	if isDir && !isReparse {
-		entries, err := os.ReadDir(path)
+		// List through the handle already held for delete: a second open
+		// such as os.ReadDir does not share delete access and fails with a
+		// sharing violation, and the handle is the directory just verified.
+		names, err := listSetupDirectoryByHandle(handle)
 		if err != nil {
 			return fmt.Errorf("list %s: %w", path, err)
 		}
 		var failures []error
-		for _, entry := range entries {
-			if err := removeSetupChild(filepath.Join(path, entry.Name()), depth+1); err != nil {
+		for _, name := range names {
+			if err := removeSetupChild(filepath.Join(path, name), depth+1); err != nil {
 				failures = append(failures, err)
 			}
 		}
@@ -560,6 +565,56 @@ func removeSetupObject(handle windows.Handle, path string, info *windows.ByHandl
 		return fmt.Errorf("remove %s: %w", path, err)
 	}
 	return nil
+}
+
+// listSetupDirectoryByHandle returns the entry names of the directory open
+// as handle (which needs FILE_LIST_DIRECTORY), without "." and "..". It reads
+// FILE_FULL_DIR_INFO records: NextEntryOffset at 0, FileNameLength at 60 and
+// the UTF-16 name at 68.
+func listSetupDirectoryByHandle(handle windows.Handle) ([]string, error) {
+	const (
+		fileFullDirectoryInfo        = 14
+		fileFullDirectoryRestartInfo = 15
+		nameLengthOffset             = 60
+		nameOffset                   = 68
+	)
+	// The records hold 8-byte fields, so back the buffer with uint64s.
+	words := make([]uint64, 8<<10)
+	buffer := unsafe.Slice((*byte)(unsafe.Pointer(&words[0])), len(words)*8)
+	class := uint32(fileFullDirectoryRestartInfo)
+	var names []string
+	for {
+		err := windows.GetFileInformationByHandleEx(handle, class, &buffer[0], uint32(len(buffer)))
+		if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+			return names, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		class = fileFullDirectoryInfo
+		for offset := 0; ; {
+			if offset < 0 || offset+nameOffset > len(buffer) {
+				return nil, errors.New("directory listing record overruns its buffer")
+			}
+			record := buffer[offset:]
+			next := int(binary.LittleEndian.Uint32(record[0:4]))
+			nameLength := int(binary.LittleEndian.Uint32(record[nameLengthOffset : nameLengthOffset+4]))
+			if nameLength%2 != 0 || nameOffset+nameLength > len(record) {
+				return nil, errors.New("directory listing record has an invalid name length")
+			}
+			name := make([]uint16, nameLength/2)
+			for index := range name {
+				name[index] = binary.LittleEndian.Uint16(record[nameOffset+2*index:])
+			}
+			if entry := string(utf16.Decode(name)); entry != "." && entry != ".." {
+				names = append(names, entry)
+			}
+			if next == 0 {
+				break
+			}
+			offset += next
+		}
+	}
 }
 
 func removeSetupChild(path string, depth int) error {
