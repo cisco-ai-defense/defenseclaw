@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -37,8 +38,10 @@ import (
 // the gateway (GAP-0946). The lifecycle writes no ACL entries, so status and
 // verify name every entry that lets another account change a file or folder
 // the deployment installs, and every transaction (repair, ensure, the
-// package postinstall ensure --from-package) removes them with chmod -N
-// before it writes anything. A recursive read entry for a group of standard
+// package postinstall ensure --from-package) removes those entries, one by
+// one with chmod -a# (never the path's whole ACL: chmod -N also removed an
+// administrator's unrelated entries, GAP-0034), before it writes anything.
+// A recursive read entry for a group of standard
 // users on the install root let every user read runtime/device.key,
 // runtime/.env and the lifecycle record while status and verify stayed green
 // (GAP-0950): on a private path (one whose mode gives other accounts no
@@ -74,13 +77,15 @@ type aclTarget struct {
 	ancestor      bool
 }
 
-// aclFinding is a path with the ACL entries that are wrong for it; write is
-// set when one of them grants write; ancestor when the path is a folder above
-// a vendor machine-policy folder.
+// aclFinding is a path with the ACL entries that are wrong for it and their
+// indexes, as chmod -a# takes them; write is set when one of them grants
+// write; ancestor when the path is a folder above a vendor machine-policy
+// folder.
 type aclFinding struct {
 	path     string // canonical
 	rooted   string
 	entries  []string
+	indexes  []int
 	write    bool
 	deny     bool
 	ancestor bool
@@ -286,6 +291,7 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 				if target.ancestor {
 					if entry.GrantsWrite() && !darwinACLAdminPrincipal(entry) {
 						finding.entries = append(finding.entries, entry.Text)
+						finding.indexes = append(finding.indexes, entry.Index)
 						finding.write = true
 					}
 					continue
@@ -294,6 +300,7 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 					((target.publishedFile || target.gatewayRead) && entry.DeniesFileRead())
 				if entry.GrantsWrite() || (target.private && entry.GrantsAccess()) || deny {
 					finding.entries = append(finding.entries, entry.Text)
+					finding.indexes = append(finding.indexes, entry.Index)
 					finding.write = finding.write || entry.GrantsWrite()
 					finding.deny = finding.deny || deny
 				}
@@ -342,7 +349,7 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 	}
 	if len(write) > 0 {
 		problems = append(problems, fmt.Sprintf(
-			"macOS ACL entries let other accounts change DefenseClaw files and folders that root and every agent rely on, although their owner and mode bits do not: %s; run `%s` to remove them (it runs chmod -N on each path)",
+			"macOS ACL entries let other accounts change DefenseClaw files and folders that root and every agent rely on, although their owner and mode bits do not: %s; run `%s` to remove them (it removes only those entries)",
 			describeACLFindings(write), e.lifecycleCommand(ActionRepair)))
 	}
 	if len(deny) > 0 {
@@ -352,7 +359,7 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 	}
 	if len(read) > 0 {
 		problems = append(problems, fmt.Sprintf(
-			"macOS ACL entries let other accounts read private DefenseClaw files and folders (the device key, credentials, audit store and lifecycle state) that their owner and mode bits keep from them: %s; run `%s` to remove them (it runs chmod -N on each path)",
+			"macOS ACL entries let other accounts read private DefenseClaw files and folders (the device key, credentials, audit store and lifecycle state) that their owner and mode bits keep from them: %s; run `%s` to remove them (it removes only those entries)",
 			describeACLFindings(read), e.lifecycleCommand(ActionRepair)))
 	}
 	return problems
@@ -387,11 +394,12 @@ func describeACLFindings(findings []aclFinding) string {
 	return strings.Join(parts, "; ")
 }
 
-// removeACLs removes the macOS ACL of every target with an entry that lets
-// another account change it, or reach it when it is private. chmod -h never
-// follows a link put in place of a path after it was listed. An entry still
-// listed afterwards fails the transaction with the paths, so a repair never
-// reports success while verify keeps naming them (GAP-0946).
+// removeACLs removes, from every target, the macOS ACL entries that let
+// another account change it, or reach it when it is private, and keeps its
+// other entries (GAP-0034). chmod -h never follows a link put in place of a
+// path after it was listed. An entry still listed afterwards fails the
+// transaction with the paths, so a repair never reports success while
+// verify keeps naming them (GAP-0946).
 func (l *lifecycle) removeACLs(ctx context.Context, files, connectors []string) error {
 	return l.removeACLTargets(ctx, l.env.aclTargets(files, connectors))
 }
@@ -416,7 +424,7 @@ func (l *lifecycle) removeConfigACLs(ctx context.Context) error {
 func (l *lifecycle) removeACLTargets(ctx context.Context, targets []aclTarget) error {
 	env := l.env
 	findings, err := env.aclFindings(ctx, targets)
-	// Set before anything below can fail: a run that stops before chmod -N
+	// Set before anything below can fail: a run that stops before chmod -a#
 	// cleared config.yaml (or could not list its ACL) must not keep bytes
 	// written through the entry as a newer config (GAP-1518, GAP-1535).
 	if err != nil && env.GOOS == "darwin" {
@@ -444,9 +452,15 @@ func (l *lifecycle) removeACLTargets(ctx context.Context, targets []aclTarget) e
 	}
 	var removed []string
 	for _, finding := range findings {
-		if _, err := env.Runner.Run(ctx, "chmod", "-h", "-N", finding.rooted); err != nil {
-			return fmt.Errorf("remove the macOS ACL of %s: %w; remove it with `chmod -N %s`, then rerun `%s`",
-				finding.path, err, finding.path, env.lifecycleCommand(l.opts.Action))
+		// Highest index first: removing an entry renumbers the ones after it.
+		indexes := slices.Clone(finding.indexes)
+		slices.Sort(indexes)
+		slices.Reverse(indexes)
+		for _, index := range slices.Compact(indexes) {
+			if _, err := env.Runner.Run(ctx, "chmod", "-h", "-a#", strconv.Itoa(index), finding.rooted); err != nil {
+				return fmt.Errorf("remove the macOS ACL entries %s of %s: %w; remove them with `chmod -a \"<entry>\" %s`, then rerun `%s`",
+					strings.Join(finding.entries, ", "), finding.path, err, finding.path, env.lifecycleCommand(l.opts.Action))
+			}
 		}
 		removed = append(removed, finding.path)
 	}
@@ -455,7 +469,7 @@ func (l *lifecycle) removeACLTargets(ctx context.Context, targets []aclTarget) e
 		return fmt.Errorf("read the macOS ACLs of the deployment after removing them: %w", err)
 	}
 	if len(left) > 0 {
-		return fmt.Errorf("harmful macOS ACL entries are still there after chmod -N: %s; remove them with `chmod -N <path>`, then rerun `%s`",
+		return fmt.Errorf("harmful macOS ACL entries are still there after removing them: %s; remove them with `chmod -a \"<entry>\" <path>`, then rerun `%s`",
 			describeACLFindings(left), env.lifecycleCommand(l.opts.Action))
 	}
 	l.noteChange("removed harmful macOS ACL entries from %d %s (%s)", len(removed), plural(len(removed), "path", "paths"), examples(removed))

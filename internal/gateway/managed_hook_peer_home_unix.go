@@ -1077,6 +1077,7 @@ func (c *managedHookPeerHomeCache) cachedHolderFor(name string) (int, string, er
 	if !useridentity.QualifiedAccountName(name) {
 		return 0, "", errNoCachedHolder
 	}
+	accountName := false
 	for uid, holder := range holders {
 		if holder.name == "" {
 			continue
@@ -1089,9 +1090,22 @@ func (c *managedHookPeerHomeCache) cachedHolderFor(name string) (int, string, er
 			return 0, "", errNoCachedHolder
 		}
 		foundUID, foundName = uid, holder.name
+		accountName = cachedFactsQualifyName(name, holder.name, facts)
 	}
 	if foundName == "" {
 		return 0, "", errNoCachedHolder
+	}
+	if accountName {
+		// DOMAIN\name or name@domain of the account's own name, in a domain
+		// its facts name, spells the holder as its account name does, and is
+		// served as that name is: through an outage, until the account
+		// database names another holder (GAP-0551). Only an alias the facts
+		// alone tie to the uid (a UPN or principal with another account
+		// part) needs the holder and incarnation confirmed now.
+		if c.holderChanged(foundUID, holders[foundUID]) {
+			return 0, "", errNoCachedHolder
+		}
+		return foundUID, foundName, nil
 	}
 	if err := c.confirmCachedSpelling(name, foundUID, holders[foundUID]); err != nil {
 		return 0, "", err
@@ -1203,6 +1217,13 @@ func cachedFactsSpell(name, holder string, facts useridentity.DirectoryFacts) bo
 			return true
 		}
 	}
+	return cachedFactsQualifyName(name, holder, facts)
+}
+
+// cachedFactsQualifyName reports whether name is the bare account name of
+// holder qualified with a domain its facts name (DNS domain, NetBIOS domain
+// or realm): CORP\alice or alice@corp.example for alice.
+func cachedFactsQualifyName(name, holder string, facts useridentity.DirectoryFacts) bool {
 	bare, domain := useridentity.SplitQualifiedName(name)
 	holderBare, _ := useridentity.SplitQualifiedName(holder)
 	if domain == "" || !useridentity.EqualFold(bare, holderBare) {

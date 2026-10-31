@@ -202,6 +202,38 @@ func TestAPackageUpgradeDoesNotLeaveTheDailyVerifyFailed(t *testing.T) {
 	requireError(t, h.run(Options{Action: ActionVerify}), codeBusy)
 }
 
+// GAP-0542: the package scripts hold the config-apply trigger while the
+// package is installed, so the postinstall ensure of an identical reinstall
+// found it stopped, ran a transaction and restarted the gateway (noop
+// false). It is a no-op now; the postinstall starts the trigger again.
+func TestIdenticalPackageReinstallIsANoop(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	stagePackage(t, h, "1.0.0")
+	requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}))
+	marker := h.env.P(packageTransactionMarker)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stagePackage(t, h, "1.0.0")
+	h.services.active[unitApplyPath] = false
+	h.services.calls = nil
+	r := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"})
+	requireOK(t, r)
+	if !r.Noop || len(touched(h.services.calls, unitGateway)) > 0 {
+		t.Fatalf("identical reinstall: noop %v (%s), gateway calls %v", r.Noop, r.NoopReason, touched(h.services.calls, unitGateway))
+	}
+	// Without the package's hold a stopped trigger is still drift.
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}); r.Noop {
+		t.Fatal("a stopped apply trigger outside a package transaction was a no-op")
+	}
+}
+
 // Right after an administrator replaced config.yaml, status and verify failed
 // with "modified after install ... run repair" while the apply trigger was
 // still applying the change; a repair then fought the apply (GAP-0919).

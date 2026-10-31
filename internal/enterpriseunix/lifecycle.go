@@ -1768,6 +1768,25 @@ func (e *Env) installedConfigWritable(ctx context.Context) (string, error) {
 	return "", nil
 }
 
+// secureConfigFolder takes write access to the config folder and
+// config.yaml from other accounts (the folder mode and, on macOS, their ACL
+// entries), as replaceWritableConfig does, for a run that refused a config
+// edit before it got there: the plan refuses an in-place edit another
+// account could have written, and that refusal left a folder ACL entry for
+// a standard user in place, so verify kept naming it until a second ensure
+// (GAP-1450). When that fails the run says to run repair.
+func (l *lifecycle) secureConfigFolder(ctx context.Context) {
+	env := l.env
+	err := env.ensureDir(env.P(env.Layout.ConfigDir), 0o755, rootOwner())
+	if err == nil {
+		err = l.removeConfigACLs(ctx)
+	}
+	if err != nil {
+		l.result.AddWarning(codeConfigReverted, fmt.Sprintf("another account may still be able to write %s (%v); run `%s` to remove that access",
+			env.Layout.ConfigDir, err, env.lifecycleCommand(ActionRepair)))
+	}
+}
+
 // replaceWritableConfig puts a new file in place of an installed config.yaml
 // another account could write (p.configWritable), before the transaction
 // changes anything. Re-owning the file in place blessed what that account
@@ -1915,6 +1934,10 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			// Refused before any change: the service account this run
 			// created goes too (GAP-0542).
 			_ = env.Accounts.Remove(ctx, serviceName)
+		}
+		if record != nil && code == codeConfig {
+			// Before the applied config goes back in place (GAP-1441 order).
+			l.secureConfigFolder(ctx)
 		}
 		if committedConfig != nil && (code == codeConfig || code == codeMachinePolicy) {
 			l.revertRejectedConfig(record, committedConfig, nil, err.Error())

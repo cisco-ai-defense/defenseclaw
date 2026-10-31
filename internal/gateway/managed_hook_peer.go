@@ -663,9 +663,10 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			return
 		}
 		defer release()
-		if r.URL.Path == managedRefusalAuditPath {
+		if r.URL.Path == managedRefusalAuditPath || r.URL.Path == managed.OwnProfileExplainPath {
 			// Any kernel-verified local account may report its own refused
-			// policy write; the route has no connector to enroll for.
+			// policy write, or read its own guardrail profile; the routes have
+			// no connector to enroll for.
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -808,7 +809,8 @@ var loadStandaloneRuntimeDescriptor = func(goos string) (*managed.RuntimeDescrip
 
 // managedHookSocketMux registers only the agent-facing routes on the hook
 // socket: connector hook endpoints, the inspect endpoints, the Codex
-// notifier, the refused-write report of a standard user CLI, the root
+// notifier, the refused-write report of a standard user CLI, a user's
+// explain of their own guardrail profile, the root
 // guardian's repair report, the root lifecycle's credential rotation proof,
 // and the managed sandbox authority routes a user's sandbox daemon calls.
 // Management, status, configuration, policy and scan routes are not reachable
@@ -827,6 +829,7 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	a.registerAgentGatewayRoute(mux, true, limiter)
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
+	mux.HandleFunc(managed.OwnProfileExplainPath, a.handleOwnProfileExplain)
 	mux.HandleFunc(managedGuardianRepairAuditPath, a.handleManagedGuardianRepairAudit)
 	mux.HandleFunc(managed.LaunchCoverageReportPath, a.handleManagedLaunchCoverageAudit)
 	mux.HandleFunc(connector.UserScopedRotationProofPath, a.serveRotationListenerProof)

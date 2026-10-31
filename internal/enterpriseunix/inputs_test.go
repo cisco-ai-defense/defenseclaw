@@ -187,7 +187,7 @@ func TestConfigMadeWritableAfterPlanningIsRefused(t *testing.T) {
 }
 
 // GAP-1535: removing the ACL entries can fail before the transaction gets
-// to the entry on config.yaml: chmod -N fails on config.yaml or on a path
+// to the entry on config.yaml: chmod -a# fails on config.yaml or on a path
 // listed before it, ls fails, or an entry on a folder above a vendor
 // machine-policy folder refuses the run first. Bytes written through the
 // entry on config.yaml are still not kept for a follow-up, for a --config
@@ -202,10 +202,10 @@ func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
 		kept  bool
 	}{
 		{"chmod-config", "user:standard allow write", func(h *testHost, config, _ string) {
-			h.runner.replies["chmod -h -N "+config] = denied
+			h.runner.replies["chmod -h -a# 0 "+config] = denied
 		}, false},
 		{"chmod-earlier", "user:standard allow write", func(h *testHost, _, binDir string) {
-			h.runner.replies["chmod -h -N "+binDir] = denied
+			h.runner.replies["chmod -h -a# 0 "+binDir] = denied
 		}, false},
 		{"ls", "user:standard allow write", func(h *testHost, config, _ string) {
 			h.env.Runner = failingLsRunner{Runner: h.runner, path: config}
@@ -214,7 +214,7 @@ func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
 			h.runner.acls[h.env.P("/Library/Application Support")] = []string{"user:developer allow add_subdirectory"}
 		}, false},
 		{"read-entry", "user:standard allow read", func(h *testHost, config, _ string) {
-			h.runner.replies["chmod -h -N "+config] = denied
+			h.runner.replies["chmod -h -a# 0 "+config] = denied
 		}, true},
 	} {
 		for _, configFlag := range []bool{true, false} {
@@ -295,9 +295,9 @@ func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
 				}
 				switch failure {
 				case "chmod-config":
-					h.runner.replies["chmod -h -N "+config] = denied
+					h.runner.replies["chmod -h -a# 0 "+config] = denied
 				case "chmod-etc":
-					h.runner.replies["chmod -h -N "+etc] = denied
+					h.runner.replies["chmod -h -a# 0 "+etc] = denied
 				case "ls-recheck":
 					h.env.Runner = &failingACLRecheckRunner{Runner: h.runner, path: config}
 				}
@@ -310,8 +310,8 @@ func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
 						}
 					} else {
 						target := map[string]string{"chmod-config": config, "chmod-etc": etc}[failure]
-						if !strings.Contains(strings.Join(h.runner.calls, " "), "chmod -h -N "+target) {
-							t.Fatal("the intended chmod -N failure was not reached")
+						if !strings.Contains(strings.Join(h.runner.calls, " "), "chmod -h -a# 0 "+target) {
+							t.Fatal("the intended chmod -a# failure was not reached")
 						}
 					}
 				}
@@ -330,7 +330,7 @@ func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
 	}
 }
 
-// failingACLRecheckRunner fails the first ls of config.yaml after chmod -N.
+// failingACLRecheckRunner fails the first ls of config.yaml after chmod -a#.
 type failingACLRecheckRunner struct {
 	Runner
 	path    string
@@ -344,7 +344,7 @@ func (r *failingACLRecheckRunner) Run(ctx context.Context, name string, args ...
 		return CommandResult{ExitCode: 1}, errors.New("ls: permission denied")
 	}
 	result, err := r.Runner.Run(ctx, name, args...)
-	if name == "chmod" && err == nil && len(args) >= 2 && args[1] == "-N" {
+	if name == "chmod" && err == nil && len(args) >= 2 && args[1] == "-a#" {
 		r.removed = true
 	}
 	return result, err
