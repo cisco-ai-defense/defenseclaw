@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -40,6 +41,12 @@ func r106KeysHome(t *testing.T) (homes, home, project string) {
 // write to the keys file (plain, quoted, wrapped, through a link) still
 // decide.
 func TestR106PosixCommentNamesNoTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// A Windows home is read with the Windows grammars and, for Git
+		// Bash, the POSIX dialect hint: those rows are the GAP-0147 test
+		// of fix/r106-fc-wingrammar (TestGAP0147ClaudeCodeBashCommentNamingTheKeys).
+		t.Skip("POSIX home")
+	}
 	_, home, project := r106KeysHome(t)
 	for _, tc := range []struct {
 		command string
