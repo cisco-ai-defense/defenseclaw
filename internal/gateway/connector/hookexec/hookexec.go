@@ -3699,8 +3699,9 @@ func managedFailClosedText(opts Options, layer, reason string) string {
 // managedInstallWindowText is what a managed hook says when the gateway is
 // stopped, restarting or silent while an enterprise lifecycle run (a package
 // install or upgrade, ensure, repair or rollback: managedLifecycleActive)
-// holds it: that DefenseClaw is being installed or upgraded and to try again,
-// as the per-user install window says (perUserGatewayDownText). It said "the
+// holds it: that DefenseClaw is being installed or upgraded, to try again and,
+// if it continues, to have the administrator run the status command (a run
+// stopped before it finished leaves the same marker, GAP-0509). It said "the
 // gateway is not available" or "is restarting to apply a change", which did
 // not name the upgrade (GAP-2173). "" for any other failure: a refusal
 // with its own cause (another program on the port, SELinux, a sandboxed
@@ -3726,9 +3727,22 @@ func managedInstallWindowText(opts Options, layer, reason string) string {
 	if !managedLifecycleActive(opts) {
 		return ""
 	}
-	return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
-		"upgraded on this computer, and its gateway starts again when that is done. Try again in a moment; " +
-		"if this continues, contact your administrator."
+	// The marker stays after a Setup or package run that was stopped before
+	// it finished (a killed Setup leaves the transaction pending and the
+	// gateway service disabled), and no run is left to start the gateway
+	// again. The hook cannot tell the two apart, so the text does not
+	// promise a restart and names the status command, which says whether a
+	// run is still going or the transaction needs Setup's recovery
+	// (GAP-0509). The outage code goes last, as in the other refusals.
+	text := "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
+		"upgraded on this computer, and its gateway is stopped until that run finishes or is recovered. Try again in a moment; " +
+		"if this continues, ask your administrator to check DefenseClaw on this computer: `" +
+		managedStatusCommand(runtime.GOOS) + "` names what to do."
+	switch reason {
+	case managedGatewayNotRunningReason, managedGatewayRestartingReason, managedGatewayNoAnswerReason:
+		text += " (" + reason + ")"
+	}
+	return text
 }
 
 // managedLifecycleRuntimeStateReason reports a managed runtime-state

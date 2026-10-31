@@ -588,9 +588,11 @@ That is about 6 such calls per vCPU at once. In observe mode the same burst was 
 On Linux, measured on a per-user install on RHEL 9.8 with 4 vCPUs, up to 3 interactive agents per vCPU working at once got every tool-call decision within 2 seconds (613 calls, maximum 1.9 seconds). See [Many agents on one Linux host](/docs/support-matrix#many-agents-on-one-linux-host).
 
 While a Setup, pkg or rpm run holds the gateway, the block names the run: "DefenseClaw is being
-installed or upgraded on this computer, and its gateway starts again when that is done. Try again
-in a moment." The call is still blocked. Retry when the run ends. A refusal with its own cause keeps
-its own text.
+installed or upgraded on this computer, and its gateway is stopped until that run finishes or is
+recovered. Try again in a moment", and it points the administrator to the platform's `status`
+command. The call is still blocked. Retry when the run ends. A run that was stopped before it
+finished leaves the same block until it is recovered. A refusal with its own cause keeps its own
+text.
 
 The administrator's `hook_fail_mode: open` allows a call only while the hook proves the
 gateway service is stopped (no gateway took the call). A restart the hook cannot prove
