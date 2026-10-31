@@ -6063,7 +6063,11 @@ def _connector_contract_upgrade_guidance(
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
     if key == "opencode":
-        return f"Install OpenCode V2 with 'npm install -g @opencode/cli@2', then run: {rerun}."
+        return (
+            f"Install OpenCode V2 with 'npm install -g @opencode/cli@2' (where you cannot write npm's global "
+            "prefix, for your account: 'npm install -g --prefix ~/.npm-global @opencode/cli@2', with "
+            f"~/.npm-global/bin first on PATH), then run: {rerun}."
+        )
     broken, _ = known_broken_entry(key, normalized_version)
     if broken is not None:
         return f"Install a {label} release that is not known broken ({broken['issue']}), then run: {rerun}."
@@ -6483,7 +6487,7 @@ def _check_connector_version_supported_for_setup(
     # floor has a surface that sends no hooks (GAP-0227): their messages say so.
     strict_unknown = connector in {"opencode", "kiro"}
     if connector == "opencode" and opencode_requires_v2_upgrade(compatibility.raw_version):
-        detail = f"OpenCode V2 is required; detected {version_display}. {upgrade_guidance}"
+        detail = _opencode_v2_required(version_display, upgrade_guidance)
         if emit:
             ux.err(detail)
         _refuse_in_every_mode(_refusal_scope, detail)
@@ -6512,6 +6516,41 @@ def _check_connector_version_supported_for_setup(
         ux.warn(detail + " Continuing because the explicit drift override is set.")
         ux.subhead(upgrade_guidance)
     return True
+
+
+def _opencode_v2_required(version_display: str, upgrade_guidance: str) -> str:
+    """The refusal for an OpenCode that is not V2 (V1, another major, a git build)."""
+    return (
+        f"OpenCode V2 is required; detected {version_display}. This DefenseClaw guards OpenCode V2 only "
+        f"(V1 is not supported). {upgrade_guidance}"
+    )
+
+
+def _refuse_opencode_v1_before_questions(app: AppContext) -> None:
+    """Refuse an OpenCode that is not V2 before setup asks anything (rel-1-0-6 GAP-0012).
+
+    Setup asked for the mode, whether to re-apply the hooks and whether to
+    add the LLM judge, and only then refused V1 in its version check. The
+    same discovery probe answers here first, without writing the discovery
+    cache; anything it cannot tell (no OpenCode, no version, a probe error,
+    an untrusted prefix) is left to the full check, which still runs.
+    """
+    try:
+        disc = agent_discovery.discover_with_probes(
+            ["opencode"],
+            use_cache=False,
+            refresh=True,
+            data_dir=getattr(app.cfg, "data_dir", None) or None,
+            persist_cache=False,
+        )
+        signal = disc.agents.get("opencode")
+    except Exception:  # noqa: BLE001 - the full version check reports a probe failure
+        return
+    raw = (getattr(signal, "version", "") or "").strip() if signal is not None else ""
+    if signal is None or not signal.installed or not raw or not opencode_requires_v2_upgrade(raw):
+        return
+    ux.err(_opencode_v2_required(raw.rstrip("."), _connector_contract_upgrade_guidance("opencode", "OpenCode")))
+    raise click.ClickException("OpenCode setup stopped before any change; nothing was changed")
 
 
 def _refuse_in_every_mode(scope: dict[str, Any] | None, reason: str) -> None:
@@ -11627,11 +11666,50 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
         _echo_saved_without_restart(plural=True)
 
 
+def _outage_sentence(outage_fail_mode: str) -> tuple[str, str]:
+    """Two banner lines: what the hooks do while the gateway is down (rel-1-0-6 GAP-0011).
+
+    "A failed hook can block" read as the outage behaviour, while the
+    per-user default tier is fail open and status and doctor said so.
+    """
+    if outage_fail_mode == "closed":
+        return "While the gateway is down, tool calls are", "blocked (hook fail mode closed)."
+    if outage_fail_mode == "open":
+        return "While the gateway is down, tool calls run", "with a warning (hook fail mode open)."
+    return "While the gateway is down, the hook fail mode", "decides (defenseclaw guardrail status)."
+
+
+def _setup_outage_fail_mode(cfg, connector: str, *, fail_mode: str | None, rule_pack: str | None) -> str:
+    """The gateway-outage mode ``connector``'s hooks get from this setup run.
+
+    Read before the run saves anything, so the flags of the run count: an
+    explicit ``--fail-mode``, and a built-in ``--rule-pack`` whose tier
+    decides while no fail mode is saved.
+    """
+    if fail_mode is not None:
+        return "closed" if str(fail_mode).strip().lower() == "closed" else "open"
+    gc = cfg.guardrail
+    pack = (rule_pack or "").strip().lower()
+    if (
+        pack in {"strict", "default", "permissive"}
+        and not saved_hook_fail_mode_scope(gc, connector)
+        and not cfg.managed_outside_secure_client()
+        and not gc.secure_client_hook_fail_modes()
+    ):
+        return "closed" if pack == "strict" else "open"
+    return gc.effective_hook_outage_fail_mode(connector)
+
+
 def _print_connector_observability_banner(
-    connector: str, *, mode: str = "observe", native_export_expected: bool = False
+    connector: str,
+    *,
+    mode: str = "observe",
+    native_export_expected: bool = False,
+    outage_fail_mode: str = "",
 ) -> None:
     setup_slug = "claude-code" if connector == "claudecode" else connector
     label = _CONNECTOR_META[connector]["label"]
+    outage_first, outage_second = _outage_sentence(outage_fail_mode)
     click.echo()
     ux.echo(f"  DefenseClaw — {label} {mode} setup")
     ux.echo("  ─────────────────────────────────────────────────────────")
@@ -11643,7 +11721,8 @@ def _print_connector_observability_banner(
             click.echo("  waits for synchronous tool.call allow, confirm, or reject")
             click.echo("  verdicts before the requested tool can execute.")
         else:
-            click.echo("  observes policy findings; an unavailable hook can still block.")
+            click.echo(f"  observes policy findings. {outage_first}")
+            click.echo(f"  {outage_second}")
     else:
         click.echo(f"  This wires {label} into DefenseClaw via the agent's")
         click.echo("  native hook bus. No proxy is inserted in the LLM data")
@@ -11663,7 +11742,8 @@ def _print_connector_observability_banner(
             click.echo("  path; supported actions flagged by policy are blocked")
             click.echo("  by the connector's native lifecycle verdict.")
         else:
-            click.echo("  path; policy findings are observed, but a failed hook can block.")
+            click.echo(f"  path; policy findings are observed. {outage_first}")
+            click.echo(f"  {outage_second}")
     click.echo()
     click.echo("  Telemetry channels:")
     if connector == "amp":
@@ -12057,6 +12137,8 @@ def _setup_observability_alias(
     if connector not in _HOOK_ENFORCED_CONNECTORS:
         raise click.ClickException(f"unsupported connector for hook alias: {connector!r}")
     _ensure_connector_available(connector)
+    if connector == "opencode":
+        _refuse_opencode_v1_before_questions(app)
     if connector == "hermes":
         unsupported = connector_paths.hermes_profile_unsupported_reason()
         if unsupported:
@@ -12133,6 +12215,7 @@ def _setup_observability_alias(
         connector,
         mode=normalized_mode,
         native_export_expected=str(getattr(app.cfg, "deployment_mode", "")).strip().lower() == "managed_enterprise",
+        outage_fail_mode=_setup_outage_fail_mode(app.cfg, connector, fail_mode=fail_mode, rule_pack=rule_pack),
     )
     # WU7: resolve add-vs-replace. Only HOOK-ENFORCED peers count as valid
     # multi-connector neighbors (D4=A) — proxy-backed connectors
@@ -16203,6 +16286,17 @@ def _restart_services(
     )
     if not gateway_restarted:
         failed.append("defenseclaw-gateway")
+
+    if gateway_restarted and "opencode" in {connector, *(connectors or [])}:
+        # OpenCode V2's background server keeps the plugin it loaded (rel-1-0-6
+        # GAP-0026). Restarted once the new gateway serves, before the runtime
+        # wait, so that wait sees the plugin the restarted server loads.
+        from defenseclaw import opencode_service
+
+        opencode_service.report(
+            opencode_service.restart_if_running(opencode_service.account_binary(data_dir)),
+            what="runs the plugin as it is now",
+        )
 
     connector_runtime_pending_reload = False
     # Peers the restarted gateway refused: setup skipped them, so they are

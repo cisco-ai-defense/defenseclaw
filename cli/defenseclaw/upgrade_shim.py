@@ -348,6 +348,8 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
         return 0
     if _key(version) < (1, 0, 0):
         raise ShimError(f"DefenseClaw {installed} cannot install {version}; 1.x installs only 1.0.0 or later")
+    if _key(version) < _key(installed):
+        _refuse_unguarding_downgrade(version)
 
     print(f"  → Installing DefenseClaw {version} (installed: {installed})")
     workdir = tempfile.mkdtemp(prefix="defenseclaw-upgrade-")
@@ -384,6 +386,27 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     # for its installer and drops the helper (rel-1-0-4:GAP-2503).
     newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
     return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer)
+
+
+def _refuse_unguarding_downgrade(version: str) -> None:
+    """Stop a downgrade to a release that cannot guard an agent set up here.
+
+    ``defenseclaw rollback`` runs the same check (``migrate
+    --check-rollback-to``); a downgrade runs the older release's installer,
+    which has none, so this install checks before anything changes
+    (rel-1-0-6 GAP-0128: OpenCode V2 under 1.0.5 ran unguarded). The check
+    belongs to the rest of the CLI: when that cannot load, the downgrade goes
+    on as before, since it may be the way out of a broken install.
+    """
+
+    try:
+        from defenseclaw.migrations import MigrationError, check_opencode_rollback
+    except Exception:  # noqa: BLE001 - a broken CLI must not block the way back
+        return
+    try:
+        check_opencode_rollback(_data_home(), version, downgrade=True)
+    except MigrationError as exc:
+        raise ShimError(str(exc)) from None
 
 
 def _active_config_path() -> str:

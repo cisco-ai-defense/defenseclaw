@@ -346,6 +346,34 @@ class TestConnectorContractManifest(unittest.TestCase):
                 rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
                 self.assertIn(f"→ {route}", rendered)
 
+    def test_observe_banner_states_the_outage_fail_mode(self) -> None:
+        # rel-1-0-6 GAP-0011: "a failed hook can block" contradicted the per-user
+        # default (fail open) that status and doctor show.
+        for connector in ("opencode", "codex", "amp"):
+            for outage, expected in (
+                ("open", "run with a warning (hook fail mode open)"),
+                ("closed", "blocked (hook fail mode closed)"),
+            ):
+                with self.subTest(connector=connector, outage=outage):
+                    with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
+                        _print_connector_observability_banner(connector, outage_fail_mode=outage)
+                    rendered = " ".join(str(call.args[0]).strip() for call in echo.call_args_list if call.args)
+                    self.assertIn(expected, rendered)
+                    self.assertNotIn("failed hook can block", rendered)
+                    self.assertNotIn("can still block", rendered)
+
+    def test_setup_outage_fail_mode_follows_the_flags_of_the_run(self) -> None:
+        from defenseclaw.commands.cmd_setup import _setup_outage_fail_mode
+        from defenseclaw.config import Config
+
+        cfg = Config()  # per-user, nothing saved: the default tier is fail open
+        self.assertEqual(_setup_outage_fail_mode(cfg, "opencode", fail_mode=None, rule_pack=None), "open")
+        self.assertEqual(_setup_outage_fail_mode(cfg, "opencode", fail_mode="closed", rule_pack=None), "closed")
+        self.assertEqual(_setup_outage_fail_mode(cfg, "opencode", fail_mode=None, rule_pack="strict"), "closed")
+        cfg.guardrail.hook_fail_mode = "open"
+        cfg.guardrail._hook_fail_mode_saved = True  # a saved mode wins over the strict tier
+        self.assertEqual(_setup_outage_fail_mode(cfg, "opencode", fail_mode=None, rule_pack="strict"), "open")
+
     def test_claude_aliases_resolve_to_claudecode(self) -> None:
         compat = resolve_connector_contract("claude-code", "Claude Code 2.1.154")
         self.assertEqual(compat.status, STATUS_KNOWN)
