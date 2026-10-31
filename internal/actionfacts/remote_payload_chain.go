@@ -260,7 +260,10 @@ func remoteArtifactDownloadIntent(facts Facts, allowUncertainControlFlow bool) (
 }
 
 func remoteArtifactDownloadIntentSource(facts Facts, allowUncertainControlFlow bool) (PathFact, string, bool) {
-	if facts.Parse.Dialect != DialectPOSIX {
+	// A generic shell call such as curl -o C:/x URL reads as CMD (curl.exe
+	// with a drive operand); its drive file is the same artifact a later
+	// Git Bash run names (rel-1-0-6:GAP-0077, agent-gateway route).
+	if facts.Parse.Dialect != DialectPOSIX && facts.Parse.Dialect != DialectCMD {
 		return PathFact{}, "", false
 	}
 	var selected PathFact
@@ -330,6 +333,9 @@ func remoteDownloadIntentPath(facts Facts, command CommandFact) (PathFact, strin
 			continue
 		}
 		placed, ok := intentArtifact(facts, candidate)
+		if !ok && command.Dialect == DialectCMD {
+			placed, ok = cmdDriveArtifact(candidate)
+		}
 		if !ok {
 			return PathFact{}, "", false
 		}
@@ -627,6 +633,16 @@ func intentArtifact(facts Facts, candidate PathFact) (PathFact, bool) {
 		return PathFact{}, false
 	}
 	candidate.Resolved = resolved
+	return candidate, true
+}
+
+// cmdDriveArtifact is the download artifact of a CMD-dialect curl or wget:
+// an absolute Windows drive path the facts resolved (rel-1-0-6:GAP-0077).
+func cmdDriveArtifact(candidate PathFact) (PathFact, bool) {
+	if candidate.Flavor != PathFlavorWindows || !candidate.Absolute ||
+		!DriveLetterPath(candidate.Resolved) {
+		return PathFact{}, false
+	}
 	return candidate, true
 }
 
