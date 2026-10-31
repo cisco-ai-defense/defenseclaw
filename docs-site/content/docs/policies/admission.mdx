@@ -544,7 +544,7 @@ presented. The CLI writes a pin when you allow an installed skill or plugin,
 and never writes one on a block, so a block follows the name wherever the
 asset is installed.
 
-Claude Code's `Skill` hook call names the skill. DefenseClaw looks in the
+Claude Code's `Skill` hook call names the skill and carries no path. DefenseClaw looks in the
 connector's skill folders for folders that provide that name and judges each
 copy at its own path. An `asset_policy.skill.denied` rule pinned with
 `source_path_contains` to one copy blocks the call when that copy exists. If
