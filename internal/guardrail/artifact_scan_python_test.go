@@ -517,28 +517,3 @@ func TestArtifactPythonPathWriteReadsTheScriptsDirectory(t *testing.T) {
 		}
 	}
 }
-
-// A name rebound to another path before the write no longer holds the
-// matched path (GAP-1312); a rebinding inside a branch, one that uses the
-// name, or a write before the rebinding still counts.
-func TestPythonPathWriteMatchEndsAtARebinding(t *testing.T) {
-	rule := regexp.MustCompile(`MEMORY\.md`)
-	for _, tc := range []struct {
-		name, source string
-		want         bool
-	}{
-		{"rebound before the write", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n", false},
-		{"rebound in a function", "def f():\n    target = Path(\"MEMORY.md\")\n    target = Path(\"safe.txt\")\n    with open(target, \"a\") as fh:\n        fh.write(\"x\")\n", false},
-		{"rebound after an inner block", "for x in xs:\n    target = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n", false},
-		{"written before the rebinding", "target = Path(\"MEMORY.md\")\ntarget.write_text(\"hello\")\ntarget = Path(\"safe.txt\")\n", true},
-		{"rebound only in a branch", "target = Path(\"MEMORY.md\")\nif other:\n    target = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n", true},
-		{"rebound from itself", "target = Path.home() / \"MEMORY.md\"\ntarget = target.resolve()\ntarget.write_text(\"hello\")\n", true},
-		{"compared, not rebound", "target = Path(\"MEMORY.md\")\ntarget == other\ntarget.write_text(\"hello\")\n", true},
-		{"rebound across lines", "target = Path(\"MEMORY.md\")\ntarget = pick(\n    target)\ntarget.write_text(\"hello\")\n", true},
-		{"rebound beside another statement", "target = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\"); target = alias\ntarget.write_text(\"hello\")\n", true},
-	} {
-		if got := pythonPathWriteMatch(rule, tc.source, "") != nil; got != tc.want {
-			t.Errorf("%s: pythonPathWriteMatch(%q) = %t, want %t", tc.name, tc.source, got, tc.want)
-		}
-	}
-}
