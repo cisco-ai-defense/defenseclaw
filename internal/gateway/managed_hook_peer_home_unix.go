@@ -38,6 +38,16 @@ import (
 
 var managedHookDirectoryNeedsFresh = runtime.GOOS == "darwin"
 
+// managedHookReadsFreshFacts reports a managed Mac whose hooks read each
+// call's directory facts fresh (identityCache.getFresh) and get none while
+// the directory does not answer: Open Directory gives no notice when a
+// secondary group is removed, so cached groups could select a looser
+// profile (TestManagedMacHookRefreshesSecondaryGroupsBeforeDecision).
+// Explain reads them the same way for every spelling it accepts (GAP-0551).
+func managedHookReadsFreshFacts() bool {
+	return managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load()
+}
+
 // managedHookPeerHomeTTL bounds how long a resolved home is reused, so a
 // moved or recreated account is picked up without restarting the gateway.
 const managedHookPeerHomeTTL = 5 * time.Minute
@@ -786,7 +796,7 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	if !ok {
 		return useridentity.DirectoryFacts{}, false
 	}
-	if managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load() {
+	if managedHookReadsFreshFacts() {
 		if !block {
 			return cache.getNonblocking(key)
 		}
@@ -808,7 +818,7 @@ func (c *managedHookPeerHomeCache) currentDirectory(uid int) (useridentity.Direc
 	if !ok {
 		return useridentity.DirectoryFacts{}, false
 	}
-	if managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load() {
+	if managedHookReadsFreshFacts() {
 		return cache.getFresh(key, identityDirectoryBudget)
 	}
 	return cache.getCurrent(key, identityDirectoryBudget)
@@ -892,7 +902,7 @@ func (c *managedHookPeerHomeCache) explainDirectory(uid int) (useridentity.Direc
 	c.noteHolder(uid, key)
 	cache := c.directoryCache()
 	forgetOnSpoolAccountChange(cache, key, time.Now())
-	if managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load() {
+	if managedHookReadsFreshFacts() {
 		if facts, ok := cache.getFresh(key, identityDirectoryBudget); ok {
 			return facts, nil
 		}

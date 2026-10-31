@@ -297,3 +297,7 @@ func resolveNSSPeerFacts(key string) (useridentity.DirectoryFacts, error) {
 	noteGroupDomains(facts.Groups)
 	return facts, nil
 }
+
+// directoryNodeOffline is false on Linux: the guardian lists an SSSD domain
+// SSSD reports offline as away (directoryUnreachable).
+func directoryNodeOffline() bool { return false }
