@@ -4448,7 +4448,8 @@ func (s *Store) QueryNetworkEgressEvents(f NetworkEgressFilter) ([]NetworkEgress
 		query += " AND blocked = ?"
 		args = append(args, blocked)
 	}
-	query += " ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?"
+	// Newest first by the exact instant, insert order on a tie (GAP-0251).
+	query += " ORDER BY " + s.timeOrderForTable("network_egress_events", "", true) + " LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.queryDB(context.Background(), "audit", query, args...)
@@ -4679,13 +4680,15 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 		rows *sql.Rows
 		err  error
 	)
+	// Newest first by the exact instant, insert order on a tie (GAP-0251).
+	order := s.timeOrderForTable("network_egress_events", "", true)
 	if hostname == "" {
 		rows, err = s.queryDB(context.Background(), "audit",
 			`SELECT id, timestamp, session_id, connector, agent_id, root_agent_id, parent_agent_id, root_session_id, agent_lifecycle_id,
 			        agent_execution_id, user_id, tool_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events
-			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, limit,
+			 ORDER BY `+order+` LIMIT ?`, limit,
 		)
 	} else {
 		rows, err = s.queryDB(context.Background(), "audit",
@@ -4693,7 +4696,7 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 			        agent_execution_id, user_id, tool_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events WHERE hostname = ?
-			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, hostname, limit,
+			 ORDER BY `+order+` LIMIT ?`, hostname, limit,
 		)
 	}
 	if err != nil {
