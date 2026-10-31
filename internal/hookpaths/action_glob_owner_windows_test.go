@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -19,9 +20,8 @@ import (
 
 // A Windows profile holds legacy junctions (Application Data, Cookies ...)
 // that deny listing to everyone, and NTUSER.DAT, which Windows holds open. The user Git Bash expands nothing in them,
-// so at the home folder head -n 1 */* names no protected file when the
-// process runs as the home user; a process of another user keeps the
-// folder as unproved (rel-1-0-6:GAP-0211).
+// so at the home folder head -n 1 */* names no protected file, whichever
+// account the process runs as (rel-1-0-6:GAP-0211, managed parity).
 func TestWindowsProfileUnlistableFolderAtHome(t *testing.T) {
 	home := t.TempDir()
 	keys := filepath.Join(home, ".ssh", "authorized_keys")
@@ -53,6 +53,9 @@ func TestWindowsProfileUnlistableFolderAtHome(t *testing.T) {
 		_ = directory.Close()
 		denied = readErr != nil && !errors.Is(readErr, io.EOF)
 	}
+	if !actionGlobDirDeniesEveryoneList(filepath.Join(home, "Cookies")) {
+		t.Fatal("a folder that denies listing to Everyone was not read as such")
+	}
 	saved := actionProcessProfileDirectory
 	t.Cleanup(func() { actionProcessProfileDirectory = saved })
 	for _, row := range []struct {
@@ -61,7 +64,10 @@ func TestWindowsProfileUnlistableFolderAtHome(t *testing.T) {
 	}{
 		{"head -n 1 */*; echo done", "", true},
 		{"echo */*; echo done", "", true},
-		{"head -n 1 */*; echo done", "protected-target", false},
+		// No account lists a folder that denies listing to Everyone, so a
+		// gateway service of another account judges it as the user does
+		// (managed parity).
+		{"head -n 1 */*; echo done", "", false},
 		{"cp a.txt .ssh/authorized_keys", "protected-target", true},
 		{"cp a.txt .*/authorized_keys", "protected-target", true},
 	} {
@@ -78,5 +84,56 @@ func TestWindowsProfileUnlistableFolderAtHome(t *testing.T) {
 		if got := ActionCommandDecisionWithDialectAndGlobFacts(row.command, home, home, actionfacts.DialectPOSIX, nil); got != row.want {
 			t.Errorf("owner=%v %q: decision %q, want %q", row.owner, row.command, got, row.want)
 		}
+	}
+}
+
+// A folder that denies listing only to some accounts (here the account of
+// this process) proves nothing for another account: a process that is not
+// the home user keeps it unproved, the home user reads it as empty.
+func TestWindowsProfileFolderDeniedToOneAccountAtHome(t *testing.T) {
+	home := t.TempDir()
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	for _, dir := range []string{filepath.Dir(keys), filepath.Join(home, "Private")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(keys, []byte("k\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	user, err := exec.Command("whoami").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := strings.TrimSpace(string(user))
+	if out, err := exec.Command("icacls", filepath.Join(home, "Private"), "/deny", account+":(RD)").CombinedOutput(); err != nil {
+		t.Fatalf("icacls: %v %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("icacls", filepath.Join(home, "Private"), "/remove:d", account).Run() })
+	if directory, err := pathOpen(filepath.Join(home, "Private")); err == nil {
+		_, readErr := directory.Readdirnames(1)
+		_ = directory.Close()
+		if readErr == nil || errors.Is(readErr, io.EOF) {
+			t.Skip("this process lists a folder that denies it listing (backup privilege)")
+		}
+	}
+	saved := actionProcessProfileDirectory
+	t.Cleanup(func() { actionProcessProfileDirectory = saved })
+	for _, row := range []struct {
+		owner bool
+		want  string
+	}{{true, ""}, {false, "protected-target"}} {
+		actionProcessProfileDirectory = func() (string, error) {
+			if row.owner {
+				return home, nil
+			}
+			return filepath.Join(filepath.Dir(home), "other"), nil
+		}
+		if got := ActionCommandDecisionWithDialectAndGlobFacts("head -n 1 */*; echo done", home, home, actionfacts.DialectPOSIX, nil); got != row.want {
+			t.Errorf("owner=%v: decision %q, want %q", row.owner, got, row.want)
+		}
+	}
+	if actionGlobDirDeniesEveryoneList(filepath.Join(home, "Private")) {
+		t.Fatal("a deny entry of one account read as a deny to Everyone")
 	}
 }

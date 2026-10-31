@@ -20,3 +20,7 @@ func actionProcessOwnsHome(home string) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && int(stat.Uid) == os.Getuid()
 }
+
+// actionGlobDirDeniesEveryoneList is false off Windows: a POSIX mode has no
+// deny entry for every account.
+func actionGlobDirDeniesEveryoneList(string) bool { return false }
