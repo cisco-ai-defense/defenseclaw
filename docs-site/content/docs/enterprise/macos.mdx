@@ -388,7 +388,7 @@ Run these as root from `/opt/cisco/defenseclaw/bin`.
 
 | Goal | Command |
 | --- | --- |
-| Stop and remove the deployment, its binaries, config, secrets and logs, most of its data and lifecycle state, and the `_defenseclaw` account. Each user keeps `~/.defenseclaw`. When an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` stay with the root-only record `/opt/cisco/defenseclaw/lifecycle/openshell-state.kept.json`. They are root-owned while the service account is gone; the next `ensure` adopts them | `defenseclaw-gateway enterprise macos uninstall --json` |
+| Stop and remove the deployment, its binaries, config, secrets and logs, most of its data and lifecycle state, and the `_defenseclaw` account. Each user keeps `~/.defenseclaw`. When an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` stay with the root-only records `/opt/cisco/defenseclaw/lifecycle/openshell-state.kept.json` and `/opt/cisco/defenseclaw/lifecycle/retained-state.json` and the marker `/opt/cisco/defenseclaw/runtime/.defenseclaw-retained`. They are root-owned while the service account is gone; the next `ensure` adopts them | `defenseclaw-gateway enterprise macos uninstall --json` |
 | Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise macos uninstall --purge --json` |
 | Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise macos uninstall --keep-state --json` |
 | Keep only the `_defenseclaw` account | Add `--keep-service-account` |

@@ -1821,6 +1821,10 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1822", page: "support-matrix.mdx", section: "Hook capacity on managed hosts", has: ["only after that full wait", "the gateway answered about 14 calls a second when 32 tool calls ran in parallel", "710 MB audit store", "With a 2 GB audit store, the first cold start of the gateway after an upgrade denied 27 to 37 calls at the full wait", "lower the number of tool calls the agent runs in parallel", "`observability.local.retention_days` (default 7)"] },
   { gap: "GAP-2463", page: "enterprise/lifecycle.mdx", has: ["**Windows rollback to 1.0.4 with a disconnected Hermes user:**", "The `/verify` result names the account, and it passes once that user reconnects.", "A user who is signed out is listed as pending and `/verify` passes."], lacks: ["a signed-out Hermes user:**"] },
   { gap: "GAP-2508", page: "enterprise/lifecycle.mdx", has: ["**Windows rollback to 1.0.2 with Codex users:**", "each Codex event runs the hook twice and writes two audit rows", "A 1.0.2 `/repair` keeps both."], lacks: ["GAP-2508 draft", "CONDITIONAL"] },
+  // sidecar-aispg-retest GAP-0015: a non-purge uninstall that keeps sandboxes also leaves retained-state.json and the .defenseclaw-retained marker; the pages name them.
+  { gap: "sidecar-aispg-retest GAP-0015", page: "enterprise/lifecycle.mdx", section: "What uninstall keeps", has: ["`retained-state.json`, the root-only record of the state folders the uninstall kept", "a root-only `.defenseclaw-retained` marker"] },
+  { gap: "sidecar-aispg-retest GAP-0015", page: "enterprise/linux.mdx", section: "Remove", has: ["`/var/lib/defenseclaw-enterprise/retained-state.json`", "`/var/lib/defenseclaw/.defenseclaw-retained`"] },
+  { gap: "sidecar-aispg-retest GAP-0015", page: "enterprise/macos.mdx", section: "Remove", has: ["`/opt/cisco/defenseclaw/lifecycle/retained-state.json`", "`/opt/cisco/defenseclaw/runtime/.defenseclaw-retained`"] },
 ];
 
 function pageSection(name: string, heading?: string): string {
@@ -2651,5 +2655,13 @@ describe('Windows uninstall session wording matches the pages (GH #1100)', () =>
   it('the no-active-session reason still names a disconnected session', () => {
     const messages = source('internal/cli/windows_enterprise_messages.go');
     assert.ok(messages.includes('"had no active (connected) session (signed out, or signed in with a disconnected session)"'), 'windowsEnterpriseNoActiveSession changed: re-check enterprise/windows.mdx Remove, lifecycle.mdx Uninstall notes and threat-model.mdx');
+  });
+});
+
+// sidecar-aispg-retest GAP-0015: the retained-state file names the Remove pages quote.
+describe('retained-state file names match the Remove pages (sidecar-aispg-retest GAP-0015)', () => {
+  it('retained.go still writes retained-state.json and .defenseclaw-retained', () => {
+    const go = source('internal/enterpriseunix/retained.go');
+    assert.ok(go.includes('retainedStateFileName      = "retained-state.json"') && go.includes('retainedMarkerName         = ".defenseclaw-retained"'), 'retained-state names changed: re-check enterprise/lifecycle.mdx What uninstall keeps, linux.mdx and macos.mdx Remove');
   });
 });
