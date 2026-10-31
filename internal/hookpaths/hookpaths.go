@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"io/fs"
 	"maps"
 	"os"
@@ -956,8 +955,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	var directoryOperands []RedirectOccurrence
 	var directoryUnknown bool
 	links := shellLinks{known: true}
-	// The plain moves that only a simple command of the list reads (GAP-2559).
-	var statementMoves map[string]bool
+	// The plain moves that only a simple command of the list reads, and
+	// those of them that pass -T (GAP-2559).
+	var statementMoves, statementNoTarget map[string]bool
 	var dynamicReadings []string
 	readingTargets := map[string]string{}
 	sourceFacts := map[string]string{}
@@ -1033,7 +1033,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
-				statementMoves = PlainMoveDestinationsWithStatements(fallback, fallbackFacts)
+				statementMoves, statementNoTarget = plainMoveDestinationsWithStatements(fallback, fallbackFacts)
 				facts.Paths = append(facts.Paths, fallbackFacts.Paths...)
 				truncated = truncated || fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded
 				// Past the ActionFacts limits (a touch, chmod or mkdir of more
@@ -1147,7 +1147,14 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		for path := range statementMoves {
 			destinations[path] = true
 		}
-		replacedLinks = movedOntoLinkEntriesOf(destinations)
+		noTarget := noTargetMoveDestinations(facts)
+		for path := range statementNoTarget {
+			if noTarget == nil {
+				noTarget = map[string]bool{}
+			}
+			noTarget[path] = true
+		}
+		replacedLinks = movedOntoLinkEntriesOf(destinations, noTarget)
 	}
 	targets := map[string]string{CWDKey: cwd}
 	// The fixed part counts the truncation marker, so setting it never
@@ -1863,22 +1870,20 @@ func pathFactIsRedirect(candidate actionfacts.PathFact, commands []actionfacts.C
 // (GAP-2558). A managed gateway behind ProtectHome judges the move from
 // the client map, which otherwise followed the final link. A destination
 // that another writer of the command also names (cp, a redirect), a
-// trailing separator, a link to a directory (the move lands inside it) or
-// a link whose target cannot be read is not listed.
+// trailing separator, a link to a directory (the move lands inside it,
+// unless mv -T replaces it, GAP-2559) or a link whose target cannot be
+// read is not listed.
 func movedOntoLinkEntries(facts actionfacts.Facts) map[string]bool {
-	return movedOntoLinkEntriesOf(PlainMoveDestinations(facts))
+	return movedOntoLinkEntriesOf(PlainMoveDestinations(facts), noTargetMoveDestinations(facts))
 }
 
 // movedOntoLinkEntriesOf is movedOntoLinkEntries for a list of plain move
-// destinations.
-func movedOntoLinkEntriesOf(destinations map[string]bool) map[string]bool {
+// destinations; noTarget are those an mv -T replaces as an entry.
+func movedOntoLinkEntriesOf(destinations, noTarget map[string]bool) map[string]bool {
 	var out map[string]bool
 	for path := range destinations {
 		info, err := pathLstat(path)
-		if err != nil || info.Mode()&os.ModeSymlink == 0 {
-			continue
-		}
-		if target, err := pathStat(path); err == nil && target.IsDir() || err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err != nil || !replaceableMoveLink(path, info, noTarget[path]) {
 			continue
 		}
 		if out == nil {
@@ -1904,10 +1909,9 @@ func PlainMoveDestinations(facts actionfacts.Facts) map[string]bool {
 		if path == "" {
 			path = candidate.Normalized
 		}
-		if !filepath.IsAbs(path) {
+		if path = PlainMovePath(path); !filepath.IsAbs(path) {
 			continue
 		}
-		path = filepath.Clean(path)
 		value := filepath.ToSlash(candidate.Value)
 		plainMove := candidate.Access == actionfacts.PathAccessWrite &&
 			!strings.HasSuffix(value, "/") && !strings.HasSuffix(value, "/.") &&
