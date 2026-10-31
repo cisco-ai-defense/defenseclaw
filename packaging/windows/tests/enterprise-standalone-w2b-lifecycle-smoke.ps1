@@ -85,28 +85,62 @@ $stream.Dispose()
         $script:ProgramData = $Root
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         try {
-            # GAP-0145: a junction in StateRoot is refused before anything
-            # changes, naming how to remove only the link.
+            # GAP-0145, mgmt-agent-api GAP-1317: a junction or symbolic link
+            # below StateRoot is removed as a link before the uninstall changes
+            # the state tree; what it points to keeps every file. A link at
+            # StateRoot itself is refused before anything changes, naming how
+            # to remove only the link.
             $state = [IO.Path]::Combine($Root, 'state')
             $target = [IO.Path]::Combine($Root, 'junction-target')
             [void][IO.Directory]::CreateDirectory($state)
             [void][IO.Directory]::CreateDirectory($target)
+            $targetFile = [IO.Path]::Combine($target, 'kept.txt')
+            [IO.File]::WriteAllText($targetFile, 'kept')
+            $targetHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $targetFile).Hash
             $junction = [IO.Path]::Combine($state, 'secrets')
             [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $junction -Target $target)
+            $nested = [IO.Path]::Combine($state, 'logs', 'deeper')
+            [void][IO.Directory]::CreateDirectory($nested)
+            $nestedJunction = [IO.Path]::Combine($nested, 'link')
+            [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $nestedJunction -Target $target)
+            $fileLink = [IO.Path]::Combine($state, 'file-link.txt')
+            [void](Microsoft.PowerShell.Management\New-Item -ItemType SymbolicLink -Path $fileLink -Target $targetFile)
+            $warnings = @(Remove-DefenseClawUninstallStateTreeLinks -Layout @{ StateRoot = $state } 3>&1)
+            foreach ($link in @($junction, $nestedJunction, $fileLink)) {
+                if ($null -ne (Microsoft.PowerShell.Management\Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue)) {
+                    $failures.Add("the uninstall kept the link below StateRoot: $link")
+                }
+            }
+            if ($warnings.Count -ne 3) {
+                $failures.Add("the StateRoot link removal reported $($warnings.Count) links, not 3")
+            }
+            if (-not [IO.File]::Exists($targetFile) -or
+                (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $targetFile).Hash -ne $targetHash -or
+                @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $target -Force).Count -ne 1) {
+                $failures.Add('removing the StateRoot links changed what they pointed to')
+            }
+            if (-not [IO.Directory]::Exists($nested)) {
+                $failures.Add('removing the StateRoot links removed a real folder')
+            }
+            $linkedState = [IO.Path]::Combine($Root, 'linked-state')
+            [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $linkedState -Target $target)
             try {
-                Assert-DefenseClawUninstallStateTreeNoReparse -Layout @{ StateRoot = $state }
-                $failures.Add('a junction in StateRoot passed the uninstall preflight')
+                Remove-DefenseClawUninstallStateTreeLinks -Layout @{ StateRoot = $linkedState }
+                $failures.Add('a StateRoot that is a junction passed the uninstall preflight')
             }
             catch {
                 if ($_.Exception.Message -notlike 'state_invalid: managed state contains a reparse point:*' -or
-                    $_.Exception.Message -notlike '*stopped before it changed anything*' -or
+                    $_.Exception.Message -notlike '*still installed*' -or
                     $_.Exception.Message -notlike '*rmdir*') {
-                    $failures.Add("junction refusal: $($_.Exception.Message)")
+                    $failures.Add("StateRoot junction refusal: $($_.Exception.Message)")
                 }
             }
-            [IO.Directory]::Delete($junction)
-            Assert-DefenseClawUninstallStateTreeNoReparse -Layout @{ StateRoot = $state }
-            # The preflight runs before the uninstall transaction.
+            if (-not [IO.File]::Exists($targetFile)) {
+                $failures.Add('the StateRoot junction refusal changed its target')
+            }
+            [IO.Directory]::Delete($linkedState)
+            Remove-DefenseClawUninstallStateTreeLinks -Layout @{ StateRoot = $state }
+            # The link removal runs before the uninstall transaction.
             $tokens = $null
             $errors = $null
             $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
@@ -115,11 +149,11 @@ $stream.Dispose()
                     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Invoke-DefenseClawUninstallLifecycle'
                 }, $true)
             $calls = @($uninstall.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] }, $true))
-            $preflight = @($calls | Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq 'Assert-DefenseClawUninstallStateTreeNoReparse' })
+            $preflight = @($calls | Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq 'Remove-DefenseClawUninstallStateTreeLinks' })
             $transaction = @($calls | Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq 'New-DefenseClawTransaction' })
             if ($preflight.Count -ne 1 -or $transaction.Count -lt 1 -or
                 $preflight[0].Extent.StartOffset -ge $transaction[0].Extent.StartOffset) {
-                $failures.Add('the StateRoot link preflight does not run before the uninstall transaction')
+                $failures.Add('the StateRoot link removal does not run before the uninstall transaction')
             }
 
             # GAP-0149: the retirement rename waits for a program that holds a
