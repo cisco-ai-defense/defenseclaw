@@ -4204,7 +4204,7 @@ def _seal_windows_hook_credentials(data_dir: str) -> None:
                 continue
             protect_private_file(path)
         except OSError as exc:
-            ux.warn(f"Could not make {path} private ({exc}); 'defenseclaw setup rotate-token' refuses it until it is")
+            ux.warn(f"Could not make {path} private ({exc}); 'defenseclaw setup rotate-token' refuses it until it is private")
 
 
 def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:

@@ -323,6 +323,16 @@ def test_init_step_saves_and_reports(home, system_one):
     assert config_module.load().decision_model.active()
 
 
+def test_setup_decision_model_unreachable_warning_is_a_whole_sentence(home):
+    shutil.copy(FIXTURES / "1.0.5.yaml", home / "config.yaml")
+    result = _invoke(
+        home,
+        ["decision-model", "--base-url", "http://127.0.0.1:1/v1/systemone", "--model", "m", "--ping", "--non-interactive"],
+        catch_exceptions=False,
+    )
+    assert "the LLM judge decides alone until it is reachable" in result.output
+
+
 def test_init_step_warns_when_unreachable(home):
     from defenseclaw.bootstrap import FirstRunReport
     from defenseclaw.commands.cmd_init import _apply_first_run_decision_model
@@ -334,7 +344,7 @@ def test_init_step_warns_when_unreachable(home):
         report, {"enabled": True, "base_url": "http://127.0.0.1:1/v1/systemone", "model": "m", "api_key_env": "", "token": ""}, str(home)
     )
     assert report.setup[-1].status == "warn"
-    assert "judge decides alone" in report.setup[-1].detail
+    assert report.setup[-1].detail.endswith("the LLM judge decides alone until it is reachable")
 
 
 # --- doctor ---------------------------------------------------------------------
