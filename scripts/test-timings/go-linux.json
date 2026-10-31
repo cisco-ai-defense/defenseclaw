@@ -2053,7 +2053,8 @@
    "TestWriteCallCodeGuardRunsBesideTheRuleDispatch": 3.5,
    "TestWriteThroughALinkToStateIsAStateWrite": 18.3,
    "TestWriteThroughCommandLinkToActiveStateBlocks": 16.0,
-   "TestXxdOutputOperandOfActiveState": 7.8
+   "TestXxdOutputOperandOfActiveState": 7.8,
+   "TestR106ManagedPrivateKeyReadMatchesPerUser": 40.0
   },
   "internal/gateway/connector": {
    "*": 0.113,
