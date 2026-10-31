@@ -500,7 +500,14 @@ func (a *APIServer) applyCopilotSubagentLineage(ctx context.Context, meta llmEve
 	now := time.Now().UTC()
 	switch meta.LifecycleEvent {
 	case "subagent_start":
-		a.noteCopilotSubagentStart(meta, firstString(payload, "agentId", "agent_id"), now)
+		// The start row is the child's: one level under the agent that
+		// started it, also when the start names no child (Copilot 1.0.90)
+		// and a pending spawn intent cleared the session-root fallback
+		// (rel-1-0-6:GAP-0223).
+		if parent, ok := a.noteCopilotSubagentStart(meta, firstString(payload, "agentId", "agent_id"), now); ok &&
+			meta.LineageProvenance != "reported" && parent.AgentID != meta.AgentID {
+			return linkHookChildToParent(meta, parent)
+		}
 		return meta
 	case "subagent_stop":
 		return a.noteCopilotSubagentStop(meta, firstString(payload, "agentId", "agent_id"), now)
@@ -584,18 +591,20 @@ func (a *APIServer) hookSessionInHistory(ctx context.Context, meta llmEventMeta)
 	return err == nil && found
 }
 
-func (a *APIServer) noteCopilotSubagentStart(meta llmEventMeta, child string, now time.Time) {
+// noteCopilotSubagentStart records a pending sub-agent start under the
+// retained agent of the start's session and returns that parent.
+func (a *APIServer) noteCopilotSubagentStart(meta llmEventMeta, child string, now time.Time) (llmEventMeta, bool) {
 	// Session IDs are caller-supplied and can repeat across accounts: the
 	// parent is a session of the same agent identity and user (GAP-1047).
 	parent, ok := a.hookSessionStateSnapshotMatching("copilot", meta.SessionID,
 		agentNodeID(meta.AgentIdentityID, "copilot", meta.SessionID, "root"), &meta)
 	if !ok {
 		if parent, ok = a.hookSessionStateSnapshotMatching("copilot", meta.SessionID, "", &meta); !ok {
-			return
+			return llmEventMeta{}, false
 		}
 	}
 	if strings.TrimSpace(parent.meta.AgentID) == "" || parent.meta.AgentDepth < 0 || parent.meta.AgentDepth >= 64 {
-		return
+		return llmEventMeta{}, false
 	}
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
@@ -617,6 +626,7 @@ func (a *APIServer) noteCopilotSubagentStart(meta llmEventMeta, child string, no
 	a.copilotSubagents = append(a.copilotSubagents, copilotPendingSubagent{
 		identity: meta.AgentIdentityID, parent: parent.meta, child: child, createdAt: now,
 	})
+	return parent.meta, true
 }
 
 // noteCopilotSubagentStop ends the pending start the child session belongs
