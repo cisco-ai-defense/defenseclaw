@@ -151,6 +151,7 @@ def test_add_with_unwritable_generation_file_is_one_plain_line(tmp_path: Path, m
     assert result.exit_code != 0
     assert "Traceback" not in result.output
     assert "config.generation.json" in result.output
+    assert ".." not in result.output
     assert len(result.output.strip().splitlines()) == 1
     assert (tmp_path / "config.yaml").read_bytes() == before
 

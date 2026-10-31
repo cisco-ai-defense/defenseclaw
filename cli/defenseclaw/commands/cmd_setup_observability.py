@@ -317,7 +317,8 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         name_of_file = os.path.basename(str(exc.filename2 or exc.filename or "")).strip(".")
         if name_of_file.endswith(".tmp"):
             name_of_file = ""
-        reason = exc.strerror or exc.__class__.__name__
+        # Windows messages already end with a period ("Access is denied.").
+        reason = (exc.strerror or exc.__class__.__name__).strip().rstrip(".")
         raise click.ClickException(
             f"Could not save {name_of_file or 'the observability settings'}: {reason}. "
             "Nothing was changed; fix that file and run the command again."
