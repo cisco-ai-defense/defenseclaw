@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,8 +58,8 @@ var swapReaderShares = []struct {
 // An agent that loads its policy while DefenseClaw updates it must always
 // find the old policy or the new one at the live name: never no file or a
 // partial file. Cursor (Node) and Codex (Rust) share deletion and are never
-// refused; a reader that does not is refused only for the instant of the
-// rename and gets the file on a prompt retry.
+// refused; a reader that does not is refused only while a swap holds the file
+// for its rename and gets the file on a retry once that rename is done.
 func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 	for _, reader := range swapReaderShares {
 		t.Run(reader.name, func(t *testing.T) {
@@ -72,6 +73,7 @@ func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 				mu      sync.Mutex
 				failure string
 				reads   int
+				refused atomic.Bool
 			)
 			stop := make(chan struct{})
 			done := make(chan struct{})
@@ -85,15 +87,23 @@ func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 					}
 					data, err := readForSwapReaderTest(destination, reader.share)
 					// Windows refuses a reader that does not share deletion
-					// for the instant a rename holds the new file open, as
-					// with any atomic replacement (ReplaceFileW included).
-					// Such a reader must get the file on a prompt retry.
-					for retry := time.Now().Add(200 * time.Millisecond); err != nil &&
+					// while a swap holds the file for its rename, as with any
+					// atomic replacement (ReplaceFileW included). Such a
+					// reader must get the file once that rename is done. On
+					// a busy machine one rename can take hundreds of
+					// milliseconds (354 ms on four busy CPUs of a Windows
+					// Server 2025 host; a 200 ms retry failed the Windows CI
+					// shard pk2), so the retry is bounded by the swap's own
+					// lock timeout, and no new swap starts while the reader
+					// is refused.
+					for retry := time.Now().Add(swapLockTimeout); err != nil &&
 						reader.share&windows.FILE_SHARE_DELETE == 0 &&
 						errors.Is(err, windows.ERROR_SHARING_VIOLATION) && time.Now().Before(retry); {
+						refused.Store(true)
 						time.Sleep(time.Millisecond)
 						data, err = readForSwapReaderTest(destination, reader.share)
 					}
+					refused.Store(false)
 					mu.Lock()
 					reads++
 					if failure == "" && (err != nil || (!bytes.Equal(data, versions[0]) && !bytes.Equal(data, versions[1]))) {
@@ -123,6 +133,11 @@ func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 				mu.Unlock()
 				if failed {
 					break
+				}
+				// A policy changes now and then, not back to back: a reader
+				// refused by this swap gets in before the next one.
+				for wait := time.Now().Add(swapLockTimeout); refused.Load() && time.Now().Before(wait); {
+					time.Sleep(time.Millisecond)
 				}
 			}
 			close(stop)
