@@ -1142,41 +1142,59 @@ func windowsManagedObstructionQuarantinePath(path string) string {
 // that is not the canonical one are left to the checks that follow, which
 // refuse them as before.
 func moveWindowsTargetOwnedDataDirLinksAside(home, dataDir string, target *windows.SID) error {
-	if target == nil || !sameWindowsEnterprisePath(dataDir, filepath.Join(home, ".defenseclaw")) {
+	path := windowsTargetOwnedDataDirLink(home, dataDir, target)
+	if path == "" {
 		return nil
+	}
+	if err := quarantineWindowsTargetOwnedObstruction(home, path, target, false, "DefenseClaw folder"); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr,
+		"[enterprise-hooks] moved the account's own link at %s aside to %s; what it names was not opened or changed\n",
+		path, windowsManagedObstructionQuarantinePath(path))
+	return nil
+}
+
+// windowsTargetOwnedDataDirLink returns the link or junction the account
+// (target) itself made at its canonical DefenseClaw folder (<home>\.defenseclaw)
+// or at that folder's hooks folder, or "" when there is none. It only reads
+// the names and the links' owners, never what a link names. The enrollment
+// moves such a link aside (moveWindowsTargetOwnedDataDirLinksAside); while
+// the account is signed out, the guardian's pending proof and the
+// Upgrade/Repair plan leave that account pending instead of failing the
+// lifecycle for the computer (GAP-0193). A link another account or an
+// administrator owns, a link anywhere else and a data dir that is not the
+// canonical one report "".
+func windowsTargetOwnedDataDirLink(home, dataDir string, target *windows.SID) string {
+	if target == nil || !sameWindowsEnterprisePath(dataDir, filepath.Join(home, ".defenseclaw")) {
+		return ""
 	}
 	for _, path := range []string{filepath.Clean(dataDir), filepath.Join(filepath.Clean(dataDir), "hooks")} {
 		info, err := os.Lstat(path)
 		if err != nil {
-			return nil
+			return ""
 		}
 		ptr, err := winpath.UTF16Ptr(path)
 		if err != nil {
-			return nil
+			return ""
 		}
 		attributes, err := windows.GetFileAttributes(ptr)
 		if err != nil {
-			return nil
+			return ""
 		}
 		if info.Mode()&os.ModeSymlink == 0 && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
 			if !info.IsDir() {
-				return nil
+				return ""
 			}
 			continue
 		}
 		owner, err := windowsPathOwnerNoFollow(path)
 		if err != nil || owner == nil || !owner.Equals(target) {
-			return nil
+			return ""
 		}
-		if err := quarantineWindowsTargetOwnedObstruction(home, path, target, false, "DefenseClaw folder"); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr,
-			"[enterprise-hooks] moved the account's own link at %s aside to %s; what it names was not opened or changed\n",
-			path, windowsManagedObstructionQuarantinePath(path))
-		return nil
+		return path
 	}
-	return nil
+	return ""
 }
 
 func quarantineWindowsTargetOwnedObstruction(home, path string, target *windows.SID, recreateDirectory bool, label string) error {

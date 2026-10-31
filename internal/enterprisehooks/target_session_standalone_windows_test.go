@@ -64,7 +64,9 @@ func TestStandaloneDeferredPendingProofAndEnrollmentAdoptAnAccountCreatedDataDir
 	target := deferredPendingProofFixture(t, true)
 	sid := currentWindowsTestSID(t)
 	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
-	// A junction the account made there, to another folder it owns, is not one.
+	// A junction the account made there, to another folder it owns, is not
+	// an account-created folder; it proves pending without being adopted or
+	// followed (GAP-0193), and the enrollment moves it aside.
 	elsewhere := filepath.Join(target.UserHome, "elsewhere")
 	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
 		t.Fatal(err)
@@ -74,8 +76,11 @@ func TestStandaloneDeferredPendingProofAndEnrollmentAdoptAnAccountCreatedDataDir
 		t.Fatalf("create junction: %v: %s", err, output)
 	}
 	setWindowsTestPathExactOwner(t, dataDir, sid)
-	if err := RequireWindowsEnterpriseDeferredTargetPending(target); err == nil {
-		t.Fatal("the pending proof accepted a junctioned data directory")
+	if err := RequireWindowsEnterpriseDeferredTargetPending(target); err != nil {
+		t.Fatalf("pending proof for the account's own junction: %v", err)
+	}
+	if WindowsAccountCreatedDataDir(target.UserHome, sid.String()) {
+		t.Fatal("the account's junction reads as an account-created data directory")
 	}
 	if err := os.Remove(dataDir); err != nil {
 		t.Fatal(err)
