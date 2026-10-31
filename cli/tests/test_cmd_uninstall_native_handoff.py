@@ -1011,6 +1011,26 @@ def test_authenticode_refuses_wrong_signer_or_version_and_checks_fixed_argv(
     assert run.call_args.kwargs["shell"] is False
 
 
+def test_authenticode_verifier_timeout_is_one_plain_refusal() -> None:
+    # Windows shard 8 (rel-1-0-6:GAP-0220): a stalled PowerShell hit the old 30 s
+    # bound and the refusal carried the whole PowerShell command line.
+    stalled = subprocess.TimeoutExpired(["powershell.exe", "-Command", "Get-AuthenticodeSignature"], 120)
+    with (
+        patch.object(native, "_system_powershell_path", return_value=r"C:\Windows\powershell.exe"),
+        patch.object(native.subprocess, "run", side_effect=stalled) as run,
+        pytest.raises(native.NativeWindowsUninstallRefusal) as refused,
+    ):
+        native._verify_setup_authenticode(r"C:\cache\DefenseClawSetup-x64.exe", expected_version=_VERSION)
+
+    message = str(refused.value)
+    assert "Get-AuthenticodeSignature" not in message
+    assert message == (
+        "Windows PowerShell did not finish checking the cached Setup signature within "
+        "120 seconds. Nothing was uninstalled; run the command again."
+    )
+    assert run.call_args.kwargs["timeout"] == 120
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires system Windows PowerShell")
 def test_authenticode_verifier_passes_target_to_real_powershell_over_stdin(
     tmp_path: Path,
