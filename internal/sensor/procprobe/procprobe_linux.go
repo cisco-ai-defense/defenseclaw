@@ -79,6 +79,14 @@ func snapshot() ([]Process, int, error) {
 	return rows, skipped, nil
 }
 
+// OwnerOfPID is the name of the account that owns the live process pid, ""
+// when the process is gone or the account database does not name the uid. The
+// Linux event source reads it as a creation event arrives, so a session that
+// exits before any poll still names its account (p0-round GAP-1389).
+func OwnerOfPID(pid int) string {
+	return ownerOf(filepath.Join("/proc", strconv.Itoa(pid)))
+}
+
 func readProcess(pid int, clockTicks, pageSize int64, bootTime time.Time) (Process, bool) {
 	base := filepath.Join("/proc", strconv.Itoa(pid))
 	statBytes, err := os.ReadFile(filepath.Join(base, "stat"))

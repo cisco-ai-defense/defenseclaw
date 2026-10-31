@@ -606,6 +606,13 @@ func (r *ownerResolver) resolve(processes []procRef, configPaths []string) owner
 	if found, ok := r.profileOwner(configPaths); ok {
 		return found
 	}
+	// Last: on Linux and macOS the creation event of the session's own
+	// process names the account (read from /proc as the event arrived), so a
+	// session that exited before any poll and wrote no configuration file is
+	// still the account that ran it (p0-round GAP-1389).
+	if user, ok := eventUserPOSIX(processes); ok {
+		return owner{User: user, Attribution: AttributionProcessOwner}
+	}
 	reason := "the process owner could not be read (" + ownerSourcesFor(ownerGOOS) + ") " +
 		"and no enrolled profile holds the agent's configuration"
 	switch {
@@ -652,6 +659,28 @@ func eventOwner(processes []procRef) (user, sid string, mixed bool) {
 		}
 	}
 	return user, sid, false
+}
+
+// eventUserPOSIX is the one account name the creation events of the session's
+// own (non-descendant) processes named on Linux or macOS, where an event
+// carries a name and no SID. A descendant is left out as in eventOwner (a
+// setuid child names another account), and more than one name names none.
+func eventUserPOSIX(processes []procRef) (string, bool) {
+	if ownerGOOS == "windows" {
+		return "", false
+	}
+	user := ""
+	for _, process := range processes {
+		name := strings.TrimSpace(process.User)
+		switch {
+		case process.Descendant, process.SID != "", name == "":
+		case user == "":
+			user = name
+		case user != name:
+			return "", false
+		}
+	}
+	return user, user != ""
 }
 
 // named qualifies an owner with the enrolled table's DOMAIN\name for its
