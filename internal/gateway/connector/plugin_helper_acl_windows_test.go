@@ -219,15 +219,30 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 					t.Fatal(err)
 				}
 				hostileEnv := append(os.Environ(), "PSModulePath="+hostile+";"+os.Getenv("PSModulePath"))
+				// The plugin gives its ACL check 5 s and past that refuses
+				// the call and asks for a retry. A busy runner can take longer
+				// to start Windows PowerShell (median 3.8 s, max 4.7 s on four
+				// busy CPUs of a Windows Server 2025 host; over 5 s in the
+				// Windows CI shard gw9). A timed-out check reaches no verdict,
+				// so the test retries it as the message asks; every attempt
+				// runs under the plugin's own 5 s budget.
 				checkIn := func(env []string) string {
 					t.Helper()
-					cmd := exec.Command(node, plugin)
-					cmd.Env = env
-					out, err := cmd.CombinedOutput()
-					if err != nil {
-						t.Fatalf("rendered plugin: %v\n%s", err, out)
+					var got string
+					for attempt := 1; attempt <= 3; attempt++ {
+						cmd := exec.Command(node, plugin)
+						cmd.Env = env
+						out, err := cmd.CombinedOutput()
+						if err != nil {
+							t.Fatalf("rendered plugin: %v\n%s", err, out)
+						}
+						got = strings.TrimSpace(string(out))
+						if !strings.Contains(got, "helper ACL check did not finish within 5 s") {
+							return got
+						}
+						t.Logf("ACL check attempt %d timed out; retrying as the refusal asks", attempt)
 					}
-					return strings.TrimSpace(string(out))
+					return got
 				}
 				check := func() string { t.Helper(); return checkIn(nil) }
 				if got := check(); got != "trusted" {
