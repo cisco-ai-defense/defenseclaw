@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -942,7 +943,39 @@ func windowsEnterprisePolicyDigestCommand(ctx context.Context) (*exec.Cmd, error
 // reported for every action. Nothing is reported while the gateway is not
 // ready; when the installed CLI cannot compute it, policy_unverified names why.
 func applyWindowsEnterprisePolicy(ctx context.Context, result *enterprisestatus.Result) {
-	applyWindowsEnterprisePolicyAs(ctx, result, result.Action != "status" && result.Action != "verify")
+	change := result.Action != "status" && result.Action != "verify"
+	applyWindowsEnterprisePolicyAs(ctx, result, change)
+	if change {
+		addWindowsEnterpriseUnselectedCustomPackWarnings(result)
+	}
+}
+
+// addWindowsEnterpriseUnselectedCustomPackWarnings warns
+// custom_pack_will_not_load for each custom pack of the installed config that
+// no setting selects and that the gateway would refuse once one did (its pin
+// does not match its files, or the pack is missing or invalid). Setup /ensure
+// applied such a pin with only ensure_config_applied, while config set says
+// the pack is registered but will not load (GAP-1076). A selected pack with
+// that problem is still refused before anything changes.
+func addWindowsEnterpriseUnselectedCustomPackWarnings(result *enterprisestatus.Result) {
+	if result == nil || !result.Installed {
+		return
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return
+	}
+	raw, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return
+	}
+	installed, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, raw)
+	if err != nil {
+		return
+	}
+	for _, problem := range gateway.UnselectedCustomPackProblems(installed) {
+		result.AddWarning("custom_pack_will_not_load", problem+". No setting selects it now; a config that selects it is refused until the pin matches")
+	}
 }
 
 // applyWindowsEnterprisePolicyAs is applyWindowsEnterprisePolicy for a run
