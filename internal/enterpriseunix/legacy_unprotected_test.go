@@ -8,6 +8,8 @@ package enterpriseunix
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -171,5 +173,53 @@ func TestCommandOpsStatusReadsTheUnprotectedSandboxes(t *testing.T) {
 	st, err := ops.Status(context.Background(), alice)
 	if err != nil || len(st.Unprotected) != 1 || st.Unprotected[0] != (UnprotectedSandbox{Name: "kept", Stop: "defenseclaw sandbox stop kept"}) {
 		t.Fatalf("Status = %+v %v", st, err)
+	}
+}
+
+// GAP-0016 (#1224 row 1): a foreign regular file at the launcher path is the
+// launcher row alone. The account's status is asked of the managed binary, so
+// the file's output is not read as a daemon that cannot answer, which made a
+// false "running unprotected: legacy sandbox" row for every account and
+// failed verify. A daemon that does report a legacy guest still gets its row.
+func TestAForeignLauncherIsNotALegacySandbox(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			legacy := false
+			ops, runner, alice := opsHost(t, goos, func(line string) (CommandResult, error) {
+				switch {
+				case strings.HasSuffix(line, "is-active defenseclaw-sandbox.service"):
+					return CommandResult{Stdout: []byte("active\n")}, nil
+				case line == "launchctl print gui/1001":
+					return CommandResult{}, errors.New("not found")
+				case strings.HasPrefix(line, "launchctl print user/1001/com.cisco.defenseclaw.sandbox"):
+					return CommandResult{Stdout: []byte("com.cisco.defenseclaw.sandbox = {\n\tstate = running\n}\n")}, nil
+				case strings.Contains(line, " /usr/bin/defenseclaw "), strings.Contains(line, " /usr/local/bin/defenseclaw "):
+					return CommandResult{Stdout: []byte("ok from a foreign file\n")}, nil
+				case strings.HasSuffix(line, "sandbox status --output json") && legacy:
+					return CommandResult{Stdout: []byte(`{"sandboxes":1,"running":1,"live":1,"unprotected":[{"name":"kept","stop":"defenseclaw sandbox stop kept"}]}`)}, nil
+				case strings.HasSuffix(line, "sandbox status --output json"):
+					return CommandResult{Stdout: []byte(`{"sandboxes":0,"running":0,"live":0}`)}, nil
+				}
+				return CommandResult{}, nil
+			})
+			launcher := ops.env.P(ops.env.launcherPath())
+			if err := os.MkdirAll(filepath.Dir(launcher), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(launcher, []byte("#!/bin/sh\necho ok from a foreign file\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, conflict := ops.env.checkLauncher(); !conflict {
+				t.Fatal("the foreign launcher is not its own row")
+			}
+			st, err := ops.Status(context.Background(), alice)
+			if err != nil || len(st.Unprotected) != 0 || runner.called(ops.env.launcherPath()+" sandbox") {
+				t.Fatalf("Status = %+v %v after %v", st, err, runner.calls)
+			}
+			legacy = true
+			if st, err := ops.Status(context.Background(), alice); err != nil || len(st.Unprotected) != 1 {
+				t.Fatalf("a real legacy guest behind a foreign launcher: Status = %+v %v", st, err)
+			}
+		})
 	}
 }
