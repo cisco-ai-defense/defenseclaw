@@ -116,6 +116,9 @@ type LLMJudge struct {
 	// it is judged (keepDecisionState / takeDecisionState).
 	decisionStatesMu sync.Mutex
 	decisionStates   map[string]decisionModelState
+	// calls bounds and orders the judge calls sent to the model when
+	// guardrail.judge.max_parallel is set (nil: no limit).
+	calls *judgeScheduler
 
 	toolContextMu sync.Mutex
 	toolContext   map[string]toolJudgeSessionContext
@@ -225,7 +228,22 @@ func newLLMJudgeWithReason(cfg *config.JudgeConfig, llm config.LLMConfig, dotenv
 	return &LLMJudge{
 		cfg: cfg, model: model, providerName: llm.ProviderPrefix(),
 		provider: provider, rp: rp,
+		calls: judgeSchedulerFor(firstNonEmpty(llm.BaseURL, model), cfg.MaxParallel),
 	}, ""
+}
+
+// chat sends one judge request. With guardrail.judge.max_parallel set it
+// first waits for a call slot of the model endpoint: tool-call judging goes
+// ahead of prompt judging, so a pending tool call is not queued behind a
+// turn's prompt checks on a slow local model (#1395). The wait counts
+// against ctx, the call's own deadline.
+func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (*ChatResponse, error) {
+	release, err := j.calls.acquire(ctx, judgeCallClassOf(kind))
+	if err != nil {
+		return nil, fmt.Errorf("judge call waited for a free slot (guardrail.judge.max_parallel) past its deadline: %w", err)
+	}
+	defer release()
+	return j.provider.ChatCompletion(ctx, req)
 }
 
 // llmJudgeAllowsEmptyAPIKey reports whether the selected provider has a
@@ -586,7 +604,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 	defer judgeTrace.Abort()
 	start := time.Now()
 
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok, kind))
+	resp, err := j.chat(llmCtx, kind, j.judgeChatRequest(messages, maxTok, kind))
 	latencyMs := time.Since(start).Milliseconds()
 	rawResponse := ""
 
@@ -1284,7 +1302,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	)
 	defer judgeTrace.Abort()
 	start := time.Now()
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok, kind))
+	resp, err := j.chat(llmCtx, kind, j.judgeChatRequest(messages, maxTok, kind))
 	latencyMs := time.Since(start).Milliseconds()
 	rawResponse := ""
 
@@ -1778,7 +1796,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 	defer judgeTrace.Abort()
 	start := time.Now()
 
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok, kind))
+	resp, err := j.chat(llmCtx, kind, j.judgeChatRequest(messages, maxTok, kind))
 	latencyMs := time.Since(start).Milliseconds()
 	rawResponse := ""
 
@@ -2356,7 +2374,7 @@ func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample s
 	)
 	defer judgeTrace.Abort()
 	start := time.Now()
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok, kind))
+	resp, err := j.chat(llmCtx, kind, j.judgeChatRequest(messages, maxTok, kind))
 	latencyMs := time.Since(start).Milliseconds()
 	rawResponse := ""
 
@@ -2858,7 +2876,7 @@ func (j *LLMJudge) adjudicateCategory(ctx context.Context, direction, content st
 	)
 	defer judgeTrace.Abort()
 	started := time.Now()
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok, kind))
+	resp, err := j.chat(llmCtx, kind, j.judgeChatRequest(messages, maxTok, kind))
 	latencyMs := time.Since(started).Milliseconds()
 	rawResponse := ""
 	recordJudgeMetrics := func(verdict *ScanVerdict, failure judgeTraceFailure) {

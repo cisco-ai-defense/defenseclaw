@@ -80,6 +80,13 @@ func gatewayAnswerWindowShort(opts Options, deadline time.Time) bool {
 // informational response.
 const HookProgressHeader = "X-DefenseClaw-Hook-Progress"
 
+// HookAnswerWithinHeader carries, in milliseconds, how long a per-user shell
+// hook's request waits for the gateway's answer (defenseclaw-hook-post, from
+// the shell's _DC_HOOK_POST_DEADLINE_MS). The gateway keeps a tool-call
+// judge's wait inside it, since these hooks do not ask for progress reports
+// (#1395).
+const HookAnswerWithinHeader = "X-DefenseClaw-Hook-Answer-Within-Ms"
+
 // HookDeliveryReceiptHeader selects the full-duplex managed hook protocol.
 // The hook sends the receipt only after committing the answer to the agent.
 const HookDeliveryReceiptHeader = "X-DefenseClaw-Hook-Delivery-Receipt"

@@ -1739,6 +1739,10 @@ class OverviewPanelModel:
             failed = details.get("judge_failed_calls", 0)
             total = details.get("judge_recent_calls", 0)
             parts.append(f"judge {judge_state}: {failed}/{total} calls failed")
+        # Hook checks the rules decided without a judge verdict (#1395).
+        fallbacks = details.get("judge_fallbacks", 0)
+        if isinstance(fallbacks, int) and not isinstance(fallbacks, bool) and fallbacks > 0:
+            parts.append(f"judge fallbacks: {fallbacks}")
         return ", ".join(parts)
 
     def ai_discovery_detail(self) -> str:

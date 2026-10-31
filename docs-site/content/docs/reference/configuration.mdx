@@ -476,6 +476,7 @@ Defaults from the loader. Omitted keys take these values.
 | `notifications.dedup_window`, `.max_per_minute` | 30 seconds, `12` | Duplicate suppression and rate cap. |
 | `guardrail.stream_buffer_bytes` | `1024` | Buffer for streamed proxy responses. |
 | `guardrail.judge.timeout`, `.adjudication_timeout` | `30`, `5` | Seconds for a judge call, and for adjudication. |
+| `guardrail.judge.max_parallel` | `0` | Most judge calls sent to the judge model at once; `0` is no limit. With a limit, tool-call judging goes first. See [A judge on a local model](/docs/guardrail#let-tool-calls-go-first). |
 | `guardrail.judge.injection`, `.pii`, `.pii_prompt`, `.pii_completion`, `.tool_injection`, `.exfil` | `true` | Which judge categories run when the judge is enabled. |
 | `guardrail.judge_sweep` | `true` | Run the full judge on content the regex triage found no signal in. |
 | `guardrail.retain_judge_bodies`, `.judge_persist_queue_depth` | `true`, `1024` | Keep raw judge bodies in `judge_bodies.db`, and the async write queue depth. Restart required. |

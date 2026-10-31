@@ -818,6 +818,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// per-profile evaluators (claudeCode / codex / generic) so
 		// they round-trip back to the HTTP response and onto the
 		// audit envelope without a second pass here.
+		// The judge fallback of this call, for its audit row and record (#1395).
+		ctx = withHookJudgeFallbackNote(ctx)
+		if cfg := a.decisionConfig(ctx); shellHookBoundsToolGate(connectorName, req.HookEventName, r) &&
+			(cfg == nil || !cfg.SecureClientIntegration()) {
+			ctx = withShellToolGateBound(ctx, r)
+		}
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
 		// An argumentless Copilot permission callback is bound to the call of
@@ -1319,6 +1325,10 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		env.BodyBytes = req.pendingBodyBytes
 	}
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
+	if reason := hookJudgeFallbackReason(ctx); reason != "" {
+		// The rules decided because the judge gave no verdict in time (#1395).
+		env.Extra = mergeHookEnvelopeExtra(env.Extra, map[string]string{hookJudgeFallbackExtraKey: reason})
+	}
 	// Every panic recovered before the call's audit row is written is an
 	// evaluator failure on its row and export, whatever verdict was kept: the
 	// evaluator's, a later additive check's, a renderer's or the identity

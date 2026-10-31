@@ -2411,10 +2411,14 @@ class JudgeConfig:
     # (the proxy lane is unaffected); ``"*"`` enables every connector.
     hook_connectors: list[str] = field(default_factory=list)
     # Hook-lane judge timeout in seconds (Go ``JudgeConfig.HookTimeout``).
-    # 0 means the gateway default (5s, sized under the hook scripts'
+    # 0 means the gateway default (8s, sized under the hook scripts'
     # ``curl --max-time 10`` budget — the proxy lane's 30s would let the
     # client hang up before a verdict lands).
     hook_timeout: float = 0.0
+    # Most judge calls sent to the judge model at once (Go
+    # ``JudgeConfig.MaxParallel``); 0 = no limit. With a limit, tool-call
+    # judging goes ahead of prompt judging (#1395).
+    max_parallel: int = 0
     # Log judge prompts and responses (was DEFENSECLAW_JUDGE_TRACE).
     trace: bool = False
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
@@ -5053,6 +5057,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             judge.pop("hook_connectors", None)
         if not judge.get("hook_timeout"):
             judge.pop("hook_timeout", None)
+        if not judge.get("max_parallel"):
+            judge.pop("max_parallel", None)
     # Mirror Go's ``yaml:"connectors,omitempty"`` — drop the empty
     # per-connector overrides map so existing single-connector configs
     # stay byte-identical after a load/save round-trip. The block
@@ -5502,6 +5508,8 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "guardrail.judge.hook_connectors",
         # Hook-lane judge timeout: 0 = gateway default, stripped on save.
         "guardrail.judge.hook_timeout",
+        # Judge call bound: 0 = no limit, stripped on save.
+        "guardrail.judge.max_parallel",
         # Identity-based guardrail profile selection: empty = no profiles.
         "guardrail.profile_assignments",
         "guardrail.default_profile",
@@ -6399,6 +6407,16 @@ def _merge_cisco_ai_defense(raw: dict[str, Any] | None) -> CiscoAIDefenseConfig:
     )
 
 
+def _judge_max_parallel(value: Any) -> int:
+    """guardrail.judge.max_parallel as an int (0 = no limit), as Go reads it."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
     if not raw:
         return JudgeConfig()
@@ -6413,6 +6431,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         timeout=raw.get("timeout", 30.0),
         hook_connectors=raw.get("hook_connectors", []),
         hook_timeout=raw.get("hook_timeout", 0.0),
+        max_parallel=_judge_max_parallel(raw.get("max_parallel", 0)),
         trace=raw.get("trace", False) is True,
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
