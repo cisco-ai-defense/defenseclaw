@@ -105,7 +105,7 @@ func installWindowsCodexManagedResult(
 				!verifiedSID.Equals(target.sid) {
 				return errors.New("enterprise hooks: Codex target profile identity changed before runtime mutation")
 			}
-			if err := moveWindowsTargetOwnedDataDirLinksAside(transaction.home, transaction.dataDir, transaction.targetSID); err != nil {
+			if err := moveWindowsTargetOwnedDataDirLinksAside(transaction.home, transaction.dataDir, transaction.targetSID, opts.WindowsDeferredFirstEnrollment); err != nil {
 				return err
 			}
 			if err := prepareWindowsCodexRuntime(

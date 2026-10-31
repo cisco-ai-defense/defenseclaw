@@ -688,7 +688,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			// for a user whose installed agent the enumerator discovered.
 			_, perUserStandalone := windowsStandalonePerUserConnector(target.conn.Name())
 			allowMissingConfig := opts.AllowMissingHookConfigRepair || perUserStandalone
-			if err := moveWindowsTargetOwnedDataDirLinksAside(target.home, target.dataDir, target.sid); err != nil {
+			if err := moveWindowsTargetOwnedDataDirLinksAside(target.home, target.dataDir, target.sid, opts.WindowsDeferredFirstEnrollment); err != nil {
 				return err
 			}
 			if err := prepareWindowsGenericFootprint(target, configPaths, footprint, allowMissingConfig); err != nil {
@@ -1130,10 +1130,14 @@ func windowsManagedObstructionQuarantinePath(path string) string {
 
 // moveWindowsTargetOwnedDataDirLinksAside runs once per enrollment, under
 // the target's own token, before the account's DefenseClaw folder
-// (<home>\.defenseclaw) or its hooks folder is checked. A link or junction
-// the account itself made at either name is moved aside (the rename moves the
+// (<home>\.defenseclaw) or its hooks folder is checked. Only on the first
+// enrollment of a standalone deferred account (deferredFirstEnrollment, the
+// account stayed pending while it was signed out) is a link or junction the
+// account itself made at either name moved aside (the rename moves the
 // link, never what it names), so the enrollment that follows creates and
-// protects the folder as it does for an account that has none.
+// protects the folder as it does for an account that has none. Any other
+// install, a repair of an account that was protected before, and every
+// Secure Client process refuse the link as before.
 // Refusing it failed that account's guardian reconcile, and that refused
 // every administrator ensure, repair and uninstall on the computer until the
 // account removed the link (GAP-0193). The quarantine slot is purged by
@@ -1141,7 +1145,10 @@ func windowsManagedObstructionQuarantinePath(path string) string {
 // object, a link another account or an administrator owns, and a data dir
 // that is not the canonical one are left to the checks that follow, which
 // refuse them as before.
-func moveWindowsTargetOwnedDataDirLinksAside(home, dataDir string, target *windows.SID) error {
+func moveWindowsTargetOwnedDataDirLinksAside(home, dataDir string, target *windows.SID, deferredFirstEnrollment bool) error {
+	if !deferredFirstEnrollment || !windowsEnterpriseStandaloneProcess() {
+		return nil
+	}
 	path := windowsTargetOwnedDataDirLink(home, dataDir, target)
 	if path == "" {
 		return nil

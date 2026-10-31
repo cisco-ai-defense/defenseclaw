@@ -91,6 +91,15 @@ type InstallOptions struct {
 	// profiles from scratch.
 	AllowMissingHookConfigRepair bool
 
+	// WindowsDeferredFirstEnrollment is set by the standalone Windows
+	// guardian only for a deferred manifest row that was never protected:
+	// the first enrollment, at sign-in, of an account that stayed pending
+	// while it was signed out. Only that enrollment may move aside a link or
+	// junction the account made itself at its DefenseClaw folder
+	// (GAP-0193). Every other install, repair and verify refuses a reparse
+	// data dir.
+	WindowsDeferredFirstEnrollment bool
+
 	// MachinePolicyContractID is the hook contract a standalone Windows
 	// deployment renders its single machine-wide Claude policy from (see
 	// WindowsStandaloneClaudeMachinePolicyContract). Empty, and every
