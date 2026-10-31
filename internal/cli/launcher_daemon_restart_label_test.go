@@ -92,7 +92,7 @@ func TestLauncherRestartLoadsTheRenamedAgentInPlaceOfTheEarlierLabel(t *testing.
 	bootout := slices.Index(calls, "bootout gui/501/"+oldLabel)
 	bootstrap := slices.Index(calls, "bootstrap gui/501 "+filepath.Join(dir, newLabel+".plist"))
 	kick := slices.Index(calls, "kickstart -k gui/501/"+newLabel)
-	if bootout < 0 || bootstrap < 0 || kick < 0 || !(bootout < bootstrap && bootstrap < kick) {
+	if bootout < 0 || bootstrap < 0 || kick < 0 || bootout >= bootstrap || bootstrap >= kick {
 		t.Fatalf("want bootout of %s, bootstrap of %s, then its kickstart; calls:\n%s", oldLabel, newLabel, strings.Join(calls, "\n"))
 	}
 	// The account's OpenShell gateway of the earlier label keeps running:
