@@ -2475,12 +2475,14 @@ type windowsEnterpriseManifestAccount struct {
 
 // windowsEnterpriseManifestAccounts reads the installed manifest's accounts;
 // windowsEnterpriseAccountCreatedDataDir reports an account-created data
-// folder, and windowsEnterpriseAccountDeleted a local account SID that no
-// longer names an account. Tests replace them.
+// folder, windowsEnterpriseAccountOwnedDataDirLink a link the account made at
+// that folder or its hooks folder, and windowsEnterpriseAccountDeleted a local
+// account SID that no longer names an account. Tests replace them.
 var (
-	windowsEnterpriseManifestAccounts      = readWindowsEnterpriseManifestAccounts
-	windowsEnterpriseAccountCreatedDataDir = enterprisehooks.WindowsAccountCreatedDataDir
-	windowsEnterpriseAccountDeleted        = func(sid string) bool {
+	windowsEnterpriseManifestAccounts        = readWindowsEnterpriseManifestAccounts
+	windowsEnterpriseAccountCreatedDataDir   = enterprisehooks.WindowsAccountCreatedDataDir
+	windowsEnterpriseAccountOwnedDataDirLink = enterprisehooks.WindowsAccountOwnedDataDirLink
+	windowsEnterpriseAccountDeleted          = func(sid string) bool {
 		// A domain or Entra account's lookup also fails while its directory
 		// is unreachable; never tell the administrator to remove that
 		// profile.
@@ -2531,12 +2533,14 @@ func readWindowsEnterpriseManifestAccounts() ([]windowsEnterpriseManifestAccount
 	return accounts, nil
 }
 
-// applyWindowsEnterpriseAccountFolders names two accounts the manifest keeps
+// applyWindowsEnterpriseAccountFolders names the accounts the manifest keeps
 // rows for that the administrator should know about: one that was deleted
 // while its profile folder stays (the enumerator keeps its rows until the
-// profile is removed), and one that created its own
-// %USERPROFILE%\.defenseclaw before it was enrolled (the guardian adopts
-// it at the account's next sign-in; Upgrade and Repair leave it alone).
+// profile is removed), one that made its %USERPROFILE%\.defenseclaw (or its
+// hooks folder) a link itself, and one that created its own
+// %USERPROFILE%\.defenseclaw before it was enrolled (the guardian moves the
+// link aside or adopts the folder at the account's next sign-in; Upgrade and
+// Repair leave it pending).
 func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 	accounts, err := windowsEnterpriseManifestAccounts()
 	if err != nil {
@@ -2563,6 +2567,12 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 					"profile folder %s remains (remove it under System Properties > Advanced > User Profiles), and until then "+
 					"the guardian reports them for this account only",
 				label, account.Rows, account.Home))
+		case windowsEnterpriseAccountOwnedDataDirLink(account.Home, account.SID):
+			result.AddWarning("enrollment_pending_account_link", fmt.Sprintf(
+				"the account %s made %s (or its hooks folder) a link or junction itself, so it is not protected yet; DefenseClaw "+
+					"never follows that link, moves it aside and enrolls the account when it next signs in, and Upgrade and Repair "+
+					"leave this account pending until then",
+				label, filepath.Join(account.Home, ".defenseclaw")))
 		case windowsEnterpriseAccountCreatedDataDir(account.Home, account.SID):
 			result.AddWarning("enrollment_pending_account_folder", fmt.Sprintf(
 				"the account %s created %s itself, so it has no DefenseClaw runtime (for example when an agent it ran before enrollment "+
