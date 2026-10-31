@@ -732,6 +732,8 @@ func (a *APIServer) handleSandboxBind(w http.ResponseWriter, r *http.Request) {
 		writeSandboxReason(w, sandboxrelay.ReasonNotAllowed, "This sandbox is already registered.")
 	case errors.Is(err, sandboxreg.ErrDriverMismatch):
 		writeSandboxReason(w, sandboxrelay.ReasonNotAllowed, "This sandbox runs on another compute driver than the one your organization's policy chose for it; delete it and start it again.")
+	case errors.Is(err, sandboxreg.ErrTooManyLive):
+		writeSandboxReason(w, sandboxrelay.ReasonUnavailable, sandboxTextTooManyLive)
 	case errors.Is(err, sandboxreg.ErrNotFound):
 		writeSandboxReason(w, sandboxrelay.ReasonRegistrationUnknown, sandboxTextRegistrationUnkn)
 	default:
@@ -847,6 +849,8 @@ func (a *APIServer) handleSandboxRestart(w http.ResponseWriter, r *http.Request)
 		writeSandboxReason(w, sandboxrelay.ReasonRegistrationUnknown, sandboxTextRegistrationUnkn)
 	case errors.Is(err, sandboxreg.ErrFull):
 		writeSandboxReason(w, sandboxrelay.ReasonUnavailable, "Too many sandboxes are registered for your account; delete the ones you no longer use.")
+	case errors.Is(err, sandboxreg.ErrTooManyLive):
+		writeSandboxReason(w, sandboxrelay.ReasonUnavailable, sandboxTextTooManyLive)
 	default:
 		fmt.Fprintf(os.Stderr, "[sandbox-authority] restart uid=%d registration=%s: %v\n", peer.UID, reg.ID, err)
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
@@ -923,6 +927,10 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		switch {
 		case err == nil, errors.Is(err, sandboxreg.ErrRevoked):
 			reg = next
+		case errors.Is(err, sandboxreg.ErrTooManyLive):
+			fmt.Fprintf(os.Stderr, "[sandbox-authority] running report refused uid=%d registration=%s: too many running sandboxes\n", peer.UID, reg.ID)
+			writeSandboxReason(w, sandboxrelay.ReasonUnavailable, sandboxTextTooManyLive)
+			return
 		case errors.Is(err, sandboxreg.ErrStopped):
 			// A report only moves a registration toward stopped: after a
 			// stop its daemon reported, the sandbox runs again only under
@@ -946,7 +954,8 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 	provisional := reg.Provisional
 	current := sandboxrelay.CurrentPolicy{
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
-		Floor: &floor, RequiredPack: requiredPack, Digest: reg.EffectiveDigest, Profile: sandboxUserProfile(cfg, reg), Provisional: &provisional,
+		Floor: &floor, RequiredPack: requiredPack, Digest: reg.EffectiveDigest, Profile: sandboxUserProfile(cfg, reg),
+		PinnedProfile: sandboxPinnedProfile(cfg, reg), Provisional: &provisional,
 		UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
 	minProfile := floor.MinProfile
@@ -1068,6 +1077,10 @@ func sandboxProfileLabel(cfg *config.Config, profile, match string) (label, desc
 	return profileUserLabel(profile), sandboxProfileDescription(cfg, profile)
 }
 
+// sandboxTextTooManyLive refuses a sandbox past sandboxreg.MaxLivePerUID
+// running ones of the account (GAP-0020).
+var sandboxTextTooManyLive = fmt.Sprintf("You already run %d sandboxes on this computer, the most one account can run at once; stop one of them first.", sandboxreg.MaxLivePerUID)
+
 // sandboxUserProfile is the name of reg's profile in its owner's views.
 func sandboxUserProfile(cfg *config.Config, reg sandboxreg.Registration) string {
 	label, _ := sandboxProfileLabel(cfg, reg.Profile, reg.ProfileMatch)
@@ -1143,8 +1156,16 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		}
 		profile, label, description = strings.TrimSpace(cfg.Guardrail.DefaultProfile), profileMeetLabel, sandboxTextProfileWithheld
 	}
+	pinned := ""
+	if scope.registered {
+		// The floor still pinned to the profile the sandbox was created
+		// under is that profile's rules: name it, and describe it (GAP-0285).
+		if pinned = sandboxPinnedProfile(cfg, scope.reg); pinned != "" {
+			description = sandboxProfileDescription(cfg, *scope.reg.CreateProfile)
+		}
+	}
 	out := sandboxapi.ManagedExplain{
-		Profile: label, Description: description,
+		Profile: label, PinnedProfile: pinned, Description: description,
 		Match: scope.match.decision.Match, MatchedGroup: scope.match.decision.MatchedGroup,
 		Provisional: scope.match.provisional, Allowed: floor.Allowed == nil || *floor.Allowed,
 		RequiredFor: slices.Clone(floor.RequiredFor), WhenUnavailable: floor.WhenUnavailable,
@@ -1543,7 +1564,8 @@ func (a *APIServer) handleSandboxDecide(w http.ResponseWriter, r *http.Request) 
 			// (GAP-0632).
 			sandboxRecordAskDecided(r.Context(), a, reg, req, sandboxAskOutcome{Refused: true})
 			writeSandboxRefusal(w, http.StatusForbidden, sandboxrelay.ReasonDecisionRefused,
-				sandboxapi.AccessRefusedWhy(refused.Message, refused.Rule, req.Host, sandboxUserProfile(cfg, reg), reg.SandboxName, floor.RequestAccess))
+				sandboxapi.AccessRefusedWhy(refused.Message, refused.Rule, req.Host,
+					sandboxapi.PinnedProfileLabel(sandboxPinnedProfile(cfg, reg), sandboxUserProfile(cfg, reg)), reg.SandboxName, floor.RequestAccess))
 			return
 		}
 		fmt.Fprintf(os.Stderr, "[sandbox-authority] decision check uid=%d: %v\n", peer.UID, err)

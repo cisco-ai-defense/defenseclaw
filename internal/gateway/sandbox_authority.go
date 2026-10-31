@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -729,6 +730,32 @@ func sandboxRegistrationFloor(cfg *config.Config, reg sandboxreg.Registration) (
 		pinned.RequestAccess = floor.RequestAccess
 	}
 	return pinned, sandboxDigestOf([]string{"create-pinned-v1", digest, createdDigest}), nil
+}
+
+// sandboxPinnedProfile names, in reg's owner's views, the profile reg's
+// sandbox was created under while its floor is still pinned to it: a
+// profile-assignment change moved the registration to another profile, and
+// the created profile's floor still tightens the new one
+// (sandboxRegistrationFloor). "" when the floor is the current profile's
+// alone, or cannot be loaded (GAP-0285).
+func sandboxPinnedProfile(cfg *config.Config, reg sandboxreg.Registration) string {
+	if cfg == nil || reg.CreateProfile == nil || *reg.CreateProfile == reg.Profile ||
+		sandboxProfileWithheld(cfg, reg.Profile, reg.ProfileMatch) {
+		return ""
+	}
+	current, _, err := sandboxStoredMeetFloor(cfg, reg.Profile, reg.ProfileMembers)
+	if err != nil {
+		return ""
+	}
+	pinned, _, err := sandboxRegistrationFloor(cfg, reg)
+	if err != nil {
+		return ""
+	}
+	pinned.RequestAccess = current.RequestAccess
+	if reflect.DeepEqual(current, pinned) {
+		return ""
+	}
+	return profileUserLabel(*reg.CreateProfile)
 }
 
 // sandboxDigestOf is "sha256:" and the hex SHA-256 of v's JSON.

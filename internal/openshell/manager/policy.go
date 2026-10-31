@@ -70,6 +70,8 @@ func (m *Manager) resolveBox(b *box) (*packs.Effective, error) {
 // policy no longer resolves fails closed (policyUnresolved) until it does
 // again (policyRestored).
 func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violation, error) {
+	b.resolveMu.Lock()
+	defer b.resolveMu.Unlock()
 	m.mu.Lock()
 	rec, unrecorded := b.rec, b.unrecorded
 	m.mu.Unlock()

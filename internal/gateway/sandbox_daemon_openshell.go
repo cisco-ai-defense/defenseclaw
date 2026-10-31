@@ -103,6 +103,14 @@ var (
 	openShellGatewayStartWait = 90 * time.Second
 	openShellGatewayPollEvery = 500 * time.Millisecond
 	openShellGatewayHealAfter = 3 * time.Second
+	// openShellGatewayRestartEvery is how often the start wait looks
+	// whether the account's gateway unit stopped before it listened
+	// (Linux): a start asked while the unit was still stopping (after a
+	// SIGTERM, say) was a no-op, and the unit then stayed inactive for the
+	// whole wait (rel-1-0-2:GAP-0419, #1202). It is started again, up to
+	// openShellGatewayRestarts times.
+	openShellGatewayRestartEvery = 3 * time.Second
+	openShellGatewayRestarts     = 3
 )
 
 // daemonOpenShell is what the daemon does with the account's OpenShell;
@@ -594,12 +602,16 @@ func (o *accountOpenShell) ensureRunning(ctx context.Context, port int, cfg stri
 		if errors.As(err, &reloadErr) {
 			return true, openShellPrerequisiteError("your OpenShell gateway's LaunchAgent could not be reloaded; run `%s`", openShellGatewayRepairCommand)
 		}
-		return true, openShellPrerequisiteError("your OpenShell gateway could not be started (%s); "+
-			"`defenseclaw sandbox doctor` shows why", o.unitState(ctx))
+		// The unit's state stays in the log too (#1202, GAP-0419).
+		state := o.unitState(ctx)
+		o.logf("your OpenShell gateway could not be started: %s", state)
+		return true, openShellPrerequisiteError("your OpenShell gateway could not be started%s; "+
+			"`defenseclaw sandbox doctor` shows why", unitStateForPerson(state))
 	}
 	deadline := time.Now().Add(openShellGatewayStartWait)
 	healAt := time.Now().Add(openShellGatewayHealAfter)
 	healChecked := reloaded
+	restartAt, restarts := time.Now().Add(openShellGatewayRestartEvery), 0
 	for {
 		if holder, held := o.portHolder(port); held {
 			if holder == o.uid {
@@ -609,8 +621,22 @@ func (o *accountOpenShell) ensureRunning(ctx context.Context, port int, cfg stri
 			return true, accountBusyError()
 		}
 		if time.Now().After(deadline) {
-			return true, openShellPrerequisiteError("your OpenShell gateway did not start listening on 127.0.0.1:%d within %s (%s); "+
-				"`defenseclaw sandbox doctor` shows why", port, openShellGatewayStartWait, o.unitState(ctx))
+			// The address and the unit's state are for the log; the person
+			// reads a sentence (GAP-0419).
+			state := o.unitState(ctx)
+			o.logf("your OpenShell gateway did not start listening on 127.0.0.1:%d within %s (%s)", port, openShellGatewayStartWait, state)
+			return true, openShellPrerequisiteError("your OpenShell gateway did not start listening within %s%s; "+
+				"`defenseclaw sandbox doctor` shows why", openShellGatewayStartWait, unitStateForPerson(state))
+		}
+		if o.goos == "linux" && restarts < openShellGatewayRestarts && !time.Now().Before(restartAt) {
+			restartAt = time.Now().Add(openShellGatewayRestartEvery)
+			if o.unitStopped(ctx) {
+				restarts++
+				o.logf("your OpenShell gateway stopped before it listened (%s): starting it again", o.unitState(ctx))
+				if _, err := o.startUnit(ctx); err != nil {
+					o.logf("start your OpenShell gateway again: %v", err)
+				}
+			}
 		}
 		if o.goos == "darwin" && !healChecked && !time.Now().Before(healAt) {
 			healChecked = true
@@ -887,6 +913,35 @@ func (o *accountOpenShell) launchDomain(ctx context.Context) string {
 var launchdLastExit = lazyregexp.New(`last exit code = (\d+)`)
 
 // unitState says what the gateway unit is doing, for a start that timed out.
+// unitStateForPerson is unitState as the person reads it, in parentheses:
+// the sentences they can act on (the unit is missing, a prerequisite of the
+// account is missing). The service manager's raw states (active and sub
+// state, exit status, unknown) are for the log only (GAP-0419, #1202).
+func unitStateForPerson(state string) string {
+	if strings.HasPrefix(state, "its service unit was not found") || strings.HasPrefix(state, "it exited 78") {
+		return " (" + state + ")"
+	}
+	return ""
+}
+
+// unitStopped reports whether the account's gateway unit is inactive or
+// failed (Linux), but not for the exec shim's exit 78 (a missing
+// prerequisite, which another start does not fix).
+func (o *accountOpenShell) unitStopped(ctx context.Context) bool {
+	out, err := o.run(ctx, daemonSystemctl, []string{"--user", "show", "-p", "ActiveState", "-p", "ExecMainStatus", openShellGatewayUnit}, userManagerEnv(o.uid))
+	if err != nil {
+		return false
+	}
+	fields := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			fields[k] = v
+		}
+	}
+	state := fields["ActiveState"]
+	return (state == "inactive" || state == "failed") && fields["ExecMainStatus"] != strconv.Itoa(78)
+}
+
 // Exit status 78 is the exec shim's: a prerequisite of the account is missing.
 func (o *accountOpenShell) unitState(ctx context.Context) string {
 	status := ""

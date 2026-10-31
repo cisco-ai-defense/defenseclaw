@@ -296,6 +296,9 @@ func managedProfileIdentity(m *sandboxapi.ManagedExplain) string {
 	profile := sandboxapi.DisplayText(m.Profile)
 	if profile == "" {
 		profile = "(your organization's floor)"
+	} else {
+		// The profile the sandbox's floor is still pinned to (GAP-0285).
+		profile = sandboxapi.PinnedProfileLabel(sandboxapi.DisplayText(m.PinnedProfile), profile)
 	}
 	text := profile + "   matched: " + matchText(m)
 	if m.Provisional {

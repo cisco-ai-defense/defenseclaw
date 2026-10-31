@@ -44,6 +44,13 @@ type box struct {
 	// op serializes lifecycle operations (create, start, stop, delete,
 	// undo) on this sandbox. It is taken before Manager.mu, never under it.
 	op sync.Mutex
+	// resolveMu serializes the policy resolutions of this sandbox
+	// (Manager.resolveBoxViolations): the configuration read, the resolve
+	// and the store of eff, decider and violations, so a caller that read an
+	// older configuration (an unblock, an approval, a hook) cannot store its
+	// view over a newer one a refresh already stored (GAP-0616). It may be
+	// taken under op, and is taken before Manager.mu, never under it.
+	resolveMu sync.Mutex
 
 	// The fields below are guarded by Manager.mu.
 	rec record
