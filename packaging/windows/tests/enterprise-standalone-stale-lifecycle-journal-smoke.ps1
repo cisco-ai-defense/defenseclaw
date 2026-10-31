@@ -263,7 +263,7 @@ try {
             function script:Assert-DefenseClawStandaloneInstallRootNotHeld { param($Layout, $GatewayServiceName, $GuardianServiceName, $SelfUninstallCallerPID) }
             function script:Assert-DefenseClawStandaloneUninstallInstallTree { param($Layout) }
             function script:Assert-DefenseClawRecordedArtifactHashes { param($Metadata, $Layout, $Action) }
-            function script:Assert-DefenseClawUninstallStateTreeNoReparse { param($Layout) }
+            function script:Remove-DefenseClawUninstallStateTreeLinks { param($Layout) }
             # This deployment's helper prepares the hook removal against the
             # tombstone (teardown-managed-hooks capabilities); the older-helper
             # paths are covered by enterprise-standalone-uninstall-hook-commit-smoke.ps1.

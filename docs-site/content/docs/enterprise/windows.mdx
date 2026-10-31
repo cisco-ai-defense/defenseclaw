@@ -905,6 +905,17 @@ not remove a lock an earlier uninstall left.
   `C:\ProgramData\Cisco\DefenseClaw` (a SIEM forwarder reading `runtime\audit.db`,
   for example) blocks it the same way. Close it and run again. The Intune
   launcher's uninstall retries and then exits `1618`.
+- A file or folder under `C:\Program Files\Cisco\DefenseClaw` that DefenseClaw did not
+  install stops a standalone uninstall with `1603` before it changes anything, and the result
+  names that item, also inside the `lib\defenseclaw` folder that 1.0.2 installed (for example
+  `lib\defenseclaw\operator-note.txt`). Move it out of `C:\Program Files\Cisco\DefenseClaw`,
+  then run the uninstall again.
+- A junction or symbolic link inside `C:\ProgramData\Cisco\DefenseClaw` (for example at
+  `secrets`) is removed as a link before the uninstall changes that folder, and never
+  followed: the folder or file it points to keeps its content and permissions, and the log
+  names each link removed. A link at `C:\ProgramData\Cisco\DefenseClaw` itself, or one
+  Setup cannot remove, stops the uninstall with `1603` (`state_invalid`) while DefenseClaw is
+  still installed, and the result names the command that removes only the link.
 - **Per-user registrations.** Uninstall revokes every enrollment, then removes
   DefenseClaw's own registrations and plugins (Amp, Antigravity, Devin, Hermes,
   Kiro, OpenCode, a Copilot user hook file) from the agent config of users with an

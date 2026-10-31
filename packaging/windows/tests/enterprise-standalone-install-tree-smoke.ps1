@@ -295,10 +295,25 @@ try {
             [void][IO.Directory]::CreateDirectory($siblingDirectory)
             Test-Refused 'unknown directory under the retired lib (walk)' {
                 Assert-DefenseClawManagedInstallTree -Layout $sibling
-            } 'unexpected directory from managed install root'
+            } ('unexpected directory from managed install root: ' + [regex]::Escape($siblingDirectory) + '$')
             Remove-DefenseClawRetiredStandaloneCompiler -Layout $sibling
             if (-not [IO.Directory]::Exists($siblingDirectory)) {
                 $failures.Add('the Fleet-off retire removed an unknown directory under lib')
+            }
+
+            # rel-1-0-3 GAP-0283: a file left in the retired lib tree is the
+            # item the refusal names (not lib, which 1.0.2 installed), and it
+            # stays where it is.
+            $note = New-TestLayout 'retired-note'
+            $noteFile = [IO.Path]::Combine((Get-RetiredLib $note), 'defenseclaw', 'operator-note.txt')
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($noteFile))
+            [IO.File]::WriteAllText($noteFile, 'operator note')
+            Test-Refused 'operator file in the retired lib tree (uninstall)' {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $note
+            } ('unexpected file from managed install root: ' + [regex]::Escape($noteFile) +
+                '\. The uninstall stopped before it changed anything\. DefenseClaw did not install that item: move it out of ')
+            if (-not [IO.File]::Exists($noteFile)) {
+                $failures.Add('the uninstall refusal removed the operator file in the retired lib tree')
             }
 
             $linked = New-TestLayout 'retired-linked'
