@@ -6,7 +6,6 @@ package connector
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -91,11 +90,10 @@ func openCodePluginTestData(t *testing.T, server *httptest.Server) templateData 
 	}
 }
 
-// nodeHarnessTimeout bounds one node run of a plugin harness, and each step
-// after the start of an interactive harness session. It covers node's start,
-// which on a busy Windows runner can take many seconds when it is the job's
-// first node process, and a request, which waits on the plugin's own 10s
-// gateway timeout.
+// nodeHarnessTimeout bounds the work of one node run of a plugin harness once
+// node has started, and each step after the start of an interactive harness
+// session. It covers a request, which waits on the plugin's own 10s gateway
+// timeout; node's start has its own bound (nodeHarnessStartTimeout).
 const nodeHarnessTimeout = 60 * time.Second
 
 // nodeForTest returns the node binary, or skips the test when there is none.
@@ -108,22 +106,65 @@ func nodeForTest(t *testing.T) string {
 	return node
 }
 
+// nodeHarnessStarted is the line runNodeHarness has node print before the
+// harness's own code runs: node is up and its built-in modules are loaded.
+const nodeHarnessStarted = "defenseclaw-node-harness-started"
+
 // runNodeHarness runs an ES module harness with node and returns its output
-// lines. The test fails if node fails.
+// lines. The test fails if node fails. Node's start is bounded like an
+// interactive harness's (nodeHarnessStartTimeout): the first node processes of
+// a Windows CI job have taken over a minute each to start (60 s killed, 60 s
+// killed, 41 s, then 3.6 s in gw1 at e5c04823b6, no output at all), and that
+// wait is the operating system's. The harness's own work, from the start line
+// to node's exit, keeps nodeHarnessTimeout.
 func runNodeHarness(t *testing.T, harness string, args ...string) []string {
 	t.Helper()
-	harness = withOpenCodeV2Fixture(t, harness)
+	harness = "process.stdout.write(" + strconv.Quote(nodeHarnessStarted+"\n") + ");\n" + withOpenCodeV2Fixture(t, harness)
 	node := nodeForTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, node, append([]string{"--input-type=module", "-e", harness}, args...)...)
+	cmd := exec.Command(node, append([]string{"--input-type=module", "-e", harness}, args...)...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	pipe, err := cmd.StdoutPipe()
 	if err != nil {
+		t.Fatal(err)
+	}
+	launched := time.Now()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan string, 1)
+	rest := make(chan string, 1)
+	go func() {
+		reader := bufio.NewReader(pipe)
+		first, _ := reader.ReadString('\n')
+		started <- first
+		remaining, _ := io.ReadAll(reader)
+		rest <- string(remaining)
+	}()
+	fail := func(step string) {
+		t.Helper()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("node %s %s after launch (%v)\nstderr=%s", step, time.Since(launched).Round(time.Millisecond), cmd.ProcessState, stderr.String())
+	}
+	select {
+	case first := <-started:
+		if strings.TrimSpace(first) != nodeHarnessStarted {
+			fail(fmt.Sprintf("ended or printed %q before the harness ran:", first))
+		}
+	case <-time.After(nodeHarnessStartTimeout(t)):
+		fail("did not start:")
+	}
+	var out string
+	select {
+	case out = <-rest:
+	case <-time.After(nodeHarnessTimeout):
+		fail(fmt.Sprintf("started, then did not finish within %s:", nodeHarnessTimeout))
+	}
+	if err := cmd.Wait(); err != nil {
 		t.Fatalf("node: %v\nstdout=%s\nstderr=%s", err, out, stderr.String())
 	}
-	return strings.Split(strings.TrimSpace(string(out)), "\n")
+	return strings.Split(strings.TrimSpace(out), "\n")
 }
 
 func withOpenCodeV2Fixture(t *testing.T, harness string) string {
