@@ -3025,8 +3025,9 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 		// cmd type, and the search and select filters, only read (GAP-2168).
 		"type", "findstr", "select-string", "sls", "select-object", "select",
 		// Git Bash search and count programs read their operands as on a
-		// POSIX home (actionKnownReadOnlyShell, GAP-2168 Windows leg).
-		"grep", "egrep", "fgrep", "wc":
+		// POSIX home (actionKnownReadOnlyShell, GAP-2168 Windows leg); so do
+		// the size and path readers (GAP-0091).
+		"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath":
 		return true
 	case "ssh-keygen":
 		return actionSSHKeygenListsOnlyWords(words[1:])

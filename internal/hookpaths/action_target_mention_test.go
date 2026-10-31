@@ -456,3 +456,27 @@ func TestR104DirectoryScopedWriteSurvivesDirectoryMentionExemption(t *testing.T)
 		t.Errorf("ordinary directory write decision = %q", got)
 	}
 }
+
+// du, readlink and realpath print sizes and resolved names: the read-only
+// statement list takes them, with no redirect (GAP-0091).
+func TestActionKnownReadOnlyWindowsSizeReaders(t *testing.T) {
+	for _, words := range [][]string{
+		{"du", "-sh", "/c/Users/a/.ssh/"},
+		{"readlink", "-f", "/c/Users/a/.ssh"},
+		{"realpath", "/c/Users/a/.ssh"},
+		{"du", "-sh", "/c/Users/a/.ssh/", "&&", "ls"},
+	} {
+		if !actionKnownReadOnlyWindows(words) {
+			t.Errorf("%v: want read-only", words)
+		}
+	}
+	for _, words := range [][]string{
+		{"du", "-sh", "/c/Users/a/.ssh/", ">", "/c/Users/a/.ssh/authorized_keys"},
+		{"du", "--output=x", "/c/Users/a/.ssh/"},
+		{"du", "-sh", "/c/Users/a/.ssh/", "&&", "rm", "x"},
+	} {
+		if actionKnownReadOnlyWindows(words) {
+			t.Errorf("%v: want not read-only", words)
+		}
+	}
+}
