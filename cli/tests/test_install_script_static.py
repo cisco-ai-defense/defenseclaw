@@ -3935,3 +3935,70 @@ def test_waiting_for_cli_calls_skips_the_installers_own_parents(tmp_path: Path) 
     )
     assert out.returncode == 0, out.stderr
     assert int(out.stdout.strip().split("=", 1)[1]) <= 1
+
+
+def _shell_and_shim_functions() -> str:
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    out = []
+    for name in ("shell_runnable_entry", "write_busy_shim"):
+        start = script.index(f"\n{name}() {{") + 1
+        out.append(script[start : script.index("\n}\n", start) + 3])
+    mark = script[script.index('readonly BUSY_SHIM_MARK="') + len("readonly ") :].split("\n", 1)[0]
+    return mark + "\n" + "".join(out)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="install.sh runs on macOS and Linux")
+def test_the_cli_entry_and_the_busy_shim_run_under_sh_and_python(tmp_path: Path) -> None:
+    """rel-1-0-6 GAP-0105: the interpreter the kernel picked opens the CLI path
+    again by name. A call that started from the busy shim (sh) read the new
+    Python entry there, and one that started from the old Python entry read
+    the shim. Both files now run the same under either interpreter."""
+    python = shutil.which("python3")
+    assert python
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(python)
+    entry = venv / "bin" / "defenseclaw"
+    entry.write_text(f"#!{venv}/bin/python\n# -*- coding: utf-8 -*-\nimport sys\nprint('entry', sys.argv[1:])\nsys.exit(3)\n", encoding="utf-8")
+    entry.chmod(0o755)
+    sh_form = venv / "bin" / "long"
+    uv_sh_form = "#!/bin/sh\n'''exec' \"/a b/python\" \"$0\" \"$@\"\n' '''\nimport sys\n"
+    sh_form.write_text(uv_sh_form, encoding="utf-8")
+    spaced = venv / "bin" / "spaced"
+    spaced.write_text("#!/usr/bin/env python3 -E\nimport sys\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    files = " ".join(shlex.quote(str(f)) for f in (entry, entry, sh_form, spaced))
+    script = ("set -euo pipefail\n" + _shell_and_shim_functions()
+              + f"BIN_DIR={shlex.quote(str(bin_dir))}\n"
+              + f'for f in {files}; do shell_runnable_entry "$f"; done\n'
+              + "write_busy_shim\n")
+    done = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60, check=False)
+    assert done.returncode == 0, done.stderr
+    lines = entry.read_text(encoding="utf-8").splitlines()
+    assert lines[:4] == [f"#!{venv}/bin/python", '""":"', f"exec '{venv}/bin/python' \"$0\" \"$@\"", '":"""']
+    assert lines.count('""":"') == 1 and lines[4] == "# -*- coding: utf-8 -*-"
+    assert sh_form.read_text(encoding="utf-8") == uv_sh_form
+    assert spaced.read_text(encoding="utf-8") == "#!/usr/bin/env python3 -E\nimport sys\n"
+    for runner in ("/bin/sh", python):
+        ran = subprocess.run([runner, str(entry), "a b", "c"], capture_output=True, text=True, timeout=30, check=False)
+        assert (ran.returncode, ran.stdout.strip()) == (3, "entry ['a b', 'c']"), (runner, ran.stderr)
+    shim = bin_dir / "defenseclaw"
+    head = shim.read_text(encoding="utf-8").splitlines()
+    assert head[0] == "#!/bin/sh" and "Written by the DefenseClaw installer" in head[1] and head[2] == '""":"'
+    outputs = set()
+    for runner in ("/bin/sh", python):
+        ran = subprocess.run([runner, str(shim), "keys", "list"], capture_output=True, text=True, timeout=30, check=False)
+        assert ran.returncode == 1 and "defenseclaw: a DefenseClaw install" in ran.stderr, (runner, ran.stderr)
+        outputs.add(ran.stderr)
+    assert len(outputs) == 1
+
+
+def test_the_new_entry_runs_under_sh_before_any_link_names_it() -> None:
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    swap = script[script.index("swap_in() {"):]
+    swap = swap[: swap.index("\n}\n")]
+    assert swap.index('shell_runnable_entry "${VENV}/bin/defenseclaw"') < swap.index('"${VENV}/bin/defenseclaw" --version')
+    assert swap.index('"${VENV}/bin/defenseclaw" --version') < swap.index('publish_link "${target}" "${link}"')
+    restore = script[script.index("restore_links() {"):]
+    restore = restore[: restore.index("\n}\n")]
+    assert restore.index("shell_runnable_entry") < restore.index('mv -f "${new}" "${BIN_DIR}/${link}"')

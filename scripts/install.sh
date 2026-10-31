@@ -2369,21 +2369,58 @@ undo_snapshot() {
 write_busy_shim() {
     local shim="${BIN_DIR}/.defenseclaw.busy"
     mkdir -p "${BIN_DIR}" 2>/dev/null || return 0
+    # sh and Python both run it: a call that started from the old Python
+    # entry has Python read this path again by name and so may get the shim;
+    # its Python part hands the path to sh (rel-1-0-6 GAP-0105).
     if cat > "${shim}" 2>/dev/null <<EOF
 #!/bin/sh
 ${BUSY_SHIM_MARK} (pid $$).
+""":"
 if kill -0 $$ 2>/dev/null; then
     echo "defenseclaw: a DefenseClaw install is running (pid $$); run the command again when it has finished" >&2
 else
     echo "defenseclaw: a DefenseClaw install (pid $$) stopped before it finished; run the installer again to finish or undo it: ${INSTALL_AGAIN:-the install command}" >&2
 fi
 exit 1
+":"""
+import os, sys
+try:
+    os.execv("/bin/sh", ["/bin/sh", __file__] + sys.argv[1:])
+except OSError:
+    sys.stderr.write("defenseclaw: a DefenseClaw install is running; run the command again when it has finished\\n")
+    sys.exit(1)
 EOF
     then
         chmod 755 "${shim}" && mv -f "${shim}" "${BIN_DIR}/defenseclaw" && return 0
     fi
     rm -f "${shim}"
     return 0
+}
+
+# shell_runnable_entry FILE: let sh run the venv's Python entry script too.
+# The kernel starts a script's interpreter with the path the caller named,
+# and the interpreter opens that path again: a call that started from the
+# busy shim (#!/bin/sh) read the new Python entry there once the link was
+# published, and sh ran it (import: command not found, rel-1-0-6 GAP-0105).
+# Lines 2-4 are a string to Python and, to sh, a no-op and an exec of the
+# entry's own interpreter. uv's #!/bin/sh form (long or spaced paths) is
+# already both, and an interpreter with arguments or quotes is left alone.
+shell_runnable_entry() {
+    local entry="$1" first second interp tmp
+    [[ -f "${entry}" && ! -L "${entry}" ]] || return 0
+    { IFS= read -r first && IFS= read -r second; } < "${entry}" || return 0
+    [[ "${second}" != '""":"' ]] || return 0
+    case "${first}" in
+        '#!/bin/sh'*) return 0 ;;
+        '#!/'*) ;;
+        *) return 0 ;;
+    esac
+    interp="${first#??}"
+    case "${interp}" in *[[:space:]\'\"\\\$\`]*) return 0 ;; esac
+    tmp="${entry%/*}/.${entry##*/}.sh-runnable"
+    { printf '%s\n' "${first}" '""":"' "exec '${interp}' \"\$0\" \"\$@\"" '":"""' \
+        && tail -n +2 "${entry}"; } > "${tmp}" && chmod 755 "${tmp}" && mv -f "${tmp}" "${entry}" \
+        || { rm -f "${tmp}"; return 1; }
 }
 
 # publish_link TARGET NAME: point BIN_DIR/NAME at TARGET with one rename.
@@ -2432,10 +2469,13 @@ wait_cli_calls_done() {
 }
 
 # restore_links SLOT: put back the CLI links SLOT saved, over the busy shim.
+# The entry a restored defenseclaw link names (an earlier release's venv) is
+# made runnable by sh first, as swap_in does for a new one (rel-1-0-6 GAP-0105).
 restore_links() {
     local link new
     for link in ${MANAGED_LINKS}; do
         if [[ -L "$1/bin/${link}" ]]; then
+            [[ "${link}" != defenseclaw ]] || shell_runnable_entry "$(readlink "$1/bin/${link}")" || true
             new="${BIN_DIR}/.${link}.new"
             { rm -f "${new}" && cp -P "$1/bin/${link}" "${new}" && mv -f "${new}" "${BIN_DIR}/${link}"; } || true
         elif [[ -f "${BIN_DIR}/${link}" && ! -L "${BIN_DIR}/${link}" ]] \
@@ -2515,6 +2555,7 @@ swap_in() {
         && record_binaries || return 1
     # The CLI the links name must start before any link names it: until
     # then the busy shim answers (rel-1-0-6 GAP-0105).
+    shell_runnable_entry "${VENV}/bin/defenseclaw" || { warn "Could not prepare the new DefenseClaw CLI entry"; return 1; }
     "${VENV}/bin/defenseclaw" --version >/dev/null 2>&1 || { warn "The new DefenseClaw CLI does not start"; return 1; }
     for link in ${MANAGED_LINKS}; do
         target="${VENV}/bin/${link}"
