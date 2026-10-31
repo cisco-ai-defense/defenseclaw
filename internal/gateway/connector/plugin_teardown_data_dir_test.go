@@ -29,7 +29,7 @@ func TestPluginTeardownAfterADataDirRoundTrip(t *testing.T) {
 				plugin := filepath.Join(root, "plugins", "defenseclaw.js")
 				conn := pluginConnectorAt(t, name, plugin)
 				first := pluginTestOpts(t, name, filepath.Join(root, ".defenseclaw"))
-				second := pluginTestOpts(t, name, filepath.Join(root, "dcdata"))
+				second := sameAgentOtherDataDir(t, first, filepath.Join(root, "dcdata"))
 				if err := conn.Setup(context.Background(), first); err != nil {
 					t.Fatalf("Setup in the first data dir: %v", err)
 				}
@@ -85,6 +85,27 @@ func pluginConnectorAt(t *testing.T, name, plugin string) Connector {
 	OpenCodePluginPathOverride = plugin
 	t.Cleanup(func() { OpenCodePluginPathOverride = previous })
 	return NewOpenCodeConnector()
+}
+
+// sameAgentOtherDataDir is opts under another data directory for the same
+// account and the same agent executable, as `config set data_dir` gives:
+// the agent selection the first setup recorded goes along (on Windows the
+// admission fixture binds one executable per account, and a second fixture
+// would replace the first one's).
+func sameAgentOtherDataDir(t *testing.T, opts SetupOpts, dataDir string) SetupOpts {
+	t.Helper()
+	if err := ensureManagedBackupDirRestricted(dataDir); err != nil {
+		t.Fatalf("prepare %s: %v", dataDir, err)
+	}
+	if receipt, err := os.ReadFile(filepath.Join(opts.DataDir, agentSelectionFile)); err == nil {
+		if err := atomicWriteFile(filepath.Join(dataDir, agentSelectionFile), receipt, 0o600); err != nil {
+			t.Fatalf("copy the agent selection: %v", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	opts.DataDir = dataDir
+	return opts
 }
 
 func pluginTestOpts(t *testing.T, name, dataDir string) SetupOpts {
