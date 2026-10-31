@@ -83,6 +83,16 @@ type enrolledWatchSet struct {
 	mcpUnreadable map[string]enterprisehooks.ClaudeStateUnreadable
 }
 
+// scanAssetOwners names the account of each enrolled home of the watch set
+// the gateway resolved last, so the scan API's rows name the user whose
+// folder held a scanned asset, as the watcher's do (GAP-0575).
+var scanAssetOwners atomic.Pointer[[]watcher.AssetOwner]
+
+func publishScanAssetOwners(owners []watcher.AssetOwner) {
+	copied := append([]watcher.AssetOwner(nil), owners...)
+	scanAssetOwners.Store(&copied)
+}
+
 // mcpUnreadableKey is the key of a connector and an enrolled home.
 func mcpUnreadableKey(connector, home string) string {
 	return connector + "|" + strings.ToLower(filepath.Clean(home))

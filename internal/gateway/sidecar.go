@@ -4172,6 +4172,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	if enrolled != nil {
 		w.SetRootConnectors(enrolled.roots)
 		w.SetAssetOwners(enrolled.owners)
+		publishScanAssetOwners(enrolled.owners)
 		w.SetMCPServerSource(enrolled.live.list)
 		// Each account's MCP verdict is journaled under its own key; rows
 		// earlier versions kept under the bare name move to their account

@@ -3287,7 +3287,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	admission := a.scanAdmissionPreview(r.Context(), cfg, config.AdmissionTypeSkill, req.Target, req.Name, result)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationWithJudge(r.Context(), result))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationForTarget(r.Context(), result, req.Target))
 	}
 
 	a.writeJSON(w, http.StatusOK, withScanAdmission(withScannerSettings(cfg, "skill", result, scanAPIResponseEnvelope(result)), admission))
@@ -3498,7 +3498,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	admission := a.scanAdmissionPreview(r.Context(), cfg, config.AdmissionTypePlugin, req.Target, req.Name, result)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIPluginScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationWithJudge(r.Context(), result))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationForTarget(r.Context(), result, req.Target))
 	}
 
 	a.writeJSON(w, http.StatusOK, withScanAdmission(scanAPIResponseEnvelope(result), admission))
@@ -5146,6 +5146,24 @@ func connectorProxyBindsByName(name string) bool {
 // scanCorrelationWithJudge is ScanCorrelationFromContext plus the LLM judge
 // model the skill or plugin scan ran with, so its audit rows say the judge
 // ran, as the install watcher rows do (GAP-0575, GAP-2435).
+// scanCorrelationForTarget is scanCorrelationWithJudge plus, when the request
+// names no verified caller (an administrator's scan on a managed host), the
+// enrolled user whose home holds target: the scan, scan-finding rows then
+// name the user whose asset it was, as the watcher's rows do (GAP-0575).
+// Secure Client rows keep their shape.
+func scanCorrelationForTarget(ctx context.Context, result *scanner.ScanResult, target string) audit.ScanCorrelation {
+	correlation := scanCorrelationWithJudge(ctx, result)
+	if correlation.UserID != "" || ManagedEnterpriseActive() {
+		return correlation
+	}
+	if owners := scanAssetOwners.Load(); owners != nil {
+		if owner, ok := watcher.AssetOwnerOf(*owners, target); ok {
+			correlation.UserID, correlation.UserIDKind, correlation.UserName = owner.ID, owner.IDKind, owner.Name
+		}
+	}
+	return correlation
+}
+
 func scanCorrelationWithJudge(ctx context.Context, result *scanner.ScanResult) audit.ScanCorrelation {
 	correlation := ScanCorrelationFromContext(ctx)
 	if result != nil {

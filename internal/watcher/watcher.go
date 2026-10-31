@@ -337,12 +337,25 @@ func (w *InstallWatcher) ownerOf(path string) (AssetOwner, bool) {
 	if w == nil || w.secureClientActive() {
 		return AssetOwner{}, false
 	}
-	for _, owner := range w.assetOwners {
-		if watcherPathAtOrBelow(path, owner.Home) {
-			return owner, true
+	return AssetOwnerOf(w.assetOwners, path)
+}
+
+// AssetOwnerOf is the account among owners whose home holds path; the
+// deepest home wins. The gateway's scan API uses it too, so a scan an
+// administrator runs on an enrolled user's asset names that user, as the
+// watcher's rows do (GAP-0575).
+func AssetOwnerOf(owners []AssetOwner, path string) (AssetOwner, bool) {
+	if strings.TrimSpace(path) == "" {
+		return AssetOwner{}, false
+	}
+	var found AssetOwner
+	ok := false
+	for _, owner := range owners {
+		if home := strings.TrimSpace(owner.Home); home != "" && watcherPathAtOrBelow(path, home) && (!ok || len(home) > len(found.Home)) {
+			found, ok = owner, true
 		}
 	}
-	return AssetOwner{}, false
+	return found, ok
 }
 
 // ownedScanCorrelation adds the asset's owner and the judge model of the
