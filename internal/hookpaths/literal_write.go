@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -105,9 +106,24 @@ func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (opera
 			return true
 		}
 		words := make([]string, len(call.Args))
+		// The brace words of a plain cp call are the fixed words bash
+		// makes of them, so its real destination is listed (rel-1-0-6
+		// GAP-0202): the hook client resolves it like any operand.
+		var braces map[int][]string
+		var argStatic []bool
+		if first, ok := StaticWord(call.Args[0], home); ok && slices.Contains(copyPrograms, programBase(first)) {
+			argStatic = make([]bool, len(call.Args))
+			for i, arg := range call.Args {
+				_, argStatic[i] = StaticWord(arg, home)
+			}
+			braces = copyBraceWordFields(call.Args, argStatic, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")))
+		}
 		for i, arg := range call.Args {
 			var static bool
 			words[i], static = StaticWord(arg, home)
+			if braces[i] != nil {
+				continue
+			}
 			if i == 0 && !static && simpleShellParameter(arg) == boundName {
 				words[i], static = boundValue, true
 			}
@@ -143,6 +159,7 @@ func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (opera
 				return true
 			}
 		}
+		_, words, _ = spliceCopyBraceWords(call.Args, words, argStatic, braces)
 		names := literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1)
 		// A plain cp call lists only its own destination; a literal shell
 		// body (sh -c BODY) lists the own destinations of its cp calls.
