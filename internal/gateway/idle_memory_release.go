@@ -146,8 +146,13 @@ func compactHookCache[V any](m map[string]V, order []string) (map[string]V, []st
 }
 
 // runIdleMemoryRelease runs the releaser until ctx ends; release gives the
-// memory back (releaseIdleGatewayMemory in the gateway).
+// memory back (releaseIdleGatewayMemory in the gateway). It first turns off
+// transparent huge pages for the process, so the pages it returns stay
+// returned (disableTransparentHugePages).
 func runIdleMemoryRelease(ctx context.Context, release func()) {
+	if err := disableTransparentHugePages(); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] turn off transparent huge pages: %v\n", err)
+	}
 	releaser := newIdleMemoryReleaser(heapAllocatedBytes, release)
 	ticker := time.NewTicker(idleMemoryReleaseTick)
 	defer ticker.Stop()
