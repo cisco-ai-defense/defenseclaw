@@ -95,7 +95,7 @@ The machine-wide drop-in carries one hook contract for every account, not the ve
 
 ### On a managed computer
 
-The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup claudecode` and `setup remove`, and has no `guardrail` group.
+The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup claudecode` and `setup remove`, and refuses `guardrail` commands (exit `3`).
 
 The administrator manages Claude Code in the managed `config.yaml`. `guardrail.connectors.claudecode: {}` adds it, the connector's `mode` and `hook_fail_mode` tune it, and `guardrail.connectors.claudecode.enabled: false` removes it. Apply the change as in [Change the config](/docs/enterprise/lifecycle), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/machine-policy)).
 
