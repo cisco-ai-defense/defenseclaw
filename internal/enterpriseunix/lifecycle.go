@@ -2064,7 +2064,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	pending := &Pending{
 		Action: l.opts.Action, StartedAt: env.Now().UTC().Format(time.RFC3339), SnapshotDir: snap.Dir, Phase: "quiesce",
 		PreviouslyActive: previouslyActive, PreviouslyEnabled: previouslyEnabled, EnabledRecorded: enabledRecorded,
-		Hot: hot,
+		Hot: hot, ConfigFile: l.opts.ConfigFile,
 	}
 	if err := env.savePending(pending); err != nil {
 		env.discardSnapshot(snap)
