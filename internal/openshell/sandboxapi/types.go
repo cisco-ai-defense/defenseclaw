@@ -237,6 +237,12 @@ type ManagedStatus struct {
 	// HostRunGate, when present, is the caller's gateway decision carried
 	// from a managed explain into a launch banner.
 	HostRunGate string `json:"host_run_gate,omitempty"`
+	// RequiredOnHost names the configured sandbox agents the managed
+	// gateway refuses to run on this computer outside a sandbox for the
+	// caller (ManagedExplain.HostRunRefused). Doctor's Docker access row
+	// says what the docker group means for them (GAP-0554). Empty from a
+	// daemon before DefenseClaw 1.0.6.
+	RequiredOnHost []string `json:"required_on_host,omitempty"`
 	// Provisional says the directory could not be reached and the default
 	// profile applies until it can.
 	Provisional bool `json:"provisional,omitempty"`

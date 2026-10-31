@@ -1958,6 +1958,9 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 			out.Allowed = false
 			out.DeniedHarnesses = append(out.DeniedHarnesses, connector)
 		}
+		if me.HostRunRefused(connector) {
+			out.RequiredOnHost = append(out.RequiredOnHost, connector)
+		}
 		if !registered && !viewSet {
 			out.Profile, out.Description, out.Provisional, out.EffectiveDigest = me.Profile, me.Description, me.Provisional, me.PolicyDigest
 			viewSet = true
