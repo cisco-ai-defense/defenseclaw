@@ -245,3 +245,20 @@ func TestPurgeUserStateLeavesTheOwnInstallConnectorsAlone(t *testing.T) {
 	_ = hermesConfig
 	requireOwnInstallFiles(t, files)
 }
+
+// An agent config the enrollment never changed is not named as changed:
+// the put-back finds it as the own install left it (live dc-ubuntu-eh
+// green leg of rel-1-0-6 GAP-0178 named every untouched config).
+func TestRestoreOwnInstallDoesNotNameAnUntouchedAgentConfig(t *testing.T) {
+	skipIfRoot(t)
+	home, dataDir, _, _, files := ownInstallTestHome(t)
+	if err := PreserveOwnInstall(home, dataDir); err != nil {
+		t.Fatal(err)
+	}
+	writeOwnInstallTestFile(t, filepath.Join(dataDir, "hooks", "hermes-hook.sh"), "#!/bin/sh\n# managed\n", 0o700)
+	restored, changed, err := RestoreOwnInstall(home, dataDir)
+	if err != nil || !restored || len(changed) != 0 {
+		t.Fatalf("RestoreOwnInstall = %t, %v, %v; want nothing named", restored, changed, err)
+	}
+	requireOwnInstallFiles(t, files)
+}

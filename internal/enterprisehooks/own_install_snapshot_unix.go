@@ -289,6 +289,17 @@ func RestoreOwnInstall(home, dataDir string) (restored bool, changed []string, e
 		if !ok || !pathInside(home, agent.Path) {
 			continue
 		}
+		if current, err := os.Lstat(agent.Path); err == nil && current.Mode().IsRegular() {
+			if data, err := os.ReadFile(agent.Path); err == nil && string(data) == string(agent.Data) {
+				// The enrollment left it as the own install had it.
+				if current.Mode().Perm() != os.FileMode(agent.Mode).Perm() {
+					if err := os.Chmod(agent.Path, os.FileMode(agent.Mode).Perm()); err != nil {
+						return false, changed, err
+					}
+				}
+				continue
+			}
+		}
 		if !ownInstallFileMatches(agent.Path, pristine) {
 			changed = append(changed, agent.Path)
 			continue
