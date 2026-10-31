@@ -46,6 +46,9 @@ func copyBraceWordFields(args []*syntax.Word, static []bool, env expand.Environ)
 		if !plain || !syntax.SplitBraces(&braced) {
 			continue
 		}
+		if uint64(total)+shellparse.MinBraceFields(arg) > maxCopyBraceWords+1 {
+			return nil
+		}
 		words, err := expand.Fields(&expand.Config{Env: env}, arg)
 		if err != nil || len(words) < 2 {
 			return nil
