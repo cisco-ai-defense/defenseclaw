@@ -306,8 +306,14 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	}
 	processes, err := windowsEnterpriseAgentProcesses()
 	if err != nil {
+		// A snapshot that cannot be read says nothing about the sessions, so
+		// their restart status is named unknown, not left out
+		// (rel-1-0-2:GAP-0672).
 		if restoresErr != nil {
 			result.AddWarning(windowsAgentSessionsRestartCode, "restart status unknown: the hook guardian's restore record and running agent sessions could not be read")
+		} else {
+			result.SecurityComplete = false
+			result.AddWarning(windowsAgentSessionsRestartCode, "restart status unknown: the running agent sessions could not be read, so DefenseClaw cannot tell whether an agent session started before its hooks were installed: "+err.Error())
 		}
 		return
 	}
