@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -282,6 +283,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	// tilde quoted inside it is literal and an unquoted one is the home. The
 	// outer quotes around the body say nothing about that (round m).
 	text = actionBlankWords(text, nestedBodies)
+	if parsed {
+		// A # that starts a word comments out the rest of its line in
+		// bash, sh and zsh alike: the shell runs none of it, so a path
+		// only a comment names is no target (rel-1-0-6:GAP-0133; the
+		// Windows plain reading has the same rule, GAP-1982).
+		text = actionBlankComments(text, command)
+	}
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "${HOME}/", home+"/"), "$HOME/", home+"/")
 	for _, token := range actionMentionToken.FindAllString(text, -1) {
 		literalTilde := strings.HasPrefix(token, actionLiteralTilde)
@@ -2014,6 +2022,55 @@ func actionBlankWords(text string, words []*syntax.Word) string {
 		}
 	}
 	return string(out)
+}
+
+// actionBlankComments replaces with spaces each comment of command that the
+// shell parser finds: a # that starts a word, up to the end of its line. A
+// quoted or escaped #, or one inside a word, starts no comment, and a
+// here-document body is not one. text is a same-length view of command;
+// a command the parser cannot read keeps every byte.
+func actionBlankComments(text, command string) string {
+	if len(text) != len(command) || !strings.Contains(command, "#") {
+		return text
+	}
+	file, ok := shellparse.ParseWithComments(command)
+	if !ok {
+		return text
+	}
+	out := []byte(text)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		comment, ok := node.(*syntax.Comment)
+		if !ok {
+			return true
+		}
+		start := int(comment.Hash.Offset())
+		end := start + 1 + len(comment.Text)
+		if start < 0 || end > len(out) || out[start] != '#' || !actionPosixCommentStarts(command, start) {
+			return true
+		}
+		for i := start; i < end; i++ {
+			out[i] = ' '
+		}
+		return true
+	})
+	return string(out)
+}
+
+// actionPosixCommentStarts reports a # at i that bash itself reads as the
+// start of a comment: at the start of the command or after a blank, a line
+// end or an operator character, and not after an escaped character (an
+// escaped blank or operator is word text, a backslash-newline joins the
+// lines). The parser also skips a carriage return as a blank, but bash keeps it in the word,
+// so a # after it is word text and what follows on the line still runs
+// (the GAP-1982 corpus row G02).
+func actionPosixCommentStarts(command string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	if strings.IndexByte(" \t\n;&|()<>", command[i-1]) < 0 {
+		return false
+	}
+	return i < 2 || command[i-2] != '\\'
 }
 
 // Quoted or escaped dollar signs and glob characters do not expand in the

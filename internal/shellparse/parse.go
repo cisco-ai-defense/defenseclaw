@@ -66,11 +66,21 @@ func (tooDeepReader) Read([]byte) (int, error) { return 0, ErrTooDeep }
 // command proofs. Callers bound their inputs before parsing; a command past
 // MaxNestingDepth is not parsed.
 func Parse(command string) (*syntax.File, bool) {
+	return parse(command, false)
+}
+
+// ParseWithComments is Parse with the comments kept in the tree, for a
+// reader that must know which bytes the shell skips as a comment.
+func ParseWithComments(command string) (*syntax.File, bool) {
+	return parse(command, true)
+}
+
+func parse(command string, comments bool) (*syntax.File, bool) {
 	if TooDeep(command) {
 		return nil, false
 	}
 	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
-		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(Reader(command), "")
+		file, err := syntax.NewParser(syntax.Variant(variant), syntax.KeepComments(comments)).Parse(Reader(command), "")
 		if err == nil {
 			return file, true
 		}
