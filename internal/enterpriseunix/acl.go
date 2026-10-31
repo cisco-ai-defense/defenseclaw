@@ -96,6 +96,7 @@ type aclFinding struct {
 	indexes  []int
 	write    bool
 	deny     bool
+	service  bool // an entry denies the gateway service account the policy folder (GAP-1323)
 	ancestor bool
 }
 
@@ -331,7 +332,7 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 					if serviceDenied[entry.Index] {
 						finding.entries = append(finding.entries, entry.Text)
 						finding.indexes = append(finding.indexes, entry.Index)
-						finding.deny = true
+						finding.service = true
 					}
 					continue
 				}
@@ -344,12 +345,14 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 					continue
 				}
 				deny := ((target.publishedDir || target.gatewayRead) && entry.DeniesDirectoryAccess(target.requireList)) ||
-					((target.publishedFile || target.gatewayRead) && entry.DeniesFileRead()) || serviceDenied[entry.Index]
-				if entry.GrantsWrite() || (target.private && entry.GrantsAccess()) || deny {
+					((target.publishedFile || target.gatewayRead) && entry.DeniesFileRead())
+				service := serviceDenied[entry.Index]
+				if entry.GrantsWrite() || (target.private && entry.GrantsAccess()) || deny || service {
 					finding.entries = append(finding.entries, entry.Text)
 					finding.indexes = append(finding.indexes, entry.Index)
 					finding.write = finding.write || entry.GrantsWrite()
 					finding.deny = finding.deny || deny
+					finding.service = finding.service || service
 				}
 			}
 			if len(finding.entries) > 0 {
@@ -375,7 +378,7 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 	if err != nil && e.Geteuid() == 0 {
 		problems = append(problems, fmt.Sprintf("the macOS ACLs of the deployment could not be read (%v), so entries that grant write or deny policy access are not checked", err))
 	}
-	var write, read, deny, ancestors []aclFinding
+	var write, read, deny, service, ancestors []aclFinding
 	for _, finding := range findings {
 		if finding.ancestor {
 			ancestors = append(ancestors, finding)
@@ -387,7 +390,10 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 		if finding.deny {
 			deny = append(deny, finding)
 		}
-		if !finding.write && !finding.deny {
+		if finding.service {
+			service = append(service, finding)
+		}
+		if !finding.write && !finding.deny && !finding.service {
 			read = append(read, finding)
 		}
 	}
@@ -403,6 +409,11 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 		problems = append(problems, fmt.Sprintf(
 			"macOS ACL entries deny users access to published machine-policy directories or files, so their agents cannot load DefenseClaw hooks: %s; run `%s` to remove them",
 			describeACLFindings(deny), e.lifecycleCommand(ActionRepair)))
+	}
+	if len(service) > 0 {
+		problems = append(problems, fmt.Sprintf(
+			"macOS ACL entries deny the %s service account reading the administrator policy folder (policy_dir), so the gateway refuses it and does not start after its next restart: %s; run `%s` to remove them (it removes only those entries)",
+			e.Layout.ServiceUser, describeACLFindings(service), e.lifecycleCommand(ActionRepair)))
 	}
 	if len(read) > 0 {
 		problems = append(problems, fmt.Sprintf(

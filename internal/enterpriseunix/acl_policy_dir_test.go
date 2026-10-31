@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -44,8 +45,8 @@ func TestRepairRemovesOnlyThePolicyDirEntriesThatDenyTheGateway(t *testing.T) {
 		pack: {"group:" + h.env.Layout.ServiceGroup + " deny search"},
 	}
 	status := h.run(Options{Action: ActionStatus})
-	if status.OK {
-		t.Fatal("status passed a policy_dir entry that denies the gateway reading it")
+	if status.OK || !strings.Contains(messagesOf(status.Errors, codeVerify), "service account reading the administrator policy folder (policy_dir)") {
+		t.Fatalf("status passed or misnamed a policy_dir entry that denies the gateway reading it: %+v", status.Errors)
 	}
 	requireOK(t, h.run(Options{Action: ActionRepair}))
 	if got := h.runner.acls[dir]; !slices.Equal(got, []string{"user:dcm-qv deny delete,writeattr", "user:dcm-qv deny list"}) {
