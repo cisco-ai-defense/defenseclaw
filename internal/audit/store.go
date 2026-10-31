@@ -245,6 +245,11 @@ type Store struct {
 	// toolChainRootTablesReady is set once the root-scope chain tables exist
 	// (tool_chain_root.go); they are created on first use, not by a migration.
 	toolChainRootTablesReady atomic.Bool
+	// findingsRetentionInstant is set once scan_findings has its
+	// retention_timestamp_unix_nano column (the retention migration only adds
+	// it), so a hook's correlation read stops asking the schema for it on the
+	// store's one connection on every call (rel-1-0-6 GAP-0152).
+	findingsRetentionInstant atomic.Bool
 
 	// checkpointDB is a second connection used only for PASSIVE WAL
 	// checkpoints. It is opened on first use and closed with the store.
