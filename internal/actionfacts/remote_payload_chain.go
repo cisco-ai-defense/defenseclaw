@@ -329,10 +329,11 @@ func remoteDownloadIntentPath(facts Facts, command CommandFact) (PathFact, strin
 			candidate.Flavor == PathFlavorDevice {
 			continue
 		}
-		if !intentArtifactPath(candidate) {
+		placed, ok := intentArtifact(facts, candidate)
+		if !ok {
 			return PathFact{}, "", false
 		}
-		artifact = candidate
+		artifact = placed
 		pathCount++
 	}
 	return artifact, host, pathCount == 1
@@ -549,11 +550,7 @@ func exactLiteralArgumentPath(facts Facts, command CommandFact, index int) (Path
 		facts.ActiveHome,
 		[]CommandFact{command},
 	)
-	candidate := candidates[0]
-	if !intentArtifactPath(candidate) {
-		return PathFact{}, false
-	}
-	return candidate, true
+	return intentArtifact(facts, candidates[0])
 }
 
 func exactSingleArtifactCommand(facts Facts, operation OperationKind) (CommandFact, bool) {
@@ -591,27 +588,46 @@ func exactSingleResolvedCommandPath(facts Facts, commandID int64, access PathAcc
 		if candidate.CommandID != commandID || candidate.Access != access {
 			continue
 		}
-		if !intentArtifactPath(candidate) {
+		placed, ok := intentArtifact(facts, candidate)
+		if !ok {
 			return PathFact{}, false
 		}
-		selected = candidate
+		selected = placed
 		count++
 	}
 	return selected, count == 1
 }
 
-// intentArtifactPath reports a POSIX-shell operand that a detection-only
-// chain intent (#1390) may name as its artifact: an absolute resolved path,
-// or a literal drive-letter spelling (C:/x, C:\x) that Git Bash on Windows
-// opens as that drive file although the POSIX reading leaves it relative
-// (rel-1-0-6:GAP-0182). Whether a drive spelling is an exact join identity
-// is the caller's choice (the gateway knows its host OS); facts never
-// resolve it.
-func intentArtifactPath(candidate PathFact) bool {
+// intentArtifact is the artifact a detection-only chain intent (#1390) may
+// name for a POSIX-shell operand: an absolute resolved path; a literal
+// drive-letter spelling (C:/x, C:\\x) that Git Bash on Windows opens as that
+// drive file although the POSIX reading leaves it relative
+// (rel-1-0-6:GAP-0182); or a literal relative operand of a call made in a
+// native Windows directory, which Git Bash opens under that directory, so it
+// is returned with that Windows path as Resolved (rel-1-0-6:GAP-0212).
+// Whether a drive path is an exact join identity is the caller's choice (the
+// gateway knows its host OS); the facts themselves are not changed.
+func intentArtifact(facts Facts, candidate PathFact) (PathFact, bool) {
 	if candidate.Flavor != PathFlavorPOSIX {
-		return false
+		return PathFact{}, false
 	}
-	return strings.HasPrefix(candidate.Resolved, "/") || DriveLetterPath(candidate.Value)
+	if strings.HasPrefix(candidate.Resolved, "/") || DriveLetterPath(candidate.Value) ||
+		DriveLetterPath(candidate.Resolved) {
+		// A drive path the facts already resolved under the caller's
+		// Windows home or directory is kept as it is.
+		return candidate, true
+	}
+	value := candidate.Value
+	if candidate.Resolved != "" || value == "" || strings.HasPrefix(value, "/") ||
+		strings.HasPrefix(value, "~") || syntaxForCWD(facts.CWD) != pathSyntaxWindows {
+		return PathFact{}, false
+	}
+	_, _, resolved, ok := derivePOSIXPathUnderWindowsCWD(value, facts.CWD, "", pathExpansionPolicy{})
+	if !ok || !DriveLetterPath(resolved) {
+		return PathFact{}, false
+	}
+	candidate.Resolved = resolved
+	return candidate, true
 }
 
 // DriveLetterPath reports a literal drive-letter path spelling: one ASCII
@@ -622,11 +638,12 @@ func DriveLetterPath(value string) bool {
 }
 
 // commandMutatesIntentArtifact is commandMutatesResolvedPath for an intent
-// artifact. A drive spelling the POSIX reading left unresolved is matched by
-// its literal text, so an unrelated unresolved write does not hide it.
+// artifact. An operand the POSIX reading left unresolved (a drive spelling,
+// or a relative name under a Windows directory) is also matched by its
+// literal text, so a sibling write of the same name still breaks the join.
 func commandMutatesIntentArtifact(facts Facts, commandID int64, artifact PathFact) bool {
-	if artifact.Resolved != "" {
-		return commandMutatesResolvedPath(facts, commandID, artifact.Resolved)
+	if artifact.Resolved != "" && commandMutatesResolvedPath(facts, commandID, artifact.Resolved) {
+		return true
 	}
 	for _, candidate := range facts.Paths {
 		if candidate.CommandID != commandID || candidate.Resolved != "" ||

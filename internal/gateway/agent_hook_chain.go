@@ -1971,9 +1971,16 @@ func exactArtifactIntentPathDigest(candidate actionfacts.PathFact) (string, bool
 
 // gitBashDriveLetterIdentity is the Windows identity (lower case, forward
 // slashes, as gitBashDriveIdentity) of a POSIX-shell operand spelled with a
-// drive letter, on a Windows host only; elsewhere C:/x is a relative path.
+// drive letter, or of a relative operand the intent placed under the call's
+// Windows directory, on a Windows host only; elsewhere C:/x is a relative
+// path.
 func gitBashDriveLetterIdentity(candidate actionfacts.PathFact) (string, bool) {
 	value := candidate.Value
+	if !actionfacts.DriveLetterPath(value) && actionfacts.DriveLetterPath(candidate.Resolved) {
+		// A relative operand placed under the call's Windows directory
+		// (rel-1-0-6:GAP-0212).
+		value = candidate.Resolved
+	}
 	if !toolChainDriveMounts || candidate.Flavor != actionfacts.PathFlavorPOSIX ||
 		!actionfacts.DriveLetterPath(value) || strings.ContainsRune(value, '\x00') {
 		return "", false
