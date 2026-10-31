@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -31,6 +32,15 @@ func gitBashDrivePath(path string) string {
 		return slashed
 	}
 	return "/" + strings.ToLower(slashed[:1]) + slashed[2:]
+}
+
+// upperDrive spells a Git Bash drive mount with an upper-case letter
+// (/c/a -> /C/a); a path that is not one is returned unchanged.
+func upperDrive(path string) string {
+	if len(path) > 2 && path[0] == '/' && path[2] == '/' {
+		return "/" + strings.ToUpper(path[1:2]) + path[2:]
+	}
+	return path
 }
 
 // rel-1-0-6:GAP-0173 and GAP-0063 (#1390, cell L-ewin-J3-002). A person
@@ -129,6 +139,8 @@ func TestDownloadThenExecuteAlertsAfterARunExactlyPromptWithAnAside(t *testing.T
 						"Now use the Bash tool once to run exactly: bash " + target, target, true},
 					{"another file", aside, "Now run exactly: bash " + other, other, false},
 					{"asked download and run", "Download " + url + " to " + target + " and run it.", "Go ahead.", target, false},
+					// Git Bash names drive C: /c and /C: one file on Windows only.
+					{"run spelled with an upper-case drive mount", aside, "Now run exactly: bash " + upperDrive(target), upperDrive(target), runtime.GOOS == "windows" || upperDrive(target) == target},
 				} {
 					name := fmt.Sprintf("%s in %s", row.name, filepath.Base(cwd))
 					session := strings.NewReplacer(" ", "-", ",", "").Replace(name)
@@ -148,5 +160,40 @@ func TestDownloadThenExecuteAlertsAfterARunExactlyPromptWithAnAside(t *testing.T
 				}
 			}
 		})
+	}
+}
+
+// One canonical Windows path for a tool chain join: a Git Bash drive mount
+// (/c/..., /C/...) and the drive path (C:\...) are one file on a Windows
+// host, case-insensitively; elsewhere /c is an ordinary directory
+// (rel-1-0-6:GAP-0173).
+func TestToolChainPathIdentityReadsGitBashDriveMountsOnWindows(t *testing.T) {
+	saved := toolChainDriveMounts
+	t.Cleanup(func() { toolChainDriveMounts = saved })
+	identity := func(value string, flavor actionfacts.PathFlavor) string {
+		id, ok := exactPathIdentity(actionfacts.PathFact{Value: value, Resolved: value, Flavor: flavor, Absolute: true})
+		if !ok {
+			return ""
+		}
+		return id
+	}
+	toolChainDriveMounts = true
+	want := identity(`C:\Users\U\proj\page.txt`, actionfacts.PathFlavorWindows)
+	for _, spelling := range []string{"/c/Users/U/proj/page.txt", "/C/users/u/proj/page.txt"} {
+		if got := identity(spelling, actionfacts.PathFlavorPOSIX); got == "" || got != want {
+			t.Errorf("Windows: %q identity %q, want the drive path's %q", spelling, got, want)
+		}
+	}
+	for _, other := range []string{"/c/Users/U/proj/other.txt", "/cc/Users/U/proj/page.txt", "/tmp/page.txt", "/d/Users/U/proj/page.txt"} {
+		if got := identity(other, actionfacts.PathFlavorPOSIX); got == want {
+			t.Errorf("Windows: %q joins %q", other, want)
+		}
+	}
+	if got := identity("/c", actionfacts.PathFlavorPOSIX); got != "windows\x00c:/" {
+		t.Errorf("Windows: /c identity %q, want the drive root", got)
+	}
+	toolChainDriveMounts = false
+	if lower, upper := identity("/c/Users/U/page", actionfacts.PathFlavorPOSIX), identity("/C/Users/U/page", actionfacts.PathFlavorPOSIX); lower == upper || lower != "posix\x00/c/Users/U/page" {
+		t.Errorf("POSIX host: /c and /C identities %q, %q, want two POSIX paths", lower, upper)
 	}
 }
