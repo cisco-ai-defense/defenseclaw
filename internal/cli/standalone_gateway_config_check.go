@@ -38,7 +38,7 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 	defer restore()
 	var runtimeConfig *config.Config
 	var compiled *config.ObservabilityV8CompiledConfig
-	loaded, err := loadConfigV8FileWithCredentials(configPath, dataDir, credentialsDir)
+	loaded, err := loadManagedCandidateV8File(configPath, dataDir, credentialsDir)
 	if err != nil {
 		var secretError *config.V8SecretReferenceError
 		if !errors.As(err, &secretError) || secretError.Credential {
@@ -61,6 +61,7 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		if readErr != nil {
 			return readErr
 		}
+		raw = config.V8ManagedChecksView(raw)
 		secretsDir := credentialsDir
 		if secretsDir == "" {
 			secretsDir = managed.StandaloneSecretsDirForConfig(runtime.GOOS, configPath)
@@ -384,7 +385,7 @@ func standaloneGatewayRuntimeCandidate(configPath string) *config.Config {
 	if err != nil {
 		return nil
 	}
-	candidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(absPath, raw)
+	candidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(absPath, config.V8ManagedChecksView(raw))
 	if err != nil {
 		return nil
 	}
