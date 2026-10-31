@@ -6,8 +6,8 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
-	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"mvdan.cc/sh/v3/syntax"
@@ -48,6 +48,9 @@ func actionMovedDiskLinkWrite(command, cwd, home string, writes []string) bool {
 			value, static := StaticWord(word, home)
 			if !static {
 				return true
+			}
+			if runtime.GOOS == "windows" {
+				value = actionMSYSDrivePath(value) // Git Bash /c/...
 			}
 			words = append(words, value)
 		}
@@ -135,18 +138,21 @@ type movedBackup struct{ dest, suffix string }
 // numbered .~N~ suffix.
 func (b movedBackup) names(path string) bool {
 	dir, base := filepath.Dir(b.dest), filepath.Base(b.dest)
-	for filepath.Dir(path) != dir {
+	// A case form names the same entry where names fold case (Windows,
+	// macOS).
+	for !samePathName(filepath.Dir(path), dir) {
 		parent := filepath.Dir(path)
 		if parent == path {
 			return false
 		}
 		path = parent
 	}
-	rest, ok := strings.CutPrefix(filepath.Base(path), base)
-	if !ok || rest == "" {
+	name := filepath.Base(path)
+	if len(name) <= len(base) || !samePathName(name[:len(base)], base) {
 		return false
 	}
-	return rest == "~" || b.suffix != "" && rest == b.suffix || movedBackupNumbered.MatchString(rest)
+	rest := name[len(base):]
+	return rest == "~" || b.suffix != "" && samePathName(rest, b.suffix) || movedBackupNumbered.MatchString(rest)
 }
 
 var movedBackupNumbered = lazyregexp.New(`^\.~[0-9]+~$`)

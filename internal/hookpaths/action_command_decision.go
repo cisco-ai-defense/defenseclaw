@@ -117,16 +117,29 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 	}
 	patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
 	writes = append(writes, patches...)
-	// The new name of a disk link to the keys file that the command moves
-	// does not exist on the disk yet (rel-1-0-6:GAP-0045).
-	if !windowsHome && actionMovedDiskLinkWrite(command, cwd, home, writes) {
-		return true
-	}
 	msys := func(value string) string {
 		if windowsHome && runtime.GOOS == "windows" {
 			return actionMSYSDrivePath(value) // Git Bash /c/... (GAP-0781 RV8-1)
 		}
 		return value
+	}
+	// The new name of a disk link to the keys file that the command moves
+	// does not exist on the disk yet (rel-1-0-6:GAP-0045), nor does the
+	// backup name of a link a mv with a backup option replaces
+	// (rel-1-0-6:GAP-0144). A POSIX shell on a native Windows host (Git
+	// Bash) renames the link as on Linux, so the same reading holds there,
+	// on the Windows file system.
+	if !windowsHome || runtime.GOOS == "windows" {
+		moveWrites := writes
+		if windowsHome {
+			moveWrites = make([]string, len(writes))
+			for i, write := range writes {
+				moveWrites[i] = msys(write)
+			}
+		}
+		if actionMovedDiskLinkWrite(command, cwd, home, moveWrites) {
+			return true
+		}
 	}
 	for _, target := range writes {
 		if protectedReachPath(OperandPath(msys(target), cwd), protected, ssh) {
