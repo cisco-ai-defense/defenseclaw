@@ -875,7 +875,7 @@ def test_migrate_puts_back_the_keys_a_downgrade_set_aside(data_dir: Path, monkey
 
 
 
-def test_migrate_puts_back_the_chains_block_a_downgrade_set_aside(
+def test_migrate_puts_back_the_1_0_6_blocks_a_downgrade_set_aside(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import yaml
@@ -883,11 +883,15 @@ def test_migrate_puts_back_the_chains_block_a_downgrade_set_aside(
     for name in ("_refresh_local_observability_bundle", "_refresh_guardrail_profiles", "_refresh_rego_policies"):
         monkeypatch.setattr(migrations, name, lambda *_args: None)
     config = _write_config(data_dir, "config_version: 9\n")
-    record = _set_aside_record(data_dir, {"guardrail.chains": {"root_scope": True}})
+    record = _set_aside_record(
+        data_dir, {"guardrail.chains": {"root_scope": True}, "connectors": {"agent_gateway": {"enabled": True}}}
+    )
 
     migrate(str(data_dir))
 
-    assert yaml.safe_load(config.read_text(encoding="utf-8"))["guardrail"]["chains"] == {"root_scope": True}
+    restored = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert restored["guardrail"]["chains"] == {"root_scope": True}
+    assert restored["connectors"] == {"agent_gateway": {"enabled": True}}
     assert not record.exists()
 
 

@@ -982,6 +982,34 @@ def test_downgrade_sets_aside_the_chains_block(
     assert record == {"version": 1, "for": target, "keys": {"guardrail.chains": {"root_scope": True}}}
 
 
+# connectors (connectors.agent_gateway, 1.0.6): 1.0.5 and 1.0.4 refuse the
+# top-level block, so a downgrade sets it aside with guardrail.chains.
+@pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
+def test_downgrade_sets_aside_the_connectors_block(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    (home / "config.yaml").write_text(
+        "config_version: 9\nconnectors:\n  agent_gateway:\n    enabled: true\n"
+        "guardrail:\n  chains:\n    root_scope: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, target)))
+
+    assert upgrade_shim.run(["upgrade", "--version", target, "--yes"]) == 0
+
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert "connectors" not in config
+    assert "chains" not in (config.get("guardrail") or {})
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record["keys"] == {
+        "guardrail.chains": {"root_scope": True},
+        "connectors": {"agent_gateway": {"enabled": True}},
+    }
+
+
 @pytest.mark.parametrize(("installed", "target"), [("1.0.3", "1.0.4"), ("1.0.4", "1.0.3")])
 def test_upgrade_keeps_keys_the_target_release_has(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: str, target: str

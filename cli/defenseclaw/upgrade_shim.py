@@ -65,11 +65,13 @@ _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 # Configuration keys added after 1.0.2, with the first release that has each.
 # The installer of an older release refuses a config.yaml that sets one
 # ("unknown field", GAP-0137), so a downgrade sets them aside first.
-# guardrail.chains is set aside whole: an older release refuses the block
-# itself, so taking only root_scope out would leave an empty one behind.
+# guardrail.chains and connectors (connectors.agent_gateway) are set aside
+# whole: an older release refuses the block itself, so taking only the inner
+# key out would leave an empty block behind.
 NEWER_CONFIG_KEYS = (
     ("openshell.trusted_ca_bundle", (1, 0, 3)),
     ("guardrail.chains", (1, 0, 6)),
+    ("connectors", (1, 0, 6)),
 )
 # Where a downgrade keeps the keys it set aside, in the data folder:
 # {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
