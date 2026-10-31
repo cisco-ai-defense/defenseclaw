@@ -1804,6 +1804,43 @@ def _print_skill_scan_policy(
         click.echo(f"          {step}")
 
 
+def _skill_scan_audit_verdict(
+    app: AppContext, pe: Any, name: str, path: str, result: Any, *, connector: str = "",
+) -> str:
+    """The audit verdict of a skill scan: what its "policy:" line says (GAP-0156).
+
+    ``block`` for a skill the policy rejects (or the block list holds),
+    ``clean`` for informational findings only, ``warn`` for other findings
+    that are allowed. Empty (the gateway infers it from the findings) when
+    the scan is clean or the policy cannot be read.
+    """
+    if result.is_clean():
+        return ""
+    severity = str(result.max_severity()).upper()
+    try:
+        if pe is not None and pe.is_blocked_for_connector("skill", name, connector or ""):
+            return "block"
+        label, _, _ = _skill_policy_verdict(
+            app,
+            name,
+            skill={"baseDir": path},
+            scan_entry={
+                "target": path,
+                "finding_count": len(result.findings),
+                "max_severity": severity,
+            },
+            connector=connector or "",
+            pe=pe,
+        )
+    except Exception:  # noqa: BLE001 - the audit row falls back to the findings' severity.
+        return ""
+    if label in ("rejected", "blocked"):
+        return "block"
+    if label in ("-", "clean"):
+        return ""
+    return "clean" if severity == "INFO" else "warn"
+
+
 def _skill_scan_findings_verdict(result: Any, *, blocked: bool = False) -> str:
     from defenseclaw.commands import _scan_ui
 
@@ -2408,7 +2445,12 @@ def _scan_one_local_skill(
 
     # A path scan belongs to no connector, so its audit record, alert and
     # finding.observed carry none either (GAP-1919).
-    _record_scan(app.logger, result, connector=json_connector or None)
+    _record_scan(
+        app.logger, result, connector=json_connector or None,
+        **_scan_ui.verdict_kwargs(
+            _skill_scan_audit_verdict(app, pe, name, scan_dir, result, connector=connector)
+        ),
+    )
 
     payload: dict[str, Any] | None = None
     if as_json:
@@ -2992,7 +3034,12 @@ def _scan_all(
         telemetry_error: Exception | None = None
         if app.logger:
             try:
-                app.logger.log_scan(result, connector=resolved_connector)
+                app.logger.log_scan(
+                    result, connector=resolved_connector,
+                    **_scan_ui.verdict_kwargs(
+                        _skill_scan_audit_verdict(app, pe, name, base_dir, result, connector=connector)
+                    ),
+                )
             except Exception as exc:
                 telemetry_error = exc
                 telemetry_errors += 1
