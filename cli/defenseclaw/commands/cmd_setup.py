@@ -16439,10 +16439,6 @@ def _hook_runtime_wait_targets(hook_targets: list[str], data_dir: str, focus: st
     return sorted(set(hook_targets))
 
 
-def _hook_contract_lock_marker(data_dir: str) -> int | None:
-    return _regular_file_marker(os.path.join(data_dir, "hook_contract_lock.json"))
-
-
 def _regular_file_marker(path: str) -> int | None:
     try:
         info = os.lstat(path)

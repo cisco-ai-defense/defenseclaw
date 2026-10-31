@@ -97,5 +97,12 @@ After gateway setup, DefenseClaw writes `hook_contract_lock.json` in the data di
 | `hook_script_version` | The hook script generation installed on disk. |
 | `hook_script_digests` | Hashes of installed hook scripts, for drift detection. |
 | `defenseclaw_version` | The DefenseClaw build that wrote the lock. |
+| `updated_at` | When the gateway last wrote the lock, for the file and for each connector. |
 
 `defenseclaw doctor` compares the lock with the current discovery cache, so upgrades, contract changes and script drift show up before action-mode enforcement depends on them.
+
+### Fields the gateway rewrites
+
+The gateway writes the lock again each time it starts, and on every upgrade, rollback or roll-forward. Those writes change only `updated_at` (for the file and for each connector) and, when the DefenseClaw version changed, `defenseclaw_version`. The new `updated_at` tells `defenseclaw setup` that the restarted gateway checked the hooks. The other fields change only when the agent, its hooks or your setup change.
+
+A saved lock that you put back keeps its bytes until the gateway next starts. To check a restored lock, compare it without these two fields.
