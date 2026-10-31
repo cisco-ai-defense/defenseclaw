@@ -27820,6 +27820,7 @@ function Assert-DefenseClawManagedInstallTree {
     $refuseUnexpected = (Test-DefenseClawTrustStrictAncestors) -or
         (Test-DefenseClawStandaloneProfile)
     $retiredLibRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($Layout.InstallRoot, 'lib')).TrimEnd('\')
+    $retiredLibDirectories = @($retiredLibRoot, [IO.Path]::Combine($retiredLibRoot, 'defenseclaw'))
     $allowedDirectories = @(
         $Layout.BinDirectory,
         $Layout.LibexecDirectory,
@@ -27926,6 +27927,14 @@ function Assert-DefenseClawManagedInstallTree {
                 # item DefenseClaw did not install there stops the uninstall
                 # before anything changes.
                 if ($refuseUnexpected -or $inRetiredLib) {
+                    # lib and lib\defenseclaw are directories 1.0.2 installed.
+                    # When one still holds something, the walk goes on to that
+                    # content, so the refusal names the item DefenseClaw did
+                    # not install instead of lib (rel-1-0-3 GAP-0283).
+                    if ($full.TrimEnd('\') -in $retiredLibDirectories -and
+                        @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $full -Force).Count -gt 0) {
+                        continue
+                    }
                     throw "refusing to remove unexpected directory from managed install root: $full"
                 }
                 Write-DefenseClawAclSelfHealAdvisory `
