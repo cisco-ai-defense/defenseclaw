@@ -25,11 +25,20 @@ const (
 	serverInstances   = 4
 	serverReadTimeout = time.Second
 	// clientRights is what any authenticated account may open the pipe
-	// with: FILE_WRITE_DATA, FILE_READ_ATTRIBUTES and SYNCHRONIZE, never
-	// FILE_CREATE_PIPE_INSTANCE (FILE_APPEND_DATA), so no account can serve
-	// an instance of the gateway's pipe.
-	clientRights = "0x00100082"
+	// with: FILE_READ_DATA (the receipt), FILE_WRITE_DATA,
+	// FILE_READ_ATTRIBUTES and SYNCHRONIZE, never FILE_CREATE_PIPE_INSTANCE
+	// (FILE_APPEND_DATA), so no account can serve an instance of the
+	// gateway's pipe.
+	clientRights = "0x00100083"
+	// receiptTimeout bounds the write of a receipt a client does not read.
+	receiptTimeout = time.Second
 )
+
+// Receipt is the one byte the server writes once it has read a report and
+// named its sender. A client that closed its end at once after the write
+// lost about one report in ten: the server then read or identified a client
+// that was gone (GAP-2639). The client waits for it before closing.
+var Receipt = []byte{1}
 
 // Serve accepts refusal reports on PipeName until ctx ends. handle gets the
 // SID of the account whose token connected, read from the pipe client token,
@@ -111,6 +120,9 @@ func receive(ctx context.Context, pipe windows.Handle) (string, Report, bool) {
 	if err != nil || !AccountSID(sid) {
 		return "", Report{}, false
 	}
+	_, _ = overlapped(ctx, receiptTimeout, pipe, func(done *uint32, o *windows.Overlapped) error {
+		return windows.WriteFile(pipe, Receipt, done, o)
+	})
 	return sid, report, true
 }
 
@@ -190,7 +202,7 @@ func createPipe(name string, s *security, first bool) (windows.Handle, error) {
 	if err != nil {
 		return 0, err
 	}
-	flags := uint32(windows.PIPE_ACCESS_INBOUND | windows.FILE_FLAG_OVERLAPPED)
+	flags := uint32(windows.PIPE_ACCESS_DUPLEX | windows.FILE_FLAG_OVERLAPPED)
 	if first {
 		flags |= windows.FILE_FLAG_FIRST_PIPE_INSTANCE
 	}
@@ -199,7 +211,7 @@ func createPipe(name string, s *security, first bool) (windows.Handle, error) {
 		flags,
 		windows.PIPE_TYPE_MESSAGE|windows.PIPE_READMODE_MESSAGE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS,
 		serverInstances,
-		0,
+		uint32(len(Receipt)),
 		MaxMessageBytes,
 		0,
 		&s.attributes,
