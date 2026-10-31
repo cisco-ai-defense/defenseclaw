@@ -688,11 +688,40 @@ func windowsEnterpriseEnumeratorFailureText(message string) (text, code string, 
 	if text == "" {
 		return message, "", false
 	}
-	if label, _, found := strings.Cut(strings.TrimPrefix(text, "the managed config's "), " "); found &&
-		windowsEnterpriseRulePackLabel(label) && strings.Contains(text, "cannot read") {
+	if label, detail, found := strings.Cut(strings.TrimPrefix(text, "the managed config's "), " "); found &&
+		windowsEnterpriseRulePackServiceReadRefusal(label, detail) {
 		code = "rule_pack_unreadable"
 	}
 	return text, code, true
+}
+
+// windowsEnterpriseRulePackUnreadable reports whether message refuses a rule
+// pack the gateway service account cannot read: Setup's preflight text for a
+// selected pack, or the config check's "managed standalone <setting> <dir>:
+// the gateway service account ... cannot read" for any rule-pack setting.
+// The config check refuses a guardrail.custom_packs path that no setting
+// selects before the preflight reads the selected packs, and that refusal
+// got invalid_arguments although troubleshooting.mdx documents
+// rule_pack_unreadable for it (GAP-0314).
+func windowsEnterpriseRulePackUnreadable(message string) bool {
+	if strings.Contains(message, standaloneRulePackUnreadableText) {
+		return true
+	}
+	_, rest, found := strings.Cut(message, "managed standalone ")
+	if !found {
+		return false
+	}
+	label, detail, found := strings.Cut(rest, " ")
+	return found && windowsEnterpriseRulePackServiceReadRefusal(label, detail)
+}
+
+// windowsEnterpriseRulePackServiceReadRefusal reports whether detail, the
+// text after a setting's label, says the gateway service account cannot read
+// the pack or list a folder above it, and label is a rule-pack setting.
+func windowsEnterpriseRulePackServiceReadRefusal(label, detail string) bool {
+	return windowsEnterpriseRulePackLabel(label) &&
+		strings.Contains(detail, "the gateway service account ") &&
+		(strings.Contains(detail, " cannot read ") || strings.Contains(detail, " cannot list or read "))
 }
 
 // windowsEnterpriseRulePackLabel reports whether label is a rule-pack

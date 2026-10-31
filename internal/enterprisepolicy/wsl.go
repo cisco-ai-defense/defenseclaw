@@ -491,16 +491,25 @@ func reconcileClaudeDesktopGate(opts Options, reg WSLRegistry, policy config.Ent
 				state.OwnedEntries++
 				state.detail("%s=true (DefenseClaw) keeps Claude Desktop WSL sessions off", path)
 				// The conditions DefenseClaw wrote the gate under can stop
-				// holding (the organization's own values removed, HKCU
-				// policy or local configuration added). The gate stays,
-				// since removing it turns WSL sessions back on, but the
-				// row is not covered while it overrides account policy.
-				refusal, err := claudeDesktopGateRefusal(reg, policy, withoutRegValue(values, ClaudeDesktopWSLValue), keyExists)
+				// holding (HKCU policy or local configuration added, the
+				// key opened to standard accounts). The gate stays, since
+				// removing it turns WSL sessions back on, but the row is
+				// not covered while it overrides account policy. A value
+				// DefenseClaw already wrote is judged by what it overrides,
+				// as create judges it before writing: with create removed
+				// from the config, or the organization's own values gone,
+				// the lone gate was reported as a conflict that blamed
+				// DefenseClaw's own value although nothing depended on the
+				// key (GAP-1072).
+				others := withoutRegValue(values, ClaudeDesktopWSLValue)
+				refusal, err := claudeDesktopGateConditions(reg, true, others, keyExists)
 				if err != nil {
 					return true, err
 				}
 				if refusal.text != "" {
 					state.conflict("DefenseClaw's %s no longer meets its write conditions: %s", path, refusal.text)
+				} else if !claudeDesktopHasVisibleValue(others) && policy.ClaudeDesktopKey != config.WSLClaudeDesktopKeyCreate {
+					state.detail("%s is DefenseClaw's own value and the only machine policy under HKLM\\%s; it stays, no account has HKCU Claude Desktop policy or local third-party configuration that it overrides, and uninstall removes it", path, ClaudeDesktopPolicyKey)
 				}
 			} else {
 				state.detail("administrator policy %s=%s keeps Claude Desktop WSL sessions off", path, describeRegValue(*current))
@@ -562,7 +571,24 @@ func withoutRegValue(values []RegValue, name string) []RegValue {
 // override (merge); an unmet claude_desktop_key: create, or a key a standard
 // account can change, fails verify.
 func claudeDesktopGateRefusal(reg WSLRegistry, policy config.EnterpriseWindowsWSLPolicy, values []RegValue, keyExists bool) (wslGap, error) {
-	create := policy.ClaudeDesktopKey == config.WSLClaudeDesktopKeyCreate
+	return claudeDesktopGateConditions(reg, policy.ClaudeDesktopKey == config.WSLClaudeDesktopKeyCreate, values, keyExists)
+}
+
+// claudeDesktopHasVisibleValue reports whether values hold a value Claude
+// Desktop reads, that is machine policy.
+func claudeDesktopHasVisibleValue(values []RegValue) bool {
+	for _, value := range values {
+		if claudeDesktopVisible(value) {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeDesktopGateConditions is claudeDesktopGateRefusal with create
+// standing for claude_desktop_key: create, or for a gate DefenseClaw already
+// wrote, which is judged by what it overrides whatever the config says now.
+func claudeDesktopGateConditions(reg WSLRegistry, create bool, values []RegValue, keyExists bool) (wslGap, error) {
 	// A key a standard account can change lets that account turn WSL
 	// sessions on whatever DefenseClaw writes.
 	if keyExists {
@@ -602,7 +628,7 @@ func claudeDesktopGateRefusal(reg WSLRegistry, policy config.EnterpriseWindowsWS
 			}
 		}
 		if count > 0 {
-			return wslGap{text: fmt.Sprintf("claude_desktop_key is create, but %d signed-in account(s) have HKCU Claude Desktop policy that a new HKLM value would override; move it to HKLM first", count)}, nil
+			return wslGap{text: fmt.Sprintf("%d signed-in account(s) have HKCU Claude Desktop policy that an HKLM value overrides; move it to HKLM first", count)}, nil
 		}
 	}
 	if appBehaviorOnly {

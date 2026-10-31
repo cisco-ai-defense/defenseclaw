@@ -3051,9 +3051,9 @@ namespace $nativeNamespace
             }
         }
 
-        // The Win32 error opening a folder for one right with every sharing
-        // mode allowed, or 0 when it opens: 5 is a missing right, 19 a
-        // read-only volume, 32 a handle that does not share the folder.
+        // The Win32 error opening a folder (or a file) for one right with
+        // every sharing mode allowed, or 0 when it opens: 5 is a missing
+        // right, 19 a read-only volume, 32 a handle that does not share it.
         public static int GetDirectoryOpenError(string path, uint desiredAccess)
         {
             const uint FILE_SHARE_ALL = 0x00000007;
@@ -19380,6 +19380,10 @@ function Assert-DefenseClawHookNotHeld {
         retryable hook_in_use (exit 1618) before the transaction stopped or
         replaced anything. A failed query counts as no holder: the swap's own
         retry and refusal then apply as before.
+        GAP-0789: only a holder whose handle does not share delete counts. A
+        well-behaved scanner that opens the hook with FileShare ReadWrite and
+        Delete deferred every repair with hook_in_use, although File.Replace
+        swaps a file opened that way and the backup it leaves is deleted.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -19396,6 +19400,9 @@ function Assert-DefenseClawHookNotHeld {
         if ($holders.Count -eq 0) {
             return
         }
+        if (Test-DefenseClawHookSharesDelete -Path ([string]$Layout.HookPath)) {
+            return
+        }
         if ([DateTime]::UtcNow -ge $deadline) {
             break
         }
@@ -19406,6 +19413,24 @@ function Assert-DefenseClawHookNotHeld {
             else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
         })
     throw ("hook_in_use: {0} has {1} open, so Setup could not replace it; this run stopped and replaced nothing. Next step: close that program (for example an antivirus scan or an editor), then run the same Setup command again (an MDM retries exit 1618 on its own)" -f ($named -join ', '), $Layout.HookPath)
+}
+
+function Test-DefenseClawHookSharesDelete {
+    <#
+        GAP-0789: whether every open handle of the file shares delete, so
+        File.Replace can swap it: an open for DELETE with every sharing mode
+        allowed succeeds (the probe handle is closed at once). A sharing
+        violation, any other refusal or a failed probe answers $false, so the
+        holder is waited for and named as before.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $native = Initialize-DefenseClawNativeSecurity
+        return ([int]$native::GetDirectoryOpenError($Path, [uint32]0x00010000) -eq 0)
+    }
+    catch {
+        return $false
+    }
 }
 
 function Restore-DefenseClawEarlyHook {
