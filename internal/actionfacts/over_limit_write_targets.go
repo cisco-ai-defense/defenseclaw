@@ -92,17 +92,94 @@ func OverLimitWriteTargetReduction(input Input, facts Facts) (Facts, json.RawMes
 		len(input.Args) > maxOverLimitWriteArgsBytes || !utf8.Valid(input.Args) {
 		return Facts{}, nil, false
 	}
-	reduced, ok := reduceOverLimitWriteArgs(input.Args, isApplyPatchTool(input.Tool))
+	view, reduced, _, ok := overLimitWriteReduction(input, false)
+	return view, reduced, ok
+}
+
+// OverLimitWriteBoundedTwin returns the arguments of a limit-exceeded
+// structured write tool call with each large text in its bounded form
+// (boundedOverLimitText) when every large text has one: the same call,
+// within the limits, whose content rules read the text as the file gets it
+// (GAP-0687). Callers judge it as a twin of the call; false when the call
+// is not one or a large text has no bounded form.
+func OverLimitWriteBoundedTwin(input Input, facts Facts) (json.RawMessage, bool) {
+	if !LimitExceededWriteTool(input, facts) ||
+		len(input.Args) > maxOverLimitWriteArgsBytes || !utf8.Valid(input.Args) {
+		return nil, false
+	}
+	_, reduced, elided, ok := overLimitWriteReduction(input, true)
+	if !ok || elided {
+		return nil, false
+	}
+	return reduced, true
+}
+
+func overLimitWriteReduction(input Input, bounded bool) (Facts, json.RawMessage, bool, bool) {
+	reduced, elided, ok := reduceOverLimitWriteArgs(input.Args, isApplyPatchTool(input.Tool), bounded)
 	if !ok || len(reduced) > maxArgsJSONBytes {
-		return Facts{}, nil, false
+		return Facts{}, nil, false, false
 	}
 	reducedInput := input
 	reducedInput.Args = reduced
 	view := Analyze(reducedInput)
 	if !view.Authoritative() || !factsMutateAPath(view) {
-		return Facts{}, nil, false
+		return Facts{}, nil, false, false
 	}
-	return view, reduced, true
+	return view, reduced, elided, true
+}
+
+// OverLimitWriteElidedContentTarget reports a limit-exceeded structured
+// write whose reduced call still stands in for a written text and writes a
+// file a content rule judges by its text (contentRuleWriteTarget), and that
+// file's class. No content rule can read the text left out, so callers take
+// the conservative block where the call is enforcement-capable (GAP-0687).
+// An ordinary file is never such a target, however large the write.
+func OverLimitWriteElidedContentTarget(input Input, facts Facts) (string, bool) {
+	if !LimitExceededWriteTool(input, facts) ||
+		len(input.Args) > maxOverLimitWriteArgsBytes || !utf8.Valid(input.Args) {
+		return "", false
+	}
+	var view Facts
+	elided, ok := false, false
+	for _, bounded := range []bool{true, false} {
+		if view, _, elided, ok = overLimitWriteReduction(input, bounded); ok {
+			break
+		}
+	}
+	if !ok || !elided {
+		return "", false
+	}
+	for _, path := range view.Paths {
+		if path.Access != PathAccessWrite && path.Access != PathAccessAppend {
+			continue
+		}
+		for _, value := range []string{path.Normalized, path.Resolved} {
+			if class := contentRuleWriteTarget(value); class != "" {
+				return class, true
+			}
+		}
+	}
+	return "", false
+}
+
+// contentRuleWriteTarget is the class of a system file whose structured-write
+// content rules decide on the written text: Docker's daemon configuration,
+// sudoers, the account database, the global preload list and profile
+// fragments, and PAM configuration. "" for any other path.
+func contentRuleWriteTarget(value string) string {
+	switch {
+	case value == dockerDaemonConfigPath:
+		return "docker-daemon-config"
+	case exactSudoersWriteTarget(value):
+		return "sudoers"
+	case value == posixPasswdPath:
+		return "account-database"
+	case value == "/etc/ld.so.preload" || ExactGlobalLDPreloadProfilePath(value):
+		return "global-preload"
+	case exactProtectedPAMPath(value):
+		return "pam"
+	}
+	return ""
 }
 
 func factsMutateAPath(facts Facts) bool {
@@ -123,22 +200,25 @@ type overLimitArgsReducer struct {
 	out       bytes.Buffer
 	members   int
 	patchTool bool
+	// bounded keeps a large text in its bounded form when it has one;
+	// elided reports a text replaced by the stand-in.
+	bounded, elided bool
 }
 
-func reduceOverLimitWriteArgs(raw json.RawMessage, patchTool bool) (json.RawMessage, bool) {
+func reduceOverLimitWriteArgs(raw json.RawMessage, patchTool, bounded bool) (json.RawMessage, bool, bool) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return nil, false
+		return nil, false, false
 	}
-	reducer := &overLimitArgsReducer{decoder: json.NewDecoder(bytes.NewReader(trimmed)), patchTool: patchTool}
+	reducer := &overLimitArgsReducer{decoder: json.NewDecoder(bytes.NewReader(trimmed)), patchTool: patchTool, bounded: bounded}
 	reducer.decoder.UseNumber()
 	if !reducer.value(0, "") {
-		return nil, false
+		return nil, false, false
 	}
 	if _, err := reducer.decoder.Token(); !errors.Is(err, io.EOF) {
-		return nil, false
+		return nil, false, false
 	}
-	return json.RawMessage(reducer.out.Bytes()), true
+	return json.RawMessage(reducer.out.Bytes()), reducer.elided, true
 }
 
 // value copies the next JSON value; key is the object key it belongs to
@@ -261,9 +341,28 @@ func (r *overLimitArgsReducer) reduceString(key, text string) (string, bool) {
 		return compactPatchEnvelope(text)
 	}
 	if _, ok := overLimitTextKeys[key]; ok {
+		if bounded, ok := boundedOverLimitText(text); ok && r.bounded {
+			return bounded, true
+		}
+		r.elided = true
 		return overLimitTextStandIn, true
 	}
 	return text, true
+}
+
+// boundedOverLimitText is a large written text in a form its content reads
+// the same in, when that form fits maxCommandBytes: without the white space
+// around it, and, for a JSON document, compacted. White space padding no
+// longer puts a short document past the content rules (GAP-0687).
+func boundedOverLimitText(text string) (string, bool) {
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) > maxCommandBytes && (trimmed[0] == '{' || trimmed[0] == '[') {
+		var compact bytes.Buffer
+		if json.Compact(&compact, []byte(trimmed)) == nil {
+			trimmed = compact.String()
+		}
+	}
+	return trimmed, trimmed != "" && len(trimmed) <= maxCommandBytes
 }
 
 // compactPatchEnvelope keeps every line of a patch envelope except the
