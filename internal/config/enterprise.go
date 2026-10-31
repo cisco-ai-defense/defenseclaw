@@ -1650,7 +1650,7 @@ func validateEnterpriseConfig(cfg *Config) error {
 			return &V8SemanticError{
 				Path:    "$.enterprise.network.https_proxy",
 				Summary: err.Error(),
-				Action:  netguard.ProxyURLAdvice,
+				Action:  netguard.ProxyURLAdviceFor(err),
 				cause:   err,
 			}
 		}

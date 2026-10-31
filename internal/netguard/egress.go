@@ -33,13 +33,29 @@ type EgressProxy struct {
 	NoProxy string
 }
 
-// ProxyURLAdvice is what to write instead of a refused proxy URL. The parse
+// ProxyURLAdvice is what to write instead of a refused proxy URL. Most parse
 // errors below say only what is wrong; callers that show them to an
-// administrator add this advice once.
+// administrator add this advice once, through ProxyURLAdviceFor.
 const ProxyURLAdvice = "use http://host:port or https://host:port, without a user name, password or path"
 
 // egressProxyURLForm is the shape enterprise.network.https_proxy accepts.
-const egressProxyURLForm = "http://host[:port] or https://host[:port]"
+const egressProxyURLForm = "http://host[:port] or https://host[:port], without a user name, password or path"
+
+// proxyFormError is a refusal that already names the accepted form.
+type proxyFormError struct{ message string }
+
+func (e *proxyFormError) Error() string { return e.message }
+
+// ProxyURLAdviceFor is the advice a caller adds after err, or "" when err
+// already names the accepted form, so the form is said once (GAP-0666,
+// GAP-0114).
+func ProxyURLAdviceFor(err error) string {
+	var named *proxyFormError
+	if errors.As(err, &named) {
+		return ""
+	}
+	return ProxyURLAdvice
+}
 
 // ParseEgressProxyURL validates an enterprise.network.https_proxy value.
 // Credentials are refused because the managed config is readable by every
@@ -53,11 +69,11 @@ func ParseEgressProxyURL(raw string) (*url.URL, error) {
 	// Both refusals name the accepted form: "needs a scheme" alone left the
 	// administrator to guess what to write for 127.0.0.1:3128 (GAP-0666).
 	if !strings.Contains(raw, "://") {
-		return nil, errors.New("proxy URL needs a scheme: use " + egressProxyURLForm)
+		return nil, &proxyFormError{"proxy URL needs a scheme: use " + egressProxyURLForm}
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, errors.New("proxy URL is malformed: use " + egressProxyURLForm)
+		return nil, &proxyFormError{"proxy URL is malformed: use " + egressProxyURLForm}
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("proxy URL scheme %q must be http or https", u.Scheme)
