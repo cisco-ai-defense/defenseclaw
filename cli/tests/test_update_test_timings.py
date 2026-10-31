@@ -4,7 +4,7 @@
 import json
 from pathlib import Path
 
-from scripts.update_test_timings import go_timings, windows_go_timings
+from scripts.update_test_timings import go_timings, merge_go_timings, windows_go_timings
 
 STAMP = "2026-10-19T12:00:00.1234567Z"
 MODULE = "github.com/example"
@@ -62,3 +62,18 @@ def test_go_timings_reads_events_after_a_log_prefix(tmp_path: Path) -> None:
     windows = windows_go_timings([log], MODULE)
     assert windows["packages"] == {f"{MODULE}/internal/cli": 46.5}
     assert windows["tests"] == {"internal/gateway": {"TestSlow": 61.0, "*": 0.1}}
+
+
+def test_merge_go_timings_replaces_only_the_measured_packages() -> None:
+    # go-darwin.json: the darwin connector parts refresh the connector
+    # package; the enterpriseunix times recorded earlier stay.
+    old = {
+        "packages": {f"{MODULE}/pkg/a": 100.0, f"{MODULE}/pkg/b": 50.0},
+        "tests": {"pkg/a": {"TestGone": 9.0, "*": 0.2}, "pkg/b": {"TestKept": 7.0, "*": 0.3}},
+    }
+    new = {"packages": {f"{MODULE}/pkg/a": 120.0}, "tests": {"pkg/a": {"TestNew": 30.0, "*": 0.4}}}
+
+    data = merge_go_timings(old, new, MODULE)
+
+    assert data["packages"] == {f"{MODULE}/pkg/a": 120.0, f"{MODULE}/pkg/b": 50.0}
+    assert data["tests"] == {"pkg/a": {"TestNew": 30.0, "*": 0.4}, "pkg/b": {"TestKept": 7.0, "*": 0.3}}
