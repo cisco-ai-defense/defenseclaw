@@ -26,11 +26,14 @@ import (
 // longListingOwnerGroupRe matches the owner and group columns of one
 // `ls -l` line ("drwxr-xr-x. 2 alice alice 6 Oct 31 01:15 ."). A hook
 // tool result is often the JSON of the tool response, so a line also
-// starts after an escaped line break or the opening quote of a string.
-var longListingOwnerGroupRe = lazyregexp.New(`(?m)(?:^|\\[nr]|")[-bcdlpsD][-rwxsStTlL]{9}[.+@]?[ \t]+\d+[ \t]+(\S+)[ \t]+(\S+)[ \t]+`)
+// starts after an escaped line break. An assistant message often re-quotes
+// the line in markdown (a list bullet, a code span, a quote or a table row),
+// so the mode string may follow any byte that is not a word or escape
+// byte, and table pipes may separate the columns (rel-1-0-6 GAP-0111).
+var longListingOwnerGroupRe = lazyregexp.New("(?m)(?:^|\\\\[nr]|[^A-Za-z0-9_\\\\])[-bcdlpsD][-rwxsStTlL]{9}[.+@]?[ \\t|]+\\d+[ \\t|]+([^\\s|`*]+)[ \\t|]+([^\\s|`*]+)[ \\t|]+")
 
 // accountPathSegmentEnd holds the bytes that may follow a path segment.
-const accountPathSegmentEnd = "/\\ \t\r\n:\"\x27`,;)]}"
+const accountPathSegmentEnd = "/\\ \t\r\n:\"\x27`,;)]}*|<>"
 
 // filterAccountMetadataUsernames drops judge-reported Username entities
 // that appear in the content only as local account metadata: a path

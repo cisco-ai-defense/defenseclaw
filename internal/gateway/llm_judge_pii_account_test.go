@@ -47,9 +47,18 @@ func TestPIIJudgeIgnoresAccountNameInListingsAndPaths(t *testing.T) {
 		"claude code bash tool_response JSON": `{"interrupted":false,"isImage":false,"stderr":"",` +
 			`"stdout":"total 16\ndrwxr-xr-x. 5 devuser1 devuser1 90 Oct 31 13:59 .\n` +
 			`drwx------. 9 devuser1 devuser1 191 Oct 31 14:00 ..\n-rw-r--r--. 1 devuser1 devuser1 6 Oct 31 13:57 README.md"}`,
-		"pwd and paths":    "/home/devuser1/proj\nwrote /home/devuser1/proj/src/a.txt (2 lines)\n",
-		"windows path":     "Directory: C:\\Users\\devuser1\\proj\n    README.md",
-		"macOS path quote": "open \"/Users/devuser1/proj/README.md\": permission denied",
+		"pwd and paths": "/home/devuser1/proj\nwrote /home/devuser1/proj/src/a.txt (2 lines)\n",
+		"windows path":  "Directory: C:\\Users\\devuser1\\proj\n    README.md",
+		// The assistant re-quotes the tool's ls -l line in markdown (TST-4640).
+		"markdown bullet code span": "- `drwxr-xr-x. 4 devuser1 devuser1 48 Oct 31 18:08 /home/devuser1/project`\n" +
+			"- `/home/devuser1/bench`: No such file or directory",
+		"markdown bullet plain":  "* drwxr-xr-x. 4 devuser1 devuser1 48 Oct 31 18:08 project\n1. -rw-r--r--. 1 devuser1 devuser1 6 Oct 31 a.txt",
+		"markdown quote":         "> drwxr-xr-x. 4 devuser1 devuser1 48 Oct 31 18:08 project",
+		"markdown table row":     "| drwxr-xr-x. | 4 | devuser1 | devuser1 | 48 | project |",
+		"inline quote":           "The listing shows 'drwxr-xr-x. 4 devuser1 devuser1 48 Oct 31 18:08 project'.",
+		"bold home path":         "Your project is in **/home/devuser1/project**.",
+		"assistant JSON escaped": `{"message":"- ` + "`" + `drwxr-xr-x. 4 devuser1 devuser1 48 Oct 31 18:08 /home/devuser1/project` + "`" + `\n- done"}`,
+		"macOS path quote":       "open \"/Users/devuser1/proj/README.md\": permission denied",
 	} {
 		t.Run(name, func(t *testing.T) {
 			verdict := piiJudgeReturning(t, piiUsernameDevuser1).runPIIJudge(t.Context(), content, "completion", "Bash")
@@ -65,12 +74,14 @@ func TestPIIJudgeIgnoresAccountNameInListingsAndPaths(t *testing.T) {
 // touched.
 func TestPIIJudgeKeepsUsernameSharedAsData(t *testing.T) {
 	for name, content := range map[string]string{
-		"record":            "customer record: name Jo Example, login devuser1, plan gold, renewal pending",
-		"path and prose":    "/home/devuser1/proj/notes.txt says the account owner devuser1 asked for a reset",
-		"listing and prose": "-rw-r--r--. 1 devuser1 devuser1 6 Oct 31 13:57 a.txt\nticket from devuser1 about the invoice",
-		"longer token":      "/home/devuser1x/proj and the user devuser1 called support",
-		"URL path":          "cloned https://git.example.com/devuser1/project.git into ./project",
-		"non-home path":     "uploaded the export to /srv/exports/devuser1/",
+		"record":                    "customer record: name Jo Example, login devuser1, plan gold, renewal pending",
+		"path and prose":            "/home/devuser1/proj/notes.txt says the account owner devuser1 asked for a reset",
+		"listing and prose":         "-rw-r--r--. 1 devuser1 devuser1 6 Oct 31 13:57 a.txt\nticket from devuser1 about the invoice",
+		"longer token":              "/home/devuser1x/proj and the user devuser1 called support",
+		"URL path":                  "cloned https://git.example.com/devuser1/project.git into ./project",
+		"non-home path":             "uploaded the export to /srv/exports/devuser1/",
+		"bullet listing and prose":  "- `drwxr-xr-x. 4 devuser1 devuser1 48 Oct 31 project`\n- the owner devuser1 asked for a refund",
+		"table with a login column": "| ticket | login |\n| 4411 | devuser1 |",
 	} {
 		t.Run(name, func(t *testing.T) {
 			verdict := piiJudgeReturning(t, piiUsernameDevuser1).runPIIJudge(t.Context(), content, "completion", "Bash")
