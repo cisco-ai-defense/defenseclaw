@@ -46,21 +46,16 @@ func curlDownloadExecPrerequisite(facts actionfacts.Facts) bool {
 	if powerShellDownloadExecPrerequisite(facts) {
 		return true
 	}
-	for _, command := range facts.Commands {
-		if command.PipelineID == 0 || !oneOfFold(command.Program, "curl", "curl.exe") ||
-			!hasExternalNetworkAction(facts, command.ID, actionfacts.NetworkDownload, actionfacts.NetworkUpload) ||
-			!actionfacts.ProvesPOSIXPipelineInterpreterSource(command) {
-			continue
-		}
-		for _, sink := range facts.Commands {
-			if sink.PipelineID == command.PipelineID &&
-				actionfacts.ProvesPOSIXStdinInterpreter(sink) &&
-				hasCommandDataFlow(facts, command.ID, sink.ID, actionfacts.DataStdout, actionfacts.DataStdin) {
-				return true
-			}
-		}
-	}
-	return false
+	// Same proof as CMD-PIPE-WGET: any parsed curl download (or upload
+	// response) whose stdout feeds a stdin interpreter, whatever the URL host,
+	// so a private or documentation-range IP literal alerts like wget does
+	// (rel-1-0-6 GAP-0221). The owner is alert-only.
+	return stdinInterpreterPipelineFallbackProof(
+		facts,
+		actionfacts.OperationFetch,
+		"curl",
+		"curl.exe",
+	)
 }
 
 func wgetDownloadExecPrerequisite(facts actionfacts.Facts) bool {

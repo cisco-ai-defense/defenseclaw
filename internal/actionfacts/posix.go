@@ -1367,7 +1367,7 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 						return nil, false, true
 					}
 					if posixShellProgram(commandProgram(argv[i+1])) {
-						if terminalPOSIXShellArgv(argv[i+1:]) {
+						if sudoStdinPOSIXShellArgv(argv[i+1:]) {
 							return nil, false, false
 						}
 						if !staticPOSIXShellCommandArgv(argv[i+1:]) {
@@ -1423,7 +1423,7 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 				return nil, false, true
 			}
 			if posixShellProgram(commandProgram(argv[i])) {
-				if terminalPOSIXShellArgv(argv[i:]) {
+				if sudoStdinPOSIXShellArgv(argv[i:]) {
 					return nil, false, false
 				}
 				if !staticPOSIXShellCommandArgv(argv[i:]) {
@@ -1512,6 +1512,24 @@ func posixSudoChangesExecutionRoot(arg string) bool {
 		arg == "--chdir" || arg == "--chroot" ||
 		strings.HasPrefix(arg, "--chdir=") ||
 		strings.HasPrefix(arg, "--chroot=")
+}
+
+// sudoStdinPOSIXShellArgv reports whether a shell that sudo starts reads its
+// commands from stdin and names no command of its own: a bare shell (`sudo
+// bash`) or one with an explicit stdin operand (`sudo bash -`, `sudo sh -s`).
+// Like the bare shell, it has no nested command to analyze, so the action
+// stays authoritative (rel-1-0-6 GAP-0221).
+func sudoStdinPOSIXShellArgv(argv []string) bool {
+	if terminalPOSIXShellArgv(argv) {
+		return true
+	}
+	program := commandProgram(argv[0])
+	switch program {
+	case "sh", "bash", "zsh", "dash", "ksh":
+		return exactPOSIXShellStdinArguments(program, argv)
+	default:
+		return false
+	}
 }
 
 func terminalPOSIXShellArgv(argv []string) bool {
