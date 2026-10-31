@@ -14,17 +14,32 @@ package cli
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
+// identityRefreshSSSCacheNoMatch is the sss_cache exit code for "No cache
+// object matched the specified search".
+const identityRefreshSSSCacheNoMatch = 2
+
 var (
 	identityRefreshSSSCache    = "/usr/sbin/sss_cache"
+	identityRefreshGetent      = "/usr/bin/getent"
 	identityRefreshNSSwitch    = "/etc/nsswitch.conf"
 	identityRefreshSSSDBackend = identityRefreshUsesSSSD
 )
+
+// identityRefreshRun runs one OS cache command; replaceable in tests.
+var identityRefreshRun = func(path string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), identityRefreshCommandTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, path, args...).Run()
+}
 
 // identityRefreshUsesSSSD reports SSSD as an account backend: sss_cache is
 // installed and the passwd line of nsswitch.conf names sss.
@@ -65,9 +80,21 @@ func identityRefreshPlatformFlushOSCache(name string) (identityRefreshFlush, *en
 	if name != "" {
 		args, scope = []string{"-u", name}, "user"
 	}
-	if err := identityRefreshRun(identityRefreshSSSCache, args...); err != nil {
+	err := identityRefreshRun(identityRefreshSSSCache, args...)
+	var exit *exec.ExitError
+	if name != "" && errors.As(err, &exit) && exit.ExitCode() == identityRefreshSSSCacheNoMatch {
+		// A local (files) account is not in the SSSD cache: nothing to flush.
+		flush.Reason = "not_in_sssd_cache"
+		return flush, nil
+	}
+	if err != nil {
 		flush.Reason = "failed"
 		return flush, &enterprisestatus.Message{Code: "os_cache_flush_failed", Message: "sss_cache failed: " + err.Error() + "; the facts were re-read from the SSSD cache as it is"}
+	}
+	if name != "" {
+		// Resolve the account again as root, so SSSD holds it before the
+		// gateway, with its shorter lookup budget, re-reads it.
+		_ = identityRefreshRun(identityRefreshGetent, "initgroups", name)
 	}
 	flush.Flushed, flush.Method = scope, "sss_cache"
 	return flush, nil

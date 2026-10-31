@@ -377,7 +377,9 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise identity refresh --flus
 
 `changes[]` lists each account whose profile changed, with the old and the new
 profile; its hooks use the new one from their next call. Add `--user alice` to
-refresh one account (on Linux it then flushes only that account from SSSD). On
+refresh one account (on Linux it then flushes only that account from SSSD). Managed
+macOS hooks already ask Open Directory on each call; there the command reports
+the changes and, without `--user`, flushes the Open Directory caches. On
 Windows, signed-in accounts keep their sign-in groups until they sign in again
 and are listed in `windows_token_groups_pending`. See
 [`enterprise identity refresh`](/docs/reference/cli#re-read-directory-facts-enterprise-identity-refresh).
