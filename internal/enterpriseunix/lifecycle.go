@@ -263,6 +263,9 @@ type lifecycle struct {
 	sandboxesKept       []string
 	sandboxStoreKept    bool
 	openshellRecordKept bool
+	// accountChanges are the sandbox changes of this run's settle, per
+	// line (openshellChange, flushAccountChanges).
+	accountChanges []accountChange
 	// configWrittenDuringRun holds a config.yaml another writer put in place
 	// while a transaction of this run planned its own (applyFiles kept it).
 	// A rollback restores the earlier file, so the newer one is put back
