@@ -282,7 +282,8 @@ func isThumbsDB(data []byte) bool {
 // isUTF16Text reports whether data is UTF-16 text with a byte order mark
 // and no control characters but tab and line breaks.
 func isUTF16Text(data []byte) bool {
-	if len(data) < 4 || len(data)%2 != 0 || !(data[0] == 0xFF && data[1] == 0xFE || data[0] == 0xFE && data[1] == 0xFF) {
+	bom := bytes.HasPrefix(data, []byte{0xFF, 0xFE}) || bytes.HasPrefix(data, []byte{0xFE, 0xFF})
+	if len(data) < 4 || len(data)%2 != 0 || !bom {
 		return false
 	}
 	text, _ := DecodeSkillText(data)
