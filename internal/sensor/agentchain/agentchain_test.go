@@ -22,6 +22,7 @@
 package agentchain
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -728,5 +729,33 @@ func TestProcessPollKeepsTheExecResponsiblePid(t *testing.T) {
 	}
 	if got := tracker.records[other].responsiblePID; got != agent {
 		t.Fatalf("an unnamed responsible pid was not filled from the ppid: got %d", got)
+	}
+}
+
+// GAP-1534: alice's agent was running when the sensor started, so a poll
+// found its pid first. It exits with no exit event and Windows hands the pid
+// to bob's process. bob's creation event names another account, so it starts
+// a new instance; a late creation event of alice's own process does not.
+func TestACreationNamingAnotherAccountOnAPolledPidIsANewInstance(t *testing.T) {
+	const aliceSID, bobSID = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"
+	base := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name, sid string
+		fresh     bool
+	}{
+		{"another account", bobSID, true},
+		{"the same account, any case", strings.ToLower(aliceSID), false},
+		{"no account", "", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tracker := NewTracker()
+			tracker.ObserveProcessTable([]ProcessRow{{PID: 300, PPID: 1, Name: "claude.exe", Start: base, UserSID: aliceSID}})
+			before := tracker.InstanceOf(300)
+			tracker.ObserveExec(300, 1, 1, "claude.exe", "claude", Creation{At: base.Add(time.Minute), SID: test.sid})
+			after := tracker.InstanceOf(300)
+			if before.ID == 0 || (after.ID != before.ID) != test.fresh {
+				t.Fatalf("instance %d -> %d, want a new instance %v", before.ID, after.ID, test.fresh)
+			}
+		})
 	}
 }
