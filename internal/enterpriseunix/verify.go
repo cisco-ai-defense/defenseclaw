@@ -1377,6 +1377,13 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		case "busy_locked", "deadline", "full", "io", "readonly_cantopen", "constraint_corrupt", "unavailable", "other":
 			message += "; last SQLite failure class: " + class
 		}
+		// A call whose audit record cannot be written is blocked on a
+		// managed install (rel-1-0-6 GAP-0174): say so, and for a full
+		// disk where to free space.
+		message += "; until it can, managed hooks block the agent prompts and tool calls whose records fail (fail closed)"
+		if class == "full" {
+			message += "; the filesystem holding " + l.env.Layout.DataDir + " is full: free space on it, and agent work resumes by itself"
+		}
 		l.result.AddWarning(codeAuditWriteFailed, message+"; inspect the gateway /health telemetry details")
 	} else if class := health.Telemetry.Details.LastSQLiteClass; class != "" && class != "busy_locked" && class != "deadline" &&
 		!auditWriteFailureRecovered(health.Telemetry.Details.LastFailureAt, l.env.Now()) {
@@ -1393,7 +1400,7 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		}
 		l.gatewayAuditFailure = true
 		l.result.AddWarning(codeAuditWriteFailed, "the gateway failed to write a mandatory audit record since it started (last SQLite failure class: "+class+
-			"); later records were written, but a failure that hits only some records can still refuse those calls; inspect the gateway /health telemetry details. The warning clears "+
+			"); later records were written, but a failure that hits only some records can still block those calls (managed hooks fail closed when a call's audit record cannot be written); inspect the gateway /health telemetry details. The warning clears "+
 			auditWriteFailureWindow.String()+" after the last failed write")
 	}
 	// A judge that stops answering silently downgrades detection to the
