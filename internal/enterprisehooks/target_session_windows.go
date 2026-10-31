@@ -35,6 +35,30 @@ func windowsEnterpriseStandaloneDeferredDataDirAccountCreated(dataDir string, ta
 	return windowsEnterpriseStandaloneProcess() && windowsAccountCreatedDataDirAt(dataDir, target)
 }
 
+// windowsEnterpriseStandaloneDeferredDataDirAccountLink reports, in a
+// standalone process only, a link or junction the account itself made at its
+// canonical data directory or at that directory's hooks folder
+// (windowsTargetOwnedDataDirLink). Refusing it failed the signed-out
+// account's row and, through it, every administrator lifecycle on the
+// computer (GAP-0193); the account stays pending until it signs in.
+func windowsEnterpriseStandaloneDeferredDataDirAccountLink(home, dataDir string, target *windows.SID) bool {
+	return windowsEnterpriseStandaloneProcess() && windowsTargetOwnedDataDirLink(home, dataDir, target) != ""
+}
+
+// WindowsAccountOwnedDataDirLink reports whether home's
+// %USERPROFILE%\.defenseclaw, or its hooks folder, is a link or junction the
+// account (sid) made itself (windowsTargetOwnedDataDirLink). The account
+// stays pending until it next signs in, when the guardian moves the link
+// aside and enrolls it. Status names such accounts.
+func WindowsAccountOwnedDataDirLink(home, sid string) bool {
+	target, err := windows.StringToSid(strings.TrimSpace(sid))
+	if err != nil || strings.TrimSpace(home) == "" {
+		return false
+	}
+	home = filepath.Clean(home)
+	return windowsTargetOwnedDataDirLink(home, filepath.Join(home, ".defenseclaw"), target) != ""
+}
+
 // windowsAccountCreatedDataDirAt reads dataDir's owner and DACL and reports
 // windowsAccountCreatedDataDir for it; any read failure reports false.
 func windowsAccountCreatedDataDirAt(dataDir string, target *windows.SID) bool {
@@ -97,7 +121,8 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 	}
 	if err := validateWindowsUserPathElement(dataDir, targetSID, true, true, true); err != nil {
 		if !windowsEnterpriseStandaloneDeferredDataDirAbsent(err) &&
-			!windowsEnterpriseStandaloneDeferredDataDirAccountCreated(dataDir, targetSID) {
+			!windowsEnterpriseStandaloneDeferredDataDirAccountCreated(dataDir, targetSID) &&
+			!windowsEnterpriseStandaloneDeferredDataDirAccountLink(home, dataDir, targetSID) {
 			return fmt.Errorf(
 				"enterprise hooks: deferred target data directory is untrusted: %w",
 				err,
@@ -105,9 +130,11 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 		}
 		// Standalone writes every discovered row deferred, including users
 		// DefenseClaw has never touched. An absent canonical data directory,
-		// or one the account created itself before enrollment,
-		// holds no runtime, so it proves the pending state as well as a
-		// trusted empty one; the selector-absence proof below still runs.
+		// one the account created itself before enrollment, or a link the
+		// account made there (never followed; the enrollment in its session
+		// moves it aside) holds no runtime, so it proves the pending state as
+		// well as a trusted empty one; the selector-absence proof below
+		// still runs.
 	}
 	hookExecutable, err := windowsEnterpriseHookExecutable()
 	if err != nil {
