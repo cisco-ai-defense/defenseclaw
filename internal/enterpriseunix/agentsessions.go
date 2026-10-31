@@ -156,6 +156,9 @@ type agentSession struct {
 	Unknown bool
 	// CodexServer marks the Codex background server.
 	CodexServer bool
+	// ContainerID is the Docker container the process runs in, read from
+	// its cgroup on Linux ("" outside a container or when unknown).
+	ContainerID string
 }
 
 // agentSessionsStartedBefore lists the agent CLI processes of accounts
@@ -300,6 +303,9 @@ func (e *Env) linuxAgentSessionsWithError() ([]agentSession, error) {
 		ppid, _ := strconv.Atoi(fields[1])
 		session := agentSession{PID: pid, PPID: ppid, UID: int(owner.Uid), Agent: agent, Started: started, Args: argv, Executable: executable,
 			ArgsKnown: argvKnown, CodexServer: codexBackgroundServer(argv)}
+		if cgroup, err := readBounded(filepath.Join(dir, "cgroup"), 64<<10); err == nil {
+			session.ContainerID = linuxCgroupContainer(cgroup)
+		}
 		if pluginLaunchConnector(agent) {
 			raw, err := readBounded(filepath.Join(dir, "environ"), 64<<10)
 			if err == nil {

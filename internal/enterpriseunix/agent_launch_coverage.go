@@ -94,6 +94,7 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 		}
 	}
 	enrolled := env.launchEnrollment(cfg)
+	sandboxed := map[string]bool{}
 	for _, session := range sessions {
 		name := pluginLaunchConnectorName(session.Agent)
 		if session.UID == 0 || session.UID == record.ServiceUID || !enabled[name] ||
@@ -105,6 +106,9 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 		}
 		if !enrolled.covers(session.UID, func() (string, string) { return env.pluginLaunchAccount(ctx, session.UID) }) {
 			continue // excluded, exempt or not admitted: DefenseClaw does not protect this account
+		}
+		if env.registeredSandboxLaunch(ctx, session, sandboxed) {
+			continue // runs in a sandbox the managed gateway registered: its sandbox policy and hooks cover it
 		}
 		l.describePluginLaunchSession(ctx, session, name)
 	}
