@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 const (
@@ -153,7 +154,38 @@ func conflictingToolArgumentKeys(request trustedActionRequest, facts actionfacts
 			result.shellOrWrite = true
 		}
 	}
+	if !complete && competing && toolArgumentCommandsCompete(members) &&
+		(trustedBashExecutionTool(input.Tool) || trustedPowerShellExecutionTool(input.Tool)) &&
+		!connector.IsShellTool(request.Connector, input.Tool) {
+		// Two different commands on a shell tool, next to a key no
+		// candidate's contract knows: no candidate is complete, but there
+		// is still no one command to verify. A connector's own shell tool
+		// takes TOOL-ARGS-UNVERIFIED for it (inspectSandboxShellToolPolicyCtx);
+		// any other shell tool name was judged detection-only
+		// (rel-1-0-6:GAP-0132). Each candidate is still judged.
+		result.shellOrWrite = true
+		return result, true
+	}
 	return result, complete
+}
+
+// toolArgumentCommandsCompete reports an argument object whose command keys
+// (command, cmd, script, ...) hold more than one command, compared as
+// toolArgumentSpellingsAgree compares values.
+func toolArgumentCommandsCompete(members []toolArgument) bool {
+	for _, group := range groupToolArguments(members) {
+		if field, _ := conflictingToolArgumentField(group.keys[0]); field != "command" || len(group.values) < 2 {
+			continue
+		}
+		first, ok := normalizedToolArgumentValue(group.values[0])
+		for _, value := range group.values[1:] {
+			next, nextOK := normalizedToolArgumentValue(value)
+			if !ok || !nextOK || !bytes.Equal(first, next) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // toolArgumentSpellingsAgree reports an argument object in which every
