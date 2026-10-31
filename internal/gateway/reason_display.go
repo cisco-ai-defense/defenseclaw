@@ -86,7 +86,8 @@ func trustedBuiltInFindingLabel(label string) bool {
 		}
 	}
 	// The authorized-keys block after an archive extraction (GAP-1555).
-	if label == "persistence.ssh_authorized_keys_command:"+archiveBeforeWriteTitle {
+	if label == "persistence.ssh_authorized_keys_command:"+archiveBeforeWriteTitle ||
+		label == "persistence.ssh_authorized_keys_command:"+unresolvedWriteTargetTitle {
 		return true
 	}
 	if title, ok := strings.CutPrefix(label, "persistence.ssh_authorized_keys_command:"); ok {

@@ -168,15 +168,39 @@ func pathAtOrUnder(path, prefix string) bool {
 // followRenames gives every link a static mv moves its new name, with the
 // target a relative symbolic link has in its new directory. It reports
 // false when a move lands on or around a link name or target (the move may
-// replace what a link names) or moves a name through a link.
+// replace what a link names) or moves a name through a link. A plain move
+// of one entry onto the name of a link the command makes (ln -s README.md
+// p && mv a.txt p) replaces that link entry, or moves the entry into the
+// directory the link names: the link keeps its alias, so the caller still
+// judges its target, and nothing else changes name (rel-1-0-6:GAP-0195).
 func (l *shellLinks) followRenames(ops []renameOp) bool {
 	for _, op := range ops {
 		before := append([]linkAlias(nil), l.aliases...)
+		// onto is the destination of a one-source move onto a name a link
+		// of the command has. The other aliases at or under it are the
+		// reading of ln into an existing directory of that name.
+		onto := ""
+		if op.targetDir == "" && len(op.sources) == 1 && op.dest != "" {
+			for _, alias := range before {
+				if dest := absolutePath(op.dest, op.wd); samePathName(dest, alias.name) {
+					onto = dest
+					break
+				}
+			}
+		}
 		for _, source := range op.sources {
 			from := absolutePath(source, op.wd)
 			for _, dest := range op.destinations(source) {
 				for _, alias := range before {
-					if pathsOverlap(dest, alias.name) || pathsOverlap(dest, alias.target) {
+					switch {
+					case onto != "" && pathAtOrUnder(alias.name, onto) && samePathName(dest, onto):
+						// The link entry is replaced, or the move goes into
+						// the directory it names.
+					case onto != "" && pathAtOrUnder(alias.name, onto) && samePathName(filepath.Dir(dest), onto):
+						if pathsOverlap(dest, alias.target) {
+							return false
+						}
+					case pathsOverlap(dest, alias.name) || pathsOverlap(dest, alias.target):
 						return false
 					}
 					if _, through := cutPathPrefix(from, alias.name); through && !samePathName(from, alias.name) {

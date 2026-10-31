@@ -6195,6 +6195,26 @@ def _no_hook_contract_detail(label: str, version_display: str, compatibility: An
     )
 
 
+def _unversioned_probe_next_step(probe_error: str) -> str:
+    """The next step for an installed agent whose version probe recorded why it
+    gave no version, matching the gateway's per-cause refusal (GAP-2479). An
+    untrusted install path has its own hints; other causes have none."""
+    if agent_discovery.VERSION_PROBE_TIMED_OUT in probe_error:
+        return (
+            "The agent did not answer its version probe in time (a cold first start or a busy host): "
+            "start it once from this account and let it finish, then run setup again."
+        )
+    if any(
+        cause in probe_error
+        for cause in ("version probe exited", "version probe failed", "version probe returned empty stdout")
+    ):
+        return (
+            "The agent did not run when its version was read: make it run from this account, "
+            "for example by putting its runtime on PATH, then run setup again."
+        )
+    return ""
+
+
 def _check_connector_version_supported_for_setup(
     connector: str,
     *,
@@ -6449,6 +6469,7 @@ def _check_connector_version_supported_for_setup(
                 _trusted_prompt_cache[parent] = False
             # Declined: fall through to the mode-specific handling below.
 
+        next_step = _unversioned_probe_next_step(probe_error)
         if action_mode and not allow_drift:
             if emit:
                 if not (is_untrusted_path and interactive):
@@ -6458,6 +6479,8 @@ def _check_connector_version_supported_for_setup(
                     )
                 if is_untrusted_path:
                     _emit_untrusted_prefix_setup_hints(resolved_bin, parent)
+                if next_step:
+                    ux.subhead(next_step)
                 ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
             return False
 
@@ -6470,6 +6493,8 @@ def _check_connector_version_supported_for_setup(
                 ux.warn(detail)
             if is_untrusted_path:
                 _emit_untrusted_prefix_setup_hints(resolved_bin, parent)
+            if next_step:
+                ux.subhead(next_step)
         return True
 
     detail = _no_hook_contract_detail(label, version_display, compatibility)
