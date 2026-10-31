@@ -1343,6 +1343,12 @@ function Assert-DefenseClawBootstrapCleanupEntry {
         if (Test-DefenseClawBootstrapMissingPathError -Exception $_.Exception) {
             return $null
         }
+        if (Test-DefenseClawBootstrapRetiredCompilerScratch `
+                -Path $full `
+                -Root $rootFull `
+                -Exception $_.Exception) {
+            return $null
+        }
         throw
     }
 }
@@ -1360,6 +1366,71 @@ function Test-DefenseClawBootstrapMissingPathError {
         $current = $current.InnerException
     }
     return $false
+}
+
+function Test-DefenseClawBootstrapAccessDeniedError {
+    # A .NET method failure reaches PowerShell wrapped in a
+    # MethodInvocationException, so match on the inner chain, not the outer type.
+    param([Parameter(Mandatory)]$Exception)
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [UnauthorizedAccessException]) {
+            return $true
+        }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
+function Complete-DefenseClawBootstrapCompilerScratch {
+    # Windows PowerShell 5.1 Add-Type compiles through CodeDom into a randomly
+    # named scratch folder under TEMP, which is pinned to the one-shot root,
+    # and retires that folder only from a finalizer. A finalizer that retired
+    # the folder in the middle of the exact cleanup walk failed the cleanup
+    # with Access denied on that folder (Windows Native CI, Python shard 8,
+    # 5.1 race worker). A collection queues those finalizers now. It never
+    # waits for them: GC.WaitForPendingFinalizers can block for good in
+    # PowerShell when a pending finalizer needs the pipeline thread.
+    [GC]::Collect()
+}
+
+function Test-DefenseClawBootstrapRetiredCompilerScratch {
+    # True only when an entry below the root that answered Access denied is
+    # gone within a bounded wait (it was the compiler scratch retiring
+    # through its finalizer). An entry that is still there when the wait ends
+    # keeps the fail-closed refusal of the caller.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)]$Exception
+    )
+    if ([string]::Equals(
+            [IO.Path]::GetFullPath($Path).TrimEnd('\'),
+            [IO.Path]::GetFullPath($Root).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not (Test-DefenseClawBootstrapAccessDeniedError -Exception $Exception)) {
+        return $false
+    }
+    $wait = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        Complete-DefenseClawBootstrapCompilerScratch
+        try {
+            [void][IO.File]::GetAttributes($Path)
+        }
+        catch {
+            if (Test-DefenseClawBootstrapMissingPathError -Exception $_.Exception) {
+                return $true
+            }
+            if (-not (Test-DefenseClawBootstrapAccessDeniedError -Exception $_.Exception)) {
+                return $false
+            }
+        }
+        if ($wait.ElapsedMilliseconds -ge 3000) {
+            return $false
+        }
+        [Threading.Thread]::Sleep(50)
+    }
 }
 
 function Get-DefenseClawBootstrapEntryAttributes {
@@ -1383,6 +1454,7 @@ function Remove-DefenseClawBootstrapEnvironment {
         -Path ([string]$Context.Path) `
         -ExpectedSecurity $Context.Security `
         -ExpectedParent ([string]$Context.BootstrapParent)
+    Complete-DefenseClawBootstrapCompilerScratch
     $directories = [Collections.Generic.List[string]]::new()
     $files = [Collections.Generic.List[string]]::new()
     $pending = [Collections.Generic.Stack[string]]::new()
@@ -1434,6 +1506,10 @@ function Remove-DefenseClawBootstrapEnvironment {
         }
         catch {
             if (-not (Test-DefenseClawBootstrapMissingPathError `
+                    -Exception $_.Exception) -and
+                -not (Test-DefenseClawBootstrapRetiredCompilerScratch `
+                    -Path $directory `
+                    -Root $root `
                     -Exception $_.Exception)) {
                 throw
             }
