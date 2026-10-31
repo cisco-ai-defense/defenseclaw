@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -141,6 +142,41 @@ func parseDSCLPlatformSSOAccounts(output string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// confirmLocalNodeAccount is ConfirmLocalAccount on macOS: name is an
+// account of the local directory node (record reads it there) that holds
+// uid, it is not a mobile account (one the node caches for a directory
+// account, which mobile lists with its node), and the account database,
+// when it names the holder of uid, names name. Any read that fails proves
+// nothing, so it is an error.
+func confirmLocalNodeAccount(r Resolver, uid int, name string, record func(string) (LocalAccountRecord, bool, error),
+	mobile func() (map[string]string, error)) error {
+	if err := validName(name); err != nil {
+		return err
+	}
+	found, ok, err := record(name)
+	switch {
+	case err != nil:
+		return fmt.Errorf("unixidentity: %q is not proven an account of the local directory node: %w", name, err)
+	case !ok || found.UID != uid:
+		return fmt.Errorf("unixidentity: the local directory node holds no account %q with uid %d", name, uid)
+	}
+	nodes, err := mobile()
+	if err != nil {
+		return fmt.Errorf("unixidentity: cannot tell whether %q is a mobile account: %w", name, err)
+	}
+	for listed, node := range nodes {
+		if useridentity.EqualFold(listed, name) {
+			return fmt.Errorf("unixidentity: %q is a mobile account of %s, not a local one", name, node)
+		}
+	}
+	if r != nil {
+		if holder, err := r.LookupUID(uid); err == nil && !useridentity.EqualFold(holder.Name, name) {
+			return fmt.Errorf("unixidentity: uid %d is held by %q, not by the local account %q", uid, holder.Name, name)
+		}
+	}
+	return nil
 }
 
 // parseDSCLOriginalNodes parses `dscl . -list /Users OriginalNodeName` rows

@@ -205,12 +205,31 @@ func profileExplainUID(name string, lookupErr error) (profileSubject, bool) {
 // shows the hook's profile with the age of the facts, not a spelling error
 // (GAP-0899). errNoCachedHolder when there are none; another error says why
 // the facts a qualified spelling names are not shown (cachedHolderFor).
+//
+// A managed Mac's hooks keep no cached facts through an outage: they read
+// each call's facts fresh and get none while the directory does not answer
+// (managedHookReadsFreshFacts). There the account the cached facts name is
+// explained with that same read, as explain by its account name and uid is,
+// so every spelling reports what the hooks apply. Served from the cache,
+// DOMAIN\name (and a UPN Open Directory did not answer) reported the cached
+// group profile while the name and uid reported default_lookup_failed, the
+// profile the hooks applied (GAP-0551, managed macOS).
 var profileExplainCachedSubject = func(name string, now time.Time) (profileSubject, error) {
 	uid, userName, err := managedHookPeerHomes.cachedHolderFor(name)
 	if err != nil {
 		return profileSubject{}, err
 	}
 	id := strconv.Itoa(uid)
+	if managedHookReadsFreshFacts() {
+		facts, err := profileExplainDirectoryFacts(id)
+		switch {
+		case err != nil:
+			return profileSubjectLookupFailed(id, userName, err), nil
+		case facts.ResolvedAt.IsZero():
+			return profileSubjectLookupFailed(id, userName, fmt.Errorf("the operating system returned no directory facts for %s", id)), nil
+		}
+		return profileSubjectOfFacts(id, userName, facts), nil
+	}
 	// peek reports only facts a hook call would still get: within the hour,
 	// and from a guardian record still trusted.
 	facts, fetchedAt, ok := peerDirectoryCache().peek(id)

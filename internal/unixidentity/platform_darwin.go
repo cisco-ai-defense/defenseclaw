@@ -46,9 +46,20 @@ func QualifiedUserName(context.Context, Resolver, string) string  { return "" }
 // name to one account.
 func SameNameAccounts(context.Context, Resolver, Account) ([]Account, error) { return nil, nil }
 
-// ConfirmLocalAccount has nothing to order on macOS: Open Directory's
-// local node holds the accounts os/user names.
-func ConfirmLocalAccount(Resolver, int, string) error { return nil }
+// ConfirmLocalAccount reports, with nil, that name is an account of the
+// local directory node that holds uid (confirmLocalNodeAccount). os/user
+// also names the accounts of a bound Active Directory domain, from Open
+// Directory's own cache while the domain controllers do not answer, and
+// profile explain took such an account for a local one: it explained the
+// account with the groups os/user listed, which no hook uses, so its
+// spellings reported different profiles during an outage (GAP-0551).
+func ConfirmLocalAccount(r Resolver, uid int, name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return confirmLocalNodeAccount(r, uid, name,
+		func(name string) (LocalAccountRecord, bool, error) { return platformLocalAccountRecord(ctx, name) },
+		func() (map[string]string, error) { return platformMobileAccounts(ctx) })
+}
 
 const (
 	darwinDSCL   = "/usr/bin/dscl"

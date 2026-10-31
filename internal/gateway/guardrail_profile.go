@@ -901,13 +901,7 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 	}
 	facts, err := profileExplainDirectoryFacts(id)
 	if err != nil {
-		// A required lookup failure leaves directory-dependent assignments unresolved. With
-		// agent- or connector-only assignments, live requests can still match
-		// without directory facts. Keep the error for explain (GAP-0124).
-		return profileSubject{
-			UserID: id, IDKind: useridentity.KindForID(id), UserName: userName,
-			LookupFailed: identityLookupBlocking.Load(), LookupError: err.Error(),
-		}, nil
+		return profileSubjectLookupFailed(id, userName, err), nil
 	}
 	if facts.ResolvedAt.IsZero() {
 		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
@@ -921,12 +915,32 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: identityLookupBlocking.Load()},
 			fmt.Errorf("the operating system returned no directory facts for %s", id)
 	}
+	return profileSubjectOfFacts(id, userName, facts), nil
+}
+
+// profileSubjectOfFacts is the explained subject of account id (userName)
+// with facts, the answer of explain's own lookup
+// (profileExplainDirectoryFacts), which hooks use from their next call.
+func profileSubjectOfFacts(id, userName string, facts useridentity.DirectoryFacts) profileSubject {
 	subject := profileSubjectFromVerified(VerifiedSubject{
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, Directory: facts,
 	}, identityLookupBlocking.Load())
 	_, _, failing := cachedDirectoryRefreshFailure(id)
 	subject.refreshed, subject.accountName = !failing, userName
-	return subject, nil
+	return subject
+}
+
+// profileSubjectLookupFailed is the explained subject of account id
+// (userName) whose directory facts explain's lookup did not get (err). A
+// required lookup failure leaves directory-dependent assignments
+// unresolved. With agent- or connector-only assignments, live requests can
+// still match without directory facts. Keep the error for explain
+// (GAP-0124).
+func profileSubjectLookupFailed(id, userName string, err error) profileSubject {
+	return profileSubject{
+		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName,
+		LookupFailed: identityLookupBlocking.Load(), LookupError: err.Error(),
+	}
 }
 
 // explainEnrollmentExempt reports whether enterprise.enrollment.exempt_users
