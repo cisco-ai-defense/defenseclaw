@@ -91,6 +91,8 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	}
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait
+	} else if lockWait := applyTriggerLockWait(cmd, action, opts); lockWait > 0 {
+		env.LockTimeout = lockWait
 	}
 	ctx := cmd.Context()
 	var interrupted <-chan struct{}
@@ -843,4 +845,19 @@ func describeSecretChange(result *enterprisestatus.Result, action, name string, 
 	}
 	shown.Changes = append([]string{change}, result.Changes...)
 	return &shown
+}
+
+// applyTriggerLockWait is the lifecycle-lock wait of ensure --reason path
+// without a typed --lock-wait: the wait the config-apply trigger passes
+// (enterpriseunix.ApplyTriggerLockWait), so a second push queues behind the
+// run that applies the first instead of exiting busy (rel-1-0-3 GAP-0142).
+// Zero for every other run, which keeps the MDM default.
+func applyTriggerLockWait(cmd *cobra.Command, action string, opts *unixLifecycleOptions) time.Duration {
+	if action != enterpriseunix.ActionEnsure || opts == nil || opts.reason != enterpriseunix.ApplyTriggerReason {
+		return 0
+	}
+	if f := cmd.Flags().Lookup("lock-wait"); f != nil && f.Changed {
+		return 0
+	}
+	return enterpriseunix.ApplyTriggerLockWait
 }

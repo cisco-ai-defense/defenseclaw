@@ -29,8 +29,9 @@ commits a deployment does.
 
 Only one lifecycle run works at a time. On Linux and macOS a run that finds another in
 progress waits 5 seconds and exits `75` (busy); `--lock-wait <duration>` (at most
-`15m`) waits longer. The apply trigger waits up to 10 minutes and the deb, rpm and pkg
-install scripts up to 8, so a change made during another run is applied after it. The
+`15m`) waits longer. The apply trigger waits up to 10 minutes, and so does any
+`ensure --reason path` without `--lock-wait`; the deb, rpm and pkg install scripts wait
+up to 8, so a change made during another run is applied after it. The
 deb and rpm removal scripts wait the same, and a removal that still finds the lock busy
 fails without deleting anything. On Windows a busy run exits `1618`. MDM agents retry
 both.

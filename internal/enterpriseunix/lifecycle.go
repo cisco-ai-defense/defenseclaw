@@ -2439,7 +2439,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// Accounts follow the committed deployment: a daemon without a running
 	// sandbox restarts on it now, one with sandboxes waits (openshell_users.go).
 	l.settleOpenShell(ctx, p.openshell)
-	if !l.opts.NoStart {
+	// A config.yaml or credential replaced during this transaction is
+	// applied by its follow-up, which restarts the guardian again and waits
+	// for that report; waiting here too made two pushes seconds apart wait
+	// out the guardian twice (rel-1-0-3 GAP-0142: the first ensure took 26 s
+	// on macOS). A bundle never runs that follow-up for an in-place edit.
+	followUp := l.inputsChanged() && l.bundle == nil && !env.bundleMode()
+	if !l.opts.NoStart && !followUp {
 		// The result reports what the guardian found under the new state
 		// (an agent the change left without hooks), not its previous report.
 		if l.awaitGuardianReport(ctx, activationStarted) {

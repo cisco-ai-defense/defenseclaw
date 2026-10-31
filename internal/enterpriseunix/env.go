@@ -361,6 +361,19 @@ func NewEnv(goos, productVersion string) (*Env, error) {
 // --lock-wait so a change made during another run is applied after it.
 const DefaultLockWait = 5 * time.Second
 
+// ApplyTriggerLockWait is the wait of an ensure run for the config-apply
+// trigger (--reason path): the launchd apply job and the systemd apply
+// service pass it as --lock-wait, so a change made during another run is
+// applied once that run ends. An ensure --reason path started any other way
+// (configuration management that runs what the trigger runs) waits as long
+// unless --lock-wait says otherwise; with the MDM default a second push five
+// seconds after the first exited lifecycle_busy after 5 s instead of being
+// applied (rel-1-0-3 GAP-0142).
+const ApplyTriggerLockWait = 10 * time.Minute
+
+// ApplyTriggerReason is the --reason of the config-apply trigger.
+const ApplyTriggerReason = "path"
+
 // MaxLockWait bounds --lock-wait.
 const MaxLockWait = 15 * time.Minute
 
