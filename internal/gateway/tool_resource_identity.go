@@ -147,8 +147,7 @@ func authenticatedToolResource(
 	req agentHookRequest,
 ) (trustedToolResourceProjection, bool) {
 	connectorName := canonicalConnectorRulePackKey(req.ConnectorName)
-	if connectorName == "" || authenticatedHookConnector(ctx) != connectorName ||
-		req.SuppressCorrelationEmit || !exactConnectorInstanceID(req.ConnectorInstanceID) {
+	if connectorName == "" || authenticatedHookConnector(ctx) != connectorName {
 		return trustedToolResourceProjection{}, false
 	}
 	explicitServer := strings.TrimSpace(payloadString(req.Payload, "mcp_server_name"))
@@ -156,16 +155,21 @@ func authenticatedToolResource(
 	if !ok {
 		return trustedToolResourceProjection{}, false
 	}
-	identity := opaqueTrustedToolResourceIdentity(
-		connectorName, req.ConnectorInstanceID, server,
-	)
-	if identity == "" {
-		return trustedToolResourceProjection{}, false
-	}
-	return trustedToolResourceProjection{
+	projection := trustedToolResourceProjection{
 		connector: connectorName, nativeTool: req.ToolName, actionTool: actionTool,
-		resourceIdentity: identity,
-	}, true
+	}
+	// The action tool is a decision input and depends only on the
+	// authenticated native name: an exact redelivery, or a call whose
+	// correlation ledger is degraded, gets the decision of its first
+	// delivery (rel-1-0-6:GAP-0140). The resource identity is lineage
+	// authority: only a fresh occurrence of the exact connector instance
+	// mints it.
+	if !req.SuppressCorrelationEmit && exactConnectorInstanceID(req.ConnectorInstanceID) {
+		projection.resourceIdentity = opaqueTrustedToolResourceIdentity(
+			connectorName, req.ConnectorInstanceID, server,
+		)
+	}
+	return projection, true
 }
 
 func trustedToolActionFromContext(
@@ -179,8 +183,7 @@ func trustedToolActionFromContext(
 	}
 	projection, ok := ctx.Value(trustedToolResourceContextKey{}).(trustedToolResourceProjection)
 	if !ok || projection.connector != canonicalConnectorRulePackKey(connectorName) ||
-		projection.nativeTool != nativeTool || projection.actionTool == "" ||
-		projection.resourceIdentity == "" {
+		projection.nativeTool != nativeTool || projection.actionTool == "" {
 		return fallbackTool, ""
 	}
 	return projection.actionTool, projection.resourceIdentity
