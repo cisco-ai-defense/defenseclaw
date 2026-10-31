@@ -40,11 +40,16 @@ func TestR106DirectoryStackCopyAfterPushdStaysAllowed(t *testing.T) {
 		{command: `cd ~/linked && cd ~/project && cd /nonexistent-zz || cp -a ~- lb && echo k >> lb/lnk`, block: true},
 		{command: `cd ~/linked && cd ~/project && cd /nonexistent-zz && true; cp -a ~- lb && echo k >> lb/lnk`, block: true},
 		{command: `pushd /nonexistent-zz; pushd ~/linked && pushd ~/project && cp -a ~1 lb; echo k >> lb/lnk`, block: true},
-		// Copies out of ~/.ssh through the stack: a managed gateway allows
-		// the plain spelling too (pre-existing), judged per-user here.
-		{command: `pushd src && cp -r ~/.ssh ~1/sshcopy`, block: true, perUserOnly: true},
-		{command: `pushd ~/.ssh && pushd ~/project && cp -r ~1 k`, block: true, perUserOnly: true},
-		{command: `pushd ~/.ssh && pushd /tmp && cp -r ~2/ordinary ~1/`, block: true, perUserOnly: true},
+		// Copies out of ~/.ssh: a managed gateway reads a word that names
+		// the .ssh directory as a per-user gateway does (rel-1-0-6:GAP-0130).
+		{command: `pushd src && cp -r ~/.ssh ~1/sshcopy`, block: true},
+		{command: `pushd ~/.ssh && pushd ~/project && cp -r ~1 k`, block: true},
+		{command: `pushd ~/.ssh && pushd /tmp && cp -r ~2/ordinary ~1/`, block: true},
+		{command: `cp -r ~/.ssh sshcopy`, block: true},
+		{command: `cp -r ~/.ssh/. sshcopy2`, block: true},
+		{command: `ls -la ~/.ssh`},
+		{command: `cp ~/.ssh/config ssh-config.bak`},
+		{command: `git commit --allow-empty -m "doc: mention ~/.ssh"`},
 	}, func(t *testing.T, f b36ManagedHookFixture) {
 		for _, dir := range []string{filepath.Join(f.project, "src"), filepath.Join(f.home, "linked")} {
 			if err := os.MkdirAll(dir, 0o700); err != nil {

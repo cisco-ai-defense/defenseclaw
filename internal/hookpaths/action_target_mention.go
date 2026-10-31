@@ -132,6 +132,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		if stateOnly {
 			return actionProtectedStatePath(operand, stateHome)
 		}
+		if _, resolved := ResolveWriteTarget(operand); !resolved && samePathName(filepath.Clean(operand), ssh) {
+			// A gateway behind ProtectHome cannot resolve the home: a word
+			// that names the .ssh directory itself is still that directory,
+			// as a per-user gateway reads it (rel-1-0-6:GAP-0130).
+			return true
+		}
 		return protectedReachPath(operand, protected, ssh)
 	}
 	// The hook client records an answer for every pattern the scan checks,
