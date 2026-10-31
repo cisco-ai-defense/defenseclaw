@@ -105,11 +105,20 @@ $stream.Dispose()
             [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $nestedJunction -Target $target)
             $fileLink = [IO.Path]::Combine($state, 'file-link.txt')
             [void](Microsoft.PowerShell.Management\New-Item -ItemType SymbolicLink -Path $fileLink -Target $targetFile)
-            $warnings = @(Remove-DefenseClawUninstallStateTreeLinks -Layout @{ StateRoot = $state } 3>&1)
+            try {
+                $warnings = @(Remove-DefenseClawUninstallStateTreeLinks -Layout @{ StateRoot = $state } 3>&1)
+            }
+            catch {
+                $warnings = @()
+                $failures.Add("the StateRoot link removal refused: $($_.Exception.Message)")
+            }
             foreach ($link in @($junction, $nestedJunction, $fileLink)) {
                 if ($null -ne (Microsoft.PowerShell.Management\Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue)) {
                     $failures.Add("the uninstall kept the link below StateRoot: $link")
                 }
+            }
+            if ([IO.File]::Exists($fileLink)) {
+                [IO.File]::Delete($fileLink)
             }
             if ($warnings.Count -ne 3) {
                 $failures.Add("the StateRoot link removal reported $($warnings.Count) links, not 3")

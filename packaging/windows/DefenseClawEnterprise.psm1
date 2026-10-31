@@ -27998,7 +27998,7 @@ function Get-DefenseClawUninstallStateLinkRefusal {
     return (
         "state_invalid: managed state contains a reparse point: $path. The uninstall stopped before it changed the " +
         "deployment, which is still installed. DefenseClaw does not follow links in its state folder and could not " +
-        "remove this one as a link$why: " + $removal + ' (the folder it points to is not changed), then run the ' +
+        "remove this one as a link${why}: " + $removal + ' (the folder it points to is not changed), then run the ' +
         'uninstall again'
     )
 }
