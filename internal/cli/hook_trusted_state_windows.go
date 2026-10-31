@@ -150,10 +150,28 @@ func NativeHookRuntimeNoop() bool {
 		// nothing for a managed call either, so they are not run before its
 		// watchdog: a Setup /repair that held them kept a managed call 5.2 s
 		// (rel-1-0-3 GAP-0159). The snapshot stays unprepared, so a later
-		// reader does its own trusted read.
+		// reader does its own trusted read: the gateway recovery readers,
+		// and the uninstall tombstone check, which reads it only when the
+		// machine policy is absent and the account unregistered.
 		return false
 	}
-	executable := nativeHookExecutable()
+	state, recognized, err := prepareNativeHookRuntimeSnapshot(nativeHookExecutable())
+	if !recognized {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	if !state.Active() || !filepath.IsAbs(state.DataRoot) || !windowsHookPathHasNoReparsePoints(state.DataRoot) {
+		return true
+	}
+	return false
+}
+
+// prepareNativeHookRuntimeSnapshot runs the per-user stable runtime admission
+// read (the delegated proof, then the full executable read) for executable and
+// records it as this process's snapshot.
+func prepareNativeHookRuntimeSnapshot(executable string) (hookruntime.State, bool, error) {
 	state, recognized, err := nativeDelegatedHookRuntimeReader(executable)
 	if !recognized {
 		state, recognized, err = nativeHookRuntimeReader(executable)
@@ -165,16 +183,7 @@ func NativeHookRuntimeNoop() bool {
 	nativeHookRuntimeSnapshot.recognized = recognized
 	nativeHookRuntimeSnapshot.err = err
 	nativeHookRuntimeSnapshot.Unlock()
-	if !recognized {
-		return false
-	}
-	if err != nil {
-		return true
-	}
-	if !state.Active() || !filepath.IsAbs(state.DataRoot) || !windowsHookPathHasNoReparsePoints(state.DataRoot) {
-		return true
-	}
-	return false
+	return state, recognized, err
 }
 
 // NativeConnectorHookNoop applies connector-scoped disabled state after the
@@ -349,6 +358,7 @@ func enterpriseManagedRuntimeAbsenceNoop(
 	resolveErr error,
 ) bool {
 	if managedRuntimeAbsentWithTrustedTombstone(
+		executable,
 		policyActive,
 		registered,
 		resolveErr,
@@ -381,7 +391,14 @@ func enterpriseManagedRuntimeAbsenceNoop(
 	return false
 }
 
+// managedRuntimeAbsentWithTrustedTombstone reports the trusted no-op of a
+// recognized stable per-user launcher that a long-running agent still calls
+// with cached managed arguments after its uninstall tombstone. A managed call
+// leaves main without the per-user read (rel-1-0-3 GAP-0159), so when the
+// snapshot is unprepared the read happens here, on the absent-policy,
+// unregistered branch only, after the hook armed its answer watchdog.
 func managedRuntimeAbsentWithTrustedTombstone(
+	executable string,
 	policyActive bool,
 	registered bool,
 	resolveErr error,
@@ -390,11 +407,15 @@ func managedRuntimeAbsentWithTrustedTombstone(
 		return false
 	}
 	nativeHookRuntimeSnapshot.Lock()
-	defer nativeHookRuntimeSnapshot.Unlock()
-	return nativeHookRuntimeSnapshot.prepared &&
-		nativeHookRuntimeSnapshot.recognized &&
-		nativeHookRuntimeSnapshot.err == nil &&
-		!nativeHookRuntimeSnapshot.state.Active()
+	prepared := nativeHookRuntimeSnapshot.prepared
+	state := nativeHookRuntimeSnapshot.state
+	recognized := nativeHookRuntimeSnapshot.recognized
+	err := nativeHookRuntimeSnapshot.err
+	nativeHookRuntimeSnapshot.Unlock()
+	if !prepared {
+		state, recognized, err = prepareNativeHookRuntimeSnapshot(executable)
+	}
+	return recognized && err == nil && !state.Active()
 }
 
 func enterpriseManagedHookRuntimeForceClosed() bool {

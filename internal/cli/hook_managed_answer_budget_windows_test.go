@@ -151,3 +151,64 @@ func TestManagedHookLeavesMainWithoutThePerUserRuntimeReads(t *testing.T) {
 		t.Fatal("a managed call prepared the per-user runtime snapshot")
 	}
 }
+
+// rel-1-0-3 GAP-0159 follow-up: a managed call leaves main with the per-user
+// snapshot unprepared, yet a recognized stable per-user launcher that a
+// long-running agent still calls with cached managed arguments must stay the
+// silent no-op after its uninstall tombstone (absent machine policy,
+// unregistered account), never a closed block.
+func TestCachedManagedArgsOfTheRetiredPerUserLauncherNoopThroughMain(t *testing.T) {
+	stubNativeDelegatedHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		return hookruntime.State{}, false, nil
+	})
+	stubNativeHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		return hookruntime.State{Status: hookruntime.StatusDisabled}, true, nil
+	})
+	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+		return enterprisehooks.WindowsManagedHookRuntime{Connector: "codex"}, nil
+	})
+	savedArgs := os.Args
+	t.Cleanup(func() { os.Args = savedArgs })
+	os.Args = []string{savedArgs[0], "hook", "--connector", "codex", "--enterprise-managed"}
+
+	if NativeHookRuntimeNoop() {
+		t.Fatal("the managed call ended in main")
+	}
+	if !prepareEnterpriseManagedHookRuntime("codex") {
+		t.Fatal("the retired per-user launcher with cached managed args did not no-op after its tombstone")
+	}
+}
+
+// The registered managed call keeps the GAP-0159 timing: with the machine
+// policy active and the account registered, neither main nor the runtime
+// preparation runs the per-user stable runtime reads.
+func TestRegisteredManagedCallNeverRunsThePerUserRuntimeReads(t *testing.T) {
+	read := func(string) (hookruntime.State, bool, error) {
+		t.Error("a registered managed call ran a per-user stable runtime read")
+		return hookruntime.State{}, false, nil
+	}
+	stubNativeDelegatedHookRuntimeReader(t, read)
+	stubNativeHookRuntimeReader(t, read)
+	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+		return enterprisehooks.WindowsManagedHookRuntime{
+			Connector:    "claudecode",
+			PolicyActive: true,
+			Registered:   true,
+			GenerationID: "0123456789abcdef0123456789abcdef",
+			ScopedToken:  "scoped",
+		}, nil
+	})
+	savedArgs := os.Args
+	t.Cleanup(func() { os.Args = savedArgs })
+	os.Args = []string{savedArgs[0], "hook", "--connector", "claudecode", "--enterprise-managed"}
+
+	if NativeHookRuntimeNoop() {
+		t.Fatal("the managed call ended in main")
+	}
+	if prepareEnterpriseManagedHookRuntime("claudecode") {
+		t.Fatal("a registered managed call ended as a no-op")
+	}
+	if _, _, _, prepared := preparedNativeHookRuntime(nativeHookExecutable()); prepared {
+		t.Fatal("a registered managed call prepared the per-user runtime snapshot")
+	}
+}
