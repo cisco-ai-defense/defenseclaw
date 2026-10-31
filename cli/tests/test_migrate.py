@@ -874,6 +874,19 @@ def test_migrate_puts_back_the_keys_a_downgrade_set_aside(data_dir: Path, monkey
     assert not record.exists()
 
 
+def test_set_aside_internal_domains_is_put_back(data_dir: Path) -> None:
+    """#1390: a downgrade below 1.0.6 set guardrail.internal_domains aside."""
+    import yaml
+
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(data_dir, {"guardrail.internal_domains": ["corp.example.com"]})
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["guardrail"]["internal_domains"] == ["corp.example.com"]
+    assert not record.exists()
+
+
 def test_set_aside_keys_keep_a_value_set_again_and_a_later_release_key(data_dir: Path) -> None:
     import yaml
 

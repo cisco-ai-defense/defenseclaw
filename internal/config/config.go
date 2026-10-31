@@ -1787,6 +1787,11 @@ type GuardrailConfig struct {
 	CiscoTrustLevel string      `mapstructure:"cisco_trust_level" yaml:"cisco_trust_level,omitempty"`
 	Judge           JudgeConfig `mapstructure:"judge"                yaml:"judge"`
 	HILT            HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
+	// InternalDomains are the organization's own domains (corp.example.com):
+	// a host equal to or under one is inside its network, so a download
+	// from it does not start chain.download_then_execute_same_artifact
+	// (#1390). Empty by default. Read through IsInternalDomainHost.
+	InternalDomains []string `mapstructure:"internal_domains" yaml:"internal_domains,omitempty"`
 
 	// BlockAt and AlertAt replace the block and alert levels the rule
 	// pack's profile implies (strict / default / permissive) when the
@@ -2309,7 +2314,7 @@ func (g *GuardrailConfig) Validate() error {
 	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {
 		return err
 	}
-	return nil
+	return validateInternalDomains(g.InternalDomains)
 }
 
 // validateGuardrailMode accepts the empty string (inherit/default) and

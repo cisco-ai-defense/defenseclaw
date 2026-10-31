@@ -535,6 +535,7 @@ concept pages explain how they combine: [Rules](/docs/policies/rules) and
 | `guardrail.rules.sensitive_tools` | `[]` | `{name, result_inspection, judge_result, min_entities_for_alert}` entries merged into the pack's sensitive tools by name. |
 | `guardrail.block_at`, `guardrail.alert_at` | empty | The lowest severity that blocks or alerts: `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`, in any case. Empty inherits: a connector from the global value, the global value from the rule pack's default. `alert_at` is never above `block_at`. `defenseclaw guardrail block-at LEVEL [--connector X]` writes them. |
 | `guardrail.cisco_trust_level` | `full` | How much a Cisco AI Defense verdict counts. `full`: as much as a local finding. `advisory`: a verdict that only Cisco AI Defense reached is downgraded to an alert, never a block. `none`: Cisco AI Defense results are ignored when choosing the action. |
+| `guardrail.internal_domains` | `[]` | Your organization's own domains, such as `corp.example.com`. A download from a host that is one of them or under one does not start the [download → execute](/docs/policies/deterministic-detection#download--execute) alert. Domain names only: no scheme, port, path, wildcard or IP address. At most 256. |
 | `guardrail.judge.trace` | `false` | Log the judge's prompts and responses for debugging. They can hold agent traffic and secrets. It replaces `DEFENSECLAW_JUDGE_TRACE`, and a managed device refuses it. |
 
 `block_at` and `alert_at` are the only threshold source. They apply to hook

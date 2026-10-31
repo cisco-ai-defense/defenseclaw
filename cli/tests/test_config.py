@@ -1813,6 +1813,12 @@ class TestGuardrailHostField(unittest.TestCase):
         )
         self.assertEqual(gc.allow_private_upstreams, ["10.50.2.100", "172.16.0.5"])
 
+    def test_merge_guardrail_internal_domains(self):
+        gc = _merge_guardrail({"internal_domains": ["corp.example.com", " "]}, "/tmp")
+        self.assertEqual(gc.internal_domains, ["corp.example.com"])
+        self.assertEqual(_merge_guardrail({}, "/tmp").internal_domains, [])
+        self.assertEqual(_merge_guardrail({"internal_domains": "corp.example.com"}, "/tmp").internal_domains, [])
+
     def test_merge_guardrail_hilt_defaults_and_values(self):
         default_gc = _merge_guardrail({}, "/tmp")
         self.assertFalse(default_gc.hilt.enabled)

@@ -675,3 +675,25 @@ def test_stale_save_merges_a_mapping_another_writer_added(tmp_path, monkeypatch)
     after = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     assert after["update"]["check"] is False
     assert after["update"]["source"] == "https://updates.example.test/releases"
+
+
+class TestConfigSaveInternalDomains(unittest.TestCase):
+    """guardrail.internal_domains (#1390) round-trips, and an empty list is
+    not written: an unset 1.0.6 file stays loadable by 1.0.5 on rollback."""
+
+    def _saved_guardrail(self, tmpdir, domains):
+        cfg = _make_cfg(tmpdir)
+        cfg.guardrail.internal_domains = domains
+        cfg.save()
+        with open(os.path.join(tmpdir, "config.yaml")) as f:
+            return (yaml.safe_load(f) or {}).get("guardrail") or {}
+
+    def test_internal_domains_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            saved = self._saved_guardrail(tmpdir, ["corp.example.com"])
+        self.assertEqual(saved.get("internal_domains"), ["corp.example.com"])
+
+    def test_empty_internal_domains_not_written(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            saved = self._saved_guardrail(tmpdir, [])
+        self.assertNotIn("internal_domains", saved)
