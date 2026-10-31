@@ -1518,6 +1518,15 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		return nil, &codedError{code: codeConfig, err: err}
 	}
 	if err := env.checkRequiredSandboxPacks(validated.Loaded); err != nil {
+		if record != nil && sha256Bytes(raw) == record.ConfigSHA256 {
+			// The applied config, unchanged: a required sandbox pack it
+			// names was edited in place into one that does not load. That is
+			// no config to refuse but a policy that does not build, as for a
+			// pack the gateway's policy digest refuses (policyAssetsChanged):
+			// nothing is applied and the running gateway keeps the last good
+			// policy (GAP-0286).
+			return nil, &codedError{code: codeConfigRefused, err: &policyAssetRefusedError{reason: err.Error()}}
+		}
 		return nil, &codedError{code: codeConfig, err: err}
 	}
 	p.configFromInstalled = fromInstalled
@@ -1922,6 +1931,16 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		// A plan that failed before commit must never supply prerequisite
 		// settings to describe; the prior applied record remains in force.
 		l.osPlan = nil
+		var refused *policyAssetRefusedError
+		if record != nil && errors.As(err, &refused) {
+			// The deployment is as applied and runs its last good policy:
+			// the run is a noop that fails with the reason, as the noop path
+			// reports a policy asset that does not load.
+			r.AddError(codeConfigRefused, env.policyAssetRefusedMessage(refused.reason))
+			r.Noop, r.NoopReason = true, "policy_refused"
+			l.describe(ctx, record, false)
+			return 0
+		}
 		if committedConfig == nil && code == codeConfig {
 			// An edit written after the check above, while this run planned
 			// (a standard user writing a config.yaml whose mode was just
@@ -3482,6 +3501,13 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	}
 	return true, "up_to_date"
 }
+
+// policyAssetRefusedError is a policy file the applied, unchanged config
+// names that does not load (a required sandbox pack edited in place):
+// reason says why.
+type policyAssetRefusedError struct{ reason string }
+
+func (e *policyAssetRefusedError) Error() string { return e.reason }
 
 // policyAssetsChanged reports whether the installed config computes to an
 // effective policy the running gateway does not report while config.yaml
