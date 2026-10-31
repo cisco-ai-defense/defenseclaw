@@ -22,10 +22,10 @@ On a managed computer, `defenseclaw` runs only `sandbox` commands. Use `defensec
 
    ```text
    Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/default"
-     rules: 239/243 enabled across 7 files
+     rules: 242/246 enabled across 7 files
      components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
-     digest: 36bc8fb641b358f7fc8cb7a5bc0b6967d639a982bb66e6ed2228453aa96d3960
-     files digest: f664ccf64bf91e0377966066762d1672e261327107ca4f74bbed3c5ad4fd2164 (the guardrail.custom_packs pin)
+     digest: f36358a2434af4cf7f706a1eec371c90c929645cdebe1ffc7fb963c9cf33e6d7
+     files digest: 7f0d2611d777cd27bee55ec1d0a0b4a3fce57d910a73afa475a980e32ade0528 (the guardrail.custom_packs pin)
    ```
 
    `judges=4` counts the compiled-in exfil judge and the three judge files. The full digest includes compiled defaults and can change between builds even when the files digest stays the same. Use your own run's `files digest` to pin a custom pack. You can pass a pack name instead of a path.
@@ -37,18 +37,18 @@ On a managed computer, `defenseclaw` runs only `sandbox` commands. Use `defensec
    ```
 
    ```json
-   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"36bc8fb6…","enabled_rule_count":239,"files_digest":"f664ccf6…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":243,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
+   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"f36358a2…","enabled_rule_count":242,"files_digest":"7f0d2611…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":246,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
    ```
 
-3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`:
+3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`. The reason names the file, or the folder when a whole copy of another pack sits inside this one (for example `default/judge/injection.yaml` names `default`), and says to move it out or remove it:
 
    ```text
    Rule pack invalid: "/home/alice/.defenseclaw/policies/guardrail/bad"
-     inventory_unexpected at correlation-patterns.yaml: unexpected YAML component
+     inventory_unexpected at correlation-patterns.yaml: unexpected YAML component: move correlation-patterns.yaml out of the rule-pack folder or remove it, then run the command or installer again
    ```
 
    ```json
-   {"error":{"code":"inventory_unexpected","path":"correlation-patterns.yaml","reason":"unexpected YAML component"},"kind":"validation_error","valid":false,"wire_version":1}
+   {"error":{"code":"inventory_unexpected","path":"correlation-patterns.yaml","reason":"unexpected YAML component: move correlation-patterns.yaml out of the rule-pack folder or remove it, then run the command or installer again"},"kind":"validation_error","valid":false,"wire_version":1}
    ```
 
 | Exit | Meaning |

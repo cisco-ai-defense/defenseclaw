@@ -1948,6 +1948,9 @@ type GuardrailConfig struct {
 	// a rollback to a release without the key reads the file unchanged.
 	ProtectedFiles ProtectedFilesConfig `mapstructure:"protected_files" yaml:"protected_files,omitempty"`
 
+	// Chains tunes tool-call chain evaluation (trusted_connectors.go).
+	Chains GuardrailChainsConfig `mapstructure:"chains" yaml:"chains,omitempty"`
+
 	// profileConnectors is set only on a configuration DerivedForProfile
 	// returns: the profile's own connectors map, keyed by normalized
 	// connector name. policyOverride layers it over Connectors so a profile

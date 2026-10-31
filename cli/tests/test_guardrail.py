@@ -2846,7 +2846,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
     def test_wait_for_connector_runtime_requires_fresh_matching_state(self):
         from defenseclaw.commands.cmd_setup import (
             _active_connector_state_marker,
-            _hook_contract_lock_marker,
+            _regular_file_marker,
             _wait_for_connector_runtime,
         )
 
@@ -2861,7 +2861,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                     lock_file,
                 )
             state_marker = _active_connector_state_marker(tmpdir)
-            lock_marker = _hook_contract_lock_marker(tmpdir)
+            lock_marker = _regular_file_marker(lock_path)
             self.assertIsNotNone(state_marker)
             self.assertIsNotNone(lock_marker)
 
@@ -3849,15 +3849,15 @@ class BalancedPermissiveNoisePosture(unittest.TestCase):
                 commands = _load_profile_rules(profile, "commands.yaml")
                 paths = _load_profile_rules(profile, "sensitive-paths.yaml")
 
-                # Owner decision for 1.0 (GAP-0893): curl piped to a shell stays off outside strict.
-                self.assertEqual(commands["CMD-PIPE-CURL"]["expression"], "false")
-                self.assertEqual(commands["CMD-PIPE-CURL"]["pattern"], "a^")
-                self.assertEqual(commands["CMD-PIPE-CURL"]["severity"], "HIGH")
+                # Generic installer pipelines are off in both balanced packs.
+                for rule_id in ("CMD-PIPE-CURL", "CMD-PIPE-WGET"):
+                    self.assertEqual(commands[rule_id]["expression"], "false")
+                    self.assertEqual(commands[rule_id]["pattern"], "a^")
+                    self.assertEqual(commands[rule_id]["severity"], "HIGH")
                 self.assertEqual(paths["PATH-ENV-FILE"]["expression"], "false")
                 self.assertEqual(paths["PATH-ENV-FILE"]["pattern"], "a^")
 
-                for rule_id in ("CMD-PIPE-WGET", "CMD-PIPE-BASE64"):
-                    self.assertEqual(commands[rule_id]["severity"], "HIGH")
+                self.assertEqual(commands["CMD-PIPE-BASE64"]["severity"], "HIGH")
 
 
 if __name__ == "__main__":

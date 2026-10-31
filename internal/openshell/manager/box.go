@@ -549,6 +549,9 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		// The session is over: keep what it reached.
 		m.flushDestinations(rec.Name)
 	}
+	if phase == audit.SandboxPhaseStopped {
+		m.endStoppedAsks(ctx, b, rec.Name, rec.BindingID)
+	}
 	if !unchanged {
 		msg := lifecycleMessage(rec.Name, phase)
 		if phase == audit.SandboxPhaseError {

@@ -1917,6 +1917,13 @@ type shellLinks struct {
 	findMoves []findMove
 	// linkTexts are the source texts of the link calls (RV-c4-1).
 	linkTexts []string
+	// linkNameOnly: the names of link calls placed in the starting directory
+	// ahead of every directory change, that the rest of the command only
+	// enters with cd. The disk walks of a nested directory change could not
+	// clear the links (a large linked tree, a link to the home), which makes
+	// every write opaque; the link call's own name is placed where it is
+	// written, so it is not (GAP-0091).
+	linkNameOnly map[string]bool
 }
 
 // merge adds the links a nested literal shell body makes.
@@ -2072,6 +2079,9 @@ func (l shellLinks) opaqueTargetWithFacts(path, ownCopy string, facts map[string
 	if !l.opaque {
 		return false
 	}
+	if l.linkNameOnly[filepath.Clean(path)] {
+		return false
+	}
 	if l.globalOpaque && ownCopy != "" && ownCopy == path && l.globalCopyScopesAfter(ownCopy) {
 		if len(l.opaqueScopes) == 0 {
 			return false
@@ -2195,6 +2205,10 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	var copyScopes []string
 	var renameOps []renameOp
 	var findMoves []findMove
+	// placedLinkNames: the names of plain link calls the statement walk
+	// placed in the starting directory (GAP-0091).
+	var placedLinkNames []string
+	placedLinkCalls := make(map[*syntax.CallExpr]bool)
 	boundPrograms := actionBoundProgramWords(file, home)
 	// A literal shell -c body is read in this directory only when nothing in
 	// the command changes directory first.
@@ -2342,10 +2356,18 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 				links.unknown(true)
 				break
 			}
+			before := len(links.aliases)
 			for _, workingDirectory := range workingDirectories {
 				if !links.add(program, words[1:], workingDirectory) {
 					links.unknown(true)
 				}
+			}
+			if _, placed := linkDirs[call]; placed && !nested && movedDir == "" && call != linkCall &&
+				len(workingDirectories) == 1 && workingDirectories[0] == cwd {
+				for _, alias := range links.aliases[before:] {
+					placedLinkNames = append(placedLinkNames, alias.name)
+				}
+				placedLinkCalls[call] = true
 			}
 		case slices.Contains(copyPrograms, program):
 			if _, placed := linkDirs[call]; !placed {
@@ -2562,6 +2584,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		if stable && !links.dotDotPastLinksClear(command, cwd, home) {
 			stable = false
 		}
+		walkFailed := false
 		if stable && walked && !userView {
 			stable = links.findMovesClear(findMoves, home) && links.aliasesAwayFromState(cwd, home)
 			// A nested cd or a find -exec mv may also go below a linked
@@ -2575,9 +2598,19 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 				stable = movedEntriesAwayFromState(renameOps, findMoves, home)
 			}
 			links.movesStable = stable
+			walkFailed = !stable
 		}
-		if !stable || cds && links.relative && linkCall == nil && !linkDirsKnown {
+		unplacedRelative := cds && links.relative && linkCall == nil && !linkDirsKnown
+		if !stable || unplacedRelative {
+			// Only the disk walks of a nested directory change failed, with no
+			// move and no other unread link: the names of the link calls
+			// that the command enters with cd alone stay judged where they
+			// are written (GAP-0091).
+			nameOnly := walkFailed && !unplacedRelative && !renames && !moves && !links.opaque && !links.unread && links.known
 			links.unknown(true)
+			if nameOnly {
+				links.linkNameOnly = enteredOnlyLinkNames(file, command, cwd, home, placedLinkNames, links.aliases, links.linkTexts, placedLinkCalls)
+			}
 		}
 	}
 	// Scopes are read against the starting directory; after a directory
@@ -3230,7 +3263,7 @@ func (l Links) Known() bool {
 // scopes, none of which can reach path, keep the links from being known. The
 // hook client resolves such an operand through the links (GAP-2582).
 func (l Links) KnownOutsideScopes(path string, ownCopy bool, facts map[string]string) bool {
-	if l.Known() {
+	if l.Known() || l.links.linkNameOnly[filepath.Clean(path)] {
 		return true
 	}
 	return !l.links.unread && !l.links.globalOpaque && !l.OpaqueTargetWithFacts(path, ownCopy, facts)
@@ -4518,11 +4551,22 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 		if dest != "" {
 			l.record(source, dest, literal, symbolic, cwd)
 		}
-		if dir != "" {
+		if dir != "" && lnEntryName(source) {
 			l.record(source, filepath.Join(dir, filepath.Base(filepath.Clean(source))), literal, symbolic, cwd)
 		}
 	}
 	return true
+}
+
+// lnEntryName reports a source whose last component can name a new entry in
+// a target directory. ln names the link after the source's last component as
+// written; for ., .. or / that entry is the directory itself or its parent,
+// which always exists, so ln refuses and makes no link there. Reading it as a
+// link at dir/.. made ln -s ../.. sub/l alias sub itself (GAP-0329).
+func lnEntryName(source string) bool {
+	trimmed := strings.TrimRight(source, "/")
+	last := trimmed[strings.LastIndexByte(trimmed, '/')+1:]
+	return last != "" && last != "." && last != ".."
 }
 
 // record adds the alias that a link at name to source creates, under the

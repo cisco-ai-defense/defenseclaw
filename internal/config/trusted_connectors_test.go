@@ -72,12 +72,12 @@ func TestValidateTrustedConnectors(t *testing.T) {
 	}
 }
 
-// The 1.0.6 settings are off by default, and a config that never sets
+// The three 1.0.6 settings are off by default, and a config that never sets
 // them marshals without them, so 1.0.2 to 1.0.5 configs stay byte-identical
 // and a rollback to 1.0.4 or 1.0.5 reads them.
 func TestIdentityChainSettingsOffByDefaultAndOmitted(t *testing.T) {
 	var cfg Config
-	if cfg.Connectors.AgentGateway.Enabled || len(cfg.Enterprise.Identity.TrustedConnectors) != 0 {
+	if cfg.Connectors.AgentGateway.Enabled || cfg.Guardrail.Chains.RootScope || len(cfg.Enterprise.Identity.TrustedConnectors) != 0 {
 		t.Fatal("a zero config enables a 1.0.6 setting")
 	}
 	if keys := cfg.UsesMinProductVersion106Keys(); len(keys) != 0 {
@@ -87,15 +87,16 @@ func TestIdentityChainSettingsOffByDefaultAndOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"connectors:", "identity:", "trusted_connectors", "agent_gateway"} {
+	for _, key := range []string{"connectors:", "chains:", "identity:", "trusted_connectors", "agent_gateway", "root_scope"} {
 		if strings.Contains(string(out), key) {
 			t.Errorf("a zero config marshals %q:\n%s", key, out)
 		}
 	}
 	cfg.Connectors.AgentGateway.Enabled = true
+	cfg.Guardrail.Chains.RootScope = true
 	cfg.Enterprise.Identity.TrustedConnectors = []TrustedConnectorConfig{validTrustedConnector()}
-	if keys := cfg.UsesMinProductVersion106Keys(); len(keys) != 2 {
-		t.Fatalf("keys = %v, want both", keys)
+	if keys := cfg.UsesMinProductVersion106Keys(); len(keys) != 3 {
+		t.Fatalf("keys = %v, want all three", keys)
 	}
 	out, err = yaml.Marshal(&cfg)
 	if err != nil {
@@ -105,7 +106,7 @@ func TestIdentityChainSettingsOffByDefaultAndOmitted(t *testing.T) {
 	if err := yaml.Unmarshal(out, &back); err != nil {
 		t.Fatal(err)
 	}
-	if !back.Connectors.AgentGateway.Enabled || len(back.Enterprise.Identity.TrustedConnectors) != 1 {
+	if !back.Connectors.AgentGateway.Enabled || !back.Guardrail.Chains.RootScope || len(back.Enterprise.Identity.TrustedConnectors) != 1 {
 		t.Fatalf("the settings did not round-trip:\n%s", out)
 	}
 }
@@ -134,7 +135,7 @@ func TestReleasedConfigsKeepNewSettingsOff(t *testing.T) {
 }
 
 func TestIdentityChainSettingsSchema(t *testing.T) {
-	ok := "config_version: 9\nconnectors:\n  agent_gateway:\n    enabled: true\n    instance_name: gas\n"
+	ok := "config_version: 9\nconnectors:\n  agent_gateway:\n    enabled: true\n    instance_name: gas\nguardrail:\n  chains:\n    root_scope: false\n"
 	if err := ValidateV8SchemaBytes("config.yaml", []byte(ok)); err != nil {
 		t.Fatalf("schema refuses the settings: %v", err)
 	}
@@ -142,6 +143,8 @@ func TestIdentityChainSettingsSchema(t *testing.T) {
 		"unknown connectors key": "config_version: 9\nconnectors:\n  claude:\n    enabled: true\n",
 		"unknown agent_gateway":  "config_version: 9\nconnectors:\n  agent_gateway:\n    route: x\n",
 		"bad instance name":      "config_version: 9\nconnectors:\n  agent_gateway:\n    instance_name: Has Space\n",
+		"unknown chains key":     "config_version: 9\nguardrail:\n  chains:\n    window: 3\n",
+		"root_scope not bool":    "config_version: 9\nguardrail:\n  chains:\n    root_scope: yes please\n",
 		"unknown identity key":   "config_version: 9\nenterprise:\n  identity:\n    acting_for: true\n",
 		"trusted route":          "config_version: 9\nenterprise:\n  identity:\n    trusted_connectors:\n      - name: gas\n        account: svc\n        route: codex\n        may_act_for: {users: [a]}\n",
 		"trusted unknown field":  "config_version: 9\nenterprise:\n  identity:\n    trusted_connectors:\n      - name: gas\n        account: svc\n        groups: [a]\n        may_act_for: {users: [a]}\n",
@@ -160,6 +163,11 @@ func TestIdentityChainSettingsRefusedUnderSecureClient(t *testing.T) {
 	cfg.Connectors.AgentGateway.Enabled = true
 	if err := cfg.ValidateIdentityChainSettings(); err == nil {
 		t.Error("agent_gateway accepted under Secure Client")
+	}
+	cfg.Connectors.AgentGateway.Enabled = false
+	cfg.Guardrail.Chains.RootScope = true
+	if err := cfg.ValidateIdentityChainSettings(); err == nil {
+		t.Error("root_scope accepted under Secure Client")
 	}
 	rest := cfg.Enterprise
 	rest.Profile = ""

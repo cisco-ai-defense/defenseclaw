@@ -33,6 +33,7 @@ import json
 import logging
 import ntpath
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -72,6 +73,7 @@ from defenseclaw.scanner._llm_env import (
     inject_llm_env,
     litellm_model,
     llm_analyzer_ready,
+    model_refuses_temperature,
 )
 
 if TYPE_CHECKING:
@@ -128,6 +130,33 @@ def _accept_legacy_http_version_rejection(scanner_cls: type) -> None:
 
     should_fallback._defenseclaw_legacy_http_version = True  # type: ignore[attr-defined]
     scanner_cls._should_fallback_to_initialize = staticmethod(should_fallback)
+
+
+# MCP Scanner 4.8.7 sets temperature=1 for every "gpt-5" model
+# (mcpscanner.utils.llm_request_params.apply_model_constraints, used by the
+# LLM and behavioral analyzers). LiteLLM's drop_params keeps a 1, and Bedrock
+# refuses the field for its OpenAI models ("This model doesn't support the
+# temperature field"), so with GPT-5.6 Luna the LLM analyzer failed with
+# BadRequestError, where 4.3.0 sent 0.1, which LiteLLM dropped (GAP-0112).
+# Leave temperature out for the models that take only their default, the
+# rule the gateway judge uses; 1 is their default, so the request does not
+# otherwise change. Remove once a pinned scanner release omits it upstream.
+def _omit_refused_temperature() -> None:
+    try:
+        from mcpscanner.utils import llm_request_params
+    except ImportError:
+        return
+    original = getattr(llm_request_params, "apply_model_constraints", None)
+    if not callable(original) or getattr(original, "_defenseclaw_omit_temperature", False):
+        return
+
+    def apply_model_constraints(model: str, params: dict) -> None:
+        original(model, params)
+        if model_refuses_temperature(model):
+            params.pop("temperature", None)
+
+    apply_model_constraints._defenseclaw_omit_temperature = True  # type: ignore[attr-defined]
+    llm_request_params.apply_model_constraints = apply_model_constraints
 
 
 def _supplemental_yara_analyzers(yara_analyzer_cls: type, yara_cfg: MCPScannerYARAConfig | None = None) -> list[object]:
@@ -380,46 +409,45 @@ class _StdioLaunchPlan:
 
 
 class _ContainedWindowsProcess:
-    """Delegate an AnyIO/MCP process while retaining a race-free Job Object."""
+    """Delegate an AnyIO/MCP process while retaining a race-free Job Object.
+
+    The MCP SDK 2.x stdio client never enters the process as a context
+    manager. It stops the server itself (close stdin, wait, kill the tree),
+    then calls ``close_process_job`` and closes the subprocess transport,
+    which it reaches as ``process._process._transport``. The wrapped process
+    is kept as ``_inner`` so that lookup falls through ``__getattr__`` to the
+    real process; ``close_job`` is what the scoped ``close_process_job``
+    calls.
+    """
 
     def __init__(self, process: object, job: object) -> None:
-        self._process = process
+        self._inner = process
         self._job = job
 
     def __getattr__(self, name: str) -> object:
-        return getattr(self._process, name)
+        return getattr(self._inner, name)
 
     @property
     def pid(self) -> int:
-        return int(getattr(self._process, "pid"))
+        return int(getattr(self._inner, "pid"))
 
-    async def __aenter__(self) -> _ContainedWindowsProcess:
-        enter = getattr(self._process, "__aenter__")
-        await enter()
-        _trace_windows_stdio_lifecycle("process-context-entered", pid=self.pid)
-        return self
-
-    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-        try:
-            exit_process = getattr(self._process, "__aexit__")
-            await exit_process(exc_type, exc_value, traceback)
-        finally:
-            _trace_windows_stdio_lifecycle(
-                "process-context-exited",
-                pid=self.pid,
-                returncode=getattr(self._process, "returncode", None),
-            )
-            self._job.close()
-            _trace_windows_stdio_lifecycle("job-containment-closed", pid=self.pid)
+    def close_job(self) -> None:
+        """Close the Job Object; KILL_ON_JOB_CLOSE ends surviving members."""
+        self._job.close()
+        _trace_windows_stdio_lifecycle(
+            "job-containment-closed",
+            pid=self.pid,
+            returncode=getattr(self._inner, "returncode", None),
+        )
 
     async def wait(self):
-        return await self._process.wait()
+        return await self._inner.wait()
 
     def terminate(self) -> None:
-        self._process.terminate()
+        self._inner.terminate()
 
     def kill(self) -> None:
-        self._process.kill()
+        self._inner.kill()
 
     async def terminate_tree(self, timeout_seconds: float) -> None:
         _trace_windows_stdio_lifecycle("job-cleanup-started", pid=self.pid)
@@ -431,7 +459,7 @@ class _ContainedWindowsProcess:
         _trace_windows_stdio_lifecycle(
             "job-cleanup-completed",
             pid=self.pid,
-            returncode=getattr(self._process, "returncode", None),
+            returncode=getattr(self._inner, "returncode", None),
         )
 
 
@@ -521,13 +549,26 @@ def _contained_mcp_windows_process_factory(started: list[object] | None = None) 
     with _MCP_WINDOWS_PROCESS_FACTORY_LOCK:
         original_create = mcp_stdio._create_platform_compatible_process
         original_terminate = mcp_stdio._terminate_process_tree
+        original_close_job = mcp_stdio.close_process_job
+
+        def close_job(process: object) -> None:
+            # The SDK's own job table does not know DefenseClaw's job, so its
+            # close_process_job would leave the job (and any server child that
+            # outlived a graceful exit) open until this process exits.
+            if isinstance(process, _ContainedWindowsProcess):
+                process.close_job()
+                return
+            original_close_job(process)
+
         mcp_stdio._create_platform_compatible_process = create
         mcp_stdio._terminate_process_tree = _terminate_contained_windows_process
+        mcp_stdio.close_process_job = close_job
         try:
             yield
         finally:
             mcp_stdio._create_platform_compatible_process = original_create
             mcp_stdio._terminate_process_tree = original_terminate
+            mcp_stdio.close_process_job = original_close_job
 
 
 def _trusted_codex_runtime_roots() -> tuple[str, ...]:
@@ -1517,6 +1558,7 @@ class MCPScannerWrapper:
         if not is_local:
             self._inject_env()
         drop_unsupported_litellm_params()
+        _omit_refused_temperature()
 
         # ``llm_model`` must be LiteLLM-shaped (``provider/model``) —
         # the mcp-scanner SDK passes it straight through to LiteLLM.
@@ -1823,9 +1865,10 @@ class MCPScannerWrapper:
         detail = " ".join(str(error).split())
         if len(detail) > 200:
             detail = detail[:197] + "..."
-        self._llm_skipped = f"LLM analysis skipped (backend unreachable): {detail}"
+        cause = _llm_failure_cause(detail)
+        self._llm_skipped = f"LLM analysis skipped ({cause}): {detail}"
         print(
-            f"warning: LLM skipped (backend unreachable) while scanning "
+            f"warning: LLM skipped ({cause}) while scanning "
             f"{target!r}: {detail}",
             file=sys.stderr,
         )
@@ -2069,6 +2112,29 @@ _LLM_ERROR_MESSAGE_SIGNALS = (
     "ollama", "vllm", "lm studio", "lmstudio",
     "apiconnectionerror", "api_base", "chat/completions", "11434",
 )
+
+
+# The SDK logs only the LiteLLM exception class ("LLM API final error:
+# BadRequestError"), never the provider text, which can carry credentials or
+# scanned input. The class still tells a refused request from an unreachable
+# backend; before, every failure read "backend unreachable" (GAP-0112).
+_LLM_FAILURE_CAUSES = (
+    (("BadRequestError", "UnsupportedParamsError", "UnprocessableEntityError",
+      "ContextWindowExceededError", "ContentPolicyViolationError"),
+     "the model refused the request; check llm.model"),
+    (("AuthenticationError", "PermissionDeniedError"), "the LLM provider refused the credentials"),
+    (("NotFoundError",), "the LLM model was not found; check llm.model"),
+    (("RateLimitError",), "the LLM provider is rate limiting"),
+)
+
+
+def _llm_failure_cause(detail: str) -> str:
+    """A short cause for an LLM-lane failure line, from its exception class."""
+    names = set(re.findall(r"[A-Za-z]+(?:Error|Exception)", detail))
+    for classes, cause in _LLM_FAILURE_CAUSES:
+        if names.intersection(classes):
+            return cause
+    return "backend unreachable"
 
 
 def _is_llm_backend_error(logger_name: str, message: str, llm: LLMConfig) -> bool:

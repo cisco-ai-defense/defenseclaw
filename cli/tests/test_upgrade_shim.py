@@ -957,6 +957,59 @@ def test_downgrade_sets_aside_the_keys_the_older_release_lacks(
         assert _set_aside(home).stat().st_mode & 0o777 == 0o600
 
 
+
+# guardrail.chains (1.0.6, root-scope chains, issue #1391): 1.0.5 and 1.0.4
+# refuse the block itself, so a downgrade sets it aside whole.
+@pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
+def test_downgrade_sets_aside_the_chains_block(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    (home / "config.yaml").write_text(
+        "config_version: 9\nguardrail:\n  mode: observe\n  chains:\n    root_scope: true\n", encoding="utf-8"
+    )
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, target)))
+
+    assert upgrade_shim.run(["upgrade", "--version", target, "--yes"]) == 0
+
+    assert len(execs) == 1
+    guardrail = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))["guardrail"]
+    assert "chains" not in guardrail
+    assert guardrail["mode"] == "observe"
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record == {"version": 1, "for": target, "keys": {"guardrail.chains": {"root_scope": True}}}
+
+
+# connectors (connectors.agent_gateway, 1.0.6): 1.0.5 and 1.0.4 refuse the
+# top-level block, so a downgrade sets it aside with guardrail.chains.
+@pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
+def test_downgrade_sets_aside_the_connectors_block(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    (home / "config.yaml").write_text(
+        "config_version: 9\nconnectors:\n  agent_gateway:\n    enabled: true\n"
+        "guardrail:\n  chains:\n    root_scope: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, target)))
+
+    assert upgrade_shim.run(["upgrade", "--version", target, "--yes"]) == 0
+
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert "connectors" not in config
+    assert "chains" not in (config.get("guardrail") or {})
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record["keys"] == {
+        "guardrail.chains": {"root_scope": True},
+        "connectors": {"agent_gateway": {"enabled": True}},
+    }
+
+
 @pytest.mark.parametrize(("installed", "target"), [("1.0.3", "1.0.4"), ("1.0.4", "1.0.3")])
 def test_upgrade_keeps_keys_the_target_release_has(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: str, target: str
@@ -1220,3 +1273,41 @@ def test_rollback_checks_a_previous_installer_only_when_it_was_recorded(home: Pa
     _record(previous / "data", saved)
     assert upgrade_shim.run(["rollback", "--yes"]) == 0
     assert len(execs) == 2
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["http://127.0.0.1:8765/defenseclaw", "ftp://mirror.example/dc", "justaname", "a/b/c", "owner/na me", "file:///tmp/dc"],
+)
+def test_a_bad_defenseclaw_repo_is_refused_with_the_https_requirement(
+    home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    """GAP-1065: DEFENSECLAW_REPO is an owner/name or an https:// URL. Anything
+    else used to be appended to github.com and ended in an HTTP 404; it is now
+    refused before any download, without echoing the value."""
+    monkeypatch.setenv(upgrade_shim.REPO_ENV, value)
+    downloads: list[str] = []
+    monkeypatch.setattr(upgrade_shim, "_download", lambda url, *_a, **_k: downloads.append(url))
+
+    assert upgrade_shim.run(["upgrade", "--yes", "--version", "1.0.8200"]) == 2
+    err = capsys.readouterr().err
+    assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in err
+    assert "Nothing was changed." in err
+    assert value not in err
+    assert downloads == [] and execs == []
+    # The update notice stays quiet about it.
+    assert update_notice._lookup_latest() == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "base"),
+    [
+        ("fork/defense.claw", "https://github.com/fork/defense.claw"),
+        ("https://mirror.example/dc/", "https://mirror.example/dc"),
+    ],
+)
+def test_a_good_defenseclaw_repo_is_still_accepted(
+    home: Path, monkeypatch: pytest.MonkeyPatch, value: str, base: str
+) -> None:
+    monkeypatch.setenv(upgrade_shim.REPO_ENV, value)
+    assert upgrade_shim.release_source() == base

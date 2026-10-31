@@ -157,11 +157,14 @@ type BundleRef struct {
 	ID          string
 	Version     uint64
 	SignerKeyID string
+	// Dir is the store version directory name of the bundle, recorded as
+	// bundle_dir ("" records none). Only Bundle records it.
+	Dir string
 }
 
 func (o Options) writer() cfgtxn.Writer {
 	return cfgtxn.Writer{GenerationFloor: o.GenerationFloor, Actor: o.Actor, LocalActor: o.LocalActor, Reason: o.Reason,
-		BundleID: o.Bundle.ID, BundleVersion: o.Bundle.Version, SignerKeyID: o.Bundle.SignerKeyID,
+		BundleID: o.Bundle.ID, BundleVersion: o.Bundle.Version, SignerKeyID: o.Bundle.SignerKeyID, BundleDir: o.Bundle.Dir,
 		TransactionActor: o.TransactionActor, TransactionBundleID: o.TransactionBundle.ID,
 		TransactionBundleVersion: o.TransactionBundle.Version,
 		TransactionSignerKeyID:   o.TransactionBundle.SignerKeyID, TransactionSummary: o.TransactionSummary}
@@ -583,7 +586,8 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 		bundleTransition := (opt.Lifecycle || opt.Actor == ActorLifecycle) &&
 			(opt.Bundle.ID != "" || state.BundleID != "") &&
 			(stateErr != nil || state.ConfigSHA256 != sum || state.BundleID != opt.Bundle.ID ||
-				state.BundleVersion != opt.Bundle.Version || state.SignerKeyID != opt.Bundle.SignerKeyID)
+				state.BundleVersion != opt.Bundle.Version || state.SignerKeyID != opt.Bundle.SignerKeyID ||
+				(opt.Bundle.Dir != "" && state.BundleDir != opt.Bundle.Dir))
 		if !bundleTransition {
 			return Result{Generation: state.Generation, SHA256: sum}, nil
 		}

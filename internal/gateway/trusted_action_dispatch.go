@@ -4821,6 +4821,24 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 		alertOnly: true,
 	},
+	"CMD-WRAPPED-DOWNLOAD-EXEC": {
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return wrappedDownloadExecProof(facts)
+		},
+		codeOwnedDetection: true,
+	},
+	"CMD-SUBST-DOWNLOAD-EXEC": {
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXDownloadSubstitution(facts, input)
+		},
+		codeOwnedDetection: true,
+	},
+	"CMD-PYTHON-SOCKET-CONNECT": {
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPythonExternalSocketConnect(facts)
+		},
+		codeOwnedDetection: true,
+	},
 	"secrets.cloud_secret_manager_read": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return cloudSecretManagerPrerequisite(facts)
@@ -4846,7 +4864,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 				"wget.exe",
 			)
 		},
-		detectionOnly: true,
+		alertOnly: true,
 	},
 	"CMD-PIPE-BASE64": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -4883,6 +4901,10 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return devTCPFallbackProof(facts, false) ||
 				scriptDevTCPReverseShellProof(facts)
 		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXDescriptorFeedbackShell(facts)
+		},
+		codeOwnedDetection: true,
 	},
 	"CMD-REVSHELL-PYTHON": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -5583,14 +5605,15 @@ func filterExactFallbackFindings(
 				getNestedActions(),
 			)
 		}
+		boundedSubgraphProven := contract.boundedSubgraphProves != nil &&
+			contract.boundedSubgraphProves(input, facts)
+		matched = matched || boundedSubgraphProven
 		if contract.requiresExactDetectionProof && !matched {
 			continue
 		}
 		if !preserveUnstructured && !matched {
 			continue
 		}
-		boundedSubgraphProven := contract.boundedSubgraphProves != nil &&
-			contract.boundedSubgraphProves(input, facts)
 		proofBoundary := facts.Authoritative() &&
 			enforcementFacts.EnforcementEligible() &&
 			enforcementFacts.Parse.Status == actionfacts.StatusComplete
@@ -6294,6 +6317,11 @@ func filterTrustedLegacyActionContext(
 			continue
 		}
 		if contract, ok := exactFallbackContracts[finding.RuleID]; ok {
+			if contract.codeOwnedDetection && contract.boundedSubgraphProves != nil &&
+				contract.boundedSubgraphProves(input, facts) {
+				filtered = append(filtered, finding)
+				continue
+			}
 			proven := contract.proves != nil && contract.proves(input, facts)
 			if contract.requiresExactDetectionProof && !proven {
 				continue

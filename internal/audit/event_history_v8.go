@@ -602,6 +602,14 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	// empty, as each lookup did.
 	projectedPayload, _ := projection.Payload().Object()
 	target := projectedCompatibilityTarget(projectedPayload)
+	if target == "" && strings.TrimSpace(record.Connector()) != "" &&
+		strings.TrimSpace(projectedCompatibilityString(projectedPayload, "defenseclaw.health.subsystem")) != "" {
+		// A connector's own health record (the guardrail-degraded alert for
+		// its hook calls that ran fail-open, its hook files changed) names
+		// no asset: its target is the connector. `defenseclaw alerts`
+		// showed an empty Target (rel-1-0-2 GAP-0446 item 8).
+		target = strings.TrimSpace(record.Connector())
+	}
 	details := projectedCompatibilityDetails(projectedPayload, string(record.EventName()))
 	if target == "" && details == string(record.EventName()) && correlation.EvaluationID != "" &&
 		record.EventName() == observability.EventName(observability.TelemetryEventEnforcementBlockApplied) {

@@ -100,6 +100,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 	}
 	jobs := map[int]*enterpriseHookWorkerJob{}
 	dispatched := map[int]bool{}
+	machinePolicy := enterpriseHookStandaloneMachinePolicySet()
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -143,6 +144,27 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 			}
 			row.Pending = true
 			run.Rows = append(run.Rows, row)
+			continue
+		}
+		if _, published := machinePolicy[strings.ToLower(row.Connector)]; published {
+			// The guardian proves a target of a connector the lifecycle
+			// published through vendor machine policy by that policy, and
+			// writes no per-user hook for it. Verify and readiness looked for
+			// the per-user hook file, so a manifest that lists such a target
+			// (enrollment.mode: manifest) failed verify while status and the
+			// guardian were healthy (GAP-0101).
+			covered, err := enterpriseHookStandaloneMachinePolicyCovered(row.Connector)
+			switch {
+			case err != nil:
+				fail(fmt.Errorf("enterprise hooks: %s machine policy is unreadable: %w", row.Connector, err))
+			case !covered:
+				fail(fmt.Errorf("enterprise hooks: %s machine policy is not in place", row.Connector))
+			case exists && !enterpriseHookAuthorizationCovers(authorization, row):
+				fail(errors.New("protected authorization does not cover target"))
+			default:
+				row.OK = true
+				run.Rows = append(run.Rows, row)
+			}
 			continue
 		}
 		if transportErr != nil {

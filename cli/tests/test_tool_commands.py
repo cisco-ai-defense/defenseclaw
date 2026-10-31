@@ -167,6 +167,8 @@ class TestToolList(ToolCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("delete_file", result.output)
         self.assertIn("read_file", result.output)
+        # The "-" in UPDATED says that config.yaml keeps no time (GAP-1343).
+        self.assertEqual(result.output.count("UPDATED -: config.yaml records no time for a block or allow entry"), 1)
 
     def test_list_filter_blocked(self):
         self.pe().block_tool_for_connector("delete_file", "", "dangerous")

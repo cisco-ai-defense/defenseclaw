@@ -73,8 +73,11 @@ def test_active_policy_is_the_activated_one_of_two_equal_presets(policy_dir: Pat
     # `policy activate` named is the active one, until the config changes.
     from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
 
+    # UTF-8 both ways: strict.yaml has non-ASCII comments, and the Windows
+    # locale default (cp1252) would make the copy unreadable to the loader.
     (policy_dir / "w5-team.yaml").write_text(
-        open(pc.policy_file("strict", policy_dir), encoding="utf-8").read().replace("name: strict", "name: w5-team")
+        Path(pc.policy_file("strict", policy_dir)).read_text(encoding="utf-8").replace("name: strict", "name: w5-team"),
+        encoding="utf-8",
     )
     cfg = default_config()
     cfg.policy_dir = str(policy_dir)
@@ -91,6 +94,40 @@ def test_active_policy_is_the_activated_one_of_two_equal_presets(policy_dir: Pat
     assert pc.active_policy_name(policy_dir, cfg) == "strict"
     pc.record_activated_policy(cfg, "w5-team")
     cfg.guardrail.block_at = "LOW"  # no longer the preset's values
+    assert pc.active_policy_name(policy_dir, cfg) == ""
+
+
+def test_active_policy_after_upgrade_from_a_release_that_kept_no_record(policy_dir: Path, tmp_path: Path) -> None:
+    # GAP-1341: 1.0.5 wrote no policy_activated.json, only a policy-activate
+    # audit event. A policy created from strict whose name sorts after
+    # "strict" must stay the active one after the upgrade.
+    from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
+    from defenseclaw.db import Store
+    from defenseclaw.models import Event
+
+    # UTF-8 on every OS: strict.yaml holds non-ASCII text, and the Windows
+    # locale encoding would write bytes the catalog cannot read as a policy.
+    (policy_dir / "u33a-pol.yaml").write_text(
+        Path(pc.policy_file("strict", policy_dir)).read_text(encoding="utf-8").replace("name: strict", "name: u33a-pol"),
+        encoding="utf-8",
+    )
+    cfg = default_config()
+    cfg.policy_dir = str(policy_dir)
+    cfg.data_dir = str(tmp_path)
+    cfg.audit_db = str(tmp_path / "audit.db")
+    strict = pc.load_policy_yaml(pc.policy_file("strict", policy_dir))
+    cfg.admission = _admission_from_policy(strict)
+    _apply_policy_guardrail(cfg, strict)
+    cfg.watch.rescan_enabled = strict["watch"]["rescan_enabled"]
+    cfg.watch.rescan_interval_min = strict["watch"]["rescan_interval_min"]
+    assert pc.active_policy_name(policy_dir, cfg) == "strict"  # no audit database: first match
+    store = Store(cfg.audit_db)
+    store.init()
+    store.log_event(Event(action="policy-activate", target="u33a-pol"))
+    store.close()
+    assert not os.path.exists(tmp_path / "policy_activated.json")
+    assert [p.name for p in pc.list_named_policies(policy_dir, cfg) if p.active] == ["u33a-pol"]
+    cfg.guardrail.block_at = "LOW"  # the config no longer holds the preset
     assert pc.active_policy_name(policy_dir, cfg) == ""
 
 

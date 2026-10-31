@@ -434,7 +434,9 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		{"uniq second operand output", "uniq input.txt " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"unknown output option", "fixture-tool --output=" + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
-		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		// uniq with one operand prints it, a plain read like cat (owner
+		// decision 2, GAP-2168; GAP-2590); its second operand is the write.
+		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: row.cwd,

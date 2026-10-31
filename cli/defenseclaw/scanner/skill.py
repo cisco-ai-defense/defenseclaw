@@ -30,7 +30,6 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
 
 from defenseclaw.config import (
     CiscoAIDefenseConfig,
@@ -39,16 +38,13 @@ from defenseclaw.config import (
     SkillScannerConfig,
 )
 from defenseclaw.models import Finding, ScanResult
-from defenseclaw.scanner import settings
+from defenseclaw.scanner import settings, skill_metadata
 from defenseclaw.scanner._llm_env import (
     drop_unsupported_litellm_params,
     inject_llm_env,
     litellm_model,
     llm_analyzer_ready,
 )
-
-if TYPE_CHECKING:
-    pass
 
 _log = logging.getLogger(__name__)
 
@@ -108,19 +104,56 @@ def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     )
 
 
-# Bounds on the copy _utf8_skill_copy makes (Go stageUTF16Skill).
-_UTF16_STAGE_MAX_BYTES = 64 << 20
-_UTF16_STAGE_MAX_FILES = 2000
+# Bounds on the copy _skill_scan_copy makes (Go stageSkill).
+_SCAN_STAGE_MAX_BYTES = 64 << 20
+_SCAN_STAGE_MAX_FILES = 2000
+
+
+class _StageError(RuntimeError):
+    pass
+
+
+def _plan_scan_copy(target: str) -> tuple[list[tuple[str, str]], set[str]]:
+    """The OS metadata files to leave out and the files to re-encode (one bounded walk)."""
+    metadata: list[tuple[str, str]] = []
+    transcode: set[str] = set()
+    total = files = 0
+    for root, dirs, names in os.walk(target):
+        for name in dirs + names:
+            if os.path.islink(os.path.join(root, name)):
+                raise _StageError("the skill holds a link")
+        for name in names:
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, target)
+            if not os.path.isfile(path):
+                raise _StageError(f"{rel} is not a regular file")
+            size = os.path.getsize(path)
+            files += 1
+            total += size
+            if files > _SCAN_STAGE_MAX_FILES or total > _SCAN_STAGE_MAX_BYTES:
+                raise _StageError("the skill is too large to re-encode")
+            kind, recode = skill_metadata.classify(target, rel, size)
+            if kind:
+                metadata.append((rel.replace(os.sep, "/"), kind))
+            elif recode:
+                transcode.add(rel)
+    return metadata, transcode
 
 
 @contextlib.contextmanager
-def _utf8_skill_copy(target: str) -> Iterator[str]:
-    """Yield a copy of the skill whose UTF-16 SKILL.md is re-encoded as UTF-8.
+def _skill_scan_copy(target: str) -> Iterator[tuple[str, list[tuple[str, str]]]]:
+    """Yield the folder to scan for the skill and the OS metadata files left out.
 
-    skill-scanner refuses a SKILL.md with NUL bytes, which is how Windows
-    editors save "Unicode" text (GAP-0417); the install watcher scans the
-    same copy (internal/scanner stageUTF16Skill). Any other skill is scanned
-    in place, and the skill's own files are never changed.
+    That folder is the skill itself unless it needs a scan copy: a SKILL.md
+    saved as UTF-16 is re-encoded as UTF-8, since skill-scanner refuses one
+    with NUL bytes, which is how Windows editors save "Unicode" text
+    (GAP-0417); OS metadata files (skill_metadata) are left out and a UTF-16
+    desktop.ini is re-encoded, since the scanner scored them as opaque
+    binaries and the watcher quarantined a plain-text skill (GAP-0106). The
+    install watcher scans the same copy (internal/scanner stageSkill). A
+    UTF-16 SKILL.md that cannot be copied fails the scan; any other skill is
+    then scanned in place, metadata files included. The skill's own files
+    are never changed.
     """
     manifest = ""
     for name in ("SKILL.md", "skill.md"):
@@ -128,40 +161,39 @@ def _utf8_skill_copy(target: str) -> Iterator[str]:
         if os.path.isfile(candidate) and not os.path.islink(candidate):
             manifest = name
             break
-    if not manifest:
-        yield target
+    utf16_manifest = False
+    if manifest:
+        with open(os.path.join(target, manifest), "rb") as fh:
+            utf16_manifest = fh.read(2) in (b"\xff\xfe", b"\xfe\xff")
+    try:
+        metadata, transcode = _plan_scan_copy(target)
+    except (_StageError, OSError) as exc:
+        if utf16_manifest:
+            raise RuntimeError(f"{manifest} is saved as UTF-16 and {exc}; save it as UTF-8") from exc
+        yield target, []
         return
-    with open(os.path.join(target, manifest), "rb") as fh:
-        head = fh.read(2)
-    if head not in (b"\xff\xfe", b"\xfe\xff"):
-        yield target
+    if not utf16_manifest and not metadata and not transcode:
+        yield target, []
         return
     from defenseclaw.skill_discovery import decode_skill_text
 
-    with tempfile.TemporaryDirectory(prefix="dc-skill-utf8-") as tmp:
+    skip = {rel for rel, _ in metadata}
+    with tempfile.TemporaryDirectory(prefix="dc-skill-scan-") as tmp:
         stage = os.path.join(tmp, os.path.basename(os.path.normpath(target)))
-        total = files = 0
-        for root, dirs, names in os.walk(target):
+        for root, _dirs, names in os.walk(target):
             rel_root = os.path.relpath(root, target)
             os.makedirs(os.path.join(stage, rel_root), exist_ok=True)
-            for name in dirs + names:
-                if os.path.islink(os.path.join(root, name)):
-                    raise RuntimeError(f"{manifest} is saved as UTF-16 and the skill holds a link; save it as UTF-8")
             for name in names:
-                source = os.path.join(root, name)
-                files += 1
-                total += os.path.getsize(source)
-                if files > _UTF16_STAGE_MAX_FILES or total > _UTF16_STAGE_MAX_BYTES:
-                    raise RuntimeError(
-                        f"{manifest} is saved as UTF-16 and the skill is too large to re-encode; save it as UTF-8"
-                    )
-                with open(source, "rb") as fh:
+                rel = os.path.normpath(os.path.join(rel_root, name))
+                if rel.replace(os.sep, "/") in skip:
+                    continue
+                with open(os.path.join(root, name), "rb") as fh:
                     data = fh.read()
-                if rel_root == "." and name == manifest:
+                if (utf16_manifest and rel == manifest) or rel in transcode:
                     data = decode_skill_text(data).encode("utf-8")
-                with open(os.path.join(stage, rel_root, name), "wb") as fh:
+                with open(os.path.join(stage, rel), "wb") as fh:
                     fh.write(data)
-        yield stage
+        yield stage, metadata
 
 
 # The INFO finding skill-scanner reports when its LLM judge started but did
@@ -323,12 +355,13 @@ class SkillScannerWrapper:
             scanner = SkillScanner(analyzers=analyzers, policy=policy)
 
             start = time.monotonic()
-            with _utf8_skill_copy(str(target)) as scan_target:
+            with _skill_scan_copy(str(target)) as (scan_target, metadata):
                 sdk_result = scanner.scan_skill(scan_target, lenient=cfg.lenient)
                 if cfg.enable_meta and judge and len(analyzers) > 1:
                     _apply_meta_analysis(scanner, sdk_result, scan_target, cfg.lenient, judge, policy)
                 elapsed = time.monotonic() - start
                 result = self._convert(sdk_result, scan_target, elapsed)
+                result.findings.extend(skill_metadata.metadata_findings(metadata, self.name()))
         result.target = target
         if judge:
             _raise_on_judge_failure(result)

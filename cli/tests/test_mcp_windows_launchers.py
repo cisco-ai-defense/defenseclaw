@@ -398,14 +398,14 @@ def test_lifecycle_trace_reaches_tools_list_and_analyzer_handoff(
     assert stages == [
         "transport-opening",
         "process-created-job-assigned-resumed",
-        "process-context-entered",
         "transport-opened",
         "initialize-sent",
         "initialize-responded-initialized-sent",
         "tools-list-sent",
         "tools-list-responded",
         "session-closed",
-        "process-context-exited",
+        # MCP SDK 2.x has no process context: its stdio shutdown closes the
+        # job through close_process_job before the transport closes.
         "job-containment-closed",
         "transport-closed",
         "analyzer-handoff",
@@ -979,9 +979,7 @@ def test_protocol_error_is_distinguished_from_timeout() -> None:
     assert "timeout" not in message.lower()
 
 
-@pytest.mark.allow_subprocess
-@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object regression")
-def test_timeout_cleans_up_process_tree_without_orphan(tmp_path: Path) -> None:
+def _windows_pid_exists(pid: int) -> bool:
     import ctypes
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -995,20 +993,48 @@ def test_timeout_cleans_up_process_tree_without_orphan(tmp_path: Path) -> None:
     get_exit_code.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
     get_exit_code.restype = ctypes.c_int
 
-    def pid_exists(pid: int) -> bool:
-        handle = open_process(0x1000, 0, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if handle:
-            try:
-                exit_code = ctypes.c_uint32()
-                if get_exit_code(handle, ctypes.byref(exit_code)):
-                    return exit_code.value == 259  # STILL_ACTIVE
-                return True
-            finally:
-                close_handle(handle)
-        # ERROR_INVALID_PARAMETER means the PID no longer exists. Access
-        # denied still means a live process, so fail closed for the assertion.
-        return ctypes.get_last_error() != 87
+    handle = open_process(0x1000, 0, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if handle:
+        try:
+            exit_code = ctypes.c_uint32()
+            if get_exit_code(handle, ctypes.byref(exit_code)):
+                return exit_code.value == 259  # STILL_ACTIVE
+            return True
+        finally:
+            close_handle(handle)
+    # ERROR_INVALID_PARAMETER means the PID no longer exists. Access
+    # denied still means a live process, so fail closed for the assertion.
+    return ctypes.get_last_error() != 87
 
+
+@pytest.mark.allow_subprocess
+@pytest.mark.skipif(os.name != "nt", reason="native Windows stdio adapter")
+def test_graceful_exit_closes_the_job_and_reaps_a_lingering_child(tmp_path: Path) -> None:
+    # The server answers tools/list and exits when stdin closes, but leaves a
+    # child running. Only closing the Job Object (KILL_ON_JOB_CLOSE) ends it;
+    # MCP SDK 2.x closes jobs through close_process_job, not a process context.
+    child_pid_path = tmp_path / "child.pid"
+    env = mcp._safe_subprocess_env({"MCP_FIXTURE_LINGER_CHILD_PID": os.fspath(child_pid_path)})
+    results, _stderr_size = asyncio.run(
+        mcp._scan_windows_stdio_tools(_RecordingScanner(), _python_plan(env), ["fixture"])
+    )
+    assert [result.tool_name for result in results] == ["benign_echo", "malicious_shell"]
+
+    child_pid = int(child_pid_path.read_text(encoding="ascii"))
+    deadline = time.monotonic() + 5
+    while _windows_pid_exists(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    try:
+        assert not _windows_pid_exists(child_pid)
+    finally:
+        if _windows_pid_exists(child_pid):
+            subprocess.run(["taskkill", "/F", "/PID", str(child_pid)], capture_output=True, check=False)
+
+
+@pytest.mark.allow_subprocess
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object regression")
+def test_timeout_cleans_up_process_tree_without_orphan(tmp_path: Path) -> None:
+    pid_exists = _windows_pid_exists
     child_pid_path = tmp_path / "child.pid"
     env = mcp._safe_subprocess_env(
         {

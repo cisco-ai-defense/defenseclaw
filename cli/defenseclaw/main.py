@@ -866,8 +866,20 @@ def main() -> None:
         # a traceback (GAP-0055). The file is left as it was.
         click.echo(f"Error: config.yaml was not changed: {plain_error(exc)}", err=True)
         sys.exit(1)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         from defenseclaw.config import ConfigSaveError
+        from defenseclaw.file_permissions import UnsafePathError
+
+        # A sensitive file DefenseClaw will not write through (a symlink, a
+        # reparse point) is a refusal, not a crash: one line that names the file,
+        # whatever command hit it (GAP-1390). Some writers re-raise it as a
+        # ValueError that keeps the refusal as its cause.
+        refusal = exc if isinstance(exc, UnsafePathError) else exc.__cause__
+        if isinstance(refusal, UnsafePathError):
+            click.echo(f"Error: {refusal}", err=True)
+            sys.exit(1)
+        if not isinstance(exc, OSError):
+            raise
 
         if isinstance(exc, ConfigSaveError):
             click.echo(

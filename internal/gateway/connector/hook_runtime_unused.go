@@ -79,25 +79,34 @@ func RemoveUnusedSharedHookRuntime(dataDir string) error {
 	return errors.Join(errs...)
 }
 
-// connectorLifecycleLocks are the empty lock files a connector's setup and
-// teardown take in the data directory.
-var connectorLifecycleLocks = map[string]string{"hermes": ".hermes-lifecycle.lock"}
+// connectorStateLeftovers are the files a connector's setup leaves in the
+// data directory that mean nothing once no connector is registered: its
+// empty lifecycle lock and the record of where Setup last registered it.
+var connectorStateLeftovers = []string{".hermes-lifecycle.lock", hermesHomeSetUpFileName}
 
 // agentProcessMayRun reports whether a process of the data directory's
 // account may still run agent (tests replace it).
 var agentProcessMayRun = accountAgentProcessMayRun
 
 // removeIdleConnectorLeftovers removes, from an account no connector uses
-// any more, the disabled hook tombstones and lifecycle locks a connector's
-// teardown leaves (r102 GAP-0430: hermes-hook.sh and .hermes-lifecycle.lock
-// stayed after Hermes left the managed config). A tombstone stays while a
-// process of the account may still run that agent: such a process can have
-// the hook command cached, and Hermes 0.21 registers it fail closed, so a
-// missing script would block every tool of the running session until the
-// agent restarts. Only the plain exit-0 tombstone goes; one that blocks on
-// purpose (Devin's, the failed-setup placeholder) stays.
+// any more, what a connector's setup and teardown leave behind (r102
+// GAP-0430: hermes-hook.sh, .hermes-lifecycle.lock, hermes-home-setup.json
+// and an empty connector_backups/hermes stayed after Hermes left the
+// managed config): the plain exit-0 hook tombstones, the connector state
+// files and empty backup folders. A tombstone stays while a process of the
+// account may still run that agent: such a process can have the hook
+// command cached, and Hermes 0.21 registers it fail closed, so a missing
+// script would block every tool of the running session until the agent
+// restarts. A tombstone that blocks on purpose (Devin's, the failed-setup
+// placeholder), any other script and a backup folder that holds a receipt
+// stay.
 func removeIdleConnectorLeftovers(dataDir, hookDir string) []error {
 	var errs []error
+	remove := func(path string) {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
 	entries, err := os.ReadDir(hookDir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return []error{fmt.Errorf("read hook runtime folder: %w", err)}
@@ -111,23 +120,24 @@ func removeIdleConnectorLeftovers(dataDir, hookDir string) []error {
 		if err != nil {
 			continue
 		}
-		agent, ok := plainDisabledHookTombstoneAgent(string(body))
-		if !ok || agentProcessMayRun(dataDir, agent) {
-			continue
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, err)
+		if agent, ok := plainDisabledHookTombstoneAgent(string(body)); ok && !agentProcessMayRun(dataDir, agent) {
+			remove(path)
 		}
 	}
-	for agent, name := range connectorLifecycleLocks {
+	for _, name := range connectorStateLeftovers {
 		path := filepath.Join(dataDir, name)
-		if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Size() != 0 ||
-			agentProcessMayRun(dataDir, agent) {
-			continue
+		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+			remove(path)
 		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, err)
+	}
+	backups := filepath.Join(dataDir, "connector_backups")
+	if folders, err := os.ReadDir(backups); err == nil {
+		for _, folder := range folders {
+			if folder.IsDir() {
+				_ = os.Remove(filepath.Join(backups, folder.Name())) // only an empty folder goes
+			}
 		}
+		_ = os.Remove(backups)
 	}
 	return errs
 }

@@ -187,7 +187,7 @@ func signedBundleActivation(cfg *config.Config) (bool, string) {
 		BundlesDir: filepath.Join(dir, enterprisebundle.BundlesDirName),
 		Anchors:    anchors, AnchorsRaw: anchorsRaw, Platform: runtime.GOOS, Cache: &trustedConnectorSignatures,
 	}
-	if _, refusal := enterprisebundle.CheckSignedActivation(in, state.BundleID, state.BundleVersion, state.SignerKeyID, installed); refusal != nil {
+	if _, refusal := enterprisebundle.CheckSignedActivation(in, state.BundleID, state.BundleVersion, state.BundleDir, state.SignerKeyID, installed); refusal != nil {
 		return false, trustedConnectorsNotSigned
 	}
 	return true, ""

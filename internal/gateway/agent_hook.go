@@ -3639,7 +3639,8 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 // shell input rather than not at all. The recorded ToolArgs never change.
 //
 // cwd is the directory the tool call names for its command (agy's Cwd, and
-// the working-directory argument of the shell tools that have one), or "".
+// the working-directory argument of the shell tools that have one, also
+// when the projection refuses the call: connector.ShellCommandCWD), or "".
 // It is the command's working directory, so the caller uses it in place of
 // the session's; left in the arguments, any directory other than the
 // workspace conflicted with the request's working directory and the parse
@@ -3670,7 +3671,10 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 	if out, dir, ok := connector.TrustedShellArgs(connectorName, toolName, args); ok {
 		return out, dir
 	}
-	return args, ""
+	// A shell call whose projection was refused (an extra or mistyped
+	// argument) still runs its command in the directory it names; judged
+	// in the session's, the command alone could miss a rule (GAP-0694).
+	return args, connector.ShellCommandCWD(connectorName, toolName, args)
 }
 
 // agentHookWindowsDialectHint reports whether a structured tool call's

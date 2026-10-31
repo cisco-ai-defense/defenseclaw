@@ -52,6 +52,15 @@ import urllib.request
 DEFAULT_REPO = "cisco-ai-defense/defenseclaw"
 # Deprecated alias of config.yaml update.source: a GitHub owner/name.
 REPO_ENV = "DEFENSECLAW_REPO"
+# DEFENSECLAW_REPO is a GitHub owner/name or an https:// mirror base URL. Any
+# other value (an http:// URL, a path) used to be appended to github.com and
+# ended in an HTTP 404 (GAP-1065). The value is never echoed: a mirror URL can
+# carry credentials.
+_VALID_REPO_ENV = re.compile(r"^(https://\S+|[^\s/:@]+/[^\s/:@]+)$")
+REPO_ENV_REFUSAL = (
+    f"{REPO_ENV} must be a GitHub owner/name or an https:// mirror URL (an http:// URL is not accepted). "
+    f"Fix or unset {REPO_ENV}, or set update.source to an https:// URL"
+)
 OFFICIAL_SOURCE = "https://github.com/" + DEFAULT_REPO
 # The release signing identity is compiled in. update.source and
 # DEFENSECLAW_REPO only change where release bytes are fetched from; a
@@ -65,9 +74,14 @@ _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 # Configuration keys added after 1.0.2, with the first release that has each.
 # The installer of an older release refuses a config.yaml that sets one
 # ("unknown field", GAP-0137), so a downgrade sets them aside first.
+# guardrail.chains and connectors (connectors.agent_gateway) are set aside
+# whole: an older release refuses the block itself, so taking only the inner
+# key out would leave an empty block behind.
 NEWER_CONFIG_KEYS = (
     ("openshell.trusted_ca_bundle", (1, 0, 3)),
     ("guardrail.internal_domains", (1, 0, 6)),
+    ("guardrail.chains", (1, 0, 6)),
+    ("connectors", (1, 0, 6)),
 )
 # Where a downgrade keeps the keys it set aside, in the data folder:
 # {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
@@ -289,6 +303,8 @@ def release_source() -> str:
         return configured.rstrip("/")
     repo = os.environ.get(REPO_ENV, "").strip()
     if repo:
+        if not _VALID_REPO_ENV.match(repo):
+            raise ShimUsageError(REPO_ENV_REFUSAL)
         return _source_url(repo)
     return OFFICIAL_SOURCE
 

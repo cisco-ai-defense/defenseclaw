@@ -44,6 +44,23 @@ A refusal is a deny (HTTP 403, `action: block`). `acting_for` from anyone else i
 
 `verified_by_connector` selects a profile and nothing else. Checks that need proof of the person's own process (the session-start gate, sandbox ownership, per-user secret paths, require-sandbox) keep seeing the service account. Path rules and `~` resolve against the service account's home. Tool-call chains are kept per connector account and person.
 
+## Follow one piece of work across sessions
+
+Tool-call chains are kept per session. A gateway that splits one piece of work across sub-agents, or resumes a conversation as a new session, splits its chains too: a download in a sub-agent followed by running the file in the parent completes nothing.
+
+```yaml
+guardrail:
+  chains:
+    root_scope: true    # off by default
+```
+
+With `guardrail.chains.root_scope` on, a trusted connector's call that carries `root_session_id` is also evaluated in a second chain window. That window is kept per root id, connector account and person, so one person's work never joins another's. It has the bounds of a session window (the same number of calls and the same time window), and a session end or a turn boundary does not clear it.
+
+- A chain completed in the root window gets the verdict and rule ids it gets within one session. The local audit row says so: `chain_scope=session,root`, and `root_chain_ids` names the chains only the root window completed.
+- Only a trusted connector's `root_session_id` counts. Anyone else's is ignored and recorded as `root_session_ignored=untrusted_caller`, as before.
+- The setting adds no rule and changes no profile. It has no effect on a per-user install and is refused under Secure Client. It takes effect without a restart.
+- Releases before 1.0.6 refuse the setting. After a rollback to 1.0.5 or 1.0.4 the audit store stays readable: the older release ignores the root-chain tables, and root chains in flight are lost. Session chains carry on.
+
 ## Limits
 
 - A compromised gateway process can act as any person in its `may_act_for` list. Keep the list small.

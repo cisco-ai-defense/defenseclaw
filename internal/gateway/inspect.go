@@ -1436,21 +1436,13 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 }
 
 // connectorRulePack is the composed rule pack the request scans connector
-// with: its guardrail profile scope when one applies, else the connector
-// scope of the request's generation (guardrail.rules with every connector
-// layer), else the global pack.
+// with: its guardrail profile scope when one applies, preloaded or loaded
+// lazily (GAP-1526), else the connector scope of the request's generation
+// (guardrail.rules with every connector layer), else the global pack.
 func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *guardrail.RulePack {
 	connector = canonicalConnectorRulePackKey(connector)
-	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil && resolved.derived != nil {
-		key := effectiveRulePackKey(resolved.derived, connector)
-		if pack := resolved.set.packs[key]; pack != nil {
-			return pack
-		}
-		if retry := resolved.set.missing[key]; retry != nil {
-			if pack := retry.pack.Load(); pack != nil {
-				return pack
-			}
-		}
+	if pack := resolvedGuardrailProfileFrom(ctx).rulePack(connector); pack != nil {
+		return pack
 	}
 	g := a.decisionGeneration(ctx)
 	if g == nil {

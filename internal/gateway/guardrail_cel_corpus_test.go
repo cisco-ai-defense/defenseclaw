@@ -166,6 +166,11 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 	// join, and destination proof live in a bounded Python parser. The CEL
 	// expression is only its inert catalog selector.
 	coveredExpressions[semanticRecursiveModelArtifactEgressExpression] = struct{}{}
+	// Python -c source is intentionally partial at the whole-command parse
+	// boundary. The code-owned exact parser and its hard negatives are covered
+	// by TestAdmissionCorpusActionProofs; every authoritative corpus row still
+	// evaluates this cheap selector below.
+	coveredExpressions[semanticPythonSocketConnectExpression] = struct{}{}
 	for _, corpusCase := range celTargeted {
 		facts := actionfacts.Analyze(toolCallCorpusActionFactsInput(corpusCase))
 		if !facts.Authoritative() {

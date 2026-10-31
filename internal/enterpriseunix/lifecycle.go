@@ -1976,6 +1976,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			previouslyActive = append(previouslyActive, unit.Name)
 		}
 	}
+	// A gateway that runs but does not answer (stopped, hung) is ended by
+	// the restart below; the changes name it (GAP-0959).
+	unresponsive := l.unresponsiveGateway(ctx, units, previouslyActive)
 	// What started at boot before the transaction is put back if it rolls
 	// back: activation enables every managed unit, and a packaged unit file
 	// stays on disk after a rollback, so a unit left enabled would start at
@@ -2064,7 +2067,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	pending := &Pending{
 		Action: l.opts.Action, StartedAt: env.Now().UTC().Format(time.RFC3339), SnapshotDir: snap.Dir, Phase: "quiesce",
 		PreviouslyActive: previouslyActive, PreviouslyEnabled: previouslyEnabled, EnabledRecorded: enabledRecorded,
-		Hot: hot,
+		Hot: hot, ConfigFile: l.opts.ConfigFile,
 	}
 	if err := env.savePending(pending); err != nil {
 		env.discardSnapshot(snap)
@@ -2277,6 +2280,12 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			switch {
 			case !contains(previouslyActive, unit.Name):
 				l.noteChange("started %s, which was not running", unit.Name)
+			case unresponsive != nil && unit.Name == unresponsive.unit:
+				// A repair of a stopped gateway listed only "nothing to
+				// repair" although it ended the process (GAP-0959).
+				if note := unresponsive.replacedNote(ctx, env.Services, unit); note != "" {
+					l.noteChange("%s", note)
+				}
 			case changesApplied && unit.Kind == "gateway" && !l.gatewayKeptRunning:
 				l.noteChange("restarted %s to load the change", unit.Name)
 			}
@@ -2543,10 +2552,13 @@ func (l *lifecycle) applyFilesRecorded(ctx context.Context, p *plan, account Acc
 		}
 		state, stateErr := configwrite.ReadGenerationState(configPath)
 		// Equal bytes still need a generation naming the current signed
-		// bundle. This also repairs records left by older lifecycle builds.
+		// bundle. This also repairs records left by older lifecycle builds,
+		// including a record with no bundle_dir (before 1.0.6): the gateway
+		// cannot list the store and opens the directory the record names.
 		bundleUnrecorded := writeOptions.Bundle.ID != "" &&
 			(state.BundleID != writeOptions.Bundle.ID || state.BundleVersion != writeOptions.Bundle.Version ||
-				state.SignerKeyID != writeOptions.Bundle.SignerKeyID || state.Actor != writeOptions.Actor)
+				state.SignerKeyID != writeOptions.Bundle.SignerKeyID || state.Actor != writeOptions.Actor ||
+				(writeOptions.Bundle.Dir != "" && state.BundleDir != writeOptions.Bundle.Dir))
 		return changed[env.Layout.ConfigPath] || stateErr != nil || state.ConfigSHA256 != p.config.SHA || bundleUnrecorded || l.policyAssetsEdited, nil
 	})
 	if err != nil {
@@ -3188,7 +3200,8 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 		}
 		state, stateErr := configwrite.ReadGenerationState(configPath)
 		return stateErr != nil || state.ConfigSHA256 != sha ||
-			(opt.Bundle.ID != "" && (state.BundleID != opt.Bundle.ID || state.BundleVersion != opt.Bundle.Version)), nil
+			(opt.Bundle.ID != "" && (state.BundleID != opt.Bundle.ID || state.BundleVersion != opt.Bundle.Version ||
+				(opt.Bundle.Dir != "" && state.BundleDir != opt.Bundle.Dir))), nil
 	})
 	if err != nil {
 		return err

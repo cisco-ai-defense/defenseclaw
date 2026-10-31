@@ -241,11 +241,12 @@ func TestStatusAndVerifyWhileTheApplyTriggerRunsAreBusyNotFailed(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	h.services.activating = map[string]bool{unitApplyService: true}
-	for _, action := range []string{ActionStatus, ActionVerify} {
-		r := h.run(Options{Action: action})
-		if len(r.Errors) != 1 || r.Errors[0].Code != codeBusy || !strings.Contains(r.Errors[0].Message, "configuration change is being applied") {
-			t.Fatalf("%s during an apply: %+v", action, r.Errors)
-		}
+	// verify fails busy; status is a pending apply (GAP-0129).
+	if r := h.run(Options{Action: ActionVerify}); len(r.Errors) != 1 || r.Errors[0].Code != codeBusy || !strings.Contains(r.Errors[0].Message, "configuration change is being applied") {
+		t.Fatalf("verify during an apply: %+v", r.Errors)
+	}
+	if r := h.run(Options{Action: ActionStatus}); !r.OK || !r.PendingApply || !strings.Contains(messagesOf(r.Warnings, codeBusy), "configuration change is being applied") {
+		t.Fatalf("status during an apply: ok=%v pending_apply=%v errors=%+v warnings=%+v", r.OK, r.PendingApply, r.Errors, r.Warnings)
 	}
 	// An apply that ends within the lock wait is waited for, not reported
 	// busy: a no-op apply right after an ensure --config made detect.sh

@@ -127,6 +127,11 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}
+	if result.PendingApply {
+		// stdout already says which run applies a change; no "Error:" line
+		// on stderr for a status that is not a failure (GAP-0129).
+		cmd.SilenceErrors = true
+	}
 	return lifecycleFailure(result, opts.json, env.LifecycleCommand(enterpriseunix.ActionRepair))
 }
 
@@ -211,6 +216,11 @@ func settleInterruptedLifecycle(w io.Writer, command, platform string) (<-chan s
 // document is on stdout and the error line on stderr carries the problems.
 func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairCommand string) error {
 	if result.OK {
+		if result.PendingApply && result.ExitCode != 0 {
+			// A status that found a change being applied is ok, and exits
+			// 75 so its caller asks again for the full state (GAP-0129).
+			return withExitCode(errors.New(result.Action+" found another lifecycle run applying a change (pending_apply); run it again when that run finishes"), result.ExitCode)
+		}
 		return nil
 	}
 	if asJSON || len(result.Errors) == 0 {
@@ -265,7 +275,15 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		}
 		warns = append(warns, warning.Code+": "+warning.Message)
 	}
-	writeLifecycleSummary(w, result.Action, result.OK, result.Noop, result.NoopReason, errs, warns)
+	if result.PendingApply {
+		// A change being applied is neither done nor a failure (GAP-0129).
+		fmt.Fprintf(w, "! %s: pending apply: another lifecycle run is applying a change, so %s checked nothing but the installed version\n", result.Action, result.Action)
+		for _, warning := range warns {
+			fmt.Fprintf(w, "  ! %s\n", warning)
+		}
+	} else {
+		writeLifecycleSummary(w, result.Action, result.OK, result.Noop, result.NoopReason, errs, warns)
+	}
 	// repair (and an ensure that re-applied) says what it changed.
 	for _, change := range result.Changes {
 		fmt.Fprintf(w, "  - %s\n", change)
@@ -275,7 +293,7 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	}
 	// A verify that found the lifecycle lock held checked nothing either:
 	// its all-false readiness line read as "not installed" (GAP-1542).
-	if (result.Action == enterpriseunix.ActionStatus || result.Action == enterpriseunix.ActionVerify) &&
+	if (result.Action == enterpriseunix.ActionStatus || result.Action == enterpriseunix.ActionVerify) && !result.PendingApply &&
 		!lifecycleResultHasError(result, "not_root") && !lifecycleResultHasError(result, "lifecycle_busy") {
 		fmt.Fprintf(w, "  installed=%v version=%s gateway_ready=%v guardian_ready=%v enumerator_ready=%v sensor_helper_ready=%v\n",
 			result.Installed, result.InstalledVersion, result.Readiness.Gateway, result.Readiness.Guardian,
@@ -296,9 +314,10 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	if result.Bundle != nil && result.Bundle.SessionsRestartRequired != nil {
 		enterprisestatus.WriteSessionEntries(w, *result.Bundle.SessionsRestartRequired)
 	}
-	// A busy status checked nothing else, but still reports the recorded
-	// deployment's version, as the docs say (GAP-2409).
-	if result.Action == enterpriseunix.ActionStatus && result.Installed && lifecycleResultHasError(result, "lifecycle_busy") {
+	// A status that found a change being applied checked nothing else, but
+	// still reports the recorded deployment's version, as the docs say
+	// (GAP-2409, GAP-0129).
+	if result.Action == enterpriseunix.ActionStatus && result.Installed && result.PendingApply {
 		fmt.Fprintf(w, "  installed=true version=%s\n", result.InstalledVersion)
 	}
 	return nil

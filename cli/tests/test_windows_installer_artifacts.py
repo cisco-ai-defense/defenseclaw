@@ -443,6 +443,73 @@ def test_site_packages_normalization_removes_cache_paths_and_repairs_record(tmp_
     )
 
 
+def _pe_bytes(machine: int) -> bytes:
+    header = bytearray(b"MZ" + b"\0" * 62)
+    header[0x3C:0x40] = (64).to_bytes(4, "little")
+    return bytes(header) + b"PE\0\0" + machine.to_bytes(2, "little") + b"\0" * 18
+
+
+def test_foreign_pe_prune_drops_pips_non_x64_launchers_and_repairs_record(tmp_path: Path) -> None:
+    # MCP Scanner 4.8 -> pip-audit -> pip vendors distlib launchers for every
+    # Windows architecture; Setup refuses any non-x64 PE in its payload.
+    site = tmp_path / "site-packages"
+    distlib = site / "pip" / "_vendor" / "distlib"
+    metadata = site / "pip-26.2.2.dist-info"
+    distlib.mkdir(parents=True)
+    metadata.mkdir()
+    machines = {"t32.exe": 0x014C, "t64.exe": 0x8664, "t64-arm.exe": 0xAA64,
+                "w32.exe": 0x014C, "w64.exe": 0x8664, "w64-arm.exe": 0xAA64}
+    for name, machine in machines.items():
+        (distlib / name).write_bytes(_pe_bytes(machine))
+    (distlib / "scripts.py").write_text("X = 1\n", encoding="utf-8")
+    (metadata / "RECORD").write_text(
+        "".join(f"pip/_vendor/distlib/{name},,\n" for name in sorted(machines))
+        + "pip/_vendor/distlib/scripts.py,,\npip-26.2.2.dist-info/RECORD,,\n",
+        encoding="utf-8",
+    )
+
+    result = artifacts.prune_foreign_portable_executables(site)
+
+    assert result == {
+        "removed_foreign_pe": [
+            "pip/_vendor/distlib/t32.exe",
+            "pip/_vendor/distlib/t64-arm.exe",
+            "pip/_vendor/distlib/w32.exe",
+            "pip/_vendor/distlib/w64-arm.exe",
+        ],
+        "rewritten_records": 1,
+    }
+    assert sorted(path.name for path in distlib.iterdir()) == ["scripts.py", "t64.exe", "w64.exe"]
+    assert (metadata / "RECORD").read_text(encoding="utf-8") == (
+        "pip/_vendor/distlib/t64.exe,,\npip/_vendor/distlib/w64.exe,,\n"
+        "pip/_vendor/distlib/scripts.py,,\npip-26.2.2.dist-info/RECORD,,\n"
+    )
+    # Every PE left is Windows x64, which is what Setup's inventory check demands.
+    for path in site.rglob("*.exe"):
+        assert artifacts._pe_machine(path) == artifacts.IMAGE_FILE_MACHINE_AMD64
+
+
+@pytest.mark.parametrize("machine", [0x014C, 0xAA64])
+def test_foreign_pe_prune_refuses_an_unlisted_non_x64_pe(tmp_path: Path, machine: int) -> None:
+    site = tmp_path / "site-packages"
+    (site / "example").mkdir(parents=True)
+    (site / "example" / "helper.dll").write_bytes(_pe_bytes(machine))
+
+    with pytest.raises(artifacts.ArtifactError, match=r"example/helper\.dll"):
+        artifacts.prune_foreign_portable_executables(site)
+    assert (site / "example" / "helper.dll").exists()
+
+
+def test_builder_prunes_foreign_pes_before_staging_and_inventory() -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    prune = "'-I', $WindowsArtifactHelper, 'prune-foreign-pe', '--root', $sitePackages"
+    assert build.count(prune) == 1
+    position = build.index(prune)
+    assert build.index("'-I', $WindowsArtifactHelper, 'normalize-site', '--root', $sitePackages") < position
+    assert position < build.index("foreach ($item in Get-ChildItem -LiteralPath $sitePackages -Force)")
+    assert position < build.index("foreach ($file in Get-ChildItem -LiteralPath $sitePackages -File -Recurse")
+
+
 def test_builder_binds_authenticode_inventory_to_payload_provenance_and_sbom() -> None:
     build = BUILD_PS1.read_text(encoding="utf-8")
     helper = AUTHENTICODE_PS1.read_text(encoding="utf-8")

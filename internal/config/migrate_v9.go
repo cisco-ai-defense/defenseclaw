@@ -482,9 +482,7 @@ func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record Mi
 	}
 	if !ack {
 		if err := finishV9ActionCleanup(ctx, latest); err != nil {
-			return fmt.Errorf("%w; the config_version 9 migration stays pending: run `defenseclaw-gateway config migrate "+
-				"--to 9` again once that is fixed, or `defenseclaw-gateway config migrate --ack` to complete it and keep "+
-				"the moved rows in audit.db", err)
+			return v9CleanupPendingError(err)
 		}
 	}
 	unenforced, err := m.resumeRegoRefresh()
@@ -499,12 +497,91 @@ func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record Mi
 	latest.Pending = false
 	if ack {
 		latest.Acknowledged = true
-		if cleanup := latest.AuditCleanup; latest.ActionsRowsMoved > 0 && (cleanup == nil || !cleanup.Skipped) {
-			latest.Notes = append(latest.Notes, "`config migrate --ack` completed the migration without the audit.db "+
-				"cleanup: the operator rows it moved to config.yaml may still be in audit.db")
+		if note := v9AckCleanupNote(latest); note != "" {
+			latest.Notes = append(latest.Notes, note)
 		}
 	}
 	return writeMigrationRecord(MigrationRecordPath(configPath), latest)
+}
+
+// v9AckCleanupNote is the note `config migrate --ack` adds to the record it
+// completes without the audit.db cleanup, or "" when no moved row is left
+// there. The commit clears the rows before a later step (the pre-9 Rego
+// refresh) can leave the record pending, so the note is written only when a
+// row of the snapshot is still an operator row in audit.db, or when that
+// cannot be checked (GAP-1552).
+func v9AckCleanupNote(record MigrationRecord) string {
+	const left = "`config migrate --ack` completed the migration without the audit.db cleanup: " +
+		"the operator rows it moved to config.yaml may still be in audit.db"
+	cleanup := record.AuditCleanup
+	switch {
+	case record.ActionsRowsMoved == 0, cleanup != nil && cleanup.Skipped:
+		return ""
+	case cleanup == nil, len(cleanup.Rows) != record.ActionsRowsMoved, strings.TrimSpace(cleanup.Path) == "":
+		return left
+	}
+	if _, err := os.Stat(cleanup.Path); errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	current, err := readV9ActionRows(cleanup.Path)
+	if err != nil {
+		return fmt.Sprintf("`config migrate --ack` completed the migration without the audit.db cleanup and could not "+
+			"check audit.db (%v): the operator rows it moved to config.yaml may still be in audit.db", err)
+	}
+	moved := make(map[string]bool, len(cleanup.Rows))
+	for _, row := range cleanup.Rows {
+		moved[row.ID] = true
+	}
+	for _, row := range current {
+		if moved[row.id] {
+			return left
+		}
+	}
+	return ""
+}
+
+// v9CleanupPendingError is the error of an audit.db row cleanup that did not
+// finish after the config commit, at the commit or at a retry: the record
+// stays pending, so the text names both ways to complete it, and a held
+// audit.db lock as the thing to release first (GAP-1554).
+func v9CleanupPendingError(err error) error {
+	return fmt.Errorf("%w%s; the config_version 9 migration stays pending: run `defenseclaw-gateway config migrate "+
+		"--to 9` again once that is fixed, or `defenseclaw-gateway config migrate --ack` to complete it and keep "+
+		"the moved rows in audit.db", err, v9AuditLockHint(err))
+}
+
+// v9AuditLockedError adds the held-lock hint and the retry to an audit.db
+// error from before the config commit, when nothing has been written yet;
+// any other error is returned as it is (GAP-1554).
+func v9AuditLockedError(err error) error {
+	hint := v9AuditLockHint(err)
+	if hint == "" {
+		return err
+	}
+	return fmt.Errorf("%w%s, then run the migration again (`defenseclaw-gateway config migrate --to 9`, or the "+
+		"upgrade); nothing was changed", err, hint)
+}
+
+// v9AuditLockHint names the held audit.db lock when err is SQLite lock
+// contention (SQLITE_BUSY or SQLITE_LOCKED, after the busy timeout), and is
+// "" for any other error. It matches the driver's result code and, for a
+// wrapped or message-only error, the text (as audit.isSQLiteBusy does).
+func v9AuditLockHint(err error) string {
+	if err == nil {
+		return ""
+	}
+	var coded interface{ Code() int }
+	busy := errors.As(err, &coded) && (coded.Code()&0xff == 5 || coded.Code()&0xff == 6)
+	if !busy {
+		message := strings.ToLower(err.Error())
+		busy = strings.Contains(message, "database is locked") || strings.Contains(message, "database table is locked") ||
+			strings.Contains(message, "sqlite_busy") || strings.Contains(message, "sqlite_locked")
+	}
+	if !busy {
+		return ""
+	}
+	return "; another process holds a lock on audit.db (a running DefenseClaw gateway, or a program with a write " +
+		"transaction open on it): stop it or let it finish so the lock is released"
 }
 
 // finishV9ActionCleanup clears the operator rows a pending record moved from
@@ -1107,7 +1184,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (writt
 	if m.auditRowsRead && !m.in.Managed {
 		auditDB, err = lockV9ActionRows(ctx, m.in.AuditDBPath, m.auditRowsSnapshot)
 		if err != nil {
-			return nil, fmt.Errorf("config: %w", err)
+			return nil, v9AuditLockedError(fmt.Errorf("config: %w", err))
 		}
 		defer auditDB.Close()
 		defer func() { _, _ = auditDB.Exec("ROLLBACK") }()
@@ -1271,14 +1348,16 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (writt
 	}
 	// Rows are cleared only after the config commit, so a failure leaves
 	// them enforcing from the table and recorded in config: never lost.
+	// The record written before the config commit is pending, so a failure
+	// here names the retry and --ack like one at the retry (GAP-1554).
 	if auditCleanup {
 		if err := clearV9ActionRowsDB(auditDB, m.rows); err != nil {
-			return written, fmt.Errorf("config: clean up migrated audit.db rows: %w", err)
+			return written, v9CleanupPendingError(fmt.Errorf("config: clean up migrated audit.db rows: %w", err))
 		}
 	}
 	if auditDB != nil {
 		if _, err := auditDB.Exec("COMMIT"); err != nil {
-			return written, fmt.Errorf("config: commit audit.db cleanup: %w", err)
+			return written, v9CleanupPendingError(fmt.Errorf("config: commit audit.db cleanup: %w", err))
 		}
 	}
 	// A pre-9 module left in place keeps the record pending, and a retry
@@ -4396,7 +4475,12 @@ func (m *v9Migrator) migrateActionsRows(root *yaml.Node) error {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("config: read operator rows from %s: %w", path, err)
+		err = fmt.Errorf("config: read operator rows from %s: %w", path, err)
+		if m.in.InMemory {
+			// The gateway's load error names `defenseclaw migrate` itself.
+			return fmt.Errorf("%w%s", err, v9AuditLockHint(err))
+		}
+		return v9AuditLockedError(err)
 	}
 	m.auditRowsSnapshot, m.auditRowsRead = rows, true
 	if m.in.Managed {

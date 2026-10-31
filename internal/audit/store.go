@@ -242,6 +242,9 @@ type Store struct {
 	lifecycleMu sync.RWMutex
 	ready       atomic.Bool
 	closed      bool
+	// toolChainRootTablesReady is set once the root-scope chain tables exist
+	// (tool_chain_root.go); they are created on first use, not by a migration.
+	toolChainRootTablesReady atomic.Bool
 
 	// checkpointDB is a second connection used only for PASSIVE WAL
 	// checkpoints. It is opened on first use and closed with the store.

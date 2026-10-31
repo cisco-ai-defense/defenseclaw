@@ -24,8 +24,7 @@ import (
 
 func TestParsedPipelineVariantsReachTrustedDispatch(t *testing.T) {
 	const connector = "parsed-pipeline-dispatch-test"
-	// Generic curl-to-interpreter visibility is intentionally strict-only.
-	// This test targets parsed pipeline dispatch and proof disposition.
+	// Strict reports complete parsed pipelines as alerts.
 	installToolCallCorpusProfileConnector(t, connector, "strict")
 
 	for _, test := range []struct {

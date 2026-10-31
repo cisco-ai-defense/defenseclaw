@@ -1196,6 +1196,9 @@ $RunByUpgrade = $false
 $Run = @{{ Owner = [IntPtr]::Zero; Lock = $false; Transcript = $false; Log = '' }}
 $Version = '{target}'
 $DcVersion = '1.0.2'
+# The installer's top level sets $Repo to the default owner/name when
+# DEFENSECLAW_REPO is unset; Invoke-Install refuses any other shape (GAP-1065).
+$Repo = 'cisco-ai-defense/defenseclaw'
 $Local = {_literal(assets)}
 $LocalGiven = $true
 $BinDir = {_literal(data / 'bin')}

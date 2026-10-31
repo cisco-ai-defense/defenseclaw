@@ -70,7 +70,7 @@ The words these settings take (`prerequisite`, `setup`, `docker`, `vm`, `auto`, 
 | `driver` | `docker`, `vm` or `auto`. The default is `vm` on macOS and `docker` on Linux. On Linux, `auto` chooses the MicroVM driver where the user's KVM probe passes and `docker` where it does not. On macOS, `auto` resolves to `vm`; an explicit `docker` uses Docker and does not need MicroVM `e2fsprogs`. `vm` or `auto` with `install: prerequisite` on Linux needs the driver binary, which the stock OpenShell rpm lacks. |
 | `driver_fallback` | Linux, `driver: vm` or `auto`. What a sandbox gets when KVM is not available for the user: `docker` (the default) or `none`. |
 | `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.5"`; `prerequisite` also accepts a range inside `>=0.1.5 <0.2.0`. Sandboxes run only on 0.1.5 or later: `setup` installs 0.1.5 for an older exact pin, and in `prerequisite` mode an installed release older than 0.1.5 is a failed row, whatever the pin allows. |
-| `gateway_port` | The OpenShell gateway's loopback port, 1024 to 65535, default 17670. It may not equal the API, hook, ingress or egress port. |
+| `gateway_port` | The OpenShell gateway's loopback port, 1024 to 65535, default 17670. It may not equal the API, hook, ingress or egress port. This is the administrator's key only: a per-user config has no `openshell.gateway_port`. |
 | `e2fsprogs_dir` | macOS only. Optional: an absolute root-owned e2fsprogs install prefix (`mke2fs` and `debugfs` in its `sbin` or `bin`) or the folder that holds both. A broken explicit value is refused with `openshell_prerequisite_missing`. When unset, an account's `~/.local/opt/e2fsprogs/sbin` build or the package tools are used. Another account's Homebrew keg is never a source. |
 | `openshell.image.base` | Admin config. The base image for every agent image, by digest: `name@sha256:<digest>`. For an image built on the computer, the digest is its image ID (`docker image inspect --format '{{.Id}}' name:tag`). A tag alone is refused. A base the engine already has is never pulled. |
 
@@ -732,7 +732,7 @@ The sandbox routes answer with an HTTP status and a `sandbox_*` reason. The user
 | `sandbox_decision_refused` (403) | An ask, unblock or "always" past what `user_approvals` and `allow_unblock` allow | The notice carries the quote to send; change the profile if the person should be allowed |
 | `sandbox_unavailable` (503) | Sandboxes aren't available for the account right now; the reason is one of the codes above | Fix the reason |
 | `sandbox_policy_unloadable` (503) | The organization's sandbox policy can't be loaded on this computer. The person is told only that | Run `config validate` and `verify`; check the packs folder |
-| `enterprise_managed_rate_limited` (429) | A flood of relayed hooks hit the per-user budget (100 per second, burst 200) | The hook fails closed for that call; check the agent for a loop |
+| `enterprise_managed_rate_limited` (429) | A flood of relayed hooks hit the per-user budget (100 per second, burst 200). The sandbox CLI's read-only calls (`status`, `pack list`, `policy explain`, `policy test`) have a budget of their own (60 per second, burst 120), apart from the policy writes (registrations, decisions: 10 per second, burst 20) | The hook fails closed for that call; check the agent for a loop. A CLI command refused this way says so and changes nothing: run it again in a few seconds |
 | `enterprise_managed_root_denied` (403) | root called a sandbox route | Run sandboxes as the user |
 
 ### Messages a person can get

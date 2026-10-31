@@ -1519,8 +1519,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2368", page: "get-started/windows/paths-troubleshooting.mdx", has: ["The watchdog is on by default (`gateway.watchdog.enabled` is `true`)", "set `gateway.watchdog.enabled` to `false` to turn it off"], lacks: ["The watchdog runs only when `gateway.watchdog.enabled` is set"] },
   { gap: "GAP-2363", page: "guardrail/multi-connector.mdx", has: ["Setup first asks the new agent's enforcement mode, prints what it will change, and then", "ask `Proceed? [Y/n]`; Enter applies it, and `--yes` skips the question in scripts."] },
   { gap: "GAP-2354", page: "reference/fail-modes.mdx", has: ["On a per-user install with the `default` or `permissive` rule pack, a call DefenseClaw would allow still runs.", "On a per-user install with the `strict` rule pack, on a managed install and inside an OpenShell sandbox, the call is blocked"], lacks: ["(disk full, database busy), the call is denied."] },
-  { gap: "GAP-2356", page: "guardrail/user-and-group-policies.mdx", section: "Before you start", has: ["Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no `defenseclaw guardrail` commands", "`defenseclaw.exe config validate FILE` and `defenseclaw.exe enterprise windows profile-explain --user CORP\\alice`"] },
-  { gap: "GAP-2357", page: "guardrail/user-and-group-policies.mdx", section: "Steps", has: ["With no `--user`, `guardrail profile explain` explains the account that runs the command. The managed `enterprise linux|macos|windows profile-explain` commands need `--user`."], lacks: ["3. Ask which profile a person gets. With no `--user`, it explains the account that runs the command."] },
+  { gap: "GAP-2356", page: "guardrail/user-and-group-policies.mdx", section: "Before you start", has: ["Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no per-user `config.yaml` and no `defenseclaw guardrail` commands except `defenseclaw guardrail profile explain` on Linux and macOS, which shows a standard user their own profile", "`defenseclaw.exe config validate FILE` and `defenseclaw.exe enterprise windows profile-explain --user CORP\\alice`"] },
+  { gap: "GAP-2357", page: "guardrail/user-and-group-policies.mdx", section: "Steps", has: ["With no `--user`, `guardrail profile explain` explains the account that runs the command. The managed `enterprise linux|macos|windows profile-explain` commands need `--user` when an administrator runs them; on Linux and macOS a standard user leaves it out and gets their own profile only."], lacks: ["3. Ask which profile a person gets. With no `--user`, it explains the account that runs the command."] },
   { gap: "GAP-2332", page: "scanning/index.mdx", has: ["The defaults quarantine CRITICAL and HIGH skills, warn on MEDIUM and queue it for review, and allow LOW and INFO.", "`defenseclaw config get admission.skill` shows the actions in force"], lacks: ["A skill whose worst finding is MEDIUM, LOW or INFO is installed with the `warning` verdict"] },
   { gap: "GAP-2353", page: "guardrail/unified-llm-key.mdx", has: ["While the guardrail is on, the `DEFENSECLAW_LLM_KEY` row still reads `OPTIONAL`", "A local judge's `JUDGE_API_KEY` row reads `NOT_USED`."], lacks: ["correctly classifies them as `NOT_USED` even when the feature is on"] },
   { gap: "GAP-0515", page: "connectors/hermes.mdx", has: ["On Windows, where Hermes has no guard, an administrator's `open` lets the call run during an outage: the user's `hook-failures.jsonl` gets a line with `fail_mode` `open` and `outcome` `fail_open`.", "through the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) while `foreign_hooks` is `remove`"], lacks: ["(service not running, unusable answer, call too large to inspect)", "The administrator-owned hook is stricter"] },
@@ -2099,19 +2099,31 @@ describe('profile-explain subject fields exist (GAP-2338)', () => {
   });
 });
 
-// GAP-2356 / GAP-2357: managed hosts run the Go CLI, which has no guardrail
-// group and whose profile-explain needs --user; the page says so.
+// GAP-2356 / GAP-2357: managed hosts run the Go CLI, whose administrator
+// profile-explain needs --user; the page says so. Since rel-1-0-2:GAP-0431 /
+// GAP-0422 a standard user on managed Linux and macOS explains their own
+// profile: the launcher's hidden `guardrail profile explain` and a non-root
+// `enterprise linux|macos profile-explain` both ask the gateway for the
+// caller's own profile, without --user. That launcher command is the only Go
+// guardrail command, and Windows has none.
 describe('managed profile commands match the Go CLI (GAP-2356, GAP-2357)', () => {
-  it('keeps --user required and no guardrail command in the Go CLI', () => {
-    assert.ok(source('internal/cli/enterprise_identity_views.go').includes('if view.use == "profile-explain" && query.Get("user") == "" {'), 'enterprise profile-explain no longer requires --user: re-check user-and-group-policies.mdx step 3');
-    // git grep exits 1 when nothing matches: no Go command named guardrail.
+  it('keeps --user required for an administrator and only the own-profile guardrail command in the Go CLI', () => {
+    const views = source('internal/cli/enterprise_identity_views.go');
+    assert.ok(views.includes('if view.use == "profile-explain" && query.Get("user") == "" {'), 'enterprise profile-explain no longer requires --user: re-check user-and-group-policies.mdx step 3');
+    const own = views.indexOf('if refusal := refuseEnterpriseIdentityViewForStandardUser(cmd); refusal != nil {');
+    assert.ok(own !== -1 && views.indexOf('return explainOwnGuardrailProfile(', own) !== -1 && own < views.indexOf('query.Get("user") == ""'), 'a standard user no longer gets their own profile from profile-explain without --user: re-check user-and-group-policies.mdx step 3');
+    // git grep exits 1 when nothing matches.
     let withGuardrail = '';
     try {
       withGuardrail = execFileSync('git', ['grep', '-l', '-E', 'Use:[[:space:]]+"guardrail', '--', 'internal/cli/*.go', ':!*_test.go'], { cwd: repo, encoding: 'utf8' }).trim();
     } catch (err) {
       if ((err as { status?: number }).status !== 1) throw err;
     }
-    assert.equal(withGuardrail, '', 'the Go CLI gained a guardrail command: re-check user-and-group-policies.mdx Before you start');
+    assert.equal(withGuardrail, 'internal/cli/own_profile_explain_unix.go', 'the Go CLI guardrail commands changed: re-check user-and-group-policies.mdx Before you start');
+    const unix = source('internal/cli/own_profile_explain_unix.go');
+    assert.ok(unix.startsWith('// Copyright') && unix.includes('//go:build !windows'), 'the own-profile guardrail command is no longer Linux and macOS only');
+    assert.equal([...unix.matchAll(/\.AddCommand\(/g)].length, 2, 'the launcher guardrail group gained a command besides profile explain: re-check user-and-group-policies.mdx Before you start');
+    assert.ok(source('internal/cli/own_profile_explain_windows.go').includes('func newLauncherGuardrailCommand() *cobra.Command { return nil }'), 'Windows gained a guardrail command: re-check user-and-group-policies.mdx Before you start');
   });
 });
 

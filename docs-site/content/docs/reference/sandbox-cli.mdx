@@ -1989,7 +1989,7 @@ With the MicroVM driver, every run works on a copy, `--context` is refused, `--c
 
 ### One OpenShell gateway per machine (Linux)
 
-OpenShell's packaged gateway listens on the fixed port `127.0.0.1:17670` and runs as the `openshell-gateway` user service of the account that started it. A machine runs one gateway, so only that account can run sandboxes. In a second account, `sandbox setup` and `sandbox doctor` say that the port is held by another account's process, and setup installs and starts nothing.
+OpenShell's packaged gateway listens on the fixed port `127.0.0.1:17670` and runs as the `openshell-gateway` user service of the account that started it. A machine runs one gateway, so only that account can run sandboxes. In a second account, `sandbox setup` and `sandbox doctor` say that the port is held by another account's process, and setup installs and starts nothing. There is no per-account port setting: `openshell.gateway_port` is not a key (the config is refused with it), and an administrator's `enterprise.openshell.gateway_port` applies to managed computers only.
 
 To hand sandboxes to another account, stop the gateway in the account that runs it, then run `defenseclaw sandbox setup` in the other one. `disable --now` also keeps the gateway from starting again at the next login:
 
@@ -2055,7 +2055,7 @@ Limits on a Mac: there is no live mount and no pre-session snapshot, `sandbox un
 
 ### One OpenShell gateway per Mac
 
-OpenShell's gateway listens on the fixed port `127.0.0.1:17670` and runs as the Homebrew service of the account that started it. A Mac runs one gateway, so only that account can run sandboxes. In a second account, `defenseclaw sandbox doctor` says that the port is held by another account's process, skips the checks that follow from it, and setup installs and starts nothing.
+OpenShell's gateway listens on the fixed port `127.0.0.1:17670` and runs as the Homebrew service of the account that started it. A Mac runs one gateway, so only that account can run sandboxes. In a second account, `defenseclaw sandbox doctor` says that the port is held by another account's process, skips the checks that follow from it, and setup installs and starts nothing. There is no per-account port setting: `openshell.gateway_port` is not a key (the config is refused with it), and an administrator's `enterprise.openshell.gateway_port` applies to managed computers only.
 
 To hand sandboxes to another account, stop the gateway in the account that runs it, then run `defenseclaw sandbox setup` in the other one (add `--install-openshell` if OpenShell is not installed there). Several users on one machine are tracked upstream in [NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
 

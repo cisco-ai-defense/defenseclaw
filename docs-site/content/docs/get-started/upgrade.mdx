@@ -114,7 +114,7 @@ defenseclaw config set update.source https://mirror.example.com/defenseclaw
 
 The mirror must serve the paths GitHub serves: `releases/latest` (a redirect to the newest tag) and `releases/download/<tag>/` with the installer, the release files, `checksums.txt` and `checksums.txt.bundle`.
 
-`update.source` changes only where files come from. The certificate identity that signed the official releases is built into DefenseClaw, so a mirror must serve the official signed `checksums.txt` and its bundle, and the machine needs `cosign` 2.0 or later. Without it, the upgrade stops before it runs anything. `DEFENSECLAW_REPO` is the deprecated alias; `update.source` wins when both are set. A first install has no `config.yaml`, so use `DEFENSECLAW_REPO` for the installer there ([Installer](/docs/reference/setup-commands)).
+`update.source` changes only where files come from. The certificate identity that signed the official releases is built into DefenseClaw, so a mirror must serve the official signed `checksums.txt` and its bundle, and the machine needs `cosign` 2.0 or later. Without it, the upgrade stops before it runs anything. `update.source` must be an `https://` URL: `defenseclaw config set` refuses an `http://` one and asks for an `https://` URL. `DEFENSECLAW_REPO` is the deprecated alias and takes a GitHub `owner/name` or an `https://` URL, with the same refusal for anything else; `update.source` wins when both are set. A first install has no `config.yaml`, so use `DEFENSECLAW_REPO` for the installer there ([Installer](/docs/reference/setup-commands)).
 
 ## Upgrading from 0.x to 1.0
 
@@ -210,6 +210,10 @@ Agent hook entries live in each agent's own settings, so the swap does not resto
 The step from `config_version: 8` to `9` moves the decisions 0.8.x kept outside `config.yaml` into it: admission and thresholds from `policies/rego/data.json`, the `skill_actions`, `mcp_actions` and `plugin_actions` keys, `rule_pack_dir`, the scanner switches, and your skill, MCP server and plugin block and allow entries from `audit.db`. It keeps `config.yaml.v8.bak`, renames `data.json` to `data.json.migrated-v9`, and writes `migration-v9.json` with every value it moved and every conflict it settled. An unmodified install moves one value. `defenseclaw doctor` shows a **Config migration** row until you run `defenseclaw config migrate --ack`. Preview with `defenseclaw config migrate --dry-run`. Until the file is migrated, the gateway reads a version 8 file as if it were migrated, in memory only.
 
 [Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9) shows before and after for every key and covers going back. On a managed standalone host, the [lifecycle](/docs/enterprise/lifecycle) migrates the administrator config.
+
+Block and allow entries keep applying across an upgrade, but `config.yaml` records no time for them: `tool list` shows UPDATED as `-` for every entry there, before and after an upgrade, and an entry moved from 0.8.x `audit.db` does not keep its 0.8.x time.
+
+One built-in policy is retired: 0.8.x listed the host-firewall template `firewall-deny-default` as a policy. 1.0 has three named policies, `default`, `strict` and `permissive`; `policy list` no longer shows the template and `policy activate` refuses it.
 
 ### Shipped policy files
 
