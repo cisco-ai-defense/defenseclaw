@@ -23,6 +23,11 @@ type renameOp struct {
 	targetDir   string
 	noTargetDir bool
 	wd          string
+	// backup: -b, --backup or a backup suffix keeps a replaced
+	// destination as a backup entry beside it, named with suffix ("~"
+	// unless -S or --suffix names another one, or .~N~ when numbered).
+	backup bool
+	suffix string
 }
 
 // parseRename reads the arguments of mv or gmv. ok is false for an option
@@ -45,7 +50,9 @@ func parseRename(args []string, cwd string) (op renameOp, ok bool) {
 		if strings.HasPrefix(arg, "--") {
 			name, value, hasValue := strings.Cut(arg[2:], "=")
 			switch name {
-			case "backup", "update", "context":
+			case "backup":
+				op.backup = op.backup || value != "none" && value != "off"
+			case "update", "context":
 			case "force", "interactive", "no-clobber", "strip-trailing-slashes", "verbose", "no-copy", "debug":
 				if hasValue {
 					return op, false
@@ -67,6 +74,8 @@ func parseRename(args []string, cwd string) (op renameOp, ok bool) {
 						return op, false
 					}
 					op.targetDir = value
+				} else {
+					op.backup, op.suffix = true, value
 				}
 			default:
 				// --exchange swaps the names; an abbreviation is not read.
@@ -76,7 +85,9 @@ func parseRename(args []string, cwd string) (op renameOp, ok bool) {
 		}
 		for j := 1; j < len(arg); j++ {
 			switch flag := arg[j : j+1]; flag {
-			case "b", "f", "i", "n", "u", "v", "Z", "h":
+			case "b":
+				op.backup = true
+			case "f", "i", "n", "u", "v", "Z", "h":
 			case "T":
 				op.noTargetDir = true
 			case "t", "S":
@@ -92,6 +103,8 @@ func parseRename(args []string, cwd string) (op renameOp, ok bool) {
 						return op, false
 					}
 					op.targetDir = value
+				} else {
+					op.backup, op.suffix = true, value
 				}
 				j = len(arg)
 			default:

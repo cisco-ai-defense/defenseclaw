@@ -16,14 +16,20 @@ import (
 
 // plainMoveLongOptions are the GNU mv long options that keep a two-operand
 // call a rename of the first operand onto the second. Any other option
-// (--target-directory, an abbreviation, --suffix=...) ends the reading.
+// (--target-directory, an abbreviation) ends the reading; --backup=CONTROL
+// and the backup suffix are read in actionPlainMoveOntoLink.
 var plainMoveLongOptions = map[string]bool{
 	"--force": true, "--interactive": true, "--no-clobber": true, "--verbose": true,
 	"--no-target-directory": true, "--backup": true,
 }
 
+// plainMoveBackupControls are the GNU --backup=CONTROL values.
+var plainMoveBackupControls = map[string]bool{
+	"none": true, "off": true, "numbered": true, "t": true, "existing": true, "nil": true, "simple": true, "never": true,
+}
+
 // actionPlainMoveOntoLink reads a plain mv a b call (mv or gmv, options
-// only among -f -i -n -v -b -T and their long forms, exactly two operands)
+// only among -f -i -n -v -b -T, -S SUFFIX and their long forms, exactly two operands)
 // whose destination is an existing symbolic link to a file, or a dangling
 // one. rename(2) replaces that link entry and writes neither the file it
 // names nor anything else (a cross-device GNU mv removes the destination
@@ -40,14 +46,37 @@ func actionPlainMoveOntoLink(call *syntax.CallExpr, values actionValues, cwd, ho
 	}
 	var operands []*syntax.Word
 	options := true
-	for _, arg := range call.Args[1:] {
+	suffix, suffixSet := "", false
+	args := call.Args[1:]
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		value, static := StaticWord(arg, home)
 		if !static {
 			return nil, "", false
 		}
+		// optionValue reads the value of -S or --suffix from the next word.
+		optionValue := func() (string, bool) {
+			if i++; i >= len(args) {
+				return "", false
+			}
+			return StaticWord(args[i], home)
+		}
 		switch {
 		case options && value == "--":
 			options = false
+		case options && (value == "-S" || value == "--suffix"):
+			if suffix, static = optionValue(); !static {
+				return nil, "", false
+			}
+			suffixSet = true
+		case options && strings.HasPrefix(value, "--suffix="):
+			suffix, suffixSet = strings.TrimPrefix(value, "--suffix="), true
+		case options && strings.HasPrefix(value, "--backup="):
+			// --backup=CONTROL keeps the replaced link as a backup entry
+			// beside it (rel-1-0-6:GAP-0144).
+			if !plainMoveBackupControls[strings.TrimPrefix(value, "--backup=")] {
+				return nil, "", false
+			}
 		case options && strings.HasPrefix(value, "--"):
 			if !plainMoveLongOptions[value] {
 				return nil, "", false
@@ -83,6 +112,13 @@ func actionPlainMoveOntoLink(call *syntax.CallExpr, values actionValues, cwd, ho
 	name := filepath.Base(path)
 	parent, resolved := ResolveWriteTarget(filepath.Dir(path))
 	if !resolved || name == "." || name == ".." {
+		return nil, "", false
+	}
+	// The backup entry is the link renamed to its name with the suffix: a
+	// suffix that leaves the directory or names a protected entry is not
+	// read as plain.
+	if suffixSet && (suffix == "" || strings.ContainsRune(suffix, filepath.Separator) || strings.Contains(suffix, "/") ||
+		protectedEntry(filepath.Join(parent, name+suffix), newProtectedFiles(home), filepath.Join(home, ".ssh"))) {
 		return nil, "", false
 	}
 	return destination, filepath.Join(parent, name), true

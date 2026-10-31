@@ -199,7 +199,12 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 		{"cp --link ~/.ssh/authorized_keys notes.txt; echo k >> notes.txt", "notes.txt", keys},
 		{"ln ~/.ssh/authorized_keys notes.txt; mv notes.txt n2; echo k >> n2", "n2", ""},
 		{"ln \"$SRC\" notes.txt; echo k >> notes.txt", "notes.txt", ""},
-		{"python3 -c \"import os; os.link('a', 'notes.txt')\"; echo k >> notes.txt", "notes.txt", ""},
+		// An interpreter link call with a computed argument stays unknown; one
+		// with two string literals is read as link reads them: an ordinary file
+		// keeps its own name, the keys file is the keys file (rel-1-0-6:GAP-0157).
+		{"python3 -c \"import os; s='a'; os.link(s, 'notes.txt')\"; echo k >> notes.txt", "notes.txt", ""},
+		{"python3 -c \"import os; os.link('a', 'notes.txt')\"; echo k >> notes.txt", "notes.txt", notes},
+		{"python3 -c \"import os; os.link('.ssh/authorized_keys', 'notes.txt')\"; echo k >> notes.txt", "notes.txt", keys},
 		{"echo k >> notes.txt", "notes.txt", notes},
 		// A multicall binary runs its applet; archive and sync tools that
 		// link files make the write targets unknown (GAP-1521).
