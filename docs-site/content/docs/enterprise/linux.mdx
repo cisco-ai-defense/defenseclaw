@@ -101,6 +101,10 @@ them to `/etc/systemd/system`. Put host-specific drop-ins in
 (`30-defenseclaw-tetragon.conf`, `40-defenseclaw-agent-prefixes.conf`,
 `50-defenseclaw-paths.conf`, `60-defenseclaw-credentials.conf`,
 `70-defenseclaw-network.conf`) and `verify` does not report them as overrides.
+Those five file names are DefenseClaw's; do not edit them. Every other name is
+yours and the lifecycle never touches it. Use `00-` to `29-` or `80-` to `99-`
+(for example `80-site-proxy.conf`), and leave `defenseclaw` out of the name, so
+a reader can tell your drop-ins from DefenseClaw's.
 
 <Flow
   direction="TB"
