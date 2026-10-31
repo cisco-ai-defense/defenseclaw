@@ -2038,7 +2038,7 @@ func gitBashDriveIdentity(resolved string) (string, bool) {
 		return "", false
 	}
 	letter := resolved[1]
-	if !(letter >= 'a' && letter <= 'z' || letter >= 'A' && letter <= 'Z') ||
+	if (letter < 'a' || letter > 'z') && (letter < 'A' || letter > 'Z') ||
 		len(resolved) > 2 && resolved[2] != '/' {
 		return "", false
 	}
