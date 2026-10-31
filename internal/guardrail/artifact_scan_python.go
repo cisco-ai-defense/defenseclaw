@@ -49,6 +49,8 @@ func pythonPathWriteMatch(rule *regexp.Regexp, source, script string) []int {
 	if len(callLines) != len(lines) {
 		callLines = lines
 	}
+	var stmts []pythonStmt
+	var lineStmt []int
 	for _, hit := range rule.FindAllStringIndex(code, -1) {
 		lineNo := strings.Count(code[:hit[0]], "\n")
 		if lineNo >= len(lines) {
@@ -66,79 +68,263 @@ func pythonPathWriteMatch(rule *regexp.Regexp, source, script string) []int {
 		// A path assigned to a name is a write when a later statement uses
 		// that name as the path argument. This covers Path.home()/"name"
 		// followed by open(target, "a"), the common skill-script form.
-		if pythonNameWrittenAfter(lines, callLines, lineNo, assign[1]) {
-			return hit
+		// A strict exception: a later plain rebinding of the name to a fresh
+		// literal hides the path from the writes it dominates (GAP-1312).
+		if stmts == nil {
+			stmts, lineStmt = pythonStatements(lines, callLines)
+		}
+		hidden := pythonRebindingHides(stmts, lineStmt, lineNo, assign[1])
+		for k := lineNo + 1; k < len(lines); k++ {
+			if !hidden[k] && pythonLineWritesName(lines[k], callLines[k], assign[1]) {
+				return hit
+			}
 		}
 	}
 	return nil
 }
 
-var pythonNestedScope = lazyregexp.New(`\b(?:def|lambda)\b`)
+// pythonStmt is one logical Python line: the physical lines first..last
+// (open brackets and backslash continuations joined), the indent of its
+// first line, and its code and calls views (see pythonPathWriteMatch).
+type pythonStmt struct {
+	first, last, indent int
+	code, calls         string
+}
 
-// pythonNameWrittenAfter reports whether a line after lines[at], which
-// assigns the path to name, writes through name. A plain rebinding of name
-// (target = Path("safe.txt")) hides the path only from the writes it
-// dominates (GAP-1312): the rebinding sits in the block of the assignment
-// (the same indent, no shallower line between them, not a continuation
-// line), and a write after it is covered until that block ends or a def or
-// lambda starts (code that may run later, when the name can hold the path
-// again). A rebinding in a sibling branch (else, elif, except, finally, a
-// loop's else, another match case), in another function or in a nested
-// block leaves the path live, and so does one whose value names anything a
-// line after the assignment derived from name (alias = target; target =
-// alias). PySource.path_written in the Python plugin scanner follows the
-// same rule.
-func pythonNameWrittenAfter(lines, callLines []string, at int, name string) bool {
-	indent := pythonIndent(lines[at])
+// pythonStatements splits a file into logical lines. lineStmt maps each
+// physical line to its statement, -1 for a line with no code.
+func pythonStatements(lines, callLines []string) ([]pythonStmt, []int) {
+	var stmts []pythonStmt
+	lineStmt := make([]int, len(lines))
+	depth, open := 0, false
+	for k := range lines {
+		lineStmt[k] = -1
+		if !open && strings.TrimSpace(callLines[k]) == "" {
+			continue
+		}
+		if open {
+			st := &stmts[len(stmts)-1]
+			st.last = k
+			st.code += "\n" + lines[k]
+			st.calls += "\n" + callLines[k]
+		} else {
+			stmts = append(stmts, pythonStmt{first: k, last: k, indent: pythonIndent(lines[k]), code: lines[k], calls: callLines[k]})
+		}
+		lineStmt[k] = len(stmts) - 1
+		var cont bool
+		depth, cont = pythonBracketDepth(callLines[k], depth)
+		open = depth > 0 || cont
+	}
+	return stmts, lineStmt
+}
+
+// pythonDynamicNames rebind or run code without naming the variable in code.
+var pythonDynamicNames = map[string]bool{
+	"globals": true, "locals": true, "vars": true, "setattr": true, "exec": true, "eval": true,
+	"compile": true, "__import__": true, "__dict__": true, "modules": true, "importlib": true,
+	"builtins": true, "__builtins__": true,
+}
+
+// pythonRebindingHides returns the physical lines whose writes through name
+// do not act on the path that the statement starting on line at assigned to
+// name (GAP-1312). It is strict on purpose. The path is hidden only when all
+// of these hold:
+//   - the assignment is a plain `name = value` whose value does not use name;
+//   - a later statement in the same block (the same indent, no shallower
+//     statement between) rebinds name to a fresh literal on one physical
+//     line: a string, Path() of a string, or None;
+//   - the write follows that rebinding in the same block (no shallower
+//     statement between);
+//   - the file has no global or nonlocal for name;
+//   - no statement after the rebinding names a name bound, before it, from
+//     name or from such an alias; binds name other than to a fresh literal;
+//     has a def or lambda; mentions name together with a for (a
+//     comprehension or generator, which may run later); or uses globals,
+//     vars, setattr, exec and the like.
+//
+// Otherwise it returns nil and every write counts, as before.
+// PySource.path_written in the Python plugin scanner applies the same rule.
+func pythonRebindingHides(stmts []pythonStmt, lineStmt []int, at int, name string) map[int]bool {
+	ai := lineStmt[at]
+	if ai < 0 || stmts[ai].first != at || !pythonPlainAssign(stmts[ai].calls, name) {
+		return nil
+	}
+	a := stmts[ai]
+	ri := -1
+	for k := ai + 1; k < len(stmts) && ri < 0; k++ {
+		switch {
+		case stmts[k].indent < a.indent:
+			return nil
+		case stmts[k].indent == a.indent && pythonFreshRebinding(stmts[k], name):
+			ri = k
+		}
+	}
+	if ri < 0 {
+		return nil
+	}
 	carriers := map[string]bool{name: true}
-	inBlock, covered := true, false
-	depth, cont := pythonBracketDepth(callLines[at], 0)
-	for k := at + 1; k < len(lines); k++ {
-		line, calls := lines[k], callLines[k]
-		continuation := depth > 0 || cont
-		depth, cont = pythonBracketDepth(calls, depth)
-		code := !continuation && strings.TrimSpace(line) != ""
-		if code && pythonIndent(line) < indent {
-			inBlock, covered = false, false
-		}
-		if covered && pythonNestedScope.MatchString(calls) {
-			covered = false
-		}
-		if !covered && pythonLineWritesName(line, calls, name) {
-			return true
-		}
-		if !inBlock || covered {
-			continue
-		}
-		if code && pythonIndent(line) == indent && pythonLineRebinds(calls, name, carriers) {
-			covered = true
-			continue
-		}
-		if pythonMentionsAny(calls, carriers) {
-			for _, n := range pythonName.FindAllString(calls, -1) {
-				carriers[n] = true
+	for changed := true; changed; {
+		changed = false
+		for k := 0; k < ri; k++ {
+			if k == ai || !pythonMentionsAny(stmts[k].calls, carriers) {
+				continue
+			}
+			for b := range pythonStmtBinds(stmts[k].calls) {
+				if !carriers[b] {
+					carriers[b], changed = true, true
+				}
 			}
 		}
 	}
-	return false
+	for _, st := range stmts {
+		if pythonDeclares(st.calls, name) {
+			return nil
+		}
+	}
+	for _, st := range stmts[ri+1:] {
+		mentions, loop := false, false
+		for _, w := range pythonName.FindAllString(st.calls, -1) {
+			switch {
+			case w == name:
+				mentions = true
+			case carriers[w] || pythonDynamicNames[w] || w == "def" || w == "lambda":
+				return nil
+			case w == "for":
+				loop = true
+			}
+		}
+		if mentions && loop || pythonStmtBinds(st.calls)[name] && !pythonFreshRebinding(st, name) {
+			return nil
+		}
+	}
+	hidden := map[int]bool{}
+	for _, st := range stmts[ri+1:] {
+		if st.indent < a.indent {
+			break
+		}
+		for k := st.first; k <= st.last; k++ {
+			hidden[k] = true
+		}
+	}
+	return hidden
 }
 
-// pythonLineRebinds reports whether calls (a line with its string text
-// blanked) is a plain `name = value` statement whose value names none of
-// carriers, so after it the name holds a new value. A line the scan cannot
-// read as one whole statement (a semicolon, a backslash or an open bracket)
-// is not a rebinding.
-func pythonLineRebinds(calls, name string, carriers map[string]bool) bool {
-	assign := pythonAssignment.FindStringSubmatchIndex(calls)
-	if len(assign) != 4 || calls[assign[2]:assign[3]] != name {
+const pythonPlainString = `[rRbBuU]{0,2}(?:"[^"\\\n]*"|'[^'\\\n]*')`
+
+var pythonFreshLiteral = lazyregexp.New(`^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(?:None|` + pythonPlainString +
+	`|Path\s*\(\s*` + pythonPlainString + `\s*\))\s*$`)
+
+// pythonFreshRebinding reports whether st is `name = <fresh literal>` on one
+// physical line: a string (not an f-string), Path() of one, or None.
+func pythonFreshRebinding(st pythonStmt, name string) bool {
+	if st.first != st.last {
 		return false
 	}
-	value := calls[assign[1]:]
-	if strings.HasPrefix(value, "=") || strings.ContainsAny(value, ";\\") || pythonMentionsAny(value, carriers) {
+	m := pythonFreshLiteral.FindStringSubmatch(st.code)
+	return m != nil && m[1] == name
+}
+
+// pythonPlainAssign reports whether calls is a single `name = value`
+// statement whose value does not use name.
+func pythonPlainAssign(calls, name string) bool {
+	m := pythonAssignment.FindStringSubmatchIndex(calls)
+	if len(m) != 4 || calls[m[2]:m[3]] != name || pythonLastAssign(calls) != m[1]-1 {
 		return false
 	}
-	depth, cont := pythonBracketDepth(value, 0)
-	return depth == 0 && !cont
+	return !containsPythonName(calls[m[1]:], name)
+}
+
+// pythonLastAssign returns the index of the '=' of the last assignment
+// operator (=, +=, <<= and the like) outside brackets in calls, or -1.
+func pythonLastAssign(calls string) int {
+	last, depth := -1, 0
+	for i := 0; i < len(calls); i++ {
+		switch calls[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case '=':
+			if depth != 0 {
+				continue
+			}
+			if i+1 < len(calls) && calls[i+1] == '=' {
+				i++
+				continue
+			}
+			if i > 0 {
+				p := calls[i-1]
+				if p == '!' || p == ':' || p == '=' || (p == '<' || p == '>') && (i < 2 || calls[i-2] != p) {
+					continue
+				}
+			}
+			last = i
+		}
+	}
+	return last
+}
+
+var (
+	pythonWalrusTarget = lazyregexp.New(`([A-Za-z_][A-Za-z_0-9]*)\s*:=`)
+	pythonAsTarget     = lazyregexp.New(`\bas\s+([A-Za-z_][A-Za-z_0-9]*)`)
+	pythonDefTarget    = lazyregexp.New(`^\s*(?:async\s+)?(?:def|class)\s+([A-Za-z_][A-Za-z_0-9]*)`)
+	pythonMutated      = lazyregexp.New(`([A-Za-z_][A-Za-z_0-9]*)\s*\.\s*(?:append|extend|add|insert|update|setdefault)\s*\(`)
+	pythonForTargets   = lazyregexp.New(`^\s*(?:async\s+)?for\b([\s\S]*?)\bin\b`)
+	pythonImportStmt   = lazyregexp.New(`^\s*(?:import|from)\b`)
+	pythonDeclaration  = lazyregexp.New(`\b(?:global|nonlocal)\s+([^;]*)`)
+)
+
+// pythonStmtBinds returns the names a statement (its calls view) may bind:
+// assignment targets outside brackets, walrus, as, for and def/class
+// targets, the receiver of a mutating call, and every name of an import.
+func pythonStmtBinds(calls string) map[string]bool {
+	out := map[string]bool{}
+	if pythonImportStmt.MatchString(calls) {
+		for _, n := range pythonName.FindAllString(calls, -1) {
+			out[n] = true
+		}
+		return out
+	}
+	if pos := pythonLastAssign(calls); pos >= 0 {
+		left := calls[:pos]
+		for _, m := range pythonName.FindAllStringIndex(left, -1) {
+			depth, annotation := 0, false
+			for _, c := range left[:m[0]] {
+				switch c {
+				case '(', '[', '{':
+					depth++
+				case ')', ']', '}':
+					depth--
+				case ':':
+					annotation = annotation || depth == 0
+				}
+			}
+			if depth == 0 && !annotation && !strings.HasPrefix(strings.TrimLeft(left[m[1]:], " \t\n\\"), ".") {
+				out[left[m[0]:m[1]]] = true
+			}
+		}
+	}
+	for _, re := range []*lazyregexp.Regexp{pythonWalrusTarget, pythonAsTarget, pythonDefTarget, pythonMutated} {
+		for _, m := range re.FindAllStringSubmatch(calls, -1) {
+			out[m[1]] = true
+		}
+	}
+	if m := pythonForTargets.FindStringSubmatch(calls); m != nil {
+		for _, n := range pythonName.FindAllString(m[1], -1) {
+			out[n] = true
+		}
+	}
+	return out
+}
+
+// pythonDeclares reports whether a statement declares name global or nonlocal.
+func pythonDeclares(calls, name string) bool {
+	for _, m := range pythonDeclaration.FindAllStringSubmatch(calls, -1) {
+		if containsPythonName(m[1], name) {
+			return true
+		}
+	}
+	return false
 }
 
 // pythonBracketDepth returns the bracket depth after calls, a line with its

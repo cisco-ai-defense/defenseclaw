@@ -294,8 +294,8 @@ def test_hermes_user_memory_copy_is_flagged(tmp_path):
     ]
 
 
-# GAP-1312: a plain rebinding of the name hides the path only from the
-# writes it dominates. The cases match
+# GAP-1312: a plain rebinding of the name hides the path only under the strict
+# rule of PySource._rebinding_hides. The cases match
 # TestPythonPathWriteMatchRebindingMustDominateTheWrite (internal/guardrail).
 _REBINDING_CASES = [
     (
@@ -407,6 +407,47 @@ _REBINDING_CASES = [
     (
         "lambda after the rebinding",
         'target = Path("MEMORY.md")\ntarget = Path("safe.txt")\nsave = lambda: target.write_text(x)\n',
+        True,
+    ),
+    # Second review of d18f88716c (IN-bd-w2hooks2-REVIEW.md): each flags at base.
+    (
+        "copy back after the rebinding",
+        't = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\nt = a\nt.write_text(x)\n',
+        True,
+    ),
+    ("str() copy back", 't = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\nt = str(a)\nt.write_text(x)\n', True),
+    ("tuple copy back", 't = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\nt, y = a, 1\nt.write_text(x)\n', True),
+    (
+        "global restore function",
+        't = Path("MEMORY.md")\na = t\n\ndef restore():\n    global t\n    t = a\n\nt = Path("safe.txt")\nrestore()\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "generator, then a copy back",
+        't = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\ng = (t.write_text(x) for _ in s)\nt = a\nnext(g)\n',
+        True,
+    ),
+    (
+        "generator, then the path again",
+        't = Path("MEMORY.md")\nt = Path("safe.txt")\ng = (t.write_text(x) for _ in s)\nt = Path("MEMORY.md")\nnext(g)\n',
+        True,
+    ),
+    (
+        "nonlocal restore",
+        'def outer():\n    t = Path("MEMORY.md")\n    a = t\n\n    def restore():\n        nonlocal t\n        t = a\n\n    t = Path("safe.txt")\n    restore()\n    t.write_text(x)\n',
+        True,
+    ),
+    (
+        "walrus copy back",
+        't = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\nif (t := a):\n    t.write_text(x)\n',
+        True,
+    ),
+    ("backslash-continued rebinding", 't = Path("MEMORY.md")\nt = \\\n    Path("safe.txt")\nt.write_text(x)\n', True),
+    ("walrus rebinding", 't = Path("MEMORY.md")\n(t := Path("safe.txt"))\nt.write_text(x)\n', True),
+    ("exec after the rebinding", 't = Path("MEMORY.md")\nt = Path("safe.txt")\nexec(code)\nt.write_text(x)\n', True),
+    (
+        "import as after the rebinding",
+        't = Path("MEMORY.md")\nt = Path("safe.txt")\nfrom cfg import P as t\nt.write_text(x)\n',
         True,
     ),
 ]

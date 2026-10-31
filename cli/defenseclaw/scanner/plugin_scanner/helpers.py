@@ -259,17 +259,22 @@ _PY_ASSIGN_OPS = frozenset({"=", "+=", "-=", "*=", "/=", "//=", "%=", "|=", "&="
 
 
 class _PyStmt:
-    __slots__ = ("scope", "writes", "names", "targets", "rebinds", "indent", "nested")
+    __slots__ = ("scope", "writes", "names", "targets", "rebinds", "indent", "words", "binds", "fresh", "declares")
 
     def __init__(self, scope: int) -> None:
         self.scope = scope
         self.writes = False
         self.names: set[str] = set()
-        # The name of a plain ``name = value`` whose value does not use name
-        # (GAP-1312), its block level, and whether it starts a def or lambda.
+        # GAP-1312: the name of a plain ``name = value`` whose value does not
+        # use name; the block level; every NAME token, keywords included; the
+        # names the statement may bind; the name of a ``name = <fresh
+        # literal>`` on one physical line; global/nonlocal names.
         self.rebinds = ""
         self.indent = 0
-        self.nested = False
+        self.words: set[str] = set()
+        self.binds: set[str] = set()
+        self.fresh = ""
+        self.declares: set[str] = set()
         # (scope, name) pairs; scope -1 is module-wide (globals, attributes).
         self.targets: set[tuple[int, str]] = set()
 
@@ -313,10 +318,10 @@ class PySource:
         tainted: dict[str, set[int]] = {}
         for scope, name in first.targets:
             tainted.setdefault(name, set()).add(scope)
-        # A plain rebinding of the name (target = Path("safe.txt")) hides
-        # the path from the statements it dominates (GAP-1312), until a
-        # statement that may carry the path assigns the name again.
-        hidden = {first.rebinds: self._dominated_by_rebinding(first_idx)} if first.rebinds else {}
+        # A strict exception (GAP-1312): a later plain rebinding of the name
+        # to a fresh literal hides the path from the statements it dominates,
+        # until a statement that may carry the path assigns the name again.
+        hidden = {first.rebinds: self._rebinding_hides(first_idx)} if first.rebinds else {}
         seen = {id(first)}
         changed = bool(tainted)
         while changed:
@@ -338,32 +343,58 @@ class PySource:
                 changed = True
         return False
 
-    def _dominated_by_rebinding(self, first_idx: int) -> set[int]:
-        """Indexes of the statements a plain rebinding of the name that
-        statement *first_idx* assigns dominates (GAP-1312).
+    def _rebinding_hides(self, first_idx: int) -> set[int]:
+        """Indexes of the statements whose writes through the name that
+        statement *first_idx* assigns do not act on its path (GAP-1312).
 
-        The rebinding must sit in the block of the assignment: the same
-        level, with no shallower statement between them. A statement after it
-        is covered until that block ends or a def or lambda starts (code that
-        may run later, when the name can hold the path again). A rebinding in
-        a sibling branch (else, elif, except, finally, a loop's else, another
-        match case), in another function or in a nested block covers nothing.
-        The Go artifact scan (pythonNameWrittenAfter) follows the same rule.
+        Strict on purpose. The path is hidden only when all of these hold:
+        the assignment is a plain ``name = value`` whose value does not use
+        name; a later statement in the same block (same level, no shallower
+        statement between) rebinds name to a fresh literal on one physical
+        line (a string, ``Path()`` of a string, or None); the write follows
+        it in the same block; the file has no global or nonlocal for name;
+        and no statement after the rebinding names a name bound, before it,
+        from name or from such an alias, binds name other than to a fresh
+        literal, has a def or lambda, mentions name together with a for (a
+        comprehension or generator, which may run later), or uses globals,
+        vars, setattr, exec and the like. Otherwise nothing is hidden. The Go
+        artifact scan (pythonRebindingHides) applies the same rule.
         """
-        first = self._stmts[first_idx]
-        covered: set[int] = set()
-        on = False
-        for k in range(first_idx + 1, len(self._stmts)):
-            st = self._stmts[k]
-            if st.indent < first.indent:
+        stmts = self._stmts
+        first = stmts[first_idx]
+        name = first.rebinds
+        rebind = -1
+        for k in range(first_idx + 1, len(stmts)):
+            if stmts[k].indent < first.indent:
+                return set()
+            if stmts[k].indent == first.indent and stmts[k].fresh == name:
+                rebind = k
                 break
-            if st.nested:
-                on = False
-            if on:
-                covered.add(k)
-            elif st.rebinds == first.rebinds and st.indent == first.indent:
-                on = True
-        return covered
+        if rebind < 0:
+            return set()
+        carriers = {name}
+        changed = True
+        while changed:
+            changed = False
+            for k in range(rebind):
+                st = stmts[k]
+                if k != first_idx and st.words & carriers and not st.binds <= carriers:
+                    carriers |= st.binds
+                    changed = True
+        if any(name in st.declares for st in stmts):
+            return set()
+        for st in stmts[rebind + 1 :]:
+            w = st.words
+            if (w & carriers) - {name} or w & _PY_DYNAMIC_NAMES or "def" in w or "lambda" in w:
+                return set()
+            if (name in w and "for" in w) or (name in st.binds and st.fresh != name):
+                return set()
+        hidden: set[int] = set()
+        for k in range(rebind + 1, len(stmts)):
+            if stmts[k].indent < first.indent:
+                break
+            hidden.add(k)
+        return hidden
 
     def _analyze(self) -> None:
         nrows = len(self.code)
@@ -453,10 +484,7 @@ def _py_statement(cur: list, funcs: list[tuple[int, int, str]], global_names: se
             elif depth == 0 and tok.string in _PY_ASSIGN_OPS:
                 assign_at.append(k)
             continue
-        if tok.type != tokenize.NAME:
-            continue
-        if keyword.iskeyword(tok.string):
-            st.nested = st.nested or tok.string in ("def", "lambda")
+        if tok.type != tokenize.NAME or keyword.iskeyword(tok.string):
             continue
         name = tok.string
         st.names.add(name)
@@ -519,7 +547,91 @@ def _py_statement(cur: list, funcs: list[tuple[int, int, str]], global_names: se
                     break
             elif tok.type == tokenize.NAME and depth == 0 and not is_op(k + 1, "."):
                 add_target(k)
+    _py_rebinding_facts(st, cur)
     return st
+
+
+# Names that rebind or run code without naming the variable in code (GAP-1312).
+_PY_DYNAMIC_NAMES = frozenset(
+    {
+        "globals",
+        "locals",
+        "vars",
+        "setattr",
+        "exec",
+        "eval",
+        "compile",
+        "__import__",
+        "__dict__",
+        "modules",
+        "importlib",
+        "builtins",
+        "__builtins__",
+    }
+)
+
+
+def _py_plain_string(tok) -> bool:
+    """A one-line string literal that is not an f-string and has no escape."""
+    if tok.type != tokenize.STRING:
+        return False
+    text = tok.string
+    i = 0
+    while i < len(text) and text[i] in "rRbBuU":
+        i += 1
+    body = text[i:]
+    return (
+        i <= 2
+        and len(body) >= 2
+        and body[0] in "'\""
+        and body[:3] not in ('"""', "'''")
+        and "\\" not in body
+        and "\n" not in body
+    )
+
+
+def _py_rebinding_facts(st: _PyStmt, cur: list) -> None:
+    """Fill the GAP-1312 fields of *st*: words, binds, fresh, declares."""
+    n = len(cur)
+    st.words = {t.string for t in cur if t.type == tokenize.NAME}
+    binds = {name for _, name in st.targets}
+    for k in range(n - 1):
+        tok, nxt = cur[k], cur[k + 1]
+        if tok.type != tokenize.NAME:
+            continue
+        if nxt.type == tokenize.OP and nxt.string == ":=":
+            binds.add(tok.string)
+        elif tok.string in ("as", "def", "class") and nxt.type == tokenize.NAME:
+            binds.add(nxt.string)
+        elif tok.string in ("global", "nonlocal"):
+            for t in cur[k + 1 :]:
+                if t.type == tokenize.OP and t.string == ";":
+                    break
+                if t.type == tokenize.NAME:
+                    st.declares.add(t.string)
+    if cur[0].string in ("import", "from"):
+        binds |= st.words
+    st.binds = binds
+    if (
+        n >= 3
+        and cur[0].type == tokenize.NAME
+        and not keyword.iskeyword(cur[0].string)
+        and cur[1].type == tokenize.OP
+        and cur[1].string == "="
+        and cur[0].start[0] == cur[-1].end[0]
+    ):
+        val = cur[2:]
+        if (
+            len(val) == 1 and ((val[0].type == tokenize.NAME and val[0].string == "None") or _py_plain_string(val[0]))
+        ) or (
+            len(val) == 4
+            and val[0].type == tokenize.NAME
+            and val[0].string == "Path"
+            and val[1].string == "("
+            and _py_plain_string(val[2])
+            and val[3].string == ")"
+        ):
+            st.fresh = cur[0].string
 
 
 def python_source(content: str) -> PySource | None:

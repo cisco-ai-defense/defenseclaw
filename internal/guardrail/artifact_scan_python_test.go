@@ -518,9 +518,9 @@ func TestArtifactPythonPathWriteReadsTheScriptsDirectory(t *testing.T) {
 	}
 }
 
-// A plain rebinding of the name hides the path only from the writes it
-// dominates (GAP-1312). The cases match test_rebound_python_path in
-// cli/tests/test_plugin_scanner_python_source.py.
+// A plain rebinding of the name hides the path only under the strict rule of
+// pythonRebindingHides (GAP-1312). The cases match test_rebound_python_path
+// in cli/tests/test_plugin_scanner_python_source.py.
 func TestPythonPathWriteMatchRebindingMustDominateTheWrite(t *testing.T) {
 	rule := regexp.MustCompile(`MEMORY\.md`)
 	for _, tc := range []struct {
@@ -550,6 +550,18 @@ func TestPythonPathWriteMatchRebindingMustDominateTheWrite(t *testing.T) {
 		{"keyword argument, not a rebinding", "def f():\n    target = Path(\"MEMORY.md\")\n    configure(\n    target=None,\n    )\n    target.write_text(x)\n", true},
 		{"def after the rebinding", "target = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\ndef later():\n    target.write_text(x)\n", true},
 		{"lambda after the rebinding", "target = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\nsave = lambda: target.write_text(x)\n", true},
+		{"copy back after the rebinding", "t = Path(\"MEMORY.md\")\na = t\nt = Path(\"safe.txt\")\nt = a\nt.write_text(x)\n", true},
+		{"str() copy back", "t = Path(\"MEMORY.md\")\na = t\nt = Path(\"safe.txt\")\nt = str(a)\nt.write_text(x)\n", true},
+		{"tuple copy back", "t = Path(\"MEMORY.md\")\na = t\nt = Path(\"safe.txt\")\nt, y = a, 1\nt.write_text(x)\n", true},
+		{"global restore function", "t = Path(\"MEMORY.md\")\na = t\n\ndef restore():\n    global t\n    t = a\n\nt = Path(\"safe.txt\")\nrestore()\nt.write_text(x)\n", true},
+		{"generator, then a copy back", "t = Path(\"MEMORY.md\")\na = t\nt = Path(\"safe.txt\")\ng = (t.write_text(x) for _ in s)\nt = a\nnext(g)\n", true},
+		{"generator, then the path again", "t = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\ng = (t.write_text(x) for _ in s)\nt = Path(\"MEMORY.md\")\nnext(g)\n", true},
+		{"nonlocal restore", "def outer():\n    t = Path(\"MEMORY.md\")\n    a = t\n\n    def restore():\n        nonlocal t\n        t = a\n\n    t = Path(\"safe.txt\")\n    restore()\n    t.write_text(x)\n", true},
+		{"walrus copy back", "t = Path(\"MEMORY.md\")\na = t\nt = Path(\"safe.txt\")\nif (t := a):\n    t.write_text(x)\n", true},
+		{"backslash-continued rebinding", "t = Path(\"MEMORY.md\")\nt = \\\n    Path(\"safe.txt\")\nt.write_text(x)\n", true},
+		{"walrus rebinding", "t = Path(\"MEMORY.md\")\n(t := Path(\"safe.txt\"))\nt.write_text(x)\n", true},
+		{"exec after the rebinding", "t = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nexec(code)\nt.write_text(x)\n", true},
+		{"import as after the rebinding", "t = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nfrom cfg import P as t\nt.write_text(x)\n", true},
 	} {
 		if got := pythonPathWriteMatch(rule, tc.source, "") != nil; got != tc.want {
 			t.Errorf("%s: pythonPathWriteMatch(%q) = %t, want %t", tc.name, tc.source, got, tc.want)
