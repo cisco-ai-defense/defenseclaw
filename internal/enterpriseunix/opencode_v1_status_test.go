@@ -143,7 +143,7 @@ func TestMachineWideOpenCodeV1IsOneWarningWithTheUserCount(t *testing.T) {
 				t.Fatalf("the machine-wide line names account %s: %q", user, line)
 			}
 		}
-		if !strings.Contains(line, "`enterprise policy show --json` lists them") {
+		if !strings.Contains(line, "unprotected-agents.json names them") {
 			t.Fatalf("the machine-wide line does not say where the accounts are listed: %q", line)
 		}
 	}
