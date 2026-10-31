@@ -430,8 +430,14 @@ func (controller *RetentionController) run(ctx context.Context) {
 				controller.publishStatus(controller.nextStatus(
 					RetentionStateDisabled, RetentionFailureNone, nil,
 				))
-			} else if prompt && !controller.runOnce(ctx) {
-				return
+			} else if prompt {
+				if !controller.runOnce(ctx) {
+					return
+				}
+			} else {
+				// A looser age or cap needs no run, but the health still has
+				// to show the policy now in force (a cap set back to 0).
+				controller.publishStatus(controller.Status())
 			}
 		default:
 			controller.publishStatus(controller.nextStatus(

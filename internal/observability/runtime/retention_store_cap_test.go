@@ -77,3 +77,43 @@ func TestRetentionControllerRunsForASizeCapAlone(t *testing.T) {
 		t.Fatal("a reaper without a size cap accepted one")
 	}
 }
+
+// A size cap set back to 0 (or any looser policy that needs no prompt run) is
+// still published, so gateway status stops showing the old cap without a
+// restart.
+func TestRetentionControllerPublishesALooserPolicyWithoutARun(t *testing.T) {
+	reaper := &cappedFakeRetentionReaper{fakeRetentionReaper: newFakeRetentionReaper(7)}
+	reaper.maxStoreMB.Store(128)
+	scheduler := newScriptedRetentionScheduler()
+	reporter := &recordingRetentionReporter{statuses: make(chan RetentionControllerStatus, 16)}
+	controller, err := newRetentionController(reaper, RetentionControllerOptions{
+		Scheduler: scheduler, Reporter: reporter,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	receiveRetentionTest(t, reaper.started)
+	reaper.responses <- fakeRetentionResponse{result: successfulRetentionResult()}
+	if got := receiveRetentionTest(t, reporter.statuses); got.MaxStoreMB != 128 {
+		t.Fatalf("startup status cap = %d, want 128", got.MaxStoreMB)
+	}
+	receiveRetentionTest(t, scheduler.waits)
+
+	controller.lifecycleMu.Lock()
+	err = controller.applyPolicyLocked(7, 0)
+	controller.lifecycleMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := receiveRetentionTest(t, reporter.statuses)
+	if got.MaxStoreMB != 0 || got.RetentionDays != 7 {
+		t.Fatalf("status after the cap was lowered to 0 = %#v, want cap 0 and 7 days", got)
+	}
+	if runs, _, _, _ := reaper.snapshot(); runs != 1 {
+		t.Fatalf("a looser policy started a run: %d runs, want 1", runs)
+	}
+	stopRetentionControllerTest(t, controller)
+}
