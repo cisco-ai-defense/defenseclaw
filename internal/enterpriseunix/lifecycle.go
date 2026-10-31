@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -1388,16 +1389,17 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		return nil, &codedError{code: codeConfig, err: fmt.Errorf("%s changed while %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
 			env.Layout.ConfigPath, writable, env.lifecycleCommand(ActionEnsure))}
 	}
-	// The applied config, unchanged, on the release that applied it: a
-	// refusal of it can only come from a policy file it names that was
-	// edited in place since (a required sandbox pack of openshell.admin or
-	// of a profile, a rule pack). That is no config to refuse but a policy
-	// that does not build, as policyAssetsChanged reports one the gateway's
-	// policy digest refuses: nothing is applied and the running gateway
-	// keeps the last good policy (GAP-0286).
+	// The applied config, unchanged, on the release that applied it, refused
+	// because a sandbox pack it names (the required pack of openshell.admin
+	// or of a profile) was edited in place into one that does not load: no
+	// config to refuse but a policy that does not build, as
+	// policyAssetsChanged reports one the gateway's policy digest refuses:
+	// nothing is applied and the running gateway keeps the last good policy
+	// (GAP-0286). Any other refusal (a destination's ACL, say) stays a
+	// config refusal.
 	unchangedApplied := record != nil && record.ProductVersion == p.version && sha256Bytes(raw) == record.ConfigSHA256
 	assetRefusal := func(err error) error {
-		if unchangedApplied {
+		if unchangedApplied && sandboxPackLoadError(err) {
 			return &codedError{code: codeConfigRefused, err: &policyAssetRefusedError{reason: err.Error()}}
 		}
 		return &codedError{code: codeConfig, err: err}
@@ -1529,7 +1531,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 	if err := env.checkCandidateAssets(validated); err != nil {
-		return nil, assetRefusal(err)
+		return nil, &codedError{code: codeConfig, err: err}
 	}
 	if err := env.checkRequiredSandboxPacks(validated.Loaded); err != nil {
 		return nil, assetRefusal(err)
@@ -3505,6 +3507,13 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 		return true, "policy_refused"
 	}
 	return true, "up_to_date"
+}
+
+// sandboxPackLoadError reports a refusal that a sandbox pack file caused
+// (packs.Error, or its words where a loader flattened it).
+func sandboxPackLoadError(err error) bool {
+	var pe *packs.Error
+	return errors.As(err, &pe) || strings.Contains(err.Error(), "sandbox pack /")
 }
 
 // policyAssetRefusedError is a policy file the applied, unchanged config
