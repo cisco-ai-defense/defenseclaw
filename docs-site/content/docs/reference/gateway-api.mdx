@@ -727,6 +727,11 @@ not an anchor. `span_id` narrows a `trace_id` anchor, and
 page with `limit` (at most 500), `after_time` and `after_id`. Unknown query
 keys are rejected, and each key may appear only once.
 
+In observe mode a hook tool call does not wait past its answer window for the
+ledger. When many hooks run at once and the audit database is busy, the call
+is still evaluated and audited, without its links to other calls, instead of
+reaching the hook too late. Action mode waits for the ledger.
+
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/v1/correlation/graph` | Return the evidence-backed identity graph around an anchor. |
