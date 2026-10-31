@@ -191,6 +191,7 @@ Shell can express the same write in many ways, and some unusual forms are not re
 - **Command text built when it runs.** A command that joins strings, fills in variables or decodes a value while it runs, and then runs the result, has no fixed text for the hook to check beforehand.
 - **A link made by git, then a write.** A git command such as a pull or a checkout can create a symbolic link from the repository's content. A write later in the same command that goes through that new link can reach the file the link points to, because the link does not exist yet when the hook reads the command.
 - **Link text with line breaks.** A link whose text has line breaks is a limit of the command reader.
+- **A socket opened from an interpreter command line.** The deterministic socket rule recognises the minimal one-liner form only. Other spellings are left to the LLM judge.
 
 The LLM judge (the LLM guardrail) is the second layer for protected-file access. If you need more than the command reader gives, turn it on; see [Optional LLM judge](/docs/policies/deterministic-detection#optional-llm-judge).
 
