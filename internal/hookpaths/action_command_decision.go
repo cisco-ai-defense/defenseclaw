@@ -116,6 +116,11 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 	}
 	patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
 	writes = append(writes, patches...)
+	// The new name of a disk link to the keys file that the command moves
+	// does not exist on the disk yet (rel-1-0-6:GAP-0045).
+	if !windowsHome && actionMovedDiskLinkWrite(command, cwd, home, writes) {
+		return true
+	}
 	msys := func(value string) string {
 		if windowsHome && runtime.GOOS == "windows" {
 			return actionMSYSDrivePath(value) // Git Bash /c/... (GAP-0781 RV8-1)
