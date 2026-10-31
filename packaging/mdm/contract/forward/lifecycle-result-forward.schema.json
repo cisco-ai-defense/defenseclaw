@@ -59,6 +59,9 @@
     "installed": {
       "type": "boolean"
     },
+    "pending_apply": {
+      "type": "boolean"
+    },
     "transaction_pending": {
       "type": "boolean"
     },

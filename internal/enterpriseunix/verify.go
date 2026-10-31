@@ -120,9 +120,26 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			r.InstalledVersion = record.ProductVersion
 		}
 		if busyMessage == "" {
-			busyMessage = errLockBusy.Error() + "; " + readOnlyBusyNextStep(env.LockTimeout, ActionStatus)
+			holder := errLockBusy.Error()
+			if pending != nil && pending.Action != "" {
+				// Name the run and how far it got, from its intent record.
+				detail := pending.Action
+				if pending.Phase != "" {
+					detail += ", phase " + pending.Phase
+				}
+				holder += " (" + detail + ")"
+			}
+			busyMessage = holder + "; " + readOnlyBusyNextStep(env.LockTimeout, ActionStatus)
 		}
-		r.AddError(codeBusy, busyMessage)
+		// A change being applied is a pending apply, not an unhealthy
+		// deployment: rapid config pushes read ok false with a
+		// lifecycle_busy error until each apply ended (GAP-0129). The code
+		// stays (as a warning) and so does exit 75, which detect.sh and
+		// management agents read as busy and retry; verify, which checks
+		// health, still fails busy.
+		r.PendingApply = true
+		r.AddWarning(codeBusy, busyMessage)
+		r.MarkCoverageIncomplete(codeBusy)
 		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if record == nil {

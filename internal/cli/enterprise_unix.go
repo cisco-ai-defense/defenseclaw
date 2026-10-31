@@ -243,7 +243,7 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	case "verify":
 		cmd.Long = summary + ".\n\nverify first waits up to 5s for another lifecycle run to finish. If that run is still going, it checks nothing and exits 75 (lifecycle_busy)."
 	case "status":
-		cmd.Long = summary + ".\n\nRun as root, status first waits up to 5s for another lifecycle run to finish. If that run is still going, it reports the installed version, checks nothing else and exits 75 (lifecycle_busy)."
+		cmd.Long = summary + ".\n\nRun as root, status first waits up to 5s for another lifecycle run to finish. If that run is still going, the change is pending apply, which is not a failure: status reports ok with pending_apply and the installed version, names the run in a lifecycle_busy warning, checks nothing else and exits 75 so you run it again."
 	}
 	if action == "status" || action == "verify" {
 		cmd.Long += sandboxRowsHelp

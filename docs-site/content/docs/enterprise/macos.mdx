@@ -269,7 +269,10 @@ pkgutil --pkg-info com.cisco.defenseclaw.enterprise   # pkg installs only
 
 `status` reports the state. `verify` also checks every file, permission (including
 macOS ACL entries), LaunchDaemon and readiness check, and exits `1` when anything
-fails. The JSON has the same shape as the [Linux sample](/docs/enterprise/linux#verify-the-install).
+fails. `repair` removes only the ACL entries that are wrong: one that lets another
+account change a DefenseClaw file or reach a private one, or that keeps the
+`_defenseclaw` service account from reading `etc/policies` and the packs in it. Other entries
+stay. The JSON has the same shape as the [Linux sample](/docs/enterprise/linux#verify-the-install).
 
 | Field | Healthy value |
 | --- | --- |

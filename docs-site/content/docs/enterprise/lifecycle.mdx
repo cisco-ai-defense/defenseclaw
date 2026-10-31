@@ -308,7 +308,7 @@ The managed config is administrator-owned. For what it contains, see
 2. Run Setup as LocalSystem ([Run Setup as LocalSystem](/docs/enterprise/windows#run-setup-as-localsystem)) with `/uninstall JSON=1`, without `PURGE=1`, so each user's `%USERPROFILE%\.defenseclaw` stays. It removes the trust anchors, the bundle state and the rest of the machine state ([Remove](/docs/enterprise/windows#remove)). It removes the connector registrations of each user with an active (connected) session. A user who is signed out, or whose session is disconnected, keeps an inert registration and is named in the `user_registrations_pending` warning; that is expected here and needs no `/repair`. From an elevated prompt instead of LocalSystem every user is named, except the Claude Code registration of the account running Setup, which is removed.
 3. Run Setup as LocalSystem with `/ensure CONFIG=<file> JSON=1`. It installs again from that config and enrolls the users again: a signed-in user at once, a signed-out user at their next sign-in (until then `status` counts their connectors as pending). Later changes go through `/ensure CONFIG=` as on any device without anchors.
 
-A change is applied by the apply trigger on Linux and macOS. While it runs, `status` and `verify` report `lifecycle_busy` and exit `75`; that is not a failure, so run them again. A hand edit of the config as root is applied, not reported as drift.
+A change is applied by the apply trigger on Linux and macOS. While it runs, `status` reports the change as pending apply (`ok: true`, `pending_apply: true`, a `lifecycle_busy` warning) and `verify` reports `lifecycle_busy`; both exit `75`. That is not a failure, so run them again. A hand edit of the config as root is applied, not reported as drift.
 
 On Linux and macOS you can also hand the new file to `ensure`. It validates the file,
 installs it as the managed config (mode `0640`, owner root, group of the service account),
@@ -330,8 +330,9 @@ If the new config is invalid, `ensure` fails and the installed config stays (`co
 ### Applying a config change
 
 `status` and `verify` wait up to 5 seconds for a running apply trigger. If it is still
-running (usually under a minute), they report `lifecycle_busy`, exit `75` and say a
-configuration change is being applied. That is not a failure and needs no repair: run them
+running (usually under a minute), they exit `75` and say a configuration change is being
+applied: `status` reports it as pending apply (`ok: true`, `pending_apply: true`, a
+`lifecycle_busy` warning), `verify` as the `lifecycle_busy` error. That is not a failure and needs no repair: run them
 again when it finishes.
 
 **A hand edit of the config is applied, not reported as drift.** When you edit the managed
