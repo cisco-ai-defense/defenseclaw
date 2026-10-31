@@ -48,11 +48,25 @@ func TestV9SchemaRefusalNamesMovedStorePathKey(t *testing.T) {
 			!strings.Contains(err.Error(), "did you mean "+home+"?") {
 			t.Errorf("top-level %s = %v (%+v)", key, err, schemaErr)
 		}
+		// The managed ensure and validate refusals add the same key (GAP-0188).
+		if hint, ok := schemaErr.MovedKeyHint(); !ok || hint != "it moved to "+home {
+			t.Errorf("top-level %s hint = %q, %t", key, hint, ok)
+		}
 	}
 	err := ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\nguardrail:\n  audit_db: /tmp/store.db\n"))
 	var schemaErr *V8SchemaError
 	if !errors.As(err, &schemaErr) || schemaErr.Suggestion == "observability.local.path" {
 		t.Errorf("nested audit_db = %v (%+v)", err, schemaErr)
+	}
+	if hint, ok := schemaErr.MovedKeyHint(); ok {
+		t.Errorf("nested audit_db hint = %q", hint)
+	}
+	err = ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\naudit_dbx: /tmp/store.db\n"))
+	if !errors.As(err, &schemaErr) {
+		t.Fatalf("typo = %v", err)
+	}
+	if hint, ok := schemaErr.MovedKeyHint(); ok {
+		t.Errorf("audit_dbx hint = %q", hint)
 	}
 }
 

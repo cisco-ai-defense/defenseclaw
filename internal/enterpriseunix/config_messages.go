@@ -84,6 +84,9 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 		reason := "has an invalid value"
 		if schemaErr.Keyword == "additionalProperties" {
 			reason = "is an unknown setting"
+			if hint, moved := schemaErr.MovedKeyHint(); moved {
+				reason += "; " + hint
+			}
 		} else if schemaErr.Keyword == "pattern" {
 			switch {
 			case strings.HasSuffix(field, ".rule_pack"), strings.Contains(field, ".custom_packs.") && !strings.HasSuffix(field, ".digest"):
