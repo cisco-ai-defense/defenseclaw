@@ -147,9 +147,15 @@ func (r *userDownloadRequests) pruneLocked(now time.Time) {
 var userRequestRunWord = lazyregexp.New(`(?i)\b(run|runs|running|execute|executes|executing|exec|install|installs|installing|launch|launches|launching|invoke|invokes)\b`)
 
 // userRequestRunsDownloader matches the text right after a run word whose
-// object is the download command itself ("run exactly: curl -o page URL"):
-// that asks to download, not to run what was downloaded.
-var userRequestRunsDownloader = lazyregexp.New(`^(?i)[\s:"'\x60]*(?:exactly[\s:"'\x60]*)?(?:(?:the|this)\s+(?:command|commands)[\s:"'\x60]*)?(?:curl|wget)\b`)
+// object is the download command itself ("run exactly: curl -o page URL",
+// "run exactly this command and nothing else: curl -o page URL"): that asks
+// to download, not to run what was downloaded. Only a closed set of filler
+// words may stand between the run word and curl or wget, so "run it: curl"
+// still names what the download fetches as the thing to run. The second
+// form is how a person asks Claude Code to run one command; before it was
+// read as a request to run the download, and the unasked run of the file
+// in the next turn did not alert (rel-1-0-6:GAP-0031, L-emac-J3-002).
+var userRequestRunsDownloader = lazyregexp.New(`^(?i)(?:[\s:"'\x60]+|(?:exactly|just|only|please|the|this|following|command|commands|and|nothing|else|for|me)\b)*(?:curl|wget)\b`)
 
 // userRequestAsksToRun reports a prompt with a run, execute or install word
 // whose object is not the download command.

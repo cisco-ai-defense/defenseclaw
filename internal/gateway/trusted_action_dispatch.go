@@ -295,7 +295,7 @@ func dispatchTrustedAction(
 			if !analyzed {
 				facts = actionfacts.Analyze(request.Input)
 			}
-			request.record(facts, findings)
+			request.record(toolChainPlacedFacts(facts, request), findings)
 		}()
 	}
 	if parent == nil {
