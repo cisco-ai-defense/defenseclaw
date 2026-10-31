@@ -68,8 +68,11 @@ func setupTestEnv(t *testing.T) (cfg *config.Config, store *audit.Store, logger 
 		QuarantineDir: filepath.Join(tmpDir, "quarantine"),
 		PolicyDir:     filepath.Join(tmpDir, "policies"),
 		Scanners: config.ScannersConfig{
-			SkillScanner: config.SkillScannerConfig{Binary: "skill-scanner"},
-			MCPScanner:   config.MCPScannerConfig{Binary: "mcp-scanner"},
+			// Never a scanner installed on the test host: its --version
+			// probe (the rescan fingerprint) took 2.5 s idle and over 5 s
+			// under CPU load (p0-round GAP-1423).
+			SkillScanner: config.SkillScannerConfig{Binary: filepath.Join(tmpDir, "no-host-scanner", "skill-scanner")},
+			MCPScanner:   config.MCPScannerConfig{Binary: filepath.Join(tmpDir, "no-host-scanner", "mcp-scanner")},
 		},
 		Watch: config.WatchConfig{
 			DebounceMs: 100,
@@ -105,8 +108,11 @@ func setupQuarantineProvenanceTestEnv(
 		QuarantineDir: filepath.Join(tmpDir, "quarantine"),
 		PolicyDir:     filepath.Join(tmpDir, "policies"),
 		Scanners: config.ScannersConfig{
-			SkillScanner: config.SkillScannerConfig{Binary: "skill-scanner"},
-			MCPScanner:   config.MCPScannerConfig{Binary: "mcp-scanner"},
+			// Never a scanner installed on the test host: its --version
+			// probe (the rescan fingerprint) took 2.5 s idle and over 5 s
+			// under CPU load (p0-round GAP-1423).
+			SkillScanner: config.SkillScannerConfig{Binary: filepath.Join(tmpDir, "no-host-scanner", "skill-scanner")},
+			MCPScanner:   config.MCPScannerConfig{Binary: filepath.Join(tmpDir, "no-host-scanner", "mcp-scanner")},
 		},
 		Watch: config.WatchConfig{DebounceMs: 100, AutoBlock: true},
 	}
