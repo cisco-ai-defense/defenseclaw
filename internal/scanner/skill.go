@@ -464,7 +464,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		return result, err
 	}
 
-	scanPath, unstage, err := stageUTF16Skill(target)
+	scanPath, metadata, unstage, err := stageSkill(target)
 	defer unstage()
 	if err != nil {
 		result.Duration = time.Since(start)
@@ -517,7 +517,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 			scanErr = fmt.Errorf("scanner: failed to parse %s output: %w (stderr=%s)", s.Name(), parseErr, stderrStr)
 			return nil, scanErr
 		}
-		result.Findings = findings
+		result.Findings = append(findings, metadataFindings(metadata)...)
 	}
 
 	// Fail closed on any non-zero exit even when stdout parsed: exit 2 is
