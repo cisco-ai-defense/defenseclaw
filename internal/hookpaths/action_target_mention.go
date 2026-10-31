@@ -133,11 +133,14 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		if stateOnly {
 			return actionProtectedStatePath(operand, stateHome)
 		}
-		if _, resolved := ResolveWriteTarget(operand); !resolved && samePathName(filepath.Clean(operand), ssh) {
+		if _, resolved := ResolveWriteTarget(operand); !resolved {
 			// A gateway behind ProtectHome cannot resolve the home: a word
-			// that names the .ssh directory itself is still that directory,
-			// as a per-user gateway reads it (rel-1-0-6:GAP-0130).
-			return true
+			// that names the .ssh directory itself (rel-1-0-6:GAP-0130) or
+			// one of its authorized-keys files (rel-1-0-6:GAP-0046) is still
+			// that path, as a per-user gateway reads it.
+			if clean := filepath.Clean(operand); samePathName(clean, ssh) || protected.has(clean) {
+				return true
+			}
 		}
 		return protectedReachPath(operand, protected, ssh)
 	}
