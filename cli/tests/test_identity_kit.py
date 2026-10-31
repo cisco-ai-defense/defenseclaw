@@ -44,7 +44,12 @@ REGION_END = "# endregion graph client"
 
 def test_intune_bundle_package_requires_equivalent_base_rule_pack() -> None:
     script = (ROOT / "packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1").read_text()
-    assert "if ($BundlePath -and -not $BaseConfigPath)" in script
+    # A bundle-only app (-BundlePath alone) needs the base app's config, whose
+    # rule pack must equal the bundle's. The single app (-ConfigPath with
+    # -BundlePath, fix/r106-intune-scripted) carries its own config, which no
+    # service runs on, so it takes no -BaseConfigPath.
+    assert "if ($BundlePath -and -not $ConfigPath -and -not $BaseConfigPath) { throw '-BaseConfigPath is required with -BundlePath alone" in script
+    assert "if ($BundlePath -and $ConfigPath -and $BaseConfigPath) { throw '-BaseConfigPath is only for a bundle-only app" in script
     assert "base CONFIG= guardrail policy differs from the signed bundle's" in script
     assert script.index("($baseLines -join \"`n\") -cne $bundleBlock") < script.index("$setup = (Resolve-Path")
     assert "it must equal config_sha256 in the base app's intune-package.json" in script
