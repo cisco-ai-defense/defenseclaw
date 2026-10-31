@@ -73,8 +73,11 @@ def test_active_policy_is_the_activated_one_of_two_equal_presets(policy_dir: Pat
     # `policy activate` named is the active one, until the config changes.
     from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
 
+    # UTF-8 both ways: strict.yaml has non-ASCII comments, and the Windows
+    # locale default (cp1252) would make the copy unreadable to the loader.
     (policy_dir / "w5-team.yaml").write_text(
-        open(pc.policy_file("strict", policy_dir), encoding="utf-8").read().replace("name: strict", "name: w5-team")
+        Path(pc.policy_file("strict", policy_dir)).read_text(encoding="utf-8").replace("name: strict", "name: w5-team"),
+        encoding="utf-8",
     )
     cfg = default_config()
     cfg.policy_dir = str(policy_dir)
