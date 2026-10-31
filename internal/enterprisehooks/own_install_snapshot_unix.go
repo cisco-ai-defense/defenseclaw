@@ -56,6 +56,7 @@ var ownInstallSnapshotTopFiles = []string{
 	".hermes-lifecycle.lock",
 	"removed-connectors-logged.json",
 	"session-facts.json",
+	"watcher-created-dirs.json",
 	PersonalClaudeHookCopyName,
 }
 

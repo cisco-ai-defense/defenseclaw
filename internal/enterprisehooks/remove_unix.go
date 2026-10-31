@@ -91,6 +91,9 @@ func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts 
 	if err := conn.Teardown(ctx, setupOpts); err != nil {
 		return fmt.Errorf("enterprise hooks: connector %s teardown failed: %w", conn.Name(), err)
 	}
+	// The agent folders the install created for this connector, and its
+	// connector_backups folder, go once empty (rel-1-0-6 GAP-0207).
+	connector.RemoveCreatedDirsOf(conn, setupOpts)
 	// A hooks folder this account cannot search (a root-owned
 	// ~/.defenseclaw/hooks made by sudo with HOME kept) holds nothing the
 	// account's agents can read or run, and nothing this worker can remove
