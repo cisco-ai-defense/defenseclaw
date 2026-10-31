@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -1794,13 +1795,13 @@ func projectRemoteArtifactChainSteps(
 		}
 	}
 	if downloaded, ok := actionfacts.ExactRemoteArtifactDownloadIntent(facts); ok {
-		digest, exact := exactPathDigest(downloaded)
+		digest, exact := exactArtifactIntentPathDigest(downloaded)
 		addToolChainStep(projection, directChainID, 1, exact, false)
 		if exact {
 			setToolChainEnforcementJoinDigest(projection, directChainID, digest)
 		}
 	} else if downloaded, ok := actionfacts.BoundedRemoteArtifactDownloadIntent(facts); ok {
-		digest, exact := exactPathDigest(downloaded)
+		digest, exact := exactArtifactIntentPathDigest(downloaded)
 		addToolChainStep(projection, directChainID, 1, exact, false)
 		if exact {
 			setToolChainEnforcementJoinDigest(projection, directChainID, digest)
@@ -1831,15 +1832,18 @@ func projectRemoteArtifactChainSteps(
 		}
 	}
 	if executed, ok := actionfacts.ExactArtifactExecutionIntent(facts); ok {
+		artifactDigest, artifactExact := exactArtifactIntentPathDigest(executed)
+		addToolChainStep(projection, directChainID, 2, artifactExact, false)
+		if artifactExact {
+			setToolChainEnforcementJoinDigest(projection, directChainID, artifactDigest)
+		}
 		digest, exact := exactPathDigest(executed)
-		addToolChainStep(projection, directChainID, 2, exact, false)
 		addToolChainStep(projection, sensitiveEgressChainID, 2, exact, false)
 		if exact {
-			setToolChainEnforcementJoinDigest(projection, directChainID, digest)
 			setToolChainEnforcementJoinDigest(projection, sensitiveEgressChainID, digest)
 		}
 	} else if executed, ok := actionfacts.BoundedArtifactExecutionIntent(facts); ok {
-		digest, exact := exactPathDigest(executed)
+		digest, exact := exactArtifactIntentPathDigest(executed)
 		addToolChainStep(projection, directChainID, 2, exact, false)
 		if exact {
 			setToolChainEnforcementJoinDigest(projection, directChainID, digest)
@@ -1944,8 +1948,37 @@ func exactPathDigest(candidate actionfacts.PathFact) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	return pathIdentityDigest(identity), true
+}
+
+func pathIdentityDigest(identity string) string {
 	digest := sha256.Sum256([]byte("defenseclaw/tool-chain/path-identity/v1\x00" + identity))
-	return hex.EncodeToString(digest[:]), true
+	return hex.EncodeToString(digest[:])
+}
+
+// exactArtifactIntentPathDigest is exactPathDigest for the artifact of a
+// download or run intent of chain.download_then_execute_same_artifact
+// (#1390). On a Windows host it also reads a Git Bash drive-letter spelling
+// (C:/x or C:\x, which the POSIX reading leaves relative) as that drive
+// file, so it joins the same file spelled /c/x or C:\x
+// (rel-1-0-6:GAP-0182). Other chains keep exactPathDigest.
+func exactArtifactIntentPathDigest(candidate actionfacts.PathFact) (string, bool) {
+	if identity, ok := gitBashDriveLetterIdentity(candidate); ok {
+		return pathIdentityDigest("windows\x00" + identity), true
+	}
+	return exactPathDigest(candidate)
+}
+
+// gitBashDriveLetterIdentity is the Windows identity (lower case, forward
+// slashes, as gitBashDriveIdentity) of a POSIX-shell operand spelled with a
+// drive letter, on a Windows host only; elsewhere C:/x is a relative path.
+func gitBashDriveLetterIdentity(candidate actionfacts.PathFact) (string, bool) {
+	value := candidate.Value
+	if !toolChainDriveMounts || candidate.Flavor != actionfacts.PathFlavorPOSIX ||
+		!actionfacts.DriveLetterPath(value) || strings.ContainsRune(value, '\x00') {
+		return "", false
+	}
+	return strings.ToLower(value[:2] + path.Clean(strings.ReplaceAll(value[2:], `\`, "/"))), true
 }
 
 func exactSingleReadPathDigest(facts actionfacts.Facts) (string, bool) {

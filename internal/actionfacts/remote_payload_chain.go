@@ -286,7 +286,7 @@ func remoteArtifactDownloadIntentSource(facts Facts, allowUncertainControlFlow b
 		if command.ID == selectedCommandID {
 			continue
 		}
-		if commandMutatesResolvedPath(facts, command.ID, selected.Resolved) {
+		if commandMutatesIntentArtifact(facts, command.ID, selected) {
 			return PathFact{}, "", false
 		}
 	}
@@ -329,7 +329,7 @@ func remoteDownloadIntentPath(facts Facts, command CommandFact) (PathFact, strin
 			candidate.Flavor == PathFlavorDevice {
 			continue
 		}
-		if candidate.Flavor != PathFlavorPOSIX || !strings.HasPrefix(candidate.Resolved, "/") {
+		if !intentArtifactPath(candidate) {
 			return PathFact{}, "", false
 		}
 		artifact = candidate
@@ -449,7 +449,7 @@ func ExactArtifactExecutionIntent(facts Facts) (PathFact, bool) {
 		if command.ID == selectedCommandID {
 			continue
 		}
-		if commandMutatesResolvedPath(facts, command.ID, selected.Resolved) {
+		if commandMutatesIntentArtifact(facts, command.ID, selected) {
 			return PathFact{}, false
 		}
 	}
@@ -522,7 +522,7 @@ func BoundedArtifactExecutionIntent(facts Facts) (PathFact, bool) {
 	}
 	for _, command := range facts.Commands {
 		if command.ID != selectedCommandID &&
-			commandMutatesResolvedPath(facts, command.ID, selected.Resolved) {
+			commandMutatesIntentArtifact(facts, command.ID, selected) {
 			return PathFact{}, false
 		}
 	}
@@ -550,8 +550,7 @@ func exactLiteralArgumentPath(facts Facts, command CommandFact, index int) (Path
 		[]CommandFact{command},
 	)
 	candidate := candidates[0]
-	if candidate.Flavor != PathFlavorPOSIX || candidate.Resolved == "" ||
-		!strings.HasPrefix(candidate.Resolved, "/") {
+	if !intentArtifactPath(candidate) {
 		return PathFact{}, false
 	}
 	return candidate, true
@@ -592,14 +591,54 @@ func exactSingleResolvedCommandPath(facts Facts, commandID int64, access PathAcc
 		if candidate.CommandID != commandID || candidate.Access != access {
 			continue
 		}
-		if candidate.Resolved == "" || candidate.Flavor != PathFlavorPOSIX ||
-			!strings.HasPrefix(candidate.Resolved, "/") {
+		if !intentArtifactPath(candidate) {
 			return PathFact{}, false
 		}
 		selected = candidate
 		count++
 	}
 	return selected, count == 1
+}
+
+// intentArtifactPath reports a POSIX-shell operand that a detection-only
+// chain intent (#1390) may name as its artifact: an absolute resolved path,
+// or a literal drive-letter spelling (C:/x, C:\x) that Git Bash on Windows
+// opens as that drive file although the POSIX reading leaves it relative
+// (rel-1-0-6:GAP-0182). Whether a drive spelling is an exact join identity
+// is the caller's choice (the gateway knows its host OS); facts never
+// resolve it.
+func intentArtifactPath(candidate PathFact) bool {
+	if candidate.Flavor != PathFlavorPOSIX {
+		return false
+	}
+	return strings.HasPrefix(candidate.Resolved, "/") || DriveLetterPath(candidate.Value)
+}
+
+// DriveLetterPath reports a literal drive-letter path spelling: one ASCII
+// letter, a colon, then a forward or back slash (C:/x, c:\x).
+func DriveLetterPath(value string) bool {
+	return len(value) >= 3 && isASCIILetter(value[0]) && value[1] == ':' &&
+		(value[2] == '/' || value[2] == '\\')
+}
+
+// commandMutatesIntentArtifact is commandMutatesResolvedPath for an intent
+// artifact. A drive spelling the POSIX reading left unresolved is matched by
+// its literal text, so an unrelated unresolved write does not hide it.
+func commandMutatesIntentArtifact(facts Facts, commandID int64, artifact PathFact) bool {
+	if artifact.Resolved != "" {
+		return commandMutatesResolvedPath(facts, commandID, artifact.Resolved)
+	}
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID != commandID || candidate.Resolved != "" ||
+			candidate.Value != artifact.Value {
+			continue
+		}
+		switch candidate.Access {
+		case PathAccessWrite, PathAccessAppend, PathAccessDelete:
+			return true
+		}
+	}
+	return false
 }
 
 func hasExactFileProcessFileFlow(facts Facts, commandID int64) bool {
