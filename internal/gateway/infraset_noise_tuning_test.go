@@ -8,6 +8,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -475,6 +476,14 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		}
 		if home == "" {
 			home = "/home/alice"
+			if runtime.GOOS == "windows" && test.name == "ssh config redirect" {
+				// A Windows account's home is a drive path; the
+				// authorized-keys rows also match by name, but
+				// ~/.ssh/config is judged by its resolved path, which a
+				// POSIX home does not give on Windows. The same write
+				// under the real Windows home must block (GAP-2586).
+				home = `C:\Users\alice`
+			}
 		}
 		args := []byte(`{"command":` + strconv.Quote(test.command) + `}`)
 		tool := "Bash"
