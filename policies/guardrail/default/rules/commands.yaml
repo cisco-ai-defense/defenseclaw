@@ -57,8 +57,6 @@ rules:
   - id: CMD-PIPE-CURL
     tool_call_only: true
     expression: 'false'
-    # Candidate discovery covers POSIX curl pipelines and PowerShell web-cmdlet
-    # aliases. The exact fallback contract proves stdout-to-interpreter flow.
     pattern: 'a^'
     title: "curl piped to shell"
     severity: HIGH
@@ -66,16 +64,38 @@ rules:
     tags: [execution, download-exec]
   - id: CMD-PIPE-WGET
     tool_call_only: true
-    expression: >-
-      f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] &&
-      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations ||
-      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))
-    # Closes (parity with CMD-PIPE-CURL above).
-    pattern: '(?i)\bwget\b\s+[^|]*\|\s*(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\b'
+    expression: 'false'
+    pattern: 'a^'
     title: "wget piped to shell"
     severity: HIGH
     confidence: 0.95
     tags: [execution, download-exec]
+  - id: CMD-WRAPPED-DOWNLOAD-EXEC
+    tool_call_only: true
+    expression: 'false'
+    pattern: 'a^'
+    title: "Download piped through a privilege wrapper to a shell"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [execution, download-exec]
+  - id: CMD-SUBST-DOWNLOAD-EXEC
+    tool_call_only: true
+    expression: 'false'
+    pattern: 'a^'
+    title: "Downloaded command substitution evaluated by a shell"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [execution, download-exec]
+  - id: CMD-PYTHON-SOCKET-CONNECT
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.program in ['python', 'python2', 'python3'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations)
+    pattern: 'a^'
+    title: "Python code connects to a nonlocal socket"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [execution, network]
   - id: CMD-PIPE-BASE64
     tool_call_only: true
     expression: >-

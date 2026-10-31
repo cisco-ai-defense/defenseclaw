@@ -104,7 +104,25 @@
       ]
     },
     {
+      "id": "CMD-PYTHON-SOCKET-CONNECT",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-SUBST-DOWNLOAD-EXEC",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
       "id": "CMD-WGET-POST",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-WRAPPED-DOWNLOAD-EXEC",
       "axes": [
         "egress_external"
       ]
