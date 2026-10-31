@@ -4317,11 +4317,25 @@ func maskCmdMklinkCalls(file *syntax.File, command, home string) string {
 		for i, arg := range call.Args {
 			words[i], static[i] = StaticWord(arg, home)
 		}
-		if _, ok := cmdMklinkArgs(words, static); ok {
-			start, end := int(call.Pos().Offset()), int(call.End().Offset())
-			for i := start; i < end && i < len(masked); i++ {
-				masked[i] = " "[0]
+		start, end := int(call.Pos().Offset()), int(call.End().Offset())
+		if _, ok := cmdMklinkArgs(words, static); !ok {
+			// A literal shell body (bash -lc 'cmd //c "mklink /J L E"; ...')
+			// is read as its own command (commandLinks, GAP-2526): when its
+			// only link text is mklink calls cmdMklinkArgs reads, the body
+			// word is no opaque link text either (rel-1-0-4:GAP-2534).
+			body := literalShellBody(programBase(words[0]), words, static)
+			if body == "" || !strings.Contains(strings.ToLower(body), "mklink") {
+				return true
 			}
+			inner, parsed := parseShell(body)
+			if !parsed || opaqueLink.MatchString(maskCmdMklinkCalls(inner, body, home)) {
+				return true
+			}
+			last := call.Args[len(call.Args)-1]
+			start, end = int(last.Pos().Offset()), int(last.End().Offset())
+		}
+		for i := start; i < end && i < len(masked); i++ {
+			masked[i] = " "[0]
 		}
 		return true
 	})
