@@ -2203,6 +2203,7 @@ snapshot() {
         [[ -L "${BIN_DIR}/${link}" ]] && { cp -P "${BIN_DIR}/${link}" "${SNAP}/bin/${link}" || return 1; }
     done
     write_busy_shim
+    wait_cli_calls_done
     while IFS= read -r name; do
         cp -Rp "${DEFENSECLAW_HOME}/${name}" "${SNAP}/data/" || return 1
     done < <(data_entries)
@@ -2343,6 +2344,30 @@ EOF
 publish_link() {
     local new="${BIN_DIR}/.$2.new"
     rm -f "${new}" && ln -s "$1" "${new}" && mv -f "${new}" "${BIN_DIR}/$2"
+}
+
+# wait_cli_calls_done: with the busy shim in place, wait (at most 15 s) for
+# CLI calls of this account that already started from the old venv. Moving the
+# venv under a call that was still importing failed it with
+# ModuleNotFoundError, or had the shell run the entry script (rel-1-0-6
+# GAP-0105). A process that keeps running (the TUI) is not waited for longer.
+wait_cli_calls_done() {
+    local deadline=$((SECONDS + 15)) pid argv0 busy
+    [[ -d "${VENV}" ]] || return 0
+    while (( SECONDS < deadline )); do
+        busy=""
+        for pid in $(pgrep -u "$(id -u)" 2>/dev/null); do
+            [[ "${pid}" == "$$" ]] && continue
+            argv0=""
+            IFS= read -r -d '' argv0 < <(process_argv "${pid}" 2>/dev/null) || [[ -n "${argv0}" ]] || continue
+            case "${argv0}" in
+                "${VENV}"/bin/*) busy=1; break ;;
+            esac
+        done
+        [[ -z "${busy}" ]] && return 0
+        sleep 0.2
+    done
+    return 0
 }
 
 # restore_links SLOT: put back the CLI links SLOT saved, over the busy shim.
@@ -2938,6 +2963,7 @@ stash_live() {
         [[ -L "${BIN_DIR}/${link}" ]] && { cp -P "${BIN_DIR}/${link}" "${slot}/bin/${link}" || return 1; }
     done
     write_busy_shim
+    wait_cli_calls_done
     while IFS= read -r name; do
         mv "${DEFENSECLAW_HOME}/${name}" "${slot}/data/" || return 1
     done < <(data_entries)
