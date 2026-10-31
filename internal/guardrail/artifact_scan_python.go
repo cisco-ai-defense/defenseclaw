@@ -66,13 +66,49 @@ func pythonPathWriteMatch(rule *regexp.Regexp, source, script string) []int {
 		// A path assigned to a name is a write when a later statement uses
 		// that name as the path argument. This covers Path.home()/"name"
 		// followed by open(target, "a"), the common skill-script form.
+		// A later plain rebinding of the name at the same or an outer level
+		// (target = Path("safe.txt")) ends that: writes after it act on the
+		// new value (GAP-1312).
 		for offset, later := range lines[lineNo+1:] {
 			if pythonLineWritesName(later, callLines[lineNo+1+offset], assign[1]) {
 				return hit
 			}
+			if pythonLineRebinds(later, callLines[lineNo+1+offset], assign[1], pythonIndent(line)) {
+				break
+			}
 		}
 	}
 	return nil
+}
+
+// pythonLineRebinds reports whether line is a plain `name = value` statement
+// at indent or less (not inside a branch or loop body of the first
+// assignment) whose value does not use name, so the name no longer holds the
+// earlier path. A line the scan cannot read as one statement (a semicolon or
+// an open bracket) is not a rebinding.
+func pythonLineRebinds(line, calls, name string, indent int) bool {
+	assign := pythonAssignment.FindStringSubmatchIndex(calls)
+	if len(assign) != 4 || calls[assign[2]:assign[3]] != name || pythonIndent(line) > indent {
+		return false
+	}
+	value := calls[assign[1]:]
+	if strings.HasPrefix(value, "=") || strings.ContainsAny(value, ";\\") || containsPythonName(value, name) {
+		return false
+	}
+	depth := 0
+	for _, c := range value {
+		switch c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		}
+	}
+	return depth == 0
+}
+
+func pythonIndent(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t"))
 }
 
 // pythonLineWritesPath reports whether a write call on line acts on the

@@ -291,3 +291,24 @@ def test_hermes_user_memory_copy_is_flagged(tmp_path):
         ("COG-TAMPER", "copy.py:7"),
         ("COG-TAMPER", "copy.py:8"),
     ]
+
+
+def test_rebound_python_path_is_not_the_old_path(tmp_path):
+    """GAP-1312: a name rebound to safe.txt before the write is not a MEMORY.md write."""
+    from defenseclaw.scanner.plugin_scanner.helpers import python_source
+
+    def written(src: str) -> bool:
+        py = python_source(src)
+        assert py is not None
+        return py.path_written(next(i for i, line in enumerate(src.split("\n")) if "MEMORY.md" in line))
+
+    assert not written(
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\ntarget = Path("safe.txt")\ntarget.write_text("hello")\n'
+    )
+    assert not written(
+        'def f():\n    target = Path("MEMORY.md")\n    target = Path("safe.txt")\n    with open(target, "a") as fh:\n        fh.write("x")\n'
+    )
+    assert written('target = Path("MEMORY.md")\ntarget.write_text("hello")\ntarget = Path("safe.txt")\n')
+    assert written('target = Path("MEMORY.md")\nif other:\n    target = Path("safe.txt")\ntarget.write_text("hello")\n')
+    assert written('target = Path.home() / "MEMORY.md"\ntarget = target.resolve()\ntarget.write_text("hello")\n')
+    assert written('target = Path("MEMORY.md")\nalias = target\ntarget = Path("safe.txt")\nalias.write_text("hello")\n')

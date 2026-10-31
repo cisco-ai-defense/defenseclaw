@@ -259,12 +259,15 @@ _PY_ASSIGN_OPS = frozenset({"=", "+=", "-=", "*=", "/=", "//=", "%=", "|=", "&="
 
 
 class _PyStmt:
-    __slots__ = ("scope", "writes", "names", "targets")
+    __slots__ = ("scope", "writes", "names", "targets", "rebinds", "indent")
 
     def __init__(self, scope: int) -> None:
         self.scope = scope
         self.writes = False
         self.names: set[str] = set()
+        # A plain ``name = value`` whose value does not use name (GAP-1312).
+        self.rebinds = ""
+        self.indent = 0
         # (scope, name) pairs; scope -1 is module-wide (globals, attributes).
         self.targets: set[tuple[int, str]] = set()
 
@@ -301,26 +304,43 @@ class PySource:
             self._analyze()
         if line_idx >= len(self._line_stmt) or self._line_stmt[line_idx] < 0:
             return False
-        first = self._stmts[self._line_stmt[line_idx]]
+        first_idx = self._line_stmt[line_idx]
+        first = self._stmts[first_idx]
         if first.writes:
             return True
         tainted: dict[str, set[int]] = {}
         for scope, name in first.targets:
             tainted.setdefault(name, set()).add(scope)
+        # A name of the first statement plainly rebound later in its scope,
+        # at its level or an outer one, holds the new value after that
+        # (target = Path("safe.txt"), GAP-1312); names reached through other
+        # statements keep the order-free reading.
+        rebound: dict[str, int] = {}
+        for k in range(first_idx + 1, len(self._stmts)):
+            st = self._stmts[k]
+            if st.rebinds and st.scope == first.scope and st.indent <= first.indent:
+                rebound.setdefault(st.rebinds, k)
+        direct = set(tainted)
         seen = {id(first)}
         changed = bool(tainted)
         while changed:
             changed = False
-            for st in self._stmts:
+            for idx, st in enumerate(self._stmts):
                 if id(st) in seen:
                     continue
-                if not any((scopes := tainted.get(n)) and (-1 in scopes or st.scope in scopes) for n in st.names):
+                if not any(
+                    (scopes := tainted.get(n))
+                    and (-1 in scopes or st.scope in scopes)
+                    and not (n in direct and st.scope == first.scope and idx > rebound.get(n, len(self._stmts)))
+                    for n in st.names
+                ):
                     continue
                 if st.writes:
                     return True
                 seen.add(id(st))
                 for scope, name in st.targets:
                     tainted.setdefault(name, set()).add(scope)
+                    direct.discard(name)
                 changed = True
         return False
 
@@ -357,6 +377,7 @@ class PySource:
                     while funcs and funcs[-1][0] >= indent:
                         funcs.pop()
                     st = _py_statement(cur, funcs)
+                    st.indent = indent
                     for r in range(cur[0].start[0] - 1, min(cur[-1].end[0], nrows)):
                         line_stmt[r] = len(stmts)
                     stmts.append(st)
@@ -445,6 +466,15 @@ def _py_statement(cur: list, funcs: list[tuple[int, int, str]]) -> _PyStmt:
         if funcs and funcs[-1][2]:
             st.targets.add((-1, funcs[-1][2]))
     elif assign_at:
+        if (
+            assign_at == [1]
+            and cur[0].type == tokenize.NAME
+            and cur[1].string == "="
+            and cur[0].string not in {t.string for t in cur[2:] if t.type == tokenize.NAME}
+        ):
+            st.rebinds = cur[0].string
+            # It sets the name without reading it.
+            st.names.discard(st.rebinds)
         depth = 0
         for k in range(assign_at[-1]):
             tok = cur[k]
