@@ -882,6 +882,8 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	var directoryOperands []RedirectOccurrence
 	var directoryUnknown bool
 	links := shellLinks{known: true}
+	// The plain moves that only a simple command of the list reads (GAP-2559).
+	var statementMoves map[string]bool
 	var dynamicReadings []string
 	readingTargets := map[string]string{}
 	sourceFacts := map[string]string{}
@@ -957,6 +959,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
+				statementMoves = PlainMoveDestinationsWithStatements(fallback, fallbackFacts)
 				facts.Paths = append(facts.Paths, fallbackFacts.Paths...)
 				truncated = truncated || fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded
 				// A command over the analysis limits has no path facts, but
@@ -1044,7 +1047,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// entries are described as the entry itself (GAP-2558).
 	var replacedLinks map[string]bool
 	if links.known && !links.opaque && len(links.aliases) == 0 {
-		replacedLinks = movedOntoLinkEntries(facts)
+		destinations := PlainMoveDestinations(facts)
+		for path := range statementMoves {
+			destinations[path] = true
+		}
+		replacedLinks = movedOntoLinkEntriesOf(destinations)
 	}
 	targets := map[string]string{CWDKey: cwd}
 	// The fixed part counts the truncation marker, so setting it never
@@ -1753,8 +1760,14 @@ func pathFactIsRedirect(candidate actionfacts.PathFact, commands []actionfacts.C
 // trailing separator, a link to a directory (the move lands inside it) or
 // a link whose target cannot be read is not listed.
 func movedOntoLinkEntries(facts actionfacts.Facts) map[string]bool {
+	return movedOntoLinkEntriesOf(PlainMoveDestinations(facts))
+}
+
+// movedOntoLinkEntriesOf is movedOntoLinkEntries for a list of plain move
+// destinations.
+func movedOntoLinkEntriesOf(destinations map[string]bool) map[string]bool {
 	var out map[string]bool
-	for path := range PlainMoveDestinations(facts) {
+	for path := range destinations {
 		info, err := os.Lstat(path)
 		if err != nil || info.Mode()&os.ModeSymlink == 0 {
 			continue
