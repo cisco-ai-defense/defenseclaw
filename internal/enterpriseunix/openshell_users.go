@@ -411,7 +411,13 @@ func (o *commandUserOps) Accounts(ctx context.Context) []SandboxAccount {
 
 // lookupUID resolves an account by uid through the host's account database.
 func (o *commandUserOps) lookupUID(ctx context.Context, uid int) (SandboxAccount, bool) {
-	e := o.env
+	return o.env.lookupAccountUID(ctx, uid)
+}
+
+// lookupAccountUID resolves an account by uid through the host's account
+// database (getent on Linux, dscl on macOS). A lookup that does not answer
+// is no account.
+func (e *Env) lookupAccountUID(ctx context.Context, uid int) (SandboxAccount, bool) {
 	if e.GOOS == "darwin" {
 		res, err := e.Runner.Run(ctx, "dscl", ".", "-search", "/Users", "UniqueID", strconv.Itoa(uid))
 		if err != nil {
