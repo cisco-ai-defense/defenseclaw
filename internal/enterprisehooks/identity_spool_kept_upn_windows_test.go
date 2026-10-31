@@ -67,6 +67,48 @@ func TestWindowsIdentitySpoolMarksAKeptUPN(t *testing.T) {
 	}
 }
 
+// identity-round GAP-1238: a pass that gets no TranslateNameW answer does not
+// carry forward the UPN an earlier build took from the identity store for a
+// hybrid AD account, which a rename of the AD UPN left stale; the record has
+// the account's own principal until the domain controller answers. An
+// Entra ID account's identity store UPN is its own and is carried.
+func TestWindowsIdentitySpoolDoesNotCarryAnIdentityStoreUPNOfAnADAccount(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		directory     useridentity.Directory
+		wantUPN       string
+		wantPrincipal string
+	}{
+		{"hybrid AD account", useridentity.DirectoryActiveDirectory, "", "alice@corp.example"},
+		{"Entra ID account", useridentity.DirectoryEntraID, "old.alice@olddomain.example", "old.alice@olddomain.example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeKeptUPNTestRecord(t, dir, IdentitySpoolRecord{Key: testSpoolUserA, User: `CORP\alice`,
+				UpdatedAt: time.Now().UTC().Add(-time.Minute), UPNSource: UPNSourceIdentityStore,
+				Facts: useridentity.DirectoryFacts{Directory: tc.directory, UPN: "old.alice@olddomain.example",
+					Principal: "old.alice@olddomain.example", Source: useridentity.SourceWindowsIdentityStore}})
+			stubWindowsIdentityLookups(t, nil, nil)
+			windowsIdentityDirectoryFacts = func(string, time.Duration) useridentity.DirectoryFacts {
+				principal := "alice@corp.example"
+				if tc.directory == useridentity.DirectoryEntraID {
+					principal = ""
+				}
+				return useridentity.DirectoryFacts{Directory: tc.directory, Principal: principal, Source: useridentity.SourceWindowsLSA}
+			}
+			cache := NewWindowsEnrollmentGroupCache()
+			cache.Users[testSpoolUserA] = nil
+			if err := WriteWindowsIdentitySpool(context.Background(), dir, cache, nil, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			got, err := ReadIdentitySpoolRecord(dir, testSpoolUserA, nil)
+			if err != nil || got.Facts.UPN != tc.wantUPN || got.Facts.Principal != tc.wantPrincipal {
+				t.Fatalf("record = %+v (%v); want UPN %q and principal %q", got, err, tc.wantUPN, tc.wantPrincipal)
+			}
+		})
+	}
+}
+
 // A token-group-only pass publishes the previous record's UPN with this
 // pass's groups (loop round 3), and marks that UPN kept.
 func TestWindowsIdentitySpoolMarksTheUPNOfATokenGroupRecordKept(t *testing.T) {

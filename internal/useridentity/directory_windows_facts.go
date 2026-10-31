@@ -19,6 +19,8 @@ import (
 //   - The identity store, HKLM\SOFTWARE\Microsoft\IdentityStore\Cache\<SID>\
 //     IdentityCache\<SID>, holds the UPN of a cloud sign-in (UserName) and
 //     the provider that issued it (ProviderName, "AzureAD" for Entra ID).
+//     It is the UPN of an Entra ID account only; for a hybrid AD account it
+//     says only that the account signed in to the device's tenant.
 //   - CloudDomainJoin\JoinInfo\<thumbprint> (TenantId) and TenantInfo say the
 //     device is Entra joined, and the LSA primary-domain policy says it is
 //     AD joined; both together is a hybrid join.
@@ -146,23 +148,21 @@ func resolveWindowsDirectoryFacts(
 		// Linux; LookupAccountSid gives only the NetBIOS name.
 		facts.Directory = DirectoryActiveDirectory
 		facts.Domain = strings.ToLower(domain)
-		hybrid := upn != "" && strings.EqualFold(provider, entraProviderName)
-		if hybrid {
+		if upn != "" && strings.EqualFold(provider, entraProviderName) {
 			// A hybrid user signed in to Entra: the device's tenant is theirs.
 			facts.TenantID = join.TenantID
 		}
-		// The domain controller's answer (TranslateNameW) is the account's
-		// UPN. The identity store keeps the cloud UPN of the user's last Entra
-		// sign-in, the synced AD UPN only until that is renamed; it came first,
-		// so the old UPN went on selecting the old users assignment after the
-		// rename and after `enterprise identity refresh` (identity-round
-		// GAP-1238). It stands in only while the directory has not answered.
+		// Only the domain controller's answer (TranslateNameW) is the AD
+		// account's UPN. The identity store keeps the cloud UPN of the user's
+		// last Entra sign-in, which an AD UPN rename leaves stale, so it never
+		// stands in for it: the managed gateway's write-restricted service
+		// token gets no TranslateNameW answer, and a stand-in became the
+		// account's UPN for good, also after `enterprise identity refresh`
+		// (identity-round GAP-1238). Until the directory answers here or in the
+		// SYSTEM enumerator's identity record, the principal is the account's
+		// own (AccountPrincipal below).
 		if adUPN != nil && account != "" {
 			facts.UPN = NormalizeUPN(adUPN(sid, domain+`\`+account))
-		}
-		if facts.UPN == "" && hybrid {
-			facts.UPN = upn
-			facts.Source = SourceWindowsIdentityStore
 		}
 		if join.DNSDomain != "" && strings.EqualFold(domain, join.ADDomain) {
 			// LSA identifies the joined AD domain, even when the computer
