@@ -164,6 +164,56 @@ func pollUntil(t *testing.T, reporter *bundleReceiptReporter, cond func() bool) 
 	}
 }
 
+// refuseOnce offers the change with reporter, as a gateway does, until the
+// destination refused one offer, then stops the reporter as a gateway that
+// stops does: it makes no more offers, and its delivery in flight ends
+// before the next reporter starts. A restarted gateway is a new process
+// with its own destination queues, so nothing the stopped one handed to a
+// destination is still in flight then; the fixture's reporters share one
+// queue, so the next reporter is made only once this one settled. A poll
+// after the refusal would offer the change again, and that copy, still
+// queued when the destination stops refusing, would reach it beside the
+// restarted gateway's offer (GAP-0110); a third refusal in a row would also
+// open the destination's circuit for 30 s.
+func (f *changeExportFixture) refuseOnce(t *testing.T, reporter *bundleReceiptReporter) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for f.refused.Load() == 0 {
+		// Offer again only while no delivery of the change is in flight
+		// and none was refused: the store refused the last offer, or a
+		// delivery failed before it reached the destination. The
+		// destination counts a refusal before the delivery ends, so it is
+		// read after the delivery state.
+		state := reporter.changes[f.ev.EventID]
+		if offer := state == nil || state.retry || deliverySettled(state); offer && f.refused.Load() == 0 {
+			reporter.poll(t.Context())
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the destination refused no offer")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for {
+		if deliverySettled(reporter.changes[f.ev.EventID]) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the refused delivery did not end")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// deliverySettled reports whether a change's offers ended with nothing in
+// flight.
+func deliverySettled(state *changeDelivery) bool {
+	if state == nil {
+		return false
+	}
+	settled, _ := state.delivery.Settled()
+	return settled
+}
+
 // The change spool is the durable record of a change (its command flushed
 // the event before it made the change), and the reporter its one sender:
 // the audit store and the remote destination are separate sinks of it.
@@ -238,7 +288,10 @@ func TestBundleReceiptReporterSendsOneRecordUnderAChangeID(t *testing.T) {
 	setProcess("run-first-offer", "sidecar-first-offer", "1.0.4-dev.1")
 	f.refusing.Store(true)
 	first := f.reporter()
-	pollUntil(t, first, func() bool { return f.refused.Load() >= 1 && f.storedRows(t) == 1 })
+	f.refuseOnce(t, first)
+	if n := f.storedRows(t); n != 1 {
+		t.Fatalf("the refused offer stored %d rows, want 1", n)
+	}
 
 	setProcess("run-after-restart", "sidecar-after-restart", "1.0.4-dev.2")
 	reload, err := f.gateway.sidecar.ReloadObservabilityRuntime(t.Context(), f.gateway.configPath,
@@ -376,7 +429,7 @@ func TestBundleReceiptReporterKeepsAChangeUntilTheDestinationHasIt(t *testing.T)
 	f := newChangeExportFixture(t)
 	f.refusing.Store(true)
 	first := f.reporter()
-	pollUntil(t, first, func() bool { return f.refused.Load() >= 1 })
+	f.refuseOnce(t, first)
 	if first.hasSeen(f.ev.EventID) {
 		t.Fatal("a change the destination refused was marked reported")
 	}
