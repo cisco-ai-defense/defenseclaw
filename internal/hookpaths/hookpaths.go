@@ -2187,7 +2187,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		}
 		return links
 	}
-	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) {
+	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) && !links.addPythonLiteralLinks(file, command, cwd, home) {
 		links.unknown(true)
 		return links
 	}

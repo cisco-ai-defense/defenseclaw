@@ -1,0 +1,88 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+)
+
+// r106Reader2Row is one Bash call of the action-mode keys reader rows: run
+// in the project or the home folder, with the verdict both a per-user and a
+// managed gateway must give. {P} is the project, {K} the keys file; the
+// project holds keylink, a link to the keys file.
+type r106Reader2Row struct {
+	name, where, command, want string
+}
+
+// r106Reader2Check runs each row through a per-user action-mode gateway and
+// a managed one (home hidden, the real hook client header), for Claude Code
+// and Codex.
+func r106Reader2Check(t *testing.T, rows []r106Reader2Row) {
+	t.Helper()
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, row := range rows {
+			f := newB36ManagedHookFixture(t)
+			for _, name := range []string{"a.txt", "README.md"} {
+				if err := os.WriteFile(filepath.Join(f.project, name), []byte("x\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cwd := f.project
+			if row.where == "home" {
+				cwd = f.home
+			}
+			command := strings.NewReplacer("{P}", f.project, "{K}", f.keys).Replace(row.command)
+			payload := mustJSON(t, map[string]any{"session_id": "r106", "hook_event_name": "PreToolUse", "cwd": cwd,
+				"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_r106",
+				"tool_input": map[string]any{"command": command, "description": "Run test fixture command"}})
+			header := f.clientHeader(t, payload)
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = connector
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
+			req.Header.Set(hookpaths.Header, header)
+			if connector == "codex" {
+				setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+			}
+			recorder := httptest.NewRecorder()
+			api.handleAgentHook(connector).ServeHTTP(recorder, req)
+			perUser := "allow"
+			if body := recorder.Body.String(); strings.Contains(body, `"deny"`) || strings.Contains(body, `"block"`) {
+				perUser = "block"
+			}
+			managed := f.post(t, connector, payload, header)
+			if err := os.Chmod(f.homes, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if perUser != row.want || managed != row.want {
+				t.Errorf("%s %s: per-user %s, managed %s, want %s", connector, row.name, perUser, managed, row.want)
+			}
+		}
+	}
+}
+
+// TestR106PythonLiteralLinkIsReadAsLn: os.link or os.symlink with two string
+// literals in python -c code that imports os makes the link ln makes, so an
+// append through the new name of a project file is an ordinary write and
+// one through a new name of the keys file a key write (rel-1-0-6:GAP-0157).
+func TestR106PythonLiteralLinkIsReadAsLn(t *testing.T) {
+	r106Reader2Check(t, []r106Reader2Row{
+		{"absolute hard link of a project file", "project", `python3 -c "import os; os.link('{P}/README.md','{P}/kl'); open('{P}/kl','a').write('k')"`, "allow"},
+		{"relative hard link of a project file", "project", `python3 -c "import os; os.link('README.md','kl'); open('kl','a').write('k')"`, "allow"},
+		{"symbolic link to a project file", "project", `python3 -c "import os; os.symlink('README.md','{P}/kl'); open('{P}/kl','a').write('k')"`, "allow"},
+		{"hard link of the keys file", "project", `python3 -c "import os; os.link('{K}','{P}/kl'); open('{P}/kl','a').write('k')"`, "block"},
+		{"hard link through the keys link", "project", `python3 -c "import os; os.link('{P}/keylink','{P}/kl'); open('{P}/kl','a').write('k')"`, "block"},
+		{"relative symbolic link to the keys file", "project", `python3 -c "import os; os.symlink('../.ssh/authorized_keys','kl'); open('kl','a').write('k')"`, "block"},
+		{"computed link source", "project", `python3 -c "import os; s='{K}'; os.link(s,'kl'); open('kl','a').write('k')"`, "block"},
+	})
+}
