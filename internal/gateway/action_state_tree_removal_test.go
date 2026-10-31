@@ -158,6 +158,14 @@ func TestR105GAP1774WholeTreeOfActiveState(t *testing.T) {
 		{"ln BSD -h over hooks", "ln -sfh /tmp/r105-other ~/.defenseclaw/hooks", true, ""},
 		{"ln config into root", "ln -sf /tmp/config.yaml ~/.defenseclaw", true, ""},
 		{"ln config into root slash", "ln -sf /tmp/config.yaml ~/.defenseclaw/", true, ""},
+		// Moving a protected tree away, aside or onto it removes or replaces
+		// it as rm -rf and ln -sf do (rel-1-0-4:GAP-2048).
+		{"mv hooks away", "mv ~/.defenseclaw/hooks /tmp/h", true, ""},
+		{"mv installer aside", "mv ~/.defenseclaw/installer ~/.defenseclaw/installer.bak", true, ""},
+		{"mv -t installer away", "mv -t /tmp ~/.defenseclaw/installer", true, ""},
+		{"mv whole state aside", "mv ~/.defenseclaw ~/.defenseclaw.old", true, ""},
+		{"mv onto hooks", "mv /tmp/evil ~/.defenseclaw/hooks", true, ""},
+		{"mv logs aside", "mv ~/.defenseclaw/logs ~/.defenseclaw/logs.old", false, ""},
 		{"rm -rf logs", "rm -rf ~/.defenseclaw/logs", false, ""},
 		{"ls installer", "ls -la ~/.defenseclaw/installer", false, ""},
 		{"copy installer out", "cp -r ~/.defenseclaw/installer ./installer-copy", false, ""},

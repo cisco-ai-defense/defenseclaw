@@ -19,14 +19,23 @@ var (
 	pythonLiteralLinkCall = lazyregexp.New(`\bos\.(sym)?link\(\s*(?:'([^'"\\\n]*)'|"([^'"\\\n]*)")\s*,\s*(?:'([^'"\\\n]*)'|"([^'"\\\n]*)")\s*\)`)
 	// pythonImportsOS is the plain import os statement that makes os the
 	// os module.
-	pythonImportsOS     = lazyregexp.New(`(?:^|[;\n])[ \t]*import[ \t]+os[ \t]*(?:[;\n]|$)`)
-	pythonProgramName   = regexp.MustCompile(`^python(?:3(?:\.[0-9]+)?)?$`)
-	pythonInlineOptions = map[string]bool{"-I": true, "-E": true, "-s": true, "-S": true, "-B": true, "-u": true, "-q": true}
+	pythonImportsOS = lazyregexp.New(`(?:^|[;\n])[ \t]*import[ \t]+os[ \t]*(?:[;\n]|$)`)
+	// pythonLiteralPathLinkCall is one pathlib Path(name).hardlink_to(source)
+	// or .symlink_to(source) call with two plain string literals; the Path
+	// is pathlib.Path after import pathlib, or Path after from pathlib
+	// import Path (rel-1-0-6:GAP-0195).
+	pythonLiteralPathLinkCall = lazyregexp.New(`(?:^|[^.\w])((?:pathlib\.)?)Path\(\s*(?:'([^'"\\\n]*)'|"([^'"\\\n]*)")\s*\)\.(hard|sym)link_to\(\s*(?:'([^'"\\\n]*)'|"([^'"\\\n]*)")\s*\)`)
+	pythonImportsPathlib      = lazyregexp.New(`(?:^|[;\n])[ \t]*import[ \t]+pathlib[ \t]*(?:[;\n]|$)`)
+	pythonImportsPath         = lazyregexp.New(`(?:^|[;\n])[ \t]*from[ \t]+pathlib[ \t]+import[ \t]+Path[ \t]*(?:[;\n]|$)`)
+	pythonProgramName         = regexp.MustCompile(`^python(?:3(?:\.[0-9]+)?)?$`)
+	pythonInlineOptions       = map[string]bool{"-I": true, "-E": true, "-s": true, "-S": true, "-B": true, "-u": true, "-q": true}
 )
 
 // addPythonLiteralLinks reads the link text of a command whose only link
 // API calls are os.link or os.symlink calls with two string literals, in the
-// -c code of a top-level python call that imports os, in a command that does
+// -c code of a top-level python call that imports os, or pathlib
+// Path(name).hardlink_to or .symlink_to calls with two string literals in
+// code that imports pathlib.Path the way it calls it, in a command that does
 // not change directory. Each call makes the link that link or ln -s makes
 // from the same two operands, so it is recorded as they record it, and a
 // write through the new name is judged by the file it names: a project file
@@ -64,15 +73,28 @@ func (l *shellLinks) addPythonLiteralLinks(file *syntax.File, command, cwd, home
 				return true
 			}
 			code, static := StaticWord(call.Args[last], home)
-			if !static || !opaqueLink.MatchString(code) || !pythonImportsOS.MatchString(code) || strings.Contains(code, "chdir") {
+			if !static || !opaqueLink.MatchString(code) || strings.Contains(code, "chdir") {
 				return true
 			}
-			rest := pythonLiteralLinkCall.ReplaceAllString(code, " ")
+			osCalls := pythonLiteralLinkCall.FindAllStringSubmatch(code, -1)
+			pathCalls := pythonLiteralPathLinkCall.FindAllStringSubmatch(code, -1)
+			if len(osCalls) > 0 && !pythonImportsOS.MatchString(code) {
+				return true
+			}
+			for _, match := range pathCalls {
+				if match[1] != "" && !pythonImportsPathlib.MatchString(code) || match[1] == "" && !pythonImportsPath.MatchString(code) {
+					return true
+				}
+			}
+			rest := pythonLiteralPathLinkCall.ReplaceAllString(pythonLiteralLinkCall.ReplaceAllString(code, " "), " ")
 			if opaqueLink.MatchString(rest) {
 				return true
 			}
-			for _, match := range pythonLiteralLinkCall.FindAllStringSubmatch(code, -1) {
+			for _, match := range osCalls {
 				found = append(found, literalLink{source: match[2] + match[3], name: match[4] + match[5], symbolic: match[1] != ""})
+			}
+			for _, match := range pathCalls {
+				found = append(found, literalLink{source: match[5] + match[6], name: match[2] + match[3], symbolic: match[4] == "sym"})
 			}
 			codeWords = append(codeWords, call.Args[last])
 			return true

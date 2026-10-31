@@ -64,8 +64,8 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 		if !serviceHasAccess(parent, sids, serviceParentAccess) {
 			return fmt.Errorf(
 				"%s %s: the gateway service account %s cannot list or read the permissions of the parent folder %s; "+
-					"grant it Read & execute on that folder, for example: icacls \"%s\" /grant \"%s:RX\", or move the rule pack out of %s to a folder whose parents it can read",
-				label, root, serviceAccount, parent, parent, serviceGrantPrincipal(serviceAccount), parent)
+					"grant it Read & execute on that folder, for example: icacls \"%s\" /grant \"%s:RX\"%s, or move the rule pack out of %s to a folder whose parents it can read",
+				label, root, serviceAccount, parent, parent, serviceGrantPrincipal(serviceAccount), beforeServiceExistsHint(parent, serviceAccount), parent)
 		}
 	}
 	entries := 0
@@ -89,8 +89,8 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 		// folder, then let everything in it inherit again.
 		return fmt.Errorf(
 			"%s %s: the gateway service account %s cannot read %s; grant it Read & execute on the folder and let everything in it inherit that, "+
-				"for example: icacls \"%s\" /grant \"%s\" and then icacls \"%s\\*\" /reset /T /C",
-			label, root, serviceAccount, path, root, RulePackServiceReadGrant(serviceAccount), root)
+				"for example: icacls \"%s\" /grant \"%s\"%s and then icacls \"%s\\*\" /reset /T /C",
+			label, root, serviceAccount, path, root, RulePackServiceReadGrant(serviceAccount), beforeServiceExistsHint(root, serviceAccount), root)
 	})
 }
 
@@ -393,4 +393,16 @@ func serviceDACLGrants(path string, sids []*windows.SID, want windows.ACCESS_MAS
 		}
 	}
 	return allowed&want == want
+}
+
+// beforeServiceExistsHint is the sentence that follows an icacls example for
+// the gateway service SID: icacls fails with error 1332 until the service
+// exists, so a first install is given the PowerShell form that does not
+// (GAP-0087). It is empty for an account that is not an NT SERVICE name.
+func beforeServiceExistsHint(path, serviceAccount string) string {
+	command := ServiceReadGrantPowerShell(path, serviceAccount)
+	if command == "" {
+		return ""
+	}
+	return " (icacls fails with error 1332 until the service exists; before that run: " + command + ")"
 }

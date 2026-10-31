@@ -461,7 +461,7 @@ Store the new value under the same credential name. On Linux and macOS the comma
 
 ## Add or remove users
 
-The enumerator enrolls users automatically, within 5 minutes. To force a user in or keep one
+The enumerator enrolls users automatically, within 5 minutes of their sign-in. On Windows, Claude Code is enrolled within 5 minutes of its first start in that account (its build is verified then), so a user who signs in and opens Claude Code later waits from that start; until then its calls are refused ([enrollment](/docs/enterprise/enrollment)). To force a user in or keep one
 out, change `enterprise.enrollment` in the config and apply it as in
 [Change the config](#change-the-config). See [Enrollment](/docs/enterprise/enrollment).
 

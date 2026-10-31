@@ -98,8 +98,8 @@ deployment reads:
     or bearer_credential (http_jsonl).
 
 Values are read from standard input or a file and are never printed.
-Status shows only presence, modification time and a digest prefix. On Linux and
-macOS, check proves the Cisco AI Defense key before the first prompt.`,
+Status shows only presence, modification time and a digest prefix. Check
+proves the Cisco AI Defense key before the first prompt.`,
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 	}
 )

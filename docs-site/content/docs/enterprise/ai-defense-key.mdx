@@ -196,7 +196,13 @@ On Linux and macOS the value comes from the gateway's own `/health`, so `ok`
 means the key works. On Windows, `ok` reflects the config and gateway
 readiness and does not prove the key was accepted: check the gateway log for
 an error from the `cisco-inspect` subsystem after the restart, where a
-missing or untrusted key is logged. See
+missing or untrusted key is logged. To prove the key on any OS without waiting for a prompt, run
+`enterprise secret check --name <credential> --json` as root (Linux, macOS) or
+from an elevated PowerShell prompt (Windows,
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' enterprise secret check --name ai-defense-api-key --json`):
+it makes one request whose only content is a full stop and prints `ok` or
+`unavailable:<code>`; it exits 0 when the key is accepted, 1 (Windows 1603)
+when not. See
 [Logs and events](/docs/enterprise/operations#logs-and-events).
 
 ## Rotate the key

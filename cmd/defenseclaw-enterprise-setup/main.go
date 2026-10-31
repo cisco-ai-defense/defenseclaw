@@ -186,6 +186,9 @@ type enterpriseSetupOptions struct {
 	Bundle               string
 	TrustAnchors         string
 	RefuseCapabilityLoss bool
+	// DeviceGroup (DEVICEGROUP=) pins the anchors TRUSTANCHORS= installs to
+	// one device group; the lifecycle checks it (rel-1-0-6:GAP-0036).
+	DeviceGroup string
 
 	// Set from the embedded payload, never from the command line.
 	Standalone         bool
@@ -396,6 +399,7 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 		flags.BoolVar(&opts.Force, "force", false, "standalone /uninstall: remove the deployment without recovering a pending transaction (last resort)")
 		flags.StringVar(&opts.Bundle, "bundle", "", "standalone /ensure: signed policy bundle (.dcbundle) to apply")
 		flags.StringVar(&opts.TrustAnchors, "trust-anchors", "", "standalone /ensure: bundle trust anchor file to install first")
+		flags.StringVar(&opts.DeviceGroup, "device-group", "", "standalone /ensure with TRUSTANCHORS=: pin the installed anchors to this device group")
 		flags.BoolVar(&opts.RefuseCapabilityLoss, "refuse-capability-loss", false, "standalone /ensure: refuse a bundle that disables an enforced capability")
 	}
 	timeoutSeconds := int(defaultLifecycleTimeout / time.Second)
@@ -611,7 +615,7 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 	}
 	if standalone {
 		// Only the standalone Setup has the ensure action and signer pins.
-		for name, canonical := range map[string]string{"allowedsigners": "allowed-signers", "bundle": "bundle", "trustanchors": "trust-anchors"} {
+		for name, canonical := range map[string]string{"allowedsigners": "allowed-signers", "bundle": "bundle", "trustanchors": "trust-anchors", "devicegroup": "device-group"} {
 			valueNames[name] = canonical
 		}
 		boolNames["force"] = "force"
@@ -1021,6 +1025,7 @@ func standaloneSetupRetryCommand(opts enterpriseSetupOptions, timeoutSeconds int
 	value("MANIFEST", opts.Manifest)
 	value("BUNDLE", opts.Bundle)
 	value("TRUSTANCHORS", opts.TrustAnchors)
+	value("DEVICEGROUP", opts.DeviceGroup)
 	value("MODE", opts.Mode)
 	value("CONNECTOR", opts.Connector)
 	flag("REFUSECAPABILITYLOSS", opts.RefuseCapabilityLoss)
@@ -1097,6 +1102,7 @@ func writeStandaloneSetupUsage(output io.Writer) {
 	fmt.Fprintln(output, "  MANIFEST=<path>                target manifest you publish yourself; required for /install")
 	fmt.Fprintln(output, "  BUNDLE=<path>                  with /ensure: apply this signed policy bundle; with CONFIG= on a new computer, the first install starts on the bundle")
 	fmt.Fprintln(output, "  TRUSTANCHORS=<path>            with /ensure BUNDLE=: install this administrator-only bundle trust anchor file with the bundle")
+	fmt.Fprintln(output, "  DEVICEGROUP=<group>            with TRUSTANCHORS=: pin the installed anchors to this one device group")
 	fmt.Fprintln(output, "  REFUSECAPABILITYLOSS=1         with /ensure: refuse a bundle that disables an enforced capability")
 	fmt.Fprintln(output, "  JSON=1                         print the result document on standard output")
 	fmt.Fprintln(output, "  NOSTART=1                      install or update with the services stopped and disabled")
