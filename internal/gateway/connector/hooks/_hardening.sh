@@ -2644,6 +2644,13 @@ defenseclaw_emit_unreachable_stderr() {
     # that does (GAP-1352).
     case "${DEFENSECLAW_HOOK_CONNECTOR:-}|${subject}" in
       "claudecode|claude-code "*|"codex|codex "*) : ;;
+      "copilot|copilot "*)
+        # Copilot CLI does not show a hook's stderr: this line is for logs,
+        # on every call, and the marker is left for the one visible warning,
+        # the postToolUse additionalContext (copilot-hook.sh, rel-1-0-4
+        # GAP-1320).
+        echo "defenseclaw: gateway unreachable, allowing ${subject} unchecked (fail mode open for an outage): ${reason}. If it does not start, run \`defenseclaw doctor\`." >&2
+        ;;
       *)
         if defenseclaw_first_outage_warning; then
           echo "defenseclaw: gateway unreachable, allowing ${subject} unchecked (fail mode open for an outage): ${reason}. If it does not start, run \`defenseclaw doctor\`." >&2
@@ -2684,15 +2691,17 @@ defenseclaw_unreachable_mode_note() {
   printf '%s' 'not a gateway outage, so it is blocked in every fail mode'
 }
 
-# defenseclaw_unreachable_notice_json prints a one-line hook result whose
-# systemMessage tells the user that DefenseClaw is not checking this session
-# and how to resume, when this account's own per-user gateway is down. A
-# fail-open hook exits 0, and Claude Code and Codex do not show stderr then:
-# the systemMessage is the only text the user sees. It prints nothing when
-# the gateway is not this account's to start (managed or socket hooks).
-# Each per-user notice also names `defenseclaw-gateway status` (GAP-0093).
+# defenseclaw_unreachable_notice_json [FIELD] prints a one-line hook result
+# whose FIELD (systemMessage by default) tells the user that DefenseClaw is
+# not checking this session and how to resume, when this account's own
+# per-user gateway is down. A fail-open hook exits 0, and Claude Code and
+# Codex do not show stderr then: the systemMessage is the only text the user
+# sees. Copilot CLI shows a postToolUse hook's additionalContext under the
+# tool's output (rel-1-0-4 GAP-1320). It prints nothing when the gateway is
+# not this account's to start (managed or socket hooks). Each per-user notice
+# also names `defenseclaw-gateway status` (GAP-0093).
 defenseclaw_unreachable_notice_json() {
-  local next="" text=""
+  local field="${1:-systemMessage}" next="" text=""
   next="$(defenseclaw_unreachable_next_step)"
   [ -n "$next" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
@@ -2714,7 +2723,7 @@ defenseclaw_unreachable_notice_json() {
     defenseclaw_first_outage_warning || return 0
     text="${text} If it does not start, run \`defenseclaw doctor\`."
   fi
-  printf '{"systemMessage":"%s"}\n' "$(defenseclaw_json_escape "$text")"
+  printf '{"%s":"%s"}\n' "$field" "$(defenseclaw_json_escape "$text")"
 }
 
 # Reserve an advisory warning marker for this session. Missing session IDs or

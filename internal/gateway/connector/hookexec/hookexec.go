@@ -2454,7 +2454,12 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		// leaves the once-per-session marker for the next one that can, so
 		// a running session's first prompt does not spend it silently
 		// (GAP-1352).
-		if outageWarningNoticeOnly(sp.connector) && perUserGatewayDownNotice(opts, sp, reason) == "" {
+		if outageWarningNoticeOnly(sp) && perUserGatewayDownNotice(opts, sp, reason) == "" {
+			if text := perUserOutageOpenText(opts, reason); text != "" && copilotCLIOutageNotice(sp) {
+				// Copilot CLI does not show stderr: the line is for logs, on
+				// every call, as copilot-hook.sh prints it.
+				fmt.Fprintf(opts.Stderr, "defenseclaw: %s\n", text)
+			}
 			return emitFailOpenAllow(opts, sp, reason)
 		}
 		showWarning = firstOutageWarning(opts)
@@ -2560,9 +2565,19 @@ func coldStartFailureReason(err error) string {
 // never fails open outside Secure Client (noAnswerFailMode), so only the
 // outage reasons have a notice.
 // outageWarningNoticeOnly reports a connector whose agent shows a per-user
-// outage warning only as a systemMessage (perUserGatewayDownNotice).
-func outageWarningNoticeOnly(connector string) bool {
-	return connector == "claudecode" || connector == "codex"
+// outage warning only in its hook result (perUserGatewayDownNotice): Claude
+// Code and Codex as a systemMessage, Copilot CLI as postToolUse
+// additionalContext. Their other events leave the once-per-session marker.
+func outageWarningNoticeOnly(sp spec) bool {
+	return sp.connector == "claudecode" || sp.connector == "codex" || copilotCLIOutageNotice(sp)
+}
+
+// copilotCLIOutageNotice reports a Copilot CLI hook (not the VS Code local
+// surface, whose results have another shape). Copilot CLI shows nothing a
+// hook prints on an allow except a postToolUse additionalContext, which it
+// adds under the tool's output (rel-1-0-4 GAP-1320).
+func copilotCLIOutageNotice(sp spec) bool {
+	return sp.connector == "copilot" && sp.dialect != copilotVSCodeLocalSurface
 }
 
 func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
@@ -2570,11 +2585,14 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 		return ""
 	}
 	var events []string
-	switch sp.connector {
-	case "claudecode":
+	field := "systemMessage"
+	switch {
+	case sp.connector == "claudecode":
 		events = []string{"SessionStart", "UserPromptSubmit", "PreToolUse"}
-	case "codex":
+	case sp.connector == "codex":
 		events = []string{"SessionStart", "PreToolUse"}
+	case copilotCLIOutageNotice(sp):
+		events, field = []string{"postToolUse"}, "additionalContext"
 	default:
 		return ""
 	}
@@ -2585,7 +2603,7 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	if text == "" {
 		return ""
 	}
-	return `{"systemMessage":` + mustJSONString(text) + `}`
+	return `{"` + field + `":` + mustJSONString(text) + `}`
 }
 
 // perUserOutageDoctorHint ends every per-user outage warning: the command
