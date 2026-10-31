@@ -186,10 +186,11 @@ On Linux, the gateway confirms an SSH session through systemd-logind, or through
 
 On a per-user install the agent runs as the account that owns DefenseClaw's own files, SSH keys and agent instruction files, and the hook decides from the command text the agent sends. It blocks the common ways an agent could change DefenseClaw's own files, SSH keys or protected instruction files. DefenseClaw's own state is protected in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it). SSH keys, `authorized_keys` and agent instruction files are protected in action mode.
 
-Shell can express the same write in many ways, and some unusual forms are not recognised. Two kinds cannot be decided by reading the command:
+Shell can express the same write in many ways, and some unusual forms are not recognised. These cannot be decided by reading the command:
 
 - **Command text built when it runs.** A command that joins strings, fills in variables or decodes a value while it runs, and then runs the result, has no fixed text for the hook to check beforehand.
 - **A link made by git, then a write.** A git command such as a pull or a checkout can create a symbolic link from the repository's content. A write later in the same command that goes through that new link can reach the file the link points to, because the link does not exist yet when the hook reads the command.
+- **Link text with line breaks.** A link whose text has line breaks is a limit of the command reader.
 
 The LLM judge (the LLM guardrail) is the second layer for protected-file access. If you need more than the command reader gives, turn it on; see [Optional LLM judge](/docs/policies/deterministic-detection#optional-llm-judge).
 
