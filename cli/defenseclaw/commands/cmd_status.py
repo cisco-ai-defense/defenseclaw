@@ -526,7 +526,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_guardrail_profile(cfg)
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
-        _print_llm_judge(health)
+        _print_llm_judge(health, cfg)
         _print_hook_guardian(cfg)
         _print_fleet_health(cfg, client)
         hint(
@@ -1689,16 +1689,26 @@ def judge_fallback_summary(details: dict) -> str:
     return text
 
 
-def _print_judge_fallbacks(details: dict) -> None:
+JUDGE_MAX_PARALLEL_HINT = "a slow judge model: set guardrail.judge.max_parallel"
+
+
+def judge_max_parallel_hint(cfg) -> str:
+    """The max_parallel suggestion, only while guardrail.judge.max_parallel is 0 (off)."""
+    judge = getattr(getattr(cfg, "guardrail", None), "judge", None)
+    value = getattr(judge, "max_parallel", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value > 0:
+        return ""
+    return JUDGE_MAX_PARALLEL_HINT
+
+
+def _print_judge_fallbacks(details: dict, cfg=None) -> None:
     summary = judge_fallback_summary(details)
     if summary:
-        _status_row(
-            "Judge fallbacks",
-            ux._style(summary + "; a slow judge model: set guardrail.judge.max_parallel", fg="yellow"),
-        )
+        hint = judge_max_parallel_hint(cfg)
+        _status_row("Judge fallbacks", ux._style(summary + ("; " + hint if hint else ""), fg="yellow"))
 
 
-def _print_llm_judge(health: dict | None) -> None:
+def _print_llm_judge(health: dict | None, cfg=None) -> None:
     """Show the LLM judge row when the gateway has made judge calls.
 
     A judge whose provider failed every call was invisible here: the hook
@@ -1708,7 +1718,7 @@ def _print_llm_judge(health: dict | None) -> None:
     details = guardrail.get("details") if isinstance(guardrail, dict) else None
     if not isinstance(details, dict):
         return
-    _print_judge_fallbacks(details)
+    _print_judge_fallbacks(details, cfg)
     if not details.get("judge_state"):
         return
     state = str(details.get("judge_state"))

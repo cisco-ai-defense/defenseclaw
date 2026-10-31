@@ -1,5 +1,7 @@
 """#1395: guardrail.judge.max_parallel round trip and judge fallback summaries."""
 
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -9,7 +11,11 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import defenseclaw.config as config_mod  # noqa: E402
-from defenseclaw.commands.cmd_status import judge_fallback_summary  # noqa: E402
+from defenseclaw.commands.cmd_status import (  # noqa: E402
+    _print_judge_fallbacks,
+    judge_fallback_summary,
+    judge_max_parallel_hint,
+)
 from defenseclaw.config import _merge_guardrail, default_config  # noqa: E402
 
 
@@ -64,6 +70,36 @@ class TestJudgeFallbackSummary(unittest.TestCase):
         self.assertIn("3 hook check(s)", text)
         self.assertIn("claudecode 2, codex 1", text)
         self.assertIn("last: timeout (claudecode)", text)
+
+
+class TestJudgeMaxParallelHint(unittest.TestCase):
+    """GAP-0088: suggest max_parallel only while it is 0 (off)."""
+
+    DETAILS = {"judge_fallbacks": 2, "judge_fallbacks_by_connector": {"codex": 2}}
+
+    def _cfg(self, value):
+        cfg = default_config()
+        cfg.guardrail.judge.max_parallel = value
+        return cfg
+
+    def _status_output(self, cfg):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _print_judge_fallbacks(self.DETAILS, cfg)
+        return buf.getvalue()
+
+    def test_hint_only_when_off(self):
+        self.assertIn("guardrail.judge.max_parallel", judge_max_parallel_hint(self._cfg(0)))
+        self.assertEqual(judge_max_parallel_hint(self._cfg(1)), "")
+        self.assertEqual(judge_max_parallel_hint(self._cfg(4)), "")
+
+    def test_status_row_hint_follows_the_setting(self):
+        off = self._status_output(self._cfg(0))
+        self.assertIn("the rules decided 2 hook check(s)", off)
+        self.assertIn("set guardrail.judge.max_parallel", off)
+        on = self._status_output(self._cfg(1))
+        self.assertIn("the rules decided 2 hook check(s)", on)
+        self.assertNotIn("max_parallel", on)
 
 
 if __name__ == "__main__":

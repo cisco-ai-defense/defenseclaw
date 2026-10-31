@@ -499,7 +499,7 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 		printConnectorModes(modes)
 	}
 
-	printSubsystems(&snap)
+	printSubsystems(&snap, cfg.Guardrail.Judge.MaxParallel)
 
 	printConnectors(&snap)
 	if isLocalStatusTarget(bind) {
@@ -1101,18 +1101,18 @@ func printConnectorModeEntry(m *connectorModeSummary) {
 // fleet uplink: when it is disabled and no rostered connector is a proxy
 // connector (OpenClaw, ZeptoClaw), nothing uses it, so its DISABLED state and
 // OpenClaw upstream advice are left out (the TUI does the same).
-func printSubsystems(snap *gateway.HealthSnapshot) {
+func printSubsystems(snap *gateway.HealthSnapshot, judgeMaxParallel int) {
 	Section("Subsystems")
 	if !fleetUplinkUnused(snap) {
-		printSubsystem("Gateway", snap.Gateway)
+		printSubsystem("Gateway", snap.Gateway, judgeMaxParallel)
 	}
-	printSubsystem("Watcher", snap.Watcher)
-	printSubsystem("API", snap.API)
-	printSubsystem("Guardrail", snap.Guardrail)
-	printSubsystem("Routing", snap.Routing)
-	printSubsystem("Telemetry", snap.Telemetry)
+	printSubsystem("Watcher", snap.Watcher, judgeMaxParallel)
+	printSubsystem("API", snap.API, judgeMaxParallel)
+	printSubsystem("Guardrail", snap.Guardrail, judgeMaxParallel)
+	printSubsystem("Routing", snap.Routing, judgeMaxParallel)
+	printSubsystem("Telemetry", snap.Telemetry, judgeMaxParallel)
 	if snap.Sandbox != nil {
-		printSubsystem("Sandbox", *snap.Sandbox)
+		printSubsystem("Sandbox", *snap.Sandbox, judgeMaxParallel)
 	}
 	if line := kernelSensorStatusLine(snap); line != "" {
 		fmt.Printf("  %s%s\n\n", Style("Kernel sensor: ", "fg=bright_black", "bold"), asciiText(line))
@@ -1176,7 +1176,7 @@ func fleetUplinkUnused(snap *gateway.HealthSnapshot) bool {
 	return true
 }
 
-func printSubsystem(name string, h gateway.SubsystemHealth) {
+func printSubsystem(name string, h gateway.SubsystemHealth, judgeMaxParallel int) {
 	// One column wider than the longest label ("Telemetry:"), so the state
 	// never runs into it and lines up with the detail rows below.
 	label := fmt.Sprintf("%-*s", 11, name+":")
@@ -1197,7 +1197,7 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 	if judge != "" {
 		fmt.Printf("             %s %s\n", Dim("problem:"), asciiText(judge))
 	}
-	fallbacks := judgeFallbackNote(h.Details)
+	fallbacks := judgeFallbackNote(h.Details, judgeMaxParallel)
 	if fallbacks != "" {
 		fmt.Printf("             %s %s\n", Dim("judge:"), asciiText(fallbacks))
 	}
@@ -1281,8 +1281,9 @@ func judgeProblem(details map[string]interface{}) string {
 
 // judgeFallbackNote says how many hook checks the rules decided because the
 // LLM judge gave no verdict in time, per connector (gateway judge_fallbacks
-// details, #1395), or returns "".
-func judgeFallbackNote(details map[string]interface{}) string {
+// details, #1395), or returns "". It suggests guardrail.judge.max_parallel
+// only while that setting is 0 (off).
+func judgeFallbackNote(details map[string]interface{}, maxParallel int) string {
 	total, ok := formatDetailValue(details["judge_fallbacks"])
 	if !ok || total == "" || total == "0" {
 		return ""
@@ -1303,6 +1304,9 @@ func judgeFallbackNote(details map[string]interface{}) string {
 	}
 	if last, _ := details["judge_last_fallback"].(string); last != "" {
 		note += "; last: " + last
+	}
+	if maxParallel > 0 {
+		return note // guardrail.judge.max_parallel is already set: nothing to suggest
 	}
 	return note + "; a slow judge model: set guardrail.judge.max_parallel (see the LLM judge docs)"
 }

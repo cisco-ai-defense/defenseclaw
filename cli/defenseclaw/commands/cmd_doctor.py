@@ -17166,10 +17166,12 @@ def _check_connector_inventory(
         fallbacks = by_connector.get(connector) if isinstance(by_connector, dict) else None
         if judge_enabled and isinstance(fallbacks, int) and not isinstance(fallbacks, bool) and fallbacks > 0:
             # Hook checks the rules decided without a judge verdict (#1395).
-            detail += (
-                f"; the rules decided {fallbacks} hook check(s) because the judge gave no verdict in time"
-                " (a slow judge model: set guardrail.judge.max_parallel)"
-            )
+            detail += f"; the rules decided {fallbacks} hook check(s) because the judge gave no verdict in time"
+            from defenseclaw.commands.cmd_status import judge_max_parallel_hint
+
+            hint = judge_max_parallel_hint(cfg)
+            if hint:
+                detail += f" ({hint})"
         _emit("warn" if judge_enabled and judge_failing else "pass", "Detection", detail, r=r)
 
 
