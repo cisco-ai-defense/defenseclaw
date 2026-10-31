@@ -40,15 +40,15 @@ On a managed computer, `defenseclaw` runs only `sandbox` commands. Use `defensec
    {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"f36358a2…","enabled_rule_count":242,"files_digest":"7f0d2611…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":246,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
    ```
 
-3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`:
+3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`. The reason names the file, or the folder when a whole copy of another pack sits inside this one (for example `default/judge/injection.yaml` names `default`), and says to move it out or remove it:
 
    ```text
    Rule pack invalid: "/home/alice/.defenseclaw/policies/guardrail/bad"
-     inventory_unexpected at correlation-patterns.yaml: unexpected YAML component
+     inventory_unexpected at correlation-patterns.yaml: unexpected YAML component: move correlation-patterns.yaml out of the rule-pack folder or remove it, then run the command or installer again
    ```
 
    ```json
-   {"error":{"code":"inventory_unexpected","path":"correlation-patterns.yaml","reason":"unexpected YAML component"},"kind":"validation_error","valid":false,"wire_version":1}
+   {"error":{"code":"inventory_unexpected","path":"correlation-patterns.yaml","reason":"unexpected YAML component: move correlation-patterns.yaml out of the rule-pack folder or remove it, then run the command or installer again"},"kind":"validation_error","valid":false,"wire_version":1}
    ```
 
 | Exit | Meaning |

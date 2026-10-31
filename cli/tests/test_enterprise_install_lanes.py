@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
@@ -365,10 +366,70 @@ def test_upgrade_config_check_requires_a_v9_source_and_every_value_kept(tmp_path
     assert "  - guardrail.mode changed from 'observe' to 'action'" in changed.stderr.splitlines()
     gone = run("config_version: 9\nguardrail:\n  mode: observe\n")
     assert "  - guardrail.connectors.codex.enabled is gone" in gone.stderr.splitlines()
+    # A release older than the first that reads version 9 is given version 8 and
+    # is migrated: the source may be 8, the upgraded config must be 9.
     (tmp_path / "before.yaml").write_text(before.replace("config_version: 9", "config_version: 8"), encoding="utf-8")
-    v8 = run(before)
-    assert v8.returncode == 1
-    assert "want 9 (the lanes upgrade from 1.x)" in v8.stderr
+    assert run(before).returncode == 0, run(before).stderr
+    still_v8 = run(before.replace("config_version: 9", "config_version: 8"))
+    assert still_v8.returncode == 1 and "config_version is 8, want 9" in still_v8.stderr
+    (tmp_path / "before.yaml").write_text(before.replace("config_version: 9", "config_version: 7"), encoding="utf-8")
+    v7 = run(before)
+    assert v7.returncode == 1
+    assert "want 8 or 9 (the lanes upgrade from 1.x)" in v7.stderr
+
+
+def _unix_lane_functions(*names: str) -> str:
+    lane = UNIX_LANE.read_text(encoding="utf-8")
+    found = []
+    for name in names:
+        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", lane, re.MULTILINE | re.DOTALL)
+        assert match, name
+        found.append(match.group(0))
+    cut = re.search(r"^config_v9_first_release=\S+\n", lane, re.MULTILINE)
+    assert cut
+    return cut.group(0) + "\n".join(found)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+@pytest.mark.parametrize(
+    ("previous", "want"),
+    [("1.0.0", 8), ("v1.0.0", 8), ("1.0.0-rc.2", 8), ("1.0.1", 9), ("v1.0.5", 9), ("1.1.0", 9), ("2.0.0", 9),
+     ("1.0", 9), ("latest", 9), ("", 9)],
+)
+def test_unix_upgrade_lane_writes_the_previous_releases_config_version(tmp_path: Path, previous: str, want: int) -> None:
+    # GAP-1424: the lane wrote config_version 9 for every previous release, so a
+    # 1.0.0 previous answered config_version_unsupported.
+    functions = _unix_lane_functions("release_number", "admin_config_version", "write_admin_config")
+    env = {**os.environ, "stage": str(tmp_path), "data_dir": str(tmp_path / "data"),
+           "vendor_policy_dir": str(tmp_path / "policy"), "upgrade_from": "old.rpm", "previous_version": previous}
+    result = subprocess.run(["bash", "-c", functions + "\nwrite_admin_config"], env=env,
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    text = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+    assert text.startswith(f"config_version: {want}\n"), text
+    # A version 8 file leaves the pack to the layout; version 9 names it.
+    assert ("  rule_pack: default\n" in text) == (want == 9), text
+    document = yaml.safe_load(text)
+    assert document["config_version"] == want and document["guardrail"]["connectors"]["codex"] == {"enabled": True}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+def test_unix_install_lane_writes_version_9_without_a_previous_release(tmp_path: Path) -> None:
+    functions = _unix_lane_functions("release_number", "admin_config_version", "write_admin_config")
+    env = {**os.environ, "stage": str(tmp_path), "data_dir": str(tmp_path / "data"),
+           "vendor_policy_dir": str(tmp_path / "policy"), "upgrade_from": "", "previous_version": "1.0.0"}
+    result = subprocess.run(["bash", "-c", functions + "\nwrite_admin_config"], env=env,
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "config.yaml").read_text(encoding="utf-8").startswith("config_version: 9\n")
+
+
+def test_windows_upgrade_lane_writes_the_previous_releases_config_version() -> None:
+    lane = (SCRIPTS / "test-enterprise-windows-install.ps1").read_text(encoding="utf-8")
+    assert "function Get-AdminConfigVersion" in lane and "-lt [version]'1.0.1'" in lane
+    assert "\"config_version: $adminConfigVersion\"" in lane and "'config_version: 9'" not in lane
+    cut = re.search(r"^config_v9_first_release=(\S+)$", UNIX_LANE.read_text(encoding="utf-8"), re.MULTILINE)
+    assert cut and f"[version]'{cut.group(1)}'" in lane, "the Unix and Windows lanes name different version 9 cuts"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")

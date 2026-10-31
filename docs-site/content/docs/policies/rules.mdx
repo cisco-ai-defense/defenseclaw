@@ -63,7 +63,7 @@ On a managed host the Python CLI is not installed. Validate with `defenseclaw-ga
 
 ### What the digest covers
 
-The `digest:` line describes the loaded pack after compilation. The `files digest:` line is the pin in `guardrail.custom_packs.NAME.digest`: it hashes the pack files byte for byte. Comments, key order, line endings and a UTF-8 BOM change the files digest even when the loaded rules stay the same. The config format is `sha256:` followed by the 64 hex characters on the `files digest:` line.
+The `digest:` line describes the loaded pack after compilation. The `files digest:` line is the pin in `guardrail.custom_packs.NAME.digest`: it hashes the pack files byte for byte. Comments, key order, line endings and a UTF-8 BOM change the files digest even when the loaded rules stay the same. The config format is `sha256:` followed by the 64 hex characters on the `files digest:` line. `defenseclaw config set guardrail.custom_packs.NAME` stores the pin as given and the write still applies, but it prints `is registered but will not load` with the `config set ... .digest` command when the pack is missing, invalid or does not match the pin.
 
 ### Change a pinned pack
 
