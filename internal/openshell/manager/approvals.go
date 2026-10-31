@@ -1653,6 +1653,10 @@ type managedState struct {
 	// decisions are the saved decisions per registration, as the last
 	// refresh (or a decision since) left them.
 	decisions map[string][]sandboxrelay.Decision
+	// unanswered are the registrations whose decisions the refresh under
+	// way loaded without an answer (prefetchDecisions): its policy builds
+	// do not wait for them again.
+	unanswered map[string]bool
 	// foreignRules counts each sandbox's removals of rules DefenseClaw
 	// neither rendered nor approved: a repeat stops the sandbox.
 	foreignRules map[string]int
@@ -1720,9 +1724,10 @@ func (m *Manager) savedDecisions(registration string, f config.OpenShellAdminCon
 	st := m.managedSide()
 	st.mu.Lock()
 	list, loaded := st.decisions[registration]
+	unanswered := st.unanswered[registration]
 	list = slices.Clone(list)
 	st.mu.Unlock()
-	if !loaded {
+	if !loaded && !unanswered {
 		list = m.loadDecisions(registration)
 	}
 	return slices.DeleteFunc(list, func(d sandboxrelay.Decision) bool {
@@ -1764,6 +1769,57 @@ func (m *Manager) loadDecisions(registration string) []sandboxrelay.Decision {
 	}
 	st.decisions[registration] = list
 	return slices.Clone(list)
+}
+
+// prefetchDecisions loads, side by side, the saved decisions of the boxes'
+// registrations not loaded yet (loadDecisions, each bounded by
+// loadDecisionsTimeout), so a refresh of the policies waits for one load,
+// not one per sandbox: the daemon's start-up refresh runs before it serves
+// (GAP-0608). A registration that got no answer is not asked again by the
+// policy builds of this refresh, until done is called; the next refresh
+// asks again.
+func (m *Manager) prefetchDecisions(boxes []*box) (done func()) {
+	if m.authority() == nil {
+		return func() {}
+	}
+	var regs []string
+	for _, b := range boxes {
+		if r := m.registrationOf(b); r != "" && !slices.Contains(regs, r) {
+			regs = append(regs, r)
+		}
+	}
+	st := m.managedSide()
+	st.mu.Lock()
+	regs = slices.DeleteFunc(regs, func(r string) bool { _, ok := st.decisions[r]; return ok })
+	st.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, r := range regs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.loadDecisions(r)
+		}()
+	}
+	wg.Wait()
+	var missed []string
+	st.mu.Lock()
+	for _, r := range regs {
+		if _, ok := st.decisions[r]; !ok {
+			if st.unanswered == nil {
+				st.unanswered = map[string]bool{}
+			}
+			st.unanswered[r] = true
+			missed = append(missed, r)
+		}
+	}
+	st.mu.Unlock()
+	return func() {
+		st.mu.Lock()
+		for _, r := range missed {
+			delete(st.unanswered, r)
+		}
+		st.mu.Unlock()
+	}
 }
 
 // refreshDecisions reloads the saved decisions of every registered
