@@ -175,3 +175,40 @@ func TestUninstallPurgeGoesOnForAnAccountWhoseHomeIsGone(t *testing.T) {
 		})
 	}
 }
+
+// rel-1-0-6 GAP-0178: a purge keeps the session-facts cache of an enrolled
+// account whose ~/.defenseclaw holds its own per-user install (its hooks
+// write and read the cache); an account with only the managed hook's cache
+// loses it, as before (GAP-1186).
+func TestUninstallPurgeKeepsTheSessionCacheOfAnAccountWithItsOwnInstall(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			uid := os.Getuid()
+			root := "/home"
+			if goos == "darwin" {
+				root = "/Users"
+			}
+			writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath), fmt.Sprintf(
+				`{"accounts":[{"user":"alice","uid":%d,"home":"%s/alice"},{"user":"own","uid":%d,"home":"%s/own"}]}`, uid, root, uid, root))
+			writeHostFile(t, h, root+"/alice/.defenseclaw/session-facts.json", "{}")
+			writeHostFile(t, h, root+"/own/.defenseclaw/session-facts.json", `{"own":true}`)
+			writeHostFile(t, h, root+"/own/.defenseclaw/config.yaml", "data_dir: ~/.defenseclaw\n")
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+				return CommandResult{Stdout: []byte(`{"ok":true,"removed":0}`)}, nil
+			}}
+			done := h.run(Options{Action: ActionUninstall, Purge: true})
+			requireOK(t, done)
+			if exists(h.env.P(root + "/alice/.defenseclaw/session-facts.json")) {
+				t.Fatalf("the purge left the managed hook's session cache; changes %v", done.Changes)
+			}
+			if h.read(root+"/own/.defenseclaw/session-facts.json") != `{"own":true}` {
+				t.Fatalf("the purge changed the session cache of an account's own per-user install; changes %v", done.Changes)
+			}
+			if strings.Contains(strings.Join(done.Changes, "\n"), "session cache of user own") {
+				t.Fatalf("the purge reports removing the own install's cache: %v", done.Changes)
+			}
+		})
+	}
+}
