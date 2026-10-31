@@ -167,14 +167,26 @@ dc_legacy_sandbox_guard() {
             continue
         fi
         dc_who=$dc_acct_name
-        if ! dc_status=$(dc_guard_as "$dc_uid" "$dc_who" "$dc_acct_home" "$dc_guard_launcher" sandbox status --output json); then
-            dc_held="$dc_held$dc_nl  $dc_who: the sandbox daemon did not answer; \`defenseclaw sandbox list\`, run as $dc_who, names the sandboxes that run"
+        # After an uninstall that kept the package (enterprise uninstall
+        # without purge) the launcher is gone: the installed gateway, which
+        # the launcher runs, asks the daemon instead (GAP-0181).
+        dc_ask=$dc_guard_launcher
+        [ -x "$dc_ask" ] || dc_ask=$dc_guard_gateway
+        if ! dc_status=$(dc_guard_as "$dc_uid" "$dc_who" "$dc_acct_home" "$dc_ask" sandbox status --output json); then
+            if [ "$dc_guard_os" = darwin ]; then
+                dc_held="$dc_held$dc_nl  $dc_who: the sandbox daemon did not answer; \`defenseclaw sandbox list\`, run as $dc_who, names the sandboxes that run"
+            else
+                # A way out that needs no DefenseClaw command: the daemon's own
+                # units, which an uninstall that kept the package can leave
+                # running with nothing to answer for (GAP-0181).
+                dc_held="$dc_held$dc_nl  $dc_who: the sandbox daemon did not answer (pid $dc_pid); \`defenseclaw sandbox list\`, run as $dc_who, names the sandboxes that run; if that command is not there or does not answer either, run as $dc_who \`systemctl --user stop defenseclaw-sandbox.socket defenseclaw-sandbox.service\` (it stops that user's sandboxes first, if any run), or sign $dc_who out"
+            fi
             continue
         fi
         if printf '%s\n' "$dc_status" | dc_guard_json status | grep -qx live; then
             continue # DefenseClaw 1.0.4 or later: it waits for its sandboxes itself
         fi
-        if ! dc_list=$(dc_guard_as "$dc_uid" "$dc_who" "$dc_acct_home" "$dc_guard_launcher" sandbox list --output json) ||
+        if ! dc_list=$(dc_guard_as "$dc_uid" "$dc_who" "$dc_acct_home" "$dc_ask" sandbox list --output json) ||
             ! dc_rows=$(printf '%s\n' "$dc_list" | dc_guard_json list) ||
             ! printf '%s\n' "$dc_rows" | grep -qx list; then
             dc_held="$dc_held$dc_nl  $dc_who: the sandbox daemon of an earlier DefenseClaw did not list its sandboxes; \`defenseclaw sandbox list\`, run as $dc_who, names the sandboxes that run"

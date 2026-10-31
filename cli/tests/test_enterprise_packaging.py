@@ -2805,6 +2805,43 @@ def test_linux_preinstall_ends_an_idle_earlier_daemon_and_leaves_a_current_one(t
     assert not [c for c in calls if "sandbox list" in c or "--user stop" in c], calls
 
 
+@pytest.mark.parametrize("answers", [True, False])
+def test_linux_preinstall_after_an_uninstall_that_kept_the_package(tmp_path: Path, answers: bool) -> None:
+    # GAP-0181: `enterprise linux uninstall` without purge removes the
+    # launcher and keeps the package; the installed gateway asks the daemon
+    # in its place. A daemon that answers as 1.0.4 or later is left alone and
+    # the install goes on; one that does not answer refuses it with a way out
+    # that needs no DefenseClaw command: the daemon's own user units.
+    host, _ = _guard_host(tmp_path, [], "", "")
+    gateway = tmp_path / "gw" / "defenseclaw-gateway"
+    gateway.parent.mkdir()
+    status = tmp_path / "gw-status.json"
+    status.write_text('{"sandboxes":0,"running":0,"live":0}', encoding="utf-8")
+    _write_stub(gateway.parent, "defenseclaw-gateway", f"""echo "gateway $*" >>'{host.log}'
+case "$1 $2" in
+    "sandbox status") cat '{status}'; exit {0 if answers else 1} ;;
+esac
+exit 1""")
+    (tmp_path / "ps.out").write_text(f" 1001  4242 {gateway} sandbox-daemon\n", encoding="utf-8")
+    text = _rooted((LINUX / "preinstall.sh").read_text(encoding="utf-8"), {
+        "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+        "/run/systemd/system": str(host.run_systemd),
+        "/run/defenseclaw-enterprise-apply-path.held": str(tmp_path / "held"),
+        "/opt/defenseclaw/bin/defenseclaw-gateway /usr/bin/defenseclaw": f"{gateway} {tmp_path / 'no-launcher'}",
+    })
+    result = host.run(_stamp(tmp_path, text, "1.0.6"), "2")
+    calls = host.calls()
+    assert "gateway sandbox status --output json" in calls, calls
+    if answers:
+        assert result.returncode == 0, result.stderr
+        assert not [c for c in calls if "--user stop" in c], calls
+        return
+    assert result.returncode == 1, result.stderr
+    assert "alice: the sandbox daemon did not answer (pid 4242)" in result.stderr
+    assert "run as alice `systemctl --user stop defenseclaw-sandbox.socket defenseclaw-sandbox.service`" in result.stderr
+    assert not [c for c in calls if c.startswith(("systemctl", "systemd-run"))], calls  # nothing touched
+
+
 def test_both_package_preinstalls_are_stamped_with_the_guard() -> None:
     # The release stamps the guard in place of each preinstall's marker line;
     # an unstamped copy (a local build) only skips it.
