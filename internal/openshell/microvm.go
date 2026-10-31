@@ -827,6 +827,19 @@ func (r *doctorRun) vmStateDir() string {
 	return VMStateDir(r.vmConfig().StateDir, home)
 }
 
+// ManagedVMDiskCheck is the Disk space row of a managed computer's MicroVM
+// driver: the free space under the account's MicroVM state directory, with
+// the fail and warn thresholds of the per-user doctor (VMDiskFailBytes,
+// VMDiskWarnBytes). The managed doctor reports no machine checks of its
+// own, so it adds this one where the administrator's driver is vm
+// (GAP-0259). The rendered gateway configuration names no state directory,
+// so it is the default one under the account's home.
+func (d *Doctor) ManagedVMDiskCheck() Check {
+	d.defaults()
+	r := &doctorRun{Doctor: d, report: &DoctorReport{}}
+	return r.vmDiskCheck()
+}
+
 // pruneCommand removes DefenseClaw's superseded harness images, and the
 // MicroVM disks prepared from them.
 const pruneCommand = "defenseclaw sandbox image prune"

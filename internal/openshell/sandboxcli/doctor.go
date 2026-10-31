@@ -244,6 +244,11 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	if a.Cfg != nil || managed {
 		rep.Checks = append(rep.Checks, a.tlsTrustCheck(ctx, managed), a.hostGitCheck(ctx, managed, a.everyRunCopies(managed, string(rep.Driver))))
 	}
+	if managed && rep.Driver == openshell.DriverVM {
+		// The MicroVM driver's disks need room on the account's volume; the
+		// managed report has no machine checks of its own (GAP-0259).
+		rep.Checks = append(rep.Checks, d.ManagedVMDiskCheck())
+	}
 	if managed && a.GOOS == "darwin" {
 		if rep.Driver == openshell.DriverVM || (st.managed != nil && rep.Driver != openshell.DriverDocker) {
 			rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
