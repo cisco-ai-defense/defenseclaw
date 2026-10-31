@@ -183,13 +183,29 @@ func (a *APIServer) handleAgentGatewayHook() http.HandlerFunc {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent-gateway event refused", "reason": hookexec.MalformedHookPayloadReason})
 			return
 		}
-		next := r.WithContext(ctx)
+		next := r.WithContext(withAgentGatewayHookCaller(ctx))
 		next.Body = io.NopCloser(bytes.NewReader(mapped))
 		next.ContentLength = int64(len(mapped))
 		next.Header = r.Header.Clone()
 		next.Header.Set("Content-Length", strconv.Itoa(len(mapped)))
 		unified(w, next)
 	}
+}
+
+// withAgentGatewayHookCaller marks the request as authenticated for the
+// agent-gateway connector, as every connector hook route marks its caller.
+// Only an authenticated caller reaches the route: the gateway token on a
+// per-user install, the kernel-verified hook-socket peer on a managed device
+// (managedHookPeerAuth marks it already). With the mark the evaluator applies
+// the projections of an authenticated hook: an mcp__<server>__<tool> name is
+// judged by its action tool, so a call gets the native hook's decision on
+// the same arguments (rel-1-0-6:GAP-0131). A request another connector
+// authenticated, or a sandbox relay, keeps its own mark.
+func withAgentGatewayHookCaller(ctx context.Context) context.Context {
+	if authenticatedHookConnector(ctx) != "" || isSandboxHookRequest(ctx) {
+		return ctx
+	}
+	return withAuthenticatedHookConnector(ctx, connector.AgentGatewayConnectorName)
 }
 
 // agentGatewayInstanceLabel is the label of the calling gateway: the trusted
