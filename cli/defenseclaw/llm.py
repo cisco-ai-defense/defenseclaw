@@ -82,6 +82,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from typing import Any
 
 from defenseclaw import envvars
@@ -789,19 +790,32 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
 
 
 _PR_SET_PDEATHSIG = 1
+# SIGKILL is 9 on every Linux architecture. The constant keeps the Linux branch
+# free of the host's signal module (Windows has no signal.SIGKILL), so tests
+# reach it on any OS without patching process globals (rel-1-0-6:GAP-0243).
+_LINUX_SIGKILL = 9
 
 
-def _exit_with_parent() -> None:
+def _load_libc() -> Any:
+    import ctypes
+
+    return ctypes.CDLL(None, use_errno=True)
+
+
+def _exit_with_parent(
+    platform: str | None = None,
+    load_libc: Callable[[], Any] | None = None,
+) -> None:
     """On Linux, ask the kernel to kill this helper with the scanner that
     started it. The gateway kills its scanner with itself, and the helper
-    outlived both (p0 GAP-1156)."""
-    if not sys.platform.startswith("linux"):
+    outlived both (p0 GAP-1156). ``platform`` and ``load_libc`` default to the
+    running interpreter and its libc; tests pass them instead of patching
+    ``sys.platform`` or ``ctypes.CDLL``."""
+    if not (sys.platform if platform is None else platform).startswith("linux"):
         return
-    import ctypes
-    import signal
-
+    loader = _load_libc if load_libc is None else load_libc
     try:
-        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_PDEATHSIG, int(signal.SIGKILL), 0, 0, 0)
+        loader().prctl(_PR_SET_PDEATHSIG, _LINUX_SIGKILL, 0, 0, 0)
     except (OSError, AttributeError):
         return
 
