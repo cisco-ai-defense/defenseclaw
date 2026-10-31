@@ -10,12 +10,16 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // Causes of an activation refusal (ActivationRefusal.Cause).
@@ -172,11 +176,9 @@ func CheckStoredVersion(in ActivationInput, name string) (*SignedVersion, *Activ
 func CheckSignedActivation(in ActivationInput, bundleID string, version uint64, signerKeyID string, raw []byte) (*SignedVersion, *ActivationRefusal) {
 	base := VersionDirName(version, bundleID)
 	names := []string{}
-	if entries, err := os.ReadDir(in.BundlesDir); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() && validVersionDir(entry.Name(), version, bundleID) {
-				names = append(names, entry.Name())
-			}
+	for _, name := range storedVersionDirNames(in.BundlesDir, VersionDirName(version, bundleID), VersionDirNameForReceipt(version, bundleID, bundleID)) {
+		if validVersionDir(name, version, bundleID) {
+			names = append(names, name)
 		}
 	}
 	first := &ActivationRefusal{Cause: ActivationNotStored, Detail: "no stored version directory holds this bundle (" + safePath(base) + ")"}
@@ -206,19 +208,89 @@ func CheckSignedActivation(in ActivationInput, bundleID string, version uint64, 
 // CheckStoredVersion, highest bundle version first: the start fallback runs
 // the newest signed bundle in memory when the installed config is not one.
 func SignedVersions(in ActivationInput) []*SignedVersion {
-	entries, err := os.ReadDir(in.BundlesDir)
-	if err != nil {
-		return nil
-	}
 	var out []*SignedVersion
-	for _, entry := range entries {
-		if !entry.IsDir() || !IsVersionDirName(entry.Name()) {
-			continue
-		}
-		if v, refusal := CheckStoredVersion(in, entry.Name()); refusal == nil {
+	for _, name := range storedVersionDirNames(in.BundlesDir) {
+		if v, refusal := CheckStoredVersion(in, name); refusal == nil {
 			out = append(out, v)
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Manifest.Version > out[j].Manifest.Version })
 	return out
+}
+
+// maxPublicReceiptBytes bounds one public receipt the gateway reads to name
+// a version directory.
+const maxPublicReceiptBytes = 64 << 10
+
+// storedVersionDirNames are the version directory names in bundlesDir. The
+// store directory is 0711 on Linux and macOS (rel-1-0-6:GAP-0038): the
+// gateway, which runs as the service account, can open a version directory
+// (0750 root:service) by name but cannot list the store. When the listing is
+// refused, the names are the extra names given (the first delivery of a
+// bundle has its bundle id as receipt id) and the names the public receipt
+// events and receipt.json give, each kept only when it is a directory. A name
+// only says where to look: CheckStoredVersion still checks the signature and
+// the files of what it finds.
+func storedVersionDirNames(bundlesDir string, extra ...string) []string {
+	if entries, err := os.ReadDir(bundlesDir); err == nil {
+		names := []string{}
+		for _, entry := range entries {
+			if entry.IsDir() && IsVersionDirName(entry.Name()) {
+				names = append(names, entry.Name())
+			}
+		}
+		return names
+	}
+	seen := map[string]bool{}
+	names := []string{}
+	add := func(name string) {
+		if seen[name] || !IsVersionDirName(name) {
+			return
+		}
+		seen[name] = true
+		if info, err := os.Lstat(filepath.Join(bundlesDir, name)); err == nil && info.IsDir() {
+			names = append(names, name)
+		}
+	}
+	for _, name := range extra {
+		add(name)
+	}
+	fromReceipt := func(path string) {
+		file, err := os.Open(path)
+		if err != nil {
+			return
+		}
+		defer file.Close()
+		raw, err := io.ReadAll(io.LimitReader(file, maxPublicReceiptBytes+1))
+		if err != nil || len(raw) > maxPublicReceiptBytes {
+			return
+		}
+		var r struct {
+			ReceiptID string `json:"receipt_id"`
+			BundleID  string `json:"bundle_id"`
+			Version   uint64 `json:"version"`
+		}
+		if json.Unmarshal(raw, &r) != nil || !ValidBundleID(r.BundleID) || r.Version == 0 {
+			return
+		}
+		add(VersionDirName(r.Version, r.BundleID))
+		add(VersionDirNameForReceipt(r.Version, r.BundleID, r.BundleID))
+		if receiptIDPattern.MatchString(r.ReceiptID) {
+			add(VersionDirNameForReceipt(r.Version, r.BundleID, r.ReceiptID))
+		}
+	}
+	fromReceipt(filepath.Join(bundlesDir, enterprisestatus.PublicReceiptName))
+	events := filepath.Join(bundlesDir, enterprisestatus.PublicReceiptEventsDirName)
+	if entries, err := os.ReadDir(events); err == nil {
+		for i, entry := range entries {
+			if i >= maxUnreportedReceiptEvents {
+				break
+			}
+			if entry.Type().IsRegular() && filepath.Ext(entry.Name()) == ".json" {
+				fromReceipt(filepath.Join(events, entry.Name()))
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
 }
