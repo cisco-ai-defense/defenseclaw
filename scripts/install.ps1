@@ -911,8 +911,15 @@ function Get-GatewayProcess {
 # Older OpenCode and Amp processes retain their plugin in memory. Only the
 # exact installed entry may defer a gateway swap. Unproven candidates are
 # audited and the upgrade proceeds with the configured hook outage behavior.
+# The line goes to a log beside the install log, not the console, which shows
+# only the installer's own steps (GAP-0103).
 function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) {
-    Write-Warn "audit: live-agent identity unproven for PID ${ProcessId}: $Reason"
+    $line = "audit: live-agent identity unproven for PID ${ProcessId}: $Reason"
+    $file = if ($Run.Log) { [IO.Path]::ChangeExtension($Run.Log, $null).TrimEnd(".") + "-audit.log" } else { "" }
+    if ($file) {
+        try { Add-Content -LiteralPath $file -Value $line -ErrorAction Stop; return } catch { }
+    }
+    Write-Verbose $line
 }
 
 # Resolve a file link without consulting PATH. Get-Item sees Windows file

@@ -835,9 +835,18 @@ installed_version() {
 
 # Older OpenCode and Amp processes retain their plugin in memory. Refuse a
 # gateway swap only when the process is the exact entry installed for that
-# agent. Unproven candidates are audited and do not block the upgrade.
+# agent. Unproven candidates are audited and do not block the upgrade. The
+# audit line goes to the install log only: the console shows the installer's
+# own steps, and a process that exits between the listing and the lookup (the
+# listing's own ps, say) is not something the user can act on (GAP-0103).
+# Without a log (a unit test, a sourced call) it falls back to stderr.
 agent_identity_audit() {
-    printf 'audit: live-agent identity unproven for PID %s: %s\n' "$1" "$2" >&2
+    local line
+    printf -v line 'audit: live-agent identity unproven for PID %s: %s' "$1" "$2"
+    if [[ -n "${LOG:-}" ]] && printf '%s\n' "${line}" >> "${LOG}" 2>/dev/null; then
+        return 0
+    fi
+    printf '%s\n' "${line}" >&2
 }
 
 # resolved_agent_path FILE: the file's real path, with no PATH search.
