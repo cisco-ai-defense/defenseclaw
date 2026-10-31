@@ -101,6 +101,9 @@ var openDirectoryOffline = func() bool {
 	return unixidentity.OpenDirectoryOffline(ctx)
 }
 
+// directoryNodeOffline is openDirectoryOffline for missingAccountDirectoryAway.
+func directoryNodeOffline() bool { return openDirectoryOffline() }
+
 // darwinLocalNodeAccount reports whether the local directory node holds the
 // account name with this uid (dscl . -list /Users UniqueID) as an account of
 // its own. A mobile account is held there too, but it is a copy of a
