@@ -361,6 +361,25 @@ func OperandPath(name, cwd string) string {
 
 // parseShell parses a command of at most MaxPayloadBytes as bash, or else as
 // POSIX sh.
+// callPastArgvBound reports whether a simple command of the shell text has
+// more argv words than ActionFacts reads (actionfacts.MaxArgvItems). Its
+// operands past the bound have no path facts, also when the analysis status
+// is only partial (a tilde or another dynamic word in the list, GAP-0151).
+func callPastArgvBound(command string) bool {
+	file, ok := parseShell(command)
+	if !ok {
+		return false
+	}
+	past := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if call, isCall := node.(*syntax.CallExpr); isCall && len(call.Args) > actionfacts.MaxArgvItems {
+			past = true
+		}
+		return !past
+	})
+	return past
+}
+
 func parseShell(command string) (*syntax.File, bool) {
 	if len(command) > MaxPayloadBytes {
 		return nil, false
@@ -1025,7 +1044,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// decision as the user, so the managed answer is the same
 				// (GAP-0151). Only a protected target sets the fact.
 				if !protectedDecision && !isApplyPatchToolName(tool) &&
-					fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded {
+					(fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded || callPastArgvBound(command)) {
 					protectedDecision = ActionCommandDecision(command, cwd, home) != ""
 				}
 				// A command over the analysis limits has no path facts, but
