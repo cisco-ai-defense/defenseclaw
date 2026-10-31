@@ -106,12 +106,15 @@ func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (opera
 			return true
 		}
 		words := make([]string, len(call.Args))
-		// The brace words of a plain cp call are the fixed words bash
-		// makes of them, so its real destination is listed (rel-1-0-6
-		// GAP-0202): the hook client resolves it like any operand.
+		// The brace words of a plain cp call, or of another writer, are
+		// the fixed words bash makes of them, so its real targets are
+		// listed (rel-1-0-6 GAP-0202, GAP-0228): the hook client resolves
+		// them like any operand. tee ~/.ssh/authorized_key{s,x} writes the
+		// keys file; a managed gateway that cannot search the home only
+		// sees the targets the client lists.
 		var braces map[int][]string
 		var argStatic []bool
-		if first, ok := StaticWord(call.Args[0], home); ok && slices.Contains(copyPrograms, programBase(first)) {
+		if first, ok := StaticWord(call.Args[0], home); ok && slices.Contains(braceOperandPrograms, programBase(first)) {
 			argStatic = make([]bool, len(call.Args))
 			for i, arg := range call.Args {
 				_, argStatic[i] = StaticWord(arg, home)

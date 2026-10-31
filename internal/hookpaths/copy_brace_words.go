@@ -18,6 +18,16 @@ import (
 // the evaluation limit before any reader expands it (GAP-0187).
 const maxCopyBraceWords = shellparse.MaxBraceFields
 
+// braceOperandPrograms are the writers whose plain brace operands the
+// literal write reader expands before it lists their targets: the copy
+// programs (GAP-0202) and the writers that name a target file as an
+// operand (GAP-0228). A brace operand of any of them is several fixed
+// words bash expands before the program runs.
+var braceOperandPrograms = []string{
+	"cp", "gcp", "tee", "dd", "sed", "gsed", "truncate", "install", "ginstall",
+	"mv", "gmv", "ln", "gln",
+}
+
 // copyBraceWordFields returns, by argv index, the words bash makes of each
 // copy operand spelled as a brace expansion of plain text (cp a.txt{,.orig},
 // cp {a.txt,b.txt} dir): bash expands such a word to several fixed words
