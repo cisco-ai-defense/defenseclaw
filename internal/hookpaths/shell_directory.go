@@ -164,6 +164,15 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			}
 			writes = append(writes, RedirectOccurrence{Path: literal, OwnCopy: own})
 		}
+		// A plain mv onto an existing link to a file replaces the link entry
+		// and writes neither file, as without the directory change: judge
+		// that destination by its entry (GAP-2559, actionPlainMoveOntoLink).
+		// The hook client (record) still lists it: its map describes the
+		// entry for a gateway that cannot read the link (GAP-2558).
+		var movedOntoLinks map[string]bool
+		if s.known && !record {
+			movedOntoLinks = movedOntoLinkEntries(facts)
+		}
 		for _, candidate := range facts.Paths {
 			if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
 				continue
@@ -171,6 +180,12 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			target := candidate.Resolved
 			if target == "" {
 				target = candidate.Normalized
+			}
+			if movedOntoLinks[target] {
+				if parent, ok := ResolveWriteTarget(filepath.Dir(target)); ok &&
+					!protectedEntry(filepath.Join(parent, filepath.Base(target)), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
+					continue
+				}
 			}
 			if raw, ok := RawDotDotOperand(candidate.Value, s.logical); ok {
 				target = raw
