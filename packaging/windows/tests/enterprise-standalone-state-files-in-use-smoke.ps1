@@ -51,16 +51,16 @@ try {
         $engineName = [IO.Path]::GetFileName($engine)
         $readerScript = [IO.Path]::Combine($Root, 'reader.ps1')
         [IO.File]::WriteAllText($readerScript, @'
-param([string]$Path, [string]$Ready, [int]$HoldMilliseconds)
-$stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+param([string]$Path, [string]$Ready, [int]$HoldMilliseconds, [string]$Share = 'Read')
+$stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]$Share)
 [IO.File]::WriteAllText($Ready, 'ready')
 Start-Sleep -Milliseconds $HoldMilliseconds
 $stream.Dispose()
 '@)
         try {
-            function Start-TestReader([string]$Path, [int]$HoldMilliseconds) {
+            function Start-TestReader([string]$Path, [int]$HoldMilliseconds, [string]$Share = 'Read') {
                 $ready = [IO.Path]::Combine($Root, 'ready-' + [Guid]::NewGuid().ToString('N'))
-                $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Path "{1}" -Ready "{2}" -HoldMilliseconds {3}' -f $readerScript, $Path, $ready, $HoldMilliseconds
+                $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Path "{1}" -Ready "{2}" -HoldMilliseconds {3} -Share "{4}"' -f $readerScript, $Path, $ready, $HoldMilliseconds, $Share
                 $process = Microsoft.PowerShell.Management\Start-Process `
                     -FilePath $engine `
                     -ArgumentList $arguments `
@@ -223,6 +223,48 @@ $stream.Dispose()
                 '.* holds a file in ' + [regex]::Escape([string]$layout.InstallRoot) +
                 '; nothing was changed\. Close the program and run the uninstall again$')
             Test-StateIntact 'install-root holder refusal' $layout
+            Stop-TestReader $reader
+
+            # GAP-0789: before an upgrade or repair swaps the hook, only a
+            # holder whose handle does not share delete defers the run. A
+            # well-behaved scanner (FileShare ReadWrite and Delete) deferred
+            # every repair with hook_in_use; the swap works under its handle
+            # and leaves nothing beside the hook.
+            $layout = New-TestState 'hook-shares-delete'
+            $layout.HookPath = [IO.Path]::Combine($layout.BinDirectory, 'defenseclaw-hook.exe')
+            $reader = Start-TestReader $layout.HookPath 120000 'ReadWrite, Delete'
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            Test-Accepted 'hook held with delete sharing' { Assert-DefenseClawHookNotHeld -Layout $layout -TimeoutSeconds 3 }
+            if ($clock.ElapsedMilliseconds -ge 3000) {
+                $failures.Add("a hook holder that shares delete was waited for ($($clock.ElapsedMilliseconds) ms)")
+            }
+            $replacement = [IO.Path]::Combine($Root, 'hook-shares-delete', 'replacement.exe')
+            [IO.File]::WriteAllText($replacement, 'replaced')
+            Test-Accepted 'swap of a hook held with delete sharing' { Install-DefenseClawFileAtomic -Source $replacement -Destination $layout.HookPath }
+            if (-not [IO.File]::Exists($layout.HookPath) -or [IO.File]::ReadAllText($layout.HookPath) -cne 'replaced') {
+                $failures.Add('the hook held with delete sharing was not replaced')
+            }
+            $left = @([IO.Directory]::GetFileSystemEntries($layout.BinDirectory) | Microsoft.PowerShell.Core\Where-Object {
+                    [IO.Path]::GetFileName($_) -cne 'defenseclaw-hook.exe' })
+            if ($left.Count -gt 0) {
+                $failures.Add("the swap of a hook held with delete sharing left $($left -join ', ')")
+            }
+            if ($reader.HasExited) {
+                $failures.Add('the hook holder that shares delete was ended')
+            }
+            Stop-TestReader $reader
+
+            # A holder without delete sharing still defers the run, named,
+            # with the hook unchanged.
+            $layout = New-TestState 'hook-held'
+            $layout.HookPath = [IO.Path]::Combine($layout.BinDirectory, 'defenseclaw-hook.exe')
+            $reader = Start-TestReader $layout.HookPath 120000 'Read'
+            Test-Refused 'hook held without delete sharing' { Assert-DefenseClawHookNotHeld -Layout $layout -TimeoutSeconds 2 } (
+                '^hook_in_use: ' + [regex]::Escape($engineName) + ' \(process id ' + $reader.Id + '[,)].* has ' +
+                [regex]::Escape([string]$layout.HookPath) + ' open, so Setup could not replace it; this run stopped and replaced nothing\.')
+            if ([IO.File]::ReadAllText($layout.HookPath) -cne 'installed') {
+                $failures.Add('the hook held without delete sharing changed')
+            }
             Stop-TestReader $reader
 
             # Two short hook invocations on a busy host can be seen on

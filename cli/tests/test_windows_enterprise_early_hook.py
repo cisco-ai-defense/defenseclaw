@@ -165,10 +165,16 @@ if ($Case -like 'held*') {
         param([hashtable]$Layout, [string[]]$Paths, $Excluded)
         $script:holderLooks++
         $script:events.Add('holders:' + [string]$script:holderLooks)
-        if ($Case -eq 'held-stays' -or $script:holderLooks -le 2) {
+        if ($Case -eq 'held-stays' -or $Case -eq 'held-shares-delete' -or $script:holderLooks -le 2) {
             return @{ '4343/1' = [pscustomobject]@{ Id = 4343; Name = 'scanner.exe'; UserName = 'NT AUTHORITY\SYSTEM'; Parent = ''; File = '' } }
         }
         return @{}
+    }
+    # GAP-0789: the reader shares delete only in held-shares-delete.
+    function Test-DefenseClawHookSharesDelete {
+        param([string]$Path)
+        $script:events.Add('shares-delete:' + [string]($Case -eq 'held-shares-delete'))
+        return ($Case -eq 'held-shares-delete')
     }
 }
 if ($Case -like 'restorer*') {
@@ -326,6 +332,10 @@ try {
             }
         }
         'held-closes' {
+            Assert-DefenseClawHookNotHeld -Layout $layout -TimeoutSeconds 30
+            $script:events.Add('returned')
+        }
+        'held-shares-delete' {
             Assert-DefenseClawHookNotHeld -Layout $layout -TimeoutSeconds 30
             $script:events.Add('returned')
         }
@@ -676,7 +686,17 @@ def test_a_program_holding_the_hook_open_defers_the_run_before_anything_changes(
 def test_the_run_goes_on_once_the_program_closed_the_hook(tmp_path: Path) -> None:
     result = _run(tmp_path, "held-closes")
     assert result["threw"] == "", result
-    assert result["events"] == ["holders:1", "holders:2", "holders:3", "returned"], result
+    assert result["events"] == ["holders:1", "shares-delete:False", "holders:2", "shares-delete:False", "holders:3", "returned"], result
+
+
+def test_a_holder_that_shares_delete_does_not_defer_the_run(tmp_path: Path) -> None:
+    """GAP-0789: a well-behaved scanner holding the hook with FileShare
+    ReadWrite and Delete deferred every repair with hook_in_use, although the
+    swap works under such a handle. It is not waited for; a holder without
+    delete sharing still is (held-stays, held-closes)."""
+    result = _run(tmp_path, "held-shares-delete")
+    assert result["threw"] == "", result
+    assert result["events"] == ["holders:1", "shares-delete:True", "returned"], result
 
 
 def test_the_transaction_checks_for_a_hook_holder_before_it_stops_anything() -> None:
