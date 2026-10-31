@@ -754,15 +754,15 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
   It then removes all of `~/.defenseclaw` (hook scripts, hook credentials and
   `~/.defenseclaw/foreign-hooks-backup` included) and, from `~/.local/bin`, `defenseclaw-gateway`,
   `defenseclaw-acp`, the launcher links, the `uv` the per-user installer added (when unchanged) and
-  its bookkeeping. A user enrolled only for machine-policy connectors has no per-user install: the
-  purge removes the session cache `~/.defenseclaw/session-facts.json`, and `~/.defenseclaw` when
-  that was all it held. It follows no symlink there and removes only a file the user owns; the
+  its bookkeeping. A user enrolled only for machine-policy connectors loses `~/.defenseclaw` the same
+  way when it holds no own install (only the session cache `~/.defenseclaw/session-facts.json` and
+  what DefenseClaw wrote there, an earlier failed install's hook files and backups included). It follows no symlink there and removes only a file the user owns; the
   user's own tools in `~/.local/bin` stay. The result names each user whose data it removed and
   each enrolled user it left alone, with the reason (a home that is not trusted or not available, a
   hook removal that failed, a gateway that could not be stopped). Fix the cause and run the same
   uninstall again. Back up `~/.defenseclaw/foreign-hooks-backup` first if a user wants their own
   moved-aside hooks back.
-- **A user's own install from before the enrollment (Linux and macOS).** If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. No `~/.defenseclaw-backup-*` folder is made.
+- **A user's own install from before the enrollment (Linux and macOS).** If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. No `~/.defenseclaw-backup-*` folder is made. The enrollment shares that folder: the uninstall, with or without `--purge`, puts back the install's hook scripts and hook settings, connector backups, hook contract lock and session cache as they were before the enrollment, and each agent config those backups name when the uninstall left it as it was before the own install (an agent config changed while the computer was managed stays as it is and is named in a `per_user_state_remaining` warning). The Claude Code hook script the enrollment replaced with a blocker comes back too.
 - **A user whose home is gone (Linux and macOS).** When an enrolled user's home folder was
   deleted and its parent folder still holds other entries, the hooks and `~/.defenseclaw` went with
   it. The uninstall warns (`per_user_hooks_remaining`) with the home and goes on. A home that does

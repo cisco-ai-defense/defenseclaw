@@ -4431,6 +4431,14 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		// ClaudeHookUnblocked: the accounts whose Claude Code blocker the
 		// uninstall removed (GAP-1828).
 		ClaudeHookUnblocked []string `json:"claude_hook_unblocked"`
+		// ClaudeHookRestored: those of them whose own hook script the
+		// uninstall put back (rel-1-0-6 GAP-0178).
+		ClaudeHookRestored []string `json:"claude_hook_restored"`
+		// OwnInstallRestored, OwnInstallKeptChanged: the accounts whose own
+		// per-user install files the uninstall put back, and the agent
+		// configs of those installs it left as they are (rel-1-0-6 GAP-0178).
+		OwnInstallRestored    []string `json:"own_install_restored"`
+		OwnInstallKeptChanged []string `json:"own_install_kept_changed"`
 	}
 	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil {
 		r.AddError(codePerUserHooks, "the per-user hook removal returned an invalid report; keep the deployment and rerun `"+l.uninstallCommand()+"`")
@@ -4494,7 +4502,18 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	// The enrollment had replaced the account's own Claude Code hook script
 	// with a blocker; the uninstall removed it, and the account's own hook
 	// does not guard Claude Code until its owner sets it up again.
+	for _, user := range report.OwnInstallRestored {
+		r.Changes = append(r.Changes, fmt.Sprintf("put back the own per-user DefenseClaw files of user %s that the enrollment had changed (hook scripts and hook settings in ~/.defenseclaw/hooks, connector backups, hook contract lock, and the agent configs those backups name), byte for byte as they were before the managed deployment", user))
+	}
+	for _, entry := range report.OwnInstallKeptChanged {
+		user, path, _ := strings.Cut(entry, ": ")
+		r.AddWarning(codePerUserState, fmt.Sprintf("kept %s of user %s as it is: it changed while the computer was managed, so the uninstall did not put back its content from before the managed deployment; if that account's own DefenseClaw hooks are missing from it, that user runs `defenseclaw setup` again", path, user))
+	}
 	for _, user := range report.ClaudeHookUnblocked {
+		if slices.Contains(report.ClaudeHookRestored, user) {
+			r.Changes = append(r.Changes, fmt.Sprintf("put back the own DefenseClaw Claude Code hook script of user %s (~/.defenseclaw/hooks/claude-code-hook.sh) that the enrollment had replaced with a blocker", user))
+			continue
+		}
 		r.Changes = append(r.Changes, fmt.Sprintf("removed the Claude Code blocker the enrollment had written over the own DefenseClaw hook script of user %s (~/.defenseclaw/hooks/claude-code-hook.sh); that account's own Claude Code hook now reports a missing script and does not guard Claude Code until `defenseclaw setup claude-code` runs as that user", user))
 	}
 	return left

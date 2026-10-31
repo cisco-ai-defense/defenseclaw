@@ -14,7 +14,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -96,8 +95,8 @@ func TestWorkerUnblockPersonalClaudeRemovesTheEnrollmentBlocker(t *testing.T) {
 	enterpriseHookWorkerStopPerUser = func(enterprisehooks.InstallOptions) (bool, error) { return false, nil }
 	blockerAtPurge := true
 	enterpriseHookWorkerPurger = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.PurgeSummary, error) {
-		_, err := os.Lstat(script)
-		blockerAtPurge = !errors.Is(err, os.ErrNotExist)
+		got, err := os.ReadFile(script)
+		blockerAtPurge = err == nil && string(got) == enterprisehooks.PersonalClaudeHookBlocker
 		return enterprisehooks.PurgeSummary{Kept: true}, nil
 	}
 	request := enterpriseHookWorkerRequest{Home: home, UID: uid, GID: gid, Targets: []enterpriseHookWorkerTarget{
@@ -110,6 +109,10 @@ func TestWorkerUnblockPersonalClaudeRemovesTheEnrollmentBlocker(t *testing.T) {
 	}
 	if blockerAtPurge {
 		t.Fatal("the blocker was still in place when the purge ran")
+	}
+	// The account's own script is back as it was (rel-1-0-6 GAP-0178).
+	if got, _ := os.ReadFile(script); string(got) != personal || !response.Targets[0].Restored {
+		t.Fatalf("the unblock did not put the own script back: %q %+v", got, response.Targets[0])
 	}
 
 	// The account's own script is not the blocker: it stays.
