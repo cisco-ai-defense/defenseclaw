@@ -238,3 +238,41 @@ func TestReportTrustAdvisoryEmbedderHookBypassesDedupe(t *testing.T) {
 		t.Fatalf("embedder hook saw %d advisories, want 5 (hook path must NOT be deduped)", len(*advisories))
 	}
 }
+
+// GAP-0925: the advisory reports the reason in the form the describer gives
+// (on Windows standalone: the account named and the icacls fix), on the
+// default log and to an embedder hook alike.
+func TestTrustAdvisoryReportsTheDescribedReason(t *testing.T) {
+	advisoryLogDedupe.reset()
+	t.Cleanup(advisoryLogDedupe.reset)
+	originalDescribe, originalHook := DescribeTrustAdvisoryReason, ReportTrustAdvisory
+	t.Cleanup(func() { DescribeTrustAdvisoryReason, ReportTrustAdvisory = originalDescribe, originalHook })
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	raw := `C:\ProgramData\Cisco\DefenseClaw\etc: untrusted Windows principal S-1-5-32-545 has write-like access mask 0x1301bf`
+	described := `C:\ProgramData\Cisco\DefenseClaw\etc: BUILTIN\Users (S-1-5-32-545) has write access (modify (0x1301bf)). Fix: icacls`
+	DescribeTrustAdvisoryReason = func(reason string) string {
+		if reason != raw {
+			t.Fatalf("describer got %q", reason)
+		}
+		return described
+	}
+	var buf bytes.Buffer
+	originalOutput, originalFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(originalOutput); log.SetFlags(originalFlags) })
+	if err := relaxAncestorTrustVerdict(true, `C:\ProgramData\Cisco\DefenseClaw\etc`, "managed config", errors.New(raw)); err != nil {
+		t.Fatalf("ancestor verdict was fatal: %v", err)
+	}
+	if got := buf.String(); !strings.Contains(got, described) || strings.Contains(got, "untrusted Windows principal") {
+		t.Fatalf("default log line does not carry the described reason: %q", got)
+	}
+	var hooked string
+	ReportTrustAdvisory = func(_, _, reason string) { hooked = reason }
+	if err := relaxAncestorTrustVerdict(true, `C:\ProgramData\Cisco\DefenseClaw\etc`, "managed config", errors.New(raw)); err != nil {
+		t.Fatalf("ancestor verdict was fatal: %v", err)
+	}
+	if hooked != described {
+		t.Fatalf("embedder hook got %q, want %q", hooked, described)
+	}
+}

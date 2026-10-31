@@ -8,6 +8,8 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // GAP-0925: a trust refusal names well-known accounts next to their SIDs,
@@ -30,5 +32,28 @@ func TestWindowsEnterpriseNamePrincipals(t *testing.T) {
 		if got := windowsEnterpriseNamePrincipals(tc.in); !strings.Contains(got, tc.want) {
 			t.Errorf("%s\n got %s\nwant %s", tc.in, got, tc.want)
 		}
+	}
+}
+
+// GAP-0925: the relaxed-ancestor advisory status, verify and policy show
+// print names the account, the mask in words and the icacls fix on a
+// standalone install; elsewhere it is left as it was.
+func TestWindowsStandaloneTrustAdvisoryNamesTheAccountAndTheFix(t *testing.T) {
+	originalName, originalStandalone := windowsPrincipalName, managedHostWindowsStandalone
+	t.Cleanup(func() { windowsPrincipalName, managedHostWindowsStandalone = originalName, originalStandalone })
+	windowsPrincipalName = func(sid string) string {
+		return map[string]string{"S-1-5-32-545": `BUILTIN\Users`}[sid]
+	}
+	raw := `C:\ProgramData\Cisco\DefenseClaw\etc: untrusted Windows principal S-1-5-32-545 has write-like access mask 0x1301bf`
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
+	got := managed.DescribeTrustAdvisoryReason(raw)
+	for _, want := range []string{`BUILTIN\Users (S-1-5-32-545) has write access (modify (0x1301bf))`, `Fix: icacls "C:\ProgramData\Cisco\DefenseClaw\etc" /remove:g *S-1-5-32-545`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("advisory reason %q lacks %q", got, want)
+		}
+	}
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	if got := managed.DescribeTrustAdvisoryReason(raw); got != raw {
+		t.Errorf("non-standalone advisory reason was rewritten: %q", got)
 	}
 }

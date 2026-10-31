@@ -3020,6 +3020,7 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	}
 	if result.Action == "status" || result.Action == "verify" {
 		writeWindowsEnterpriseEnrollmentAccounts(output, result.Enrollment.Accounts)
+		writeWindowsEnterpriseEnrollmentExclusions(output, result.Enrollment)
 	}
 	writeWindowsEnterpriseScanners(output, result.Scanners)
 	if result.Policy != nil {
@@ -3442,7 +3443,18 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 	if err != nil {
 		return enterprisestatus.Enrollment{}, err
 	}
-	return readWindowsEnterpriseStandaloneEnrollmentAt(layout.ManifestPath, layout.DataDir)
+	enrollment, err := readWindowsEnterpriseStandaloneEnrollmentAt(layout.ManifestPath, layout.DataDir)
+	if err != nil {
+		return enrollment, err
+	}
+	// The accounts the config holds out get no manifest rows: name them
+	// (GAP-1243). An unreadable config leaves the lists out.
+	if standaloneLayout, layoutErr := managed.StandaloneWindowsLayout(); layoutErr == nil {
+		if body, readErr := readWindowsEnterpriseBoundedFile(standaloneLayout.ConfigPath, windowsEnterpriseConfigProfileLimit); readErr == nil {
+			enrollment.ExcludedUsers, enrollment.ExcludedGroups, _ = windowsEnterpriseEnrollmentExclusions(body)
+		}
+	}
+	return enrollment, nil
 }
 
 // readWindowsEnterpriseStandaloneEnrollmentAt counts the manifest's targets

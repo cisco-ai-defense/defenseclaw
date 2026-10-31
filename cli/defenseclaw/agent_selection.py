@@ -255,6 +255,34 @@ _WINDOWS_NATIVE_INSTALL_HINTS = {
 }
 
 
+# The next step for an agent that ran and failed its version probe (a node
+# script with no node on PATH exits 127): the advice admission gives for the
+# same cause (GAP-1167), so setup does not call a found agent "not installed"
+# or stop at a bare exit code (GAP-2479).
+AGENT_DID_NOT_RUN_STEP = "make it run from this account, for example by putting its runtime on PATH, and re-run setup"
+_AGENT_DID_NOT_RUN_MARKERS = (
+    "version probe exited",
+    "version probe failed",
+    "version probe returned empty stdout",
+)
+
+
+def probe_error_means_agent_did_not_run(error: str) -> bool:
+    """True when a recorded probe error says the agent ran and failed."""
+    return any(marker in (error or "") for marker in _AGENT_DID_NOT_RUN_MARKERS)
+
+
+def agent_did_not_run_message(label: str, error: str) -> str:
+    """One line naming the failed probe and the step that fixes it."""
+    detail = " ".join((error or "").split())
+    if len(detail) > 300:
+        detail = detail[:300] + "..."
+    return (
+        f"{label}: the agent was found but did not run when setup read its version ({detail}); "
+        f"{AGENT_DID_NOT_RUN_STEP}"
+    )
+
+
 def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelection:
     spec = agent_discovery._SPECS[connector]
     if connector == "opencode" and os.name == "nt":
@@ -309,6 +337,8 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
             continue
         if probe_error or not raw_version:
             rejection = probe_error or "version probe returned no version"
+            if probe_error_means_agent_did_not_run(rejection):
+                rejection = f"{rejection}; the agent did not run: {AGENT_DID_NOT_RUN_STEP}"
             continue
         normalized = normalize_agent_version(raw_version)
         if not normalized:
