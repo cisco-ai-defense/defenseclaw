@@ -1433,6 +1433,21 @@ def _quarantine_copy_present(record: Any) -> bool:
     return record.state == "restoring" or os.path.lexists(record.quarantine_path)
 
 
+def _lost_quarantine_names(app: AppContext) -> set[str]:
+    """Skills whose quarantine records all lost their held copy (deleted by hand)."""
+    if app.store is None:
+        return set()
+    try:
+        records = [
+            record for record in app.store.list_quarantine_records("skill")
+            if record.state in ("pending", "active")
+        ]
+    except Exception:
+        return set()
+    present = {record.target_name for record in records if _quarantine_copy_present(record)}
+    return {record.target_name for record in records} - present
+
+
 def _mark_quarantined_phantoms(app: AppContext, skills: list[dict[str, Any]]) -> None:
     """Flag off-disk skills whose files are held in quarantine.
 
@@ -1471,7 +1486,22 @@ def _collect_skills_for_connector(
     skills = [dict(s) for s in oc_list.get("skills", [])] if oc_list else []
 
     known_names = {s.get("name", "") for s in skills}
+    # A quarantine whose held copy was deleted by hand holds nothing: it is
+    # neither a quarantined row nor a disabled skill (GAP-2606).
+    import dataclasses
+
+    from defenseclaw.models import ActionState
+
+    lost = _lost_quarantine_names(app) - known_names
+    for name in lost:
+        ae = actions_map.get(name)
+        if ae is not None and ae.actions.file == "quarantine":
+            actions_map[name] = dataclasses.replace(
+                ae, actions=ActionState(install=ae.actions.install),
+            )
     for name, ae in actions_map.items():
+        if name in lost:
+            continue
         # Non-OpenClaw connectors normally trust their connector-specific
         # filesystem walk.  A physically quarantined copy is necessarily
         # absent from that walk, so retain only that connector-owned phantom;
@@ -4514,6 +4544,8 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     _, physical_records = _skill_quarantine_records(
         app, pe, skill_name, connector_flag,
     )
+    # A held copy that was deleted by hand is not "still quarantined".
+    physical_records = [record for record in physical_records if _quarantine_copy_present(record)]
 
     # SK-4 connector-scoped unblock: EXACT-match on the targeted peer so a
     # connector unblock never falsely reports (or clears) the global block.
