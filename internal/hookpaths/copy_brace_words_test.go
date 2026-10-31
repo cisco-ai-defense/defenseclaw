@@ -15,6 +15,10 @@ import (
 // as the words bash makes of them, within the argv bound (rel-1-0-6
 // GAP-0202); anything else keeps the dynamic reading.
 func TestCopyBraceWordFields(t *testing.T) {
+	// Past the brace budget no reader parses the command (GAP-0187).
+	if _, ok := parseShell(`cp a a{1..70000}`); ok {
+		t.Error("a copy past the brace budget parses")
+	}
 	for _, row := range []struct {
 		command string
 		want    map[int][]string
@@ -29,7 +33,6 @@ func TestCopyBraceWordFields(t *testing.T) {
 		{`cp *{,.x} d`, nil},
 		{`cp $HOME{,.x}`, nil},
 		{`cp a{,$(id)}`, nil},
-		{`cp a a{1..300}`, nil},
 		{`cp a{1..3} d`, map[int][]string{1: {"a1", "a2", "a3"}}},
 	} {
 		file, ok := parseShell(row.command)

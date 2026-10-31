@@ -8,11 +8,15 @@ import (
 
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
-// maxCopyBraceWords bounds the argv a copy call with brace words is read as,
-// the ActionFacts argv bound. A longer expansion keeps the dynamic reading.
-const maxCopyBraceWords = 256
+// maxCopyBraceWords bounds the argv a copy call with brace words is read
+// as: the brace budget every reader checks first (shellparse.TooDeep), so a
+// command this reader sees is read in full, and one past the budget takes
+// the evaluation limit before any reader expands it (GAP-0187).
+const maxCopyBraceWords = shellparse.MaxBraceFields
 
 // copyBraceWordFields returns, by argv index, the words bash makes of each
 // copy operand spelled as a brace expansion of plain text (cp a.txt{,.orig},
