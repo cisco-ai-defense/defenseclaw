@@ -179,6 +179,41 @@ finally {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# The module's own deployment.json reader refuses every record that is not a
+# JSON object with the marker the CLI maps to ensure_refused, an empty one
+# too ($null -isnot [pscustomobject] is false; GAP-0164).
+$moduleSource = [IO.Path]::GetFullPath(
+    (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1')
+)
+$moduleAst = [Management.Automation.Language.Parser]::ParseFile($moduleSource, [ref]$tokens, [ref]$parseErrors)
+$readers = @($moduleAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            [string]$node.Name -ceq 'ConvertFrom-DefenseClawDeploymentMetadataText'
+        }, $true))
+if ($readers.Count -ne 1) {
+    $failures.Add("expected one ConvertFrom-DefenseClawDeploymentMetadataText, found $($readers.Count)")
+}
+else {
+    . ([scriptblock]::Create([string]$readers[0].Extent.Text))
+    $script:UnreadableMetadataMessage = 'could not read the installed deployment metadata'
+    foreach ($case in @(@('empty', ''), @('garbage', 'e-not-a-record'), @('array', '[1]'), @('number', '5'))) {
+        try {
+            [void](ConvertFrom-DefenseClawDeploymentMetadataText -Path 'C:\x\deployment.json' -Text $case[1])
+            $failures.Add("module reader accepted the $($case[0]) record")
+        }
+        catch {
+            if (-not ([string]$_.Exception.Message).StartsWith($script:UnreadableMetadataMessage) -or
+                -not ([string]$_.Exception.Message).Contains('Setup /repair')) {
+                $failures.Add("module reader $($case[0]) record: $($_.Exception.Message)")
+            }
+        }
+    }
+    if ($null -eq (ConvertFrom-DefenseClawDeploymentMetadataText -Path 'C:\x\deployment.json' -Text '{"installed":true}')) {
+        $failures.Add('module reader refused a JSON object')
+    }
+}
+
 if ($failures.Count -gt 0) {
     foreach ($failure in $failures) {
         Microsoft.PowerShell.Utility\Write-Output "FAIL: $failure"

@@ -11423,7 +11423,10 @@ function ConvertFrom-DefenseClawDeploymentMetadataText {
     catch {
         $reason = $_.Exception.Message
     }
-    if ($metadata -isnot [pscustomobject]) {
+    # [pscustomobject] is [psobject], which also matches $null (an empty
+    # record) and a wrapped number or array: test the parsed object's own
+    # type, so every record that is not a JSON object is unreadable (GAP-0164).
+    if ($metadata -isnot [Management.Automation.PSCustomObject]) {
         throw "$($script:UnreadableMetadataMessage) $Path ($reason); run Setup /repair to rebuild it"
     }
     return $metadata

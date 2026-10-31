@@ -1860,7 +1860,9 @@ function Get-DefenseClawBootstrapRecordedModulePin {
         catch {
             $reason = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
         }
-        if ($metadata -isnot [pscustomobject]) {
+        # [pscustomobject] is [psobject], which also matches $null and a
+        # wrapped number: test the parsed object's own type.
+        if ($metadata -isnot [Management.Automation.PSCustomObject]) {
             $script:DefenseClawBootstrapUnreadableRecord = "$metadataFull ($reason)"
             return ''
         }
