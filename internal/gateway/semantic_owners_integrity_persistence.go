@@ -1545,21 +1545,32 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
+			// A file tool write whose every target is a sudoers file keeps
+			// this block (a managed gateway cannot verify a target the user
+			// cannot read) and its severity, but names the sudoers rule of
+			// the pack, not the SSH keys rule (GAP-0190).
+			named := rule
+			if commandText == "" && trustedSudoersOnlyWrite(facts) {
+				if _, sudoers, found := trustedActionCatalogRule(generation, "PATH-ETC-SUDOERS"); found {
+					named = sudoers
+				}
+			}
 			kept := findings[:0]
 			for _, finding := range findings {
 				if finding.RuleID != "PATH-SSH-DIR" &&
-					finding.RuleID != "persistence.ssh_authorized_keys_command" {
+					finding.RuleID != "persistence.ssh_authorized_keys_command" &&
+					finding.RuleID != named.ID {
 					kept = append(kept, finding)
 				}
 			}
-			title := rule.Title
+			title := named.Title
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
 			}
 			return append(kept, adjustConfidence(input.Tool, RuleFinding{
-				RuleID: rule.ID, Title: title, Severity: rule.Severity,
+				RuleID: named.ID, Title: title, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
-				Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
+				Tags: append([]string(nil), named.Tags...), LineNumber: 1,
 				enforcement: findingEnforcementAllowed,
 			}))
 		}
@@ -1568,6 +1579,24 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
 		generation, request, input,
 	)
+}
+
+// trustedSudoersOnlyWrite reports a call that writes, appends or deletes at
+// least one path and only sudoers files (/etc/sudoers, /etc/sudoers.d/...).
+func trustedSudoersOnlyWrite(facts actionfacts.Facts) bool {
+	written := false
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+		default:
+			continue
+		}
+		if !matchesSudoersCandidate(semanticPathValue(candidate)) {
+			return false
+		}
+		written = true
+	}
+	return written
 }
 
 // trustedAuthorizedKeysWriteProof reports a bounded positive proof that the
