@@ -2297,6 +2297,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
+	knownWords := knownWordParameterUses(file, home)
 	stackPlaces := directoryStackPlaces(file, command, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds, wrappedCds := false, false, false
@@ -2494,9 +2495,11 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			// (GAP-2551).
 			for _, dir := range callDirs {
 				if len(args) == 3 && !static[1] && static[2] &&
-					quotedDynamicCopySource(args[1]) && words[2] != "" && !strings.HasPrefix(words[2], "-") {
+					(quotedDynamicCopySource(args[1]) || knownWords[args[1]]) && words[2] != "" && !strings.HasPrefix(words[2], "-") {
 					// A quoted source is one argv word. If it expands to an option,
-					// cp has no source and cannot write its fixed destination.
+					// cp has no source and cannot write its fixed destination. An
+					// unquoted parameter with one known plain value is one such
+					// word too (knownWordParameterUses, rel-1-0-2:GAP-0004).
 					links.copyDestinations = append(links.copyDestinations, OperandPath(words[2], dir))
 					links.noteCopyEnd(OperandPath(words[2], dir), copyEnd)
 					continue
@@ -3530,7 +3533,8 @@ func quotedDynamicCopySource(word *syntax.Word) bool {
 }
 
 // QuotedDynamicCopyDestinations lists the fixed destinations of cp calls
-// whose only source is a quoted scalar parameter. The source is one argv
+// whose only source is a quoted scalar parameter, or an unquoted one with a
+// known plain value (knownWordParameterUses). The source is one argv
 // word; an option value cannot turn the fixed destination into a write
 // somewhere else because it leaves cp without a source operand.
 func QuotedDynamicCopyDestinations(command, cwd, home string) []string {
@@ -3539,9 +3543,10 @@ func QuotedDynamicCopyDestinations(command, cwd, home string) []string {
 		return nil
 	}
 	var destinations []string
+	knownWords := knownWordParameterUses(file, home)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) != 3 || !quotedDynamicCopySource(call.Args[1]) {
+		if !ok || len(call.Args) != 3 || !quotedDynamicCopySource(call.Args[1]) && !knownWords[call.Args[1]] {
 			return true
 		}
 		program, programOK := StaticWord(call.Args[0], home)

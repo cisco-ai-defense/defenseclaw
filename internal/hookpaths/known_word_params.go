@@ -1,0 +1,195 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package hookpaths
+
+import (
+	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
+)
+
+// knownWordBuiltins can bind a shell variable without an assignment word, or
+// run text the walk does not read. A command that calls one has no known
+// parameter words.
+var knownWordBuiltins = []string{
+	".", "alias", "builtin", "declare", "enable", "eval", "export", "getopts", "let", "local",
+	"mapfile", "printf", "read", "readarray", "readonly", "set", "source", "typeset", "unset",
+}
+
+// knownWordParameterUses returns the unquoted copy-operand parameter words of
+// file ($f, ${f}) that the shell expands to exactly one fixed word which is
+// not an option: f is bound only by plain assignments and for loops whose
+// values are fixed plain names (no blank, pattern or quoting character, no
+// leading dash), and the use sits in the body of such a loop or after a
+// top-level assignment that always runs. Such a word reads as a quoted
+// single parameter ("$f"), so for f in a.txt b.txt; do cp $f build/; done
+// and f=a.txt; cp $f out.txt read as their quoted spellings do
+// (rel-1-0-2:GAP-0004). Any other binding (read, eval, an arithmetic, a
+// default expansion, a function, an IFS change, a dynamic program word)
+// leaves every word unknown.
+func knownWordParameterUses(file *syntax.File, home string) map[*syntax.Word]bool {
+	if file == nil {
+		return nil
+	}
+	safe := func(value string) bool {
+		return value != "" && !strings.HasPrefix(value, "-") &&
+			!strings.ContainsAny(value, " \t\r\n*?[]{}$`\\\"'()|&;<>!~#=,\x00")
+	}
+	type loop struct {
+		from, to uint
+	}
+	unsafeNames := map[string]bool{}
+	loops := map[string][]loop{}
+	after := map[string]uint{}
+	rejected := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if rejected {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.FuncDecl, *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause,
+			*syntax.DeclClause, *syntax.CoprocClause, *syntax.ProcSubst:
+			rejected = true
+		case *syntax.Assign:
+			if node.Name == nil {
+				rejected = true
+				break
+			}
+			name := node.Name.Value
+			if name == "IFS" {
+				// Field splitting of every unquoted word changes.
+				rejected = true
+				break
+			}
+			value, fixed := "", false
+			if node.Value != nil {
+				value, fixed = StaticWord(node.Value, home)
+			}
+			if node.Append || node.Naked || node.Array != nil || node.Index != nil || !fixed || !safe(value) {
+				unsafeNames[name] = true
+			}
+		case *syntax.ForClause:
+			iter, ok := node.Loop.(*syntax.WordIter)
+			if !ok || iter.Name == nil || node.Select {
+				rejected = true
+				break
+			}
+			name := iter.Name.Value
+			if name == "IFS" {
+				rejected = true
+				break
+			}
+			if !iter.InPos.IsValid() || len(iter.Items) == 0 {
+				unsafeNames[name] = true
+				break
+			}
+			for _, item := range iter.Items {
+				if value, fixed := StaticWord(item, home); !fixed || !safe(value) {
+					unsafeNames[name] = true
+				}
+			}
+			loops[name] = append(loops[name], loop{node.DoPos.Offset(), node.DonePos.Offset()})
+		case *syntax.ParamExp:
+			if node.Param != nil && node.Exp != nil {
+				unsafeNames[node.Param.Value] = true
+			}
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				break
+			}
+			program, static := StaticWord(node.Args[0], home)
+			if !static {
+				rejected = true
+				break
+			}
+			for _, builtin := range knownWordBuiltins {
+				if programBase(program) == builtin {
+					rejected = true
+				}
+			}
+		}
+		return !rejected
+	})
+	if rejected {
+		return nil
+	}
+	// A top-level assignment statement, or the first statement of a
+	// top-level AND list, always runs before what follows it.
+	var first func(*syntax.Stmt) *syntax.Stmt
+	first = func(stmt *syntax.Stmt) *syntax.Stmt {
+		if stmt == nil || stmt.Background || stmt.Negated || stmt.Coprocess {
+			return nil
+		}
+		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && pair.Op == syntax.AndStmt {
+			return first(pair.X)
+		}
+		return stmt
+	}
+	for _, top := range file.Stmts {
+		stmt := first(top)
+		if stmt == nil || len(stmt.Redirs) != 0 {
+			continue
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) != 0 {
+			continue
+		}
+		for _, assign := range call.Assigns {
+			if assign.Name != nil {
+				if _, seen := after[assign.Name.Value]; !seen {
+					after[assign.Name.Value] = stmt.End().Offset()
+				}
+			}
+		}
+	}
+	uses := map[*syntax.Word]bool{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 2 {
+			return true
+		}
+		for _, word := range call.Args[1:] {
+			if len(word.Parts) != 1 {
+				continue
+			}
+			param, ok := word.Parts[0].(*syntax.ParamExp)
+			if !ok || !simpleScalarParameter(param) || unsafeNames[param.Param.Value] {
+				continue
+			}
+			name, at := param.Param.Value, word.Pos().Offset()
+			known := false
+			if end, bound := after[name]; bound && at > end {
+				known = true
+			}
+			for _, body := range loops[name] {
+				known = known || at > body.from && at < body.to
+			}
+			if known {
+				uses[word] = true
+			}
+		}
+		return true
+	})
+	return uses
+}
+
+// simpleScalarParameter accepts $name or ${name} of a plain variable name.
+func simpleScalarParameter(param *syntax.ParamExp) bool {
+	if param == nil || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet ||
+		param.Index != nil || param.Slice != nil || param.Repl != nil || param.Names != 0 ||
+		param.Exp != nil || param.Flags != nil || param.NestedParam != nil || len(param.Modifiers) != 0 {
+		return false
+	}
+	name := param.Param.Value
+	if name == "" || name == "IFS" {
+		return false
+	}
+	for i, ch := range name {
+		if ch != '_' && (ch < 'A' || ch > 'Z') && (ch < 'a' || ch > 'z') &&
+			(i == 0 || ch < '0' || ch > '9') {
+			return false
+		}
+	}
+	return true
+}

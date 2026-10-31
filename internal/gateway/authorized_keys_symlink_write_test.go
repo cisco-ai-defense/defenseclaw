@@ -1371,6 +1371,10 @@ func TestR103B07FalsePositiveRows(t *testing.T) {
 		{"FP-0003", "tar -a -xf pkg.tar -C build; echo hi > report.txt"},
 		{"FP-0004", `for f in *.txt; do cp "$f" build/; done; echo ok > report.txt`},
 		{"FP-0005", `cp "$F" out.txt && echo done > report.txt`},
+		// rel-1-0-2 GAP-0004: the unquoted spellings with one known plain
+		// value read as the quoted ones.
+		{"FP-0004u", `for f in a.txt README.md; do cp $f build/; done; echo ok > report.txt`},
+		{"FP-0005u", `F=input.txt; cp $F out.txt && echo done > report.txt`},
 		{"FP-0006", "cp -c report.txt r2.txt"},
 		{"FP-0007", "cp -X report.txt r2.txt"},
 		{"FP-0008", "cp -N report.txt r2.txt"},
@@ -1425,7 +1429,8 @@ func TestR103B07FalsePositiveRows(t *testing.T) {
 			t.Fatalf("unknown tar destination allowed: %s", command)
 		}
 	}
-	for _, command := range []string{`cp "$F" disklink`, `for f in *.txt; do cp "$f" disklink; done`} {
+	for _, command := range []string{`cp "$F" disklink`, `for f in *.txt; do cp "$f" disklink; done`,
+		`for f in a.txt; do cp $f disklink; done`, `F=input.txt; cp $F out.txt && echo k >> disklink`} {
 		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
 			ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
 		request := trustedActionRequest{Input: input}

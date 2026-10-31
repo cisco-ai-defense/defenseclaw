@@ -155,3 +155,27 @@ func TestManagedClaudeCodeKeepsTheEvalRedirectBlockWithoutACompleteClientReading
 		t.Errorf("eval of a dynamic script = %.300s, want block", got)
 	}
 }
+
+// rel-1-0-2:GAP-0004 (corpus FP-0004 and FP-0005 neighbours): an unquoted
+// copy source with one known plain value gets the verdict of its quoted
+// spelling in every cell, so managed Codex and Claude Code on macOS and
+// Linux match per-user. A source that may expand to an option stays unknown.
+func TestUnquotedCopyWordWithOneKnownValueGetsTheQuotedVerdictInEveryCell(t *testing.T) {
+	checkDynamicWordParity(t,
+		[]string{
+			`for f in a.txt README.md; do cp $f build/; done; echo hi > report.txt`,
+			`for f in a.txt README.md; do cp "$f" build/; done; echo hi > report.txt`,
+			`f=a.txt; cp $f out.txt`,
+			`v=a.txt; cp $v out.txt && echo ok`,
+			`f=a.txt; cp $f build/ && echo hi > report.txt`,
+			`F=a.txt; cp ${F} out.txt && echo done > report.txt`,
+		},
+		[]string{
+			`cp $f build/ && echo hi > report.txt`,
+			`T=--target-directory=$HOME/.ssh; cp $T a.txt`,
+			`for f in a.txt; do cp $f disklink; done`,
+			`for f in a.txt README.md; do cp $f build/; done; echo hi > disklink`,
+			`f=a.txt; read f; cp $f build/ && echo hi > report.txt`,
+			`for f in a.txt; do IFS=.; cp $f build/; done; echo hi > report.txt`,
+		})
+}
