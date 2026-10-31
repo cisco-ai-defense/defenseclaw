@@ -2201,6 +2201,15 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		case "uniq", "tar", "gtar", "bsdtar":
 			words, known := actionStaticWords(call.Args, home)
 			safe = known && actionReadsOnlyWords(words)
+		case "pwsh", "powershell":
+			// pwsh -Command "Get-ChildItem ~/.ssh" lists names, as ls does
+			// (rel-1-0-6:GAP-0145).
+			j, ok := actionPowerShellCommandBodyIndex(call.Args, 0, home)
+			body, static := "", false
+			if ok {
+				body, static = StaticWord(call.Args[j], home)
+			}
+			safe = static && actionPowerShellListOnlyBody(body, home)
 		default:
 			safe = false
 		}
@@ -2226,6 +2235,54 @@ func actionDiscardRedirect(redirect *syntax.Redirect, home string) bool {
 		return target == "-" || target != "" && strings.Trim(target, "0123456789") == ""
 	}
 	return false
+}
+
+// actionPowerShellListOnly are the PowerShell commands that read names or
+// properties and write nothing. On a POSIX host ls and dir run the programs
+// of that name, which only list too; sort runs the sort program, which can
+// write a file (-o), so it is not one.
+var actionPowerShellListOnly = map[string]bool{
+	"get-childitem": true, "gci": true, "ls": true, "dir": true, "get-item": true, "gi": true, "test-path": true, "resolve-path": true, "rvpa": true,
+	"select-object": true, "select": true, "format-list": true, "fl": true, "format-table": true, "ft": true,
+	"format-wide": true, "fw": true, "measure-object": true, "measure": true, "sort-object": true,
+	"out-string": true, "write-output": true, "echo": true,
+}
+
+// actionPowerShellListOnlyBodyText is the text a list-only body may hold:
+// words, paths, wildcards, pipes and statement ends. A variable, a
+// subexpression, a script block, a quote, an escape or a redirect is not.
+var actionPowerShellListOnlyBodyText = lazyregexp.New(`^[A-Za-z0-9_./~:*?,|; \t-]+$`)
+
+// actionPowerShellListOnlyBody reports a PowerShell -Command body, read as
+// shell words, whose every command is a list-only PowerShell command
+// (actionPowerShellListOnly) and whose text has no other syntax.
+func actionPowerShellListOnlyBody(body, home string) bool {
+	if !actionPowerShellListOnlyBodyText.MatchString(body) {
+		return false
+	}
+	file, parsed := parseShell(body)
+	if !parsed {
+		return false
+	}
+	listOnly, calls := true, 0
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if !listOnly {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.FuncDecl, *syntax.ProcSubst, *syntax.CoprocClause, *syntax.DeclClause, *syntax.Redirect:
+			listOnly = false
+		case *syntax.CallExpr:
+			program, static := "", false
+			if len(node.Assigns) == 0 && len(node.Args) > 0 {
+				program, static = StaticWord(node.Args[0], home)
+			}
+			listOnly = static && actionPowerShellListOnly[strings.ToLower(program)]
+			calls++
+		}
+		return listOnly
+	})
+	return listOnly && calls > 0
 }
 
 // actionExitStatusAssignment reports a bare NAME=$? assignment: it keeps the

@@ -128,3 +128,24 @@ func TestR106MoveWithBackupOntoKeysLinkReplacesTheLink(t *testing.T) {
 		{"write through a numbered backup name", "project", `mv --backup=numbered a.txt keylink; echo x >> keylink.~1~`, "block"},
 	})
 }
+
+// TestR106PowerShellListingOfSSHIsARead: a pwsh -Command body that only
+// lists names (Get-ChildItem, ls, Test-Path, Select-Object ...) reads, as an
+// ls of ~/.ssh does; a body with any writer, redirect or other syntax keeps
+// the target reading (rel-1-0-6:GAP-0145).
+func TestR106PowerShellListingOfSSHIsARead(t *testing.T) {
+	r106Reader2Check(t, []r106Reader2Row{
+		{"Get-ChildItem", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh"`, "allow"},
+		{"Get-ChildItem piped to Select-Object", "project", `pwsh -Command "Get-ChildItem -Force ~/.ssh | Select-Object Name"`, "allow"},
+		{"ls", "project", `pwsh -NoProfile -Command "ls ~/.ssh"`, "allow"},
+		{"Test-Path", "project", `pwsh -NoProfile -Command "Test-Path ~/.ssh"`, "allow"},
+		{"Add-Content to the keys file", "project", `pwsh -NoProfile -Command "Add-Content -Path ~/.ssh/authorized_keys -Value k"`, "block"},
+		{"listing then Set-Content", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh; Set-Content ~/.ssh/authorized_keys k"`, "block"},
+		{"Copy-Item onto the keys file", "project", `pwsh -NoProfile -Command "Copy-Item notes.txt ~/.ssh/authorized_keys"`, "block"},
+		{"listing piped to Remove-Item", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh | Remove-Item"`, "block"},
+		{"New-Item in .ssh", "project", `pwsh -NoProfile -Command "New-Item -ItemType File ~/.ssh/authorized_keys2"`, "block"},
+		{"listing redirected onto the keys file", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh > ~/.ssh/authorized_keys"`, "block"},
+		{"listing with a subexpression", "project", `pwsh -NoProfile -Command "Get-ChildItem $(Set-Content ~/.ssh/authorized_keys k)"`, "block"},
+		{"listing with sort", "project", `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh | sort -o ~/.ssh/authorized_keys"`, "block"},
+	})
+}
