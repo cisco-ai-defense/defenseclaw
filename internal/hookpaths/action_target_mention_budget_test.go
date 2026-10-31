@@ -4,10 +4,10 @@
 package hookpaths
 
 import (
-	"runtime"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
