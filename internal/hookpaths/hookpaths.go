@@ -2383,6 +2383,13 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 				program = programBase(words[0])
 			}
 		}
+		// A copy operand spelled as a brace expansion of plain text is the
+		// fixed words bash makes of it, read like any other operand: a
+		// non-static word would open an unbounded copy scope that makes
+		// every write of the call opaque (rel-1-0-6 GAP-0202).
+		if slices.Contains(copyPrograms, program) {
+			args, words, static = spliceCopyBraceWords(args, words, static, copyBraceWordFields(args, static, env))
+		}
 		// A directory-stack tilde (~1, ~-) in a copy or archive argv is one
 		// path, never an option (GAP-2552). A copy that makes links (cp -s,
 		// cp -l) keeps the dynamic reading: the walk would record the
