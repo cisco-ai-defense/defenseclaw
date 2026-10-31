@@ -864,8 +864,11 @@ install checks every enrolled profile and stops in seconds, naming the folder an
 this command. A folder the account created itself without a per-user product is
 taken over. A link or junction the account made at that folder, or at its `hooks`
 folder, is moved aside when the account enrolls, without opening what it names,
-and the folder is created. A running per-user gateway holds the API port, and Setup names it in
-`api_port_held`. See
+and the folder is created. Releases before 1.0.6 refuse that account instead, and
+every later Setup run on the computer stops with `lifecycle_error` naming the
+link; remove the link (`rmdir` on a junction removes only the link) and run
+Setup again. A running per-user gateway holds the API port, and Setup names it
+in `api_port_held`. See
 [Uninstall and preserved state](/docs/get-started/windows).
 
 ## Remove
