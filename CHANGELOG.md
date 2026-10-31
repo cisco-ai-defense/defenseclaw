@@ -22,6 +22,7 @@ for current behavior.
 - **`defenseclaw doctor` fails the OpenCode hooks row while OpenCode is V1.** After a downgrade to V1 the V2 plugin file stays, V1 never runs it, and the row said SKIP. It now fails and says to install `@opencode/cli@2` and run `opencode service restart` (GAP-0069).
 - **The 1.0.6 rpm upgrade no longer prints `remove failed` for `share/opencode/defenseclaw.js`.** The lifecycle removed the 1.0.5 plugin file before rpm did; on Linux it now leaves that file to the package manager (GAP-0073).
 - **Rollback from 1.0.6 to 1.0.5 leaves the OpenCode plugin-folder entry in the managed OpenCode config.** 1.0.5 cannot remove it; V1 stays guarded. The next 1.0.6 `ensure`, `repair` or uninstall cleans it (GAP-0072, documented under rollback notes).
+- **Hook calls that ran fail-open are reported while the gateway runs.** A per-user gateway reads `hook-failures.jsonl` about once a minute, not only when it starts, so a call that ran unchecked while the gateway was up but did not answer is not left for the next start; lines after the last report are kept whatever their age. It also reads `$DEFENSECLAW_HOME/logs` when a custom `data_dir` differs from it. The `guardrail-degraded` alert counts calls instead of hook events, names the sessions, and its Target is the connector (rel-1-0-2 GAP-0446).
 - **Managed hosts register the OpenCode plugin folder (`share/opencode/index.js`).** An approved directory plugin is approved by its content: approve the new digest of each previously approved folder after the upgrade.
 
 ## [Unreleased] — 1.0.5
