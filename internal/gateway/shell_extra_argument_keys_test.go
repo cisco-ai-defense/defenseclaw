@@ -83,6 +83,9 @@ func TestShellToolCallWithExtraArgumentKeys(t *testing.T) {
 		{"kiro", "shell", "working_dir"},
 		{"hermes", "terminal", "workdir"},
 		{"codex", "Bash", "workdir"},
+		// A bash tool no projection lists (GAP-0694).
+		{"opencode", "bash", "workdir"},
+		{"devin", "bash", "workdir"},
 	} {
 		upper := strings.ToUpper(shell.workdir[:1]) + shell.workdir[1:]
 		for _, row := range []struct {

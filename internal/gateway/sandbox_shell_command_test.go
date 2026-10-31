@@ -73,6 +73,12 @@ func workdirShellCalls() []workdirShellCall {
 			dirs: []string{"/work/app/sub", "/tmp"},
 		},
 		{
+			// Amp's Bash names its command cmd (GAP-0694).
+			name: "amp-bash", connector: "amp", version: "0.0.1785334225", contract: "amp-plugin-v1", path: "/api/v1/amp/hook",
+			body: `{"hook_event_name":"tool.call","tool_name":"Bash","tool_input":{"cmd":"` + c + `","cwd":"{DIR}"},"session_id":"T-1","cwd":"/work/app"}`,
+			dirs: []string{"/work/app/sub", "/tmp"},
+		},
+		{
 			// Cursor reports the call's working_directory as both cwds, ""
 			// when the model named none.
 			name: "cursor-pretooluse-shell", connector: "cursor", version: "2026.07.23-e383d2b", contract: "cursor-hooks-v1", path: "/api/v1/cursor/hook",

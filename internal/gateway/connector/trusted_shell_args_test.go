@@ -249,8 +249,31 @@ func TestShellCommandArgs(t *testing.T) {
 		{"not-an-object", "opencode", "shell", `"ls"`, ""},
 		{"invalid-json", "opencode", "shell", `{"command":"ls"`, ""},
 		{"other-tool", "opencode", "read", `{"command":"ls"}`, ""},
-		{"tool-case", "cursor", "shell", `{"command":"ls"}`, ""},
-		{"other-connector", "zed", "bash", `{"command":"ls"}`, ""},
+		{"tool-case", "devin", "Exec", `{"command":"ls"}`, ""},
+		{"other-connector", "zed", "read", `{"command":"ls"}`, ""},
+		// Amp's Bash holds its command under cmd (also reported as bash),
+		// and any connector's bash, powershell or shell tool is read by name
+		// (GAP-0694): an extra key next to the command reached no rule.
+		{"amp-bash-cmd", "amp", "Bash", `{"cmd":"ls","timeout_ms":5000}`, `{"command":"ls"}`},
+		{"amp-bash-cmd-cwd-note", "amp", "Bash", `{"cmd":"ls","cwd":"/w","note":"x"}`, `{"command":"ls"}`},
+		{"amp-bash-lower", "amp", "bash", `{"cmd":"ls","zz":1}`, `{"command":"ls"}`},
+		{"amp-bash-command-key", "amp", "Bash", `{"command":"ls","zz":1}`, `{"command":"ls"}`},
+		{"amp-bash-both-same", "amp", "Bash", `{"cmd":"ls","command":"ls"}`, `{"command":"ls"}`},
+		{"amp-bash-argv", "amp", "Bash", `{"cmd":["ls","-la"],"zz":1}`, `{"command":["ls","-la"]}`},
+		{"amp-shell-command-cmd-key", "amp", "shell_command", `{"cmd":"ls","zz":1}`, `{"command":"ls"}`},
+		{"codex-exec-command-key", "codex", "exec_command", `{"command":"ls","zz":1}`, `{"cmd":"ls"}`},
+		{"opencode-bash", "opencode", "bash", `{"command":"ls","zz":1}`, `{"command":"ls"}`},
+		{"devin-bash", "devin", "bash", `{"command":"ls","zz":1}`, `{"command":"ls"}`},
+		{"claudecode-powershell", "claudecode", "PowerShell", `{"command":"Get-ChildItem","zz":1}`, `{"command":"Get-ChildItem"}`},
+		{"any-connector-bash", "zed", "bash", `{"command":"ls","zz":1}`, `{"command":"ls"}`},
+		// Two different commands, or a case twin the reduced shape cannot
+		// keep: refused, so the call is judged as unverified.
+		{"amp-bash-both-differ", "amp", "Bash", `{"cmd":"true","command":"ls"}`, ""},
+		{"claudecode-both-differ", "claudecode", "Bash", `{"command":"ls","cmd":"true"}`, ""},
+		{"amp-bash-cmd-twin", "amp", "Bash", `{"cmd":"true","Cmd":"ls"}`, ""},
+		{"amp-bash-command-twin", "amp", "Bash", `{"cmd":"true","Command":"ls"}`, ""},
+		{"amp-bash-no-command", "amp", "Bash", `{"cwd":"/w","zz":1}`, ""},
+		{"amp-bash-blank", "amp", "Bash", `{"cmd":" ","command":"ls"}`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := ShellCommandArgs(tc.connector, tc.tool, json.RawMessage(tc.args))
@@ -266,6 +289,32 @@ func TestShellCommandArgs(t *testing.T) {
 			if shellCommandKeys[connectorName][tool] == "" {
 				t.Errorf("%s %s names no command key", connectorName, tool)
 			}
+		}
+	}
+}
+
+// TestShellCommandCWD: a shell call whose projection is refused keeps the
+// working directory it names for the command judged on its own (GAP-0694).
+func TestShellCommandCWD(t *testing.T) {
+	for _, tc := range []struct{ name, connector, tool, args, want string }{
+		{"amp-bash", "amp", "Bash", `{"cmd":"ls","cwd":"/w","zz":1}`, "/w"},
+		{"amp-bash-lower", "amp", "bash", `{"cmd":"ls","cwd":"/w"}`, "/w"},
+		{"agy", "antigravity", "run_command", `{"CommandLine":"ls","Cwd":"/w","Extra":1}`, "/w"},
+		{"amp-shell-command", "amp", "shell_command", `{"command":"ls","workdir":"/w","timeout_ms":"x"}`, "/w"},
+		{"kiro-two-same", "kiro", "execute_bash", `{"command":"ls","working_dir":"/w","cwd":"/w"}`, "/w"},
+		{"opencode-bash", "opencode", "bash", `{"command":"ls","workdir":"/w","zz":1}`, "/w"},
+		// None: no directory, a mistyped or blank one, two different ones,
+		// a tool that names none, a tool that is no shell.
+		{"none", "amp", "Bash", `{"cmd":"ls","zz":1}`, ""},
+		{"mistyped", "amp", "Bash", `{"cmd":"ls","cwd":7}`, ""},
+		{"blank", "antigravity", "run_command", `{"CommandLine":"ls","Cwd":" "}`, ""},
+		{"kiro-two-differ", "kiro", "execute_bash", `{"command":"ls","working_dir":"/a","cwd":"/b"}`, ""},
+		{"claudecode", "claudecode", "Bash", `{"command":"ls","cwd":"/w"}`, ""},
+		{"not-shell", "amp", "Read", `{"path":"x","cwd":"/w"}`, ""},
+		{"invalid", "amp", "Bash", `{"cwd":"/w"`, ""},
+	} {
+		if got := ShellCommandCWD(tc.connector, tc.tool, json.RawMessage(tc.args)); got != tc.want {
+			t.Errorf("%s: ShellCommandCWD = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }
