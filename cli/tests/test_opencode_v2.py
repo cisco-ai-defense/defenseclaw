@@ -32,6 +32,46 @@ def test_opencode_only_v2_is_admitted(version):
     assert opencode_requires_v2_upgrade(version)
 
 
+
+@pytest.mark.parametrize(("version", "refused"), [("1.18.34", True), ("vgit.5bba024", True), ("2.2.5", False), ("", False)])
+def test_setup_refuses_opencode_v1_before_it_asks_anything(monkeypatch, version, refused):
+    """rel-1-0-6 GAP-0012: the mode, re-apply and judge questions came before the V1 refusal."""
+    from types import SimpleNamespace
+
+    import click
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.inventory import agent_discovery
+
+    calls = []
+
+    def discover(connectors, **kwargs):
+        calls.append((connectors, kwargs))
+        signal = SimpleNamespace(installed=True, version=version, binary_path="/opt/agents/bin/opencode")
+        return SimpleNamespace(agents={"opencode": signal})
+
+    asked = []
+    monkeypatch.setattr(agent_discovery, "discover_with_probes", discover)
+    monkeypatch.setattr(cmd_setup, "_ensure_connector_available", lambda connector: None)
+    monkeypatch.setattr(cmd_setup, "_is_interactive", lambda: True)
+    monkeypatch.setattr(cmd_setup, "_prompt_connector_mode", lambda *a, **k: asked.append("mode") or "observe")
+    monkeypatch.setattr(cmd_setup.click, "confirm", lambda *a, **k: asked.append("confirm") or False)
+    monkeypatch.setattr(cmd_setup, "_resolve_connector_workspace", lambda value: None)
+    errors = []
+    monkeypatch.setattr(cmd_setup.ux, "err", lambda text, *a, **k: errors.append(text))
+    app = SimpleNamespace(cfg=default_config())
+
+    if refused:
+        with pytest.raises(click.ClickException, match="nothing was changed"):
+            cmd_setup._setup_observability_alias(app, connector="opencode", yes=False, restart=False, with_local_stack=False)
+        assert asked == []
+        assert errors and errors[0].startswith(f"OpenCode V2 is required; detected {version}.")
+        assert "--prefix ~/.npm-global @opencode/cli@2" in errors[0]
+    else:
+        # Not refused here: the run goes on to its questions (declined, so nothing is written).
+        cmd_setup._setup_observability_alias(app, connector="opencode", yes=False, restart=False, with_local_stack=False)
+        assert asked and not errors
+    assert calls[0][0] == ["opencode"] and calls[0][1]["persist_cache"] is False and calls[0][1]["use_cache"] is False
+
 def test_v2_native_inventory_and_mcp_round_trip(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "dc"))

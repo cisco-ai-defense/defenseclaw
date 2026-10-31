@@ -6063,7 +6063,11 @@ def _connector_contract_upgrade_guidance(
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
     if key == "opencode":
-        return f"Install OpenCode V2 with 'npm install -g @opencode/cli@2', then run: {rerun}."
+        return (
+            f"Install OpenCode V2 with 'npm install -g @opencode/cli@2' (where you cannot write npm's global "
+            "prefix, for your account: 'npm install -g --prefix ~/.npm-global @opencode/cli@2', with "
+            f"~/.npm-global/bin first on PATH), then run: {rerun}."
+        )
     broken, _ = known_broken_entry(key, normalized_version)
     if broken is not None:
         return f"Install a {label} release that is not known broken ({broken['issue']}), then run: {rerun}."
@@ -6483,7 +6487,7 @@ def _check_connector_version_supported_for_setup(
     # floor has a surface that sends no hooks (GAP-0227): their messages say so.
     strict_unknown = connector in {"opencode", "kiro"}
     if connector == "opencode" and opencode_requires_v2_upgrade(compatibility.raw_version):
-        detail = f"OpenCode V2 is required; detected {version_display}. {upgrade_guidance}"
+        detail = _opencode_v2_required(version_display, upgrade_guidance)
         if emit:
             ux.err(detail)
         _refuse_in_every_mode(_refusal_scope, detail)
@@ -6512,6 +6516,41 @@ def _check_connector_version_supported_for_setup(
         ux.warn(detail + " Continuing because the explicit drift override is set.")
         ux.subhead(upgrade_guidance)
     return True
+
+
+def _opencode_v2_required(version_display: str, upgrade_guidance: str) -> str:
+    """The refusal for an OpenCode that is not V2 (V1, another major, a git build)."""
+    return (
+        f"OpenCode V2 is required; detected {version_display}. This DefenseClaw guards OpenCode V2 only "
+        f"(V1 is not supported). {upgrade_guidance}"
+    )
+
+
+def _refuse_opencode_v1_before_questions(app: AppContext) -> None:
+    """Refuse an OpenCode that is not V2 before setup asks anything (rel-1-0-6 GAP-0012).
+
+    Setup asked for the mode, whether to re-apply the hooks and whether to
+    add the LLM judge, and only then refused V1 in its version check. The
+    same discovery probe answers here first, without writing the discovery
+    cache; anything it cannot tell (no OpenCode, no version, a probe error,
+    an untrusted prefix) is left to the full check, which still runs.
+    """
+    try:
+        disc = agent_discovery.discover_with_probes(
+            ["opencode"],
+            use_cache=False,
+            refresh=True,
+            data_dir=getattr(app.cfg, "data_dir", None) or None,
+            persist_cache=False,
+        )
+        signal = disc.agents.get("opencode")
+    except Exception:  # noqa: BLE001 - the full version check reports a probe failure
+        return
+    raw = (getattr(signal, "version", "") or "").strip() if signal is not None else ""
+    if signal is None or not signal.installed or not raw or not opencode_requires_v2_upgrade(raw):
+        return
+    ux.err(_opencode_v2_required(raw.rstrip("."), _connector_contract_upgrade_guidance("opencode", "OpenCode")))
+    raise click.ClickException("OpenCode setup stopped before any change; nothing was changed")
 
 
 def _refuse_in_every_mode(scope: dict[str, Any] | None, reason: str) -> None:
@@ -12098,6 +12137,8 @@ def _setup_observability_alias(
     if connector not in _HOOK_ENFORCED_CONNECTORS:
         raise click.ClickException(f"unsupported connector for hook alias: {connector!r}")
     _ensure_connector_available(connector)
+    if connector == "opencode":
+        _refuse_opencode_v1_before_questions(app)
     if connector == "hermes":
         unsupported = connector_paths.hermes_profile_unsupported_reason()
         if unsupported:
