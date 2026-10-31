@@ -1470,7 +1470,7 @@ def _install_sh_functions(*names: str) -> str:
     return helpers + "".join(bodies)
 
 
-_AGENT_SCAN = ("loaded_plugin_agents", "process_argv", "process_cwd", "process_programs", "resolved_agent_path",
+_AGENT_SCAN = ("loaded_plugin_agents", "process_argv_heads", "argv_heads_load", "argv_head", "process_cwd", "process_programs", "resolved_agent_path",
                "agent_identity_audit", "npm_config_prefixes", "installed_agent_programs", "runtime_agent_programs", "entry_prefix_agent_programs", "agent_of",
                "assert_no_loaded_plugin_agents")
 
@@ -1993,24 +1993,61 @@ def test_only_the_installed_node_entry_is_a_live_agent(tmp_path: Path, script_na
 
 @pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")
 def test_the_arguments_are_read_with_their_boundaries(tmp_path: Path) -> None:
-    # Review loop 2: process_argv gives each argument whole, as the kernel
-    # keeps it; ps would join "a b" and "c  d" into one line of words.
-    words = ["-c", "sleep 60; :", "a b", "c  d", "", "e"]
-    proc = subprocess.Popen([BASH, *words], start_new_session=True)
+    # Review loop 2: the lookup gets each argument whole, as the kernel keeps
+    # it; ps would join "a b" and "c  d" into one line of words. The first two
+    # words of every PID come back from one call (rel-1-0-6 GAP-0203), escaped
+    # so a tab, newline or % in a word survives the round trip.
+    word0 = "a b\tc%09 %0A x\ny%"
+    script_path = tmp_path / "s p\tq%25.sh"
+    script_path.write_text("sleep 60\n", encoding="utf-8")
+    proc = subprocess.Popen([word0, str(script_path), "c  d", "", "e"], executable=BASH, start_new_session=True)
     try:
         for _ in range(500):
-            if Path(f"/proc/{proc.pid}/cmdline").read_bytes().count(b"\0") == len(words) + 1:
+            if Path(f"/proc/{proc.pid}/cmdline").read_bytes().count(b"\0") == 5:
                 break
             time.sleep(0.01)
-        script = _install_sh_functions("process_argv") + 'OSTYPE=linux-gnu\nprocess_argv "$1"'
-        own = subprocess.run([BASH, "-c", script, "argv", str(proc.pid)], capture_output=True, timeout=30, check=False)
+        script = (_install_sh_functions("process_argv_heads", "argv_heads_load", "argv_head")
+                  + 'OSTYPE=linux-gnu\nprocess_argv_heads 999999999 "$1" x > "$2"\n'
+                  + 'argv_heads_load 999999999 "$1" x; argv_head "$1"; printf "%s\\0" "${#argv[@]}" "${argv[@]}"')
+        own = subprocess.run([BASH, "-c", script, "argv", str(proc.pid), str(tmp_path / "heads")],
+                             capture_output=True, timeout=30, check=False)
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
     assert own.returncode == 0, own.stderr
-    assert own.stdout.split(b"\0")[1:-1] == [w.encode() for w in words]
-    gone = subprocess.run([BASH, "-c", script, "argv", str(proc.pid)], capture_output=True, timeout=30, check=False)
-    assert (gone.returncode != 0, gone.stdout) == (True, b"")
+    assert own.stdout.split(b"\0")[:-1] == [b"2", word0.encode(), str(script_path).encode()]
+    assert (tmp_path / "heads").read_text(encoding="utf-8").count("\n") == 1
+    gone = subprocess.run([BASH, "-c", script, "argv", str(proc.pid), str(tmp_path / "heads")],
+                          capture_output=True, timeout=30, check=False)
+    assert (gone.returncode, gone.stdout) == (0, b"0\0")
+
+
+def test_argv_heads_keep_each_pids_own_words() -> None:
+    # PID 12 must not take the words of PID 112 or 123; an empty word stays a
+    # word; an unreadable PID has none.
+    heads = "112\t2\t=wrong\t=wrong\n123\t2\t=also\t=wrong\n12\t1\t=node%25%09\t=\n7\t2\t=\t=/x%0Ay\n9\t0\t=\t=\n"
+    script = (_install_sh_functions("argv_heads_load", "argv_head")
+              + 'process_argv_heads() { printf "%s" "$HEADS"; }\nlocal_test() { local -a argv head_n head_w0 head_w1\n'
+              + 'argv_heads_load 112 123 12 7 9; for p in 12 7 9 1; do argv_head "$p"; printf "%s:%s|" "$p" "${#argv[@]}"; '
+              + 'for w in ${argv[@]+"${argv[@]}"}; do printf "[%s]" "$w"; done; printf "\\n"; done; }\nlocal_test')
+    out = subprocess.run([BASH, "-c", "set -euo pipefail\n" + script], env={"HEADS": heads, "PATH": "/usr/bin:/bin"},
+                         capture_output=True, text=True, timeout=30, check=False)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout == "12:1|[node%\t]\n7:2|[][/x\ny]\n9:0|\n1:0|\n"
+
+
+def test_the_agent_lookup_opens_no_descriptor_per_process() -> None:
+    """rel-1-0-6 GAP-0203: macOS bash 3.2 keeps the descriptor of every <(...)
+    a function opens; the running-agent lookup read each node process's argv
+    through one. It now reads every node process's first words in one call."""
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    for name in ("loaded_plugin_agents", "entry_prefix_agent_programs", "process_argv_heads", "argv_heads_load", "argv_head", "agent_of"):
+        body = _install_sh_functions(name).split(f"{name}() {{", 1)[1]
+        assert "<(" not in body, name
+    lookup = _install_sh_functions("loaded_plugin_agents").split("loaded_plugin_agents() {", 1)[1]
+    assert lookup.count("argv_heads_load") == 1 and "process_argv " not in source
+    heads = _install_sh_functions("process_argv_heads").split("process_argv_heads() {", 1)[1]
+    assert heads.count("/usr/bin/perl") == 2 and 'for my $pid (@ARGV)' in heads
 
 
 def test_a_relative_script_is_the_process_folders_not_the_installers(tmp_path: Path) -> None:
