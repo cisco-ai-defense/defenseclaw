@@ -124,7 +124,7 @@ func serviceGrantPrincipal(serviceAccount string) string {
 // service Read & execute on path (and what it contains) by its service SID.
 // icacls refuses every SID Windows cannot map yet, also in the *S-1-5-80-...
 // form, with error 1332, and the service SID maps only once the service
-// exists; Set-Acl with a SecurityIdentifier accepts it before (GAP-0087). It
+// exists; an ACL rule with a SecurityIdentifier accepts it before (GAP-0087). It
 // is empty for an account that is not an NT SERVICE name.
 func ServiceReadGrantPowerShell(path, serviceAccount string) string {
 	script := serviceReadGrantScript(path, serviceAccount)
@@ -140,10 +140,13 @@ func serviceReadGrantScript(path, serviceAccount string) string {
 	if !ok {
 		return ""
 	}
+	// .NET calls, not Get-Acl and Set-Acl: run from a PowerShell 7 prompt,
+	// Windows PowerShell inherits a module path whose Security module it
+	// cannot load, and the cmdlets are not found.
 	quoted := strings.ReplaceAll(path, "'", "''")
-	return "$p = '" + quoted + "'; $a = Get-Acl -LiteralPath $p; " +
+	return "$d = [IO.DirectoryInfo]::new('" + quoted + "'); $a = $d.GetAccessControl(); " +
 		"$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('" + sid + "'), " +
-		"'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')); Set-Acl -LiteralPath $p -AclObject $a"
+		"'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')); $d.SetAccessControl($a)"
 }
 
 // StandardUserReadersOf returns the SIDs of the groups every standard user is in (Users,
