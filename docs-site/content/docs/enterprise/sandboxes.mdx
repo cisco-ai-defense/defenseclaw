@@ -732,7 +732,7 @@ The sandbox routes answer with an HTTP status and a `sandbox_*` reason. The user
 | `sandbox_decision_refused` (403) | An ask, unblock or "always" past what `user_approvals` and `allow_unblock` allow | The notice carries the quote to send; change the profile if the person should be allowed |
 | `sandbox_unavailable` (503) | Sandboxes aren't available for the account right now; the reason is one of the codes above | Fix the reason |
 | `sandbox_policy_unloadable` (503) | The organization's sandbox policy can't be loaded on this computer. The person is told only that | Run `config validate` and `verify`; check the packs folder |
-| `enterprise_managed_rate_limited` (429) | A flood of relayed hooks hit the per-user budget (100 per second, burst 200) | The hook fails closed for that call; check the agent for a loop |
+| `enterprise_managed_rate_limited` (429) | A flood of relayed hooks hit the per-user budget (100 per second, burst 200). The sandbox CLI's read-only calls (`status`, `pack list`, `policy explain`, `policy test`) have a budget of their own (60 per second, burst 120), apart from the policy writes (registrations, decisions: 10 per second, burst 20) | The hook fails closed for that call; check the agent for a loop. A CLI command refused this way says so and changes nothing: run it again in a few seconds |
 | `enterprise_managed_root_denied` (403) | root called a sandbox route | Run sandboxes as the user |
 
 ### Messages a person can get

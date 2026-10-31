@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
@@ -356,5 +357,36 @@ func TestManagedSandboxSessionUnblockEndsWithItsSession(t *testing.T) {
 	stopAndStart()
 	if got := relayedWebhookCurl(t, gw, reg.ID); got != "allow" {
 		t.Fatalf("an unblock for every sandbox after a stop and start: %q", got)
+	}
+}
+
+// GAP-0432: the gateway lifted a destination rule for a stored unblock of a
+// host the registration's own sandbox policy still blocks (its repository
+// policy's or its pack's egress.block), checking only the floor. The proxy
+// still refused the host; only the agent was told it was allowed. The lift
+// now asks the registration's policy as the daemon's proxy does.
+func TestManagedSandboxUnblockLiftsNothingTheSandboxPolicyBlocks(t *testing.T) {
+	useWebhookSiteRule(t)
+	gw := newRelayFixture(t)
+	reg := gw.register(t, "repoblk", "claudecode", relayTestBindingID(0xf31))
+	if err := gw.auth.decisions.Add(relayTestPeer.UID, sandboxreg.Decision{Registration: reg.ID, Kind: sandboxrelay.DecisionUnblock,
+		Host: "webhook.site", Scope: sandboxrelay.DecisionScopeSession, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := relayedWebhookCurl(t, gw, reg.ID); got != "allow" {
+		t.Fatalf("the user's unblock under a policy that lets it lift: %q", got)
+	}
+	repo, err := packs.ParseRepoPolicy([]byte("version: 1\negress: {block: [webhook.site]}\n"), sandboxRepoPolicySrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := sandboxResolveEffective
+	t.Cleanup(func() { sandboxResolveEffective = prev })
+	sandboxResolveEffective = func(cfg *config.Config, floor config.OpenShellAdminConfig, in sandboxResolveInput) (*packs.Effective, []packs.Violation, error) {
+		in.Repo = repo
+		return prev(cfg, floor, in)
+	}
+	if got := relayedWebhookCurl(t, gw, reg.ID); got != "block" {
+		t.Fatalf("the unblock lifted a host the repository policy blocks: %q", got)
 	}
 }
