@@ -620,23 +620,49 @@ function Invoke-CollisionNoSeizeProbe {
             $directory.Create($foreign)
             $directory.Create($expected)
         }
-        $rejected = $false
-        try {
-            [void](Assert-DefenseClawBootstrapOneShotRoot `
-                -Path $collisionPath `
-                -ExpectedSecurity $expected `
-                -ExpectedParent $windowsTemp `
-                -RequireEmpty)
+        # The descriptor is judged by meaning: an extra read entry under an
+        # allowed owner is accepted and logged, never a reason to fail.
+        $script:DefenseClawBootstrapResilienceEvents.Clear()
+        [void](Assert-DefenseClawBootstrapOneShotRoot `
+            -Path $collisionPath `
+            -ExpectedSecurity $expected `
+            -ExpectedParent $windowsTemp `
+            -RequireEmpty)
+        if (@($script:DefenseClawBootstrapResilienceEvents |
+                Where-Object { $_ -like 'defenseclaw_accept *extra read entry for S-1-5-32-545*' }).Count -ne 1) {
+            throw (
+                'an extra read entry on the bootstrap directory was not accepted and logged: ' +
+                ($script:DefenseClawBootstrapResilienceEvents -join ' | ')
+            )
         }
-        catch {
-            if ($_.Exception.Message -notmatch
-                'security descriptor mismatch') {
-                throw
-            }
-            $rejected = $true
-        }
-        if (-not $rejected) {
-            throw 'ACL-aware create seized an existing collision directory'
+        # A foreign writer is re-stamped once and re-checked; the write entry
+        # must be gone afterwards and the repair logged.
+        $writable = Get-DefenseClawBootstrapDirectorySecurity `
+            -Directory $directory `
+            -Sections ([Security.AccessControl.AccessControlSections]::Access)
+        $writable.AddAccessRule(
+            [Security.AccessControl.FileSystemAccessRule]::new(
+                $usersSID,
+                [Security.AccessControl.FileSystemRights]::Modify,
+                [Security.AccessControl.InheritanceFlags]::None,
+                [Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.AccessControlType]::Allow
+            )
+        )
+        Set-DefenseClawBootstrapDirectorySecurity -Directory $directory -Security $writable
+        [void](Assert-DefenseClawBootstrapOneShotRoot `
+            -Path $collisionPath `
+            -ExpectedSecurity $expected `
+            -ExpectedParent $windowsTemp `
+            -RequireEmpty)
+        $restamped = Get-DefenseClawBootstrapDirectorySecurity `
+            -Directory $directory `
+            -Sections ([Security.AccessControl.AccessControlSections]::Access)
+        if (@($restamped.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+                Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-545' }).Count -ne 0 -or
+            @($script:DefenseClawBootstrapResilienceEvents |
+                Where-Object { $_ -like 'defenseclaw_repair *write-like access*' }).Count -ne 1) {
+            throw 'a foreign writer on the bootstrap directory was not re-stamped and logged'
         }
     }
     finally {

@@ -72,7 +72,7 @@ func validateJudgeBodyPlatformTrust(path string, _ os.FileInfo, directory, prote
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil {
-		if !protectChildren && errors.Is(err, windows.ERROR_ACCESS_DENIED) && managed.PlatformInstallerOwnedPath(path) {
+		if !protectChildren && errors.Is(err, windows.ERROR_ACCESS_DENIED) && managed.AdvisoryAncestorPath(path) {
 			// An installer-owned ancestor whose DACL no longer grants this
 			// process READ_CONTROL is permission drift, not structure.
 			if relaxErr := managed.RelaxAncestorTrustVerdict(true, path, "judge body ancestor",
@@ -100,7 +100,7 @@ func validateJudgeBodyPlatformTrust(path string, _ os.FileInfo, directory, prote
 		verdict := managed.NewTrustVerdict(
 			"judge_body: Windows owner %s is not trusted", judgeBodyWindowsSID(owner),
 		)
-		advisory := !protectChildren && managed.PlatformInstallerOwnedPath(path)
+		advisory := !protectChildren && managed.AdvisoryAncestorPath(path)
 		if err := managed.RelaxAncestorTrustVerdict(
 			advisory, path, "judge body owner", verdict,
 		); err != nil {
@@ -311,7 +311,7 @@ func rejectUntrustedJudgeBodyWindowsWriteACEs(path string, dacl *windows.ACL, di
 				"judge_body: untrusted Windows principal %s has access mask 0x%x that can expose or modify judge-body storage on %s",
 				judgeBodyWindowsSID(sid), uint32(ace.Mask), path,
 			)
-			advisory := !protectChildren && managed.PlatformInstallerOwnedPath(path)
+			advisory := !protectChildren && managed.AdvisoryAncestorPath(path)
 			if err := managed.RelaxAncestorTrustVerdict(
 				advisory, path, "judge body DACL", verdict,
 			); err != nil {

@@ -7,7 +7,6 @@ package cli
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -79,6 +79,10 @@ func nativeHookExecutable() string {
 // uninstall removes that policy before retiring the binary and requires
 // already-running clients to reload.
 func NativeHookRuntimeNoop() bool {
+	// defenseclaw-hook.exe calls this first, before any managed check runs.
+	// From here on managed diagnostics go to the durable record only: the
+	// agent shows hook stderr, and Claude Code makes it the block message.
+	hookexec.InstallManagedHookDiagnosticSinks()
 	executable := nativeHookExecutable()
 	state, recognized, err := nativeHookRuntimeReader(executable)
 	nativeHookRuntimeSnapshot.Lock()
@@ -309,13 +313,28 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 		nativeEnterpriseHookRuntimeSnapshot.err == nil {
 		return ""
 	}
-	if errors.Is(
-		nativeEnterpriseHookRuntimeSnapshot.err,
-		enterprisehooks.ErrWindowsManagedSIDUnregistered,
-	) {
+	switch enterprisehooks.WindowsManagedRuntimeFailureClassOf(nativeEnterpriseHookRuntimeSnapshot.err) {
+	case enterprisehooks.WindowsManagedRuntimeFailureUnregistered:
 		return enterprisehooks.WindowsManagedSIDUnregisteredReason
+	case enterprisehooks.WindowsManagedRuntimeFailureDrift:
+		return enterprisehooks.WindowsManagedRuntimeDriftReason
 	}
 	return "enterprise_managed_runtime_state_invalid"
+}
+
+// enterpriseManagedHookRuntimeDriftFailMode is the fail mode of a drifted
+// managed runtime: the configured mode the resolver recovered from
+// authenticated state, or closed when it could not establish one.
+func enterpriseManagedHookRuntimeDriftFailMode() string {
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		enterprisehooks.WindowsManagedRuntimeFailureClassOf(nativeEnterpriseHookRuntimeSnapshot.err) ==
+			enterprisehooks.WindowsManagedRuntimeFailureDrift &&
+		nativeEnterpriseHookRuntimeSnapshot.failMode == "open" {
+		return "open"
+	}
+	return "closed"
 }
 
 func enterpriseManagedHookRuntimeEndpoint(

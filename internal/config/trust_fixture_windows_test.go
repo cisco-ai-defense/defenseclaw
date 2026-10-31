@@ -11,6 +11,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// untrustedWriterAcceptedAsBoundary: on Windows the managed trust check for
+// a policy or config file accepts an untrusted writer (the fixture below) as
+// permission drift and logs a MarkerBoundary finding instead of refusing it.
+const untrustedWriterAcceptedAsBoundary = true
+
 // grantUntrustedWriterForTest gives Everyone write access to path. The process
 // user can be an administrator principal (hosted CI runs as the built-in
 // Administrator), which the managed trust walk accepts as drift, so a fixture

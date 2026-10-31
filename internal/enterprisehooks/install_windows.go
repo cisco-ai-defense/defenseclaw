@@ -1649,11 +1649,12 @@ func validateWindowsUserPathElement(path string, target *windows.SID, wantDir, p
 			// accepted here; the subsequent DACL repair transfers
 			// ownership to the target SID. A foreign user SID (not in the
 			// trusted admin set) stays fatal above.
-			fmt.Fprintf(os.Stderr,
-				"[enterprise-hooks] admin-owned per-user runtime file "+
-					"accepted during trust check (owner=%s, target=%s on %s): "+
-					"subsequent DACL repair will transfer ownership\n",
-				windowsSIDString(owner), windowsSIDString(target), path)
+			managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+				"path":       path,
+				"owner":      windowsSIDString(owner),
+				"target_sid": windowsSIDString(target),
+				"reason":     "admin-owned per-user runtime file accepted during trust check; subsequent DACL repair will transfer ownership",
+			})
 		}
 	} else if owner == nil || (!owner.Equals(target) && !windowsEnterpriseAdminIdentity(owner)) {
 		return fmt.Errorf("enterprise hooks: foreign owner SID %s on %s", windowsSIDString(owner), path)

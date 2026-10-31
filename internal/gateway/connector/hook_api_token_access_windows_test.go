@@ -10,6 +10,9 @@ import (
 	"testing"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // programDataUsersMask is the mask stock Windows grants BUILTIN\Users on
@@ -80,5 +83,24 @@ func TestHookAPIAncestorRejectsReplacementRightsForUsers(t *testing.T) {
 				t.Fatalf("ancestor accepted %s, which can replace a protected child", name)
 			}
 		})
+	}
+}
+
+// The LocalSystem guardian walks C:\ProgramData when it validates the hook
+// token directory. A Modify grant there (which includes DELETE) is host
+// hardening drift on an OS root: logged, never fatal.
+func TestHookAPIRelaxerAdvisoryOnProgramDataDrift(t *testing.T) {
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		t.Fatalf("TrustedProgramData: %v", err)
+	}
+	advisory := managed.AdvisoryAncestorPath(programData)
+	if !advisory {
+		t.Fatalf("AdvisoryAncestorPath(%q) = false", programData)
+	}
+	acl := ancestorDACL(t, windows.WinAuthenticatedUserSid, 0x1301bf)
+	relax := hookAPIDriftRelaxer(programData, nil, advisory, hookAPIDriftStrict)
+	if err := hookAPIRejectUntrustedWindowsWriteACEsWith(programData, acl, true, false, relax); err != nil {
+		t.Fatalf("Modify drift on %s stayed fatal: %v", programData, err)
 	}
 }

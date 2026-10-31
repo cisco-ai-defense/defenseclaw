@@ -290,3 +290,7 @@ func ValidateExecutableFilePath(path, label string) error {
 func AcceptServiceRuntimeFileDrift(path, label, serviceAccount string) error {
 	return ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount)
 }
+
+// osRootAncestor is Windows-only; on Unix only PlatformInstallerOwnedRoots
+// make an ancestor advisory.
+func osRootAncestor(string) bool { return false }

@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/spf13/cobra"
@@ -91,14 +92,6 @@ type windowsEnterpriseLifecycleOptions struct {
 	providerLibrary string
 }
 
-type windowsEnterpriseACLHeader struct {
-	revision  uint8
-	reserved  uint8
-	size      uint16
-	aceCount  uint16
-	reserved2 uint16
-}
-
 type windowsEnterpriseLifecyclePreflightFailure struct {
 	SchemaVersion int      `json:"schema_version"`
 	Action        string   `json:"action"`
@@ -155,9 +148,19 @@ type windowsEnterprisePowerShellTempOps struct {
 	elevatedTempRoot func() (string, error)
 	randomRead       func([]byte) (int, error)
 	createDirectory  func(*uint16, *windows.SecurityAttributes) error
-	validate         func(string) error
-	remove           func(string) error
-	removeAll        func(string) error
+	// validate checks a freshly created temp and repairs descriptor drift.
+	validate func(string) error
+	// validateStructure is the structural check cleanup makes before it
+	// removes anything; nil skips it.
+	validateStructure func(string) error
+	remove            func(string) error
+	removeAll         func(string) error
+	// fallbackParent returns ProgramData\Cisco when it already exists, for a
+	// retry after ProgramData refused the temp with access denied; nil
+	// disables the retry.
+	fallbackParent func(string) (string, bool)
+	// sweep removes leftover temps under the staging roots; nil skips it.
+	sweep func(parent string)
 }
 
 var enterpriseWindowsCmd = &cobra.Command{
@@ -287,6 +290,18 @@ func runWindowsEnterpriseLifecycle(
 	if err := validateWindowsEnterpriseLifecycleSecurityOptions(cmd, action, opts); err != nil {
 		return failPreflight(err)
 	}
+	// Host prerequisites run before PowerShell does, so a host that cannot
+	// run the installer fails with one precise finding. They are fatal only
+	// for Install, Upgrade and Repair; other actions log and continue.
+	if err := windowsEnterprisePrerequisiteChecker(windowsEnterprisePrereqInput{
+		Action:          action,
+		ConfigPath:      opts.configPath,
+		InstallRoot:     opts.installRoot,
+		StateRoot:       opts.stateRoot,
+		UnsignedPayload: opts.allowUnsigned,
+	}); err != nil {
+		return failPreflight(err)
+	}
 	mutation := action == "install" || action == "upgrade" || action == "repair"
 	if mutation && strings.TrimSpace(opts.brokerBinary) != "" {
 		// A full XDR installation sequences Cloud Management last, so
@@ -311,7 +326,15 @@ func runWindowsEnterpriseLifecycle(
 		if stageErr != nil {
 			return failPreflight(errors.Join(err, stageErr))
 		}
-		defer func() { _ = cleanup() }()
+		defer func() {
+			if cleanupErr := cleanup(); cleanupErr != nil {
+				acceptWindowsEnterpriseStagingCleanupFailure(
+					filepath.Dir(staged),
+					"Windows enterprise installer staging",
+					cleanupErr,
+				)
+			}
+		}()
 		script = staged
 	}
 	args := windowsEnterprisePowerShellArgs(action, opts)
@@ -380,12 +403,13 @@ func writeWindowsEnterpriseLifecyclePreflightFailure(
 			cause,
 		)
 	}
+	messages := windowsEnterprisePreflightMessages(cause)
 	report := windowsEnterpriseLifecyclePreflightFailure{
 		SchemaVersion: 1,
 		Action:        strings.ToLower(strings.TrimSpace(action)),
 		OK:            false,
-		Error:         cause.Error(),
-		Errors:        []string{cause.Error()},
+		Error:         strings.Join(messages, "; "),
+		Errors:        messages,
 	}
 	if err := json.NewEncoder(cmd.OutOrStdout()).Encode(report); err != nil {
 		return fmt.Errorf(
@@ -395,6 +419,28 @@ func writeWindowsEnterpriseLifecyclePreflightFailure(
 		)
 	}
 	return cause
+}
+
+// windowsEnterprisePreflightMessages lists each host-prerequisite finding of
+// a joined preflight error separately, so errors[] carries one entry per
+// finding. Any other error keeps its single message.
+func windowsEnterprisePreflightMessages(cause error) []string {
+	if joined, ok := cause.(interface{ Unwrap() []error }); ok {
+		var messages []string
+		for _, inner := range joined.Unwrap() {
+			if inner == nil {
+				continue
+			}
+			if !strings.HasPrefix(inner.Error(), managed.MarkerPrereq+" ") {
+				return []string{cause.Error()}
+			}
+			messages = append(messages, inner.Error())
+		}
+		if len(messages) != 0 {
+			return messages
+		}
+	}
+	return []string{cause.Error()}
 }
 
 func windowsEnterpriseSelfUpgradeConflict(
@@ -732,7 +778,18 @@ func findWindowsEnterpriseInstaller(explicit string) (string, error) {
 }
 
 func validateWindowsEnterpriseInstallerTrust(installer string) error {
-	if err := managed.ValidateTrustedFilePath(installer, "Windows enterprise installer"); err != nil {
+	validate := managed.ValidateTrustedFilePath
+	// The staged CLI running its own staged installer inside the outer
+	// Setup's capability directory uses the Setup trust rule: the outer
+	// Setup holds that directory and every staged file open until this
+	// process exits, so the ancestors above it are advisory.
+	if executable, err := windowsEnterpriseExecutableResolver(); err == nil &&
+		windowsEnterpriseInstallerInSetupStage(installer, executable) {
+		validate = func(path, label string) error {
+			return managed.ValidateSetupPath(path, label, managed.SetupPathFile)
+		}
+	}
+	if err := validate(installer, "Windows enterprise installer"); err != nil {
 		return fmt.Errorf("refusing untrusted Windows enterprise installer: %w", err)
 	}
 	module := filepath.Join(filepath.Dir(installer), "DefenseClawEnterprise.psm1")
@@ -743,7 +800,7 @@ func validateWindowsEnterpriseInstallerTrust(installer string) error {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("adjacent Windows enterprise installer module is not a regular non-link file: %s", module)
 	}
-	if err := managed.ValidateTrustedFilePath(module, "Windows enterprise installer module"); err != nil {
+	if err := validate(module, "Windows enterprise installer module"); err != nil {
 		return fmt.Errorf("refusing untrusted Windows enterprise installer module: %w", err)
 	}
 	return nil
@@ -789,45 +846,112 @@ func runWindowsEnterprisePowerShell(
 	child.Env = childEnvironment
 	child.Dir = workingDirectory
 	child.Stdin = cmd.InOrStdin()
-	var childOutput windowsEnterpriseOutputCapture
-	child.Stdout = io.MultiWriter(cmd.OutOrStdout(), &childOutput)
-	child.Stderr = cmd.ErrOrStderr()
-	runErr := child.Run()
-	cleanupErr := cleanupTemp()
-	cleanupPending = false
-	if runErr != nil || cleanupErr != nil {
-		var failures []error
-		if runErr != nil {
-			// The child's own code is the first thing an operator needs, and
-			// "exit status N" alone does not say who exited.
-			var exit *exec.ExitError
-			if errors.As(runErr, &exit) {
-				if action, detail, ok := windowsEnterpriseInstallerFailureDiagnostic(
-					childOutput.buffer.Bytes(),
-					childOutput.truncated,
-				); ok {
-					failures = append(failures, fmt.Errorf(
-						"Windows enterprise installer %s failed: %s (exit code %d)",
-						action,
-						detail,
-						exit.ExitCode(),
-					))
-				} else {
-					failures = append(failures, fmt.Errorf(
-						"Windows enterprise installer exited with code %d",
-						exit.ExitCode(),
-					))
-				}
-			} else {
-				failures = append(failures, fmt.Errorf("Windows enterprise installer: %w", runErr))
-			}
-		}
-		if cleanupErr != nil {
-			failures = append(failures, fmt.Errorf("remove protected Windows enterprise PowerShell temp: %w", cleanupErr))
-		}
-		return errors.Join(failures...)
+	var childOutput, childErrors windowsEnterpriseOutputCapture
+	_, jsonOutput := windowsEnterprisePowerShellArgsAction(args)
+	var relay *windowsEnterpriseJSONRelay
+	if jsonOutput {
+		// Windows PowerShell writes warnings to stdout. With -Json the
+		// caller parses stdout as one JSON result, so everything else the
+		// child printed goes to stderr and only the result reaches stdout.
+		relay = newWindowsEnterpriseJSONRelay(cmd.OutOrStdout(), cmd.ErrOrStderr())
+		child.Stdout = io.MultiWriter(relay, &childOutput)
+	} else {
+		child.Stdout = io.MultiWriter(cmd.OutOrStdout(), &childOutput)
 	}
-	return nil
+	child.Stderr = io.MultiWriter(cmd.ErrOrStderr(), &childErrors)
+	runErr := child.Run()
+	relayedResult := true
+	if relay != nil {
+		relayedResult = relay.Finish()
+	}
+	// A temp that cannot be removed never changes the lifecycle result: it
+	// is logged, scheduled for removal at restart and swept by a later run.
+	if cleanupErr := cleanupTemp(); cleanupErr != nil {
+		acceptWindowsEnterpriseStagingCleanupFailure(
+			powerShellTemp,
+			"Windows enterprise PowerShell temp",
+			cleanupErr,
+		)
+	}
+	cleanupPending = false
+	if runErr == nil {
+		return nil
+	}
+	// Under -Json stdout must still carry one result when the installer
+	// printed none: report the failure in the preflight failure shape.
+	failed := func(cause error) error {
+		if relayedResult {
+			return cause
+		}
+		action, _ := windowsEnterprisePowerShellArgsAction(args)
+		return writeWindowsEnterpriseLifecyclePreflightFailure(cmd, action, true, cause)
+	}
+	// The child's own code is the first thing an operator needs, and
+	// "exit status N" alone does not say who exited.
+	var exit *exec.ExitError
+	if !errors.As(runErr, &exit) {
+		return failed(fmt.Errorf("Windows enterprise installer: %w", runErr))
+	}
+	if action, detail, ok := windowsEnterpriseInstallerFailureDiagnostic(
+		childOutput.buffer.Bytes(),
+		childOutput.truncated,
+	); ok {
+		return failed(fmt.Errorf(
+			"Windows enterprise installer %s failed: %s (exit code %d)",
+			action,
+			detail,
+			exit.ExitCode(),
+		))
+	}
+	// PowerShell refused the script before it ran (AMSI, execution policy),
+	// so the installer printed no result. Report the block as the lifecycle
+	// result, in the same JSON shape a preflight failure uses.
+	if lastWindowsEnterpriseJSONObject(childOutput.buffer.Bytes()) == nil {
+		if block, ok := classifyWindowsEnterpriseScriptBlock(childErrors.buffer.Bytes()); ok {
+			blocked := windowsEnterpriseScriptBlockError(block, script, exit.ExitCode())
+			managed.EmitResilienceEvent(managed.MarkerPrereq, parseWindowsEnterprisePrereqFields(blocked.Error()))
+			action, jsonOutput := windowsEnterprisePowerShellArgsAction(args)
+			return writeWindowsEnterpriseLifecyclePreflightFailure(cmd, action, jsonOutput, blocked)
+		}
+	}
+	return failed(fmt.Errorf("Windows enterprise installer exited with code %d", exit.ExitCode()))
+}
+
+// windowsEnterprisePowerShellArgsAction recovers the lowercase action and
+// the -Json switch from the installer arguments.
+func windowsEnterprisePowerShellArgsAction(args []string) (string, bool) {
+	action := "lifecycle"
+	jsonOutput := false
+	for index, value := range args {
+		switch {
+		case strings.EqualFold(value, "-Action") && index+1 < len(args):
+			action = strings.ToLower(strings.TrimSpace(args[index+1]))
+		case strings.EqualFold(value, "-Json"):
+			jsonOutput = true
+		}
+	}
+	return action, jsonOutput
+}
+
+// acceptWindowsEnterpriseStagingCleanupFailure logs a staging directory that
+// could not be removed and, when it is one of this CLI's capability
+// directories under the staging roots, schedules it for removal at restart.
+func acceptWindowsEnterpriseStagingCleanupFailure(path, label string, cause error) {
+	fields := map[string]string{
+		"path":   path,
+		"object": label,
+		"reason": "staging cleanup failed; the lifecycle result stands: " + cause.Error(),
+	}
+	if programData, err := windowsEnterpriseProgramDataResolver(); err == nil &&
+		managed.IsSetupStagingChild(path, managed.SetupStagingRoots(programData),
+			[]string{managed.SetupPowerShellTempPrefix, managed.SetupInstallerStagePrefix}) {
+		if err := managed.ScheduleSetupTreeRemovalAtReboot(path); err != nil {
+			fields["restart_removal"] = "not scheduled: " + err.Error()
+		} else {
+			fields["restart_removal"] = "scheduled"
+		}
+	}
+	managed.EmitResilienceEvent(managed.MarkerAccept, fields)
 }
 
 func windowsEnterpriseInstallerFailureDiagnostic(
@@ -844,7 +968,9 @@ func windowsEnterpriseInstallerFailureDiagnostic(
 		Error         string   `json:"error"`
 		Errors        []string `json:"errors"`
 	}
-	trimmed := trimWindowsJSONBOM(bytes.TrimSpace(body))
+	// PowerShell or the module may print lines before the result, so the
+	// result is the last top-level JSON object rather than the whole stream.
+	trimmed := lastWindowsEnterpriseJSONObject(trimWindowsJSONBOM(bytes.TrimSpace(body)))
 	if len(trimmed) == 0 || len(trimmed) > windowsEnterpriseOutputCaptureMax ||
 		json.Unmarshal(trimmed, &report) != nil || report.SchemaVersion != 1 ||
 		report.OK {
@@ -950,9 +1076,29 @@ func prepareWindowsEnterprisePowerShellTemp() (string, func() error, error) {
 			randomRead:      rand.Read,
 			createDirectory: windows.CreateDirectory,
 			validate:        validateWindowsEnterprisePowerShellTemp,
-			remove:          os.Remove,
-			removeAll:       os.RemoveAll,
+			validateStructure: func(path string) error {
+				return managed.ValidateSetupPathStructure(
+					path,
+					"elevated Windows enterprise PowerShell temporary directory",
+					managed.SetupPathDirectory,
+				)
+			},
+			remove:         os.Remove,
+			removeAll:      managed.RemoveSetupTree,
+			fallbackParent: managed.SetupStagingFallbackRoot,
+			sweep:          sweepWindowsEnterpriseLeftovers,
 		},
+	)
+}
+
+// sweepWindowsEnterpriseLeftovers removes this CLI's leftover temps and
+// installer stagings, older than any lifecycle run can last, under both
+// staging roots. It never fails the caller.
+func sweepWindowsEnterpriseLeftovers(programData string) {
+	managed.SweepSetupLeftovers(
+		managed.SetupStagingRoots(programData),
+		[]string{managed.SetupPowerShellTempPrefix, managed.SetupInstallerStagePrefix},
+		time.Now(),
 	)
 }
 
@@ -968,12 +1114,16 @@ func prepareWindowsEnterprisePowerShellTempWithOps(
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve the trusted ProgramData directory: %w", err)
 	}
-	path, err := createProtectedWindowsEnterpriseDirectory(
+	if ops.sweep != nil {
+		ops.sweep(parent)
+	}
+	path, err := createProtectedWindowsEnterpriseDirectoryWithFallback(
 		parent,
-		"DefenseClaw-PowerShell-",
+		managed.SetupPowerShellTempPrefix,
 		"Windows enterprise PowerShell temp",
 		ops.randomRead,
 		ops.createDirectory,
+		ops.fallbackParent,
 	)
 	if err != nil {
 		return "", nil, err
@@ -988,9 +1138,14 @@ func prepareWindowsEnterprisePowerShellTempWithOps(
 	if err := ops.validate(path); err != nil {
 		return removeEmptyOnError(err)
 	}
+	// Cleanup checks structure only: a temp whose descriptor drifted while
+	// PowerShell ran is still this run's directory and is still removed, but
+	// nothing is removed through a reparse point.
 	cleanup := func() error {
-		if err := ops.validate(path); err != nil {
-			return fmt.Errorf("refusing unsafe temp cleanup: %w", err)
+		if ops.validateStructure != nil {
+			if err := ops.validateStructure(path); err != nil {
+				return fmt.Errorf("refusing unsafe temp cleanup: %w", err)
+			}
 		}
 		if err := ops.removeAll(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -998,6 +1153,76 @@ func prepareWindowsEnterprisePowerShellTempWithOps(
 		return nil
 	}
 	return filepath.Clean(path), cleanup, nil
+}
+
+// createProtectedWindowsEnterpriseDirectoryWithFallback is
+// createProtectedWindowsEnterpriseDirectory that, when parent refuses the new
+// directory with access denied (Controlled Folder Access or an endpoint
+// product), retries once under an existing ProgramData\Cisco and otherwise
+// fails with a prerequisite naming the block and its remedy.
+func createProtectedWindowsEnterpriseDirectoryWithFallback(
+	parent string,
+	prefix string,
+	label string,
+	randomRead func([]byte) (int, error),
+	createDirectory func(*uint16, *windows.SecurityAttributes) error,
+	fallbackParent func(string) (string, bool),
+) (string, error) {
+	path, err := createProtectedWindowsEnterpriseDirectory(parent, prefix, label, randomRead, createDirectory)
+	if err == nil || !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		return path, err
+	}
+	parents := []string{filepath.Clean(parent)}
+	if fallbackParent != nil {
+		if fallback, ok := fallbackParent(parent); ok {
+			parents = append(parents, fallback)
+			path, fallbackErr := createProtectedWindowsEnterpriseDirectory(fallback, prefix, label, randomRead, createDirectory)
+			if fallbackErr == nil {
+				managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+					"path":   path,
+					"object": label,
+					"reason": "ProgramData refused the directory (" + err.Error() + "); created under " + fallback,
+				})
+				return path, nil
+			}
+			if !errors.Is(fallbackErr, windows.ERROR_ACCESS_DENIED) {
+				return "", fallbackErr
+			}
+			err = errors.Join(err, fallbackErr)
+		}
+	}
+	return "", newWindowsEnterpriseStagingBlockedPrereq(label, parents, err)
+}
+
+// windowsEnterpriseStagingBlockedError is the prerequisite reported when
+// every staging parent refused a protected directory. Its text is the
+// resilience-event line; it still unwraps to the access-denied cause.
+type windowsEnterpriseStagingBlockedError struct {
+	line  string
+	cause error
+}
+
+func (blocked *windowsEnterpriseStagingBlockedError) Error() string { return blocked.line }
+
+func (blocked *windowsEnterpriseStagingBlockedError) Unwrap() error { return blocked.cause }
+
+func newWindowsEnterpriseStagingBlockedPrereq(label string, parents []string, cause error) error {
+	executable, err := windowsEnterpriseExecutableResolver()
+	if err != nil || strings.TrimSpace(executable) == "" {
+		executable = "defenseclaw.exe"
+	}
+	line := newWindowsEnterprisePrereq("staging_directory", map[string]string{
+		"path":  strings.Join(parents, ";"),
+		"error": cause.Error(),
+		"reason": "access denied creating the protected " + label +
+			"; Controlled Folder Access or an endpoint protection product is blocking " + filepath.Base(executable),
+		"remedy": "allow " + executable + " through Controlled Folder Access (Windows Security > Virus & threat " +
+			"protection > Ransomware protection > Allow an app through Controlled folder access, or " +
+			"Add-MpPreference -ControlledFolderAccessAllowedApplications '" + executable + "') and in the " +
+			"endpoint protection allow list, then run Setup again",
+	}).Error()
+	managed.EmitResilienceEvent(managed.MarkerPrereq, parseWindowsEnterprisePrereqFields(line))
+	return &windowsEnterpriseStagingBlockedError{line: line, cause: cause}
 }
 
 // createProtectedWindowsEnterpriseDirectory creates a freshly named child of
@@ -1060,122 +1285,89 @@ func trustedWindowsEnterpriseUserTempDirectory() (string, error) {
 	return filepath.Clean(path), nil
 }
 
-func windowsEnterpriseExactDescriptorMatch(
-	actual, expected *windows.SECURITY_DESCRIPTOR,
-) (bool, error) {
-	if actual == nil || expected == nil {
-		return false, nil
-	}
-	actualControl, actualRevision, err := actual.Control()
-	if err != nil {
-		return false, err
-	}
-	expectedControl, expectedRevision, err := expected.Control()
-	if err != nil {
-		return false, err
-	}
-	ignored := windows.SECURITY_DESCRIPTOR_CONTROL(windows.SE_DACL_AUTO_INHERITED)
-	if actualRevision != expectedRevision ||
-		actualControl&^ignored != expectedControl&^ignored {
-		return false, nil
-	}
-	actualOwner, _, err := actual.Owner()
-	if err != nil {
-		return false, err
-	}
-	expectedOwner, _, err := expected.Owner()
-	if err != nil {
-		return false, err
-	}
-	if !windowsEnterpriseSIDEqual(actualOwner, expectedOwner) {
-		return false, nil
-	}
-	actualGroup, _, err := actual.Group()
-	if err != nil {
-		return false, err
-	}
-	expectedGroup, _, err := expected.Group()
-	if err != nil {
-		return false, err
-	}
-	if !windowsEnterpriseSIDEqual(actualGroup, expectedGroup) {
-		return false, nil
-	}
-	actualDACL, err := windowsEnterpriseRawDACL(actual)
-	if err != nil {
-		return false, err
-	}
-	expectedDACL, err := windowsEnterpriseRawDACL(expected)
-	if err != nil {
-		return false, err
-	}
-	return bytes.Equal(actualDACL, expectedDACL), nil
-}
-
-func windowsEnterpriseSIDEqual(left, right *windows.SID) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return left.Equals(right)
-}
-
-func windowsEnterpriseRawDACL(descriptor *windows.SECURITY_DESCRIPTOR) ([]byte, error) {
-	dacl, _, err := descriptor.DACL()
-	if err != nil {
-		return nil, err
-	}
-	if dacl == nil {
-		return nil, nil
-	}
-	header := (*windowsEnterpriseACLHeader)(unsafe.Pointer(dacl))
-	minimum := uint16(unsafe.Sizeof(windowsEnterpriseACLHeader{}))
-	if header.size < minimum || header.aceCount != dacl.AceCount {
-		return nil, fmt.Errorf("invalid DACL header")
-	}
-	return unsafe.Slice((*byte)(unsafe.Pointer(dacl)), int(header.size)), nil
-}
-
+// validateWindowsEnterprisePowerShellTemp accepts the elevated PowerShell
+// temp when it is structurally sound, has a protected DACL, a trusted owner
+// and no untrusted writer. A descriptor that differs (an endpoint product or
+// inheritance reset it between create and use) is re-stamped once to the
+// canonical protected descriptor and logged; structure is never repaired.
 func validateWindowsEnterprisePowerShellTemp(path string) error {
-	if err := managed.ValidateTrustedRuntimeDir(
-		path,
-		"elevated Windows enterprise PowerShell temporary directory",
-	); err != nil {
+	const label = "elevated Windows enterprise PowerShell temporary directory"
+	if err := managed.ValidateSetupPathStructure(path, label, managed.SetupPathDirectory); err != nil {
 		return fmt.Errorf("trusted elevated PowerShell temporary directory validation: %w", err)
+	}
+	verdict := windowsEnterprisePowerShellTempVerdict(path, label)
+	if verdict == nil {
+		return nil
+	}
+	if err := stampWindowsEnterprisePowerShellTemp(path); err != nil {
+		return fmt.Errorf(
+			"trusted elevated PowerShell temporary directory validation: %w",
+			errors.Join(verdict, fmt.Errorf("re-stamp protected descriptor: %w", err)),
+		)
+	}
+	if after := windowsEnterprisePowerShellTempVerdict(path, label); after != nil {
+		return fmt.Errorf("trusted elevated PowerShell temporary directory validation: %w", after)
+	}
+	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+		"path":   path,
+		"object": label,
+		"reason": "re-stamped the protected SYSTEM and Administrators descriptor: " + verdict.Error(),
+	})
+	return nil
+}
+
+func windowsEnterprisePowerShellTempVerdict(path, label string) error {
+	if err := managed.ValidateSetupPath(path, label, managed.SetupPathDirectory); err != nil {
+		return err
 	}
 	extended, err := winpath.Extended(path)
 	if err != nil {
 		return fmt.Errorf("encode protected Windows enterprise PowerShell temp path: %w", err)
 	}
-	actual, err := windows.GetNamedSecurityInfo(
-		extended,
-		windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|
-			windows.GROUP_SECURITY_INFORMATION|
-			windows.DACL_SECURITY_INFORMATION,
-	)
+	actual, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return fmt.Errorf("inspect protected Windows enterprise PowerShell temp descriptor: %w", err)
 	}
-	expected, err := windows.SecurityDescriptorFromString(windowsEnterpriseTempSDDL)
+	control, _, err := actual.Control()
 	if err != nil {
-		return fmt.Errorf("build expected protected Windows enterprise PowerShell temp descriptor: %w", err)
+		return fmt.Errorf("inspect protected Windows enterprise PowerShell temp descriptor: %w", err)
 	}
-	matches, err := windowsEnterpriseExactDescriptorMatch(actual, expected)
-	if err != nil {
-		return fmt.Errorf("compare protected Windows enterprise PowerShell temp descriptor: %w", err)
-	}
-	if !matches {
-		actualString := "<nil>"
-		if actual != nil {
-			actualString = actual.String()
-		}
-		return fmt.Errorf(
-			"protected Windows enterprise PowerShell temp descriptor mismatch: got %q, want %q",
-			actualString,
-			expected.String(),
-		)
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return fmt.Errorf("%s: DACL inherits from its parent instead of being protected", path)
 	}
 	return nil
+}
+
+func stampWindowsEnterprisePowerShellTemp(path string) error {
+	expected, err := windows.SecurityDescriptorFromString(windowsEnterpriseTempSDDL)
+	if err != nil {
+		return err
+	}
+	owner, _, err := expected.Owner()
+	if err != nil {
+		return err
+	}
+	dacl, _, err := expected.DACL()
+	if err != nil {
+		return err
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	return managed.RunWithWindowsRepairPrivileges(func() error {
+		return windows.SetNamedSecurityInfo(
+			extended,
+			windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|
+				windows.DACL_SECURITY_INFORMATION|
+				windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			owner,
+			nil,
+			dacl,
+			nil,
+		)
+	})
 }
 
 func trustedWindowsEnterpriseWorkingDirectory() (string, error) {
@@ -1191,9 +1383,12 @@ func trustedWindowsEnterpriseWorkingDirectory() (string, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("trusted Windows System32 is not a regular non-link directory: %s", system32)
 	}
-	if err := managed.ValidateTrustedRuntimeDir(
+	// The working directory is only where PowerShell starts; nothing is read
+	// from it by relative path, so structure is all that is checked.
+	if err := managed.ValidateSetupPathStructure(
 		system32,
 		"Windows enterprise PowerShell working directory",
+		managed.SetupPathDirectory,
 	); err != nil {
 		return "", fmt.Errorf("trusted Windows PowerShell working directory validation: %w", err)
 	}
@@ -1219,7 +1414,8 @@ func findWindowsPowerShell() (string, error) {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("trusted Windows PowerShell is not a regular non-link file: %s", path)
 	}
-	if err := managed.ValidateTrustedFilePath(path, "Windows PowerShell"); err != nil {
+	// powershell.exe is component-store serviced and hard-linked into WinSxS.
+	if err := managed.ValidateSetupPath(path, "Windows PowerShell", managed.SetupPathSystemFile); err != nil {
 		return "", fmt.Errorf("trusted Windows PowerShell path validation: %w", err)
 	}
 	return filepath.Clean(path), nil

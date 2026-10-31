@@ -205,7 +205,7 @@ func validateAuditDBPlatformTrust(path string, _ os.FileInfo, directory, protect
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil {
-		if !protectChildren && errors.Is(err, windows.ERROR_ACCESS_DENIED) && managed.PlatformInstallerOwnedPath(path) {
+		if !protectChildren && errors.Is(err, windows.ERROR_ACCESS_DENIED) && managed.AdvisoryAncestorPath(path) {
 			// An installer-owned ancestor whose DACL no longer grants this
 			// process READ_CONTROL is permission drift, not structure; its
 			// type and reparse state were checked above.
@@ -249,7 +249,7 @@ func validateAuditDBWindowsSecurityDescriptor(
 		verdict := managed.NewTrustVerdict(
 			"audit: Windows owner %s is not trusted", auditDBWindowsSID(owner),
 		)
-		advisory := !protectChildren && managed.PlatformInstallerOwnedPath(path)
+		advisory := !protectChildren && managed.AdvisoryAncestorPath(path)
 		if err := managed.RelaxAncestorTrustVerdict(
 			advisory, path, "audit store owner", verdict,
 		); err != nil {
@@ -643,7 +643,7 @@ func rejectUntrustedAuditDBWindowsACEs(
 				"audit: untrusted Windows principal %s has access mask 0x%x that can expose or modify audit storage on %s",
 				auditDBWindowsSID(sid), uint32(ace.Mask), path,
 			)
-			advisory := !protectChildren && managed.PlatformInstallerOwnedPath(path)
+			advisory := !protectChildren && managed.AdvisoryAncestorPath(path)
 			if err := managed.RelaxAncestorTrustVerdict(
 				advisory, path, "audit store DACL", verdict,
 			); err != nil {

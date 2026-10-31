@@ -304,10 +304,11 @@ func checkCanonicalStructure(handle windows.Handle, path string, kind ObjectKind
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
 		return fmt.Errorf("%s: inspect object: %w", path, err)
 	}
-	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 &&
+		(isDir || kind.Directory() || !acceptBenignFileReparseTag(handle, path)) {
 		return fmt.Errorf("%s: reparse points are not allowed for managed objects", path)
 	}
-	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 	if isDir != kind.Directory() {
 		if kind.Directory() {
 			return fmt.Errorf("%s: expected a directory", path)
@@ -318,6 +319,43 @@ func checkCanonicalStructure(handle windows.Handle, path string, kind ObjectKind
 		return fmt.Errorf("%s: file has %d hard links, expected exactly 1", path, info.NumberOfLinks)
 	}
 	return nil
+}
+
+// canonicalAttributeTagInfo mirrors FILE_ATTRIBUTE_TAG_INFO.
+type canonicalAttributeTagInfo struct {
+	FileAttributes uint32
+	ReparseTag     uint32
+}
+
+// acceptBenignFileReparseTag reports whether the regular file open as handle
+// carries a storage reparse tag that keeps its content local (WOF
+// compression, deduplication), logging the acceptance once. Cloud-files
+// placeholders, AF_UNIX sockets, symbolic links, mount points and unknown
+// tags stay fatal, and the strict pin makes every tag fatal again.
+func acceptBenignFileReparseTag(handle windows.Handle, path string) bool {
+	if trustStrictAncestors() {
+		return false
+	}
+	var info canonicalAttributeTagInfo
+	if err := windows.GetFileInformationByHandleEx(
+		handle,
+		windows.FileAttributeTagInfo,
+		(*byte)(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+	); err != nil {
+		return false
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 || !isLocalContentFileReparseTag(info.ReparseTag) {
+		return false
+	}
+	fields := map[string]string{
+		"path":   path,
+		"reason": fmt.Sprintf("regular file carries a storage reparse tag 0x%08x that redirects nothing", info.ReparseTag),
+	}
+	if advisoryLogDedupe.shouldEmit(path, MarkerAccept, FormatResilienceEvent(MarkerAccept, fields)) {
+		EmitResilienceEvent(MarkerAccept, fields)
+	}
+	return true
 }
 
 func readObjectDescriptor(handle windows.Handle) (objectDescriptor, error) {
