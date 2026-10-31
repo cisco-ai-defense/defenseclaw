@@ -47,6 +47,7 @@ func TestManagedStandaloneFailClosedTextIsPlain(t *testing.T) {
 		},
 	} {
 		r, _ := runSessionStop(t, tc.failure, tc.ev, true)
+		r.stderr = withoutLocalDenyEventID(r.stderr)
 		if tc.ev.connector == "claudecode" {
 			if r.code != 0 || !strings.Contains(r.stdout, mustJSONString(tc.want)) || r.stderr != "" {
 				t.Fatalf("%s: expected structured prompt block: %+v", tc.name, r)
@@ -68,6 +69,7 @@ func TestManagedStandaloneFailClosedTextIsPlain(t *testing.T) {
 func TestManagedFailClosedTextOutsideStandaloneIsUnchanged(t *testing.T) {
 	r, _ := runSessionStop(t, sessionStopCauses[0],
 		sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"UserPromptSubmit"}`}, false)
+	r.stderr = withoutLocalDenyEventID(r.stderr)
 	if want := "defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): enterprise_managed_hook_socket_missing"; strings.TrimSpace(r.stderr) != want {
 		t.Fatalf("stderr = %q, want %q", r.stderr, want)
 	}

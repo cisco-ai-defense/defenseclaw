@@ -444,7 +444,7 @@ Defaults from the loader. Omitted keys take these values.
 | Key | Default | What it does |
 | --- | --- | --- |
 | `data_dir` | `~/.defenseclaw` | The data directory. `DEFENSECLAW_HOME` relocates it. Restart required. `defenseclaw config set data_dir` seeds the rule packs and Rego policies under the new directory (packs already there are kept), and the CLI resolves the omitted paths below under it as the gateway does. |
-| `audit_db`, `judge_bodies_db` | `<data_dir>/audit.db`, `<data_dir>/judge_bodies.db` | The audit store and the retained judge bodies. |
+| `observability.local.path`, `observability.local.judge_bodies_path` | `<data_dir>/audit.db`, `<data_dir>/judge_bodies.db` | The audit store and the retained judge bodies. The 0.8.x top-level `audit_db` and `judge_bodies_db` keys are refused; `defenseclaw migrate` moves them here. |
 | `quarantine_dir`, `plugin_dir`, `policy_dir` | `<data_dir>/quarantine`, `plugins`, `policies` | Quarantined files, connector plugins, policy assets. |
 | `environment` | detected (`macos`, `windows`, `linux`, ...) | Stamped on every record. Restart required. |
 | `tenant_id`, `workspace_id`, `discovery_source` | empty | Identity stamped on every record. Restart required. |

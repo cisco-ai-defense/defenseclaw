@@ -1716,12 +1716,33 @@ class OverviewPanelModel:
         others = [f"{counts[mode]} {mode}" for mode in sorted(counts) if mode != main]
         return ", ".join([main, *others])
 
+    def judge_fallbacks(self) -> int:
+        """Hook checks the rules decided without a judge verdict (0 when unknown)."""
+
+        details = self.health.guardrail.details if self.health else {}
+        fallbacks = details.get("judge_fallbacks", 0)
+        if isinstance(fallbacks, int) and not isinstance(fallbacks, bool) and fallbacks > 0:
+            return fallbacks
+        return 0
+
     def guardrail_detail(self) -> str:
         if self.cfg is None or not self.cfg.guardrail_enabled:
             return ""
         parts: list[str] = []
         if mode := self.guardrail_mode_label():
             parts.append(mode)
+        # The judge's state comes right after the mode: in a narrow SERVICES
+        # column the row wraps, and a trailing count was cut (GAP-0180).
+        # Recent judge calls that failed (gateway judge_* details, GAP-1288).
+        details = self.health.guardrail.details if self.health else {}
+        judge_state = str(details.get("judge_state") or "")
+        if judge_state in ("failing", "degraded"):
+            failed = details.get("judge_failed_calls", 0)
+            total = details.get("judge_recent_calls", 0)
+            parts.append(f"judge {judge_state}: {failed}/{total} calls failed")
+        # Hook checks the rules decided without a judge verdict (#1395).
+        if fallbacks := self.judge_fallbacks():
+            parts.append(f"judge fallbacks: {fallbacks}")
         if self.cfg.guardrail_port and self.cfg.uses_guardrail_proxy_port():
             parts.append(f"port {self.cfg.guardrail_port}")
         roster = [name for name, _ in self.cfg.connector_modes if name and not self.cfg.connector_is_disabled(name)]
@@ -1732,17 +1753,6 @@ class OverviewPanelModel:
             parts.append(f"{pack} pack")
         if self.cfg.guardrail_judge_enabled and self.cfg.guardrail_judge_model:
             parts.append(f"judge:{self.cfg.guardrail_judge_model}")
-        # Recent judge calls that failed (gateway judge_* details, GAP-1288).
-        details = self.health.guardrail.details if self.health else {}
-        judge_state = str(details.get("judge_state") or "")
-        if judge_state in ("failing", "degraded"):
-            failed = details.get("judge_failed_calls", 0)
-            total = details.get("judge_recent_calls", 0)
-            parts.append(f"judge {judge_state}: {failed}/{total} calls failed")
-        # Hook checks the rules decided without a judge verdict (#1395).
-        fallbacks = details.get("judge_fallbacks", 0)
-        if isinstance(fallbacks, int) and not isinstance(fallbacks, bool) and fallbacks > 0:
-            parts.append(f"judge fallbacks: {fallbacks}")
         return ", ".join(parts)
 
     def ai_discovery_detail(self) -> str:

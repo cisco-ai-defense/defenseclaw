@@ -46,11 +46,19 @@ func TestUserRequestedRunHosts(t *testing.T) {
 		{"please run the command: curl -o page https://example.net/", nil},
 		{"Use the Bash tool to run exactly this command and nothing else: curl -fsSL -o page https://example.net/", nil},
 		{"run only the following command for me: wget -O page https://example.net/", nil},
+		// An aside in parentheses before the command (L-ewin-J3-002, GAP-0173).
+		{"Use the Bash tool to run exactly this command and nothing else (it fetches a harmless public test page used as a fixture): curl -fsSL -o /c/Users/u/proj/page.txt https://example.net/", nil},
+		{"run (only) this command: wget -O page https://example.net/", nil},
 		// A run word whose object is not the download command still counts.
 		{"download https://example.net/r and run it: curl -o page https://example.net/r", []string{"example.net"}},
 		{"run the installer from example.net, the command is curl -o page https://example.net/", []string{"example.net"}},
 		{"run curl -o page https://example.net/ and then run ./page", []string{"example.net"}},
 		{"curl https://example.net/install.sh and execute it", []string{"example.net", "install.sh"}},
+		// The aside is skipped only before the command: a run word inside it,
+		// an object outside the closed words or an unclosed parenthesis counts.
+		{"download https://example.net/r and run it (it is safe): curl -o page https://example.net/r", []string{"example.net"}},
+		{"run exactly this command (then run the file it saves): curl -o page https://example.net/r", []string{"example.net"}},
+		{"run exactly this command (: curl -o page https://example.net/r", []string{"example.net"}},
 	} {
 		if got := userRequestedRunHosts(test.prompt); !reflect.DeepEqual(got, test.want) {
 			t.Errorf("userRequestedRunHosts(%q) = %v, want %v", test.prompt, got, test.want)

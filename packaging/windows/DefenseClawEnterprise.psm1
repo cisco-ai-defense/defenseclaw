@@ -27823,6 +27823,7 @@ function Assert-DefenseClawManagedInstallTree {
     $refuseUnexpected = (Test-DefenseClawTrustStrictAncestors) -or
         (Test-DefenseClawStandaloneProfile)
     $retiredLibRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($Layout.InstallRoot, 'lib')).TrimEnd('\')
+    $retiredLibDirectories = @($retiredLibRoot, [IO.Path]::Combine($retiredLibRoot, 'defenseclaw'))
     $allowedDirectories = @(
         $Layout.BinDirectory,
         $Layout.LibexecDirectory,
@@ -27929,6 +27930,14 @@ function Assert-DefenseClawManagedInstallTree {
                 # item DefenseClaw did not install there stops the uninstall
                 # before anything changes.
                 if ($refuseUnexpected -or $inRetiredLib) {
+                    # lib and lib\defenseclaw are directories 1.0.2 installed.
+                    # When one still holds something, the walk goes on to that
+                    # content, so the refusal names the item DefenseClaw did
+                    # not install instead of lib (rel-1-0-3 GAP-0283).
+                    if ($full.TrimEnd('\') -in $retiredLibDirectories -and
+                        @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $full -Force).Count -gt 0) {
+                        continue
+                    }
                     throw "refusing to remove unexpected directory from managed install root: $full"
                 }
                 Write-DefenseClawAclSelfHealAdvisory `
@@ -27976,51 +27985,87 @@ function Assert-DefenseClawStandaloneUninstallInstallTree {
     }
 }
 
-function Assert-DefenseClawUninstallStateTreeNoReparse {
+function Get-DefenseClawUninstallStateLinkRefusal {
+    param(
+        [Parameter(Mandatory)]$Item,
+        [string]$Reason = ''
+    )
+    $path = [string]$Item.FullName
+    $removal = if ($Item.PSIsContainer) {
+        'remove only the link with: cmd /c rmdir "' + $path + '"'
+    }
+    else {
+        'remove only the link with: cmd /c del /a "' + $path + '"'
+    }
+    $why = if ([string]::IsNullOrWhiteSpace($Reason)) { '' } else { " ($Reason)" }
+    return (
+        "state_invalid: managed state contains a reparse point: $path. The uninstall stopped before it changed the " +
+        "deployment, which is still installed. DefenseClaw does not follow links in its state folder and could not " +
+        "remove this one as a link${why}: " + $removal + ' (the folder it points to is not changed), then run the ' +
+        'uninstall again'
+    )
+}
+
+function Remove-DefenseClawUninstallStateTreeLinks {
     <#
         The uninstall reads, re-ACLs and (with purge) deletes everything under
-        StateRoot, and refuses a reparse point anywhere there. That refusal
-        came after the services and the payload were already removed, so a
-        junction an administrator left at StateRoot\secrets ended a committed
-        uninstall with 1603 and installed:false (GAP-0145). This check runs
-        before the uninstall changes anything: the deployment stays installed
-        and the refusal names the link and how to remove only the link.
-        StateRoot holds no AF_UNIX socket (those live under InstallRoot), so no
-        reparse point is exempt.
+        StateRoot and never follows a link out of it (GAP-0145). After the
+        refusal checks and before it changes the state tree, it removes each
+        junction or symbolic link below StateRoot (for example one an
+        administrator left at secrets) as a link: the folder or file it points
+        to keeps its content and permissions (mgmt-agent-api GAP-1317). The
+        walk never enters a link. A link at StateRoot itself, or one Windows
+        does not let Setup remove, stops the uninstall while the deployment is
+        still installed and names the link and how to remove only the link.
+        StateRoot holds no AF_UNIX socket (those live under InstallRoot), so
+        no reparse point is kept.
     #>
     param([Parameter(Mandatory)][hashtable]$Layout)
     $stateRoot = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $stateRoot)) {
         return
     }
-    $found = $null
     $root = Microsoft.PowerShell.Management\Get-Item -LiteralPath $stateRoot -Force
     if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        $found = $root
+        throw (Get-DefenseClawUninstallStateLinkRefusal -Item $root)
     }
-    else {
-        foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $stateRoot -Recurse -Force) {
+    $links = [Collections.Generic.List[object]]::new()
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($stateRoot)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force) {
             if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                $found = $item
-                break
+                $links.Add($item)
+            }
+            elseif ($item.PSIsContainer) {
+                $pending.Push([string]$item.FullName)
             }
         }
     }
-    if ($null -eq $found) {
-        return
+    foreach ($link in $links) {
+        $path = [string]$link.FullName
+        try {
+            if ($link.PSIsContainer) {
+                # Non-recursive: RemoveDirectory deletes the junction or
+                # directory link itself and never enters it.
+                [IO.Directory]::Delete($path, $false)
+            }
+            else {
+                [IO.File]::Delete($path)
+            }
+        }
+        catch {
+            throw (Get-DefenseClawUninstallStateLinkRefusal -Item $link -Reason $_.Exception.Message)
+        }
+        if ($null -ne (Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)) {
+            throw (Get-DefenseClawUninstallStateLinkRefusal -Item $link -Reason 'it is still there')
+        }
+        Microsoft.PowerShell.Utility\Write-Warning -Message (
+            "the uninstall removed the link $path from the DefenseClaw state folder; " +
+            'the folder or file it pointed to was not changed'
+        )
     }
-    $path = [string]$found.FullName
-    $removal = if ($found.PSIsContainer) {
-        'remove only the link with: cmd /c rmdir "' + $path + '"'
-    }
-    else {
-        'remove only the link with: cmd /c del /a "' + $path + '"'
-    }
-    throw (
-        "state_invalid: managed state contains a reparse point: $path. The uninstall stopped before it changed anything " +
-        "and the deployment is still installed. DefenseClaw does not follow or remove links in its state folder: " +
-        $removal + ' (the folder it points to is not changed), then run the uninstall again'
-    )
 }
 
 function Assert-DefenseClawManagedTreeNoReparse {
@@ -37700,7 +37745,7 @@ function Invoke-DefenseClawUninstallLifecycle {
         -Metadata $metadata `
         -Layout $Layout `
         -Action 'Uninstall'
-    Assert-DefenseClawUninstallStateTreeNoReparse -Layout $Layout
+    Remove-DefenseClawUninstallStateTreeLinks -Layout $Layout
     # A standalone uninstall removes the hooks after its tombstone commits
     # (pending.json keeps them registered until then) when the installed
     # helper can prepare that removal against the tombstone. An older

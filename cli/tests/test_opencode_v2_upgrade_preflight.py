@@ -31,6 +31,9 @@ def test_rollback_check_refuses_an_earlier_release_with_opencode_v2(opencode, tm
     with pytest.raises(MigrationError, match=r"1\.0\.5 guards OpenCode V1 only.*nothing was changed.*opencode-ai@1\.18"):
         migrations.check_opencode_rollback(str(tmp_path), "1.0.5")
     migrations.check_opencode_rollback(str(tmp_path), "1.0.6")
+    # GAP-0154: the check reads the OpenCode recorded at setup, so the refusal names the refresh.
+    with pytest.raises(MigrationError, match=r"agent discover --refresh"):
+        migrations.check_opencode_rollback(str(tmp_path), "1.0.5")
     opencode["value"] = ("1.18.34", "/opt/agents/bin/opencode")
     migrations.check_opencode_rollback(str(tmp_path), "1.0.5")
 

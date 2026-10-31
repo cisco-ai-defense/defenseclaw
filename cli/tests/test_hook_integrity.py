@@ -355,6 +355,32 @@ def test_missing_hook_script_is_named_as_missing_with_one_repair(tmp_path):
 
 
 @pytest.mark.parametrize("remove_folder", [False, True])
+def test_missing_hook_script_is_one_finding_with_one_next_step(tmp_path, monkeypatch, remove_folder):
+    # p0-round GAP-0402 (lead ruling): the hook-script rows give `doctor --fix` once, for the
+    # one finding; the freshness row is skipped instead of printing a second step for the same cause.
+    import shutil
+
+    from defenseclaw.commands.cmd_doctor import _check_generated_hook_freshness
+
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    cfg, script = _install(tmp_path)
+    if remove_folder:
+        shutil.rmtree(script.parent)
+    else:
+        script.unlink()
+
+    result = _DoctorResult(passive=True, quiet=True)
+    _check_hook_runtime_integrity(cfg, "codex", result)
+    _check_generated_hook_freshness(cfg, "codex", "Codex hooks", result, hook_script_paths=[str(script)])
+    rows = {row["label"]: row for row in result.checks}
+    assert rows["Hook runtime files"]["status"] == "fail"
+    assert rows["Hook runtime files"]["detail"].count("doctor --fix") == 1
+    assert rows["Codex hooks freshness"]["status"] == "skip"
+    steps = [row.get("remediation") or "" for row in result.checks]
+    assert not any("setup codex" in step or "restart" in step for step in steps)
+
+
+@pytest.mark.parametrize("remove_folder", [False, True])
 def test_doctor_fix_renders_a_deleted_hook_script_again(tmp_path, monkeypatch, remove_folder):
     # p0-round GAP-0402: the Hook runtime files row names `doctor --fix` for a
     # deleted script (or hooks folder), and --fix reported every repair as a

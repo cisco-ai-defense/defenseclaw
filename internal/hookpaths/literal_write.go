@@ -15,16 +15,21 @@ import (
 )
 
 var (
-	literalOpenCall         = lazyregexp.New(`\b(?:open|File\.open|fs\.openSync|os\.open|(?:io\.)?FileIO)\s*\(`)
-	literalWriteCall        = lazyregexp.New(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
-	literalNodeStream       = lazyregexp.New(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
-	literalPathWrite        = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
-	literalPathOpen         = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
-	literalPythonPathCall   = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(`)
-	literalPerlOpen         = lazyregexp.New(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
-	literalCopyCall         = lazyregexp.New(`\b(?:shutil\.(?:copyfile|copy|copy2)|copyFileSync|copyFile|copyfile|copy2|(?:File::Copy::)?copy)\s*\(`)
+	literalOpenCall = lazyregexp.New(`\b(?:open|File\.open|fs\.openSync|os\.open|(?:io\.)?FileIO)\s*\(`)
+	// The writer APIs whose first argument is the file they write. writeFile
+	// and appendFile are Node's callback and fs.promises forms (GAP-0366).
+	literalWriteCall      = lazyregexp.New(`\b(?:appendFileSync|writeFileSync|appendFile|writeFile|File\.write|File\.binwrite)\s*\(`)
+	literalNodeStream     = lazyregexp.New(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
+	literalPathWrite      = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
+	literalPathOpen       = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
+	literalPythonPathCall = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(`)
+	literalPerlOpen       = lazyregexp.New(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
+	// The copy and move APIs whose second argument is the file they write;
+	// literalCopyAPI says which names each language really has
+	// (rel-1-0-2:GAP-0429).
+	literalCopyCall         = lazyregexp.New(`\b(?:shutil\.(?:copyfile|copy2|copy|move)|copyFileSync|copyFile|cpSync|copyfile|copy2|FileUtils\.(?:copy_file|copy|cp|install|move|mv)|IO\.copy_stream|(?:File::Copy::)?(?:copy|cp|move|mv))\s*\(`)
 	literalPythonCopyImport = lazyregexp.New(`\bfrom\s+shutil\s+import\s+copyfile\b`)
-	literalPerlCopy         = lazyregexp.New(`\b(?:File::Copy::)?copy\s+['"][^'"]+['"]\s*,\s*(['"][^'"]+['"])`)
+	literalPerlCopy         = lazyregexp.New(`\b((?:File::Copy::)?(?:copy|cp|move|mv))\s+['"][^'"]+['"]\s*,\s*(['"][^'"]+['"])`)
 	literalPerlImport       = lazyregexp.New(`\buse\s+File::Copy\b`)
 )
 
@@ -507,6 +512,9 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 		if !literalCodePosition(code, loc[0], language) {
 			continue
 		}
+		if name := strings.TrimSpace(code[loc[0] : loc[1]-1]); (name == "writeFile" || name == "appendFile") && language != "node" {
+			continue
+		}
 		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
 			args := literalCallArgs(call)
 			if len(args) > 0 {
@@ -565,7 +573,7 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 				}
 				if path, ok := pathString(destination); ok {
 					paths = append(paths, path)
-					if language == "python" && (name == "shutil.copy" || name == "shutil.copy2") {
+					if language == "python" && (name == "shutil.copy" || name == "shutil.copy2" || name == "shutil.move") {
 						source := literalCallArgument(args, 0, "src")
 						if sourcePath, fixed := pathString(source); fixed {
 							if info, err := pathStat(OperandPath(path, cwd)); err == nil && info.IsDir() {
@@ -579,13 +587,9 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 	}
 	if language == "perl" {
 		for _, match := range literalPerlCopy.FindAllStringSubmatchIndex(code, -1) {
-			name := "copy"
-			if strings.HasPrefix(code[match[0]:match[1]], "File::Copy::copy") {
-				name = "File::Copy::copy"
-			}
 			if literalCodePosition(code, match[0], language) &&
-				literalCopyAPI(language, name, perlCopyImported) {
-				if path, ok := pathString(code[match[2]:match[3]]); ok {
+				literalCopyAPI(language, code[match[2]:match[3]], perlCopyImported) {
+				if path, ok := pathString(code[match[4]:match[5]]); ok {
 					paths = append(paths, path)
 				}
 			}
@@ -693,14 +697,24 @@ func literalCallArgument(args []string, position int, keyword string) string {
 	return ""
 }
 
+// literalCopyAPI reports the copy and move APIs of a language that write
+// their second argument: Python shutil, Node fs copies, Perl File::Copy
+// (copy and move are exported, cp and mv on request) and Ruby FileUtils.
+// A move renames when it can and copies through a link across file systems,
+// so it is a write of its destination (rel-1-0-2:GAP-0429).
 func literalCopyAPI(language, name string, perlImported bool) bool {
 	switch language {
 	case "python":
 		return strings.HasPrefix(name, "shutil.")
 	case "node":
-		return name == "copyFileSync" || name == "copyFile"
+		return name == "copyFileSync" || name == "copyFile" || name == "cpSync" || name == "cp"
 	case "perl":
-		return name == "File::Copy::copy" || name == "copy" && perlImported
+		if base, qualified := strings.CutPrefix(name, "File::Copy::"); qualified {
+			name, perlImported = base, true
+		}
+		return perlImported && (name == "copy" || name == "cp" || name == "move" || name == "mv")
+	case "ruby":
+		return strings.HasPrefix(name, "FileUtils.") || name == "IO.copy_stream"
 	}
 	return false
 }

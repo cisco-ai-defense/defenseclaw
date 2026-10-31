@@ -49,8 +49,13 @@ func diskSpace(path string) (avail, total, device uint64, err error) {
 }
 
 // warnLowDiskSpace warns when the filesystem holding the audit database or
-// the logs is nearly full. Enforcement holds on a full disk, but nothing an
-// administrator reads said so before the audit trail stopped (GAP-0514).
+// the logs is nearly full, and names it full once a write would fail
+// (GAP-0514). A managed hook whose audit record cannot be written is
+// blocked (reference/fail-modes: an audit write failure is not an outage
+// and fails closed on a managed install), so the warning says that agent
+// work stops while the audit filesystem is full and how it resumes; it said
+// that enforcement continues and only the audit trail stops (rel-1-0-6
+// GAP-0174).
 func (l *lifecycle) warnLowDiskSpace() {
 	env := l.env
 	seen := map[uint64]bool{}
@@ -63,9 +68,30 @@ func (l *lifecycle) warnLowDiskSpace() {
 		if avail >= diskSpaceLowBytes && avail*100 >= total*diskSpaceLowPercent {
 			continue
 		}
-		l.result.AddWarning(codeDiskSpaceLow, fmt.Sprintf("the filesystem holding %s has %.1f MiB free (%.1f%%): enforcement continues, but the audit database and logs stop recording when it fills; free space on it",
-			dir, float64(avail)/(1<<20), float64(avail)*100/float64(total)))
+		l.result.AddWarning(codeDiskSpaceLow, lowDiskSpaceMessage(dir, dir == env.Layout.DataDir, avail, total))
 	}
+}
+
+// lowDiskSpaceMessage is the disk_space_low warning for the filesystem
+// holding dir; audit marks the one that holds the audit database.
+func lowDiskSpaceMessage(dir string, audit bool, avail, total uint64) string {
+	state := fmt.Sprintf("has %.1f MiB free (%.1f%%)", float64(avail)/(1<<20), float64(avail)*100/float64(total))
+	full := avail < diskFullBytes
+	if full {
+		state = fmt.Sprintf("is full (%s free of %s)", formatDiskBytes(avail), formatDiskBytes(total))
+	}
+	if !audit {
+		if full {
+			return "the filesystem holding " + dir + " " + state + ": the gateway logs stop recording; free space on it"
+		}
+		return "the filesystem holding " + dir + " " + state + ": the gateway logs stop recording when it fills; free space on it"
+	}
+	effect := "when it fills, the gateway cannot write the mandatory audit records, and managed hooks then block agent prompts and tool calls (fail closed)"
+	if full {
+		effect = "the gateway cannot write the mandatory audit records, so managed hooks block agent prompts and tool calls (fail closed)"
+	}
+	return "the filesystem holding " + dir + " " + state + ": " + effect +
+		" until space is freed; free space on it, and agent work resumes by itself (no restart needed)"
 }
 
 // codeDiskFull names the filesystem a failed transaction ran out of space

@@ -4109,6 +4109,18 @@ func (s *Store) SelectAlertAcknowledgementTargets(
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}
+	// A block that a rule finding explains is one alert: the finding row.
+	// `defenseclaw alerts` does not list the connector-hook row of the same
+	// request, so a selector must not match it either (GAP-0166).
+	query += ` AND NOT (
+			LOWER(COALESCE(event.action,'')) = 'connector-hook'
+			AND COALESCE(event.request_id,'') <> ''
+			AND EXISTS (
+				SELECT 1 FROM audit_events AS finding
+				WHERE finding.request_id = event.request_id
+				  AND finding.action = 'scan-finding'
+			)
+		)`
 	// An empty or "all" severity needs no extra predicate: eligibility already
 	// excludes clean lifecycle telemetry and accepts promoted INFO non-allow
 	// outcomes plus ERROR health records.
@@ -4772,6 +4784,32 @@ func (s *Store) GetTargetSnapshot(targetType, targetPath string) (*SnapshotRow, 
 		r.CapturedAt, _ = time.Parse("2006-01-02 15:04:05", ts)
 	}
 	return &r, nil
+}
+
+// ReleaseMemory has SQLite free the page cache of every connection the store
+// holds (PRAGMA shrink_memory). Each connection keeps up to cache_size of
+// pages in memory outside the Go heap; a hook flood fills them and nothing
+// gave them back while the gateway sat idle (rel-1-0-3 GAP-0244). The gateway
+// calls it once the calls stop; the next reads load their pages again.
+func (s *Store) ReleaseMemory(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.closed {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, "PRAGMA shrink_memory")
+	s.checkpointMu.Lock()
+	defer s.checkpointMu.Unlock()
+	for _, db := range []*sql.DB{s.checkpointDB, s.durableDB} {
+		if db != nil {
+			_, shrinkErr := db.ExecContext(ctx, "PRAGMA shrink_memory")
+			err = errors.Join(err, shrinkErr)
+		}
+	}
+	return err
 }
 
 func (s *Store) Close() error {

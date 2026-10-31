@@ -13,7 +13,6 @@
 package enterpriseunix
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -33,8 +32,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
-
-	"gopkg.in/yaml.v3"
 )
 
 // DefaultConfig is the configuration a fresh standalone install gets when
@@ -251,7 +248,7 @@ func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
 // supplied (--config), and errors name it instead of the installed path.
 func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig, error) {
 	original := raw
-	raw = v8ChecksView(raw)
+	raw = config.V8ManagedChecksView(raw)
 	if plain, ok := e.managedEnvReferenceProblem(raw, source); ok {
 		return nil, &plainConfigError{msg: plain, err: errManagedEnvReference}
 	}
@@ -270,45 +267,6 @@ func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig,
 	validated.Source = source
 	validated.Raw, validated.SHA = append([]byte(nil), original...), sha256Bytes(original)
 	return validated, nil
-}
-
-// v8ChecksView is raw as the config_version 8 checks read it. The per-user
-// CLI of 1.0.x wrote a top-level update_check, which the v8 schema never
-// declared and the v9 migration moves to update.check; the v8 checks refused
-// it as an unknown setting before the migration ran, so a managed v8 file
-// that `config migrate` handles was refused by ensure (rel-1-0-2 GAP-0145).
-// The view blanks that one line, so every other line keeps its number; the
-// migration reads raw and the migrated file is checked as v9 (update.check
-// must be a boolean). A value that does not fit on the key's line is left
-// for the v8 checks to refuse as before. Remove with the v8 to v9 migration.
-func v8ChecksView(raw []byte) []byte {
-	if !config.NeedsMigrationV9(raw) {
-		return raw
-	}
-	var doc yaml.Node
-	if yaml.Unmarshal(raw, &doc) != nil || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
-		return raw
-	}
-	root := doc.Content[0]
-	for i := 0; i+1 < len(root.Content); i += 2 {
-		key, value := root.Content[i], root.Content[i+1]
-		if key.Value != "update_check" {
-			continue
-		}
-		if value.Kind != yaml.ScalarNode || value.Line != key.Line {
-			return raw
-		}
-		lines := bytes.SplitAfter(raw, []byte("\n"))
-		n := key.Line - 1
-		if n < 0 || n >= len(lines) {
-			return raw
-		}
-		line := lines[n]
-		ending := line[len(bytes.TrimRight(line, "\r\n")):]
-		lines[n] = append([]byte(nil), ending...)
-		return bytes.Join(lines, nil)
-	}
-	return raw
 }
 
 // refuseUnknownGuardrailConnectors refuses a guardrail.connector or

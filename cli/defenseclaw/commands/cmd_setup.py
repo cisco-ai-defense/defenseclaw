@@ -1555,7 +1555,7 @@ def setup_decision_model(
         if result.ok:
             ux.ok(f"Decision model reachable: {result.detail}")
         else:
-            ux.warn(f"Decision model not reachable: {result.detail}; the LLM judge decides alone until it is")
+            ux.warn(f"Decision model not reachable: {result.detail}; the LLM judge decides alone until it is reachable")
 
 
 @setup.command("skill-scanner")

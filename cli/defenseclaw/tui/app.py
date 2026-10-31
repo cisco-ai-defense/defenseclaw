@@ -6883,6 +6883,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 extras.append(f"[{TOKENS.accent_blue}]judge[/]")
             if extras:
                 guardrail_bits.append("·".join(extras))
+            if fallbacks := self.overview_model.judge_fallbacks():
+                guardrail_bits.append(f"[{TOKENS.accent_amber}]judge fallbacks: {fallbacks}[/]")
             guardrail_detail = " · ".join(guardrail_bits)
         else:
             guardrail_detail = f"[{TOKENS.accent_amber}]press g to enable[/]"

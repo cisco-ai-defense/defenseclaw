@@ -2437,7 +2437,7 @@ def _source_path_cell(value: str, width: int = SOURCE_CELL_WIDTH) -> str:
     return "\u2026" + text[-(width - 1) :]
 
 
-_MIN_FIT_CELLS = 12
+_MIN_FIT_CELLS = 10
 _DETAILS_HEADER_CELLS = len("Details")
 
 
@@ -2470,6 +2470,10 @@ def _fit_catalog_rows(
     reserve = _DETAILS_HEADER_CELLS + 2 if has_details else 0
     over = sum(cells(i) + 2 for i in range(upto + 1)) + reserve - width
     caps = {name_i: cells(name_i), source_i: cells(source_i)}
+    if has_details and upto not in caps:
+        # A long Actions value ("blocked, quarantined, disabled") gives up
+        # cells too, so the Details header is not cut at the screen edge.
+        caps[upto] = cells(upto)
     while over > 0:
         i = max(caps, key=lambda k: caps[k])
         if caps[i] <= _MIN_FIT_CELLS:

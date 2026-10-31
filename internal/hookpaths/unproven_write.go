@@ -1449,7 +1449,7 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 				continue
 			}
 			api := strings.TrimSuffix(code[location[0]:location[1]], "(")
-			if api != "shutil.copy" && api != "shutil.copy2" {
+			if api != "shutil.copy" && api != "shutil.copy2" && api != "shutil.move" {
 				continue
 			}
 			call, ok := literalBoundedCall(code, location[1]-1)
@@ -1487,7 +1487,7 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 					}
 					continue
 				}
-				// shutil.copy/copy2 choose the basename of src when dst is
+				// shutil.copy/copy2/move choose the basename of src when dst is
 				// a directory. Inspect that child, including a linked dst.
 				child := OperandPath(filepath.Base(source), destination)
 				if protectedReachPath(child, protected, ssh) {

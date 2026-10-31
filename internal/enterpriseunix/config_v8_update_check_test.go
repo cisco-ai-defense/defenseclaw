@@ -59,15 +59,15 @@ func TestV8UpdateCheckViewKeepsOtherRefusals(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "line 3") || !strings.Contains(err.Error(), "not_a_setting") {
 		t.Fatalf("unknown key: %v, want a refusal naming not_a_setting on line 3", err)
 	}
-	if view := v8ChecksView([]byte(v8UpdateCheckConfig)); strings.Count(string(view), "\n") != strings.Count(v8UpdateCheckConfig, "\n") || strings.Contains(string(view), "update_check") {
+	if view := config.V8ManagedChecksView([]byte(v8UpdateCheckConfig)); strings.Count(string(view), "\n") != strings.Count(v8UpdateCheckConfig, "\n") || strings.Contains(string(view), "update_check") {
 		t.Fatalf("view changed the line count or kept update_check:\n%s", view)
 	}
 	v9 := strings.Replace(v8UpdateCheckConfig, "config_version: 8", "config_version: 9", 1)
-	if got := string(v8ChecksView([]byte(v9))); got != v9 {
+	if got := string(config.V8ManagedChecksView([]byte(v9))); got != v9 {
 		t.Fatal("a config_version 9 file was changed by the v8 view")
 	}
 	block := strings.Replace(v8UpdateCheckConfig, "update_check: false", "update_check:\n  - false", 1)
-	if got := string(v8ChecksView([]byte(block))); got != block {
+	if got := string(config.V8ManagedChecksView([]byte(block))); got != block {
 		t.Fatal("a block value was blanked; the v8 checks must refuse it as before")
 	}
 }

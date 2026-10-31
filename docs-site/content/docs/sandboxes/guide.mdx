@@ -614,7 +614,7 @@ These problems appear while a sandbox runs or when you pull its work back. Befor
 
 **Cause:** the first is expected on a Mac: every run works on a copy. `--context` needs a mount. The third means the copy passed `openshell.workdir.max_upload_mb`.
 
-**Fix:** bring the work back with `defenseclaw sandbox pull NAME`. Run without `--context` and put a copy of the reference folder inside the project. Raise `openshell.workdir.max_upload_mb`, or shrink the project (`openshell.workdir.git_depth` for shallower history).
+**Fix:** bring the work back with `defenseclaw sandbox pull NAME --apply` (or `--branch`, `--patch-out FILE`). Run without `--context` and put a copy of the reference folder inside the project. Raise `openshell.workdir.max_upload_mb`, or shrink the project (`openshell.workdir.git_depth` for shallower history).
 
 **Check:** the run starts.
 
@@ -702,7 +702,7 @@ For another MicroVM error reason, such as `ProcessPollFailed`, OpenShell may sti
 
 ## A MicroVM stop is held because its disk could not sync
 
-On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, and the command says what a stop would lose. Save the work you need (`defenseclaw sandbox pull NAME` for a copy run), then run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. To stop it anyway, run `defenseclaw sandbox stop NAME --discard-unsynced` (on a terminal, `defenseclaw sandbox stop NAME` asks first): it loses what the VM wrote since its last sync, and the activity feed shows `stop_unflushed`. A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either, and neither does one it makes on its own for repeated foreign network rules or a lost sandbox listener: DefenseClaw contains it instead (it closes its egress proxy, withdraws its network rules and providers, reports it not protected and refuses new DefenseClaw runs), `sandbox status` names it, and it keeps running until you stop it with `--discard-unsynced` or delete it.
+On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, and the command says what a stop would lose. Save the work you need (`defenseclaw sandbox pull NAME --apply` for a copy run, or `--branch` or `--patch-out FILE`), then run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. To stop it anyway, run `defenseclaw sandbox stop NAME --discard-unsynced` (on a terminal, `defenseclaw sandbox stop NAME` asks first): it loses what the VM wrote since its last sync, and the activity feed shows `stop_unflushed`. A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either, and neither does one it makes on its own for repeated foreign network rules or a lost sandbox listener: DefenseClaw contains it instead (it closes its egress proxy, withdraws its network rules and providers, reports it not protected and refuses new DefenseClaw runs), `sandbox status` names it, and it keeps running until you stop it with `--discard-unsynced` or delete it.
 
 Signing out without linger, `sandbox teardown` and an administrator's stop of the sandbox service end the OpenShell gateway, and with it the VM, even when its disk could not sync: DefenseClaw tries its synced stop again first, and names each VM whose disk still could not sync and what it may have lost (on your own computer, in the activity feed).
 
@@ -840,7 +840,7 @@ These are the disk, telemetry and MicroVM resource checks of `defenseclaw sandbo
 
 **Cause:** a MicroVM stopped with its overlay disk full cannot start again, and its unpulled work cannot be read. A copy-mode session looks at the MicroVM's own disk soon after it starts, then every 15 seconds on a disk of 4 GiB or less (every 2 minutes on a larger one). It warns when the disk is 90% full, and once earlier when the free space is falling so fast that the disk would be full before the look after next. The warning only reports; nothing is stopped.
 
-**Fix:** while it runs, `defenseclaw sandbox exec NAME -- df -h /` shows the space. Free space, or pull the work, before it stops. A session whose end hits this leaves the MicroVM running: free space (`defenseclaw sandbox connect NAME --shell`), then `defenseclaw sandbox pull NAME`. Once stopped full, only `defenseclaw sandbox delete NAME` is left. Raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new sandboxes (the doctor shows the value and where it is set).
+**Fix:** while it runs, `defenseclaw sandbox exec NAME -- df -h /` shows the space. Free space, or pull the work, before it stops. A session whose end hits this leaves the MicroVM running: free space (`defenseclaw sandbox connect NAME --shell`), then `defenseclaw sandbox pull NAME --apply` (or `--branch`, `--patch-out FILE`). Once stopped full, only `defenseclaw sandbox delete NAME` is left. Raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new sandboxes (the doctor shows the value and where it is set).
 
 **Check:** `sandbox status NAME` shows no disk warning.
 

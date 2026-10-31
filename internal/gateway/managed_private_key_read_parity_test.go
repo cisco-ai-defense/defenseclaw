@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,51 +30,56 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
-// r106KeyReadVerdict judges one Bash call of the b36 fixture user, as a
-// per-user gateway that can see the home or as the managed gateway behind
-// ProtectHome (home hidden, verified hook peer), with the real hook client
-// header either way. It returns "block", "alert" (observe mode, would block)
-// or "allow".
-func r106KeyReadVerdict(t *testing.T, f b36ManagedHookFixture, managed bool, connector, pack, mode, cwd, command string) string {
+// keyReadCall is one hook call of the parity table and its answer:
+// "block", "alert" (observe mode, would block) or "allow".
+type keyReadCall struct {
+	name, want string
+	api        *APIServer
+	connector  string
+	payload    []byte
+	header     string
+	managed    bool
+	verdict    string
+}
+
+// keyReadGateway is a gateway with the shipped pack in mode for connector
+// and an audit store of its own.
+func keyReadGateway(t *testing.T, connector, pack, mode string) *APIServer {
 	t.Helper()
-	payload := mustJSON(t, map[string]any{"session_id": "mgdp2", "hook_event_name": "PreToolUse", "cwd": cwd,
-		"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_mgdp2",
-		"tool_input": map[string]any{"command": command, "description": "Run test fixture command"}})
-	header := f.clientHeader(t, payload)
-	if managed {
-		if err := os.Chmod(f.homes, 0); err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = os.Chmod(f.homes, 0o700) }()
-	}
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
 	cfg.DataDir = os.Getenv("DEFENSECLAW_HOME")
 	cfg.Guardrail.Mode = mode
 	cfg.Guardrail.Connector = connector
 	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), pack)
-	api := &APIServer{scannerCfg: cfg, store: store, logger: logger, health: NewSidecarHealth()}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
-	req.Header.Set(hookpaths.Header, header)
-	if connector == "codex" {
+	return &APIServer{scannerCfg: cfg, store: store, logger: logger, health: NewSidecarHealth()}
+}
+
+// answer sends the call to its gateway with the real hook client header,
+// as the verified managed hook peer of home when managed; the caller sets
+// the home mode of the reading.
+func (c *keyReadCall) answer(home string) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(c.payload)))
+	req.Header.Set(hookpaths.Header, c.header)
+	if c.connector == "codex" {
 		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
 	}
-	if managed {
-		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: f.home}))
+	if c.managed {
+		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
 	}
 	recorder := httptest.NewRecorder()
-	api.handleAgentHook(connector).ServeHTTP(recorder, req)
+	c.api.handleAgentHook(c.connector).ServeHTTP(recorder, req)
 	var response map[string]any
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("status %d body %.300s", recorder.Code, recorder.Body.String())
-	}
 	switch {
+	case json.Unmarshal(recorder.Body.Bytes(), &response) != nil:
+		c.verdict = fmt.Sprintf("status %d body %.300s", recorder.Code, recorder.Body.String())
 	case response["action"] == "block":
-		return "block"
+		c.verdict = "block"
 	case response["would_block"] == true:
-		return "alert"
+		c.verdict = "alert"
+	default:
+		c.verdict = "allow"
 	}
-	return "allow"
 }
 
 // TestR106ManagedPrivateKeyReadMatchesPerUser is rel-1-0-6:GAP-0179: the
@@ -85,7 +91,11 @@ func r106KeyReadVerdict(t *testing.T, f b36ManagedHookFixture, managed bool, con
 // GAP-0124) and alerts in observe mode. The managed verdict must equal the
 // per-user one: the reads block, and known_hosts, config, public keys,
 // project files named like a key, a listing and the everyday key tools stay
-// allowed in both.
+// allowed in both. Every row runs for both packs, modes and connectors; the
+// calls of each reading (per-user, then managed with the home hidden) are
+// answered concurrently, by one gateway and audit store per pack, mode and
+// connector, each call with a session of its own, so the race build of the
+// CI gateway shards stays within its timing entry.
 func TestR106ManagedPrivateKeyReadMatchesPerUser(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	// The data directory lies outside the home, as a managed gateway keeps
@@ -135,30 +145,58 @@ func TestR106ManagedPrivateKeyReadMatchesPerUser(t *testing.T) {
 		{"N9", "p", "cat ../.ssh/id_ed25519.pub", false},
 		{"N10", "p", "cat README.md", false},
 	}
+	// One payload per row and reading, each with a session of its own; the
+	// client header is computed as the user, with the home readable.
+	payloads := make([][]byte, 0, 2*len(rows))
+	for _, r := range rows {
+		cwd := f.project
+		if r.where == "h" {
+			cwd = f.home
+		}
+		for _, side := range []string{"peruser", "managed"} {
+			payloads = append(payloads, mustJSON(t, map[string]any{"session_id": "keyread-" + r.id + "-" + side,
+				"hook_event_name": "PreToolUse", "cwd": cwd, "permission_mode": "default", "tool_name": "Bash",
+				"tool_use_id": "toolu_keyread", "tool_input": map[string]any{"command": r.command, "description": "Run test fixture command"}}))
+		}
+	}
+	headers := f.clientHeaders(t, payloads)
+	var calls [2][]*keyReadCall
 	for _, pack := range []string{"default", "strict"} {
 		for _, mode := range []string{"action", "observe"} {
 			for _, connector := range []string{"claudecode", "codex"} {
-				for _, r := range rows {
-					cwd := f.project
-					if r.where == "h" {
-						cwd = f.home
-					}
+				api := keyReadGateway(t, connector, pack, mode)
+				for i, r := range rows {
 					want := "allow"
 					if r.block && mode == "action" {
 						want = "block"
 					} else if r.block {
 						want = "alert"
 					}
-					perUser := r106KeyReadVerdict(t, f, false, connector, pack, mode, cwd, r.command)
-					managed := r106KeyReadVerdict(t, f, true, connector, pack, mode, cwd, r.command)
-					if perUser != want {
-						t.Errorf("%s %s/%s/%s %q: per-user %s, want %s (fixture premise)", r.id, pack, mode, connector, r.command, perUser, want)
-					}
-					if managed != perUser {
-						t.Errorf("%s %s/%s/%s %q: managed %s, per-user %s", r.id, pack, mode, connector, r.command, managed, perUser)
+					for side, managed := range []bool{false, true} {
+						calls[side] = append(calls[side], &keyReadCall{
+							name: fmt.Sprintf("%s %s/%s/%s %q", r.id, pack, mode, connector, r.command), want: want,
+							api: api, connector: connector, payload: payloads[2*i+side], header: headers[2*i+side], managed: managed,
+						})
 					}
 				}
 			}
+		}
+	}
+	defer os.Chmod(f.homes, 0o700)
+	for side, mode := range []os.FileMode{0o700, 0} {
+		if err := os.Chmod(f.homes, mode); err != nil {
+			t.Fatal(err)
+		}
+		group := calls[side]
+		eachConcurrently(len(group), func(i int) { group[i].answer(f.home) })
+	}
+	for i, perUser := range calls[0] {
+		managed := calls[1][i]
+		if perUser.verdict != perUser.want {
+			t.Errorf("%s: per-user %s, want %s (fixture premise)", perUser.name, perUser.verdict, perUser.want)
+		}
+		if managed.verdict != perUser.verdict {
+			t.Errorf("%s: managed %s, per-user %s", managed.name, managed.verdict, perUser.verdict)
 		}
 	}
 }

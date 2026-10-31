@@ -258,12 +258,8 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 				return add(literalInterpreterWrites(code, "python", cwd, home))
 			}
 		}
-		if len(words) >= 3 && (program == "perl" || program == "ruby" || program == "node" || program == "nodejs") && words[1] == "-e" {
-			language := program
-			if language == "nodejs" {
-				language = "node"
-			}
-			return add(literalInterpreterWrites(words[2], language, cwd, home))
+		if code, language, ok := literalInlineProgram(words); ok {
+			return add(literalInterpreterWrites(code, language, cwd, home))
 		}
 		if program == "python" || strings.HasPrefix(program, "python3") {
 			if stmt != nil && (len(words) == 1 || len(words) >= 2 && words[1] == "-") {
@@ -505,6 +501,45 @@ func AWKReadsProgramFile(command string) bool {
 		return !found
 	})
 	return found
+}
+
+// literalInlineProgram returns the inline code of a perl, ruby or node call
+// and its language, past the interpreter's other options (perl -w or
+// -MFile::Copy, a -we cluster, perl -E, node -r x), so an option before the
+// code does not hide its writes. perl runs "use Module;" before the code for
+// each -MModule option; that use is put in front of the code here, so an
+// API the module exports is read as it is with an in-code use
+// (rel-1-0-2:GAP-0429).
+func literalInlineProgram(words []string) (code, language string, ok bool) {
+	if len(words) < 3 {
+		return "", "", false
+	}
+	language = actionInterpreterKind(words[0])
+	if language != "perl" && language != "ruby" && language != "node" {
+		return "", "", false
+	}
+	code, ok = actionInterpreterInlineCode(words, 0)
+	if !ok {
+		return "", "", false
+	}
+	if language == "perl" {
+		var uses strings.Builder
+		for j := 1; j+1 < len(words) && !actionWindowsInterpreterCodeOption(language, words[j]); j++ {
+			module, attached := strings.CutPrefix(words[j], "-M")
+			if !attached {
+				continue
+			}
+			if module == "" {
+				j++
+				module = words[j]
+			}
+			if name, _, _ := strings.Cut(module, "="); name != "" && !strings.HasPrefix(name, "-") {
+				uses.WriteString("use " + name + ";\n")
+			}
+		}
+		code = uses.String() + code
+	}
+	return code, language, true
 }
 
 // pythonLiteralCode accepts only fixed no-argument switches before -c.

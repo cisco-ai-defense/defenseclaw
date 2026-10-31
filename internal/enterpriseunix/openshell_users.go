@@ -1713,6 +1713,21 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 		// (planPackagedMacOSSandbox), and launchd loads them at every
 		// sign-in, so they are unloaded all the same.
 		l.bootOutMacOSAgents(ctx, nil)
+		if env.GOOS == "linux" {
+			// The package's socket unit is enabled for every account whatever
+			// the setup, so a sandbox command of a signed-in account started
+			// its daemon, which has no sandbox to keep. Left running after the
+			// uninstall, it could no longer be asked which sandboxes run, and
+			// the package's pre-install guard refused the next install of
+			// the package for it (GAP-0181). DefenseClaw's own units are
+			// stopped, quietly, as for an account the subsystem never served.
+			ops := env.sandboxOps()
+			for _, a := range ops.LoggedIn(ctx) {
+				if env.usableSandboxAccount(a) {
+					_ = ops.Stop(ctx, a, StopDaemon|StopGateway|StopSocket)
+				}
+			}
+		}
 		return
 	}
 	// A purge stops each account's units below, which on macOS boots its

@@ -626,7 +626,8 @@ var (
 // (rel-1-0-6 GAP-0159). A uid is resolved to the name of the account that
 // holds it, as the account database names it, else as the account's record
 // in the report names it; the findings are then matched by that name, as for
-// --user <name>. Any other spelling is matched as given.
+// --user <name>. A qualified name that resolves to a uid is matched the same
+// way. Any other spelling is matched as given.
 func enterpriseDiscoveryRuntimeFilter(user string, accounts []enterpriseDiscoveryAccount) useridentity.AccountFilter {
 	user = strings.TrimSpace(user)
 	if uid, err := strconv.Atoi(user); err == nil && uid >= 0 && strconv.Itoa(uid) == user {
@@ -640,7 +641,21 @@ func enterpriseDiscoveryRuntimeFilter(user string, accounts []enterpriseDiscover
 			return useridentity.NewAccountFilter(name)
 		}
 	}
-	return useridentity.NewAccountFilter(user, enterpriseDiscoveryAccountIDs(user)...)
+	ids := enterpriseDiscoveryAccountIDs(user)
+	// A qualified name (user@domain, DOMAIN\name) resolves to the uid of its
+	// account, and a resolved filter selects a row by that id only; a
+	// finding names no uid, so an AD account's finding was listed under
+	// --user <uid> and its bare name but not under the name NSS gives it
+	// (rel-1-0-6 GAP-0184). The uid's account is matched by its name, as for
+	// --user <uid>.
+	if len(ids) == 1 {
+		if uid, err := strconv.Atoi(ids[0]); err == nil && uid >= 0 && strconv.Itoa(uid) == ids[0] {
+			if name := strings.TrimSpace(enterpriseDiscoveryUIDName(uid)); name != "" {
+				return useridentity.NewAccountFilter(name)
+			}
+		}
+	}
+	return useridentity.NewAccountFilter(user, ids...)
 }
 
 // nameWindowsDiscoveryTwins names each account that shares its bare name

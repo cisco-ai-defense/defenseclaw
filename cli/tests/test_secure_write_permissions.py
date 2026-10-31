@@ -318,6 +318,24 @@ def test_windows_durable_replace_supports_path_beyond_max_path(tmp_path):
             shutil.rmtree(extended_root)
 
 
+def test_durable_replace_failure_names_the_target_file(tmp_path):
+    # A target that is a folder cannot be replaced. The error names the file on
+    # every OS (os.replace sets filename2; MoveFileExW through ctypes did not),
+    # so a caller can say which file it could not save.
+    target = tmp_path / "config.generation.json"
+    target.mkdir()
+    staging = tmp_path / ".config.generation.json.new"
+    staging.write_bytes(b"new")
+
+    with pytest.raises(OSError) as raised:
+        file_permissions.replace_file_durable(staging, target)
+
+    assert os.path.basename(raised.value.filename2) == "config.generation.json"
+    assert raised.value.strerror
+    assert target.is_dir()
+    assert staging.read_bytes() == b"new"
+
+
 def test_posix_file_mode_still_uses_descriptor_api(monkeypatch):
     calls: list[tuple[int, int]] = []
     fake_os = SimpleNamespace(
