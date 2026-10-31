@@ -328,6 +328,12 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+# DEFENSECLAW_REPO is a GitHub owner/name or an https:// mirror base URL. Any
+# other value (an http:// URL) would be appended to github.com and end in a
+# 404 (GAP-1065). The value is not echoed: a mirror URL can carry credentials.
+if [[ ! "${REPO}" =~ ^https://[^[:space:]]+$ && ! "${REPO}" =~ ^[^[:space:]/:@]+/[^[:space:]/:@]+$ ]]; then
+    usage_error "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL (an http:// URL is not accepted)"
+fi
 if [[ "${NO_OPENCLAW}" == true ]]; then
     [[ "${CONNECTOR}" != openclaw ]] || die "--no-openclaw cannot be combined with --connector openclaw"
     CONNECTOR="${CONNECTOR:-none}"

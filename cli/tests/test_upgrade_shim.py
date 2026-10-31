@@ -1220,3 +1220,41 @@ def test_rollback_checks_a_previous_installer_only_when_it_was_recorded(home: Pa
     _record(previous / "data", saved)
     assert upgrade_shim.run(["rollback", "--yes"]) == 0
     assert len(execs) == 2
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["http://127.0.0.1:8765/defenseclaw", "ftp://mirror.example/dc", "justaname", "a/b/c", "owner/na me", "file:///tmp/dc"],
+)
+def test_a_bad_defenseclaw_repo_is_refused_with_the_https_requirement(
+    home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    """GAP-1065: DEFENSECLAW_REPO is an owner/name or an https:// URL. Anything
+    else used to be appended to github.com and ended in an HTTP 404; it is now
+    refused before any download, without echoing the value."""
+    monkeypatch.setenv(upgrade_shim.REPO_ENV, value)
+    downloads: list[str] = []
+    monkeypatch.setattr(upgrade_shim, "_download", lambda url, *_a, **_k: downloads.append(url))
+
+    assert upgrade_shim.run(["upgrade", "--yes", "--version", "1.0.8200"]) == 2
+    err = capsys.readouterr().err
+    assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in err
+    assert "Nothing was changed." in err
+    assert value not in err
+    assert downloads == [] and execs == []
+    # The update notice stays quiet about it.
+    assert update_notice._lookup_latest() == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "base"),
+    [
+        ("fork/defense.claw", "https://github.com/fork/defense.claw"),
+        ("https://mirror.example/dc/", "https://mirror.example/dc"),
+    ],
+)
+def test_a_good_defenseclaw_repo_is_still_accepted(
+    home: Path, monkeypatch: pytest.MonkeyPatch, value: str, base: str
+) -> None:
+    monkeypatch.setenv(upgrade_shim.REPO_ENV, value)
+    assert upgrade_shim.release_source() == base

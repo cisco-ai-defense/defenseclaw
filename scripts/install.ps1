@@ -5388,6 +5388,12 @@ function Invoke-Install {
     $TargetVersion = $Version -replace '^v', ''
     if ($VersionGiven -and -not $TargetVersion) { Stop-Usage "-Version needs a value such as 1.2.3" }
     if ($TargetVersion -and -not (Test-Version $TargetVersion)) { Stop-Usage "-Version must look like 1.2.3, got '$Version'" }
+    # DEFENSECLAW_REPO is a GitHub owner/name or an https:// mirror base URL. Any
+    # other value (an http:// URL) would be appended to github.com and end in a
+    # 404 (GAP-1065). The value is not echoed: a mirror URL can carry credentials.
+    if ($Repo -notmatch '^https://\S+$' -and $Repo -notmatch '^[^\s/:@]+/[^\s/:@]+$') {
+        Stop-Usage "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL (an http:// URL is not accepted)"
+    }
     $LocalDir = ""
     if ($LocalGiven -and -not $Local.Trim()) { Stop-Usage "-Local needs the folder that holds the release assets" }
     if ($Local) {

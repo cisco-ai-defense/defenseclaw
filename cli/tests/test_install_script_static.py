@@ -3740,3 +3740,30 @@ def test_a_rollback_to_an_older_release_waits_until_its_gateway_lets_go_of_the_a
 def _audit_lock_free_py() -> str:
     text = INSTALL_SH.read_text(encoding="utf-8")
     return re.search(r'^AUDIT_LOCK_FREE_PY="([^"]+)"$', text, re.M).group(1)
+
+
+@pytest.mark.parametrize("script", [INSTALL_SH, HANDOFF_SH])
+@pytest.mark.parametrize("value", ["http://127.0.0.1:8765/defenseclaw", "ftp://mirror.example/dc", "justaname"])
+def test_a_bad_defenseclaw_repo_is_refused_before_anything_downloads(tmp_path: Path, script: Path, value: str) -> None:
+    # GAP-1065: an http:// mirror built https://github.com/http://... and ended
+    # in a 404. It is refused with the https:// requirement, value not echoed.
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    curl_log = tmp_path / "curl.log"
+    (fake / "curl").write_text(f'#!/bin/sh\necho "$*" >> "{curl_log}"\nexit 22\n', encoding="utf-8")
+    (fake / "curl").chmod(0o755)
+    args = [str(script), "--yes", "--version", "1.0.8200"] if script == INSTALL_SH else [str(script), "--version", "1.0.8200"]
+
+    result = _run(args, tmp_path, PATH=f"{fake}:/usr/bin:/bin", DEFENSECLAW_REPO=value)
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in result.stderr
+    assert value not in result.stdout + result.stderr
+    assert not curl_log.exists()
+
+
+def test_the_windows_installer_refuses_a_bad_defenseclaw_repo_too() -> None:
+    # GAP-1065: the same rule as install.sh (the PowerShell cannot run here).
+    text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in text
+    assert "'^https://\\S+$'" in text and "'^[^\\s/:@]+/[^\\s/:@]+$'" in text

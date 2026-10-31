@@ -1338,3 +1338,19 @@ def test_every_policy_source_compiles_a_chosen_quarantine_as_written(tmp_path, m
         if got != expected or compat == chosen or (not chosen and written != legacy):
             failures.append(f"{name}: MCP {got}, expected {expected}; compatibility {'on' if compat else 'off'}")
     assert not failures, "\n".join(failures)
+
+
+@pytest.mark.parametrize("value", ["http://127.0.0.1:8765/defenseclaw", "mirror.example.com/dc", "ftp://mirror.example/dc"])
+def test_update_source_refusal_asks_for_an_https_url(tmp_path, monkeypatch, value):
+    # GAP-1065: the refusal said only "not in the expected format". https:// stays accepted.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path)
+    before = (tmp_path / "config.yaml").read_bytes()
+    with pytest.raises(V8ConfigError) as refused:
+        config_writer.apply([Change("update.source", value)], "cli:test", "t", path=path)
+    message = config_writer.plain_error(refused.value, value=value)
+    assert message.startswith("update.source must be an https:// URL")
+    assert "https://mirror.example.com/defenseclaw" in message
+    assert (tmp_path / "config.yaml").read_bytes() == before
+
+    config_writer.apply([Change("update.source", "https://mirror.example.com/defenseclaw")], "cli:test", "t", path=path)
