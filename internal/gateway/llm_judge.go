@@ -1361,6 +1361,14 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 			dropped, suffix, direction)
 	}
 
+	// The OS account name in a path or an ls -l owner column is local
+	// account metadata, not a username shared as data (GAP-0111).
+	if dropped := filterAccountMetadataUsernames(parsed, content); dropped > 0 {
+		fmt.Fprintf(defaultLogWriter,
+			"  [llm-judge] pii: dropped %d account-metadata username(s) (dir=%s)\n",
+			dropped, direction)
+	}
+
 	verdict := j.piiToVerdictWith(j.suppressionPack(ctx), parsed, direction, toolName)
 	recordJudgeMetrics(verdict, judgeTraceFailureNone)
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii verdict (dir=%s): action=%s severity=%s findings=%v\n",
