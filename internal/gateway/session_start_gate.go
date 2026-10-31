@@ -49,6 +49,10 @@ type sessionStartEntry struct {
 	blocked bool
 	reason  string
 	at      time.Time
+	// inPlace marks a start judged in a call's place (judgeMissingStart):
+	// there is no start payload, only the checks a start runs and a call
+	// does not. A call does not wait for it past its answer window.
+	inPlace bool
 }
 
 // sessionStartTicket is one session start being judged.
@@ -75,6 +79,17 @@ const (
 // sessionStartGateMaxWait bounds how long a call waits for its session's
 // start verdict (a variable for tests).
 var sessionStartGateMaxWait = 10 * time.Second
+
+// sessionStartAnswerReserve is kept from a bounded call's answer window
+// (hookJudgeAnswerEnd) for the rest of its decision and the answer's way
+// back: a call waits for its session's start at most until the window less
+// this, so the start's refusal, or the call's own verdict, reaches the
+// agent before its hook gives up (rel-1-0-6 GAP-0127, rel-1-0-3 GAP-0327).
+var sessionStartAnswerReserve = 1400 * time.Millisecond
+
+// sessionStartInPlaceCheckTimeout bounds a start check judged in a call's
+// place. It runs on after the call that started it has its answer.
+const sessionStartInPlaceCheckTimeout = 30 * time.Second
 
 // sessionStartArrivalWait is how long a call of a session whose start this
 // process has not seen waits for that start to arrive. The gateway tests
@@ -229,6 +244,13 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 	if g == nil || key == "" {
 		return "", false
 	}
+	// A call whose hook bounds its wait for the answer waits for the start
+	// only inside that bound. It used to wait half of the hook's transport
+	// timeout (5 s for Codex), past the 3.5 s the native hook waits, and the
+	// hook denied the benign call as a gateway that did not answer.
+	if end, bounded := hookJudgeAnswerEnd(ctx); bounded {
+		wait = max(min(wait, time.Until(end.Add(-sessionStartAnswerReserve))), 0)
+	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	for {
@@ -305,6 +327,13 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 			resume()
 		case <-timer.C:
 			resume()
+			if entry.inPlace {
+				// A start judged in a call's place that has no verdict in
+				// the call's window: the call goes on with its own verdict.
+				// The check runs on, and its verdict holds the session's
+				// later calls.
+				return "", false
+			}
 			return sessionStartPendingReason, true
 		case <-ctx.Done():
 			resume()
@@ -317,6 +346,15 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 // arrive, unless one arrived meanwhile, and records the verdict as that
 // start's. A check that is missing or does not finish blocks, as a start
 // without a verdict does.
+//
+// The check runs apart from the call, with the call's values but not its
+// end, bounded by sessionStartInPlaceCheckTimeout: the calls of the session
+// wait for its verdict in await, a bounded call only inside its answer
+// window. A Codex registration repair that hashed the hook binary, or waited
+// for the hook guard of a gateway still starting its connectors, held the
+// first call after a gateway start past its hook's 3.5 s and the hook denied
+// the benign call (rel-1-0-3 GAP-0327); a check cut off when its call ended
+// would record a sticky block for a live session.
 func (g *sessionStartGate) judgeMissingStart(ctx context.Context, key string, startCheck func(context.Context) (bool, string)) {
 	g.mu.Lock()
 	if _, seen := g.started[key]; seen || g.entries[key] != nil {
@@ -324,15 +362,25 @@ func (g *sessionStartGate) judgeMissingStart(ctx context.Context, key string, st
 		return
 	}
 	ticket := g.beginLocked(key)
+	ticket.entry.inPlace = true
 	g.mu.Unlock()
-	blocked, reason := true, sessionStartUnfinishedReason
-	defer func() {
-		_ = recover()
-		ticket.finish(blocked, reason)
-	}()
-	if startCheck != nil {
-		blocked, reason = startCheck(ctx)
+	if startCheck == nil {
+		ticket.finish(true, sessionStartUnfinishedReason)
+		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionStartInPlaceCheckTimeout)
+	go func() {
+		defer cancel()
+		blocked, reason := true, sessionStartUnfinishedReason
+		defer func() {
+			_ = recover()
+			ticket.finish(blocked, reason)
+		}()
+		blocked, reason = startCheck(checkCtx)
+	}()
 }
 
 // sessionStartArrival is how long a call of a session whose start the gate

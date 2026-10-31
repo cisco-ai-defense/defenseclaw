@@ -5,7 +5,6 @@ package hookpaths
 
 import (
 	"maps"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -569,7 +568,7 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 					if language == "python" && (name == "shutil.copy" || name == "shutil.copy2") {
 						source := literalCallArgument(args, 0, "src")
 						if sourcePath, fixed := pathString(source); fixed {
-							if info, err := os.Stat(OperandPath(path, cwd)); err == nil && info.IsDir() {
+							if info, err := pathStat(OperandPath(path, cwd)); err == nil && info.IsDir() {
 								paths = append(paths, filepath.Join(path, filepath.Base(sourcePath)))
 							}
 						}

@@ -5,7 +5,6 @@ package hookpaths
 
 import (
 	"io"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -1463,7 +1462,7 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 			if !ok {
 				return "interpreter-path", true
 			}
-			if info, err := os.Stat(OperandPath(name, cwd)); err == nil && info.IsDir() {
+			if info, err := pathStat(OperandPath(name, cwd)); err == nil && info.IsDir() {
 				destination := OperandPath(name, cwd)
 				protected := newProtectedFiles(home)
 				ssh := filepath.Join(home, ".ssh")
@@ -1472,7 +1471,7 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 					if protectedReachPath(destination, protected, ssh) {
 						return "copy-directory", true
 					}
-					directory, err := os.Open(destination)
+					directory, err := pathOpen(destination)
 					if err != nil {
 						return "copy-directory", true
 					}
@@ -1735,7 +1734,7 @@ func boundedProtectedGlobReach(pattern, cwd string, protected protectedFiles, ss
 	if strings.ContainsAny(parent, "*?[") {
 		return true
 	}
-	directory, err := os.Open(OperandPath(parent, cwd))
+	directory, err := pathOpen(OperandPath(parent, cwd))
 	if err != nil {
 		return false
 	}
@@ -1785,7 +1784,7 @@ func cdPathProtectedReach(call *syntax.CallExpr, file *syntax.File, cwd, home st
 		return false
 	}
 	selected := OperandPath(path, filepath.Join(home, ".ssh"))
-	info, err := os.Stat(selected)
+	info, err := pathStat(selected)
 	if err != nil || !info.IsDir() {
 		return false
 	}

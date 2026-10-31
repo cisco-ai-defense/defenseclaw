@@ -1368,7 +1368,7 @@ func actionCommandMayDotglob(command string) bool {
 // system's shell, or an inherited BASHOPTS or GLOBIGNORE, that may set
 // dotglob, or a home this process cannot read.
 func actionShellProfileMayDotglob(home string) bool {
-	if _, err := os.Stat(home); err != nil || strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "" {
+	if _, err := pathStat(home); err != nil || strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "" {
 		return true
 	}
 	files := []string{"/etc/profile", "/etc/bashrc", "/etc/bash.bashrc", "/etc/zshenv", "/etc/zsh/zshenv",
@@ -1380,7 +1380,7 @@ func actionShellProfileMayDotglob(home string) bool {
 		files = append(files, filepath.Join(home, name))
 	}
 	for _, name := range files {
-		file, err := os.Open(name)
+		file, err := pathOpen(name)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -1532,12 +1532,12 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 // shell's own expansion reads that spelling: it is tried before the walk
 // concludes that the name names no directory (GAP-0781 RV7-1).
 func actionGlobOpenDir(dir string) (*os.File, error) {
-	directory, err := os.Open(dir)
+	directory, err := pathOpen(dir)
 	if err == nil || !actionGlobInvalidName(err) {
 		return directory, err
 	}
 	if mapped := actionMSYSMappedPath(dir); mapped != dir {
-		if alias, mappedErr := os.Open(mapped); mappedErr == nil || !errors.Is(mappedErr, fs.ErrNotExist) && !actionGlobInvalidName(mappedErr) {
+		if alias, mappedErr := pathOpen(mapped); mappedErr == nil || !errors.Is(mappedErr, fs.ErrNotExist) && !actionGlobInvalidName(mappedErr) {
 			return alias, mappedErr
 		}
 	}
@@ -1575,7 +1575,7 @@ func actionGlobNotDirectory(dir string, err error) bool {
 	if errors.Is(err, syscall.ENOTDIR) {
 		return true
 	}
-	info, statErr := os.Stat(dir)
+	info, statErr := pathStat(dir)
 	return statErr == nil && !info.IsDir()
 }
 
@@ -1607,7 +1607,7 @@ func actionGlobViewHidden(cwd, home string) bool {
 		if dir == "" {
 			continue
 		}
-		if _, err := os.Stat(dir); err != nil {
+		if _, err := pathStat(dir); err != nil {
 			return true
 		}
 	}
@@ -1719,7 +1719,7 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	}
 	// Only an existing regular file with a second link can alias the state.
 	// A missing or ordinary target costs one stat here, not a second walk.
-	info, err := os.Stat(resolved)
+	info, err := pathStat(resolved)
 	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return false
 	}
@@ -1736,7 +1736,7 @@ func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	info, err := os.Stat(resolved)
+	info, err := pathStat(resolved)
 	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return "", false
 	}
@@ -1751,7 +1751,7 @@ func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 		// The index can be up to activeStateIndexTTL old: confirm the name
 		// still holds this file before mapping the alias to it.
 		path := filepath.Join(activeRoot, filepath.FromSlash(file.relative))
-		if current, err := os.Stat(path); err == nil && os.SameFile(info, current) {
+		if current, err := pathStat(path); err == nil && os.SameFile(info, current) {
 			return filepath.Join(home, ".defenseclaw", filepath.FromSlash(file.relative)), true
 		}
 	}
@@ -1814,7 +1814,7 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeSt
 		return visited > activeStateIndexEntries || time.Now().After(deadline)
 	}
 	add := func(path, relative string) {
-		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		if info, err := pathStat(path); err == nil && info.Mode().IsRegular() {
 			files = append(files, activeStateIdentity{relative: relative, info: info})
 		}
 	}
@@ -3491,7 +3491,7 @@ func actionStateEntryMayDiffer(value string) bool {
 	if !filepath.IsAbs(value) {
 		return true
 	}
-	info, err := os.Lstat(value)
+	info, err := pathLstat(value)
 	if err != nil {
 		return !os.IsNotExist(err)
 	}

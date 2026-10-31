@@ -13,7 +13,7 @@ import (
 // actionProcessOwnsHome reports a process that runs as the owner of home,
 // so a directory it cannot list is one the user's shell cannot list either.
 func actionProcessOwnsHome(home string) bool {
-	info, err := os.Stat(home)
+	info, err := pathStat(home)
 	if err != nil {
 		return false
 	}

@@ -129,7 +129,7 @@ func (op renameOp) destinations(source string) []string {
 		return []string{absolutePath(op.dest, op.wd)}
 	}
 	dest := absolutePath(op.dest, op.wd)
-	if info, err := os.Lstat(dest); err == nil && info.IsDir() {
+	if info, err := pathLstat(dest); err == nil && info.IsDir() {
 		// A move onto an existing directory (not a link to one) goes inside
 		// it; the name itself is not replaced.
 		return []string{filepath.Join(dest, base)}
@@ -323,7 +323,7 @@ func diskLinkDotDotReachesState(command, cwd, home string) bool {
 				continue
 			}
 			path = filepath.Join(path, part)
-			info, err := os.Lstat(path)
+			info, err := pathLstat(path)
 			if err != nil {
 				break
 			}
@@ -457,7 +457,7 @@ func logicalDirExists(path, cwd string) bool {
 	if pathAtOrUnder(cwd, path) {
 		return true
 	}
-	info, err := os.Stat(path)
+	info, err := pathStat(path)
 	return err == nil && info.IsDir()
 }
 
@@ -548,7 +548,7 @@ func (l shellLinks) linkedTreesClear(command, cwd, home string, wrapped bool, mo
 				}
 				return false
 			}
-			if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+			if info, err := pathStat(resolved); err == nil && info.IsDir() {
 				dirs = append(dirs, resolved)
 			}
 		}
@@ -592,7 +592,7 @@ func diskLinkSteps(base, word string) (link bool, dirs []string) {
 			continue
 		}
 		path = filepath.Join(path, part)
-		info, err := os.Lstat(path)
+		info, err := pathLstat(path)
 		if err != nil {
 			return false, dirs
 		}
@@ -727,7 +727,7 @@ func movedEntriesAwayFromState(ops []renameOp, moves []findMove, home string) bo
 		if parent, ok := ResolveWriteTarget(filepath.Dir(path)); !ok || state.within(parent) {
 			return false
 		}
-		info, err := os.Lstat(path)
+		info, err := pathLstat(path)
 		switch {
 		case os.IsNotExist(err):
 			return true
@@ -802,7 +802,7 @@ func treesAwayFromState(dirs []string, state stateReach) bool {
 				clear = false
 				return filepath.SkipAll
 			}
-			if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+			if info, err := pathStat(resolved); err == nil && info.IsDir() {
 				queue = append(queue, resolved)
 			}
 			return nil
@@ -849,7 +849,7 @@ func throughFile(path string) bool {
 	}
 	path = filepath.Clean(path)
 	for dir := filepath.Dir(path); dir != path; path, dir = dir, filepath.Dir(dir) {
-		if info, err := os.Stat(dir); err == nil {
+		if info, err := pathStat(dir); err == nil {
 			return !info.IsDir()
 		} else if !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR) {
 			return false
@@ -967,7 +967,7 @@ func parseFindMove(program string, words []string, static []bool, cwd string) (f
 			if dest == "" {
 				dest = op.dest
 				move.dir = !op.noTargetDir && strings.HasSuffix(dest, "/")
-				if info, err := os.Stat(absolutePath(dest, cwd)); !op.noTargetDir && err == nil && info.IsDir() {
+				if info, err := pathStat(absolutePath(dest, cwd)); !op.noTargetDir && err == nil && info.IsDir() {
 					move.dir = true
 				}
 			}
@@ -1053,7 +1053,7 @@ func resolveMissingDotDot(path string) (string, bool) {
 			continue
 		}
 		before := filepath.FromSlash(strings.Join(parts[:i], "/"))
-		if _, err := os.Lstat(before); !os.IsNotExist(err) {
+		if _, err := pathLstat(before); !os.IsNotExist(err) {
 			return "", false
 		}
 	}

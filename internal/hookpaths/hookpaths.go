@@ -438,7 +438,7 @@ func windowsMountPointLink(candidate string, info os.FileInfo) bool {
 	if runtime.GOOS != "windows" || info.Mode()&os.ModeIrregular == 0 {
 		return false
 	}
-	_, err := os.Readlink(candidate)
+	_, err := pathReadlink(candidate)
 	return err == nil
 }
 
@@ -495,7 +495,7 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 			if !add(candidate) {
 				return "", nil, linkDepth, false
 			}
-			info, err := os.Lstat(candidate)
+			info, err := pathLstat(candidate)
 			if err != nil && !os.IsNotExist(err) {
 				return "", nil, linkDepth, false
 			}
@@ -506,7 +506,7 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 				if ProcCWDWriteOperand(candidate) {
 					return "", nil, linkDepth, false
 				}
-				link, err := os.Readlink(candidate)
+				link, err := pathReadlink(candidate)
 				if err != nil {
 					return "", nil, linkDepth, false
 				}
@@ -525,7 +525,7 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 				}
 				linkDepth = nextDepth
 				forms = append(forms, extra...)
-				_, err = os.Lstat(current)
+				_, err = pathLstat(current)
 				if err != nil && !os.IsNotExist(err) {
 					return "", nil, linkDepth, false
 				}
@@ -622,7 +622,7 @@ func newProtectedFiles(home string) protectedFiles {
 	files := make(protectedFiles, 0, len(AuthorizedKeysFiles))
 	for _, path := range ProtectedAuthorizedKeysPaths(home) {
 		protected := protectedFile{path: path}
-		info, err := os.Stat(path)
+		info, err := pathStat(path)
 		switch {
 		case err == nil:
 			protected.info = info
@@ -655,7 +655,7 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 		}
 		if info == nil {
 			var err error
-			if info, err = os.Stat(resolved); err != nil || !info.Mode().IsRegular() {
+			if info, err = pathStat(resolved); err != nil || !info.Mode().IsRegular() {
 				return resolved, true
 			}
 		}
@@ -1400,7 +1400,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		if candidate.Access != actionfacts.PathAccessDelete || !filepath.IsAbs(candidate.Resolved) {
 			continue
 		}
-		if info, err := os.Lstat(candidate.Resolved); err == nil && info.IsDir() &&
+		if info, err := pathLstat(candidate.Resolved); err == nil && info.IsDir() &&
 			info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 			reached = append(reached, filepath.Clean(candidate.Resolved))
 		}
@@ -1779,11 +1779,11 @@ func movedOntoLinkEntries(facts actionfacts.Facts) map[string]bool {
 func movedOntoLinkEntriesOf(destinations map[string]bool) map[string]bool {
 	var out map[string]bool
 	for path := range destinations {
-		info, err := os.Lstat(path)
+		info, err := pathLstat(path)
 		if err != nil || info.Mode()&os.ModeSymlink == 0 {
 			continue
 		}
-		if target, err := os.Stat(path); err == nil && target.IsDir() || err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if target, err := pathStat(path); err == nil && target.IsDir() || err != nil && !errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if out == nil {
@@ -2957,7 +2957,7 @@ func staticChangedDirectoryLink(file *syntax.File, cwd, home string) (*syntax.Ca
 	if !ok {
 		return nil, ""
 	}
-	info, err := os.Stat(changed)
+	info, err := pathStat(changed)
 	if err != nil || !info.IsDir() {
 		return nil, ""
 	}
@@ -3611,13 +3611,13 @@ func gitConfigRedirectsTree(assignment string) bool {
 // used by the write-path proof; if no worktree is found, the scope is global.
 func gitWorktreeRoot(working string) string {
 	working = filepath.Clean(working)
-	resolved, err := filepath.EvalSymlinks(working)
+	resolved, err := pathEvalSymlinks(working)
 	if err != nil {
 		return ""
 	}
 	working = resolved
 	for dir, depth := working, 0; depth < 64; dir, depth = filepath.Dir(dir), depth+1 {
-		marker, err := os.Lstat(filepath.Join(dir, ".git"))
+		marker, err := pathLstat(filepath.Join(dir, ".git"))
 		if err == nil {
 			if marker.IsDir() || marker.Mode().IsRegular() {
 				return dir
@@ -4786,7 +4786,7 @@ func (l shellLinks) missingPlainDirectory(dir string) bool {
 	if !ok {
 		return false
 	}
-	if _, err := os.Lstat(resolved); !os.IsNotExist(err) {
+	if _, err := pathLstat(resolved); !os.IsNotExist(err) {
 		return false
 	}
 	for _, alias := range l.aliases {
