@@ -39,9 +39,9 @@ func TestManagedLocalDenyNamesTheEventIDOfItsRecord(t *testing.T) {
 				t.Fatal(err)
 			}
 			id := row["event_id"]
-			if mode == "open" {
+			if row["outcome"] != "fail_closed" {
 				if id != "" || strings.Contains(r.stderr, "event_id=") {
-					t.Fatalf("%s %s: a fail-open row names an event id: row %v stderr %q", connector, mode, row, r.stderr)
+					t.Fatalf("%s %s: a %s row names an event id: row %v stderr %q", connector, mode, row["outcome"], row, r.stderr)
 				}
 				continue
 			}
@@ -50,6 +50,9 @@ func TestManagedLocalDenyNamesTheEventIDOfItsRecord(t *testing.T) {
 			}
 			if !blocked(r) || !strings.Contains(r.stdout+r.stderr, "event_id="+id) {
 				t.Fatalf("%s: answer does not name event_id %s: %+v", connector, id, r)
+			}
+			if got := withoutLocalDenyEventID(r.stderr); strings.Contains(got, "event_id=") {
+				t.Fatalf("%s: withoutLocalDenyEventID left the id line: %q", connector, got)
 			}
 		}
 	}
@@ -65,4 +68,16 @@ func TestManagedLocalDenyNamesTheEventIDOfItsRecord(t *testing.T) {
 	if !blocked(r) || strings.Contains(r.stdout+r.stderr, "event_id=") {
 		t.Fatalf("a call without a written row named an event id: %+v", r)
 	}
+}
+
+// withoutLocalDenyEventID drops the hook's event_id line (logHookFailure)
+// from stderr, so a test of the block text compares the text alone.
+func withoutLocalDenyEventID(stderr string) string {
+	var kept []string
+	for _, line := range strings.SplitAfter(stderr, "\n") {
+		if !strings.HasPrefix(line, "defenseclaw: event_id=") {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "")
 }
