@@ -10,43 +10,21 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
-	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
-	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// secretCheckTimeout bounds the one request of `secret check`.
-const secretCheckTimeout = 20 * time.Second
-
-// checkAIDefense is the check itself, and loadInstalledConfig reads the
-// config it needs; tests replace both.
-var (
-	checkAIDefense      = gateway.CheckStandaloneAIDefense
-	loadInstalledConfig = func(env *enterpriseunix.Env) (*config.Config, error) { return env.InstalledConfig() }
-)
-
-// secretCheckResult is the `enterprise secret check --json` document
-// (packaging/mdm/contract/secret-check.schema.json).
-type secretCheckResult struct {
-	SchemaVersion int                        `json:"schema_version"`
-	OK            bool                       `json:"ok"`
-	Action        string                     `json:"action"`
-	Name          string                     `json:"name"`
-	AIDefense     string                     `json:"ai_defense"`
-	Errors        []enterprisestatus.Message `json:"errors"`
-	ExitCode      int                        `json:"exit_code"`
-}
+// loadInstalledConfig reads the config the check needs; tests replace it.
+var loadInstalledConfig = func(env *enterpriseunix.Env) (*config.Config, error) { return env.InstalledConfig() }
 
 func newEnterpriseSecretCheckCommand() *cobra.Command {
 	opts := &enterpriseSecretOptions{}
@@ -122,38 +100,9 @@ func runEnterpriseSecretCheck(cmd *cobra.Command, opts *enterpriseSecretOptions)
 	if err != nil {
 		return fail(secretFailed(codeStateInvalid, enterprisestatus.UnixExitFailure, err))
 	}
-	return printSecretCheck(cmd, opts, posture)
+	return printSecretCheck(cmd, opts, posture, enterprisestatus.UnixExitFailure, false)
 }
 
 // codeStateInvalid is the code of a check that could not read the installed
 // state, as the other secret verbs name it.
 const codeStateInvalid = "state_invalid"
-
-func printSecretCheck(cmd *cobra.Command, opts *enterpriseSecretOptions, posture string) error {
-	res := secretCheckResult{SchemaVersion: 1, OK: posture == "ok", Action: "check", Name: opts.name, AIDefense: posture, Errors: []enterprisestatus.Message{}}
-	var failure error
-	switch {
-	case posture == "disabled":
-		res.Errors = append(res.Errors, enterprisestatus.Message{Code: "ai_defense_disabled",
-			Message: "enterprise.inspection.ai_defense is off, so nothing uses this credential"})
-	case posture != "ok":
-		res.Errors = append(res.Errors, enterprisestatus.Message{Code: "ai_defense_unavailable",
-			Message: "Cisco AI Defense did not accept the stored key (" + posture + "); the local policy engine keeps deciding"})
-	}
-	if !res.OK {
-		res.ExitCode = enterprisestatus.UnixExitFailure
-		failure = withExitCode(errors.New(res.Errors[0].Message), res.ExitCode)
-	}
-	if opts.json {
-		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(res); err != nil {
-			return err
-		}
-		silenceJSONReportedError(cmd, false, failure)
-		return failure
-	}
-	if res.OK {
-		fmt.Fprintf(cmd.OutOrStdout(), "Cisco AI Defense accepted the stored key %s.\n", opts.name)
-		return nil
-	}
-	return failure
-}
