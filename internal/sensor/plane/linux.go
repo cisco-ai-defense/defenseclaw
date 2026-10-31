@@ -36,6 +36,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
 )
 
 // cn_proc protocol constants. These are the netlink connector's ABI and are
@@ -426,6 +428,9 @@ func (s *linuxSource) describe(pid int) Event {
 		event.Cmdline = strings.Join(words, " ")
 	}
 	event.ResponsiblePID = event.PPID
+	// The account that owns the process, while it still exists: a session
+	// that exits before the next poll is otherwise unattributed (GAP-1389).
+	event.User = procprobe.OwnerOfPID(pid)
 	return event
 }
 

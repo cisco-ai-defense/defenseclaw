@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"slices"
 	"sort"
 	"strconv"
@@ -854,7 +855,7 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 		return ctx.Err()
 	}
 	if err != nil {
-		return err
+		return a.clientMissingOr(ctx, sb.Name, err)
 	}
 	if code != 0 {
 		// OpenShell's own line ("exec relay closed before the command
@@ -1614,7 +1615,7 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 		}
 	}
 	if err != nil {
-		return err
+		return a.clientMissingOr(ctx, sb.Name, err)
 	}
 	switch code {
 	case 0:
@@ -1713,7 +1714,18 @@ func (a *App) stoppedUnderFollower(ctx context.Context, api API, sb *sandboxapi.
 	a.keptRunState(kept)
 }
 
-// openShellClientMissingText is the refusal of a connect that could not run
+// clientMissingOr is err, except that a command which could not run the
+// OpenShell command at all (exec's "executable file not found") says in plain
+// words what is missing and what to do, as connect does, instead of Go's text
+// (GAP-0196: sandbox exec and logs printed the raw error).
+func (a *App) clientMissingOr(ctx context.Context, sandbox string, err error) error {
+	if errors.Is(err, exec.ErrNotFound) {
+		return a.openShellClientMissingText(ctx, &openShellClientMissingError{sandbox: sandbox, err: err}, false)
+	}
+	return err
+}
+
+// openShellClientMissingText is the refusal of a command that could not run
 // the OpenShell command (openShellClientMissingError), with the next step: on
 // a managed computer the account's sandbox service puts its copy back, so
 // the command is run again, and the organization's contact if it lasts.
@@ -1725,9 +1737,9 @@ func (a *App) openShellClientMissingText(ctx context.Context, e *openShellClient
 	facts := a.managedFacts(ctx)
 	if a.ManagedHost() || onManagedHost() || a.managedSeen != nil {
 		return fmt.Errorf("%s; %s. This happens for a short while after your organization changed the sandbox setup on this computer, "+
-			"until your sandbox service installs the command again: run `%s sandbox connect %s` again in a minute, and `%s sandbox doctor` shows what is missing. %s",
-			e.Error(), state, CommandName, e.sandbox, CommandName, accountOutageContact(facts.RequestAccess))
+			"until your sandbox service installs the command again: run the command again in a minute, and `%s doctor` shows what is missing. %s",
+			e.Error(), state, CommandName, accountOutageContact(facts.RequestAccess))
 	}
-	return fmt.Errorf("%s; %s. Install OpenShell again with `%s sandbox setup`, and `%s sandbox doctor` shows what is missing",
+	return fmt.Errorf("%s; %s. Install OpenShell again with `%s setup`, and `%s doctor` shows what is missing",
 		e.Error(), state, CommandName, CommandName)
 }

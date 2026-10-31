@@ -156,6 +156,25 @@ func Classify(observation Observation, indicators IndicatorSet) (Match, bool) {
 	return Match{}, false
 }
 
+// vendorPluginStores are the folders an agent's own plugin manager fills with
+// clones of third-party marketplaces and plugins (Claude Code: the marketplace
+// clone, its .staging copy, and the plugin cache). The files inside are the
+// vendor's and the plugin authors', not the agent's standing configuration or a
+// credential store, even when one is named .mcp.json or .npmrc: the first run
+// of Claude Code clones the official marketplace there (GAP-1448). A secret at
+// rest named by a high-confidence indicator still counts; the plugin's own
+// activation lives in settings.json and installed_plugins.json, which stay
+// indicators.
+var vendorPluginStores = []string{
+	"/.claude/plugins/marketplaces/", "/.claude/plugins/cache/",
+}
+
+// inVendorPluginStore reports whether path is inside a vendorPluginStores folder.
+func inVendorPluginStore(path string, indicators IndicatorSet) bool {
+	_, ok := containsAnyFold(path, vendorPluginStores, indicators.CaseInsensitivePaths)
+	return ok
+}
+
 func classifyFileRead(observation Observation, indicators IndicatorSet) (Match, bool) {
 	path := observation.Path
 	if path == "" {
@@ -166,6 +185,9 @@ func classifyFileRead(observation Observation, indicators IndicatorSet) (Match, 
 			Tactic: CredentialAccess, SignalID: "agent_credential_access",
 			Title: "agent read a secret at rest", Detail: match, Confidence: 1.0,
 		}, true
+	}
+	if inVendorPluginStore(path, indicators) {
+		return Match{}, false
 	}
 	if match, ok := containsAnyFold(path, indicators.CredentialPaths, indicators.CaseInsensitivePaths); ok {
 		// A path that merely looks credential-adjacent is graded down rather
@@ -191,7 +213,13 @@ func classifyFileWrite(observation Observation, indicators IndicatorSet) (Match,
 			Detail: match, Confidence: 1.0,
 		}, true
 	}
-	if match, ok := containsAnyFold(path, indicators.AgentConfigPaths, indicators.CaseInsensitivePaths); ok {
+	credentialPaths := indicators.CredentialPaths
+	if inVendorPluginStore(path, indicators) {
+		// The plugin manager's own clones (GAP-1448): not the agent's standing
+		// configuration, and a file there that is only named like a credential
+		// store (.npmrc) is the plugin author's.
+		credentialPaths = indicators.HighConfidenceCredentials
+	} else if match, ok := containsAnyFold(path, indicators.AgentConfigPaths, indicators.CaseInsensitivePaths); ok {
 		// The category with no equivalent in a traditional endpoint product.
 		// An agent that appends to its own CLAUDE.md or registers an MCP
 		// server is arranging to influence every future session on the
@@ -204,7 +232,7 @@ func classifyFileWrite(observation Observation, indicators IndicatorSet) (Match,
 			Detail: match, Confidence: 1.0,
 		}, true
 	}
-	if match, ok := containsAnyFold(path, indicators.CredentialPaths, indicators.CaseInsensitivePaths); ok {
+	if match, ok := containsAnyFold(path, credentialPaths, indicators.CaseInsensitivePaths); ok {
 		return Match{
 			Tactic: CredentialAccess, SignalID: "agent_credential_access",
 			Title: "agent wrote to a credential store", Detail: match, Confidence: 1.0,
