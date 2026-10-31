@@ -275,6 +275,10 @@ type InstallWatcher struct {
 	liveSlots    chan struct{}
 	startupSlots chan struct{}
 	admissions   sync.WaitGroup
+	// loops tracks the rescan, added-MCP and MCP discovery loops Run starts;
+	// Run returns only after they ended, so the store a caller closes next
+	// is not read by a cycle still running (p0-round GAP-1423).
+	loops sync.WaitGroup
 	// admitMu serializes onAdmit, which admission workers call.
 	admitMu sync.Mutex
 	// movedOut are the paths whose asset admission quarantined or whose link
@@ -1039,17 +1043,33 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	_ = w.logger.LogAction(string(audit.ActionWatchStart), "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
 
+	// The background loops stop with Run, whichever way it returns, and Run
+	// waits for them: a rescan cycle reading baselines after Run returned
+	// hit a closed store ("sql: database is closed") and ran beside the
+	// cycle of the watcher that replaced this one (p0-round GAP-1423).
+	loopCtx, stopLoops := context.WithCancel(ctx)
+	defer func() {
+		stopLoops()
+		w.loops.Wait()
+	}()
+	startLoop := func(loop func(context.Context)) {
+		w.loops.Add(1)
+		go func() {
+			defer w.loops.Done()
+			loop(loopCtx)
+		}()
+	}
 	if w.cfg.Watch.RescanEnabled {
-		go w.rescanLoop(ctx)
+		startLoop(w.rescanLoop)
 	}
 	if w.admitNewMCP {
-		go w.addedMCPLoop(ctx)
+		startLoop(w.addedMCPLoop)
 	}
 	if w.pollMCP {
 		if !w.cfg.Watch.RescanEnabled {
 			w.firstCycleDone.Store(true)
 		}
-		go w.mcpDiscoveryLoop(ctx)
+		startLoop(w.mcpDiscoveryLoop)
 	}
 
 	ticker := time.NewTicker(w.debounce)
@@ -1059,7 +1079,10 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			// In-flight admissions see the stop and end without a verdict
-			// (GAP-0335); wait for them before the store goes away.
+			// (GAP-0335); wait for them and the loops before the store goes
+			// away.
+			stopLoops()
+			w.loops.Wait()
 			w.admissions.Wait()
 			w.state.reset()
 			_ = w.logger.LogAction(string(audit.ActionWatchStop), "", "context cancelled")

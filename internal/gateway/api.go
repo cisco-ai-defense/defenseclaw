@@ -4709,10 +4709,7 @@ func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {
 // the request cannot pair one generation's query with another's lists
 // (GAP-0873).
 func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput, connector string) (*policy.AdmissionOutput, error) {
-	cfg := a.liveConfig()
-	if g := pinnedGeneration(ctx); g != nil && g.Config != nil && (cfg == nil || !cfg.SecureClientIntegration()) {
-		cfg = g.Config
-	}
+	cfg := a.requestConfig(ctx)
 	input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
 		TargetType: input.TargetType, Name: input.TargetName, Connector: connector, SourcePath: input.Path,
 	})

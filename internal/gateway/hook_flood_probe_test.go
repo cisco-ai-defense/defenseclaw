@@ -19,6 +19,7 @@ import (
 	"runtime/pprof"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -448,8 +449,9 @@ func TestHookFloodProbe(t *testing.T) {
 		runtime.GC()
 		var stats runtime.MemStats
 		runtime.ReadMemStats(&stats)
-		t.Logf("memory %s heap_inuse=%dKiB heap_sys=%dKiB heap_released=%dKiB sys=%dKiB goroutines=%d",
-			label, stats.HeapInuse>>10, stats.HeapSys>>10, stats.HeapReleased>>10, stats.Sys>>10, runtime.NumGoroutine())
+		t.Logf("memory %s heap_inuse=%dKiB heap_sys=%dKiB heap_released=%dKiB sys=%dKiB goroutines=%d%s",
+			label, stats.HeapInuse>>10, stats.HeapSys>>10, stats.HeapReleased>>10, stats.Sys>>10, runtime.NumGoroutine(),
+			hookFloodResidentSet())
 	}
 	writeProfile := func(name string, write func(*os.File) error) {
 		if out == "" {
@@ -602,6 +604,9 @@ func TestHookFloodProbe(t *testing.T) {
 			t.Errorf("flood %d: the WAL file reached %d bytes, over the %d-byte sampled bound", flood, floodWALPeak, int64(hookFloodWALBound))
 		}
 		memory(fmt.Sprintf("flood%d-end", flood))
+		// What the gateway's idle tick does once the calls stop.
+		releaseIdleGatewayMemory(api, fixture.store)
+		memory(fmt.Sprintf("flood%d-idle-release", flood))
 		for waited := 0; waited < idle; waited += 60 {
 			pause := min(60, idle-waited)
 			time.Sleep(time.Duration(pause) * time.Second)
@@ -611,4 +616,26 @@ func TestHookFloodProbe(t *testing.T) {
 	}
 	writeProfile("block.prof", func(file *os.File) error { return pprof.Lookup("block").WriteTo(file, 0) })
 	writeProfile("mutex.prof", func(file *os.File) error { return pprof.Lookup("mutex").WriteTo(file, 0) })
+}
+
+// hookFloodResidentSet is the process's resident set split by kind (anonymous
+// memory, mapped files such as the audit.db mmap window), on Linux; empty
+// elsewhere.
+func hookFloodResidentSet() string {
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return ""
+	}
+	var parts []string
+	for _, line := range bytes.Split(status, []byte("\n")) {
+		for _, name := range []string{"VmRSS:", "RssAnon:", "RssFile:"} {
+			if value, ok := bytes.CutPrefix(line, []byte(name)); ok {
+				parts = append(parts, strings.ToLower(strings.TrimSuffix(name, ":"))+"="+strings.ReplaceAll(strings.TrimSpace(string(value)), " kB", "KiB"))
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ")
 }

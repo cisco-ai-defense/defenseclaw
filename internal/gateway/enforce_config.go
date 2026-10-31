@@ -298,6 +298,19 @@ func (a *APIServer) liveConfig() *config.Config {
 	return a.scannerCfg
 }
 
+// requestConfig is the config a decision for ctx reads: the config of the
+// generation the request is pinned to, else liveConfig. A reload that
+// publishes a newer config while the request runs leaves its admission lists
+// and rules alone, so one decision never mixes two generations (GAP-0873).
+// Secure Client keeps its start-time config (issue #1092).
+func (a *APIServer) requestConfig(ctx context.Context) *config.Config {
+	cfg := a.liveConfig()
+	if g := pinnedGeneration(ctx); g != nil && g.Config != nil && (cfg == nil || !cfg.SecureClientIntegration()) {
+		return g.Config
+	}
+	return cfg
+}
+
 // apiConfigActor is the writer actor for a REST change: api:<principal>.
 func apiConfigActor(ctx context.Context) string {
 	principal := auditCallerIdentity(ctx).principalRef()

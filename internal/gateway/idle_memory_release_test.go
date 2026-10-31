@@ -4,10 +4,85 @@
 package gateway
 
 import (
+	"fmt"
+	"path/filepath"
 	"runtime/debug"
 	"runtime/metrics"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
+
+// rel-1-0-3 GAP-0244: after a single-session flood of distinct tool calls
+// (PreToolUse only, so every call stays pending) the idle release cuts each
+// per-call hook cache to its newest entries, keeps the newest call, and the
+// next call is remembered as before.
+func TestIdleReleaseKeepsOnlyTheNewestHookCacheEntries(t *testing.T) {
+	api := &APIServer{}
+	sizes := func() map[string]int {
+		api.llmPromptMu.Lock()
+		defer api.llmPromptMu.Unlock()
+		return map[string]int{
+			"hookPhaseStates":              len(api.hookPhaseStates),
+			"hookPhaseStateOrder":          len(api.hookPhaseStateOrder),
+			"hookLifecycleTransitions":     len(api.hookLifecycleTransitions),
+			"hookLifecycleTransitionOrder": len(api.hookLifecycleTransitionOrder),
+			"hookToolInvocations":          len(api.hookToolInvocations),
+			"hookToolInvocationOrder":      len(api.hookToolInvocationOrder),
+		}
+	}
+	const calls = 3 * hookIdleCacheKeepEntries
+	for i := range calls {
+		api.emitClaudeCodeHookLLMEvent(t.Context(),
+			claudePreToolUseForOperationTest("s-idle", fmt.Sprintf("toolu_idle_%06d", i)), nil, nil)
+	}
+	before := sizes()
+	if before["hookToolInvocationOrder"] <= hookIdleCacheKeepEntries {
+		t.Fatalf("fixture did not fill the caches past the idle bound: %v", before)
+	}
+	newest := api.hookToolInvocationOrder[len(api.hookToolInvocationOrder)-1]
+
+	releaseIdleGatewayMemory(api, nil)
+	after := sizes()
+	for name, size := range after {
+		if size > hookIdleCacheKeepEntries {
+			t.Errorf("after the idle release %s holds %d entries (before %d), want at most %d",
+				name, size, before[name], hookIdleCacheKeepEntries)
+		}
+	}
+	if _, kept := api.hookToolInvocations[newest]; !kept {
+		t.Errorf("the newest pending tool call %q was dropped", newest)
+	}
+	api.emitClaudeCodeHookLLMEvent(t.Context(), claudePreToolUseForOperationTest("s-idle", "toolu_idle_next"), nil, nil)
+	if got := sizes()["hookToolInvocationOrder"]; got != after["hookToolInvocationOrder"]+1 {
+		t.Errorf("the next call after the release: %d pending, want %d", got, after["hookToolInvocationOrder"]+1)
+	}
+}
+
+// rel-1-0-3 GAP-0244: the audit store frees its SQLite page caches on an
+// idle release, and the store keeps working afterwards; a closed store is a
+// no-op.
+func TestIdleReleaseFreesTheAuditStorePageCache(t *testing.T) {
+	store, err := audit.NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReleaseMemory(t.Context()); err != nil {
+		t.Fatalf("release memory: %v", err)
+	}
+	if err := store.LogEvent(audit.Event{Action: "idle-release-check", Target: "t", Severity: "INFO"}); err != nil {
+		t.Fatalf("write after the release: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReleaseMemory(t.Context()); err != nil {
+		t.Fatalf("release memory on a closed store: %v", err)
+	}
+}
 
 // GAP-2013: an idle gateway gives back the heap its last calls freed, once,
 // and never while calls keep coming.

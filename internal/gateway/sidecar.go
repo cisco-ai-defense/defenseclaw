@@ -1036,8 +1036,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	defer runCancel()
 	s.setRunCancel(runCancel)
 	defer s.setRunCancel(nil)
-	// An idle gateway gives back the heap its calls freed (GAP-2013).
-	go runIdleMemoryRelease(runCtx)
+	// An idle gateway gives back the memory its calls left (GAP-2013,
+	// rel-1-0-3 GAP-0244).
+	go runIdleMemoryRelease(runCtx, func() { releaseIdleGatewayMemory(s.apiSnapshot(), s.store) })
 	// Package-level patterns compile on first use (internal/lazyregexp), so
 	// that a hook process does not compile them all at start. The gateway
 	// compiles them now, off the request path, so that its first hook does
