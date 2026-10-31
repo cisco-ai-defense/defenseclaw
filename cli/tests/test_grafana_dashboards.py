@@ -1472,7 +1472,7 @@ def test_loki_boxes_use_the_query_form_grafana_runs() -> None:
             assert query["refId"] == "LokiVariableQueryEditor-VariableQuery"
             assert variable["definition"] == f"label_values({query['stream']}, {query['label']})"
             checked += 1
-    assert checked == 6
+    assert checked == 7
 
 
 def test_loki_boxes_list_index_labels_with_a_matcher_only_selector() -> None:
@@ -1494,7 +1494,7 @@ def test_loki_boxes_list_index_labels_with_a_matcher_only_selector() -> None:
             assert label in SHIPPED_LOKI_INDEX_LABELS, f"{path.name} ${variable['name']}: {label}"
             assert set(_MATCHER.findall(selector)) <= SHIPPED_LOKI_INDEX_LABELS, f"{path.name} ${variable['name']}"
             checked += 1
-    assert checked == 6
+    assert checked == 7
 
 
 def test_loki_body_field_boxes_are_regex_text_boxes() -> None:
