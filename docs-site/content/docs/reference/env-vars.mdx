@@ -356,7 +356,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 147 test-only variables">
+<Accordion title="Show the 149 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -423,6 +423,8 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_JUDGE_BENCHMARK_RESUME`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Resumes an opt-in judge benchmark from a validated output prefix.<br/>**Read by:** `internal/gateway/llm_judge_corpus_benchmark_test.go` |
 | `DEFENSECLAW_JUDGE_BENCHMARK_RETRY_FAILURES`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Drops the first failed prediction and its suffix before resuming an opt-in judge benchmark.<br/>**Read by:** `internal/gateway/llm_judge_corpus_benchmark_test.go` |
 | `DEFENSECLAW_JUDGE_BENCHMARK_RULE_PACK`<br/>Default: policies/guardrail/default<br/>Values: `rule-pack directory`, `unset`<br/>Managed host: `ignore` | Overrides the rule-pack directory loaded by the opt-in production-path judge benchmark.<br/>**Read by:** `internal/gateway/llm_judge_corpus_benchmark_test.go` |
+| `DEFENSECLAW_JUDGE_PRIORITY_DELAY`<br/>Default: `unset` (200ms)<br/>Values: `Go duration, for example 2s`, `unset`<br/>Managed host: `ignore` | Sets the per-call delay of the stand-in judge model in the tool-judge priority latency test (#1395), so a manual run can measure a slower model.<br/>**Read by:** `internal/gateway/judge_priority_latency_test.go` |
+| `DEFENSECLAW_JUDGE_PRIORITY_TURNS`<br/>Default: `unset` (6)<br/>Values: `positive integer`, `unset`<br/>Managed host: `ignore` | Sets how many prompt-and-tool turns the tool-judge priority latency test (#1395) runs, so a manual run can measure a longer queue.<br/>**Read by:** `internal/gateway/judge_priority_latency_test.go` |
 | `DEFENSECLAW_LAUNCHER_LOGICAL_CWD`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries the expected logical working directory to the long-CWD launcher fixture.<br/>**Read by:** `cmd/defenseclaw-launcher/long_cwd_windows_test.go` |
 | `DEFENSECLAW_LAUNCHER_LONG_CWD_HELPER`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Selects the isolated long-CWD launcher helper subprocess.<br/>**Read by:** `cmd/defenseclaw-launcher/long_cwd_windows_test.go` |
 | `DEFENSECLAW_LEAK`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marker a test sets in its own environment to prove that Unix agent discovery does not run the agent executable, or pass the caller's environment to it, without allowExec.<br/>**Read by:** `internal/enterprisehooks/enumerator_unix_test.go` |
