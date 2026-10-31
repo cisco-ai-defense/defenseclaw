@@ -860,8 +860,9 @@ func runWindowsEnterprisePowerShell(
 	}
 	child.Stderr = io.MultiWriter(cmd.ErrOrStderr(), &childErrors)
 	runErr := child.Run()
+	relayedResult := true
 	if relay != nil {
-		relay.Finish()
+		relayedResult = relay.Finish()
 	}
 	// A temp that cannot be removed never changes the lifecycle result: it
 	// is logged, scheduled for removal at restart and swept by a later run.
@@ -876,22 +877,31 @@ func runWindowsEnterprisePowerShell(
 	if runErr == nil {
 		return nil
 	}
+	// Under -Json stdout must still carry one result when the installer
+	// printed none: report the failure in the preflight failure shape.
+	failed := func(cause error) error {
+		if relayedResult {
+			return cause
+		}
+		action, _ := windowsEnterprisePowerShellArgsAction(args)
+		return writeWindowsEnterpriseLifecyclePreflightFailure(cmd, action, true, cause)
+	}
 	// The child's own code is the first thing an operator needs, and
 	// "exit status N" alone does not say who exited.
 	var exit *exec.ExitError
 	if !errors.As(runErr, &exit) {
-		return fmt.Errorf("Windows enterprise installer: %w", runErr)
+		return failed(fmt.Errorf("Windows enterprise installer: %w", runErr))
 	}
 	if action, detail, ok := windowsEnterpriseInstallerFailureDiagnostic(
 		childOutput.buffer.Bytes(),
 		childOutput.truncated,
 	); ok {
-		return fmt.Errorf(
+		return failed(fmt.Errorf(
 			"Windows enterprise installer %s failed: %s (exit code %d)",
 			action,
 			detail,
 			exit.ExitCode(),
-		)
+		))
 	}
 	// PowerShell refused the script before it ran (AMSI, execution policy),
 	// so the installer printed no result. Report the block as the lifecycle
@@ -904,7 +914,7 @@ func runWindowsEnterprisePowerShell(
 			return writeWindowsEnterpriseLifecyclePreflightFailure(cmd, action, jsonOutput, blocked)
 		}
 	}
-	return fmt.Errorf("Windows enterprise installer exited with code %d", exit.ExitCode())
+	return failed(fmt.Errorf("Windows enterprise installer exited with code %d", exit.ExitCode()))
 }
 
 // windowsEnterprisePowerShellArgsAction recovers the lowercase action and

@@ -15,6 +15,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 func TestWindowsManagedRuntimeFailureClassOf(t *testing.T) {
@@ -328,5 +330,33 @@ func TestWindowsManagedRuntimeSelectedBundleFinding(t *testing.T) {
 	}
 	if err := windowsManagedRuntimeSelectedBundleFinding(entry, intact); err != nil {
 		t.Fatalf("intact selected bundle reported a finding: %v", err)
+	}
+}
+
+// A selected-bundle read the target user caused by deleting or enlarging the
+// bundle stays a boundary even if a later probe finds the bundle restored;
+// a denied read stays drift.
+func TestWindowsManagedRuntimeSelectedBundleReadErrorIsBoundary(t *testing.T) {
+	for name, cause := range map[string]error{
+		"missing":   fmt.Errorf("read: %w", os.ErrNotExist),
+		"oversized": fmt.Errorf("read: %w", connector.ErrManagedRuntimeFileTooLarge),
+	} {
+		err := windowsManagedRuntimeSelectedBundleReadError(cause)
+		if !errors.Is(err, ErrWindowsManagedRuntimeBoundary) {
+			t.Errorf("%s: %v is not a boundary", name, err)
+		}
+		previous := windowsManagedRuntimeBoundaryProbe
+		windowsManagedRuntimeBoundaryProbe = func(WindowsManagedRuntimeGenerationResolveOptions) error { return nil }
+		classified := classifyWindowsManagedRuntimeGenerationFailure(
+			&WindowsManagedHookRuntime{}, WindowsManagedRuntimeGenerationResolveOptions{}, "open", err,
+		)
+		windowsManagedRuntimeBoundaryProbe = previous
+		if WindowsManagedRuntimeFailureClassOf(classified) == WindowsManagedRuntimeFailureDrift {
+			t.Errorf("%s: a clean probe turned the bundle failure into drift", name)
+		}
+	}
+	denied := fmt.Errorf("read: %w", windows.ERROR_ACCESS_DENIED)
+	if errors.Is(windowsManagedRuntimeSelectedBundleReadError(denied), ErrWindowsManagedRuntimeBoundary) {
+		t.Error("a denied bundle read became a boundary")
 	}
 }

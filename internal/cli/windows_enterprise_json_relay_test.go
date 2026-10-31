@@ -25,7 +25,9 @@ func TestWindowsEnterpriseJSONRelayKeepsStdoutOneResult(t *testing.T) {
 	for _, chunk := range []string{child[:20], child[20:70], child[70:]} {
 		_, _ = relay.Write([]byte(chunk))
 	}
-	relay.Finish()
+	if !relay.Finish() {
+		t.Fatal("Finish reported no result object")
+	}
 	if got := strings.TrimSpace(stdout.String()); got != `{"schema_version":1,"ok":true,"action":"install"}` {
 		t.Fatalf("stdout = %q, want only the result object", got)
 	}
@@ -39,7 +41,9 @@ func TestWindowsEnterpriseJSONRelaySendsOutputWithoutJSONToStderr(t *testing.T) 
 	var stdout, stderr bytes.Buffer
 	relay := newWindowsEnterpriseJSONRelay(&stdout, &stderr)
 	_, _ = relay.Write([]byte("plain text\n"))
-	relay.Finish()
+	if relay.Finish() {
+		t.Fatal("Finish reported a result object for plain text")
+	}
 	if stdout.Len() != 0 || stderr.String() != "plain text\n" {
 		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
 	}

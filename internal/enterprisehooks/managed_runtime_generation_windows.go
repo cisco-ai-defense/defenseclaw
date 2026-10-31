@@ -1756,7 +1756,9 @@ func loadWindowsManagedRuntimeBundle(
 		return bundle, nil, path, err
 	}
 	if windowsManagedRuntimeSHA256(data) != entry.BundleSHA256 {
-		return bundle, nil, path, errors.New("enterprise hooks: managed runtime bundle digest does not match protected selector")
+		return bundle, nil, path, windowsManagedRuntimeBoundaryError(
+			errors.New("enterprise hooks: managed runtime bundle digest does not match protected selector"),
+		)
 	}
 	bundle, err = decodeWindowsManagedRuntimeBundle(data)
 	if err != nil {
@@ -1776,7 +1778,9 @@ func loadWindowsManagedRuntimeBundleAtPath(
 		return nil, errors.New("enterprise hooks: managed runtime bundle target SID is unavailable")
 	}
 	if err := validateWindowsUserPathElement(path, target, false, false, true); err != nil {
-		return nil, fmt.Errorf("enterprise hooks: managed runtime bundle trust check failed: %w", err)
+		return nil, windowsManagedRuntimeSelectedBundleReadError(
+			fmt.Errorf("enterprise hooks: managed runtime bundle trust check failed: %w", err),
+		)
 	}
 	data, err := connector.ReadManagedHookRuntimeFile(
 		path,
@@ -1784,12 +1788,27 @@ func loadWindowsManagedRuntimeBundleAtPath(
 		windowsManagedRuntimeBundleMaxBytes,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: read immutable managed runtime generation: %w", err)
+		return nil, windowsManagedRuntimeSelectedBundleReadError(
+			fmt.Errorf("enterprise hooks: read immutable managed runtime generation: %w", err),
+		)
 	}
 	if err := validateWindowsUserPathElement(path, target, false, false, true); err != nil {
-		return nil, fmt.Errorf("enterprise hooks: managed runtime bundle changed protection during read: %w", err)
+		return nil, windowsManagedRuntimeSelectedBundleReadError(
+			fmt.Errorf("enterprise hooks: managed runtime bundle changed protection during read: %w", err),
+		)
 	}
 	return data, nil
+}
+
+// windowsManagedRuntimeSelectedBundleReadError types a selected-bundle read
+// failure the target user can cause by deleting or enlarging the bundle as a
+// boundary, so a later probe that finds the bundle restored cannot turn it
+// into drift. ACL, owner and busy-handle failures are returned unchanged.
+func windowsManagedRuntimeSelectedBundleReadError(err error) error {
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, connector.ErrManagedRuntimeFileTooLarge) {
+		return windowsManagedRuntimeBoundaryError(err)
+	}
+	return err
 }
 
 func defaultWindowsManagedRuntimeSelectorPath(connectorName string) (string, error) {

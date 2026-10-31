@@ -51,14 +51,16 @@ func (relay *windowsEnterpriseJSONRelay) Write(body []byte) (int, error) {
 	return len(body), nil
 }
 
-// Finish writes the held output. It is called once, after the child exits.
-func (relay *windowsEnterpriseJSONRelay) Finish() {
+// Finish writes the held output and reports whether it found a JSON result.
+// It is called once, after the child exits; with no result the caller writes
+// its own failure object.
+func (relay *windowsEnterpriseJSONRelay) Finish() bool {
 	body := relay.held.Bytes()
 	start, end, ok := lastWindowsEnterpriseJSONObjectSpan(body)
 	if !ok {
 		_, _ = relay.stderr.Write(body)
 		relay.held.Reset()
-		return
+		return false
 	}
 	result := body[start:end]
 	if before := bytes.TrimSpace(body[:start]); len(before) > 0 {
@@ -69,6 +71,7 @@ func (relay *windowsEnterpriseJSONRelay) Finish() {
 	}
 	_, _ = relay.stdout.Write(append(append([]byte{}, result...), '\n'))
 	relay.held.Reset()
+	return true
 }
 
 // lastWindowsEnterpriseJSONObjectSpan locates the same object as
