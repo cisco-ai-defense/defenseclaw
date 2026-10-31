@@ -325,6 +325,9 @@ func (e *Env) darwinAgentSessionsWithError(ctx context.Context) ([]agentSession,
 	now := e.Now()
 	var out []agentSession
 	for _, line := range strings.Split(string(result.Stdout), "\n") {
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
 		fields := strings.Fields(line)
 		if len(fields) < 4 {
 			continue

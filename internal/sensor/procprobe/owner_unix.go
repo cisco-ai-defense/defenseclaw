@@ -24,17 +24,47 @@
 package procprobe
 
 import (
+	"context"
 	"os"
-	"os/user"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
-// userCache avoids one getpwuid per process per poll. A busy host has hundreds
-// of processes owned by a handful of users, and the lookup can touch a
-// directory service.
-var userCache sync.Map // uid string -> username string
+// userCache avoids one account lookup per process per poll. A busy host has
+// hundreds of processes owned by a handful of users, and the lookup can touch
+// a directory service.
+var userCache sync.Map // uid string -> cachedOwner
+
+// cachedOwner is the name of a uid's account; retryAt is set when the lookup
+// failed for a reason other than "no such account" (a directory service that
+// does not answer), so the uid is asked again after it.
+type cachedOwner struct {
+	name    string
+	retryAt time.Time
+}
+
+const (
+	// ownerLookupTimeout bounds one account lookup.
+	ownerLookupTimeout = 2 * time.Second
+	// ownerRetryAfter is how long a failed lookup is kept.
+	ownerRetryAfter = time.Minute
+)
+
+// ownerAccounts is the account database the owner of a process is named
+// from: NSS through the root-owned getent on Linux (unixidentity.Default), as
+// the hook guardian's identity records and the discovery --user filter
+// resolve a uid. The release binaries are built with CGO_ENABLED=0, so os/user
+// read only /etc/passwd on Linux: a directory account's process (SSSD, LDAP or
+// winbind; an AD account on a joined host) had no owner, and its runtime
+// finding was unattributed and listed under no --user (rel-1-0-6 GAP-0184).
+// On macOS unixidentity.Default is os/user, which asks Open Directory. A
+// variable for tests.
+var ownerAccounts = func(ctx context.Context) unixidentity.Resolver { return unixidentity.Default(ctx) }
 
 // ownerOf resolves the owning username of a /proc entry or process directory.
 // It returns "" rather than a uid string when the name cannot be resolved,
@@ -48,14 +78,29 @@ func ownerOf(path string) string {
 	if !ok {
 		return ""
 	}
-	uid := strconv.FormatUint(uint64(stat.Uid), 10)
-	if cached, ok := userCache.Load(uid); ok {
-		return cached.(string)
+	return ownerName(int(stat.Uid), time.Now())
+}
+
+// ownerName is the name of the account that holds uid, "" when there is
+// none or the account database does not answer.
+func ownerName(uid int, now time.Time) string {
+	key := strconv.Itoa(uid)
+	if cached, ok := userCache.Load(key); ok {
+		entry := cached.(cachedOwner)
+		if entry.retryAt.IsZero() || now.Before(entry.retryAt) {
+			return entry.name
+		}
 	}
-	name := ""
-	if resolved, err := user.LookupId(uid); err == nil {
-		name = resolved.Username
+	ctx, cancel := context.WithTimeout(context.Background(), ownerLookupTimeout)
+	defer cancel()
+	entry := cachedOwner{}
+	account, err := ownerAccounts(ctx).LookupUID(uid)
+	switch {
+	case err == nil:
+		entry.name = strings.TrimSpace(account.Name)
+	case !unixidentity.IsNotFound(err):
+		entry.retryAt = now.Add(ownerRetryAfter)
 	}
-	userCache.Store(uid, name)
-	return name
+	userCache.Store(key, entry)
+	return entry.name
 }
