@@ -6884,7 +6884,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if extras:
                 guardrail_bits.append("·".join(extras))
             if fallbacks := self.overview_model.judge_fallbacks():
-                guardrail_bits.append(f"[{TOKENS.accent_amber}]judge fallbacks: {fallbacks}[/]")
+                # First, so the 80x24 card (14 cells) shows it whole
+                # ("fallbacks 44 …"; 1000+ is written short, GAP-0341): the
+                # SERVICES box is below the fold there (GAP-0180).
+                guardrail_bits.insert(0, f"[{TOKENS.accent_amber}]fallbacks {fallbacks}[/]")
             guardrail_detail = " · ".join(guardrail_bits)
         else:
             guardrail_detail = f"[{TOKENS.accent_amber}]press g to enable[/]"

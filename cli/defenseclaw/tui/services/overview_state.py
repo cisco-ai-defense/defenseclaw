@@ -1731,18 +1731,19 @@ class OverviewPanelModel:
         parts: list[str] = []
         if mode := self.guardrail_mode_label():
             parts.append(mode)
-        # The judge's state comes right after the mode: in a narrow SERVICES
-        # column the row wraps, and a trailing count was cut (GAP-0180).
-        # Recent judge calls that failed (gateway judge_* details, GAP-1288).
+        # The fallback count (short), then the judge's state, come right
+        # after the mode: the SERVICES column wraps the row at 24 cells and
+        # the box shows two of its lines at 120x40, so a trailing count was
+        # cut (GAP-0180). Hook checks the rules decided without a judge
+        # verdict (#1395); recent judge calls that failed (GAP-1288).
         details = self.health.guardrail.details if self.health else {}
+        if fallbacks := self.judge_fallbacks():
+            parts.append(f"fallbacks {fallbacks}")
         judge_state = str(details.get("judge_state") or "")
         if judge_state in ("failing", "degraded"):
             failed = details.get("judge_failed_calls", 0)
             total = details.get("judge_recent_calls", 0)
             parts.append(f"judge {judge_state}: {failed}/{total} calls failed")
-        # Hook checks the rules decided without a judge verdict (#1395).
-        if fallbacks := self.judge_fallbacks():
-            parts.append(f"judge fallbacks: {fallbacks}")
         if self.cfg.guardrail_port and self.cfg.uses_guardrail_proxy_port():
             parts.append(f"port {self.cfg.guardrail_port}")
         roster = [name for name, _ in self.cfg.connector_modes if name and not self.cfg.connector_is_disabled(name)]
