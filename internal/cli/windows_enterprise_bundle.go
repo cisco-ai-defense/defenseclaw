@@ -810,6 +810,12 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	if opts.refuseCapabilityLoss && opts.bundlePath == "" {
 		return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) requires BUNDLE= (--bundle); nothing was changed: deliver both with Setup /ensure (defenseclaw enterprise windows ensure)")
 	}
+	if opts.deviceGroup != "" && opts.trustAnchors == "" {
+		return refuseArguments("invalid_arguments", "DEVICEGROUP= (--device-group) pins the trust anchors that TRUSTANCHORS= (--trust-anchors) installs; give both; nothing was changed")
+	}
+	if opts.deviceGroup != "" && !enterprisebundle.ValidDeviceGroup(opts.deviceGroup) {
+		return refuseArguments("invalid_arguments", "DEVICEGROUP= (--device-group): want 1-128 characters of [A-Za-z0-9._-]; nothing was changed")
+	}
 	// --mode/--connector is the QA shorthand the installer renders a
 	// config from: a config all the same (Setup refused it with these too).
 	configGiven := strings.TrimSpace(opts.configPath) != "" || opts.mode != "" || opts.connector != ""
@@ -949,7 +955,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 			run.anchorOnly = &anchorOnlyChange{path: anchorPath, existed: !errors.Is(readErr, fs.ErrNotExist), previous: previous}
 		}
 		anchorRefusalPending = false
-		installed, replaced, err := installWindowsBundleAnchors(opts.trustAnchors, driver.AnchorsPath)
+		installed, replaced, err := installWindowsBundleAnchorsPinned(opts.trustAnchors, driver.AnchorsPath, opts.deviceGroup)
 		if err != nil {
 			code := string(windowsBundleCode(err, enterprisebundle.CodeAnchorInsecure))
 			// A write that failed (on a full volume too) is a failed change.
@@ -1580,7 +1586,7 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 		rollback.bundleRollbackTo = &windowsBundleRollbackTarget{store: run.driver.Store, ref: ref,
 			before: run.previousGeneration, restored: configwrite.SHA256Hex(last)}
 	}
-	rollback.bundlePath, rollback.trustAnchors, rollback.configPath = "", "", path
+	rollback.bundlePath, rollback.trustAnchors, rollback.deviceGroup, rollback.configPath = "", "", "", path
 	rollback.jsonOutput = true
 	out := cmd.OutOrStdout()
 	cmd.SetOut(io.Discard)
@@ -1859,10 +1865,22 @@ func writeWindowsBundleAdminFile(path string, data []byte) error {
 // check failed) leaves dst changed, which the caller puts back and records
 // as a failed change.
 func installWindowsBundleAnchors(src, dst string) (installed []byte, replaced bool, err error) {
+	return installWindowsBundleAnchorsPinned(src, dst, "")
+}
+
+// installWindowsBundleAnchorsPinned is installWindowsBundleAnchors with the
+// anchors pinned to deviceGroup first when one is given
+// (enterprisebundle.PinDeviceGroup: a pin only narrows what the file trusts).
+func installWindowsBundleAnchorsPinned(src, dst, deviceGroup string) (installed []byte, replaced bool, err error) {
 	// One read: the bytes written are the ones decoded and trust-checked.
-	_, raw, err := windowsBundleReadAnchors(src, bundleAnchorTrust)
+	anchors, raw, err := windowsBundleReadAnchors(src, bundleAnchorTrust)
 	if err != nil {
 		return nil, false, err
+	}
+	if deviceGroup != "" {
+		if _, raw, err = enterprisebundle.PinDeviceGroup(anchors, raw, deviceGroup); err != nil {
+			return nil, false, err
+		}
 	}
 	if err := windowsBundleEnsurePrivateDirectory(filepath.Dir(dst)); err != nil {
 		return nil, false, enterprisebundle.StateWriteError("prepare the trust anchor folder", err)

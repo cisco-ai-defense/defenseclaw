@@ -835,11 +835,39 @@ def validate_candidate(target: str, candidate: bytes) -> None:
 
 
 _REASON_CODE = re.compile(r"^\[(?P<code>[A-Za-z0-9_-]+)\]\s*(?P<text>.*)$", re.S)
-_RULE_PACK_PREFIX = re.compile(r'^config rule pack (?:"[^"]*"|\S+): ')
+_RULE_PACK_PREFIX = re.compile(r'^config rule pack (?P<dir>"[^"]*"|\S+): ')
+# The loader's reason for a YAML file below a folder that is neither rules nor
+# judge (a copy of another pack placed inside this one): the folder, relative.
+_STRAY_PACK_FOLDER = re.compile(r"^rule pack inventory_unexpected at (?P<first>[^/\\:]+)/")
 _SCHEMA_WORDS = (
     ("correct the field using the configuration schema and reference", "check the value and its documented format"),
     ("use the value type documented by the configuration schema", "use the value type the reference documents"),
 )
+
+
+def _stray_pack_folder(reason: str) -> tuple[str, str] | None:
+    """The pack folder and the full path of the stray folder in it, from a loader reason.
+
+    The reason names the stray folder relative to the pack (``default/judge/x.yaml``)
+    after a ``config rule pack "<dir>": `` prefix; None when it names no such folder.
+    """
+    prefix = _RULE_PACK_PREFIX.match(reason)
+    if not prefix:
+        return None
+    stray = _STRAY_PACK_FOLDER.match(reason[prefix.end() :])
+    if not stray or stray.group("first") in {"rules", "judge", ".", ".."}:
+        return None
+    pack = prefix.group("dir")
+    if pack.startswith('"'):
+        try:
+            pack = json.loads(pack)
+        except ValueError:
+            pack = pack.strip('"')
+    pack = pack.rstrip("/\\")
+    if not pack:
+        return None
+    separator = "\\" if "\\" in pack else "/"
+    return pack, pack + separator + stray.group("first")
 
 
 def pack_pin_repair(message: str, *, files_digest: str = "<files digest>") -> str:
@@ -897,6 +925,14 @@ def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -
         return f"{name} is {bound} (it has {len(value)})"
     parts = [part.strip() for part in text.split("; ") if part.strip()]
     if code == "config_semantic_invalid" and parts:
+        stray = _stray_pack_folder(parts[0])
+        if stray:
+            # GAP-1566: lead with the folder to move or remove, by its full path, not the check name.
+            return (
+                f"{name}: the rule pack {stray[0]} holds the folder {stray[1]}, which does not belong in a rule pack "
+                f"(a copy of another pack placed inside this one?). Move {stray[1]} out of the rule-pack folder "
+                "or remove it, then run the command or installer again."
+            )
         detail = _RULE_PACK_PREFIX.sub("", parts[0])
         sentence = detail if detail.startswith(name) else f"{name}: {detail}"
         actions = [part for part in parts[1:] if not part.startswith("expected ")]

@@ -34,6 +34,12 @@ func TestRulePackReadIsForTheGatewayOnly(t *testing.T) {
 	if !ok || strings.Contains(text, "S-1-5-32-545") || !strings.Contains(text, `"`+gateway+`"`) {
 		t.Fatalf("fix %q, want the gateway grant and no Users grant", text)
 	}
+	// GAP-0087: icacls refuses the service grant with error 1332 until the
+	// service exists, so the refusal also names the PowerShell form.
+	if !strings.Contains(text, "icacls fails with error 1332") ||
+		!strings.Contains(text, "SecurityIdentifier]::new('S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274')") {
+		t.Fatalf("fix %q, want the grant that works before the gateway service exists", text)
+	}
 
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
