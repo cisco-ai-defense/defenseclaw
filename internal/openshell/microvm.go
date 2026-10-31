@@ -554,9 +554,17 @@ func ManagedMicroVMFix(m *MicroVMHost, unsigned bool) string {
 // Homebrew formula that is not signed for Apple's Hypervisor: the
 // formula's post-install step signs only its own.
 func VMDriverSigningFix(driver string) string {
-	return "sign " + driver + " with the " + hypervisorEntitlement + " entitlement (codesign), or install OpenShell from its " +
-		GatewayFormula + " Homebrew formula, which signs its own driver"
+	return "sign " + driver + " with the " + hypervisorEntitlement + " entitlement (codesign; with the hardened runtime, --options runtime, also " +
+		HardenedRuntimeExceptions + "), or install OpenShell from its " + GatewayFormula + " Homebrew formula, which signs its own driver"
 }
+
+// HardenedRuntimeExceptions are the two entitlements a re-signing of the
+// MicroVM driver with the hardened runtime needs beside the Hypervisor's:
+// library validation refuses the ad-hoc signed libkrun and libkrunfw the
+// driver embeds, and dyld ignores the DYLD_ variables it points libkrun at
+// libkrunfw with. NVIDIA's driver has no way to avoid either yet
+// (NVIDIA/OpenShell#4772), so the re-signing carries the exceptions.
+const HardenedRuntimeExceptions = "com.apple.security.cs.disable-library-validation and com.apple.security.cs.allow-dyld-environment-variables"
 
 // inFormulaKeg reports whether p lies in the nvidia/openshell/openshell
 // formula's keg under the Homebrew prefix (opt/openshell, or the Cellar

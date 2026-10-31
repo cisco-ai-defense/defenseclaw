@@ -231,6 +231,9 @@ type Installer struct {
 	MaxScriptBytes int64
 	// GOOS is the platform installed on (default runtime.GOOS).
 	GOOS string
+	// OSRelease is the os-release file that tells whether this Linux host
+	// is RPM-based (default /etc/os-release).
+	OSRelease string
 	// E2fsprogsDirs are where OpenShell's MicroVM driver looks for
 	// e2fsprogs on a Mac (Doctor.E2fsprogsDirs; default the Homebrew kegs
 	// it knows): the plan says setup installs it next only when it is not
@@ -267,6 +270,37 @@ type Installer struct {
 	// entries in a directory (default: access(2)).
 	BrewPrefix string
 	Writable   func(dir string) bool
+}
+
+// installerAwkNote is the plan's note for an RPM-based host: NVIDIA's
+// installer looks its package up with a regular expression that gawk warns
+// about three times. The warnings change nothing (the dot still matches the
+// dot), and the pinned script is not edited, so the plan says so before
+// they appear (NVIDIA/OpenShell#4768, fix PR #4845).
+const installerAwkNote = "on an RPM-based computer NVIDIA's installer may print three lines starting \"awk: warning: escape sequence\"; " +
+	"they are harmless and the install is not affected (NVIDIA/OpenShell#4768)"
+
+// rpmBasedHost reports whether the os-release file at path names an
+// RPM-based distribution (ID or ID_LIKE of rhel, fedora, centos, suse, ...),
+// the hosts where NVIDIA's installer takes its RPM path.
+func rpmBasedHost(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		key, val, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok || (key != "ID" && key != "ID_LIKE") {
+			continue
+		}
+		for _, id := range strings.Fields(strings.Trim(val, `"'`)) {
+			switch strings.ToLower(id) {
+			case "rhel", "fedora", "centos", "rocky", "almalinux", "ol", "amzn", "suse", "opensuse", "sles":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // HomebrewPrefixError is ErrHomebrewPrefix: Path, a folder Homebrew writes
@@ -308,6 +342,9 @@ func homebrewPrefixProblem(prefix string, writable func(string) bool) error {
 func (i *Installer) defaults() {
 	if i.GOOS == "" {
 		i.GOOS = runtime.GOOS
+	}
+	if i.OSRelease == "" {
+		i.OSRelease = "/etc/os-release"
 	}
 	if i.E2fsprogsDirs == nil {
 		i.E2fsprogsDirs = e2fsprogsDirs
@@ -508,6 +545,9 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 		plan.Notes = append(plan.Notes,
 			fmt.Sprintf("Homebrew is at %s, not at /opt/homebrew or /usr/local: %s tells the OpenShell CLI where the gateway's client certificates are", tildePath(i.BrewPrefix), EnvLocalTLSDir),
 			"Homebrew has no prebuilt packages for that prefix, so it may build dependencies from source, which can take many minutes (it prints its progress)")
+	}
+	if i.GOOS == "linux" && rpmBasedHost(i.OSRelease) {
+		plan.Notes = append(plan.Notes, installerAwkNote)
 	}
 	if i.PackageCLI != "" {
 		// Without it the script registers the gateway with, and checks its
