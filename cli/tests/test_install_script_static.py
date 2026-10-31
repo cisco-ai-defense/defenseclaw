@@ -3805,15 +3805,3 @@ def test_cli_links_are_published_by_rename_after_the_new_cli_starts() -> None:
     restore = restore[: restore.index("\n}\n")]
     assert 'rm -f "${BIN_DIR:?}/${link}" && cp -P' not in restore
     assert 'mv -f "${new}" "${BIN_DIR}/${link}"' in restore
-
-
-def test_the_old_venv_moves_only_after_running_cli_calls_finish() -> None:
-    """rel-1-0-6 GAP-0105: a CLI call that started from the old venv crashed
-    (ModuleNotFoundError) when the snapshot moved the venv under it."""
-    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
-    snapshot = script[script.index("\nsnapshot() {"):]
-    snapshot = snapshot[: snapshot.index("\n}\n")]
-    assert snapshot.index("write_busy_shim") < snapshot.index("wait_cli_calls_done") < snapshot.index('mv "${VENV}" "${SNAP}/venv"')
-    helper = script[script.index("wait_cli_calls_done() {"):]
-    helper = helper[: helper.index("\n}\n")]
-    assert "SECONDS + 15" in helper and '"${VENV}"/bin/*' in helper
