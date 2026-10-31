@@ -1239,7 +1239,7 @@ off the device. The agent does not read `/health` itself (section 7); the
   in every case. A Windows build without `management_contract` reports `ok`
   from gateway readiness alone, which does not prove the key.
 
-  **Prove the key before the first prompt (Linux and macOS, from 1.0.6).**
+  **Prove the key before the first prompt (from 1.0.6; Windows exits 1603 and 1639 where Linux and macOS exit 1 and 2).**
   `enterprise secret check --name ai-defense-api-key --json` (root, read-only,
   no lock) builds the client the gateway builds, from the stored credential and
   the administrator's egress proxy, and makes one authenticated request whose
