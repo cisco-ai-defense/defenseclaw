@@ -18,6 +18,9 @@ func TestMain(m *testing.M) {
 	// A call never waits for a start that is not coming; the gate's tests
 	// (TestSessionStartGateCallBeforeItsStart) set the arrival wait.
 	sessionStartArrivalWait = 0
+	// The fail-open report reads only the test's data directory, never the
+	// host account's ~/.defenseclaw/logs (hookFailuresHooksHome).
+	hookFailuresHooksHome = func() string { return "" }
 	cleanup, err := hermespath.IsolateHostForTests()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the host's Hermes:", err)

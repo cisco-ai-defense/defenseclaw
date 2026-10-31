@@ -166,6 +166,30 @@ func TestHermesNeutralResultOutsideManagedToolCalls(t *testing.T) {
 	}
 }
 
+// rel-1-0-2 GAP-0446 item 5, Copilot: a per-user Copilot event that cannot
+// block (sessionStart, postToolUse) runs on an outage in fail mode closed
+// too; the hook-failure log records that it ran fail-open, not the
+// configured closed mode, so the gateway reports it.
+func TestPerUserCopilotNonBlockingEventLogsFailOpenInModeClosed(t *testing.T) {
+	for _, event := range []string{"sessionStart", "postToolUse"} {
+		t.Run(event, func(t *testing.T) {
+			var home string
+			result := run(t, "copilot", &stubRT{err: errors.New("connection refused")}, func(o *Options) {
+				o.Event = event
+				o.FailMode = "closed"
+				home = o.Home
+			})
+			if blocked(result) {
+				t.Fatalf("%s blocked: %+v", event, result)
+			}
+			row := lastHookFailure(t, home)
+			if row["fail_mode"] != "open" || row["outcome"] != "fail_open" {
+				t.Fatalf("logged %v, want fail_mode open and outcome fail_open", row)
+			}
+		})
+	}
+}
+
 // rel-1-0-3 B-20 review item 1: a managed Hermes tool call blocks on a
 // successful gateway answer that carries no usable verdict (no action, an
 // unknown one, a block without its directive or with one that does not

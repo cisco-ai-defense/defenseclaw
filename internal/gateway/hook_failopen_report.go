@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // The hooks append one line to <home>/logs/hook-failures.jsonl for every
@@ -28,8 +29,9 @@ import (
 // defenseclaw_log_hook_failure, hookexec logHookFailure). A fail-open call
 // then ran without a DefenseClaw check, and the gateway that would have
 // recorded it was down, so nothing in the alerts or the audit history said so
-// (GAP-0414). On start the gateway reads the lines it has not reported yet
-// and records one guardrail-degraded alert per connector.
+// (GAP-0414). On start, and about once a minute while it runs, the gateway
+// reads the lines it has not reported yet and records one guardrail-degraded
+// alert per connector.
 const (
 	hookFailuresFile         = "hook-failures.jsonl"
 	hookFailuresReportedFile = "hook-failures.reported"
@@ -39,10 +41,26 @@ const (
 	// hookFailuresHeadBytes bounds the first line the report fingerprints.
 	hookFailuresHeadBytes = 4096
 	// hookFailOpenReportMaxAge leaves out calls older than the default
-	// audit retention, so the first start of an upgraded gateway does not
-	// report a months-old file.
+	// audit retention when the report has no position in the file (its
+	// first read, or a replaced file), so the first start of an upgraded
+	// gateway does not report a months-old file. Lines after a recorded
+	// position are new and are reported whatever their age: a gateway that
+	// stayed stopped for more than 7 days dropped them (rel-1-0-2 GAP-0446
+	// item 3).
 	hookFailOpenReportMaxAge = 7 * 24 * time.Hour
 )
+
+// hookFailOpenReportInterval is how often a running per-user gateway looks
+// for new hook-failure lines. A call that ran fail-open while the gateway
+// was up but did not answer it (busy, a server error, a hook that timed
+// out) was reported only at the next start (rel-1-0-2 GAP-0446 item 3).
+// One stat per folder when nothing changed. A variable for tests.
+var hookFailOpenReportInterval = time.Minute
+
+// hookFailuresHooksHome is the data directory the hooks write their
+// hook-failure log to (hookFailOpenLogDirs). The gateway tests' TestMain
+// sets it to "", so no test reads or writes the host account's logs.
+var hookFailuresHooksHome = config.DefaultDataPath
 
 // hookFailOpenReportMu keeps the start-up report and a write-recovery report
 // from reading the same lines.
@@ -82,12 +100,41 @@ func (l hookFailureLine) ranUnchecked() bool {
 	return strings.TrimSpace(l.FailMode) == "open"
 }
 
-// hookFailOpenSummary is the fail-open calls of one connector.
+// hookFailOpenSummary is the fail-open calls of one connector. One call can
+// write several lines (a Hermes turn wrote 16: one per hook event), so the
+// alert counts distinct calls (session and call id; a line without a call id
+// is one call) and names the hook events and sessions apart (rel-1-0-2
+// GAP-0446 item 8).
 type hookFailOpenSummary struct {
 	Connector   string
 	Calls       int
+	Events      int
+	Sessions    int
 	First, Last time.Time
 	LastReason  string
+	callKeys    map[string]struct{}
+	sessionKeys map[string]struct{}
+}
+
+// count adds one fail-open line, which ends at offset end, to the summary.
+func (sum *hookFailOpenSummary) count(entry hookFailureLine, end int64) {
+	sum.Events++
+	key := "line\x00" + strconv.FormatInt(end, 10)
+	session := strings.TrimSpace(entry.SessionID)
+	if id := strings.TrimSpace(entry.CallID); id != "" {
+		key = "call\x00" + session + "\x00" + id
+	}
+	if sum.callKeys == nil {
+		sum.callKeys, sum.sessionKeys = map[string]struct{}{}, map[string]struct{}{}
+	}
+	if _, seen := sum.callKeys[key]; !seen {
+		sum.callKeys[key] = struct{}{}
+		sum.Calls++
+	}
+	if session != "" {
+		sum.sessionKeys[session] = struct{}{}
+		sum.Sessions = len(sum.sessionKeys)
+	}
 }
 
 // hookFailuresReported is the report's position in hook-failures.jsonl.
@@ -108,19 +155,95 @@ type hookFailuresReported struct {
 }
 
 // reportHookFailOpenCalls records the fail-open hook calls written to
-// dataDir/logs/hook-failures.jsonl since the last report. Per-user gateways
-// only: a managed hook's failures are not in the gateway's data directory,
-// and managed hooks fail closed (the block is visible in the agent).
+// hook-failures.jsonl since the last report (hookFailOpenLogDirs). Per-user
+// gateways only: a managed hook's failures are not in the gateway's data
+// directory, and managed hooks fail closed (the block is visible in the
+// agent).
 func (s *Sidecar) reportHookFailOpenCalls() {
 	if s == nil || s.logger == nil || ManagedEnterpriseActive() {
 		return
 	}
 	cfg := s.currentConfig()
-	if cfg == nil || cfg.StandaloneEnterprise() || strings.TrimSpace(cfg.DataDir) == "" {
+	if !hookFailOpenReportApplies(cfg) {
 		return
 	}
-	if err := reportHookFailOpenCallsIn(filepath.Join(cfg.DataDir, "logs"), s.logger, time.Now().UTC()); err != nil {
-		fmt.Fprintf(os.Stderr, "[gateway] fail-open hook call report: %v\n", err)
+	for _, logDir := range hookFailOpenLogDirs(cfg.DataDir) {
+		if err := reportHookFailOpenCallsIn(logDir, s.logger, time.Now().UTC()); err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] fail-open hook call report: %v\n", err)
+		}
+	}
+}
+
+func hookFailOpenReportApplies(cfg *config.Config) bool {
+	return cfg != nil && !cfg.StandaloneEnterprise() && strings.TrimSpace(cfg.DataDir) != ""
+}
+
+// hookFailOpenLogDirs are the folders whose hook-failures.jsonl the report
+// reads: the gateway's data directory and the one the hooks write to
+// (DEFENSECLAW_HOME, else ~/.defenseclaw: _hardening.sh, the native hook
+// and the OpenCode plugin's credential folder). They differ only with a
+// custom data_dir, whose hook calls that ran fail-open were never reported
+// (rel-1-0-2 GAP-0446 item 9). A folder is listed once, also through a
+// symbolic link.
+func hookFailOpenLogDirs(dataDir string) []string {
+	var dirs []string
+	seen := map[string]bool{}
+	for _, home := range []string{dataDir, hookFailuresHooksHome()} {
+		home = strings.TrimSpace(home)
+		if home == "" {
+			continue
+		}
+		key := filepath.Clean(home)
+		if resolved, err := filepath.EvalSymlinks(home); err == nil {
+			key = resolved
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		dirs = append(dirs, filepath.Join(home, "logs"))
+	}
+	return dirs
+}
+
+// watchHookFailOpenCalls reports new hook-failure lines while the gateway
+// runs (hookFailOpenReportInterval), so a call that ran fail-open while the
+// gateway was up is not left for the next start. It reads a folder only when
+// its file's size or time changed. A managed gateway starts no timer.
+func (s *Sidecar) watchHookFailOpenCalls(ctx context.Context) {
+	if s == nil || s.logger == nil || ManagedEnterpriseActive() {
+		return
+	}
+	ticker := time.NewTicker(hookFailOpenReportInterval)
+	defer ticker.Stop()
+	type stamp struct {
+		size int64
+		mod  time.Time
+	}
+	seen := map[string]stamp{}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		cfg := s.currentConfig()
+		if !hookFailOpenReportApplies(cfg) {
+			continue
+		}
+		changed := false
+		for _, dir := range hookFailOpenLogDirs(cfg.DataDir) {
+			var now stamp
+			if info, err := os.Stat(filepath.Join(dir, hookFailuresFile)); err == nil {
+				now = stamp{size: info.Size(), mod: info.ModTime()}
+			}
+			if seen[dir] != now {
+				seen[dir], changed = now, true
+			}
+		}
+		if changed {
+			s.reportHookFailOpenCalls()
+		}
 	}
 }
 
@@ -130,6 +253,15 @@ func reportHookFailOpenCallsIn(logDir string, logger *audit.Logger, now time.Tim
 	summaries, read, err := readHookFailOpenCalls(logDir, now)
 	if err != nil {
 		return err
+	}
+	if !read.found {
+		// No file: a later one is read from its start. Never create the
+		// logs folder (or the DefenseClaw folder a purge removed) for the
+		// position alone (GAP-0654).
+		if err := os.Remove(filepath.Join(logDir, hookFailuresReportedFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
 	}
 	for _, call := range read.calls {
 		if call.end <= read.start.AuditOffset {
@@ -174,6 +306,8 @@ type hookFailOpenRead struct {
 	start hookFailuresReported
 	next  int64
 	calls []hookFailOpenCall
+	// found is false when there is no hook-failures.jsonl.
+	found bool
 }
 
 type hookFailOpenCall struct {
@@ -189,7 +323,7 @@ type hookFailOpenCall struct {
 // first line that starts in the last hookFailOpenReportMaxBytes.
 func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary, hookFailOpenRead, error) {
 	state := readHookFailuresReported(logDir)
-	read := hookFailOpenRead{start: state, next: state.Offset}
+	read := hookFailOpenRead{start: state, next: state.Offset, found: true}
 	f, err := os.Open(filepath.Join(logDir, hookFailuresFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, hookFailOpenRead{}, nil
@@ -204,9 +338,13 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 	}
 	head := hookFailuresHead(f)
 	offset := state.Offset
+	// A recorded position in this file: what follows it is new, whatever
+	// its age (hookFailOpenReportMaxAge).
+	positioned := state.Offset > 0 || state.Head != ""
 	if offset > info.Size() || offset < 0 || (state.Head != "" && state.Head != head) {
 		offset, state.Done = 0, nil
 		state.AuditOffset = 0
+		positioned = false
 	}
 	skipPartial := false
 	if info.Size()-offset > hookFailOpenReportMaxBytes {
@@ -240,7 +378,7 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 		}
 		at, perr := time.Parse(time.RFC3339, strings.TrimSpace(entry.TS))
 		connectorName := strings.ToLower(strings.TrimSpace(entry.Connector))
-		if perr != nil || connectorName == "" || now.Sub(at) > hookFailOpenReportMaxAge {
+		if perr != nil || connectorName == "" || (!positioned && now.Sub(at) > hookFailOpenReportMaxAge) {
 			continue
 		}
 		entry.Connector = connectorName
@@ -253,7 +391,7 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 			sum = &hookFailOpenSummary{Connector: connectorName, First: at}
 			byConnector[connectorName] = sum
 		}
-		sum.Calls++
+		sum.count(entry, next)
 		if at.Before(sum.First) {
 			sum.First = at
 		}
@@ -285,14 +423,25 @@ func hookFailuresHead(f *os.File) string {
 }
 
 // describeHookFailOpenCalls is the alert text, for example "2 hermes hook
-// calls ran without a DefenseClaw check (fail-open) while the gateway was
-// unreachable or did not answer (first 2026-10-13T09:49:01Z, last
-// 2026-10-13T09:49:40Z; last reason: gateway unreachable); see
-// logs/hook-failures.jsonl".
+// calls (16 hook events) in 1 session ran without a DefenseClaw check
+// (fail-open) while the gateway was unreachable or did not answer (first
+// 2026-10-13T09:49:01Z, last 2026-10-13T09:49:40Z; last reason: gateway
+// unreachable); see logs/hook-failures.jsonl". The hook events are named
+// only when there are more of them than calls, the sessions only when the
+// lines name one.
 func describeHookFailOpenCalls(sum hookFailOpenSummary) string {
 	noun := "calls"
 	if sum.Calls == 1 {
 		noun = "call"
+	}
+	if sum.Events > sum.Calls {
+		noun += fmt.Sprintf(" (%d hook events)", sum.Events)
+	}
+	switch {
+	case sum.Sessions == 1:
+		noun += " in 1 session"
+	case sum.Sessions > 1:
+		noun += fmt.Sprintf(" in %d sessions", sum.Sessions)
 	}
 	reason := strings.Join(strings.Fields(sum.LastReason), " ")
 	if len(reason) > 200 {
