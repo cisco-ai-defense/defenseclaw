@@ -2083,8 +2083,10 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		switch programBase(program) {
 		case "cat", "head", "tail", "ls", "dir", "stat",
 			// Search and count programs only read their operands (owner
-			// decision 2, TGT-0194; GAP-2168).
-			"grep", "egrep", "fgrep", "wc":
+			// decision 2, TGT-0194; GAP-2168). So do the size and path
+			// readers: du reports sizes, readlink and realpath print a
+			// resolved name; none has an output option.
+			"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath":
 		case "ssh-keygen":
 			if !actionSSHKeygenListsOnly(call.Args[1:], home) {
 				safe = false

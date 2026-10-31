@@ -189,3 +189,48 @@ func TestSelfProtShellBodyDirectoryChange(t *testing.T) {
 		{"X09", `bash -c "cd $X && ln -s ../.ssh k; echo x >> k/authorized_keys"`, "block"},
 	}, "claudecode", "codex")
 }
+
+// A link call whose name is only entered with cd, beside known readers, is
+// written where it stands; a size or path reader that names the SSH folder
+// reads nothing it could change; a link moved into a real directory goes
+// inside it (GAP-0091). A writer after the entering cd, a link to state and
+// a copy of the SSH folder keep blocking.
+func TestSelfProtLinkNameBesideReaders(t *testing.T) {
+	checkSelfProtRows(t, []selfProtRow{
+		{"R01", `ln -s / r; bash -c "cd r && ls"`, "allow"},
+		{"R02", `ln -s /usr/lib lib; bash -c "cd src && /bin/ls"`, "allow"},
+		{"R03", `ln -s ordinary od; bash -c "cd od && cat o.txt"`, "allow"},
+		{"R05", `du -sh ~/.ssh/`, "allow"},
+		{"R06", `readlink -f ~/.ssh`, "allow"},
+		{"R17", `ln -s ordinary od; bash -c "cd ~nosuchuser9 && ls"`, "allow"},
+		{"R18", `du -sh ~/.*/`, "allow"},
+		{"R19", `ln -s /usr/lib lib; ls ~nosuchuser9; bash -c "cd lib && ls"`, "block"},
+		{"R07", `ln -s / r; bash -c "cd r && touch x"`, "block"},
+		{"R08", `ln -s / r; bash -c "cd r && sed -i s/a/b/ x"`, "block"},
+		{"R09", `ln -s / r; bash -c "cd r && ./run.sh"`, "block"},
+		{"R10", `ln -s / r; bash -c "cd r && ls"; echo k >> r/home/alice/.ssh/authorized_keys`, "block"},
+		{"R11", `ln -s / r; bash -c "cd r && ls"; mv a.txt r`, "block"},
+		{"R12", `ln -s ../.ssh ks; bash -c "cd ks && cat authorized_keys"`, "block"},
+		{"R13", `ln -s ~/.ssh/authorized_keys k; mv k build/; echo x >> build/k`, "block"},
+		{"R14", `du -sh ~/.ssh/ > ~/.ssh/authorized_keys`, "block"},
+	}, "claudecode", "codex")
+}
+
+// A move onto a real directory goes inside it, so the link moved into the
+// directory it points into is followed. A gateway that cannot read the user's
+// home cannot tell a directory from a link to one and keeps the unread
+// reading (GAP-0091).
+func TestSelfProtMoveIntoRealDirectory(t *testing.T) {
+	for _, r := range []selfProtRow{
+		{"M01", `ln -s build/out bin; mv bin build/`, "allow"},
+		{"M02", `ln -s build/out bin; mv bin build`, "allow"},
+		{"M03", `ln -s ~/.ssh/authorized_keys k; mv k build/; echo x >> build/k`, "block"},
+		{"M05", `ln -s build/out bin; mv bin ../.ssh/`, "block"},
+	} {
+		for _, connector := range []string{"claudecode", "codex"} {
+			if got := selfProtVerdict(t, r, false, connector); got != r.want {
+				t.Errorf("%s per-user %s: %q = %s, want %s", r.id, connector, r.cmd, got, r.want)
+			}
+		}
+	}
+}
