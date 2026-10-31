@@ -6963,7 +6963,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             elif not gateway_online:
                 call_detail_parts.append(f"[{TOKENS.accent_amber}]{gateway_unavailable_label}[/]")
             elif requests == 0:
-                call_detail_parts.append("waiting for tool calls")
+                # 12 cells: the 80x24 card caption holds 13 (GAP-0341).
+                call_detail_parts.append("no calls yet")
             else:
                 call_detail_parts.append("agent active")
                 if selected_connector:
