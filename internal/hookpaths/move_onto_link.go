@@ -180,3 +180,59 @@ func protectedEntry(entry string, protected protectedFiles, ssh string) bool {
 func MovedOntoLinkEntries(facts actionfacts.Facts) map[string]bool {
 	return movedOntoLinkEntries(facts)
 }
+
+// PlainMoveDestinationsWithStatements is PlainMoveDestinations, also for a
+// plain mv that only its own simple command reads with a complete argv: a
+// ~/ operand in a command list that the whole-command reading leaves
+// partial (cd ~/ext && mv ~/p/a.txt /home/u/p/lnk, GAP-2559). Such a
+// destination counts only when every simple command was read and no other
+// write, append or redirect of the command names it.
+func PlainMoveDestinationsWithStatements(input actionfacts.Input, facts actionfacts.Facts) map[string]bool {
+	moved := PlainMoveDestinations(facts)
+	if input.Command == "" {
+		return moved
+	}
+	writers := map[string]int{}
+	count := func(view actionfacts.Facts) {
+		for _, candidate := range view.Paths {
+			if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
+				continue
+			}
+			path := candidate.Resolved
+			if path == "" {
+				path = candidate.Normalized
+			}
+			if filepath.IsAbs(path) {
+				writers[filepath.Clean(path)]++
+			}
+		}
+	}
+	var statements map[string]bool
+	childWriters := map[string]int{}
+	for _, simple := range actionfacts.SimpleCommands(input, facts) {
+		if simple.EvaluationFailure != "" || !filepath.IsAbs(simple.CWD) {
+			return moved
+		}
+		child := input
+		child.Command, child.CWD, child.Args, child.Argv = simple.Text, simple.CWD, nil, nil
+		childFacts := actionfacts.Analyze(child)
+		count(childFacts)
+		for path := range PlainMoveDestinations(childFacts) {
+			if statements == nil {
+				statements = map[string]bool{}
+			}
+			statements[path] = true
+		}
+	}
+	for path, n := range writers {
+		childWriters[path] = n
+	}
+	writers = map[string]int{}
+	count(facts)
+	for path := range statements {
+		if !moved[path] && childWriters[path] == 1 && writers[path] <= 1 {
+			moved[path] = true
+		}
+	}
+	return moved
+}

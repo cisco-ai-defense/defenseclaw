@@ -224,7 +224,7 @@ anchors between download and install. The check then fails closed
 | Exit | Linux / macOS | Windows | Class | Agent action |
 |---|---|---|---|---|
 | `0` | success or nothing to do | success | done | use the result |
-| `75` | another lifecycle run holds the lock (`lifecycle_busy`), or a `bundle apply` whose gateway stopped reporting the bundle's policy before the receipt was confirmed (`not_confirmed` with `bundle.state` `applied`, section 4.3), or a `bundle apply --defer-restart` that deferred a restart (`restart_deferred`) | — | **retry** | back off (30 s, doubling, at most 10 min) and resubmit the same input; for `restart_deferred` see below |
+| `75` | another lifecycle run holds the lock (`lifecycle_busy`; a Linux or macOS `status` reports it as `ok: true` with `pending_apply: true` and a `lifecycle_busy` warning), or a `bundle apply` whose gateway stopped reporting the bundle's policy before the receipt was confirmed (`not_confirmed` with `bundle.state` `applied`, section 4.3), or a `bundle apply --defer-restart` that deferred a restart (`restart_deferred`) | — | **retry** | back off (30 s, doubling, at most 10 min) and resubmit the same input; for `restart_deferred` see below |
 | `1618` | — | `lifecycle_busy` (`bundle.lock` not free within `--lock-wait`, or the installer's `lifecycle.lock` not free within its fixed 30 s), or a verified bundle that did not finish applying (`bundle_apply_failed`, `bundle_policy_not_adopted`, `bundle_post_verify_failed`, `bundle_targets_refresh_failed`), or `restart_deferred` | **retry** | as for 75 |
 | `1` | failure, already rolled back; or a refusal | builds without `management_contract` only: a flag error on `enterprise secret` (section 2.3) | **final** | read `errors[].code`; do not retry until the bundle, anchors, credential or device changes |
 | `1603` | — | failure, already rolled back; or a refusal | **final** | as for 1 |
@@ -833,8 +833,13 @@ Exit 0.
 - Privilege: root or SYSTEM. On Linux and macOS a non-root caller gets
   `not_root` with the deployment fields left out; on Windows a non-elevated
   caller gets `elevation_required`, exit 5.
-- Lock: Linux and macOS wait a fixed 5 s for another run, then report `ok:
-  false`, `lifecycle_busy`, exit 75 (retry class). Windows status first
+- Lock: Linux and macOS wait a fixed 5 s for another run. If it still runs,
+  the change is pending apply, not a failure: `ok: true`, `pending_apply:
+  true`, a `lifecycle_busy` warning that names the run, only `installed` and
+  `installed_version` filled, `coverage_complete` and `security_complete`
+  false, exit 75 (retry class). Through 1.0.5 this was `ok: false` with a
+  `lifecycle_busy` error; read the exit code or the code in `errors` and
+  `warnings` to support both. Windows status first
   settles a bundle receipt that a killed run left in state `applied`, under
   `bundle.lock`, and skips that step while an apply holds the lock, so Windows
   status can write; it is still idempotent.
@@ -1686,8 +1691,11 @@ the read-only commands answer (section 4).
 - The credential value is normalised differently on Windows and on Linux and
   macOS (2.5), and Windows refuses a `secret set` before the deployment is
   installed while Linux and macOS store it (4.7).
-- A busy Linux or macOS `status` is `ok: false`, `lifecycle_busy`, exit 75,
-  after a fixed 5 s wait; it is not a device failure.
+- A busy Linux or macOS `status` (another run applying a change after a
+  fixed 5 s wait) is `ok: true` with `pending_apply: true`, a
+  `lifecycle_busy` warning and exit 75: it is not a device failure, and it
+  reports no device state beyond the installed version, so retry it. A busy
+  `verify` stays `ok: false`, `lifecycle_busy`, exit 75.
 - A rejected AI Defense key shows only after the gateway has sent a request
   with it: until a hook sends a prompt for inspection, `inspection.ai_defense`
   stays `unknown` (4.7).

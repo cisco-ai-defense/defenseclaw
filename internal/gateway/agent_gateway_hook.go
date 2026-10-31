@@ -73,6 +73,10 @@ type agentGatewayAudit struct {
 	actingForIgnored    bool
 	rootSessionIgnored  bool
 	rootSessionHonoured string
+	// rootChain is set for an honoured root_session_id; the chain lane
+	// fills it in when guardrail.chains.root_scope evaluates the root
+	// window (agent_gateway_root_chain.go).
+	rootChain *agentGatewayRootChain
 }
 
 func withAgentGatewayAudit(ctx context.Context, audit agentGatewayAudit) context.Context {
@@ -101,9 +105,14 @@ func agentGatewayAuditExtra(ctx context.Context) map[string]string {
 		extra["root_session_ignored"] = agentGatewayIgnoredUntrusted
 	}
 	if audit.rootSessionHonoured != "" {
-		// Attribution only: chains are evaluated per session (root-scope
-		// chains, issue #1391, are not in this release).
 		extra["root_session_id"] = audit.rootSessionHonoured
+	}
+	if audit.rootChain != nil && audit.rootChain.evaluated {
+		// guardrail.chains.root_scope evaluated the root window too (#1391).
+		extra["chain_scope"] = "session,root"
+		if len(audit.rootChain.chainIDs) != 0 {
+			extra["root_chain_ids"] = strings.Join(audit.rootChain.chainIDs, ",")
+		}
 	}
 	return extra
 }
@@ -225,6 +234,7 @@ func (a *APIServer) agentGatewayIdentity(ctx context.Context, ev connector.Agent
 					return ctx, actingForRefusal{Code: actingForRefusedSessionMismatch, Cause: "root_session_id"}, audit
 				}
 				audit.rootSessionHonoured = ev.RootSessionID
+				audit.rootChain = &agentGatewayRootChain{}
 			}
 			return ctx, actingForRefusal{}, audit
 		}

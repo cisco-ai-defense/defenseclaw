@@ -113,6 +113,12 @@ type Pending struct {
 	// the transaction when a later run finds it interrupted (GAP-0238). An
 	// intent written before the field existed rolls back with a restart.
 	Hot bool `json:"hot,omitempty"`
+	// ConfigFile is the administrator config the transaction was applying
+	// (the absolute --config path), so status names the command that
+	// finishes it; status named a generic --config <file> (GAP-0098). Empty
+	// for a run without --config and for an intent written before the
+	// field existed.
+	ConfigFile string `json:"config_file,omitempty"`
 }
 
 func (e *Env) deploymentPath() string {

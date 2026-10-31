@@ -120,9 +120,26 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			r.InstalledVersion = record.ProductVersion
 		}
 		if busyMessage == "" {
-			busyMessage = errLockBusy.Error() + "; " + readOnlyBusyNextStep(env.LockTimeout, ActionStatus)
+			holder := errLockBusy.Error()
+			if pending != nil && pending.Action != "" {
+				// Name the run and how far it got, from its intent record.
+				detail := pending.Action
+				if pending.Phase != "" {
+					detail += ", phase " + pending.Phase
+				}
+				holder += " (" + detail + ")"
+			}
+			busyMessage = holder + "; " + readOnlyBusyNextStep(env.LockTimeout, ActionStatus)
 		}
-		r.AddError(codeBusy, busyMessage)
+		// A change being applied is a pending apply, not an unhealthy
+		// deployment: rapid config pushes read ok false with a
+		// lifecycle_busy error until each apply ended (GAP-0129). The code
+		// stays (as a warning) and so does exit 75, which detect.sh and
+		// management agents read as busy and retry; verify, which checks
+		// health, still fails busy.
+		r.PendingApply = true
+		r.AddWarning(codeBusy, busyMessage)
+		r.MarkCoverageIncomplete(codeBusy)
 		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if record == nil {
@@ -338,7 +355,8 @@ func (l *lifecycle) clearSupersededUnitFailures(ctx context.Context) {
 }
 
 // interruptedTransactionProblem names a transaction a reset or a killed run
-// left pending, and the commands that finish it.
+// left pending, and the commands that finish it: the config it was applying
+// when the intent records one (GAP-0098).
 func (e *Env) interruptedTransactionProblem(pending *Pending) string {
 	action, phase, started := pending.Action, pending.Phase, pending.StartedAt
 	if action == "" {
@@ -350,9 +368,22 @@ func (e *Env) interruptedTransactionProblem(pending *Pending) string {
 	if started == "" {
 		started = "an unknown time"
 	}
+	finish := "to apply the config it was applying run `" + e.lifecycleCommand(ActionEnsure) + " --config <file>` again"
+	if pending.ConfigFile != "" {
+		finish = "to apply the config it was applying (" + pending.ConfigFile + ") run `" +
+			e.lifecycleCommand(ActionEnsure) + " --config " + shellWord(pending.ConfigFile) + "` again"
+	}
 	return fmt.Sprintf("a lifecycle %s that started at %s was interrupted in its %s phase (a reset or a killed run), so files differ from the deployment record; "+
-		"`%s` rolls it back to the last committed deployment, and to apply the config it was applying run `%s --config <file>` again",
-		action, started, phase, e.lifecycleCommand("repair"), e.lifecycleCommand(ActionEnsure))
+		"`%s` rolls it back to the last committed deployment, and %s",
+		action, started, phase, e.lifecycleCommand("repair"), finish)
+}
+
+// shellWord is value as one POSIX shell word, quoted only when it needs it.
+func shellWord(value string) string {
+	if value != "" && strings.Trim(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-+=:@,") == "" {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 // withoutTransactionDrift drops the file and config drift an interrupted

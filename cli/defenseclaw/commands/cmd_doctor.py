@@ -15688,7 +15688,10 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             "disruptive",
             _fix_hook_script_drift,
             ("doctor.gateway.service.reconcile",),
-            ("restart the gateway so it renders the hook scripts setup sealed again, replacing an edited or deleted copy",),
+            (
+                "restart the gateway so it renders the hook scripts setup sealed again,"
+                " replacing an edited or deleted copy",
+            ),
             True,
             False,
         ),

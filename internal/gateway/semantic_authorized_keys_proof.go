@@ -1040,7 +1040,17 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			directoryFact := strings.HasPrefix(operand, hookpaths.DirectoryFactPrefix)
 			if resolved != "" && !directoryFact && request.ResolvedWriteTargets[hookpaths.ReplacedLinkFactPrefix+operand] == "1" {
 				if plainMoves == nil {
-					plainMoves = hookpaths.PlainMoveDestinations(facts)
+					moveInput, moveFacts := request.Input, facts
+					if moveInput.Command == "" {
+						moveInput.Command, _ = trustedBashCommandInput(moveInput)
+					}
+					// A gateway that cannot validate the event cwd places the
+					// simple commands where the client keyed its evidence.
+					if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; !filepath.IsAbs(moveInput.CWD) && filepath.IsAbs(cwd) {
+						moveInput.CWD = filepath.Clean(cwd)
+						moveFacts = actionfacts.Analyze(moveInput)
+					}
+					plainMoves = hookpaths.PlainMoveDestinationsWithStatements(moveInput, moveFacts)
 				}
 				if plainMoves[operand] {
 					if scoped == nil {

@@ -105,8 +105,11 @@ def test_active_policy_after_upgrade_from_a_release_that_kept_no_record(policy_d
     from defenseclaw.db import Store
     from defenseclaw.models import Event
 
+    # UTF-8 on every OS: strict.yaml holds non-ASCII text, and the Windows
+    # locale encoding would write bytes the catalog cannot read as a policy.
     (policy_dir / "u33a-pol.yaml").write_text(
-        open(pc.policy_file("strict", policy_dir), encoding="utf-8").read().replace("name: strict", "name: u33a-pol")
+        Path(pc.policy_file("strict", policy_dir)).read_text(encoding="utf-8").replace("name: strict", "name: u33a-pol"),
+        encoding="utf-8",
     )
     cfg = default_config()
     cfg.policy_dir = str(policy_dir)

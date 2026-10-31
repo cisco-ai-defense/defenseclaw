@@ -13,7 +13,7 @@ import (
 
 // CheckKeyProductFloor refuses to sign a config that sets a key only
 // 1.0.6 and later read (enterprise.identity.trusted_connectors,
-// connectors.agent_gateway) unless the bundle
+// connectors.agent_gateway, guardrail.chains.root_scope) unless the bundle
 // carries min_product_version 1.0.6 or later. An older device refuses the
 // key as unknown anyway; the floor makes the refusal the documented
 // product_too_old, and keeps a rollback to an older build from loading a

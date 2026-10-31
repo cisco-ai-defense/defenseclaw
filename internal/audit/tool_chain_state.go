@@ -70,6 +70,11 @@ type ToolChainRepository struct {
 	maxHorizon    time.Duration
 	pendingTTL    time.Duration
 	maxPending    int
+	// tables is the session or root table set (tool_chain_root.go); every
+	// statement names its tables through repo.sql.
+	tables toolChainTableSet
+	// rootDigest is the root scope a root-set repository reads and writes.
+	rootDigest string
 }
 
 func (s *Store) ToolChainRepository() (*ToolChainRepository, error) {
@@ -81,6 +86,7 @@ func (s *Store) ToolChainRepository() (*ToolChainRepository, error) {
 		maxPartitions: guardrail.ToolChainMaxPartitions,
 		receiptTTL:    guardrail.ToolChainReceiptTTL, maxHorizon: guardrail.ToolChainMaxHorizon,
 		pendingTTL: guardrail.ToolChainMaxHorizon, maxPending: guardrail.ToolChainMaxPartitions,
+		tables: toolChainSessionTables,
 	}, nil
 }
 
@@ -285,7 +291,7 @@ func (repo *ToolChainRepository) observeTx(
 		eventFP.String != input.InputFingerprint {
 		return ToolChainObserveResult{}, ErrToolChainIntegrity
 	}
-	sessionDigest, joined, err := loadExactToolChainSession(
+	sessionDigest, joined, err := repo.scopeDigest(
 		ctx, tx, input.SemanticEventID, input.ConnectorInstanceID)
 	if err != nil {
 		return ToolChainObserveResult{}, err
@@ -324,8 +330,8 @@ func (repo *ToolChainRepository) observeTx(
 			return ToolChainObserveResult{}, err
 		}
 		if _, deleteErr := txExecContextObserved(ctx, tx, "guardrail_chain_reset_corrupt",
-			repo.store.sqliteBusyObservabilityV8(), `DELETE FROM guardrail_chain_events
-				WHERE connector_instance_id=? AND session_value_digest=?`,
+			repo.store.sqliteBusyObservabilityV8(), repo.sql(`DELETE FROM guardrail_chain_events
+				WHERE connector_instance_id=? AND session_value_digest=?`),
 			string(input.ConnectorInstanceID), sessionDigest); deleteErr != nil {
 			return ToolChainObserveResult{}, deleteErr
 		}
@@ -349,13 +355,13 @@ func (repo *ToolChainRepository) observeTx(
 	}
 	projectionFP, _ := guardrail.ToolChainProjectionFingerprint(input.Projection)
 	_, err = txExecContextObserved(ctx, tx, "guardrail_chain_event_insert",
-		repo.store.sqliteBusyObservabilityV8(), `INSERT INTO guardrail_chain_events (
+		repo.store.sqliteBusyObservabilityV8(), repo.sql(`INSERT INTO guardrail_chain_events (
 			semantic_event_id, connector_instance_id, session_value_digest, sequence,
 			received_time_unix_nano, input_fingerprint, projection_fingerprint,
 			ruleset_fingerprint, parse_status, detection_step_mask, enforcement_step_mask,
 			enforcement_join_digests, enforcement_output_join_digests, value_join_digests,
 			detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask, stable_action_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		string(input.SemanticEventID), string(input.ConnectorInstanceID), sessionDigest,
 		sequence, received, input.InputFingerprint, projectionFP, input.RulesetFingerprint,
 		string(input.Projection.ParseStatus), input.Projection.DetectionStepMask,
@@ -437,7 +443,7 @@ func (repo *ToolChainRepository) loadExistingEvent(
 	session string,
 	now time.Time,
 ) (ToolChainObserveResult, bool, error) {
-	event, found, err := scanPersistedToolChainEvent(ctx, tx, input.SemanticEventID)
+	event, found, err := repo.scanPersistedToolChainEvent(ctx, tx, input.SemanticEventID)
 	if err != nil || !found {
 		return ToolChainObserveResult{}, false, err
 	}
@@ -522,9 +528,9 @@ func (repo *ToolChainRepository) upgradeExistingEventDeny(
 		tx,
 		"guardrail_chain_event_upgrade_deny",
 		repo.store.sqliteBusyObservabilityV8(),
-		`UPDATE guardrail_chain_events
+		repo.sql(`UPDATE guardrail_chain_events
 		 SET denied_chain_mask=?, stable_action_id=?
-		 WHERE semantic_event_id=? AND denied_chain_mask=0 AND stable_action_id IS NULL`,
+		 WHERE semantic_event_id=? AND denied_chain_mask=0 AND stable_action_id IS NULL`),
 		denied,
 		stableAction,
 		string(input.SemanticEventID),
@@ -561,7 +567,7 @@ func (repo *ToolChainRepository) upgradeExistingEventDeny(
 	return result, true, err
 }
 
-func scanPersistedToolChainEvent(
+func (repo *ToolChainRepository) scanPersistedToolChainEvent(
 	ctx context.Context,
 	tx *sql.Tx,
 	eventID SemanticEventID,
@@ -569,12 +575,12 @@ func scanPersistedToolChainEvent(
 	var event persistedToolChainEvent
 	var stable sql.NullString
 	var enforcementJoinDigests, enforcementOutputJoinDigests, valueJoinDigests string
-	err := tx.QueryRowContext(ctx, `SELECT connector_instance_id, session_value_digest,
+	err := tx.QueryRowContext(ctx, repo.sql(`SELECT connector_instance_id, session_value_digest,
 		sequence, received_time_unix_nano, input_fingerprint, projection_fingerprint,
 		ruleset_fingerprint, parse_status, detection_step_mask, enforcement_step_mask,
 		enforcement_join_digests, enforcement_output_join_digests, value_join_digests,
 		detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask, stable_action_id
-		FROM guardrail_chain_events WHERE semantic_event_id=?`, string(eventID)).Scan(
+		FROM guardrail_chain_events WHERE semantic_event_id=?`), string(eventID)).Scan(
 		&event.connector, &event.session, &event.sequence, &event.received, &event.inputFP,
 		&event.projectionFP, &event.ruleset, &event.parseStatus, &event.detectionSteps,
 		&event.enforcementSteps, &enforcementJoinDigests,
@@ -639,26 +645,26 @@ func (repo *ToolChainRepository) activatePartition(
 	now time.Time,
 ) (uint64, error) {
 	var next uint64
-	err := tx.QueryRowContext(ctx, `SELECT next_sequence FROM guardrail_chain_partitions
-		WHERE connector_instance_id=? AND session_value_digest=?`,
+	err := tx.QueryRowContext(ctx, repo.sql(`SELECT next_sequence FROM guardrail_chain_partitions
+		WHERE connector_instance_id=? AND session_value_digest=?`),
 		string(input.ConnectorInstanceID), session).Scan(&next)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		next = 1
 		_, err = txExecContextObserved(ctx, tx, "guardrail_chain_partition_insert",
-			repo.store.sqliteBusyObservabilityV8(), `INSERT INTO guardrail_chain_partitions (
+			repo.store.sqliteBusyObservabilityV8(), repo.sql(`INSERT INTO guardrail_chain_partitions (
 				connector_instance_id, session_value_digest, active_ruleset_fingerprint,
-				next_sequence, updated_time_unix_nano) VALUES (?, ?, ?, 2, ?)`,
+				next_sequence, updated_time_unix_nano) VALUES (?, ?, ?, 2, ?)`),
 			string(input.ConnectorInstanceID), session, input.RulesetFingerprint, unixNano(now))
 	case err == nil:
 		if next == 0 {
 			return 0, ErrToolChainIntegrity
 		}
 		_, err = txExecContextObserved(ctx, tx, "guardrail_chain_partition_advance",
-			repo.store.sqliteBusyObservabilityV8(), `UPDATE guardrail_chain_partitions
+			repo.store.sqliteBusyObservabilityV8(), repo.sql(`UPDATE guardrail_chain_partitions
 				SET active_ruleset_fingerprint=?, next_sequence=next_sequence+1,
 					updated_time_unix_nano=?
-				WHERE connector_instance_id=? AND session_value_digest=?`,
+				WHERE connector_instance_id=? AND session_value_digest=?`),
 			input.RulesetFingerprint, unixNano(now), string(input.ConnectorInstanceID), session)
 	}
 	if err != nil {
@@ -679,14 +685,14 @@ func (repo *ToolChainRepository) loadWindow(
 	if sequence >= repo.maxEvents {
 		minSequence = sequence - repo.maxEvents + 1
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT semantic_event_id, sequence,
+	rows, err := tx.QueryContext(ctx, repo.sql(`SELECT semantic_event_id, sequence,
 		received_time_unix_nano, parse_status, detection_step_mask,
 		enforcement_step_mask, enforcement_join_digests,
 		enforcement_output_join_digests, value_join_digests, projection_fingerprint
 		FROM guardrail_chain_events
 		WHERE connector_instance_id=? AND session_value_digest=? AND ruleset_fingerprint=?
 			AND sequence>=? AND sequence<? AND received_time_unix_nano>=?
-		ORDER BY sequence, received_time_unix_nano, semantic_event_id LIMIT ?`,
+		ORDER BY sequence, received_time_unix_nano, semantic_event_id LIMIT ?`),
 		string(input.ConnectorInstanceID), session, input.RulesetFingerprint,
 		minSequence, sequence, unixNano(received.Add(-repo.maxHorizon)), repo.maxEvents-1)
 	if err != nil {
@@ -756,14 +762,14 @@ func (repo *ToolChainRepository) loadReceiptReplay(
 	session string,
 	now time.Time,
 ) (ToolChainObserveResult, bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT receipt_id, final_semantic_event_id,
+	rows, err := tx.QueryContext(ctx, repo.sql(`SELECT receipt_id, final_semantic_event_id,
 		predecessor_semantic_event_id, connector_instance_id, session_value_digest,
 		input_fingerprint, ruleset_fingerprint, chain_fingerprint, chain_id, chain_version,
 		detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask,
 		stable_action_id, expires_time_unix_nano
 		FROM guardrail_chain_deny_receipts
 		WHERE final_semantic_event_id=? AND input_fingerprint=? AND expires_time_unix_nano>=?
-		ORDER BY chain_id`,
+		ORDER BY chain_id`),
 		string(input.SemanticEventID), input.InputFingerprint, unixNano(now))
 	if err != nil {
 		return ToolChainObserveResult{}, false, err
@@ -819,10 +825,10 @@ func (repo *ToolChainRepository) loadReceiptReplay(
 	sort.Strings(ids)
 	for _, id := range ids {
 		if _, err := txExecContextObserved(ctx, tx, "guardrail_chain_receipt_replay",
-			repo.store.sqliteBusyObservabilityV8(), `UPDATE guardrail_chain_deny_receipts
+			repo.store.sqliteBusyObservabilityV8(), repo.sql(`UPDATE guardrail_chain_deny_receipts
 				SET delivery_count=delivery_count+1,
 					last_observed_time_unix_nano=MAX(last_observed_time_unix_nano, ?)
-				WHERE receipt_id=?`, unixNano(now), id); err != nil {
+				WHERE receipt_id=?`), unixNano(now), id); err != nil {
 			return ToolChainObserveResult{}, true, err
 		}
 	}
@@ -856,14 +862,14 @@ func (repo *ToolChainRepository) insertReceipts(
 		id := toolChainReceiptID(
 			stableAction, definition.ID, matches.EnforcementPredecessors[i])
 		_, err = txExecContextObserved(ctx, tx, "guardrail_chain_receipt_insert",
-			repo.store.sqliteBusyObservabilityV8(), `INSERT INTO guardrail_chain_deny_receipts (
+			repo.store.sqliteBusyObservabilityV8(), repo.sql(`INSERT INTO guardrail_chain_deny_receipts (
 				receipt_id, final_semantic_event_id, predecessor_semantic_event_id,
 				connector_instance_id, session_value_digest, input_fingerprint,
 				ruleset_fingerprint, chain_fingerprint, chain_id, chain_version,
 				detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask,
 				stable_action_id, severity, delivery_count, first_observed_time_unix_nano,
 				last_observed_time_unix_nano, expires_time_unix_nano
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'HIGH', 1, ?, ?, ?)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'HIGH', 1, ?, ?, ?)`),
 			id, string(input.SemanticEventID), matches.EnforcementPredecessors[i],
 			string(input.ConnectorInstanceID), session, input.InputFingerprint,
 			input.RulesetFingerprint, chainFP, definition.ID, definition.Version,
@@ -894,22 +900,22 @@ func (repo *ToolChainRepository) prune(
 		op, query string
 		args      []any
 	}{
-		{"guardrail_chain_prune_receipts", `DELETE FROM guardrail_chain_deny_receipts
+		{"guardrail_chain_prune_receipts", repo.sql(`DELETE FROM guardrail_chain_deny_receipts
 			WHERE rowid IN (
 				SELECT rowid FROM guardrail_chain_deny_receipts
 				WHERE expires_time_unix_nano<?
 				ORDER BY expires_time_unix_nano, receipt_id LIMIT 64
-			)`, []any{unixNano(now)}},
-		{"guardrail_chain_prune_events", `DELETE FROM guardrail_chain_events
+			)`), []any{unixNano(now)}},
+		{"guardrail_chain_prune_events", repo.sql(`DELETE FROM guardrail_chain_events
 			WHERE connector_instance_id=? AND session_value_digest=?
-			AND (sequence<? OR received_time_unix_nano<?)`,
+			AND (sequence<? OR received_time_unix_nano<?)`),
 			[]any{string(input.ConnectorInstanceID), session, minSequence,
 				unixNano(received.Add(-repo.maxHorizon))}},
-		{"guardrail_chain_prune_empty", `DELETE FROM guardrail_chain_partitions
+		{"guardrail_chain_prune_empty", repo.sql(`DELETE FROM guardrail_chain_partitions
 			WHERE updated_time_unix_nano<? AND NOT EXISTS (
 				SELECT 1 FROM guardrail_chain_events event
 				WHERE event.connector_instance_id=guardrail_chain_partitions.connector_instance_id
-				AND event.session_value_digest=guardrail_chain_partitions.session_value_digest)`,
+				AND event.session_value_digest=guardrail_chain_partitions.session_value_digest)`),
 			[]any{unixNano(now.Add(-repo.maxHorizon))}},
 	}
 	for _, statement := range statements {
@@ -919,7 +925,7 @@ func (repo *ToolChainRepository) prune(
 		}
 	}
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM guardrail_chain_partitions`).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, repo.sql(`SELECT COUNT(*) FROM guardrail_chain_partitions`)).Scan(&count); err != nil {
 		return err
 	}
 	excess := count - repo.maxPartitions
@@ -927,13 +933,13 @@ func (repo *ToolChainRepository) prune(
 		return nil
 	}
 	_, err := txExecContextObserved(ctx, tx, "guardrail_chain_prune_lru",
-		repo.store.sqliteBusyObservabilityV8(), `DELETE FROM guardrail_chain_partitions
+		repo.store.sqliteBusyObservabilityV8(), repo.sql(`DELETE FROM guardrail_chain_partitions
 		WHERE (connector_instance_id, session_value_digest) IN (
 			SELECT connector_instance_id, session_value_digest
 			FROM guardrail_chain_partitions
 			WHERE NOT (connector_instance_id=? AND session_value_digest=?)
 			ORDER BY updated_time_unix_nano, connector_instance_id, session_value_digest
-			LIMIT ?)`,
+			LIMIT ?)`),
 		string(input.ConnectorInstanceID), session, excess)
 	return err
 }
@@ -1044,8 +1050,8 @@ func (repo *ToolChainRepository) AttachFinalization(
 			defer tx.Rollback() //nolint:errcheck
 			for _, id := range receiptIDs {
 				var currentEvaluation, currentAudit sql.NullString
-				err := tx.QueryRowContext(ctx, `SELECT evaluation_id, audit_event_id
-					FROM guardrail_chain_deny_receipts WHERE receipt_id=?`, id).
+				err := tx.QueryRowContext(ctx, repo.sql(`SELECT evaluation_id, audit_event_id
+					FROM guardrail_chain_deny_receipts WHERE receipt_id=?`), id).
 					Scan(&currentEvaluation, &currentAudit)
 				if errors.Is(err, sql.ErrNoRows) {
 					return ErrToolChainConflict
@@ -1061,10 +1067,10 @@ func (repo *ToolChainRepository) AttachFinalization(
 				}
 				if _, err := txExecContextObserved(ctx, tx,
 					"guardrail_chain_attach_finalization_receipt",
-					repo.store.sqliteBusyObservabilityV8(), `UPDATE guardrail_chain_deny_receipts
+					repo.store.sqliteBusyObservabilityV8(), repo.sql(`UPDATE guardrail_chain_deny_receipts
 						SET evaluation_id=COALESCE(evaluation_id, ?),
 							audit_event_id=COALESCE(audit_event_id, ?)
-						WHERE receipt_id=?`,
+						WHERE receipt_id=?`),
 					nullStr(evaluationID), nullStr(auditEventID), id); err != nil {
 					return err
 				}

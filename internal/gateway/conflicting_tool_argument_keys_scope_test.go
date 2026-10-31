@@ -27,8 +27,10 @@ func TestConflictingToolArgumentKeysScope(t *testing.T) {
 		{"write target keys", actionfacts.Input{Tool: "Write", Args: json.RawMessage(`{"file_path":"/w/a","content":"x","path":"/w/b"}`)}, true, true, 4},
 		{"read target keys", actionfacts.Input{Tool: "Read", Args: json.RawMessage(`{"file_path":"/w/a","path":"/w/b"}`)}, true, false, 4},
 		// The closed shell contract reads the second key as unknown even
-		// when it repeats the value; the call is judged and blocked as well.
-		{"same value twice", actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls","Command":"ls"}`)}, true, true, 2},
+		// when it repeats the value; each spelling is judged, but one value
+		// is one action and takes no conservative finding (GAP-0696).
+		{"same value twice", actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls","Command":"ls"}`)}, true, false, 2},
+		{"alias, same value", actionfacts.Input{Tool: "exec", Args: json.RawMessage(`{"command":"ls","cmd":"ls"}`)}, false, false, 0},
 		{"same value twice, generic tool", actionfacts.Input{Tool: "shell", Args: json.RawMessage(`{"command":"ls","Command":"ls"}`)}, false, false, 0},
 		// Keys ActionFacts reads as one field.
 		{"command alias, generic tool", actionfacts.Input{Tool: "exec", Args: json.RawMessage(`{"command":"ls","cmd":"true"}`)}, true, true, 4},
@@ -71,7 +73,7 @@ func TestConflictingToolArgumentKeysScope(t *testing.T) {
 // argument a connector projection takes out is a conflict, and every
 // candidate is projected before it is judged.
 func TestConflictingToolArgumentKeysReadsArgumentsBeforeProjection(t *testing.T) {
-	raw := json.RawMessage(`{"command":"ls","timeout":5,"Timeout":5}`)
+	raw := json.RawMessage(`{"command":"ls","timeout":5,"Timeout":6}`)
 	project := func(args json.RawMessage) actionfacts.Input {
 		var object map[string]json.RawMessage
 		_ = json.Unmarshal(args, &object)
@@ -88,8 +90,8 @@ func TestConflictingToolArgumentKeysReadsArgumentsBeforeProjection(t *testing.T)
 		t.Fatalf("projected arguments %s alone have no second key", request.Input.Args)
 	}
 	conflict, ok := conflictingToolArgumentKeys(request, facts)
-	if !ok || !conflict.shellOrWrite || len(conflict.candidates) != 2 {
-		t.Fatalf("applies=%t shellOrWrite=%t candidates=%d, want true true 2 (status %s)",
+	if !ok || !conflict.shellOrWrite || len(conflict.candidates) != 4 {
+		t.Fatalf("applies=%t shellOrWrite=%t candidates=%d, want true true 4 (status %s)",
 			ok, conflict.shellOrWrite, len(conflict.candidates), facts.Parse.Status)
 	}
 	for _, candidate := range conflict.candidates {

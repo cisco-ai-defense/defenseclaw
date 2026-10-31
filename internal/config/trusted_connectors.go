@@ -26,7 +26,8 @@ import (
 const TrustedConnectorRouteAgentGateway = "agent-gateway"
 
 // TrustedConnectorsMinProductVersion is the first release that reads
-// enterprise.identity.trusted_connectors and connectors.agent_gateway. A bundle that sets any of them must carry
+// enterprise.identity.trusted_connectors, connectors.agent_gateway and
+// guardrail.chains.root_scope. A bundle that sets any of them must carry
 // at least this min_product_version (bundle sign refuses it otherwise).
 const TrustedConnectorsMinProductVersion = "1.0.6"
 
@@ -184,8 +185,17 @@ type AgentGatewayConnectorConfig struct {
 	InstanceName string `mapstructure:"instance_name" yaml:"instance_name,omitempty"`
 }
 
-// ValidateIdentityChainSettings checks connectors.agent_gateway, which the
-// Secure Client integration does not take.
+// GuardrailChainsConfig is guardrail.chains (issue #1391).
+type GuardrailChainsConfig struct {
+	// RootScope evaluates tool-call chains across the sessions of one
+	// piece of work, keyed on the root_session_id a trusted connector
+	// sends. Off by default; managed only, honoured under the same signed
+	// bundle rule as trusted connectors. No effect on a per-user install.
+	RootScope bool `mapstructure:"root_scope" yaml:"root_scope,omitempty"`
+}
+
+// ValidateIdentityChainSettings checks connectors.agent_gateway and
+// guardrail.chains. The Secure Client integration takes neither.
 func (c *Config) ValidateIdentityChainSettings() error {
 	if c == nil {
 		return nil
@@ -197,6 +207,9 @@ func (c *Config) ValidateIdentityChainSettings() error {
 	if c.SecureClientIntegration() {
 		if c.Connectors.AgentGateway.Enabled || name != "" {
 			return fmt.Errorf("config: connectors.agent_gateway is not supported with the Secure Client integration")
+		}
+		if c.Guardrail.Chains.RootScope {
+			return fmt.Errorf("config: guardrail.chains.root_scope is not supported with the Secure Client integration")
 		}
 	}
 	return nil
@@ -215,6 +228,9 @@ func (c *Config) UsesMinProductVersion106Keys() []string {
 	}
 	if c.Connectors.AgentGateway != (AgentGatewayConnectorConfig{}) {
 		keys = append(keys, "connectors.agent_gateway")
+	}
+	if c.Guardrail.Chains.RootScope {
+		keys = append(keys, "guardrail.chains.root_scope")
 	}
 	return keys
 }

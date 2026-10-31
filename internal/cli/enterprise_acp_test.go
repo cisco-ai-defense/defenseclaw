@@ -235,13 +235,13 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	// entry points at this data directory's token copy and lock.
 	doneLock := acpContractLockPath(userData, "zed", "kiro")
 	editorFile := filepath.Join(userHome, ".config", "zed", "settings.json")
-	guardPath := filepath.Join(userHome, "defenseclaw-acp")
+	agentBinary, agentSHA, guardPath, guardSHA := testACPExecutables(t, userHome)
 	if err := os.MkdirAll(filepath.Dir(editorFile), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	entry, _ := json.Marshal(map[string]any{"agent_servers": map[string]any{
 		acpManagedEntryName("kiro"): map[string]any{"command": guardPath,
-			"args": []string{"--token-file", tokenPath, "--contract-lock", doneLock}},
+			"args": []string{"--token-file", tokenPath, "--contract-lock", doneLock, "--", agentBinary, "acp"}},
 	}})
 	if err := os.WriteFile(editorFile, entry, 0o600); err != nil {
 		t.Fatal(err)
@@ -256,7 +256,8 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		t.Helper()
 		lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile,
 			"config_sha256": acp.EntryDigestPrefix + entryDigest},
-			"guard": map[string]any{"path": guardPath}, "profile": profile, "mode": mode})
+			"agent": map[string]any{"id": "kiro", "path": agentBinary, "sha256": agentSHA},
+			"guard": map[string]any{"path": guardPath, "sha256": guardSHA}, "profile": profile, "mode": mode})
 		if err := os.WriteFile(doneLock, lock, 0o600); err != nil {
 			t.Fatal(err)
 		}

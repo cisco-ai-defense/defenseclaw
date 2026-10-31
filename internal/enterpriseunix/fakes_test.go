@@ -61,7 +61,9 @@ type fakeServices struct {
 	restarting map[string]string
 	// activating units are running a oneshot start (systemd "activating").
 	activating map[string]bool
-	reloads    int
+	// pids are the main process ids Status reports for active units.
+	pids    map[string]int
+	reloads int
 	// failReloadOnce makes the next Reload fail (a failure before the services start).
 	failReloadOnce bool
 	inner          ServiceManager // definition paths and unit list
@@ -247,8 +249,12 @@ func (f *fakeServices) Status(_ context.Context, u Unit) (enterprisestatus.Servi
 	if f.activating[u.Name] {
 		state = "activating/start"
 	}
+	pid := 0
+	if f.active[u.Name] {
+		pid = f.pids[u.Name]
+	}
 	f.mu.Unlock()
-	return enterprisestatus.Service{Name: u.Name, Kind: u.Kind, State: state, Required: u.Required}, nil
+	return enterprisestatus.Service{Name: u.Name, Kind: u.Kind, State: state, PID: pid, Required: u.Required}, nil
 }
 
 func (f *fakeServices) PlannedRestart(_ context.Context, u Unit) bool {

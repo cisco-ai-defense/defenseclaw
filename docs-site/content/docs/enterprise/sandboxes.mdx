@@ -601,7 +601,7 @@ The `Organization profile` row is the guardrail profile your administrator assig
 
 ![defenseclaw sandbox policy explain for an engineering user: the plain-words summary, then the pack balanced and its digest and a table of settings with VALUE, SOURCE and ORIGIN](/images/sandboxes/managed/policy-explain.png)
 
-`defenseclaw sandbox doctor` checks the person's own account and reports what their sandbox service got from the managed gateway: the OpenShell release, driver, install mode and gateway port, whether sandboxes are available and why not, their profile, and their images and hooks. Every fix it prints is one the person can apply or a pointer to the IT help desk. On Linux a person in the `docker` group also gets a **Docker access** warning, because the group is administrator-equivalent on the computer.
+`defenseclaw sandbox doctor` checks the person's own account and reports what their sandbox service got from the managed gateway: the OpenShell release, driver, install mode and gateway port, whether sandboxes are available and why not, their profile, and their images and hooks. Every fix it prints is one the person can apply or a pointer to the IT help desk. On Linux a person in the `docker` group also gets a **Docker access** warning, because the group is administrator-equivalent on the computer. When the organization requires one of their agents to run only in a sandbox, the warning also says that Docker access lets them run that agent outside the sandbox policy.
 
 `sandbox policy test` judges your own sandbox policy on a managed computer. Without `--sandbox` it tests the policy a new run in this folder would get; add `--harness` for another agent. Leave out `--pack` and `--profile`, because the organization decides them:
 
@@ -709,7 +709,7 @@ These codes appear in the warnings and failed rows an administrator sees, in tex
 | `openshell_driver_fallback` | A MicroVM prerequisite is missing but the Docker fallback is ready, so people still get sandboxes | Fix the prerequisite if you want MicroVMs, or set `driver: docker` |
 | `openshell_launcher_conflict` | The launcher path holds a file that is not DefenseClaw's link, a Python install for example | Move that file aside, then run `ensure` |
 | `sandbox_user_groups` | People who need `docker` or `kvm` are not in it. `ensure` never adds anyone | Add them |
-| `docker_group_members` | How many enrolled accounts are in the `docker` group (Linux), which is root-equivalent. A number, never names | Keep the group to the accounts that run sandboxes |
+| `docker_group_members` | How many enrolled accounts are in the `docker` group (Linux), which is root-equivalent. A number, never names. With `required_for` set, it also says a member can run a required agent outside its sandbox policy | Keep the group to the accounts that run sandboxes |
 | `sandbox_pending_restart` | A user's daemon is outdated, or (macOS) a LaunchAgent reload waits for that user's sandboxes to stop | A daemon restart needs no administrator action: the user's next idle `defenseclaw sandbox` command restarts it. If a macOS reload fails, the start names `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair` |
 | `sandbox_user_state` | A per-user change could not be applied or removed (units, a file that changed after DefenseClaw wrote it, a teardown) | Read the message; the next run tries again |
 | `sandbox_default_profile_looser` | `default_profile` is looser than an assigned profile for a field | Make `default_profile` repeat the stricter setting |

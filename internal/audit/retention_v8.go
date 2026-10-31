@@ -878,24 +878,42 @@ func (reaper *RetentionReaper) drainCorrelationState(
 	now time.Time,
 	result *RetentionRunResult,
 ) error {
-	stages := [...]struct {
+	type correlationStage struct {
 		class RetentionTableClass
 		args  []any
-	}{
-		{RetentionGuardrailChainReceipts, []any{unixNano(now)}},
+		// root runs the stage on the root-scope chain tables (issue #1391),
+		// counted under the session class.
+		root bool
+	}
+	chainStages := []correlationStage{
+		{RetentionGuardrailChainReceipts, []any{unixNano(now)}, false},
 		{RetentionGuardrailChainEvents, []any{
 			unixNano(now.Add(-guardrail.ToolChainMaxHorizon)),
 			guardrail.ToolChainMaxEvents, guardrail.ToolChainMaxEvents,
-		}},
+		}, false},
 		{RetentionGuardrailChainPartitions, []any{
 			unixNano(now.Add(-guardrail.ToolChainMaxHorizon)),
-		}},
-		{RetentionCorrelationReceipts, []any{unixNano(now)}},
-		{RetentionCorrelationCursors, []any{unixNano(cutoff)}},
-		{RetentionCorrelationPending, []any{unixNano(cutoff)}},
-		{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}},
-		{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}},
+		}, false},
 	}
+	stages := append([]correlationStage(nil), chainStages...)
+	root, err := toolChainRootTablesExist(reaper.store.db)
+	if err != nil {
+		return err
+	}
+	if root {
+		// The root set has the same bounds as the session set, kept apart.
+		for _, stage := range chainStages {
+			stage.root = true
+			stages = append(stages, stage)
+		}
+	}
+	stages = append(stages,
+		correlationStage{RetentionCorrelationReceipts, []any{unixNano(now)}, false},
+		correlationStage{RetentionCorrelationCursors, []any{unixNano(cutoff)}, false},
+		correlationStage{RetentionCorrelationPending, []any{unixNano(cutoff)}, false},
+		correlationStage{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}, false},
+		correlationStage{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}, false},
+	)
 	deadline := reaper.hooks.now().Add(reaper.correlationBudget())
 	// A batch gives the connection back to the hooks waiting for it during
 	// the first half of the budget, and runs to its end in the second half:
@@ -916,7 +934,7 @@ func (reaper *RetentionReaper) drainCorrelationState(
 				result.Backlog = true
 				return nil
 			}
-			deleted, err := reaper.deleteCorrelationBatch(ctx, stage.class, reaper.yieldsToHooks(yieldUntil), stage.args...)
+			deleted, err := reaper.deleteCorrelationBatch(ctx, stage.class, stage.root, reaper.yieldsToHooks(yieldUntil), stage.args...)
 			for errors.Is(err, errRetentionYielded) {
 				// The batch was rolled back, nothing was deleted: let the
 				// waiting hooks run, then take it again with the pages it
@@ -928,7 +946,7 @@ func (reaper *RetentionReaper) drainCorrelationState(
 					result.Backlog = true
 					return nil
 				}
-				deleted, err = reaper.deleteCorrelationBatch(ctx, stage.class, reaper.yieldsToHooks(yieldUntil), stage.args...)
+				deleted, err = reaper.deleteCorrelationBatch(ctx, stage.class, stage.root, reaper.yieldsToHooks(yieldUntil), stage.args...)
 			}
 			if err != nil {
 				return err
@@ -969,12 +987,19 @@ func (reaper *RetentionReaper) yieldsToHooks(until time.Time) bool {
 func (reaper *RetentionReaper) deleteCorrelationBatch(
 	ctx context.Context,
 	class RetentionTableClass,
+	root bool,
 	yieldToHooks bool,
 	args ...any,
 ) (int64, error) {
 	statement, err := correlationRetentionDeleteStatement(class)
 	if err != nil {
 		return 0, err
+	}
+	if root {
+		statement, err = toolChainRootRetentionStatement(class, statement)
+		if err != nil {
+			return 0, err
+		}
 	}
 	args = append(args, reaper.batchSize())
 	if err := reaper.store.awaitWALHeadroom(ctx); err != nil {
@@ -1032,6 +1057,17 @@ func (reaper *RetentionReaper) deleteCorrelationBatch(
 		return nil
 	})
 	return deleted, err
+}
+
+// toolChainRootRetentionStatement is a chain class's statement on the
+// root-scope tables (tool_chain_root.go).
+func toolChainRootRetentionStatement(class RetentionTableClass, statement string) (string, error) {
+	switch class {
+	case RetentionGuardrailChainReceipts, RetentionGuardrailChainEvents, RetentionGuardrailChainPartitions:
+		return toolChainRootTables.rewrite.Replace(statement), nil
+	default:
+		return "", errors.New("retention registry contains an unsupported root chain class")
+	}
 }
 
 func correlationRetentionDeleteStatement(class RetentionTableClass) (string, error) {

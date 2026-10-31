@@ -3261,7 +3261,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except asyncio.CancelledError:
             return
         except Exception as exc:  # noqa: BLE001 - a panel must degrade, never WorkerFailed.
-            if generation == self._panel_render_generation and panel == self.active_panel:
+            if (
+                generation == self._panel_render_generation
+                and panel == self.active_panel
+                and not self._refresh_error_is_teardown(exc)
+            ):
                 self._set_status(f"{panel.title()} refresh deferred after transient error: {exc}")
         finally:
             self._panel_render_running.discard(panel)
@@ -15012,6 +15016,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         self._panel_render_workers["__signals__"] = worker
 
+    def _refresh_error_is_teardown(self, exc: BaseException) -> bool:
+        """True when a background refresh failed because the screen is going away.
+
+        The app sets ``_app_shutting_down`` in ``on_unmount``, after its
+        widgets are already gone, so a refresh that finishes in between hits
+        ``NoMatches`` ("No nodes match '#hint'"). That is not a transient data
+        error and must not replace the status line (the sandbox panel test
+        saw it overwrite a command result).
+        """
+
+        return getattr(self, "_app_shutting_down", False) or isinstance(exc, NoMatches)
+
     async def _run_signal_data_refresh(
         self,
         detached: DefenseClawTUI,
@@ -15023,7 +15039,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except asyncio.CancelledError:
             return
         except Exception as exc:  # noqa: BLE001 - cached data remains visible.
-            if not getattr(self, "_app_shutting_down", False):
+            if not self._refresh_error_is_teardown(exc):
                 self._set_status(f"Signal refresh deferred after transient error: {exc}")
         finally:
             self._signal_refresh_running = False
@@ -15164,7 +15180,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except asyncio.CancelledError:
             return
         except Exception as exc:  # noqa: BLE001 - cached Overview data remains visible.
-            if not getattr(self, "_app_shutting_down", False):
+            if not self._refresh_error_is_teardown(exc):
                 self._set_status(f"Overview refresh deferred after transient error: {exc}")
         finally:
             self._overview_disk_refresh_running = False
