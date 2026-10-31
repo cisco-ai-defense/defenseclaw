@@ -1170,12 +1170,22 @@ func readersBesides(file *syntax.File, home string, skip map[*syntax.CallExpr]bo
 			static := make([]bool, len(n.Args))
 			for i, arg := range n.Args {
 				words[i], static[i] = staticShellWord(arg, env, home != "")
-				if !static[i] {
-					safe = false
-					return false
-				}
+			}
+			if !static[0] {
+				safe = false
+				return false
 			}
 			program := programBase(words[0])
+			if slices.Contains(cdPrograms, program) || program == "dirs" {
+				// A directory change writes nothing, whatever it names (a
+				// tilde word of an unknown user is not static).
+				safe = len(words) <= 3
+				return false
+			}
+			if slices.Contains(static, false) {
+				safe = false
+				return false
+			}
 			if strings.Contains(words[0], "/") && !slices.Contains(readerDirectories, filepath.Dir(words[0])) {
 				safe = false
 				return false
@@ -1187,8 +1197,6 @@ func readersBesides(file *syntax.File, home string, skip map[*syntax.CallExpr]bo
 						safe = false
 					}
 				}
-			case slices.Contains(cdPrograms, program) || program == "dirs":
-				safe = len(words) <= 3
 			case literalShellBody(program, words, static) != "":
 				inner, parsed := parseShell(literalShellBody(program, words, static))
 				safe = parsed && readersBesides(inner, home, nil, depth+1)

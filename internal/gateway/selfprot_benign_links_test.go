@@ -202,7 +202,7 @@ func TestSelfProtLinkNameBesideReaders(t *testing.T) {
 		{"R03", `ln -s ordinary od; bash -c "cd od && cat o.txt"`, "allow"},
 		{"R05", `du -sh ~/.ssh/`, "allow"},
 		{"R06", `readlink -f ~/.ssh`, "allow"},
-		{"R17", `ln -s ordinary od; bash -c "cd ~nosuchuser9 && ls"`, "allow"},
+		{"R17", `ln -s /usr/lib lib; bash -c "cd ~nosuchuser9 && ls"`, "allow"},
 		{"R18", `du -sh ~/.*/`, "allow"},
 		{"R19", `ln -s /usr/lib lib; ls ~nosuchuser9; bash -c "cd lib && ls"`, "block"},
 		{"R07", `ln -s / r; bash -c "cd r && touch x"`, "block"},
