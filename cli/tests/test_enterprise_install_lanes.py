@@ -198,6 +198,7 @@ def test_postinstall_failure_contract_runs_in_ci() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Linux preremove requires a POSIX shell")
 def test_preremove_resets_failed_user_units_runs_in_ci() -> None:
     """GAP-0137: the package removal leaves each account's sandbox user units
     inactive, not failed, after an uninstall made the daemon exit 78."""
