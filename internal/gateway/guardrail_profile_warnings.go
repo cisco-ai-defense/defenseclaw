@@ -845,6 +845,20 @@ func unmatchedUserEntries(ctx context.Context, assignments []config.ProfileAssig
 	return warnings
 }
 
+// ProfileUserEntryWarnings names the users entries of assignments that do
+// not select the account this host resolves them to, with the spelling that
+// does (unmatchedUserEntries): a bare name of a local account, which a bare
+// name never selects (GAP-0305), and a DOMAIN\user whose domain the host does
+// not confirm. The running gateway reports the same sentences to status and
+// verify (profile_assignment_unmatched); `config validate` reports them for a
+// candidate before it is applied (GAP-0197). The lookups are the host's
+// account database, bounded like the gateway's background check.
+func ProfileUserEntryWarnings(ctx context.Context, assignments []config.ProfileAssignment) []string {
+	ctx, cancel := context.WithTimeout(ctx, profileGroupCheckBudget)
+	defer cancel()
+	return unmatchedUserEntries(ctx, assignments, profileUserEntryUnmatched())
+}
+
 // userEntryNeedsAccountCheck reports a users entry that names an account by
 // name: a bare name or DOMAIN\user. A uid, a SID, a principal or UPN (the
 // spool check covers those) and .\user (a local account by definition) are

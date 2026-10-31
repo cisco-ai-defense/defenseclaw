@@ -11,6 +11,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -118,6 +119,7 @@ var configValidateCmd = &cobra.Command{
 		warnings := append(gateway.ConfigHILTWarnings(loaded.runtime), loaded.runtime.SandboxDefaultProfileWarnings()...)
 		warnings = append(warnings, configV8InstalledAdvisories(loaded)...)
 		warnings = append(warnings, configValidateManagedStandaloneWarnings(loaded)...)
+		warnings = append(warnings, configValidateUserEntryWarnings(cmd.Context(), loaded.runtime.Guardrail.ProfileAssignments)...)
 		if configValidateJSON {
 			valid := true
 			encoder := json.NewEncoder(out)
@@ -135,6 +137,20 @@ var configValidateCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// configValidateUserEntryWarnings names the guardrail.profile_assignments
+// users entries that select nobody on this computer, as status and verify
+// name them once the gateway runs the file (GAP-0197). A seam for tests.
+var configValidateUserEntryWarnings = func(ctx context.Context, assignments []config.ProfileAssignment) []string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var warnings []string
+	for _, warning := range gateway.ProfileUserEntryWarnings(ctx, assignments) {
+		warnings = append(warnings, warning+" (profile_assignment_unmatched)")
+	}
+	return warnings
 }
 
 // configValidateLayout is this computer's standalone layout. A seam for
