@@ -971,6 +971,7 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 			// action itself, and records a refused anchor install (GAP-0608).
 			appendValue("--bundle", opts.Bundle)
 			appendValue("--trust-anchors", opts.TrustAnchors)
+			appendValue("--device-group", opts.DeviceGroup)
 			if opts.RefuseCapabilityLoss {
 				arguments = append(arguments, "--refuse-capability-loss")
 			}

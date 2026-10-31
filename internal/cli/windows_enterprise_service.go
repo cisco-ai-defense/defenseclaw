@@ -141,6 +141,11 @@ type windowsEnterpriseLifecycleOptions struct {
 	bundlePath           string
 	trustAnchors         string
 	refuseCapabilityLoss bool
+	// deviceGroup pins the trust anchors --trust-anchors installs to the
+	// one device group this computer is in (--device-group, Setup
+	// DEVICEGROUP=), as `enterprise bundle anchors install --device-group`
+	// does on Linux and macOS (rel-1-0-6:GAP-0036).
+	deviceGroup string
 	// deferRestart refuses a bundle whose config change restarts the
 	// gateway (enterprise bundle apply --defer-restart).
 	deferRestart bool
@@ -379,8 +384,10 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 		flags.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")
 		flags.StringVar(&opts.trustAnchors, "trust-anchors", "",
 			"standalone: install this administrator-only bundle trust anchor file (bundle-anchors.json) first")
+		flags.StringVar(&opts.deviceGroup, "device-group", "",
+			"standalone, with --trust-anchors: pin the installed anchors to this device group (one of the groups the file lists)")
 		if action != "ensure" {
-			for _, name := range []string{"bundle", "refuse-capability-loss", "trust-anchors"} {
+			for _, name := range []string{"bundle", "refuse-capability-loss", "trust-anchors", "device-group"} {
 				_ = flags.MarkHidden(name)
 			}
 		}
