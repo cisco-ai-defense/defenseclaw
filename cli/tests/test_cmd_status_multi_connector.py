@@ -200,6 +200,7 @@ def _render_live(cfg, health: dict) -> str:
 def test_refused_scoped_hook_credential_degrades_only_its_connector(tmp_path):
     # GAP-0821: the gateway rejects a well-formed Claude token at POSIX 0640
     # (or untrusted Windows custody), even while /status says running.
+    from defenseclaw import hook_integrity
     from defenseclaw.commands import cmd_doctor
 
     hooks = tmp_path / "hooks"
@@ -223,6 +224,10 @@ def test_refused_scoped_hook_credential_degrades_only_its_connector(tmp_path):
     with (
         patch.object(cmd_doctor, "_trusted_gateway_listener", return_value=trust),
         patch.object(cmd_doctor, "_http_probe", side_effect=gateway_verdict) as probe,
+        # The hook credential is under test. On Windows status also asks Doctor's
+        # native registration check (rel-1-0-2 GAP-0645), which has its own tests;
+        # this fixture has no ~/.claude/settings.json, so it reads healthy here.
+        patch.object(hook_integrity, "_windows_native_problem", return_value=None),
     ):
         if os.name != "nt":
             token.chmod(0o640)
