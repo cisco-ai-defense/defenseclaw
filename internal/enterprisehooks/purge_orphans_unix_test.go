@@ -31,9 +31,9 @@ func TestPurgeUserStateRemovesOrphansOfAnEarlierFailedInstall(t *testing.T) {
 	home := newTestHome(t)
 	dataDir := filepath.Join(home, ".defenseclaw")
 	for name, content := range map[string]string{
-		"hooks/claude-code-hook.sh":              "#!/bin/sh\n",
-		".hook-claudecode.token":                 "tok\n",
-		".hookcfg-claudecode.json":               "{}\n",
+		"hooks/claude-code-hook.sh":                      "#!/bin/sh\n",
+		".hook-claudecode.token":                         "tok\n",
+		".hookcfg-claudecode.json":                       "{}\n",
 		"connector_backups/claudecode/settings.json.bak": "{}\n",
 	} {
 		writePurgeTestFile(t, filepath.Join(dataDir, name), content)
