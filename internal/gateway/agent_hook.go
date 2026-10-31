@@ -626,7 +626,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			defer cancelClose()
 			audit.CloseCallWrites(closeCtx)
 		}()
-		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, b)
+		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(
+			a.hookCorrelationBoundContext(ctx, connectorName, req.HookEventName, r), profile, req, b)
 		if correlationErr != nil {
 			// Correlation persistence is fail-closed for the cross-call join IDs,
 			// not for policy enforcement or export. The hook must still be
