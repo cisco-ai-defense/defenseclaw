@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/netip"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -2007,6 +2008,9 @@ func exactPathIdentity(candidate actionfacts.PathFact) (string, bool) {
 		if !strings.HasPrefix(resolved, "/") {
 			return "", false
 		}
+		if drive, ok := gitBashDriveIdentity(resolved); ok {
+			return "windows\x00" + drive, true
+		}
 		return "posix\x00" + resolved, true
 	case actionfacts.PathFlavorWindows:
 		resolved = strings.ToLower(strings.ReplaceAll(resolved, `\`, "/"))
@@ -2017,6 +2021,32 @@ func exactPathIdentity(candidate actionfacts.PathFact) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// toolChainDriveMounts is set on Windows, where Git Bash names drive C: as
+// /c (or /C): there a POSIX path under a one-letter mount is the drive path.
+var toolChainDriveMounts = runtime.GOOS == "windows"
+
+// gitBashDriveIdentity is the Windows identity (drive letter and path, lower
+// case, forward slashes) of a Git Bash drive-mount path such as
+// /c/Users/u/page.txt on a Windows host, so a tool chain joins the same file
+// spelled /c/..., /C/... or C:\... as one path (rel-1-0-6:GAP-0173). Windows
+// file names are case-insensitive, as for PathFlavorWindows. ok is false off
+// Windows and for any other POSIX path.
+func gitBashDriveIdentity(resolved string) (string, bool) {
+	if !toolChainDriveMounts || len(resolved) < 2 || resolved[0] != '/' {
+		return "", false
+	}
+	letter := resolved[1]
+	if (letter < 'a' || letter > 'z') && (letter < 'A' || letter > 'Z') ||
+		len(resolved) > 2 && resolved[2] != '/' {
+		return "", false
+	}
+	rest := ""
+	if len(resolved) > 3 {
+		rest = resolved[3:]
+	}
+	return strings.ToLower(string(letter) + ":/" + rest), true
 }
 
 func sudoChainRoles(facts actionfacts.Facts) (discovery, elevation bool) {
