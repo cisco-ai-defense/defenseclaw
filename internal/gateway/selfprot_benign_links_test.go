@@ -234,3 +234,19 @@ func TestSelfProtMoveIntoRealDirectory(t *testing.T) {
 		}
 	}
 }
+
+// find that only lists the SSH folder reads, as ls does; a find that
+// deletes, runs a program or writes a file there still blocks
+// (rel-1-0-6:GAP-0119).
+func TestSelfProtFindListingOfTheSSHFolderReads(t *testing.T) {
+	checkSelfProtRows(t, []selfProtRow{
+		{"F1", `find ~/.ssh -maxdepth 1 -type f`, "allow"},
+		{"F2", `find ~/.ssh -name "*.pub"`, "allow"},
+		{"F3", `find ~/.ssh/ -maxdepth 1 -type f -newer ~/.ssh/authorized_keys -print`, "allow"},
+		{"F4", `find ~/.ssh -name authorized_keys -delete`, "block"},
+		{"F5", `find ~/.ssh -type f -fprint ~/.ssh/authorized_keys`, "block"},
+		{"F6", `find ~/.ssh -maxdepth 1 -type f > ~/.ssh/authorized_keys`, "block"},
+		{"F7", `find ~/.ssh -name authorized_keys -exec rm {} \;`, "block"},
+		{"F8", `find ~/.ssh -maxdepth 1 -type f -fls ~/.ssh/authorized_keys`, "block"},
+	}, "claudecode", "codex")
+}

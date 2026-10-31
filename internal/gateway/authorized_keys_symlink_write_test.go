@@ -435,7 +435,10 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		{"gawk inplace output", "gawk -i inplace '{print}' " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"uniq second operand output", "uniq input.txt " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"unknown output option", "fixture-tool --output=" + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
-		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		// A find that only lists reads, as ls does; its -name operand is
+		// data (rel-1-0-6:GAP-0119). A find that deletes still blocks.
+		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
+		{"find delete by name", "find " + filepath.Join(home, ".ssh") + " -name authorized_keys -delete", project, true},
 		// uniq with one operand prints it, a plain read like cat (owner
 		// decision 2, GAP-2168; GAP-2590); its second operand is the write.
 		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
