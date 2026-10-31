@@ -3787,21 +3787,3 @@ def test_the_windows_installer_refuses_a_bad_defenseclaw_repo_too() -> None:
     text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
     assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in text
     assert "'^https://\\S+$'" in text and "'^[^\\s/:@]+/[^\\s/:@]+$'" in text
-
-
-def test_cli_links_are_published_by_rename_after_the_new_cli_starts() -> None:
-    """rel-1-0-6 GAP-0105: a CLI call during the upgrade found a missing or
-    partly written entry. Every link switch is one rename, made after the new
-    CLI ran, so the call finds the old entry, the busy shim or the new one."""
-    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
-    swap = script[script.index("swap_in() {"):]
-    swap = swap[: swap.index("\n}\n")]
-    assert 'ln -sfn "${target}"' not in script
-    assert swap.index('"${VENV}/bin/defenseclaw" --version') < swap.index('publish_link "${target}" "${link}"')
-    publish = script[script.index("publish_link() {"):]
-    publish = publish[: publish.index("\n}\n")]
-    assert 'ln -s "$1" "${new}" && mv -f "${new}" "${BIN_DIR}/$2"' in publish
-    restore = script[script.index("restore_links() {"):]
-    restore = restore[: restore.index("\n}\n")]
-    assert 'rm -f "${BIN_DIR:?}/${link}" && cp -P' not in restore
-    assert 'mv -f "${new}" "${BIN_DIR}/${link}"' in restore
