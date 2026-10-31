@@ -286,6 +286,11 @@ file with `curl` or `wget` and then runs that same file within eight calls and
   works with or without the LLM judge. DefenseClaw keeps only the host names
   from those prompts, in memory, for at most 30 minutes. A prompt can only
   silence this alert; it never allows a call.
+- **Codex.** A Codex shell download does not start this chain. Codex
+  reports a shell result as plain text with no exit status, so DefenseClaw
+  cannot prove that the download succeeded, and a chain step counts only
+  once its call is proved to have succeeded. Claude Code reports the
+  outcome, so the same download then run alerts there.
 
 “Enforcement-capable” means the chain can set the enforcement-safe result bit;
 the connector must still be synchronous and block-capable, the same-rule proof
