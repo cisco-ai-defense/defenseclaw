@@ -135,6 +135,24 @@ func nativeHookExecutable() string {
 // uninstall removes that policy before retiring the binary and requires
 // already-running clients to reload.
 func NativeHookRuntimeNoop() bool {
+	if len(os.Args) > 1 && os.Args[1] == "hook" &&
+		(hookArgsContainEnterpriseManaged(os.Args[1:]) || implicitEnterpriseManagedHook()) {
+		// A managed hook call resolves its runtime in the hook command, after
+		// it armed the answer watchdog (prepareEnterpriseManagedHookRuntime
+		// there). The resolution reads machine policy, the account's runtime
+		// generation and their ACLs; resolved here, before the watchdog, a
+		// host that a Claude attestation repair saturated held registered
+		// calls 5.2 to 5.8 s, past the five seconds the agent waits
+		// (rel-1-0-4 GAP-0872). Every outcome of the deferred resolution is
+		// the same: an absent runtime ends the call with no answer, any other
+		// failure closes it. The per-user stable runtime reads below (the
+		// LocalAppData known folder, the runtime folder's ACLs) answer
+		// nothing for a managed call either, so they are not run before its
+		// watchdog: a Setup /repair that held them kept a managed call 5.2 s
+		// (rel-1-0-3 GAP-0159). The snapshot stays unprepared, so a later
+		// reader does its own trusted read.
+		return false
+	}
 	executable := nativeHookExecutable()
 	state, recognized, err := nativeDelegatedHookRuntimeReader(executable)
 	if !recognized {
@@ -147,19 +165,6 @@ func NativeHookRuntimeNoop() bool {
 	nativeHookRuntimeSnapshot.recognized = recognized
 	nativeHookRuntimeSnapshot.err = err
 	nativeHookRuntimeSnapshot.Unlock()
-	if len(os.Args) > 1 && os.Args[1] == "hook" &&
-		(hookArgsContainEnterpriseManaged(os.Args[1:]) || implicitEnterpriseManagedHook()) {
-		// A managed hook call resolves its runtime in the hook command, after
-		// it armed the answer watchdog (prepareEnterpriseManagedHookRuntime
-		// there). The resolution reads machine policy, the account's runtime
-		// generation and their ACLs; resolved here, before the watchdog, a
-		// host that a Claude attestation repair saturated held registered
-		// calls 5.2 to 5.8 s, past the five seconds the agent waits
-		// (rel-1-0-4 GAP-0872). Every outcome of the deferred resolution is
-		// the same: an absent runtime ends the call with no answer, any other
-		// failure closes it.
-		return false
-	}
 	if !recognized {
 		return false
 	}
