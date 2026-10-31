@@ -5,9 +5,18 @@ package gateway
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
+
+// withoutStatementBudget drops the statement-budget finding, for a test of
+// another reader on a call that is also over the budget.
+func withoutStatementBudget(findings []RuleFinding) []RuleFinding {
+	return slices.DeleteFunc(slices.Clone(findings), func(f RuleFinding) bool {
+		return f.RuleID == "ACTION-COMPOUND-LIMIT"
+	})
+}
 
 // gap0146Statements is n statements of a benign form joined into one line.
 func gap0146Statements(form string, n int) string {
