@@ -244,7 +244,7 @@ Every other bug that 1.0.4 listed here is fixed in 1.0.5; the release notes list
 ### Fail mode and outages
 
 - **OpenCode and Amp keep their start-up state:** a session started while the gateway was down keeps blocking after the gateway is back, and a running OpenCode session keeps the outage mode it loaded with. Restart OpenCode or Amp after the gateway is healthy and after you change the fail mode or policy.
-- **Outage warnings:** Copilot CLI, Hermes and OpenCode show no DefenseClaw warning in the chat when a call runs during an outage. Codex and Claude Code show it once per hook event, so one command can show it two or three times. Check `defenseclaw status`; each unchecked call is in `~/.defenseclaw/logs/hook-failures.jsonl`.
+- **Outage warnings:** Hermes shows no DefenseClaw warning in the chat when a call runs during an outage. Copilot CLI shows it once per session under the first tool call's output (expand the tool output to read it), and OpenCode V2 adds it to the tool call's result. Codex and Claude Code show it once per hook event, so one command can show it two or three times. Check `defenseclaw status`; each unchecked call is in `~/.defenseclaw/logs/hook-failures.jsonl`.
 
 ### Agents and hooks
 
