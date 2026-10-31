@@ -89,6 +89,39 @@ func TestWindowsEnterpriseEnumeratorFailureTextUnwrapsTheCause(t *testing.T) {
 	}
 }
 
+// GAP-0314: every rule-pack setting the gateway service account cannot read
+// is rule_pack_unreadable, whichever check refused it: the config check
+// refuses a guardrail.custom_packs path that no setting selects, and the
+// folder-above-the-pack form too. A pack a standard user can write and a
+// policy_dir keep their own codes.
+func TestWindowsEnterpriseRulePackUnreadableCoversEveryRulePackSetting(t *testing.T) {
+	const account = `NT SERVICE\DefenseClawGateway`
+	unselected := `invalid_arguments: config: managed standalone guardrail.custom_packs.acme.path C:\packs\acme: the gateway service account ` +
+		account + ` cannot read C:\packs\acme; grant it Read & execute on the folder and let everything in it inherit that; fix it and run again (nothing was changed)`
+	parent := `invalid_arguments: config: managed standalone guardrail.custom_packs.acme.path C:\packs\acme: the gateway service account ` +
+		account + ` cannot list or read the permissions of the parent folder C:\packs; grant it Read & execute on that folder`
+	for message, want := range map[string]bool{
+		unselected: true,
+		parent:     true,
+		strings.Replace(unselected, "guardrail.custom_packs.acme.path", "guardrail.connectors.codex.rule_pack", 1): true,
+		standaloneRulePackUnreadableText + ` that C:\cfg.yaml names: guardrail.rule_pack C:\packs\strict`:          true,
+		strings.Replace(unselected, "guardrail.custom_packs.acme.path", "policy_dir", 1):                           false,
+		`invalid_arguments: config: managed standalone guardrail.custom_packs.acme.path is not administrator-controlled: ` +
+			`BUILTIN\Users (S-1-5-32-545) can write to C:\packs\acme`: false,
+		`invalid_arguments: the config does not compile`: false,
+	} {
+		if got := windowsEnterpriseRulePackUnreadable(message); got != want {
+			t.Errorf("windowsEnterpriseRulePackUnreadable(%q) = %t, want %t", message, got, want)
+		}
+	}
+	enumerator := `synchronous target enumeration failed with exit 1603: [hook-enumerator] windows: interval=5m0s ` +
+		`Error: enterprise windows enumerate: load config: config: managed standalone guardrail.custom_packs.acme.path C:\packs\acme: ` +
+		`the gateway service account ` + account + ` cannot list or read the permissions of the parent folder C:\packs; grant it Read & execute on that folder`
+	if _, code, ok := windowsEnterpriseEnumeratorFailureText(enumerator); !ok || code != "rule_pack_unreadable" {
+		t.Fatalf("enumerator parent folder: ok=%t code=%q", ok, code)
+	}
+}
+
 // GAP-1419: a refused managed runtime bundle names the file and the reason
 // and gives a next step; other errors get nothing added.
 func TestWindowsEnterpriseInvalidRuntimeBundleNextStep(t *testing.T) {

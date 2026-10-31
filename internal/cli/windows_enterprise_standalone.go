@@ -3153,8 +3153,9 @@ func writeWindowsEnterpriseStandaloneRefusal(
 	if invalid {
 		code = "invalid_arguments"
 		// A rule pack the gateway service cannot read has its own code,
-		// as the enumerator's report has; the exit stays 1639 (GAP-0314).
-		if strings.Contains(cause.Error(), standaloneRulePackUnreadableText) {
+		// as the enumerator's report has, whichever check found it; the
+		// exit stays 1639 (GAP-0314).
+		if windowsEnterpriseRulePackUnreadable(cause.Error()) {
 			code = "rule_pack_unreadable"
 		}
 	} else {
