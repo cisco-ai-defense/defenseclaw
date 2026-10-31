@@ -317,6 +317,15 @@ def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value
     ctx.exit()
 
 
+def _warn_failed_deferred_uninstall() -> None:
+    """Name a Windows uninstall whose deferred removal failed (p0 GAP-1095)."""
+    from defenseclaw.uninstall_result import failed_deferred_uninstall, failed_deferred_uninstall_message
+
+    found = failed_deferred_uninstall()
+    if found:
+        ux.echo(f"  ⚠ {failed_deferred_uninstall_message(found)}", err=True)
+
+
 # -h is the short form of --help on every command, as on defenseclaw-gateway
 # (GAP-2170). Child contexts inherit help_option_names from this group.
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -357,6 +366,8 @@ def cli(ctx: click.Context) -> None:
         return
     if _is_audit_export(ctx):
         return
+    if platform_support.host_os() == "windows":
+        _warn_failed_deferred_uninstall()
     if invoked == "sandbox" and platform_support.host_os() == "windows":
         # Every sandbox command refuses Windows (exit 3) before it would use
         # the configuration, so a broken config.yaml is not the first thing
