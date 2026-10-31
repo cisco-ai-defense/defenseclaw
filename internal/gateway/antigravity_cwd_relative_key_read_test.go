@@ -70,7 +70,7 @@ func TestAntigravityCwdRelativeKeyReadBlocksOnBothRoutes(t *testing.T) {
 			route = "managed"
 		}
 		for _, row := range []struct {
-			name, command, cwd string // cwd: "ssh", "proj" or "" (no Cwd argument)
+			name, command, cwd string // cwd: "home", "ssh", "proj" or "" (no Cwd argument)
 			workspace          string // "ssh" or "proj"
 			block              bool
 		}{
@@ -80,10 +80,12 @@ func TestAntigravityCwdRelativeKeyReadBlocksOnBothRoutes(t *testing.T) {
 			{"cwd-proj/parent", "cat ../.ssh/id_rsa", "proj", "proj", true},
 			{"no-cwd/workspace-ssh", "cat id_rsa", "", "ssh", true},
 			{"cwd-ssh/absolute", "cat ~/.ssh/id_rsa", "ssh", "proj", true},
+			{"cwd-home/dot-ssh", "cat .ssh/id_rsa", "home", "proj", true},
 			// Hard negatives: the same reads of project files allow.
 			{"benign/cwd-proj", "cat README.md", "proj", "proj", false},
 			{"benign/no-cwd", "cat README.md", "", "proj", false},
 			{"benign/public-key", "cat id_rsa.pub", "ssh", "proj", false},
+			{"benign/cwd-home", "cat proj/README.md", "home", "proj", false},
 		} {
 			for _, extra := range []bool{false, true} {
 				name := route + "/" + row.name
@@ -93,7 +95,7 @@ func TestAntigravityCwdRelativeKeyReadBlocksOnBothRoutes(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					root := t.TempDir()
 					home := filepath.Join(root, "home")
-					dirs := map[string]string{"ssh": filepath.Join(home, ".ssh"), "proj": filepath.Join(home, "proj")}
+					dirs := map[string]string{"home": home, "ssh": filepath.Join(home, ".ssh"), "proj": filepath.Join(home, "proj")}
 					for _, dir := range dirs {
 						if err := os.MkdirAll(dir, 0o700); err != nil {
 							t.Fatal(err)

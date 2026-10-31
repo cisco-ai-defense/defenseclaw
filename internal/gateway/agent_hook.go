@@ -3750,7 +3750,7 @@ func agentHookTrustedActionCWDReported(ctx context.Context, requestCWD, reported
 // the project) were judged without a directory. The per-user gateway and
 // the managed Claude Code route judged the same reads as the key file
 // (rel-1-0-2:GAP-0694, managed Antigravity parity). Only a clean absolute
-// directory inside the peer's verified home is kept, as
+// directory that is the peer's verified home or inside it is kept, as
 // serviceAccountCallerCWD does on Windows; the directory only ever adds a
 // verdict (relative operands are resolved against it).
 func managedPeerLexicalCWD(ctx context.Context, requestCWD, toolCWD string) string {
@@ -3759,6 +3759,9 @@ func managedPeerLexicalCWD(ctx context.Context, requestCWD, toolCWD string) stri
 		return ""
 	}
 	dir := strings.TrimSpace(toolCWD)
+	if strings.HasPrefix(dir, "~") {
+		return ""
+	}
 	if dir == "" {
 		dir = strings.TrimSpace(requestCWD)
 	} else if !filepath.IsAbs(dir) {
@@ -3772,7 +3775,7 @@ func managedPeerLexicalCWD(ctx context.Context, requestCWD, toolCWD string) stri
 		return ""
 	}
 	dir = filepath.Clean(dir)
-	if !insideHome(peer.Home, dir) {
+	if dir != filepath.Clean(peer.Home) && !insideHome(peer.Home, dir) {
 		return ""
 	}
 	return dir
