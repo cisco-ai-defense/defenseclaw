@@ -94,10 +94,23 @@ try {
     function Write-TestMetadata([hashtable]$Document) {
         [IO.File]::WriteAllText($metadata, ($Document | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 4), $utf8)
     }
-    function Test-Pin([string]$Label, [string]$Want, [string]$Installer = $installer) {
+    # $Unreadable is the text the damaged-record note must hold ('' for no
+    # note): a record that does not parse is named by the caller instead of
+    # the module signature (GAP-0164); any other outcome leaves no note.
+    function Test-Pin([string]$Label, [string]$Want, [string]$Installer = $installer, [string]$Unreadable = '') {
+        $script:DefenseClawBootstrapUnreadableRecord = 'stale note from an earlier call'
         $got = Get-DefenseClawBootstrapRecordedModulePin -MetadataPath $metadata -InstallerPath $Installer
         if ($got -cne $Want) {
             $failures.Add("${Label}: pin '$got', want '$Want'")
+        }
+        $note = [string]$script:DefenseClawBootstrapUnreadableRecord
+        if ([string]::IsNullOrEmpty($Unreadable)) {
+            if ($note -ne '') {
+                $failures.Add("${Label}: damaged-record note '$note', want none")
+            }
+        }
+        elseif (-not $note.StartsWith($metadata, [StringComparison]::OrdinalIgnoreCase) -or -not $note.Contains($Unreadable)) {
+            $failures.Add("${Label}: damaged-record note '$note', want $metadata and '$Unreadable'")
         }
     }
     $recorded = @{
@@ -145,10 +158,22 @@ try {
     Test-Pin 'non-canonical module digest' ''
 
     [IO.File]::WriteAllText($metadata, 'not json', $utf8)
-    Test-Pin 'unparseable metadata' ''
+    Test-Pin 'unparseable metadata' '' $installer 'Conversion from JSON failed'
+
+    [IO.File]::WriteAllText($metadata, '[1, 2]', $utf8)
+    Test-Pin 'metadata that is not a JSON object' '' $installer 'it is not a JSON object'
+
+    [IO.File]::WriteAllText($metadata, '', $utf8)
+    Test-Pin 'empty metadata' '' $installer ' ('
 
     [IO.File]::WriteAllText($metadata, ('{"trust_mode":"hash_pinned","pad":"' + ('x' * 1048576) + '"}'), $utf8)
-    Test-Pin 'oversized metadata' ''
+    Test-Pin 'oversized metadata' '' $installer 'larger than 1 MiB'
+
+    # An untrusted record is not named: only a protected record is evidence.
+    [IO.File]::WriteAllText($metadata, 'not json', $utf8)
+    $script:UntrustedMetadata = $metadata
+    Test-Pin 'unparseable metadata a standard user could write' ''
+    $script:UntrustedMetadata = ''
 }
 finally {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
