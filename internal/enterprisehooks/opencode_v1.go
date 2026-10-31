@@ -6,7 +6,6 @@ package enterprisehooks
 import (
 	"fmt"
 	"path"
-	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -68,8 +67,9 @@ type UnprotectedAgentLine struct {
 	Members []UnprotectedAgent
 }
 
-// openCodeV1UsersNamed bounds how many accounts the combined line names.
-const openCodeV1UsersNamed = 3
+// UnprotectedAccountsCommand is the administrator view that lists the
+// accounts a combined line counts (unprotected_agents in its JSON).
+const UnprotectedAccountsCommand = "enterprise policy show --json"
 
 func unprotectedAccount(agent UnprotectedAgent) string {
 	if sid := strings.TrimSpace(agent.SID); sid != "" {
@@ -87,7 +87,10 @@ func unprotectedAgentIdentity(agent UnprotectedAgent) string {
 }
 
 // Message is the combined status line: the copy, the number of users and the
-// remedy the per-account lines carry.
+// remedy the per-account lines carry. It counts the accounts and names none:
+// status, verify and ensure documents go to management tooling, which shows
+// them to people who are not the host's administrator (status-v2 GAP-0005).
+// As root, UnprotectedAccountsCommand lists them.
 func (l UnprotectedAgentLine) Message() string {
 	first := l.Members[0]
 	name := strings.TrimSpace(first.Connector)
@@ -95,23 +98,8 @@ func (l UnprotectedAgentLine) Message() string {
 		name += " " + version
 	}
 	name += " at " + strings.TrimSpace(first.InstallPath)
-	users := make([]string, 0, len(l.Members))
-	for _, member := range l.Members {
-		if who := strings.TrimSpace(member.User); who != "" {
-			users = append(users, who)
-		} else {
-			users = append(users, strings.TrimSpace(member.SID))
-		}
-	}
-	sort.Strings(users)
-	listed := users
-	more := ""
-	if len(listed) > openCodeV1UsersNamed {
-		more = fmt.Sprintf(" and %d more", len(listed)-openCodeV1UsersNamed)
-		listed = listed[:openCodeV1UsersNamed]
-	}
-	return fmt.Sprintf("%s is a machine-wide copy and is not protected for %d users (%s%s): %s",
-		name, len(l.Members), strings.Join(listed, ", "), more, strings.TrimSpace(first.Reason))
+	return fmt.Sprintf("%s is a machine-wide copy and is not protected for %d users (as root, `%s` lists them under unprotected_agents): %s",
+		name, len(l.Members), UnprotectedAccountsCommand, strings.TrimSpace(first.Reason))
 }
 
 // CollapseSharedOpenCodeV1 returns one line for each OpenCode V1 copy

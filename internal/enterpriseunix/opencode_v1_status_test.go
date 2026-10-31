@@ -132,6 +132,21 @@ func TestMachineWideOpenCodeV1IsOneWarningWithTheUserCount(t *testing.T) {
 			t.Fatalf("warnings lack %q: %q", want, lines)
 		}
 	}
+	// status-v2 GAP-0005: the machine-wide line counts the accounts and names
+	// none of them; the per-account line of a copy in one home is unchanged.
+	for _, line := range lines {
+		if !strings.Contains(line, "machine-wide copy") {
+			continue
+		}
+		for _, user := range []string{"alice", "bob", "carol", "dave", "erin", "frank"} {
+			if strings.Contains(line, user) {
+				t.Fatalf("the machine-wide line names account %s: %q", user, line)
+			}
+		}
+		if !strings.Contains(line, "`enterprise policy show --json` lists them") {
+			t.Fatalf("the machine-wide line does not say where the accounts are listed: %q", line)
+		}
+	}
 	if result.CoverageComplete || result.SecurityComplete {
 		t.Fatalf("coverage=%v security=%v with OpenCode V1 installed", result.CoverageComplete, result.SecurityComplete)
 	}

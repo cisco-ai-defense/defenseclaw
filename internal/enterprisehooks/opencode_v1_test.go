@@ -112,9 +112,15 @@ func TestCollapseSharedOpenCodeV1(t *testing.T) {
 		t.Fatalf("want one line for the 5 accounts, got %+v", lines)
 	}
 	message := lines[0].Message()
-	for _, want := range []string{"opencode 1.18.34 at " + machine, "machine-wide copy", "5 users", "alice, bob, carol and 2 more", "npm install -g @opencode/cli@2", "opencode service restart"} {
+	for _, want := range []string{"opencode 1.18.34 at " + machine, "machine-wide copy", "5 users", "`enterprise policy show --json` lists them", "npm install -g @opencode/cli@2", "opencode service restart"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("combined line %q lacks %q", message, want)
+		}
+	}
+	// status-v2 GAP-0005: the shared line counts the accounts and names none.
+	for _, user := range []string{"alice", "bob", "carol", "dave", "erin"} {
+		if strings.Contains(message, user) {
+			t.Fatalf("combined line %q names account %s", message, user)
 		}
 	}
 	for _, agent := range agents[:5] {

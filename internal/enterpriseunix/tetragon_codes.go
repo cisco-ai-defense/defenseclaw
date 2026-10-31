@@ -156,9 +156,11 @@ type tetragonFacts struct {
 	// At is when an operator changed a family; Verb what they did.
 	At   time.Time
 	Verb string
-	// Names are policy names; Users and Connectors those a message lists.
-	Names, Users, Connectors []string
-	Count                    int
+	// Names are policy names and Connectors the connectors a message lists;
+	// UserCount counts the users it is about.
+	Names, Connectors []string
+	UserCount         int
+	Count             int
 	// State and Error describe a policy.
 	State, Error string
 	// ETA is when the next user is ready, in words.
@@ -307,8 +309,10 @@ var tetragonCodes = map[string]tetragonCodeText{
 			return "no user has finished burn-in yet (nothing is denied yet); nothing to do: " + eta
 		}
 		var who []string
-		if len(f.Users) > 0 {
-			who = append(who, "no agent installed for "+strings.Join(f.Users, ", "))
+		if f.UserCount > 0 {
+			// A count, not names: status documents go to management tooling
+			// (status-v2 GAP-0005).
+			who = append(who, fmt.Sprintf("no agent installed for %d enrolled %s", f.UserCount, plural(f.UserCount, "user", "users")))
 		}
 		if len(f.Connectors) > 0 {
 			who = append(who, "no enrolled user has a row for "+strings.Join(f.Connectors, ", "))
