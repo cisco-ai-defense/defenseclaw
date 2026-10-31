@@ -150,3 +150,57 @@ func TestEnterpriseHookWatchDropsAPassOwnMadeAndDroppedReceipt(t *testing.T) {
 		t.Fatal("an owned file without a found fingerprint was judged a tail")
 	}
 }
+
+// GAP-0256: a hook file deleted again right after a pass repaired it (a held
+// delete: the file removed every 0.3 s) was missing in both snapshots of the
+// pass, because the delete landed before the pass took its snapshot. Its
+// Remove was then dropped as the pass's own make-and-drop tail, and the file
+// stayed missing until the interval pass, 20-70 s after the hold ended. Only a
+// pass that failed rolls a file back that way (GAP-0030), so after a pass that
+// succeeded the Remove arms the next pass; after a failed pass the tail is
+// still dropped and the repair backoff applies.
+func TestEnterpriseHookWatchDeleteRightAfterARepairArmsThePass(t *testing.T) {
+	dir := t.TempDir()
+	hook := filepath.Join(dir, ".copilot", "hooks", "defenseclaw-vscode.json")
+	script := filepath.Join(dir, "hooks", "copilot-hook.ps1")
+	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exclusive := map[string]struct{}{hook: {}, script: {}}
+	shared := map[string]struct{}{}
+	// The hook file is absent as the last pass found it and as its snapshot
+	// read it after the repair.
+	found, left := map[string]string{}, map[string]string{}
+	takeEnterpriseHookOwnedSnapshot(found, exclusive, shared, enterprisehooks.OwnedFileFingerprint)
+	takeEnterpriseHookOwnedSnapshot(left, exclusive, shared, enterprisehooks.OwnedFileFingerprint)
+	now := time.Now()
+	settleUntil := now.Add(2 * time.Second)
+	dropped := func(path string, op fsnotify.Op, lastPassFailed bool) (bool, bool) {
+		return enterpriseHookWatchEventDropped(now, settleUntil, fsnotify.Event{Name: path, Op: op}, lastPassFailed,
+			exclusive, shared, found, left, enterprisehooks.OwnedFileFingerprint)
+	}
+	for _, op := range []fsnotify.Op{fsnotify.Remove, fsnotify.Create | fsnotify.Remove} {
+		if drop, _ := dropped(hook, op, false); drop {
+			t.Fatalf("a %s of a hook file right after a successful repair was dropped as the pass's tail (GAP-0256)", op)
+		}
+		// GAP-0030: after a failed pass the same event is its own tail.
+		if drop, settling := dropped(hook, op, true); !drop || !settling {
+			t.Fatalf("a %s after a failed pass: drop %v settling %v, want the tail dropped (GAP-0030)", op, drop, settling)
+		}
+	}
+	// The pass's own Write or Chmod of a file it left as it is stays a
+	// dropped tail after either pass.
+	takeEnterpriseHookOwnedSnapshot(left, exclusive, shared, enterprisehooks.OwnedFileFingerprint)
+	for _, failed := range []bool{false, true} {
+		if drop, settling := dropped(script, fsnotify.Write, failed); !drop || !settling {
+			t.Fatalf("a settle-window Write of an unchanged script (failed pass %v): drop %v settling %v", failed, drop, settling)
+		}
+	}
+	// An event on an unowned path is dropped without counting as a tail.
+	if drop, settling := dropped(filepath.Join(dir, "session.log"), fsnotify.Write, false); !drop || settling {
+		t.Fatalf("an unowned Write: drop %v settling %v", drop, settling)
+	}
+}
