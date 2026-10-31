@@ -55,10 +55,17 @@ func TestPendingStopOfARemovedAccountIsDropped(t *testing.T) {
 					t.Fatalf("%s: no pending stop: %+v", a.Name, entry)
 				}
 			}
-			// Both accounts' daemons stop answering; one was removed.
+			// Both accounts' units no longer run, and nothing can run as them:
+			// the status finds nothing, the drain fails (as runuser does for
+			// a removed account). One was removed; the other's lookup fails.
 			for _, a := range []SandboxAccount{gone, down} {
-				delete(h.ops.status, a.UID)
-				h.ops.statusErr[a.UID] = errors.New("runuser: user " + a.Name + " does not exist")
+				h.ops.status[a.UID] = SandboxStatus{}
+			}
+			h.ops.onDrain = func(a SandboxAccount) error {
+				if a.UID == gone.UID || a.UID == down.UID {
+					return errors.New("runuser: user " + a.Name + " does not exist")
+				}
+				return nil
 			}
 			if goos == "darwin" {
 				h.reply(map[string]fakeReply{

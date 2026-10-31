@@ -1050,6 +1050,16 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 	for _, entry := range state.sortedPending() {
 		key := strconv.Itoa(entry.UID)
 		account := SandboxAccount{Name: entry.User, UID: entry.UID, Home: entry.Home, GID: -1}
+		if env.sandboxAccountRemoved(ctx, account) {
+			// The account was removed from this computer: no user manager,
+			// daemon or sandbox of it can run again, so nothing waits, and
+			// the warning would never clear (its status and its drain both
+			// fail on the missing account, GAP-0155). Its sandbox records
+			// stay for the administrator's purge.
+			delete(state.Pending, key)
+			l.openshellChange("dropped the pending %s change of %s: the account no longer exists on this computer", entry.Kind, entry.User)
+			continue
+		}
 		status, err := ops.Status(ctx, account)
 		switch {
 		case err != nil && entry.Kind != "launchd" && !env.hasHomeSandboxState(account):
@@ -1057,14 +1067,6 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 			// nothing can be waiting: a pending entry no sandbox command of
 			// the account could ever clear (GAP-0490).
 			delete(state.Pending, key)
-			continue
-		case err != nil && env.sandboxAccountRemoved(ctx, account):
-			// The account was removed from this computer: no user manager,
-			// daemon or sandbox of it can run again, so nothing waits, and
-			// the warning would never clear (GAP-0155). Its sandbox records
-			// stay for the administrator's purge.
-			delete(state.Pending, key)
-			l.openshellChange("dropped the pending %s change of %s: the account no longer exists on this computer", entry.Kind, entry.User)
 			continue
 		case err != nil:
 			entry.Sandboxes = -1
