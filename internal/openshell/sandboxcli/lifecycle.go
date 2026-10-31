@@ -650,6 +650,13 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	// fail stops the sandbox this command started for a session that never
 	// began: the probe, the refresh or the harness's start failed.
 	fail := func(err error) error {
+		var missing *openShellClientMissingError
+		if errors.As(err, &missing) {
+			// The sandbox runs; only this command cannot reach it. Stopping it
+			// would end what it runs for a client binary that the account's
+			// sandbox service installs again (GAP-0196).
+			return a.openShellClientMissingText(ctx, missing, started)
+		}
 		if started {
 			switch keep, serr := a.stopIfAlone(context.WithoutCancel(ctx), api, sb.Name, nil); {
 			case keep != "":
@@ -1704,4 +1711,23 @@ func (a *App) stoppedUnderFollower(ctx context.Context, api API, sb *sandboxapi.
 	a.note(fmt.Sprintf("%s is %s (%s); DefenseClaw kept the log of its detached run (`%s logs %s` shows it)",
 		sb.Name, sb.Phase, a.clock(kept.KeptAt), CommandName, sb.Name))
 	a.keptRunState(kept)
+}
+
+// openShellClientMissingText is the refusal of a connect that could not run
+// the OpenShell command (openShellClientMissingError), with the next step: on
+// a managed computer the account's sandbox service puts its copy back, so
+// the command is run again, and the organization's contact if it lasts.
+func (a *App) openShellClientMissingText(ctx context.Context, e *openShellClientMissingError, started bool) error {
+	state := e.sandbox + " keeps running"
+	if !started {
+		state = e.sandbox + " is not changed"
+	}
+	facts := a.managedFacts(ctx)
+	if a.ManagedHost() || onManagedHost() || a.managedSeen != nil {
+		return fmt.Errorf("%s; %s. This happens for a short while after your organization changed the sandbox setup on this computer, "+
+			"until your sandbox service installs the command again: run `%s sandbox connect %s` again in a minute, and `%s sandbox doctor` shows what is missing. %s",
+			e.Error(), state, CommandName, e.sandbox, CommandName, accountOutageContact(facts.RequestAccess))
+	}
+	return fmt.Errorf("%s; %s. Install OpenShell again with `%s sandbox setup`, and `%s sandbox doctor` shows what is missing",
+		e.Error(), state, CommandName, CommandName)
 }
