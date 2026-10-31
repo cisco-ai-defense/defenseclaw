@@ -1030,6 +1030,17 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// apply_patch tool is a patch envelope, not shell.
 				if !isApplyPatchToolName(tool) {
 					links = commandLinksWithFacts(command, cwd, home, sourceFacts, true)
+					// The gateway also judges each simple command in the
+					// directory actionfacts places it in, which follows a
+					// pushd of a bare name as it follows cd. The copy source
+					// facts of those readings are recorded too, so a gateway
+					// behind ProtectHome reads the same answer (GAP-2586).
+					for _, simple := range actionfacts.SimpleCommands(fallback, fallbackFacts) {
+						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) &&
+							filepath.Clean(simple.CWD) != filepath.Clean(cwd) {
+							commandLinksWithFacts(simple.Text, simple.CWD, home, sourceFacts, true)
+						}
+					}
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
 					globFacts = actionGlobFacts(command, cwd, home)
 					// Where each link-walk spelling of the command lies, for a
@@ -2116,10 +2127,14 @@ var directoryStackTilde = lazyregexp.New(`^~([+-]?[0-9]{1,3}|[+-])(/|$)`)
 
 // withDirectoryStackOperands returns words and static with each all-literal
 // directory-stack tilde word read as a static directoryStackOperand path,
-// unless destination (the call destination of that reading) is one.
-func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bool, destination func([]string, []bool) string) ([]string, []bool) {
+// unless destination (the call destination of that reading) is one. A word
+// that places (directoryStackPlaces) expands the same way wherever the call
+// may run is read as that directory instead, so the walk inspects it like
+// any other source (GAP-2586).
+func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bool, places []stackPlace, destination func([]string, []bool) string) ([]string, []bool) {
 	var stackWords []string
 	var stackStatic []bool
+	var stackArgs []int
 	for i, arg := range args {
 		if i == 0 || static[i] || len(arg.Parts) != 1 {
 			continue
@@ -2132,9 +2147,15 @@ func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bo
 			stackWords, stackStatic = slices.Clone(words), slices.Clone(static)
 		}
 		stackWords[i], stackStatic[i] = directoryStackOperand+lit.Value, true
+		stackArgs = append(stackArgs, i)
 	}
 	if stackWords == nil || strings.Contains(destination(stackWords, stackStatic), directoryStackOperand) {
 		return words, static
+	}
+	for _, i := range stackArgs {
+		if path, ok := expandDirectoryStackWord(strings.TrimPrefix(stackWords[i], directoryStackOperand), places); ok {
+			stackWords[i] = path
+		}
 	}
 	return stackWords, stackStatic
 }
@@ -2162,6 +2183,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
+	stackPlaces := directoryStackPlaces(file, command, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds, wrappedCds := false, false, false
 	// unplacedMoves, unplacedLinks: a followed move or a link call that the
@@ -2254,12 +2276,12 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		switch {
 		case slices.Contains(copyPrograms, program):
 			if makesLinks, _ := copyLinkOptions(args[1:], words[1:], static[1:]); !makesLinks {
-				words, static = withDirectoryStackOperands(args, words, static, func(words []string, static []bool) string {
+				words, static = withDirectoryStackOperands(args, words, static, stackPlaces[call], func(words []string, static []bool) string {
 					return cpDestination(words[1:], static[1:], cwd)
 				})
 			}
 		case slices.Contains(archivePrograms, program):
-			words, static = withDirectoryStackOperands(args, words, static, func(words []string, static []bool) string {
+			words, static = withDirectoryStackOperands(args, words, static, stackPlaces[call], func(words []string, static []bool) string {
 				return archiveDestination(program, words[1:], static[1:], cwd)
 			})
 		}
