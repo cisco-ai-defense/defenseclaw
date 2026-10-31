@@ -1130,7 +1130,7 @@ func (m *ConfigManager) managedGenerationAdmission(raw []byte) (bool, *enterpris
 					BundleID: state.BundleID, Version: state.BundleVersion, Detail: "config.yaml cannot be read"}
 			}
 		}
-		if _, refusal := enterprisebundle.CheckSignedActivation(in, state.BundleID, state.BundleVersion, state.SignerKeyID, raw); refusal != nil {
+		if _, refusal := enterprisebundle.CheckSignedActivation(in, state.BundleID, state.BundleVersion, state.BundleDir, state.SignerKeyID, raw); refusal != nil {
 			return false, refusal
 		}
 		return true, nil
@@ -1172,7 +1172,7 @@ func (m *ConfigManager) startupActivationRefusal(raw []byte) *enterprisebundle.A
 	}
 	state, err := configwrite.ReadGenerationState(m.path)
 	if err == nil && state.BundleID != "" {
-		_, refusal := enterprisebundle.CheckSignedActivation(in, state.BundleID, state.BundleVersion, state.SignerKeyID, raw)
+		_, refusal := enterprisebundle.CheckSignedActivation(in, state.BundleID, state.BundleVersion, state.BundleDir, state.SignerKeyID, raw)
 		return refusal
 	}
 	if err == nil && state.Actor == configwrite.ActorLifecycle && state.BundleVersion == 0 && state.SignerKeyID == "" &&
@@ -1200,11 +1200,16 @@ func (m *ConfigManager) startupFallbackVersion() *enterprisebundle.SignedVersion
 	if !anchored {
 		return nil
 	}
-	versions := enterprisebundle.SignedVersions(in)
+	state, stateErr := configwrite.ReadGenerationState(m.path)
+	var hints []string
+	if stateErr == nil && state.BundleID != "" {
+		hints = enterprisebundle.RecordVersionDirs(state.BundleID, state.BundleVersion, state.BundleDir)
+	}
+	versions := enterprisebundle.SignedVersions(in, hints...)
 	if len(versions) == 0 {
 		return nil
 	}
-	if state, err := configwrite.ReadGenerationState(m.path); err == nil && state.BundleID != "" {
+	if stateErr == nil && state.BundleID != "" {
 		for _, v := range versions {
 			if v.Manifest.BundleID == state.BundleID && v.Manifest.Version == state.BundleVersion {
 				return v

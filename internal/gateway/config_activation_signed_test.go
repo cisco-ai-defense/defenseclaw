@@ -64,6 +64,15 @@ func (s *signedStore) writeAnchors(t *testing.T, keyID string, public ed25519.Pu
 // bytes an apply installs (RenderConfig against that directory).
 func (s *signedStore) store(t *testing.T, id string, version uint64, source []byte) []byte {
 	t.Helper()
+	rendered, _ := s.storeFor(t, id, version, id, source)
+	return rendered
+}
+
+// storeFor is store for the delivery receipt receiptID: the version
+// directory is the one Promote names for that receipt (a retry of a bundle
+// has a fresh r- receipt id). It also returns that directory name.
+func (s *signedStore) storeFor(t *testing.T, id string, version uint64, receiptID string, source []byte) ([]byte, string) {
+	t.Helper()
 	b := &enterprisebundle.Bundle{Files: map[string][]byte{
 		enterprisebundle.ConfigName:            source,
 		"policies/guardrail/custom/rules.yaml": []byte("name: custom\n"),
@@ -89,7 +98,8 @@ func (s *signedStore) store(t *testing.T, id string, version uint64, source []by
 	if err != nil {
 		t.Fatal(err)
 	}
-	versionDir := filepath.Join(s.dir, enterprisebundle.BundlesDirName, enterprisebundle.VersionDirNameForReceipt(version, id, id))
+	name := enterprisebundle.VersionDirNameForReceipt(version, id, receiptID)
+	versionDir := filepath.Join(s.dir, enterprisebundle.BundlesDirName, name)
 	files := map[string][]byte{enterprisebundle.ManifestName: manifest, enterprisebundle.SignatureName: signature}
 	for name, data := range b.Files {
 		files[name] = data
@@ -107,7 +117,7 @@ func (s *signedStore) store(t *testing.T, id string, version uint64, source []by
 	if err != nil {
 		t.Fatal(err)
 	}
-	return rendered
+	return rendered, name
 }
 
 func bundleWrite(id string, version uint64) configwrite.Options {

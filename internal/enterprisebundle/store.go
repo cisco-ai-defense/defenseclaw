@@ -917,8 +917,13 @@ func GenerationOptions(r *Receipt) (opt configwrite.Options, ok bool) {
 	if r == nil || r.Principal == "" {
 		return configwrite.Options{}, false
 	}
+	ref := configwrite.BundleRef{ID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID}
+	if receiptIDPattern.MatchString(r.ReceiptID) {
+		// Promote names the version directory of a receipt this way.
+		ref.Dir = VersionDirNameForReceipt(r.Version, r.BundleID, r.ReceiptID)
+	}
 	return configwrite.Options{Actor: r.Principal, LocalActor: configwrite.CurrentOSActor(), Reason: configwrite.BundleReason(r.BundleID, r.Version, r.ChangeSummary),
-		Lifecycle: true, Bundle: configwrite.BundleRef{ID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID}}, true
+		Lifecycle: true, Bundle: ref}, true
 }
 
 // Receive starts the receipt of a bundle in state received. bundleID and

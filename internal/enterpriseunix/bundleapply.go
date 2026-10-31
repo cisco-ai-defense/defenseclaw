@@ -180,6 +180,7 @@ func currentBundleGenerationOptions(store *enterprisebundle.Store, ref *enterpri
 		return configwrite.Options{}, fmt.Errorf("confirmed policy bundle %s version %d has no principal", ref.BundleID, ref.Version)
 	}
 	opt.GenerationFloor = ref.ConfigGeneration
+	opt.Bundle.Dir = ref.Dir
 	return opt, nil
 }
 
