@@ -229,6 +229,10 @@ type lifecycle struct {
 	// gatewayKeptRunning is set when the gateway applied a config change
 	// itself (hotConfigApply) and was not restarted.
 	gatewayKeptRunning bool
+	// launchdKept are the macOS launchd jobs whose definition this
+	// transaction leaves as it is (keepRunningDuringChange): a loaded one is
+	// not started again.
+	launchdKept map[string]bool
 	// confirmCommitted is set while a committed change outside bundle mode
 	// describes the gateway: a generation the gateway rejected or does not
 	// run then fails the run with its cause, as verify does (GAP-0943).
@@ -2439,7 +2443,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// Accounts follow the committed deployment: a daemon without a running
 	// sandbox restarts on it now, one with sandboxes waits (openshell_users.go).
 	l.settleOpenShell(ctx, p.openshell)
-	if !l.opts.NoStart {
+	// A config.yaml or credential replaced during this transaction is
+	// applied by its follow-up, which restarts the guardian again and waits
+	// for that report; waiting here too made two pushes seconds apart wait
+	// out the guardian twice (rel-1-0-3 GAP-0142: the first ensure took 26 s
+	// on macOS). A bundle never runs that follow-up for an in-place edit.
+	followUp := l.inputsChanged() && l.bundle == nil && !env.bundleMode()
+	if !l.opts.NoStart && !followUp {
 		// The result reports what the guardian found under the new state
 		// (an agent the change left without hooks), not its previous report.
 		if l.awaitGuardianReport(ctx, activationStarted) {
@@ -2532,16 +2542,22 @@ func (l *lifecycle) keepRunningDuringChange(p *plan) map[string]bool {
 		// upgrade (GAP-0585). Left alone it verifies the changed deployment.
 		keep[unitVerifyService] = true
 	case "darwin":
-		unit := Unit{Name: labelApply}
-		path := env.Services.DefinitionPath(unit, p.channel)
-		current, err := sha256File(env.P(path))
-		if err != nil {
-			return keep
-		}
-		for _, file := range p.files {
-			if file.Path == path && file.SHA == current {
-				keep[labelApply] = true
+		l.launchdKept = map[string]bool{}
+		for _, name := range []string{labelApply, labelVerify} {
+			unit := Unit{Name: name}
+			path := env.Services.DefinitionPath(unit, p.channel)
+			current, err := sha256File(env.P(path))
+			if err != nil {
+				continue
 			}
+			for _, file := range p.files {
+				if file.Path == path && file.SHA == current {
+					l.launchdKept[name] = true
+				}
+			}
+		}
+		if l.launchdKept[labelApply] {
+			keep[labelApply] = true
 		}
 	}
 	return keep
@@ -2899,6 +2915,16 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 		if unit.Kind == "path" && env.GOOS == "darwin" && env.Services.Active(ctx, unit) {
 			// The apply job stayed loaded through the change (its definition
 			// did not change); a kickstart would kill a queued run.
+			continue
+		}
+		if unit.Kind == "timer" && env.GOOS == "darwin" && l.launchdKept[unit.Name] && env.Services.Active(ctx, unit) {
+			// The verify job is loaded with the definition it keeps, and it
+			// runs on its calendar. Starting it again failed "already loaded",
+			// and kickstart -k ran a verify at once and killed the one the
+			// previous transaction had started, which was waiting for the
+			// lifecycle lock of this run: the follow-up of a second config
+			// push waited about 15 s for it to exit (rel-1-0-3 GAP-0142). The
+			// systemd timer is started, which leaves an active one alone.
 			continue
 		}
 		if unit.Kind == "socket" && env.Services.Active(ctx, unit) {

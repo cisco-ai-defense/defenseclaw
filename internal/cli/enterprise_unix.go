@@ -192,7 +192,7 @@ const sandboxRowsHelp = "\n\nWhen sandboxes are on (openshell.enabled), the serv
 
 // lockWaitUsage documents --lock-wait on every action that takes the
 // lifecycle lock.
-const lockWaitUsage = "wait up to this long for another lifecycle run (default 5s, at most 15m) before exiting 75"
+const lockWaitUsage = "wait up to this long for another lifecycle run (default 5s; 10m for ensure --reason path, as the config-apply trigger passes; at most 15m) before exiting 75"
 
 // lockWaitValue is --lock-wait: a duration that keeps the text as typed, so
 // the cap error names "1h", not "60m", and whose malformed-value error gives
