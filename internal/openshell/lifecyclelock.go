@@ -45,6 +45,10 @@ import (
 // DefenseClaw rollback is unsupported.
 const lifecycleLockFile = ".defenseclaw-lifecycle.lock"
 
+// LifecycleLockFile is the lock's file name, which the managed purge removes
+// from each account's OpenShell configuration directory.
+const LifecycleLockFile = lifecycleLockFile
+
 // ErrGatewayBusy refuses a create or a start while DefenseClaw restarts,
 // upgrades or rolls back the OpenShell gateway, an attach, a stop or a
 // delete that waited for one past lifecycleLockWait, and a restart, an

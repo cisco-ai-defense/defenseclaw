@@ -210,7 +210,22 @@ const (
 	installStateRel     = openshell.TarballStateDir
 	// userSandboxDataRel is the sandbox CLI's data below ~/.defenseclaw.
 	userSandboxDataRel = ".defenseclaw/sandboxes"
+	// openshellConfigRel is the account's OpenShell configuration folder
+	// (openshell.UserConfigDir), where DefenseClaw keeps its gateway
+	// lifecycle lock (openshellLifecycleLockRel).
+	openshellConfigRel        = ".config/openshell"
+	openshellLifecycleLockRel = openshellConfigRel + "/" + openshell.LifecycleLockFile
 )
+
+// defenseclawCacheRel is DefenseClaw's folder in the account's cache folder
+// (os.UserCacheDir), which holds the hook-fire probe folder of image builds
+// (openshell.HookFireProbeDir).
+func (e *Env) defenseclawCacheRel() string {
+	if e.GOOS == "darwin" {
+		return "Library/Caches/defenseclaw"
+	}
+	return ".cache/defenseclaw"
+}
 
 // tarballRels are the only files the tarball install places, relative to the
 // home.
@@ -1968,6 +1983,11 @@ func (l *lifecycle) purgeAccountSandbox(a SandboxAccount) {
 	remove(openshellVMStateRel)
 	remove(env.daemonStateRel())
 	remove(installStateRel)
+	// DefenseClaw's own files in the account's OpenShell and cache folders:
+	// the gateway lifecycle lock and the hook-fire probe folder of image
+	// builds. Both stayed after the purge (rel-1-0-2 GAP-0599).
+	remove(openshellLifecycleLockRel)
+	remove(env.defenseclawCacheRel() + "/hookfire")
 	// What the managed `defenseclaw sandbox` keeps below ~/.defenseclaw (the
 	// image records, each sandbox's CLI state; the teardown above writes the
 	// image records again), unless the folder is the account's own
@@ -1986,7 +2006,7 @@ func (l *lifecycle) purgeAccountSandbox(a SandboxAccount) {
 		}
 	}
 	// The folders the install made for itself, once empty.
-	for _, rel := range []string{".local/libexec/openshell", openshellStateRel, openshellShareRel, ".defenseclaw"} {
+	for _, rel := range []string{".local/libexec/openshell", openshellStateRel, openshellShareRel, ".defenseclaw", openshellConfigRel, env.defenseclawCacheRel()} {
 		if _, err := env.removeEmptyBelowHome(a, rel); err != nil {
 			r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not remove the empty %s of %s: %v", rel, a.Name, err))
 		}
