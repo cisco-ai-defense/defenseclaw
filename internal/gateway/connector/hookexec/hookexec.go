@@ -3787,6 +3787,11 @@ func managedInstallWindowText(opts Options, layer, reason string) string {
 		"upgraded on this computer, and its gateway is stopped until that run finishes or is recovered. Try again in a moment; " +
 		"if this continues, ask your administrator to check DefenseClaw on this computer: `" +
 		managedStatusCommand(runtime.GOOS) + "` names what to do."
+	if managedLifecycleRuntimeStateReason(reason) {
+		// The runtime-state refusal keeps its code in the window too
+		// (rel-1-0-3 GAP-0303).
+		return text + " (" + reason + ")"
+	}
 	switch reason {
 	case managedGatewayNotRunningReason, managedGatewayRestartingReason, managedGatewayNoAnswerReason:
 		text += " (" + reason + ")"
@@ -3832,8 +3837,9 @@ func managedOutageShapedReason(reason string) bool {
 // Windows, managedPlainFailClosed) says when it fails closed: that DefenseClaw blocked the prompt or tool
 // call, why in plain words and what to do, e.g. "DefenseClaw blocked this
 // prompt: the DefenseClaw gateway is not available. Try again in a moment;
-// if this continues, contact your administrator." The internal reason goes
-// to the hook-failure log only (GAP-0554).
+// if this continues, contact your administrator." A documented refusal code
+// goes last in parentheses (troubleshooting.mdx); any other internal reason
+// goes to the hook-failure log only (GAP-0554).
 func managedStandaloneFailClosedText(event, layer, reason string) string {
 	var cause, advice, code string
 	switch {
@@ -3905,6 +3911,11 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 		reason == "enterprise_managed_hook_socket_missing" ||
 		reason == "enterprise_machine_policy_summary_untrusted":
 		cause, advice = "DefenseClaw is not set up correctly on this computer", "Contact your administrator."
+		// The documented code goes last, so an administrator can look it
+		// up and a sampler can count the refusal by its cause (a missing
+		// runtime descriptor during an uninstall and reinstall said only
+		// "not set up correctly", rel-1-0-3 GAP-0303).
+		code = reason
 	default:
 		cause, advice = "the DefenseClaw gateway is not available",
 			"Try again in a moment; if this continues, contact your administrator."
