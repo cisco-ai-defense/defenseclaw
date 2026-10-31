@@ -284,9 +284,10 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 		!strings.EqualFold(own.Domain, spool.Domain) {
 		merged.Domain, merged.Realm, merged.Principal, merged.Directory, merged.AccountDomain = "", "", "", "", ""
 	}
-	if ownDirectoryUPNSupersedes(own, record) {
-		// Keep the domain controller's UPN; the record's identity store one
-		// may be the UPN from before a rename (identity-round GAP-1238).
+	if identityStoreUPNOfADAccount(own, record) {
+		// Not the account's UPN: an earlier guardian build took it from
+		// the identity store, which an AD UPN rename leaves stale
+		// (identity-round GAP-1238).
 		spool.UPN, spool.Principal, spool.Source = "", "", ""
 	}
 	if spool.UPN != "" {
@@ -332,14 +333,17 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 	return merged
 }
 
-// ownDirectoryUPNSupersedes reports a Windows AD account whose own facts
-// carry the UPN the domain controller answered (TranslateNameW, confirmed by
-// its latest translation) while the guardian's record carries the identity
-// store's cloud UPN, which a rename of the AD UPN leaves stale until the
-// enumerator's next pass translates it.
-func ownDirectoryUPNSupersedes(own useridentity.DirectoryFacts, record enterprisehooks.IdentitySpoolRecord) bool {
-	return record.UPNSource == enterprisehooks.UPNSourceIdentityStore && own.UPN != "" && !own.UPNKept &&
-		own.Directory == useridentity.DirectoryActiveDirectory && own.Source == useridentity.SourceWindowsLSA
+// identityStoreUPNOfADAccount reports a guardian record whose UPN an
+// earlier guardian build took from the identity store for an AD account.
+// Only the domain controller's answer (TranslateNameW, which the SYSTEM
+// enumerator gets and the gateway's write-restricted token does not) is an
+// AD account's UPN; the identity store keeps the cloud UPN of the user's last
+// Entra sign-in, which a rename of the AD UPN leaves stale. The record's
+// UPN is then dropped and the account keeps its own principal until the
+// enumerator records the domain controller's answer.
+func identityStoreUPNOfADAccount(own useridentity.DirectoryFacts, record enterprisehooks.IdentitySpoolRecord) bool {
+	return record.UPNSource == enterprisehooks.UPNSourceIdentityStore &&
+		(own.Directory == useridentity.DirectoryActiveDirectory || record.Facts.Directory == useridentity.DirectoryActiveDirectory)
 }
 
 // forgetOnSpoolGroupChange drops key's cached facts when the guardian's
