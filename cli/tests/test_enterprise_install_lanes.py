@@ -33,6 +33,9 @@ RESULT_CHECKER_TEST = SCRIPTS / "test_check_enterprise_lifecycle_result.py"
 UNIX_LANE = SCRIPTS / "test-enterprise-unix-install.sh"
 POSTINSTALL_RESULT_TEST = ROOT / "packaging/linux/tests/test_postinstall_result.sh"
 SANDBOX_HOLD_TEST = ROOT / "packaging/linux/tests/test_upgrade_holds_legacy_sandbox_daemons.sh"
+# CI selects this module for preremove.sh changes by its basename (GAP-0137).
+PREREMOVE = ROOT / "packaging/linux/preremove.sh"
+PREREMOVE_USER_UNITS_TEST = ROOT / "packaging/linux/tests/test_preremove_resets_failed_user_units.sh"
 # CI selects Python modules that name the changed file's basename: the hold
 # lives in preinstall.sh and the macOS package's build script (GAP-1809).
 POSTINSTALL = ROOT / "packaging/linux/postinstall.sh"
@@ -190,6 +193,18 @@ def test_postinstall_failure_contract_runs_in_ci() -> None:
     assert POSTINSTALL.is_file()
     result = subprocess.run(
         ["sh", str(POSTINSTALL_RESULT_TEST)],
+        cwd=ROOT, capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux preremove requires a POSIX shell")
+def test_preremove_resets_failed_user_units_runs_in_ci() -> None:
+    """GAP-0137: the package removal leaves each account's sandbox user units
+    inactive, not failed, after an uninstall made the daemon exit 78."""
+    assert PREREMOVE.is_file()
+    result = subprocess.run(
+        ["sh", str(PREREMOVE_USER_UNITS_TEST), str(PREREMOVE)],
         cwd=ROOT, capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr

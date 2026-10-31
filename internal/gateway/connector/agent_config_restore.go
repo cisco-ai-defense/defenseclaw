@@ -494,19 +494,25 @@ func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, re
 		switch {
 		case notice.SettingsLost && !settingsBack:
 			status = AgentConfigSettingsLost
+		case !settingsBack:
+			// A copy put back that held DefenseClaw's hooks only (a file
+			// setup created, say), or a file recreated without one, is
+			// reported as hooks only, not as the user's settings, and stays
+			// reported until the account has settings in it again. The
+			// guardian's next verify used to drop it seconds after the
+			// repair, so status and verify never showed it (rel-1-0-2
+			// GAP-0612).
+			status = AgentConfigRecreatedHooksOnly
 		case since.IsZero() || at.Before(since.Add(-time.Second)):
-			// Reported by the setup that recreated the file.
-		case notice.Source == AgentConfigFromLastGood && settingsBack:
+			// Reported by the setup that put the file back.
+		case notice.Source == AgentConfigFromLastGood:
 			status = AgentConfigRestoredLastGood
-		case notice.Source == AgentConfigFromPristine && settingsBack:
+		case notice.Source == AgentConfigFromPristine:
 			status = AgentConfigRestoredPristine
-		// A copy put back that held DefenseClaw's hooks only (a file setup
-		// created, say) is reported as hooks only, not as the user's settings
-		// (GAP-0612).
 		default:
 			status = AgentConfigRecreatedHooksOnly
 		}
-		if refresh && (!notice.SettingsLost || settingsBack) {
+		if refresh && settingsBack {
 			_ = os.Remove(spec.noticePath(opts.DataDir))
 		}
 	}
@@ -562,7 +568,7 @@ func AgentConfigNotice(connectorName, user, code string) (string, bool) {
 	case AgentConfigSettingsLost:
 		what = "went missing and DefenseClaw had no copy of it to put back, so it holds DefenseClaw's hooks only: that user must enter the account's own settings in it (model, provider) again"
 	case AgentConfigRecreatedHooksOnly:
-		what = "went missing and DefenseClaw had no copy of it, so the guardian recreated it with DefenseClaw's hooks only: if that user had settings in it, they must be entered again"
+		what = "went missing and the guardian put it back with DefenseClaw's hooks only (DefenseClaw had no copy of it with that user's settings): if that user had settings in it, they must be entered again"
 	case AgentConfigRestoredLastGood:
 		what = "went missing; the guardian put back DefenseClaw's last copy of it, with that user's settings, and changes made after that copy are not in it"
 	case AgentConfigRestoredPristine:

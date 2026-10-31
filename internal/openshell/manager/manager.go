@@ -320,6 +320,10 @@ type Manager struct {
 	// gateway call (lockRun, shared) against a guest recorded contained
 	// (containUnsynced, exclusive). Taken after the start lock, before mu.
 	runGate sync.RWMutex
+	// refreshMu orders overlapping policy refreshes (refreshEgress): a
+	// configuration check and an explicit adoption that arrive together
+	// re-register the proxy credentials and the default decider in order.
+	refreshMu sync.Mutex
 
 	mu    sync.Mutex
 	boxes map[string]*box

@@ -2384,6 +2384,12 @@ defenseclaw_response_failure_reason() {
   # yet: say so instead of "HTTP 403" (GAP-0738). RESULT is the body.
   if [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ]; then
     case "$1|${RESULT:-}" in
+      *"HTTP 403"*"|"*'"enrollment":"excluded"'*enterprise_managed_uid_unregistered*)
+        # The policy excludes the account: no enrollment is coming
+        # (identity-round GAP-1181).
+        printf '%s' "your organization's DefenseClaw policy excludes this account on this computer, so DefenseClaw does not enroll it and trying again later will not help; ask your administrator if you need to use agents here (enterprise_managed_uid_unregistered)"
+        return 0
+        ;;
       *"HTTP 403"*"|"*enterprise_managed_uid_unregistered*)
         printf '%s' 'this account is not enrolled in DefenseClaw on this computer yet. DefenseClaw enrolls a new account within about five minutes of its first sign-in, so try again then; if this continues, the policy may exclude this account, so ask your administrator (enterprise_managed_uid_unregistered)'
         return 0

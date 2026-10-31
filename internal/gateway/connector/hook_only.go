@@ -2197,16 +2197,30 @@ func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
 		return fmt.Errorf("%s restore plugin backup: %w", c.name, err)
 	}
 	if !restored {
-		// The plugin was hand-edited after setup; leave it, and its
-		// receipt, for the operator rather than clobbering their changes.
-		// Doctor surfaces the lingering managed plugin. A plugin
-		// DefenseClaw created that is gone leaves nothing to restore.
-		if b, loadErr := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config")); loadErr == nil && !b.Existed {
-			if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
-				discardManagedFileBackup(opts.DataDir, c.name, "config")
-			}
+		// The plugin differs from the one this data directory's setup
+		// wrote. A hand edit stays, and its receipt, for the operator;
+		// doctor surfaces it. A plugin DefenseClaw created (or found as an
+		// earlier DefenseClaw plugin) that is byte for byte what setup
+		// renders for another data directory is DefenseClaw's: `config set
+		// data_dir` rendered it with that directory's token path, and
+		// keeping it aborted the uninstall (rel-1-0-6 GAP-0117). It goes,
+		// with the receipt, as a plugin DefenseClaw created that is gone
+		// leaves nothing to restore.
+		b, loadErr := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config"))
+		if loadErr != nil || (b.Existed && !ownedPluginBytes(b.PristineBytes)) {
+			return nil
 		}
-		return nil
+		if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
+			discardManagedFileBackup(opts.DataDir, c.name, "config")
+			return nil
+		}
+		const maxManagedPluginBytes = 4 << 20
+		current, readErr := safefile.ReadRegularFileBounded(path, maxManagedPluginBytes)
+		if readErr != nil || !ownedPluginBytes(current) || !c.renderedForAnotherDataDir(opts, current) {
+			return nil
+		}
+		discardManagedFileBackup(opts.DataDir, c.name, "config")
+		return c.removeOwnedPluginWithoutBackup(path)
 	}
 	discardManagedFileBackup(opts.DataDir, c.name, "config")
 	// A plugin captured after an earlier DefenseClaw setup (one a
@@ -2221,26 +2235,9 @@ func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
 // version, so an older DefenseClaw's plugin is recognized too) in a trusted
 // plugin directory. Any other file is left alone.
 func (c *hookOnlyConnector) removeOwnedPluginWithoutBackup(path string) error {
-	const maxManagedPluginBytes = 4 << 20
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("%s inspect plugin %s: %w", c.name, path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil
-	}
-	data, err := safefile.ReadRegularFileBounded(path, maxManagedPluginBytes)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("%s read plugin %s: %w", c.name, path, err)
-	}
-	firstLine, _, _ := bytes.Cut(data, []byte("\n"))
-	if !validManagedPluginOwnershipMarker(bytes.TrimSuffix(firstLine, []byte("\r"))) {
-		return nil
+	owned, err := c.ownedPluginFile(path)
+	if err != nil || !owned {
+		return err
 	}
 	if err := validatePluginArtifactDestination(path); err != nil {
 		return fmt.Errorf("%s validate plugin %s for removal: %w", c.name, path, err)
@@ -2249,6 +2246,74 @@ func (c *hookOnlyConnector) removeOwnedPluginWithoutBackup(path string) error {
 		return fmt.Errorf("%s remove plugin %s: %w", c.name, path, err)
 	}
 	return nil
+}
+
+// ownedPluginFile reports whether path is a regular file whose first line is
+// a DefenseClaw ownership marker (any version). A missing file is not.
+func (c *hookOnlyConnector) ownedPluginFile(path string) (bool, error) {
+	const maxManagedPluginBytes = 4 << 20
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("%s inspect plugin %s: %w", c.name, path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+	data, err := safefile.ReadRegularFileBounded(path, maxManagedPluginBytes)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%s read plugin %s: %w", c.name, path, err)
+	}
+	return ownedPluginBytes(data), nil
+}
+
+// renderedForAnotherDataDir reports whether current is the plugin setup
+// renders for opts except for its scoped token path, which names the same
+// file under another data directory: the plugin a setup under another
+// data_dir wrote.
+func (c *hookOnlyConnector) renderedForAnotherDataDir(opts SetupOpts, current []byte) bool {
+	rendered, err := c.renderPluginArtifact(opts)
+	if err != nil {
+		return false
+	}
+	tokenPath, err := HookAPITokenFilePath(opts.DataDir, c.name)
+	if err != nil {
+		return false
+	}
+	tokenPath, err = filepath.Abs(tokenPath)
+	if err != nil {
+		return false
+	}
+	dataDir, err := filepath.Abs(opts.DataDir)
+	if err != nil || !strings.HasPrefix(tokenPath, dataDir+string(filepath.Separator)) {
+		return false
+	}
+	suffix := []byte(javaScriptStringContent(tokenPath[len(dataDir):]))
+	parts := bytes.Split(rendered, []byte(javaScriptStringContent(tokenPath)))
+	if len(parts) < 2 || len(parts[1]) == 0 || !bytes.HasPrefix(current, parts[0]) {
+		return false
+	}
+	rest := current[len(parts[0]):]
+	end := bytes.Index(rest, parts[1])
+	if end <= len(suffix) {
+		return false
+	}
+	other := rest[:end]
+	if !bytes.HasSuffix(other, suffix) || bytes.ContainsAny(other, "\"'`\n\r") {
+		return false
+	}
+	return bytes.Equal(current, bytes.Join(parts, other))
+}
+
+// ownedPluginBytes reports whether data starts with a DefenseClaw ownership
+// marker line.
+func ownedPluginBytes(data []byte) bool {
+	firstLine, _, _ := bytes.Cut(data, []byte("\n"))
+	return validManagedPluginOwnershipMarker(bytes.TrimSuffix(firstLine, []byte("\r")))
 }
 
 func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {

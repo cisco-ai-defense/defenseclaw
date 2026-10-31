@@ -613,7 +613,35 @@ func windowsDiscoveryAccountKey(signal inventory.AISignal) string {
 var (
 	enterpriseDiscoveryAccountIDs  = platformDiscoveryAccountIDs
 	enterpriseDiscoveryAccountName = platformDiscoveryAccountName
+	// enterpriseDiscoveryUIDName names the Linux or macOS account that holds
+	// a uid now, as the account database spells it ("" on Windows or when
+	// none does).
+	enterpriseDiscoveryUIDName = platformDiscoveryUIDName
 )
+
+// enterpriseDiscoveryRuntimeFilter is the --user filter runtime findings are
+// matched with. A Linux or macOS finding names its account by name only (it
+// carries no SID), while the per-user records also carry the uid, so a uid
+// --user selected the account's records and none of its runtime findings
+// (rel-1-0-6 GAP-0159). A uid is resolved to the name of the account that
+// holds it, as the account database names it, else as the account's record
+// in the report names it; the findings are then matched by that name, as for
+// --user <name>. Any other spelling is matched as given.
+func enterpriseDiscoveryRuntimeFilter(user string, accounts []enterpriseDiscoveryAccount) useridentity.AccountFilter {
+	user = strings.TrimSpace(user)
+	if uid, err := strconv.Atoi(user); err == nil && uid >= 0 && strconv.Itoa(uid) == user {
+		name := enterpriseDiscoveryUIDName(uid)
+		for _, account := range accounts {
+			if name == "" && account.UID != nil && *account.UID == uid {
+				name = strings.TrimSpace(account.User)
+			}
+		}
+		if name != "" {
+			return useridentity.NewAccountFilter(name)
+		}
+	}
+	return useridentity.NewAccountFilter(user, enterpriseDiscoveryAccountIDs(user)...)
+}
 
 // nameWindowsDiscoveryTwins names each account that shares its bare name
 // with another one (a domain and a local account of one name) DOMAIN\name or
@@ -718,7 +746,7 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 			// apart, as host-wide (GAP-1250). Secure Client keeps the exact
 			// --user match of main (issue #1092).
 			secureClient := cfg != nil && cfg.SecureClientIntegration()
-			accountFilter := useridentity.NewAccountFilter(user, enterpriseDiscoveryAccountIDs(user)...)
+			accountFilter := enterpriseDiscoveryRuntimeFilter(user, report.Accounts)
 			findings := []enterpriseRuntimeFinding{}
 			for _, finding := range view.Findings {
 				switch {

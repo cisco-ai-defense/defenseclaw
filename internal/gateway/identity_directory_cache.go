@@ -432,6 +432,54 @@ func (c *identityCache[T]) explain(key string, wait time.Duration) identityExpla
 	return answer
 }
 
+// reread looks key up again with a lookup that starts after the call, once
+// any lookup of it already running has finished, and waits at most wait for
+// it. `enterprise identity refresh` re-reads an account the directory has
+// just changed: explain reuses a lookup from the last identityExplainFresh,
+// and one that started before the change answers with the facts from before
+// it, so a refresh run seconds after a group change reported the account
+// unchanged and its hooks kept the old profile (rel-1-0-6 GAP-0143). The
+// explain lookup that follows reuses this answer. A key the cache holds
+// nothing for is left alone: nothing older can be reused for it, and a
+// lookup started for an account no hook has used would only add it to the
+// directory health report.
+func (c *identityCache[T]) reread(key string, wait time.Duration) {
+	if c == nil || key == "" || c.resolve == nil {
+		return
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	c.mu.Lock()
+	entry := c.entries[key]
+	if entry == nil {
+		c.mu.Unlock()
+		return
+	}
+	earlier := entry.inflight
+	c.mu.Unlock()
+	if earlier != nil {
+		select {
+		case <-earlier:
+		case <-timer.C:
+			return
+		}
+	}
+	c.mu.Lock()
+	if entry = c.entries[key]; entry == nil {
+		c.mu.Unlock()
+		return
+	}
+	if entry.inflight == nil {
+		c.refreshLocked(key, entry)
+	}
+	done := entry.inflight
+	c.mu.Unlock()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
+}
+
 // explainDirectoryFacts returns the directory facts a hook call of key gets
 // after explain's lookup (identityCache.explain), or why it gets none.
 func explainDirectoryFacts(cache *identityDirectoryCache, key string) (useridentity.DirectoryFacts, error) {

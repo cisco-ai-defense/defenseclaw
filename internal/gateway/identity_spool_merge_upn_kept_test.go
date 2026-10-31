@@ -14,6 +14,32 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+// A Windows AD account's own UPN from the domain controller wins over a
+// guardian record's identity store UPN, which a rename leaves stale; a
+// record's translated UPN, and an own UPN that is only kept, still yield to
+// the record (identity-round GAP-1238).
+func TestMergeSpoolFactsKeepsTheDirectoryUPNOverAnIdentityStoreRecord(t *testing.T) {
+	own := useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+		UPN: "new@corp.example", Principal: "new@corp.example", Source: useridentity.SourceWindowsLSA}
+	stale := useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+		UPN: "old@corp.example", Principal: "old@corp.example", Source: useridentity.SourceWindowsIdentityStore}
+	record := enterprisehooks.IdentitySpoolRecord{Key: "S-1-5-21-1-2-3-1105", UPNSource: enterprisehooks.UPNSourceIdentityStore, Facts: stale}
+	if merged := mergeSpoolFacts(own, record); merged.UPN != "new@corp.example" || merged.Principal != "new@corp.example" ||
+		merged.Source != useridentity.SourceWindowsLSA {
+		t.Fatalf("merged = %+v; want the domain controller UPN", merged)
+	}
+	kept := own
+	kept.UPNKept = true
+	if merged := mergeSpoolFacts(kept, record); merged.UPN != "old@corp.example" {
+		t.Fatalf("merged with a kept own UPN = %+v; want the record's", merged)
+	}
+	translated := record
+	translated.UPNSource = enterprisehooks.UPNSourceTranslateName
+	if merged := mergeSpoolFacts(own, translated); merged.UPN != "old@corp.example" {
+		t.Fatalf("merged with a translated record = %+v; want the record's", merged)
+	}
+}
+
 // W19 review (loop round 1): the merge carries a guardian's kept mark with
 // the spool's UPN for agent identity rows; every fact profile matching reads
 // is what it was without the mark (GAP-0129, GAP-0284).

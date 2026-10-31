@@ -691,8 +691,9 @@ A lifecycle that fails normally rolls back. If the rollback cannot finish, the
 transaction stays pending: the result reports `transaction_pending: true` and names
 the services that stay stopped. `status` shows it and `verify` refuses until it is
 recovered. While the gateway is stopped, users' agents block with
-`enterprise_managed_gateway_not_running`. Starting a service by hand does not
-recover it.
+`enterprise_managed_gateway_not_running`, and the block asks them to have an
+administrator run `enterprise windows status`. Starting a service by hand does
+not recover it.
 
 A run that hits `TIMEOUTSECONDS` (`lifecycle_timeout`) is stopped, and Setup then
 runs one recovery of its own, limited to 10 minutes, that replays the pending

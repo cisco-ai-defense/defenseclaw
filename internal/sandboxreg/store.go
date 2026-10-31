@@ -62,6 +62,9 @@ var (
 	// ErrFull: the uid holds MaxEntriesPerUID registrations none of which
 	// can be evicted, or its run records reached MaxRunBytesPerUID.
 	ErrFull = errors.New("sandboxreg: too many sandbox registrations")
+	// ErrTooManyLive: the uid already has MaxLivePerUID live registrations,
+	// so another one may not become live (GAP-0020).
+	ErrTooManyLive = errors.New("sandboxreg: too many running sandboxes for one account")
 	// ErrStopped: a running report for a registration whose daemon reported
 	// its sandbox stopped. A stop is final for a registration: the sandbox
 	// runs again only under a new one (Restart, GAP-0673).
@@ -169,6 +172,18 @@ func EffectiveState(r Registration, now time.Time) string {
 		return StateStopped
 	}
 	return r.State
+}
+
+// liveCount is how many of u's registrations other than except are live at
+// now (EffectiveState): the ones MaxLivePerUID caps.
+func liveCount(u *uidRecords, now time.Time, except string) int {
+	n := 0
+	for _, r := range u.regs {
+		if r.ID != except && EffectiveState(r, now) == StateLive {
+			n++
+		}
+	}
+	return n
 }
 
 // leaseStart is when r's LiveLease began: its daemon's last running
@@ -750,6 +765,8 @@ func (s *FileStore) Bind(uid int, id string, b sandboxrelay.BindRequest) (Regist
 		return Registration{}, ErrExpired
 	case b.Driver != "" && r.Driver != "" && b.Driver != r.Driver:
 		return Registration{}, ErrDriverMismatch
+	case liveCount(u, now, r.ID) >= MaxLivePerUID:
+		return Registration{}, ErrTooManyLive
 	}
 	r.State, r.BoundAt, r.SeenAt = StateLive, now, now
 	r.GuestWatch, r.GuestSeenAt = true, time.Time{}
@@ -923,6 +940,10 @@ func (s *FileStore) Report(uid int, id string, running bool) (Registration, erro
 				return r, nil
 			}
 			if EffectiveState(r, now) == StateStopped {
+				// A lapsed lease revives only within the account's cap.
+				if liveCount(u, now, r.ID) >= MaxLivePerUID {
+					return r, ErrTooManyLive
+				}
 				next.SessionAt = now
 			}
 			next.State, next.SeenAt = StateLive, now
@@ -975,6 +996,9 @@ func (s *FileStore) Restart(uid int, id string) (Registration, error) {
 		return r, ErrNotPending
 	}
 	now := s.now()
+	if liveCount(u, now, r.ID) >= MaxLivePerUID {
+		return r, ErrTooManyLive
+	}
 	old := r
 	old.State, old.RevokedReason, old.RevokedAt = StateRevoked, ReasonRestarted, now
 	fresh := r

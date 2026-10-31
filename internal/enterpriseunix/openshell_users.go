@@ -1050,6 +1050,16 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 	for _, entry := range state.sortedPending() {
 		key := strconv.Itoa(entry.UID)
 		account := SandboxAccount{Name: entry.User, UID: entry.UID, Home: entry.Home, GID: -1}
+		if env.sandboxAccountRemoved(ctx, account) {
+			// The account was removed from this computer: no user manager,
+			// daemon or sandbox of it can run again, so nothing waits, and
+			// the warning would never clear (its status and its drain both
+			// fail on the missing account, GAP-0155). Its sandbox records
+			// stay for the administrator's purge.
+			delete(state.Pending, key)
+			l.openshellChange("dropped the pending %s change of %s: the account no longer exists on this computer", entry.Kind, entry.User)
+			continue
+		}
 		status, err := ops.Status(ctx, account)
 		switch {
 		case err != nil && entry.Kind != "launchd" && !env.hasHomeSandboxState(account):
@@ -2074,6 +2084,26 @@ func (e *Env) hasHomeSandboxState(a SandboxAccount) bool {
 		}
 	}
 	return false
+}
+
+// sandboxAccountRemoved reports whether the host's account database answers
+// that a is gone: `getent passwd UID` exits 2 (not found) on Linux, and
+// `dscl . -read /Users/NAME` finds no record on macOS. A lookup that fails
+// any other way (a directory outage, for one) is no answer, so a change an
+// account waits for is never dropped for a directory that did not answer.
+func (e *Env) sandboxAccountRemoved(ctx context.Context, a SandboxAccount) bool {
+	if a.UID <= 0 {
+		return false
+	}
+	if e.GOOS == "darwin" {
+		if !plainAccountName(a.Name) {
+			return false
+		}
+		_, err := e.Runner.Run(ctx, "dscl", ".", "-read", "/Users/"+a.Name, "UniqueID")
+		return err != nil && strings.Contains(err.Error(), "eDSRecordNotFound")
+	}
+	res, err := e.Runner.Run(ctx, "getent", "passwd", strconv.Itoa(a.UID))
+	return err != nil && res.ExitCode == 2
 }
 
 // sandboxRecorded reports whether the managed gateway keeps a registration or

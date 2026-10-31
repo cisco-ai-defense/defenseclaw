@@ -2203,6 +2203,7 @@ snapshot() {
         [[ -L "${BIN_DIR}/${link}" ]] && { cp -P "${BIN_DIR}/${link}" "${SNAP}/bin/${link}" || return 1; }
     done
     write_busy_shim
+    wait_cli_calls_done
     while IFS= read -r name; do
         cp -Rp "${DEFENSECLAW_HOME}/${name}" "${SNAP}/data/" || return 1
     done < <(data_entries)
@@ -2336,12 +2337,46 @@ EOF
     return 0
 }
 
+# publish_link TARGET NAME: point BIN_DIR/NAME at TARGET with one rename.
+# `ln -sfn` over the busy shim removes it first, and a command run in that
+# moment found no CLI; with the rename it finds the old entry, the busy shim
+# or the new one, never a missing or partly written one (rel-1-0-6 GAP-0105).
+publish_link() {
+    local new="${BIN_DIR}/.$2.new"
+    rm -f "${new}" && ln -s "$1" "${new}" && mv -f "${new}" "${BIN_DIR}/$2"
+}
+
+# wait_cli_calls_done: with the busy shim in place, wait (at most 15 s) for
+# CLI calls of this account that already started from the old venv. Moving the
+# venv under a call that was still importing failed it with
+# ModuleNotFoundError, or had the shell run the entry script (rel-1-0-6
+# GAP-0105). A process that keeps running (the TUI) is not waited for longer.
+wait_cli_calls_done() {
+    local deadline=$((SECONDS + 15)) pid argv0 busy
+    [[ -d "${VENV}" ]] || return 0
+    while (( SECONDS < deadline )); do
+        busy=""
+        for pid in $(pgrep -u "$(id -u)" 2>/dev/null); do
+            [[ "${pid}" == "$$" ]] && continue
+            argv0=""
+            IFS= read -r -d '' argv0 < <(process_argv "${pid}" 2>/dev/null) || [[ -n "${argv0}" ]] || continue
+            case "${argv0}" in
+                "${VENV}"/bin/*) busy=1; break ;;
+            esac
+        done
+        [[ -z "${busy}" ]] && return 0
+        sleep 0.2
+    done
+    return 0
+}
+
 # restore_links SLOT: put back the CLI links SLOT saved, over the busy shim.
 restore_links() {
-    local link
+    local link new
     for link in ${MANAGED_LINKS}; do
         if [[ -L "$1/bin/${link}" ]]; then
-            rm -f "${BIN_DIR:?}/${link}" && cp -P "$1/bin/${link}" "${BIN_DIR}/${link}" || true
+            new="${BIN_DIR}/.${link}.new"
+            { rm -f "${new}" && cp -P "$1/bin/${link}" "${new}" && mv -f "${new}" "${BIN_DIR}/${link}"; } || true
         elif [[ -f "${BIN_DIR}/${link}" && ! -L "${BIN_DIR}/${link}" ]] \
             && [[ "$(head -n 2 "${BIN_DIR}/${link}" 2>/dev/null)" == *"${BUSY_SHIM_MARK}"* ]]; then
             rm -f "${BIN_DIR:?}/${link}"
@@ -2417,10 +2452,13 @@ swap_in() {
         && chmod 700 "${INSTALLER_DIR}/.defenseclaw-hook-post.new" \
         && mv -f "${INSTALLER_DIR}/.defenseclaw-hook-post.new" "${INSTALLER_DIR}/defenseclaw-hook-post" \
         && record_binaries || return 1
+    # The CLI the links name must start before any link names it: until
+    # then the busy shim answers (rel-1-0-6 GAP-0105).
+    "${VENV}/bin/defenseclaw" --version >/dev/null 2>&1 || { warn "The new DefenseClaw CLI does not start"; return 1; }
     for link in ${MANAGED_LINKS}; do
         target="${VENV}/bin/${link}"
         [[ -x "${target}" ]] || continue
-        ln -sfn "${target}" "${BIN_DIR}/${link}" || return 1
+        publish_link "${target}" "${link}" || return 1
     done
     if [[ -n "${APP_PATH}" ]]; then
         swap_app || return 1
@@ -2925,6 +2963,7 @@ stash_live() {
         [[ -L "${BIN_DIR}/${link}" ]] && { cp -P "${BIN_DIR}/${link}" "${slot}/bin/${link}" || return 1; }
     done
     write_busy_shim
+    wait_cli_calls_done
     while IFS= read -r name; do
         mv "${DEFENSECLAW_HOME}/${name}" "${slot}/data/" || return 1
     done < <(data_entries)

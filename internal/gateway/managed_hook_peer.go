@@ -190,6 +190,11 @@ type managedHookDecision struct {
 	Status int
 	Reason string
 	Exempt bool
+	// Excluded marks an enterprise_managed_uid_unregistered refusal of an
+	// account enterprise.enrollment.exclude_users names: the refusal body
+	// says so (enrollment: excluded), so the hook does not tell the account
+	// to wait for an enrollment that never comes (identity-round GAP-1181).
+	Excluded bool
 }
 
 func allowManagedHook() managedHookDecision {
@@ -397,12 +402,28 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 		if ledger.enrolledAny(peer) {
 			return allowManagedHook()
 		}
-		return denyManagedHook(http.StatusForbidden, managedHookReasonUIDUnregistered)
+		return z.unenrolledRefusal(peer)
 	}
 	if ledger.enrolled(peer, connectorName) {
 		return allowManagedHook()
 	}
-	return denyManagedHook(http.StatusForbidden, managedHookReasonUIDUnregistered)
+	return z.unenrolledRefusal(peer)
+}
+
+// unenrolledRefusal refuses a caller the ledger does not enroll, and marks
+// one exclude_users names as the guardian's enumerator matches it: its
+// account name or its decimal uid. The mark changes only the refusal text;
+// the caller is refused either way.
+func (z *managedHookAuthorizer) unenrolledRefusal(peer managedHookPeer) managedHookDecision {
+	decision := denyManagedHook(http.StatusForbidden, managedHookReasonUIDUnregistered)
+	uid := strconv.Itoa(peer.UID)
+	for _, entry := range z.enrollment.ExcludeUsers {
+		if entry = strings.TrimSpace(entry); entry != "" && (entry == uid || entry == peer.Name) {
+			decision.Excluded = true
+			break
+		}
+	}
+	return decision
 }
 
 // decideAgentGateway authorizes a call to the agent-gateway route, which no
@@ -714,7 +735,7 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s\n",
 				peer.UID, connectorName, route, decision.Reason)
 			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, decision.Reason, connectorName)
-			writeManagedHookRefusal(w, decision.Status, decision.Reason)
+			writeManagedHookDecisionRefusal(w, decision)
 			return
 		}
 		if decision.Exempt {
@@ -782,6 +803,23 @@ func (a *APIServer) refuseUnverifiedSurface(w http.ResponseWriter, r *http.Reque
 	a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, managedHookReasonSurfaceUnverified, connectorName)
 	writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonSurfaceUnverified)
 	return true
+}
+
+// managedHookEnrollmentExcluded is the refusal body's enrollment value for
+// an account the administrator excludes (managedHookDecision.Excluded).
+const managedHookEnrollmentExcluded = "excluded"
+
+// writeManagedHookDecisionRefusal writes decide's refusal: the reason, and
+// for an excluded account enrollment: excluded. Only the caller's own
+// enrollment is named, never another account's.
+func writeManagedHookDecisionRefusal(w http.ResponseWriter, decision managedHookDecision) {
+	if !decision.Excluded {
+		writeManagedHookRefusal(w, decision.Status, decision.Reason)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(decision.Status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "forbidden", "reason": decision.Reason, "enrollment": managedHookEnrollmentExcluded})
 }
 
 func writeManagedHookRefusal(w http.ResponseWriter, status int, reason string) {

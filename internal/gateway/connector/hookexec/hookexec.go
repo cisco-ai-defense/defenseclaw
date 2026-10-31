@@ -1238,12 +1238,12 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	case resp.StatusCode == http.StatusForbidden && managedStandaloneHook(opts) &&
 		refusalReason(body) == managedUIDUnregisteredReason:
 		// The gateway is up and refuses an account the enumerator has not
-		// enrolled yet (or the policy excludes): say so, not "HTTP 403"
-		// (GAP-0738).
+		// enrolled yet, or one the policy excludes: say which, not "HTTP
+		// 403" (GAP-0738, identity-round GAP-1181).
 		if strings.TrimSpace(opts.Event) == "" {
 			opts.Event = resolveHookEvent("", payload)
 		}
-		return failEnrollmentRefusal(opts, sp, managedUIDUnregisteredReason)
+		return failEnrollmentRefusalOf(opts, sp, managedUIDUnregisteredReason, refusalExcluded(body))
 	case resp.StatusCode == http.StatusForbidden && managedStandaloneHook(opts) &&
 		refusalReason(body) == managedRootDeniedReason:
 		// enrollment.root: deny refuses root: say so, not "an answer
@@ -1405,8 +1405,6 @@ func retryAfterDelay(value string) time.Duration {
 	return time.Duration(min(seconds, 3)) * time.Second
 }
 
-// refusalReason is the reason of a gateway refusal body
-// ({"error":"forbidden","reason":...}), or "".
 // managedAuditUnavailableReason is the hook-failure reason of a managed call
 // the gateway refused because it could not write the call's audit record
 // (gatewayAuditUnavailable).
@@ -1425,6 +1423,17 @@ func gatewayAuditUnavailable(status int, body []byte) bool {
 	return json.Unmarshal(body, &answer) == nil && strings.TrimSpace(answer.Error) == "hook audit is unavailable"
 }
 
+// refusalExcluded reports a standalone gateway refusal that marks the
+// caller's account as excluded by the administrator's enrollment policy.
+func refusalExcluded(body []byte) bool {
+	var refusal struct {
+		Enrollment string `json:"enrollment"`
+	}
+	return json.Unmarshal(body, &refusal) == nil && strings.TrimSpace(refusal.Enrollment) == "excluded"
+}
+
+// refusalReason is the reason of a gateway refusal body
+// ({"error":"forbidden","reason":...}), or "".
 func refusalReason(body []byte) string {
 	var refusal struct {
 		Reason string `json:"reason"`
@@ -2849,6 +2858,12 @@ const unixUnenrolledAccountExplanation = "this account is not enrolled in Defens
 	"DefenseClaw enrolls a new account within about five minutes of its first sign-in, so try again then; " +
 	"if this continues, the policy may exclude this account, so ask your administrator"
 
+// unixExcludedAccountExplanation is why the call of an account the Linux or
+// macOS policy excludes (enterprise.enrollment.exclude_users) is blocked: it
+// will not be enrolled, so waiting does not help (identity-round GAP-1181).
+const unixExcludedAccountExplanation = "your organization's DefenseClaw policy excludes this account on this computer, " +
+	"so DefenseClaw does not enroll it and trying again later will not help; ask your administrator if you need to use agents here"
+
 // unenrolledAccountExplanation is why an unenrolled Windows account's call is
 // blocked. It leads with the next step and the wait, because Claude Code
 // shows only the first line's first 80-odd characters (GAP-0385): a new
@@ -2870,6 +2885,12 @@ const unenrolledAccountExplanation = "this account is not enrolled yet; restart 
 // the JSON-bodied hooks) gets the same explanation instead of the generic
 // failed-closed text.
 func failEnrollmentRefusal(opts Options, sp spec, reason string) int {
+	return failEnrollmentRefusalOf(opts, sp, reason, false)
+}
+
+// failEnrollmentRefusalOf is failEnrollmentRefusal; excluded words the Unix
+// refusal of an account the policy excludes.
+func failEnrollmentRefusalOf(opts Options, sp spec, reason string, excluded bool) int {
 	if !sp.failOpenOnly && failClosedStopEvent(opts, sp) {
 		// Nothing is refused, so no refusal is reported.
 		return allowFailClosedStop(opts, sp, reason, "transport")
@@ -2883,6 +2904,9 @@ func failEnrollmentRefusal(opts Options, sp spec, reason string) int {
 	switch reason {
 	case managedUIDUnregisteredReason:
 		why = unixUnenrolledAccountExplanation
+		if excluded {
+			why = unixExcludedAccountExplanation
+		}
 	case managedRootDeniedReason:
 		why = rootDeniedExplanation
 	}
@@ -3724,8 +3748,9 @@ func managedFailClosedText(opts Options, layer, reason string) string {
 // managedInstallWindowText is what a managed hook says when the gateway is
 // stopped, restarting or silent while an enterprise lifecycle run (a package
 // install or upgrade, ensure, repair or rollback: managedLifecycleActive)
-// holds it: that DefenseClaw is being installed or upgraded and to try again,
-// as the per-user install window says (perUserGatewayDownText). It said "the
+// holds it: that DefenseClaw is being installed or upgraded, to try again and,
+// if it continues, to have the administrator run the status command (a run
+// stopped before it finished leaves the same marker, GAP-0509). It said "the
 // gateway is not available" or "is restarting to apply a change", which did
 // not name the upgrade (GAP-2173). "" for any other failure: a refusal
 // with its own cause (another program on the port, SELinux, a sandboxed
@@ -3751,9 +3776,22 @@ func managedInstallWindowText(opts Options, layer, reason string) string {
 	if !managedLifecycleActive(opts) {
 		return ""
 	}
-	return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
-		"upgraded on this computer, and its gateway starts again when that is done. Try again in a moment; " +
-		"if this continues, contact your administrator."
+	// The marker stays after a Setup or package run that was stopped before
+	// it finished (a killed Setup leaves the transaction pending and the
+	// gateway service disabled), and no run is left to start the gateway
+	// again. The hook cannot tell the two apart, so the text does not
+	// promise a restart and names the status command, which says whether a
+	// run is still going or the transaction needs Setup's recovery
+	// (GAP-0509). The outage code goes last, as in the other refusals.
+	text := "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
+		"upgraded on this computer, and its gateway is stopped until that run finishes or is recovered. Try again in a moment; " +
+		"if this continues, ask your administrator to check DefenseClaw on this computer: `" +
+		managedStatusCommand(runtime.GOOS) + "` names what to do."
+	switch reason {
+	case managedGatewayNotRunningReason, managedGatewayRestartingReason, managedGatewayNoAnswerReason:
+		text += " (" + reason + ")"
+	}
+	return text
 }
 
 // managedLifecycleRuntimeStateReason reports a managed runtime-state
