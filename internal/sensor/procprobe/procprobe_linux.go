@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procboot"
@@ -79,12 +80,23 @@ func snapshot() ([]Process, int, error) {
 	return rows, skipped, nil
 }
 
-// OwnerOfPID is the name of the account that owns the live process pid, ""
-// when the process is gone or the account database does not name the uid. The
+// OwnerOfPID is the uid that owns the live process pid (nil when the process
+// is gone) and its account's name when a lookup has already answered. The
 // Linux event source reads it as a creation event arrives, so a session that
-// exits before any poll still names its account (p0-round GAP-1389).
-func OwnerOfPID(pid int) string {
-	return ownerOf(filepath.Join("/proc", strconv.Itoa(pid)))
+// exits before any poll still names its account (p0-round GAP-1389). It costs
+// one stat and never waits on the account database: the poll names a uid the
+// cache could not (OwnerNameOfUID).
+func OwnerOfPID(pid int) (*int, string) {
+	info, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid)))
+	if err != nil {
+		return nil, ""
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil, ""
+	}
+	uid := int(stat.Uid)
+	return &uid, CachedOwnerName(uid)
 }
 
 func readProcess(pid int, clockTicks, pageSize int64, bootTime time.Time) (Process, bool) {
