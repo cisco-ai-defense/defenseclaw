@@ -1,0 +1,157 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+)
+
+// dynamicWordParityProject is a project in a home with an authorized_keys
+// file and, in the project, a link to it (disklink) beside ordinary files.
+func dynamicWordParityProject(t *testing.T) (home, project string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell rows")
+	}
+	home = filepath.Join(t.TempDir(), "home")
+	project = filepath.Join(home, "proj")
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	for _, dir := range []string{filepath.Dir(keys), filepath.Join(project, "build")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{keys, filepath.Join(project, "report.txt"), filepath.Join(project, "a.txt"),
+		filepath.Join(project, "README.md")} {
+		if err := os.WriteFile(name, []byte("marker\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(keys, filepath.Join(project, "disklink")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+	return home, project
+}
+
+// postDynamicWordParity sends command to the hook route in one cell. A
+// managed cell carries the hook client write evidence, edited by evidence
+// when it is set; a per-user cell is judged without it, as shipped.
+func postDynamicWordParity(t *testing.T, home, project, connector string, managed bool, command string,
+	evidence func(map[string]string)) string {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = connector
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	body := mustJSON(t, map[string]any{"session_id": "parity-session", "hook_event_name": "PreToolUse",
+		"tool_name": "Bash", "cwd": project, "tool_input": map[string]any{"command": command, "description": "d"}})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(body)))
+	if connector == "codex" {
+		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+	}
+	if managed {
+		header := hookpaths.Resolve(body)
+		if evidence != nil {
+			targets, ok := hookpaths.Decode(header)
+			if !ok {
+				t.Fatalf("%s: client evidence does not decode", command)
+			}
+			evidence(targets)
+			encoded, err := json.Marshal(targets)
+			if err != nil {
+				t.Fatal(err)
+			}
+			header = base64.RawURLEncoding.EncodeToString(encoded)
+		}
+		req.Header.Set(hookpaths.Header, header)
+		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+	}
+	recorder := httptest.NewRecorder()
+	api.handleAgentHook(connector).ServeHTTP(recorder, req)
+	return recorder.Body.String()
+}
+
+func checkDynamicWordParity(t *testing.T, allowed, blocked []string) {
+	t.Helper()
+	home, project := dynamicWordParityProject(t)
+	const block, allow = `{"action":"block"`, `{"action":"allow"`
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, managed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s managed=%v", connector, managed), func(t *testing.T) {
+				for _, command := range allowed {
+					if got := postDynamicWordParity(t, home, project, connector, managed, command, nil); !strings.HasPrefix(got, allow) {
+						t.Errorf("%s = %.300s, want allow", command, got)
+					}
+				}
+				for _, command := range blocked {
+					got := postDynamicWordParity(t, home, project, connector, managed, command, nil)
+					if !strings.HasPrefix(got, block) || !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+						t.Errorf("%s = %.300s, want block", command, got)
+					}
+				}
+			})
+		}
+	}
+}
+
+// rel-1-0-6:GAP-0229: an eval-assigned redirect onto an ordinary file is
+// allowed by managed Claude Code as by managed Codex and both per-user
+// cells, in a project that also holds a keys link; the same form onto the
+// link blocks in every cell.
+func TestEvalAssignedRedirectOntoAnOrdinaryFileGetsThePerUserVerdictInEveryCell(t *testing.T) {
+	checkDynamicWordParity(t,
+		[]string{
+			`f=other; eval f=report.txt; echo marker >> "$f"`,
+			`eval f=report.txt; echo marker >> $f`,
+			`f=report.txt; eval true; echo marker >> "$f"`,
+		},
+		[]string{
+			`f=other; eval f=disklink; echo marker >> "$f"`,
+			`eval f=disklink; echo marker >> $f`,
+			`eval cd ~/.ssh; echo marker >> authorized_keys`,
+		})
+}
+
+// rel-1-0-6:GAP-0229: managed Claude Code keeps the conservative block of
+// the eval form when the client evidence is truncated or has no reading of
+// the starting directory.
+func TestManagedClaudeCodeKeepsTheEvalRedirectBlockWithoutACompleteClientReading(t *testing.T) {
+	home, project := dynamicWordParityProject(t)
+	if runtime.GOOS != "linux" {
+		t.Skip("only a Linux managed gateway reads the starting directory from the client")
+	}
+	const command = `f=other; eval f=report.txt; echo marker >> "$f"`
+	for name, edit := range map[string]func(map[string]string){
+		"truncated": func(targets map[string]string) { targets[hookpaths.TruncatedKey] = "1" },
+		"no starting directory": func(targets map[string]string) {
+			delete(targets, hookpaths.DirectoryFactPrefix+project)
+		},
+		"unreadable starting directory": func(targets map[string]string) {
+			targets[hookpaths.DirectoryFactPrefix+project] = "?"
+		},
+	} {
+		got := postDynamicWordParity(t, home, project, "claudecode", true, command, edit)
+		if !strings.HasPrefix(got, `{"action":"block"`) {
+			t.Errorf("%s: %s = %.300s, want block", name, command, got)
+		}
+	}
+	got := postDynamicWordParity(t, home, project, "claudecode", true, `eval "$CMD"; echo marker >> "$f"`, nil)
+	if !strings.HasPrefix(got, `{"action":"block"`) {
+		t.Errorf("eval of a dynamic script = %.300s, want block", got)
+	}
+}
