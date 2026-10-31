@@ -11627,11 +11627,50 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
         _echo_saved_without_restart(plural=True)
 
 
+def _outage_sentence(outage_fail_mode: str) -> tuple[str, str]:
+    """Two banner lines: what the hooks do while the gateway is down (rel-1-0-6 GAP-0011).
+
+    "A failed hook can block" read as the outage behaviour, while the
+    per-user default tier is fail open and status and doctor said so.
+    """
+    if outage_fail_mode == "closed":
+        return "While the gateway is down, tool calls are", "blocked (hook fail mode closed)."
+    if outage_fail_mode == "open":
+        return "While the gateway is down, tool calls run", "with a warning (hook fail mode open)."
+    return "While the gateway is down, the hook fail mode", "decides (defenseclaw guardrail status)."
+
+
+def _setup_outage_fail_mode(cfg, connector: str, *, fail_mode: str | None, rule_pack: str | None) -> str:
+    """The gateway-outage mode ``connector``'s hooks get from this setup run.
+
+    Read before the run saves anything, so the flags of the run count: an
+    explicit ``--fail-mode``, and a built-in ``--rule-pack`` whose tier
+    decides while no fail mode is saved.
+    """
+    if fail_mode is not None:
+        return "closed" if str(fail_mode).strip().lower() == "closed" else "open"
+    gc = cfg.guardrail
+    pack = (rule_pack or "").strip().lower()
+    if (
+        pack in {"strict", "default", "permissive"}
+        and not saved_hook_fail_mode_scope(gc, connector)
+        and not cfg.managed_outside_secure_client()
+        and not gc.secure_client_hook_fail_modes()
+    ):
+        return "closed" if pack == "strict" else "open"
+    return gc.effective_hook_outage_fail_mode(connector)
+
+
 def _print_connector_observability_banner(
-    connector: str, *, mode: str = "observe", native_export_expected: bool = False
+    connector: str,
+    *,
+    mode: str = "observe",
+    native_export_expected: bool = False,
+    outage_fail_mode: str = "",
 ) -> None:
     setup_slug = "claude-code" if connector == "claudecode" else connector
     label = _CONNECTOR_META[connector]["label"]
+    outage_first, outage_second = _outage_sentence(outage_fail_mode)
     click.echo()
     ux.echo(f"  DefenseClaw — {label} {mode} setup")
     ux.echo("  ─────────────────────────────────────────────────────────")
@@ -11643,7 +11682,8 @@ def _print_connector_observability_banner(
             click.echo("  waits for synchronous tool.call allow, confirm, or reject")
             click.echo("  verdicts before the requested tool can execute.")
         else:
-            click.echo("  observes policy findings; an unavailable hook can still block.")
+            click.echo(f"  observes policy findings. {outage_first}")
+            click.echo(f"  {outage_second}")
     else:
         click.echo(f"  This wires {label} into DefenseClaw via the agent's")
         click.echo("  native hook bus. No proxy is inserted in the LLM data")
@@ -11663,7 +11703,8 @@ def _print_connector_observability_banner(
             click.echo("  path; supported actions flagged by policy are blocked")
             click.echo("  by the connector's native lifecycle verdict.")
         else:
-            click.echo("  path; policy findings are observed, but a failed hook can block.")
+            click.echo(f"  path; policy findings are observed. {outage_first}")
+            click.echo(f"  {outage_second}")
     click.echo()
     click.echo("  Telemetry channels:")
     if connector == "amp":
@@ -12133,6 +12174,7 @@ def _setup_observability_alias(
         connector,
         mode=normalized_mode,
         native_export_expected=str(getattr(app.cfg, "deployment_mode", "")).strip().lower() == "managed_enterprise",
+        outage_fail_mode=_setup_outage_fail_mode(app.cfg, connector, fail_mode=fail_mode, rule_pack=rule_pack),
     )
     # WU7: resolve add-vs-replace. Only HOOK-ENFORCED peers count as valid
     # multi-connector neighbors (D4=A) — proxy-backed connectors
