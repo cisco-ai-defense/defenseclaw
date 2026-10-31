@@ -31,7 +31,7 @@
       <title>Scoped investigation results</title>
       <table>
         <search>
-          <query>`dcso_investigation_events($run_id|s$,$session_id|s$)` | where $pivot|s$="all" OR ($pivot|s$="policy" AND event_domain="policy") OR ($pivot|s$="runtime" AND event_domain="runtime") OR ($pivot|s$="diagnostics" AND event_domain="operations") OR ($pivot|s$="usage" AND event_domain="usage") OR ($pivot|s$="trace" AND event_domain="trace") OR (match($pivot|s$, "^event_type:") AND event_type=replace($pivot|s$, "^event_type:", "")) | table timestamp event_domain event_type component action status severity actor target message request_id trace_id | sort - timestamp | head 50</query>
+          <query>`dcso_investigation_events("$run_id|u$","$session_id|u$")` | where $pivot|s$="all" OR ($pivot|s$="policy" AND event_domain="policy") OR ($pivot|s$="runtime" AND event_domain="runtime") OR ($pivot|s$="diagnostics" AND event_domain="operations") OR ($pivot|s$="usage" AND event_domain="usage") OR ($pivot|s$="trace" AND event_domain="trace") OR (match($pivot|s$, "^event_type:") AND event_type=replace($pivot|s$, "^event_type:", "")) | table timestamp event_domain event_type component action status severity actor target message request_id trace_id | sort - timestamp | head 50</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
