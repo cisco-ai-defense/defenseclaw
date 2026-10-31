@@ -88,6 +88,72 @@ func actionPlainMoveOntoLink(call *syntax.CallExpr, values actionValues, cwd, ho
 	return destination, filepath.Join(parent, name), true
 }
 
+// plainRemoveLongOptions keep rm a removal of each operand's own entry.
+var plainRemoveLongOptions = map[string]bool{"--force": true, "--verbose": true, "--interactive": true}
+
+// actionPlainRemovedLinks maps each operand of a plain rm or unlink (rm
+// options only among -f -i -I -v and their long forms, no recursive or
+// directory removal) that is an existing symbolic link, written with no
+// trailing slash, to the entry it removes. unlink(2) removes the link entry
+// and neither the file nor the directory it names, so such an operand is
+// judged by its entry, its directory followed and its name kept, as a plain
+// mv onto a link is (GAP-2590, GAP-2559).
+func actionPlainRemovedLinks(call *syntax.CallExpr, values actionValues, cwd, home string) map[*syntax.Word]string {
+	if call == nil || len(call.Assigns) != 0 || len(call.Args) < 2 {
+		return nil
+	}
+	program, known := staticProgramWord(call.Args[0], home)
+	if base := programBase(program); !known || base != "rm" && base != "unlink" {
+		return nil
+	}
+	var removed map[*syntax.Word]string
+	options := true
+	for _, arg := range call.Args[1:] {
+		value, static := StaticWord(arg, home)
+		if !static {
+			return nil
+		}
+		switch {
+		case options && value == "--":
+			options = false
+			continue
+		case options && strings.HasPrefix(value, "--"):
+			name, _, _ := strings.Cut(value, "=")
+			if !plainRemoveLongOptions[name] {
+				return nil
+			}
+			continue
+		case options && len(value) > 1 && strings.HasPrefix(value, "-"):
+			if strings.Trim(value[1:], "fiIv") != "" {
+				return nil
+			}
+			continue
+		}
+		operand, known := actionWordValue(arg, values, cwd, home)
+		if !known || operand == "" || strings.ContainsAny(operand, "*?[]") ||
+			strings.HasSuffix(operand, "/") || strings.HasSuffix(operand, "/.") {
+			continue
+		}
+		path := OperandPath(operand, cwd)
+		if !filepath.IsAbs(path) {
+			continue
+		}
+		if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		name := filepath.Base(path)
+		parent, resolved := ResolveWriteTarget(filepath.Dir(path))
+		if !resolved || name == "." || name == ".." {
+			continue
+		}
+		if removed == nil {
+			removed = make(map[*syntax.Word]string)
+		}
+		removed[arg] = filepath.Join(parent, name)
+	}
+	return removed
+}
+
 // protectedEntry reports an entry that is itself one of the protected
 // authorized-keys names or the .ssh directory, each read with its own
 // directory followed and its name kept; the file a link entry names is not

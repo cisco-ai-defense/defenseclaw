@@ -161,7 +161,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		found := false
 		effectiveCWD := cwd
 		var directoryStack []string
-		var movedOntoLinks []*syntax.Word
+		var judgedWords []*syntax.Word
 		checkWord := func(word *syntax.Word) bool {
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
@@ -218,20 +218,38 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				}
 				var moved *syntax.Word
 				var movedEntry string
+				var removed map[*syntax.Word]string
 				if !stateOnly {
 					// A plain mv onto a link replaces the link: judge its
-					// entry, not the file it names (GAP-2559).
+					// entry, not the file it names (GAP-2559). A plain rm of
+					// a link removes the link (GAP-2590).
 					if word, entry, ok := actionPlainMoveOntoLink(call, values, effectiveCWD, home); ok {
 						moved, movedEntry = word, entry
-						movedOntoLinks = append(movedOntoLinks, word)
+						judgedWords = append(judgedWords, word)
 					}
+					removed = actionPlainRemovedLinks(call, values, effectiveCWD, home)
 				}
+				// An --eval text that only defines rules make does not run
+				// is not a target of the call (GAP-2169).
+				inert := actionInertMakeEvals(call, effectiveCWD, home)
+				judgedWords = append(judgedWords, inert...)
 				for _, word := range call.Args {
 					if moved != nil && word == moved {
 						if protectedEntry(movedEntry, protected, ssh) {
 							found = true
 							return false
 						}
+						continue
+					}
+					if entry, ok := removed[word]; ok {
+						if protectedEntry(entry, protected, ssh) {
+							found = true
+							return false
+						}
+						judgedWords = append(judgedWords, word)
+						continue
+					}
+					if slices.Contains(inert, word) {
 						continue
 					}
 					if checkWord(word) {
@@ -246,8 +264,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		if found {
 			return true
 		}
-		// The text scan below would follow the link the move replaces.
-		nestedBodies = append(nestedBodies, movedOntoLinks...)
+		// The text scan below would read the words judged above again: the
+		// link a move replaces or an rm removes, an inert make --eval text.
+		nestedBodies = append(nestedBodies, judgedWords...)
 	}
 	text := actionBlankPatchBodies(command, actionMaskLiteralMetacharacters(command))
 	if parsed && actionLiteralArgumentProgramsOnly(file, home) {
@@ -2104,6 +2123,9 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 					break
 				}
 			}
+		case "uniq", "tar", "gtar", "bsdtar":
+			words, known := actionStaticWords(call.Args, home)
+			safe = known && actionReadsOnlyWords(words)
 		default:
 			safe = false
 		}
@@ -2270,6 +2292,9 @@ func actionLessWritesFile(option string) bool {
 // comment are not blocked by the reading of a shell that does not run them.
 func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool, dialect actionfacts.Dialect) bool {
 	for _, grammar := range []actionWindowsGrammar{0, actionWindowsPlainGrammar} {
+		if grammar != 0 && (dialect == actionfacts.DialectPowerShell || dialect == actionfacts.DialectPOSIX) {
+			grammar |= actionWindowsPlainComments
+		}
 		if !actionWindowsTargetMentionAs(command, cwd, home, depth, stateOnly, grammar) {
 			continue
 		}
@@ -3036,8 +3061,118 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 			}
 		}
 		return true
+	case "uniq", "tar", "gtar", "bsdtar":
+		return actionReadsOnlyWords(words)
 	}
 	return false
+}
+
+// actionStaticWords spells every word of a call, or reports that one is not
+// static.
+func actionStaticWords(args []*syntax.Word, home string) ([]string, bool) {
+	words := make([]string, len(args))
+	for i, arg := range args {
+		value, known := StaticWord(arg, home)
+		if !known {
+			return nil, false
+		}
+		words[i] = value
+	}
+	return words, true
+}
+
+// actionReadsOnlyWords reports a uniq that prints to standard output (at
+// most one operand: a second one is the file uniq writes) and a tar listing
+// (-t, --list) with only archive, directory, compression and verbosity
+// options: both read their operands and write no file, so a link operand to
+// a protected file or directory is a read there (GAP-2590). words starts
+// with the program.
+func actionReadsOnlyWords(words []string) bool {
+	if len(words) == 0 {
+		return false
+	}
+	if program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe"); program == "uniq" {
+		return actionUniqPrintsOnly(words[1:])
+	}
+	return actionTarListsOnly(words[1:])
+}
+
+func actionUniqPrintsOnly(args []string) bool {
+	operands, options := 0, true
+	for i := 0; i < len(args); i++ {
+		value := args[i]
+		switch {
+		case options && value == "--":
+			options = false
+		case options && strings.HasPrefix(value, "--"):
+			name, _, attached := strings.Cut(value, "=")
+			if !attached && (name == "--skip-fields" || name == "--skip-chars" || name == "--check-chars") {
+				i++ // the number
+			}
+		case options && len(value) > 1 && value[0] == '-':
+			if strings.IndexByte("fsw", value[len(value)-1]) >= 0 {
+				i++ // -f N, -s N, -w N
+			}
+		default:
+			operands++
+		}
+	}
+	return operands <= 1
+}
+
+var actionTarListLongOptions = map[string]bool{
+	"--list": true, "--verbose": true, "--gzip": true, "--gunzip": true, "--bzip2": true, "--xz": true, "--zstd": true,
+}
+
+func actionTarListsOnly(args []string) bool {
+	list, values, options := false, 0, true
+	archive := func(value string) bool { return !strings.Contains(value, ":") } // host:file runs a remote shell
+	for i, value := range args {
+		if values > 0 {
+			values--
+			continue
+		}
+		switch {
+		case !options:
+		case value == "--":
+			options = false
+		case strings.HasPrefix(value, "--"):
+			name, attached, hasValue := strings.Cut(value, "=")
+			switch {
+			case name == "--file" || name == "--directory":
+				if !hasValue {
+					values++
+				} else if name == "--file" && !archive(attached) {
+					return false
+				}
+			case !actionTarListLongOptions[name] || hasValue:
+				return false
+			}
+			list = list || name == "--list"
+		case strings.HasPrefix(value, "-") || i == 0:
+			// A first word without a dash is the old bundled form (tvf).
+			letters := strings.TrimPrefix(value, "-")
+			for j := 0; j < len(letters); j++ {
+				switch letters[j] {
+				case 't':
+					list = true
+				case 'v', 'z', 'j', 'J', 'Z':
+				case 'f', 'C':
+					if rest := letters[j+1:]; rest != "" && value[0] == '-' {
+						if letters[j] == 'f' && !archive(rest) {
+							return false
+						}
+						j = len(letters)
+						continue
+					}
+					values++
+				default:
+					return false
+				}
+			}
+		}
+	}
+	return list && values == 0
 }
 
 func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) bool {

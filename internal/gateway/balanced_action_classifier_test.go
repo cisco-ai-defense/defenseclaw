@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -301,7 +302,19 @@ func TestBalancedActionSelectedMakeRecipes(t *testing.T) {
 		{"include", "include ../writer.mk\n", "make write-key", true},
 		{"MAKEFLAGS", "safe:\n\tprintf ok > report.txt\n", "MAKEFLAGS=-f../writer.mk make write-key", true},
 		{"eval", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys' x", true},
-		{"unselected eval", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", true},
+		// An --eval text that only defines a rule the call does not select
+		// is parsed and never run (GAP-2169); any other --eval text is read.
+		// A Windows home also reads the call with the Windows grammars,
+		// which do not read make, so the text stays a mention there.
+		{"unselected eval", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", runtime.GOOS == "windows"},
+		{"unselected eval word", "safe:\n\tprintf ok > report.txt\n", "make --eval 'unused: ; printf ok >> ~/.ssh/authorized_keys' safe", runtime.GOOS == "windows"},
+		{"eval prerequisite of the goal", "safe:\n\tprintf ok > report.txt\n", "make --eval='safe: x' --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", true},
+		{"eval default goal", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys'", true},
+		{"eval function", "safe:\n\tprintf ok > report.txt\n", "make --eval='$(shell printf marker >> ~/.ssh/authorized_keys)' safe", true},
+		{"eval special target", "safe:\n\tprintf ok > report.txt\n", "make --eval='.DEFAULT: ; printf marker >> ~/.ssh/authorized_keys' other", true},
+		{"eval pattern", "safe:\n\tprintf ok > report.txt\n", "make --eval='%.k: ; printf marker >> ~/.ssh/authorized_keys' a.k", true},
+		{"eval assignment", "safe:\n\tprintf ok > report.txt\n", "make --eval='SHELL := /bin/sh' --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", true},
+		{"eval double colon", "safe:\n\tprintf ok > report.txt\n", "make --eval='safe:: ; printf marker >> ~/.ssh/authorized_keys' safe", true},
 		{"pattern", "%.key:\n\tprintf marker >> ~/.ssh/authorized_keys\n", "make token.key", true},
 		{"pattern prerequisite", "%.key: %.prep\n\t@true\na.prep:\n\t@true\nb.prep:\n\tprintf marker >> ~/.ssh/authorized_keys\n", "make a.key b.key", true},
 		{"stdin", "safe:\n\tprintf ok > report.txt\n", "make -f - safe <<'EOF'\nsafe:\n\tprintf marker >> ~/.ssh/authorized_keys\nEOF", true},
