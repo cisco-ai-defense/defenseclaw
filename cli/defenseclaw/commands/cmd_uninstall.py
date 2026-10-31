@@ -2279,9 +2279,16 @@ def _names_defenseclaw(path: str) -> bool:
 
 
 #: What DefenseClaw writes into an agent config, never a bare project path
-#: that merely contains the word: its hook launcher, its data folder (hook
-#: scripts, notify bridge) and its telemetry header names.
-_DEFENSECLAW_WIRING_MARKERS = (b"defenseclaw-hook", b".defenseclaw/", b".defenseclaw\\", b"x-defenseclaw-")
+#: that merely contains the word: its hook launcher and gateway executables
+#: (a Codex notify entry names either), its data folder (hook scripts, notify
+#: bridge) and its telemetry header names.
+_DEFENSECLAW_WIRING_MARKERS = (
+    b"defenseclaw-hook",
+    b"defenseclaw-gateway",
+    b".defenseclaw/",
+    b".defenseclaw\\",
+    b"x-defenseclaw-",
+)
 
 
 _DATA_REMOVED_LEFTOVER_NOTE = (
