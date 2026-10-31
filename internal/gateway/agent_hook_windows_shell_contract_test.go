@@ -170,7 +170,7 @@ func TestCursorWindowsShellPermissionChecks(t *testing.T) {
 			input := actionfacts.Input{
 				Tool: "shell", Args: args, CWD: `C:\Users\alice\project`, ActiveHome: `C:\Users\alice`,
 			}
-			input.DialectHint = agentHookWindowsShellDialect(input)
+			input.DialectHint = agentHookWindowsShellDialect("", input)
 			facts := actionfacts.Analyze(input)
 			if !facts.Authoritative() || !facts.EnforcementEligible() {
 				t.Fatalf("permission facts unavailable: dialect=%q status=%q", facts.Parse.Dialect, facts.Parse.Status)

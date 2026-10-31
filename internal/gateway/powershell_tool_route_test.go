@@ -125,7 +125,7 @@ func TestR105PowerShellToolRouteMatchesBash(t *testing.T) {
 					t.Fatal(err)
 				}
 				input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
-				input.DialectHint = agentHookWindowsShellDialect(input)
+				input.DialectHint = agentHookWindowsShellDialect("", input)
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, LegacyText: string(args), Connector: connector,
 					EnforcementCapable: true, windowsShellDialect: true,

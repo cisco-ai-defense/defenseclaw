@@ -29,12 +29,12 @@ func TestShellExtraArgumentKeysWindowsDialect(t *testing.T) {
 	} {
 		alone := mustJSON(t, map[string]string{"command": command})
 		input := actionfacts.Input{Tool: "shell", Args: alone, CWD: home + `\proj`, ActiveHome: home}
-		if hint := agentHookWindowsShellDialect(input); hint != actionfacts.DialectPowerShell {
+		if hint := agentHookWindowsShellDialect("", input); hint != actionfacts.DialectPowerShell {
 			t.Fatalf("%s alone: dialect %q, want powershell", command, hint)
 		}
 		full := mustJSON(t, map[string]string{"command": command, "extra": "x"})
 		input.Args = full
-		input.DialectHint = agentHookWindowsShellDialect(input)
+		input.DialectHint = agentHookWindowsShellDialect("", input)
 		if input.DialectHint != "" {
 			t.Fatalf("%s with an extra key: dialect %q; the regression needs the empty hint", command, input.DialectHint)
 		}

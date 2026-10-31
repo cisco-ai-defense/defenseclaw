@@ -3326,7 +3326,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		}
 		dialectHint := a.agentHookWindowsDialectHint(ctx)
 		if dialectHint {
-			actionInput.DialectHint = agentHookWindowsShellDialect(actionInput)
+			actionInput.DialectHint = agentHookWindowsShellDialect(req.ConnectorName, actionInput)
 		}
 		var conflictSource *conflictingToolArgumentSource
 		if bytes.Equal(trustedArgs, shellProjectedArgs) {
@@ -3571,7 +3571,21 @@ func selectWindowsShellDialect(tool, command string, input actionfacts.Input) ac
 
 // agentHookWindowsShellDialect reads only the server-projected shell arguments.
 // A payload-supplied dialect field cannot choose the parser grammar.
-func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
+//
+// Claude Code names the shell its tool runs (the route's connector, not a
+// payload field): its Bash tool runs Git Bash on Windows, a POSIX shell, and
+// its PowerShell tool runs PowerShell. That call is read in that dialect,
+// as the private-key read proof reads it, so a Git Bash call is read with
+// the POSIX grammar (hookpaths.actionGitBashReadsAlone; GAP-1717, GAP-0147).
+func agentHookWindowsShellDialect(connectorName string, input actionfacts.Input) actionfacts.Dialect {
+	if strings.EqualFold(strings.TrimSpace(connectorName), "claudecode") {
+		switch input.Tool {
+		case "Bash":
+			return actionfacts.DialectPOSIX
+		case "PowerShell":
+			return actionfacts.DialectPowerShell
+		}
+	}
 	var args struct {
 		Command string `json:"command"`
 	}
@@ -3706,7 +3720,7 @@ func agentHookConflictSource(
 			candidate.Args = args
 			candidate.CWD = agentHookTrustedActionCWD(ctx, req.CWD, toolCWD)
 			if dialectHint {
-				candidate.DialectHint = agentHookWindowsShellDialect(candidate)
+				candidate.DialectHint = agentHookWindowsShellDialect(req.ConnectorName, candidate)
 			}
 			return candidate
 		},

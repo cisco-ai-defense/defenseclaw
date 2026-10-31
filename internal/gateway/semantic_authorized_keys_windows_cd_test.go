@@ -64,7 +64,7 @@ func TestWindowsAuthorizedKeysLocationChains(t *testing.T) {
 			}
 			input := actionfacts.Input{Tool: test.tool, Args: args, CWD: test.cwd, ActiveHome: test.home, DialectHint: test.dialect}
 			if test.dialect != actionfacts.DialectCMD {
-				input.DialectHint = agentHookWindowsShellDialect(input)
+				input.DialectHint = agentHookWindowsShellDialect("", input)
 			}
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: string(args), Connector: connector, EnforcementCapable: true,
@@ -169,7 +169,7 @@ func TestWindowsManagedOrdinaryLocationWrites(t *testing.T) {
 				}
 				input := actionfacts.Input{Tool: "Bash", Args: args, CWD: home, ActiveHome: home, DialectHint: row.dialect}
 				if row.dialect != actionfacts.DialectCMD {
-					input.DialectHint = agentHookWindowsShellDialect(input)
+					input.DialectHint = agentHookWindowsShellDialect("", input)
 				}
 				target := filepath.Join(home, filepath.FromSlash(row.target))
 				if !row.block && !windowsLocationOrdinaryWriteTarget(target) {
