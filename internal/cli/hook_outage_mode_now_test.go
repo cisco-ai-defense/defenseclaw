@@ -231,3 +231,65 @@ func TestPerUserNativeHookOnAnAgentChosenHomeNeverOpensAnOutage(t *testing.T) {
 		t.Fatal("an agent-chosen DEFENSECLAW_HOME opened the outage")
 	}
 }
+
+// rel-1-0-6 GAP-0224: `defenseclaw config set data_dir` leaves config.yaml in
+// the account's ~/.defenseclaw and the gateway renders the hooks into
+// <data_dir>/hooks. A gateway outage then follows that config exactly as with
+// the default data_dir: the default tier opens, strict and a saved closed
+// close, and a config whose data_dir is another folder, a data directory with
+// its own config.yaml, or an account the database does not list keep their
+// answer. HOME and DEFENSECLAW_HOME never choose the account's config.
+func TestHookOutageFailModeNowFollowsTheAccountConfigOfACustomDataDir(t *testing.T) {
+	for _, tc := range []struct {
+		name, account, own string
+		otherDataDir       bool
+		noAccount          bool
+		want               string
+	}{
+		{name: "default tier", account: outageNowDefaultConfig, want: "open"},
+		{name: "permissive tier", account: outageNowDefaultConfig + "  rule_pack: permissive\n", want: "open"},
+		{name: "strict tier", account: outageNowStrictConfig, want: "closed"},
+		{name: "saved closed", account: outageNowDefaultConfig + "  hook_fail_mode: closed\n", want: "closed"},
+		{name: "account config names another data dir", account: outageNowDefaultConfig, otherDataDir: true, want: "closed"},
+		{name: "data dir keeps its own strict config", account: outageNowDefaultConfig, own: outageNowStrictConfig, want: "closed"},
+		{name: "account not in the database", account: outageNowDefaultConfig, noAccount: true, want: "closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := t.TempDir()
+			dataDir := t.TempDir()
+			elsewhere := t.TempDir()
+			envHome := t.TempDir()
+			oldAccount, oldRoot := outageAccountHome, outageInstalledDataRoot
+			outageAccountHome = func() string {
+				if tc.noAccount {
+					return ""
+				}
+				return account
+			}
+			outageInstalledDataRoot = func() (string, bool) { return "", false }
+			t.Cleanup(func() { outageAccountHome, outageInstalledDataRoot = oldAccount, oldRoot })
+			// The agent's environment names a default-tier home of its own.
+			t.Setenv("HOME", envHome)
+			t.Setenv("USERPROFILE", envHome)
+			t.Setenv("DEFENSECLAW_HOME", filepath.Join(envHome, ".defenseclaw"))
+			t.Setenv("DEFENSECLAW_CONFIG", "")
+			writeOutageNowConfig(t, filepath.Join(envHome, ".defenseclaw"), "data_dir: "+dataDir+"\n"+outageNowDefaultConfig)
+			named := dataDir
+			if tc.otherDataDir {
+				named = elsewhere
+			}
+			writeOutageNowConfig(t, filepath.Join(account, ".defenseclaw"), "data_dir: "+named+"\n"+tc.account)
+			if tc.own != "" {
+				writeOutageNowConfig(t, dataDir, "data_dir: "+dataDir+"\n"+tc.own)
+			}
+			if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, connector := range []string{"claudecode", "codex", "opencode"} {
+				if got := hookOutageFailModeNow(connector, filepath.Join(dataDir, "hooks")); got != tc.want {
+					t.Fatalf("hookOutageFailModeNow(%s) with data_dir %s = %q, want %q", connector, named, got, tc.want)
+				}
+			}
+		})
+	}
+}
