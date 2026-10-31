@@ -56,15 +56,17 @@ rules and lexical fallback posture:
 
 | Profile | Declared rules | Enabled rules | CEL declarations | Tool-call-only | Never-match `a^` fallbacks |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Balanced/default | 246 | 242 | 137 | 125 | 69 |
+| Balanced/default | 246 | 242 | 137 | 125 | 67 |
 | Permissive | 246 | 238 | 137 | 125 | 69 |
 | Strict | 258 | 258 | 150 | 143 | 69 |
 
 `a^` is an intentionally impossible RE2 pattern. It is used when a broad raw
 text fallback would add noise or could not safely prove the same semantic
-effect. In balanced and permissive, twelve CEL declarations are explicit `false`
-placeholders for rules that remain lexical-only in those profiles; strict
-enables tighter variants of ten of those candidates. In every profile,
+effect. Explicit `false` CEL declarations are placeholders for rules that
+remain lexical-only in a profile: ten in balanced/default and twelve in
+permissive, which also keeps `CMD-PIPE-CURL` and `CMD-PIPE-WGET` off. Strict
+enables tighter variants of eight of the balanced/default candidates and ten of
+the permissive ones. In every profile,
 `CMD-WRAPPED-DOWNLOAD-EXEC` and `CMD-SUBST-DOWNLOAD-EXEC` keep a `false`
 declaration because only their exact action proof can match them.
 
