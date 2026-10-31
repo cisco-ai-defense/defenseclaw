@@ -211,6 +211,10 @@ The step from `config_version: 8` to `9` moves the decisions 0.8.x kept outside 
 
 [Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9) shows before and after for every key and covers going back. On a managed standalone host, the [lifecycle](/docs/enterprise/lifecycle) migrates the administrator config.
 
+Block and allow entries keep applying across an upgrade, but `config.yaml` records no time for them: `tool list` shows UPDATED as `-` for every entry there, before and after an upgrade, and an entry moved from 0.8.x `audit.db` does not keep its 0.8.x time.
+
+One built-in policy is retired: 0.8.x listed the host-firewall template `firewall-deny-default` as a policy. 1.0 has three named policies, `default`, `strict` and `permissive`; `policy list` no longer shows the template and `policy activate` refuses it.
+
 ### Shipped policy files
 
 Every upgrade brings the Rego modules in `~/.defenseclaw/policies/rego` (`admission.rego`, `guardrail.rego`) to the new release. The previous copies go to `~/.defenseclaw/backups/rego-<time>/`. A module you edited is replaced too, and the upgrade names it; re-apply your change from the backup, or keep your own rules in a file of another name. An unmodified module the release no longer ships, such as the 0.8 `sandbox.rego`, moves to the same backup. Unedited guardrail rule packs in `~/.defenseclaw/policies/guardrail` are updated the same way; an edited pack is kept.
