@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 from defenseclaw.tui.services.catalog_state import SkillRow, SkillsPanelModel
+from textual.widgets import DataTable
+
+sys.path.insert(0, str(Path(__file__).parent))
+from fixtures import screen_text, settle_panel, snapshot_app  # noqa: E402
 
 
 def test_skills_details_column_fits_inside_80_columns(monkeypatch) -> None:
@@ -65,3 +72,39 @@ def test_skills_details_header_fits_with_a_long_actions_value(monkeypatch) -> No
         actions = columns.index("Actions")
         assert rows[0][actions].endswith("…")
         assert panel.selected().actions == "blocked, quarantined, disabled"
+
+
+async def test_refresh_after_the_rows_change_fits_the_columns_again(tmp_path, monkeypatch) -> None:
+    # A refresh patched the new rows into the old table, and Textual's
+    # auto-width columns never shrink: after a held copy was deleted and the
+    # skill quarantined again, the Skills table was 4 cells wider than the
+    # body and cut the Details header ("Detai"); reopening fitted (GAP-2642).
+    monkeypatch.setenv("HOME", "/home/fcd-u3")
+    monkeypatch.setenv("USERPROFILE", "/home/fcd-u3")
+    system = "/home/fcd-u3/.codex/skills/.system"
+    codex = [
+        SkillRow(name=name, status="active", source=system, connector="codex", description="Generate images")
+        for name in ("imagegen", "review-agent", "skill-installer")
+    ]
+    blocked = SkillRow(name="dvq2606", status="blocked", source="scan-history", actions="blocked")
+    quarantined = SkillRow(
+        name="dvq2606", status="disabled", source="enforcement", actions="blocked, quarantined, disabled"
+    )
+    app = snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.action_switch_panel("skills")
+        await settle_panel(app, pilot)
+        table = app.query_one("#panel-table", DataTable)
+        body = 80 - 9
+
+        async def show(row: SkillRow) -> int:
+            app.skills_model.apply_loaded([row, *codex])
+            app._render_chrome()  # noqa: SLF001
+            await pilot.pause()
+            return sum(column.get_render_width(table) for column in table.columns.values())
+
+        await show(blocked)
+        assert await show(quarantined) <= body, "a refresh with a long Actions value fits the body"
+        assert "Details" in screen_text(app)
+        assert await show(blocked) <= body
+        assert "Details" in screen_text(app)
