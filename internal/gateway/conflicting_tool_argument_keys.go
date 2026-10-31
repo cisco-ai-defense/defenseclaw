@@ -120,6 +120,9 @@ func conflictingToolArgumentKeys(request trustedActionRequest, facts actionfacts
 	if !conflicted && !repeated {
 		return conflictingToolArguments{}, false
 	}
+	// Two spellings of one argument with the same value name one action:
+	// each candidate is still judged, but the call is no conflict (GAP-0696).
+	competing := conflicted && !toolArgumentSpellingsAgree(members)
 
 	var result conflictingToolArguments
 	complete := false
@@ -145,12 +148,69 @@ func conflictingToolArgumentKeys(request trustedActionRequest, facts actionfacts
 		// that disagree leave the call unverifiable; a key repeated with
 		// the value it already has, or an unreviewed key given twice, is
 		// judged as the one call it is.
-		if conflicted && ((len(analysis.Commands) > 0 && hasCommandArgument(candidate.input.Args)) ||
+		if competing && ((len(analysis.Commands) > 0 && hasCommandArgument(candidate.input.Args)) ||
 			slices.ContainsFunc(analysis.Paths, writeClassPathFact)) {
 			result.shellOrWrite = true
 		}
 	}
 	return result, complete
+}
+
+// toolArgumentSpellingsAgree reports an argument object in which every
+// field named by more than one key is named with one value, compared as
+// the JSON value it decodes to (command and cmd, command and Command, cwd
+// and workdir, all with the same value). Whichever spelling a reader takes,
+// the call is the same action, so it is judged as that call and not as a
+// conflict (GAP-0696). A wrapper object (input, parameters, request, an
+// args object) is never read so: its fields can cross the object's own,
+// and that stays a conflict.
+func toolArgumentSpellingsAgree(members []toolArgument) bool {
+	for _, member := range members {
+		if toolArgumentWrapper(member.key, member.value) {
+			return false
+		}
+	}
+	for _, group := range groupToolArguments(members) {
+		if len(group.values) < 2 {
+			continue
+		}
+		first, ok := normalizedToolArgumentValue(group.values[0])
+		if !ok {
+			return false
+		}
+		for _, value := range group.values[1:] {
+			next, ok := normalizedToolArgumentValue(value)
+			if !ok || !bytes.Equal(first, next) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// normalizedToolArgumentValue is a scalar JSON value as a reader decodes
+// it, encoded one way (string escapes). An object or array keeps its
+// compact form: a repeated key inside it must not fold two values into one.
+func normalizedToolArgumentValue(raw json.RawMessage) ([]byte, bool) {
+	if len(raw) > 0 && (raw[0] == '{' || raw[0] == '[') {
+		return raw, true
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, false
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false
+	}
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, false
+	}
+	return out.Bytes(), true
 }
 
 // maxNestedToolArgumentDepth bounds the wrapper objects (input, parameters,
