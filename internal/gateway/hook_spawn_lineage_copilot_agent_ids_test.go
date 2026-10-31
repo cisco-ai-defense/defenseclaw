@@ -55,11 +55,25 @@ func TestCopilotSubagentRowsShareTheChildLineageWithOrWithoutReportedAgentIDs(t 
 			emit("sessionStart", map[string]any{"source": "new", "initialPrompt": "use the task tool", "sessionId": tc.parent})
 			emit("userPromptSubmitted", map[string]any{"sessionId": tc.parent, "prompt": "use the task tool"})
 			emit("preToolUse", map[string]any{"sessionId": tc.parent, "toolName": "task", "toolArgs": `{"agent_type":"explore"}`})
-			emit("subagentStart", stamp(map[string]any{"sessionId": tc.parent, "agentName": "explore",
+			startReq := emit("subagentStart", stamp(map[string]any{"sessionId": tc.parent, "agentName": "explore",
 				"transcriptPath": "/home/u/.copilot/session-state/" + tc.parent + "/events.jsonl"}, tc.child))
-			if tc.stamped {
-				start, ok := api.hookLifecycleSnapshot("copilot", tc.parent, childAgent)
-				want("subagent_start", start, ok)
+			// rel-1-0-6:GAP-0223: the start row, which comes before any row
+			// of the child, is the child's at depth 1 under the main agent.
+			// A start that names no child (Copilot 1.0.90) keeps the agent id
+			// the gateway gives it; one that names it has the child's.
+			startAgent := childAgent
+			if !tc.stamped {
+				startAgent = startReq.AgentID
+			}
+			start, ok := api.hookLifecycleSnapshot("copilot", tc.parent, startAgent)
+			if !ok || start.LifecycleEvent != "subagent_start" || startAgent == "" || startAgent == mainAgent ||
+				start.AgentDepth != 1 || start.ParentAgentID != mainAgent || start.RootAgentID != mainAgent {
+				t.Fatalf("subagent_start = agent %s event %s depth %d parent %s root %s (retained %v), want depth 1 parent = root = %s",
+					start.AgentID, start.LifecycleEvent, start.AgentDepth, start.ParentAgentID, start.RootAgentID, ok, mainAgent)
+			}
+			if startDecision, _, ok := api.hookDecisionMeta(ctx, startReq); !ok || startDecision.AgentID != startAgent ||
+				startDecision.AgentDepth != 1 || startDecision.ParentAgentID != mainAgent || startDecision.RootAgentID != mainAgent {
+				t.Fatalf("subagent_start decision row = %+v (ok %v), want agent %s depth 1 parent = root = %s", startDecision, ok, startAgent, mainAgent)
 			}
 			emit("userPromptSubmitted", stamp(map[string]any{"sessionId": tc.child, "prompt": "read hello.txt"}, tc.child))
 			emit("preToolUse", map[string]any{"sessionId": tc.child, "toolName": "view", "toolArgs": `{"path":"hello.txt"}`})
