@@ -3424,7 +3424,12 @@ def check_opencode_rollback(data_dir: str, back_to: str, *, downgrade: bool = Fa
     if not raw:
         return
     reason = f"DefenseClaw {back_to} guards OpenCode V1 only and the OpenCode here is V2 ({raw.strip()})"
-    put_back = "put OpenCode V1 back first (npm uninstall -g @opencode/cli && npm install -g opencode-ai@1.18)"
+    # DefenseClaw reads the OpenCode it recorded at setup; until a refresh it
+    # still sees V2 after the swap and refuses again (GAP-0154).
+    put_back = (
+        "put OpenCode V1 back first (npm uninstall -g @opencode/cli && npm install -g opencode-ai@1.18), "
+        "then run 'defenseclaw agent discover --refresh' so DefenseClaw sees it"
+    )
     if downgrade:
         raise MigrationError(
             f"{reason}: OpenCode would run unguarded. To downgrade, {put_back}, or stay on "
