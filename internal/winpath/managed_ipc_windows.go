@@ -16,19 +16,30 @@ import (
 	"strings"
 )
 
-// ManagedIPCRelativeDir is where managed-enterprise local IPC sockets live,
-// relative to the trusted Program Files root.
-var ManagedIPCRelativeDir = filepath.Join(
-	"Cisco", "Cisco Secure Client", "DefenseClaw", "ipc",
+// ManagedInstallRelativeDir is the production managed-enterprise install
+// root, relative to the trusted Program Files root. It is the Go copy of
+// the default InstallRoot in packaging/windows/install-enterprise.ps1 and
+// the layout in DefenseClawEnterprise.psm1. Go code that needs the installed
+// Secure Client tree derives it from here, not from its own path literal.
+var ManagedInstallRelativeDir = filepath.Join(
+	"Cisco", "Cisco Secure Client", "DefenseClaw",
 )
+
+// ManagedIPCRelativeDir is where managed-enterprise local IPC sockets live,
+// relative to the trusted Program Files root. It sits inside the install
+// root.
+var ManagedIPCRelativeDir = filepath.Join(ManagedInstallRelativeDir, "ipc")
+
+// StandaloneManagedInstallRelativeDir is the standalone enterprise profile's
+// install root, relative to the trusted Program Files root. It is the Go
+// copy of the InstallRoot in managed.StandaloneWindowsLayoutForRoots.
+var StandaloneManagedInstallRelativeDir = filepath.Join("Cisco", "DefenseClaw")
 
 // StandaloneManagedIPCRelativeDir is the standalone enterprise profile's
 // socket directory, relative to the trusted Program Files root. The
 // standalone lifecycle creates and ACLs it exactly like the Secure Client
 // one.
-var StandaloneManagedIPCRelativeDir = filepath.Join(
-	"Cisco", "DefenseClaw", "ipc",
-)
+var StandaloneManagedIPCRelativeDir = filepath.Join(StandaloneManagedInstallRelativeDir, "ipc")
 
 // ManagedIPCDir is the trusted directory local IPC sockets bind in.
 //
