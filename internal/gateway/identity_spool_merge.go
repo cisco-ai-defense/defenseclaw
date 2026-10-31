@@ -82,20 +82,35 @@ func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
 // spoolRecordNote is the explain note for an account the enumerator has no
 // current identity record for. On Windows a group assignment can match only
 // through that record, so the answer, usually match=default, is not final.
-func spoolRecordNote(id string, now time.Time) string {
+//
+// selected reports that an assignment already chose the profile (a users, SID
+// or agent assignment does not need the token groups): the strict default then
+// protects nothing here, so the note must not claim it does (GAP-0507).
+func spoolRecordNote(id string, now time.Time, selected bool) string {
 	if id == "" || currentIdentitySpoolDir() == "" {
 		return ""
 	}
 	if record, ok := readIdentitySpoolFacts(id, now); ok {
 		if record.Facts.GroupsPartial {
-			return "the guardian has no current token groups for this account (it has no active desktop session): " +
-				"group assignments cannot match until it signs in again; a strict default profile protects this gap"
+			return spoolSignedOutNote(selected)
 		}
 		return ""
 	}
 	return "the guardian has no identity record for this account yet: its group membership is unknown until the enumerator " +
 		"writes one (at the account's first sign-in or its next cycle), so a group assignment cannot match it now and the " +
 		"profile above is not final" + spoolRecordSignInHint
+}
+
+// spoolSignedOutNote is the note for an account whose desktop session ended:
+// group assignments cannot match until it signs in again. The strict default
+// is named as the safety net only while no assignment has chosen the profile.
+func spoolSignedOutNote(selected bool) string {
+	note := "the guardian has no current token groups for this account (it has no active desktop session): " +
+		"group assignments cannot match until it signs in again"
+	if selected {
+		return note + "; the profile above was chosen by an assignment that needs no token groups"
+	}
+	return note + "; a strict default profile protects this gap"
 }
 
 // spoolRecordSignInHint names the sign-in that writes the record on Windows:
