@@ -7151,6 +7151,11 @@ def _check_windows_native_hooks(
     if _hermes_passive_unverified(check, r):
         _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_HERMES_PASSIVE_STEP)
         return
+    if not check.healthy and check.state == "missing" and _hook_runtime_file_problems(cfg, connector):
+        # The registered adapter is gone with the hooks folder: the Hook
+        # runtime files row names the one repair (p0-round GAP-0402).
+        _emit("skip", label, f"{check.state}: {check.detail.split('; run ')[0]}: covered by Hook runtime files", r=r)
+        return
     status = "pass" if check.healthy else "fail"
     _emit(status, label, f"{check.state}: {check.detail}", r=r, remediation=check.repair)
 
@@ -7987,6 +7992,11 @@ def _check_codex_hooks(
             "`defenseclaw-gateway start`",
             r=r,
         )
+    elif _hook_runtime_file_problems(cfg, "codex"):
+        # The Hook runtime files row reports the missing script with its one
+        # repair (doctor --fix renders it again); a second next step here
+        # was printed for the same cause (p0-round GAP-0402).
+        _emit("skip", "Codex hooks", f"hook script {hook_script} is missing: covered by Hook runtime files", r=r)
     else:
         _emit(
             "fail",
@@ -16251,6 +16261,16 @@ def _run_fixers(
                                     or ("repair postcondition did not converge",),
                                     state_key=verified.state_key,
                                 )
+                except click.exceptions.Abort:
+                    # A confirmation prompt with no answer (stdin closed or not
+                    # a terminal) is a declined repair, not a failed one: DV18
+                    # showed "[FAIL] ... fixer raised unexpectedly" for
+                    # doctor --fix without --yes (p0-round GAP-0402).
+                    decision = RepairDecision(
+                        "declined",
+                        "declined: no answer to the confirmation prompt; run `defenseclaw doctor --fix --yes`",
+                        effects=spec.effects,
+                    )
                 except Exception as exc:  # defensive — one fixer shouldn't abort the rest
                     # ``error`` is not a Doctor schema status and used to fall
                     # through as a skipped check, allowing a broken repair to
@@ -16863,43 +16883,8 @@ def _emit_rule_pack_row(
     )
 
 
-def _check_connector_inventory(
-    cfg,
-    connector: str,
-    r: _DoctorResult,
-    *,
-    rule_pack_validation_cache: dict[str, object] | None = None,
-    live_health: dict | None = None,
-) -> None:
-    """Surface one connector and everything it resolves to.
-
-    Each connector has its own conventions for where skills, plugins,
-    and MCP server registrations live. ``Config.skill_dirs()`` /
-    ``plugin_dirs()`` / ``mcp_servers()`` are now polymorphic per
-    connector (S4.1), so this check makes that mapping visible to the
-    operator: if Codex is active but skill_dirs() still points at
-    ``~/.openclaw/skills``, that's a config bug doctor should flag.
-
-    Rendered identically for every active connector (the caller tags each
-    block with a "[<connector>]" suffix) so the output reads the same
-    whether one or many connectors are active — there is no separate
-    single- vs multi-connector layout. Alongside the path inventory this
-    also surfaces the connector's effective guardrail mode and rule pack.
-    """
-    label = _CONNECTOR_LABELS.get(connector, connector)
-    if connector not in _CONNECTOR_LABELS:
-        _emit(
-            "warn",
-            "Connector",
-            f"unknown connector {connector!r} — known: " + ", ".join(sorted(_CONNECTOR_LABELS)),
-            r=r,
-        )
-    else:
-        _emit("pass", "Connector", label, r=r)
-
-    # Effective guardrail mode for this connector (falls back to the
-    # global guardrail.mode when the connector sets no override).
-    gc = getattr(cfg, "guardrail", None)
+def _check_connector_mode(cfg, gc, connector: str, r: _DoctorResult) -> None:
+    """The Mode row: the connector's guardrail mode and the fail mode its hooks run."""
     if gc is not None and hasattr(gc, "effective_mode"):
         try:
             mode = (gc.effective_mode(connector) or "").strip()
@@ -16974,6 +16959,19 @@ def _check_connector_inventory(
                             f"`{setup_command(connector)}`"
                         ),
                     )
+                elif (
+                    rendered_missing
+                    # On Windows a hook with no installed mode runs closed,
+                    # so the runtime differs for the same cause.
+                    and (not runtime_mismatch or fail_mode.get("provenance") == "no-installed-mode")
+                    and desired in {"open", "closed"}
+                    and _hook_runtime_file_problems(cfg, connector)
+                ):
+                    # A missing or changed hook script has no readable fail
+                    # mode; the Hook runtime files row names its one repair
+                    # (doctor --fix), so this row adds no second next step
+                    # for the same cause (p0-round GAP-0402).
+                    _emit("skip", "Mode", f"{detail}; the hook script is covered by Hook runtime files", r=r)
                 elif desired in {"open", "closed"} and (runtime_mismatch or rendered_open or rendered_missing):
                     # The hooks run another fail mode than config.yaml asks
                     # for (GAP-0009): an open hook while config says closed
@@ -17008,6 +17006,46 @@ def _check_connector_inventory(
                         f"set guardrail.mode to observe or action, or run `{setup_command(connector)} --mode action`"
                     ),
                 )
+
+
+def _check_connector_inventory(
+    cfg,
+    connector: str,
+    r: _DoctorResult,
+    *,
+    rule_pack_validation_cache: dict[str, object] | None = None,
+    live_health: dict | None = None,
+) -> None:
+    """Surface one connector and everything it resolves to.
+
+    Each connector has its own conventions for where skills, plugins,
+    and MCP server registrations live. ``Config.skill_dirs()`` /
+    ``plugin_dirs()`` / ``mcp_servers()`` are now polymorphic per
+    connector (S4.1), so this check makes that mapping visible to the
+    operator: if Codex is active but skill_dirs() still points at
+    ``~/.openclaw/skills``, that's a config bug doctor should flag.
+
+    Rendered identically for every active connector (the caller tags each
+    block with a "[<connector>]" suffix) so the output reads the same
+    whether one or many connectors are active — there is no separate
+    single- vs multi-connector layout. Alongside the path inventory this
+    also surfaces the connector's effective guardrail mode and rule pack.
+    """
+    label = _CONNECTOR_LABELS.get(connector, connector)
+    if connector not in _CONNECTOR_LABELS:
+        _emit(
+            "warn",
+            "Connector",
+            f"unknown connector {connector!r} — known: " + ", ".join(sorted(_CONNECTOR_LABELS)),
+            r=r,
+        )
+    else:
+        _emit("pass", "Connector", label, r=r)
+
+    # Effective guardrail mode for this connector (falls back to the
+    # global guardrail.mode when the connector sets no override).
+    gc = getattr(cfg, "guardrail", None)
+    _check_connector_mode(cfg, gc, connector, r)
 
     workspace = _workspace_dir(cfg)
     if workspace:
@@ -17445,6 +17483,15 @@ def _check_hook_contract_lock(
         _emit("warn", "Hook contract", detail, r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
     elif _hermes_passive_unverified(native_runtime, r) and status in {"known", "unversioned"}:
         _emit("warn", "Hook contract", detail, r=r, remediation=_HERMES_PASSIVE_STEP)
+    elif (
+        native_runtime is not None
+        and not native_runtime.healthy
+        and native_runtime.state == "missing"
+        and _hook_runtime_file_problems(cfg, connector)
+    ):
+        # The adapter went with the hooks folder; one finding, one step
+        # (p0-round GAP-0402).
+        _emit("skip", "Hook contract", f"{detail}; the hook adapter is covered by Hook runtime files", r=r)
     elif native_runtime is not None and not native_runtime.healthy:
         _emit("fail", "Hook contract", detail, r=r, remediation=native_runtime.repair)
     elif status == "unknown":
@@ -17465,6 +17512,22 @@ def _check_hook_contract_lock(
         _emit("warn", "Hook contract", detail, r=r)
 
 
+def _hook_runtime_file_problems(cfg, connector: str) -> list[str]:
+    """The drifted or missing hook scripts the Hook runtime files row reports for ``connector``.
+
+    Token problems are reported once, by the Connector hook credential row,
+    with the repair doctor --fix applies (GAP-1436). Rows that a missing hook
+    script also trips (Mode, Codex hooks) defer to this one finding.
+    """
+    from defenseclaw.hook_integrity import hook_runtime_problems
+
+    try:
+        problems = hook_runtime_problems(cfg, connector)
+    except Exception:  # noqa: BLE001 - the hook rows still report what they can read.
+        return []
+    return [problem for problem in problems if not problem.startswith("hook token ")]
+
+
 def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None:
     """FAIL when a generated hook script or its token sidecar drifted.
 
@@ -17472,11 +17535,7 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
     missing token blocks every call, while the other hook rows stay green
     (GAP-1141, GAP-1138). Both are repaired by rerunning setup.
     """
-    from defenseclaw.hook_integrity import hook_runtime_problems
-
-    # Token problems are reported once, by the Connector hook credential row,
-    # with the repair doctor --fix applies (GAP-1436).
-    problems = [problem for problem in hook_runtime_problems(cfg, connector) if not problem.startswith("hook token ")]
+    problems = _hook_runtime_file_problems(cfg, connector)
     if problems:
         # A hook file another account can change carries its own repair
         # (rel-1-0-4 GAP-0600); doctor --fix re-renders the others.

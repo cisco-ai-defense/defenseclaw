@@ -6963,7 +6963,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             elif not gateway_online:
                 call_detail_parts.append(f"[{TOKENS.accent_amber}]{gateway_unavailable_label}[/]")
             elif requests == 0:
-                call_detail_parts.append("waiting for tool calls")
+                # 12 cells: the 80x24 card caption holds 13 (GAP-0341).
+                call_detail_parts.append("no calls yet")
             else:
                 call_detail_parts.append("agent active")
                 if selected_connector:
@@ -11130,10 +11131,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         terminal, cutting off a longer task name.
         """
 
-        if self.active_panel == "registries":
+        if self.active_panel == "registries" or self.active_panel in self.catalog_models:
             # Auto-width columns never shrink when rows are patched, so a
             # status that got shorter after a good sync kept its wide column
-            # until a restart (GAP-2347). The widest cell per column decides.
+            # until a restart (GAP-2347), and a Skills refresh after the data
+            # changed kept the old rows' widths beside the new fitted cells,
+            # 4 cells wider than the body with Details cut (GAP-2642). The
+            # widest cell per column decides.
             return tuple(max((len(cell) for cell in column), default=0) for column in zip(*self._table_rows))
         if self.active_panel != "setup":
             return False
@@ -11266,7 +11270,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             columns,
             rows,
             cursor_row,
-            False,
+            self._panel_table_shape(),
         )
         previous = self._last_table_signature
         if signature == previous:
