@@ -29,6 +29,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func hookFailureCorrelation(payload []byte) (sessionID, callID string) {
@@ -302,6 +304,10 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		Category  string `json:"category"`
 		FailMode  string `json:"fail_mode"`
 		Outcome   string `json:"outcome"`
+		// EventID names a managed call the hook blocked itself (the
+		// gateway, which writes the audit log, did not decide it); the
+		// hook's answer names the same id (managedLocalDenyEventID).
+		EventID string `json:"event_id,omitempty"`
 	}{
 		TS:        opts.Now().UTC().Format("2006-01-02T15:04:05Z"),
 		Connector: sp.connector,
@@ -313,6 +319,7 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		Category:  category,
 		FailMode:  failMode,
 		Outcome:   outcome,
+		EventID:   managedLocalDenyEventID(opts, outcome),
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {
@@ -324,5 +331,26 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		return
 	}
 	defer f.Close()
-	_, _ = f.Write(append(line, '\n'))
+	if _, err := f.Write(append(line, '\n')); err == nil && entry.EventID != "" && opts.Stderr != nil {
+		// The answer names the record, so the refusal can be looked up
+		// although the gateway that writes the audit log did not see it
+		// (mgmt-p1 GAP-0134).
+		fmt.Fprintf(opts.Stderr, "defenseclaw: event_id=%s: this refusal is recorded in %s\n",
+			entry.EventID, filepath.Join(logDir, "hook-failures.jsonl"))
+	}
+}
+
+// managedLocalDenyEventID is a new event id for a managed call the hook
+// blocked itself (outcome fail_closed): the gateway is down, restarting or
+// gave no answer, so no audit event id came back and no audit row holds the
+// call. "" for any other row. A UUIDv7, the gateway's own event id form.
+func managedLocalDenyEventID(opts Options, outcome string) string {
+	if !opts.ManagedEnterprise || outcome != "fail_closed" {
+		return ""
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		return ""
+	}
+	return id.String()
 }
