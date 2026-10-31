@@ -985,14 +985,11 @@ runtime_agent_programs() {
 # Only the launcher npm put in <prefix>/bin, resolving to exactly that entry,
 # is evidence, as for a configured prefix (GAP-1761).
 entry_prefix_agent_programs() {
-    local pid="$1" entry="${2% (deleted)}" word agent prefix link target
+    local pid="$1" entry="${2% (deleted)}" agent prefix link target
     local -a argv=()
     case "${entry##*/}" in
         node | nodejs)
-            while IFS= read -r -d '' word; do
-                argv+=("${word}")
-                [[ ${#argv[@]} -ge 2 ]] && break
-            done < <(process_argv "${pid}" 2>/dev/null)
+            argv_head "${pid}"
             [[ ${#argv[@]} -ge 2 && "${argv[1]}" == /* ]] || return 0
             entry="$(resolved_agent_path "${argv[1]}")" || return 0
             ;;
@@ -1050,26 +1047,76 @@ for line in sys.stdin:
     printf '%s\n' "${rows}"
 }
 
-# process_argv PID: kernel argument boundaries, never the flattened ps text.
-process_argv() {
+# process_argv_heads PID...: the first two kernel argument words of each PID
+# (their boundaries, never the flattened ps text), one line per readable PID:
+# PID<TAB>COUNT<TAB>=WORD0<TAB>=WORD1, with %, tab and newline %-escaped. One
+# call reads every PID, with one perl on macOS: a <(...) per process kept one
+# descriptor each in macOS /bin/bash 3.2, which then ran out of them or
+# aborted (rel-1-0-6 GAP-0203, the class of GAP-0185).
+process_argv_heads() {
+    local pid n w0 w1 tab=$'\t' nl=$'\n'
+    [[ $# -gt 0 ]] || return 0
     if [[ "${OSTYPE:-}" == linux* ]]; then
-        cat "/proc/$1/cmdline" 2>/dev/null
-        return
+        for pid in ${1+"$@"}; do
+            [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+            n=0 w0="" w1=""
+            { IFS= read -r -d '' w0 && n=1 && IFS= read -r -d '' w1 && n=2; } 2>/dev/null < "/proc/${pid}/cmdline" || true
+            (( n > 0 )) || continue
+            (( n > 1 )) || w1=""
+            w0="${w0//[%]/%25}"; w0="${w0//"${tab}"/%09}"; w0="${w0//"${nl}"/%0A}"
+            w1="${w1//[%]/%25}"; w1="${w1//"${tab}"/%09}"; w1="${w1//"${nl}"/%0A}"
+            printf '%s\t%s\t=%s\t=%s\n' "${pid}" "${n}" "${w0}" "${w1}"
+        done
+        return 0
     fi
-    [[ "${OSTYPE:-}" == darwin* && -x /usr/bin/perl ]] || return 1
+    [[ "${OSTYPE:-}" == darwin* && -x /usr/bin/perl ]] || return 0
     /usr/bin/perl -e '
-        my $mib = pack("i3", 1, 49, $ARGV[0]); my $len = pack("Q", 0);
-        syscall(202, $mib, 3, 0, $len, 0, 0) == 0 or exit 1;
-        my $buf = "\0" x unpack("Q", $len);
-        syscall(202, $mib, 3, $buf, $len, 0, 0) == 0 or exit 1;
-        $buf = substr($buf, 0, unpack("Q", $len));
-        my $argc = unpack("i", $buf);
-        my @words = split(/\0/, substr($buf, 4), -1);
-        shift @words;
-        shift @words while @words && $words[0] eq "";
-        $argc = @words if $argc > @words;
-        print map { "$_\0" } @words[0 .. $argc - 1];
-    ' "$1"
+        for my $pid (@ARGV) {
+            next unless $pid =~ /^[0-9]+$/;
+            my $mib = pack("i3", 1, 49, $pid); my $len = pack("Q", 0);
+            syscall(202, $mib, 3, 0, $len, 0, 0) == 0 or next;
+            my $buf = "\0" x unpack("Q", $len);
+            syscall(202, $mib, 3, $buf, $len, 0, 0) == 0 or next;
+            $buf = substr($buf, 0, unpack("Q", $len));
+            my $argc = unpack("i", $buf);
+            my @words = split(/\0/, substr($buf, 4), -1);
+            shift @words;
+            shift @words while @words && $words[0] eq "";
+            $argc = @words if $argc > @words;
+            $argc = 2 if $argc > 2;
+            next if $argc < 1;
+            my @head = @words[0 .. $argc - 1];
+            s/%/%25/g, s/\t/%09/g, s/\n/%0A/g for @head;
+            print join("\t", $pid, $argc, "=" . $head[0], "=" . ($argc > 1 ? $head[1] : "")), "\n";
+        }
+    ' "$@" 2>/dev/null || true
+}
+
+# argv_heads_load PID...: read the first two words of every PID once
+# (process_argv_heads) into the caller's head_n, head_w0 and head_w1, indexed
+# by PID, so each lookup after it is one array read.
+argv_heads_load() {
+    local pid n w0 w1 heads tab=$'\t' nl=$'\n'
+    heads="$(process_argv_heads ${1+"$@"})"
+    while IFS="${tab}" read -r pid n w0 w1; do
+        [[ "${pid}" =~ ^[0-9]+$ && ( "${n}" == 1 || "${n}" == 2 ) ]] || continue
+        w0="${w0#=}"; w1="${w1#=}"
+        w0="${w0//[%]0A/${nl}}"; w0="${w0//[%]09/${tab}}"; w0="${w0//[%]25/%}"
+        w1="${w1//[%]0A/${nl}}"; w1="${w1//[%]09/${tab}}"; w1="${w1//[%]25/%}"
+        head_n[pid]="${n}"; head_w0[pid]="${w0}"; head_w1[pid]="${w1}"
+    done <<< "${heads}"
+    return 0
+}
+
+# argv_head PID: set the caller's argv to PID's words argv_heads_load read;
+# empty when none were readable.
+argv_head() {
+    argv=()
+    case "${head_n[$1]:-0}" in
+        1) argv=("${head_w0[$1]}") ;;
+        2) argv=("${head_w0[$1]}" "${head_w1[$1]}") ;;
+    esac
+    return 0
 }
 
 # A relative Node entry is resolved from the process's own cwd on Linux.
@@ -1107,11 +1154,16 @@ agent_of() {
 }
 
 loaded_plugin_agents() {
-    local pids installed rows runtime prefixed pid program agent word fresh
-    local -a argv
+    local pids installed rows runtime prefixed pid program agent word fresh nodes=""
+    local -a argv head_n head_w0 head_w1
     installed="$(installed_agent_programs)"
     pids="$(ps -u "$(id -u)" -o pid= 2>/dev/null)" || { [[ -z "${installed}" ]] || agent_identity_audit 0 'process list unreadable'; return 0; }
     rows="$(process_programs "${pids}")"
+    while IFS=$'\t' read -r pid program; do
+        program="${program% (deleted)}"
+        case "${program##*/}" in node | nodejs) [[ "${pid}" =~ ^[0-9]+$ ]] && nodes+="${nodes:+ }${pid}" ;; esac
+    done <<< "${rows}"
+    argv_heads_load ${nodes}
     runtime="$(while IFS=$'\t' read -r pid program; do runtime_agent_programs "${program}"; done <<< "${rows}")"
     [[ -z "${runtime}" ]] || installed+="${installed:+$'\n'}${runtime}"
     prefixed="$(while IFS=$'\t' read -r pid program; do [[ -z "${program}" ]] || entry_prefix_agent_programs "${pid}" "${program}"; done <<< "${rows}")"
@@ -1127,10 +1179,7 @@ loaded_plugin_agents() {
         word="${program% (deleted)}"
         case "${word##*/}" in
             node | nodejs)
-                while IFS= read -r -d '' word; do
-                    argv+=("${word}")
-                    [[ ${#argv[@]} -ge 2 ]] && break
-                done < <(process_argv "${pid}" 2>/dev/null)
+                argv_head "${pid}"
                 [[ ${#argv[@]} -gt 0 ]] || { agent_identity_audit "${pid}" 'arguments unreadable'; continue; }
                 ;;
         esac
