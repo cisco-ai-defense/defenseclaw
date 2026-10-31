@@ -58,6 +58,11 @@ type RetentionControllerStatus struct {
 	LastBatchCount     int64
 	LastRunDuration    time.Duration
 	LastRunCompletedAt time.Time
+
+	// MaxStoreMB is the audit store size cap (observability.local.max_store_mb,
+	// 0: none). Managed status surfaces show it with the retention, because
+	// the per-user status that shows it is refused there (GAP-0141).
+	MaxStoreMB int64
 }
 
 // RetentionControllerReporter receives bounded status changes. Implementations
@@ -257,10 +262,12 @@ func (controller *RetentionController) Status() RetentionControllerStatus {
 	if status == nil {
 		return RetentionControllerStatus{
 			State: RetentionStateWaiting, RetentionDays: controller.reaper.RetentionDays(),
+			MaxStoreMB: controller.maxStoreMB(),
 		}
 	}
 	copyStatus := *status
 	copyStatus.RetentionDays = controller.reaper.RetentionDays()
+	copyStatus.MaxStoreMB = controller.maxStoreMB()
 	return copyStatus
 }
 

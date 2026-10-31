@@ -135,6 +135,20 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	return lifecycleFailure(result, opts.json, env.LifecycleCommand(enterpriseunix.ActionRepair))
 }
 
+// runUnixTransactionWatch runs the watcher a lifecycle run starts for its
+// transaction (enterpriseunix.WatchTransaction, GAP-0276).
+func runUnixTransactionWatch(cmd *cobra.Command, platform string, pid int, snapshot string) error {
+	goos := platformGOOS(platform)
+	if enterpriseunix.CurrentGOOS() != goos {
+		return withExitCode(fmt.Errorf("`enterprise %s` manages %s hosts; this host is %s", platform, goos, enterpriseunix.CurrentGOOS()), enterprisestatus.UnixExitInvalidArgs)
+	}
+	env, err := newUnixLifecycleEnv(goos)
+	if err != nil {
+		return withExitCode(err, enterprisestatus.UnixExitFailure)
+	}
+	return enterpriseunix.WatchTransaction(cmd.Context(), env, pid, snapshot)
+}
+
 // settleInterruptedRotation makes an interrupt (Ctrl+C, SIGTERM) end
 // rotate-credentials with one accepted key: the first one cancels the
 // returned context, and the rotation rolls itself back (or, past its commit,
@@ -305,6 +319,7 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 			fmt.Fprintf(w, "  %-46s %s\n", service.Name, service.State)
 		}
 		enterprisestatus.WriteDestinations(w, result.Destinations)
+		enterprisestatus.WriteAuditStore(w, result.AuditStore)
 	}
 	// The policy the lifecycle left in place (absent under Secure Client):
 	// an administrator reading the text must see the generation and digest.

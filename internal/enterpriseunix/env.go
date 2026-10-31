@@ -301,6 +301,11 @@ type Env struct {
 	// (receipts). Production leaves it nil.
 	bundleFault func(phase string) error
 
+	// StartTransactionWatch starts the watcher that recovers a transaction
+	// whose run pid is killed (txwatch.go, GAP-0276). NewEnv sets it; nil
+	// (tests) starts none.
+	StartTransactionWatch func(ctx context.Context, pid int, snapshotDir string) error
+
 	// SelfUnit names the service unit or launchd job this lifecycle run
 	// executes inside (the config-apply trigger). The lifecycle never stops
 	// or restarts that unit: doing so would kill its own transaction.
@@ -346,6 +351,7 @@ func NewEnv(goos, productVersion string) (*Env, error) {
 	}
 	env.fillDefaults()
 	env.SelfUnit = selfUnitFromEnv(env.Services, os.Getenv(LifecycleUnitEnv))
+	env.StartTransactionWatch = env.startTransactionWatch
 	return env, nil
 }
 

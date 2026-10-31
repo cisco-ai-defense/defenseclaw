@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -261,6 +262,22 @@ func (c ACPConfig) ACPPairDisabled(client, agent string) string {
 type ACPBinding struct {
 	Enabled bool   `mapstructure:"enabled" yaml:"enabled,omitempty"`
 	Profile string `mapstructure:"profile" yaml:"profile,omitempty"`
+}
+
+// AllowListRefusals says which allow-list of the profile named name leaves
+// out the pair, by the gateway's rule: an empty allowed_clients or
+// allowed_agents admits every client or agent. The gateway refuses such a
+// pair ("outside the selected profile"); enterprise acp verify and list say
+// so with the same rule, they used to stay green (GAP-1155).
+func (p ACPProfile) AllowListRefusals(name, client, agent string) []string {
+	var refusals []string
+	if len(p.AllowedClients) > 0 && !slices.Contains(p.AllowedClients, client) {
+		refusals = append(refusals, fmt.Sprintf("acp.profiles.%s.allowed_clients does not name %s", name, client))
+	}
+	if len(p.AllowedAgents) > 0 && !slices.Contains(p.AllowedAgents, agent) {
+		refusals = append(refusals, fmt.Sprintf("acp.profiles.%s.allowed_agents does not name %s", name, agent))
+	}
+	return refusals
 }
 
 type ACPProfile struct {
