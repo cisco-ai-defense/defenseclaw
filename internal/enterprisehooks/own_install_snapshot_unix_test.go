@@ -262,3 +262,31 @@ func TestRestoreOwnInstallDoesNotNameAnUntouchedAgentConfig(t *testing.T) {
 	}
 	requireOwnInstallFiles(t, files)
 }
+
+// OwnInstallRegistrationUnchanged holds only while every agent config the
+// teardown would edit is exactly as the own install had it.
+func TestOwnInstallRegistrationUnchangedNeedsTheKeptBytes(t *testing.T) {
+	skipIfRoot(t)
+	home, dataDir, hermesConfig, _, _ := ownInstallTestHome(t)
+	if OwnInstallRegistrationUnchanged(dataDir, []string{hermesConfig}) {
+		t.Fatal("unchanged without a snapshot")
+	}
+	if err := PreserveOwnInstall(home, dataDir); err != nil {
+		t.Fatal(err)
+	}
+	absent := filepath.Join(home, ".hermes", "shell-hooks-allowlist.json")
+	if !OwnInstallRegistrationUnchanged(dataDir, []string{hermesConfig, absent}) {
+		t.Fatal("the kept config is not seen as unchanged")
+	}
+	if OwnInstallRegistrationUnchanged(dataDir, []string{absent}) {
+		t.Fatal("no kept config matched, yet unchanged")
+	}
+	writeOwnInstallTestFile(t, absent, "{}", 0o600)
+	if OwnInstallRegistrationUnchanged(dataDir, []string{hermesConfig, absent}) {
+		t.Fatal("a config the enrollment created is seen as the own install's")
+	}
+	writeOwnInstallTestFile(t, hermesConfig, "changed\n", 0o600)
+	if OwnInstallRegistrationUnchanged(dataDir, []string{hermesConfig}) {
+		t.Fatal("a changed config is seen as unchanged")
+	}
+}

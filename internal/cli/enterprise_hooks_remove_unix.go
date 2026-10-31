@@ -307,6 +307,8 @@ func addEnterpriseHookRemoveRuns(report *enterpriseHooksRemoveAllReport, runs []
 				if result.Restored {
 					report.ClaudeHookRestored = append(report.ClaudeHookRestored, run.Job.Account.User)
 				}
+			case target.Mode == enterpriseHookWorkerModeRemove && result.OwnInstall:
+				// The account's own install keeps its registration.
 			case target.Mode == enterpriseHookWorkerModeRemove && result.Remaining != "":
 				// The teardown ran, but the agent still loads a DefenseClaw
 				// entry (a copied home's plugin, say): not removed (GAP-0632).

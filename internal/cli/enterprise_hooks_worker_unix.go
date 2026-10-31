@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -329,10 +330,13 @@ type enterpriseHookWorkerTargetResult struct {
 	Removed  bool `json:"removed,omitempty"`
 	// Restored: the unblock put the account's own Claude Code hook script
 	// back from the copy the enrollment kept (rel-1-0-6 GAP-0178).
-	Restored bool                           `json:"restored,omitempty"`
-	Pending  bool                           `json:"pending,omitempty"`
-	Error    string                         `json:"error,omitempty"`
-	Result   *enterprisehooks.InstallResult `json:"result,omitempty"`
+	Restored bool `json:"restored,omitempty"`
+	// OwnInstall: the removal left a registration the enrollment reused
+	// from the account's own per-user install in place (rel-1-0-6 GAP-0178).
+	OwnInstall bool                           `json:"own_install,omitempty"`
+	Pending    bool                           `json:"pending,omitempty"`
+	Error      string                         `json:"error,omitempty"`
+	Result     *enterprisehooks.InstallResult `json:"result,omitempty"`
 	// AgentConfig is the result's connector.AgentConfigStatus code (a
 	// Hermes or Devin config put back or recreated, GAP-0564). It is kept
 	// out of the result, which the guardian state stores.
@@ -679,6 +683,9 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 	var rechecks []enterpriseHookWorkerRecheck
 	var recheckedAt []time.Time
 	preserveOwnInstallForJob(request)
+	restoresOwnInstall := request.Standalone && slices.ContainsFunc(request.Targets, func(target enterpriseHookWorkerTarget) bool {
+		return target.Mode == enterpriseHookWorkerModeRestoreOwnInstall
+	})
 	removeRetiredConnectorsForAccount(ctx, request)
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
@@ -739,6 +746,16 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				restorePreviousHome()
 				break
 			}
+			// An uninstall that puts the account's own per-user install back
+			// leaves a registration the enrollment reused from that install
+			// in place: its agent configs are as the install had them
+			// (rel-1-0-6 GAP-0178).
+			if outcome.PathsReported && restoresOwnInstall &&
+				enterprisehooks.OwnInstallRegistrationUnchanged(setupOpts.DataDir, outcome.CleanedPaths) {
+				restorePreviousHome()
+				outcome.OwnInstall = true
+				break
+			}
 			// A report is needed only for a re-homed row. An unreadable
 			// receipt must not prevent ordinary teardown.
 			if err = enterpriseHookWorkerRemover(ctx, opts); err != nil {
@@ -795,8 +812,17 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				break
 			}
 			var stopped bool
-			if stopped, err = enterpriseHookWorkerStopPerUser(opts); err != nil {
-				break
+			purgeDir := strings.TrimSpace(opts.DataDir)
+			if purgeDir == "" {
+				purgeDir = filepath.Join(opts.UserHome, ".defenseclaw")
+			}
+			// The purge keeps a folder with the account's own per-user
+			// install as it is, so that install's gateway keeps running
+			// (rel-1-0-6 GAP-0178).
+			if own, ownErr := enterprisehooks.HoldsPerUserInstall(purgeDir); ownErr != nil || !own {
+				if stopped, err = enterpriseHookWorkerStopPerUser(opts); err != nil {
+					break
+				}
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {

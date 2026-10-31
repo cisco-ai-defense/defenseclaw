@@ -205,23 +205,9 @@ func ownInstallBackupRecord(file ownInstallSnapshotFile) (ownInstallBackupRecord
 // was there; the snapshot goes once everything is back.
 func RestoreOwnInstall(home, dataDir string) (restored bool, changed []string, err error) {
 	path := filepath.Join(dataDir, OwnInstallSnapshotName)
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil, nil
-	}
-	if err != nil {
+	snapshot, found, err := loadOwnInstallSnapshot(dataDir)
+	if err != nil || !found {
 		return false, nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return false, nil, fmt.Errorf("%s is not a regular file", path)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false, nil, err
-	}
-	var snapshot ownInstallSnapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil || snapshot.Version != ownInstallSnapshotVersion {
-		return false, nil, fmt.Errorf("%s is not a snapshot this version reads", path)
 	}
 	kept := map[string]bool{}
 	for _, file := range snapshot.Files {
@@ -312,6 +298,70 @@ func RestoreOwnInstall(home, dataDir string) (restored bool, changed []string, e
 		return true, changed, err
 	}
 	return true, changed, nil
+}
+
+// loadOwnInstallSnapshot reads dataDir's snapshot; found is false when there
+// is none.
+func loadOwnInstallSnapshot(dataDir string) (snapshot ownInstallSnapshot, found bool, err error) {
+	path := filepath.Join(dataDir, OwnInstallSnapshotName)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return snapshot, false, nil
+	}
+	if err != nil {
+		return snapshot, false, err
+	}
+	if !info.Mode().IsRegular() {
+		return snapshot, false, fmt.Errorf("%s is not a regular file", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return snapshot, false, err
+	}
+	if err := json.Unmarshal(data, &snapshot); err != nil || snapshot.Version != ownInstallSnapshotVersion {
+		return snapshot, false, fmt.Errorf("%s is not a snapshot this version reads", path)
+	}
+	return snapshot, true, nil
+}
+
+// OwnInstallRegistrationUnchanged reports whether every agent config in
+// paths (the files a connector's teardown would edit) is exactly as the
+// account's own install had it when the enrollment began, with at least one
+// of them kept: the registration in them is that install's own, which the
+// enrollment reused, so the uninstall leaves it in place and only puts the
+// install's hook files back (RestoreOwnInstall). A teardown there reverted
+// the files to their content from before the own install, or removed the
+// own install's Hermes approvals (rel-1-0-6 GAP-0178).
+func OwnInstallRegistrationUnchanged(dataDir string, paths []string) bool {
+	snapshot, found, err := loadOwnInstallSnapshot(dataDir)
+	if err != nil || !found || len(paths) == 0 {
+		return false
+	}
+	kept := map[string]string{}
+	for _, agent := range snapshot.Agent {
+		kept[filepath.Clean(agent.Path)] = string(agent.Data)
+	}
+	matched := false
+	for _, path := range paths {
+		path = filepath.Clean(path)
+		want, wasKept := kept[path]
+		info, err := os.Lstat(path)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			if wasKept {
+				return false
+			}
+		case err != nil, !info.Mode().IsRegular(), !wasKept:
+			return false
+		default:
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != want {
+				return false
+			}
+			matched = true
+		}
+	}
+	return matched
 }
 
 // ownInstallPristineOf is the pristine hash the kept backup record of
