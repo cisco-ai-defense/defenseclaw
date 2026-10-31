@@ -362,6 +362,9 @@ type enterpriseHookPurgeDetail struct {
 	// RemovedConnectorBackups names the folders the OpenHands/OmniGent
 	// backups were moved to, comma separated (GAP-2015).
 	RemovedConnectorBackups string `json:"removed_connector_backups,omitempty"`
+	// UnrestorableConnectorBackups names the folders the purge moved the
+	// connector backup records that name no file to (rel-1-0-2 GAP-0576).
+	UnrestorableConnectorBackups string `json:"unrestorable_connector_backups,omitempty"`
 }
 
 type enterpriseHookWorkerResponse struct {
@@ -797,7 +800,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", ")}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", "), UnrestorableConnectorBackups: strings.Join(summary.KeptUnrestorableConnectorBackups, ", ")}
 			}
 		case enterpriseHookWorkerModeRestoreOwnInstall:
 			if purgeBlocked != "" {

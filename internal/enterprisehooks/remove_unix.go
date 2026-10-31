@@ -150,6 +150,10 @@ type PurgeSummary struct {
 	// KeptRemovedConnectorBackups names the folders the purge moved the
 	// OpenHands/OmniGent backups to instead of deleting them (GAP-2015).
 	KeptRemovedConnectorBackups []string
+	// KeptUnrestorableConnectorBackups names the folders the purge moved
+	// the connector backup records that name no file to (rel-1-0-2
+	// GAP-0576).
+	KeptUnrestorableConnectorBackups []string
 }
 
 // purgeUserFiles removes the per-user binaries and DefenseClaw's uv cache
@@ -253,6 +257,11 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) (PurgeSummary, err
 				}
 				summary.Kept = true
 				return nil
+			}
+			unrestorable, err := moveUnrestorableConnectorBackupsOut(dataDir)
+			summary.KeptUnrestorableConnectorBackups = unrestorable
+			if err != nil {
+				return fmt.Errorf("enterprise hooks: kept the per-user state: %w", err)
 			}
 			names, err := connector.BackedUpConnectors(dataDir)
 			if err != nil {

@@ -4529,6 +4529,9 @@ type purgedUserDetail struct {
 	// RemovedConnectorBackups names the folders the OpenHands/OmniGent
 	// backups were moved to instead of being deleted (GAP-2015).
 	RemovedConnectorBackups string `json:"removed_connector_backups"`
+	// UnrestorableConnectorBackups names the folders the connector backup
+	// records that name no file were moved to (rel-1-0-2 GAP-0576).
+	UnrestorableConnectorBackups string `json:"unrestorable_connector_backups"`
 }
 
 // purgedUserChange names what the purge removed for user: only what it
@@ -4565,6 +4568,9 @@ func purgedUserChange(user string, detail purgedUserDetail) string {
 	}
 	if detail.RemovedConnectorBackups != "" {
 		text += "; the copies DefenseClaw saved of its OpenHands/OmniGent files were kept in " + detail.RemovedConnectorBackups + " (copy back what you need, then delete them)"
+	}
+	if detail.UnrestorableConnectorBackups != "" {
+		text += "; connector backup records that name no file DefenseClaw can put back (an earlier failed install, say) were kept in " + detail.UnrestorableConnectorBackups + " (delete them when nothing in them is needed)"
 	}
 	return text
 }
