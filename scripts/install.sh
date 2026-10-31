@@ -2469,10 +2469,13 @@ wait_cli_calls_done() {
 }
 
 # restore_links SLOT: put back the CLI links SLOT saved, over the busy shim.
+# The entry a restored defenseclaw link names (an earlier release's venv) is
+# made runnable by sh first, as swap_in does for a new one (rel-1-0-6 GAP-0105).
 restore_links() {
     local link new
     for link in ${MANAGED_LINKS}; do
         if [[ -L "$1/bin/${link}" ]]; then
+            [[ "${link}" != defenseclaw ]] || shell_runnable_entry "$(readlink "$1/bin/${link}")" || true
             new="${BIN_DIR}/.${link}.new"
             { rm -f "${new}" && cp -P "$1/bin/${link}" "${new}" && mv -f "${new}" "${BIN_DIR}/${link}"; } || true
         elif [[ -f "${BIN_DIR}/${link}" && ! -L "${BIN_DIR}/${link}" ]] \

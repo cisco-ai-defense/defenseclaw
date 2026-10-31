@@ -3999,3 +3999,6 @@ def test_the_new_entry_runs_under_sh_before_any_link_names_it() -> None:
     swap = swap[: swap.index("\n}\n")]
     assert swap.index('shell_runnable_entry "${VENV}/bin/defenseclaw"') < swap.index('"${VENV}/bin/defenseclaw" --version')
     assert swap.index('"${VENV}/bin/defenseclaw" --version') < swap.index('publish_link "${target}" "${link}"')
+    restore = script[script.index("restore_links() {"):]
+    restore = restore[: restore.index("\n}\n")]
+    assert restore.index("shell_runnable_entry") < restore.index('mv -f "${new}" "${BIN_DIR}/${link}"')
