@@ -452,19 +452,19 @@ var (
 // everywhere else. Every ancestor walk in this file routes through here so the
 // allowlist cannot be forgotten at one call site.
 func windowsAncestorScope(path string) windowsTrustScope {
-	if PlatformInstallerOwnedPath(path) || windowsOSRootAncestor(path) {
+	if AdvisoryAncestorPath(path) {
 		return windowsTrustAncestor
 	}
 	return windowsTrustForeignAncestor
 }
 
-// windowsOSRootAncestor reports whether path is one of the fixed operating
+// osRootAncestor reports whether path is one of the fixed operating
 // system roots every managed path sits under: the system drive root, the
 // Windows and System32 directories, ProgramData and Program Files. Their
 // permissions belong to Windows and to whatever hardening the host applies,
 // not to DefenseClaw, so drift there is advisory like the platform
 // installer's roots. Temp, profile and other prefixes stay fatal.
-func windowsOSRootAncestor(path string) bool {
+func osRootAncestor(path string) bool {
 	clean := filepath.Clean(path)
 	var roots []string
 	if dir, err := windows.GetWindowsDirectory(); err == nil && dir != "" {

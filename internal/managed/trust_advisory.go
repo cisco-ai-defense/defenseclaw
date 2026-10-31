@@ -120,6 +120,16 @@ func PlatformInstallerOwnedPath(path string) bool {
 	return false
 }
 
+// AdvisoryAncestorPath reports whether an ancestor's permission verdict should
+// be advisory: the ancestor is inside PlatformInstallerOwnedRoots or, on
+// Windows, is one of the fixed operating system roots (system drive root,
+// Windows, System32, ProgramData, Program Files). Every ancestor walk, in this
+// package and outside it, uses this so the scope cannot drift between walks.
+// Like PlatformInstallerOwnedPath it says nothing about the named path itself.
+func AdvisoryAncestorPath(path string) bool {
+	return PlatformInstallerOwnedPath(path) || osRootAncestor(path)
+}
+
 // containsInstallerOwnedRoot keeps PlatformInstallerOwnedRoots free of
 // duplicates when %ProgramData% resolves to the canonical location that is
 // always seeded, matching the case-insensitive comparison pathAtOrUnder uses.

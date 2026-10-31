@@ -592,6 +592,28 @@ func TestWindowsAncestorScopeFollowsInstallerOwnedRoots(t *testing.T) {
 	}
 }
 
+// Walks outside this package (hook API token, audit DB, judge body) decide
+// ancestor scope through AdvisoryAncestorPath, so it must agree with the core
+// walk: OS roots and installer roots advisory, temp fatal.
+func TestAdvisoryAncestorPathCoversOSRoots(t *testing.T) {
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		t.Fatalf("TrustedProgramData: %v", err)
+	}
+	windowsDir, err := windows.GetWindowsDirectory()
+	if err != nil {
+		t.Fatalf("GetWindowsDirectory: %v", err)
+	}
+	for _, path := range []string{programData, filepath.VolumeName(windowsDir) + `\`, filepath.Join(programData, "Cisco")} {
+		if !AdvisoryAncestorPath(path) {
+			t.Errorf("AdvisoryAncestorPath(%q) = false, want true", path)
+		}
+	}
+	if AdvisoryAncestorPath(os.TempDir()) {
+		t.Errorf("AdvisoryAncestorPath(%q) = true, want false", os.TempDir())
+	}
+}
+
 // A service started with a stripped or partially redirected environment still
 // has to recognise the canonical per-machine tree, or the managed state root
 // itself would be judged foreign and every ancestor verdict would turn fatal.
