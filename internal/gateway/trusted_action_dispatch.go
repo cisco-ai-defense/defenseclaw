@@ -201,6 +201,10 @@ type trustedActionRequest struct {
 	recordTelemetry func(trustedActionTelemetry)
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
+	// overBudgetOmission, when set, is told that the authorized-keys proof
+	// found only an operand that the client's bounded map left out because
+	// it was full (hookpaths.BudgetKey, GAP-0146).
+	overBudgetOmission *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
@@ -415,6 +419,14 @@ func dispatchTrustedActionWith(
 			wholeWriteSafe := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
 			simples := actionfacts.SimpleCommands(request.Input, facts)
+			if len(simples) == 0 && wholeCommandKnown && trustedStatementBudgetExceeded(request.Input, facts, wholeCommand) {
+				// The analysis stopped at its node or input bound before the
+				// per-command split, so no simple command of the call was
+				// judged: the call is over the statement budget at every size,
+				// as it is between 129 statements and those bounds (GAP-0146,
+				// GAP-0568).
+				simples = []actionfacts.SimpleCommand{{EvaluationFailure: "limit"}}
+			}
 			evidenceCWDs := trustedSimpleCommandEvidenceCWDs(request, simples)
 			for index, simple := range simples {
 				if simple.EvaluationFailure != "" {
@@ -8429,6 +8441,38 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 		return trustedActionRequest{}, false
 	}
 	return bashReadingRequest(request, command, rewritten), true
+}
+
+// trustedStatementBudgetExceeded reports whether a POSIX shell call whose
+// analysis is limit-exceeded has more statements than one action evaluates
+// (actionfacts.ShellStatementsOverBudget). A PowerShell or CMD call, and a
+// call of no known dialect on a Windows gateway without a POSIX hint, is not
+// read here.
+func trustedStatementBudgetExceeded(input actionfacts.Input, facts actionfacts.Facts, command string) bool {
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded || trustedPowerShellExecutionTool(input.Tool) {
+		return false
+	}
+	switch facts.Parse.Dialect {
+	case actionfacts.DialectPOSIX:
+	case actionfacts.DialectNone, "":
+		if input.DialectHint != "" && input.DialectHint != actionfacts.DialectPOSIX ||
+			input.DialectHint == "" && runtime.GOOS == "windows" {
+			return false
+		}
+	default:
+		return false
+	}
+	return actionfacts.ShellStatementsOverBudget(command)
+}
+
+// withTrustedActionLimitFinding adds the over-limit verdict once.
+func withTrustedActionLimitFinding(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+	for _, finding := range findings {
+		if finding.RuleID == "ACTION-COMPOUND-LIMIT" {
+			return findings
+		}
+	}
+	return append(findings, trustedActionLimitFindings(enforcementCapable)...)
 }
 
 // trustedActionLimitFindings is the over-limit verdict of a shell command

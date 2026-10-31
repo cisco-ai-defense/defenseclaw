@@ -121,6 +121,13 @@ In `default` and `permissive`, a world-writable `chmod` and a Windows Run-key ad
 
 **Known limit.** The rule reads the text of the command. A write made by a program the command starts (a nested shell, a generated script, a build tool, a tool option that runs another command) is not visible in that text, so it is not caught when it goes through an already existing link to the protected file. Rely on the OpenShell sandbox and file permissions for containment.
 
+**Evaluation limit.** DefenseClaw judges each command of a shell call on its own, up to 128 commands
+in one call (commands joined with `;`, `&&`, `||` or `|`, and the commands inside bodies). In action
+mode a call with more commands is blocked with rule `ACTION-COMPOUND-LIMIT` ("Shell command exceeds
+policy evaluation limit"), whatever its length, up to the 1 MiB hook payload cap. In observe mode it
+raises the alert and runs. Split such a command into several calls, or put it in a script file and
+run the script.
+
 ## What `setup guardrail` actually writes
 
 ```bash

@@ -109,6 +109,15 @@ const GlobFactPrefix = "\x00glob:"
 // the unknown answer. An empty or missing fact leaves the operand unknown.
 const ReadingTargetPrefix = "\x00reading-target:"
 
+// BudgetKey marks a map that left operands out because they did not fit its
+// bounds (MaxWriteTargets entries or 64 KiB of JSON). "1" is the only value.
+// It is set only together with TruncatedKey. A gateway that cannot place an
+// omitted operand still fails closed, and names the call over the evaluation
+// budget (ACTION-COMPOUND-LIMIT), not a protected write (GAP-0146): a target
+// the client's own walk found protected is ActionDecisionKey, which goes in
+// before any operand.
+const BudgetKey = "\x00budget"
+
 // maxWriteTargetLinkDepth matches the Linux kernel limit (MAXSYMLINKS) for
 // one path resolution. Every followed link counts, also in parent components,
 // so a link loop ends here and reports an unresolvable target.
@@ -1079,7 +1088,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
 	protected := newProtectedFiles(home)
-	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3
+	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3 +
+		len(jsonString(BudgetKey)) + 1 + 3 + 1
+	// overBudget is set when an operand or fact is left out only because the
+	// map is full (BudgetKey).
+	overBudget := false
 	if protectedDecision {
 		// The protected-target reading goes in first, so no operand list,
 		// however long, can push it out of the bounded map (GAP-0151): an
@@ -1102,8 +1115,12 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			size -= len(jsonString(path)) + 1 + len(jsonString(old)) + 1
 			delete(targets, path)
 		}
-		if len(path) > MaxWriteTargetPathBytes || len(targets)-1 >= MaxWriteTargets {
+		if len(path) > MaxWriteTargetPathBytes {
 			truncated = true
+			return
+		}
+		if len(targets)-1 >= MaxWriteTargets {
+			truncated, overBudget = true, true
 			return
 		}
 		resolved, ok := "", false
@@ -1153,7 +1170,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		entry := len(jsonString(path)) + 1 + len(jsonString(resolved)) + 1
 		if size+entry > maxEncodedTargets {
-			truncated = true
+			truncated, overBudget = true, true
 			return
 		}
 		size += entry
@@ -1234,7 +1251,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		cost := len(jsonString(path)) + 1 + len(jsonString(entry)) + 1
 		if size+cost > maxEncodedTargets {
-			truncated = true
+			truncated, overBudget = true, true
 			continue
 		}
 		size += cost
@@ -1324,7 +1341,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	for key, value := range sourceFacts {
 		entry := len(jsonString(key)) + 1 + len(jsonString(value)) + 1
 		if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
-			truncated = true
+			truncated, overBudget = true, true
 			break
 		}
 		targets[key] = value
@@ -1428,6 +1445,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	}
 	if truncated {
 		targets[TruncatedKey] = "1"
+		if overBudget {
+			targets[BudgetKey] = "1"
+		}
 	}
 	encoded, err := json.Marshal(targets)
 	if err != nil || len(encoded) > maxEncodedTargets {
@@ -1667,8 +1687,9 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	var targets map[string]string
-	if json.Unmarshal(data, &targets) != nil || len(targets) > 2*MaxWriteTargets+6 ||
+	if json.Unmarshal(data, &targets) != nil || len(targets) > 2*MaxWriteTargets+7 ||
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
+		(targets[BudgetKey] != "" && (targets[BudgetKey] != "1" || targets[TruncatedKey] != "1")) ||
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
 		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||

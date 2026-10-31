@@ -254,8 +254,8 @@ func TestCommandHookResolvedWritesScope(t *testing.T) {
 // and link forms of a protected write after a full map, a Unicode HOME
 // alias of the account home, and a real bounded header reused on another
 // call. A large benign command whose write operands do not fit the map is
-// also denied: that is the known 1.0.3 limit for managed Claude Code (Codex
-// has denied it since 1.0.1), tracked for 1.0.4.
+// also denied, as over the evaluation budget (ACTION-COMPOUND-LIMIT,
+// GAP-0146): the documented managed known limit (rel-1-0-3 GAP-0291).
 func TestR103B36BoundedHeaderOmittedOperandsStayUnknown(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	if err := os.Symlink("../.ssh", filepath.Join(f.project, "dirlink")); err != nil {
@@ -314,7 +314,7 @@ func TestR103B36BoundedHeaderOmittedOperandsStayUnknown(t *testing.T) {
 				t.Errorf("%s/%s: protected link write = %s, want block", connector, mode, got)
 			}
 		}
-		// Known 1.0.3 limit: the omitted benign operands stay unknown.
+		// Known limit: the omitted benign operands stay unknown.
 		if got := f.post(t, connector, benign, benignHeader); got != "block" {
 			t.Errorf("%s: large benign command = %s, want block (known limit)", connector, got)
 		}

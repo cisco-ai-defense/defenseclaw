@@ -1513,7 +1513,18 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	commandText := strings.ToLower(input.Command)
-	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(request, facts)
+	overBudget := false
+	evidence := request
+	evidence.overBudgetOmission = &overBudget
+	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
+	if symlinkWrite && overBudget {
+		// The only write found is an operand the client's full bounded map
+		// left out. The call still blocks, as over the evaluation budget,
+		// not as a key write it does not name (GAP-0146); a protected target
+		// the client found is its ActionDecisionKey and is proved above.
+		symlinkWrite = false
+		findings = withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+	}
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
 		!strings.Contains(commandText, "base64") && !symlinkWrite &&

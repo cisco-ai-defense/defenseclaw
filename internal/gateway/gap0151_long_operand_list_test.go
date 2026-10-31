@@ -15,35 +15,51 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
-// postAs sends the hook request as a managed gateway behind ProtectHome
+// answerAs sends the hook request as a managed gateway behind ProtectHome
 // (managed) or as a per-user gateway that reads the home itself, and
-// returns "allow", "block" or a description of any other answer.
-func (f b36ManagedHookFixture) postAs(t *testing.T, connector string, payload []byte, header string, managed bool) string {
+// returns "allow", "block" or a description of any other answer, with the
+// answer body.
+func (f b36ManagedHookFixture) answerAs(t *testing.T, connector string, payload []byte, header string, managed bool) (string, string) {
 	t.Helper()
+	mode := os.FileMode(0o700)
 	if managed {
-		return f.post(t, connector, payload, header)
+		mode = 0
 	}
-	if err := os.Chmod(f.homes, 0o700); err != nil {
+	if err := os.Chmod(f.homes, mode); err != nil {
 		t.Fatal(err)
 	}
+	defer os.Chmod(f.homes, 0o700)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = connector
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
+	if managed && header != "" {
+		req.Header.Set(hookpaths.Header, header)
+	}
 	if connector == "codex" {
 		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+	}
+	if managed {
+		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: f.home}))
 	}
 	recorder := httptest.NewRecorder()
 	api.handleAgentHook(connector).ServeHTTP(recorder, req)
 	body := recorder.Body.String()
 	switch {
 	case strings.HasPrefix(body, `{"action":"block"`):
-		return "block"
+		return "block", body
 	case strings.HasPrefix(body, `{"action":"allow"`):
-		return "allow"
+		return "allow", body
 	}
-	return fmt.Sprintf("status %d body %.200s", recorder.Code, body)
+	return fmt.Sprintf("status %d body %.200s", recorder.Code, body), body
+}
+
+// postAs is the verdict of answerAs.
+func (f b36ManagedHookFixture) postAs(t *testing.T, connector string, payload []byte, header string, managed bool) string {
+	t.Helper()
+	verdict, _ := f.answerAs(t, connector, payload, header, managed)
+	return verdict
 }
 
 // gap0151Operands is N benign touch operands with the protected keys path
