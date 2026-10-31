@@ -15,6 +15,11 @@ weighs an estimate. Refresh after a large test change:
            gh run download <run> --pattern 'go-test-timings-*' --dir t
            scripts/update_test_timings.py go t/*/*.json
          A local run works too (go test -race ... -json ./... > go.json).
+         The darwin connector parts of Unix Standalone Lifecycle upload
+         go-test-timings-darwin-connector-* the same way; --update keeps
+         the other packages of go-darwin.json (internal/enterpriseunix):
+           gh run download <run> --pattern 'go-test-timings-darwin-*' --dir t
+           scripts/update_test_timings.py go t/*/*.json --update --out scripts/test-timings/go-darwin.json
   python pytest --junitxml reports of the Python suite -> python-linux.json
            pytest cli/tests --junitxml=py.xml ...; scripts/update_test_timings.py python py.xml
          Windows Native CI uploads windows-python-junit-<n> reports:
@@ -121,11 +126,27 @@ def windows_go_timings(files: list[Path], module: str) -> dict:
     return {"packages": {package: round(value, 1) for package, value in sorted(packages.items())}, "tests": tests}
 
 
+def merge_go_timings(old: dict, new: dict, module: str) -> dict:
+    """Recorded go timings with the packages new measured replaced: a
+    package new has drops its old per-test times too, so a test it no longer
+    records falls back to the new "*"."""
+    packages = {**old.get("packages", {}), **new.get("packages", {})}
+    measured = {package[len(module) + 1 :] if package.startswith(module + "/") else package for package in new.get("packages", {})}
+    tests = {rel: names for rel, names in old.get("tests", {}).items() if rel not in measured}
+    tests.update(new.get("tests", {}))
+    return {"packages": dict(sorted(packages.items())), "tests": dict(sorted(tests.items()))}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("kind", choices=("go", "python", "windows-go"))
     parser.add_argument("inputs", nargs="+", type=Path)
     parser.add_argument("--out", type=Path, help="output file (default: scripts/test-timings/<kind>.json)")
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="go: replace only the packages the inputs measured and keep the rest of the output file",
+    )
     args = parser.parse_args()
     module = re.search(r"^module\s+(\S+)", (ROOT / "go.mod").read_text(encoding="utf-8"), re.MULTILINE).group(1)
     if args.kind == "go":
@@ -134,7 +155,10 @@ def main() -> int:
         data, default = python_timings(args.inputs), "python-linux.json"
     else:
         data, default = windows_go_timings(args.inputs, module), "go-windows.json"
-    _write(args.out or OUT_DIR / default, data)
+    out = args.out or OUT_DIR / default
+    if args.update and out.is_file():
+        data = merge_go_timings(json.loads(out.read_text(encoding="utf-8")), data, module)
+    _write(out, data)
     return 0
 
 

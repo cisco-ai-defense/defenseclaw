@@ -1085,8 +1085,10 @@ jobs:
     # 15 minutes: the lifecycle packages, the darwin paths of the small
     # connector packages (hookexec alone takes ~11 minutes), the unix and
     # darwin tests of internal/gateway and internal/cli ("darwin gateway and
-    # cli"), and the connector package in three time-balanced parts
-    # ("darwin connector", scripts/test-timings/go-darwin.json).
+    # cli"), and the connector package in four time-balanced parts
+    # ("darwin connector", scripts/test-timings/go-darwin.json; each part
+    # uploads its test times as a go-test-timings-darwin-connector-* artifact
+    # for scripts/update_test_timings.py).
     name: Unix Standalone Lifecycle (${{ matrix.label }})
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
@@ -1125,17 +1127,21 @@ jobs:
             label: macos-latest darwin gateway and cli
             part: darwin-unix
           - os: macos-latest
-            label: macos-latest darwin connector 1 of 3
+            label: macos-latest darwin connector 1 of 4
             part: darwin-connector
             shard: 0
           - os: macos-latest
-            label: macos-latest darwin connector 2 of 3
+            label: macos-latest darwin connector 2 of 4
             part: darwin-connector
             shard: 1
           - os: macos-latest
-            label: macos-latest darwin connector 3 of 3
+            label: macos-latest darwin connector 3 of 4
             part: darwin-connector
             shard: 2
+          - os: macos-latest
+            label: macos-latest darwin connector 4 of 4
+            part: darwin-connector
+            shard: 3
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -1226,8 +1232,11 @@ jobs:
             go test -count=1 -timeout 10m -run "$pattern" "./$pkg"
           done
       - name: Go tests of the darwin connector package, part ${{ matrix.shard }}
-        # One of three time-balanced parts of the connector package's tests
-        # (go_test_shards.py covers every test exactly once).
+        # One of four time-balanced parts of the connector package's tests
+        # (go_test_shards.py covers every test exactly once). The package
+        # takes about 1,700 s of tests on the hosted macOS runner; in three
+        # parts on stale recorded times one part ran 875 s and hit the
+        # 14-minute -timeout (PR #1398).
         if: runner.os == 'macOS' && matrix.part == 'darwin-connector'
         shell: bash
         env:
@@ -1241,9 +1250,26 @@ jobs:
           test_regex="$(python3 scripts/go_test_shards.py \
             --package-dir internal/gateway/connector \
             --timings scripts/test-timings/go-darwin.json \
-            --shard-count 3 \
+            --shard-count 4 \
             --shard-index "$GO_TEST_SHARD")"
-          go test -count=1 -timeout 14m -run "$test_regex" ./internal/gateway/connector
+          # go_test_report.py prints the quiet go test log (a timeout's
+          # goroutine dump and still-running test included) and keeps the
+          # test times, as in Go Gateway Test.
+          set +e
+          go test -json -count=1 -timeout 14m -run "$test_regex" ./internal/gateway/connector 2>&1 |
+            python3 scripts/go_test_report.py --timings "go-test-timings-darwin-connector-$GO_TEST_SHARD.json" \
+              --annotate "darwin connector part $GO_TEST_SHARD failed"
+          test_status=${PIPESTATUS[0]}
+          set -e
+          exit "$test_status"
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        # The test times scripts/update_test_timings.py go --update reads.
+        if: ${{ !cancelled() && matrix.part == 'darwin-connector' }}
+        with:
+          name: go-test-timings-darwin-connector-${{ matrix.shard }}
+          path: go-test-timings-darwin-connector-${{ matrix.shard }}.json
+          retention-days: 14
+          if-no-files-found: ignore
       - name: The shipped binaries start without stderr output
         # A dependency's start-up warning (for example sonic's Go-version
         # notice) would reach admin and MDM output and agent hook errors.
