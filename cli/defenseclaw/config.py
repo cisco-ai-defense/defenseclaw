@@ -606,7 +606,9 @@ def detect_environment() -> str:
         )
         if "DGX" in out:
             return "dgx-spark"
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError):
+        # No nvidia-smi on PATH, or a PATH folder this account cannot read
+        # (PermissionError): the same answer, a plain Linux host (GAP-0049).
         pass
     return "linux"
 
