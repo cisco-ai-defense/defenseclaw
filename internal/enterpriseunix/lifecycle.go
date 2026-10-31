@@ -1388,9 +1388,23 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		return nil, &codedError{code: codeConfig, err: fmt.Errorf("%s changed while %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
 			env.Layout.ConfigPath, writable, env.lifecycleCommand(ActionEnsure))}
 	}
+	// The applied config, unchanged, on the release that applied it: a
+	// refusal of it can only come from a policy file it names that was
+	// edited in place since (a required sandbox pack of openshell.admin or
+	// of a profile, a rule pack). That is no config to refuse but a policy
+	// that does not build, as policyAssetsChanged reports one the gateway's
+	// policy digest refuses: nothing is applied and the running gateway
+	// keeps the last good policy (GAP-0286).
+	unchangedApplied := record != nil && record.ProductVersion == p.version && sha256Bytes(raw) == record.ConfigSHA256
+	assetRefusal := func(err error) error {
+		if unchangedApplied {
+			return &codedError{code: codeConfigRefused, err: &policyAssetRefusedError{reason: err.Error()}}
+		}
+		return &codedError{code: codeConfig, err: err}
+	}
 	validated, err := env.validateConfigSource(raw, l.opts.ConfigFile)
 	if err != nil {
-		return nil, &codedError{code: codeConfig, err: err}
+		return nil, assetRefusal(err)
 	}
 	if err := refuseUnknownGuardrailConnectors(validated.Loaded, l.opts.ConfigFile, env.Layout.ConfigPath); err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
@@ -1515,19 +1529,10 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 	if err := env.checkCandidateAssets(validated); err != nil {
-		return nil, &codedError{code: codeConfig, err: err}
+		return nil, assetRefusal(err)
 	}
 	if err := env.checkRequiredSandboxPacks(validated.Loaded); err != nil {
-		if record != nil && sha256Bytes(raw) == record.ConfigSHA256 {
-			// The applied config, unchanged: a required sandbox pack it
-			// names was edited in place into one that does not load. That is
-			// no config to refuse but a policy that does not build, as for a
-			// pack the gateway's policy digest refuses (policyAssetsChanged):
-			// nothing is applied and the running gateway keeps the last good
-			// policy (GAP-0286).
-			return nil, &codedError{code: codeConfigRefused, err: &policyAssetRefusedError{reason: err.Error()}}
-		}
-		return nil, &codedError{code: codeConfig, err: err}
+		return nil, assetRefusal(err)
 	}
 	p.configFromInstalled = fromInstalled
 	p.configWritable = writable

@@ -24,8 +24,13 @@ import (
 // and the reason, says nothing was applied and the running gateway keeps
 // the last good policy, and leaves the generation and the gateway alone.
 func TestEnsureReportsAnInPlaceEditOfARequiredSandboxPackAsPolicyRefused(t *testing.T) {
-	for _, goos := range []string{"darwin", "linux"} {
-		t.Run(goos, func(t *testing.T) {
+	// The profile form (a guardrail profile's own required pack, which the
+	// config load refuses before the plan's pack check) resolves its pack by
+	// the real path, which the rooted fixture does not map: it is the live
+	// cell's (evidence/rel-1-0-6/fc-fix/sbx2/dc-ent-mac).
+	for _, tc := range []struct{ goos, where string }{{"darwin", "admin"}, {"linux", "admin"}} {
+		goos := tc.goos
+		t.Run(goos+" "+tc.where, func(t *testing.T) {
 			h := newOSHost(t, goos)
 			base := sandboxConfig(t, goos, true, map[string]any{"install": "prerequisite", "driver": "docker"})
 			requireOK(t, h.ensure(base))
@@ -51,13 +56,24 @@ func TestEnsureReportsAnInPlaceEditOfARequiredSandboxPackAsPolicyRefused(t *test
 				}
 				h.owners[h.env.P(dir)] = [2]int{0, group}
 			}
-			good := "version: 1\nname: r-pack\nextends: balanced\nnetwork:\n  mode: allowlist\n"
+			good := "version: 1\nname: r-pack\nextends: balanced\nworkspace:\n  mode: copy\nnetwork:\n  mode: allowlist\n"
 			if err := os.WriteFile(h.env.P(pack), []byte(good), 0o640); err != nil {
 				t.Fatal(err)
 			}
 			h.owners[h.env.P(pack)] = [2]int{0, group}
 			doc["openshell"].(map[string]any)["pack_dir"] = filepath.Join(policyDir, "sandbox")
-			doc["openshell"].(map[string]any)["admin"] = map[string]any{"required_pack": "r-pack"}
+			if tc.where == "admin" {
+				doc["openshell"].(map[string]any)["admin"] = map[string]any{"required_pack": "r-pack"}
+			} else {
+				// A profile's own required pack, as the live cell used: the
+				// config load refuses it, not the plan's pack check.
+				guard, _ := doc["guardrail"].(map[string]any)
+				if guard == nil {
+					guard = map[string]any{}
+					doc["guardrail"] = guard
+				}
+				guard["profiles"] = map[string]any{"r-prof": map[string]any{"mode": "observe", "sandbox": map[string]any{"required_pack": "r-pack"}}}
+			}
 			window, err := yaml.Marshal(doc)
 			if err != nil {
 				t.Fatal(err)
