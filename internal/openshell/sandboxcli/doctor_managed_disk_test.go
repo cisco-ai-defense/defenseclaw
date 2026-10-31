@@ -53,3 +53,35 @@ func TestManagedDoctorHasTheMicroVMDiskRow(t *testing.T) {
 		})
 	}
 }
+
+// With the docker driver rendered on a managed Mac, the doctor names that
+// driver everywhere: no e2fsprogs row, and the Platform row says the docker
+// driver instead of the MicroVM note (GAP-0249), whether the account's
+// sandbox service answers or not. On the vm driver the note stays.
+func TestManagedMacDoctorPlatformFollowsTheDockerDriver(t *testing.T) {
+	withManagedHost(t)
+	ta := newTestApp(t, "")
+	ta.GOOS = "darwin"
+	ta.ManagedE2fsprogsDir = func(context.Context) (string, bool) { return "", false }
+	ta.ManagedAccountHome = func() (string, error) { return ta.home, nil }
+	ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+		d.DiskFree = func(string) (uint64, error) { return 45 << 30, nil }
+		return hostReport(func(rep *openshell.DoctorReport) {
+			rep.Checks[0] = openshell.Check{ID: openshell.CheckIDPlatform, Title: "Platform", Status: openshell.StatusWarn,
+				Detail: "darwin/arm64: macOS sandboxes run in OpenShell MicroVMs (the vm driver, experimental upstream)"}
+		})(ctx, d)
+	}
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.status.Managed.Driver = "docker"
+	rep := ta.runDoctor(bg)
+	platform := rep.Get(openshell.CheckIDPlatform)
+	if platform == nil || platform.Status != openshell.StatusPass || strings.Contains(platform.Detail, "MicroVM") ||
+		!strings.Contains(platform.Detail, "docker driver") || rep.Get(openshell.CheckIDManagedE2fsprogs) != nil {
+		t.Fatalf("docker driver: platform %+v, e2fsprogs %+v", platform, rep.Get(openshell.CheckIDManagedE2fsprogs))
+	}
+	ta.daemon.status.Managed.Driver = "vm"
+	rep = ta.runDoctor(bg)
+	if platform := rep.Get(openshell.CheckIDPlatform); platform == nil || platform.Status != openshell.StatusWarn || !strings.Contains(platform.Detail, "vm driver") {
+		t.Fatalf("vm driver: platform %+v", platform)
+	}
+}

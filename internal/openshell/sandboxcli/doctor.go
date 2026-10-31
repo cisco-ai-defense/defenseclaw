@@ -250,6 +250,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		rep.Checks = append(rep.Checks, d.ManagedVMDiskCheck())
 	}
 	if managed && a.GOOS == "darwin" {
+		if rep.Driver == openshell.DriverDocker {
+			managedDockerPlatform(rep)
+		}
 		if rep.Driver == openshell.DriverVM || (st.managed != nil && rep.Driver != openshell.DriverDocker) {
 			rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
 		}
@@ -261,6 +264,23 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		}
 	}
 	return rep
+}
+
+// managedDockerPlatform makes the Platform row of a managed Mac whose
+// administrator chose the docker driver say so: the row's MicroVM note
+// (the vm driver, experimental upstream) is not this computer's setup, and
+// the doctor and the exec shim name the same driver in every state
+// (GAP-0249).
+func managedDockerPlatform(rep *openshell.DoctorReport) {
+	for i := range rep.Checks {
+		c := &rep.Checks[i]
+		if c.ID != openshell.CheckIDPlatform || c.Status != openshell.StatusWarn {
+			continue
+		}
+		platform, _, _ := strings.Cut(c.Detail, ":")
+		c.Status = openshell.StatusPass
+		c.Detail = platform + ": your organization runs sandboxes on this Mac with the docker driver (in Docker's Linux VM)"
+	}
 }
 
 func managedRenderedDoctorDriver(paths *openshell.RenderedPaths) (openshell.ComputeDriver, error) {
