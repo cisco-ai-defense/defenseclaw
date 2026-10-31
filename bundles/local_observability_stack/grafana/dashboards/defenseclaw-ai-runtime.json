@@ -1849,10 +1849,10 @@
     {
       "type": "bargauge",
       "title": "Would-block in monitor mode, by control",
-      "description": "Distinct host-plane findings per control in the selected range while running in monitor mode.",
+      "description": "Would-block events per kernel control in the selected range while running in monitor mode, every user on the selected hosts: each kernel event counts once under its own control, so the bars should add up to the Would-block (monitor) tile. From the defenseclaw_kernel_events_total counter, not from the per-tactic activity records, which keep one control per tactic.",
       "datasource": {
-        "type": "loki",
-        "uid": "defenseclaw-loki"
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
       },
       "gridPos": {
         "x": 12,
@@ -1862,13 +1862,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (control) (max by (host_name, body_defenseclaw_ai_runtime_finding_id, control) (max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.activity\" | body_user_id=~\"$user\" | body_defenseclaw_ai_runtime_kernel_outcome=\"would_block\" | body_defenseclaw_ai_runtime_finding_id!=\"\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\", hits=`{{ or .body_defenseclaw_ai_runtime_kernel_count \"1\" }}` | unwrap hits | __error__=\"\")[$__range])) > 0)",
+          "expr": "sum by (control) (increase(defenseclaw_kernel_events_total{host_name=~\"$host\", owner=\"defenseclaw\", outcome=\"would_block\"}[$__range])) > 0",
           "refId": "A",
           "instant": true,
-          "queryType": "instant",
           "datasource": {
-            "type": "loki",
-            "uid": "defenseclaw-loki"
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
           },
           "legendFormat": "{{control}}"
         }
