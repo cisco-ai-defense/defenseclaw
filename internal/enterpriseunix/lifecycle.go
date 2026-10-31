@@ -1976,6 +1976,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			previouslyActive = append(previouslyActive, unit.Name)
 		}
 	}
+	// A gateway that runs but does not answer (stopped, hung) is ended by
+	// the restart below; the changes name it (GAP-0959).
+	unresponsive := l.unresponsiveGateway(ctx, units, previouslyActive)
 	// What started at boot before the transaction is put back if it rolls
 	// back: activation enables every managed unit, and a packaged unit file
 	// stays on disk after a rollback, so a unit left enabled would start at
@@ -2277,6 +2280,12 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			switch {
 			case !contains(previouslyActive, unit.Name):
 				l.noteChange("started %s, which was not running", unit.Name)
+			case unresponsive != nil && unit.Name == unresponsive.unit:
+				// A repair of a stopped gateway listed only "nothing to
+				// repair" although it ended the process (GAP-0959).
+				if note := unresponsive.replacedNote(ctx, env.Services, unit); note != "" {
+					l.noteChange("%s", note)
+				}
 			case changesApplied && unit.Kind == "gateway" && !l.gatewayKeptRunning:
 				l.noteChange("restarted %s to load the change", unit.Name)
 			}
