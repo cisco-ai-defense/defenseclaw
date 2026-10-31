@@ -16363,6 +16363,15 @@ def _restart_services(
         for note in put_back_notes(data_dir, wait_targets, restart_started):
             ux.warn(note)
 
+    if not failed and "opencode" in {connector, *(connectors or [])}:
+        # OpenCode V2's background server keeps the plugin it loaded (rel-1-0-6 GAP-0026).
+        from defenseclaw import opencode_service
+
+        opencode_service.report(
+            opencode_service.restart_if_running(opencode_service.account_binary(data_dir)),
+            what="runs the plugin as it is now",
+        )
+
     # Multi-connector global change: every active hook connector is affected
     # by the gateway bounce, so enumerate them rather than naming the primary.
     hook_multi = [c for c in (connectors or []) if c in _HOOK_ENFORCED_CONNECTORS]
