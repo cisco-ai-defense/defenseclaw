@@ -353,53 +353,115 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 		lock.Client.ID != clientID || lock.Agent.ID != agentID || lock.Profile != profile || lock.Mode != string(mode) {
 		return errors.New("ACP runtime contract metadata does not match the guarded binding")
 	}
-	agentPath, err := filepath.Abs(command)
+	agentPath, err := lock.agentExecutablePath(command)
 	if err != nil {
-		return errors.New("resolve ACP agent executable")
-	}
-	lockedAgentPath, err := filepath.Abs(lock.Agent.Path)
-	if err != nil || !samePath(agentPath, lockedAgentPath) {
-		return errors.New("ACP agent executable path does not match the runtime contract")
+		return err
 	}
 	guardPath, err := os.Executable()
 	if err != nil {
 		return errors.New("resolve ACP guard executable")
 	}
-	lockedGuardPath, err := filepath.Abs(lock.Guard.Path)
-	if err != nil || !samePath(guardPath, lockedGuardPath) {
-		return errors.New("ACP guard executable path does not match the runtime contract")
+	if err := lock.guardExecutablePathMatches(guardPath); err != nil {
+		return err
 	}
 	clientConfigPath, err := filepath.Abs(lock.Client.ConfigPath)
 	if err != nil || strings.TrimSpace(lock.Client.ConfigSHA256) == "" {
 		return errors.New("ACP client configuration identity is missing from the runtime contract")
 	}
-	for _, item := range []struct{ path, expected, label string }{
-		{clientConfigPath, lock.Client.ConfigSHA256, "client configuration"},
-		{agentPath, lock.Agent.SHA256, "agent"},
-	} {
-		if pinned, entry := strings.CutPrefix(item.expected, EntryDigestPrefix); entry && item.label == "client configuration" && !secureClientHost() {
-			observed, digestErr := ClientEntrySHA256(item.path, clientID, agentID, path)
-			if digestErr != nil || !strings.EqualFold(observed, pinned) {
-				label, pronoun := pinnedEntriesLabel(item.path, clientID, agentID, path)
-				subject := "it"
-				if pronoun == "them" {
-					subject = "they"
-				}
-				return fmt.Errorf("the %s in the editor settings file %s changed after setup (the contract lock pins %s), "+
-					"so %s must be set up again", label, clientConfigPath, pronoun, subject)
+	if pinned, entry := strings.CutPrefix(lock.Client.ConfigSHA256, EntryDigestPrefix); entry && !secureClientHost() {
+		observed, digestErr := ClientEntrySHA256(clientConfigPath, clientID, agentID, path)
+		if digestErr != nil || !strings.EqualFold(observed, pinned) {
+			label, pronoun := pinnedEntriesLabel(clientConfigPath, clientID, agentID, path)
+			subject := "it"
+			if pronoun == "them" {
+				subject = "they"
 			}
+			return fmt.Errorf("the %s in the editor settings file %s changed after setup (the contract lock pins %s), "+
+				"so %s must be set up again", label, clientConfigPath, pronoun, subject)
+		}
+	} else if observed, digestErr := fileSHA256(clientConfigPath); digestErr != nil || !strings.EqualFold(observed, lock.Client.ConfigSHA256) {
+		if !secureClientHost() {
+			// The lock pins the whole settings file, and "executable
+			// digest" sent users looking for a changed binary (GAP-0391).
+			return fmt.Errorf("the editor settings file %s changed after setup (the contract lock pins its digest, "+
+				"so any edit needs setup again)", clientConfigPath)
+		}
+		return errors.New("ACP client configuration executable digest does not match the runtime contract")
+	}
+	return lock.executableDigestsMatch(agentPath, guardPath)
+}
+
+// LockedExecutablesMatch checks the agent command an editor entry starts and
+// the guard at guardPath against the executables the contract lock pins, by
+// the rule the guard applies at start (ValidateRuntimeContract): the same
+// paths and digests, with the managed guard's custody exception. enterprise
+// acp verify and list said setup was done while the guard refused to start
+// because the agent executable it pins had changed (GAP-1156).
+func LockedExecutablesMatch(lock RuntimeContractLock, command, guardPath string) error {
+	agentPath, err := lock.agentExecutablePath(command)
+	if err != nil {
+		return err
+	}
+	guardPath, err = filepath.Abs(guardPath)
+	if err != nil {
+		return errors.New("resolve ACP guard executable")
+	}
+	if err := lock.guardExecutablePathMatches(guardPath); err != nil {
+		return err
+	}
+	return lock.executableDigestsMatch(agentPath, guardPath)
+}
+
+// EntryAgentCommand is the agent command the guard starts for an editor
+// entry with args: the first argument after "--", or the catalog command of
+// agentID when the entry names none, as defenseclaw-acp reads its command
+// line.
+func EntryAgentCommand(args []any, agentID string) string {
+	for i, arg := range args {
+		if arg != "--" {
 			continue
 		}
-		observed, digestErr := fileSHA256(item.path)
-		if digestErr != nil || !strings.EqualFold(observed, item.expected) {
-			if item.label == "client configuration" && !secureClientHost() {
-				// The lock pins the whole settings file, and "executable
-				// digest" sent users looking for a changed binary (GAP-0391).
-				return fmt.Errorf("the editor settings file %s changed after setup (the contract lock pins its digest, "+
-					"so any edit needs setup again)", clientConfigPath)
-			}
-			return fmt.Errorf("ACP %s executable digest does not match the runtime contract", item.label)
+		if i+1 < len(args) {
+			command, _ := args[i+1].(string)
+			return command
 		}
+		break
+	}
+	agent, err := LookupAgent(agentID)
+	if err != nil {
+		return ""
+	}
+	return agent.Command
+}
+
+// agentExecutablePath is the absolute path of command, the agent the guard
+// starts, which must be the one the lock pins.
+func (lock RuntimeContractLock) agentExecutablePath(command string) (string, error) {
+	agentPath, err := filepath.Abs(command)
+	if err != nil {
+		return "", errors.New("resolve ACP agent executable")
+	}
+	lockedAgentPath, err := filepath.Abs(lock.Agent.Path)
+	if err != nil || !samePath(agentPath, lockedAgentPath) {
+		return "", errors.New("ACP agent executable path does not match the runtime contract")
+	}
+	return agentPath, nil
+}
+
+// guardExecutablePathMatches checks that guardPath is the guard the lock pins.
+func (lock RuntimeContractLock) guardExecutablePathMatches(guardPath string) error {
+	lockedGuardPath, err := filepath.Abs(lock.Guard.Path)
+	if err != nil || !samePath(guardPath, lockedGuardPath) {
+		return errors.New("ACP guard executable path does not match the runtime contract")
+	}
+	return nil
+}
+
+// executableDigestsMatch checks the agent and guard executables against the
+// digests the lock pins.
+func (lock RuntimeContractLock) executableDigestsMatch(agentPath, guardPath string) error {
+	if observed, err := fileSHA256(agentPath); err != nil || !strings.EqualFold(observed, lock.Agent.SHA256) {
+		return errors.New("ACP agent executable digest does not match the runtime contract")
 	}
 	observedGuardDigest, err := fileSHA256(guardPath)
 	if err != nil || !strings.EqualFold(observedGuardDigest, lock.Guard.SHA256) {
