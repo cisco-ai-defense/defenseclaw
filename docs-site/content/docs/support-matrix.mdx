@@ -192,6 +192,7 @@ Shell can express the same write in many ways, and some unusual forms are not re
 - **A link made by git, then a write.** A git command such as a pull or a checkout can create a symbolic link from the repository's content. A write later in the same command that goes through that new link can reach the file the link points to, because the link does not exist yet when the hook reads the command.
 - **Link text with line breaks.** A link whose text has line breaks is a limit of the command reader.
 - **A socket opened from an interpreter command line.** The deterministic socket rule recognises the minimal one-liner form only. Other spellings are left to the LLM judge.
+- **PowerShell text sent to the Claude Code Bash tool on Windows.** The Bash tool runs Git Bash, so DefenseClaw reads the call as Git Bash and PowerShell cmdlet text with a comment that names a protected path is blocked. Run PowerShell commands through PowerShell.
 
 The LLM judge (the LLM guardrail) is the second layer for protected-file access. If you need more than the command reader gives, turn it on; see [Optional LLM judge](/docs/policies/deterministic-detection#optional-llm-judge).
 
