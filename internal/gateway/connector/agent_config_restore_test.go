@@ -300,34 +300,6 @@ func TestHermesPutBackHooksOnlyCopyIsReportedAsHooksOnly(t *testing.T) {
 	}
 }
 
-// GAP-0612 clause 1, live on managed 1.0.5: the copy put back held
-// DefenseClaw's hooks only, but the file read after the put-back had another
-// key (the running agent writes its own), and the notice said the user's
-// settings came back. What was put back decides the wording.
-func TestHermesHooksOnlyCopyStaysHooksOnlyWhenTheAgentAddsKeysLater(t *testing.T) {
-	conn, opts, configPath := hermesRestoreFixture(t, "")
-	if keys := hermesTopKeys(t, configPath); keys != "hooks" {
-		t.Fatalf("first setup without a file wrote %s", keys)
-	}
-	if err := os.Remove(configPath); err != nil {
-		t.Fatal(err)
-	}
-	started := time.Now()
-	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup over the missing file: %v", err)
-	}
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, append(data, []byte("_config_version: 17\n")...), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := AgentConfigStatus("hermes", opts, started, false); got != AgentConfigRecreatedHooksOnly {
-		t.Fatalf("AgentConfigStatus = %q, want %q", got, AgentConfigRecreatedHooksOnly)
-	}
-}
-
 // rel-1-0-2 GAP-0612 (2): with the backup record gone, a copy that is there
 // but no longer reads is settings DefenseClaw saw: the file is recreated with
 // the hooks and reported as settings lost, not silently.

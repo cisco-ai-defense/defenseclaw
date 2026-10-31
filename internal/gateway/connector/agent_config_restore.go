@@ -121,12 +121,7 @@ type agentConfigNotice struct {
 	// could not put them back. It stays set across another loss of the file
 	// until the account has settings in it again: the file recreated without
 	// them is then the copy, which holds DefenseClaw's hooks only.
-	SettingsLost bool `json:"settings_lost,omitempty"`
-	// SeedSettings says whether the copy put back held settings of the
-	// account (nil in a notice an older release wrote). What was put back
-	// decides the wording, not the file read later: the agent may write its
-	// own keys into it once it is back (GAP-0612).
-	SeedSettings *bool  `json:"seed_settings,omitempty"`
+	SettingsLost bool   `json:"settings_lost,omitempty"`
 	At           string `json:"at"`
 }
 
@@ -331,10 +326,6 @@ func (s agentConfigSpec) seedMissing(dataDir, configPath string) (string, error)
 		// recreated then) has none either.
 		notice.SettingsLost = true
 	}
-	if seed != nil {
-		seedSettings := s.hasSettings(seed)
-		notice.SeedSettings = &seedSettings
-	}
 	if seed == nil {
 		// DefenseClaw saw settings it cannot put back: a file before its
 		// first setup, or a copy that is there but no longer reads.
@@ -500,18 +491,14 @@ func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, re
 		at, _ := time.Parse(time.RFC3339, notice.At)
 		data, info, _ := readManagedTarget(configPath)
 		settingsBack := info != nil && spec.hasSettings(data)
-		putBackSettings := settingsBack
-		if notice.SeedSettings != nil {
-			putBackSettings = *notice.SeedSettings
-		}
 		switch {
 		case notice.SettingsLost && !settingsBack:
 			status = AgentConfigSettingsLost
 		case since.IsZero() || at.Before(since.Add(-time.Second)):
 			// Reported by the setup that recreated the file.
-		case notice.Source == AgentConfigFromLastGood && putBackSettings:
+		case notice.Source == AgentConfigFromLastGood && settingsBack:
 			status = AgentConfigRestoredLastGood
-		case notice.Source == AgentConfigFromPristine && putBackSettings:
+		case notice.Source == AgentConfigFromPristine && settingsBack:
 			status = AgentConfigRestoredPristine
 		// A copy put back that held DefenseClaw's hooks only (a file setup
 		// created, say) is reported as hooks only, not as the user's settings
