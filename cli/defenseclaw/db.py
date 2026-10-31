@@ -1276,6 +1276,14 @@ class Store:
         ).fetchone()
         return int(row[0] or 0)
 
+    def recent_action_targets(self, action: str, limit: int = 20) -> list[str]:
+        """Targets of the newest audit events with this action, newest first."""
+        cur = self.db.execute(
+            f"SELECT target FROM audit_events WHERE action = ? ORDER BY {self._audit_event_order()} LIMIT ?",
+            (action, max(limit, 1)),
+        )
+        return [str(row[0]) for row in cur.fetchall() if row[0]]
+
     def list_alerts(self, limit: int = 100) -> list[Event]:
         where = self._alert_where_clause(actionable=False)
         display_severity = self._alert_display_severity_sql()
