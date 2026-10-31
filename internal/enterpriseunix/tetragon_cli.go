@@ -488,6 +488,8 @@ var perInstanceCodes = map[string]bool{
 	kernelpolicy.WarnGuardrailObserve: true,
 	kernelpolicy.WarnOperatorOverride: true,
 	kernelpolicy.WarnPolicyLoadError:  true,
+	kernelpolicy.NoteExtraLinks:       true,
+	kernelpolicy.NoteDentryMount:      true,
 	codeCustomerEventsCapped:          true,
 }
 

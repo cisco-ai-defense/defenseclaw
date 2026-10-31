@@ -255,3 +255,43 @@ func TestEveryTetragonCodeIsDocumented(t *testing.T) {
 		t.Fatalf("enterprise/troubleshooting.mdx does not list:\n  %s", strings.Join(missing, "\n  "))
 	}
 }
+
+// The helper reports a protected file with a second hard link by its path;
+// status and verify print the path, one line per file (rel-1-0-6 GAP-0124).
+func TestExtraLinkWarningsNameTheFile(t *testing.T) {
+	first, second := "/home/alice/.ssh/authorized_keys", "/home/bob/.ssh/authorized_keys"
+	var state kernelpolicy.State
+	state.Warnings = []string{
+		kernelpolicy.NoteExtraLinks + ":" + first,
+		kernelpolicy.NoteExtraLinks + ":" + second,
+		kernelpolicy.NoteDentryMount + ":" + first,
+	}
+	var codes []string
+	for _, finding := range findingsOf("linux", tetragonIntent{}, false, state, true, tetragonHost{}) {
+		codes = append(codes, finding.Code)
+		if strings.Contains(finding.Message, "reported by the sensor helper") {
+			t.Errorf("%s printed as an unknown code: %s", finding.Code, finding.Message)
+		}
+		_, file, _ := strings.Cut(finding.Code, ":")
+		if file == "" || !strings.Contains(finding.Message, file) {
+			t.Errorf("%s: the message does not name the file: %s", finding.Code, finding.Message)
+		}
+	}
+	want := []string{
+		kernelpolicy.NoteExtraLinks + ":" + first, kernelpolicy.NoteExtraLinks + ":" + second,
+		kernelpolicy.NoteDentryMount + ":" + first,
+	}
+	sort.Strings(codes)
+	sort.Strings(want)
+	if strings.Join(codes, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("codes %v, want %v", codes, want)
+	}
+}
+
+// A code only a newer helper reports keeps its detail when it prints.
+func TestUnknownTetragonCodeKeepsItsDetail(t *testing.T) {
+	got := tetragonMessage("kernel_something_new", tetragonFacts{Detail: "/home/a"})
+	if !strings.HasPrefix(got, "kernel_something_new:/home/a (reported by the sensor helper)") {
+		t.Fatalf("message %q", got)
+	}
+}

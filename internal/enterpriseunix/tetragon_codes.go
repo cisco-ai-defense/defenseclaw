@@ -391,6 +391,16 @@ var tetragonCodes = map[string]tetragonCodeText{
 			" (in enforce it denies for one of them, the lowest uid; the others stay in monitor mode);" +
 			" nothing to do: their would-block hits are still counted, and the Tetragon guide lists this limit"
 	}},
+	kernelpolicy.NoteExtraLinks: {Message: func(f tetragonFacts) string {
+		file := defaultStr(f.Detail, "<path>")
+		return "the protected file " + file + " has a second hard link, and no path control matches another name for a file" +
+			" (a write through the other name is not denied); remove the other name, found with find ~ -samefile " + file
+	}},
+	kernelpolicy.NoteDentryMount: {Message: func(f tetragonFacts) string {
+		file := defaultStr(f.Detail, "<path>")
+		return "the protected path " + file + " is not on the root mount (the link and rename controls cannot name it;" +
+			" the open control and the protected-file watch still cover it); nothing to do, or move the home onto the root mount"
+	}},
 	kernelpolicy.WarnReconcileFailed: {Message: func(tetragonFacts) string {
 		return "the sensor helper's last pass failed (policies stay in or move to monitor mode); see the ERROR column of " + gwStatus +
 			" and " + helperJournal
@@ -446,6 +456,10 @@ func tetragonMessage(fullCode string, f tetragonFacts) string {
 	}
 	if entry, ok := tetragonCodes[base]; ok {
 		return entry.Message(f)
+	}
+	// A detail the caller already split off is part of what the helper wrote.
+	if !strings.Contains(fullCode, ":") && f.Detail != "" {
+		fullCode += ":" + f.Detail
 	}
 	return fullCode + " (reported by the sensor helper); see " + gwStatus
 }
