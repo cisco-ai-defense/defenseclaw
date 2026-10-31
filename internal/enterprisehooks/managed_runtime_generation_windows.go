@@ -1132,6 +1132,7 @@ func collectWindowsManagedRuntimeGenerations(
 	// folder, and its selected generation with it, away. The guardian adopts
 	// it in the account's session.
 	accountCreated := false
+	accountLink := false
 	// relaxed is a classification over a root left in the guardian's exact
 	// setup shape: it reads, never repairs (GAP-1818).
 	relaxed := false
@@ -1145,6 +1146,12 @@ func collectWindowsManagedRuntimeGenerations(
 		switch {
 		case windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target):
 			accountCreated = true
+		case windowsEnterpriseStandaloneDeferredDataDirAccountLink(filepath.Dir(validated.DataDir), validated.DataDir, target):
+			// A link the account made at its DefenseClaw folder is never
+			// followed: nothing DefenseClaw wrote is behind it, so there
+			// is nothing to retire, as for a folder the account created
+			// (GAP-0193). The enrollment moves it aside.
+			accountLink = true
 		case !classifyOnly && recoverStaleWindowsSetupRelaxedDataDir(validated.DataDir, target):
 		case classifyOnly && windowsManagedRuntimeDirSetupRelaxedPlain(validated.DataDir, target):
 			relaxed = true
@@ -1173,6 +1180,12 @@ func collectWindowsManagedRuntimeGenerations(
 		// using selector absence to authorize the empty pre-activation case.
 		if accountCreated {
 			if !windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target) {
+				return errors.New("enterprise hooks: managed runtime generation directory changed while it was retired")
+			}
+			return nil
+		}
+		if accountLink {
+			if !windowsEnterpriseStandaloneDeferredDataDirAccountLink(filepath.Dir(validated.DataDir), validated.DataDir, target) {
 				return errors.New("enterprise hooks: managed runtime generation directory changed while it was retired")
 			}
 			return nil

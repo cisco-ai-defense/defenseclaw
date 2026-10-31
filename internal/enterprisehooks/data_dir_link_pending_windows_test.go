@@ -52,6 +52,38 @@ func TestStandaloneSignedOutAccountOwnDataDirLinkStaysPending(t *testing.T) {
 	}
 }
 
+// The lifecycle retire (Upgrade, Repair, uninstall) and the classification
+// before an upgrade found the account's own link at its DefenseClaw folder
+// untrusted, which failed an uninstall for the computer (GAP-0193); they now
+// find nothing to retire behind it and never follow it.
+func TestStandaloneRetireFindsNothingBehindAnAccountOwnDataDirLink(t *testing.T) {
+	target := deferredPendingProofFixture(t, true)
+	sid := currentWindowsTestSID(t)
+	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
+	outside, canary := outsideDataDirTree(t, target.UserHome)
+	plantWindowsAccountJunction(t, dataDir, outside, sid)
+	hookExe, _ := windowsEnterpriseHookExecutable()
+	previousAncestor, previousDir, previousFile := windowsManagedPolicyAncestorTrustCheck, windowsManagedPolicyDirTrustCheck, windowsManagedPolicyFileTrustCheck
+	windowsManagedPolicyAncestorTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyDirTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	previousOwner, previousMutation := windowsManagedPolicyOwnerSID, windowsManagedRuntimeSelectorMutationAuthorize
+	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return sid, nil }
+	windowsManagedRuntimeSelectorMutationAuthorize = func() error { return nil }
+	t.Cleanup(func() {
+		windowsManagedPolicyAncestorTrustCheck, windowsManagedPolicyDirTrustCheck, windowsManagedPolicyFileTrustCheck = previousAncestor, previousDir, previousFile
+		windowsManagedPolicyOwnerSID, windowsManagedRuntimeSelectorMutationAuthorize = previousOwner, previousMutation
+	})
+	gc := WindowsManagedRuntimeGenerationGCOptions{Connector: "claudecode", TargetSID: sid.String(), DataDir: dataDir, HookExecutable: hookExe}
+	if removed, err := GarbageCollectWindowsManagedRuntimeGenerations(gc); err != nil || removed != 0 {
+		t.Fatalf("lifecycle retire behind the account's own link = %d, %v; want nothing to retire", removed, err)
+	}
+	if err := ClassifyWindowsManagedRuntimeGenerations(gc); err != nil {
+		t.Fatalf("classification behind the account's own link: %v", err)
+	}
+	requireOutsideDataDirTreeUnchanged(t, outside, canary)
+}
+
 // A link at the DefenseClaw folder that another account or an administrator
 // owns, and any link on the Secure Client profile, is still refused for that
 // account.
@@ -74,6 +106,9 @@ func TestStandaloneForeignOwnedDataDirLinkStaysRefused(t *testing.T) {
 	}
 	if WindowsAccountOwnedDataDirLink(target.UserHome, currentWindowsTestSID(t).String()) {
 		t.Fatal("status names a junction the account does not own as its own")
+	}
+	if !windowsEnterpriseStandaloneProcess() || windowsEnterpriseStandaloneDeferredDataDirAccountLink(target.UserHome, dataDir, currentWindowsTestSID(t)) {
+		t.Fatal("the retire would skip a junction the account does not own")
 	}
 	requireOutsideDataDirTreeUnchanged(t, outside, canary)
 }
