@@ -87,6 +87,31 @@ func postNativeHook(t *testing.T, api *APIServer, name string, payload map[strin
 	return w.Code, answer
 }
 
+// agentGatewayNativeServers is one agent-gateway route server and one
+// native hook server per connector for a rule-pack profile, shared by every
+// row of that profile (the audit store and its migrations are the slow part
+// of a call). Each row names its own session, so no row sees the state of
+// another, and one shared gateway serves concurrent hook calls as it does in
+// production.
+type agentGatewayNativeServers struct {
+	route  *APIServer
+	native map[string]*APIServer
+}
+
+func newAgentGatewayNativeServers(t *testing.T, profile string, natives ...string) agentGatewayNativeServers {
+	t.Helper()
+	installToolCallCorpusProfileConnector(t, connector.AgentGatewayConnectorName, profile)
+	servers := agentGatewayNativeServers{route: testAPIServerWithConfig(t, "action"), native: map[string]*APIServer{}}
+	servers.route.scannerCfg.Connectors.AgentGateway.Enabled = true
+	for _, native := range natives {
+		installToolCallCorpusProfileConnector(t, native, profile)
+		hook := testAPIServerWithConfig(t, "action")
+		hook.scannerCfg.Guardrail.Connector = native
+		servers.native[native] = hook
+	}
+	return servers
+}
+
 // Every kind gets the native hook's decision on the same arguments, on both
 // routes (per-user: the gateway token; managed: the hook socket, which marks
 // the request for agent-gateway), for a must-block set and benign hard
@@ -99,59 +124,61 @@ func TestAgentGatewayMatchesNativeHookPerKind(t *testing.T) {
 			return withAuthenticatedHookConnector(context.Background(), connector.AgentGatewayConnectorName)
 		},
 	}
+	natives := []string{"claudecode", "devin"}
 	for _, profile := range []string{"default", "strict"} {
-		for route, ctxFor := range routes {
-			for _, native := range []string{"claudecode", "devin"} {
-				for _, c := range agentGatewayNativeCases() {
-					t.Run(fmt.Sprintf("%s/%s/%s/%s", profile, route, native, c.name), func(t *testing.T) {
-						installToolCallCorpusProfileConnector(t, connector.AgentGatewayConnectorName, profile)
-						installToolCallCorpusProfileConnector(t, native, profile)
-						session := fmt.Sprintf("np-%s-%s-%s-%s", profile, route, native, c.name)
-						api := testAPIServerWithConfig(t, "action")
-						api.scannerCfg.Connectors.AgentGateway.Enabled = true
-						code, routed := postAgentGatewayFrom(t, api, ctxFor(), fmt.Sprintf(
-							`{"event":"pre_tool","session_id":%q,"tool_use_id":"t-1","cwd":"/work","tool":{"name":%q,"kind":%q,"input":%s}}`,
-							session, c.tool, c.kind, c.input))
-						if code != http.StatusOK {
-							t.Fatalf("route status=%d answer=%v", code, routed)
-						}
-						hook := testAPIServerWithConfig(t, "action")
-						hook.scannerCfg.Guardrail.Connector = native
-						code, direct := postNativeHook(t, hook, native, map[string]interface{}{
-							"hook_event_name": "PreToolUse", "session_id": session, "tool_use_id": "t-1", "tool_call_id": "t-1",
-							"cwd": "/work", "tool_name": c.native, "tool_input": c.args,
-						})
-						if code != http.StatusOK {
-							t.Fatalf("native status=%d answer=%v", code, direct)
-						}
-						if got, want := verdictFields(routed), verdictFields(direct); !reflect.DeepEqual(got, want) {
-							t.Fatalf("route verdict %v, native %s verdict %v", got, native, want)
-						}
-						t.Logf("route = native %s: raw_action=%v rule_ids=%v", native, routed["raw_action"], routed["rule_ids"])
-						if c.parity {
-							return
-						}
-						if !c.block {
-							if routed["raw_action"] != "allow" {
-								t.Fatalf("benign call raw_action=%v rule_ids=%v, want allow", routed["raw_action"], routed["rule_ids"])
+		// The rule packs are process-wide: profiles run one after the
+		// other, the rows of one profile in parallel.
+		t.Run(profile, func(t *testing.T) {
+			servers := newAgentGatewayNativeServers(t, profile, natives...)
+			for route, ctxFor := range routes {
+				for _, native := range natives {
+					for _, c := range agentGatewayNativeCases() {
+						t.Run(fmt.Sprintf("%s/%s/%s", route, native, c.name), func(t *testing.T) {
+							t.Parallel()
+							session := fmt.Sprintf("np-%s-%s-%s-%s", profile, route, native, c.name)
+							code, routed := postAgentGatewayFrom(t, servers.route, ctxFor(), fmt.Sprintf(
+								`{"event":"pre_tool","session_id":%q,"tool_use_id":"t-1","cwd":"/work","tool":{"name":%q,"kind":%q,"input":%s}}`,
+								session, c.tool, c.kind, c.input))
+							if code != http.StatusOK {
+								t.Fatalf("route status=%d answer=%v", code, routed)
 							}
-							return
-						}
-						// The bar is the native hook's decision on this OS (checked
-						// above). On Windows the packs take a home-relative POSIX
-						// path (~/.ssh/id_rsa) as an alert on the native hooks too,
-						// so there a must-block row needs its finding, not a block.
-						want := "block"
-						if runtime.GOOS == "windows" && routed["raw_action"] == "alert" {
-							want = "alert"
-						}
-						if routed["raw_action"] != want || routed["rule_ids"] == nil {
-							t.Fatalf("raw_action=%v rule_ids=%v, want %s with its finding", routed["raw_action"], routed["rule_ids"], want)
-						}
-					})
+							code, direct := postNativeHook(t, servers.native[native], native, map[string]interface{}{
+								"hook_event_name": "PreToolUse", "session_id": session, "tool_use_id": "t-1", "tool_call_id": "t-1",
+								"cwd": "/work", "tool_name": c.native, "tool_input": c.args,
+							})
+							if code != http.StatusOK {
+								t.Fatalf("native status=%d answer=%v", code, direct)
+							}
+							if got, want := verdictFields(routed), verdictFields(direct); !reflect.DeepEqual(got, want) {
+								t.Fatalf("route verdict %v, native %s verdict %v", got, native, want)
+							}
+							t.Logf("route = native %s: raw_action=%v rule_ids=%v", native, routed["raw_action"], routed["rule_ids"])
+							if c.parity {
+								return
+							}
+							if !c.block {
+								if routed["raw_action"] != "allow" {
+									t.Fatalf("benign call raw_action=%v rule_ids=%v, want allow", routed["raw_action"], routed["rule_ids"])
+								}
+								return
+							}
+							// The bar is the native hook's decision on this OS
+							// (checked above). On Windows the packs take a
+							// home-relative POSIX path (~/.ssh/id_rsa) as an alert
+							// on the native hooks too, so there a must-block row
+							// needs its finding, not a block.
+							want := "block"
+							if runtime.GOOS == "windows" && routed["raw_action"] == "alert" {
+								want = "alert"
+							}
+							if routed["raw_action"] != want || routed["rule_ids"] == nil {
+								t.Fatalf("raw_action=%v rule_ids=%v, want %s with its finding", routed["raw_action"], routed["rule_ids"], want)
+							}
+						})
+					}
 				}
 			}
-		}
+		})
 	}
 }
 
@@ -159,13 +186,9 @@ func TestAgentGatewayMatchesNativeHookPerKind(t *testing.T) {
 // delivered twice) gets the first delivery's decision on the route and on
 // the native hook (rel-1-0-6:GAP-0140).
 func TestAgentGatewayAndNativeHookRedeliveryKeepsDecision(t *testing.T) {
-	installToolCallCorpusProfileConnector(t, connector.AgentGatewayConnectorName, "default")
-	installToolCallCorpusProfileConnector(t, "claudecode", "default")
-	api := testAPIServerWithConfig(t, "action")
-	api.scannerCfg.Connectors.AgentGateway.Enabled = true
+	servers := newAgentGatewayNativeServers(t, "default", "claudecode")
+	api, hook := servers.route, servers.native["claudecode"]
 	body := `{"event":"pre_tool","session_id":"redeliver-1","tool_use_id":"t-1","cwd":"/work","tool":{"name":"mcp__files__read","kind":"mcp","input":{"path":"~/.ssh/id_rsa"}}}`
-	hook := testAPIServerWithConfig(t, "action")
-	hook.scannerCfg.Guardrail.Connector = "claudecode"
 	payload := map[string]interface{}{
 		"hook_event_name": "PreToolUse", "session_id": "redeliver-1", "tool_use_id": "t-1",
 		"cwd": "/work", "tool_name": "mcp__files__read", "tool_input": map[string]interface{}{"path": "~/.ssh/id_rsa"},
