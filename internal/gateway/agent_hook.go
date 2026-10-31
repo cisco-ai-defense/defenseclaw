@@ -3319,7 +3319,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		actionInput := actionfacts.Input{
 			Tool:                     actionTool,
 			Args:                     trustedArgs,
-			CWD:                      agentHookTrustedActionCWD(ctx, req.CWD, toolCWD),
+			CWD:                      agentHookTrustedActionCWDReported(ctx, req.CWD, req.ReportedCWD, toolCWD),
 			ActiveHome:               hookActiveHome(ctx),
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
@@ -3704,7 +3704,7 @@ func agentHookConflictSource(
 			candidate := base
 			args, toolCWD := agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, raw)
 			candidate.Args = args
-			candidate.CWD = agentHookTrustedActionCWD(ctx, req.CWD, toolCWD)
+			candidate.CWD = agentHookTrustedActionCWDReported(ctx, req.CWD, req.ReportedCWD, toolCWD)
 			if dialectHint {
 				candidate.DialectHint = agentHookWindowsShellDialect(candidate)
 			}
@@ -3720,9 +3720,65 @@ func agentHookConflictSource(
 // session's first; one the gateway cannot place ("~" or no session
 // directory) is none.
 func agentHookTrustedActionCWD(ctx context.Context, requestCWD, toolCWD string) string {
-	if toolCWD == "" {
+	return agentHookTrustedActionCWDReported(ctx, requestCWD, "", toolCWD)
+}
+
+// agentHookTrustedActionCWDReported is agentHookTrustedActionCWD with the
+// directory the hook payload reported (before the gateway resolved it), for
+// a managed peer whose directory the service account cannot resolve.
+func agentHookTrustedActionCWDReported(ctx context.Context, requestCWD, reportedCWD, toolCWD string) string {
+	if toolCWD == "" && requestCWD != "" {
 		return requestCWD
 	}
+	if toolCWD != "" {
+		if cwd := agentHookToolCWD(ctx, requestCWD, toolCWD); cwd != "" {
+			return cwd
+		}
+	}
+	base := requestCWD
+	if base == "" {
+		base = reportedCWD
+	}
+	return managedPeerLexicalCWD(ctx, base, toolCWD)
+}
+
+// managedPeerLexicalCWD is the directory a managed hook peer's tool call
+// names, kept lexically when the gateway service cannot resolve it: the
+// service account has no access to the enrolled user's home, so
+// sanitizeHookCWD returned "" for every directory there and a command's
+// relative operands (cat id_rsa with Cwd ~/.ssh, cat ../.ssh/id_rsa from
+// the project) were judged without a directory. The per-user gateway and
+// the managed Claude Code route judged the same reads as the key file
+// (rel-1-0-2:GAP-0694, managed Antigravity parity). Only a clean absolute
+// directory inside the peer's verified home is kept, as
+// serviceAccountCallerCWD does on Windows; the directory only ever adds a
+// verdict (relative operands are resolved against it).
+func managedPeerLexicalCWD(ctx context.Context, requestCWD, toolCWD string) string {
+	peer, ok := managedHookPeerFromContext(ctx)
+	if !ok || peer.Home == "" || isSandboxHookRequest(ctx) {
+		return ""
+	}
+	dir := strings.TrimSpace(toolCWD)
+	if dir == "" {
+		dir = strings.TrimSpace(requestCWD)
+	} else if !filepath.IsAbs(dir) {
+		base := strings.TrimSpace(requestCWD)
+		if base == "" || !filepath.IsAbs(base) || hasParentElement(base) {
+			return ""
+		}
+		dir = filepath.Join(base, dir)
+	}
+	if !filepath.IsAbs(dir) || strings.HasPrefix(dir, "~") {
+		return ""
+	}
+	dir = filepath.Clean(dir)
+	if !insideHome(peer.Home, dir) {
+		return ""
+	}
+	return dir
+}
+
+func agentHookToolCWD(ctx context.Context, requestCWD, toolCWD string) string {
 	if strings.HasPrefix(toolCWD, "~") {
 		return ""
 	}
