@@ -277,6 +277,10 @@ class UninstallPlan:
     # out; until 1.0.6 they stayed and kept starting defenseclaw-acp
     # (GAP-2632). A managed computer's enrollment owns its entries.
     acp_entries: tuple[tuple[str, str, str], ...] = ()
+    # config_error is why config.yaml did not load ("" when it did). The
+    # uninstall goes on from the connector records and says so; it used to
+    # drop the error without a word (rel-1-0-6 GAP-0153).
+    config_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -1063,12 +1067,13 @@ def _build_plan(
     # Config identifies active connectors. If it is missing or unreadable,
     # only durable rollback markers may authorize connector teardown.
     cfg = None
+    config_error = ""
     config_file = config_module.config_path_for_data_dir(data_dir)
     if config_file.is_file():
         try:
             cfg = config_module.load()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - any load failure is reported in the plan.
+            config_error = _one_line(str(exc) or type(exc).__name__)
 
     active_connectors = _resolve_active_connectors(cfg)
     resolved_connector = _resolve_active_connector(cfg)
@@ -1150,7 +1155,14 @@ def _build_plan(
         hook_temp_dirs=_hook_temp_dirs(platform_name) if wipe_data and not preserve_data_entries else (),
         quarantined=_quarantined_copies(data_dir) if wipe_data and not preserve_data_entries else (),
         acp_entries=_acp_editor_entries(cfg, data_dir),
+        config_error=config_error,
     )
+
+
+def _one_line(text: str, limit: int = 400) -> str:
+    """*text* on one line, at most *limit* characters."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 3] + "..."
 
 
 def _acp_editor_entries(cfg, data_dir: str) -> tuple[tuple[str, str, str], ...]:
@@ -2486,6 +2498,12 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     display_connectors = plan.connectors
     teardown = ", ".join(display_connectors) if display_connectors else "no"
     ux.echo(f"  • {ux.bold('connector teardown:')}  {teardown}")
+    if plan.config_error:
+        ux.warn(
+            f"config.yaml did not load ({plan.config_error}); the teardown goes on from the connector "
+            f"records in {plan.data_dir}",
+            indent="    ",
+        )
     if display_connectors:
         # An open Codex session ran on after the uninstall with every hook
         # failing, and its next marker command ran (GAP-0255).
