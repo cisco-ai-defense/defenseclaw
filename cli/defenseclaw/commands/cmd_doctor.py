@@ -11908,7 +11908,7 @@ def _check_decision_model(cfg, r: _DoctorResult) -> None:
         _emit(
             "warn",
             "Decision model",
-            f"{dm.model}: {result.detail}; the LLM judge decides alone until it answers",
+            f"{dm.model}: {result.detail}; the LLM judge decides alone until it is reachable",
             r=r,
             remediation="defenseclaw setup decision-model --show --ping",
         )

@@ -626,6 +626,47 @@ func TestCLIObservabilityV8PluginScanRowNamesTargetAndConnector(t *testing.T) {
 	}
 }
 
+// GAP-0156: the CLI sends the admission decision it printed, and the scan row
+// reads that verdict instead of the one inferred from the findings.
+func TestCLIObservabilityV8ScanRowCarriesTheCLIVerdict(t *testing.T) {
+	for _, tc := range []struct{ verdict, want string }{{"block", "verdict=block"}, {"clean", "verdict=clean"}, {"", "verdict=warn"}} {
+		fixture, api, _ := newCLIObservabilityV8Fixture(t)
+		verdictField := ""
+		if tc.verdict != "" {
+			verdictField = `,"verdict":"` + tc.verdict + `"`
+		}
+		body := `{"kind":"scan","run_id":"gap-0156","scan":{"scanner":"plugin-scanner","target":"/home/u/.hermes/plugins/web/ddgs","connector":"hermes","timestamp":"2026-07-06T00:00:00Z","duration_ms":5` + verdictField + `,"findings":[{"id":"rule-1","severity":"MEDIUM","title":"Network access","description":"network","location":"plugin.py","remediation":"review","scanner":"plugin-scanner","tags":[],"rule_id":"plugin.rule-1"}]}}`
+		request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, bytes.NewBufferString(body))
+		response := httptest.NewRecorder()
+		api.handleCLIObservabilityV8(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("%q: status=%d response=%q", tc.verdict, response.Code, response.Body.String())
+		}
+		database, err := sql.Open("sqlite", fixture.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var details string
+		err = database.QueryRow(`SELECT COALESCE(details,'') FROM audit_events
+			WHERE run_id = 'gap-0156' AND event_name = 'scan.completed'`).Scan(&details)
+		database.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(details, tc.want) {
+			t.Errorf("verdict %q: scan row details %q lack %q", tc.verdict, details, tc.want)
+		}
+	}
+	// An unknown verdict is refused, not stored.
+	_, api, _ := newCLIObservabilityV8Fixture(t)
+	body := `{"kind":"scan","run_id":"gap-0156","scan":{"scanner":"plugin-scanner","target":"/x","timestamp":"2026-07-06T00:00:00Z","duration_ms":5,"verdict":"maybe","findings":[]}}`
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, bytes.NewBufferString(body)))
+	if response.Code == http.StatusNoContent {
+		t.Fatalf("an unknown scan verdict was accepted")
+	}
+}
+
 // GAP-2381: re-running "defenseclaw init" on a v8 install sent the "init"
 // action, whose registry entry needs caller context, and got a 503.
 func TestCLIObservabilityV8RecordsContextRequiredSetupActions(t *testing.T) {

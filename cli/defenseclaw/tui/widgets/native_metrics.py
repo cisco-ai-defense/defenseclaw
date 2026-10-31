@@ -80,6 +80,10 @@ def fit_metric_detail(detail: str, width: int) -> str | Text:
             kept.append(_MORE, style=TOKENS.text_muted)
             return kept
     first = text[: ends[0]] if ends else text
+    if ends and first.cell_len <= width:
+        # No room for the " …" marker beside the first item: keep that item
+        # whole ("claudecode 59") rather than cutting its label (GAP-0341).
+        return first
     count = _TRAILING_COUNT.search(first.plain)
     if count is not None and count.start() > 0:
         number = first[count.start() :]

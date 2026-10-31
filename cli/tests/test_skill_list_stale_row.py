@@ -81,6 +81,25 @@ class TestSkillListStaleRow(unittest.TestCase):
         panel.apply_json(self.invoke(["list", "--json"]))
         self.assertEqual(panel.count(), 0)
 
+    def test_quarantine_copy_deleted_by_hand_while_blocked_is_not_listed_quarantined(self) -> None:
+        self.invoke(["quarantine", "risky", "--connector", "claudecode"])
+        for record in self.app.store.list_quarantine_records("skill"):
+            shutil.rmtree(record.quarantine_path)
+
+        for row in self.listed():
+            self.assertNotEqual(row.get("actions", {}).get("file"), "quarantine", row)
+            self.assertNotEqual(row.get("actions", {}).get("runtime"), "disable", row)
+            self.assertFalse(row.get("disabled"), row)
+        panel = SkillsPanelModel(connector="claudecode")
+        panel.apply_json(self.invoke(["list", "--json"]))
+        self.assertTrue(all("quarantine" not in (row.actions or "") for row in panel.items))
+
+    def test_unblock_after_hand_deleted_copy_does_not_say_files_remain(self) -> None:
+        self.invoke(["quarantine", "risky", "--connector", "claudecode"])
+        for record in self.app.store.list_quarantine_records("skill"):
+            shutil.rmtree(record.quarantine_path)
+        self.assertNotIn("remain quarantined", self.invoke(["unblock", "risky"]))
+
 
 if __name__ == "__main__":
     unittest.main()

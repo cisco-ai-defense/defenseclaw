@@ -408,6 +408,12 @@ def supported_components() -> tuple[str, ...]:
 _SCAN_NOT_RECORDED_NOTED = False
 
 
+def verdict_kwargs(verdict: str) -> dict[str, str]:
+    """``record_scan`` keyword for an audit verdict, empty when there is none."""
+
+    return {"verdict": verdict} if verdict else {}
+
+
 def record_scan(logger: Any, result: Any, **kwargs: Any) -> None:
     """Record a finished scan; a stopped gateway only skips the record.
 
