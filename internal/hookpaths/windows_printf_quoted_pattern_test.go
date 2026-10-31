@@ -52,3 +52,41 @@ func TestWindowsPrintfQuotedPatternIsTextAsEcho(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-6:GAP-0227: text that echo or printf prints into a shell (sh,
+// bash, pwsh, cmd, Invoke-Expression) is a script there, so its quoted
+// patterns are paths and keep their verdict; the GAP-1717 text reading
+// applies only when the printed text is not run. Each printf row gets the
+// verdict of its echo twin in every Windows reading. Benign scripts piped
+// into a shell still allow.
+func TestWindowsTextPipedIntoAShellKeepsItsPatterns(t *testing.T) {
+	const home = `C:\Users\b00`
+	rows := []struct {
+		command string
+		block   bool
+	}{
+		{"printf 'cp a.txt .ssh/authorized_k*' | bash", true},
+		{"printf 'cat a.txt >> .ssh/authorized_k*' | sh", true},
+		{"printf 'cp a.txt .ssh/authorized_k*' | grep cp | sh", true},
+		{"printf 'cp a.txt .ssh/authorized_k*' | iex", true},
+		{"printf 'cp a.txt .ssh/authorized_k*' | pwsh -NoProfile -Command -", true},
+		{"printf 'echo hi' | sh", false},
+		{"printf 'git status' | bash", false},
+		{"printf 'ls' | sh", false},
+		{"printf '*' | Out-Host", false},
+		{"printf 'cp a.txt .ssh/authorized_k*' | Out-Host", false},
+		{"printf 'cp a.txt .ssh/authorized_k*'; ls | sh", false},
+	}
+	for _, row := range rows {
+		twin := "echo" + strings.TrimPrefix(row.command, "printf")
+		for _, dialect := range []actionfacts.Dialect{"", actionfacts.DialectPowerShell, actionfacts.DialectPOSIX} {
+			got := ActionCommandDecisionWithDialectAndGlobFacts(row.command, home, home, dialect, nil)
+			if blocked := got == "protected-target"; blocked != row.block {
+				t.Errorf("dialect %q %q = %q, want block=%v", dialect, row.command, got, row.block)
+			}
+			if echo := ActionCommandDecisionWithDialectAndGlobFacts(twin, home, home, dialect, nil); echo != got {
+				t.Errorf("dialect %q %q = %q, its echo twin %q = %q", dialect, row.command, got, twin, echo)
+			}
+		}
+	}
+}

@@ -3072,6 +3072,9 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 		}
 		if i > start && (actionWindowsTextProgram(words[start]) || actionWindowsNativeProgram(words[start])) {
 			pattern := start + actionWindowsSearchPatternWord(words[start:i])
+			// Text piped into a shell is a script: its quoted patterns are
+			// paths there (rel-1-0-6:GAP-0227, for echo as for printf).
+			script := actionWindowsPipedIntoShell(words, i)
 			for j := start + 1; j < i; j++ {
 				if !scan.quoted[j] || strings.Contains(words[j], "$(") || actionWindowsRedirectOperator(words[j-1]) != "" {
 					continue
@@ -3086,7 +3089,7 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 				// the home folder). Other native programs (the MSYS tools
 				// of Git for Windows) expand a quoted word of their own
 				// argv, so it stays a path pattern (GAP-1984).
-				if (actionWindowsTextStatement(words[start:i]) && !actionWindowsGitPathspecWord(words[start:i], j-start)) || j == pattern {
+				if (actionWindowsTextStatement(words[start:i]) && !script && !actionWindowsGitPathspecWord(words[start:i], j-start)) || j == pattern {
 					words[j] = actionWindowsLiteralPattern.Replace(words[j])
 				}
 			}
@@ -3094,6 +3097,30 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 		start = i + 1
 	}
 	return skip
+}
+
+// actionWindowsPipedIntoShell reports a pipeline stage that ends at end (a
+// "|") and feeds a later stage of the same pipeline that runs its input as
+// a script: a shell (sh, bash, pwsh, cmd ...) or Invoke-Expression.
+func actionWindowsPipedIntoShell(words []string, end int) bool {
+	for k := end; k < len(words) && words[k] == "|"; {
+		if k+1 < len(words) && actionWindowsScriptReader(words[k+1]) {
+			return true
+		}
+		for k++; k < len(words) && words[k] != ";" && words[k] != "|" && words[k] != "||" && words[k] != "&" && words[k] != "&&"; k++ {
+		}
+	}
+	return false
+}
+
+// actionWindowsScriptReader reports a program that runs the text it reads
+// on its input as commands.
+func actionWindowsScriptReader(word string) bool {
+	switch strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(word, `\`, "/"))), ".exe") {
+	case "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "pwsh", "powershell", "cmd", "iex", "invoke-expression":
+		return true
+	}
+	return false
 }
 
 func actionWindowsLocationProgram(word string) bool {
