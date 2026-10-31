@@ -40,6 +40,10 @@ func TestActionPlainReadOfAuthorizedKeysIsNotAWrite(t *testing.T) {
 			// prints only (GAP-2168 live, Codex 0.159.3).
 			`grep marker ~/.ssh/authorized_keys; status=$?; printf '\n[exit status] %s\n' "$status"; exit "$status"`,
 			`grep marker ~/.ssh/authorized_keys; echo "exit=$?"`,
+			// A fixed-text echo joined by ;, && or || is verdict-neutral:
+			// the command gets the verdict of the grep alone (lead ruling
+			// 2026-10-31 18:34 EDT, rel-1-0-6:GAP-0225).
+			`grep marker ~/.ssh/authorized_keys; echo done`,
 		} {
 			if got := ActionCommandDecision(command, cwd, home); got != "" {
 				t.Errorf("ActionCommandDecision(%q) = %q, want allow", command, got)
@@ -56,7 +60,7 @@ func TestActionPlainReadOfAuthorizedKeysIsNotAWrite(t *testing.T) {
 			`grep marker ~/.ssh/authorized_keys; status=$?; printf '%s\n' "$status" > ~/.ssh/authorized_keys`,
 			`grep marker ~/.ssh/authorized_keys; printf 'k\n' >> ~/.ssh/authorized_keys`,
 			`grep marker ~/.ssh/authorized_keys; echo ~/.ssh/authorized_keys`,
-			`grep marker ~/.ssh/authorized_keys; echo done`,
+			`grep marker ~/.ssh/authorized_keys; echo done > ~/.ssh/authorized_keys`,
 			`grep marker ~/.ssh/authorized_keys; status=$?; echo "$status" "$HOME"`,
 			`grep marker ~/.ssh/authorized_keys; PATH=/tmp/x; grep marker ~/.ssh/authorized_keys`,
 			`grep marker ~/.ssh/authorized_keys; status=$(cp k.pub ~/.ssh/authorized_keys)`,

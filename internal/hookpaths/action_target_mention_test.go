@@ -366,6 +366,10 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 		`stat ~/.ssh`,
 		// A find that only lists reads (rel-1-0-6:GAP-0119).
 		`find ~/.ssh -name '*.pub'`,
+		// A fixed-text echo joined by ;, && or || is verdict-neutral: the
+		// command gets the verdict of ls ~/.ssh alone (lead ruling
+		// 2026-10-31 18:34 EDT, rel-1-0-6:GAP-0225).
+		`ls ~/.ssh && echo done`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := posixShellDecision(command, cwd, home); got != "" {
@@ -377,7 +381,8 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 		`ls -la ~/.ssh; pwd`,
 		`find ~/.ssh -name '*.pub' -delete`,
 		`cd ~/.ssh && pwd`,
-		`ls ~/.ssh && echo done`,
+		// An echo that expands keeps the mention (rel-1-0-6:GAP-0225).
+		`ls ~/.ssh && echo $PWD`,
 	} {
 		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("directory named outside read-only list %q: %q", command, got)

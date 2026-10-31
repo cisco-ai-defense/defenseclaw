@@ -34,7 +34,7 @@ func TestR104StructuralProtectedNamedPOSIX(t *testing.T) {
 		`grep marker payload >> ~/.ssh/authorized_keys`,
 		`wc -l ~/.ssh/authorized_keys > ~/.ssh/authorized_keys2`,
 		`cd ~/.ssh && echo authorized_keys`,
-		`ls ~/.ssh && echo done`,
+		`ls ~/.ssh && echo "$(cat ~/.ssh/authorized_keys)"`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := posixShellDecision(command, cwd, home); got != "protected-target" {
@@ -44,6 +44,9 @@ func TestR104StructuralProtectedNamedPOSIX(t *testing.T) {
 	}
 	for _, command := range []string{
 		`cd ~/.ssh`, `pushd ~/.ssh`, `ls ~/.ssh`, `ls -o ~/.ssh`, `stat ~/.ssh`,
+		// A fixed-text echo joined by ;, && or || is verdict-neutral (lead
+		// ruling 2026-10-31 18:34 EDT, rel-1-0-6:GAP-0225).
+		`ls ~/.ssh && echo done`,
 		`cd ~/.ssh && cat authorized_keys`, `cd ~/.ssh && ls authorized_keys`,
 		`grep marker report.txt`,
 		// Plain reads stay allowed in action (owner decision 2, GAP-2168).

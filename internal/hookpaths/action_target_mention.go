@@ -2210,6 +2210,7 @@ func actionWordHasUnquotedGlob(word *syntax.Word, command string) bool {
 func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 	seen, safe := false, true
 	status := map[string]bool{"?": true}
+	neutral := actionFixedTextEchoes(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if !safe {
 			return false
@@ -2229,6 +2230,9 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok {
 			return true
+		}
+		if neutral[call] {
+			return false
 		}
 		if len(call.Args) == 0 && actionExitStatusAssignment(call) {
 			// status=$? of an agent's exit-status wrapper (GAP-2168).
@@ -2307,6 +2311,87 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		return safe
 	})
 	return seen && safe
+}
+
+// actionFixedTextEchoes returns the echo calls of a command that print fixed
+// text and do nothing else: a top-level statement, or an operand of && or
+// ||, with no redirect, pipe, background or negation, whose words are plain
+// text (actionFixedEchoText). Such an echo is verdict-neutral: the command
+// gets the verdict of its other statements alone (lead ruling 2026-10-31
+// 18:34 EDT, rel-1-0-6:GAP-0225). An echo in a pipeline, a subshell, a
+// substitution or a loop body is not one.
+func actionFixedTextEchoes(file *syntax.File) map[*syntax.CallExpr]bool {
+	neutral := map[*syntax.CallExpr]bool{}
+	var list func(stmt *syntax.Stmt)
+	list = func(stmt *syntax.Stmt) {
+		if stmt == nil || len(stmt.Redirs) != 0 || stmt.Background || stmt.Coprocess || stmt.Negated {
+			return
+		}
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.BinaryCmd:
+			if cmd.Op == syntax.AndStmt || cmd.Op == syntax.OrStmt {
+				list(cmd.X)
+				list(cmd.Y)
+			}
+		case *syntax.CallExpr:
+			if actionFixedTextEcho(cmd) {
+				neutral[cmd] = true
+			}
+		}
+	}
+	for _, stmt := range file.Stmts {
+		list(stmt)
+	}
+	return neutral
+}
+
+// actionFixedEchoText is the text a verdict-neutral echo word may hold:
+// letters, digits, spaces and plain punctuation. A $, a backtick, a glob or
+// brace character, a ~, a / (a path), a backslash, a quote character or a !
+// is not.
+var actionFixedEchoText = lazyregexp.New(`^[A-Za-z0-9 _.,:=+@%-]*$`)
+
+// actionFixedTextEcho reports an echo call whose every word is fixed text:
+// unquoted, single-quoted or double-quoted literal parts only, matching
+// actionFixedEchoText and naming no SSH file.
+func actionFixedTextEcho(call *syntax.CallExpr) bool {
+	if len(call.Assigns) != 0 || len(call.Args) == 0 {
+		return false
+	}
+	if lit := call.Args[0].Lit(); lit != "echo" {
+		return false
+	}
+	fixed := func(text string) bool {
+		lower := strings.ToLower(text)
+		return actionFixedEchoText.MatchString(text) && !strings.Contains(lower, "ssh") && !strings.Contains(lower, "authorized")
+	}
+	for _, word := range call.Args[1:] {
+		for _, part := range word.Parts {
+			switch part := part.(type) {
+			case *syntax.Lit:
+				if !fixed(part.Value) {
+					return false
+				}
+			case *syntax.SglQuoted:
+				if part.Dollar || !fixed(part.Value) {
+					return false
+				}
+			case *syntax.DblQuoted:
+				if part.Dollar {
+					return false
+				}
+				for _, inner := range part.Parts {
+					lit, ok := inner.(*syntax.Lit)
+					if !ok || !fixed(lit.Value) {
+						return false
+					}
+				}
+			default:
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // actionDiscardRedirect reports a redirect that writes no file: output or
