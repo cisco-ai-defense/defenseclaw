@@ -73,6 +73,7 @@ Earlier releases guard OpenCode V1 only, and OpenCode V2 cannot load their plugi
 - **OpenCode V1 still installed:** `defenseclaw upgrade` (and the one-line installer) stops before it changes anything and says to install V2. Your current DefenseClaw keeps guarding OpenCode V1. Install V2, then upgrade again. To upgrade without OpenCode, run `defenseclaw setup remove opencode` first.
 - **OpenCode V2 installed:** the upgrade selects V2 and writes the V2 plugin; no setup run is needed. Restart OpenCode's background server afterwards.
 - **Rollback:** `defenseclaw rollback` to 1.0.5 or earlier refuses while OpenCode V2 is installed and set up, because that release cannot guard it and its gateway does not start. The rollback restores that release's own configuration, so put OpenCode V1 back first to roll back, or stay on this release.
+- **Downgrade:** `defenseclaw upgrade --version 1.0.5` (or earlier, and the installers with an older `--version`) is refused the same way, before anything changes. A downgrade keeps this install's configuration, so `defenseclaw setup remove opencode` first is the other way through; OpenCode then runs without DefenseClaw.
 - Install V2 and upgrade DefenseClaw together: DefenseClaw 1.0.5 still lists OpenCode as protected when V2 is installed, but V2 does not load its plugin.
 
 ## What it can block or ask

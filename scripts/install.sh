@@ -405,11 +405,30 @@ latest_release() {
     printf '%s' "${location}"
 }
 
+# refuse_unguarding_move rollback|downgrade VERSION: the installed CLI says
+# whether DefenseClaw VERSION can guard the agents set up here (OpenCode V2
+# before 1.0.6: rel-1-0-6 GAP-0028 for a rollback, GAP-0128 for a downgrade)
+# and stops before anything changes. A CLI without the check (1.0.5 and
+# earlier, or a newer target) answers 2 and is not shown: no refusal.
+refuse_unguarding_move() {
+    local kind="$1" version="$2" out rc=0
+    [[ -x "${BIN_DIR}/defenseclaw" ]] || return 0
+    out="$("${BIN_DIR}/defenseclaw" migrate "--check-${kind}-to" "${version}" 2>&1)" || rc=$?
+    [[ ${rc} -eq 1 ]] || return 0
+    printf '%s\n' "${out}" >&2
+    if [[ "${kind}" == rollback ]]; then
+        die "Rollback cancelled; nothing was changed (see above)"
+    fi
+    die "Downgrade cancelled; nothing was changed (see above)"
+}
+
 # run_release_installer VERSION ARGS...: download VERSION's installer, verify it,
 # and run it. Used for --version and for an unstamped (source) copy.
 run_release_installer() {
     local version="$1"; shift
     local tmp base="${TMPDIR:-/tmp}"
+    # An older release's installer has no check for what it cannot guard.
+    refuse_unguarding_move downgrade "${version}"
     tmp="$(mktemp -d "${base%/}/defenseclaw-upgrade-XXXXXX")"
     info "Fetching the installer for DefenseClaw ${version}"
     curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/install.sh" \
@@ -1428,12 +1447,9 @@ if [[ "${ROLLBACK}" == true ]]; then
     AUDIT_DAMAGED=""
     if version_lt "${back_to}" 1.0.0; then check_rollback_data; fi
     # rel-1-0-6 GAP-0028: a release that cannot guard an agent here (OpenCode
-    # V2 before 1.0.6) says so before anything changes. A CLI without the
-    # check (a roll forward runs the older CLI) answers 2: no refusal.
-    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}" && [[ -x "${BIN_DIR}/defenseclaw" ]]; then
-        rollback_check_rc=0
-        "${BIN_DIR}/defenseclaw" migrate --check-rollback-to "${back_to}" || rollback_check_rc=$?
-        [[ ${rollback_check_rc} -ne 1 ]] || die "Rollback cancelled; nothing was changed (see above)"
+    # V2 before 1.0.6) says so before anything changes.
+    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}"; then
+        refuse_unguarding_move rollback "${back_to}"
     fi
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true

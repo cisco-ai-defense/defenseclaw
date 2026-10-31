@@ -3397,12 +3397,15 @@ def _opencode_v2_in_known_places(data_dir: str) -> tuple[str, str] | None:
     return None
 
 
-def check_opencode_rollback(data_dir: str, back_to: str) -> None:
-    """Refuse a rollback to a release that cannot guard the OpenCode V2 here (rel-1-0-6 GAP-0028).
+def check_opencode_rollback(data_dir: str, back_to: str, *, downgrade: bool = False) -> None:
+    """Refuse a move to a release that cannot guard the OpenCode V2 here (rel-1-0-6 GAP-0028).
 
     Such a release's gateway does not start with OpenCode V2 (the rollback
     undid itself with an unrelated message), and OpenCode V2 cannot load its
-    plugin, so it would run unguarded.
+    plugin, so it would run unguarded. *downgrade*: the move is
+    ``defenseclaw upgrade --version`` (or an installer run for an older
+    release), which keeps this install's configuration, so removing OpenCode
+    from it first is a way through (rel-1-0-6 GAP-0128).
     """
     if not _version_before(back_to, _OPENCODE_V2_SINCE) or not _opencode_configured(data_dir):
         return
@@ -3420,11 +3423,17 @@ def check_opencode_rollback(data_dir: str, back_to: str) -> None:
         raw = elsewhere[0] if elsewhere else ""
     if not raw:
         return
+    reason = f"DefenseClaw {back_to} guards OpenCode V1 only and the OpenCode here is V2 ({raw.strip()})"
+    put_back = "put OpenCode V1 back first (npm uninstall -g @opencode/cli && npm install -g opencode-ai@1.18)"
+    if downgrade:
+        raise MigrationError(
+            f"{reason}: OpenCode would run unguarded. To downgrade, {put_back}, or stay on "
+            "this release. To downgrade without OpenCode instead, run 'defenseclaw setup remove opencode' first."
+        )
     raise MigrationError(
-        f"DefenseClaw {back_to} guards OpenCode V1 only and the OpenCode here is V2 ({raw.strip()}): its gateway "
-        "would not start, and OpenCode would run unguarded; nothing was changed. The rollback restores that "
-        "release's own configuration, so removing OpenCode here does not help: to roll back, put OpenCode V1 back "
-        "first (npm uninstall -g @opencode/cli && npm install -g opencode-ai@1.18), or stay on this release."
+        f"{reason}: its gateway would not start, and OpenCode would run unguarded; nothing was changed. The "
+        "rollback restores that release's own configuration, so removing OpenCode here does not help: to roll "
+        f"back, {put_back}, or stay on this release."
     )
 
 

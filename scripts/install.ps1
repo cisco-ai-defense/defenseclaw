@@ -636,6 +636,21 @@ function Test-ReleaseSignature([string]$Cosign, [string]$Bundle, [string]$Checks
         "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", $Checksums) -Quiet
 }
 
+function Assert-OlderReleaseGuardsAgents([string]$Kind, [string]$Target) {
+    # The installed CLI says whether DefenseClaw $Target can guard the agents
+    # set up here (OpenCode V2 before 1.0.6: rel-1-0-6 GAP-0028 for a
+    # rollback, GAP-0128 for a downgrade) and stops before anything changes.
+    # A CLI without the check (1.0.5 and earlier) answers 2 and is not shown.
+    $venv = Get-Variable -Name Venv -ValueOnly -ErrorAction SilentlyContinue
+    $cli = if ($venv) { Join-Path $venv "Scripts\defenseclaw.exe" } else { "" }
+    if (-not ($cli -and (Test-Path -LiteralPath $cli))) { return }
+    $probe = Get-NativeProbe $cli @("migrate", "--check-$Kind-to", $Target)
+    if ($probe.Exit -ne 1) { return }
+    Write-Host ($probe.Output.TrimEnd())
+    $what = if ($Kind -eq "rollback") { "Rollback" } else { "Downgrade" }
+    Die "$what cancelled; nothing was changed (see above)"
+}
+
 function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     # Download that release's installer, verify it, and run it (-Version, or
     # an unstamped copy from the source tree). Named like the directories of
@@ -645,6 +660,8 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     $versionChange = (Test-Version $installed) -and (Test-Version $target) -and [version]$target -ne [version]$installed
     if ($versionChange) { Assert-NoActiveConnectorRecovery "Version change to $target" }
     $downgrade = $versionChange -and [version]$target -lt [version]$installed
+    # An older release's installer has no check for what it cannot guard.
+    if ($downgrade) { Assert-OlderReleaseGuardsAgents "downgrade" $target }
     $restartCurrent = $false
     $hooksConverted = $false
     $childCode = $null
@@ -5198,11 +5215,7 @@ function Invoke-Rollback {
     if (-not $rollForward) {
         # rel-1-0-6 GAP-0028: a release that cannot guard an agent here
         # (OpenCode V2 before 1.0.6) says so before anything changes.
-        $rollbackVenv = Get-Variable -Name Venv -ValueOnly -ErrorAction SilentlyContinue
-        $rollbackCli = if ($rollbackVenv) { Join-Path $rollbackVenv "Scripts\defenseclaw.exe" } else { "" }
-        if ($rollbackCli -and (Test-Path -LiteralPath $rollbackCli) -and ((Invoke-Native $rollbackCli @("migrate", "--check-rollback-to", $backTo)) -eq 1)) {
-            Die "Rollback cancelled; nothing was changed (see above)"
-        }
+        Assert-OlderReleaseGuardsAgents "rollback" $backTo
         Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
         $stale = @(Get-StaleAgentEvidence (Join-Path $Previous "data"))
         if ($stale.Count -and $backTo -match '^(?:0\.8\.10|1\.0\.[0-3])$') {
@@ -5484,6 +5497,7 @@ function Invoke-Install {
         if (-not (Test-Path -LiteralPath $targetWheel -PathType Leaf)) {
             Die "-Local $LocalDir has no wheel for the requested DefenseClaw $TargetVersion"
         }
+        Assert-OlderReleaseGuardsAgents "downgrade" $TargetVersion
         $Ver = $TargetVersion
     }
     if ($TargetVersion -and $TargetVersion -ne $Ver -and -not $Rollback) {

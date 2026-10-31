@@ -1,6 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
-"""Upgrade and rollback refuse before anything changes when OpenCode's major does not fit (rel-1-0-6 GAP-0021, GAP-0028)."""
+"""Upgrade, rollback and downgrade refuse before anything changes when OpenCode's major does not fit
+(rel-1-0-6 GAP-0021, GAP-0028, GAP-0128)."""
 
 import pytest
 from defenseclaw import migrations
@@ -33,6 +34,32 @@ def test_rollback_check_refuses_an_earlier_release_with_opencode_v2(opencode, tm
     opencode["value"] = ("1.18.34", "/opt/agents/bin/opencode")
     migrations.check_opencode_rollback(str(tmp_path), "1.0.5")
 
+
+
+def test_downgrade_check_gives_the_downgrade_next_step(opencode, tmp_path):
+    """GAP-0128: a downgrade keeps this install's configuration, so removing OpenCode first is a way through."""
+    opencode["value"] = ("opencode v2.2.5", "/home/u/.npm/bin/opencode")
+    with pytest.raises(MigrationError) as raised:
+        migrations.check_opencode_rollback(str(tmp_path), "1.0.5", downgrade=True)
+    text = str(raised.value)
+    assert text.startswith("DefenseClaw 1.0.5 guards OpenCode V1 only and the OpenCode here is V2 (opencode v2.2.5)")
+    assert "To downgrade, put OpenCode V1 back first" in text and "setup remove opencode" in text
+    assert "rollback restores" not in text
+    migrations.check_opencode_rollback(str(tmp_path), "1.0.6", downgrade=True)
+
+
+def test_migrate_check_downgrade_to_exits_1_with_the_reason(opencode, tmp_path):
+    from click.testing import CliRunner
+    from defenseclaw.commands.cmd_migrate import migrate_cmd
+
+    opencode["value"] = ("opencode v2.2.5", "/home/u/.npm/bin/opencode")
+    result = CliRunner().invoke(migrate_cmd, ["--check-downgrade-to", "1.0.5", "--data-dir", str(tmp_path)])
+    assert result.exit_code == 1, result.output
+    assert "guards OpenCode V1 only" in result.output and "To downgrade" in result.output
+    result = CliRunner().invoke(migrate_cmd, ["--check-rollback-to", "1.0.5", "--data-dir", str(tmp_path)])
+    assert result.exit_code == 1 and "to roll back" in result.output
+    opencode["value"] = ("1.18.34", "/opt/agents/bin/opencode")
+    assert CliRunner().invoke(migrate_cmd, ["--check-downgrade-to", "1.0.5", "--data-dir", str(tmp_path)]).exit_code == 0
 
 def test_installed_opencode_uses_the_discovery_probe_outside_trusted_prefixes(monkeypatch, tmp_path):
     from types import SimpleNamespace
