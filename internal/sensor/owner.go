@@ -603,21 +603,26 @@ func (r *ownerResolver) resolve(processes []procRef, configPaths []string) owner
 			return r.named(instance.sessionUser, instance.sessionSID, AttributionSession)
 		}
 	}
-	if found, ok := r.profileOwner(configPaths); ok {
+	found, ok, ambiguous := r.profileOwner(configPaths)
+	if ok {
 		return found
 	}
-	reason := "the process owner could not be read (" + ownerSourcesFor(ownerGOOS) + ") " +
-		"and no enrolled profile holds the agent's configuration"
+	// Say why the profiles named nobody: none holds the configuration, or
+	// it spans more than one, which is ambiguous (p0-round GAP-1447).
+	config := "no enrolled profile holds the agent's configuration"
+	if ambiguous {
+		config = "the agent's configuration spans more than one enrolled profile, so it is ambiguous"
+	}
+	reason := "the process owner could not be read (" + ownerSourcesFor(ownerGOOS) + ") and " + config
 	switch {
 	case len(matched) == 0 && descendants:
 		reason = "the agent's own process is no longer in the process table, the owner of a process it " +
-			"started is not the session's, and no enrolled profile holds the agent's configuration"
+			"started is not the session's, and " + config
 	case len(matched) == 0 && reused:
 		reason = "the finding's processes have exited and their pids now belong to other processes, " +
-			"whose owners are not the finding's; no enrolled profile holds the agent's configuration"
+			"whose owners are not the finding's; " + config
 	case len(matched) == 0:
-		reason = "the finding's processes are no longer in the process table " +
-			"and no enrolled profile holds the agent's configuration"
+		reason = "the finding's processes are no longer in the process table and " + config
 	}
 	return owner{Attribution: AttributionUnattributed, Reason: reason}
 }
@@ -667,30 +672,31 @@ func (r *ownerResolver) named(user, sid, attribution string) owner {
 }
 
 // profileOwner is the enrolled account whose profile holds the agent's
-// configuration files. Paths in more than one profile name no account, and
-// paths outside every profile (a project's AGENTS.md) say nothing.
+// configuration files. Paths in more than one profile name no account and
+// report ambiguous, and paths outside every profile (a project's AGENTS.md)
+// say nothing.
 //
 // A Windows account is identified by its SID. A Linux or macOS account has
 // none and is identified by its name: the enrolled-account table there
 // (the hook guardian's identity records) had no entry at all, so an exited
 // session could not be attributed to the one enrolled profile it wrote
 // (p0-round GAP-1389).
-func (r *ownerResolver) profileOwner(paths []string) (owner, bool) {
-	var found *Account
+func (r *ownerResolver) profileOwner(paths []string) (found owner, ok, ambiguous bool) {
+	var account *Account
 	for _, path := range paths {
-		account := r.accountForPath(path)
+		holder := r.accountForPath(path)
 		switch {
-		case account == nil:
+		case holder == nil:
 			continue
-		case found != nil && accountKey(*found) != accountKey(*account):
-			return owner{}, false
+		case account != nil && accountKey(*account) != accountKey(*holder):
+			return owner{}, false, true
 		}
-		found = account
+		account = holder
 	}
-	if found == nil || accountKey(*found) == "" {
-		return owner{}, false
+	if account == nil || accountKey(*account) == "" {
+		return owner{}, false, false
 	}
-	return owner{User: found.Name, SID: found.SID, Attribution: AttributionEnrolledProfile}, true
+	return owner{User: account.Name, SID: account.SID, Attribution: AttributionEnrolledProfile}, true, false
 }
 
 // accountKey identifies an enrolled account: its SID (Windows, any case),
