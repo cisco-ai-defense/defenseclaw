@@ -966,6 +966,17 @@ not remove a lock an earlier uninstall left.
   Hermes, Antigravity, Kiro and Copilot hooks point at the removed
   `defenseclaw-hook.exe`, so each call fails to start and none of those agents
   blocks on it ([Hook process control](/docs/enterprise/threat-model)).
+- **Folder permissions stay.** While an account is enrolled, the guardian gives the
+  agent folders and files that hold DefenseClaw's registrations (for example
+  `%USERPROFILE%\.config`, `.config\amp\plugins`, `.config\opencode\plugins`, `.codex`
+  and `.claude\settings.json`) an explicit access list that does not inherit from the
+  profile. Uninstall and `PURGE=1` remove DefenseClaw's entries and the gateway's access,
+  but keep that list. The account keeps full access to its files, but cannot change the
+  permissions of those folders, new items in them do not inherit from the profile, and
+  Administrators are not on the list. To return one to the profile's permissions, run
+  `icacls "<folder or file>" /reset` as LocalSystem (a SYSTEM scheduled task, for
+  example). `(Get-Acl "<path>").AreAccessRulesProtected` is `True` for each one that
+  still has the list.
 
 ## Payload trust
 
