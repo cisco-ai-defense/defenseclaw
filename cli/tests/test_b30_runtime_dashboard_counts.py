@@ -42,10 +42,18 @@ def test_grafana_would_block_by_control_counts_every_kernel_event() -> None:
     assert control["datasource"]["type"] == target["datasource"]["type"] == "prometheus"
     assert target["instant"] is True and target["legendFormat"] == "{{control}}"
     expression = target["expr"]
-    assert expression.startswith("sum by (control) (increase(defenseclaw_kernel_events_total{")
+    # The counter is a delta sum made cumulative by the Collector, so a series
+    # holds its first batch as its first sample and increase() skips it: the
+    # bar is the last value in range minus the last value before the range, or
+    # zero for a control first seen in the range.
+    assert "increase(" not in expression
+    assert expression.startswith("sum by (control) (last_over_time(defenseclaw_kernel_events_total{")
+    assert expression.count("last_over_time(") == 3 and "offset $__range)" in expression and " or (" in expression
+    assert expression.endswith(") > 0")
     assert 'owner="defenseclaw"' in expression and 'outcome="would_block"' in expression
     assert 'host_name=~"$host"' in expression and "[$__range]" in expression
     assert "ai.runtime.activity" not in expression
+    assert "first batch" in control["description"]
 
 
 def test_splunk_timecharts_keep_first_sighting_bucket() -> None:
