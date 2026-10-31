@@ -112,14 +112,6 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 			if row.alias == symlink && !symlinks {
 				t.Skip("no symlink privilege")
 			}
-			if runtime.GOOS == "windows" && row.name == "benign staged pipe after an inert envelope" {
-				// Codex runs PowerShell on Windows. The plain (cmd) reading,
-				// which a PowerShell hint keeps (GAP-1504), splits the
-				// single-quoted envelope and its *** is a glob that reaches
-				// hard.cfg, the hard link to authorized_keys here: a lead
-				// ruling on that reading is pending (GAP-1717 IN file).
-				t.Skip("plain reading of a quoted PowerShell envelope: lead ruling pending (GAP-1717)")
-			}
 			body := string(mustJSON(t, map[string]any{"session_id": "patch-session", "hook_event_name": "PreToolUse",
 				"tool_name": row.tool, "cwd": project, "tool_input": row.input}))
 			header := hookpaths.Resolve([]byte(body))

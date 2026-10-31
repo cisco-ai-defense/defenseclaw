@@ -3167,7 +3167,10 @@ func actionWindowsNativeProgram(word string) bool {
 func actionWindowsTextProgram(word string) bool {
 	switch strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(word, `\`, "/"))), ".exe") {
 	case "write-output", "echo", "write", "write-host", "write-information", "write-verbose",
-		"write-warning", "write-debug", "write-error", "git":
+		"write-warning", "write-debug", "write-error", "git",
+		// printf prints, as echo does (GAP-1717, Codex PowerShell row);
+		// printf -v assigns and is no text statement.
+		"printf":
 		return true
 	}
 	return false
@@ -3277,6 +3280,10 @@ func actionWindowsGitPathspecWord(words []string, k int) bool {
 // (GAP-2090).
 func actionWindowsTextStatement(words []string) bool {
 	if len(words) == 0 || !actionWindowsTextProgram(words[0]) {
+		return false
+	}
+	if len(words) > 1 && strings.HasPrefix(words[1], "-v") &&
+		strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(words[0], `\`, "/"))), ".exe") == "printf" {
 		return false
 	}
 	if strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(words[0], `\`, "/"))), ".exe") != "git" {
