@@ -575,8 +575,8 @@
                 {
                   "id": "CMD-PIPE-CURL",
                   "tool_call_only": true,
-                  "expression": "false",
-                  "pattern": "a^",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
+                  "pattern": "(?i)\\bcurl\\b\\s+[^|;\\r\\n]*\\|\\s*(?:[/\\w.-]+/)?(?:(?:bash|zsh|sh|dash|ksh)\\b|python(?:[0-9.]*)?\\s+-(?:\\s|$)|(?:perl|ruby)\\b)",
                   "title": "curl piped to shell",
                   "severity": "HIGH",
                   "confidence": 0.95,
@@ -588,8 +588,8 @@
                 {
                   "id": "CMD-PIPE-WGET",
                   "tool_call_only": true,
-                  "expression": "false",
-                  "pattern": "a^",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
+                  "pattern": "(?i)\\bwget\\b\\s+[^|]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b",
                   "title": "wget piped to shell",
                   "severity": "HIGH",
                   "confidence": 0.95,

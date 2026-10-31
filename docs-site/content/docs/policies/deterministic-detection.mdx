@@ -90,12 +90,14 @@ The same parsed download-to-shell proof applies to `curl` and `wget`:
 
 | Profile | Severity | Action mode |
 | --- | --- | --- |
-| `default` | HIGH (off) | Allow; no finding |
+| `default` | HIGH | Alert; allow |
 | `permissive` | HIGH (off) | Allow; no finding |
 | `strict` | CRITICAL | Alert; allow |
 
-Common installer pipelines remain quiet in the balanced profiles. The strict
-finding requires a parsed stdout-to-interpreter flow. A plain download or a
+The finding is an alert in every profile and mode: the call runs, also in
+action mode. The finding requires a parsed stdout-to-interpreter flow. In
+`default` it covers `curl` and `wget`; `strict` also reports PowerShell web
+cmdlets piped to `iex` under `CMD-PIPE-CURL`. A plain download or a
 pipeline into `tee` is not a match. A download piped through a privilege wrapper
 to a shell, or used as a shell command substitution, has a separate exact action proof.
 PowerShell `iwr ... | iex` or `irm ... | iex` is reported (`CMD-WIN-IWR-IEX`) when PowerShell runs it:
@@ -105,9 +107,9 @@ runs before the command, so it cannot stop it). Typed into bash or sh on Linux
 or macOS, `iwr` and `iex` are not
 commands, so there is no finding for them.
 
-To get alerts for generic installer pipelines, set `guardrail.rule_pack: strict`
-in `config.yaml` or run `defenseclaw guardrail use-pack strict`. The shipped
-default is `guardrail.rule_pack: default`; connector-specific choices take precedence.
+To turn these alerts off, use the `permissive` pack (`defenseclaw guardrail use-pack permissive`)
+or add a suppression. The shipped default is `guardrail.rule_pack: default`;
+connector-specific choices take precedence.
 
 ## ActionFacts
 
