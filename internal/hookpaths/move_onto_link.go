@@ -73,11 +73,11 @@ func actionPlainMoveOntoLink(call *syntax.CallExpr, values actionValues, cwd, ho
 	if !filepath.IsAbs(path) {
 		return nil, "", false
 	}
-	info, err := os.Lstat(path)
+	info, err := pathLstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		return nil, "", false
 	}
-	if target, err := os.Stat(path); err == nil && target.IsDir() || err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if target, err := pathStat(path); err == nil && target.IsDir() || err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, "", false
 	}
 	name := filepath.Base(path)
@@ -138,7 +138,7 @@ func actionPlainRemovedLinks(call *syntax.CallExpr, values actionValues, cwd, ho
 		if !filepath.IsAbs(path) {
 			continue
 		}
-		if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		if info, err := pathLstat(path); err != nil || info.Mode()&os.ModeSymlink == 0 {
 			continue
 		}
 		name := filepath.Base(path)

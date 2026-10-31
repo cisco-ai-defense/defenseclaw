@@ -4,7 +4,6 @@
 package hookpaths
 
 import (
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -328,7 +327,7 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 			if strings.HasPrefix(source, "-") {
 				continue
 			}
-			if info, err := os.Stat(OperandPath(source, cwd)); err == nil && info.IsDir() {
+			if info, err := pathStat(OperandPath(source, cwd)); err == nil && info.IsDir() {
 				return nil // A recursive directory copy has its own scope proof.
 			}
 			break
@@ -581,7 +580,7 @@ func literalFindOperands(words []string, cwd, home string, depth int) []string {
 		start = 4
 	}
 	target := OperandPath(subject, cwd)
-	if _, err := os.Lstat(target); err != nil {
+	if _, err := pathLstat(target); err != nil {
 		return nil
 	}
 	for i := start; i < len(words); i++ {

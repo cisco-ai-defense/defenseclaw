@@ -287,7 +287,7 @@ func actionSubstitutionValue(sub *syntax.CmdSubst, values actionValues, cwd, hom
 			pwd, p := StaticWord(right.Args[0], home)
 			if g && aOK && bOK && p && git == "git" && a == "rev-parse" && b == "--show-toplevel" && pwd == "pwd" {
 				for dir := cwd; ; dir = filepath.Dir(dir) {
-					if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+					if _, err := pathLstat(filepath.Join(dir, ".git")); err == nil {
 						return dir, true
 					}
 					if filepath.Dir(dir) == dir {

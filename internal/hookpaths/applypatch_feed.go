@@ -396,11 +396,11 @@ func patchFeedPath(name, cwd, home string) (string, bool) {
 
 // readPatchFeed reads a regular file of at most MaxPayloadBytes.
 func readPatchFeed(path string) (string, bool) {
-	before, err := os.Stat(path)
+	before, err := pathStat(path)
 	if err != nil || !before.Mode().IsRegular() || before.Size() > MaxPayloadBytes {
 		return "", false
 	}
-	file, err := os.Open(path)
+	file, err := pathOpen(path)
 	if err != nil {
 		return "", false
 	}

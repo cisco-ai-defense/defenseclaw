@@ -966,7 +966,7 @@ func actionBoundedGlob(pattern string, dotglob bool) []string {
 				next = append(next, filepath.Join(dir, component))
 				continue
 			}
-			entries, err := os.ReadDir(dir)
+			entries, err := pathReadDir(dir)
 			if err != nil {
 				continue
 			}
@@ -1015,8 +1015,8 @@ func actionPrivateReadPath(value, cwd, home string) bool {
 		if samePathName(resolved, key) {
 			return true
 		}
-		resolvedInfo, err1 := os.Stat(resolved)
-		keyInfo, err2 := os.Stat(key)
+		resolvedInfo, err1 := pathStat(resolved)
+		keyInfo, err2 := pathStat(key)
 		if err1 == nil && err2 == nil && os.SameFile(resolvedInfo, keyInfo) {
 			return true
 		}
@@ -1046,7 +1046,7 @@ func actionGeneratedPathSafe(value, cwd, home string) bool {
 		return false
 	}
 	pattern := strings.ReplaceAll(filepath.Base(target), actionGeneratedMarker, "*")
-	directory, err := os.Open(parent)
+	directory, err := pathOpen(parent)
 	if err != nil {
 		return false
 	}

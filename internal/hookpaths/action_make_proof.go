@@ -5,7 +5,6 @@ package hookpaths
 
 import (
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -292,7 +291,7 @@ func (p *makeRecipeProof) load() int {
 	before := len(p.rules)
 	if len(p.files) == 0 && !p.stdinFile {
 		for _, name := range []string{"GNUmakefile", "makefile", "Makefile"} {
-			if _, err := os.Lstat(filepath.Join(p.dir, name)); err == nil {
+			if _, err := pathLstat(filepath.Join(p.dir, name)); err == nil {
 				p.files = append(p.files, name)
 				break
 			}
@@ -458,11 +457,11 @@ func (p *makeRecipeProof) read(name string) {
 	}
 	p.reads++
 	path := OperandPath(name, p.dir)
-	real, err := filepath.EvalSymlinks(path)
+	real, err := pathEvalSymlinks(path)
 	if err != nil {
 		return
 	}
-	file, err := os.Open(real)
+	file, err := pathOpen(real)
 	if err != nil {
 		return
 	}
