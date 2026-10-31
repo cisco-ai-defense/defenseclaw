@@ -7,7 +7,6 @@ package managed
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -64,7 +63,7 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cannot read") || !strings.Contains(err.Error(), account) ||
 		!strings.Contains(err.Error(), `icacls "`+root+`" /grant "`+serviceSID+`:(OI)(CI)RX"`) ||
 		!strings.Contains(err.Error(), "error 1332 until the service exists") ||
-		!strings.Contains(err.Error(), "SecurityIdentifier]::new('"+strings.TrimPrefix(serviceSID, "*")+"')") {
+		!strings.Contains(strings.Join(printedGrantScripts(t, err.Error()), "\n"), "SecurityIdentifier]::new('"+strings.TrimPrefix(serviceSID, "*")+"'), 'ReadAndExecute', 'ContainerInherit,ObjectInherit'") {
 		t.Fatalf("admin-only rule pack: %v", err)
 	}
 	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", tree...)
@@ -86,7 +85,8 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	setDACL("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x20020;;;BU)", parent)
 	err = ValidateServiceCanReadTree(root, "guardrail.rule_pack_dir", account)
 	if err == nil || !strings.Contains(err.Error(), "parent folder "+parent) ||
-		!strings.Contains(err.Error(), `icacls "`+parent+`" /grant "`+serviceSID+`:RX"`) {
+		!strings.Contains(err.Error(), `icacls "`+parent+`" /grant "`+serviceSID+`:RX"`) ||
+		!strings.Contains(strings.Join(printedGrantScripts(t, err.Error()), "\n"), "SecurityIdentifier]::new('"+strings.TrimPrefix(serviceSID, "*")+"'), 'ReadAndExecute', 'None'") {
 		t.Fatalf("pack under a locked parent: %v", err)
 	}
 	setDACL(readableParent, parent)
@@ -279,27 +279,5 @@ func TestValidateServiceCanWriteFileChecksMissingFolderParent(t *testing.T) {
 	setDACL("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICI;0x1301ff;;;BU)")
 	if err := ValidateServiceCanWriteFile(sink, account); err != nil {
 		t.Fatalf("service may create the missing folder: %v", err)
-	}
-}
-
-// GAP-0087: the PowerShell form in the message grants the service SID on a
-// folder before the service exists, where icacls fails with error 1332.
-func TestServiceReadGrantPowerShellWorksBeforeTheServiceExists(t *testing.T) {
-	const account = `NT SERVICE\DefenseClawOOFNoSuchService`
-	dir := t.TempDir()
-	script := serviceReadGrantScript(dir, account)
-	if script == "" || ServiceReadGrantPowerShell(dir, `CORP\gateway`) != "" {
-		t.Fatalf("script %q, or a command for an account that is not an NT SERVICE name", script)
-	}
-	sid := WindowsServiceSIDString("DefenseClawOOFNoSuchService")
-	if out, err := exec.Command("icacls.exe", dir, "/grant", "*"+sid+":(OI)(CI)RX").CombinedOutput(); err == nil {
-		t.Skipf("icacls accepts the unmapped service SID on this Windows build: %s", out)
-	}
-	if out, err := exec.Command("powershell.exe", "-NoProfile", "-Command", script).CombinedOutput(); err != nil {
-		t.Fatalf("the PowerShell grant failed: %v\n%s", err, out)
-	}
-	out, err := exec.Command("icacls.exe", dir).CombinedOutput()
-	if err != nil || !strings.Contains(string(out), sid+":(OI)(CI)(RX)") {
-		t.Fatalf("the folder does not carry the service SID grant: %v\n%s", err, out)
 	}
 }

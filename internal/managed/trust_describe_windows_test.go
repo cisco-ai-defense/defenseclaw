@@ -37,7 +37,7 @@ func TestRulePackReadIsForTheGatewayOnly(t *testing.T) {
 	// GAP-0087: icacls refuses the service grant with error 1332 until the
 	// service exists, so the refusal also names the PowerShell form.
 	if !strings.Contains(text, "icacls fails with error 1332") ||
-		!strings.Contains(text, "SecurityIdentifier]::new('S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274')") {
+		!strings.Contains(strings.Join(printedGrantScripts(t, text), "\n"), "SecurityIdentifier]::new('S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274'), 'ReadAndExecute', 'ContainerInherit,ObjectInherit'") {
 		t.Fatalf("fix %q, want the grant that works before the gateway service exists", text)
 	}
 
