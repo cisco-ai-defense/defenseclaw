@@ -140,6 +140,11 @@ func (op renameOp) destinations(source string) []string {
 		return []string{filepath.Join(absolutePath(op.dest, op.wd), base)}
 	case op.noTargetDir:
 		return []string{absolutePath(op.dest, op.wd)}
+	case op.dest != "" && (strings.HasSuffix(op.dest, "/") || os.IsPathSeparator(op.dest[len(op.dest)-1])):
+		// A destination written with a trailing separator must be a
+		// directory: the move goes inside it or fails, and never takes
+		// its name (mv bin build/, rel-1-0-6:GAP-0219).
+		return []string{filepath.Join(absolutePath(op.dest, op.wd), base)}
 	}
 	dest := absolutePath(op.dest, op.wd)
 	if info, err := pathLstat(dest); err == nil && info.IsDir() {
@@ -148,6 +153,26 @@ func (op renameOp) destinations(source string) []string {
 		return []string{filepath.Join(dest, base)}
 	}
 	return []string{dest, filepath.Join(dest, base)}
+}
+
+// plainRenameSource reports a move source that cannot make a link target
+// reach another file: a name the command links (its alias moves with it and
+// is judged at its new name), an existing regular file, or a name that does
+// not exist (the move fails). A disk link, a junction, a directory (it may
+// hold links) or a name this process cannot read is not one. So
+// ln -s build/out bin; mv bin build/ in a project without build/ keeps the
+// links known (rel-1-0-6:GAP-0219, the GAP-0091 shape W07).
+func (l *shellLinks) plainRenameSource(from string) bool {
+	for _, alias := range l.aliases {
+		if samePathName(from, alias.name) {
+			return true
+		}
+	}
+	info, err := pathLstat(from)
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	return info.Mode().IsRegular()
 }
 
 func pathsOverlap(a, b string) bool {
@@ -200,7 +225,9 @@ func (l *shellLinks) followRenames(ops []renameOp) bool {
 						if pathsOverlap(dest, alias.target) {
 							return false
 						}
-					case pathsOverlap(dest, alias.name) || pathsOverlap(dest, alias.target):
+					case pathsOverlap(dest, alias.name):
+						return false
+					case pathsOverlap(dest, alias.target) && !l.plainRenameSource(from):
 						return false
 					}
 					if _, through := cutPathPrefix(from, alias.name); through && !samePathName(from, alias.name) {
