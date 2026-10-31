@@ -187,6 +187,20 @@ def non_executable_hook_scripts(cfg: Any, connector: str) -> list[Path]:
     return found
 
 
+def missing_hook_scripts(cfg: Any, connector: str) -> list[Path]:
+    """Sealed hook scripts of *connector* that are gone from disk (POSIX), for ``doctor --fix``.
+
+    The gateway renders every generated script, and reseals its digest, each
+    time it starts, so a missing file is repaired by the same restart that
+    replaces an edited one (p0-round GAP-0402). A link to a gone target is
+    reported separately and is not listed here.
+    """
+
+    if _is_windows():
+        return []
+    return [script for script in _locked_hook_scripts(cfg, connector)[0] if not os.path.lexists(script)]
+
+
 def _moved_install_root(script: Path, data_dir: str) -> str:
     """The old DefenseClaw folder a sealed hook script names, when the install moved.
 

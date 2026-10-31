@@ -15688,7 +15688,7 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             "disruptive",
             _fix_hook_script_drift,
             ("doctor.gateway.service.reconcile",),
-            ("restart the gateway so it renders the hook scripts setup sealed again, replacing an edited copy",),
+            ("restart the gateway so it renders the hook scripts setup sealed again, replacing an edited or deleted copy",),
             True,
             False,
         ),
@@ -19709,17 +19709,20 @@ def _drifted_hook_connectors(cfg) -> list[str]:
         agent_hook_switch_problems,
         edited_hook_problems,
         hook_runtime_problems,
+        missing_hook_scripts,
         unguarded_tool_call_hooks,
     )
 
     # Codex hook entries left without a command may leave Codex running unguarded, and
     # an edited hook entry fails or runs unguarded; the restart re-runs the
     # gateway's setup of the connector, which removes or replaces them
-    # (GAP-1102, GAP-0906, GAP-0907, rel-1-0-4 GAP-0538).
+    # (GAP-1102, GAP-0906, GAP-0907, rel-1-0-4 GAP-0538). A deleted script or hooks
+    # folder is rendered again by the same restart (p0-round GAP-0402).
     return [
         connector
         for connector in _doctor_active_connectors(cfg)
         if any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector))
+        or missing_hook_scripts(cfg, connector)
         or edited_hook_problems(cfg, connector)
         or unguarded_tool_call_hooks(cfg, connector)
         or (
@@ -19735,7 +19738,7 @@ def _fix_hook_script_drift(
     assume_yes: bool,
     plan_only: bool = False,
 ) -> tuple[str, str]:
-    """Render a hand-edited generated hook script again (GAP-0098).
+    """Render a hand-edited or deleted generated hook script again (GAP-0098, GAP-0402).
 
     The script is derived from config.yaml: the gateway renders it, with its
     digest sealed in hook_contract_lock.json, each time it starts. So the
