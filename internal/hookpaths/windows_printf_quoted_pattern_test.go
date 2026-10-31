@@ -15,8 +15,9 @@ import (
 // lines, a lone '*') was read as a glob that selects .ssh, while the same
 // echo was text. printf only prints, as echo does: its quoted words are
 // text in every Windows reading, and each row gets the verdict of its echo
-// twin. printf -v assigns a variable and is not a print. Redirect targets
-// and unquoted words still count.
+// twin. printf -v assigns a variable and is not a print, and a piped printf
+// may feed a shell: its quoted words stay patterns. Redirect targets and
+// unquoted words still count.
 func TestWindowsPrintfQuotedPatternIsTextAsEcho(t *testing.T) {
 	envelope := "*** Begin Patch\n*** Update File: notes.txt\n@@\n marker\n+x\n*** End Patch"
 	const home = `C:\Users\b00`
@@ -33,6 +34,7 @@ func TestWindowsPrintfQuotedPatternIsTextAsEcho(t *testing.T) {
 		{"printf '*'; cp a.txt .ssh/authorized_keys", true},
 		{"printf x > .ssh/authorized_k*", true},
 		{"printf '*' > .ssh/authorized_keys", true},
+		{"printf 'x' | tee .ssh/authorized_k*", true},
 	}
 	for _, row := range rows {
 		twin := "echo" + strings.TrimPrefix(row.command, "printf")
@@ -43,6 +45,15 @@ func TestWindowsPrintfQuotedPatternIsTextAsEcho(t *testing.T) {
 			}
 			if echo := ActionCommandDecisionWithDialectAndGlobFacts(twin, home, home, dialect, nil); echo != got {
 				t.Errorf("dialect %q %q = %q, its echo twin %q = %q", dialect, row.command, got, twin, echo)
+			}
+		}
+	}
+	// A piped printf may feed a shell that expands the printed text: its
+	// quoted pattern stays a pattern.
+	for _, command := range []string{"printf 'cp a.txt .ssh/authorized_k*' | sh", "printf '.ssh/authorized_k*' | xargs -I{} cp a.txt {}"} {
+		for _, dialect := range []actionfacts.Dialect{"", actionfacts.DialectPowerShell, actionfacts.DialectPOSIX} {
+			if got := ActionCommandDecisionWithDialectAndGlobFacts(command, home, home, dialect, nil); got != "protected-target" {
+				t.Errorf("dialect %q %q = %q, want protected-target", dialect, command, got)
 			}
 		}
 	}

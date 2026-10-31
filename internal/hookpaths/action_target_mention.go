@@ -3001,7 +3001,11 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 				// the home folder). Other native programs (the MSYS tools
 				// of Git for Windows) expand a quoted word of their own
 				// argv, so it stays a path pattern (GAP-1984).
-				if (actionWindowsTextStatement(words[start:i]) && !actionWindowsGitPathspecWord(words[start:i], j-start)) || j == pattern {
+				// A printf whose output is piped may feed a shell that
+				// expands the printed text: its quoted words stay patterns.
+				pipedPrintf := i < len(words) && words[i] == "|" &&
+					strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(words[start], `\`, "/"))), ".exe") == "printf"
+				if (actionWindowsTextStatement(words[start:i]) && !pipedPrintf && !actionWindowsGitPathspecWord(words[start:i], j-start)) || j == pattern {
 					words[j] = actionWindowsLiteralPattern.Replace(words[j])
 				}
 			}
