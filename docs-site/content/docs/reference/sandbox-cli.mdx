@@ -895,8 +895,8 @@ A few rules the flags follow:
   of an image the driver has not prepared yet says it takes about a minute.
   That start prepares a disk of about the image's size in the driver's image
   cache: before anything is copied, `run` refuses it when the volume has less
-  free space than the measured first-start use of about 11 GiB (at least 12 GiB), and warns
-  below twice that (at least 22 GiB), naming what is free and
+  free space than the measured first-start use of about 12 GiB (at least 13 GiB), and warns
+  below twice that (at least 24 GiB), naming what is free and
   `sandbox image prune`. The daemon refuses such a create from any client the
   same way.
 
@@ -2013,7 +2013,7 @@ Membership in the `docker` group is root-equivalent on the machine. Every accoun
 | Xcode or the Command Line Tools | Current for your macOS release. Homebrew may build the formula from source and checks them first ([developer tools](#developer-tools)). |
 | `e2fsprogs` | The MicroVM driver formats each MicroVM's disks with its `mke2fs` and `debugfs`. Setup offers to install it with Homebrew. The driver looks only in the Homebrew kegs under `/opt/homebrew` and `/usr/local`. |
 | Docker Desktop, running | DefenseClaw builds the harness images in Docker, and the MicroVM driver reads them from it. Start it once on your own account first ([first start](#docker-desktops-first-start)). |
-| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. A MicroVM image's first start uses about 11 GiB of free host space while it prepares its disk (the VM volume needs at least 12 GiB free, 22 GiB recommended). The driver then keeps a disk of about 5 GB per image it has started. |
+| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. A MicroVM image's first start uses about 12 GiB of free host space while it prepares its disk (the VM volume needs at least 13 GiB free, 24 GiB recommended). The driver then keeps a disk of about 5 GB per image it has started. |
 
 On a Mac your organization manages with a standalone enterprise install, an administrator provides OpenShell and `e2fsprogs`, and the managed setup mode needs no Homebrew on your account: [Sandboxes on managed computers](/docs/enterprise/sandboxes).
 

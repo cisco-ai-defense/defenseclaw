@@ -41,7 +41,7 @@ Install and configure OpenShell sandboxes on an Apple-silicon Mac. Each sandbox 
 | Xcode or Command Line Tools | Current for your macOS release. Homebrew may build from source. They include Git 2.29 or newer, which a copy-mode run uses to copy your project and the pre-session snapshot of a git repository uses; a MicroVM mounts no host folders, so every run on a Mac works on a copy and the row fails without git; `defenseclaw sandbox doctor` checks it (**Host Git**). |
 | `e2fsprogs` | Setup offers to install it with Homebrew. |
 | Docker Desktop, running | Start it once on your own account first. It asks for Rosetta, local-network access and an administrator password. |
-| Disk | At least 12 GiB free in the VM volume (22 GiB recommended). The first image build downloads about 3 GB. |
+| Disk | At least 13 GiB free in the VM volume (24 GiB recommended). The first image build downloads about 3 GB. |
 
 OpenShell 0.1.5 or newer is required. Setup installs it, or upgrades an older one, after asking. If another account owns Homebrew, setup stops and names the owner and folder. Ask them for write access, or install a Homebrew of your own in your home directory ([below](#a-homebrew-that-belongs-to-another-account)). On a managed Mac an administrator provides OpenShell: [Sandboxes on managed computers](/docs/enterprise/sandboxes).
 
@@ -141,7 +141,7 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
     { type: "out", text: "  Building the Claude Code image (the first build downloads about 3 GB)…" },
     { type: "ok", text: "  ✓ Claude Code 2.1.156: defenseclaw/sandbox:claudecode-2d7c00d21fdd8f50-u509, hooks verified (built in 59s)" },
     { type: "prompt", text: "Build the Codex image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run codex` builds it) [Y/n] ", reply: "n", pauseMs: 800 },
-    { type: "dim", text: "  the first run of each image uses about 11 GiB while preparing its MicroVM disk (about a minute; OpenShell keeps the prepared disk)" },
+    { type: "dim", text: "  the first run of each image uses about 12 GiB while preparing its MicroVM disk (about a minute; OpenShell keeps the prepared disk)" },
     { type: "ok", text: "  ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:19072, egress proxy 127.0.0.1:19073)" },
     { type: "out", text: "  skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)" },
     { type: "spacer" },
