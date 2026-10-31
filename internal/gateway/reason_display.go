@@ -220,19 +220,7 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 			return sentence
 		}
 	}
-	subject := agentBlockListSubject(sourceReason)
-	if subject == "" {
-		subject = agentAssetPolicySubject(sourceReason)
-	}
-	if subject == "" {
-		subject = agentMCPAdmissionSubject(sourceReason)
-	}
-	if subject == "" {
-		subject = agentJudgeSubject(sourceReason)
-	}
-	if subject == "" {
-		subject = agentRuleAndJudgeSubject(sourceReason)
-	}
+	subject := agentReasonSubject(sourceReason)
 	if action == "block" && subject != "" {
 		return agentBlockSentence(subject)
 	}
@@ -285,19 +273,46 @@ func agentConfirmSentence(subject string) string {
 	return "DefenseClaw policy needs your confirmation for this action" + detail + "."
 }
 
+// agentReasonSubject words a ship-authored reason that is not a plain local
+// rule match (a block-list entry, an asset-policy decision, an MCP install
+// admission verdict, an LLM judge verdict alone or after a rule match) the way
+// the agent reads it, or returns "" for any other reason. agentVerdictReason
+// puts it in the block sentence and agentObservedReason in the observe notice,
+// so both modes name the same thing.
+func agentReasonSubject(sourceReason string) string {
+	for _, word := range []func(string) string{
+		agentBlockListSubject,
+		agentAssetPolicySubject,
+		agentMCPAdmissionSubject,
+		agentJudgeSubject,
+		agentRuleAndJudgeSubject,
+	} {
+		if subject := word(sourceReason); subject != "" {
+			return subject
+		}
+	}
+	return ""
+}
+
 // agentObservedReason names the rules of a finding DefenseClaw lets through
 // (observe mode, or an alert) the way agentVerdictReason names them in a
 // block: "rule R1: Title". The observe notice used to show a rule pack's
 // title as a "<redacted len=N sha=...>" token while the action-mode block
-// printed it (GAP-1187). The gates are agentVerdictReason's: a managed
+// printed it (GAP-1187), and an MCP server its install admission rejected
+// read as a row of redacted spans while the block named the server
+// (rel-1-0-6:GAP-0198): the notice words every reason the block words
+// (agentReasonSubject). The gates are agentVerdictReason's: a managed
 // deployment or an explicit redaction directive keeps displayReason, and so
-// does any reason that is not a plain local rule match.
+// does any other reason.
 func agentObservedReason(action, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
 	if action == "block" || action == "confirm" || action == agentReviewAction {
 		return displayReason
 	}
 	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
 		return displayReason
+	}
+	if subject := agentReasonSubject(sourceReason); subject != "" {
+		return subject
 	}
 	if displayReason == sourceReason && !trustedBuiltInMatchReason(sourceReason) {
 		return displayReason
