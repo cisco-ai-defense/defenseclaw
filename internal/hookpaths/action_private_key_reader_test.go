@@ -6,7 +6,6 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -14,9 +13,6 @@ import (
 // private key named as its operand, as cat, head and tail do; metadata
 // programs, the public key and ordinary files are not key reads.
 func TestActionPrivateKeyReadCoversEveryContentReader(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX home")
-	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	for _, dir := range []string{filepath.Join(home, ".ssh"), cwd} {
@@ -47,8 +43,8 @@ func TestActionPrivateKeyReadCoversEveryContentReader(t *testing.T) {
 		`ruby -e 'puts File.read(File.expand_path("~/.ssh/id_ed25519"))'`,
 		`perl -e 'open(my $f, "<", "$ENV{HOME}/.ssh/id_ed25519"); print <$f>'`,
 	} {
-		if !ActionPrivateKeyRead(command, cwd, home) {
-			t.Errorf("ActionPrivateKeyRead(%q) = false, want a key read", command)
+		if !posixShellPrivateKeyRead(command, cwd, home) {
+			t.Errorf("posixShellPrivateKeyRead(%q) = false, want a key read", command)
 		}
 	}
 	for _, command := range []string{
@@ -64,8 +60,8 @@ func TestActionPrivateKeyReadCoversEveryContentReader(t *testing.T) {
 print('ok')"`,
 		`python3 -c "print('see ~/.ssh/id_ed25519; open() it yourself')"`,
 	} {
-		if ActionPrivateKeyRead(command, cwd, home) {
-			t.Errorf("ActionPrivateKeyRead(%q) = true, want no key read", command)
+		if posixShellPrivateKeyRead(command, cwd, home) {
+			t.Errorf("posixShellPrivateKeyRead(%q) = true, want no key read", command)
 		}
 	}
 }

@@ -1279,6 +1279,13 @@ func actionPosixWindowsProtectedGlob(value, cwd, home string) bool {
 // the walk of a gateway that can see the home would (GAP-1460 review). With
 // no answer, the name fallback below keeps the pattern closed.
 func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs) bool {
+	return actionProtectedFileGlobReachAs(pattern, cwd, protected, ssh, home, globs, false)
+}
+
+// actionProtectedFileGlobReachAs is actionProtectedFileGlobReach; windows
+// reads the pattern as a PowerShell or cmd wildcard, which matches a leading
+// dot, where a POSIX shell's * and ? skip it (Git Bash too, GAP-1717).
+func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs, windows bool) bool {
 	literal := ""
 	if !filepath.IsAbs(pattern) {
 		literal = filepath.Clean(cwd)
@@ -1293,7 +1300,7 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 		return false
 	}
 	hidden := actionGlobViewHidden(cwd, home)
-	dots := sync.OnceValue(func() bool { return globs.dotNames() || actionShellProfileMayDotglob(home) })
+	dots := sync.OnceValue(func() bool { return windows || globs.dotNames() || actionShellProfileMayDotglob(home) })
 	userView := !hidden && actionProcessOwnsHome(home)
 	candidates, complete, unseen := actionExpandGlob(pattern, literal, hidden, userView, dots)
 	for _, candidate := range candidates {
@@ -1628,7 +1635,7 @@ func actionGlobViewHidden(cwd, home string) bool {
 // actionGlobSkipsDotName reports a leading-dot name that the shell's * or ?
 // does not match. A bracket stays a match: the walk keeps the doubt.
 func actionGlobSkipsDotName(component, name string, dots func() bool) bool {
-	return runtime.GOOS != "windows" && strings.HasPrefix(name, ".") &&
+	return strings.HasPrefix(name, ".") &&
 		(strings.HasPrefix(component, "*") || strings.HasPrefix(component, "?")) && !dots()
 }
 
@@ -1884,7 +1891,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 						continue
 					}
 					if child, childStatic := StaticWord(call.Args[j+1], home); childStatic {
-						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
+						if actionPosixShellBodyMention(child, cwd, home, depth+1, stateOnly, globs) {
 							found = true
 							return false
 						}
@@ -1926,7 +1933,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 				if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
 					!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
 					if child, static := StaticWord(call.Args[j+1], home); static {
-						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
+						if actionPosixShellBodyMention(child, cwd, home, depth+1, stateOnly, globs) {
 							found = true
 						} else {
 							bodies = append(bodies, call.Args[j+1])
@@ -1939,6 +1946,17 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 		return !found
 	})
 	return bodies, found
+}
+
+// actionPosixShellBodyMention reads the body of a POSIX shell (sh -c, env
+// -S) the POSIX reading meets. On a native Windows host that shell is Git
+// Bash: a body the POSIX grammar reads alone is read with it, as the shell
+// runs it (GAP-1717); any other body keeps every reading.
+func actionPosixShellBodyMention(child, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) bool {
+	if depth < 8 && actionGitBashReadsAlone(child, home, actionfacts.DialectPOSIX) {
+		return actionPosixTargetMention(child, cwd, home, depth, stateOnly, globs)
+	}
+	return actionProtectedTargetMentionDepth(child, cwd, home, depth, stateOnly, globs)
 }
 
 // actionPowerShellCommandBodyIndex returns the index of the -Command body
@@ -3417,8 +3435,8 @@ func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	}
 	// On the host, expand every component through junctions and links
 	// (GAP-1445).
-	if runtime.GOOS == "windows" && filepath.IsAbs(filepath.FromSlash(pattern)) && actionProtectedFileGlobReach(
-		filepath.FromSlash(pattern), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home, nil) {
+	if runtime.GOOS == "windows" && filepath.IsAbs(filepath.FromSlash(pattern)) && actionProtectedFileGlobReachAs(
+		filepath.FromSlash(pattern), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home, nil, true) {
 		return true
 	}
 	if strings.ContainsAny(parent, "*?[") {

@@ -6,7 +6,6 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -15,9 +14,6 @@ import (
 // called PATH or text that reads $PATH changes nothing; an assignment, an
 // export, a zsh path array, a sourced or evaluated file or an alias may.
 func TestR104RoundNReviewPatchBodyPathMention(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX paths")
-	}
 	_, home, cwd := globFactsFixture(t, false)
 	body := "+Append your key: cat key.pub >> ~/.ssh/authorized_keys\n"
 	patch := func(opener, header, delimiter string) string {
@@ -32,7 +28,7 @@ func TestR104RoundNReviewPatchBodyPathMention(t *testing.T) {
 		patch("printf 'Set PATH in your shell\\n' > hint.txt && ", "*** Add File: notes.md", "PATCH"),
 		patch(`echo "$PATH" >/dev/null && `, "*** Add File: notes.md", "PATCH"),
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "" {
+		if got := posixShellDecision(command, cwd, home); got != "" {
 			t.Errorf("%q: ActionCommandDecision = %q, want allow", command, got)
 		}
 	}
@@ -49,13 +45,13 @@ func TestR104RoundNReviewPatchBodyPathMention(t *testing.T) {
 		"hash -r; ",
 	} {
 		command := patch(opener, "*** Add File: PATH.md", "PATCH")
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("%q: ActionCommandDecision = %q, want protected-target", command, got)
 		}
 	}
 	// A header that names the key blocks, PATH in its name or not.
 	command := patch("", "*** Add File: "+filepath.Join(home, ".ssh", "authorized_keys"), "PATH")
-	if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+	if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 		t.Errorf("%q: ActionCommandDecision = %q, want protected-target", command, got)
 	}
 }
@@ -65,9 +61,6 @@ func TestR104RoundNReviewPatchBodyPathMention(t *testing.T) {
 // directory; an explicit dot, a bracket, or a dotglob setting (in the
 // command or a startup file) does.
 func TestR104RoundNReviewGlobLeadingDot(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX fixture")
-	}
 	_, home, cwd := globFactsFixture(t, false)
 	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(cwd, ".private")); err != nil {
 		t.Fatal(err)
@@ -80,10 +73,10 @@ func TestR104RoundNReviewGlobLeadingDot(t *testing.T) {
 		`(cd src && git add */*)`,
 	}
 	for _, command := range allowed {
-		if got := ActionCommandDecision(command, cwd, home); got != "" {
+		if got := posixShellDecision(command, cwd, home); got != "" {
 			t.Errorf("%q: ActionCommandDecision = %q, want allow", command, got)
 		}
-		if got := ActionCommandDecisionWithGlobFacts(command, cwd, home, clientGlobFactsFor(t, command, cwd)); got != "" {
+		if got := posixShellDecisionWithGlobFacts(command, cwd, home, clientGlobFactsFor(t, command, cwd)); got != "" {
 			t.Errorf("%q: with client facts = %q, want allow", command, got)
 		}
 	}
@@ -98,14 +91,14 @@ func TestR104RoundNReviewGlobLeadingDot(t *testing.T) {
 		`setopt GLOB_DOTS; cp payload */authorized_keys`,
 		`GLOBIGNORE=x; git add */*`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("%q: ActionCommandDecision = %q, want protected-target", command, got)
 		}
 	}
 	// An inherited setting, or a startup file that sets dotglob, makes the
 	// user's shell match it.
 	t.Setenv("GLOBIGNORE", "x")
-	if got := ActionCommandDecision(`git add */*`, cwd, home); got != "protected-target" {
+	if got := posixShellDecision(`git add */*`, cwd, home); got != "protected-target" {
 		t.Errorf("GLOBIGNORE inherited: ActionCommandDecision = %q, want protected-target", got)
 	}
 	t.Setenv("GLOBIGNORE", "")
@@ -114,7 +107,7 @@ func TestR104RoundNReviewGlobLeadingDot(t *testing.T) {
 		if err := os.WriteFile(file, []byte("shopt -s dotglob\nsetopt GLOB_DOTS\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if got := ActionCommandDecision(`git add */*`, cwd, home); got != "protected-target" {
+		if got := posixShellDecision(`git add */*`, cwd, home); got != "protected-target" {
 			t.Errorf("dotglob in %s: ActionCommandDecision = %q, want protected-target", name, got)
 		}
 		if err := os.Remove(file); err != nil {

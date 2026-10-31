@@ -4,10 +4,10 @@
 package hookpaths
 
 import (
+	"runtime"
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -18,7 +18,7 @@ import (
 // resolved once per scan; the decision for a protected word is unchanged.
 func TestLongHeredocResolvesEachDistinctWordOnce(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("POSIX home layout")
+		t.Skip("counts the POSIX walk of ActionStateTargetMention; a Windows home is read by the Windows grammar (TestLongWindowsHeredocChecksEachDistinctCandidateOnce)")
 	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")

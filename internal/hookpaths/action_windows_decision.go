@@ -675,7 +675,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 		return "nested-shell"
 	}
 	if program == "git" {
-		return actionGitDecision(words, cwd, home, depth+1)
+		return actionGitDecision(words, cwd, home, depth+1, false)
 	}
 	if strings.Contains(" env nice ionice timeout stdbuf setsid chroot unshare nsenter flock sudo su script xargs find parallel busybox time nohup command exec ", " "+program+" ") {
 		return actionWindowsWrapperDecision(program, words, cwd, home, depth+1)

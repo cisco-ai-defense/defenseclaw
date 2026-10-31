@@ -50,7 +50,6 @@ func r104Loop3CDPathHome(t *testing.T) (home, cwd string) {
 // An unexported CDPATH that the hook cannot see is a documented limit of the
 // pre-tool check; a pushd keeps the conservative opaque scope.
 func TestR104Loop3SearchPathCDKeepsLinkScopeOpaque(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home, cwd := r104Loop3CDPathHome(t)
 	for _, tc := range []struct {
 		command  string
