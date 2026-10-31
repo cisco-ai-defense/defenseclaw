@@ -197,8 +197,32 @@ def missing_hook_scripts(cfg: Any, connector: str) -> list[Path]:
     """
 
     if _is_windows():
-        return []
+        return _windows_missing_hook_files(cfg, connector)
     return [script for script in _locked_hook_scripts(cfg, connector)[0] if not os.path.lexists(script)]
+
+
+def _windows_missing_hook_files(cfg: Any, connector: str) -> list[Path]:
+    """Sealed files of *connector* gone from the data directory's hooks folder (per-user Windows).
+
+    The gateway renders every file of that folder (the .ps1 adapters, the
+    scripts and the mode sidecars) each time it starts, so ``doctor --fix``
+    repairs a deleted one or a deleted folder with a restart (p0-round
+    GAP-0402, L-win-J2-016). The native launcher outside that folder is
+    reported by its own row (GAP-0378), and managed installs keep their own
+    status.
+    """
+
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+        return []
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return []
+    hooks = os.path.normcase(os.path.abspath(os.path.join(data_dir, "hooks")))
+    return [
+        script
+        for script in _locked_hook_scripts(cfg, connector)[0]
+        if os.path.normcase(os.path.dirname(os.path.abspath(script))) == hooks and not os.path.lexists(script)
+    ]
 
 
 def _moved_install_root(script: Path, data_dir: str) -> str:
@@ -292,6 +316,18 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
         # adapters included. An edited copilot-hook.ps1 failed only the
         # Hook contract row, and doctor --fix said the scripts matched
         # (GAP-1658). The POSIX owner, mode and token checks do not apply.
+        missing = _windows_missing_hook_files(cfg, connector)
+        if missing:
+            # A deleted hooks folder printed a step on each row it tripped
+            # (Copilot hooks, Hook contract, Mode); this is the one finding,
+            # and doctor --fix renders the folder again (p0-round GAP-0402).
+            adapter = next((script for script in missing if script.suffix.lower() == ".ps1"), None)
+            if adapter is not None:
+                return [
+                    f"hook adapter {adapter} is missing, so the agent cannot run it and DefenseClaw is not "
+                    "guarding its tool calls"
+                ]
+            return [f"hook file {missing[0]} is missing; the gateway renders it again when it starts"]
         for script in scripts:
             expected = digests.get(script.name)
             if not expected or not script.is_file():
