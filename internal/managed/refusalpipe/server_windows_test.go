@@ -9,11 +9,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // GAP-1242: the gateway names the account from the pipe client token, not
@@ -216,4 +219,19 @@ func TestRefusalPipeKeepsEveryReportOfAClientThatExitsAtOnce(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	t.Fatalf("received %d of %d reports", received, sent)
+}
+
+// GAP-2639: the gateway service's write-restricted token creates the pipe's
+// further instances only through an ACE for its service SID; clients get
+// clientRights and never FILE_CREATE_PIPE_INSTANCE.
+func TestRefusalPipeSecurityLetsTheRestrictedServiceCreateInstances(t *testing.T) {
+	sddl := pipeSDDL("S-1-5-18")
+	service := managed.WindowsServiceSIDString(managed.StandaloneWindowsGatewaySvc)
+	if !strings.HasPrefix(service, "S-1-5-80-") || !strings.Contains(sddl, "(A;;GA;;;"+service+")") ||
+		!strings.Contains(sddl, "(A;;"+clientRights+";;;AU)") {
+		t.Fatalf("refusal pipe SDDL = %s", sddl)
+	}
+	if _, err := windows.SecurityDescriptorFromString(sddl); err != nil {
+		t.Fatal(err)
+	}
 }

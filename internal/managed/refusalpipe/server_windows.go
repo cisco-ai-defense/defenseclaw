@@ -14,6 +14,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // ImpersonateNamedPipeClient is not exported by golang.org/x/sys/windows.
@@ -175,16 +177,20 @@ type security struct {
 	attributes windows.SecurityAttributes
 }
 
-// pipeSecurity gives SYSTEM and the gateway's own account full access and
-// every authenticated account clientRights.
+// pipeSecurity gives SYSTEM, the gateway's own account and the gateway
+// service SID full access and every authenticated account clientRights.
+//
+// The gateway service runs with a write-restricted token (service SID type
+// RESTRICTED): creating a further instance of an existing pipe is a write,
+// so it also needs an ACE for the service SID. Without one, every instance
+// after the first was refused (Access is denied): serve gave up, waited 5 s
+// and started over, and the reports sent in between were lost (GAP-2639).
 func pipeSecurity() (*security, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || user == nil || user.User.Sid == nil {
 		return nil, errors.New("resolve the gateway process account")
 	}
-	descriptor, err := windows.SecurityDescriptorFromString(
-		"O:" + user.User.Sid.String() + "D:P(A;;GA;;;SY)(A;;GA;;;" + user.User.Sid.String() + ")(A;;" + clientRights + ";;;AU)",
-	)
+	descriptor, err := windows.SecurityDescriptorFromString(pipeSDDL(user.User.Sid.String()))
 	if err != nil {
 		return nil, fmt.Errorf("build refusal pipe security descriptor: %w", err)
 	}
@@ -195,6 +201,13 @@ func pipeSecurity() (*security, error) {
 			SecurityDescriptor: descriptor,
 		},
 	}, nil
+}
+
+// pipeSDDL is the refusal pipe's security descriptor for the gateway
+// process account owner.
+func pipeSDDL(owner string) string {
+	service := managed.WindowsServiceSIDString(managed.StandaloneWindowsGatewaySvc)
+	return "O:" + owner + "D:P(A;;GA;;;SY)(A;;GA;;;" + owner + ")(A;;GA;;;" + service + ")(A;;" + clientRights + ";;;AU)"
 }
 
 func createPipe(name string, s *security, first bool) (windows.Handle, error) {
