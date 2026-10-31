@@ -1384,15 +1384,6 @@ func scanAllRulesForConnectorFor(ctx context.Context, connectorName, text, toolN
 	return scanRuleGeneration(snapshotRulePackGenerationFor(ctx, connectorName), text, toolName, ruleScanOptions{})
 }
 
-// scanContentRulesForConnectorFor is scanContentRulesForConnector with the
-// request's profile rule pack.
-func scanContentRulesForConnectorFor(ctx context.Context, connectorName, text, toolName string, scope ruleContentScope) []RuleFinding {
-	if ManagedEnterpriseActive() {
-		return nil
-	}
-	return scanContentRuleCategoryWithGeneration(snapshotRulePackGenerationFor(ctx, connectorName), text, toolName, scope, "")
-}
-
 // ruleGenerationFor is ruleGeneration for a request on ctx: a meet scans
 // with every rule of its members' packs, the base generation's included.
 func (r *resolvedGuardrailProfile) ruleGenerationFor(ctx context.Context, connectorName string) *compiledRulePackCategories {
