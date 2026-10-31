@@ -26755,7 +26755,10 @@ function Get-DefenseClawGuardianStatusReport {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         # The authenticated replacement gateway a Repair or Upgrade staged,
         # used when the installed one cannot run (GAP-1417).
-        [hashtable]$GatewaySource
+        [hashtable]$GatewaySource,
+        # A caller with its own deadline bounds the status command by it
+        # (rel-1-0-2:GAP-0535).
+        [ValidateRange(1, 1800)][int]$TimeoutSeconds = 300
     )
     try {
         $probe = Invoke-DefenseClawGatewayCommand `
@@ -26764,7 +26767,8 @@ function Get-DefenseClawGuardianStatusReport {
             -GatewaySource $GatewaySource `
             -Arguments @('enterprise', 'hooks', 'status', '--manifest', $Layout.ManifestPath, '--json') `
             -Capture `
-            -AllowFailure
+            -AllowFailure `
+            -TimeoutSeconds $TimeoutSeconds
         foreach ($line in @($probe.output)) {
             $text = ([string]$line).Trim()
             if (-not $text.StartsWith('{')) {
@@ -27396,9 +27400,15 @@ function Wait-DefenseClawFreshGuardianReconcile {
     $guardianGone = ''
     $lastStatus = 'guardian status report unavailable'
     while ($true) {
+        # One status command may not outlast the hard limit by more than
+        # its own 30 s floor: with the command's 300 s default the 600 s
+        # limit was not a bound (rel-1-0-2:GAP-0535).
+        $probeTimeout = [int][Math]::Ceiling(($limit - [DateTime]::UtcNow).TotalSeconds) + 30
+        $probeTimeout = [Math]::Max(30, [Math]::Min(300, $probeTimeout))
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName
+            -GatewayServiceName $GatewayServiceName `
+            -TimeoutSeconds $probeTimeout
         $currentStateIdentity = [string](
             Get-DefenseClawGuardianStateIdentity -Layout $Layout
         )
