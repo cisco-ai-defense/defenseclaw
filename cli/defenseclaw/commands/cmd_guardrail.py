@@ -5494,11 +5494,16 @@ def _change_suppression(
 
     sid = suppression_id.strip().upper()
 
-    def _done(ok: bool, exit_code: int, message: str) -> None:
+    def _done(ok: bool, exit_code: int, message: str, warning: str = "") -> None:
         if json_out:
-            click.echo(json.dumps({"version": 1, "ok": ok, "suppression": sid, "message": message}, indent=2))
+            payload = {"version": 1, "ok": ok, "suppression": sid, "message": message}
+            if warning:
+                payload["warning"] = warning
+            click.echo(json.dumps(payload, indent=2))
         else:
             (ux.ok if ok else ux.err)(message, indent="  ")
+            if warning:
+                ux.warn(warning, indent="  ")
         if exit_code:
             raise SystemExit(exit_code)
 
@@ -5549,7 +5554,27 @@ def _change_suppression(
         result = _write_guardrail_config(app, [change], f"guardrail suppress {verb} {sid}", _fail)
     _log_guardrail_change(app, "guardrail-suppress", f"scope={_scope_key(connector_key, profile_name)} id={sid} {verb}")
     state = "added" if entry is not None else "removed"
-    _done(True, 0, f"Suppression {sid} {state} for {where}. {_applied_note(app, result)}")
+    warning = _suppression_never_silences(app, connector_key, profile_name, entry["finding_pattern"]) if entry else ""
+    _done(True, 0, f"Suppression {sid} {state} for {where}. {_applied_note(app, result)}", warning)
+
+
+def _suppression_never_silences(app: AppContext, connector_key: str | None, profile: str | None, pattern: str) -> str:
+    """A warning when *pattern* is exactly a regex or CEL rule ID of the pack the scope enforces, else "".
+
+    Suppressions drop LLM judge findings only (docs: policies/rules). The entry
+    is still stored, since the judge's finding IDs never collide with rule IDs
+    and an operator may keep it for a later pack; the warning says what to do
+    instead (p0-round GAP-1018).
+    """
+    wanted = pattern.strip().casefold()
+    for rule_id in _scope_rule_defaults(app.cfg, connector_key, profile):
+        if rule_id.casefold() == wanted:
+            return (
+                f"{rule_id} is a rule of the active pack, and suppressions never silence a regex or CEL rule; "
+                f"they drop LLM judge findings only. To change it, use `defenseclaw guardrail rule disable {rule_id}` "
+                f"or `defenseclaw guardrail rule severity {rule_id} LOW`."
+            )
+    return ""
 
 
 # ---------------------------------------------------------------------------

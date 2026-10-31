@@ -502,6 +502,9 @@ func TestLauncherReportsOnlyNamedManagedRefusals(t *testing.T) {
 		{"guardrail", "status"}, {"config", "set", "token=untrusted"},
 		{"config", "show"}, {"guardrail", "protection", "list"}, {"guardrail", "block-at", "LOW"},
 		{"policy", "edit", "x"}, {"policy", "show"}, {"config"},
+		// rel-1-0-6 GAP-0104: a help request is no refused write and costs no report.
+		{"upgrade", "--help"}, {"setup", "-h"}, {"guardrail", "disable", "--help"},
+		{"upgrade"}, {"rollback"},
 	} {
 		root := &cobra.Command{Use: "defenseclaw"}
 		root.SetErr(&bytes.Buffer{})
@@ -509,7 +512,7 @@ func TestLauncherReportsOnlyNamedManagedRefusals(t *testing.T) {
 			t.Fatalf("%v: exit %d, want refusal", args, code)
 		}
 	}
-	if got, want := strings.Join(reported, ","), "guardrail disable:,uninstall:,config set:,guardrail block-at:,policy edit:"; got != want {
+	if got, want := strings.Join(reported, ","), "guardrail disable:,uninstall:,config set:,guardrail block-at:,policy edit:,upgrade:,rollback:"; got != want {
 		t.Fatalf("reported %q, want %q", got, want)
 	}
 }

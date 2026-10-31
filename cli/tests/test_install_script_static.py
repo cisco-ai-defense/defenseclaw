@@ -2068,6 +2068,26 @@ def test_a_process_gone_since_ps_listed_it_is_skipped_without_lsof(tmp_path: Pat
     assert time.monotonic() - started < 10
 
 
+@pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")
+def test_the_audit_line_goes_to_the_install_log_not_the_console(tmp_path: Path) -> None:
+    # GAP-0103: install.sh printed "audit: live-agent identity unproven ... process vanished during
+    # lookup" in the console. With the install log open (LOG) the line is written there only.
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    stubs, log = tmp_path / "stubs", tmp_path / "install.log"
+    stubs.mkdir()
+    (stubs / "ps").write_text(f"#!/bin/sh\necho '{gone.pid}'\n", encoding="utf-8")
+    (stubs / "ps").chmod(0o755)
+    home = tmp_path / "home"
+    entry = home / ".opencode" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    result = _agent_scan(home, [stubs], LOG=str(log))
+    assert result.returncode == 0 and "scan-passed" in result.stdout, (result.stdout, result.stderr)
+    assert "audit:" not in result.stderr and "audit:" not in result.stdout
+    assert f"audit: live-agent identity unproven for PID {gone.pid}: process vanished during lookup" in log.read_text()
+
+
 @pytest.mark.parametrize("installed", [False, True])
 def test_an_unreadable_process_list_is_audited_without_refusal(tmp_path: Path, installed: bool) -> None:
     stubs = tmp_path / "stubs"

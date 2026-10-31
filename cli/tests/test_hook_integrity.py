@@ -354,6 +354,46 @@ def test_missing_hook_script_is_named_as_missing_with_one_repair(tmp_path):
     assert _repair_display_tag("blocked") == "skip"
 
 
+@pytest.mark.parametrize("remove_folder", [False, True])
+def test_doctor_fix_renders_a_deleted_hook_script_again(tmp_path, monkeypatch, remove_folder):
+    # p0-round GAP-0402: the Hook runtime files row names `doctor --fix` for a
+    # deleted script (or hooks folder), and --fix reported every repair as a
+    # no-op, so the file stayed missing until a gateway restart.
+    import shutil
+
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    monkeypatch.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: ["codex"])
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener_for_lifecycle", lambda _cfg: SimpleNamespace(trusted=True, detail="")
+    )
+    cfg, script = _install(tmp_path)
+    body = script.read_bytes()
+    token = (script.parent / ".hook-codex.token").read_bytes()
+    assert cmd_doctor._drifted_hook_connectors(cfg) == []
+    assert cmd_doctor._fix_hook_script_drift(cfg, assume_yes=True)[0] == "skip"
+
+    if remove_folder:
+        shutil.rmtree(script.parent)
+    else:
+        script.unlink()
+    assert cmd_doctor._drifted_hook_connectors(cfg) == ["codex"]
+    assert cmd_doctor._fix_hook_script_drift(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+
+    def restart(_cfg, *, start_if_stopped):
+        script.parent.mkdir(exist_ok=True)
+        script.write_bytes(body)  # the restarted gateway renders what setup sealed
+        script.chmod(0o700)
+        (script.parent / ".hook-codex.token").write_bytes(token)
+        return True, ""
+
+    monkeypatch.setattr(cmd_doctor, "_repair_gateway_lifecycle", restart)
+    assert cmd_doctor._fix_hook_script_drift(cfg, assume_yes=True)[0] == "pass"
+    assert hook_runtime_problems(cfg, "codex") == []
+    assert cmd_doctor._drifted_hook_connectors(cfg) == []
+
+
 def _agent_config(tmp_path, connector, name):
     config = tmp_path / name
     lock = {"version": 2, "connectors": {connector: {"locations": {"hook_config_paths": [str(config)]}}}}

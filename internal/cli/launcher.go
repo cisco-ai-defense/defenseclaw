@@ -379,11 +379,28 @@ func launcherAuditedWriter(args []string) (string, bool) {
 	return "", false
 }
 
+// launcherAsksHelp reports whether args carry -h or --help before a "--".
+func launcherAsksHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
 // executeLauncher runs the launcher over root with args and returns the exit
 // code.
 func executeLauncher(ctx context.Context, root *cobra.Command, args []string) int {
 	if !launcherOffers(args) {
-		if command, ok := launcherAuditedWriter(args); ok {
+		// A help request changes nothing, so it is not a refused write. Its
+		// audit report was a socket round trip on a path that is otherwise
+		// instant: `upgrade --help` took 13 ms longer than on 1.0.5
+		// (rel-1-0-6 GAP-0104).
+		if command, ok := launcherAuditedWriter(args); ok && !launcherAsksHelp(args) {
 			reportManagedCommandRefusal(command, "")
 		}
 		fmt.Fprintln(root.ErrOrStderr(), launcherRefusal)
