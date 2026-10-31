@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -131,7 +132,10 @@ const (
 	// enterpriseSetupStageStaleAge is the age after which a staging folder
 	// belongs to no Setup still staging: unpacking the payload takes
 	// seconds to minutes. A Setup whose lifecycle still runs holds its
-	// folder as the working directory, which the rename below needs free.
+	// folder as the working directory, which the rename below needs free;
+	// a Setup of this release holds it from its creation
+	// (holdEnterpriseSetupStage). After an interrupted transaction the age
+	// is not waited for (enterpriseSetupStageSweepAge).
 	enterpriseSetupStageStaleAge = 30 * time.Minute
 )
 
@@ -225,7 +229,7 @@ func executeEnterpriseSetup(
 			if opts.JSON {
 				progress = io.Discard
 			}
-			removeStaleEnterpriseSetupStages(programData, time.Now(), progress, stderr)
+			removeStaleEnterpriseSetupStages(programData, time.Now(), enterpriseSetupStageSweepAge(), progress, stderr)
 			if err := requireEnterpriseSetupFreeSpace(programData, payload, opts.Action); err != nil {
 				return 0, err
 			}
@@ -570,6 +574,13 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 	if err != nil {
 		return "", nil, err
 	}
+	hold, err := holdEnterpriseSetupStage(stageRoot)
+	if err != nil {
+		return "", nil, errors.Join(fmt.Errorf("hold the enterprise Setup staging directory: %w", err), cleanupEnterpriseSetupStage(stageRoot, programData))
+	}
+	release := sync.OnceFunc(func() { _ = windows.CloseHandle(hold) })
+	// The folder can be removed only once this Setup lets go of it.
+	cleanup := func() error { release(); return cleanupEnterpriseSetupStage(stageRoot, programData) }
 	// Create a dedicated scratch subdirectory that TEMP/TMP/LOCALAPPDATA/
 	// APPDATA/USERPROFILE/HOME all point at, so PowerShell and the
 	// lifecycle can write scratch files without breaking the strict
@@ -577,9 +588,8 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 	// on stageRoot itself.
 	scratchDir := filepath.Join(stageRoot, enterpriseSetupScratchDirName)
 	if err := os.Mkdir(scratchDir, 0o700); err != nil {
-		return "", nil, errors.Join(fmt.Errorf("create enterprise Setup scratch directory: %w", err), cleanupEnterpriseSetupStage(stageRoot, programData))
+		return "", nil, errors.Join(fmt.Errorf("create enterprise Setup scratch directory: %w", err), cleanup())
 	}
-	cleanup := func() error { return cleanupEnterpriseSetupStage(stageRoot, programData) }
 	required := payload.Required
 	if len(required) == 0 {
 		required = requiredPayloadFiles
@@ -696,6 +706,49 @@ func createEnterpriseSetupStage(programData string) (string, error) {
 	return "", errors.New("create enterprise Setup staging directory: random path collisions exhausted")
 }
 
+// holdEnterpriseSetupStage opens this Setup's staging folder for listing
+// without delete sharing, for as long as the Setup runs: no other Setup's
+// removeStaleEnterpriseSetupStages can rename it then, also while the
+// payload is still unpacked and before the lifecycle child holds it as its
+// working directory. A killed Setup's handle closes with its process, so its
+// folder can be taken (GAP-0165).
+func holdEnterpriseSetupStage(path string) (windows.Handle, error) {
+	name, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	return windows.CreateFile(name, windows.FILE_LIST_DIRECTORY, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+}
+
+// standaloneSetupTransactionPending reports a protected pending.json in the
+// standalone lifecycle folder: a lifecycle transaction that has not finished.
+// A variable for tests.
+var standaloneSetupTransactionPending = func() bool {
+	layout, err := setupRecoveryLayout()
+	if err != nil {
+		return false
+	}
+	path := filepath.Join(layout.LifecycleDir, "pending.json")
+	if _, err := os.Lstat(path); err != nil {
+		return false
+	}
+	return managed.ValidateTrustedFilePath(path, "standalone pending transaction") == nil
+}
+
+// enterpriseSetupStageSweepAge is how old a staging folder must be before
+// this Setup takes it. A pending transaction means a Setup run was stopped
+// before it finished: this run recovers it, and the staging folder the
+// stopped run left (the whole payload, about 700 MB) is taken now instead
+// of by a run 30 minutes later (GAP-0165). A folder a running Setup or
+// lifecycle still holds is kept either way: the rename fails for it.
+func enterpriseSetupStageSweepAge() time.Duration {
+	if standaloneSetupTransactionPending() {
+		return 0
+	}
+	return enterpriseSetupStageStaleAge
+}
+
 func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 	cleanStage := filepath.Clean(stageRoot)
 	cleanProgramData := filepath.Clean(programData)
@@ -781,13 +834,14 @@ var cleanupStaleEnterpriseSetupStage = cleanupEnterpriseSetupStage
 // removeStaleEnterpriseSetupStages removes the staging folders that
 // interrupted standalone Setup runs left in ProgramData (a stopped Setup
 // cannot clean up; each holds the whole payload, GAP-0525). Only a folder
-// older than enterpriseSetupStageStaleAge that can be renamed is taken: a
-// Setup whose lifecycle still runs holds its folder as the working
-// directory, so the rename fails for it. The renamed folder keeps the stage
+// at least minimumAge old (enterpriseSetupStageSweepAge) that can be renamed
+// is taken: a Setup of this release holds its folder from its creation, and
+// a Setup whose lifecycle still runs holds it as the working directory, so
+// the rename fails for it. The renamed folder keeps the stage
 // prefix, so one this run cannot clean (unexpected content) is swept by a
 // later run or by uninstall. A removed folder is reported to progress, one
 // it had to keep to diagnostics.
-func removeStaleEnterpriseSetupStages(programData string, now time.Time, progress, diagnostics io.Writer) {
+func removeStaleEnterpriseSetupStages(programData string, now time.Time, minimumAge time.Duration, progress, diagnostics io.Writer) {
 	entries, err := os.ReadDir(programData)
 	if err != nil {
 		return
@@ -804,7 +858,7 @@ func removeStaleEnterpriseSetupStages(programData string, now time.Time, progres
 			continue
 		}
 		attributes, ok := info.Sys().(*syscall.Win32FileAttributeData)
-		if !ok || now.Sub(time.Unix(0, attributes.CreationTime.Nanoseconds())) < enterpriseSetupStageStaleAge {
+		if !ok || now.Sub(time.Unix(0, attributes.CreationTime.Nanoseconds())) < minimumAge {
 			continue
 		}
 		retired := ""

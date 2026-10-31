@@ -94,10 +94,23 @@ try {
     function Write-TestMetadata([hashtable]$Document) {
         [IO.File]::WriteAllText($metadata, ($Document | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 4), $utf8)
     }
-    function Test-Pin([string]$Label, [string]$Want, [string]$Installer = $installer) {
+    # $Unreadable is the text the damaged-record note must hold ('' for no
+    # note): a record that does not parse is named by the caller instead of
+    # the module signature (GAP-0164); any other outcome leaves no note.
+    function Test-Pin([string]$Label, [string]$Want, [string]$Installer = $installer, [string]$Unreadable = '') {
+        $script:DefenseClawBootstrapUnreadableRecord = 'stale note from an earlier call'
         $got = Get-DefenseClawBootstrapRecordedModulePin -MetadataPath $metadata -InstallerPath $Installer
         if ($got -cne $Want) {
             $failures.Add("${Label}: pin '$got', want '$Want'")
+        }
+        $note = [string]$script:DefenseClawBootstrapUnreadableRecord
+        if ([string]::IsNullOrEmpty($Unreadable)) {
+            if ($note -ne '') {
+                $failures.Add("${Label}: damaged-record note '$note', want none")
+            }
+        }
+        elseif (-not $note.StartsWith($metadata, [StringComparison]::OrdinalIgnoreCase) -or -not $note.Contains($Unreadable)) {
+            $failures.Add("${Label}: damaged-record note '$note', want $metadata and '$Unreadable'")
         }
     }
     $recorded = @{
@@ -145,13 +158,60 @@ try {
     Test-Pin 'non-canonical module digest' ''
 
     [IO.File]::WriteAllText($metadata, 'not json', $utf8)
-    Test-Pin 'unparseable metadata' ''
+    Test-Pin 'unparseable metadata' '' $installer 'Conversion from JSON failed'
+
+    [IO.File]::WriteAllText($metadata, '[1, 2]', $utf8)
+    Test-Pin 'metadata that is not a JSON object' '' $installer 'it is not a JSON object'
+
+    [IO.File]::WriteAllText($metadata, '', $utf8)
+    Test-Pin 'empty metadata' '' $installer ' ('
 
     [IO.File]::WriteAllText($metadata, ('{"trust_mode":"hash_pinned","pad":"' + ('x' * 1048576) + '"}'), $utf8)
-    Test-Pin 'oversized metadata' ''
+    Test-Pin 'oversized metadata' '' $installer 'larger than 1 MiB'
+
+    # An untrusted record is not named: only a protected record is evidence.
+    [IO.File]::WriteAllText($metadata, 'not json', $utf8)
+    $script:UntrustedMetadata = $metadata
+    Test-Pin 'unparseable metadata a standard user could write' ''
+    $script:UntrustedMetadata = ''
 }
 finally {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# The module's own deployment.json reader refuses every record that is not a
+# JSON object with the marker the CLI maps to ensure_refused, an empty one
+# too ($null -isnot [pscustomobject] is false; GAP-0164).
+$moduleSource = [IO.Path]::GetFullPath(
+    (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1')
+)
+$moduleAst = [Management.Automation.Language.Parser]::ParseFile($moduleSource, [ref]$tokens, [ref]$parseErrors)
+$readers = @($moduleAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            [string]$node.Name -ceq 'ConvertFrom-DefenseClawDeploymentMetadataText'
+        }, $true))
+if ($readers.Count -ne 1) {
+    $failures.Add("expected one ConvertFrom-DefenseClawDeploymentMetadataText, found $($readers.Count)")
+}
+else {
+    . ([scriptblock]::Create([string]$readers[0].Extent.Text))
+    $script:UnreadableMetadataMessage = 'could not read the installed deployment metadata'
+    foreach ($case in @(@('empty', ''), @('garbage', 'e-not-a-record'), @('array', '[1]'), @('number', '5'))) {
+        try {
+            [void](ConvertFrom-DefenseClawDeploymentMetadataText -Path 'C:\x\deployment.json' -Text $case[1])
+            $failures.Add("module reader accepted the $($case[0]) record")
+        }
+        catch {
+            if (-not ([string]$_.Exception.Message).StartsWith($script:UnreadableMetadataMessage) -or
+                -not ([string]$_.Exception.Message).Contains('Setup /repair')) {
+                $failures.Add("module reader $($case[0]) record: $($_.Exception.Message)")
+            }
+        }
+    }
+    if ($null -eq (ConvertFrom-DefenseClawDeploymentMetadataText -Path 'C:\x\deployment.json' -Text '{"installed":true}')) {
+        $failures.Add('module reader refused a JSON object')
+    }
 }
 
 if ($failures.Count -gt 0) {

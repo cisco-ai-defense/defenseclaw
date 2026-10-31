@@ -1641,6 +1641,9 @@ func applyWindowsEnterpriseInstallerReport(
 		// named next to the drop-in drift it leaves unrepaired.
 		applyWindowsEnterpriseClaudeDropInDrift(result)
 	}
+	if report.Installed && (result.Action == "status" || result.Action == "verify" || result.Action == "ensure") {
+		appendWindowsEnterpriseLLMModelWarning(result)
+	}
 	if lifecycle && !report.OK && len(result.Errors) > firstError {
 		configPath := ""
 		purge, force := false, false

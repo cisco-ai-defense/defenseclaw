@@ -1395,6 +1395,14 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err := refuseUnknownGuardrailConnectors(validated.Loaded, l.opts.ConfigFile, env.Layout.ConfigPath); err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
+	// A model id the judge cannot route is applied, with a warning: the
+	// config came from an MDM or a file, and the judge falls back to the
+	// rules until it is fixed (GAP-0172; setup llm refuses it, GAP-2638).
+	if validated.Loaded != nil {
+		if message := validated.Loaded.LLM.ModelIDProblem("llm.model"); message != "" {
+			l.result.AddWarning(enterprisestatus.CodeLLMModelUnroutable, message+"; then run `"+env.lifecycleCommand(ActionEnsure)+" --config <file>` with the corrected config")
+		}
+	}
 	if record == nil {
 		// The service group exists only now: packs staged before the first
 		// install get it (GAP-0501).

@@ -127,6 +127,7 @@ Warnings do not fail an action. They appear in `warnings[]`.
 | `selinux_module` | Linux | The lifecycle could not load (or, on uninstall, remove) the DefenseClaw SELinux module; the message has `semodule`'s error. Only SELinux-confined users depend on it |
 | `selinux_module_missing` | Linux | `status` or `verify` found SELinux enabled without the DefenseClaw SELinux module, the hook socket without its `defenseclaw_hook_sock_t` label, or the gateway binary without its `defenseclaw_gateway_exec_t` label. SELinux-confined users (`user_u`, `staff_u` and other confined logins) then cannot reach the hook socket, and their hooks are refused with `enterprise_managed_hook_socket_selinux_denied`. Run `repair` |
 | `judge_failing` | Linux, macOS, Windows | The gateway's `/health` reports the LLM judge as `failing` (every recent call failed) or `unavailable`. Prompts still get the rule-pack verdicts, but not the judge's checks, until it recovers. The message has the last error; check the judge's provider credentials and network |
+| `llm_model_unroutable` | Linux, macOS, Windows | `ensure` (and on Windows also `status` and `verify`) found an `llm.model` the gateway cannot route: a Bedrock model (`llm.provider: bedrock` or a `bedrock/` prefix) that is not a Bedrock model id, ARN or deployment alias, or a value with no provider that is no known model name, such as a short name (`luna`, `haiku-4.5`). The config is applied, but the LLM judge falls back to the rules on every call. Write `provider/model` or the full Bedrock id (for example `us.openai.gpt-5.6-luna`), then run `ensure` again |
 | `disk_space_low` | Linux, macOS | `status` or `verify` found less than 256 MiB, or less than 2%, free on the filesystem that holds the gateway's audit database or logs. Enforcement continues on a full disk, but the audit trail stops recording; free space on it |
 | `unit_drop_in` | Linux | A local systemd drop-in that DefenseClaw did not write changes a DefenseClaw unit (environment, limits, timeouts) but keeps its account, sandbox and config. The message names the files. A drop-in that changes those fails `status` and `verify` instead |
 | `ai_defense_unavailable` | Linux, macOS | Cisco AI Defense is enabled, but the gateway reports `inspection.ai_defense` as `unavailable:<code>` (for example `auth_failed` or `credential_unavailable`). The local policy engine keeps deciding. Check the credential `enterprise.inspection.ai_defense.credential` names and the network path; see [Check the key](/docs/enterprise/ai-defense-key#check-the-key) |
@@ -325,10 +326,14 @@ report `enterprise_managed_runtime_state_invalid` instead.
 
 While a Setup, pkg or rpm run (an install, upgrade, `ensure`, `repair` or rollback) holds the gateway
 stopped, restarting or silent, a managed hook that would block for an outage says "DefenseClaw is
-being installed or upgraded on this computer, and its gateway starts again when that is done. Try
-again in a moment; if this continues, contact your administrator." Retry after the run ends. A
-refusal with its own cause (another program on the port, SELinux, a missing DefenseClaw folder, a
-bad hook input) keeps its own text. The decision does not change: the call is still blocked.
+being installed or upgraded on this computer, and its gateway is stopped until that run finishes or
+is recovered. Try again in a moment; if this continues, ask your administrator to check DefenseClaw
+on this computer: `enterprise windows status` names what to do." (`enterprise linux status` or
+`enterprise macos status` on those systems), followed by the outage code. Retry after the run ends.
+A run that was stopped before it finished leaves the same block until it is recovered: `status`
+shows `transaction_pending` and names the recovery. A refusal with its own cause (another program
+on the port, SELinux, a missing DefenseClaw folder, a bad hook input) keeps its own text. The
+decision does not change: the call is still blocked.
 
 ### Known limits for managed hooks
 
