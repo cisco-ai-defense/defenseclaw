@@ -49,9 +49,11 @@ func TestWindowsPrintfQuotedPatternIsTextAsEcho(t *testing.T) {
 		}
 	}
 	// A piped printf may feed a shell that expands the printed text: its
-	// quoted pattern stays a pattern.
+	// quoted pattern stays a pattern in the Windows readings. A POSIX call
+	// on a native Windows host is read by the POSIX grammar alone, which
+	// reads printed text as text on every OS (rel-1-0-6:GAP-0227).
 	for _, command := range []string{"printf 'cp a.txt .ssh/authorized_k*' | sh", "printf '.ssh/authorized_k*' | xargs -I{} cp a.txt {}"} {
-		for _, dialect := range []actionfacts.Dialect{"", actionfacts.DialectPowerShell, actionfacts.DialectPOSIX} {
+		for _, dialect := range []actionfacts.Dialect{"", actionfacts.DialectPowerShell} {
 			if got := ActionCommandDecisionWithDialectAndGlobFacts(command, home, home, dialect, nil); got != "protected-target" {
 				t.Errorf("dialect %q %q = %q, want protected-target", dialect, command, got)
 			}
