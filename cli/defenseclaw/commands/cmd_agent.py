@@ -40,6 +40,7 @@ from defenseclaw.config import (
     AIRuntimeConfig,
     enable_all_runtime_planes,
     enable_user_runtime_planes,
+    gateway_pid_path,
 )
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
@@ -3654,7 +3655,7 @@ def _gateway_running(app: AppContext) -> bool:
     from defenseclaw.process_liveness import pid_file_alive
 
     try:
-        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+        return pid_file_alive(gateway_pid_path(app.cfg.data_dir))
     except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
         return False
 

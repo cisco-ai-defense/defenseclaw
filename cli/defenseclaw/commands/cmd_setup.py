@@ -90,6 +90,7 @@ from defenseclaw.config import (
     config_path_for_data_dir,
     enable_all_runtime_planes,
     enable_user_runtime_planes,
+    gateway_pid_path,
     locked_config_yaml,
     locked_file_update,
     outage_block_hint,
@@ -516,7 +517,7 @@ def _echo_saved_without_restart(*, plural: bool = False) -> None:
     ctx = click.get_current_context(silent=True)
     app = ctx.find_object(AppContext) if ctx is not None else None
     known = ctx is not None and app is not None and app.cfg is not None
-    running = known and _is_pid_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+    running = known and _is_pid_alive(gateway_pid_path(app.cfg.data_dir))
     noun = "connectors" if plural else "connector"
     if running and _only_hot_config_changes(ctx, _config_yaml_path_from_ctx(ctx)):
         ux.echo("  ℹ Saved. The running gateway applies it on its own, without a restart.")
@@ -4839,7 +4840,7 @@ def _rotate_token_transaction(
         snapshot = _rotate_token_snapshot_locked(dotenv_path)
         hook_snapshots = [_rotate_token_hook_snapshot_locked(data_dir, connector) for connector in tracked_scopes]
         old_token = _rotate_token_previous_value(app, snapshot)
-        pid_file = os.path.join(data_dir, "gateway.pid")
+        pid_file = gateway_pid_path(data_dir)
         was_running = _is_pid_alive(pid_file)
         if was_running and any(
             hook_snapshot.connector in requested_scopes and not hook_snapshot.existed
@@ -5307,7 +5308,7 @@ def setup_gateway(
     # verify yet and cannot record the audit event; the change applies when
     # it starts (GAP-2009). That holds for a new API port too, so a stopped
     # gateway gets the same single note (GAP-2153).
-    gateway_stopped = not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
+    gateway_stopped = not _is_pid_alive(gateway_pid_path(data_dir))
     keep_running_gateway_token(app.logger, data_dir, previous_token, gw.resolved_token())
     # The running gateway keeps its old OpenClaw host and port until the
     # restart that follows this command, so checking it now reports a
@@ -13810,7 +13811,7 @@ def _warn_codex_home_not_applied_without_restart(cfg) -> None:
         os.path.normcase(os.path.normpath(recorded)) == os.path.normcase(os.path.normpath(selected))
     ):
         return
-    if recorded is None and not _is_pid_alive(os.path.join(data_dir, "gateway.pid")):
+    if recorded is None and not _is_pid_alive(gateway_pid_path(data_dir)):
         return
     kept = f" ({recorded})" if recorded else ""
     ux.warn(
@@ -14879,7 +14880,7 @@ def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> 
 
 def _stop_gateway_before_token_swap(data_dir: str) -> bool:
     """Stop a running gateway with the token it loaded; True when it is now down."""
-    pid_file = os.path.join(data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(data_dir)
     if not _is_pid_alive(pid_file) or not _gateway_pid_file_identifies_gateway(pid_file):
         return False
     if os.name == "nt":
@@ -16145,7 +16146,7 @@ def _gateway_pid_generation_marker(data_dir: str) -> bytes | None:
 
     try:
         return read_regular_file_no_follow(
-            os.path.join(data_dir, "gateway.pid"),
+            gateway_pid_path(data_dir),
             max_bytes=_GATEWAY_PID_GENERATION_MAX_BYTES,
         )
     except OSError:
@@ -17857,7 +17858,7 @@ def _restart_defense_gateway(
                 previous_generation=previous_generation,
             )
 
-    pid_file = os.path.join(data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(data_dir)
     pid_alive = _is_pid_alive(pid_file)
     # F-0721: only trust a live PID when it actually belongs to the gateway
     # binary. If a PID file points at some live but unverified process, fail
@@ -18030,7 +18031,7 @@ def _wait_for_defense_gateway_api(
             if (
                 current_pid_marker is None
                 or current_pid_marker == previous_generation.pid_marker
-                or not _gateway_pid_file_identifies_gateway(os.path.join(data_dir, "gateway.pid"))
+                or not _gateway_pid_file_identifies_gateway(gateway_pid_path(data_dir))
             ):
                 ready = False
 
@@ -18106,7 +18107,7 @@ def _restart_defense_gateway_native(
         click.echo("  defenseclaw-gateway: native executable not found.")
         return False
 
-    pid_file = os.path.join(data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(data_dir)
     pid_alive = _is_pid_alive(pid_file)
     if pid_alive and not _gateway_pid_file_identifies_gateway(pid_file):
         click.echo("  defenseclaw-gateway: live gateway.pid did not verify as DefenseClaw gateway.")
@@ -18204,7 +18205,7 @@ def _stop_defense_gateway_native(data_dir: str) -> bool:
         return False
     if not _native_gateway_lifecycle_stop(CommandRunner(), executable):
         return False
-    return not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
+    return not _is_pid_alive(gateway_pid_path(data_dir))
 
 
 def _gateway_lifecycle_status(
@@ -18378,7 +18379,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
         )
         return
 
-    pid_file = os.path.join(data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(data_dir)
     if not _is_pid_alive(pid_file):
         if ctx.meta.get(_SETUP_OFFLINE_NOTED_KEY):
             return
@@ -19908,7 +19909,7 @@ def _apply_native_windows_logs_config(
         dotenv_snapshot = _snapshot_dotenv(dotenv_path)
     prior_token_present = LOCAL_TOKEN_ENV in os.environ
     prior_token = os.environ.get(LOCAL_TOKEN_ENV)
-    pid_file = os.path.join(app.cfg.data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(app.cfg.data_dir)
     gateway_was_running = _is_pid_alive(pid_file) and _gateway_pid_file_identifies_gateway(pid_file)
     transaction: NativeSplunkSetupTransaction | None = None
     contract = None

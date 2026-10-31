@@ -63,6 +63,7 @@ import click
 from defenseclaw import codex_toml, credential_provenance, envvars, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.audit_time_order import audit_time_order
+from defenseclaw.config import gateway_pid_path
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACT_MANIFEST,
     HOOK_CONTRACTS,
@@ -5807,7 +5808,7 @@ def _managed_gateway_process_trust(
         return _GatewayTrust("unavailable", "gateway data directory is unavailable")
     platform_name = platform_name or ("win32" if os.name == "nt" else sys.platform)
     evidence = evidence or GatewayEvidence(platform_name=platform_name)
-    record = evidence.pid_record(os.path.join(data_dir, "gateway.pid"))
+    record = evidence.pid_record(gateway_pid_path(data_dir))
     process = evidence.process(record.pid) if record.status == "ok" else None
     return _gateway_process_trust(
         cfg,
@@ -6198,7 +6199,7 @@ def _check_windows_gateway_diagnostics(
             _emit("skip", label, _NEEDS_RUNNING_GATEWAY, r=r)
         return True
     evidence = evidence or GatewayEvidence(platform_name=platform_name)
-    pid_path = os.path.join(data_dir, "gateway.pid")
+    pid_path = gateway_pid_path(data_dir)
     record = evidence.pid_record(pid_path)
     process = evidence.process(record.pid) if record.status == "ok" else None
     process_trust = _gateway_process_trust(
@@ -12136,7 +12137,7 @@ def _check_judge_calls(cfg, r: _DoctorResult) -> None:
         return
     since = ""
     try:
-        started = os.path.getmtime(os.path.join(cfg.data_dir, "gateway.pid"))
+        started = os.path.getmtime(gateway_pid_path(cfg.data_dir))
         since = datetime.fromtimestamp(started, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     except OSError:
         pass
@@ -18220,7 +18221,7 @@ def _fix_stale_pid(
     data_dir = _configured_gateway_data_dir(cfg)
     if not data_dir:
         return ("fail", "gateway data directory is unavailable; refusing PID-file repair")
-    pid_file = os.path.join(data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(data_dir)
     inspected_fingerprint = pid_file_fingerprint(pid_file)
     if not inspected_fingerprint:
         record = read_pid_record(pid_file)
@@ -18876,7 +18877,7 @@ def _fix_gateway_token_drift(
             "gateway A/B restart and authenticated replacement verification",
         )
 
-    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(cfg.data_dir)
     process_trust = _managed_gateway_process_trust_for_lifecycle(cfg)
     if process_trust.code in {"missing", "missing_process"}:
         return ("skip", "no live sidecar to restart")
@@ -19227,7 +19228,7 @@ def _fix_gateway_service(
                 f"gateway health suggests repair, but {endpoint_trust.detail}; refusing lifecycle mutation",
             )
         process_trust = endpoint_trust
-        inspected_fingerprint = pid_file_fingerprint(os.path.join(cfg.data_dir, "gateway.pid"))
+        inspected_fingerprint = pid_file_fingerprint(gateway_pid_path(cfg.data_dir))
     else:
         if code != 0:
             return (
@@ -19237,7 +19238,7 @@ def _fix_gateway_service(
             )
         reason = "gateway service is unreachable"
         process_trust = _managed_gateway_process_trust_for_lifecycle(cfg)
-        pid_path = os.path.join(cfg.data_dir, "gateway.pid")
+        pid_path = gateway_pid_path(cfg.data_dir)
         listener = _managed_gateway_listener_evidence(
             _gateway_api_port(cfg),
             host=_gateway_api_host(cfg),
@@ -19295,7 +19296,7 @@ def _fix_gateway_service(
     ):
         return ("skip", "declined by user")
 
-    if pid and pid_file_fingerprint(os.path.join(cfg.data_dir, "gateway.pid")) != inspected_fingerprint:
+    if pid and pid_file_fingerprint(gateway_pid_path(cfg.data_dir)) != inspected_fingerprint:
         return (
             "fail",
             "gateway PID record changed after verification; refusing to restart a replacement",

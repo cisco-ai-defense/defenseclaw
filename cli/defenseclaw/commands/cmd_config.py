@@ -47,6 +47,7 @@ import yaml
 
 from defenseclaw import config as config_module
 from defenseclaw import ux
+from defenseclaw.config import gateway_pid_path
 from defenseclaw.config_inspect import (
     ConfigInspectError,
     ConfigInspectTimeoutError,
@@ -986,7 +987,7 @@ def _refresh_stopped_gateway_hooks(before: object) -> list[str]:
         return []
     from defenseclaw.process_liveness import pid_file_alive
 
-    if pid_file_alive(os.path.join(after.data_dir, "gateway.pid")):
+    if pid_file_alive(gateway_pid_path(after.data_dir)):
         return []  # the running gateway re-renders them from this config generation
     from defenseclaw.fail_mode import fail_mode_transaction_lock, reconcile_connector_registration
 

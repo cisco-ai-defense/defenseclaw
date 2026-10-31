@@ -35,6 +35,7 @@ from defenseclaw import connector_paths, platform_support, terminal_checkbox, ux
 if TYPE_CHECKING:
     from defenseclaw.bootstrap import StepResult
     from defenseclaw.config import Config
+from defenseclaw.config import gateway_pid_path
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.openclaw_presence import openclaw_installed
@@ -2976,7 +2977,7 @@ def _gateway_already_running(data_dir: str) -> bool:
     from defenseclaw.bootstrap import _pid_file_running
 
     try:
-        return _pid_file_running(os.path.join(data_dir, "gateway.pid"))
+        return _pid_file_running(gateway_pid_path(data_dir))
     except Exception:
         return False
 
@@ -3848,7 +3849,7 @@ def _start_gateway(cfg, logger) -> None:
         click.echo("                 install with: make gateway-install")
         return
 
-    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(cfg.data_dir)
     if _is_sidecar_running(pid_file):
         pid = _read_pid(pid_file)
         click.echo(f"  Sidecar:       already running (PID {pid})")

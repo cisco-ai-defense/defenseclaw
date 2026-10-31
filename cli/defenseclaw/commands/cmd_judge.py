@@ -57,6 +57,7 @@ import click
 
 from defenseclaw import connector_paths, ux
 from defenseclaw.commands._audit_notice import saved_change_audit
+from defenseclaw.config import gateway_pid_path
 from defenseclaw.context import AppContext, pass_ctx
 
 #: Sentinel accepted by the Go gate meaning "every hook connector".
@@ -300,12 +301,11 @@ def _ensure_enabled_hook_judge_strategies(gc) -> bool:
 
 def _gateway_running(app: AppContext) -> bool:
     """Same PID-file probe as ``cmd_guardrail._gateway_running``."""
-    import os
 
     from defenseclaw.process_liveness import pid_file_alive
 
     try:
-        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+        return pid_file_alive(gateway_pid_path(app.cfg.data_dir))
     except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
         return False
 

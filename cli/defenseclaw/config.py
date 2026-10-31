@@ -572,6 +572,8 @@ def config_path_for_data_dir(data_dir: str | os.PathLike[str] | None = None) -> 
     return config_path()
 
 
+GATEWAY_PID_FILE_NAME = "gateway.pid"
+
 # (path, st_dev, st_ino, st_size, st_mtime_ns) -> the data_dir that config names.
 _home_data_dir_cache: dict[tuple[str, int, int, int, int], str | None] = {}
 
@@ -609,6 +611,11 @@ def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
     if configured and _same_folder(configured, own):
         return home
     return own
+
+
+def gateway_pid_path(data_dir: str | os.PathLike[str]) -> str:
+    """Path of the gateway's PID record for the install that uses ``data_dir``."""
+    return os.path.join(gateway_home_for_data_dir(data_dir), GATEWAY_PID_FILE_NAME)
 
 
 def _home_config_data_dir(path: str) -> str | None:
