@@ -587,7 +587,7 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 			return nil
 		}
 		if !isRecognizedRulePackYAML(rel) {
-			return rulePackErr(safeInventoryPath(rel), "inventory_unexpected", "unexpected YAML component")
+			return rulePackErr(safeInventoryPath(rel), "inventory_unexpected", unexpectedYAMLReason(safeInventoryPath(rel)))
 		}
 
 		fileInfo, infoErr := entry.Info()
@@ -621,6 +621,27 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 		return nil, rulePackErr(".", "inventory_unreadable", "rule-pack inventory cannot be inspected")
 	}
 	return inventory, nil
+}
+
+// unexpectedYAMLReason says what to take out of the pack folder for a YAML file
+// the loader does not recognize. rel is the safe, slash-separated path under
+// the pack root. A file below a folder that is neither rules nor judge (a copy
+// of another pack placed inside this one, such as default/judge/injection.yaml)
+// is named by that folder, since removing the one file would only surface the
+// next; any other file is named by itself. The text holds relative names only
+// (RulePackError.Reason never carries an absolute path); the installer adds the
+// absolute folder (GAP-1566).
+func unexpectedYAMLReason(rel string) string {
+	const base = "unexpected YAML component"
+	const next = ", then run the command or installer again"
+	if rel == "" || rel == "." {
+		return base
+	}
+	first, _, nested := strings.Cut(rel, "/")
+	if nested && first != "rules" && first != "judge" {
+		return base + ": the folder " + first + " does not belong in a rule pack (a copy of another pack placed inside this one?); move " + first + " out of the rule-pack folder or remove it" + next
+	}
+	return base + ": move " + rel + " out of the rule-pack folder or remove it" + next
 }
 
 // isPackManifestName reports whether rel names the pack manifest. Windows

@@ -391,24 +391,30 @@ func standaloneGatewayRuntimeCandidate(configPath string) *config.Config {
 	return candidate
 }
 
-// rulePackNestedCopyHint names a copy of a pack folder inside itself, which
-// copying the pack folder onto an existing one creates (Copy-Item -Recurse,
-// cp -r). The loader reported only an unexpected YAML component deep inside
-// it (GAP-0558).
+// rulePackNestedCopyHint names, by its full path, the stray folder inside a
+// rule pack that holds an unexpected YAML file. The loader's reason names it
+// relative to the pack; the installer and the lifecycle commands need the
+// folder to remove. A copy of the pack inside itself (copying the pack folder
+// onto an existing one, Copy-Item -Recurse or cp -r) gets its own wording
+// (GAP-0558); any other folder, such as a nested copy of the default pack,
+// is named the same way (GAP-1566).
 func rulePackNestedCopyHint(dir string, err error) string {
 	var packErr *guardrail.RulePackError
 	if !errors.As(err, &packErr) || packErr.Code != "inventory_unexpected" {
 		return ""
 	}
 	first, _, found := strings.Cut(packErr.Path, "/")
-	if !found || !strings.EqualFold(first, filepath.Base(filepath.Clean(dir))) {
+	if !found || first == "rules" || first == "judge" {
 		return ""
 	}
 	nested := filepath.Join(dir, first)
 	if info, statErr := os.Lstat(nested); statErr != nil || !info.IsDir() {
 		return ""
 	}
-	return fmt.Sprintf("; %s is a copy of the pack inside itself (copying the pack folder onto an existing one creates it): remove that folder and run again", nested)
+	if strings.EqualFold(first, filepath.Base(filepath.Clean(dir))) {
+		return fmt.Sprintf("; %s is a copy of the pack inside itself (copying the pack folder onto an existing one creates it): remove that folder and run again", nested)
+	}
+	return fmt.Sprintf("; the stray folder is %s: move it out of the pack folder or remove it, then run again", nested)
 }
 
 // standaloneServiceCanReadTree checks that the gateway service account can
