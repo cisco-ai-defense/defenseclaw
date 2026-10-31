@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -76,45 +77,135 @@ func TestR105GAP2404HomeFindSinksAndNameDeletesOnManaged(t *testing.T) {
 	for _, command := range stagedAttack {
 		rows = append(rows, row{command: command, block: true, staged: true})
 	}
-	for _, r := range rows {
+	// The rows of one fixture home share it (the staged rows add a
+	// state-named archive): every per-user call first, with the home
+	// readable, then every managed call, with the home unlistable and the
+	// state tree unreadable. Each phase is answered concurrently by one
+	// gateway per side, mode and connector, each call with a session of its
+	// own, so the race build of the CI gateway shards stays within its
+	// timing entry. Every row, mode and connector still runs.
+	for _, staged := range []bool{false, true} {
 		home, cwd := r105StateFixture(t)
-		for _, name := range []string{"proj.zip", "a.orig"} {
+		names := []string{"proj.zip", "a.orig"}
+		if staged {
+			names = append(names, ".defenseclaw.zip")
+		}
+		for _, name := range names {
 			if err := os.WriteFile(filepath.Join(home, name), []byte("PK\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if r.staged {
-			if err := os.WriteFile(filepath.Join(home, ".defenseclaw.zip"), []byte("PK\n"), 0o600); err != nil {
-				t.Fatal(err)
+		t.Setenv("HOME", home)
+		var group []row
+		var targets []map[string]string
+		for _, r := range rows {
+			if r.staged == staged {
+				group = append(group, r)
+				targets = append(targets, r105ClientTargets(t, r.command, cwd))
 			}
 		}
-		t.Setenv("HOME", home)
-		targets := r105ClientTargets(t, r.command, cwd)
+		var calls [2][]*findSinkCall
 		for _, mode := range []string{"observe", "action"} {
 			for _, connector := range []string{"claudecode", "codex"} {
-				if blocked, body := r105PerUserHook(t, connector, mode, r.command, cwd, targets); blocked != r.block {
-					t.Errorf("per-user %s %s: %q blocked=%v, want %v: %.300s", mode, connector, r.command, blocked, r.block, body)
-				}
-				blocked, body := r105ManagedHook(t, connector, mode, r.command, cwd, home, targets)
-				if blocked != r.block {
-					t.Errorf("managed %s %s: %q blocked=%v, want %v: %.300s", mode, connector, r.command, blocked, r.block, body)
-				}
-				if !r.block {
-					// An older client sends no state facts: a gateway that
-					// cannot read the home still refuses.
-					old := maps.Clone(targets)
-					maps.DeleteFunc(old, func(key, _ string) bool {
-						return strings.HasPrefix(key, hookpaths.StateRootSiblingsPrefix) ||
-							strings.HasPrefix(key, hookpaths.StateTreeNamePrefix)
-					})
-					if blocked, body := r105ManagedHook(t, connector, mode, r.command, cwd, home, old); !blocked &&
-						(strings.Contains(r.command, "%") || strings.Contains(r.command, "-delete") || strings.Contains(r.command, "rm -rf")) {
-						t.Errorf("managed %s %s: %q without the client facts allowed: %.300s", mode, connector, r.command, body)
+				perUser, managed := findSinkGateway(t, connector, mode), findSinkGateway(t, connector, mode)
+				for i, r := range group {
+					call := func(api *APIServer, side string, targets map[string]string) *findSinkCall {
+						payload := mustJSON(t, map[string]any{"session_id": fmt.Sprintf("findsink-%d", len(calls[0])+len(calls[1])),
+							"hook_event_name": "PreToolUse", "cwd": cwd, "permission_mode": "default", "tool_name": "Bash",
+							"tool_use_id": "toolu_r105", "tool_input": map[string]any{"command": r.command, "description": "Run test fixture command"}})
+						return &findSinkCall{name: fmt.Sprintf("%s %s %s: %q", side, mode, connector, r.command), want: r.block,
+							command: r.command, api: api, connector: connector, payload: payload, header: r105EncodeTargets(t, targets), managed: side == "managed"}
+					}
+					calls[0] = append(calls[0], call(perUser, "per-user", targets[i]))
+					calls[1] = append(calls[1], call(managed, "managed", targets[i]))
+					if !r.block {
+						// An older client sends no state facts: a gateway that
+						// cannot read the home still refuses.
+						old := maps.Clone(targets[i])
+						maps.DeleteFunc(old, func(key, _ string) bool {
+							return strings.HasPrefix(key, hookpaths.StateRootSiblingsPrefix) ||
+								strings.HasPrefix(key, hookpaths.StateTreeNamePrefix)
+						})
+						c := call(managed, "managed", old)
+						c.oldClient = true
+						calls[1] = append(calls[1], c)
 					}
 				}
 			}
 		}
+		group0 := calls[0]
+		eachConcurrently(len(group0), func(i int) { group0[i].answer(home) })
+		// The managed gateway may not list the home or read the state tree.
+		state := filepath.Join(home, ".defenseclaw")
+		if err := os.Chmod(state, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(home, 0o311); err != nil {
+			_ = os.Chmod(state, 0o700)
+			t.Fatal(err)
+		}
+		if _, err := os.ReadDir(home); err == nil {
+			_ = os.Chmod(home, 0o700)
+			_ = os.Chmod(state, 0o700)
+			t.Fatal("home still listable")
+		}
+		group1 := calls[1]
+		eachConcurrently(len(group1), func(i int) { group1[i].answer(home) })
+		_ = os.Chmod(home, 0o700)
+		_ = os.Chmod(state, 0o700)
+		for _, c := range append(group0, group1...) {
+			switch {
+			case c.oldClient:
+				if !c.blocked && (strings.Contains(c.command, "%") || strings.Contains(c.command, "-delete") || strings.Contains(c.command, "rm -rf")) {
+					t.Errorf("%s without the client facts allowed: %.300s", c.name, c.body)
+				}
+			case c.blocked != c.want:
+				t.Errorf("%s blocked=%v, want %v: %.300s", c.name, c.blocked, c.want, c.body)
+			}
+		}
 	}
+}
+
+// findSinkCall is one hook call of the GAP-2404 sink table and its answer.
+type findSinkCall struct {
+	name      string
+	command   string
+	want      bool
+	oldClient bool
+	api       *APIServer
+	connector string
+	payload   []byte
+	header    string
+	managed   bool
+	blocked   bool
+	body      string
+}
+
+// findSinkGateway is a hook gateway with the default pack in mode for
+// connector (one per side, so a per-user call never answers for managed).
+func findSinkGateway(t *testing.T, connector, mode string) *APIServer {
+	t.Helper()
+	api := instructionProtectionTestAPI(t, connector, mode, "")
+	api.health = NewSidecarHealth()
+	return api
+}
+
+// answer posts the call with the hook client's target header, as the
+// verified managed hook peer of home when managed; the caller sets the
+// home and state tree modes of the phase.
+func (c *findSinkCall) answer(home string) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(c.payload)))
+	req.Header.Set(hookpaths.Header, c.header)
+	if c.connector == "codex" {
+		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+	}
+	if c.managed {
+		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+	}
+	recorder := httptest.NewRecorder()
+	c.api.handleAgentHook(c.connector).ServeHTTP(recorder, req)
+	c.body = recorder.Body.String()
+	c.blocked = strings.HasPrefix(c.body, `{"action":"block"`)
 }
 
 // The stdin filter rule is narrow: options and one grep pattern only.
@@ -150,24 +241,4 @@ func r105AnalyzeBash(t *testing.T, command string) actionfacts.Facts {
 		Tool: "Bash", Args: mustJSON(t, map[string]any{"command": command}),
 		CWD: "/tmp", ActiveHome: "/home/alice",
 	})
-}
-
-// r105PerUserHook posts command as a per-user hook call (the gateway may
-// read the home) with the hook client's target map.
-func r105PerUserHook(t *testing.T, connector, mode, command, cwd string, targets map[string]string) (bool, string) {
-	t.Helper()
-	payload := mustJSON(t, map[string]any{"session_id": "s", "hook_event_name": "PreToolUse", "cwd": cwd,
-		"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_r105",
-		"tool_input": map[string]any{"command": command, "description": "Run test fixture command"}})
-	api := instructionProtectionTestAPI(t, connector, mode, "")
-	api.health = NewSidecarHealth()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
-	req.Header.Set(hookpaths.Header, r105EncodeTargets(t, targets))
-	if connector == "codex" {
-		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
-	}
-	recorder := httptest.NewRecorder()
-	api.handleAgentHook(connector).ServeHTTP(recorder, req)
-	got := recorder.Body.String()
-	return strings.HasPrefix(got, `{"action":"block"`), got
 }
