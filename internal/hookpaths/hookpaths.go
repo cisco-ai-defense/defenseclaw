@@ -2235,8 +2235,11 @@ var directoryStackTilde = lazyregexp.New(`^~([+-]?[0-9]{1,3}|[+-])(/|$)`)
 // unless destination (the call destination of that reading) is one. A word
 // that places (directoryStackPlaces) expands the same way wherever the call
 // may run is read as that directory instead, so the walk inspects it like
-// any other source (GAP-2586).
-func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bool, places []stackPlace, destination func([]string, []bool) string) ([]string, []bool) {
+// any other source (GAP-2586); expanded lists those directory paths. The
+// shell expands such a word to a local directory: on a native Windows host
+// the walk spells it as a drive path (C:\...), which is never an rsync
+// remote source (Git Bash spells it /c/...).
+func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bool, places []stackPlace, destination func([]string, []bool) string) ([]string, []bool, []string) {
 	var stackWords []string
 	var stackStatic []bool
 	var stackArgs []int
@@ -2255,14 +2258,16 @@ func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bo
 		stackArgs = append(stackArgs, i)
 	}
 	if stackWords == nil || strings.Contains(destination(stackWords, stackStatic), directoryStackOperand) {
-		return words, static
+		return words, static, nil
 	}
+	var expanded []string
 	for _, i := range stackArgs {
 		if path, ok := expandDirectoryStackWord(strings.TrimPrefix(stackWords[i], directoryStackOperand), places); ok {
 			stackWords[i] = path
+			expanded = append(expanded, path)
 		}
 	}
-	return stackWords, stackStatic
+	return stackWords, stackStatic, expanded
 }
 
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
@@ -2382,15 +2387,18 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		// path, never an option (GAP-2552). A copy that makes links (cp -s,
 		// cp -l) keeps the dynamic reading: the walk would record the
 		// placeholder as the link target.
+		// stackSources: the directory-stack words of the call read as the
+		// directory the stack holds.
+		var stackSources []string
 		switch {
 		case slices.Contains(copyPrograms, program):
 			if makesLinks, _ := copyLinkOptions(args[1:], words[1:], static[1:]); !makesLinks {
-				words, static = withDirectoryStackOperands(args, words, static, stackPlaces[call], func(words []string, static []bool) string {
+				words, static, _ = withDirectoryStackOperands(args, words, static, stackPlaces[call], func(words []string, static []bool) string {
 					return cpDestination(words[1:], static[1:], cwd)
 				})
 			}
 		case slices.Contains(archivePrograms, program):
-			words, static = withDirectoryStackOperands(args, words, static, stackPlaces[call], func(words []string, static []bool) string {
+			words, static, stackSources = withDirectoryStackOperands(args, words, static, stackPlaces[call], func(words []string, static []bool) string {
 				return archiveDestination(program, words[1:], static[1:], cwd)
 			})
 		}
@@ -2521,7 +2529,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 				if archiveCopiesLinks(program, words[1:], static[1:]) {
 					destination := archiveDestination(program, words[1:], static[1:], dir)
 					copyScopes = append(copyScopes, destination)
-					if archiveCopiesDiskSymlink(program, words[1:], static[1:], dir, home, facts, record) {
+					if archiveCopiesDiskSymlink(program, words[1:], static[1:], dir, home, facts, record, stackSources) {
 						links.unknownIn(destination)
 					}
 				}
@@ -3924,7 +3932,10 @@ func cpDiskSymlink(args []string, static []bool, cwd, home string, facts map[str
 	return false
 }
 
-func archiveCopiesDiskSymlink(program string, args []string, static []bool, cwd, home string, facts map[string]string, record bool) bool {
+// archiveCopiesDiskSymlink reports an archive or rsync call whose sources
+// may hold a link. stackSources are sources the walk expanded from a
+// directory-stack word: local directories (withDirectoryStackOperands).
+func archiveCopiesDiskSymlink(program string, args []string, static []bool, cwd, home string, facts map[string]string, record bool, stackSources []string) bool {
 	operands := make([]string, 0, len(args))
 	for i, arg := range args {
 		if !static[i] || strings.HasPrefix(arg, "-") {
@@ -3940,7 +3951,7 @@ func archiveCopiesDiskSymlink(program string, args []string, static []bool, cwd,
 	for _, source := range operands[:len(operands)-1] {
 		if program == "rsync" && !strings.HasPrefix(source, "/") &&
 			!strings.HasPrefix(source, "./") && !strings.HasPrefix(source, "../") &&
-			strings.Contains(source, ":") {
+			strings.Contains(source, ":") && !slices.Contains(stackSources, source) {
 			// A remote source cannot be inspected by the hook client. It can
 			// materialize a link at any name in the destination tree.
 			return true
