@@ -2019,7 +2019,8 @@
    "TestGAP0151LongOperandListKeepsProtectedTarget": 100.0,
    "TestGAP0151DecisionSurvivesFullMap": 40.0,
    "TestGAP0146OneStatementBudget": 98.0,
-   "TestGAP0146BoundedMapOverflowIsTheBudget": 28.0
+   "TestGAP0146BoundedMapOverflowIsTheBudget": 28.0,
+   "TestR106ManagedPrivateKeyReadMatchesPerUser": 40.0
   },
   "internal/gateway/connector": {
    "*": 0.107,
