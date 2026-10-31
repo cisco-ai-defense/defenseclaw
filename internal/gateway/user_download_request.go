@@ -154,8 +154,11 @@ var userRequestRunWord = lazyregexp.New(`(?i)\b(run|runs|running|execute|execute
 // still names what the download fetches as the thing to run. The second
 // form is how a person asks Claude Code to run one command; before it was
 // read as a request to run the download, and the unasked run of the file
-// in the next turn did not alert (rel-1-0-6:GAP-0031, L-emac-J3-002).
-var userRequestRunsDownloader = lazyregexp.New(`^(?i)(?:[\s:"'\x60]+|(?:exactly|just|only|please|the|this|following|command|commands|and|nothing|else|for|me)\b)*(?:curl|wget)\b`)
+// in the next turn did not alert (rel-1-0-6:GAP-0031, L-emac-J3-002). An
+// aside in parentheses among those words ("run exactly this command and
+// nothing else (it fetches a test page): curl ...") is skipped too; a run
+// word inside it is weighed on its own (rel-1-0-6:GAP-0173, L-ewin-J3-002).
+var userRequestRunsDownloader = lazyregexp.New(`^(?i)(?:[\s:"'\x60]+|\([^()]{0,240}\)|(?:exactly|just|only|please|the|this|following|command|commands|and|nothing|else|for|me)\b)*(?:curl|wget)\b`)
 
 // userRequestAsksToRun reports a prompt with a run, execute or install word
 // whose object is not the download command.
