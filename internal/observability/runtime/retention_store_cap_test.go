@@ -43,6 +43,10 @@ func TestRetentionControllerRunsForASizeCapAlone(t *testing.T) {
 	if !controller.enabled() || reaper.MaxStoreMB() != 2048 {
 		t.Fatalf("enabled %t, cap %d; want a run for the size cap", controller.enabled(), reaper.MaxStoreMB())
 	}
+	// The status the health reports carries the cap (GAP-0141).
+	if got := controller.Status().MaxStoreMB; got != 2048 {
+		t.Fatalf("status cap = %d, want 2048", got)
+	}
 	if err := controller.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}

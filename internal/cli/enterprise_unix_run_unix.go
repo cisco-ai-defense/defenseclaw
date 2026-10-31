@@ -305,6 +305,7 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 			fmt.Fprintf(w, "  %-46s %s\n", service.Name, service.State)
 		}
 		enterprisestatus.WriteDestinations(w, result.Destinations)
+		enterprisestatus.WriteAuditStore(w, result.AuditStore)
 	}
 	// The policy the lifecycle left in place (absent under Secure Client):
 	// an administrator reading the text must see the generation and digest.

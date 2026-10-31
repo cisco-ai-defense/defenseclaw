@@ -213,6 +213,10 @@ type Result struct {
 	// installed config.yaml with their effective redaction profiles, from the
 	// compiler `defenseclaw observability plan` uses (GAP-1105).
 	Destinations []Destination `json:"destinations,omitempty"`
+	// AuditStore is, for Linux and macOS status, the local audit store of
+	// the installed config.yaml: retention, size cap and size on disk; nil
+	// when the config does not compile (GAP-0141).
+	AuditStore *AuditStore `json:"audit_store,omitempty"`
 	// Connectors, OpenShell and Identity are the status v2 blocks of status
 	// and verify on the standalone profile (connector_block.go,
 	// openshell_block.go, identity_block.go); nil (omitted) elsewhere.

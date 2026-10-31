@@ -111,6 +111,7 @@
       }
     },
     "destinations": { "type": "array", "items": { "$ref": "#/$defs/destination" }, "description": "status only: the observability destinations the installed config.yaml compiles to (the compiler of defenseclaw observability plan), with the effective redaction profiles of each one's send routes." },
+    "audit_store": { "$ref": "#/$defs/auditStore", "description": "Linux and macOS status only: the local audit store of the installed config.yaml (observability.local retention_days and max_store_mb) and its size on disk." },
     "connectors": {
       "type": "object",
       "propertyNames": { "pattern": "^[a-z][a-z0-9_-]*$" },
@@ -182,7 +183,7 @@
       "then": {
         "properties": {
           "installed": false, "installed_version": false, "transaction_pending": false, "services": false,
-          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false,
+          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false, "audit_store": false,
           "connectors": false, "openshell": false, "identity": false
         }
       },
@@ -220,6 +221,16 @@
         "higher_precedence": { "type": "array", "items": { "type": "string" } },
         "conflicts": { "type": "array", "items": { "type": "string" } },
         "live_verified_at": { "type": "string" }
+      }
+    },
+    "auditStore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retention_days", "max_store_mb"],
+      "properties": {
+        "retention_days": { "type": "integer", "minimum": 0, "description": "observability.local.retention_days; 0 keeps rows until the size cap, or forever without one." },
+        "max_store_mb": { "type": "integer", "minimum": 0, "description": "observability.local.max_store_mb, the audit.db size cap in MiB; 0 is no size cap." },
+        "size_bytes": { "type": "integer", "minimum": 0, "description": "Bytes of audit.db and its write-ahead log on disk; omitted when they cannot be read." }
       }
     },
     "destination": {

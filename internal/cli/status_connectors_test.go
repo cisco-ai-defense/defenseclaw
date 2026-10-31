@@ -515,6 +515,22 @@ func TestPrintSubsystemExplainsAuditWriteFailure(t *testing.T) {
 	}
 }
 
+// The gateway status names the audit store size cap with the retention, in
+// the words of the per-user status: on a managed computer that status is
+// refused and the gateway status showed only retention_days (GAP-0141).
+func TestPrintSubsystemShowsTheAuditStoreSizeCap(t *testing.T) {
+	h := gateway.SubsystemHealth{State: gateway.StateRunning, Details: map[string]interface{}{
+		"retention_days": float64(7), "retention_state": "healthy", "retention_max_store_mb": float64(64),
+	}}
+	if out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) }); !strings.Contains(out, "retention: 7 days, size cap 64 MiB") {
+		t.Fatalf("no size cap in the telemetry lines:\n%s", out)
+	}
+	delete(h.Details, "retention_max_store_mb")
+	if out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) }); !strings.Contains(out, "retention: 7 days\n") {
+		t.Fatalf("retention without a cap:\n%s", out)
+	}
+}
+
 // TestPrintSubsystemExplainsFailingJudge pins GAP-1288: gateway status says
 // in words that the LLM judge is failing.
 func TestPrintSubsystemExplainsFailingJudge(t *testing.T) {

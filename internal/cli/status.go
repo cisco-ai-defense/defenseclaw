@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -1201,6 +1202,9 @@ func printSubsystem(name string, h gateway.SubsystemHealth, judgeMaxParallel int
 	if fallbacks != "" {
 		fmt.Printf("             %s %s\n", Dim("judge:"), asciiText(fallbacks))
 	}
+	if retention := telemetryRetentionLabel(h.Details); retention != "" {
+		fmt.Printf("             %s %s\n", Dim("retention:"), retention)
+	}
 	if len(h.Details) > 0 {
 		keys := make([]string, 0, len(h.Details))
 		for k := range h.Details {
@@ -1228,6 +1232,20 @@ func printSubsystem(name string, h gateway.SubsystemHealth, judgeMaxParallel int
 		}
 	}
 	fmt.Println()
+}
+
+// telemetryRetentionLabel is the audit store retention in the words of the
+// per-user status ("7 days, size cap 64 MiB"), from the telemetry health
+// details retention_days and retention_max_store_mb; "" when the gateway
+// reports no retention. On a managed computer defenseclaw status, doctor and
+// the TUI are refused, so this line is where the size cap shows (GAP-0141).
+func telemetryRetentionLabel(details map[string]interface{}) string {
+	days, ok := details["retention_days"].(float64)
+	if !ok || days < 0 || days != float64(int64(days)) {
+		return ""
+	}
+	capMB, _ := details["retention_max_store_mb"].(float64)
+	return enterprisestatus.RetentionLabel(int64(days), int64(capMB))
 }
 
 // eventHistoryProblem says in plain words why audit events cannot be
