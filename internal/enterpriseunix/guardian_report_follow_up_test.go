@@ -6,6 +6,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -61,5 +62,37 @@ func TestAPushDuringTheRunWaitsForTheGuardianReportOnce(t *testing.T) {
 					pushed.Round(time.Millisecond), alone.Round(time.Millisecond), report)
 			}
 		})
+	}
+}
+
+// rel-1-0-3 GAP-0142 on macOS: every transaction started the loaded verify
+// job again; launchd refused the bootstrap ("already loaded") and kickstart
+// -k ran a verify at once and killed the one the previous transaction had
+// started, so the follow-up of a second config push waited about 15 s for
+// it to exit. A loaded verify job whose definition the run keeps is left on
+// its calendar; a changed definition is still loaded again.
+func TestATransactionLeavesTheLoadedMacVerifyJobOnItsCalendar(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	if !h.services.Active(context.Background(), Unit{Name: labelVerify, Kind: "timer"}) {
+		t.Fatal("the install did not load the verify job")
+	}
+	before := len(h.services.calls)
+	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")}))
+	if n := countCalls(h.services.calls[before:], "start "+labelVerify); n != 0 {
+		t.Fatalf("the upgrade started the loaded verify job %d times (launchd: kickstart -k); calls %v", n, h.services.calls[before:])
+	}
+	if !h.services.Active(context.Background(), Unit{Name: labelVerify, Kind: "timer"}) {
+		t.Fatal("the verify job is not loaded after the upgrade")
+	}
+	// A definition that changes is loaded again.
+	plist := h.env.P(h.env.Services.DefinitionPath(Unit{Name: labelVerify}, ""))
+	if err := os.WriteFile(plist, []byte("<plist>tampered</plist>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before = len(h.services.calls)
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if countCalls(h.services.calls[before:], "start "+labelVerify) == 0 {
+		t.Fatalf("a repair of the changed verify definition did not load it again; calls %v", h.services.calls[before:])
 	}
 }
