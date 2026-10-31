@@ -259,12 +259,17 @@ _PY_ASSIGN_OPS = frozenset({"=", "+=", "-=", "*=", "/=", "//=", "%=", "|=", "&="
 
 
 class _PyStmt:
-    __slots__ = ("scope", "writes", "names", "targets")
+    __slots__ = ("scope", "writes", "names", "targets", "rebinds", "indent", "nested")
 
     def __init__(self, scope: int) -> None:
         self.scope = scope
         self.writes = False
         self.names: set[str] = set()
+        # The name of a plain ``name = value`` whose value does not use name
+        # (GAP-1312), its block level, and whether it starts a def or lambda.
+        self.rebinds = ""
+        self.indent = 0
+        self.nested = False
         # (scope, name) pairs; scope -1 is module-wide (globals, attributes).
         self.targets: set[tuple[int, str]] = set()
 
@@ -301,28 +306,64 @@ class PySource:
             self._analyze()
         if line_idx >= len(self._line_stmt) or self._line_stmt[line_idx] < 0:
             return False
-        first = self._stmts[self._line_stmt[line_idx]]
+        first_idx = self._line_stmt[line_idx]
+        first = self._stmts[first_idx]
         if first.writes:
             return True
         tainted: dict[str, set[int]] = {}
         for scope, name in first.targets:
             tainted.setdefault(name, set()).add(scope)
+        # A plain rebinding of the name (target = Path("safe.txt")) hides
+        # the path from the statements it dominates (GAP-1312), until a
+        # statement that may carry the path assigns the name again.
+        hidden = {first.rebinds: self._dominated_by_rebinding(first_idx)} if first.rebinds else {}
         seen = {id(first)}
         changed = bool(tainted)
         while changed:
             changed = False
-            for st in self._stmts:
+            for idx, st in enumerate(self._stmts):
                 if id(st) in seen:
                     continue
-                if not any((scopes := tainted.get(n)) and (-1 in scopes or st.scope in scopes) for n in st.names):
+                if not any(
+                    (scopes := tainted.get(n)) and (-1 in scopes or st.scope in scopes) and idx not in hidden.get(n, ())
+                    for n in st.names
+                ):
                     continue
                 if st.writes:
                     return True
                 seen.add(id(st))
                 for scope, name in st.targets:
                     tainted.setdefault(name, set()).add(scope)
+                    hidden.pop(name, None)
                 changed = True
         return False
+
+    def _dominated_by_rebinding(self, first_idx: int) -> set[int]:
+        """Indexes of the statements a plain rebinding of the name that
+        statement *first_idx* assigns dominates (GAP-1312).
+
+        The rebinding must sit in the block of the assignment: the same
+        level, with no shallower statement between them. A statement after it
+        is covered until that block ends or a def or lambda starts (code that
+        may run later, when the name can hold the path again). A rebinding in
+        a sibling branch (else, elif, except, finally, a loop's else, another
+        match case), in another function or in a nested block covers nothing.
+        The Go artifact scan (pythonNameWrittenAfter) follows the same rule.
+        """
+        first = self._stmts[first_idx]
+        covered: set[int] = set()
+        on = False
+        for k in range(first_idx + 1, len(self._stmts)):
+            st = self._stmts[k]
+            if st.indent < first.indent:
+                break
+            if st.nested:
+                on = False
+            if on:
+                covered.add(k)
+            elif st.rebinds == first.rebinds and st.indent == first.indent:
+                on = True
+        return covered
 
     def _analyze(self) -> None:
         nrows = len(self.code)
@@ -331,6 +372,7 @@ class PySource:
         stmts: list[_PyStmt] = []
         stack: list[int] = []
         funcs: list[tuple[int, int, str]] = []  # (indent, scope id, name)
+        declared: dict[int, set[str]] = {}  # ``global`` names per function scope
         indent = 0
         row = 0
         cur: list = []
@@ -356,7 +398,11 @@ class PySource:
                     # (also after a one-line ``def f(): ...``).
                     while funcs and funcs[-1][0] >= indent:
                         funcs.pop()
-                    st = _py_statement(cur, funcs)
+                    scope = funcs[-1][1] if funcs else -1
+                    st = _py_statement(cur, funcs, declared.get(scope, set()))
+                    st.indent = indent
+                    if cur[0].string == "global" and scope != -1:
+                        declared.setdefault(scope, set()).update(t.string for t in cur[1:] if t.type == tokenize.NAME)
                     for r in range(cur[0].start[0] - 1, min(cur[-1].end[0], nrows)):
                         line_stmt[r] = len(stmts)
                     stmts.append(st)
@@ -378,8 +424,12 @@ def _string_value(tok_string: str) -> str:
     return body[1:-1]
 
 
-def _py_statement(cur: list, funcs: list[tuple[int, int, str]]) -> _PyStmt:
-    """Names, assignment targets and write calls of one logical line."""
+def _py_statement(cur: list, funcs: list[tuple[int, int, str]], global_names: set[str]) -> _PyStmt:
+    """Names, assignment targets and write calls of one logical line.
+
+    *global_names* are the names the function declares ``global``: they
+    are module-wide, so a write through one in another function counts.
+    """
     st = _PyStmt(funcs[-1][1] if funcs else -1)
     n = len(cur)
 
@@ -390,7 +440,7 @@ def _py_statement(cur: list, funcs: list[tuple[int, int, str]]) -> _PyStmt:
         name = cur[k].string
         if keyword.iskeyword(name):
             return
-        st.targets.add((-1 if is_op(k - 1, ".") else st.scope, name))
+        st.targets.add((-1 if is_op(k - 1, ".") or name in global_names else st.scope, name))
 
     depth = 0
     assign_at: list[int] = []
@@ -403,7 +453,10 @@ def _py_statement(cur: list, funcs: list[tuple[int, int, str]]) -> _PyStmt:
             elif depth == 0 and tok.string in _PY_ASSIGN_OPS:
                 assign_at.append(k)
             continue
-        if tok.type != tokenize.NAME or keyword.iskeyword(tok.string):
+        if tok.type != tokenize.NAME:
+            continue
+        if keyword.iskeyword(tok.string):
+            st.nested = st.nested or tok.string in ("def", "lambda")
             continue
         name = tok.string
         st.names.add(name)
@@ -445,6 +498,15 @@ def _py_statement(cur: list, funcs: list[tuple[int, int, str]]) -> _PyStmt:
         if funcs and funcs[-1][2]:
             st.targets.add((-1, funcs[-1][2]))
     elif assign_at:
+        if (
+            assign_at == [1]
+            and cur[0].type == tokenize.NAME
+            and cur[0].string not in {t.string for t in cur[2:] if t.type == tokenize.NAME}
+            and cur[1].string == "="
+        ):
+            st.rebinds = cur[0].string
+            # It sets the name without reading it.
+            st.names.discard(st.rebinds)
         depth = 0
         for k in range(assign_at[-1]):
             tok = cur[k]

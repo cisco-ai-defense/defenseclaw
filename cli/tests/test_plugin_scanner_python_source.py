@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 
+import pytest
 from defenseclaw.scanner.plugin_scanner.analyzers import scan_source_files
 
 
@@ -291,3 +292,131 @@ def test_hermes_user_memory_copy_is_flagged(tmp_path):
         ("COG-TAMPER", "copy.py:7"),
         ("COG-TAMPER", "copy.py:8"),
     ]
+
+
+# GAP-1312: a plain rebinding of the name hides the path only from the
+# writes it dominates. The cases match
+# TestPythonPathWriteMatchRebindingMustDominateTheWrite (internal/guardrail).
+_REBINDING_CASES = [
+    (
+        "row: rebound before the write",
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\ntarget = Path("safe.txt")\ntarget.write_text("hello")\n',
+        False,
+    ),
+    (
+        "rebound in a function",
+        'def f():\n    target = Path("MEMORY.md")\n    target = Path("safe.txt")\n    with open(target, "a") as fh:\n        fh.write("x")\n',
+        False,
+    ),
+    (
+        "written in a block the rebinding dominates",
+        'target = Path("MEMORY.md")\ntarget = Path("safe.txt")\nif ok:\n    target.write_text("hello")\n',
+        False,
+    ),
+    (
+        "written before the rebinding",
+        'target = Path("MEMORY.md")\ntarget.write_text("hello")\ntarget = Path("safe.txt")\n',
+        True,
+    ),
+    (
+        "rebound only in a nested branch",
+        'target = Path("MEMORY.md")\nif other:\n    target = Path("safe.txt")\ntarget.write_text("hello")\n',
+        True,
+    ),
+    (
+        "rebound in the else branch",
+        'if c:\n    target = Path.home() / ".claude" / "MEMORY.md"\nelse:\n    target = Path("notes.txt")\ntarget.write_text(x)\n',
+        True,
+    ),
+    (
+        "rebound in the elif branch",
+        'if c:\n    target = Path("MEMORY.md")\nelif d:\n    target = Path("notes.txt")\ntarget.write_text(x)\n',
+        True,
+    ),
+    (
+        "dead rebinding before except",
+        'try:\n    target = Path("MEMORY.md")\n    raise E\n    target = Path("safe.txt")\nexcept E:\n    target.write_text(x)\n',
+        True,
+    ),
+    (
+        "written in finally",
+        'try:\n    target = Path("MEMORY.md")\n    risky()\n    target = Path("safe.txt")\nfinally:\n    target.write_text(x)\n',
+        True,
+    ),
+    (
+        "rebound in the for else",
+        'for item in items:\n    target = Path("MEMORY.md")\n    break\nelse:\n    target = Path("safe.txt")\ntarget.write_text(x)\n',
+        True,
+    ),
+    (
+        "loop body rebinding after a break",
+        'while True:\n    target = Path("MEMORY.md")\n    if done:\n        break\n    target = Path("safe.txt")\ntarget.write_text(x)\n',
+        True,
+    ),
+    (
+        "rebound in another match case",
+        'match mode:\n    case "m":\n        target = Path("MEMORY.md")\n    case _:\n        target = Path("safe.txt")\ntarget.write_text(x)\n',
+        True,
+    ),
+    (
+        "rebound in another function",
+        'from pathlib import Path\n\ndef a():\n    global target\n    target = Path.home() / ".claude" / "MEMORY.md"\n\ndef b():\n    target = None\n\ndef c():\n    target.write_text(x)\n',
+        True,
+    ),
+    (
+        "rebound in a function, written at module level",
+        'target = Path("MEMORY.md")\ndef b():\n    target = None\ntarget.write_text(x)\n',
+        True,
+    ),
+    (
+        "rebound after the inner block",
+        'for x in xs:\n    target = Path("MEMORY.md")\ntarget = Path("safe.txt")\ntarget.write_text("hello")\n',
+        True,
+    ),
+    (
+        "rebound from itself",
+        'target = Path.home() / "MEMORY.md"\ntarget = target.resolve()\ntarget.write_text("hello")\n',
+        True,
+    ),
+    (
+        "rebound through an alias",
+        'target = Path("MEMORY.md")\nalias = target\ntarget = alias\ntarget.write_text(x)\n',
+        True,
+    ),
+    ("compared, not rebound", 'target = Path("MEMORY.md")\ntarget == other\ntarget.write_text("hello")\n', True),
+    (
+        "rebound across lines",
+        'target = Path("MEMORY.md")\ntarget = pick(\n    target)\ntarget.write_text("hello")\n',
+        True,
+    ),
+    (
+        "rebound beside another statement",
+        'target = Path("MEMORY.md")\ntarget = Path("safe.txt"); target = alias\ntarget.write_text("hello")\n',
+        True,
+    ),
+    (
+        "keyword argument, not a rebinding",
+        'def f():\n    target = Path("MEMORY.md")\n    configure(\n    target=None,\n    )\n    target.write_text(x)\n',
+        True,
+    ),
+    (
+        "def after the rebinding",
+        'target = Path("MEMORY.md")\ntarget = Path("safe.txt")\ndef later():\n    target.write_text(x)\n',
+        True,
+    ),
+    (
+        "lambda after the rebinding",
+        'target = Path("MEMORY.md")\ntarget = Path("safe.txt")\nsave = lambda: target.write_text(x)\n',
+        True,
+    ),
+]
+
+
+@pytest.mark.parametrize(("source", "flagged"), [c[1:] for c in _REBINDING_CASES], ids=[c[0] for c in _REBINDING_CASES])
+def test_rebound_python_path(source, flagged):
+    from defenseclaw.scanner.plugin_scanner.helpers import python_source
+
+    py = python_source(source)
+    assert py is not None
+    line = next(i for i, text in enumerate(source.split("\n")) if "MEMORY.md" in text)
+    assert py.path_written(line) is flagged

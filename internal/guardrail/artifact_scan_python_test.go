@@ -517,3 +517,42 @@ func TestArtifactPythonPathWriteReadsTheScriptsDirectory(t *testing.T) {
 		}
 	}
 }
+
+// A plain rebinding of the name hides the path only from the writes it
+// dominates (GAP-1312). The cases match test_rebound_python_path in
+// cli/tests/test_plugin_scanner_python_source.py.
+func TestPythonPathWriteMatchRebindingMustDominateTheWrite(t *testing.T) {
+	rule := regexp.MustCompile(`MEMORY\.md`)
+	for _, tc := range []struct {
+		name, source string
+		want         bool
+	}{
+		{"row: rebound before the write", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n", false},
+		{"rebound in a function", "def f():\n    target = Path(\"MEMORY.md\")\n    target = Path(\"safe.txt\")\n    with open(target, \"a\") as fh:\n        fh.write(\"x\")\n", false},
+		{"written in a block the rebinding dominates", "target = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\nif ok:\n    target.write_text(\"hello\")\n", false},
+		{"written before the rebinding", "target = Path(\"MEMORY.md\")\ntarget.write_text(\"hello\")\ntarget = Path(\"safe.txt\")\n", true},
+		{"rebound only in a nested branch", "target = Path(\"MEMORY.md\")\nif other:\n    target = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n", true},
+		{"rebound in the else branch", "if c:\n    target = Path.home() / \".claude\" / \"MEMORY.md\"\nelse:\n    target = Path(\"notes.txt\")\ntarget.write_text(x)\n", true},
+		{"rebound in the elif branch", "if c:\n    target = Path(\"MEMORY.md\")\nelif d:\n    target = Path(\"notes.txt\")\ntarget.write_text(x)\n", true},
+		{"dead rebinding before except", "try:\n    target = Path(\"MEMORY.md\")\n    raise E\n    target = Path(\"safe.txt\")\nexcept E:\n    target.write_text(x)\n", true},
+		{"written in finally", "try:\n    target = Path(\"MEMORY.md\")\n    risky()\n    target = Path(\"safe.txt\")\nfinally:\n    target.write_text(x)\n", true},
+		{"rebound in the for else", "for item in items:\n    target = Path(\"MEMORY.md\")\n    break\nelse:\n    target = Path(\"safe.txt\")\ntarget.write_text(x)\n", true},
+		{"loop body rebinding after a break", "while True:\n    target = Path(\"MEMORY.md\")\n    if done:\n        break\n    target = Path(\"safe.txt\")\ntarget.write_text(x)\n", true},
+		{"rebound in another match case", "match mode:\n    case \"m\":\n        target = Path(\"MEMORY.md\")\n    case _:\n        target = Path(\"safe.txt\")\ntarget.write_text(x)\n", true},
+		{"rebound in another function", "from pathlib import Path\n\ndef a():\n    global target\n    target = Path.home() / \".claude\" / \"MEMORY.md\"\n\ndef b():\n    target = None\n\ndef c():\n    target.write_text(x)\n", true},
+		{"rebound in a function, written at module level", "target = Path(\"MEMORY.md\")\ndef b():\n    target = None\ntarget.write_text(x)\n", true},
+		{"rebound after the inner block", "for x in xs:\n    target = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n", true},
+		{"rebound from itself", "target = Path.home() / \"MEMORY.md\"\ntarget = target.resolve()\ntarget.write_text(\"hello\")\n", true},
+		{"rebound through an alias", "target = Path(\"MEMORY.md\")\nalias = target\ntarget = alias\ntarget.write_text(x)\n", true},
+		{"compared, not rebound", "target = Path(\"MEMORY.md\")\ntarget == other\ntarget.write_text(\"hello\")\n", true},
+		{"rebound across lines", "target = Path(\"MEMORY.md\")\ntarget = pick(\n    target)\ntarget.write_text(\"hello\")\n", true},
+		{"rebound beside another statement", "target = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\"); target = alias\ntarget.write_text(\"hello\")\n", true},
+		{"keyword argument, not a rebinding", "def f():\n    target = Path(\"MEMORY.md\")\n    configure(\n    target=None,\n    )\n    target.write_text(x)\n", true},
+		{"def after the rebinding", "target = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\ndef later():\n    target.write_text(x)\n", true},
+		{"lambda after the rebinding", "target = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\nsave = lambda: target.write_text(x)\n", true},
+	} {
+		if got := pythonPathWriteMatch(rule, tc.source, "") != nil; got != tc.want {
+			t.Errorf("%s: pythonPathWriteMatch(%q) = %t, want %t", tc.name, tc.source, got, tc.want)
+		}
+	}
+}

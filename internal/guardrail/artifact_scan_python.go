@@ -66,13 +66,107 @@ func pythonPathWriteMatch(rule *regexp.Regexp, source, script string) []int {
 		// A path assigned to a name is a write when a later statement uses
 		// that name as the path argument. This covers Path.home()/"name"
 		// followed by open(target, "a"), the common skill-script form.
-		for offset, later := range lines[lineNo+1:] {
-			if pythonLineWritesName(later, callLines[lineNo+1+offset], assign[1]) {
-				return hit
-			}
+		if pythonNameWrittenAfter(lines, callLines, lineNo, assign[1]) {
+			return hit
 		}
 	}
 	return nil
+}
+
+var pythonNestedScope = lazyregexp.New(`\b(?:def|lambda)\b`)
+
+// pythonNameWrittenAfter reports whether a line after lines[at], which
+// assigns the path to name, writes through name. A plain rebinding of name
+// (target = Path("safe.txt")) hides the path only from the writes it
+// dominates (GAP-1312): the rebinding sits in the block of the assignment
+// (the same indent, no shallower line between them, not a continuation
+// line), and a write after it is covered until that block ends or a def or
+// lambda starts (code that may run later, when the name can hold the path
+// again). A rebinding in a sibling branch (else, elif, except, finally, a
+// loop's else, another match case), in another function or in a nested
+// block leaves the path live, and so does one whose value names anything a
+// line after the assignment derived from name (alias = target; target =
+// alias). PySource.path_written in the Python plugin scanner follows the
+// same rule.
+func pythonNameWrittenAfter(lines, callLines []string, at int, name string) bool {
+	indent := pythonIndent(lines[at])
+	carriers := map[string]bool{name: true}
+	inBlock, covered := true, false
+	depth, cont := pythonBracketDepth(callLines[at], 0)
+	for k := at + 1; k < len(lines); k++ {
+		line, calls := lines[k], callLines[k]
+		continuation := depth > 0 || cont
+		depth, cont = pythonBracketDepth(calls, depth)
+		code := !continuation && strings.TrimSpace(line) != ""
+		if code && pythonIndent(line) < indent {
+			inBlock, covered = false, false
+		}
+		if covered && pythonNestedScope.MatchString(calls) {
+			covered = false
+		}
+		if !covered && pythonLineWritesName(line, calls, name) {
+			return true
+		}
+		if !inBlock || covered {
+			continue
+		}
+		if code && pythonIndent(line) == indent && pythonLineRebinds(calls, name, carriers) {
+			covered = true
+			continue
+		}
+		if pythonMentionsAny(calls, carriers) {
+			for _, n := range pythonName.FindAllString(calls, -1) {
+				carriers[n] = true
+			}
+		}
+	}
+	return false
+}
+
+// pythonLineRebinds reports whether calls (a line with its string text
+// blanked) is a plain `name = value` statement whose value names none of
+// carriers, so after it the name holds a new value. A line the scan cannot
+// read as one whole statement (a semicolon, a backslash or an open bracket)
+// is not a rebinding.
+func pythonLineRebinds(calls, name string, carriers map[string]bool) bool {
+	assign := pythonAssignment.FindStringSubmatchIndex(calls)
+	if len(assign) != 4 || calls[assign[2]:assign[3]] != name {
+		return false
+	}
+	value := calls[assign[1]:]
+	if strings.HasPrefix(value, "=") || strings.ContainsAny(value, ";\\") || pythonMentionsAny(value, carriers) {
+		return false
+	}
+	depth, cont := pythonBracketDepth(value, 0)
+	return depth == 0 && !cont
+}
+
+// pythonBracketDepth returns the bracket depth after calls, a line with its
+// strings and comments blanked, starting at depth, and whether the line ends
+// in a backslash continuation.
+func pythonBracketDepth(calls string, depth int) (int, bool) {
+	for _, c := range calls {
+		switch c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		}
+	}
+	return max(depth, 0), strings.HasSuffix(strings.TrimRight(calls, " \t\r"), "\\")
+}
+
+func pythonMentionsAny(text string, names map[string]bool) bool {
+	for _, n := range pythonName.FindAllString(text, -1) {
+		if names[n] {
+			return true
+		}
+	}
+	return false
+}
+
+func pythonIndent(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t"))
 }
 
 // pythonLineWritesPath reports whether a write call on line acts on the
