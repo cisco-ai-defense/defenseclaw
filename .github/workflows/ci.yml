@@ -1247,6 +1247,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/go-tmp"
           TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
           export TMPDIR
+          # The hook tests run the real gateway binary. Built here once, it
+          # stays out of the -timeout and of the recorded test times (in the
+          # test, the first hook test of a part paid 60-120 s for it).
+          mkdir -p "$RUNNER_TEMP/dc-test-gateway"
+          go build -o "$RUNNER_TEMP/dc-test-gateway/defenseclaw" ./cmd/defenseclaw
+          export DC_TEST_NATIVE_GATEWAY="$RUNNER_TEMP/dc-test-gateway/defenseclaw"
           test_regex="$(python3 scripts/go_test_shards.py \
             --package-dir internal/gateway/connector \
             --timings scripts/test-timings/go-darwin.json \

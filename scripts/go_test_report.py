@@ -17,7 +17,12 @@ a "still running" line, so a hung shard names its test.
 
 --timings writes the pass and fail events of every package and top-level
 test, without output, in `go test -json` form: scripts/update_test_timings.py
-go reads these files to refresh scripts/test-timings/go-linux.json.
+go reads these files to refresh scripts/test-timings/go-linux.json. A
+top-level test's Elapsed there is its wall time (from its run event, or its
+cont event once t.Parallel resumed it, to its pass or fail event) when that
+is longer: go test leaves the parallel subtests out of their parent's
+Elapsed, so a test of parallel subtests weighed almost nothing to the shard
+planner while it held its shard for minutes.
 
 --annotate TITLE prints a GitHub error annotation per failed top-level test
 (at most 20). The exit status is always 0; the caller keeps go test's.
@@ -27,7 +32,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+from datetime import datetime
+
+_FRACTION = re.compile(r"(\.\d{6})\d+")
+
+
+def _time(event: dict) -> datetime | None:
+    """The event's Time (RFC 3339, nanoseconds), or None."""
+    value = event.get("Time")
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(_FRACTION.sub(r"\1", value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def main() -> int:
@@ -39,6 +59,7 @@ def main() -> int:
     out = sys.stdout
     timings = open(args.timings, "w", encoding="utf-8") if args.timings else None
     buffered: dict[tuple[str, str], list[str]] = {}
+    started: dict[tuple[str, str], datetime] = {}
     failed: list[str] = []
     package_failed = False
     try:
@@ -77,6 +98,10 @@ def main() -> int:
                     timings.write(json.dumps({"Action": action, "Package": package, "Elapsed": event.get("Elapsed", 0)}) + "\n")
                 continue
             key = (package, test)
+            if action in ("run", "cont") and "/" not in test:
+                at = _time(event)
+                if at is not None:
+                    started[key] = at
             if action == "output":
                 buffered.setdefault(key, []).append(event.get("Output", ""))
             elif action in ("pass", "skip"):
@@ -87,9 +112,12 @@ def main() -> int:
                 if "/" not in test:
                     failed.append(test)
             if action in ("pass", "fail") and "/" not in test and timings is not None:
-                timings.write(
-                    json.dumps({"Action": action, "Package": package, "Test": test, "Elapsed": event.get("Elapsed", 0)}) + "\n"
-                )
+                elapsed = event.get("Elapsed", 0)
+                start, end = started.pop(key, None), _time(event)
+                if start is not None and end is not None:
+                    elapsed = max(elapsed, round((end - start).total_seconds(), 3))
+                record = {"Action": action, "Package": package, "Test": test, "Elapsed": elapsed}
+                timings.write(json.dumps(record) + "\n")
     finally:
         if timings is not None:
             timings.close()

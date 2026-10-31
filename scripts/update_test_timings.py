@@ -131,7 +131,8 @@ def merge_go_timings(old: dict, new: dict, module: str) -> dict:
     package new has drops its old per-test times too, so a test it no longer
     records falls back to the new "*"."""
     packages = {**old.get("packages", {}), **new.get("packages", {})}
-    measured = {package[len(module) + 1 :] if package.startswith(module + "/") else package for package in new.get("packages", {})}
+    prefix = module + "/"
+    measured = {package.removeprefix(prefix) for package in new.get("packages", {})}
     tests = {rel: names for rel, names in old.get("tests", {}).items() if rel not in measured}
     tests.update(new.get("tests", {}))
     return {"packages": dict(sorted(packages.items())), "tests": dict(sorted(tests.items()))}
