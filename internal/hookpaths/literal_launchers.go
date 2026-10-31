@@ -331,7 +331,7 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		if dest := cpDestination(words[1:], makeStatic(len(words)-1), cwd); dest != "" {
 			return []string{dest}
 		}
-	case program == "tee":
+	case program == "tee" || program == "gtee":
 		var names []string
 		for _, word := range words[1:] {
 			if word == "--" {
@@ -343,7 +343,7 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 			names = append(names, word)
 		}
 		return add(names)
-	case program == "dd":
+	case program == "dd" || program == "gdd":
 		// dd writes its of= operand; with several, GNU dd uses the last,
 		// so each is listed (GAP-0228).
 		var names []string
@@ -353,7 +353,7 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 			}
 		}
 		return add(names)
-	case program == "truncate":
+	case program == "truncate" || program == "gtruncate":
 		// truncate FILE... rewrites every file operand; -s and -r take a
 		// value (GAP-0228: a brace operand is read as its fixed words).
 		var names []string
