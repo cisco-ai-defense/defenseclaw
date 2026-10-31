@@ -253,42 +253,62 @@ func executeEnterpriseSetup(
 		}
 	}()
 
-	arguments := enterpriseLifecycleArguments(stageRoot, opts)
 	childEnvironment, err := trustedEnterpriseSetupEnvironment(stageRoot)
 	if err != nil {
 		return 0, err
 	}
-	if opts.Standalone && opts.Action == "uninstall" {
-		// The worker can be killed after it removes managed hook wiring and
-		// before it commits. Arm an independent journal replay first.
-		if err := enterpriseSetupArmUninstallRecovery(); err != nil {
-			return 0, fmt.Errorf("cannot arm uninstall recovery before changing the installation: %w", err)
+	// A standalone /ensure with CONFIG= and BUNDLE= is the single-app form:
+	// on a new computer it stages the install with every service stopped and
+	// then applies the signed bundle, so the first policy any service runs is
+	// the signed one (first_bundle.go).
+	plan := standaloneEnsurePlan{steps: []standaloneEnsureStep{{opts: opts}}}
+	if opts.Standalone && standaloneFirstBundleRequested(opts) {
+		deployment, err := standaloneSetupDeployment()
+		if err != nil {
+			return 0, fmt.Errorf("cannot establish whether a standalone deployment is already installed: %w", err)
 		}
+		plan = planStandaloneEnsure(opts, deployment.State != winpath.EnterpriseDeploymentAbsent &&
+			deployment.State != winpath.EnterpriseDeploymentTombstone)
 	}
 	cliPath := filepath.Join(stageRoot, "defenseclaw.exe")
-	lifecycle := runEnterpriseLifecycleChild(parent, opts, func(ctx context.Context) ([]byte, error) {
-		child := processutil.CommandContext(ctx, cliPath, arguments...)
-		child.Dir = stageRoot
-		child.Env = childEnvironment
-		if !opts.Standalone {
-			return processutil.CombinedOutputTree(child, false)
+	runChild := func(runOpts enterpriseSetupOptions) (enterpriseLifecycleChildRun, error) {
+		arguments := enterpriseLifecycleArguments(stageRoot, runOpts)
+		if runOpts.Standalone && runOpts.Action == "uninstall" {
+			// The worker can be killed after it removes managed hook wiring and
+			// before it commits. Arm an independent journal replay first.
+			if err := enterpriseSetupArmUninstallRecovery(); err != nil {
+				return enterpriseLifecycleChildRun{}, fmt.Errorf("cannot arm uninstall recovery before changing the installation: %w", err)
+			}
 		}
-		// Pass the lifecycle's stderr (diagnostics of a failing run) on at
-		// once. Its scanner runtime progress goes to stdout for a person and
-		// to the lifecycle log in a JSON run, never to stderr, which an MDM
-		// reads as a failed script (GAP-0642, GAP-1069). stdout is the result.
-		var captured bytes.Buffer
-		child.Stdout = &captured
-		child.Stderr = lifecycleProgress{stderr}
-		err := processutil.RunTree(child)
-		return captured.Bytes(), err
-	}, func(ctx context.Context) ([]byte, error) {
-		// The trusted staged CLI and module stay until this recovery ends:
-		// cleanup runs below. It replays pending rollback or committed
-		// uninstall hook teardown using the protected lifecycle evidence.
-		return enterpriseSetupRecoveryRunner(ctx, cliPath,
-			enterpriseLifecycleArguments(stageRoot, standaloneRecoveryOptions(opts)), stageRoot, childEnvironment)
-	})
+		return runEnterpriseLifecycleChild(parent, runOpts, func(ctx context.Context) ([]byte, error) {
+			child := processutil.CommandContext(ctx, cliPath, arguments...)
+			child.Dir = stageRoot
+			child.Env = childEnvironment
+			if !runOpts.Standalone {
+				return processutil.CombinedOutputTree(child, false)
+			}
+			// Pass the lifecycle stderr (diagnostics of a failing run) on at
+			// once. Its scanner runtime progress goes to stdout for a person and
+			// to the lifecycle log in a JSON run, never to stderr, which an MDM
+			// reads as a failed script (GAP-0642, GAP-1069). stdout is the result.
+			var captured bytes.Buffer
+			child.Stdout = &captured
+			child.Stderr = lifecycleProgress{stderr}
+			err := processutil.RunTree(child)
+			return captured.Bytes(), err
+		}, func(ctx context.Context) ([]byte, error) {
+			// The trusted staged CLI and module stay until this recovery ends:
+			// cleanup runs below. It replays pending rollback or committed
+			// uninstall hook teardown using the protected lifecycle evidence.
+			return enterpriseSetupRecoveryRunner(ctx, cliPath,
+				enterpriseLifecycleArguments(stageRoot, standaloneRecoveryOptions(runOpts)), stageRoot, childEnvironment)
+		}), nil
+	}
+	lifecycle, last, err := runStandaloneEnsurePlan(plan, runChild)
+	if err != nil {
+		return 0, err
+	}
+	opts = last
 	output, runErr, timedOut := lifecycle.output, lifecycle.runErr, lifecycle.timedOut
 	if len(output) > maximumLifecycleOutput {
 		if !timedOut {

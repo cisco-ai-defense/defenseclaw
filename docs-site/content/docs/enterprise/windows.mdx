@@ -268,8 +268,8 @@ Setup properties use `NAME=value`; names are case-insensitive and ignore dashes.
 | --- | --- |
 | `CONFIG=<path>` | The administrator config. Required for the first install; later runs reuse the installed config |
 | `MANIFEST=<path>` | A target manifest you publish. Required for `/install` and for `enterprise.enrollment.mode: manifest` |
-| `BUNDLE=<path>` | With `/ensure` on an installed computer: apply this signed policy bundle. Not with `CONFIG=` |
-| `TRUSTANCHORS=<path>` | With `/ensure`: install this administrator-only bundle trust anchor file first. Not with `CONFIG=` |
+| `BUNDLE=<path>` | With `/ensure`: apply this signed policy bundle. With `CONFIG=` on a computer without DefenseClaw, Setup installs from `CONFIG=` with every service stopped, then applies the bundle and starts the services on it; if the bundle is not applied it removes that install and exits `1603`. On an installed computer `CONFIG=` is then ignored |
+| `TRUSTANCHORS=<path>` | With `/ensure` and `BUNDLE=`: install this administrator-only bundle trust anchor file with the bundle. Not with `CONFIG=` alone |
 | `REFUSECAPABILITYLOSS=1` | With `/ensure` and `BUNDLE=`: refuse a bundle that turns off an enforced capability |
 | `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the Claude Code attestation ([Verify the install](#verify-the-install)) |
 | `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accept only these Authenticode signer thumbprints |

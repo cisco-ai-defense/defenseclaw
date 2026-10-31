@@ -30,14 +30,24 @@ tested. Pilot other channels and upgrades before fleet assignment.
 
 | Platform | Install | Detect | Keep healthy | Remove |
 | --- | --- | --- | --- | --- |
-| Windows 10/11 x64 | Base Win32 app with config; one dependent Win32 app per signed bundle version | Registry rule for base; generated `detect-bundle.ps1` for bundles | Remediations pair (`Remediate-Detect.ps1`, `Remediate-Fix.ps1`); in bundle mode compliant only while the gateway enforces the confirmed bundle, and the fix re-applies it from the bundle store | Base app uninstall; bundle app no-op uninstall |
+| Windows 10/11 x64 | Win32 app with config; with signed bundles, one app with config and bundle (a new app version per bundle version) | Registry rule for a config app; generated `detect-bundle.ps1` for bundles | Remediations pair (`Remediate-Detect.ps1`, `Remediate-Fix.ps1`); in bundle mode compliant only while the gateway enforces the confirmed bundle, and the fix re-applies it from the bundle store | Base app uninstall; bundle app no-op uninstall |
 | macOS 13+ (Apple silicon) | Shell script (recommended) or unmanaged PKG app | `detect.sh` custom attribute; pkg receipt | Script frequency | `uninstall.sh` shell script |
 | Ubuntu, RHEL (the releases Intune supports) | Linux platform script | `detect.sh` as a second platform script; package database | Script frequency (default every 15 minutes) | `uninstall.sh` platform script |
 
 ## Signed policy bundles on Windows
 
-Deliver three apps, in this order: the rule-pack app, the base app, the
-bundle app. Each later app depends on the one before it.
+Recommended: one app built with `-ConfigPath`, `-BundlePath`,
+`-TrustAnchorPath` and `-RequireBundle`. On a new device Setup installs from
+`config.yaml` with every service stopped, then applies the bundle and starts the
+services on it, so no service runs on `config.yaml`; if the bundle is not
+applied, Setup removes that install and the app fails, so Intune retries it
+whole. On an installed device the same app applies the bundle only, so a later
+bundle version is a new version of this app, with no app dependency. Devices
+installed with the two-app recipe below take it as they are.
+
+The two-app recipe (kept for devices installed with it until they move to the
+single app): deliver three apps, in this order: the rule-pack app, the base
+app, the bundle app. Each later app depends on the one before it.
 
 1. **Rule-pack app.** `Install-DefenseClawRulePack.ps1` copies the pack folder
    from its content to `C:\ProgramData\DefenseClaw-RulePacks\<pack>`, gives
