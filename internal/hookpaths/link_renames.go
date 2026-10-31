@@ -834,7 +834,7 @@ func hasDotDotStep(path string) bool {
 // findExecCommands returns the source text of every child command a find
 // call runs with -exec, -execdir, -ok or -okdir.
 func findExecCommands(command, program string, args []*syntax.Word, words []string, static []bool) []string {
-	if program != "find" && program != "gfind" {
+	if program != "find" && program != "gfind" || findRunsNoChild(words, static) {
 		return nil
 	}
 	var children []string
@@ -852,6 +852,19 @@ func findExecCommands(command, program string, args []*syntax.Word, words []stri
 		i = end
 	}
 	return children
+}
+
+// findRunsNoChild reports a find call that no ; or + word ends: bash ends
+// the statement at an unescaped ;, so an -exec, -execdir, -ok or -okdir
+// action of the call is incomplete. find then refuses the whole expression
+// before it visits an entry and runs no child; the next statement runs on
+// its own (GAP-0189). A word that expands at run time may be the
+// terminator, so only an all-static call is read so.
+func findRunsNoChild(words []string, static []bool) bool {
+	if slices.Contains(static, false) {
+		return false
+	}
+	return !slices.ContainsFunc(words[1:], func(word string) bool { return word == ";" || word == "+" })
 }
 
 // throughFile reports a path whose nearest existing parent is not a
@@ -876,6 +889,9 @@ func throughFile(path string) bool {
 func wrapperChangesDirectory(program string, words []string, static []bool) bool {
 	switch program {
 	case "find", "gfind":
+		if findRunsNoChild(words, static) {
+			return false
+		}
 		for i, word := range words {
 			if static[i] && (word == "-execdir" || word == "-okdir") {
 				return true
