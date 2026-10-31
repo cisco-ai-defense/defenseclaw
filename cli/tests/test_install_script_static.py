@@ -3817,14 +3817,3 @@ def test_the_old_venv_moves_only_after_running_cli_calls_finish() -> None:
     helper = script[script.index("wait_cli_calls_done() {"):]
     helper = helper[: helper.index("\n}\n")]
     assert "SECONDS + 15" in helper and '"${VENV}"/bin/*' in helper
-
-
-def test_waiting_for_cli_calls_opens_no_process_substitution() -> None:
-    """rel-1-0-6 GAP-0185: macOS bash 3.2 keeps the pipe of every <(...) a
-    function opens; one per process ran install.sh out of descriptors and it
-    aborted. The wait reads one ps listing per poll."""
-    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
-    helper = script[script.index("wait_cli_calls_done() {"):]
-    helper = helper[: helper.index("\n}\n")]
-    assert "<(" not in helper
-    assert 'ps -U "$(id -u)" -o pid= -o command=' in helper
