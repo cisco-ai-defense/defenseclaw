@@ -82,6 +82,11 @@ func sharedDefaultRegistry() *connector.Registry {
 // profile fields (Capabilities, NativeOTLP, MapVerdict, etc.) without
 // a nil-check ladder.
 func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
+	if name == connector.AgentGatewayConnectorName {
+		// The agent-gateway route installs nothing and is not in the
+		// connector registry; its profile is fixed (agent_gateway_hook.go).
+		return connector.AgentGatewayHookProfile()
+	}
 	provider, ok := a.hookProfileProvider(name)
 	if !ok {
 		return connector.HookProfile{Name: name}

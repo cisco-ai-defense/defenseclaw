@@ -48,9 +48,9 @@ func overLimitNativeWriteCalls() []nativeWriteCall {
 		{"claudecode", "MultiEdit", func(p string) map[string]any {
 			return map[string]any{"file_path": p, "edits": []any{map[string]any{"old_string": "# base", "new_string": overLimitWriteText}}}
 		}},
-		{"opencode", "write", func(p string) map[string]any { return map[string]any{"filePath": p, "content": overLimitWriteText} }},
+		{"opencode", "write", func(p string) map[string]any { return map[string]any{"path": p, "content": overLimitWriteText} }},
 		{"opencode", "edit", func(p string) map[string]any {
-			return map[string]any{"filePath": p, "oldString": "# base", "newString": overLimitWriteText}
+			return map[string]any{"path": p, "oldString": "# base", "newString": overLimitWriteText}
 		}},
 		{"codex", "apply_patch", func(p string) map[string]any {
 			return map[string]any{"command": "*** Begin Patch\n*** Update File: " + p + "\n@@\n # base\n" +
@@ -240,7 +240,7 @@ func TestOverLimitNativeWritesThroughAHomeSymlinkUnderProtectHome(t *testing.T) 
 func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedInASandbox(t *testing.T) {
 	f := newSandboxIngressFixture(t)
 	versions := map[string][3]string{
-		"opencode":   {"1.18.10", "opencode-hooks-v1", "/api/v1/opencode/hook"},
+		"opencode":   {"2.1.4", "opencode-hooks-v2", "/api/v1/opencode/hook"},
 		"claudecode": {"2.1.156", "claudecode-hooks-v1", "/api/v1/claude-code/hook"},
 		"codex":      {"0.128.0", "codex-hooks-v1", "/api/v1/codex/hook"},
 		"copilot":    {"1.0.40", "copilot-hooks-v1", "/api/v1/copilot/hook"},

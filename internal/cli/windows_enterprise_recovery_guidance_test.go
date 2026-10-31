@@ -313,3 +313,41 @@ func TestWindowsEnterpriseExecutionPolicyRefusal(t *testing.T) {
 		t.Fatalf("other stderr = %q", got)
 	}
 }
+
+// A failed lifecycle never hands the administrator security-descriptor
+// internals (ACE counts, DACL shapes, SDDL): a known diagnostic becomes a plain
+// statement about its path, an unknown one keeps its context and names the
+// path, and a message without such detail is kept as it is.
+func TestWindowsEnterpriseStandaloneErrorTextHidesSecurityDescriptorDetail(t *testing.T) {
+	for _, test := range []struct {
+		message, want string
+		internal      bool
+	}{
+		{
+			message:  `enterprise hooks: managed Windows DACL on C:\ProgramData\DefenseClaw has 8 ACEs, expected 7`,
+			want:     `enterprise hooks: the permissions on C:\ProgramData\DefenseClaw are not the ones DefenseClaw set`,
+			internal: true,
+		},
+		{
+			message:  `read DACL of C:\Users\u1\.defenseclaw: Access is denied.`,
+			want:     `DefenseClaw could not read the permissions on C:\Users\u1\.defenseclaw (Access is denied.)`,
+			internal: true,
+		},
+		{
+			message:  `apply managed state: set SDDL O:BAG:SY on C:\ProgramData\DefenseClaw\hooks: access denied`,
+			want:     `apply managed state: DefenseClaw could not verify or apply the permissions on C:\ProgramData\DefenseClaw\hooks`,
+			internal: true,
+		},
+		{
+			message:  `ACL mismatch`,
+			want:     `DefenseClaw could not verify or apply the permissions of a managed path`,
+			internal: true,
+		},
+		{message: "  the gateway did not start  ", want: "the gateway did not start"},
+	} {
+		got, internal := windowsEnterpriseStandaloneErrorText(test.message)
+		if got != test.want || internal != test.internal {
+			t.Errorf("windowsEnterpriseStandaloneErrorText(%q) = %q, %v; want %q, %v", test.message, got, internal, test.want, test.internal)
+		}
+	}
+}

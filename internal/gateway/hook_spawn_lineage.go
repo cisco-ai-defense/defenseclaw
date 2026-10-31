@@ -7,12 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"path"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -51,7 +51,7 @@ type scoredHookSpawnIntent struct {
 	ready bool
 }
 
-var hookSpawnTaskPattern = regexp.MustCompile(`(?i)(?:task[_-]?name|agent[_-]?name|child[_-]?(?:name|role))\s*[:=]\s*["']?([A-Za-z0-9_./:-]{1,512})`)
+var hookSpawnTaskPattern = lazyregexp.New(`(?i)(?:task[_-]?name|agent[_-]?name|child[_-]?(?:name|role))\s*[:=]\s*["']?([A-Za-z0-9_./:-]{1,512})`)
 
 func hookSpawnIntentToolKey(meta llmEventMeta) string {
 	source := strings.ToLower(strings.TrimSpace(meta.Source))
@@ -340,7 +340,7 @@ type hookChildThread struct {
 	createdAt time.Time
 }
 
-var codexThreadIDPattern = regexp.MustCompile(`"threadId"\s*:\s*"([A-Za-z0-9][A-Za-z0-9._-]{7,127})"`)
+var codexThreadIDPattern = lazyregexp.New(`"threadId"\s*:\s*"([A-Za-z0-9][A-Za-z0-9._-]{7,127})"`)
 
 // isCodexThreadSpawnTool reports whether tool is the Codex TUI's
 // create_thread. Codex 0.160 runs a spawned agent as a thread of its own: it

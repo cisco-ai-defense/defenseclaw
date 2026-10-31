@@ -93,6 +93,7 @@ gateway.
 | `anchors-install.schema.json` | `.../enterprise/management/anchors-install-v1.json` | `enterprise bundle anchors install --json` (Linux, macOS) |
 | `bundle-receipt.schema.json` | `.../enterprise/management/bundle-receipt-v1.json` | the files `<etc>/bundles/receipt.json` and `<etc>/bundles/receipt-events/<receipt_id>.json` |
 | `bundle-anchors.schema.json` | `.../enterprise/management/bundle-anchors-v1.json` | the trust anchor file the agent supplies (input) |
+| `identity-refresh.schema.json` | `.../enterprise/management/identity-refresh-v1.json` | `enterprise identity refresh --json` (from 1.0.6) |
 
 Every `$id` starts with `https://defenseclaw.cisco.com/schemas/enterprise/`.
 The schemas are Draft 2020-12 and closed (`additionalProperties: false`), so
@@ -103,6 +104,35 @@ or an exit code bumps it.
 
 `exit-codes.md` lists the exit codes and the MDM wrapper codes;
 `detection.md` covers inventory detection.
+
+### What to forward
+
+Some members name accounts or hold free text: warning and error messages,
+`enrollment.accounts`, `services[]`, `changes`,
+`sessions_restart_required.entries`, a receipt's `actor` and `principal`,
+and the bundle `created_by` and `change_summary`. Keep them on the device.
+`forward/` holds one closed schema per document with only the members that
+are safe to send off the device:
+
+| Forward schema (`forward/`) | Projects |
+|---|---|
+| `lifecycle-result-forward.schema.json` | `bundle apply`, `<os> status`, `verify`, `ensure` |
+| `bundle-verify-forward.schema.json` | `bundle verify --json` |
+| `bundle-status-forward.schema.json` | `bundle status --json` |
+| `bundle-receipt-forward.schema.json` | receipt files (4.9) |
+| `identity-refresh-forward.schema.json` | `enterprise identity refresh --json` (from 1.0.6) |
+
+They list only DefenseClaw ids, bundle and receipt ids, the agent's own
+`delivery_id`, digests, counts, codes, booleans, enums, versions and times.
+No account name or identifier passes: no user, uid, SID, UPN or group.
+
+Project a document before you send it: keep the members the forward schema
+lists, and drop every other member and every value outside its pattern or
+enum. Do not reject the document. A member that a newer DefenseClaw adds is
+then dropped, not an error. `forward/project.py` is a reference projection
+(Python standard library only). The contract tests project a full document
+from Linux, macOS and Windows through each forward schema and check that no
+name remains.
 
 ## 1. Binaries and paths
 
@@ -194,7 +224,7 @@ anchors between download and install. The check then fails closed
 | Exit | Linux / macOS | Windows | Class | Agent action |
 |---|---|---|---|---|
 | `0` | success or nothing to do | success | done | use the result |
-| `75` | another lifecycle run holds the lock (`lifecycle_busy`), or a `bundle apply` whose gateway stopped reporting the bundle's policy before the receipt was confirmed (`not_confirmed` with `bundle.state` `applied`, section 4.3), or a `bundle apply --defer-restart` that deferred a restart (`restart_deferred`) | — | **retry** | back off (30 s, doubling, at most 10 min) and resubmit the same input; for `restart_deferred` see below |
+| `75` | another lifecycle run holds the lock (`lifecycle_busy`; a Linux or macOS `status` reports it as `ok: true` with `pending_apply: true` and a `lifecycle_busy` warning), or a `bundle apply` whose gateway stopped reporting the bundle's policy before the receipt was confirmed (`not_confirmed` with `bundle.state` `applied`, section 4.3), or a `bundle apply --defer-restart` that deferred a restart (`restart_deferred`) | — | **retry** | back off (30 s, doubling, at most 10 min) and resubmit the same input; for `restart_deferred` see below |
 | `1618` | — | `lifecycle_busy` (`bundle.lock` not free within `--lock-wait`, or the installer's `lifecycle.lock` not free within its fixed 30 s), or a verified bundle that did not finish applying (`bundle_apply_failed`, `bundle_policy_not_adopted`, `bundle_post_verify_failed`, `bundle_targets_refresh_failed`), or `restart_deferred` | **retry** | as for 75 |
 | `1` | failure, already rolled back; or a refusal | builds without `management_contract` only: a flag error on `enterprise secret` (section 2.3) | **final** | read `errors[].code`; do not retry until the bundle, anchors, credential or device changes |
 | `1603` | — | failure, already rolled back; or a refusal | **final** | as for 1 |
@@ -403,6 +433,8 @@ member; use these fallbacks on it:
 | Windows secret locks and JSON | Windows `secret set` / `remove` take `--lock-wait`, `bundle.lock` then `lifecycle.lock`, and print a JSON document on every outcome | do **not** pass `--lock-wait` (exit 1); the set takes no lock and can collide with an apply's confirm step or an installer run; failures print no JSON |
 | Linux and macOS secret failure JSON | `secret set` / `remove` / `status` print the schema-1 failure document for an argument, flag, privilege, value or stdin read error | those failures print one line on stderr and no JSON: classify them by the exit code (2 fix the call, 1 failed) |
 | Anchors command (Linux, macOS) | `enterprise bundle anchors install` | install the file as the MDM kit does (section 4.8) |
+| `--trust-anchors`, `--device-group` (from 1.0.6, Linux and macOS) | `bundle apply --trust-anchors F` installs anchors and applies the bundle in one transaction; `anchors install --device-group G` pins the device (4.8) | an unknown flag: exit 2 with no JSON; run `anchors install`, then `apply`, and restore by hand on a failure (4.8) |
+| `identity_refresh` (from 1.0.6) | `enterprise identity refresh` re-reads directory facts now (4.10) | no such command: directory facts refresh within 15 minutes, or at the next sign-in on Windows |
 | `secret_set_bundle` (from 1.0.4) | `secret set --bundle` stores a credential a newer signed bundle signs (4.7) | an unknown flag: leave it out; the build binds no credential value, so store the credential without it |
 | Optional status v2 members (from 1.0.3) | `bundle verify` `secret_refs_missing` and `restart_prediction` (4.2); `status` / `verify` `connectors`, `openshell` and `identity` (4.4.1); each only when present | absent: preflight by verifying and reading the refusal, and treat every apply as one that can restart the gateway |
 
@@ -519,6 +551,21 @@ Exit 0.
   never a value. Store the signed values (4.7: a value the confirmed bundle
   does not sign needs `--bundle` with this bundle), or sign the bundle again
   with `--secret-file` for the stored ones.
+- Every credential reference, `secret_refs` (absent on builds before 1.0.6):
+  present exactly when `secret_refs_missing` is, one entry per `secret_refs`
+  entry of the bundle in manifest order: `name`, `required`, `present` (the
+  device stores a value) and `value_match` (the stored value is the one the
+  bundle signs). Names and booleans only, never a value or a digest. Every
+  listed entry binds a value: a bundle entry that signs only a name is
+  refused `secret_ref_unbound` before the store is read.
+- When a credential change is checked: `enterprise secret set` refuses a
+  value the confirmed bundle does not sign. A value written to the
+  credential store by other means is not checked when the gateway reads it:
+  `bundle verify` of the confirmed bundle reports it (`secret_ref_mismatch`,
+  with the name in `secret_refs_mismatch` and `value_match` `false`), and the
+  next apply refuses until the signed value is stored again. Deliver
+  credentials only with `secret set`, and verify the confirmed bundle on a
+  schedule to find such a change.
 - Restart prediction, `restart_prediction` (absent on builds before 1.0.3):
   on a device, for `verified` and `already_applied`, whether the apply
   restarts the gateway, from the installed config.yaml and the bundle
@@ -559,7 +606,11 @@ Exit 0.
   that device (or on a computer with the same version and layout) and compare
   its `effective_policy_digest` with `gateway_digest` of `bundle status` after
   the apply. Do not compare digests computed by different product versions;
-  the digest algorithm is not part of the contract.
+  the digest algorithm is not part of the contract, and a build never prints
+  the digest another product version would compute. To compare a fleet that
+  runs mixed versions, compare `effective_policy_digest` only among devices
+  with the same `product_version` of `enterprise <os> status`, and use
+  `digest_verified` (the signer's digest checked on this device) for the rest.
 - Preflight before an apply:
   1. Run verify. `already_applied` with `config_drift` `false`: done. With
      `config_drift` `true`, the installed config drifted: apply the same
@@ -707,6 +758,16 @@ Exit 0.
   connector names can be incomplete when `count` is above 20. The integer
   `sessions_restart_required` of a receipt file (4.9) is the count at
   confirmation, not a live value.
+
+  The apply result, `<os> status` and `bundle status` also carry
+  `enforcement_pending` (`count` and `connectors`, never a user name or a
+  pid) when they name such sessions; it is omitted when there are none. In a
+  lifecycle result it also counts the sessions of the
+  `agent_sessions_restart_required` warnings (sessions that started before
+  the deployment, a newly enabled connector, an enrollment or a guardian
+  restore gave them hooks), each session once. It is safe to forward as it
+  is. An unknown scan is not in it: read `sessions_restart_required.state`
+  for that.
 - **The agent's own receipt id** (for its list, section 2.6):
   `bundle.receipt_id` when `bundle.bundle_id` is the submitted id and the
   apply was not a repeat of the current bundle (a confirmed or failed
@@ -772,8 +833,13 @@ Exit 0.
 - Privilege: root or SYSTEM. On Linux and macOS a non-root caller gets
   `not_root` with the deployment fields left out; on Windows a non-elevated
   caller gets `elevation_required`, exit 5.
-- Lock: Linux and macOS wait a fixed 5 s for another run, then report `ok:
-  false`, `lifecycle_busy`, exit 75 (retry class). Windows status first
+- Lock: Linux and macOS wait a fixed 5 s for another run. If it still runs,
+  the change is pending apply, not a failure: `ok: true`, `pending_apply:
+  true`, a `lifecycle_busy` warning that names the run, only `installed` and
+  `installed_version` filled, `coverage_complete` and `security_complete`
+  false, exit 75 (retry class). Through 1.0.5 this was `ok: false` with a
+  `lifecycle_busy` error; read the exit code or the code in `errors` and
+  `warnings` to support both. Windows status first
   settles a bundle receipt that a killed run left in state `applied`, under
   `bundle.lock`, and skips that step while an apply holds the lock, so Windows
   status can write; it is still idempotent.
@@ -1173,6 +1239,24 @@ off the device. The agent does not read `/health` itself (section 7); the
   in every case. A Windows build without `management_contract` reports `ok`
   from gateway readiness alone, which does not prove the key.
 
+  **Prove the key before the first prompt (Linux and macOS, from 1.0.6).**
+  `enterprise secret check --name ai-defense-api-key --json` (root, read-only,
+  no lock) builds the client the gateway builds, from the stored credential and
+  the administrator's egress proxy, and makes one authenticated request whose
+  only content is a single full stop. It prints `secret-result.schema.json`
+  (the check branch): `ai_defense` is `ok`, `disabled` or `unavailable:<code>`
+  with the codes of the table above (never `unknown`, `not_initialized` or
+  `gateway_not_ready`), `ok` is true only for `ok`, and a key AI Defense
+  rejects is `unavailable:auth_failed` with `errors[0].code`
+  `ai_defense_unavailable`, exit 1. `--name` must be the credential
+  `enterprise.inspection.ai_defense.credential` names (else `invalid_arguments`,
+  exit 2); failures before the request are the failure document of the other
+  verbs (`not_root`, `not_installed`, `state_invalid`). It does not change what
+  `inspection.ai_defense` reports; the next prompt does that. Builds before
+  1.0.6 have no `check` verb (an unknown command, exit 2): read `unknown`
+  until the first prompt, as above. Windows has no `check`: read
+  `inspection.ai_defense` from `enterprise windows status`.
+
 The agent holds the value in its own memory and writes it to the child's
 stdin; the examples stand that in with a variable of the agent process
 (`key`, `$key`), never an environment variable, which the child would
@@ -1232,8 +1316,13 @@ is still the one owner.
   MDM kit and Windows `--trust-anchors`): any valid root-owned file is
   installed, an older one included, so the agent tracks which anchor file
   it last installed. The confirmed bundle version floor still applies.
-- stdout: `anchors-install.schema.json` (`sha256`, `previous_sha256` and
-  `key_ids` for the agent's own report). The change is audited as
+- `--device-group <group>` (from 1.0.6) pins the device to one group: the
+  source must list that group or no group (else `anchor_invalid`, nothing
+  written) and the installed file lists it alone, so a bundle for another
+  group is refused `target_mismatch`. A source that already lists only that
+  group keeps its bytes. A pin only narrows what the file trusts.
+- stdout: `anchors-install.schema.json` (`sha256`, `previous_sha256`,
+  `device_groups` and `key_ids` for the agent's own report). The change is audited as
   `config.trust_anchors.changed` (section 0).
   Exit: 0; 1; 2; 75.
 
@@ -1279,6 +1368,23 @@ else
   rm -f "$ETC/trust/bundle-anchors.json"
 fi
 ```
+
+**Anchors and the first bundle in one transaction on Linux and macOS (from
+1.0.6): `enterprise bundle apply --bundle B --trust-anchors F [--device-group G]
+--json`.** As Windows `ensure --trust-anchors F --bundle B` below: under the
+lifecycle lock the file is checked like `anchors install` checks it, written,
+and the bundle is verified against it. The file stays only when the bundle is
+confirmed, or applied and waiting for the gateway to report its policy (the
+next run settles it against the same file). A bundle that fails puts the
+previous file back, or removes the new one when there was none, so the agent
+no longer restores by hand; the failed change is audited as
+`config.trust_anchors.changed` with outcome `failed`. A successful run lists
+`installed trust anchors in <path>` or `replaced the trust anchors in <path>`
+in `changes` and is not a no-op, also when the bundle is the confirmed one.
+`--trust-anchors` goes with `--bundle`, not `--inbox`; `--device-group` goes
+with `--trust-anchors`. stdout: `lifecycle-result.schema.json`. Builds before
+1.0.6 refuse the flags (exit 2); use `anchors install`, then `apply`, and the
+restore recipe below.
 
 **Windows: `enterprise windows ensure --profile standalone --trust-anchors F
 [--bundle B] --json`** (every build). It takes `bundle.lock`, checks the source
@@ -1341,16 +1447,59 @@ enforcing.
   again, copied from its signed manifest (`enterprise bundle sign
   --rollback-of`). As with every member, the agent ignores it when it does
   not know it and treats its absence as normal (section 0).
-- Receipt ids are not ordered in time. Keep the set of `receipt_id`s already
-  forwarded (prune ids whose file is gone) and order receipts by
-  `finished_at` when the order matters; do not keep only the last id.
-  Nothing is acknowledged back.
+- Receipt ids are not ordered in time. From 1.0.6 each public receipt and
+  receipt event carries `seq`, the delivery sequence of this device: it grows
+  by one for each new delivery (a retry of a bundle is a new delivery), never
+  goes back while the receipt history exists, and orders receipts without a
+  clock. The agent may remember the highest `seq` it forwarded, and treats a
+  `seq` below it as a device whose history was reset (reinstalled or purged)
+  and starts again from the set of `receipt_id`s. On builds without `seq`, and
+  as the portable rule, keep the set of `receipt_id`s already forwarded (prune
+  ids whose file is gone) and order receipts by `finished_at` when the order
+  matters; do not keep only the last id. Nothing is acknowledged back.
 
 ```sh
 ls -1 /etc/defenseclaw/bundles/receipt-events/        # macOS: /opt/cisco/defenseclaw/etc/bundles/receipt-events/
 ```
 ```powershell
 Get-ChildItem 'C:\ProgramData\Cisco\DefenseClaw\etc\bundles\receipt-events' -Filter *.json
+```
+
+### 4.10 Re-read directory facts: `enterprise identity refresh`
+
+- argv: `enterprise identity refresh [--user <name|uid|SID>] [--flush-os-cache] [--max-users N] --json`.
+  Optional, from 1.0.6 (`identity_refresh` in `--version-json`).
+- Privilege: root, or an elevated administrator or SYSTEM on Windows. Any
+  other caller gets `not_admin` (exit 1, 1603 on Windows) before any account
+  is resolved. Standalone managed devices only (`not_managed` otherwise).
+- What it does: the gateway re-reads the directory facts (groups, UPN) of the
+  `--user` account, or of every account it has cached (at most `--max-users`,
+  default 500, 8 lookups at a time), and lists in `changes[]` the accounts
+  whose guardrail profile changed. Hook calls use the new facts from their
+  next call. Nothing else changes: no config, policy or default decision.
+- `--flush-os-cache`: Linux with SSSD runs `sss_cache -u <account>` with
+  `--user`, `sss_cache -E` without it. macOS runs `dscacheutil -flushcache`
+  and `dsmemberutil flushcache` without `--user` only (macOS has no
+  per-account flush; with `--user` it reports `reason: no_per_user_flush`).
+  Windows flushes nothing.
+- Windows: an account takes its groups from its sign-in token. A signed-in
+  account gets a directory group change at its next sign-in; such accounts
+  are listed in `windows_token_groups_pending` (warning of the same code).
+- Lock: one run at a time; a second run gets `refresh_busy`, exit 75 (1618).
+- Privacy: account names and ids are in this output only. The audit row
+  `identity-refresh-completed` and its telemetry carry counts, duration and
+  the flush scope.
+- Exit codes: 0 done (also when some accounts of an all-account run failed:
+  warning `accounts_failed`); 1 / 1603 `lookup_failed` for a failed `--user`
+  account, `not_admin`, `not_managed`, `gateway_unavailable`; 2 / 1639
+  `invalid_arguments`, `account_unresolved`; 75 / 1618 `refresh_busy`.
+- Schema `identity-refresh.schema.json`.
+
+```sh
+"$GW" enterprise identity refresh --user eng2@corp.example.com --flush-os-cache --json
+```
+```powershell
+& $GW enterprise identity refresh --json
 ```
 
 ## 5. The agent loop
@@ -1461,11 +1610,32 @@ Later bundles go through 5.2.
    the sessions restarted (4.3, sessions that need a restart). Report anchor
    and credential changes yourself (section 0).
 
+Keys that only 1.0.6 and later read (`enterprise.identity.trusted_connectors`,
+`connectors.agent_gateway`) need a bundle signed with `--min-product-version
+1.0.6` or later: `bundle sign` refuses the config otherwise (`config_invalid`,
+on `min_product_version`), and a 1.0.4 or 1.0.5 device refuses the bundle
+(`product_too_old`). The same floor refuses a rollback to 1.0.4 or 1.0.5 on
+Linux and macOS (5.3). A 1.0.5 Windows Setup does not check the floor:
+before a Windows rollback to 1.0.5, deliver a bundle without these keys.
+
 ### 5.3 Release floor
 
 On Linux and macOS, DefenseClaw 1.0.4 and later refuse to install a release
 below the confirmed bundle's `min_product_version` (`product_floor_refused`).
-The rollback marker and `--allow-downgrade` do not lift it.
+The rollback marker and `--allow-downgrade` do not lift it. Windows Setup
+1.0.6 and later refuses the same way (exit 1603) on `/install`, `/upgrade`,
+`/repair` and `/ensure`, before it changes anything; a 1.0.5 or older Setup
+does not check the floor.
+
+Check the floor first, the package refusal is the second line: `bundle
+status` reports it as `current.min_product_version` (absent when the bundle
+sets none and on builds before 1.0.6). Compare it with the target version
+before you dispatch a downgrade; a rollback to 1.0.4 needs it unset or at
+most 1.0.4. On a 1.0.4 or 1.0.5 device, `bundle status` has no such member
+and its `floor` is the bundle version floor, not the release floor. A 1.0.6
+or later release that runs below the floor warns `product_below_floor` in
+`status`, `verify` and `bundle status`; the warning changes nothing on the
+device. To go below the floor, contact your administrator.
 
 The preinstall of a 1.0.4 or later package checks the floor before it replaces
 files, but only with a gateway that has the check: the installed gateway when
@@ -1521,8 +1691,11 @@ the read-only commands answer (section 4).
 - The credential value is normalised differently on Windows and on Linux and
   macOS (2.5), and Windows refuses a `secret set` before the deployment is
   installed while Linux and macOS store it (4.7).
-- A busy Linux or macOS `status` is `ok: false`, `lifecycle_busy`, exit 75,
-  after a fixed 5 s wait; it is not a device failure.
+- A busy Linux or macOS `status` (another run applying a change after a
+  fixed 5 s wait) is `ok: true` with `pending_apply: true`, a
+  `lifecycle_busy` warning and exit 75: it is not a device failure, and it
+  reports no device state beyond the installed version, so retry it. A busy
+  `verify` stays `ok: false`, `lifecycle_busy`, exit 75.
 - A rejected AI Defense key shows only after the gateway has sent a request
   with it: until a hook sends a prompt for inspection, `inspection.ai_defense`
   stays `unknown` (4.7).

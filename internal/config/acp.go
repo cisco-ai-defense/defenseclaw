@@ -5,12 +5,13 @@ package config
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
-var acpStableNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+var acpStableNamePattern = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 const (
 	maxACPBindings      = 128

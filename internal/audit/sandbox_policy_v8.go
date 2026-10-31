@@ -19,11 +19,11 @@ package audit
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -79,6 +79,9 @@ const (
 	SandboxManagedRemove            = "remove"
 	SandboxGuestRelayWithoutGuest   = "relay_without_guest"
 	SandboxGuestRunningWithoutGuest = "running_without_guest"
+	// SandboxGuestRunningAfterStop: a running report for a registration
+	// whose daemon reported its sandbox stopped, refused (GAP-0673).
+	SandboxGuestRunningAfterStop = "running_after_stop"
 )
 
 // Bounds of the managed attributes, as the registry declares them.
@@ -90,12 +93,12 @@ const (
 )
 
 var (
-	sandboxSubjectKeyPattern  = regexp.MustCompile(`^hmac-sha256:[0-9a-f]{64}$`)
-	sandboxOpenShellVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$`)
-	sandboxProfileNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	sandboxManagedCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
-	sandboxPolicyRulePattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	sandboxSettingsFieldRe    = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,63}$`)
+	sandboxSubjectKeyPattern  = lazyregexp.New(`^hmac-sha256:[0-9a-f]{64}$`)
+	sandboxOpenShellVersionRe = lazyregexp.New(`^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$`)
+	sandboxProfileNamePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	sandboxManagedCodePattern = lazyregexp.New(`^[a-z][a-z0-9_]{0,63}$`)
+	sandboxPolicyRulePattern  = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	sandboxSettingsFieldRe    = lazyregexp.New(`^[a-z][a-z0-9_.]{0,63}$`)
 )
 
 // SandboxManaged is what the managed gateway knows about the sandbox's
@@ -1020,7 +1023,7 @@ const maxSandboxContainerImageBytes = 256
 
 // sandboxContainerImagePattern is a plain image reference: a repository
 // with a tag or a digest, or an image ID.
-var sandboxContainerImagePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]*$`)
+var sandboxContainerImagePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/@-]*$`)
 
 // optionalSandboxContainerImage is the image reference, or absent when it
 // is not a plain one: an engine's value never costs the record.
@@ -1171,7 +1174,7 @@ func (recorder *SandboxRecorder) RecordSandboxRegistrationWithoutGuest(ctx conte
 		return fmt.Errorf("audit: sandbox registration without guest requires a registration id")
 	}
 	switch input.Reason {
-	case SandboxGuestRelayWithoutGuest, SandboxGuestRunningWithoutGuest:
+	case SandboxGuestRelayWithoutGuest, SandboxGuestRunningWithoutGuest, SandboxGuestRunningAfterStop:
 	default:
 		return fmt.Errorf("audit: sandbox registration without guest reason %q is not registered", input.Reason)
 	}

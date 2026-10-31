@@ -127,3 +127,30 @@ func TestCiscoInspectClient_ConfiguredRulesRetryWithoutConfig(t *testing.T) {
 		t.Fatal("retry must omit config after a rules-related 400")
 	}
 }
+
+// GAP-0660: with no enabled_rules there is no config block to drop, so a
+// rules-related 400 is final; retrying would re-send the identical request.
+func TestCiscoInspectClient_RulesRelated400WithoutConfigIsNotRetried(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"detail":"This connection already has rules configured."}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := NewCiscoInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint: srv.URL, APIKey: "test-key", TimeoutMs: 3000,
+	}, "")
+	if client == nil {
+		t.Fatal("expected Cisco AI Defense client")
+	}
+	if verdict := client.Inspect(t.Context(), []ChatMessage{{Role: "user", Content: "hello"}}); verdict != nil {
+		t.Fatalf("verdict=%+v, want nil for a final 400", verdict)
+	}
+	if requests != 1 {
+		t.Fatalf("inspect requests=%d, want 1 (no config block to drop)", requests)
+	}
+}

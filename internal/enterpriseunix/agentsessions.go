@@ -45,17 +45,14 @@ var agentCLINames = map[string]bool{
 	"devin": true, "hermes": true, "agy": true, "kiro-cli": true,
 }
 
-// agentsReadingHooksLive pick up DefenseClaw's hooks without a restart: a
-// Codex session open before the install is inspected at once when its
-// app-server reads the managed requirements per turn, so naming it asked
-// users to restart sessions that were already inspected (GAP-0936). The
-// Codex background server (the app-server daemon) is the exception: one
-// started before the install keeps the requirements it read then, so the
-// sessions it serves ran tool calls with no decision, and a new Codex
-// session refuses it ("Cannot use the shared background server") until it
-// is restarted (GAP-0988, GAP-0983). It and the Codex sessions of its user
-// are named.
-var agentsReadingHooksLive = map[string]bool{"codex": true}
+// Codex is named like every other agent: a Codex session (TUI only, or
+// served by the app-server daemon) keeps the managed requirements it read
+// when it started and loads no DefenseClaw hook later (Codex 0.159.3, live
+// on RHEL 2026-10-30; private #12). An older allowlist skipped Codex
+// sessions on the premise that Codex reads the requirements per turn. A
+// Codex background server started before the install is named with how to
+// restart it: a new Codex session refuses it ("Cannot use the shared
+// background server") until it is restarted (GAP-0988, GAP-0983).
 
 // codexBackgroundServer reports the Codex app-server daemon process (not
 // its "app-server daemon" supervisor or an IDE stdio server).
@@ -171,17 +168,10 @@ func (e *Env) agentSessionsStartedBefore(ctx context.Context, since time.Time, s
 	case "darwin":
 		all = e.darwinAgentSessions(ctx)
 	}
-	oldServer := map[int]bool{}
-	for _, session := range all {
-		if session.CodexServer && session.Started.Before(since) {
-			oldServer[session.UID] = true
-		}
-	}
 	all = oneProcessPerSession(all)
 	var out []agentSession
 	for _, session := range all {
-		if session.UID == 0 || session.UID == serviceUID || !session.Started.Before(since) ||
-			(agentsReadingHooksLive[session.Agent] && !session.CodexServer && !oldServer[session.UID]) {
+		if session.UID == 0 || session.UID == serviceUID || !session.Started.Before(since) {
 			continue
 		}
 		out = append(out, session)
@@ -335,6 +325,9 @@ func (e *Env) darwinAgentSessionsWithError(ctx context.Context) ([]agentSession,
 	now := e.Now()
 	var out []agentSession
 	for _, line := range strings.Split(string(result.Stdout), "\n") {
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
 		fields := strings.Fields(line)
 		if len(fields) < 4 {
 			continue
@@ -426,6 +419,62 @@ func parseElapsed(text string) (time.Duration, bool) {
 	return time.Duration(days)*24*time.Hour + time.Duration(total)*time.Second, true
 }
 
+// connectorActivations dates the machine-policy connectors this run places
+// that the previous record did not have: a config change that enables one
+// gives running sessions of that agent no hooks. A first or staged install
+// has none (the deployment activation covers it); a connector still placed
+// keeps its date; a run that does not start the services dates nothing new.
+func connectorActivations(previous *Deployment, placed []string, started bool, now string) map[string]string {
+	if previous == nil || previous.NoStart {
+		return nil
+	}
+	before := map[string]bool{}
+	for _, name := range previous.MachinePolicyConnectors {
+		before[name] = true
+	}
+	out := map[string]string{}
+	for _, name := range placed {
+		switch {
+		case !before[name] && started:
+			out[name] = now
+		case before[name] && previous.ConnectorActivatedAt[name] != "":
+			out[name] = previous.ConnectorActivatedAt[name]
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// describeAgentSessionsBeforeConnector warns about the sessions of each
+// connector a config change enabled after the activation that started
+// before that change (GAP-0018).
+func (l *lifecycle) describeAgentSessionsBeforeConnector(ctx context.Context, record *Deployment, activated time.Time) {
+	names := make([]string, 0, len(record.ConnectorActivatedAt))
+	for name := range record.ConnectorActivatedAt {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		raw := record.ConnectorActivatedAt[name]
+		at, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil || !at.After(activated) {
+			continue
+		}
+		var stale []agentSession
+		for _, session := range l.env.agentSessionsStartedBefore(ctx, at, record.ServiceUID) {
+			if session.Unknown || agentConnectors[session.Agent] != name || session.Started.Before(activated) {
+				continue
+			}
+			stale = append(stale, session)
+		}
+		l.warnAgentSessions(stale, func(sessions string) string {
+			return fmt.Sprintf("runs %s, started before its connector was enabled at %s; an agent reads its hooks when it starts, so ask that user to restart these sessions", sessions, raw)
+		})
+	}
+}
+
 // describeAgentSessionsBeforeActivation warns, per account, about agent
 // sessions that started before this deployment was activated, about
 // sessions that started before the guardian put back hooks a user changed or
@@ -454,6 +503,7 @@ func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, r
 	l.warnAgentSessions(known, func(sessions string) string {
 		return fmt.Sprintf("runs %s, started before DefenseClaw was activated on this computer at %s; an agent reads its hooks when it starts, so these sessions run without DefenseClaw until they are restarted: ask that user to restart them", sessions, activationTime)
 	})
+	l.describeAgentSessionsBeforeConnector(ctx, record, activated)
 	if l.env.GOOS == "darwin" {
 		// An unreadable record is reported by
 		// describeAgentSessionsBeforeGuardianRestore below.
@@ -519,6 +569,11 @@ func (l *lifecycle) warnAgentSessions(sessions []agentSession, reason func(sessi
 			server[session.UID] = true
 		}
 		byUID[session.UID] = append(byUID[session.UID], label)
+		connector := ""
+		if !session.Unknown {
+			connector = agentConnectors[session.Agent]
+		}
+		l.result.NotePendingSession(connector, session.PID)
 	}
 	uids := make([]int, 0, len(byUID))
 	for uid := range byUID {

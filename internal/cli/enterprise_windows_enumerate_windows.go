@@ -70,6 +70,15 @@ var enterpriseWindowsEnumerateSessionSettleAfter = time.After
 // cycle could not wait for has finished. Tests replace it.
 var enterpriseWindowsEnumeratePrivateWalkLate = enterprisehooks.WindowsPrivateWalkCompletedLate
 
+// enterpriseWindowsEnumerateOnceWalkWait bounds how long enumerate --once
+// waits after its cycle for a profile walk the cycle could not wait for.
+// Each walk stops itself at its own 2-minute bound; the installer allows the
+// standalone --once 900 seconds. Tests replace the waiter.
+var (
+	enterpriseWindowsEnumerateOnceWalkWait   = 150 * time.Second
+	enterpriseWindowsEnumerateOnceWalkWaiter = enterprisehooks.WaitWindowsPrivateWalksReported
+)
+
 // enterpriseWindowsEnumerateSessionNow reads the clock for sign-in times.
 // Tests replace it so a late sign-in's remaining settle time is exact.
 var enterpriseWindowsEnumerateSessionNow = time.Now
@@ -185,10 +194,34 @@ func runEnterpriseWindowsEnumerate(
 		manifestPath, opts.interval, opts.once, opts.initialDelay)
 
 	if opts.once {
-		return runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath)
+		if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
+			return err
+		}
+		runEnterpriseWindowsEnumerateOnceLateWalk(ctx, stderr, manifestPath)
+		return nil
 	}
 
 	return runEnterpriseWindowsEnumerateInterval(ctx, stderr, opts, manifestPath)
+}
+
+// runEnterpriseWindowsEnumerateOnceLateWalk runs, for --once, the extra
+// cycle the interval loop runs when a profile walk outlasts its share of a
+// cycle (GAP-2002): it waits for that walk and publishes again with it, so
+// a first install reports the account inspected instead of
+// agent_install_scan_incomplete. A walk that does not finish complete keeps
+// the first publication, which names the account incomplete. The extra
+// cycle's own failure keeps that publication too.
+func runEnterpriseWindowsEnumerateOnceLateWalk(ctx context.Context, stderr io.Writer, manifestPath string) {
+	waitCtx, cancel := context.WithTimeout(ctx, enterpriseWindowsEnumerateOnceWalkWait)
+	finished := enterpriseWindowsEnumerateOnceWalkWaiter(waitCtx)
+	cancel()
+	if !finished {
+		return
+	}
+	fmt.Fprintf(stderr, "[hook-enumerator] a slow profile scan finished after the cycle: running one more cycle\n")
+	if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] extra cycle failed; the first publication stands: %v\n", err)
+	}
 }
 
 // runEnterpriseWindowsEnumerateSingleCycle runs one bounded cycle,

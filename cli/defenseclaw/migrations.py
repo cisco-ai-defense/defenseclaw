@@ -3273,6 +3273,175 @@ def _remove_or_replace_hint(removable: list[str], *, force: bool, can_remove: bo
     return f"remove it ({remove}) or set up another connector ({setup})"
 
 
+# DefenseClaw guards OpenCode V2 only since this release (#1373); earlier
+# releases guard V1 only. Remove both checks with the 1.0.x upgrade path.
+_OPENCODE_V2_SINCE = (1, 0, 6)
+_OPENCODE_V2_INSTALL = "npm uninstall -g opencode-ai && npm install -g @opencode/cli@2"
+
+
+def _opencode_configured(data_dir: str) -> bool:
+    """Whether this per-user install guards OpenCode (managed installs are the administrator's)."""
+    from defenseclaw import config as config_module
+
+    try:
+        cfg = config_module.load(data_dir=data_dir)
+        if config_module._is_managed_enterprise_mode(getattr(cfg, "deployment_mode", "")) or (
+            config_module._is_managed_enterprise_mode(os.environ.get(config_module.DEPLOYMENT_MODE_ENV))
+        ):
+            return False
+        return "opencode" in cfg.active_connectors()
+    except Exception:  # noqa: BLE001 - an unreadable config is reported by the other checks
+        return False
+
+
+def _installed_opencode(data_dir: str) -> tuple[str, str] | None:
+    """``(raw_version, executable)`` of the OpenCode this account runs now, or None.
+
+    The fresh discovery probe setup and the gateway's version check use
+    (rel-1-0-6 GAP-0040: the setup trusted-prefix selection alone missed an
+    npm prefix such as /opt/agents or ~/.npm-global, so the checks did
+    nothing). It never writes the discovery cache.
+    """
+    from defenseclaw.inventory import agent_discovery
+
+    try:
+        disc = agent_discovery.discover_with_probes(
+            ["opencode"], use_cache=False, refresh=True, data_dir=data_dir, persist_cache=False,
+        )
+        signal = disc.agents.get("opencode")
+    except Exception:  # noqa: BLE001 - no answer is no refusal; the gateway start still checks
+        return None
+    if signal is None or not signal.installed or not (signal.version or "").strip():
+        return None
+    return signal.version, signal.binary_path
+
+
+def _check_opencode_v2(data_dir: str, version: str) -> None:
+    """Fail ``migrate --check`` while the guarded OpenCode is V1 (rel-1-0-6 GAP-0021).
+
+    This release's gateway refuses OpenCode V1, so the upgrade would roll back
+    and leave the earlier gateway stopped: OpenCode then ran unguarded. Before
+    the swap the earlier install still runs and guards V1, so stop here.
+    """
+    if not _opencode_configured(data_dir):
+        return
+    found = _installed_opencode(data_dir)
+    if found is None:
+        return
+    from defenseclaw.connector_contracts import opencode_requires_v2_upgrade
+
+    raw, executable = found
+    if not opencode_requires_v2_upgrade(raw):
+        return
+    raise MigrationError(
+        f"OpenCode {raw.strip() or '(unknown version)'} at {executable} is OpenCode V1, and DefenseClaw {version} "
+        "guards OpenCode V2 only; nothing was changed, and the DefenseClaw you have keeps guarding it. Install "
+        f"OpenCode V2 ({_OPENCODE_V2_INSTALL}), then upgrade again. To upgrade without OpenCode instead, run "
+        "'defenseclaw setup remove opencode' first."
+    )
+
+
+def _opencode_v2_in_known_places(data_dir: str) -> tuple[str, str] | None:
+    """``(version, path)`` of an OpenCode V2 this account has outside the caller's PATH, or None.
+
+    Reads files only; nothing runs. Two sources: the binary the discovery
+    record of this install (written by setup) names, if it is still there, and
+    the ``@opencode/cli`` package metadata under the usual npm prefixes (the
+    account's home, version managers, Homebrew and the machine prefixes
+    below ``/opt``).
+    """
+    import glob
+    import json
+
+    from defenseclaw.connector_contracts import normalize_agent_version
+
+    try:
+        with open(os.path.join(data_dir, "agent_discovery.json"), encoding="utf-8") as fh:
+            recorded = json.load(fh)["agents"]["opencode"]
+        binary = str(recorded.get("binary_path") or "")
+        version = str(recorded.get("version") or "")
+        if (
+            recorded.get("installed") is True
+            and binary
+            and os.path.exists(binary)
+            and normalize_agent_version(version).split(".", 1)[0] == "2"
+        ):
+            return version, binary
+    except (OSError, ValueError, KeyError, AttributeError, TypeError):
+        pass
+    home = os.path.expanduser("~")
+    prefixes = [
+        os.path.join(home, ".npm-global"),
+        os.path.join(home, ".local"),
+        os.path.join(home, "npm"),
+        "/usr/local",
+        "/usr",
+        "/opt/homebrew",
+        "/home/linuxbrew/.linuxbrew",
+        *sorted(glob.glob(os.path.join(home, ".nvm", "versions", "node", "*")))[:16],
+        *sorted(glob.glob("/opt/*"))[:64],
+    ]
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        prefixes.append(os.path.join(appdata, "npm"))
+    for prefix in prefixes:
+        for modules in (os.path.join(prefix, "lib", "node_modules"), os.path.join(prefix, "node_modules")):
+            meta = os.path.join(modules, "@opencode", "cli", "package.json")
+            try:
+                with open(meta, encoding="utf-8") as fh:
+                    version = str(json.load(fh).get("version") or "")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if normalize_agent_version(version).split(".", 1)[0] == "2":
+                return version, os.path.dirname(meta)
+    return None
+
+
+def check_opencode_rollback(data_dir: str, back_to: str, *, downgrade: bool = False) -> None:
+    """Refuse a move to a release that cannot guard the OpenCode V2 here (rel-1-0-6 GAP-0028).
+
+    Such a release's gateway does not start with OpenCode V2 (the rollback
+    undid itself with an unrelated message), and OpenCode V2 cannot load its
+    plugin, so it would run unguarded. *downgrade*: the move is
+    ``defenseclaw upgrade --version`` (or an installer run for an older
+    release), which keeps this install's configuration, so removing OpenCode
+    from it first is a way through (rel-1-0-6 GAP-0128).
+    """
+    if not _version_before(back_to, _OPENCODE_V2_SINCE) or not _opencode_configured(data_dir):
+        return
+    from defenseclaw.connector_contracts import normalize_agent_version
+
+    # The caller's PATH is not the agent's: a V2 in an npm prefix that this
+    # shell does not have on PATH still runs unguarded under the earlier
+    # release (rel-1-0-6 GAP-0067), so the known install places count too.
+    raw = ""
+    found = _installed_opencode(data_dir)
+    if found is not None and normalize_agent_version(found[0]).split(".", 1)[0] == "2":
+        raw = found[0]
+    else:
+        elsewhere = _opencode_v2_in_known_places(data_dir)
+        raw = elsewhere[0] if elsewhere else ""
+    if not raw:
+        return
+    reason = f"DefenseClaw {back_to} guards OpenCode V1 only and the OpenCode here is V2 ({raw.strip()})"
+    # DefenseClaw reads the OpenCode it recorded at setup; until a refresh it
+    # still sees V2 after the swap and refuses again (GAP-0154).
+    put_back = (
+        "put OpenCode V1 back first (npm uninstall -g @opencode/cli && npm install -g opencode-ai@1.18), "
+        "then run 'defenseclaw agent discover --refresh' so DefenseClaw sees it"
+    )
+    if downgrade:
+        raise MigrationError(
+            f"{reason}: OpenCode would run unguarded. To downgrade, {put_back}, or stay on "
+            "this release. To downgrade without OpenCode instead, run 'defenseclaw setup remove opencode' first."
+        )
+    raise MigrationError(
+        f"{reason}: its gateway would not start, and OpenCode would run unguarded; nothing was changed. The "
+        "rollback restores that release's own configuration, so removing OpenCode here does not help: to roll "
+        f"back, {put_back}, or stay on this release."
+    )
+
+
 def _check_connector_roster(
     config_path: str,
     data_dir: str,
@@ -3852,6 +4021,7 @@ def migrate(
         _check_connector_roster(
             config_path, data_dir, __version__, gateway_binary=gateway_binary, from_version=from_version or ""
         )
+        _check_opencode_v2(data_dir, __version__)
         # The v8 conversion reads the config as it is now, so the preflight is
         # only meaningful when no earlier 0.x step would change it first; the
         # real migration still validates and the installer rolls back on failure.
@@ -4039,7 +4209,7 @@ def _seal_windows_hook_credentials(data_dir: str) -> None:
                 continue
             protect_private_file(path)
         except OSError as exc:
-            ux.warn(f"Could not make {path} private ({exc}); 'defenseclaw setup rotate-token' refuses it until it is")
+            ux.warn(f"Could not make {path} private ({exc}); 'defenseclaw setup rotate-token' refuses it until it is private")
 
 
 def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:

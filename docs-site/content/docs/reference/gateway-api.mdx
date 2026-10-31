@@ -835,17 +835,29 @@ Other endpoints return their own shapes — `/v1/skill/scan` returns a scanner-s
 ## Connector hook responses
 
 A connector hook response can carry `evaluation_id` and the top `rule_ids`
-when the evaluation produced correlation data:
+when the evaluation produced correlation data, and the agent ids DefenseClaw
+derived for the hook:
 
 ```json
 {
-  "action":        "allow | block | deny | …",
-  "reason":        "rule X fired",
-  "findings":      ["rule.id.one:First finding", "rule.id.two:Second finding"],
-  "evaluation_id": "eval-c1d0…",
-  "rule_ids":      ["rule.id.one", "rule.id.two"]
+  "action":            "allow | block | deny | …",
+  "reason":            "rule X fired",
+  "findings":          ["rule.id.one:First finding", "rule.id.two:Second finding"],
+  "evaluation_id":     "eval-c1d0…",
+  "rule_ids":          ["rule.id.one", "rule.id.two"],
+  "agent_identity_id": "agt-3f9c0a1b2c3d4e5f",
+  "agent_instance_id": "ais-8e21d4c09a7b6f13"
 }
 ```
+
+`agent_identity_id` is the agent identity (`agt-`) and `agent_instance_id` is
+the session instance (`ais-`), or the sub-agent's instance when the hook names
+a sub-agent. They are the same values as `defenseclaw.agent.identity.id` and
+`defenseclaw.agent.instance_id` on the hook's audit rows and telemetry, so a
+caller can join its own records to DefenseClaw's without deriving them
+([Identity and authentication](/docs/enterprise/identity-and-authentication)).
+Each field is omitted when the hook has no such id: a hook with no session has
+no `ais-`. The Secure Client profile gets neither field.
 
 Connector-hook responses expose a string `findings` list, not the inspect
 endpoint's `detailed_findings` objects. Pattern-rule entries normally use

@@ -24,18 +24,23 @@ func (c *identityCache[T]) getNonblocking(key string) (T, bool) {
 // until their lifetime ended, and a profile assignment change let an exempt
 // name they gave exempt the caller before the refresh, which the release
 // waited for (review of r104 Q-identity, continuation 2, loop round 3).
+// The facts and whether they are current come from the one critical section
+// that started the refresh: read under a second lock, they could already be
+// the refresh's answer, so the caller saw a lookup it never waited for
+// (r106 CI: TestInvalidationDuringALookupIsNotCurrent read "answer 3").
 func (c *identityCache[T]) getCached(key string) (facts T, current, ok bool) {
-	if _, ok = c.getNonblocking(key); !ok {
+	if c == nil || key == "" || c.resolve == nil {
 		return facts, false, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	entry := c.entries[key]
-	if entry == nil {
+	entry, _, _, _ := c.serveLocked(key)
+	if !entry.ok {
 		return facts, false, false
 	}
 	_, current = c.currentLocked(key, entry)
 	if !entry.ok {
+		// currentLocked dropped facts that aged out at this instant.
 		return facts, false, false
 	}
 	return entry.facts, current && !c.unsettled(entry.facts), true

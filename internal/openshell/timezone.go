@@ -18,8 +18,9 @@ package openshell
 
 import (
 	"os"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // EnvHostTimeZone carries this machine's IANA time zone into a sandbox
@@ -32,7 +33,7 @@ const EnvHostTimeZone = "DEFENSECLAW_HOST_TZ"
 // "Etc/GMT+5"): letters first, then letters, digits, _, + and -, in at most
 // four parts. It rules out a path, a "..", and POSIX TZ strings with angle
 // brackets or commas.
-var timeZonePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,3}$`)
+var timeZonePattern = lazyregexp.New(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,3}$`)
 
 // ValidTimeZone reports whether name is an IANA zone name a sandbox may be
 // given.

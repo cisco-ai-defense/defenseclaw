@@ -13,9 +13,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -29,8 +29,8 @@ import (
 const windowsAgentLogTailMaxBytes = 256 * 1024
 
 var (
-	windowsAntigravityLogVersion = regexp.MustCompile(`Language server version: (\d+\.\d+\.\d+)`)
-	windowsVersionDirectoryName  = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+	windowsAntigravityLogVersion = lazyregexp.New(`Language server version: (\d+\.\d+\.\d+)`)
+	windowsVersionDirectoryName  = lazyregexp.New(`^\d+\.\d+\.\d+$`)
 )
 
 // windowsStandalonePerUserAgentVersionCandidatePaths returns package.json
@@ -43,7 +43,7 @@ func windowsStandalonePerUserAgentVersionCandidatePaths(profileHome, connectorNa
 	yarnGlobal := filepath.Join(appDataLocal, "Yarn", "Data", "global", "node_modules")
 	packages := map[string][]string{
 		"copilot":  {filepath.Join("@github", "copilot")},
-		"opencode": {"opencode-ai"},
+		"opencode": {filepath.Join("@opencode", "cli")},
 		"amp":      {filepath.Join("@ampcode", "cli"), filepath.Join("@sourcegraph", "amp")},
 	}[connectorName]
 	candidates := make([]string, 0, len(packages)*3)
@@ -199,7 +199,7 @@ func windowsCopilotAppCLIRoot(profileHome string) string {
 	return filepath.Join(profileHome, "AppData", "Local", "github-copilot-sdk", "cli")
 }
 
-var windowsCopilotAppCLIDirectoryName = regexp.MustCompile(`^(\d+\.\d+\.\d+)(-\d+)?$`)
+var windowsCopilotAppCLIDirectoryName = lazyregexp.New(`^(\d+\.\d+\.\d+)(-\d+)?$`)
 
 // discoverWindowsCopilotAppCLIVersion returns the newest Copilot CLI release
 // the GitHub Copilot app keeps for the profile, read from its folder name,

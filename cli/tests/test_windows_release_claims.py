@@ -15,6 +15,7 @@ from defenseclaw.platform_support import (
     WINDOWS_NOT_CERTIFIED_CONNECTORS,
     WINDOWS_PREVIEW_CONNECTORS,
     WINDOWS_SUPPORTED_CONNECTORS,
+    connector_platform_support,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +30,12 @@ RETIRED_CONNECTORS = {"openhands", "omnigent"}
 # Connectors section next to the connector pages.
 _CONNECTOR_SECTION_REFERENCE_PAGES = {"capability-matrix", "compatibility", "openclaw-integration"}
 
+# Hook routes a gateway calls (1.0.6 agent-gateway, #1394). They sit with the
+# connector pages but install nothing and have no setup connector, so they
+# carry no per-OS setup status row; the route test below checks their own
+# Windows statement instead.
+_CONNECTOR_SECTION_ROUTE_PAGES = {"agent-gateway"}
+
 
 def _active_connector_docs() -> dict[str, Path]:
     """The per-connector reference pages, which carry the platform status table."""
@@ -41,7 +48,12 @@ def _active_connector_docs() -> dict[str, Path]:
             # A sidebar group folder: its meta.json lists the pages as "../<id>".
             group = json.loads((connectors_dir / item / "meta.json").read_text(encoding="utf-8"))
             connector_ids.extend(page.removeprefix("../") for page in group["pages"])
-        elif item != "index" and not item.startswith("---") and item not in _CONNECTOR_SECTION_REFERENCE_PAGES:
+        elif (
+            item != "index"
+            and not item.startswith("---")
+            and item not in _CONNECTOR_SECTION_REFERENCE_PAGES
+            and item not in _CONNECTOR_SECTION_ROUTE_PAGES
+        ):
             connector_ids.append(item)
     return {connector_id: reference_dir / f"{connector_id}.mdx" for connector_id in connector_ids}
 
@@ -88,6 +100,19 @@ def test_windows_guide_has_unambiguous_platform_claims_and_powershell_examples()
     assert "enterprise hooks status" in enterprise_deployment
 
 
+def test_connector_route_pages_are_listed_and_state_their_windows_limit() -> None:
+    connectors_dir = ROOT / "docs-site/content/docs/connectors"
+    navigation = json.loads((connectors_dir / "meta.json").read_text(encoding="utf-8"))["pages"]
+    for route in sorted(_CONNECTOR_SECTION_ROUTE_PAGES):
+        assert route in navigation, route
+        # A route is not a setup connector: no Windows setup status to keep in parity.
+        assert route not in WINDOWS_CONNECTOR_SUPPORT, route
+        assert route.replace("-", "_") not in WINDOWS_CONNECTOR_SUPPORT, route
+        text = " ".join((connectors_dir / f"{route}.mdx").read_text(encoding="utf-8").split())
+        assert "## Platform support" not in text, route
+        assert "**Windows managed devices** have no hook socket, so the route is not served there" in text, route
+
+
 def test_connector_pages_are_the_canonical_cross_platform_support_source() -> None:
     connector_docs = _active_connector_docs()
     expected_connector_ids = set(WINDOWS_CONNECTOR_SUPPORT) - RETIRED_CONNECTORS
@@ -103,7 +128,7 @@ def test_connector_pages_are_the_canonical_cross_platform_support_source() -> No
     for connector_id, page in connector_docs.items():
         text = page.read_text(encoding="utf-8")
         assert text.count("## Platform support") == 1, page
-        assert _platform_status(text, "macOS and Linux") == "Supported", page
+        assert _platform_status(text, "macOS and Linux") == status_labels[connector_platform_support(connector_id, "darwin").status], page
 
         source_support = WINDOWS_CONNECTOR_SUPPORT[connector_id]
         expected_status = status_labels[source_support.status]
@@ -408,18 +433,20 @@ def test_opencode_docs_exclude_unqualified_enforcement_media() -> None:
         "connectors"
     ]["opencode"]
 
-    assert len(contracts) == 1
-    assert contracts[0]["agent_version"] == {
-        "min_inclusive": "1.18.10",
-        "max_exclusive": "1.19.0",
+    by_id = {contract["contract_id"]: contract for contract in contracts}
+    assert set(by_id) == {"opencode-hooks-v2"}
+    assert by_id["opencode-hooks-v2"]["agent_version"] == {
+        "min_inclusive": "2.0.0",
+        "max_exclusive": "2.3.0",
     }
+    assert "V2 support is currently a preview" in connector_page
     assert validated["live"] is False
     assert validated["os"]["windows"] == {
         "last_validated_version": "",
         "last_validated_at": "",
         "run_url": "",
     }
-    # Enforcement media may return only with exact official-package 1.18.19
+    # Enforcement media may return only with exact official V2 package
     # SHA-256 provenance plus matching version/date/run acceptance metadata.
     assert not re.search(r"<Video\b", connector_page)
     assert "v1.17.3" not in connector_page

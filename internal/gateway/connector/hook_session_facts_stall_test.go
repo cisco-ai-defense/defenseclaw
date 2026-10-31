@@ -110,7 +110,7 @@ syncBuiltinESMExports();
 const client = { tui: { showToast: async () => true } };
 const href = pathToFileURL(process.argv[1]).href;
 const loaded = await import(href);
-const plugin = await loaded.DefenseClaw({ directory: "", client });
+const plugin = await fixtureBridge(loaded, { directory: "", client });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 const started = Date.now();
 for (let i = 0; i < 2; i++) {
@@ -230,7 +230,7 @@ func TestOpenCodeIdleWakeAnswersWhilePrincipalReaderStalls(t *testing.T) {
 	defer server.Close()
 	harness := `
 import { pathToFileURL } from "node:url";
-const plugin = await (await import(pathToFileURL(process.argv[1]).href)).DefenseClaw({ directory: "", client: { tui: { showToast: async () => true } } });
+const plugin = await fixtureBridge(await import(pathToFileURL(process.argv[1]).href), { directory: "", client: { tui: { showToast: async () => true } } });
 const started = Date.now();
 try { await plugin["tool.execute.before"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C" }, { args: { command: "echo marker" } }); }
 catch (error) { console.log("block:" + String(error && error.message || error)); }

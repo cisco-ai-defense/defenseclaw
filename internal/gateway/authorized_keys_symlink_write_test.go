@@ -410,7 +410,9 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		block              bool
 	}{
 		{"known hosts", "hostname > ~/.ssh/known_hosts", project, false},
-		{"ssh config", "hostname > ~/.ssh/config", project, false},
+		// ~/.ssh/config is protected like the keys (lead ruling 10-31,
+		// rel-1-0-4:GAP-2586): ssh runs commands it names.
+		{"ssh config", "hostname > ~/.ssh/config", project, true},
 		{"known hosts again", "date > ~/.ssh/known_hosts", project, false},
 		{"relative known hosts", "date > known_hosts", filepath.Join(home, ".ssh"), false},
 		{"project redirect", "echo hi > ~/proj/e1.txt", project, false},
@@ -434,7 +436,9 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		{"uniq second operand output", "uniq input.txt " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"unknown output option", "fixture-tool --output=" + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
-		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		// uniq with one operand prints it, a plain read like cat (owner
+		// decision 2, GAP-2168; GAP-2590); its second operand is the write.
+		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: row.cwd,
@@ -1220,9 +1224,12 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
 		`ln -s ~/.ssh/authorized_keys freshlink; sed -i 's/marker/k/' freshlink`,
 		`cp --archive disklink notes.txt`,
-		`cp -a -t copy tree`,
 	}
 	allowed := []string{
+		// A bare copy of a tree that carries a link is not a write: it copies a
+		// project as it is (GAP-2579); a write through the carried link still
+		// blocks in the copy rows above.
+		`cp -a -t copy tree`,
 		`cd dirlink && cat authorized_keys`,
 		`tar "$o" xenial.tar > log`,
 		`"$PY" x.py > out.txt`,

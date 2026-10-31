@@ -128,7 +128,26 @@ const (
 	// untrusted and that has no agent the enumerator could list; the entry
 	// names the account, not a connector.
 	UnprotectedCodeHomeUntrusted = "home_untrusted"
+	// UnprotectedCodeOpenCodeV1: the account can run OpenCode V1, which
+	// cannot run the OpenCode V2 plugin DefenseClaw installs, so OpenCode is
+	// not protected for it (opencode_v1.go).
+	UnprotectedCodeOpenCodeV1 = "opencode_v1_unprotected"
 )
+
+// UnprotectedCodeLeavesCoverageIncomplete reports whether an unprotected
+// agent with code makes coverage_complete false, on every OS: no hook
+// contract, an incomplete install scan, a headless CLI path without hooks,
+// an IDE that cannot read global hooks (GAP-0151), or OpenCode V1, which
+// cannot run the V2 plugin (rel-1-0-6 GAP-0037). Every entry makes
+// security_complete false.
+func UnprotectedCodeLeavesCoverageIncomplete(code string) bool {
+	switch code {
+	case UnprotectedCodeHookContractUnverified, UnprotectedCodeInstallScanIncomplete, UnprotectedCodeKiroCLIBelowHookFloor,
+		UnprotectedCodeKiroIDEBelowGlobalHooksFloor, UnprotectedCodeOpenCodeV1:
+		return true
+	}
+	return false
+}
 
 // unprotectedReasonMaxRunes bounds the user-influenced reason text.
 const unprotectedReasonMaxRunes = 400
@@ -252,7 +271,7 @@ func ParseUnprotectedAgents(data []byte) ([]UnprotectedAgent, error) {
 		}
 		if agent.Code != UnprotectedCodeHookContractUnverified && agent.Code != UnprotectedCodeInstallScanIncomplete && agent.Code != UnprotectedCodeSurfaceUnverified &&
 			agent.Code != UnprotectedCodeKiroCLIBelowHookFloor &&
-			agent.Code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor && !accountOnly {
+			agent.Code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor && agent.Code != UnprotectedCodeOpenCodeV1 && !accountOnly {
 			agent.Code = UnprotectedCodeAgentUnprotected
 		}
 		if agent.Refusal != RefusalEnforced && agent.Refusal != RefusalMissing {
@@ -278,6 +297,7 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 		if agent.Code == "" {
 			agent.Code = UnprotectedCodeForReason(agent.Reason)
 		}
+		agent = classifyOpenCodeV1(agent)
 		key := strings.ToLower(agent.SID) + "\x00" + agent.User + "\x00" + agent.Connector + "\x00" + agent.Surface + "\x00" + agent.Host + "\x00" + agent.InstallPath + "\x00" + agent.Version + "\x00" + agent.Code
 		if agent.Connector == "kiro" {
 			// One Kiro row can describe two installed products (kiro-cli and

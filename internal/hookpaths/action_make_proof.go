@@ -5,7 +5,6 @@ package hookpaths
 
 import (
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -264,12 +263,35 @@ func (p *makeRecipeProof) options(args []string) {
 }
 
 func (p *makeRecipeProof) matches(match func(string, string, string) bool) bool {
+	p.load()
+	selected := p.selected()
+	for index, rule := range p.rules {
+		if !selected[index] {
+			continue
+		}
+		for _, recipe := range rule.recipes {
+			recipe = strings.TrimLeft(recipe, " \t@-+")
+			// make passes the environment's HOME as a variable and runs
+			// $(MAKE) as make (GAP-0996).
+			recipe = makeRecipeVariables(p.home).Replace(recipe)
+			if match(recipe, p.dir, p.home) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// load reads the --eval texts, then the makefiles. It returns the number of
+// rules defined before the makefiles: the evals' (after a stdin makefile's).
+func (p *makeRecipeProof) load() int {
 	for _, content := range p.evals {
 		p.parse(content)
 	}
+	before := len(p.rules)
 	if len(p.files) == 0 && !p.stdinFile {
 		for _, name := range []string{"GNUmakefile", "makefile", "Makefile"} {
-			if _, err := os.Lstat(filepath.Join(p.dir, name)); err == nil {
+			if _, err := pathLstat(filepath.Join(p.dir, name)); err == nil {
 				p.files = append(p.files, name)
 				break
 			}
@@ -278,6 +300,12 @@ func (p *makeRecipeProof) matches(match func(string, string, string) bool) bool 
 	for _, name := range p.files {
 		p.read(name)
 	}
+	return before
+}
+
+// selected marks the rules make runs for the goals (the first target when
+// there is none) and their prerequisites.
+func (p *makeRecipeProof) selected() map[int]bool {
 	goals := append([]string(nil), p.goals...)
 	if len(goals) == 0 && p.firstGoal != "" {
 		goals = append(goals, p.firstGoal)
@@ -313,21 +341,98 @@ func (p *makeRecipeProof) matches(match func(string, string, string) bool) bool 
 			}
 		}
 	}
-	for index, rule := range p.rules {
-		if !selected[index] {
+	return selected
+}
+
+// makeEvalDirectives are the makefile directives an --eval text may hold;
+// each one reads files, runs code or changes variables when make parses it.
+var makeEvalDirectives = map[string]bool{
+	"include": true, "-include": true, "sinclude": true, "define": true, "endef": true, "export": true,
+	"unexport": true, "override": true, "private": true, "vpath": true, "ifdef": true, "ifndef": true,
+	"ifeq": true, "ifneq": true, "else": true, "endif": true, "load": true, "-load": true, "undefine": true,
+}
+
+// actionInertMakeEvals returns the --eval words of a static make call when
+// every --eval text only defines plain rules (no $ expansion, assignment,
+// directive, pattern, special or double-colon target) and the call selects
+// none of them: make parses such a text and never runs its recipes, so the
+// paths in it are not targets of the call (GAP-2169). Any other call
+// returns nil, and its --eval texts are read as before.
+func actionInertMakeEvals(call *syntax.CallExpr, cwd, home string) []*syntax.Word {
+	if len(call.Assigns) != 0 || len(call.Args) < 2 || !filepath.IsAbs(cwd) {
+		return nil
+	}
+	words, known := actionStaticWords(call.Args, home)
+	if !known {
+		return nil
+	}
+	if base := programBase(words[0]); base != "make" && base != "gmake" {
+		return nil
+	}
+	var evals []*syntax.Word
+	for i := 1; i < len(words) && words[i] != "--"; i++ {
+		text := ""
+		switch {
+		case strings.HasPrefix(words[i], "--eval="):
+			text = strings.TrimPrefix(words[i], "--eval=")
+		case words[i] == "--eval" && i+1 < len(words):
+			i++
+			text = words[i]
+		default:
 			continue
 		}
-		for _, recipe := range rule.recipes {
-			recipe = strings.TrimLeft(recipe, " \t@-+")
-			// make passes the environment's HOME as a variable and runs
-			// $(MAKE) as make (GAP-0996).
-			recipe = makeRecipeVariables(p.home).Replace(recipe)
-			if match(recipe, p.dir, p.home) {
-				return true
-			}
+		if !makeEvalDefinesRulesOnly(text) {
+			return nil
+		}
+		evals = append(evals, call.Args[i])
+	}
+	if len(evals) == 0 {
+		return nil
+	}
+	proof := makeRecipeProof{dir: cwd, home: home}
+	proof.options(words[1:])
+	if proof.stdinFile {
+		return nil
+	}
+	evalRules := proof.load()
+	for index := range proof.selected() {
+		if index < evalRules {
+			return nil
 		}
 	}
-	return false
+	return evals
+}
+
+func makeEvalDefinesRulesOnly(text string) bool {
+	if strings.ContainsAny(text, "$`\\") {
+		return false
+	}
+	rules := false
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "\t") {
+			if !rules {
+				return false
+			}
+			continue
+		}
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		head, _, _ := strings.Cut(line, ";")
+		targets, rest, rule := strings.Cut(head, ":")
+		fields := strings.Fields(targets)
+		if !rule || len(fields) == 0 || strings.ContainsAny(head, "=%") || strings.HasPrefix(rest, ":") || makeEvalDirectives[fields[0]] {
+			return false
+		}
+		for _, target := range fields {
+			if strings.HasPrefix(target, ".") {
+				return false
+			}
+		}
+		rules = true
+	}
+	return rules
 }
 
 func makeRecipeVariables(home string) *strings.Replacer {
@@ -352,11 +457,11 @@ func (p *makeRecipeProof) read(name string) {
 	}
 	p.reads++
 	path := OperandPath(name, p.dir)
-	real, err := filepath.EvalSymlinks(path)
+	real, err := pathEvalSymlinks(path)
 	if err != nil {
 		return
 	}
-	file, err := os.Open(real)
+	file, err := pathOpen(real)
 	if err != nil {
 		return
 	}

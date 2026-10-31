@@ -52,4 +52,12 @@ defenseclaw_response_failure_reason "$2"`
 			t.Errorf("%s: %v, %q; want %q", c.reason, err, out, c.want)
 		}
 	}
+	// An excluded account is told the policy excludes it, not to wait
+	// (identity-round GAP-1181).
+	body := `{"enrollment":"excluded","error":"forbidden","reason":"enterprise_managed_uid_unregistered"}`
+	out, err := exec.Command("/bin/bash", "-c", script, "bash", filepath.Join("hooks", "_hardening.sh"), "gateway returned HTTP 403", body).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "policy excludes this account on this computer") ||
+		strings.Contains(string(out), "within about five minutes") || !strings.HasSuffix(string(out), "(enterprise_managed_uid_unregistered)") {
+		t.Errorf("excluded: %v, %q", err, out)
+	}
 }

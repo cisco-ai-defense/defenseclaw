@@ -176,6 +176,16 @@ func selectorsOf(t *testing.T, p Policy) [][]tpSelector {
 	return out
 }
 
+func hookCount(p Policy, name string) int {
+	n := 0
+	for _, hook := range p.tp.Spec.LsmHooks {
+		if hook.Hook == name {
+			n++
+		}
+	}
+	return n
+}
+
 func hasBinary(p Policy, want string) bool {
 	for _, b := range p.Binaries {
 		if b == want {

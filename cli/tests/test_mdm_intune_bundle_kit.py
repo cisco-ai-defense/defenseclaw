@@ -33,7 +33,8 @@ def test_packager_validates_bundle_inputs_before_hashing_setup() -> None:
         assert f"[string]${parameter} = ''" in script
     setup_hash = script.index("$setup = (Resolve-Path -LiteralPath $SetupPath)")
     for refusal in (
-        "if ($BundlePath -and $ConfigPath)",
+        "if ($BundlePath -and $ConfigPath -and $BaseConfigPath)",
+        "if ($BundlePath -and -not $ConfigPath -and -not $BaseConfigPath)",
         "if ($TrustAnchorPath -and -not $BundlePath)",
         "if ($BundlePath -and -not $RequireBundle)",
     ):
@@ -58,9 +59,10 @@ def test_launcher_checks_pins_before_running_setup() -> None:
     run = script.index("$run = Invoke-DefenseClawNative")
     for code in ("mdm_invalid_arguments", "mdm_package_incomplete", "mdm_hash_mismatch", "mdm_input_too_large"):
         assert code in script[:run]
-    assert script.index("if ($pins.config_sha256 -and $bundlePin)") < script.index(
-        "$arguments = @('/ensure', 'JSON=1')"
-    )
+    # A package with config.yaml and a bundle is the single app: Setup gets
+    # both and stages the first install from the config (private #2).
+    assert "pins both config.yaml and a policy bundle" not in script
+    assert "if ($Uninstall -and $bundlePin -and -not $pins.config_sha256)" in script
     assert script.index("if ($anchorPin -and -not $bundlePin)") < run
     assert "if ($bundlePin) {\n    $arguments += ('BUNDLE='" in script
     assert "if ($anchorPin) {\n        $arguments += ('TRUSTANCHORS='" in script
@@ -184,7 +186,7 @@ public class StubSetup {
 
 def _package(kit: dict[str, Path | str], name: str, *options: str) -> tuple[Path, subprocess.CompletedProcess[str]]:
     out = Path(kit["tmp"]) / name
-    if "-BundlePath" in options and "-BaseConfigPath" not in options:
+    if "-BundlePath" in options and "-BaseConfigPath" not in options and "-ConfigPath" not in options:
         options = (*options, "-BaseConfigPath", str(kit["config"]))
     result = _run_ps(
         str(kit["pwsh"]),
@@ -256,7 +258,11 @@ def test_bundle_package_pins_copies_and_generates_detection(windows_kit: dict[st
 @pytest.mark.parametrize(
     ("options", "message"),
     [
-        (("-BundlePath", "{bundle}", "-ConfigPath", "{config}"), "cannot be combined"),
+        (
+            ("-BundlePath", "{bundle}", "-ConfigPath", "{config}", "-BaseConfigPath", "{config}", "-RequireBundle", "7"),
+            "only for a bundle-only app",
+        ),
+        (("-BundlePath", "{bundle}", "-ConfigPath", "{config}"), "-RequireBundle is required"),
         (("-TrustAnchorPath", "{anchors}"), "needs -BundlePath"),
         (("-BundlePath", "{bundle}"), "-RequireBundle is required"),
         (("-RequireBundle", "7"), "needs -BundlePath"),
@@ -334,6 +340,20 @@ def test_launcher_passes_only_pinned_inputs(compiled_kit: dict[str, Path | str])
         ),
         ("bundle-only", ("-BundlePath", str(windows_kit["bundle"]), "-RequireBundle", "7"), ("BUNDLE=",)),
         ("base", ("-ConfigPath", str(windows_kit["config"])), ("CONFIG=",)),
+        (
+            "single-app",
+            (
+                "-ConfigPath",
+                str(windows_kit["config"]),
+                "-BundlePath",
+                str(windows_kit["bundle"]),
+                "-TrustAnchorPath",
+                str(windows_kit["anchors"]),
+                "-RequireBundle",
+                "7",
+            ),
+            ("CONFIG=", "BUNDLE=", "TRUSTANCHORS="),
+        ),
     ):
         out, built = _package(windows_kit, name, *options)
         assert built.returncode == 0, built.stderr
@@ -365,7 +385,7 @@ def test_launcher_passes_only_pinned_inputs(compiled_kit: dict[str, Path | str])
         ("bundle-byte", "mdm_hash_mismatch", 1603),
         ("anchors-byte", "mdm_hash_mismatch", 1603),
         ("bundle-delete", "mdm_package_incomplete", 1603),
-        ("both-pins", "mdm_invalid_arguments", 1639),
+        ("config-pin-without-file", "mdm_package_incomplete", 1603),
         ("anchors-only", "mdm_invalid_arguments", 1639),
         ("anchors-large", "mdm_input_too_large", 1639),
     ],
@@ -397,7 +417,7 @@ def test_launcher_refuses_tampered_packages(
         (content / "bundle-anchors.json").write_bytes(b"changed")
     elif mutation == "bundle-delete":
         (content / "policy.dcbundle").unlink()
-    elif mutation == "both-pins":
+    elif mutation == "config-pin-without-file":
         pins["config_sha256"] = "0" * 64
     elif mutation == "anchors-only":
         pins["bundle_sha256"] = ""

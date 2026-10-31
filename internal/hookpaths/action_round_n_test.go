@@ -98,9 +98,6 @@ func TestR104RoundNUnreadableSiblingKeepsGlobMatch(t *testing.T) {
 // read bound was dropped and the name fallback (keyl* names no key)
 // allowed the write.
 func TestR104RoundNGlobPastReadBoundIsUnproved(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX fixture")
-	}
 	_, home, cwd := globFactsFixture(t, false)
 	key := filepath.Join(home, ".ssh", "authorized_keys")
 	for i := 0; i <= actionGlobMaxReads+4; i++ {
@@ -112,12 +109,12 @@ func TestR104RoundNGlobPastReadBoundIsUnproved(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, command := range []string{`cp payload many/*/keyl*`, `cd many && cp payload */keyl*`} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("%s: ActionCommandDecision = %q, want protected-target", command, got)
 		}
 	}
 	// Within the bound an ordinary pattern stays allowed.
-	if got := ActionCommandDecision(`cp payload src/*/*.go docs/`, cwd, home); got != "" {
+	if got := posixShellDecision(`cp payload src/*/*.go docs/`, cwd, home); got != "" {
 		t.Errorf("ordinary bounded glob: %q, want allow", got)
 	}
 }
@@ -129,9 +126,6 @@ func TestR104RoundNGlobPastReadBoundIsUnproved(t *testing.T) {
 // patches were blocked in action. Single-quoted text is literal; a body
 // that mentions authorized_keys is still only data.
 func TestR104RoundNApplyPatchAfterQuotedText(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX paths")
-	}
 	_, home, cwd := globFactsFixture(t, false)
 	envelope := func(header string) string {
 		return "apply_patch <<'PATCH'\n*** Begin Patch\n" + header + "\n+line\n*** End Patch\nPATCH"
@@ -157,10 +151,10 @@ func TestR104RoundNApplyPatchAfterQuotedText(t *testing.T) {
 				t.Errorf("%q: targets %v miss %s", command, targets, name)
 			}
 		}
-		if got := actionCommandDecision(command, cwd, home, 0); got != "" {
+		if got := posixShellAuditReason(command, cwd, home); got != "" {
 			t.Errorf("%q: actionCommandDecision = %q, want allow", command, got)
 		}
-		if got := ActionCommandDecision(command, cwd, home); got != "" {
+		if got := posixShellDecision(command, cwd, home); got != "" {
 			t.Errorf("%q: ActionCommandDecision = %q, want allow", command, got)
 		}
 	}
@@ -175,7 +169,7 @@ func TestR104RoundNApplyPatchAfterQuotedText(t *testing.T) {
 		`echo 'x' && ` + envelope("*** Add File: keydir/authorized_keys"),
 		`echo 'x' && ` + envelope("*** Delete File: ../project/keydir/authorized_keys2"),
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("%q: ActionCommandDecision = %q, want protected-target", command, got)
 		}
 	}
@@ -191,7 +185,7 @@ func TestR104RoundNApplyPatchAfterQuotedText(t *testing.T) {
 		"apply_patch() { sh; }; apply_patch <<'PATCH'\n" + body + "PATCH",
 		"apply_patch <<PATCH\n*** Begin Patch\n*** Add File: notes.txt\n+cp $HOME/x ~/.ssh/authorized_keys\n*** End Patch\nPATCH",
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("%q: ActionCommandDecision = %q, want protected-target", command, got)
 		}
 	}
@@ -207,7 +201,7 @@ func TestR104RoundNApplyPatchAfterQuotedText(t *testing.T) {
 		if _, known := ApplyPatchWriteTargets("Bash", nil, command, cwd, home); known {
 			t.Errorf("%q: envelope known, want unknown", command)
 		}
-		if got := actionCommandDecision(command, cwd, home, 0); got == "" {
+		if got := posixShellAuditReason(command, cwd, home); got == "" {
 			t.Errorf("%q: actionCommandDecision allows, want an unproved class", command)
 		}
 	}

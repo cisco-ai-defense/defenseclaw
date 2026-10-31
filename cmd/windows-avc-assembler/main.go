@@ -28,8 +28,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -105,8 +106,8 @@ func artifactNameFor(flavor string) string {
 	return artifactName
 }
 
-var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-var versionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9_.-]+)?$`)
+var sourceCommitPattern = lazyregexp.New(`^[0-9a-f]{40}$`)
+var versionPattern = lazyregexp.New(`^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9_.-]+)?$`)
 
 // options mirrors the PowerShell-style CLI grammar AVC prefers. Go's
 // flag package parses `-PayloadDir value` and `-PayloadDir=value`

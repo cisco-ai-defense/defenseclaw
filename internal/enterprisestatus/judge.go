@@ -9,6 +9,11 @@ import "fmt"
 // could not start.
 const CodeJudgeFailing = "judge_failing"
 
+// CodeLLMModelUnroutable names an admin config whose llm.model is not a
+// model id the gateway can route (config.LLMConfig.ModelIDProblem): the
+// judge would fall back to the rules on every call (GAP-0172).
+const CodeLLMModelUnroutable = "llm_model_unroutable"
+
 // JudgeHealth is the LLM judge state the gateway publishes in /health
 // (guardrail.details). A judge that stops answering silently downgrades
 // detection to the static rules; only /health and the journal said so

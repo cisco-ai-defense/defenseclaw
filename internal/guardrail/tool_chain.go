@@ -183,11 +183,11 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		DetectionOnly:           true,
 	},
 	{
-		ID: ToolChainDownloadThenExecuteSameArtifact, Version: "1.1",
+		ID: ToolChainDownloadThenExecuteSameArtifact, Version: "1.2",
 		Title:       "Remote artifact downloaded and later executed",
 		Severity:    "HIGH",
 		EventWindow: 8, TimeWindow: 30 * time.Minute,
-		Revision:                "public-remote-download-to-direct-execution-bounded8-v2",
+		Revision:                "public-ip-or-hostname-download-to-direct-execution-bounded8-v3",
 		RequiresExactJoin:       true,
 		ArtifactMutationBarrier: true,
 		DetectionOnly:           true,

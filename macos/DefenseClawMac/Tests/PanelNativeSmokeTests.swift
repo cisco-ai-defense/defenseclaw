@@ -25,7 +25,7 @@ struct PanelNativeSmokeTests {
         CLIProcessGroupLauncher.execIfRequested()
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
-        let state = AppState()
+        let state = AppState(gatewayListenerTrust: { _ in true })
         let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1180, height: 800),
                               styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false

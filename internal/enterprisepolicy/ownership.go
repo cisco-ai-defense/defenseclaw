@@ -18,12 +18,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const ownershipSchemaVersion = 1
@@ -58,7 +58,7 @@ type ownershipRecord struct {
 	RestoredAt string `json:"restored_at,omitempty"`
 }
 
-var recordNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+var recordNamePattern = lazyregexp.New(`^[a-z][a-z0-9_-]{0,63}$`)
 
 func recordPath(opts Options, connector string) (string, error) {
 	if opts.StateDir == "" {
@@ -347,9 +347,11 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 		}
 	}
 	// A directory above the file that users cannot list or pass (an
-	// administrator's chmod 0700) hides the policy from every agent.
+	// administrator's chmod 0700) hides the policy from every agent; one
+	// another account can write lets it change the policy (GAP-0410).
 	dirsRestored := false
-	if problem := publishedDirProblem(opts, path); problem != "" {
+	problem, writeProblem := publishedDirProblem(opts, path), publishedDirWriteProblem(opts, path)
+	if problem != "" || writeProblem != "" {
 		restored, err := restorePublishedDirs(opts, path)
 		if errors.Is(err, errPublishedDirExposes) {
 			// The administrator restricts or moves those files; the
@@ -362,7 +364,12 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 		}
 		if len(restored) > 0 {
 			dirsRestored = true
-			state.detail("restored user access through %s to %s (%s)", strings.Join(restored, ", "), path, problem)
+			if problem != "" {
+				state.detail("restored user access through %s to %s (%s)", strings.Join(restored, ", "), path, problem)
+			}
+			if writeProblem != "" {
+				state.detail("took write away from other accounts on %s above %s (%s)", strings.Join(restored, ", "), path, writeProblem)
+			}
 		}
 	}
 	record.PostimageSHA256 = sha256Hex(rendered)
@@ -423,13 +430,18 @@ func verifyPublishedFiles(opts Options, connector string, state *State) {
 			state.Drift = true
 			state.conflict("users cannot read %s: %s, so their agents run without DefenseClaw's machine policy there; DefenseClaw keeps the directories above the files it publishes accessible, and the hook guardian or the next lifecycle run that applies changes (ensure, repair or reconcile) restores them", record.Path, problem)
 		}
+		if problem := publishedDirWriteProblem(opts, record.Path); problem != "" && !dirsReported[problem] {
+			dirsReported[problem] = true
+			state.Drift = true
+			state.conflict("other accounts can write a directory above %s: %s, so they can add or replace machine policy there; DefenseClaw keeps the directories above the files it publishes writable by administrators only, and the hook guardian or the next lifecycle run that applies changes (ensure, repair or reconcile) takes that write away", record.Path, problem)
+		}
 	}
 	state.finish()
 }
 
 // RestorePublishedPolicyDirs gives the directories above every policy file
 // DefenseClaw publishes (ownership: merge) back the access users need to
-// read it (restorePublishedDirs). The hook guardian runs it on each pass, so an administrator's
+// read it, and takes the write of other accounts away (restorePublishedDirs). The hook guardian runs it on each pass, so an administrator's
 // chmod 0700 of /etc/claude-code/managed-settings.d does not leave Claude
 // Code without managed settings until the next repair (GAP-0913). It returns
 // the directories it changed.

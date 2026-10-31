@@ -205,6 +205,8 @@ def test_windows_launcher_registrations_are_registered(tmp_path, monkeypatch, co
         assert hook_integrity._registers_defenseclaw_hooks(cfg, connector, config, strict=False)
         assert hook_registration_problems(cfg, connector)
     else:
+        # The file scan is under test; Doctor's native verdict has its own tests.
+        monkeypatch.setattr(hook_integrity, "_windows_native_problem", lambda cfg, connector: None)
         assert hook_registration_problems(cfg, connector) == []
 
     removed = {"codex": "[otel.exporter.otlp-http.headers]\nx-defenseclaw-source = 'codex'\n"}.get(
@@ -253,6 +255,8 @@ def test_windows_claude_code_handlers_setup_writes_are_registered(tmp_path, monk
         guard.write_bytes(b"MZ")
         handler = {**handler, "command": str(guard)}
     cfg, config = _install(tmp_path, "claudecode", _claude_windows_settings(handler, str(launcher)))
+    # The file scan is under test; Doctor's native verdict has its own tests.
+    monkeypatch.setattr(hook_integrity, "_windows_native_problem", lambda cfg, connector: None)
     assert hook_registration_problems(cfg, "claudecode") == []
     assert _hook_runtime_degraded_suffix(cfg, "claudecode") == ""
 

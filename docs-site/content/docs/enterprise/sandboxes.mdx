@@ -30,7 +30,7 @@ Everything is set in the one admin `config.yaml`. The user types `defenseclaw sa
 This page assumes a standalone install with an admin-owned `config.yaml`. Policy reaches the host with the package and `enterprise <os> ensure --config`; there is no MDM step. Identity is what the host's account database says; see [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources).
 
 <Callout type="info" title="Limits">
-- **Copy mode only.** A managed sandbox works on a copy of the project; changes come back with `defenseclaw sandbox pull`.
+- **Copy mode only.** A managed sandbox works on a copy of the project; changes come back with `defenseclaw sandbox pull NAME --apply` (or `--branch`, `--patch-out FILE`).
 - **One sandbox account per host at a time.** The first account to run a sandbox holds the sandbox ports.
 - **Docker is root-equivalent.** On Linux a member of the `docker` group can do anything root can. Where `required_for` must hold against deliberate users, do not give them Docker access.
 - **No bundling.** DefenseClaw never ships OpenShell. You provide it (`prerequisite`) or each user's daemon downloads NVIDIA's release at first use (`setup`). All limits: [Limits of managed sandboxes](#limits-of-managed-sandboxes).
@@ -70,7 +70,7 @@ The words these settings take (`prerequisite`, `setup`, `docker`, `vm`, `auto`, 
 | `driver` | `docker`, `vm` or `auto`. The default is `vm` on macOS and `docker` on Linux. On Linux, `auto` chooses the MicroVM driver where the user's KVM probe passes and `docker` where it does not. On macOS, `auto` resolves to `vm`; an explicit `docker` uses Docker and does not need MicroVM `e2fsprogs`. `vm` or `auto` with `install: prerequisite` on Linux needs the driver binary, which the stock OpenShell rpm lacks. |
 | `driver_fallback` | Linux, `driver: vm` or `auto`. What a sandbox gets when KVM is not available for the user: `docker` (the default) or `none`. |
 | `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.5"`; `prerequisite` also accepts a range inside `>=0.1.5 <0.2.0`. Sandboxes run only on 0.1.5 or later: `setup` installs 0.1.5 for an older exact pin, and in `prerequisite` mode an installed release older than 0.1.5 is a failed row, whatever the pin allows. |
-| `gateway_port` | The OpenShell gateway's loopback port, 1024 to 65535, default 17670. It may not equal the API, hook, ingress or egress port. |
+| `gateway_port` | The OpenShell gateway's loopback port, 1024 to 65535, default 17670. It may not equal the API, hook, ingress or egress port. This is the administrator's key only: a per-user config has no `openshell.gateway_port`. |
 | `e2fsprogs_dir` | macOS only. Optional: an absolute root-owned e2fsprogs install prefix (`mke2fs` and `debugfs` in its `sbin` or `bin`) or the folder that holds both. A broken explicit value is refused with `openshell_prerequisite_missing`. When unset, an account's `~/.local/opt/e2fsprogs/sbin` build or the package tools are used. Another account's Homebrew keg is never a source. |
 | `openshell.image.base` | Admin config. The base image for every agent image, by digest: `name@sha256:<digest>`. For an image built on the computer, the digest is its image ID (`docker image inspect --format '{{.Id}}' name:tag`). A tag alone is refused. A base the engine already has is never pulled. |
 
@@ -81,7 +81,7 @@ These are lifecycle settings: `ensure` applies a change and restarts the user da
 - **Copy mode only.** A managed sandbox always works on a copy of the project, and `sandbox run` has no flag that asks for a live mount. A pack or repository policy with `workspace.mode: mount` is clamped to copy, `--context` is refused, and the changes come back with `defenseclaw sandbox pull`. Skip-permissions mode is the default; a profile with `allow_yolo: false` keeps the agent's own prompts (the same as `--safe`). Mount mode through the relay is not available on managed hosts; it may come in a later release.
 - **One sandbox account per host at a time.** The first account to run a sandbox holds the sandbox ports. Another account is told that sandboxes are not available for it right now, without the name of the first.
 - **Docker is root-equivalent.** On Linux, a member of the `docker` group, which sandboxes need with either driver, can do anything root can, the protected credentials included. DefenseClaw keeps honest users inside the policy; it does not stop a hostile local user, who can also run an agent in a plain container and bypass `required_for`. Where `required_for` must hold against deliberate users, do not give them Docker access.
-- **Processes of one account share a trust boundary.** A registration vouches for the account, not for a VM. A user can deliberately present a running-sandbox registration for their own account. It never reaches another account's policy, and the audit record names the account.
+- **Processes of one account share a trust boundary.** A registration vouches for the account, not for a VM. A user can deliberately create a registration for their own account. It never reaches another account's policy, the audit record names the account, and the registration tripwire flags one that no guest backs. A stopped sandbox's registration stays stopped: starting the sandbox registers it again under a new id.
 - **No bundling.** DefenseClaw never ships OpenShell in its packages. You provide it (`prerequisite`) or let each user's daemon download NVIDIA's release at first use (`setup`).
 
 ## How it works
@@ -96,7 +96,7 @@ A sandbox run goes through five steps.
 
 1. The user runs `defenseclaw sandbox run claude`. The root-owned `defenseclaw` launcher starts the user's sandbox daemon if it is not running.
 2. The daemon asks the managed gateway, as the user, for the policy of this run. The gateway reads the peer's uid from the kernel, matches the profile with the same rules as the guardrails, combines the floor and the profile (tighten only), and answers with the resolved policy. Nothing the daemon or the sandbox sends is trusted as identity.
-3. The daemon creates the sandbox and binds it to the registration the gateway made. A stopped sandbox's registration, or one the daemon has not reported running for five minutes, admits no relayed hook until the sandbox starts again.
+3. The daemon creates the sandbox and binds it to the registration the gateway made. A stopped sandbox's registration, or one the daemon has not reported running for five minutes, admits no relayed hook until the sandbox starts again. Once the daemon reports a sandbox stopped, that registration never runs again: `defenseclaw sandbox start` registers the sandbox again under a new registration id, with the same policy after any re-match that is due. A sandbox that only missed reports (a lost connection, a sleeping computer, a restarted daemon) keeps its registration.
 4. Every hook the agent sends inside the sandbox goes to the user's daemon, then unchanged to the managed gateway, which judges it under the person's verified identity and profile. A broken relay or an unreachable gateway fails the hook closed.
 5. When the config or the person's group changes, the gateway re-matches the live registrations (see [Changes while sandboxes run](#changes-while-sandboxes-run)).
 
@@ -457,7 +457,7 @@ Need an exception? Contact it-security@example.com
 
 - **It is a policy control, not an exec deny.** It covers the connectors that have a machine-owned hook (Claude Code, Codex, Cursor and Copilot). For a non-exempt account, a host run is refused even when it claims to be nested in a sandbox, unless sandboxes are unavailable to the account and the effective `when_unavailable` is `alert`. An agent without a machine-owned hook is not stopped. `ensure` warns about a `required_for` connector with no machine-owned hook on the OS.
 - **Root is refused** on every sandbox route, including when you inspect.
-- **Registration tripwire.** The managed gateway records `log.sandbox.registration_without_guest` (reason `relay_without_guest` or `running_without_guest`) when a watched registration is used or reported running without a guest sighting, five minutes after bind. The Sandboxes dashboard stat **Sandbox registrations without a guest** counts these records. It is a tripwire for the simple case, not proof.
+- **Registration tripwire.** The managed gateway records `log.sandbox.registration_without_guest` (reason `relay_without_guest` or `running_without_guest`) when a watched registration is used or reported running without a guest sighting, five minutes after bind, and (reason `running_after_stop`) when it refuses a running report for a registration whose sandbox was reported stopped. A start registers the sandbox again with a new watch. The Sandboxes dashboard stat **Sandbox registrations without a guest** counts these records. It is a tripwire for the simple case, not proof.
 
 ### How the host refusal works
 
@@ -539,6 +539,10 @@ A running sandbox takes a changed live field before its next connection: its egr
 
 Floors are pinned per sandbox when it is created. When a person's profile assignment changes, each running sandbox is re-matched but runs under the stricter of the two floors: the floor of the profile it was created under and the floor of the new one. A sandbox created under a strict profile keeps its blocked destinations after the person moves to a looser profile, and one created under a looser profile is tightened at once when the person moves to a stricter one. The next sandbox takes the new profile alone; to loosen a running sandbox, stop it and run a new one. If the profile a sandbox was created under is removed from the configuration, that sandbox's policy no longer loads and it is refused until it is started again.
 
+While a running sandbox keeps the floor of the profile it was created under, its refusals, `defenseclaw sandbox status` and `defenseclaw sandbox policy explain` name that profile first, as pinned when the sandbox was created, then the profile the person is assigned now. The request-access quote names the pinned profile, whose rule refused.
+
+One account can have at most 32 sandboxes running at once on a computer. Another start is refused with a sentence that says so until one of them stops. Stopped and deleted sandboxes do not count.
+
 ![The end of a Claude Code session in a sandbox on Linux: This sandbox was stopped: your profile no longer allows sandboxes, with the request-access contact; the work stays in the sandbox and sandbox pull reads it](/images/sandboxes/managed/sandbox-stopped.png)
 
 When a directory lookup is cold, the create waits up to 10 seconds for it. If a profile assignment needs the unanswered identity fact, the create and hooks are refused with that fact named. If no assignment needs it, the proven profile or `default_profile` applies; a create under the default may be marked **provisional** and re-evaluated after the fact is confirmed. The computer must still know the account itself: OpenShell reaches every sandbox over ssh as the person, and ssh refuses an account the computer cannot look up (on Linux, SSSD stopped, or no cached entry). A new `sandbox run` then waits up to 10 seconds, and otherwise stops with "Your account can't be looked up on this computer right now. Try again in a moment." A sandbox still running two minutes after it should have stopped is revoked, and a recycled or renamed account (the same uid with a different name) revokes its registrations.
@@ -601,7 +605,7 @@ The `Organization profile` row is the guardrail profile your administrator assig
 
 ![defenseclaw sandbox policy explain for an engineering user: the plain-words summary, then the pack balanced and its digest and a table of settings with VALUE, SOURCE and ORIGIN](/images/sandboxes/managed/policy-explain.png)
 
-`defenseclaw sandbox doctor` checks the person's own account and reports what their sandbox service got from the managed gateway: the OpenShell release, driver, install mode and gateway port, whether sandboxes are available and why not, their profile, and their images and hooks. Every fix it prints is one the person can apply or a pointer to the IT help desk. On Linux a person in the `docker` group also gets a **Docker access** warning, because the group is administrator-equivalent on the computer.
+`defenseclaw sandbox doctor` checks the person's own account and reports what their sandbox service got from the managed gateway: the OpenShell release, driver, install mode and gateway port, whether sandboxes are available and why not, their profile, and their images and hooks. Every fix it prints is one the person can apply or a pointer to the IT help desk. On Linux a person in the `docker` group also gets a **Docker access** warning, because the group is administrator-equivalent on the computer. When the organization requires one of their agents to run only in a sandbox, the warning also says that Docker access lets them run that agent outside the sandbox policy.
 
 `sandbox policy test` judges your own sandbox policy on a managed computer. Without `--sandbox` it tests the policy a new run in this folder would get; add `--harness` for another agent. Leave out `--pack` and `--profile`, because the organization decides them:
 
@@ -696,6 +700,7 @@ When a sandbox can't run for a person, the refusal says why in words and the rec
 | Reason code | Record | Meaning |
 | --- | --- | --- |
 | `relay_without_guest`, `running_without_guest` | `log.sandbox.registration_without_guest` | A watched registration was used on an admitted relay call or reported running after the guest grace without an accepted guest record since bind. The record names the account, connector, registration and sandbox; it changes no decision. |
+| `running_after_stop` | `log.sandbox.registration_without_guest` | A running report for a registration whose sandbox was reported stopped was refused; the registration stays stopped. The daemon registers a sandbox it sees running again under a new registration, so one record can also follow a sandbox started outside `defenseclaw sandbox start`. At most one record per registration an hour. |
 
 ### What `ensure`, `status` and `verify` report
 
@@ -708,7 +713,7 @@ These codes appear in the warnings and failed rows an administrator sees, in tex
 | `openshell_driver_fallback` | A MicroVM prerequisite is missing but the Docker fallback is ready, so people still get sandboxes | Fix the prerequisite if you want MicroVMs, or set `driver: docker` |
 | `openshell_launcher_conflict` | The launcher path holds a file that is not DefenseClaw's link, a Python install for example | Move that file aside, then run `ensure` |
 | `sandbox_user_groups` | People who need `docker` or `kvm` are not in it. `ensure` never adds anyone | Add them |
-| `docker_group_members` | How many enrolled accounts are in the `docker` group (Linux), which is root-equivalent. A number, never names | Keep the group to the accounts that run sandboxes |
+| `docker_group_members` | How many enrolled accounts are in the `docker` group (Linux), which is root-equivalent. A number, never names. With `required_for` set, it also says a member can run a required agent outside its sandbox policy | Keep the group to the accounts that run sandboxes |
 | `sandbox_pending_restart` | A user's daemon is outdated, or (macOS) a LaunchAgent reload waits for that user's sandboxes to stop | A daemon restart needs no administrator action: the user's next idle `defenseclaw sandbox` command restarts it. If a macOS reload fails, the start names `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair` |
 | `sandbox_user_state` | A per-user change could not be applied or removed (units, a file that changed after DefenseClaw wrote it, a teardown) | Read the message; the next run tries again |
 | `sandbox_default_profile_looser` | `default_profile` is looser than an assigned profile for a field | Make `default_profile` repeat the stricter setting |
@@ -723,7 +728,7 @@ The sandbox routes answer with an HTTP status and a `sandbox_*` reason. The user
 | Reason (status) | Meaning | What to do |
 | --- | --- | --- |
 | `sandbox_registration_unknown` (404), `sandbox_registration_revoked`, `sandbox_registration_expired` (410) | The registration is gone, revoked, or the 30-minute pending window passed (a registration that was never bound to a sandbox) | Start the sandbox again |
-| `sandbox_registration_stopped` (403) | The sandbox is not running: its daemon reported it stopped, or has not reported it running for five minutes | `defenseclaw sandbox start` |
+| `sandbox_registration_stopped` (403) | The sandbox is not running: its daemon reported it stopped, or has not reported it running for five minutes. Also the answer to a running report after a reported stop | `defenseclaw sandbox start` |
 | `sandbox_subject_changed` (409) | The account behind the uid was renamed or recycled | Start the sandbox again |
 | `sandbox_relay_files_unsupported` (400) | A client sent mount-mode file bytes; managed hosts are copy-only | Use copy mode |
 | `sandbox_connector_mismatch` (403) | A hook arrived for an agent other than the one the registration was made for | Run the agent only through `defenseclaw sandbox run` for its own sandbox |
@@ -731,7 +736,7 @@ The sandbox routes answer with an HTTP status and a `sandbox_*` reason. The user
 | `sandbox_decision_refused` (403) | An ask, unblock or "always" past what `user_approvals` and `allow_unblock` allow | The notice carries the quote to send; change the profile if the person should be allowed |
 | `sandbox_unavailable` (503) | Sandboxes aren't available for the account right now; the reason is one of the codes above | Fix the reason |
 | `sandbox_policy_unloadable` (503) | The organization's sandbox policy can't be loaded on this computer. The person is told only that | Run `config validate` and `verify`; check the packs folder |
-| `enterprise_managed_rate_limited` (429) | A flood of relayed hooks hit the per-user budget (100 per second, burst 200) | The hook fails closed for that call; check the agent for a loop |
+| `enterprise_managed_rate_limited` (429) | A flood of relayed hooks hit the per-user budget (100 per second, burst 200). The sandbox CLI's read-only calls (`status`, `pack list`, `policy explain`, `policy test`) have a budget of their own (60 per second, burst 120), apart from the policy writes (registrations, decisions: 10 per second, burst 20) | The hook fails closed for that call; check the agent for a loop. A CLI command refused this way says so and changes nothing: run it again in a few seconds |
 | `enterprise_managed_root_denied` (403) | root called a sandbox route | Run sandboxes as the user |
 
 ### Messages a person can get

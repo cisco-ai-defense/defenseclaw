@@ -11,6 +11,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -371,6 +372,31 @@ var enterpriseDiscoveryLoadConfig = loadGatewayCommandConfigFor
 // status; a connection that fails does. Secure Client keeps the one error of
 // main for both (issue #1092).
 func enterpriseGatewayGet(path string, out any) (string, error) {
+	return enterpriseGatewayRequest(http.MethodGet, path, nil, out)
+}
+
+// enterpriseGatewayRefusal is a gateway answer other than 200 to a POST:
+// its status and the code and message of its JSON body.
+type enterpriseGatewayRefusal struct {
+	status        int
+	code, message string
+}
+
+func (e *enterpriseGatewayRefusal) Error() string {
+	if e.message == "" {
+		return fmt.Sprintf("the gateway answered %d", e.status)
+	}
+	return e.message
+}
+
+// enterpriseGatewayPost posts body (JSON) to one route of the local gateway
+// API of the managed deployment and decodes its answer into out, as
+// enterpriseGatewayGet does; a refusal is an *enterpriseGatewayRefusal.
+func enterpriseGatewayPost(path string, body []byte, out any) (string, error) {
+	return enterpriseGatewayRequest(http.MethodPost, path, body, out)
+}
+
+func enterpriseGatewayRequest(method, path string, body []byte, out any) (string, error) {
 	if err := enterpriseDiscoveryPinManagedEnv(); err != nil {
 		return "", err
 	}
@@ -384,9 +410,18 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 	host := net.JoinHostPort(gatewayClientHost(cfg), strconv.Itoa(cfg.Gateway.APIPort))
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+path, nil)
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "http://"+host+path, reader)
 	if err != nil {
 		return "", err
+	}
+	if method != http.MethodGet {
+		// The API refuses a POST without its CSRF tag and a JSON body.
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DefenseClaw-Client", "defenseclaw-gateway-cli")
 	}
 	token := daemonGatewayToken(cfg)
 	if token == "" {
@@ -410,6 +445,14 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if method != http.MethodGet {
+			var refusal struct {
+				Error string `json:"error"`
+				Code  string `json:"code"`
+			}
+			_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&refusal)
+			return "", &enterpriseGatewayRefusal{status: resp.StatusCode, code: refusal.Code, message: refusal.Error}
+		}
 		if !secureClient && resp.StatusCode == http.StatusBadRequest {
 			var refusal struct {
 				Error string `json:"error"`
@@ -570,7 +613,50 @@ func windowsDiscoveryAccountKey(signal inventory.AISignal) string {
 var (
 	enterpriseDiscoveryAccountIDs  = platformDiscoveryAccountIDs
 	enterpriseDiscoveryAccountName = platformDiscoveryAccountName
+	// enterpriseDiscoveryUIDName names the Linux or macOS account that holds
+	// a uid now, as the account database spells it ("" on Windows or when
+	// none does).
+	enterpriseDiscoveryUIDName = platformDiscoveryUIDName
 )
+
+// enterpriseDiscoveryRuntimeFilter is the --user filter runtime findings are
+// matched with. A Linux or macOS finding names its account by name only (it
+// carries no SID), while the per-user records also carry the uid, so a uid
+// --user selected the account's records and none of its runtime findings
+// (rel-1-0-6 GAP-0159). A uid is resolved to the name of the account that
+// holds it, as the account database names it, else as the account's record
+// in the report names it; the findings are then matched by that name, as for
+// --user <name>. A qualified name that resolves to a uid is matched the same
+// way. Any other spelling is matched as given.
+func enterpriseDiscoveryRuntimeFilter(user string, accounts []enterpriseDiscoveryAccount) useridentity.AccountFilter {
+	user = strings.TrimSpace(user)
+	if uid, err := strconv.Atoi(user); err == nil && uid >= 0 && strconv.Itoa(uid) == user {
+		name := enterpriseDiscoveryUIDName(uid)
+		for _, account := range accounts {
+			if name == "" && account.UID != nil && *account.UID == uid {
+				name = strings.TrimSpace(account.User)
+			}
+		}
+		if name != "" {
+			return useridentity.NewAccountFilter(name)
+		}
+	}
+	ids := enterpriseDiscoveryAccountIDs(user)
+	// A qualified name (user@domain, DOMAIN\name) resolves to the uid of its
+	// account, and a resolved filter selects a row by that id only; a
+	// finding names no uid, so an AD account's finding was listed under
+	// --user <uid> and its bare name but not under the name NSS gives it
+	// (rel-1-0-6 GAP-0184). The uid's account is matched by its name, as for
+	// --user <uid>.
+	if len(ids) == 1 {
+		if uid, err := strconv.Atoi(ids[0]); err == nil && uid >= 0 && strconv.Itoa(uid) == ids[0] {
+			if name := strings.TrimSpace(enterpriseDiscoveryUIDName(uid)); name != "" {
+				return useridentity.NewAccountFilter(name)
+			}
+		}
+	}
+	return useridentity.NewAccountFilter(user, ids...)
+}
 
 // nameWindowsDiscoveryTwins names each account that shares its bare name
 // with another one (a domain and a local account of one name) DOMAIN\name or
@@ -675,7 +761,7 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 			// apart, as host-wide (GAP-1250). Secure Client keeps the exact
 			// --user match of main (issue #1092).
 			secureClient := cfg != nil && cfg.SecureClientIntegration()
-			accountFilter := useridentity.NewAccountFilter(user, enterpriseDiscoveryAccountIDs(user)...)
+			accountFilter := enterpriseDiscoveryRuntimeFilter(user, report.Accounts)
 			findings := []enterpriseRuntimeFinding{}
 			for _, finding := range view.Findings {
 				switch {

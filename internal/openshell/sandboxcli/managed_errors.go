@@ -20,11 +20,11 @@ import (
 	"context"
 	"errors"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
@@ -277,7 +277,7 @@ var managedReasonTexts = map[string]string{
 
 // adminKeyNote is an openshell.admin key a policy text names in
 // parentheses: the managed user has no such file.
-var adminKeyNote = regexp.MustCompile(`\s*\(openshell\.admin\.[a-z_]+\)`)
+var adminKeyNote = lazyregexp.New(`\s*\(openshell\.admin\.[a-z_]+\)`)
 
 // managedErrorText is e as a user on a managed computer reads it, and
 // whether it is a refusal ManagedError words; m is the caller's own

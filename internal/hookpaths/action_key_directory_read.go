@@ -4,7 +4,6 @@
 package hookpaths
 
 import (
-	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -133,7 +132,7 @@ func actionKeyDirectory(value, cwd, home string, windows bool) bool {
 		if !strings.HasPrefix(resolved, root+"/.ssh/") {
 			return false
 		}
-		info, err := os.Stat(resolved)
+		info, err := pathStat(resolved)
 		return err == nil && info.IsDir()
 	}
 	ssh, ok := ResolveWriteTarget(filepath.Join(home, ".ssh"))
@@ -158,7 +157,7 @@ func actionKeyDirectory(value, cwd, home string, windows bool) bool {
 	if !strings.HasPrefix(resolved, ssh+string(filepath.Separator)) {
 		return false
 	}
-	info, err := os.Stat(resolved)
+	info, err := pathStat(resolved)
 	return err == nil && info.IsDir()
 }
 

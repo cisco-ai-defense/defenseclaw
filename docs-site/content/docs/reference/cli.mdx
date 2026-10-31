@@ -107,7 +107,7 @@ DefenseClaw Doctor
   [WARN] Hook contract [claudecode]  -  no hook_contract_lock.json yet - the gateway writes it when it starts: 'defenseclaw-gateway restart' (also starts a stopped gateway)
   …
   -- Scanners --
-  [PASS] Scanner: skill-scanner  -  ~/.local/bin/skill-scanner (skill-scanner 2.2.1); cisco-ai-skill-scanner 2.2.1
+  [PASS] Scanner: skill-scanner  -  ~/.local/bin/skill-scanner (skill-scanner 2.3.2); cisco-ai-skill-scanner 2.3.2
   [WARN] Scanner settings  -  the skill-scanner LLM judge is off; Add an LLM judge ('defenseclaw setup llm') or the local vLLM option
   …
   -- Services --
@@ -821,7 +821,7 @@ These commands are connector-aware because the same asset name can exist in more
 | `defenseclaw tool block\|allow <name> [--connector X] [--source S] [--reason R]` | Put a tool on the block or allow list. Bare rules are the fallback tier for every configured connector. A connector-scoped rule (`--connector X`, or the name given as `@X/<name>`, the form `tool list` shows) is stored as the tool name with `connector: X` in `asset_policy.tool`. `--source` is recorded for audit only: hook payloads carry no tool source, so a source-scoped block is enforced as an unscoped block, and a source-scoped allow, which would never apply, is refused. After it writes, the command waits up to 5 seconds for the running gateway and says `The running gateway enforces it now (policy digest <12 characters>).` or `Pending: the running gateway has not applied it yet. Hook calls keep the previous verdict until it reloads config.yaml, usually within a few seconds.` It says nothing when no gateway answers. |
 | `defenseclaw tool unblock <name> [--connector X] [--source S]` | Remove a tool from the block/allow list. Without `--connector` or `--source` it removes the fallback entry and the connector-specific overrides for this tool. It prints the same enforcement line. |
 | `defenseclaw tool status <name> [--connector X] [--source S] [--json]` | Show the effective policy for one tool. |
-| `defenseclaw tool list [--blocked\|--allowed] [--connector X] [--json]` | List tool policy entries. |
+| `defenseclaw tool list [--blocked\|--allowed] [--connector X] [--json]` | List tool policy entries. UPDATED is `-` for an entry in `config.yaml`, which records no time for it. |
 | `defenseclaw skill info <name> [--connector X] [--json]` / `plugin info` | Show one skill's or plugin's details. |
 | `defenseclaw skill search QUERY [--json]` | Search the remote ClawHub registry of installable skills (not the skills already installed). Uses a local `clawhub` binary or a cached `npx clawhub`. |
 | `defenseclaw plugin install NAME_OR_PATH [--connector X] [--action] [--force]` | Install a plugin from a local directory, an npm package, ClawHub, or a URL into each configured connector with a supported install directory (or one with `--connector`), then scan it. Codex requires its own marketplace install flow: this command refuses a Codex-only install and names Codex when skipping it during a multi-connector install. `--action` applies the `admission.plugin` actions to the scan result; without it, a plugin the admission policy rejects is not installed and the install fails. `--force` replaces an existing plugin, only once the new copy is admitted. |
@@ -1161,10 +1161,17 @@ The administrator runs it by its packaged path, as root
 Windows has no sandbox-only command. There `defenseclaw.exe` is the
 administrator's command: the gateway binary, not the Python CLI. It answers
 `setup`, `doctor`, `upgrade` and `rollback` with a note that the computer is
-managed and exits `1`. `config set` prints `This device is managed: change config.yaml in the admin config (MDM or management plane); config set did not change it`
+managed and exits `1`. With `--help` they print that note with their usage and
+exit `0`. `config set` prints `This device is managed: change config.yaml in the admin config (MDM or management plane); config set did not change it`
 (`config unset` says `config unset`) and exits `3`; the `block`, `allow` and
-`unblock` writers are refused with exit `3` too. It has no `guardrail` group,
-no `version` command (run `defenseclaw.exe --version`) and no `policy activate`
+`unblock` writers are refused with exit `3` too. These answers name the
+administrator's next command: `skill`, `mcp`, `plugin` and `tool` name
+`policy show`, `setup` names `enterprise windows status --profile standalone`,
+and `sandbox` (sandboxes do not run on Windows, exit `3`) names
+`defenseclaw-gateway.exe enterprise windows sandbox list --user NAME`, each from
+an elevated PowerShell prompt. Its `guardrail` commands are
+refused with exit `3` like `config set` (`guardrail disable` prints `This device is managed: change config.yaml in the admin config (MDM or management plane); guardrail disable did not change it`).
+It has no `version` command (run `defenseclaw.exe --version`) and no `policy activate`
 or `policy edit`: these return an unknown-command error and exit `2`. Its
 `policy` group has `digest`, `evaluate`, `reload`, `show`, `test` and `validate`.
 Commands that read a per-user gateway, such as `status`, `audit findings` and
@@ -1475,6 +1482,18 @@ Names use lowercase letters, digits, and dashes. Every action takes `--json`.
 | Exit codes | `0`, `1`, `2`, and `75` when the `ensure` it runs finds the lock held | `0`, `1603`, `1639` (invalid input) |
 
 Install first, then store the key. See [AI Defense key](/docs/enterprise/ai-defense-key).
+
+### Re-read directory facts (`enterprise identity refresh`)
+
+`defenseclaw-gateway enterprise identity refresh [--user U] [--flush-os-cache] [--max-users N] [--json]` re-reads groups and UPN now, for one account or for every account the managed gateway has cached (default at most 500), and lists the accounts whose guardrail profile changed. Hook calls use the new facts from their next call. Root, or an elevated prompt or SYSTEM on Windows; anyone else gets `not_admin`. Standalone managed deployments only.
+
+| Flag | Effect |
+| --- | --- |
+| `--user U` | Only this account (name, uid or SID) |
+| `--flush-os-cache` | First flush the OS cache: Linux with SSSD `sss_cache -u` (with `--user`) or `sss_cache -E`; macOS `dscacheutil -flushcache` and `dsmemberutil flushcache`, without `--user` only (macOS has no per-account flush); Windows nothing |
+| `--max-users N` | Re-read at most N cached accounts (1 to 4096) |
+
+On Windows an account takes its groups from its sign-in token, so a signed-in account gets a directory group change at its next sign-in; the result lists it in `windows_token_groups_pending`. Account names appear only in the output; the audit row `identity-refresh-completed` and its telemetry carry counts. Exit codes: `0`, `1` (`1603`), `2` (`1639`), `75` (`1618`) when another refresh is running. Schema: `packaging/mdm/contract/identity-refresh.schema.json`.
 
 ### Per-user hooks (`enterprise hooks`)
 

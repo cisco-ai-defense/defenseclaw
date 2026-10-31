@@ -64,8 +64,8 @@ var copilotShellArgs = map[string]trustedShellArg{
 // named to hooks), the arguments TrustedShellArgs takes out, from the
 // installed harnesses' tool schemas:
 //
-//   - OpenCode 1.18 bash: workdir, absolute or relative to the project
-//     (timeout is part of the shell shape the parser proves).
+//   - OpenCode V2 shell: workdir, absolute or relative to the project,
+//     and background (timeout is part of the shell shape the parser proves).
 //   - Hermes 0.21 terminal: workdir; background, timeout, pty, notify, and
 //     the legacy notify_on_complete and watch_patterns.
 //   - Amp shell_command: workdir; timeout_ms.
@@ -87,7 +87,7 @@ var copilotShellArgs = map[string]trustedShellArg{
 // hook resolves its workdir before proving the command. Agy's run_command
 // and Hermes' process have their own projections.
 var trustedShellTools = map[string]map[string]map[string]trustedShellArg{
-	"opencode": {"bash": {"workdir": trustedShellWorkdir}},
+	"opencode": {"shell": {"workdir": trustedShellWorkdir, "background": trustedShellFlag}},
 	"hermes": {"terminal": {
 		"workdir": trustedShellWorkdir, "background": trustedShellFlag, "timeout": trustedShellNumber,
 		"pty": trustedShellFlag, "notify": trustedShellNotify,
@@ -132,13 +132,32 @@ var trustedShellTools = map[string]map[string]map[string]trustedShellArg{
 // listed arguments, or unless the arguments are a JSON object whose keys
 // are unique and every listed argument has its JSON value.
 func TrustedShellArgs(connectorName, toolName string, args json.RawMessage) (projected json.RawMessage, cwd string, ok bool) {
-	known := trustedShellTools[strings.ToLower(strings.TrimSpace(connectorName))][strings.TrimSpace(toolName)]
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	toolName = strings.TrimSpace(toolName)
+	known := trustedShellTools[connectorName][toolName]
 	if len(known) == 0 || antigravityValidateUniqueJSON(args) != nil {
 		return args, "", false
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(args, &fields); err != nil || fields == nil {
 		return args, "", false
+	}
+	if connectorName == "opencode" && toolName == "shell" {
+		// Preserve case-twin control fields for the conflicting-arguments
+		// check. Projecting one away can otherwise make a V2 shell call look
+		// complete even though its original directory/control key was ambiguous.
+		seen := make(map[string]string, len(fields))
+		for key := range fields {
+			folded := strings.ToLower(key)
+			if previous, exists := seen[folded]; exists {
+				_, previousKnown := known[previous]
+				_, currentKnown := known[key]
+				if previousKnown || currentKnown {
+					return args, "", false
+				}
+			}
+			seen[folded] = key
+		}
 	}
 	taken := false
 	for key, raw := range fields {
@@ -195,12 +214,14 @@ func trustedShellArgValue(kind trustedShellArg, raw json.RawMessage) bool {
 
 // shellCommandKeys names, per connector and shell tool (as the tool is
 // named to hooks), the argument that holds the command: the tools
-// trustedShellTools lists, agy's run_command, Claude Code's Bash, and
-// Codex's Bash and exec_command.
+// trustedShellTools lists, agy's run_command, Claude Code's Bash, Codex's
+// Bash and exec_command, and Amp's Bash ("cmd"). Any connector's bash,
+// powershell or shell tool that is not listed here has its command under
+// "command" (shellCommandTool).
 var shellCommandKeys = map[string]map[string]string{
-	"opencode":    {"bash": "command"},
+	"opencode":    {"shell": "command"},
 	"hermes":      {"terminal": "command"},
-	"amp":         {"shell_command": "command"},
+	"amp":         {"shell_command": "command", "Bash": "cmd"},
 	"cursor":      {"Shell": "command"},
 	"devin":       {"exec": "command"},
 	"kiro":        {"shell": "command", "execute_bash": "command"},
@@ -211,9 +232,50 @@ var shellCommandKeys = map[string]map[string]string{
 	"openclaw":    {"exec": "command"},
 }
 
+// shellCommandWorkdirKeys names the working-directory argument of the shell
+// tools whose projection is not TrustedShellArgs (Amp's Bash, agy's
+// run_command), and of the bash, powershell and shell tools no projection
+// lists (the exact shell schema reads cwd or workdir).
+var shellCommandWorkdirKeys = map[string]map[string][]string{
+	"amp":         {"Bash": {"cwd"}},
+	"antigravity": {"run_command": {"Cwd"}},
+}
+
+// shellCommandTool returns the argument that holds the command of the
+// connector's shell tool toolName, and the key of the reduced shape the
+// trusted-action parser proves; "" for a tool that is no shell tool.
+//
+// The exact shell schema (bash, powershell, and shell with its closed
+// arguments) leaves any argument it does not know partial. A connector's
+// tool of those names that the table did not list (Amp's Bash, which
+// Amp also reports as bash; OpenCode's and Devin's bash; Claude Code's
+// PowerShell) was therefore never judged on its command alone, and one
+// extra argument turned a block into a detection-only allow (GAP-0694).
+// Amp's Bash holds its command under cmd; the reduced shape names it
+// command, as AmpBashTrustedShellArgs does.
+func shellCommandTool(connectorName, toolName string) (key, out string) {
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	toolName = strings.TrimSpace(toolName)
+	if key = shellCommandKeys[connectorName][toolName]; key != "" {
+		if connectorName == "amp" && toolName == "Bash" {
+			return key, "command"
+		}
+		return key, key
+	}
+	if connectorName == "amp" && strings.EqualFold(toolName, "bash") {
+		return "cmd", "command"
+	}
+	switch strings.ToLower(toolName) {
+	case "bash", "powershell", "shell":
+		return "command", "command"
+	}
+	return "", ""
+}
+
 // ShellCommandArgs reduces a shell tool call to its command, in the shell
-// shape the trusted-action parser proves ({"command": ...}, or agy's
-// {"CommandLine": ...}), whatever else the call carries.
+// shape the trusted-action parser proves ({"command": ...}, Codex
+// exec_command's {"cmd": ...}, or agy's {"CommandLine": ...}), whatever else
+// the call carries.
 //
 // The trusted-action projections (TrustedShellArgs and the connectors' own)
 // take out only the arguments they know, with the JSON values they expect.
@@ -227,25 +289,74 @@ var shellCommandKeys = map[string]map[string]string{
 // command runs.
 //
 // The command is a non-blank string, or a non-empty list of strings (an
-// argv). When the key repeats, the last value is the command, as JSON
-// decoders in the harnesses read it. A key that differs from the command
-// key only in letter case (Command next to command) stays next to the
-// command with its value: it names the same argument to a reader that folds
-// case, so the gateway judges the call as conflicting arguments (GAP-0678,
-// GAP-0686). Refused (ok false) for any other tool, or unless the arguments
-// are a JSON object with such a command under the exact command key.
+// argv), under the tool's command key, or, when that key is absent, under
+// the other of cmd and command (GAP-0694: Amp's Bash called with command
+// and an extra key reached no rule). When both are present they must hold
+// the same command; two different commands are refused, so the call is
+// judged as unverified. When the key repeats, the last value is the command,
+// as JSON decoders in the harnesses read it. A key that differs from the
+// command key only in letter case (Command next to command) stays next to
+// the command with its value: it names the same argument to a reader that
+// folds case, so the gateway judges the call as conflicting arguments
+// (GAP-0678, GAP-0686); a reduced shape whose key is not the call's refuses
+// such a twin instead. Refused (ok false) for any other tool, or unless the
+// arguments are a JSON object with such a command.
 func ShellCommandArgs(connectorName, toolName string, args json.RawMessage) (json.RawMessage, bool) {
-	key := shellCommandKeys[strings.ToLower(strings.TrimSpace(connectorName))][strings.TrimSpace(toolName)]
+	key, out := shellCommandTool(connectorName, toolName)
 	if key == "" {
 		return nil, false
 	}
-	return shellCommandOnly(key, args)
+	return shellCommandOnly(key, out, args)
 }
 
 // IsShellTool reports whether toolName is the connector's shell tool, as
 // the tool is named to hooks (the tools ShellCommandArgs reduces).
 func IsShellTool(connectorName, toolName string) bool {
-	return shellCommandKeys[strings.ToLower(strings.TrimSpace(connectorName))][strings.TrimSpace(toolName)] != ""
+	key, _ := shellCommandTool(connectorName, toolName)
+	return key != ""
+}
+
+// ShellCommandCWD returns the working directory a shell tool call names
+// under its tool's working-directory argument (shellCommandWorkdirKeys,
+// the TrustedShellArgs working directories, cwd or workdir for the tools
+// shellCommandTool reads by name), or "" when it names none or more than one.
+// It is for a call whose projection was refused: the command judged on its
+// own still runs there (GAP-0694: Amp's Bash and agy's run_command with an
+// extra key were judged in the session's directory).
+func ShellCommandCWD(connectorName, toolName string, args json.RawMessage) string {
+	if !IsShellTool(connectorName, toolName) {
+		return ""
+	}
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	toolName = strings.TrimSpace(toolName)
+	keys := shellCommandWorkdirKeys[connectorName][toolName]
+	if connectorName == "amp" && strings.EqualFold(toolName, "bash") {
+		keys = []string{"cwd"}
+	}
+	for key, kind := range trustedShellTools[connectorName][toolName] {
+		if kind == trustedShellWorkdir {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 && shellCommandKeys[connectorName][toolName] == "" {
+		keys = []string{"cwd", "workdir"}
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(args, &fields); err != nil || fields == nil {
+		return ""
+	}
+	cwd := ""
+	for _, key := range keys {
+		var dir string
+		if raw, ok := fields[key]; !ok || json.Unmarshal(raw, &dir) != nil || strings.TrimSpace(dir) == "" {
+			continue
+		}
+		if cwd != "" && cwd != dir {
+			return ""
+		}
+		cwd = dir
+	}
+	return cwd
 }
 
 // CursorShellCommandArgs reduces a Cursor beforeShellExecution payload to
@@ -257,38 +368,67 @@ func CursorShellCommandArgs(event string, payload json.RawMessage) (json.RawMess
 	if canonicalHookEvent(event) != "beforeshellexecution" {
 		return nil, false
 	}
-	return shellCommandOnly("command", payload)
+	return shellCommandOnly("command", "command", payload)
 }
 
-func shellCommandOnly(key string, args json.RawMessage) (json.RawMessage, bool) {
+func shellCommandOnly(key, out string, args json.RawMessage) (json.RawMessage, bool) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(args, &fields); err != nil || fields == nil {
 		return nil, false
 	}
-	var command interface{}
-	var text string
-	var argv []string
-	switch raw := fields[key]; {
-	case json.Unmarshal(raw, &text) == nil && strings.TrimSpace(text) != "":
-		command = text
-	case json.Unmarshal(raw, &argv) == nil && len(argv) > 0:
-		command = argv
-	default:
+	alias := map[string]string{"cmd": "command", "command": "cmd"}[key]
+	used := key
+	if _, present := fields[key]; !present && alias != "" {
+		used = alias
+	}
+	command, ok := shellCommandValue(fields[used])
+	if !ok {
 		return nil, false
 	}
-	reduced := map[string]interface{}{key: command}
+	if other, present := fields[alias]; present && alias != "" && used != alias {
+		// Both cmd and command: one command, or the call is unverified.
+		if again, ok := shellCommandValue(other); !ok || !shellCommandsEqual(command, again) {
+			return nil, false
+		}
+	}
+	reduced := map[string]interface{}{out: command}
 	for name, raw := range fields {
-		if name != key && strings.EqualFold(name, key) {
+		if name != used && name != alias && (strings.EqualFold(name, used) || strings.EqualFold(name, out)) {
+			if used != out {
+				// The reduced shape renames the command key: a case
+				// twin cannot be kept next to it as the call named it.
+				return nil, false
+			}
 			reduced[name] = raw
 		}
 	}
-	var out bytes.Buffer
-	enc := json.NewEncoder(&out)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(reduced); err != nil {
 		return nil, false
 	}
-	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), true
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), true
+}
+
+// shellCommandValue reads a shell command: a non-blank string, or a
+// non-empty list of strings (an argv).
+func shellCommandValue(raw json.RawMessage) (interface{}, bool) {
+	var text string
+	var argv []string
+	switch {
+	case json.Unmarshal(raw, &text) == nil && strings.TrimSpace(text) != "":
+		return text, true
+	case json.Unmarshal(raw, &argv) == nil && len(argv) > 0:
+		return argv, true
+	}
+	return nil, false
+}
+
+func shellCommandsEqual(a, b interface{}) bool {
+	left, _ := json.Marshal(a)
+	right, _ := json.Marshal(b)
+	return bytes.Equal(left, right)
 }
 
 // CursorTrustedShellArgs projects a Cursor beforeShellExecution payload onto

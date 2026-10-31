@@ -25,6 +25,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -36,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v12-sqlite-database-table-lineage"
@@ -153,10 +156,54 @@ func (capture *toolChainHookCapture) recordTrustedAction(
 	capture.recorded = true
 }
 
+// toolChainPlacedFacts is a call's facts as the tool-chain state records
+// them. A managed POSIX gateway runs as a service account behind
+// ProtectHome (and PrivateTmp on Linux): it cannot resolve a working
+// directory in the caller's home, or in /tmp on Linux, so a call there had
+// facts without one, and a relative download and the later run of the same
+// file had no path to join on. The download-then-execute chain fired for
+// absolute paths and in directories the service can read, never in a
+// project in the user's home, where agents work (rel-1-0-6:GAP-0115 macOS,
+// GAP-0118 Linux). The chain joins paths lexically, so such a call is placed
+// in the directory the managed hook client ran it in as the user
+// (hookpaths.CWDKey; absolute, no ".."), as a per-user gateway places it. The
+// gateway still reads nothing there. A call whose facts hold no unplaced
+// relative path, a call the gateway placed itself, and a per-user or sandbox
+// call are recorded as they are.
+func toolChainPlacedFacts(facts actionfacts.Facts, request trustedActionRequest) actionfacts.Facts {
+	if !request.ProtectedHomeHook || request.SkipLocalFilesystemResolution ||
+		filepath.IsAbs(request.Input.CWD) || !hasUnplacedRelativePath(facts) {
+		return facts
+	}
+	client := request.evidenceCWD
+	if !filepath.IsAbs(client) {
+		client = request.ResolvedWriteTargets[hookpaths.CWDKey]
+	}
+	if !filepath.IsAbs(client) || hasParentElement(client) || strings.ContainsRune(client, 0) {
+		return facts
+	}
+	placed := request.Input
+	placed.CWD = filepath.Clean(client)
+	return actionfacts.Analyze(placed)
+}
+
+func hasUnplacedRelativePath(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		if !candidate.Absolute && candidate.Resolved == "" {
+			return true
+		}
+	}
+	return false
+}
+
 type toolChainHookFinalization struct {
 	repository   *audit.ToolChainRepository
 	receiptIDs   []string
 	evaluationID string
+	// rootRepository and rootReceiptIDs are the root scope's receipts
+	// (issue #1391), kept in the root-scope tables.
+	rootRepository *audit.ToolChainRepository
+	rootReceiptIDs []string
 }
 
 type toolChainHookPanicState struct {
@@ -169,7 +216,9 @@ func (finalization toolChainHookFinalization) attach(
 	ctx context.Context,
 	responseEvaluationID string,
 ) error {
-	if finalization.repository == nil || len(finalization.receiptIDs) == 0 {
+	session := finalization.repository != nil && len(finalization.receiptIDs) != 0
+	root := finalization.rootRepository != nil && len(finalization.rootReceiptIDs) != 0
+	if !session && !root {
 		return nil
 	}
 	evaluationID := firstNonEmpty(finalization.evaluationID, responseEvaluationID)
@@ -178,12 +227,25 @@ func (finalization toolChainHookFinalization) attach(
 		// provides exact replay behavior when observability is not configured.
 		return nil
 	}
-	return finalization.repository.AttachFinalization(
-		ctx,
-		finalization.receiptIDs,
-		evaluationID,
-		"",
-	)
+	if session {
+		if err := finalization.repository.AttachFinalization(
+			ctx,
+			finalization.receiptIDs,
+			evaluationID,
+			"",
+		); err != nil {
+			return err
+		}
+	}
+	if root {
+		return finalization.rootRepository.AttachFinalization(
+			ctx,
+			finalization.rootReceiptIDs,
+			evaluationID,
+			"",
+		)
+	}
+	return nil
 }
 
 func (a *APIServer) applyAgentHookToolChains(
@@ -219,11 +281,18 @@ func (a *APIServer) applyAgentHookToolChains(
 		if structuredAction {
 			projectSQLValuePersistenceSink(ctx, req, &projection)
 		}
+		decision := a.decisionConfig(ctx)
 		projection = toolChainProjectionForPolicyPosture(
-			a.decisionConfig(ctx),
+			decision,
 			req.ConnectorName,
 			projection,
 		)
+		if a.expectedRemoteDownload(ctx, decision, req) {
+			// A download from an internal domain, or one the user asked for
+			// and asked to run, does not start the download-then-execute
+			// chain.
+			clearToolChainStep(&projection, guardrail.ToolChainDownloadThenExecuteSameArtifact, 1)
+		}
 	}
 	if len(typedFindings) != 0 {
 		intent := guardrailActionForConnector(
@@ -267,6 +336,11 @@ func (a *APIServer) applyAgentHookToolChains(
 	if err != nil {
 		return resp, finalization
 	}
+	// Root scope (issue #1391): nil unless guardrail.chains.root_scope is on
+	// and a trusted connector's root_session_id was honoured. Session ends and
+	// turn boundaries reset only the session scope: the root scope follows
+	// the work across them, bounded by the same event and time windows.
+	rootRepository := a.toolChainRootRepository(ctx, req)
 	rawFingerprint := sha256.Sum256(rawBody)
 	inputFingerprint := hex.EncodeToString(rawFingerprint[:])
 	if !lifecycleEligible {
@@ -337,9 +411,10 @@ func (a *APIServer) applyAgentHookToolChains(
 	}
 
 	invocationDigest := exactToolChainInvocationDigest(lifecycle, req)
-	var result audit.ToolChainObserveResult
+	var result, rootResult audit.ToolChainObserveResult
 	resolvedSuccess := false
 	resolvedInvocation := false
+	rootResolvedSuccess := false
 	if invocationDigest != "" &&
 		lifecycle.ExactInvocationJoinEligible(req.HookEventName) &&
 		route == connector.ToolEventRouteResultContent {
@@ -370,27 +445,34 @@ func (a *APIServer) applyAgentHookToolChains(
 					actionfacts.ExactKerberosS4UTicketResultProjection(resultBytes)
 			}
 		}
-		resolved, resolveErr := repository.ResolvePending(
-			ctx,
-			audit.ToolChainResolvePendingInput{
-				ConnectorInstanceID:                 audit.ConnectorInstanceID(req.ConnectorInstanceID),
-				ToolInvocationDigest:                invocationDigest,
-				Outcome:                             auditToolChainPendingOutcome(outcome),
-				RulesetFingerprint:                  rulesetFingerprint,
-				TerminalSemanticEventID:             audit.SemanticEventID(req.SemanticEventID),
-				TerminalInputFingerprint:            inputFingerprint,
-				SuccessfulReadPathDigest:            readPathDigest,
-				SuccessfulReadValueDigests:          readValueDigests,
-				SuccessfulSQLValueSource:            sqlSource,
-				SuccessfulSQLResourceIdentityDigest: sqlProjection.resourceIdentityDigest,
-				SuccessfulSQLValueDigests: toolValueLineageGuardrailDigests(
-					sqlProjection.valueDigests,
-				),
-				SuccessfulADCSCertificatePFXDigest:         adcsCertificatePFXDigest,
-				SuccessfulS4UTargetPrincipalIdentityDigest: s4uTicketResult.TargetPrincipalIdentityDigest,
-				SuccessfulS4UTicketCacheDigest:             s4uTicketResult.TicketArtifactIdentityDigest,
-			},
-		)
+		resolveInput := audit.ToolChainResolvePendingInput{
+			ConnectorInstanceID:                 audit.ConnectorInstanceID(req.ConnectorInstanceID),
+			ToolInvocationDigest:                invocationDigest,
+			Outcome:                             auditToolChainPendingOutcome(outcome),
+			RulesetFingerprint:                  rulesetFingerprint,
+			TerminalSemanticEventID:             audit.SemanticEventID(req.SemanticEventID),
+			TerminalInputFingerprint:            inputFingerprint,
+			SuccessfulReadPathDigest:            readPathDigest,
+			SuccessfulReadValueDigests:          readValueDigests,
+			SuccessfulSQLValueSource:            sqlSource,
+			SuccessfulSQLResourceIdentityDigest: sqlProjection.resourceIdentityDigest,
+			SuccessfulSQLValueDigests: toolValueLineageGuardrailDigests(
+				sqlProjection.valueDigests,
+			),
+			SuccessfulADCSCertificatePFXDigest:         adcsCertificatePFXDigest,
+			SuccessfulS4UTargetPrincipalIdentityDigest: s4uTicketResult.TargetPrincipalIdentityDigest,
+			SuccessfulS4UTicketCacheDigest:             s4uTicketResult.TicketArtifactIdentityDigest,
+		}
+		resolved, resolveErr := repository.ResolvePending(ctx, resolveInput)
+		if rootRepository != nil {
+			// The root scope promotes its own copy of the proposal; a failure
+			// there leaves the session verdict as it is.
+			if rootResolved, rootErr := rootRepository.ResolvePending(ctx, resolveInput); rootErr == nil &&
+				outcome == connector.ToolLifecycleOutcomeSuccess &&
+				rootResolved.Status == audit.ToolChainPendingResolved {
+				rootResult, rootResolvedSuccess = rootResolved.Observation, true
+			}
+		}
 		if resolveErr != nil {
 			return resp, finalization
 		}
@@ -475,19 +557,26 @@ func (a *APIServer) applyAgentHookToolChains(
 			observationProjection,
 		)
 	}
+	observeInput := audit.ToolChainObserveInput{
+		SemanticEventID:     audit.SemanticEventID(req.SemanticEventID),
+		ConnectorInstanceID: audit.ConnectorInstanceID(req.ConnectorInstanceID),
+		InputFingerprint:    inputFingerprint,
+		RulesetFingerprint:  rulesetFingerprint,
+		Projection:          observationProjection,
+		DenyEligible:        denyEligible,
+	}
 	if !resolvedSuccess && toolChainProjectionHasSteps(observationProjection) {
-		result, err = repository.Observe(ctx, audit.ToolChainObserveInput{
-			SemanticEventID:     audit.SemanticEventID(req.SemanticEventID),
-			ConnectorInstanceID: audit.ConnectorInstanceID(req.ConnectorInstanceID),
-			InputFingerprint:    inputFingerprint,
-			RulesetFingerprint:  rulesetFingerprint,
-			Projection:          observationProjection,
-			DenyEligible:        denyEligible,
-		})
+		result, err = repository.Observe(ctx, observeInput)
 		if err != nil {
 			return resp, finalization
 		}
 	}
+	if rootRepository != nil && !rootResolvedSuccess && toolChainProjectionHasSteps(observationProjection) {
+		if observed, rootErr := rootRepository.Observe(ctx, observeInput); rootErr == nil {
+			rootResult = observed
+		}
+	}
+	rootAdded := rootToolChainAdded(profile, req, resp, rootRepository, rootResult, result, panicState)
 	if result.DeniedMask != 0 && panicState != nil {
 		// Observe commits the deny receipt before returning. Snapshot an
 		// enforcement-safe response immediately so a later connector shaper or
@@ -580,26 +669,32 @@ func (a *APIServer) applyAgentHookToolChains(
 		finalization.repository = repository
 		finalization.receiptIDs = append([]string(nil), result.ReceiptIDs...)
 	}
+	if rootRepository != nil {
+		resp = a.applyToolChainRootResult(ctx, profile, req, resp, &finalization,
+			rootRepository, rootResult, rootAdded, denyEligible, latency)
+	}
 
 	if structuredAction &&
 		resp.Action != guardrailActionBlock &&
 		invocationDigest != "" &&
 		lifecycle.IsPreProposalEvent(req.HookEventName) {
-		if _, prepareErr := repository.PreparePending(
-			ctx,
-			audit.ToolChainPreparePendingInput{
-				ConnectorInstanceID:  audit.ConnectorInstanceID(req.ConnectorInstanceID),
-				ToolInvocationDigest: invocationDigest,
-				PreSemanticEventID:   audit.SemanticEventID(req.SemanticEventID),
-				PreInputFingerprint:  inputFingerprint,
-				RulesetFingerprint:   rulesetFingerprint,
-				Projection:           predecessorProjection,
-				SQLValueSource:       pendingSQLValueSource(req.toolChain),
-				ReturnedCredentialSource: actionfacts.ExactReturnedCredentialSource(
-					req.toolChain.facts,
-				),
-			},
-		); prepareErr != nil {
+		prepareInput := audit.ToolChainPreparePendingInput{
+			ConnectorInstanceID:  audit.ConnectorInstanceID(req.ConnectorInstanceID),
+			ToolInvocationDigest: invocationDigest,
+			PreSemanticEventID:   audit.SemanticEventID(req.SemanticEventID),
+			PreInputFingerprint:  inputFingerprint,
+			RulesetFingerprint:   rulesetFingerprint,
+			Projection:           predecessorProjection,
+			SQLValueSource:       pendingSQLValueSource(req.toolChain),
+			ReturnedCredentialSource: actionfacts.ExactReturnedCredentialSource(
+				req.toolChain.facts,
+			),
+		}
+		if rootRepository != nil {
+			// Additive: a root-scope persistence failure changes nothing here.
+			_, _ = rootRepository.PreparePending(ctx, prepareInput)
+		}
+		if _, prepareErr := repository.PreparePending(ctx, prepareInput); prepareErr != nil {
 			// Pending state is an additive experimental lane. A persistence
 			// failure must not replace the already-computed direct verdict.
 			return resp, finalization
@@ -1752,6 +1847,48 @@ func projectRemoteArtifactChainSteps(
 	}
 }
 
+// expectedRemoteDownload reports a call whose remote download (#1390) comes
+// from a host under guardrail.internal_domains, or from a host that one of
+// the user's recent prompts (this turn's or the two before it, as in
+// "download X and run it" then "yes, go ahead") names together with a
+// request to run, execute or install it: the only false positive of
+// chain.download_then_execute_same_artifact in an external A/B run was such
+// a download. userDownloadRequests records the prompts at the connector's
+// turn-start event, with or without the LLM judge. Either can only lower
+// this detection-only alert.
+func (a *APIServer) expectedRemoteDownload(ctx context.Context, decision *config.Config, req agentHookRequest) bool {
+	capture := req.toolChain
+	if a == nil || capture == nil || !capture.recorded {
+		return false
+	}
+	host, ok := actionfacts.RemoteArtifactDownloadIntentHost(capture.facts)
+	if !ok {
+		return false
+	}
+	if decision != nil && decision.Guardrail.IsInternalDomainHost(host) {
+		return true
+	}
+	return a.userDownloads.requested(sandboxSessionStateKey(ctx, SessionIDFromContext(ctx)), host, time.Now())
+}
+
+// clearToolChainStep removes one step of chainID from the call's projection,
+// and the chain's join digests when no other step of it is left.
+func clearToolChainStep(projection *guardrail.ToolChainProjection, chainID string, step int) {
+	bit, ok := guardrail.ToolChainStepMask(chainID, step)
+	definition, found := guardrail.ToolChainDefinitionByID(chainID)
+	index, indexed := guardrail.ToolChainIndexByID(chainID)
+	if projection == nil || !ok || !found || !indexed {
+		return
+	}
+	projection.DetectionStepMask &^= bit
+	projection.EnforcementStepMask &^= bit
+	if projection.DetectionStepMask&(definition.Step1Bit|definition.Step2Bit|definition.Step3Bit|
+		definition.Step4Bit|definition.MutationBit) == 0 {
+		projection.EnforcementJoinDigests[index] = ""
+		projection.EnforcementOutputJoinDigests[index] = ""
+	}
+}
+
 func addToolChainStep(
 	projection *guardrail.ToolChainProjection,
 	chainID string,
@@ -1871,6 +2008,9 @@ func exactPathIdentity(candidate actionfacts.PathFact) (string, bool) {
 		if !strings.HasPrefix(resolved, "/") {
 			return "", false
 		}
+		if drive, ok := gitBashDriveIdentity(resolved); ok {
+			return "windows\x00" + drive, true
+		}
 		return "posix\x00" + resolved, true
 	case actionfacts.PathFlavorWindows:
 		resolved = strings.ToLower(strings.ReplaceAll(resolved, `\`, "/"))
@@ -1881,6 +2021,32 @@ func exactPathIdentity(candidate actionfacts.PathFact) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// toolChainDriveMounts is set on Windows, where Git Bash names drive C: as
+// /c (or /C): there a POSIX path under a one-letter mount is the drive path.
+var toolChainDriveMounts = runtime.GOOS == "windows"
+
+// gitBashDriveIdentity is the Windows identity (drive letter and path, lower
+// case, forward slashes) of a Git Bash drive-mount path such as
+// /c/Users/u/page.txt on a Windows host, so a tool chain joins the same file
+// spelled /c/..., /C/... or C:\... as one path (rel-1-0-6:GAP-0173). Windows
+// file names are case-insensitive, as for PathFlavorWindows. ok is false off
+// Windows and for any other POSIX path.
+func gitBashDriveIdentity(resolved string) (string, bool) {
+	if !toolChainDriveMounts || len(resolved) < 2 || resolved[0] != '/' {
+		return "", false
+	}
+	letter := resolved[1]
+	if (letter < 'a' || letter > 'z') && (letter < 'A' || letter > 'Z') ||
+		len(resolved) > 2 && resolved[2] != '/' {
+		return "", false
+	}
+	rest := ""
+	if len(resolved) > 3 {
+		rest = resolved[3:]
+	}
+	return strings.ToLower(string(letter) + ":/" + rest), true
 }
 
 func sudoChainRoles(facts actionfacts.Facts) (discovery, elevation bool) {

@@ -364,6 +364,26 @@ func TestRulePackNestedCopyHintNamesTheNestedFolder(t *testing.T) {
 	}
 }
 
+// GAP-1566: a nested copy of the default pack (not of the pack itself) is
+// named by its full path as the folder to move or remove.
+func TestRulePackNestedCopyHintNamesAStrayFolder(t *testing.T) {
+	pack := filepath.Join(t.TempDir(), "teampack")
+	if err := os.MkdirAll(filepath.Join(pack, "default", "judge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stray := &guardrail.RulePackError{Path: "default/judge/injection.yaml", Code: "inventory_unexpected", Reason: "unexpected YAML component"}
+	hint := rulePackNestedCopyHint(pack, fmt.Errorf("wrapped: %w", stray))
+	if !strings.Contains(hint, "the stray folder is "+filepath.Join(pack, "default")) ||
+		!strings.Contains(hint, "move it out of the pack folder or remove it") || strings.Contains(hint, "inside itself") {
+		t.Fatalf("hint = %q", hint)
+	}
+	for _, rel := range []string{"judge/custom.yaml", "rules/x/y.yaml", "top.yaml"} {
+		if got := rulePackNestedCopyHint(pack, &guardrail.RulePackError{Path: rel, Code: "inventory_unexpected"}); got != "" {
+			t.Fatalf("%s got hint %q, want none (the reason names the file)", rel, got)
+		}
+	}
+}
+
 // GAP-0932: inline secrets are refused naming every rejected key, never a
 // value, and how to store a secret; before, Windows Setup said only
 // "configuration could not be compiled safely" at $.

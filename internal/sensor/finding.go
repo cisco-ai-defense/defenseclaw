@@ -111,6 +111,11 @@ type RuntimeActivity struct {
 	// reported it. Control is the control of that outcome.
 	Outcome plane.KernelOutcome
 	Control string
+	// Hits is how many kernel events reported Outcome for Control. One
+	// tactic can carry several native hits (two new autostart files are two
+	// would-block hits of kernel.persistence_write), and the dashboards count
+	// hits, as the helper's would_block_total does (GAP-1400).
+	Hits int
 	// Hook is the hook join of the tool call the activity came from. nil
 	// when it does not apply: not a managed host, the agent root acting
 	// itself, or a tool call that started before the gateway was watching.
@@ -156,6 +161,9 @@ const MaxHookRuleIDs = 3
 var kernelControlRules = map[string]string{
 	"kernel.ssh_private_key_read": "PATH-SSH-KEY",
 	"kernel.persistence_write":    "persistence.shell_profile_write",
+	// Its own id, so dashboards keyed on the shell profile rule keep their
+	// meaning; no text rule has it (the class is writes the hook cannot see).
+	"kernel.ssh_authorized_keys_write": "persistence.ssh_authorized_keys_write",
 }
 
 // KernelControlRuleID is the guardrail rule id of a kernel control, or "".

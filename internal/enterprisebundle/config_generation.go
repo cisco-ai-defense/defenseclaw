@@ -30,6 +30,7 @@ func (d *Driver) ConfigGenerationOptions(raw []byte) (configwrite.Options, bool,
 		return configwrite.Options{}, false, err
 	}
 	var floor uint64
+	dir := ""
 	if matched == nil {
 		current, ref, err := d.CurrentConfig()
 		if err != nil {
@@ -49,7 +50,7 @@ func (d *Driver) ConfigGenerationOptions(raw []byte) (configwrite.Options, bool,
 		if manifest.BundleID != ref.BundleID || manifest.Version != ref.Version || ref.SignerKeyID == "" {
 			return configwrite.Options{}, false, fmt.Errorf("confirmed policy bundle identity is incomplete")
 		}
-		floor = ref.ConfigGeneration
+		floor, dir = ref.ConfigGeneration, ref.Dir
 		matched = &Receipt{BundleID: ref.BundleID, Version: ref.Version, Principal: manifest.CreatedBy,
 			SignerKeyID: ref.SignerKeyID, ChangeSummary: manifest.ChangeSummary}
 	}
@@ -58,6 +59,9 @@ func (d *Driver) ConfigGenerationOptions(raw []byte) (configwrite.Options, bool,
 		return opt, false, fmt.Errorf("policy bundle %s has no principal", matched.ReceiptID)
 	}
 	opt.GenerationFloor = floor
+	if dir != "" {
+		opt.Bundle.Dir = dir
+	}
 	return opt, true, nil
 }
 

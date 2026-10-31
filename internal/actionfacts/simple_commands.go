@@ -194,18 +194,27 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			}
 			text := part.text
 			effective := state.vars
+			// unprefixed is the call without prefix assignments that can
+			// change which program runs (PATH=/x aws ...). The policy facts
+			// are the command's argv, so the call is also judged without
+			// them (GAP-1200, #1189): such a prefix can only pick another
+			// program of the same name, and a rule that matches the argv
+			// then over-blocks at worst, never hides a match. The call with
+			// its prefixes is still judged too: dropping PATH alone from
+			// `PATH=/missing $'rm' -rf /` would invent a runnable rm for
+			// rules that read the prefix.
+			unprefixed := ""
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Assigns) != 0 && len(call.Args) != 0 {
 				effective = state.clone().vars
 				updateSimpleVariables(effective, call.Assigns)
-				// The policy facts are the command's argv. Keep prefixes
-				// that can change executable resolution: dropping PATH from
-				// `PATH=/missing $'rm' -rf /` would invent a runnable rm.
-				if !simplePrefixChangesResolution(call.Assigns) {
-					start := int(call.Args[0].Pos().Offset())
-					end := int(call.Pos().Offset())
-					if start <= end || start > len(text) {
-						return []SimpleCommand{{EvaluationFailure: "parse"}}
-					}
+				start := int(call.Args[0].Pos().Offset())
+				end := int(call.Pos().Offset())
+				if start <= end || start > len(text) {
+					return []SimpleCommand{{EvaluationFailure: "parse"}}
+				}
+				if simplePrefixChangesResolution(call.Assigns) {
+					unprefixed = text[start:]
+				} else {
 					text = text[start:]
 					changed = true
 				}
@@ -214,18 +223,22 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			// it applies the prefix assignments, so HOME=/tmp cp a ~/f
 			// writes the previous ~/f (GAP-2476). The prefixes set only the
 			// environment of the program (effective, used for nested scripts).
-			if resolved, ok := simpleResolvedVariables(text, state.vars); ok {
-				text = resolved
-				changed = true
+			resolve := func(text string) string {
+				if resolved, ok := simpleResolvedVariables(text, state.vars); ok {
+					text = resolved
+					changed = true
+				}
+				if resolved, ok := simpleResolvedDirectoryStackTildes(text, &state); ok {
+					text = resolved
+					changed = true
+				}
+				if stripped, ok := withoutDescriptorDuplications(text); ok {
+					text = stripped
+					changed = true
+				}
+				return text
 			}
-			if resolved, ok := simpleResolvedDirectoryStackTildes(text, &state); ok {
-				text = resolved
-				changed = true
-			}
-			if stripped, ok := withoutDescriptorDuplications(text); ok {
-				text = stripped
-				changed = true
-			}
+			text = resolve(text)
 			if strings.TrimSpace(text) == "" {
 				return []SimpleCommand{{EvaluationFailure: "parse"}}
 			}
@@ -241,6 +254,21 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 				emitted[command] = true
 				if len(result) > maxSimpleEvaluations {
 					return []SimpleCommand{{EvaluationFailure: "limit"}}
+				}
+			}
+			if unprefixed != "" {
+				if reading := resolve(unprefixed); strings.TrimSpace(reading) != "" {
+					alone := SimpleCommand{Text: reading, CWD: state.cwd,
+						ZshHistoryBuiltin:       command.ZshHistoryBuiltin,
+						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound)}
+					if !emitted[alone] {
+						result = append(result, alone)
+						emitted[alone] = true
+						changed = true
+						if len(result) > maxSimpleEvaluations {
+							return []SimpleCommand{{EvaluationFailure: "limit"}}
+						}
+					}
 				}
 			}
 			if call != nil {
@@ -1223,6 +1251,9 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		case "timeout":
 			childIndex = simpleTimeoutChildIndex(argv)
 		case "env":
+			if split, ok := simpleEnvSplitString(argv); ok {
+				return split, false, true, true
+			}
 			childIndex = simpleEnvChildIndex(argv)
 		default:
 			child, found, uncertain := staticPOSIXWrapperArgv(argv, wrapper)
@@ -1239,6 +1270,9 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		}
 		if childIndex <= 0 || childIndex >= len(args) {
 			return "", false, true, false
+		}
+		if program, ok := simpleWrappedProgram(wrapper, argv, childIndex); ok {
+			return program, false, true, true
 		}
 		return simpleNestedScriptArgs(args[childIndex:], vars, depth+1, cwdUnknown, interpreter)
 	}
@@ -1354,6 +1388,113 @@ func simpleEnvChildIndex(argv []string) int {
 		}
 	}
 	return -1
+}
+
+// simpleEnvSplitString returns the command that env -S STRING (or
+// --split-string) runs: STRING split into words, then the arguments after
+// it. Analyze reads -S as uncertain, so a rule about that command never ran
+// (GAP-1200). The STRING is read as shell words, which may find more
+// commands than env would start (env does not split on ;), so the reading
+// can only over-block.
+func simpleEnvSplitString(argv []string) (string, bool) {
+	for index := 1; index < len(argv); index++ {
+		arg := argv[index]
+		split, found := "", false
+		switch {
+		case arg == "-S" || arg == "--split-string":
+			if index+1 >= len(argv) {
+				return "", false
+			}
+			index++
+			split, found = argv[index], true
+		case strings.HasPrefix(arg, "--split-string="):
+			split, found = strings.TrimPrefix(arg, "--split-string="), true
+		case strings.HasPrefix(arg, "-S"):
+			split, found = arg[2:], true
+		case arg == "-i" || arg == "--ignore-environment" ||
+			arg == "-0" || arg == "--null" || arg == "-v" || arg == "--debug" ||
+			strings.HasPrefix(arg, "--unset="):
+			continue
+		case arg == "-u" || arg == "--unset":
+			index++
+			continue
+		default:
+			return "", false
+		}
+		if !found || strings.TrimSpace(split) == "" {
+			return "", false
+		}
+		rest, ok := simpleQuotedArgv(argv[index+1:])
+		if !ok {
+			return "", false
+		}
+		if rest != "" {
+			split += " " + rest
+		}
+		return split, true
+	}
+	return "", false
+}
+
+// simpleWrappedProgram returns the program call that a static wrapper runs
+// when Analyze does not read it as a command of the action: env with a
+// NAME=value (PATH may change which program runs), nohup and timeout. A
+// shell or another wrapper as the program is read as a nested script
+// instead. The argv is static, so the call is judged as a simple command,
+// where a match can only over-block (GAP-1200, #1189). env NAME=value prog
+// is written as NAME=value prog, so the assignments are judged as the same
+// prefix assignments are.
+func simpleWrappedProgram(wrapper string, argv []string, childIndex int) (string, bool) {
+	if childIndex <= 0 || childIndex >= len(argv) {
+		return "", false
+	}
+	var assignments []string
+	switch wrapper {
+	case "nohup", "timeout":
+	case "env":
+		for _, arg := range argv[1:childIndex] {
+			name, value, found := strings.Cut(arg, "=")
+			if !found || !simpleVariableName(name) {
+				continue
+			}
+			quoted, err := syntax.Quote(value, syntax.LangBash)
+			if err != nil {
+				return "", false
+			}
+			assignments = append(assignments, name+"="+quoted)
+		}
+		if len(assignments) == 0 {
+			return "", false
+		}
+	default:
+		return "", false
+	}
+	program := filepath.Base(argv[childIndex])
+	if simpleNestedWrapper(program) {
+		return "", false
+	}
+	switch program {
+	case "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash":
+		return "", false
+	}
+	call, ok := simpleQuotedArgv(argv[childIndex:])
+	if !ok {
+		return "", false
+	}
+	return strings.Join(append(assignments, call), " "), true
+}
+
+// simpleQuotedArgv writes argv as one shell command line.
+func simpleQuotedArgv(argv []string) (string, bool) {
+	words := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		quoted, err := syntax.Quote(arg, syntax.LangBash)
+		if err != nil {
+			return "", false
+		}
+		words = append(words, quoted)
+	}
+	return strings.Join(words, " "), true
 }
 
 func simplePotentialShellScript(args []*syntax.Word) bool {

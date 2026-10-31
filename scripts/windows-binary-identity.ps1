@@ -92,7 +92,7 @@ function Assert-DefenseClawBinaryIdentity {
         }
         $properties = @($root.EnumerateObject() | ForEach-Object { $_.Name })
         $required = @('schema_version', 'name', 'version', 'commit')
-        $allowed = @($required + 'built' + 'management_contract' + 'secret_set_bundle')
+        $allowed = @($required + 'built' + 'management_contract' + 'secret_set_bundle' + 'identity_refresh')
         foreach ($name in $required) {
             if ($name -notin $properties) {
                 throw "DefenseClaw identity output is missing $name`: $Path"
@@ -107,6 +107,11 @@ function Assert-DefenseClawBinaryIdentity {
             $root.GetProperty('secret_set_bundle').ValueKind -ne
                 [Text.Json.JsonValueKind]::True) {
             throw "DefenseClaw identity output has invalid secret_set_bundle capability: $Path"
+        }
+        if ($properties -contains 'identity_refresh' -and
+            $root.GetProperty('identity_refresh').ValueKind -ne
+                [Text.Json.JsonValueKind]::True) {
+            throw "DefenseClaw identity output has invalid identity_refresh capability: $Path"
         }
         if ($properties.Count -ne (@($properties | Select-Object -Unique)).Count) {
             throw "DefenseClaw identity output has duplicate fields: $Path"

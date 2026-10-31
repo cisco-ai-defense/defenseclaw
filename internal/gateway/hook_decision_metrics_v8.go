@@ -213,6 +213,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailLatencyMs:       observability.Present(max(float64(env.ElapsedMs), 0)),
 			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes),
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
+			DefenseClawGuardrailJudgeFallback:   hookDecisionV8JudgeFallback(env),
 			DefenseClawSandboxID:                sandboxID,
 			DefenseClawSandboxName:              sandboxName,
 			DefenseClawSandboxDriver:            managed.Driver,
@@ -564,4 +565,18 @@ func hookDecisionV8RuleIDs(values []string) observability.Optional[[]string] {
 		return observability.Absent[[]string]()
 	}
 	return observability.Present(result)
+}
+
+// hookJudgeFallbackExtraKey is the audit-row extra that says why the rules
+// decided a check the LLM judge was asked to review (#1395).
+const hookJudgeFallbackExtraKey = "judge_fallback"
+
+// hookDecisionV8JudgeFallback is the decision's judge fallback, when it had
+// one.
+func hookDecisionV8JudgeFallback(env HookAuditEnvelope) observability.Optional[string] {
+	switch reason := env.Extra[hookJudgeFallbackExtraKey]; reason {
+	case judgeFallbackTimeout, judgeFallbackError, judgeFallbackLate, judgeFallbackBusy, judgeFallbackBudget:
+		return observability.Present(reason)
+	}
+	return observability.Absent[string]()
 }

@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -156,5 +157,50 @@ func TestWindowsUninstallRemovesTheGeneratedClaudeLauncherGuard(t *testing.T) {
 	again, count, err := removeWindowsManagedClaudeCommands(out, launcher)
 	if err != nil || count != 0 || string(again) != string(out) {
 		t.Fatalf("cleanup is not idempotent: %d %v", count, err)
+	}
+}
+
+// GAP-0171: Windows PowerShell 5.1 (Set-Content -Encoding utf8) writes a UTF-8
+// byte order mark, which Claude Code reads, and the managed foreign-hook guard
+// refused the file ("the Claude settings must be a JSON object") and left the
+// older per-user hook in place. A leading BOM is accepted and kept on the
+// rewrite; anything else that is not a JSON object is still refused.
+func TestWindowsManagedClaudeSettingsAcceptALeadingByteOrderMark(t *testing.T) {
+	const launcher = `C:\Users\alice\.local\bin\defenseclaw-hook.exe`
+	bom := []byte{0xef, 0xbb, 0xbf}
+	raw := append(append([]byte(nil), bom...), []byte(`{"model":"sonnet","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"C:\\Users\\alice\\.local\\bin\\defenseclaw-hook.exe"},{"type":"command","command":"C:\\tools\\lint.exe"}]}]}}`)...)
+	out, removed, err := removeWindowsManagedClaudeCommands(raw, launcher)
+	if err != nil || removed != 1 {
+		t.Fatalf("removed=%d error=%v", removed, err)
+	}
+	if !bytes.HasPrefix(out, bom) || bytes.HasPrefix(out[len(bom):], bom) {
+		t.Fatalf("the rewrite must keep exactly one byte order mark: %q", out[:min(len(out), 8)])
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(out[len(bom):], &settings); err != nil || settings["model"] != "sonnet" ||
+		strings.Contains(string(out), "defenseclaw-hook") || !strings.Contains(string(out), "lint.exe") {
+		t.Fatalf("settings after the rewrite: %s (%v)", out, err)
+	}
+	if again, count, err := removeWindowsManagedClaudeCommands(out, launcher); err != nil || count != 0 || !bytes.Equal(again, out) {
+		t.Fatalf("a clean BOM file is not left unchanged: %d %v", count, err)
+	}
+	left, err := windowsClaudeHooksNamingDefenseClaw(raw)
+	if err != nil || len(left) != 1 || !strings.HasPrefix(left[0], "PreToolUse: ") {
+		t.Fatalf("leftovers of a BOM file = %q, %v", left, err)
+	}
+	// Every other check stays: two marks, a BOM before a non-object, and
+	// a non-object without one are refused by both readers.
+	for name, bad := range map[string][]byte{
+		"two marks":         append(append(append([]byte(nil), bom...), bom...), []byte(`{}`)...),
+		"mark then array":   append(append([]byte(nil), bom...), []byte(`[]`)...),
+		"mark then garbage": append(append([]byte(nil), bom...), []byte(`not json`)...),
+		"mark only":         append([]byte(nil), bom...),
+	} {
+		if _, _, err := removeWindowsManagedClaudeCommands(bad, launcher); err == nil {
+			t.Fatalf("%s: the remover accepted it", name)
+		}
+		if _, err := windowsClaudeHooksNamingDefenseClaw(bad); err == nil {
+			t.Fatalf("%s: the leftover reader accepted it", name)
+		}
 	}
 }

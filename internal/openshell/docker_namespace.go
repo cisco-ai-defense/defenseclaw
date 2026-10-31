@@ -16,10 +16,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Per-account docker sandbox namespaces (GAP-0579). Every account's
@@ -47,7 +48,7 @@ func AccountDockerNamespace(uid int) string {
 // dockerNamespacePattern is a sandbox_label DefenseClaw writes: one plain
 // path element (the driver names a state folder after it and hashes it into
 // volume names).
-var dockerNamespacePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,62}$`)
+var dockerNamespacePattern = lazyregexp.New(`^[a-z0-9][a-z0-9_.-]{0,62}$`)
 
 func validDockerNamespace(ns string) bool { return dockerNamespacePattern.MatchString(ns) }
 

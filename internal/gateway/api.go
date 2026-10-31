@@ -74,6 +74,9 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// protectedFiles is the sidecar's protected-file watch (nil when off or
+	// in a test server); the hook handler records tool calls for it.
+	protectedFiles *protectedFileWatch
 	// Both API listeners start this server's one background recovery loop
 	// of the hook delivery journal (startPendingHookRecovery); neither
 	// waits for it.
@@ -392,6 +395,10 @@ type APIServer struct {
 	// boot via SetHookJudge. Per-connector gating happens in
 	// hookJudgeInspect via guardrail.judge.hook_connectors.
 	hookJudge atomic.Pointer[LLMJudge]
+
+	// userDownloads remembers the hosts recent user prompts ask to download
+	// from and run (#1390), per session, judge or not.
+	userDownloads userDownloadRequests
 	// hookJudgeSem bounds concurrent hook-lane judge executions,
 	// mirroring EventRouter.judgeSem on the proxy lane. At capacity
 	// the judge is skipped (fail-open to the regex/AID verdict)
@@ -1245,6 +1252,8 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// Secure Client serves none of the identity routes (issue #1092).
 	if !a.managedAIDOnly() {
 		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", awaitConfigReload(a.handleGuardrailProfileResolve))
+		// enterprise identity refresh (root or SYSTEM, managed only).
+		mux.HandleFunc(identityRefreshPath, awaitConfigReload(a.handleIdentityRefresh))
 	}
 	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
 	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
@@ -1275,6 +1284,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc(cliObservabilityV8Path, a.handleCLIObservabilityV8)
 	mux.HandleFunc(alertAcknowledgementV8Path, a.handleAlertAcknowledgementV8)
 	a.registerConnectorHookRoutes(mux, hookLimiter)
+	a.registerAgentGatewayRoute(mux, false, hookLimiter)
 	// OTLP-HTTP receiver for the three signal types codex
 	// (via [otel.exporter.otlp-http]) and Claude Code (via
 	// OTEL_EXPORTER_OTLP_ENDPOINT) post telemetry to. Body shape is
@@ -3056,6 +3066,78 @@ func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} 
 	}
 }
 
+// scanAdmissionPreview is what install admission would decide for the skill
+// or plugin a REST scan just scanned at target: the policy, the asset_policy
+// lists and the scanner gate the install watcher applies
+// (evaluateAdmissionPolicy), with no side effect. An administrator scan
+// outside the watcher blocks and quarantines nothing; it printed only the
+// scanner verdict, with no policy result, and its audit scan row read warn
+// for any finding, an INFO-only skill the policy admits included
+// (GAP-2635). The asset is named by its folder, as the watcher names it,
+// unless the request names it. Nil for a Secure Client host (its response
+// and audit rows stay as on main) or when the policy cannot be evaluated.
+func (a *APIServer) scanAdmissionPreview(
+	ctx context.Context,
+	cfg *config.Config,
+	targetType, target, name string,
+	result *scanner.ScanResult,
+) *policy.AdmissionOutput {
+	if cfg == nil || cfg.SecureClientIntegration() || result == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = filepath.Base(filepath.Clean(target))
+	}
+	input := policy.AdmissionInput{
+		TargetType: targetType,
+		TargetName: name,
+		Path:       target,
+		ScanResult: &policy.ScanResultInput{
+			MaxSeverity:   string(result.MaxSeverity()),
+			TotalFindings: len(result.Findings),
+			ScannerName:   result.Scanner,
+			ExitCode:      result.ExitCode,
+			ScanError:     result.ScanError,
+		},
+	}
+	for _, finding := range result.Findings {
+		input.ScanResult.Findings = append(input.ScanResult.Findings, policy.FindingInput{
+			Severity: string(finding.Severity), Scanner: finding.Scanner, Title: finding.Title, RuleID: finding.RuleID,
+		})
+	}
+	out, err := a.evaluateAdmissionPolicy(ctx, input, "")
+	if err != nil || out == nil || strings.TrimSpace(out.Verdict) == "" {
+		return nil
+	}
+	return out
+}
+
+// scanAdmissionVerdict is the audit scan verdict of a REST scan: the
+// admission verdict the watcher would log for the same asset (clean,
+// allowed, warning, rejected or blocked), or "" (findings read warn) when
+// there is no preview.
+func scanAdmissionVerdict(admission *policy.AdmissionOutput) string {
+	if admission == nil {
+		return ""
+	}
+	return admission.Verdict
+}
+
+// withScanAdmission adds the admission preview to a scan response as
+// "admission": {verdict, reason, install_action}.
+func withScanAdmission(envelope map[string]interface{}, admission *policy.AdmissionOutput) map[string]interface{} {
+	if admission == nil {
+		return envelope
+	}
+	envelope["admission"] = map[string]string{
+		"verdict":        admission.Verdict,
+		"reason":         admission.Reason,
+		"install_action": admission.InstallAction,
+	}
+	return envelope
+}
+
 // withScannerSettings adds the scanner settings a scan ran with (policy,
 // analyzers and judge model, never a key) so `defenseclaw scan skill|mcp`
 // reports them as the per-user `skill scan` does. For MCP it names the
@@ -3154,7 +3236,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if a.rejectWindowsGatewayPath(w, req.Target) {
+	if a.rejectWindowsGatewayPath(w, "skill", req.Target, req.Target) {
 		return
 	}
 	if isBundledSkillScanPath(req.Target) {
@@ -3164,7 +3246,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.rejectUnreadableScanTarget(w, "target directory", req.Target, "SKILL.md") {
+	if a.rejectUnreadableScanTarget(w, "skill", "target directory", req.Target, "SKILL.md") {
 		return
 	}
 
@@ -3202,12 +3284,13 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	admission := a.scanAdmissionPreview(r.Context(), cfg, config.AdmissionTypeSkill, req.Target, req.Name, result)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", scanCorrelationWithJudge(r.Context(), result))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationWithJudge(r.Context(), result))
 	}
 
-	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", result, scanAPIResponseEnvelope(result)))
+	a.writeJSON(w, http.StatusOK, withScanAdmission(withScannerSettings(cfg, "skill", result, scanAPIResponseEnvelope(result)), admission))
 }
 
 // rejectUnreadableScanTarget answers with one plain line when the folder to
@@ -3216,8 +3299,8 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 // would otherwise die on the same error and the caller would get its process
 // name, its exit code or its Python traceback (GAP-0229, GAP-0256). A path that
 // exists but is not a directory is only logged: the scanner reports it.
-func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string, mustRead ...string) bool {
-	if a.rejectWindowsGatewayPath(w, target) {
+func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, kind, what, target string, mustRead ...string) bool {
+	if a.rejectWindowsGatewayPath(w, kind, target, target) {
 		return true
 	}
 	info, err := os.Stat(target)
@@ -3247,7 +3330,7 @@ func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, targ
 	}
 	for _, name := range mustRead {
 		file := filepath.Join(target, name)
-		if a.rejectWindowsGatewayPath(w, file) {
+		if a.rejectWindowsGatewayPath(w, kind, file, target) {
 			return true
 		}
 		handle, openErr := os.Open(file)
@@ -3264,12 +3347,42 @@ func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, targ
 	return false
 }
 
-func (a *APIServer) rejectWindowsGatewayPath(w http.ResponseWriter, path string) bool {
-	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+// requireGatewayPathOutsideUserProfiles is the managed Windows profile
+// check of a scan path (a seam for tests).
+var requireGatewayPathOutsideUserProfiles = managed.RequireWindowsGatewayPathOutsideUserProfiles
+
+// rejectWindowsGatewayPath answers 403 for a path the managed Windows gateway
+// may not read. For a scan of kind ("" for none) it adds how an
+// administrator scans target instead.
+func (a *APIServer) rejectWindowsGatewayPath(w http.ResponseWriter, kind, path, target string) bool {
+	if err := requireGatewayPathOutsideUserProfiles(path); err != nil {
+		message := err.Error()
+		if kind != "" {
+			message += "; " + windowsProfileScanNextStep(kind, target)
+		}
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": message})
 		return true
 	}
 	return false
+}
+
+// windowsProfileScanNextStep is the next step of a managed Windows scan of a
+// folder inside a user profile. The refusal said to scan it as the signed-in
+// user, which managed scans refuse a standard account (GAP-0526); the
+// documented route is an administrator's copy outside the profiles.
+func windowsProfileScanNextStep(kind, target string) string {
+	trimmed := strings.TrimRight(target, `\/`)
+	name := trimmed[strings.LastIndexAny(trimmed, `\/`)+1:]
+	if name == "" || strings.HasSuffix(name, ":") {
+		name = kind
+	}
+	review := `C:\DefenseClawReview`
+	copyTo := review + `\` + name
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	return "standard accounts cannot run managed scans, so an administrator copies the folder out of the profiles and scans the copy " +
+		"from an elevated PowerShell prompt: `New-Item -ItemType Directory -Force " + quote(review) + " | Out-Null; " +
+		"Copy-Item -Recurse -Force -LiteralPath " + quote(target) + " -Destination " + quote(copyTo) + "`, then `& " +
+		quote(managed.WindowsStandaloneAdminCLI()) + " scan " + kind + " " + quote(copyTo) + "`"
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
@@ -3349,7 +3462,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if a.rejectWindowsGatewayPath(w, req.Target) {
+	if a.rejectWindowsGatewayPath(w, "plugin", req.Target, req.Target) {
 		return
 	}
 	if a.isManagedPluginScanTarget(req.Target) {
@@ -3359,7 +3472,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.rejectUnreadableScanTarget(w, "plugin target directory", req.Target) {
+	if a.rejectUnreadableScanTarget(w, "plugin", "plugin target directory", req.Target) {
 		return
 	}
 
@@ -3382,12 +3495,13 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	admission := a.scanAdmissionPreview(r.Context(), cfg, config.AdmissionTypePlugin, req.Target, req.Name, result)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIPluginScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", scanCorrelationWithJudge(r.Context(), result))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationWithJudge(r.Context(), result))
 	}
 
-	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
+	a.writeJSON(w, http.StatusOK, withScanAdmission(scanAPIResponseEnvelope(result), admission))
 }
 
 // ---------------------------------------------------------------------------
@@ -3505,7 +3619,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if a.rejectWindowsGatewayPath(w, req.Target) {
+	if a.rejectWindowsGatewayPath(w, "", req.Target, req.Target) {
 		return
 	}
 
@@ -4595,10 +4709,7 @@ func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {
 // the request cannot pair one generation's query with another's lists
 // (GAP-0873).
 func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput, connector string) (*policy.AdmissionOutput, error) {
-	cfg := a.liveConfig()
-	if g := pinnedGeneration(ctx); g != nil && g.Config != nil && (cfg == nil || !cfg.SecureClientIntegration()) {
-		cfg = g.Config
-	}
+	cfg := a.requestConfig(ctx)
 	input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
 		TargetType: input.TargetType, Name: input.TargetName, Connector: connector, SourcePath: input.Path,
 	})

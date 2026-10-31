@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -17,9 +16,6 @@ import (
 // identity, on the SessionStart and on a tool call, so the gateway carries
 // the first record of that directory across its other spellings.
 func TestReachedEvidenceKeepsTheStartDirectoryPastTheHeaderBound(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("a POSIX symlink chain")
-	}
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	project := filepath.Join(home, "p")

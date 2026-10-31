@@ -12,11 +12,12 @@ package observability
 
 import (
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -31,10 +32,10 @@ const (
 	MaxCanonicalRecordBytes    = 4 * 1024 * 1024
 )
 
-var lowerHexPattern = regexp.MustCompile(`^[0-9a-f]+$`)
-var provenanceProducerPattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,63}$`)
-var canonicalUUIDPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
-var canonicalCorrelationAttributePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+var lowerHexPattern = lazyregexp.New(`^[0-9a-f]+$`)
+var provenanceProducerPattern = lazyregexp.New(`^[a-z][a-z0-9_.-]{0,63}$`)
+var canonicalUUIDPattern = lazyregexp.New(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
+var canonicalCorrelationAttributePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
 const maxCanonicalCorrelationAttributeIDBytes = 256
 

@@ -423,8 +423,11 @@ func (h *hostPlane) noteActivityLocked(
 	if event.User != "" {
 		activity.User = event.User
 	}
-	if outcomeRank(event.Outcome) > outcomeRank(activity.Outcome) {
-		activity.Outcome, activity.Control = event.Outcome, event.Control
+	switch rank := outcomeRank(event.Outcome); {
+	case rank > outcomeRank(activity.Outcome):
+		activity.Outcome, activity.Control, activity.Hits = event.Outcome, event.Control, 1
+	case rank > 0 && event.Outcome == activity.Outcome && event.Control == activity.Control:
+		activity.Hits++
 	}
 	if h.hooks == nil || lineage.Depth == 0 {
 		return

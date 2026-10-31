@@ -344,7 +344,14 @@ class Logger:
 
         return cls(_NoRuntimeRecorder())
 
-    def log_scan(self, result: ScanResult, *, error: str = "", connector: str | None = None) -> None:
+    def log_scan(
+        self,
+        result: ScanResult,
+        *,
+        error: str = "",
+        connector: str | None = None,
+        verdict: str = "",
+    ) -> None:
         scan: dict[str, Any] = {
             "scanner": result.scanner,
             "target": result.target,
@@ -360,6 +367,10 @@ class Logger:
         # scan telemetry says which connector the asset belongs to (GAP-1381).
         if connector:
             scan["connector"] = connector
+        # The admission decision the CLI printed (clean, warn or block), so
+        # the audit row reads what the user saw (GAP-0156).
+        if verdict:
+            scan["verdict"] = verdict
         self._emit({"kind": "scan", "run_id": _current_run_id(), "scan": scan})
 
     def log_scan_failed(self, scanner: str, target: str, error: str, *, duration_ms: int = 0) -> None:

@@ -180,6 +180,7 @@ func currentBundleGenerationOptions(store *enterprisebundle.Store, ref *enterpri
 		return configwrite.Options{}, fmt.Errorf("confirmed policy bundle %s version %d has no principal", ref.BundleID, ref.Version)
 	}
 	opt.GenerationFloor = ref.ConfigGeneration
+	opt.Bundle.Dir = ref.Dir
 	return opt, nil
 }
 
@@ -606,7 +607,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	if readErr != nil {
 		return refuse(readErr)
 	}
-	if err := env.ensureDir(store.BundlesDir, 0o755, rootOwner()); err != nil {
+	if err := env.ensureDir(store.BundlesDir, bundleStoreDirMode, rootOwner()); err != nil {
 		return refuse(fmt.Errorf("prepare the policy bundle store: %w", err))
 	}
 	staging, err := store.Stage(receipt, b)
@@ -620,6 +621,26 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	}
 	if env.BundleDigester == nil {
 		return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeConfigInvalid, Detail: "this build cannot compute the effective policy digest of a bundle"})
+	}
+	// Anchors and bundle are one transaction (--trust-anchors): the file is
+	// written first, the bundle is verified against it, and it stays only
+	// when the bundle does (bundleanchors_stage.go).
+	if l.opts.TrustAnchors != "" {
+		anchorStage, stageErr := l.stageBundleAnchors()
+		defer func() {
+			keep := stageErr == nil && (repeat || receipt.State == enterprisebundle.StateConfirmed || receipt.State == enterprisebundle.StateApplied)
+			cause := stageErr
+			if !keep && cause == nil {
+				cause = &enterprisebundle.Error{Code: receipt.ErrorCode}
+				if receipt.ErrorCode == "" {
+					cause = &enterprisebundle.Error{Code: enterprisebundle.CodeApplyFailed}
+				}
+			}
+			l.settleBundleAnchors(anchorStage, keep, cause)
+		}()
+		if stageErr != nil {
+			return refuse(stageErr)
+		}
 	}
 	anchors, err := enterprisebundle.LoadAnchors(env.bundleAnchorsPath(), func(path string) error { return env.Trust(path, TrustAdminFile) })
 	if err != nil {

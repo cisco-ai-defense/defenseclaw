@@ -48,7 +48,7 @@ func TestAccountOpenShellStartFailureIsWordedForThePerson(t *testing.T) {
 			}
 			return 5002
 		}, sandboxAccountBusyMessage},
-		{"nothing holds the port", func(int) int { return 0 }, "your OpenShell gateway could not be started ("},
+		{"nothing holds the port", func(int) int { return 0 }, "your OpenShell gateway could not be started; "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newOpenShellRig(t, "linux")
@@ -70,7 +70,8 @@ func TestAccountOpenShellStartFailureIsWordedForThePerson(t *testing.T) {
 			if !strings.Contains(text, tc.want) {
 				t.Fatalf("refusal = %q, want it to contain %q", text, tc.want)
 			}
-			if strings.Contains(text, "systemctl") || strings.Contains(text, "Job for") {
+			if strings.Contains(text, "systemctl") || strings.Contains(text, "Job for") || strings.Contains(text, "the unit is") ||
+				strings.Contains(text, "its state is") {
 				t.Fatalf("refusal shows the service manager's text: %q", text)
 			}
 			mu.Lock()

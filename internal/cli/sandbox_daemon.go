@@ -512,7 +512,17 @@ var (
 func stopManagedSandboxes(ctx context.Context, c managedSandboxStopper, out io.Writer) error {
 	list, err := c.List(ctx)
 	if err != nil {
-		if sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) {
+		switch {
+		case sandboxapi.IsCode(err, sandboxapi.CodeUnavailable):
+			return nil
+		case sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation), sandboxapi.IsCode(err, sandboxapi.CodeDisabled):
+			// The daemon answers every call with the managed gateway's
+			// refusal of its settings (the account is no longer enrolled,
+			// the deployment was removed, sandboxes are off): it runs no
+			// manager and so no sandbox of its own to stop. Failing here
+			// left the unit failed after an uninstall and a package
+			// removal (GAP-0137).
+			fmt.Fprintf(out, "the sandbox daemon runs no sandbox: %v\n", err)
 			return nil
 		}
 		return err

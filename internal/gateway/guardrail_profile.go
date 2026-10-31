@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	osuser "os/user"
 	"path/filepath"
@@ -181,6 +182,9 @@ const (
 	profileSubjectVerified     = "verified"
 	profileSubjectProcessOwner = "process_owner"
 	profileSubjectLookup       = "lookup"
+	// profileSubjectVerifiedByConnector is the person a trusted connector
+	// acts for (trusted_connector.go).
+	profileSubjectVerifiedByConnector = "verified_by_connector"
 )
 
 // profileDecision is the profile one request resolved to. Name "" means no
@@ -703,6 +707,12 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 // profileRequestSubject returns the verified subject of ctx and where it
 // came from, or ("", "") when the request has none.
 func profileRequestSubject(ctx context.Context) (*profileSubject, string) {
+	// A trusted connector's call for a person selects the person's profile
+	// from the facts the gateway resolved for them. The route attaches it
+	// only for a hook-socket caller (never a sandbox).
+	if subject, ok := actingForProfileSubject(ctx); ok {
+		return &subject, profileSubjectVerifiedByConnector
+	}
 	// A sandbox bearer names a host user for attribution, but it does not
 	// authenticate the process calling the loopback ingress. Never inherit
 	// the gateway owner's verified subject for these requests. The one
@@ -1046,7 +1056,11 @@ func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res ident
 	}
 	decision := set.selectProfile(subject, res, source, connectorName, scans, path, agent)
 	if decision.Refused == "" {
-		set.matches.put(key, decision)
+		userID := ""
+		if subject != nil {
+			userID = subject.UserID
+		}
+		set.matches.put(key, userID, decision)
 	}
 	return decision
 }
@@ -1370,15 +1384,6 @@ func scanAllRulesForConnectorFor(ctx context.Context, connectorName, text, toolN
 	return scanRuleGeneration(snapshotRulePackGenerationFor(ctx, connectorName), text, toolName, ruleScanOptions{})
 }
 
-// scanContentRulesForConnectorFor is scanContentRulesForConnector with the
-// request's profile rule pack.
-func scanContentRulesForConnectorFor(ctx context.Context, connectorName, text, toolName string, scope ruleContentScope) []RuleFinding {
-	if ManagedEnterpriseActive() {
-		return nil
-	}
-	return scanContentRuleCategoryWithGeneration(snapshotRulePackGenerationFor(ctx, connectorName), text, toolName, scope, "")
-}
-
 // ruleGenerationFor is ruleGeneration for a request on ctx: a meet scans
 // with every rule of its members' packs, the base generation's included.
 func (r *resolvedGuardrailProfile) ruleGenerationFor(ctx context.Context, connectorName string) *compiledRulePackCategories {
@@ -1412,10 +1417,39 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 	return r.set.lazyRules(r.decision.Name, r.derived, connectorName, key)
 }
 
+// rulePack is the composed pack behind the profile's rules for
+// connectorName (ruleGeneration), whose judge suppressions and sensitive
+// tools the request applies; nil sends the caller to the base
+// configuration's pack. A scope the preload listed reads set.packs (or its
+// retry); one it did not list loads lazily, as its rules do, so a lazily
+// loaded scope no longer applied the base pack's suppressions (GAP-1526).
+func (r *resolvedGuardrailProfile) rulePack(connectorName string) *guardrail.RulePack {
+	if r == nil || r.set == nil || r.derived == nil {
+		return nil
+	}
+	key := effectiveRulePackKey(r.derived, connectorName)
+	if key == "" {
+		return nil
+	}
+	if pack := r.set.packs[key]; pack != nil {
+		return pack
+	}
+	if retry := r.set.missing[key]; retry != nil {
+		return retry.rulePack(time.Now())
+	}
+	if _, listed := r.set.rules[key]; listed || r.set.base == nil || key == effectiveRulePackKey(r.set.base, connectorName) {
+		return nil
+	}
+	return r.set.lazyPack(r.decision.Name, r.derived, connectorName, key)
+}
+
 // profileLazyScope is a profile rule-pack scope loaded on its first request.
 type profileLazyScope struct {
 	once  sync.Once
 	rules *compiledRulePackCategories
+	// pack is the composed pack behind rules: its judge suppressions and
+	// sensitive tools apply to the request (connectorRulePack, GAP-1526).
+	pack  *guardrail.RulePack
 	retry *profileRulePackRetry
 }
 
@@ -1425,6 +1459,26 @@ type profileLazyScope struct {
 // first requests wait for the one load. A pack that does not load is retried
 // like one that did not load at start (GAP-0333).
 func (set *guardrailProfileSet) lazyRules(profile string, cfg *config.Config, connectorName, key string) *compiledRulePackCategories {
+	entry := set.lazyScope(profile, cfg, connectorName, key)
+	if entry.rules != nil {
+		return entry.rules
+	}
+	return entry.retry.rules(time.Now())
+}
+
+// lazyPack is the composed pack behind lazyRules' rules for the same scope,
+// loading the scope on first use: a lazily loaded scope applied the
+// profile's rules but the base pack's judge suppressions (GAP-1526).
+func (set *guardrailProfileSet) lazyPack(profile string, cfg *config.Config, connectorName, key string) *guardrail.RulePack {
+	entry := set.lazyScope(profile, cfg, connectorName, key)
+	if entry.pack != nil {
+		return entry.pack
+	}
+	return entry.retry.rulePack(time.Now())
+}
+
+// lazyScope is the entry of a scope the preload did not list, loaded once.
+func (set *guardrailProfileSet) lazyScope(profile string, cfg *config.Config, connectorName, key string) *profileLazyScope {
 	value, _ := set.lazy.LoadOrStore(key, &profileLazyScope{})
 	entry := value.(*profileLazyScope)
 	entry.once.Do(func() {
@@ -1435,7 +1489,7 @@ func (set *guardrailProfileSet) lazyRules(profile string, cfg *config.Config, co
 			compiled, err = compileRulePackCategories(rp)
 		}
 		if err == nil {
-			entry.rules = compiled
+			entry.rules, entry.pack = compiled, rp
 			return
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] profile %s: %v; it scans with the base rule set until the pack loads (retried every %s)\n",
@@ -1443,10 +1497,7 @@ func (set *guardrailProfileSet) lazyRules(profile string, cfg *config.Config, co
 		entry.retry = &profileRulePackRetry{profile: profile, cfg: cfg, scope: scope,
 			lastErr: err.Error(), nextTry: time.Now().Add(profileRulePackRetryInterval)}
 	})
-	if entry.rules != nil {
-		return entry.rules
-	}
-	return entry.retry.rules(time.Now())
+	return entry
 }
 
 // proxyProfileFor returns the profile resolution the guardrail proxy applies
@@ -1694,6 +1745,15 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "profile resolution needs the gateway token"})
 		return
 	}
+	a.serveGuardrailProfileResolve(w, r, r.URL.Query(), false)
+}
+
+// serveGuardrailProfileResolve answers a profile resolution for query
+// (user, connector, agent, caller_facts). own is the caller's own view on
+// the hook socket (handleOwnProfileExplain): the subject is the caller,
+// administrator caller_facts are not taken, and the digests of the other
+// profiles are left out.
+func (a *APIServer) serveGuardrailProfileResolve(w http.ResponseWriter, r *http.Request, query url.Values, own bool) {
 	base := a.runtimeConfigSnapshot()
 	// Explain the base that decisions use: the published generation.
 	if g := a.generation(); g != nil && g.Config != nil && (base == nil || !base.SecureClientIntegration()) {
@@ -1703,7 +1763,6 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		a.writeJSON(w, http.StatusNotFound, map[string]string{"error": "guardrail profiles are not supported with the Secure Client integration"})
 		return
 	}
-	query := r.URL.Query()
 	user := strings.TrimSpace(query.Get("user"))
 	connectorName := config.NormalizeConnectorName(query.Get("connector"))
 	agent := strings.TrimSpace(query.Get("agent"))
@@ -1728,6 +1787,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		"connector":           connectorName,
 		"agent":               agent,
 	}
+	if own {
+		out["own"] = true
+	}
 	// The subject is resolved with or without profiles, so the identity check
 	// (`profile explain --user U --json | jq .subject`) answers on every
 	// install (GAP-0280).
@@ -1736,7 +1798,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	refreshedFacts := false
 	if user != "" {
 		found, err := profileExplainSubjectLookup(user)
-		if caller, ok := profileExplainCallerSubject(query.Get("caller_facts"), user); ok {
+		if caller, ok := profileExplainCallerSubject(query.Get("caller_facts"), user); ok && !own {
 			// The administrator's own NSS lookup as root resolved the account
 			// (GAP-0500); the gateway's lookup above still refreshed what the
 			// hooks read, and the cache block says what they use.
@@ -1895,9 +1957,48 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		out["warnings"] = warnings
 	}
 	out["effective"] = profileEffectiveView(effective, connectorName)
-	digests := guardrailProfileDigests(set)
-	out["profiles"] = digests
+	if !own {
+		// The other profiles are the administrator's (owner rule: users see
+		// only their own policy).
+		out["profiles"] = guardrailProfileDigests(set)
+	}
 	a.writeJSON(w, http.StatusOK, out)
+}
+
+// handleOwnProfileExplain serves GET managed.OwnProfileExplainPath on the
+// hook socket: the guardrail profile the gateway applies to the socket's
+// kernel-verified caller, for `defenseclaw guardrail profile explain` and
+// `enterprise linux|macos profile-explain` of a standard user on a managed
+// computer, who holds no gateway token (GAP-0431, GAP-0422). Users see only
+// their own policy: the subject is always the caller, and a user parameter
+// that names anyone else is refused.
+func (a *APIServer) handleOwnProfileExplain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	peer, ok := managedHookPeerFromContext(r.Context())
+	if !ok {
+		writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonPeerUnverified)
+		return
+	}
+	query := r.URL.Query()
+	self := strconv.Itoa(peer.UID)
+	if user := strings.TrimSpace(query.Get("user")); user != "" && user != self && (peer.Name == "" || !useridentity.EqualFold(user, peer.Name)) {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "own_profile_only",
+			"message": "you can explain only your own guardrail profile (omit --user, or give your account name or uid); " +
+				"an administrator explains other accounts",
+		})
+		return
+	}
+	own := url.Values{"user": {self}}
+	for _, key := range []string{"connector", "agent"} {
+		if value := strings.TrimSpace(query.Get(key)); value != "" {
+			own.Set(key, value)
+		}
+	}
+	a.serveGuardrailProfileResolve(w, r, own, true)
 }
 
 // profileCacheWindowNote says how long a group membership change takes to

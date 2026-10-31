@@ -1827,11 +1827,16 @@ function Get-DefenseClawBootstrapRecordedModulePin {
         no-reparse, administrator-owned chain as the module itself, and the
         running installer must be byte-identical to the one the deployment
         recorded, so the pin admits only the payload already installed.
+        A trusted record that does not parse (or is too large to be one)
+        leaves its path and reason in
+        $script:DefenseClawBootstrapUnreadableRecord, so the caller names
+        the damaged record instead of the module signature (GAP-0164).
     #>
     param(
         [Parameter(Mandatory)][string]$MetadataPath,
         [Parameter(Mandatory)][string]$InstallerPath
     )
+    $script:DefenseClawBootstrapUnreadableRecord = ''
     try {
         if (-not [IO.File]::Exists($MetadataPath)) {
             return ''
@@ -1841,11 +1846,26 @@ function Get-DefenseClawBootstrapRecordedModulePin {
             -AllowUnsignedModule
         $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $metadataFull -Force
         if ([int64]$item.Length -gt 1048576) {
+            $script:DefenseClawBootstrapUnreadableRecord = "$metadataFull (it is larger than 1 MiB)"
             return ''
         }
-        $metadata = Microsoft.PowerShell.Management\Get-Content `
+        $text = Microsoft.PowerShell.Management\Get-Content `
             -LiteralPath $metadataFull `
-            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+            -Raw
+        $metadata = $null
+        $reason = 'it is not a JSON object'
+        try {
+            $metadata = $text | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        }
+        catch {
+            $reason = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+        }
+        # [pscustomobject] is [psobject], which also matches $null and a
+        # wrapped number: test the parsed object's own type.
+        if ($metadata -isnot [Management.Automation.PSCustomObject]) {
+            $script:DefenseClawBootstrapUnreadableRecord = "$metadataFull ($reason)"
+            return ''
+        }
         $trust = $metadata.PSObject.Properties['trust_mode']
         $recordedProfile = $metadata.PSObject.Properties['profile']
         $hashes = $metadata.PSObject.Properties['hashes']
@@ -3519,6 +3539,7 @@ try {
         $Manifest = $renderedManifestPath
     }
     $bootstrapPinnedModuleSHA256 = ''
+    $script:DefenseClawBootstrapUnreadableRecord = ''
     if ($EnterpriseProfile -ceq 'Standalone' -and $TrustMode -ceq 'HashPinned') {
         if ([string]::IsNullOrWhiteSpace($PayloadManifest)) {
             throw '-TrustMode HashPinned requires -PayloadManifest'
@@ -3575,7 +3596,20 @@ try {
             -AllowedSignerSHA256 $bootstrapAllowedSigners
     }
     catch {
-        throw "DefenseClaw enterprise installer rejected its module before import: $($_.Exception.Message)"
+        $rejection = [string]$_.Exception.Message
+        if (-not [string]::IsNullOrEmpty($script:DefenseClawBootstrapUnreadableRecord) -and
+            $rejection.Contains('Authenticode signature is not valid')) {
+            # The module of a hash-pinned deployment is unsigned: only the
+            # digest in its deployment record admits it. A damaged record is
+            # the cause, not the signature, and Setup /repair rebuilds it from
+            # its own payload (GAP-0164), as the module says for ensure.
+            throw ("DefenseClaw enterprise installer rejected its module before import: " +
+                "could not read the installed deployment metadata $($script:DefenseClawBootstrapUnreadableRecord), " +
+                'which holds the digest this deployment admits its installed module by; nothing was changed. ' +
+                'Run Setup /repair to rebuild it: the installed release''s DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1, ' +
+                'as LocalSystem or from an elevated prompt')
+        }
+        throw "DefenseClaw enterprise installer rejected its module before import: $rejection"
     }
     # This is the last path-identity check before PowerShell opens the module.
     $importRoot = [IO.Path]::GetPathRoot($modulePath)

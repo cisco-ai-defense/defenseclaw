@@ -24,6 +24,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -88,7 +90,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			return true
 		}
 	}
-	protected := newProtectedFiles(home)
+	protected := newProtectedFiles(home).keysOnly(home)
 	ssh := filepath.Join(home, ".ssh")
 	stateHome := &actionStateHome{home: home}
 	// base places a relative value: the effective cwd for a parsed word,
@@ -131,6 +133,15 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		if stateOnly {
 			return actionProtectedStatePath(operand, stateHome)
 		}
+		if _, resolved := ResolveWriteTarget(operand); !resolved {
+			// A gateway behind ProtectHome cannot resolve the home: a word
+			// that names the .ssh directory itself (rel-1-0-6:GAP-0130) or
+			// one of its authorized-keys files (rel-1-0-6:GAP-0046) is still
+			// that path, as a per-user gateway reads it.
+			if clean := filepath.Clean(operand); samePathName(clean, ssh) || protected.has(clean) {
+				return true
+			}
+		}
 		return protectedReachPath(operand, protected, ssh)
 	}
 	// The hook client records an answer for every pattern the scan checks,
@@ -160,7 +171,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		found := false
 		effectiveCWD := cwd
 		var directoryStack []string
-		var movedOntoLinks []*syntax.Word
+		var judgedWords []*syntax.Word
 		checkWord := func(word *syntax.Word) bool {
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
@@ -217,20 +228,38 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				}
 				var moved *syntax.Word
 				var movedEntry string
+				var removed map[*syntax.Word]string
 				if !stateOnly {
 					// A plain mv onto a link replaces the link: judge its
-					// entry, not the file it names (GAP-2559).
+					// entry, not the file it names (GAP-2559). A plain rm of
+					// a link removes the link (GAP-2590).
 					if word, entry, ok := actionPlainMoveOntoLink(call, values, effectiveCWD, home); ok {
 						moved, movedEntry = word, entry
-						movedOntoLinks = append(movedOntoLinks, word)
+						judgedWords = append(judgedWords, word)
 					}
+					removed = actionPlainRemovedLinks(call, values, effectiveCWD, home)
 				}
+				// An --eval text that only defines rules make does not run
+				// is not a target of the call (GAP-2169).
+				inert := actionInertMakeEvals(call, effectiveCWD, home)
+				judgedWords = append(judgedWords, inert...)
 				for _, word := range call.Args {
 					if moved != nil && word == moved {
 						if protectedEntry(movedEntry, protected, ssh) {
 							found = true
 							return false
 						}
+						continue
+					}
+					if entry, ok := removed[word]; ok {
+						if protectedEntry(entry, protected, ssh) {
+							found = true
+							return false
+						}
+						judgedWords = append(judgedWords, word)
+						continue
+					}
+					if slices.Contains(inert, word) {
 						continue
 					}
 					if checkWord(word) {
@@ -245,8 +274,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		if found {
 			return true
 		}
-		// The text scan below would follow the link the move replaces.
-		nestedBodies = append(nestedBodies, movedOntoLinks...)
+		// The text scan below would read the words judged above again: the
+		// link a move replaces or an rm removes, an inert make --eval text.
+		nestedBodies = append(nestedBodies, judgedWords...)
 	}
 	text := actionBlankPatchBodies(command, actionMaskLiteralMetacharacters(command))
 	if parsed && actionLiteralArgumentProgramsOnly(file, home) {
@@ -256,6 +286,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	// tilde quoted inside it is literal and an unquoted one is the home. The
 	// outer quotes around the body say nothing about that (round m).
 	text = actionBlankWords(text, nestedBodies)
+	if parsed {
+		// A # that starts a word comments out the rest of its line in
+		// bash, sh and zsh alike: the shell runs none of it, so a path
+		// only a comment names is no target (rel-1-0-6:GAP-0133; the
+		// Windows plain reading has the same rule, GAP-1982).
+		text = actionBlankComments(text, command)
+	}
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "${HOME}/", home+"/"), "$HOME/", home+"/")
 	for _, token := range actionMentionToken.FindAllString(text, -1) {
 		literalTilde := strings.HasPrefix(token, actionLiteralTilde)
@@ -277,8 +314,8 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 // pathlib, str.format, % formatting, Perl's . operator or a .ssh directory
 // variable joined later (GAP-1732, GAP-2005, the GAP-0475 class).
 var (
-	actionInterpreterSSHName  = regexp.MustCompile(`\.ssh\b`)
-	actionInterpreterKeysName = regexp.MustCompile(`\bauthorized_keys2?\b`)
+	actionInterpreterSSHName  = lazyregexp.New(`\.ssh\b`)
+	actionInterpreterKeysName = lazyregexp.New(`\bauthorized_keys2?\b`)
 )
 
 // actionInterpreterHomeCall matches the home spellings that the
@@ -286,7 +323,7 @@ var (
 // expanduser: GAP-0475, a path bound again before the write, GAP-1299).
 // Such code is allowed only when that proof places every write on an
 // ordinary path; a home call elsewhere in the code proves nothing (GAP-2005).
-var actionInterpreterHomeCall = regexp.MustCompile(`Path\.home\(\)|expanduser\(`)
+var actionInterpreterHomeCall = lazyregexp.New(`Path\.home\(\)|expanduser\(`)
 
 // actionInterpreterCodeWrites reports a writer call (open, write_text,
 // appendFileSync ...) in executable code, not inside a string or comment:
@@ -574,7 +611,7 @@ func actionEvaluatesRuntimeNames(file *syntax.File, uncalled map[*syntax.FuncDec
 // that runs code for every file: a pattern followed by (e:code:),
 // (e'code'), (+name) or a longer qualifier list such as (.e:code:)
 // (RV6-1). Prose such as "see (e.g. x)" has a space before the paren.
-var actionZshQualifierText = regexp.MustCompile(`[^\s(]\([^()\s]*(?:e[^A-Za-z0-9_\s()]|\+[A-Za-z_])`)
+var actionZshQualifierText = lazyregexp.New(`[^\s(]\([^()\s]*(?:e[^A-Za-z0-9_\s()]|\+[A-Za-z_])`)
 
 // actionZshGlobSubstWord reports a word with a zsh glob-subst expansion:
 // $~name, ${~name} or a ${(...~...)name} flag list. The bash parser reads
@@ -809,7 +846,7 @@ func patchCommandResolutionChange(line string) bool {
 // not the home. Writers and redirects keep the conservative home spelling.
 const actionLiteralTilde = "\x1e"
 
-var actionMentionToken = regexp.MustCompile(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
+var actionMentionToken = lazyregexp.New(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
 
 func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 	literal := true
@@ -1093,6 +1130,16 @@ func actionLiteralGitWords(words []*syntax.Word, home string) bool {
 			}
 			words = words[2:]
 			continue
+		case "-c":
+			// An identity or display setting runs nothing (GAP-1473).
+			if len(words) < 2 {
+				return false
+			}
+			if setting, fixed := StaticWord(words[1], home); !fixed || !actionGitInertConfig(setting) {
+				return false
+			}
+			words = words[2:]
+			continue
 		case "--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs", "--glob-pathspecs",
 			"--noglob-pathspecs", "--icase-pathspecs", "--no-replace-objects":
 			words = words[1:]
@@ -1232,6 +1279,13 @@ func actionPosixWindowsProtectedGlob(value, cwd, home string) bool {
 // the walk of a gateway that can see the home would (GAP-1460 review). With
 // no answer, the name fallback below keeps the pattern closed.
 func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs) bool {
+	return actionProtectedFileGlobReachAs(pattern, cwd, protected, ssh, home, globs, false)
+}
+
+// actionProtectedFileGlobReachAs is actionProtectedFileGlobReach; windows
+// reads the pattern as a PowerShell or cmd wildcard, which matches a leading
+// dot, where a POSIX shell's * and ? skip it (Git Bash too, GAP-1717).
+func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs, windows bool) bool {
 	literal := ""
 	if !filepath.IsAbs(pattern) {
 		literal = filepath.Clean(cwd)
@@ -1246,7 +1300,7 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 		return false
 	}
 	hidden := actionGlobViewHidden(cwd, home)
-	dots := sync.OnceValue(func() bool { return globs.dotNames() || actionShellProfileMayDotglob(home) })
+	dots := sync.OnceValue(func() bool { return windows || globs.dotNames() || actionShellProfileMayDotglob(home) })
 	userView := !hidden && actionProcessOwnsHome(home)
 	candidates, complete, unseen := actionExpandGlob(pattern, literal, hidden, userView, dots)
 	for _, candidate := range candidates {
@@ -1319,8 +1373,8 @@ func (g *actionGlobs) dotNames() bool { return g != nil && g.dots }
 // GLOBIGNORE, zsh GLOB_DOTS or a (D) qualifier, or a startup file
 // (BASH_ENV) that may set one.
 var (
-	actionDotglobSetting   = regexp.MustCompile(`dotglob|globdots|globignore|bashenv`)
-	actionDotglobQualifier = regexp.MustCompile(`[*?\]]\([^()]*D[^()]*\)`)
+	actionDotglobSetting   = lazyregexp.New(`dotglob|globdots|globignore|bashenv`)
+	actionDotglobQualifier = lazyregexp.New(`[*?\]]\([^()]*D[^()]*\)`)
 )
 
 func actionCommandMayDotglob(command string) bool {
@@ -1332,7 +1386,7 @@ func actionCommandMayDotglob(command string) bool {
 // system's shell, or an inherited BASHOPTS or GLOBIGNORE, that may set
 // dotglob, or a home this process cannot read.
 func actionShellProfileMayDotglob(home string) bool {
-	if _, err := os.Stat(home); err != nil || strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "" {
+	if _, err := pathStat(home); err != nil || strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "" {
 		return true
 	}
 	files := []string{"/etc/profile", "/etc/bashrc", "/etc/bash.bashrc", "/etc/zshenv", "/etc/zsh/zshenv",
@@ -1344,7 +1398,7 @@ func actionShellProfileMayDotglob(home string) bool {
 		files = append(files, filepath.Join(home, name))
 	}
 	for _, name := range files {
-		file, err := os.Open(name)
+		file, err := pathOpen(name)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -1496,12 +1550,12 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 // shell's own expansion reads that spelling: it is tried before the walk
 // concludes that the name names no directory (GAP-0781 RV7-1).
 func actionGlobOpenDir(dir string) (*os.File, error) {
-	directory, err := os.Open(dir)
+	directory, err := pathOpen(dir)
 	if err == nil || !actionGlobInvalidName(err) {
 		return directory, err
 	}
 	if mapped := actionMSYSMappedPath(dir); mapped != dir {
-		if alias, mappedErr := os.Open(mapped); mappedErr == nil || !errors.Is(mappedErr, fs.ErrNotExist) && !actionGlobInvalidName(mappedErr) {
+		if alias, mappedErr := pathOpen(mapped); mappedErr == nil || !errors.Is(mappedErr, fs.ErrNotExist) && !actionGlobInvalidName(mappedErr) {
 			return alias, mappedErr
 		}
 	}
@@ -1539,7 +1593,7 @@ func actionGlobNotDirectory(dir string, err error) bool {
 	if errors.Is(err, syscall.ENOTDIR) {
 		return true
 	}
-	info, statErr := os.Stat(dir)
+	info, statErr := pathStat(dir)
 	return statErr == nil && !info.IsDir()
 }
 
@@ -1571,7 +1625,7 @@ func actionGlobViewHidden(cwd, home string) bool {
 		if dir == "" {
 			continue
 		}
-		if _, err := os.Stat(dir); err != nil {
+		if _, err := pathStat(dir); err != nil {
 			return true
 		}
 	}
@@ -1581,7 +1635,7 @@ func actionGlobViewHidden(cwd, home string) bool {
 // actionGlobSkipsDotName reports a leading-dot name that the shell's * or ?
 // does not match. A bracket stays a match: the walk keeps the doubt.
 func actionGlobSkipsDotName(component, name string, dots func() bool) bool {
-	return runtime.GOOS != "windows" && strings.HasPrefix(name, ".") &&
+	return strings.HasPrefix(name, ".") &&
 		(strings.HasPrefix(component, "*") || strings.HasPrefix(component, "?")) && !dots()
 }
 
@@ -1683,7 +1737,7 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	}
 	// Only an existing regular file with a second link can alias the state.
 	// A missing or ordinary target costs one stat here, not a second walk.
-	info, err := os.Stat(resolved)
+	info, err := pathStat(resolved)
 	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return false
 	}
@@ -1700,7 +1754,7 @@ func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	info, err := os.Stat(resolved)
+	info, err := pathStat(resolved)
 	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return "", false
 	}
@@ -1715,7 +1769,7 @@ func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 		// The index can be up to activeStateIndexTTL old: confirm the name
 		// still holds this file before mapping the alias to it.
 		path := filepath.Join(activeRoot, filepath.FromSlash(file.relative))
-		if current, err := os.Stat(path); err == nil && os.SameFile(info, current) {
+		if current, err := pathStat(path); err == nil && os.SameFile(info, current) {
 			return filepath.Join(home, ".defenseclaw", filepath.FromSlash(file.relative)), true
 		}
 	}
@@ -1778,7 +1832,7 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeSt
 		return visited > activeStateIndexEntries || time.Now().After(deadline)
 	}
 	add := func(path, relative string) {
-		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		if info, err := pathStat(path); err == nil && info.Mode().IsRegular() {
 			files = append(files, activeStateIdentity{relative: relative, info: info})
 		}
 	}
@@ -1837,7 +1891,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 						continue
 					}
 					if child, childStatic := StaticWord(call.Args[j+1], home); childStatic {
-						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
+						if actionPosixShellBodyMention(child, cwd, home, depth+1, stateOnly, globs) {
 							found = true
 							return false
 						}
@@ -1879,7 +1933,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 				if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
 					!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
 					if child, static := StaticWord(call.Args[j+1], home); static {
-						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
+						if actionPosixShellBodyMention(child, cwd, home, depth+1, stateOnly, globs) {
 							found = true
 						} else {
 							bodies = append(bodies, call.Args[j+1])
@@ -1892,6 +1946,17 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 		return !found
 	})
 	return bodies, found
+}
+
+// actionPosixShellBodyMention reads the body of a POSIX shell (sh -c, env
+// -S) the POSIX reading meets. On a native Windows host that shell is Git
+// Bash: a body the POSIX grammar reads alone is read with it, as the shell
+// runs it (GAP-1717); any other body keeps every reading.
+func actionPosixShellBodyMention(child, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) bool {
+	if depth < 8 && actionGitBashReadsAlone(child, home, actionfacts.DialectPOSIX) {
+		return actionPosixTargetMention(child, cwd, home, depth, stateOnly, globs)
+	}
+	return actionProtectedTargetMentionDepth(child, cwd, home, depth, stateOnly, globs)
 }
 
 // actionPowerShellCommandBodyIndex returns the index of the -Command body
@@ -1980,6 +2045,55 @@ func actionBlankWords(text string, words []*syntax.Word) string {
 	return string(out)
 }
 
+// actionBlankComments replaces with spaces each comment of command that the
+// shell parser finds: a # that starts a word, up to the end of its line. A
+// quoted or escaped #, or one inside a word, starts no comment, and a
+// here-document body is not one. text is a same-length view of command;
+// a command the parser cannot read keeps every byte.
+func actionBlankComments(text, command string) string {
+	if len(text) != len(command) || !strings.Contains(command, "#") {
+		return text
+	}
+	file, ok := shellparse.ParseWithComments(command)
+	if !ok {
+		return text
+	}
+	out := []byte(text)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		comment, ok := node.(*syntax.Comment)
+		if !ok {
+			return true
+		}
+		start := int(comment.Hash.Offset())
+		end := start + 1 + len(comment.Text)
+		if start < 0 || end > len(out) || out[start] != '#' || !actionPosixCommentStarts(command, start) {
+			return true
+		}
+		for i := start; i < end; i++ {
+			out[i] = ' '
+		}
+		return true
+	})
+	return string(out)
+}
+
+// actionPosixCommentStarts reports a # at i that bash itself reads as the
+// start of a comment: at the start of the command or after a blank, a line
+// end or an operator character, and not after an escaped character (an
+// escaped blank or operator is word text, a backslash-newline joins the
+// lines). The parser also skips a carriage return as a blank, but bash keeps it in the word,
+// so a # after it is word text and what follows on the line still runs
+// (the GAP-1982 corpus row G02).
+func actionPosixCommentStarts(command string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	if strings.IndexByte(" \t\n;&|()<>", command[i-1]) < 0 {
+		return false
+	}
+	return i < 2 || command[i-2] != '\\'
+}
+
 // Quoted or escaped dollar signs and glob characters do not expand in the
 // outer shell. Nested shell bodies are checked separately above.
 func actionMaskLiteralMetacharacters(command string) string {
@@ -2027,8 +2141,15 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		if !safe {
 			return false
 		}
-		switch node.(type) {
-		case *syntax.Redirect, *syntax.FuncDecl, *syntax.DeclClause:
+		switch node := node.(type) {
+		case *syntax.Redirect:
+			// Output sent to /dev/null, or a descriptor copy such as 2>&1,
+			// writes no file (rel-1-0-6:GAP-0160).
+			if !actionDiscardRedirect(node, home) {
+				safe = false
+			}
+			return false
+		case *syntax.FuncDecl, *syntax.DeclClause:
 			safe = false
 			return false
 		}
@@ -2073,8 +2194,10 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		switch programBase(program) {
 		case "cat", "head", "tail", "ls", "dir", "stat",
 			// Search and count programs only read their operands (owner
-			// decision 2, TGT-0194; GAP-2168).
-			"grep", "egrep", "fgrep", "wc":
+			// decision 2, TGT-0194; GAP-2168). So do the size and path
+			// readers: du reports sizes, readlink and realpath print a
+			// resolved name; none has an output option.
+			"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath":
 		case "ssh-keygen":
 			if !actionSSHKeygenListsOnly(call.Args[1:], home) {
 				safe = false
@@ -2093,12 +2216,132 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 					break
 				}
 			}
+		case "uniq", "tar", "gtar", "bsdtar":
+			words, known := actionStaticWords(call.Args, home)
+			safe = known && actionReadsOnlyWords(words)
+		case "pwsh", "powershell":
+			// pwsh -Command "Get-ChildItem ~/.ssh" lists names, as ls does
+			// (rel-1-0-6:GAP-0145).
+			j, ok := actionPowerShellCommandBodyIndex(call.Args, 0, home)
+			body, static := "", false
+			if ok {
+				body, static = StaticWord(call.Args[j], home)
+			}
+			safe = static && actionPowerShellListOnlyBody(body, home)
 		default:
 			safe = false
 		}
 		return safe
 	})
 	return seen && safe
+}
+
+// actionDiscardRedirect reports a redirect that writes no file: output or
+// append to /dev/null, or a copy of a descriptor (2>&1, >&-).
+func actionDiscardRedirect(redirect *syntax.Redirect, home string) bool {
+	if redirect.Word == nil || redirect.Hdoc != nil {
+		return false
+	}
+	target, static := StaticWord(redirect.Word, home)
+	if !static {
+		return false
+	}
+	switch redirect.Op {
+	case syntax.RdrOut, syntax.AppOut, syntax.RdrAll, syntax.AppAll, syntax.RdrClob:
+		return target == "/dev/null"
+	case syntax.DplOut:
+		return target == "-" || target != "" && strings.Trim(target, "0123456789") == ""
+	}
+	return false
+}
+
+// actionPowerShellListOnly are the PowerShell commands that read names or
+// properties and write nothing. On a POSIX host ls and dir run the programs
+// of that name, which only list too; sort runs the sort program, which can
+// write a file (-o), so it is not one.
+var actionPowerShellListOnly = map[string]bool{
+	"get-childitem": true, "gci": true, "ls": true, "dir": true, "get-item": true, "gi": true, "test-path": true, "resolve-path": true, "rvpa": true,
+	"select-object": true, "select": true, "format-list": true, "fl": true, "format-table": true, "ft": true,
+	"format-wide": true, "fw": true, "measure-object": true, "measure": true, "sort-object": true,
+	"out-string": true, "write-output": true, "echo": true,
+}
+
+// actionPowerShellListOnlyBodyText is the text a list-only body may hold:
+// words, paths, wildcards, pipes and statement ends. A variable, a
+// subexpression, a script block, a quote, an escape or a redirect is not.
+var actionPowerShellListOnlyBodyText = lazyregexp.New(`^[A-Za-z0-9_./~:*?,|; \t-]+$`)
+
+// actionPowerShellListOnlyBody reports a PowerShell -Command body, read as
+// shell words, whose every command is a list-only PowerShell command
+// (actionPowerShellListOnly) and whose text has no other syntax.
+func actionPowerShellListOnlyBody(body, home string) bool {
+	if !actionPowerShellListOnlyBodyText.MatchString(body) {
+		return false
+	}
+	file, parsed := parseShell(body)
+	if !parsed {
+		return false
+	}
+	listOnly, calls := true, 0
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if !listOnly {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.FuncDecl, *syntax.ProcSubst, *syntax.CoprocClause, *syntax.DeclClause, *syntax.Redirect:
+			listOnly = false
+		case *syntax.CallExpr:
+			program, static := "", false
+			if len(node.Assigns) == 0 && len(node.Args) > 0 {
+				program, static = StaticWord(node.Args[0], home)
+			}
+			listOnly = static && actionPowerShellListOnly[strings.ToLower(program)]
+			calls++
+		}
+		return listOnly
+	})
+	return listOnly && calls > 0
+}
+
+// actionWindowsLaunchText is the text a list-only PowerShell launch may hold
+// on a native Windows host: words, paths, wildcards, double quotes and
+// backslashes. No reading of it (Git Bash, PowerShell, cmd) finds a
+// variable, a single quote, a backtick, a caret, a percent, a parenthesis,
+// a redirect or a background operator in it.
+var actionWindowsLaunchText = lazyregexp.New(`^[A-Za-z0-9_./~:*?,|; \t"\\-]+$`)
+
+// actionWindowsPowerShellListOnlyLaunch reports a command that is one pwsh
+// or powershell call whose -Command body only lists names
+// (actionPowerShellListOnlyBody), as the POSIX read-only list reads it
+// (actionKnownReadOnlyShell, rel-1-0-6:GAP-0145). Git Bash, PowerShell and
+// cmd pass that body alike, because the text holds nothing only one of them
+// reads (actionWindowsLaunchText). PowerShell reads a backslash in a path as
+// a separator, never as an escape, so the body is checked with forward
+// slashes: a backslash cannot hide a statement end from the check.
+func actionWindowsPowerShellListOnlyLaunch(command, home string) bool {
+	if len(command) > MaxPayloadBytes || !actionWindowsLaunchText.MatchString(command) {
+		return false
+	}
+	file, parsed := parseShell(command)
+	if !parsed || len(file.Stmts) != 1 {
+		return false
+	}
+	stmt := file.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(stmt.Redirs) != 0 || stmt.Background || stmt.Coprocess || stmt.Negated ||
+		len(call.Assigns) != 0 || len(call.Args) < 3 {
+		return false
+	}
+	program, static := StaticWord(call.Args[0], home)
+	if !static || !strings.EqualFold(program, "pwsh") && !strings.EqualFold(program, "powershell") {
+		return false
+	}
+	j, ok := actionPowerShellCommandBodyIndex(call.Args, 0, home)
+	if !ok {
+		return false
+	}
+	body, static := StaticWord(call.Args[j], home)
+	return static && actionPowerShellListOnlyBody(strings.ReplaceAll(body, `\`, "/"), home)
 }
 
 // actionExitStatusAssignment reports a bare NAME=$? assignment: it keeps the
@@ -2258,7 +2501,13 @@ func actionLessWritesFile(option string) bool {
 // not a write, so Git Bash echo \$HOME/.ssh/authorized_keys and a PowerShell
 // comment are not blocked by the reading of a shell that does not run them.
 func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool, dialect actionfacts.Dialect) bool {
+	if depth == 0 && actionWindowsPowerShellListOnlyLaunch(command, home) {
+		return false
+	}
 	for _, grammar := range []actionWindowsGrammar{0, actionWindowsPlainGrammar} {
+		if grammar != 0 && (dialect == actionfacts.DialectPowerShell || dialect == actionfacts.DialectPOSIX) {
+			grammar |= actionWindowsPlainComments
+		}
 		if !actionWindowsTargetMentionAs(command, cwd, home, depth, stateOnly, grammar) {
 			continue
 		}
@@ -2828,6 +3077,10 @@ func actionWindowsGitSubcommand(words []string) (int, bool) {
 		case option == "-C" || option == "--git-dir" || option == "--work-tree" || option == "--namespace":
 			sub += 2
 			continue
+		case option == "-c" && sub+1 < len(words) && actionGitInertConfig(words[sub+1]):
+			// An identity or display setting runs nothing (GAP-1473).
+			sub += 2
+			continue
 		case strings.HasPrefix(option, "--git-dir=") || strings.HasPrefix(option, "--work-tree=") ||
 			strings.HasPrefix(option, "--namespace="):
 		case option == "--no-pager" || option == "-P" || option == "--no-optional-locks" || option == "--bare" ||
@@ -2842,6 +3095,23 @@ func actionWindowsGitSubcommand(words []string) (int, bool) {
 		return 0, false
 	}
 	return sub, true
+}
+
+// actionGitInertConfig reports a git -c NAME=VALUE setting that only names
+// the committer or changes the output, so git runs nothing it names: any
+// other setting may name a program (an alias, the pager, the editor, a hook
+// path, gpg.program) and keeps the statement out of the text reading.
+func actionGitInertConfig(setting string) bool {
+	name, _, ok := strings.Cut(setting, "=")
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(name) {
+	case "user.name", "user.email", "author.name", "author.email", "committer.name", "committer.email",
+		"color.ui", "core.quotepath", "init.defaultbranch", "advice.detachedhead":
+		return true
+	}
+	return false
 }
 
 // actionWindowsGitPathspecWord reports a word of a git text statement that
@@ -2992,8 +3262,9 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 		// cmd type, and the search and select filters, only read (GAP-2168).
 		"type", "findstr", "select-string", "sls", "select-object", "select",
 		// Git Bash search and count programs read their operands as on a
-		// POSIX home (actionKnownReadOnlyShell, GAP-2168 Windows leg).
-		"grep", "egrep", "fgrep", "wc":
+		// POSIX home (actionKnownReadOnlyShell, GAP-2168 Windows leg); so do
+		// the size and path readers (GAP-0091).
+		"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath":
 		return true
 	case "ssh-keygen":
 		return actionSSHKeygenListsOnlyWords(words[1:])
@@ -3004,8 +3275,118 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 			}
 		}
 		return true
+	case "uniq", "tar", "gtar", "bsdtar":
+		return actionReadsOnlyWords(words)
 	}
 	return false
+}
+
+// actionStaticWords spells every word of a call, or reports that one is not
+// static.
+func actionStaticWords(args []*syntax.Word, home string) ([]string, bool) {
+	words := make([]string, len(args))
+	for i, arg := range args {
+		value, known := StaticWord(arg, home)
+		if !known {
+			return nil, false
+		}
+		words[i] = value
+	}
+	return words, true
+}
+
+// actionReadsOnlyWords reports a uniq that prints to standard output (at
+// most one operand: a second one is the file uniq writes) and a tar listing
+// (-t, --list) with only archive, directory, compression and verbosity
+// options: both read their operands and write no file, so a link operand to
+// a protected file or directory is a read there (GAP-2590). words starts
+// with the program.
+func actionReadsOnlyWords(words []string) bool {
+	if len(words) == 0 {
+		return false
+	}
+	if program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe"); program == "uniq" {
+		return actionUniqPrintsOnly(words[1:])
+	}
+	return actionTarListsOnly(words[1:])
+}
+
+func actionUniqPrintsOnly(args []string) bool {
+	operands, options := 0, true
+	for i := 0; i < len(args); i++ {
+		value := args[i]
+		switch {
+		case options && value == "--":
+			options = false
+		case options && strings.HasPrefix(value, "--"):
+			name, _, attached := strings.Cut(value, "=")
+			if !attached && (name == "--skip-fields" || name == "--skip-chars" || name == "--check-chars") {
+				i++ // the number
+			}
+		case options && len(value) > 1 && value[0] == '-':
+			if strings.IndexByte("fsw", value[len(value)-1]) >= 0 {
+				i++ // -f N, -s N, -w N
+			}
+		default:
+			operands++
+		}
+	}
+	return operands <= 1
+}
+
+var actionTarListLongOptions = map[string]bool{
+	"--list": true, "--verbose": true, "--gzip": true, "--gunzip": true, "--bzip2": true, "--xz": true, "--zstd": true,
+}
+
+func actionTarListsOnly(args []string) bool {
+	list, values, options := false, 0, true
+	archive := func(value string) bool { return !strings.Contains(value, ":") } // host:file runs a remote shell
+	for i, value := range args {
+		if values > 0 {
+			values--
+			continue
+		}
+		switch {
+		case !options:
+		case value == "--":
+			options = false
+		case strings.HasPrefix(value, "--"):
+			name, attached, hasValue := strings.Cut(value, "=")
+			switch {
+			case name == "--file" || name == "--directory":
+				if !hasValue {
+					values++
+				} else if name == "--file" && !archive(attached) {
+					return false
+				}
+			case !actionTarListLongOptions[name] || hasValue:
+				return false
+			}
+			list = list || name == "--list"
+		case strings.HasPrefix(value, "-") || i == 0:
+			// A first word without a dash is the old bundled form (tvf).
+			letters := strings.TrimPrefix(value, "-")
+			for j := 0; j < len(letters); j++ {
+				switch letters[j] {
+				case 't':
+					list = true
+				case 'v', 'z', 'j', 'J', 'Z':
+				case 'f', 'C':
+					if rest := letters[j+1:]; rest != "" && value[0] == '-' {
+						if letters[j] == 'f' && !archive(rest) {
+							return false
+						}
+						j = len(letters)
+						continue
+					}
+					values++
+				default:
+					return false
+				}
+			}
+		}
+	}
+	return list && values == 0
 }
 
 func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) bool {
@@ -3144,7 +3525,7 @@ func actionWindowsDynamicKeyPath(value string) bool {
 	}
 }
 
-var actionWindowsDynamicPart = regexp.MustCompile(`\$\{[^}]*\}|\$\([^)]*\)|\$[a-z_][a-z0-9_]*(:[a-z_][a-z0-9_]*)?|%[^%/]*%`)
+var actionWindowsDynamicPart = lazyregexp.New(`\$\{[^}]*\}|\$\([^)]*\)|\$[a-z_][a-z0-9_]*(:[a-z_][a-z0-9_]*)?|%[^%/]*%`)
 
 func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	pattern = strings.ReplaceAll(pattern, `\`, "/")
@@ -3181,8 +3562,8 @@ func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	}
 	// On the host, expand every component through junctions and links
 	// (GAP-1445).
-	if runtime.GOOS == "windows" && filepath.IsAbs(filepath.FromSlash(pattern)) && actionProtectedFileGlobReach(
-		filepath.FromSlash(pattern), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home, nil) {
+	if runtime.GOOS == "windows" && filepath.IsAbs(filepath.FromSlash(pattern)) && actionProtectedFileGlobReachAs(
+		filepath.FromSlash(pattern), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home, nil, true) {
 		return true
 	}
 	if strings.ContainsAny(parent, "*?[") {
@@ -3315,7 +3696,7 @@ func actionStateEntryMayDiffer(value string) bool {
 	if !filepath.IsAbs(value) {
 		return true
 	}
-	info, err := os.Lstat(value)
+	info, err := pathLstat(value)
 	if err != nil {
 		return !os.IsNotExist(err)
 	}

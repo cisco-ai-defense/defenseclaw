@@ -679,3 +679,91 @@ func TestProcessContextRefusalReachesTheGatewayWithoutAListenerProof(t *testing.
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+// managedMarkerDecision runs one managed Claude Code PreToolUse call for a
+// command that a signed bundle blocks, as the hook command does: a true
+// prepareEnterpriseManagedHookRuntime ends the call with no answer (exit 0,
+// no output), which the agent takes as an allow.
+func managedMarkerDecision(t *testing.T) string {
+	t.Helper()
+	if prepareEnterpriseManagedHookRuntime("claudecode") {
+		return "ALLOW (no answer)"
+	}
+	opts := buildHookOptionsForRuntime("claudecode", "", "", "", true)
+	opts.Home = t.TempDir()
+	var stdout, stderr bytes.Buffer
+	opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"gap0095","tool_use_id":"gap0095",` +
+		`"tool_input":{"command":"echo gap0095 >> ~/.ssh/authorized_keys"}}`)
+	opts.Stdout, opts.Stderr = &stdout, &stderr
+	code := hookexec.Run(context.Background(), opts)
+	if code == 0 && strings.Contains(stdout.String(), `"permissionDecision":"deny"`) {
+		return "DENY"
+	}
+	return fmt.Sprintf("ALLOW (code=%d stdout=%q stderr=%q)", code, stdout.String(), stderr.String())
+}
+
+// GAP-0095 (private #5): during a signed-bundle purge uninstall a managed hook
+// answered 21 one-second marker samples with exit 0 and no output while its
+// binary still existed. The purge stops the gateway, then removes the vendor
+// machine policy and the runtime descriptor; agents keep calling the hook
+// they registered. Each teardown order, and the first-install order where
+// the policy names the hook before its descriptor exists, must answer the
+// marker with a deny at every step until the binary itself is gone.
+func TestManagedHookNeverAllowsTheMarkerThroughTheTeardownOrder(t *testing.T) {
+	dir := t.TempDir()
+	descriptorPresent := true
+	descriptor := testDescriptor()
+	descriptor.ServiceUID = os.Getuid()
+	descriptor.HookSocket = filepath.Join(dir, "stopped-gateway", "hook.sock")
+	withStandaloneHookRuntime(t, "linux", func(string) (*managed.RuntimeDescriptor, error) {
+		if !descriptorPresent {
+			return nil, managed.ErrNoRuntimeDescriptor
+		}
+		return descriptor, nil
+	}, rootedMachinePolicy(dir), filepath.Join(dir, "no-secure-client"))
+	policy, _ := rootedMachinePolicy(dir)("linux")
+	publish := func() {
+		if _, err := enterprisepolicy.Publish(policy, []string{"claudecode", "codex"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	remove := func() {
+		if _, err := enterprisepolicy.RemoveAll(policy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	type step struct {
+		name string
+		do   func()
+	}
+	for _, order := range []struct {
+		name  string
+		start func()
+		steps []step
+	}{
+		{"purge: gateway stopped, then machine policy, then descriptor", func() { publish(); descriptorPresent = true }, []step{
+			{"gateway stopped", func() {}},
+			{"machine policy removed", remove},
+			{"descriptor removed", func() { descriptorPresent = false }},
+		}},
+		{"purge: gateway stopped, then descriptor, then machine policy", func() { publish(); descriptorPresent = true }, []step{
+			{"gateway stopped", func() {}},
+			{"descriptor removed", func() { descriptorPresent = false }},
+			{"machine policy removed", remove},
+		}},
+		{"first install: machine policy before the descriptor", func() { remove(); descriptorPresent = false }, []step{
+			{"machine policy published", publish},
+			{"descriptor written, gateway not started", func() { descriptorPresent = true }},
+		}},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			order.start()
+			for _, s := range order.steps {
+				s.do()
+				if got := managedMarkerDecision(t); got != "DENY" {
+					t.Fatalf("after %q the marker got %s", s.name, got)
+				}
+			}
+		})
+	}
+}

@@ -328,6 +328,12 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+# DEFENSECLAW_REPO is a GitHub owner/name or an https:// mirror base URL. Any
+# other value (an http:// URL) would be appended to github.com and end in a
+# 404 (GAP-1065). The value is not echoed: a mirror URL can carry credentials.
+if [[ ! "${REPO}" =~ ^https://[^[:space:]]+$ && ! "${REPO}" =~ ^[^[:space:]/:@]+/[^[:space:]/:@]+$ ]]; then
+    usage_error "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL (an http:// URL is not accepted)"
+fi
 if [[ "${NO_OPENCLAW}" == true ]]; then
     [[ "${CONNECTOR}" != openclaw ]] || die "--no-openclaw cannot be combined with --connector openclaw"
     CONNECTOR="${CONNECTOR:-none}"
@@ -399,11 +405,30 @@ latest_release() {
     printf '%s' "${location}"
 }
 
+# refuse_unguarding_move rollback|downgrade VERSION: the installed CLI says
+# whether DefenseClaw VERSION can guard the agents set up here (OpenCode V2
+# before 1.0.6: rel-1-0-6 GAP-0028 for a rollback, GAP-0128 for a downgrade)
+# and stops before anything changes. A CLI without the check (1.0.5 and
+# earlier, or a newer target) answers 2 and is not shown: no refusal.
+refuse_unguarding_move() {
+    local kind="$1" version="$2" out rc=0
+    [[ -x "${BIN_DIR}/defenseclaw" ]] || return 0
+    out="$("${BIN_DIR}/defenseclaw" migrate "--check-${kind}-to" "${version}" 2>&1)" || rc=$?
+    [[ ${rc} -eq 1 ]] || return 0
+    printf '%s\n' "${out}" >&2
+    if [[ "${kind}" == rollback ]]; then
+        die "Rollback cancelled; nothing was changed (see above)"
+    fi
+    die "Downgrade cancelled; nothing was changed (see above)"
+}
+
 # run_release_installer VERSION ARGS...: download VERSION's installer, verify it,
 # and run it. Used for --version and for an unstamped (source) copy.
 run_release_installer() {
     local version="$1"; shift
     local tmp base="${TMPDIR:-/tmp}"
+    # An older release's installer has no check for what it cannot guard.
+    refuse_unguarding_move downgrade "${version}"
     tmp="$(mktemp -d "${base%/}/defenseclaw-upgrade-XXXXXX")"
     info "Fetching the installer for DefenseClaw ${version}"
     curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/install.sh" \
@@ -835,9 +860,18 @@ installed_version() {
 
 # Older OpenCode and Amp processes retain their plugin in memory. Refuse a
 # gateway swap only when the process is the exact entry installed for that
-# agent. Unproven candidates are audited and do not block the upgrade.
+# agent. Unproven candidates are audited and do not block the upgrade. The
+# audit line goes to the install log only: the console shows the installer's
+# own steps, and a process that exits between the listing and the lookup (the
+# listing's own ps, say) is not something the user can act on (GAP-0103).
+# Without a log (a unit test, a sourced call) it falls back to stderr.
 agent_identity_audit() {
-    printf 'audit: live-agent identity unproven for PID %s: %s\n' "$1" "$2" >&2
+    local line
+    printf -v line 'audit: live-agent identity unproven for PID %s: %s' "$1" "$2"
+    if [[ -n "${LOG:-}" ]] && printf '%s\n' "${line}" >> "${LOG}" 2>/dev/null; then
+        return 0
+    fi
+    printf '%s\n' "${line}" >&2
 }
 
 # resolved_agent_path FILE: the file's real path, with no PATH search.
@@ -884,10 +918,12 @@ npm_config_prefixes() {
 
 # The installer's entry evidence: native fixed locations and npm/Bun
 # launcher symlinks to their exact entry: the Node script, or the native
-# bin/opencode.exe that current opencode-ai links (GAP-1356). The links are
-# looked for in the usual prefixes, npm's configured prefix and each PATH
-# folder. A folder name, manifest or plain command on PATH is not an entry
-# record: only a launcher link to the package's own entry is.
+# bin/opencode.exe the package links (GAP-1356). The links are looked for in
+# the usual prefixes, npm's configured prefix and each PATH folder. A folder
+# name, manifest or plain command on PATH is not an entry record: only a
+# launcher link to the package's own entry is. The V1 opencode-ai entries
+# remain only to stop a running V1 install safely during an upgrade
+# (setup requires V2); remove them with the 1.0.x upgrade path.
 installed_agent_programs() {
     local agent name path target base link prefix seen=":"
     local -a bases folders
@@ -913,7 +949,8 @@ installed_agent_programs() {
             [[ -L "${link}" ]] || continue
             target="$(resolved_agent_path "${link}")" || continue
             case "${agent}:${target}" in
-                OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+                OpenCode:*/node_modules/@opencode/cli/bin/opencode | OpenCode:*/node_modules/@opencode/cli/bin/opencode.exe | \
+                    OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
                     Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                     printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
             esac
@@ -933,7 +970,8 @@ runtime_agent_programs() {
         [[ -L "${link}" ]] || continue
         target="$(resolved_agent_path "${link}")" || continue
         case "${agent}:${target}" in
-            OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+            OpenCode:*/node_modules/@opencode/cli/bin/opencode | OpenCode:*/node_modules/@opencode/cli/bin/opencode.exe | \
+                OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
                 Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                 printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
         esac
@@ -1112,7 +1150,7 @@ loaded_plugin_agents() {
 assert_no_loaded_plugin_agents() {
     local agents
     agents="$(loaded_plugin_agents)"
-    [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: ${agents//$'\n'/, }"
+    [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw (OpenCode V2 keeps a background server after its window closes: stop it with 'opencode service stop'), then run this installer again; gateway still running: ${agents//$'\n'/, }"
 }
 
 stop_gateway() {
@@ -1408,6 +1446,11 @@ if [[ "${ROLLBACK}" == true ]]; then
     # the saved data before anything of this install changes.
     AUDIT_DAMAGED=""
     if version_lt "${back_to}" 1.0.0; then check_rollback_data; fi
+    # rel-1-0-6 GAP-0028: a release that cannot guard an agent here (OpenCode
+    # V2 before 1.0.6) says so before anything changes.
+    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}"; then
+        refuse_unguarding_move rollback "${back_to}"
+    fi
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true
     # The swap overwrites previous/GATEWAY_WAS_RUNNING with this install's state.
@@ -1432,10 +1475,13 @@ if [[ "${ROLLBACK}" == true ]]; then
         fi
         die "Rollback failed part-way; see ${LOG}"
     fi
-    # rel-1-0-4:GAP-2503: going back to an older release, drop the hook
-    # helper the newer install left in the restored hooks, so the older
-    # gateway writes its own when it starts.
-    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}"; then
+    # rel-1-0-4:GAP-2503: going back to 1.0.4 or older, drop the hook helper
+    # the newer install left in the restored hooks, so the older gateway
+    # writes its own when it starts. 1.0.5 and later ship the same helper,
+    # and with only plugin connectors (OpenCode) set up their gateway never
+    # writes one: it refused to start without it and the rollback undid
+    # itself (rel-1-0-6:GAP-0047).
+    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}" && version_lt "${back_to}" 1.0.5; then
         drop_newer_hook_helper "${PREVIOUS}/data"
     fi
     # GAP-0009: a connector set up after the upgrade is not configured in the
@@ -1879,6 +1925,13 @@ except Exception:
     pass
 PY
 }
+openshell_floor_notice() {
+    # Sandboxes on and the OpenShell gateway older than 0.1.5: this release
+    # starts no sandbox on it and doctor fails its Gateway check, so the
+    # upgrade names the floor and the fix (GAP-0059).
+    [[ -x "${VENV}/bin/python" ]] || return 0
+    "${VENV}/bin/python" -I -c 'from defenseclaw import config; from defenseclaw.commands.cmd_doctor import openshell_floor_upgrade_notice as notice; print(notice(config.load()))' 2>/dev/null || true
+}
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then
     changed="Upgraded from ${PREV_VERSION}"
@@ -1888,6 +1941,8 @@ if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then
     if version_lt "${PREV_VERSION}" 1.0.4 && version_lt "${PREV_VERSION}" "${VERSION}" && [[ "$(outage_open_notice)" == notice ]]; then
         printf '  %s\n' 'Gateway outages now let calls run with a warning (the default and permissive policies). Run `defenseclaw guardrail fail-mode closed` to keep blocking them.'
     fi
+    FLOOR_NOTICE="$(openshell_floor_notice)"
+    [[ -z "${FLOOR_NOTICE}" ]] || warn "${FLOOR_NOTICE}"
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
         printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
     fi

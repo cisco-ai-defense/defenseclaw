@@ -26,7 +26,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -35,6 +34,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
@@ -174,7 +174,7 @@ func sandboxManagedStamp(reg sandboxreg.Registration) audit.SandboxManaged {
 
 // sandboxOpenShellVersion is the registry's shape of
 // defenseclaw.openshell.version: one concrete version.
-var sandboxOpenShellVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$`)
+var sandboxOpenShellVersion = lazyregexp.New(`^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$`)
 
 // sandboxRecordIdentity is the sandbox identity of reg's records.
 func sandboxRecordIdentity(reg sandboxreg.Registration) audit.SandboxIdentity {

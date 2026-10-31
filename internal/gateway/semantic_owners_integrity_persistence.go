@@ -19,7 +19,6 @@ package gateway
 import (
 	"encoding/base64"
 	"path"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -27,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -1513,7 +1513,18 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	commandText := strings.ToLower(input.Command)
-	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(request, facts)
+	overBudget := false
+	evidence := request
+	evidence.overBudgetOmission = &overBudget
+	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
+	if symlinkWrite && overBudget {
+		// The only write found is an operand the client's full bounded map
+		// left out. The call still blocks, as over the evaluation budget,
+		// not as a key write it does not name (GAP-0146); a protected target
+		// the client found is its ActionDecisionKey and is proved above.
+		symlinkWrite = false
+		findings = withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+	}
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
 		!strings.Contains(commandText, "base64") && !symlinkWrite &&
@@ -2053,7 +2064,7 @@ func matchesActiveSudoers(
 		integritySingleChild(value, "/etc/sudoers.d")
 }
 
-var unrestrictedSudoersGrantLine = regexp.MustCompile(
+var unrestrictedSudoersGrantLine = lazyregexp.New(
 	`^(%?[A-Za-z_][A-Za-z0-9_.-]*|ALL)[\t ]+ALL[\t ]*=[\t ]*\([\t ]*ALL(?:[\t ]*:[\t ]*ALL)?[\t ]*\)[\t ]+NOPASSWD[\t ]*:[\t ]*ALL[\t ]*$`,
 )
 

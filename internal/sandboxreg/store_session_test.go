@@ -61,10 +61,14 @@ func TestStoreReportAfterAStopStartsANewSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	session("stopped", boundAt)
+	// A start registers it again (GAP-0673): the new registration's
+	// session starts at the restart.
 	clock.t = clock.t.Add(time.Minute)
-	if _, err := s.Report(1001, r.ID, true); err != nil {
+	next, err := s.Restart(1001, r.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
+	r = next
 	restarted := clock.t
 	session("started again", restarted)
 	clock.t = clock.t.Add(3 * time.Minute)

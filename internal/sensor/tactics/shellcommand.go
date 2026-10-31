@@ -17,10 +17,11 @@
 package tactics
 
 import (
-	"regexp"
 	"slices"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // shellWord is one word of a command after quote removal. quoted records
@@ -358,7 +359,7 @@ var shellKeywords = map[string]bool{
 	"fi": true, "while": true, "until": true, "do": true, "done": true, "esac": true,
 }
 
-var shellAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\+?=`)
+var shellAssignment = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]*\+?=`)
 
 // wrapperSwitches are the short options without a value that each command
 // wrapper takes, as letters. An option outside them and commandWrappers

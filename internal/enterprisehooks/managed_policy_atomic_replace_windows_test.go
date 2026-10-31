@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/safefile/sharedfiletest"
 )
 
@@ -20,8 +21,21 @@ import (
 // the old bytes or the new ones, never no file. ReplaceFileW moved the old
 // file aside while it merged metadata, so a watcher saw hooks.json name a
 // missing adapter (GAP-2572, TestWindowsCursorSharedWriterKeepsConcurrent
-// AdministratorChanges/publication as LocalSystem).
+// AdministratorChanges/publication as LocalSystem). It was still the fallback
+// where Windows refuses the POSIX-semantics rename, as on the CI runner of
+// GAP-2644 (4476 missing reads in 78998).
 func TestWindowsManagedPolicyWriterNeverLeavesTheFileMissing(t *testing.T) {
+	for _, refused := range []bool{false, true} {
+		t.Run(fmt.Sprintf("posix rename refused=%v", refused), func(t *testing.T) {
+			if refused {
+				t.Cleanup(safefile.RefusePOSIXRenameForTest())
+			}
+			requireManagedPolicyWriterKeepsTheFile(t)
+		})
+	}
+}
+
+func requireManagedPolicyWriterKeepsTheFile(t *testing.T) {
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	path := paths.Adapter
 	if err := writeWindowsManagedFile(path, []byte("version 0\r\n"), true); err != nil {

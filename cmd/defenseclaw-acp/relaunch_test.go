@@ -24,6 +24,10 @@ func TestRelaunchHelperGuard(t *testing.T) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		line := scanner.Text()
+		if os.Getenv("DC_ACP_RELAUNCH_HELPER_NOTIFY") == "1" && strings.Contains(line, `"method":"initialize"`) {
+			// An agent that writes a notification before its initialize answer.
+			fmt.Println(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"early"}}`)
+		}
 		id := line[strings.Index(line, `"id":`)+5 : strings.Index(line, `,"method"`)]
 		fmt.Printf(`{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"relaunched"}}`+"\n", id)
 	}
@@ -184,5 +188,69 @@ func TestSessionEndedGuardRelaunchesUnchangedEntryAfterBindingRecovers(t *testin
 	_ = editorWriter.Close()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A relaunched agent may write a notification before it answers initialize.
+// The handshake must end at the initialize response (its id), not at the
+// first line: the editor got the agent's initialize result (an id it had
+// answered long ago) before its session/new result (GAP-1259).
+func TestRelaunchHandshakeWaitsForTheInitializeResponseNotANotification(t *testing.T) {
+	editorIn, editorWriter := io.Pipe()
+	outReader, out := io.Pipe()
+	relaunch := func([]byte) (*exec.Cmd, bool) {
+		self, err := os.Executable()
+		if err != nil {
+			t.Error(err)
+			return nil, false
+		}
+		command := exec.Command(self, "-test.run=TestRelaunchHelperGuard")
+		command.Env = append(os.Environ(), "DC_ACP_RELAUNCH_HELPER=1", "DC_ACP_RELAUNCH_HELPER_NOTIFY=1")
+		return command, true
+	}
+	done := make(chan error, 1)
+	initialize := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
+	go func() {
+		done <- serveAfterSessionEnd(editorIn, out, initialize, "binding refused", relaunch)
+		_ = out.Close()
+	}()
+	if _, err := io.WriteString(editorWriter, `{"jsonrpc":"2.0","id":4,"method":"session/new","params":{}}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	answers := bufio.NewScanner(outReader)
+	var got []string
+	for answers.Scan() {
+		got = append(got, answers.Text())
+		if strings.Contains(answers.Text(), `"id":4`) {
+			break
+		}
+	}
+	_ = editorWriter.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	for _, line := range got {
+		if strings.Contains(line, `"id":1`) {
+			t.Fatalf("the editor got the relaunched agent's initialize answer again: %q", got)
+		}
+	}
+	if len(got) != 2 || !strings.Contains(got[0], `"method":"session/update"`) || !strings.Contains(got[1], `"sessionId":"relaunched"`) {
+		t.Fatalf("editor frames = %q, want the agent's notification and then the session/new result", got)
+	}
+}
+
+func TestRelaunchHandshakeFailsOnAnInitializeError(t *testing.T) {
+	var early [][]byte
+	answers := bufio.NewReader(strings.NewReader(`{"jsonrpc":"2.0","method":"session/update","params":{}}` + "\n" +
+		`{"jsonrpc":"2.0","id":7,"result":{}}` + "\n" +
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"refused"}}` + "\n"))
+	if err := awaitRelaunchInitialize(answers, "1", &early); err == nil || err.Error() != "refused" {
+		t.Fatalf("err = %v, want refused", err)
+	}
+	if len(early) != 1 {
+		t.Fatalf("early = %q, want only the notification", early)
+	}
+	if err := awaitRelaunchInitialize(bufio.NewReader(strings.NewReader(`{"jsonrpc":"2.0","method":"x"}`+"\n")), "1", &early); err == nil {
+		t.Fatal("an agent that exits after a notification completed the handshake")
 	}
 }

@@ -22,12 +22,13 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // yamlParserProblems are the problems yaml.v3's parser (not its scanner)
@@ -41,7 +42,7 @@ var yamlParserProblems = []string{
 	"found incompatible YAML document", "found undefined tag handle",
 }
 
-var yamlLineRE = regexp.MustCompile(`^line (\d+): (.*)$`)
+var yamlLineRE = lazyregexp.New(`^line (\d+): (.*)$`)
 
 // yamlErrorText is a yaml.v3 syntax error as a file's reader counts lines.
 func yamlErrorText(err error) string {

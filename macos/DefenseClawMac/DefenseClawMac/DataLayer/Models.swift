@@ -1033,9 +1033,19 @@ struct AISignal: Sendable, Hashable {
     var model: AIUsageModel? = nil
     var runtime: AIUsageRuntime? = nil
     var evidenceTypes: [String] = []
+    /// The OpenShell sandbox a sandbox scan found the signal in (source
+    /// "sandbox"); "" for a signal on this machine.
+    var sandboxName: String = ""
 
     func hasEligiblePresence(minimum: Double) -> Bool {
         !presenceAxisReported || presenceScore >= minimum
+    }
+
+    /// The product, tagged with the sandbox it was found in (the TUI's
+    /// AIUsageSignal.display_product).
+    var displayProduct: String {
+        guard !sandboxName.isEmpty else { return product }
+        return product.isEmpty ? "(sandbox \(sandboxName))" : "\(product) (sandbox \(sandboxName))"
     }
 }
 
@@ -1084,7 +1094,8 @@ enum AISignalDecoding {
             signatureID: string(raw["signature_id"]),
             model: model,
             runtime: runtime,
-            evidenceTypes: stringList(raw["evidence_types"])
+            evidenceTypes: stringList(raw["evidence_types"]),
+            sandboxName: string(raw["sandbox_name"])
         )
     }
 
@@ -1486,6 +1497,9 @@ enum AIDiscoveryGrouping {
         var component: String
         var version: String
         var model: String
+        /// What a sandbox holds is its own row, never folded into the same
+        /// product on this machine.
+        var sandbox: String
     }
 
     /// TUI state_weight(): new < changed < active < seen < gone < other.
@@ -1564,12 +1578,23 @@ enum AIDiscoveryGrouping {
     }
 
     static func runtimeDetail(_ runtime: AIUsageRuntime) -> String {
+        runtimeDetail(runtime, sandboxName: "", now: Date())
+    }
+
+    static func runtimeDetail(_ runtime: AIUsageRuntime, sandboxName: String, now: Date = Date()) -> String {
         guard runtime.pid > 0 else { return "" }
         var parts = ["runtime: pid=\(runtime.pid)"]
         let user = runtime.user.trimmingCharacters(in: .whitespacesAndNewlines)
         if !user.isEmpty { parts.append("user=\(user)") }
-        if runtime.uptimeSeconds > 0 {
-            parts.append("up=\(humanizeDuration(seconds: runtime.uptimeSeconds))")
+        var uptime = runtime.uptimeSeconds
+        if !sandboxName.isEmpty, let startedAt = runtime.startedAt,
+           let elapsed = safeElapsedSeconds(from: startedAt, to: now) {
+            // A sandbox's uptime_sec is as of the sandbox's last read, and
+            // the process was running then: count from its start (GAP-0392).
+            uptime = now >= startedAt ? elapsed : 0
+        }
+        if uptime > 0 {
+            parts.append("up=\(humanizeDuration(seconds: uptime))")
         }
         let command = runtime.command.trimmingCharacters(in: .whitespacesAndNewlines)
         if !command.isEmpty { parts.append("comm=\(command)") }
@@ -1626,10 +1651,11 @@ enum AIDiscoveryGrouping {
                 ecosystem: signal.ecosystem.lowercased(),
                 component: signal.componentName.lowercased(),
                 version: signal.version,
-                model: modelID
+                model: modelID,
+                sandbox: signal.sandboxName
             )
             var row = groups[key] ?? AIDiscoveryRow(
-                state: signal.state, product: signal.product, vendor: signal.vendor,
+                state: signal.state, product: signal.displayProduct, vendor: signal.vendor,
                 ecosystem: signal.ecosystem, component: signal.componentName,
                 version: signal.version, model: modelID, modelStatuses: [], modelFormats: [],
                 categories: [], detectors: [], count: 0,

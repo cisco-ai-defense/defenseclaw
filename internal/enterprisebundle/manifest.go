@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // ManifestSchemaVersion is the manifest.json schema this build reads.
@@ -134,14 +134,14 @@ type Warning struct {
 var (
 	// bundleIDPattern is "b-" and a ULID in canonical upper-case Crockford
 	// base32 (the first character at most 7: 128 bits).
-	bundleIDPattern        = regexp.MustCompile(`^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
-	scopeIDPattern         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	sha256Pattern          = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	digestPattern          = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	componentDigestPattern = regexp.MustCompile(`^sha256:([0-9a-f]{12}|[0-9a-f]{64})$`)
-	productVersionRegex    = regexp.MustCompile(`^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z.-]{1,64})?(\+[0-9A-Za-z.-]{1,64})?$`)
-	warningCodePattern     = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
-	manifestKeyPattern     = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+	bundleIDPattern        = lazyregexp.New(`^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	scopeIDPattern         = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	sha256Pattern          = lazyregexp.New(`^[0-9a-f]{64}$`)
+	digestPattern          = lazyregexp.New(`^sha256:[0-9a-f]{64}$`)
+	componentDigestPattern = lazyregexp.New(`^sha256:([0-9a-f]{12}|[0-9a-f]{64})$`)
+	productVersionRegex    = lazyregexp.New(`^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z.-]{1,64})?(\+[0-9A-Za-z.-]{1,64})?$`)
+	warningCodePattern     = lazyregexp.New(`^[a-z0-9_]{1,64}$`)
+	manifestKeyPattern     = lazyregexp.New(`^[a-z0-9_]{1,64}$`)
 )
 
 // MaxVersion is the highest manifest version: 2^53-1, the largest integer a
@@ -155,6 +155,10 @@ const maxManifestDepth = 8
 
 // ValidBundleID reports whether id is "b-" followed by a canonical ULID.
 func ValidBundleID(id string) bool { return bundleIDPattern.MatchString(id) }
+
+// ValidDeviceGroup reports whether group is a device group name: 1 to 128
+// characters of [A-Za-z0-9._-] that start with a letter or digit.
+func ValidDeviceGroup(group string) bool { return scopeIDPattern.MatchString(group) }
 
 // DecodeManifest decodes and validates manifest.json. It refuses
 // (manifest_invalid) a document over MaxManifestBytes, invalid UTF-8 or a

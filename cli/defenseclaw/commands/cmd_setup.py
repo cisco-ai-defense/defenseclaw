@@ -118,6 +118,7 @@ from defenseclaw.connector_contracts import (
     openclaw_bedrock_plugin_missing,
     openclaw_lacks_plugin_approvals,
     openclaw_needs_interception_advisory,
+    opencode_requires_v2_upgrade,
     resolve_connector_contract,
     stable_agent_version,
 )
@@ -1411,6 +1412,152 @@ def setup_llm(
         _run_llm_ping(cfg.resolve_llm(target_path))
 
 
+@setup.command("decision-model")
+@click.option("--show", is_flag=True, default=False, help="Print the current decision model settings and exit.")
+@click.option("--enable/--disable", "enabled", default=None, help="Turn the decision model on or off.")
+@click.option("--model", default=None, help="Model name the System One endpoint serves (sent in each request).")
+@click.option(
+    "--base-url",
+    default=None,
+    help="Full endpoint URL, e.g. http://127.0.0.1:8791/v1/systemone. https anywhere, http only to loopback.",
+)
+@click.option(
+    "--api-key-env",
+    default=None,
+    help="Env var holding the bearer token (default DEFENSECLAW_DECISION_MODEL_KEY; local servers need none).",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=None,
+    help="Seconds one call may take (default 1; never more than a quarter of the judge's time).",
+)
+@click.option(
+    "--allow-threshold", type=float, default=None, help="Risk at or below this skips the judge (default 0.30)."
+)
+@click.option(
+    "--block-threshold", type=float, default=None, help="Risk at or above this is a confident block (default 0.75)."
+)
+@click.option(
+    "--on-confident-block",
+    type=click.Choice(["escalate", "decide"], case_sensitive=False),
+    default=None,
+    help="escalate (default): the judge still checks a confident block. decide: the block stands without the judge.",
+)
+@click.option(
+    "--ping/--no-ping", "run_ping", default=False, help="After saving, send one benign request to check the endpoint."
+)
+@click.option("--non-interactive", "--accept-defaults", is_flag=True, help="Use flags instead of prompts.")
+@pass_ctx
+def setup_decision_model(
+    app: AppContext,
+    show: bool,
+    enabled: bool | None,
+    model: str | None,
+    base_url: str | None,
+    api_key_env: str | None,
+    timeout: float | None,
+    allow_threshold: float | None,
+    block_threshold: float | None,
+    on_confident_block: str | None,
+    run_ping: bool,
+    non_interactive: bool,
+) -> None:
+    """Configure the unified decision model (``decision_model:``).
+
+    A small, fast model that speaks the System One protocol. The guardrail
+    runs it in front of the LLM judge on tool calls: it allows the clear
+    benign calls itself and sends the rest to the judge. ``skill scan``
+    records its advisory score. Off by default; when it is down, the judge
+    decides as before. The token, if any, goes in ~/.defenseclaw/.env with
+    ``defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY``.
+    """
+    from defenseclaw import decision_model as dmod
+    from defenseclaw.enforce import asset_lists
+
+    cfg = app.cfg
+    if not show and asset_lists.is_secure_client(cfg):
+        raise click.ClickException("the decision model is not available on Secure Client deployments")
+    if show:
+        click.echo()
+        ux.section("Decision model")
+        for label, value in dmod.summary_rows(cfg):
+            click.echo(f"    {ux.dim(label + ':')} {value}")
+        note = dmod.judge_note(cfg)
+        if note:
+            ux.subhead(note)
+        ux.subhead("To change: run 'defenseclaw setup decision-model' without --show.")
+        return
+
+    if api_key_env is not None and api_key_env.strip():
+        api_key_env = _validated_api_key_env_name(
+            api_key_env, "'--api-key-env'", dmod.DECISION_MODEL_KEY_ENV
+        )
+    flags_given = any(v is not None for v in (enabled, model, base_url, api_key_env, timeout,
+                                              allow_threshold, block_threshold, on_confident_block))
+    if not non_interactive and not flags_given:
+        dm = cfg.decision_model
+        click.echo()
+        terminal_checkbox.restore_line_prompt_mode()
+        ux.section("Decision model")
+        ux.subhead("A fast model in front of the LLM judge: it allows the clear benign tool calls")
+        ux.subhead("itself and sends the rest to the judge. Benchmarks: " + dmod.BENCHMARK_URL)
+        click.echo()
+        enabled = click.confirm(f"  {dmod.INIT_QUESTION}", default=dm.enabled)
+        if enabled:
+            base_url = click.prompt("  Endpoint URL", default=dm.base_url or dmod.DEFAULT_BASE_URL).strip()
+            model = click.prompt("  Model name", default=dm.model or "").strip()
+            api_key_env = click.prompt(
+                "  Token env var (leave the default for a local server)",
+                default=dm.effective_api_key_env(),
+            ).strip()
+    elif enabled is None and (base_url or model):
+        # Naming an endpoint or model on the command line turns it on.
+        enabled = True
+    previous = "on" if cfg.decision_model.enabled else "off"
+    try:
+        updated = dmod.apply_settings(
+            cfg,
+            enabled=enabled,
+            model=model,
+            base_url=base_url,
+            api_key_env=api_key_env,
+            timeout=timeout,
+            allow_threshold=allow_threshold,
+            block_threshold=block_threshold,
+            on_confident_block=on_confident_block,
+        )
+    except dmod.DecisionModelError as exc:
+        raise click.ClickException(str(exc)) from exc
+    cfg.save()
+    if app.logger:
+        from defenseclaw.commands._audit_notice import saved_change_audit
+
+        details = (
+            f"enabled={'true' if updated.enabled else 'false'} previous={previous} "
+            f"model={''.join(updated.model.split()) or '(unset)'} api_key_env={updated.effective_api_key_env()}"
+        )
+        try:
+            saved_change_audit(app.logger).log_config_change("decision_model", details)
+        except CanonicalObservabilityError as exc:
+            ux.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+    click.echo()
+    ux.ok(f"Saved to {config_path_for_data_dir(cfg.data_dir)}")
+    for label, value in dmod.summary_rows(cfg):
+        ux.kv(label, value)
+    note = dmod.judge_note(cfg)
+    if note:
+        ux.subhead(note)
+    click.echo()
+    ux.subhead("The running gateway applies it without a restart.")
+    if run_ping and updated.active():
+        result = dmod.ping(updated, cfg.data_dir)
+        if result.ok:
+            ux.ok(f"Decision model reachable: {result.detail}")
+        else:
+            ux.warn(f"Decision model not reachable: {result.detail}; the LLM judge decides alone until it is reachable")
+
+
 @setup.command("skill-scanner")
 @click.option("--use-llm/--no-use-llm", default=None, help="Enable (or disable) the LLM analyzer")
 @click.option("--use-behavioral/--no-use-behavioral", default=None, help="Enable (or disable) the behavioral analyzer")
@@ -1989,8 +2136,73 @@ def _configure_llm_non_interactive(
         tls_ca_cert_file=tls_ca_cert_file,
         insecure_skip_verify=insecure_skip_verify,
     )
+    _settle_bedrock_model_and_region(llm)
 
     _clear_legacy_llm_fields(cfg)
+
+
+# Short names people type for the Bedrock models the docs use. Anything else
+# that is not a Bedrock id is refused before it is saved (GAP-2638).
+_BEDROCK_HAIKU_4_5 = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+_BEDROCK_LUNA = "us.openai.gpt-5.6-luna"
+_BEDROCK_SHORT_MODEL_NAMES = {
+    "haiku-4.5": _BEDROCK_HAIKU_4_5,
+    "haiku-4-5": _BEDROCK_HAIKU_4_5,
+    "claude-haiku-4.5": _BEDROCK_HAIKU_4_5,
+    "claude-haiku-4-5": _BEDROCK_HAIKU_4_5,
+    "luna": _BEDROCK_LUNA,
+    "gpt-5.6-luna": _BEDROCK_LUNA,
+}
+_BEDROCK_PROVIDERS = ("bedrock", "amazon-bedrock")
+
+
+def _settle_bedrock_model_and_region(llm) -> None:
+    """Give a Bedrock LLM block a real model id and a region (GAP-2638).
+
+    ``--model haiku-4.5`` was saved as written, so the ping failed with
+    LiteLLM's ``Unknown provider=None`` and every judge call would too. A
+    known short name now becomes its full Bedrock id; any other value that is
+    not a Bedrock id, an ARN or a ``--bedrock-deployment`` alias is refused.
+    Without ``--bedrock-region`` the region came from nowhere, so doctor
+    failed "bedrock configured without a region"; it is now taken from
+    ``AWS_REGION``, then ``AWS_DEFAULT_REGION``, then ``us-east-1`` (the
+    default the gateway's Bedrock client uses), saved and printed.
+    """
+    from defenseclaw.config import BedrockKeyConfig, is_bedrock_model_id  # noqa: PLC0415
+
+    if (llm.provider or "").strip().lower() not in _BEDROCK_PROVIDERS:
+        return
+    if (llm.instance_name or "").strip():
+        # A bound llm_providers entry names its own models and region; a
+        # role-level region here would override the entry's.
+        return
+    prefix, sep, bare = (llm.model or "").partition("/")
+    if not sep or prefix.lower() not in _BEDROCK_PROVIDERS:
+        prefix, sep, bare = "", "", llm.model or ""
+    aliases = llm.bedrock.deployment_aliases if llm.bedrock is not None else {}
+    if bare and not is_bedrock_model_id(bare) and not bare.startswith("arn:") and bare not in aliases:
+        full = _BEDROCK_SHORT_MODEL_NAMES.get(bare.strip().lower())
+        if full is None:
+            raise click.UsageError(
+                f"{bare!r} is not an Amazon Bedrock model id. Give the full id or inference profile, "
+                f"for example {_BEDROCK_HAIKU_4_5} or {_BEDROCK_LUNA}."
+            )
+        llm.model = f"{prefix}{sep}{full}"
+        ux.subhead(f"Using the Bedrock model id {full} for {bare}.")
+    if llm.bedrock is not None and (llm.bedrock.region or llm.region or "").strip():
+        return
+    if llm.bedrock is None and (llm.region or "").strip():
+        return
+    source = "AWS_REGION"
+    region = (os.environ.get("AWS_REGION") or "").strip()
+    if not region:
+        source, region = "AWS_DEFAULT_REGION", (os.environ.get("AWS_DEFAULT_REGION") or "").strip()
+    if not region:
+        source, region = "the default", "us-east-1"
+    if llm.bedrock is None:
+        llm.bedrock = BedrockKeyConfig()
+    llm.bedrock.region = region
+    ux.subhead(f"Bedrock region {region} (from {source}); change it with --bedrock-region.")
 
 
 def _apply_llm_inherit(cfg, *, inherit_from: str | None, target_path: str) -> None:
@@ -5850,10 +6062,19 @@ def _connector_contract_upgrade_guidance(
 
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
+    if key == "opencode":
+        return (
+            f"Install OpenCode V2 with 'npm install -g @opencode/cli@2' (where you cannot write npm's global "
+            "prefix, for your account: 'npm install -g --prefix ~/.npm-global @opencode/cli@2', with "
+            f"~/.npm-global/bin first on PATH), then run: {rerun}."
+        )
     broken, _ = known_broken_entry(key, normalized_version)
     if broken is not None:
         return f"Install a {label} release that is not known broken ({broken['issue']}), then run: {rerun}."
     contracts = HOOK_CONTRACTS.get(key, ())
+    if key == "opencode" and normalized_version:
+        major = normalized_version.split(".", 1)[0]
+        contracts = tuple(c for c in contracts if c.min_agent_version.split(".", 1)[0] == major)
     if key == "kiro":
         return f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then run: {rerun}."
     if not contracts:
@@ -6265,6 +6486,12 @@ def _check_connector_version_supported_for_setup(
     # OpenCode needs a validated plugin contract, and a kiro-cli below the
     # floor has a surface that sends no hooks (GAP-0227): their messages say so.
     strict_unknown = connector in {"opencode", "kiro"}
+    if connector == "opencode" and opencode_requires_v2_upgrade(compatibility.raw_version):
+        detail = _opencode_v2_required(version_display, upgrade_guidance)
+        if emit:
+            ux.err(detail)
+        _refuse_in_every_mode(_refusal_scope, detail)
+        return False
     if compatibility.status == STATUS_UNKNOWN and not allow_drift:
         if emit:
             ux.err(detail)
@@ -6289,6 +6516,41 @@ def _check_connector_version_supported_for_setup(
         ux.warn(detail + " Continuing because the explicit drift override is set.")
         ux.subhead(upgrade_guidance)
     return True
+
+
+def _opencode_v2_required(version_display: str, upgrade_guidance: str) -> str:
+    """The refusal for an OpenCode that is not V2 (V1, another major, a git build)."""
+    return (
+        f"OpenCode V2 is required; detected {version_display}. This DefenseClaw guards OpenCode V2 only "
+        f"(V1 is not supported). {upgrade_guidance}"
+    )
+
+
+def _refuse_opencode_v1_before_questions(app: AppContext) -> None:
+    """Refuse an OpenCode that is not V2 before setup asks anything (rel-1-0-6 GAP-0012).
+
+    Setup asked for the mode, whether to re-apply the hooks and whether to
+    add the LLM judge, and only then refused V1 in its version check. The
+    same discovery probe answers here first, without writing the discovery
+    cache; anything it cannot tell (no OpenCode, no version, a probe error,
+    an untrusted prefix) is left to the full check, which still runs.
+    """
+    try:
+        disc = agent_discovery.discover_with_probes(
+            ["opencode"],
+            use_cache=False,
+            refresh=True,
+            data_dir=getattr(app.cfg, "data_dir", None) or None,
+            persist_cache=False,
+        )
+        signal = disc.agents.get("opencode")
+    except Exception:  # noqa: BLE001 - the full version check reports a probe failure
+        return
+    raw = (getattr(signal, "version", "") or "").strip() if signal is not None else ""
+    if signal is None or not signal.installed or not raw or not opencode_requires_v2_upgrade(raw):
+        return
+    ux.err(_opencode_v2_required(raw.rstrip("."), _connector_contract_upgrade_guidance("opencode", "OpenCode")))
+    raise click.ClickException("OpenCode setup stopped before any change; nothing was changed")
 
 
 def _refuse_in_every_mode(scope: dict[str, Any] | None, reason: str) -> None:
@@ -11404,11 +11666,50 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
         _echo_saved_without_restart(plural=True)
 
 
+def _outage_sentence(outage_fail_mode: str) -> tuple[str, str]:
+    """Two banner lines: what the hooks do while the gateway is down (rel-1-0-6 GAP-0011).
+
+    "A failed hook can block" read as the outage behaviour, while the
+    per-user default tier is fail open and status and doctor said so.
+    """
+    if outage_fail_mode == "closed":
+        return "While the gateway is down, tool calls are", "blocked (hook fail mode closed)."
+    if outage_fail_mode == "open":
+        return "While the gateway is down, tool calls run", "with a warning (hook fail mode open)."
+    return "While the gateway is down, the hook fail mode", "decides (defenseclaw guardrail status)."
+
+
+def _setup_outage_fail_mode(cfg, connector: str, *, fail_mode: str | None, rule_pack: str | None) -> str:
+    """The gateway-outage mode ``connector``'s hooks get from this setup run.
+
+    Read before the run saves anything, so the flags of the run count: an
+    explicit ``--fail-mode``, and a built-in ``--rule-pack`` whose tier
+    decides while no fail mode is saved.
+    """
+    if fail_mode is not None:
+        return "closed" if str(fail_mode).strip().lower() == "closed" else "open"
+    gc = cfg.guardrail
+    pack = (rule_pack or "").strip().lower()
+    if (
+        pack in {"strict", "default", "permissive"}
+        and not saved_hook_fail_mode_scope(gc, connector)
+        and not cfg.managed_outside_secure_client()
+        and not gc.secure_client_hook_fail_modes()
+    ):
+        return "closed" if pack == "strict" else "open"
+    return gc.effective_hook_outage_fail_mode(connector)
+
+
 def _print_connector_observability_banner(
-    connector: str, *, mode: str = "observe", native_export_expected: bool = False
+    connector: str,
+    *,
+    mode: str = "observe",
+    native_export_expected: bool = False,
+    outage_fail_mode: str = "",
 ) -> None:
     setup_slug = "claude-code" if connector == "claudecode" else connector
     label = _CONNECTOR_META[connector]["label"]
+    outage_first, outage_second = _outage_sentence(outage_fail_mode)
     click.echo()
     ux.echo(f"  DefenseClaw — {label} {mode} setup")
     ux.echo("  ─────────────────────────────────────────────────────────")
@@ -11420,7 +11721,8 @@ def _print_connector_observability_banner(
             click.echo("  waits for synchronous tool.call allow, confirm, or reject")
             click.echo("  verdicts before the requested tool can execute.")
         else:
-            click.echo("  observes policy findings; an unavailable hook can still block.")
+            click.echo(f"  observes policy findings. {outage_first}")
+            click.echo(f"  {outage_second}")
     else:
         click.echo(f"  This wires {label} into DefenseClaw via the agent's")
         click.echo("  native hook bus. No proxy is inserted in the LLM data")
@@ -11440,7 +11742,8 @@ def _print_connector_observability_banner(
             click.echo("  path; supported actions flagged by policy are blocked")
             click.echo("  by the connector's native lifecycle verdict.")
         else:
-            click.echo("  path; policy findings are observed, but a failed hook can block.")
+            click.echo(f"  path; policy findings are observed. {outage_first}")
+            click.echo(f"  {outage_second}")
     click.echo()
     click.echo("  Telemetry channels:")
     if connector == "amp":
@@ -11834,6 +12137,8 @@ def _setup_observability_alias(
     if connector not in _HOOK_ENFORCED_CONNECTORS:
         raise click.ClickException(f"unsupported connector for hook alias: {connector!r}")
     _ensure_connector_available(connector)
+    if connector == "opencode":
+        _refuse_opencode_v1_before_questions(app)
     if connector == "hermes":
         unsupported = connector_paths.hermes_profile_unsupported_reason()
         if unsupported:
@@ -11910,6 +12215,7 @@ def _setup_observability_alias(
         connector,
         mode=normalized_mode,
         native_export_expected=str(getattr(app.cfg, "deployment_mode", "")).strip().lower() == "managed_enterprise",
+        outage_fail_mode=_setup_outage_fail_mode(app.cfg, connector, fail_mode=fail_mode, rule_pack=rule_pack),
     )
     # WU7: resolve add-vs-replace. Only HOOK-ENFORCED peers count as valid
     # multi-connector neighbors (D4=A) — proxy-backed connectors
@@ -15928,6 +16234,7 @@ def _restart_services(
     ``teardown`` marks a ``guardrail disable`` restart: the closing line says
     the hooks were removed instead of announcing enforcement (GAP-1985)."""
     ux.section(title)
+    restart_started = time.time()
     ctx = click.get_current_context(silent=True)
     if ctx is not None:
         ctx.meta.pop(_CONFIG_WRITE_REMEDY_KEY, None)
@@ -15979,6 +16286,17 @@ def _restart_services(
     )
     if not gateway_restarted:
         failed.append("defenseclaw-gateway")
+
+    if gateway_restarted and "opencode" in {connector, *(connectors or [])}:
+        # OpenCode V2's background server keeps the plugin it loaded (rel-1-0-6
+        # GAP-0026). Restarted once the new gateway serves, before the runtime
+        # wait, so that wait sees the plugin the restarted server loads.
+        from defenseclaw import opencode_service
+
+        opencode_service.report(
+            opencode_service.restart_if_running(opencode_service.account_binary(data_dir)),
+            what="runs the plugin as it is now",
+        )
 
     connector_runtime_pending_reload = False
     # Peers the restarted gateway refused: setup skipped them, so they are
@@ -16050,6 +16368,11 @@ def _restart_services(
                 _note_gateway_launcher_missing()
                 click.echo(f"  {_LAUNCHER_MISSING_RESTART_TEXT}: {LAUNCHER_REINSTALL_STEP}.")
             failed.append(f"{readiness_label} readiness")
+        # A settings file the restarted setup put back or recreated (GAP-0581).
+        from defenseclaw.agent_config_notice import put_back_notes
+
+        for note in put_back_notes(data_dir, wait_targets, restart_started):
+            ux.warn(note)
 
     # Multi-connector global change: every active hook connector is affected
     # by the gateway bounce, so enumerate them rather than naming the primary.
@@ -16208,10 +16531,6 @@ def _hook_runtime_wait_targets(hook_targets: list[str], data_dir: str, focus: st
     """
 
     return sorted(set(hook_targets))
-
-
-def _hook_contract_lock_marker(data_dir: str) -> int | None:
-    return _regular_file_marker(os.path.join(data_dir, "hook_contract_lock.json"))
 
 
 def _regular_file_marker(path: str) -> int | None:

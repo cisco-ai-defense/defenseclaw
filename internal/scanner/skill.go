@@ -25,12 +25,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -39,7 +39,7 @@ import (
 // accepts a well-formed judge answer from any supported model (GAP-2609).
 const judgeCompatSkillScanner = "defenseclaw-skill-scanner"
 
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+var ansiRe = lazyregexp.New(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // liteLLMModel returns the model string shaped for LiteLLM /
 // provider-native routers. LiteLLM accepts “"provider/model-id"“
@@ -49,8 +49,13 @@ var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 // (the caller should handle that case).
 func liteLLMModel(llm config.LLMConfig) string {
 	model := llm.Model
-	if model != "" && llm.Provider != "" && !strings.Contains(model, "/") {
-		model = llm.Provider + "/" + model
+	if model != "" && !strings.Contains(model, "/") {
+		// ProviderPrefix is llm.Provider, or bedrock for an unprefixed
+		// Bedrock id: LiteLLM then signs for Bedrock instead of failing
+		// with "Authentication failed" (GAP-2640).
+		if provider := llm.ProviderPrefix(); provider != "" {
+			model = provider + "/" + model
+		}
 	}
 	return withBedrockInferenceProfile(llm, model)
 }
@@ -459,7 +464,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		return result, err
 	}
 
-	scanPath, unstage, err := stageUTF16Skill(target)
+	scanPath, metadata, unstage, err := stageSkill(target)
 	defer unstage()
 	if err != nil {
 		result.Duration = time.Since(start)
@@ -512,7 +517,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 			scanErr = fmt.Errorf("scanner: failed to parse %s output: %w (stderr=%s)", s.Name(), parseErr, stderrStr)
 			return nil, scanErr
 		}
-		result.Findings = findings
+		result.Findings = append(findings, metadataFindings(metadata)...)
 	}
 
 	// Fail closed on any non-zero exit even when stdout parsed: exit 2 is

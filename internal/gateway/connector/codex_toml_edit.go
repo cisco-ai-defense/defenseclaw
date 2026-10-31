@@ -38,9 +38,11 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 }
 
 func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOtel bool) ([]byte, error) {
+	// A fresh BOM slice: appending the result to raw[:3] wrote it over the
+	// caller's raw, which the inline-otel retry below then parsed again.
 	bom := []byte(nil)
 	if bytes.HasPrefix(raw, []byte{0xef, 0xbb, 0xbf}) {
-		bom, raw = raw[:3], raw[3:]
+		bom, raw = []byte{0xef, 0xbb, 0xbf}, raw[3:]
 	}
 	// A hook refresh also passes through this editor. Keep an operator's OTel
 	// spelling, comments, and table layout when cleanup changed no OTel value.
@@ -200,6 +202,17 @@ func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOt
 		}
 		out.WriteString(rendered(sectionBytes))
 	}
+	// Comments after the last table DefenseClaw renders again or drops have
+	// no table after them to keep them: they stay at the end of the file,
+	// after the rendered tables (p0 GAP-1242). Blank lines alone are the
+	// product section's own end and still go, so nothing grows on repeated
+	// setups.
+	if strings.TrimSpace(pending) != "" {
+		if out.Len() != 0 && !strings.HasSuffix(out.String(), "\n") {
+			out.WriteString(newline)
+		}
+		out.WriteString(pending)
+	}
 	return append(bom, []byte(out.String())...), nil
 }
 
@@ -210,7 +223,7 @@ func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOt
 func RemoveCodexManagedHookFeature(raw []byte) ([]byte, error) {
 	bom := []byte(nil)
 	if bytes.HasPrefix(raw, []byte{0xef, 0xbb, 0xbf}) {
-		bom, raw = raw[:3], raw[3:]
+		bom, raw = []byte{0xef, 0xbb, 0xbf}, raw[3:]
 	}
 	var document map[string]interface{}
 	if err := toml.Unmarshal(raw, &document); err != nil {

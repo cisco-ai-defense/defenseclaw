@@ -58,6 +58,79 @@ type hookRegistrationGoldenFile struct {
 // no agent hook file (the OpenClaw and ZeptoClaw proxies).
 var hookRegistrationGoldenSkipped = map[string]bool{}
 
+// The OpenCode user plugin is identical on both POSIX hosts. Check its
+// POSIX and Windows-rendered fixtures on macOS too, where the all-connector
+// Linux golden test is skipped. The same UPDATE_GOLDEN command regenerates
+// these cases without rewriting any other connector's fixture.
+func TestOpenCodeHookRegistrationMatchesSharedGolden(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("this case holds the POSIX user plugin")
+	}
+	setHookBinaryOverride(t, "/opt/defenseclaw/bin/defenseclaw-gateway")
+	data, err := os.ReadFile(hookRegistrationGolden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var golden hookRegistrationGoldenFile
+	if err := json.Unmarshal(data, &golden); err != nil {
+		t.Fatal(err)
+	}
+	var conn Connector
+	for _, candidate := range newBuiltinConnectors() {
+		if candidate.Name() == "opencode" {
+			conn = candidate
+			break
+		}
+	}
+	if conn == nil {
+		t.Fatal("OpenCode connector is missing")
+	}
+	matched := false
+	for i, expected := range golden.Cases {
+		if expected.Connector != "opencode" {
+			continue
+		}
+		matched = true
+		t.Run(expected.OS+"-"+expected.Scope, func(t *testing.T) {
+			var actual hookRegistrationCase
+			var ok bool
+			if expected.OS == "posix" {
+				actual, ok = hookRegistrationSetupCase(t, conn, expected.Scope)
+			} else if expected.OS == "windows" {
+				for _, candidate := range windowsRegistrationCases(t) {
+					if candidate.Connector == "opencode" && candidate.Scope == expected.Scope {
+						actual, ok = candidate, true
+						break
+					}
+				}
+			}
+			if !ok {
+				t.Fatal("OpenCode did not register its plugin")
+			}
+			if os.Getenv("DEFENSECLAW_UPDATE_GOLDEN") == "1" {
+				golden.Cases[i] = actual
+			} else if !reflect.DeepEqual(actual, expected) {
+				t.Fatal("OpenCode registration is stale; regenerate with DEFENSECLAW_UPDATE_GOLDEN=1")
+			}
+		})
+	}
+	if !matched {
+		t.Fatal("the shared golden has no OpenCode registration")
+	}
+	if t.Failed() {
+		return
+	}
+	if os.Getenv("DEFENSECLAW_UPDATE_GOLDEN") == "1" {
+		data, err := json.MarshalIndent(golden, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(hookRegistrationGolden, append(data, '\n'), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestEveryHookConnectorSetupMatchesTheSharedGolden(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the golden holds the POSIX Setup output, rendered on linux")

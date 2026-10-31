@@ -1,0 +1,382 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/forward/bundle-status-forward-v1.json",
+  "title": "forwardable bundle status result",
+  "description": "Forwardable members of bundle-status.schema.json (enterprise bundle status --json), including current.min_product_version (from 1.0.6). Forward schema (private #14 option A): the members a management agent may send off the device. Project with allowlist-and-drop (forward/project.py): a member not listed here, or a value outside its pattern or enum, is removed, never rejected, so members a newer DefenseClaw adds are not forwarded until this file lists them. Only DefenseClaw-minted ids, bundle and receipt ids, digests, counts, codes, booleans, enums, versions and times pass; account names and identifiers (user, uid, SID, UPN, group), paths and messages never do.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "command": {
+      "const": "status"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "bundle_mode": {
+      "type": "boolean"
+    },
+    "anchors_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "current": {
+      "$ref": "#/$defs/ref"
+    },
+    "last_good": {
+      "$ref": "#/$defs/ref"
+    },
+    "floor": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "receipt_id": {
+          "type": "string",
+          "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "delivery_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+        },
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "received",
+            "verified",
+            "staged",
+            "applied",
+            "confirmed",
+            "failed"
+          ]
+        },
+        "error_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "warning_codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "maxItems": 64
+        },
+        "disabled_by_bundle": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "maxItems": 64
+        },
+        "effective_policy_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "enforcing_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "config_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current_bundle_id": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "current_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "restart": {
+          "type": "boolean"
+        },
+        "restart_required": {
+          "type": "boolean"
+        },
+        "rolled_back": {
+          "type": "boolean"
+        },
+        "rollback_of": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "applied_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+        },
+        "confirmed_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+        },
+        "finished_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+        }
+      }
+    },
+    "last_refusal": {
+      "$ref": "#/$defs/bundleRefusal"
+    },
+    "bundle": {
+      "$ref": "#/$defs/bundleState"
+    },
+    "sessions_restart_required": {
+      "$ref": "#/$defs/sessions"
+    },
+    "alert_only_rule_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "gateway_checked": {
+      "type": "boolean"
+    },
+    "gateway_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "applied": {
+      "type": "boolean"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/message"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/message"
+      }
+    }
+  },
+  "$defs": {
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      }
+    },
+    "ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "effective_policy_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "config_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "confirmed_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+        },
+        "restart_required": {
+          "type": "boolean"
+        },
+        "delivery_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+        },
+        "min_product_version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z.-]{1,64})?(\\+[0-9A-Za-z.-]{1,64})?$"
+        }
+      }
+    },
+    "sessions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "known",
+            "unknown"
+          ]
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "bundleState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "receipt_id": {
+          "type": "string",
+          "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "delivery_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+        },
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "received",
+            "verified",
+            "staged",
+            "applied",
+            "confirmed",
+            "failed"
+          ]
+        },
+        "disabled_by_bundle": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "maxItems": 64
+        },
+        "warning_codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "maxItems": 64
+        },
+        "error_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "effective_policy_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "config_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "applied_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+        },
+        "confirmed_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+        },
+        "restart": {
+          "type": "boolean"
+        },
+        "restart_required": {
+          "type": "boolean"
+        },
+        "sessions_restart_required": {
+          "$ref": "#/$defs/sessions"
+        },
+        "current_bundle_id": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "current_version": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "bundleRefusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "receipt_id": {
+          "type": "string",
+          "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "delivery_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+        },
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "warning_codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "maxItems": 64
+        },
+        "disabled_by_bundle": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "maxItems": 64
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+        }
+      }
+    }
+  }
+}

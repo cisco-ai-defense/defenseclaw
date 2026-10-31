@@ -378,9 +378,17 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		// The floor refuses every ask, whatever triage's mode (GAP-0468).
 		approvals = "refused (your profile doesn't let you approve asks)"
 	}
-	if sandboxPolicyPending(*sb) {
+	switch {
+	case sandboxPolicyPending(*sb):
 		row("Policy", "pending (resolving policy)")
-	} else {
+	case sb.StopReason != "":
+		// The organization's gateway ended the registration (the Stopped
+		// row says why): the policy shown is the one the sandbox was
+		// created with, which is not in force; it can't start under it
+		// (GAP-0606). The list keeps naming it (GAP-0079).
+		row("Policy", fmt.Sprintf("pack %s, network %s, approvals %s: the policy it was created with, not in force; it can't start under it (see Stopped)",
+			joinNonEmpty(" ", firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest)), networkLabel(sb), sb.Approvals))
+	default:
 		row("Policy", fmt.Sprintf("pack %s, network %s, approvals %s", joinNonEmpty(" ", firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest)), networkLabel(sb), approvals))
 	}
 	// On a managed computer: the organization profile the sandbox's

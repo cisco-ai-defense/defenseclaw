@@ -24,7 +24,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -38,8 +37,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -161,7 +162,7 @@ func gatewayStatusDroppableValue(err error) bool {
 	return schemaErr.Keyword == "enum" || schemaErr.Keyword == "type" || schemaErr.Keyword == "additionalProperties"
 }
 
-var yamlPathSegment = regexp.MustCompile(`^(?:\.([A-Za-z0-9_-]+)|\[([0-9]+)\])`)
+var yamlPathSegment = lazyregexp.New(`^(?:\.([A-Za-z0-9_-]+)|\[([0-9]+)\])`)
 
 // yamlWithoutPath removes the value at a schema display path such as
 // $.guardrail.mode or $.connectors[0].name from a YAML document. With a
@@ -499,7 +500,7 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 		printConnectorModes(modes)
 	}
 
-	printSubsystems(&snap)
+	printSubsystems(&snap, cfg.Guardrail.Judge.MaxParallel)
 
 	printConnectors(&snap)
 	if isLocalStatusTarget(bind) {
@@ -1101,18 +1102,18 @@ func printConnectorModeEntry(m *connectorModeSummary) {
 // fleet uplink: when it is disabled and no rostered connector is a proxy
 // connector (OpenClaw, ZeptoClaw), nothing uses it, so its DISABLED state and
 // OpenClaw upstream advice are left out (the TUI does the same).
-func printSubsystems(snap *gateway.HealthSnapshot) {
+func printSubsystems(snap *gateway.HealthSnapshot, judgeMaxParallel int) {
 	Section("Subsystems")
 	if !fleetUplinkUnused(snap) {
-		printSubsystem("Gateway", snap.Gateway)
+		printSubsystem("Gateway", snap.Gateway, judgeMaxParallel)
 	}
-	printSubsystem("Watcher", snap.Watcher)
-	printSubsystem("API", snap.API)
-	printSubsystem("Guardrail", snap.Guardrail)
-	printSubsystem("Routing", snap.Routing)
-	printSubsystem("Telemetry", snap.Telemetry)
+	printSubsystem("Watcher", snap.Watcher, judgeMaxParallel)
+	printSubsystem("API", snap.API, judgeMaxParallel)
+	printSubsystem("Guardrail", snap.Guardrail, judgeMaxParallel)
+	printSubsystem("Routing", snap.Routing, judgeMaxParallel)
+	printSubsystem("Telemetry", snap.Telemetry, judgeMaxParallel)
 	if snap.Sandbox != nil {
-		printSubsystem("Sandbox", *snap.Sandbox)
+		printSubsystem("Sandbox", *snap.Sandbox, judgeMaxParallel)
 	}
 	if line := kernelSensorStatusLine(snap); line != "" {
 		fmt.Printf("  %s%s\n\n", Style("Kernel sensor: ", "fg=bright_black", "bold"), asciiText(line))
@@ -1176,7 +1177,7 @@ func fleetUplinkUnused(snap *gateway.HealthSnapshot) bool {
 	return true
 }
 
-func printSubsystem(name string, h gateway.SubsystemHealth) {
+func printSubsystem(name string, h gateway.SubsystemHealth, judgeMaxParallel int) {
 	// One column wider than the longest label ("Telemetry:"), so the state
 	// never runs into it and lines up with the detail rows below.
 	label := fmt.Sprintf("%-*s", 11, name+":")
@@ -1197,6 +1198,13 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 	if judge != "" {
 		fmt.Printf("             %s %s\n", Dim("problem:"), asciiText(judge))
 	}
+	fallbacks := judgeFallbackNote(h.Details, judgeMaxParallel)
+	if fallbacks != "" {
+		fmt.Printf("             %s %s\n", Dim("judge:"), asciiText(fallbacks))
+	}
+	if retention := telemetryRetentionLabel(h.Details); retention != "" {
+		fmt.Printf("             %s %s\n", Dim("retention:"), retention)
+	}
 	if len(h.Details) > 0 {
 		keys := make([]string, 0, len(h.Details))
 		for k := range h.Details {
@@ -1213,6 +1221,9 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 			if judge != "" && strings.HasPrefix(k, "judge_") {
 				continue
 			}
+			if fallbacks != "" && strings.HasPrefix(k, "judge_") && strings.Contains(k, "fallback") {
+				continue
+			}
 			line, ok := formatDetailValue(h.Details[k])
 			if !ok {
 				continue
@@ -1221,6 +1232,20 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 		}
 	}
 	fmt.Println()
+}
+
+// telemetryRetentionLabel is the audit store retention in the words of the
+// per-user status ("7 days, size cap 64 MiB"), from the telemetry health
+// details retention_days and retention_max_store_mb; "" when the gateway
+// reports no retention. On a managed computer defenseclaw status, doctor and
+// the TUI are refused, so this line is where the size cap shows (GAP-0141).
+func telemetryRetentionLabel(details map[string]interface{}) string {
+	days, ok := details["retention_days"].(float64)
+	if !ok || days < 0 || days != float64(int64(days)) {
+		return ""
+	}
+	capMB, _ := details["retention_max_store_mb"].(float64)
+	return enterprisestatus.RetentionLabel(int64(days), int64(capMB))
 }
 
 // eventHistoryProblem says in plain words why audit events cannot be
@@ -1270,6 +1295,38 @@ func judgeProblem(details map[string]interface{}) string {
 		return lead + "; " + judgeNetworkNextStep
 	}
 	return lead + "; run 'defenseclaw doctor' and 'defenseclaw setup llm --role judge'"
+}
+
+// judgeFallbackNote says how many hook checks the rules decided because the
+// LLM judge gave no verdict in time, per connector (gateway judge_fallbacks
+// details, #1395), or returns "". It suggests guardrail.judge.max_parallel
+// only while that setting is 0 (off).
+func judgeFallbackNote(details map[string]interface{}, maxParallel int) string {
+	total, ok := formatDetailValue(details["judge_fallbacks"])
+	if !ok || total == "" || total == "0" {
+		return ""
+	}
+	note := "the rules decided " + total + " hook check(s) because the LLM judge gave no verdict in time"
+	if byConnector, ok := details["judge_fallbacks_by_connector"].(map[string]interface{}); ok && len(byConnector) > 0 {
+		names := make([]string, 0, len(byConnector))
+		for name := range byConnector {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		parts := make([]string, 0, len(names))
+		for _, name := range names {
+			n, _ := formatDetailValue(byConnector[name])
+			parts = append(parts, name+" "+n)
+		}
+		note += " (" + strings.Join(parts, ", ") + ")"
+	}
+	if last, _ := details["judge_last_fallback"].(string); last != "" {
+		note += "; last: " + last
+	}
+	if maxParallel > 0 {
+		return note // guardrail.judge.max_parallel is already set: nothing to suggest
+	}
+	return note + "; a slow judge model: set guardrail.judge.max_parallel (see the LLM judge docs)"
 }
 
 // judgeNetworkNextStep is the next step for a judge that cannot reach its

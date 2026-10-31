@@ -1019,6 +1019,19 @@ describe('1.0.4 operator routes and limits', () => {
     }
   });
 
+  it('documents enterprise identity refresh as root-only, per-user flush and Windows sign-in pending', () => {
+    const cli = page('reference/cli.mdx');
+    assert.match(cli, /enterprise identity refresh \[--user U\] \[--flush-os-cache\]/);
+    assert.match(cli, /anyone else gets `not_admin`/);
+    assert.match(cli, /`sss_cache -u` \(with `--user`\) or `sss_cache -E`/);
+    assert.match(cli, /without `--user` only \(macOS has no per-account flush\)/);
+    assert.match(cli, /windows_token_groups_pending/);
+    assert.match(cli, /audit row `identity-refresh-completed` and its telemetry carry counts/);
+    const identity = page('enterprise/identity-and-authentication.mdx');
+    assert.match(identity, /### Refresh every account now/);
+    assert.match(identity, /enterprise identity refresh --flush-os-cache --json/);
+  });
+
   it('gives a working managed restart route without promising it in the refusal', () => {
     const lifecycle = page('enterprise/lifecycle.mdx');
     assert.match(lifecycle, /Windows \| Run the installed release's Setup with `\/repair JSON=1`/);
@@ -1415,13 +1428,14 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
-  // Final docs sync (LEAD STEER 06:36 EDT 10-30; KNOWN-ISSUES-1.0.5.md): GAP-2632 uninstall leaves ACP entries, GAP-2635 admin scan output, GAP-2638 Bedrock full id + region, GAP-2639 hook judge needs an Anthropic Bedrock model.
-  { gap: "GAP-2632", page: "get-started/install.mdx", section: "Uninstall", has: ["run `defenseclaw acp remove --client <client> --agent <agent>` for each editor and agent first", "`defenseclaw uninstall` leaves the guarded ACP entries in the editor's settings, an empty `settings.json.defenseclaw.lock` file next to Zed's `settings.json`, and the contract locks in `~/.defenseclaw/acp`", "an agent set up in observe mode still starts but runs unchecked, and an agent set up with `--activate` refuses every message", "After `defenseclaw uninstall --binaries` or `--all` the editor cannot start that agent."], lacks: ["and the editor's next start of that agent fails"] },
-  { gap: "GAP-2635", page: "scanning/skill-scanner.mdx", has: ["An administrator scan outside the watcher reports the verdict and the findings only: it never blocks or quarantines the skill.", "On managed Windows and macOS it prints the preset (`policy: quiet`) but no policy result line.", "the scan's audit row shows `verdict=warn` for any skill with findings, a CRITICAL one included"], lacks: ["a skill whose findings are all INFO shows `verdict=warn`", "On managed Windows it prints no policy result line"] },
-  { gap: "GAP-2638", page: "guardrail/index.mdx", has: ["give `defenseclaw setup llm --provider bedrock` the full Bedrock model id, for example `us.anthropic.claude-haiku-4-5-20251001-v1:0`, and `--bedrock-region`", "A short alias such as `haiku-4.5` fails the ping"], lacks: [] },
-  { gap: "GAP-2640", page: "guardrail/index.mdx", has: ["give it the `bedrock/` prefix: `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`", "neither message names the missing prefix"], lacks: [] },
-  { gap: "GAP-2640", page: "guardrail/unified-llm-key.mdx", section: "AWS Bedrock", has: ["give it the `bedrock/` prefix, for example `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`"], lacks: [] },
-  { gap: "GAP-2639", page: "guardrail/index.mdx", has: ["The hook judge needs an Anthropic model on Bedrock in 1.0.5.", "hooks keep the rule verdict, so nothing is blocked by mistake, and `verify` warns `judge_failing`", "Luna works for the skill and MCP scans."], lacks: [] },
+  // Final docs sync (LEAD STEER 06:36 EDT 10-30; KNOWN-ISSUES-1.0.5.md): GAP-2632 uninstall leaves ACP entries, GAP-2635 admin scan output, GAP-2638 Bedrock full id + region, GAP-2639 hook judge needs an Anthropic Bedrock model (1.0.6: product fixes for GAP-2638/2639/2640, rows track the new text).
+  { gap: "GAP-2632", page: "get-started/install.mdx", section: "Uninstall", has: ["uninstall also removes the guarded ACP entries it wrote in the editor's settings, with their contract locks in `~/.defenseclaw/acp`", "Every other entry in that file stays.", "`defenseclaw acp remove --client <client> --agent <agent>` removes one without uninstalling."], lacks: ["In 1.0.5 `defenseclaw uninstall` leaves the guarded ACP entries", "run `defenseclaw acp remove --client <client> --agent <agent>` for each editor and agent first"] },
+  // rel-1-0-6:GAP-0013 (product fix of GAP-2635): the admin scan prints the admission result and its audit row carries it.
+  { gap: "GAP-2635", page: "scanning/skill-scanner.mdx", has: ["An administrator scan outside the watcher never blocks or quarantines the skill.", "It prints the preset (`preset: quiet`)", "a `policy:` line with what install admission would decide for the skill", "`policy: rejected - the policy would refuse this skill at install (...)`", "`policy: accepted - the policy would admit this skill at install (...)` for one it admits (an INFO-only one)", "The scan's audit row carries that decision, as an install-time scan's row does: `verdict=block` for a skill the policy refuses, `verdict=clean` for one it admits"], lacks: ["but no policy result line", "the scan's audit row shows `verdict=warn` for any skill with findings", "On managed Windows it prints no policy result line"] },
+  { gap: "GAP-2638", page: "guardrail/index.mdx", has: ["The short names `haiku-4.5` and `luna` become their full ids, and setup refuses any other name that is not a Bedrock model id.", "Without `--bedrock-region`, setup saves `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`"], lacks: ["A short alias such as `haiku-4.5` fails the ping"] },
+  { gap: "GAP-2640", page: "guardrail/index.mdx", has: ["write it with or without the `bedrock/` prefix", "both use Bedrock"], lacks: ["neither message names the missing prefix"] },
+  { gap: "GAP-2640", page: "guardrail/unified-llm-key.mdx", section: "AWS Bedrock", has: ["the `bedrock/` prefix is optional"], lacks: ["give it the `bedrock/` prefix, for example"] },
+  { gap: "GAP-2639", page: "guardrail/index.mdx", has: ["The hook judge works with GPT-5.6 Luna on Bedrock", "through the Bedrock Converse API"], lacks: ["The hook judge needs an Anthropic model on Bedrock"] },
   // GAP-2627 (LEAD 03:53 EDT 10-30; T11a dc-fc-r104-cap-ewin4 C03): with the judge on in action mode, an agent-run `claude mcp add` of a remote server can be blocked as a security-control change (judge-tool-injection); documented workaround.
   { gap: "GAP-2627", page: "guardrail/index.mdx", section: "The judge blocks an agent-run configuration command", has: ["With the LLM judge on and the connector in action mode, the judge can block a configuration command the agent runs for you", "such as `claude mcp add --transport http <name> <url>` for a remote MCP server", "`judge-tool-injection`", "Add the server outside the agent session: type the same command in your own terminal, or use `defenseclaw mcp set <name> --url <url>`", "take the connector off the judge: `defenseclaw guardrail judge remove <agent>`", "The connector keeps its mode and its rule checks."], lacks: ["or use `defenseclaw mcp set <name>`, which"] },
   // GAP-2622 (LEAD 03:33 EDT 10-30; T11a dc-fc-r103-b2-mac C01): balanced MCP admission blocks only CRITICAL; HIGH/MEDIUM/LOW warn (policy/admission.go compileAssetType).
@@ -1444,7 +1458,7 @@ const r105Rows: DocRow[] = [
   { gap: "GH #1100 p0:GAP-0675", page: "enterprise/lifecycle.mdx", section: "Uninstall notes", has: ["out, or whose session is disconnected, keep theirs."], lacks: ["from every signed-in user's agent config"] },
   { gap: "GH #1100 p0:GAP-0675", page: "enterprise/threat-model.mdx", section: "Residual risks", has: ["of signed-out users and users whose session is disconnected"] },
   // GH #1100 p0:GAP-0742 (docs pod, 2026-10-28, live managed RHEL rc.8): chmod 000 ~/.defenseclaw is set back to 0700 with no warning; a link in its place is guardian_target_user_path.
-  { gap: "GH #1100 p0:GAP-0742", page: "enterprise/operations.mdx", section: "Per-user connector state", has: ["`~/.defenseclaw` and `~/.defenseclaw/hooks` follow one rule.", "the guardian sets its mode back to `0700` within a minute, also after `chmod 000`, and reports nothing", "A link or a file in place of either folder is not changed: it is reported as `guardian_target_user_path`", "other than `~/.defenseclaw` and its hooks folder, which the guardian sets back to `0700`"] },
+  { gap: "GH #1100 p0:GAP-0742", page: "enterprise/operations.mdx", section: "Per-user connector state", has: ["`~/.defenseclaw` and `~/.defenseclaw/hooks` follow one rule in an account the guardian has a per-user target for", "the guardian sets its mode back to `0700` within a minute, also after `chmod 000`, and reports nothing", "A link or a file in place of either folder is not changed: it is reported as `guardian_target_user_path`", "other than `~/.defenseclaw` and its hooks folder, which the guardian sets back to `0700`"] },
   { gap: "GH #1100 p0:GAP-0742", page: "enterprise/troubleshooting.mdx", section: "Lifecycle error codes", has: ["An unreadable `~/.defenseclaw` or `~/.defenseclaw/hooks` is not on this list: the guardian sets it back to `0700`."] },
   // GH #1101 reference items (docs pod, 2026-10-28): config limits, block_message refusal, pack manifest re-pin.
   { gap: "GH #1101 p0:GAP-0677", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["The file may be at most 4 MiB and 65,536 parsed YAML nodes.", "`configuration source exceeds the 4 MiB limit`", "`parsed YAML exceeds the 65,536-node limit`", "move rules into a [custom rule pack](#custom-rule-packs)"], lacks: ["The file is limited to 4 MiB and 65,536 YAML nodes."] },
@@ -1505,8 +1519,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2368", page: "get-started/windows/paths-troubleshooting.mdx", has: ["The watchdog is on by default (`gateway.watchdog.enabled` is `true`)", "set `gateway.watchdog.enabled` to `false` to turn it off"], lacks: ["The watchdog runs only when `gateway.watchdog.enabled` is set"] },
   { gap: "GAP-2363", page: "guardrail/multi-connector.mdx", has: ["Setup first asks the new agent's enforcement mode, prints what it will change, and then", "ask `Proceed? [Y/n]`; Enter applies it, and `--yes` skips the question in scripts."] },
   { gap: "GAP-2354", page: "reference/fail-modes.mdx", has: ["On a per-user install with the `default` or `permissive` rule pack, a call DefenseClaw would allow still runs.", "On a per-user install with the `strict` rule pack, on a managed install and inside an OpenShell sandbox, the call is blocked"], lacks: ["(disk full, database busy), the call is denied."] },
-  { gap: "GAP-2356", page: "guardrail/user-and-group-policies.mdx", section: "Before you start", has: ["Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no `defenseclaw guardrail` commands", "`defenseclaw.exe config validate FILE` and `defenseclaw.exe enterprise windows profile-explain --user CORP\\alice`"] },
-  { gap: "GAP-2357", page: "guardrail/user-and-group-policies.mdx", section: "Steps", has: ["With no `--user`, `guardrail profile explain` explains the account that runs the command. The managed `enterprise linux|macos|windows profile-explain` commands need `--user`."], lacks: ["3. Ask which profile a person gets. With no `--user`, it explains the account that runs the command."] },
+  { gap: "GAP-2356", page: "guardrail/user-and-group-policies.mdx", section: "Before you start", has: ["Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no per-user `config.yaml` and no `defenseclaw guardrail` commands except `defenseclaw guardrail profile explain` on Linux and macOS, which shows a standard user their own profile", "`defenseclaw.exe config validate FILE` and `defenseclaw.exe enterprise windows profile-explain --user CORP\\alice`"] },
+  { gap: "GAP-2357", page: "guardrail/user-and-group-policies.mdx", section: "Steps", has: ["With no `--user`, `guardrail profile explain` explains the account that runs the command. The managed `enterprise linux|macos|windows profile-explain` commands need `--user` when an administrator runs them; on Linux and macOS a standard user leaves it out and gets their own profile only."], lacks: ["3. Ask which profile a person gets. With no `--user`, it explains the account that runs the command."] },
   { gap: "GAP-2332", page: "scanning/index.mdx", has: ["The defaults quarantine CRITICAL and HIGH skills, warn on MEDIUM and queue it for review, and allow LOW and INFO.", "`defenseclaw config get admission.skill` shows the actions in force"], lacks: ["A skill whose worst finding is MEDIUM, LOW or INFO is installed with the `warning` verdict"] },
   { gap: "GAP-2353", page: "guardrail/unified-llm-key.mdx", has: ["While the guardrail is on, the `DEFENSECLAW_LLM_KEY` row still reads `OPTIONAL`", "A local judge's `JUDGE_API_KEY` row reads `NOT_USED`."], lacks: ["correctly classifies them as `NOT_USED` even when the feature is on"] },
   { gap: "GAP-0515", page: "connectors/hermes.mdx", has: ["On Windows, where Hermes has no guard, an administrator's `open` lets the call run during an outage: the user's `hook-failures.jsonl` gets a line with `fail_mode` `open` and `outcome` `fail_open`.", "through the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) while `foreign_hooks` is `remove`"], lacks: ["(service not running, unusable answer, call too large to inspect)", "The administrator-owned hook is stricter"] },
@@ -1604,7 +1618,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1544", page: "connectors/claudecode.mdx", section: "Disable", has: ["It asks `Proceed? [Y/n]`; add `--yes` in scripts or when stdin is not a terminal."] },
   { gap: "GAP-1566", page: "connectors/copilot.mdx", section: "On a managed computer", has: ["are per-user commands", "/docs/enterprise/lifecycle#change-the-config", "refuses `setup copilot`"] },
   { gap: "GAP-1571", page: "connectors/copilot.mdx", section: "Files DefenseClaw will modify", has: ["The registration runs `%USERPROFILE%\\.defenseclaw\\hooks\\copilot-hook.ps1`, which calls"] },
-  { gap: "GAP-1675", page: "connectors/opencode.mdx", section: "On a managed computer", has: ["`C:\\ProgramData\\opencode\\opencode.json`", "`C:\\Program Files\\Cisco\\DefenseClaw\\share\\opencode\\defenseclaw.js`", "on Windows too", "`guardrail.connectors.opencode.enabled: false`"] },
+  { gap: "GAP-1675", page: "connectors/opencode.mdx", section: "On a managed computer", has: ["`C:\\ProgramData\\opencode\\opencode.json`", "`C:\\Program Files\\Cisco\\DefenseClaw\\share\\opencode\\index.js`", "on Windows too", "`guardrail.connectors.opencode.enabled: false`"] },
   { gap: "GAP-1701", page: "connectors/hermes.mdx", has: ["| Hook program, managed Windows | `C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe`", "the administrator sets `guardrail.connectors.hermes.enabled: false` in the managed `config.yaml` and runs `ensure`"] },
   { gap: "GAP-1598", page: "connectors/antigravity.mdx", has: ["`antigravity-hook.sh PreToolUse`", "a per-user install in the default or permissive policy lets `PreToolUse` run with one warning"], lacks: ["With the default fail mode closed", "binds each registration to a trusted `--event` argument"] },
   { gap: "GAP-1637", page: "connectors/kiro.mdx", section: "Fail mode", has: ["the default and permissive policies let the call run with one warning, and the strict policy blocks it"] },
@@ -1687,6 +1701,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2458", page: "get-started/upgrade.mdx", section: "`defenseclaw_api_listener_foreign: command not found` after going back to 1.0.2 (macOS and Linux)", has: ["defenseclaw_api_listener_foreign: command not found", "rm ~/.defenseclaw/hooks/_hardening.sh defenseclaw-gateway restart", "Or go from 1.0.4 to 1.0.5 first, then back to 1.0.2"] },
   { gap: "GAP-2451", page: "enterprise/troubleshooting.mdx", section: "Warnings", has: ["| `agent_settings_not_restored` (exporter removed) | Windows |", "`.claude\\settings.json.defenseclaw-otlp-removed.bak` or `.codex\\config.toml.defenseclaw-otlp-removed.bak`", "Delete the copy to clear the warning.", "On Windows this code also reports an earlier per-user install's native OTLP exporter"], lacks: ["| `native_otlp_marked_removed` | Windows |"] },
   { gap: "GAP-2451", page: "enterprise/troubleshooting.mdx", section: "Warnings", has: ["| `agent_settings_not_restored` (exporter not removed) | Windows |", "still holds the native OTLP exporter of an earlier per-user DefenseClaw install", "| `native_otlp_config_unchecked` | Linux, macOS, Windows |"], lacks: ["| `native_otlp_take_back_pending` | Windows |"] },
+  { gap: "GAP-0059", page: "get-started/upgrade.mdx", has: ["the upgrade also prints, after `Upgraded from`, why no sandbox runs and the fix", "Until then DefenseClaw starts no sandbox and `defenseclaw doctor` fails its Gateway check. Stop running sandboxes first, then run: defenseclaw sandbox setup --install-openshell"] },
   { gap: "GAP-1613", page: "enterprise/sandboxes.mdx", has: ["`sandboxes are unavailable: OpenShell 0.1.3 runs no DefenseClaw sandbox:"], lacks: ["OpenShell 0.1.3 is installed, but that release is unsupported"] },
   { gap: "GAP-1619", page: "guardrail/user-and-group-policies.mdx", has: ["`defenseclaw-gateway config validate FILE`", "`enterprise macos ensure --config FILE`", "`enterprise macos profile-explain`"] },
   { gap: "GAP-1635", page: "policies/admission.mdx", has: ["`tool list` prints one table per connector", "`UPDATED` shows `-` for an entry until it is changed"] },
@@ -1775,7 +1790,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2224", page: "stories/cursor-secret-exfil.mdx", has: ["✓ cursor gateway outage=open (failClosed=true)", "This is the output in a terminal. Piped to another command or saved to a file, the same lines start with `OK` and `i` instead of the check mark and the info sign."] },
   { gap: "GAP-2349", page: "tui.mdx", section: "Panels", has: ["The one exception is Sandboxes: there `P`, `R` and `A` are the", "On Sandboxes, press `p` for"] },
   { gap: "GAP-2228", page: "tui.mdx", has: ["generation and policy digest as its own segment, right after the gateway:", "The active policy and mode are a separate segment further along the line"], lacks: ["example `policy strict · action · gen 10 · 8b19ede82344`", "ends with the policy the running"] },
-  { gap: "GAP-2345", page: "get-started/first-run.mdx", section: "Path A: interactive (`defenseclaw init`)", has: ["1. **Select active connector(s)**: every installed hook connector is pre-selected", "2. **Scanner mode** (`local`, `remote` or `both`, default `local`).", "3. **Select connector(s) for action enforcement**", "**Select action connector(s) for LLM judge**", "5. **Start gateway after setup?** (default yes), then **Run targeted readiness checks?** (default yes)."], lacks: ["pre-selects every installed hook connector and configures them all in `observe` mode. It then shows one checklist"] },
+  { gap: "GAP-2345", page: "get-started/first-run.mdx", section: "Path A: interactive (`defenseclaw init`)", has: ["1. **Select active connector(s)**: every installed hook connector is pre-selected", "2. **Scanner mode** (`local`, `remote` or `both`, default `local`).", "3. **Select connector(s) for action enforcement**", "**Select action connector(s) for LLM judge**", "5. **Do you want to use a decision model?** (default no).", "6. **Start gateway after setup?** (default yes), then **Run targeted readiness checks?** (default yes)."], lacks: ["pre-selects every installed hook connector and configures them all in `observe` mode. It then shows one checklist"] },
   { gap: "GAP-2223", page: "connectors/codex.mdx", has: ["A per-user install writes no `.env` block", "On a managed Linux or macOS computer, setup keeps a marked block in `$CODEX_HOME/.env`"], lacks: ["On Linux and macOS, setup keeps a marked block in `$CODEX_HOME/.env`"] },
   { gap: "GAP-2361", page: "enterprise/operations.mdx", has: ["On a managed standalone computer `/health` carries the `policy`", "`curl http://127.0.0.1:18970/health`, even under `sudo`, has no `policy` key", "sudo curl -s --unix-socket /opt/cisco/defenseclaw/run/hook.sock http://localhost/health"], lacks: ["The gateway stamps it on `/health` and `/status`"] },
   { gap: "GAP-2342", page: "get-started/first-run.mdx", has: ["You do not need `init` before `quickstart`.", "If `init` chose no agent and started the gateway, `quickstart --connector <name>` restarts the gateway so it loads the agent and writes its hooks."] },
@@ -2084,19 +2099,31 @@ describe('profile-explain subject fields exist (GAP-2338)', () => {
   });
 });
 
-// GAP-2356 / GAP-2357: managed hosts run the Go CLI, which has no guardrail
-// group and whose profile-explain needs --user; the page says so.
+// GAP-2356 / GAP-2357: managed hosts run the Go CLI, whose administrator
+// profile-explain needs --user; the page says so. Since rel-1-0-2:GAP-0431 /
+// GAP-0422 a standard user on managed Linux and macOS explains their own
+// profile: the launcher's hidden `guardrail profile explain` and a non-root
+// `enterprise linux|macos profile-explain` both ask the gateway for the
+// caller's own profile, without --user. That launcher command is the only Go
+// guardrail command, and Windows has none.
 describe('managed profile commands match the Go CLI (GAP-2356, GAP-2357)', () => {
-  it('keeps --user required and no guardrail command in the Go CLI', () => {
-    assert.ok(source('internal/cli/enterprise_identity_views.go').includes('if view.use == "profile-explain" && query.Get("user") == "" {'), 'enterprise profile-explain no longer requires --user: re-check user-and-group-policies.mdx step 3');
-    // git grep exits 1 when nothing matches: no Go command named guardrail.
+  it('keeps --user required for an administrator and only the own-profile guardrail command in the Go CLI', () => {
+    const views = source('internal/cli/enterprise_identity_views.go');
+    assert.ok(views.includes('if view.use == "profile-explain" && query.Get("user") == "" {'), 'enterprise profile-explain no longer requires --user: re-check user-and-group-policies.mdx step 3');
+    const own = views.indexOf('if refusal := refuseEnterpriseIdentityViewForStandardUser(cmd); refusal != nil {');
+    assert.ok(own !== -1 && views.indexOf('return explainOwnGuardrailProfile(', own) !== -1 && own < views.indexOf('query.Get("user") == ""'), 'a standard user no longer gets their own profile from profile-explain without --user: re-check user-and-group-policies.mdx step 3');
+    // git grep exits 1 when nothing matches.
     let withGuardrail = '';
     try {
       withGuardrail = execFileSync('git', ['grep', '-l', '-E', 'Use:[[:space:]]+"guardrail', '--', 'internal/cli/*.go', ':!*_test.go'], { cwd: repo, encoding: 'utf8' }).trim();
     } catch (err) {
       if ((err as { status?: number }).status !== 1) throw err;
     }
-    assert.equal(withGuardrail, '', 'the Go CLI gained a guardrail command: re-check user-and-group-policies.mdx Before you start');
+    assert.equal(withGuardrail, 'internal/cli/own_profile_explain_unix.go', 'the Go CLI guardrail commands changed: re-check user-and-group-policies.mdx Before you start');
+    const unix = source('internal/cli/own_profile_explain_unix.go');
+    assert.ok(unix.startsWith('// Copyright') && unix.includes('//go:build !windows'), 'the own-profile guardrail command is no longer Linux and macOS only');
+    assert.equal([...unix.matchAll(/\.AddCommand\(/g)].length, 2, 'the launcher guardrail group gained a command besides profile explain: re-check user-and-group-policies.mdx Before you start');
+    assert.ok(source('internal/cli/own_profile_explain_windows.go').includes('func newLauncherGuardrailCommand() *cobra.Command { return nil }'), 'Windows gained a guardrail command: re-check user-and-group-policies.mdx Before you start');
   });
 });
 
@@ -2539,7 +2566,7 @@ describe('first-run prompts, Codex .env block scope and managed hook sockets mat
   it('asks the five first-run prompts the page lists, in that order', () => {
     const init = source('cli/defenseclaw/commands/cmd_init.py');
     const wizard = init.split('ux.section("DefenseClaw First-Run Setup")')[1]?.split('\ndef ')[0] ?? '';
-    const order = ['_prompt_connector_selection(', '"  " + ux.bold("Scanner mode")', '_prompt_action_connectors(', 'if action_set:\n        shared_fail, shared_human, shared_sev = _prompt_action_policy(', 'judge_hook_connectors = _prompt_first_run_judge_connectors(', '"  " + ux.bold("Start gateway after setup?")', '"  " + ux.bold("Run targeted readiness checks?")'];
+    const order = ['_prompt_connector_selection(', '"  " + ux.bold("Scanner mode")', '_prompt_action_connectors(', 'if action_set:\n        shared_fail, shared_human, shared_sev = _prompt_action_policy(', 'judge_hook_connectors = _prompt_first_run_judge_connectors(', 'decision_model_answer["request"] = _prompt_first_run_decision_model(', '"  " + ux.bold("Start gateway after setup?")', '"  " + ux.bold("Run targeted readiness checks?")'];
     let at = -1;
     for (const needle of order) {
       const next = wizard.indexOf(needle, at + 1);

@@ -120,6 +120,11 @@ func (e *Env) installBundleAnchors(ctx context.Context, src string, reservation 
 	if err != nil {
 		return refused(err)
 	}
+	if group := e.AnchorsDeviceGroup; group != "" {
+		if anchors, raw, err = enterprisebundle.PinDeviceGroup(anchors, raw, group); err != nil {
+			return refused(err)
+		}
+	}
 
 	if err := e.ensureDir(e.P(e.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
 		return refuse(anchorsWriteCode(err), "%v%s", err, stateWriteAction(err))

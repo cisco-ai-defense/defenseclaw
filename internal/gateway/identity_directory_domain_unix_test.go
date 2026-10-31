@@ -78,3 +78,44 @@ func TestProfileExplainDuringOutageAcceptsEverySpelling(t *testing.T) {
 		t.Fatalf("another domain's spelling found the cached account: %+v", subject)
 	}
 }
+
+// GAP-0551 on SSSD with fully qualified names (alice@corp.example): during
+// an outage the account database answers for no uid, and explain by
+// CORP\alice was refused (the holder of the uid could not be confirmed)
+// while the name and the uid were served the cached facts the hooks apply.
+func TestProfileExplainDuringOutageServesTheDomainSpellingOfTheAccountName(t *testing.T) {
+	const uid = 1_870_400_561
+	const id = "1870400561"
+	resolver := &lockedPeerResolver{accounts: map[int]unixidentity.Account{uid: {Name: "alice@corp.example", UID: uid, Home: "/home/alice@corp.example"}}}
+	previous, previousFacts, previousIncarnation := managedHookPeerHomes, identityFactsEnabled.Load(), managedHookPeerAccountIncarnation
+	managedHookPeerHomes = &managedHookPeerHomeCache{newResolver: func() unixidentity.Resolver { return resolver }, now: time.Now}
+	managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool) { return "sid:S-1-5-21-1-2-3-561", true }
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() {
+		managedHookPeerHomes, managedHookPeerAccountIncarnation = previous, previousIncarnation
+		setIdentityFactsEnabled(previousFacts)
+	})
+	facts := useridentity.DirectoryFacts{
+		Domain: "corp.example", AccountDomain: "CORP", Realm: "CORP.EXAMPLE", UPN: "alice@corp.example",
+		Principal: "alice@corp.example", Groups: []string{"engineering"}, ResolvedAt: time.Now(),
+	}
+	managedHookPeerHomes.directoriesOnce.Do(func() {
+		managedHookPeerHomes.directories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) { return facts, nil })
+	})
+	if _, ok := managedHookPeerHomes.directory(uid, true); !ok {
+		t.Fatal("the hook path did not cache the facts")
+	}
+	// The outage: SSSD answers for nobody.
+	resolver.mu.Lock()
+	delete(resolver.accounts, uid)
+	resolver.mu.Unlock()
+	for _, spelled := range []string{`CORP\alice`, `corp\ALICE`, "alice@corp.example", id} {
+		subject, err := profileExplainUnresolved(spelled, unixidentity.ErrNotFound)
+		if err != nil || subject.UserID != id || subject.cachedFactsAge <= 0 || len(subject.Groups) == 0 {
+			t.Fatalf("explain %s during the outage = %+v, %v; want the cached facts", spelled, subject, err)
+		}
+	}
+	if subject, err := profileExplainUnresolved(`OTHER\alice`, unixidentity.ErrNotFound); err == nil && subject.UserID == id {
+		t.Fatalf("another domain's spelling found the cached account: %+v", subject)
+	}
+}

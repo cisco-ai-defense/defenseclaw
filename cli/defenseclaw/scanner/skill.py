@@ -30,7 +30,6 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
 
 from defenseclaw.config import (
     CiscoAIDefenseConfig,
@@ -39,16 +38,13 @@ from defenseclaw.config import (
     SkillScannerConfig,
 )
 from defenseclaw.models import Finding, ScanResult
-from defenseclaw.scanner import settings
+from defenseclaw.scanner import settings, skill_metadata
 from defenseclaw.scanner._llm_env import (
     drop_unsupported_litellm_params,
     inject_llm_env,
     litellm_model,
     llm_analyzer_ready,
 )
-
-if TYPE_CHECKING:
-    pass
 
 _log = logging.getLogger(__name__)
 
@@ -108,19 +104,56 @@ def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     )
 
 
-# Bounds on the copy _utf8_skill_copy makes (Go stageUTF16Skill).
-_UTF16_STAGE_MAX_BYTES = 64 << 20
-_UTF16_STAGE_MAX_FILES = 2000
+# Bounds on the copy _skill_scan_copy makes (Go stageSkill).
+_SCAN_STAGE_MAX_BYTES = 64 << 20
+_SCAN_STAGE_MAX_FILES = 2000
+
+
+class _StageError(RuntimeError):
+    pass
+
+
+def _plan_scan_copy(target: str) -> tuple[list[tuple[str, str]], set[str]]:
+    """The OS metadata files to leave out and the files to re-encode (one bounded walk)."""
+    metadata: list[tuple[str, str]] = []
+    transcode: set[str] = set()
+    total = files = 0
+    for root, dirs, names in os.walk(target):
+        for name in dirs + names:
+            if os.path.islink(os.path.join(root, name)):
+                raise _StageError("the skill holds a link")
+        for name in names:
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, target)
+            if not os.path.isfile(path):
+                raise _StageError(f"{rel} is not a regular file")
+            size = os.path.getsize(path)
+            files += 1
+            total += size
+            if files > _SCAN_STAGE_MAX_FILES or total > _SCAN_STAGE_MAX_BYTES:
+                raise _StageError("the skill is too large to re-encode")
+            kind, recode = skill_metadata.classify(target, rel, size)
+            if kind:
+                metadata.append((rel.replace(os.sep, "/"), kind))
+            elif recode:
+                transcode.add(rel)
+    return metadata, transcode
 
 
 @contextlib.contextmanager
-def _utf8_skill_copy(target: str) -> Iterator[str]:
-    """Yield a copy of the skill whose UTF-16 SKILL.md is re-encoded as UTF-8.
+def _skill_scan_copy(target: str) -> Iterator[tuple[str, list[tuple[str, str]]]]:
+    """Yield the folder to scan for the skill and the OS metadata files left out.
 
-    skill-scanner refuses a SKILL.md with NUL bytes, which is how Windows
-    editors save "Unicode" text (GAP-0417); the install watcher scans the
-    same copy (internal/scanner stageUTF16Skill). Any other skill is scanned
-    in place, and the skill's own files are never changed.
+    That folder is the skill itself unless it needs a scan copy: a SKILL.md
+    saved as UTF-16 is re-encoded as UTF-8, since skill-scanner refuses one
+    with NUL bytes, which is how Windows editors save "Unicode" text
+    (GAP-0417); OS metadata files (skill_metadata) are left out and a UTF-16
+    desktop.ini is re-encoded, since the scanner scored them as opaque
+    binaries and the watcher quarantined a plain-text skill (GAP-0106). The
+    install watcher scans the same copy (internal/scanner stageSkill). A
+    UTF-16 SKILL.md that cannot be copied fails the scan; any other skill is
+    then scanned in place, metadata files included. The skill's own files
+    are never changed.
     """
     manifest = ""
     for name in ("SKILL.md", "skill.md"):
@@ -128,45 +161,58 @@ def _utf8_skill_copy(target: str) -> Iterator[str]:
         if os.path.isfile(candidate) and not os.path.islink(candidate):
             manifest = name
             break
-    if not manifest:
-        yield target
+    utf16_manifest = False
+    if manifest:
+        with open(os.path.join(target, manifest), "rb") as fh:
+            utf16_manifest = fh.read(2) in (b"\xff\xfe", b"\xfe\xff")
+    try:
+        metadata, transcode = _plan_scan_copy(target)
+    except (_StageError, OSError) as exc:
+        if utf16_manifest:
+            raise RuntimeError(f"{manifest} is saved as UTF-16 and {exc}; save it as UTF-8") from exc
+        yield target, []
         return
-    with open(os.path.join(target, manifest), "rb") as fh:
-        head = fh.read(2)
-    if head not in (b"\xff\xfe", b"\xfe\xff"):
-        yield target
+    if not utf16_manifest and not metadata and not transcode:
+        yield target, []
         return
     from defenseclaw.skill_discovery import decode_skill_text
 
-    with tempfile.TemporaryDirectory(prefix="dc-skill-utf8-") as tmp:
+    skip = {rel for rel, _ in metadata}
+    with tempfile.TemporaryDirectory(prefix="dc-skill-scan-") as tmp:
         stage = os.path.join(tmp, os.path.basename(os.path.normpath(target)))
-        total = files = 0
-        for root, dirs, names in os.walk(target):
+        for root, _dirs, names in os.walk(target):
             rel_root = os.path.relpath(root, target)
             os.makedirs(os.path.join(stage, rel_root), exist_ok=True)
-            for name in dirs + names:
-                if os.path.islink(os.path.join(root, name)):
-                    raise RuntimeError(f"{manifest} is saved as UTF-16 and the skill holds a link; save it as UTF-8")
             for name in names:
-                source = os.path.join(root, name)
-                files += 1
-                total += os.path.getsize(source)
-                if files > _UTF16_STAGE_MAX_FILES or total > _UTF16_STAGE_MAX_BYTES:
-                    raise RuntimeError(
-                        f"{manifest} is saved as UTF-16 and the skill is too large to re-encode; save it as UTF-8"
-                    )
-                with open(source, "rb") as fh:
+                rel = os.path.normpath(os.path.join(rel_root, name))
+                if rel.replace(os.sep, "/") in skip:
+                    continue
+                with open(os.path.join(root, name), "rb") as fh:
                     data = fh.read()
-                if rel_root == "." and name == manifest:
+                if (utf16_manifest and rel == manifest) or rel in transcode:
                     data = decode_skill_text(data).encode("utf-8")
-                with open(os.path.join(stage, rel_root, name), "wb") as fh:
+                with open(os.path.join(stage, rel), "wb") as fh:
                     fh.write(data)
-        yield stage
+        yield stage, metadata
 
 
 # The INFO finding skill-scanner reports when its LLM judge started but did
 # not answer; the scan then ran the deterministic analyzers only.
 LLM_ANALYSIS_FAILED = "LLM_ANALYSIS_FAILED"
+
+
+def _scanner_llm_configured() -> bool:
+    """Whether skill-scanner can make an LLM call in this scan.
+
+    Its LLM analyzer, behavioral alignment client and adjudicator take their
+    model and provider only from ``SKILL_SCANNER_*`` variables, which
+    :func:`settings.scanner_env` sets from the resolved judge and otherwise
+    removes. With none set, no scanner component reaches LiteLLM.
+    """
+    return any(
+        value.strip() and name.upper().startswith("SKILL_SCANNER_") and "LLM" in name.upper()
+        for name, value in os.environ.items()
+    )
 
 
 class JudgeUnavailableError(RuntimeError):
@@ -211,9 +257,13 @@ class SkillScannerWrapper:
         *,
         llm: LLMConfig | None = None,
         secure_client: bool = False,
+        decision_model: tuple[dict, dict[str, str]] | None = None,
     ) -> None:
         self.config = config
         self.secure_client = secure_client
+        # (build_analyzers kwargs, env) for the scanner's advisory System One
+        # tier, from defenseclaw.decision_model.skill_scanner_options.
+        self.decision_model = decision_model or ({}, {})
         self.inspect_llm = inspect_llm or InspectLLMConfig()
         self.cisco_ai_defense = cisco_ai_defense or CiscoAIDefenseConfig()
         self._llm: LLMConfig = llm if llm is not None else _inspect_to_llm(self.inspect_llm)
@@ -251,7 +301,6 @@ class SkillScannerWrapper:
 
         # Accept a well-formed answer from any judge model (GAP-2609).
         install_judge_compat()
-        drop_unsupported_litellm_params()
         cfg = self.config
         policy = _scan_policy(ScanPolicy, cfg)
 
@@ -285,24 +334,41 @@ class SkillScannerWrapper:
             env["AI_DEFENSE_API_URL"] = self.cisco_ai_defense.endpoint or ""
         if settings.osv_enabled(cfg):
             build_kwargs["use_osv"] = True
+        dm_kwargs, dm_env = self.decision_model
+        if dm_kwargs and _supports_system_one(build_analyzers):
+            build_kwargs.update(dm_kwargs)
+            env.update(dm_env)
+        elif dm_kwargs:
+            print(
+                "warning: the installed skill scanner has no System One tier; decision model not used",
+                file=sys.stderr,
+            )
+            dm_kwargs = {}
 
         with settings.scanner_env(env, secure_client=self.secure_client):
             self._inject_env()
+            if _scanner_llm_configured():
+                # Importing LiteLLM costs about 2 s; a scan with no judge
+                # model makes no LLM call, so it skips the import.
+                drop_unsupported_litellm_params()
             analyzers = build_analyzers(**build_kwargs)
             scanner = SkillScanner(analyzers=analyzers, policy=policy)
 
             start = time.monotonic()
-            with _utf8_skill_copy(str(target)) as scan_target:
+            with _skill_scan_copy(str(target)) as (scan_target, metadata):
                 sdk_result = scanner.scan_skill(scan_target, lenient=cfg.lenient)
                 if cfg.enable_meta and judge and len(analyzers) > 1:
                     _apply_meta_analysis(scanner, sdk_result, scan_target, cfg.lenient, judge, policy)
                 elapsed = time.monotonic() - start
                 result = self._convert(sdk_result, scan_target, elapsed)
+                result.findings.extend(skill_metadata.metadata_findings(metadata, self.name()))
         result.target = target
         if judge:
             _raise_on_judge_failure(result)
         # The scan says which policy and judge model it ran with (GAP-0047).
         result.settings = {"policy": settings.effective_policy(cfg), "judge": judge.get("llm_model") or "off"}
+        if dm_kwargs:
+            result.settings["decision_model"] = _system_one_record(analyzers, dm_kwargs["system_one_model"])
         return result
 
     def _judge(self) -> dict:
@@ -422,6 +488,36 @@ class SkillScannerWrapper:
             findings=findings,
             duration=timedelta(seconds=elapsed),
         )
+
+
+def _supports_system_one(build_analyzers: object) -> bool:
+    """Whether the installed skill scanner has the System One tier (2.3+)."""
+    import inspect
+
+    try:
+        return "system_one_endpoint" in inspect.signature(build_analyzers).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _system_one_record(analyzers: list, model: str) -> dict:
+    """The decision model's advisory answer for this scan.
+
+    The skill scanner's System One tier records a calibrated probability and
+    never emits a finding, so the decision model cannot change the verdict
+    here; the record is for triage and observability only.
+    """
+    for analyzer in analyzers:
+        if getattr(analyzer, "get_name", lambda: "")() == "system_one":
+            last = dict(getattr(analyzer, "last_result", None) or {})
+            if not last:
+                last = {"status": "error", "reason": getattr(analyzer, "last_error", None) or "no answer"}
+            last.setdefault("model", model)
+            last["advisory_only"] = True
+            if isinstance(last.get("probability"), float):
+                last["probability"] = round(last["probability"], 4)
+            return last
+    return {"status": "off", "model": model, "advisory_only": True}
 
 
 def _snippet_file_line(target: str, file_path: str, line: int, snippet: object) -> int:

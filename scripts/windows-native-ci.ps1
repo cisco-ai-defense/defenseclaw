@@ -32,6 +32,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-native-paths.ps1')
+# pip check with the one reviewed LiteLLM override allowance (GAP-0020).
+$DependencyMetadataChecker = Join-Path $PSScriptRoot 'check_python_dependency_metadata.py'
 
 $windowsResourceVerifierName = 'DefenseClawWindowsResourceVerifier-x64.exe'
 $windowsResourceIconName = 'DefenseClawWindowsResourceIcon.png'
@@ -3646,8 +3648,7 @@ function Assert-PackagedRepairAcceptance(
     }
     $python = Join-Path $Profile.VenvScripts 'python.exe'
     $venvRoot = Split-Path -Parent $Profile.VenvScripts
-    $uv = Join-Path $Root 'tools\uv.exe'
-    Invoke-Installed $uv @('pip', 'check', '--python', $python) -Timeout 300 `
+    Invoke-Installed $python @('-I', $DependencyMetadataChecker) -Timeout 300 `
         -Log (Join-Path $Logs 'damaged-venv-repair-pip-check.log') | Out-Null
     Assert-ManagedDistributionIntegrity $python $venvRoot
     Assert-ManagedImports $python $venvRoot
@@ -3676,8 +3677,7 @@ function Assert-RunningReinstallAcceptance(
         -Log (Join-Path $Logs 'running-reinstall-status.log') | Out-Null
     $python = Join-Path $Profile.VenvScripts 'python.exe'
     $venvRoot = Split-Path -Parent $Profile.VenvScripts
-    $uv = Join-Path $Root 'tools\uv.exe'
-    Invoke-Installed $uv @('pip', 'check', '--python', $python) -Timeout 300 `
+    Invoke-Installed $python @('-I', $DependencyMetadataChecker) -Timeout 300 `
         -Log (Join-Path $Logs 'running-reinstall-pip-check.log') | Out-Null
     Assert-ManagedDistributionIntegrity $python $venvRoot
     Assert-ManagedImports $python $venvRoot
@@ -3787,7 +3787,6 @@ function Invoke-InstallerAcceptance([string]$Root, [string]$Artifacts) {
     $gateway = Join-Path $profile.Bin 'defenseclaw-gateway.exe'
     $python = Join-Path $profile.VenvScripts 'python.exe'
     $venvRoot = Split-Path -Parent $profile.VenvScripts
-    $uv = Join-Path $root 'tools\uv.exe'
     $logs = Join-Path $root 'logs'
 
     if (Test-Path -LiteralPath (Join-Path $profile.Bin 'defenseclaw.exe')) {
@@ -3804,7 +3803,7 @@ function Invoke-InstallerAcceptance([string]$Root, [string]$Artifacts) {
         Invoke-Installed $cliShim @('--version') -Log (Join-Path $logs 'version.log') `
             -WorkingDirectory $WorkspaceRoot | Out-Null
     } finally { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue }
-    Invoke-Installed $uv @('pip', 'check', '--python', $python) -Timeout 300 -Log (Join-Path $logs 'uv-pip-check.log') | Out-Null
+    Invoke-Installed $python @('-I', $DependencyMetadataChecker) -Timeout 300 -Log (Join-Path $logs 'uv-pip-check.log') | Out-Null
     Assert-ManagedImports $python $venvRoot
     Assert-ManagedDistributionIntegrity $python $venvRoot
     Assert-PackagedDaclAcceptance $python $root
@@ -4101,14 +4100,14 @@ package main
 import "fmt"
 
 func main() {
-	fmt.Println("opencode 1.18.11")
+	fmt.Println("opencode 2.1.4")
 }
 "@
             } else { @"
 using System;
 public static class OpenCodeVersionFixture {
     public static int Main(string[] arguments) {
-        Console.WriteLine("opencode 1.18.11");
+        Console.WriteLine("opencode 2.1.4");
         return 0;
     }
 }
@@ -4170,7 +4169,7 @@ public static class OpenCodeVersionFixture {
         # starts slowly under on-access scanning), so a tighter fixture-side
         # deadline would assert a start-up speed the product never requires.
         $openCodeVersion = Invoke-WindowsNativeProcess $openCodePath @('--version') -TimeoutSeconds 30
-        if ($openCodeVersion.StdOut.Trim() -ne 'opencode 1.18.11') {
+        if ($openCodeVersion.StdOut.Trim() -ne 'opencode 2.1.4') {
             throw "OpenCode fixture returned an unexpected version: $($openCodeVersion.StdOut)"
         }
         Assert-WizardCodexPolicyFixture $codexPath
@@ -6598,9 +6597,9 @@ function Get-WindowsReleaseClientSpecifications {
         },
         [pscustomobject]@{
             Connector = 'opencode'
-            Version = '1.18.11'
-            Package = 'opencode-ai'
-            Manifest = 'node_modules\opencode-ai\package.json'
+            Version = '2.1.4'
+            Package = '@opencode/cli'
+            Manifest = 'node_modules\@opencode\cli\package.json'
             Command = 'opencode.cmd'
         }
     )

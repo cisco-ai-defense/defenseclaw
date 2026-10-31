@@ -20,17 +20,56 @@ import Foundation
 
 /// Bounded read-only projections of the 1.0 TUI's IDE and agent identity rows.
 enum RuntimeV1Inventory {
+    /// Enabled cell for an IDE plugin row, as `defenseclaw agent ide-plugins`
+    /// and the TUI word it (inventory_state.IDE_PLUGIN_ENABLED_LABELS).
+    static let idePluginEnabledLabels = [
+        "enabled": "yes", "disabled": "no", "client_side_unknown": "client side", "unknown": "unknown",
+    ]
+    /// IDE cell suffix for a plugin of a remote install (IDE_REMOTE_LABELS).
+    static let ideRemoteLabels = ["ssh_server": "ssh", "jetbrains_remote_dev": "remote dev"]
+
+    static func idePluginEnabledLabel(_ raw: String) -> String {
+        raw.isEmpty ? "unknown" : (idePluginEnabledLabels[raw] ?? raw)
+    }
+
+    /// "<product> <version> (<location>)" (the TUI's IDEPluginRow.ide_label).
+    static func ideLabel(product: String, version: String, scope: String, remoteKind: String) -> String {
+        var label = version.isEmpty ? product : "\(product) \(version)"
+        let location = remoteKind.isEmpty ? (scope == "remote" ? "remote" : "") : (ideRemoteLabels[remoteKind] ?? "remote")
+        if !location.isEmpty { label += " (\(location))" }
+        return label
+    }
+
     static func ideRows(_ document: [String: Any]) -> [InventoryItem] {
         ((document["ide_plugins"] as? [[String: Any]]) ?? []).prefix(10_000).map { row in
             let name = text(row, "plugin_id", "display_name")
             let user = text(row, "user", "user_name", "user_id")
             let product = text(row, "ide_product", "ide_family")
+            let ide = ideLabel(product: product, version: text(row, "ide_version"), scope: text(row, "scope"), remoteKind: text(row, "remote_kind"))
             let fields = projectedFields(row, keys: ["plugin_id", "display_name", "publisher", "version", "user", "user_name", "user_id", "ide_family", "ide_product", "ide_version", "enabled", "enabled_source", "scope", "remote_kind", "is_ai", "ai_signature_id", "installed_at", "last_seen", "fingerprint"])
             return InventoryItem(category: .idePlugins, name: name, version: text(row, "version"),
                 path: [user, product, text(row, "scope"), text(row, "fingerprint")].joined(separator: "/"),
-                detail: [product, user, (row["is_ai"] as? Bool) == true ? "AI extension" : "", text(row, "remote_kind")].filter { !$0.isEmpty }.joined(separator: " · "),
-                status: text(row, "enabled").isEmpty ? "unknown" : text(row, "enabled"), fields: fields)
+                detail: [ide, user, (row["is_ai"] as? Bool) == true ? "AI extension" : ""].filter { !$0.isEmpty }.joined(separator: " · "),
+                status: idePluginEnabledLabel(text(row, "enabled")), fields: fields)
         }
+    }
+
+    /// Whether a document's IDE plugin inventory stopped at its bound
+    /// (summary.ide_plugins.partial): the tab count reads "N+".
+    static func idePluginsPartial(_ document: [String: Any]) -> Bool {
+        (((document["summary"] as? [String: Any])?["ide_plugins"] as? [String: Any])?["partial"] as? Bool) ?? false
+    }
+
+    /// The summary's IDE plugin line, "N (X AI, Y disabled, Z users)"
+    /// (inventory_state._ide_count_summary).
+    static func ideCountSummary(_ rows: [InventoryItem]) -> String {
+        let plugins = rows.filter { $0.category == .idePlugins }
+        let ai = plugins.filter { $0.detail.contains("AI extension") }.count
+        let disabled = plugins.filter { $0.status == "no" }.count
+        let users = Set(plugins.compactMap { item in
+            ["User", "User Name", "User Id"].lazy.compactMap { label in item.fields.first { $0.label == label }?.value }.first { !$0.isEmpty }
+        }).count
+        return "\(plugins.count) (\(ai) AI, \(disabled) disabled, \(users) user\(users == 1 ? "" : "s"))"
     }
 
     static func agentRows(_ output: String) -> (items: [InventoryItem], note: String)? {

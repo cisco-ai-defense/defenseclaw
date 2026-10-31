@@ -1544,6 +1544,19 @@ func removeHookStateOrderKey(order *[]string, key string) {
 	}
 }
 
+// evictOldestHookToolInvocationLocked drops the oldest pending tool
+// invocation. The caller holds llmPromptMu and checked the order is not empty.
+func (a *APIServer) evictOldestHookToolInvocationLocked() {
+	oldest := a.hookToolInvocationOrder[0]
+	a.hookToolInvocationOrder = a.hookToolInvocationOrder[1:]
+	queue := a.hookToolInvocations[oldest]
+	if len(queue) <= 1 {
+		delete(a.hookToolInvocations, oldest)
+	} else {
+		a.hookToolInvocations[oldest] = queue[1:]
+	}
+}
+
 func (a *APIServer) evictOldestHookPhaseStateLocked() bool {
 	if len(a.hookPhaseStateOrder) == 0 {
 		return false
@@ -2313,14 +2326,7 @@ func (a *APIServer) rememberHookToolInvocation(meta llmEventMeta, tool, argument
 		return pending.id
 	}
 	for len(a.hookToolInvocationOrder) >= hookPromptCacheMaxEntries {
-		oldest := a.hookToolInvocationOrder[0]
-		a.hookToolInvocationOrder = a.hookToolInvocationOrder[1:]
-		queue := a.hookToolInvocations[oldest]
-		if len(queue) <= 1 {
-			delete(a.hookToolInvocations, oldest)
-		} else {
-			a.hookToolInvocations[oldest] = queue[1:]
-		}
+		a.evictOldestHookToolInvocationLocked()
 	}
 	startedAt := time.Now()
 	id := stableLLMEventID(

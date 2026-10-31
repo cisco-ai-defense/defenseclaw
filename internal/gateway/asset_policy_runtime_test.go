@@ -118,7 +118,7 @@ func TestEvaluateRuntimeSkillAssetPolicyRespectsRuntimeDetectionDisabled(t *test
 		{SkillName: "epa-deny", ToolName: "Skill", Surface: "hook", Matched: true},
 		{TargetType: "plugin", SkillName: "epa-plug-deny", Surface: "prompt_expansion", Matched: true},
 	} {
-		decision, matched := api.runtimeSkillAssetPolicyDecision("claudecode", probe)
+		decision, matched := api.runtimeSkillAssetPolicyDecision(context.Background(), "claudecode", probe)
 		if !matched || decision.Action != "block" || decision.Source != "admin-deny" {
 			t.Fatalf("%s %s: matched=%v decision=%+v, want an admin-deny block", probe.TargetType, probe.SkillName, matched, decision)
 		}

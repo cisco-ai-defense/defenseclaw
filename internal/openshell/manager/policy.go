@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -35,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -70,6 +70,8 @@ func (m *Manager) resolveBox(b *box) (*packs.Effective, error) {
 // policy no longer resolves fails closed (policyUnresolved) until it does
 // again (policyRestored).
 func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violation, error) {
+	b.resolveMu.Lock()
+	defer b.resolveMu.Unlock()
 	m.mu.Lock()
 	rec, unrecorded := b.rec, b.unrecorded
 	m.mu.Unlock()
@@ -1011,7 +1013,7 @@ func (m *Manager) violationErrorFor(ctx context.Context, err error, sandbox stri
 
 // policyTarget is the shape of a policy record's target reference (the
 // audit recorder refuses anything else).
-var policyTarget = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+var policyTarget = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
 // recordAdminRefusal records a request the organization's policy refused as
 // a no-change policy record: of the sandbox when it exists (or is being

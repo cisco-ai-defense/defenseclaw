@@ -57,7 +57,7 @@
               "type": "null"
             },
             {
-              "$ref": "#/$defs/ref"
+              "$ref": "#/$defs/currentRef"
             }
           ]
         },
@@ -94,6 +94,10 @@
         "sessions_restart_required": {
           "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/sessionRestartStatus",
           "description": "Agent sessions that must restart to pick up the confirmed bundle. A status refused before the live session scan (not_managed, state_invalid) reports state unknown, count 0 and no entries."
+        },
+        "enforcement_pending": {
+          "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/enforcementPending",
+          "description": "sessions_restart_required as a count and connector names, without user names. Omitted when the scan found none or is unknown."
         },
         "alert_only_rule_count": {
           "type": "integer",
@@ -278,6 +282,63 @@
         "delivery_id": {
           "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/deliveryId",
           "description": "The --delivery-id of the apply that confirmed this bundle (guide section 2.6), absent when it had none. The state keeps it, so it outlives that receipt being pruned."
+        }
+      }
+    },
+    "currentRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "bundleStatusRef (internal/cli/enterprise_bundle_status.go): the current bundle record of bundle-state.json unchanged, plus min_product_version (from 1.0.6).",
+      "required": [
+        "bundle_id",
+        "version",
+        "manifest_sha256",
+        "dir"
+      ],
+      "properties": {
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "dir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "signer_key_id": {
+          "type": "string"
+        },
+        "effective_policy_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "config_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "confirmed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "restart_required": {
+          "const": true
+        },
+        "delivery_id": {
+          "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/deliveryId",
+          "description": "The --delivery-id of the apply that confirmed this bundle (guide section 2.6), absent when it had none. The state keeps it, so it outlives that receipt being pruned."
+        },
+        "min_product_version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z.-]{1,64})?(\\+[0-9A-Za-z.-]{1,64})?$",
+          "description": "The release floor the confirmed bundle signs (its min_product_version). A package or Setup below it is refused (product_floor_refused); compare it with the target version before dispatching a downgrade. Absent when the bundle sets none, when the confirmed manifest cannot be read, or on builds before 1.0.6."
         }
       }
     },

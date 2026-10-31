@@ -1144,7 +1144,7 @@ func mainAPIRoutePaths(t *testing.T) []string {
 		"/enforce/allow", "/enforce/blocked", "/enforce/allowed", "/alerts", "/audit/event",
 		"/policy/evaluate", "/policy/reload", "/skills", "/mcps", "/tools/catalog",
 		"/v1/skill/scan", "/v1/plugin/scan", "/v1/mcp/scan", "/v1/skill/fetch", "/v1/guardrail/event",
-		"/v1/guardrail/evaluate", "/v1/guardrail/config", "/api/v1/guardrail/profiles/resolve",
+		"/v1/guardrail/evaluate", "/v1/guardrail/config", "/api/v1/guardrail/profiles/resolve", identityRefreshPath,
 		"/api/v1/acp/challenge", "/api/v1/acp/evaluate",
 		"/v1/acp/catalog", "/v1/acp/profiles", "/api/v1/inspect/tool", "/api/v1/inspect/request",
 		"/api/v1/inspect/response", "/api/v1/inspect/tool-response", "/api/v1/scan/code",
@@ -1201,6 +1201,7 @@ func routesRegisteredInRun(t *testing.T) []string {
 		"alertAcknowledgementV8Path":                    alertAcknowledgementV8Path,
 		"destinationtest.EndpointPath":                  destinationtest.EndpointPath,
 		"enterprisepolicy.ForeignHookSessionPathPrefix": enterprisepolicy.ForeignHookSessionPathPrefix,
+		"identityRefreshPath":                           identityRefreshPath,
 	}
 	var resolve func(ast.Expr) string
 	resolve = func(expr ast.Expr) string {
@@ -1561,7 +1562,8 @@ func runCopyModeHooks(t *testing.T, root string) copyModeHookRun {
 }
 
 // normalizeCopyModeHookResponse drops the per-request identifiers from a hook
-// response so two runs can be compared.
+// response so two runs can be compared. The agent ids belong to each run's
+// own sandbox binding, so they differ between runs too.
 func normalizeCopyModeHookResponse(t *testing.T, body []byte) string {
 	t.Helper()
 	var value any
@@ -1574,7 +1576,7 @@ func normalizeCopyModeHookResponse(t *testing.T, body []byte) string {
 		case map[string]any:
 			for key, child := range typed {
 				switch key {
-				case "evaluation_id", "request_id", "trace_id", "event_id":
+				case "evaluation_id", "request_id", "trace_id", "event_id", "agent_identity_id", "agent_instance_id":
 					delete(typed, key)
 				default:
 					typed[key] = scrub(child)

@@ -21,10 +21,11 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 var (
@@ -277,13 +278,13 @@ const (
 )
 
 var (
-	connectorPattern   = regexp.MustCompile(`^[a-z][a-z0-9]{0,31}$`)
-	sandboxNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	sandboxIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	contractIDPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	uidPattern         = regexp.MustCompile(`^[0-9]{1,10}$`)
-	userNamePattern    = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$`)
-	bindingIDPattern   = regexp.MustCompile(`^sb_[0-9a-f]{32}$`)
+	connectorPattern   = lazyregexp.New(`^[a-z][a-z0-9]{0,31}$`)
+	sandboxNamePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	sandboxIDPattern   = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	contractIDPattern  = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	uidPattern         = lazyregexp.New(`^[0-9]{1,10}$`)
+	userNamePattern    = lazyregexp.New(`^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$`)
+	bindingIDPattern   = lazyregexp.New(`^sb_[0-9a-f]{32}$`)
 )
 
 // normalize validates s and returns its canonical form: connector folded,

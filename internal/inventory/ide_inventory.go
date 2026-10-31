@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -753,7 +753,7 @@ func attributeUserScanIDE(inv *IDEInventory, namespace func(string) string, uid,
 }
 
 var (
-	ideTokenPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
+	ideTokenPattern = lazyregexp.New(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 	ideFamilies     = map[string]bool{
 		ideplugins.FamilyVSCode: true, ideplugins.FamilyJetBrains: true, ideplugins.FamilyVisualStudio: true,
 		ideplugins.FamilyZed: true, ideplugins.FamilyEclipse: true, ideplugins.FamilyVim: true,

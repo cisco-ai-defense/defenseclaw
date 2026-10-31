@@ -535,9 +535,9 @@ func TestHookSocketProbesReadTheGateway(t *testing.T) {
 func TestStatusWarnsWhenTheAuditFilesystemIsNearlyFull(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	h.env.DiskSpace = func(string) (uint64, uint64, uint64, error) { return 4 << 20, 10 << 30, 1, nil }
+	h.env.DiskSpace = func(string) (uint64, uint64, uint64, error) { return 100 << 20, 10 << 30, 1, nil }
 	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeDiskSpaceLow)
-	if !strings.Contains(got, h.env.Layout.DataDir+" has 4.0 MiB free") || strings.Count(got, "MiB free") != 1 {
+	if !strings.Contains(got, h.env.Layout.DataDir+" has 100.0 MiB free") || strings.Count(got, "MiB free") != 1 {
 		t.Fatalf("status does not warn once about the nearly full filesystem: %q", got)
 	}
 }

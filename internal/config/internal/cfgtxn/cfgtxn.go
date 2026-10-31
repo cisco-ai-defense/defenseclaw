@@ -31,9 +31,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -96,6 +97,12 @@ type GenerationState struct {
 	BundleID      string `json:"bundle_id,omitempty"`
 	BundleVersion uint64 `json:"bundle_version,omitempty"`
 	SignerKeyID   string `json:"signer_key_id,omitempty"`
+	// BundleDir is the name of the store version directory that holds this
+	// bundle (1.0.6). The bundle store is not listable by the gateway's
+	// service account on Linux and macOS, so the signed-activation check
+	// opens this directory by name. Absent on a record an earlier build
+	// wrote.
+	BundleDir string `json:"bundle_dir,omitempty"`
 	// Transaction* identifies the attempted bundle on a rollback generation.
 	// Bundle* above continues to identify the policy that is now enforcing.
 	TransactionActor         string `json:"transaction_actor,omitempty"`
@@ -115,6 +122,7 @@ type Writer struct {
 	BundleID                 string
 	BundleVersion            uint64
 	SignerKeyID              string
+	BundleDir                string
 	TransactionActor         string
 	TransactionBundleID      string
 	TransactionBundleVersion uint64
@@ -147,7 +155,7 @@ func ReadGenerationState(configPath string) (GenerationState, error) {
 	return state, nil
 }
 
-var generationCounter = regexp.MustCompile(`"generation"\s*:\s*([0-9]{1,20})`)
+var generationCounter = lazyregexp.New(`"generation"\s*:\s*([0-9]{1,20})`)
 
 // salvageGeneration reads the "generation" counter out of bytes that are
 // not valid JSON. It returns 0 when there is none.
@@ -354,6 +362,7 @@ func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, 
 		BundleID:                 w.BundleID,
 		BundleVersion:            w.BundleVersion,
 		SignerKeyID:              w.SignerKeyID,
+		BundleDir:                w.BundleDir,
 		TransactionActor:         w.TransactionActor,
 		TransactionBundleID:      w.TransactionBundleID,
 		TransactionBundleVersion: w.TransactionBundleVersion,

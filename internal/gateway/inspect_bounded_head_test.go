@@ -21,7 +21,9 @@ import (
 // idle 64-core box scans 8 KiB in about 100 ms; a 450 KiB prefix, what the
 // hooks sent before, took 4.6 s and got 504).
 func TestGenericInspectEightKiBBoundedHeadGetsAVerdict(t *testing.T) {
-	head := strings.Repeat(`ls -la /tmp/project && echo build `, 8192/34)
+	// One statement: a head of many statements is over the statement
+	// budget, a block of its own that the review keeps (GAP-0146).
+	head := "echo" + strings.Repeat(` build`, 8192/6)
 	args, err := json.Marshal(map[string]string{"command": head})
 	if err != nil {
 		t.Fatal(err)

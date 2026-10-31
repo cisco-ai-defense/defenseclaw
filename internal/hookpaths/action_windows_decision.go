@@ -109,15 +109,20 @@ func actionWindowsProtected(value, cwd, home string, readOnly bool) (bool, bool)
 type actionWindowsGrammar uint8
 
 const (
-	// actionWindowsPlainGrammar reads only ASCII quotes, with no comment and
-	// no escape rule. A shell other than PowerShell (Git Bash, cmd) may run a
-	// command sent from a Windows home, and it reads comments, smart quotes
-	// and the backtick differently; a protected decision holds when either
-	// reading finds the target (GAP-1500 refix 2).
+	// actionWindowsPlainGrammar reads only ASCII quotes, with no escape rule.
+	// A shell other than PowerShell (Git Bash, cmd) may run a command sent
+	// from a Windows home, and it reads comments, smart quotes and the
+	// backtick differently; a protected decision holds when either reading
+	// finds the target (GAP-1500 refix 2).
 	actionWindowsPlainGrammar actionWindowsGrammar = 1 << iota
 	// actionWindowsLiteralDollar keeps a $ inside a single-quoted string or
 	// an @'...'@ here-string from reading as a home variable ($ -> @).
 	actionWindowsLiteralDollar
+	// actionWindowsPlainComments gives the plain reading the comment rule
+	// Git Bash and PowerShell share (actionWindowsPlainComment), for a call
+	// whose shell is known to be one of them (GAP-1982). A call of unknown
+	// dialect or a cmd call keeps every word.
+	actionWindowsPlainComments
 )
 
 // actionWindowsScanResult is one reading of a command. quoted[i] reports a
@@ -127,6 +132,37 @@ type actionWindowsScanResult struct {
 	literal []bool
 	quoted  []bool
 	ok      bool
+}
+
+// actionWindowsPlainComment reports a # at i that starts a comment in Git
+// Bash and in PowerShell alike, and the end of its line. In Git Bash a #
+// comments out the rest of its line where it starts a word: after a line
+// end, an unescaped blank or ; | & (a carriage return is part of a word
+// there, and a blank after a backslash is escaped). cmd has no comment, so
+// the text after the # stays words of cmd's command; it is a comment only
+// when cmd cannot reach a file through it either: no cmd operator or
+// variable (& | < > ^ % !) and no word that starts at a root or a drive
+// (~ and $HOME are literal in cmd). A protected path in a plain comment
+// was read as a target of the command before it (GAP-1982).
+func actionWindowsPlainComment(command string, i int) (end int, ok bool) {
+	if i > 0 && strings.IndexByte(" \t\n;|&", command[i-1]) < 0 ||
+		i > 1 && (command[i-1] == ' ' || command[i-1] == '\t') && command[i-2] == '\\' {
+		return 0, false
+	}
+	end = len(command)
+	if newline := strings.IndexByte(command[i:], '\n'); newline >= 0 {
+		end = i + newline
+	}
+	text := command[i:end]
+	if strings.ContainsAny(text, "&|<>^%!") {
+		return 0, false
+	}
+	for _, field := range strings.Fields(text) {
+		if field[0] == '\\' || field[0] == '/' || len(field) > 1 && field[1] == ':' {
+			return 0, false
+		}
+	}
+	return end, true
 }
 
 // actionWindowsWords treats a quoted command body as one word and emits each
@@ -150,6 +186,7 @@ func actionWindowsWords(command string) (words []string, literal []bool, ok bool
 func actionWindowsScan(command string, grammar actionWindowsGrammar) (result actionWindowsScanResult) {
 	plain := grammar&actionWindowsPlainGrammar != 0
 	literalDollar := grammar&actionWindowsLiteralDollar != 0
+	plainComments := plain && grammar&actionWindowsPlainComments != 0
 	var word strings.Builder
 	var quote byte
 	hereLen := -1
@@ -221,6 +258,12 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 			}
 			i = escaped(i)
 			continue
+		}
+		if plainComments && c == '#' && word.Len() == 0 && !quoted {
+			if end, ok := actionWindowsPlainComment(command, i); ok {
+				i = end - 1
+				continue
+			}
 		}
 		if !plain && word.Len() == 0 && !quoted && (i == 0 || strings.IndexByte(" \t\r\n;|&", command[i-1]) >= 0) {
 			if c == '#' {
@@ -632,7 +675,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 		return "nested-shell"
 	}
 	if program == "git" {
-		return actionGitDecision(words, cwd, home, depth+1)
+		return actionGitDecision(words, cwd, home, depth+1, false)
 	}
 	if strings.Contains(" env nice ionice timeout stdbuf setsid chroot unshare nsenter flock sudo su script xargs find parallel busybox time nohup command exec ", " "+program+" ") {
 		return actionWindowsWrapperDecision(program, words, cwd, home, depth+1)

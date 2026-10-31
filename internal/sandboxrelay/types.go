@@ -43,7 +43,7 @@ const (
 	PathPrefix          = "/api/v1/sandbox/"
 	PathSettings        = "/api/v1/sandbox/settings"
 	PathPolicyResolve   = "/api/v1/sandbox/policy/resolve"
-	PathRegistrations   = "/api/v1/sandbox/registrations/" // + {id}/bind, {id}/state, {id}/deleted
+	PathRegistrations   = "/api/v1/sandbox/registrations/" // + {id}/bind, {id}/state, {id}/restart, {id}/deleted
 	PathPolicyCurrent   = "/api/v1/sandbox/policy/current" // ?registration=ID
 	PathPolicyExplain   = "/api/v1/sandbox/policy/explain"
 	PathPolicyTest      = "/api/v1/sandbox/policy/test"
@@ -59,7 +59,12 @@ const (
 	// RegistrationStateSub is POST registrations/{id}/state: a StateReport
 	// answered with the CurrentPolicy policy/current gives.
 	RegistrationStateSub = "/state"
-	RegistrationQuery    = "registration"
+	// RegistrationRestartSub is POST registrations/{id}/restart: the
+	// stopped sandbox of a bound registration starts again under a new
+	// registration, answered with its RegistrationView. A state report
+	// never revives a registration whose sandbox was reported stopped.
+	RegistrationRestartSub = "/restart"
+	RegistrationQuery      = "registration"
 )
 
 // Header names and the values the relay sets.
@@ -546,6 +551,13 @@ type CurrentPolicy struct {
 	// a regroup re-matched the registration, status and refusals name it,
 	// not the profile the sandbox was created under (#1199).
 	Profile string `json:"profile,omitempty"`
+	// PinnedProfile is the profile the sandbox was created under while its
+	// floor is still pinned to it: a profile-assignment change moved the
+	// registration to Profile, and the created profile's floor still
+	// tightens it. Status and refusals name both, so a quoted rule points at
+	// the profile it comes from (GAP-0285). "" when Profile's floor alone
+	// applies, or from a gateway that does not say.
+	PinnedProfile string `json:"pinned_profile,omitempty"`
 	// MinProfile is the min_profile of the caller's floor now. It is not a
 	// live field: a running sandbox keeps the profile it started with, and
 	// a sandbox that starts again takes this one, never the looser one it

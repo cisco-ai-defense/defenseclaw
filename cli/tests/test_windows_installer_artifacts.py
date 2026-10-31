@@ -443,6 +443,73 @@ def test_site_packages_normalization_removes_cache_paths_and_repairs_record(tmp_
     )
 
 
+def _pe_bytes(machine: int) -> bytes:
+    header = bytearray(b"MZ" + b"\0" * 62)
+    header[0x3C:0x40] = (64).to_bytes(4, "little")
+    return bytes(header) + b"PE\0\0" + machine.to_bytes(2, "little") + b"\0" * 18
+
+
+def test_foreign_pe_prune_drops_pips_non_x64_launchers_and_repairs_record(tmp_path: Path) -> None:
+    # MCP Scanner 4.8 -> pip-audit -> pip vendors distlib launchers for every
+    # Windows architecture; Setup refuses any non-x64 PE in its payload.
+    site = tmp_path / "site-packages"
+    distlib = site / "pip" / "_vendor" / "distlib"
+    metadata = site / "pip-26.2.2.dist-info"
+    distlib.mkdir(parents=True)
+    metadata.mkdir()
+    machines = {"t32.exe": 0x014C, "t64.exe": 0x8664, "t64-arm.exe": 0xAA64,
+                "w32.exe": 0x014C, "w64.exe": 0x8664, "w64-arm.exe": 0xAA64}
+    for name, machine in machines.items():
+        (distlib / name).write_bytes(_pe_bytes(machine))
+    (distlib / "scripts.py").write_text("X = 1\n", encoding="utf-8")
+    (metadata / "RECORD").write_text(
+        "".join(f"pip/_vendor/distlib/{name},,\n" for name in sorted(machines))
+        + "pip/_vendor/distlib/scripts.py,,\npip-26.2.2.dist-info/RECORD,,\n",
+        encoding="utf-8",
+    )
+
+    result = artifacts.prune_foreign_portable_executables(site)
+
+    assert result == {
+        "removed_foreign_pe": [
+            "pip/_vendor/distlib/t32.exe",
+            "pip/_vendor/distlib/t64-arm.exe",
+            "pip/_vendor/distlib/w32.exe",
+            "pip/_vendor/distlib/w64-arm.exe",
+        ],
+        "rewritten_records": 1,
+    }
+    assert sorted(path.name for path in distlib.iterdir()) == ["scripts.py", "t64.exe", "w64.exe"]
+    assert (metadata / "RECORD").read_text(encoding="utf-8") == (
+        "pip/_vendor/distlib/t64.exe,,\npip/_vendor/distlib/w64.exe,,\n"
+        "pip/_vendor/distlib/scripts.py,,\npip-26.2.2.dist-info/RECORD,,\n"
+    )
+    # Every PE left is Windows x64, which is what Setup's inventory check demands.
+    for path in site.rglob("*.exe"):
+        assert artifacts._pe_machine(path) == artifacts.IMAGE_FILE_MACHINE_AMD64
+
+
+@pytest.mark.parametrize("machine", [0x014C, 0xAA64])
+def test_foreign_pe_prune_refuses_an_unlisted_non_x64_pe(tmp_path: Path, machine: int) -> None:
+    site = tmp_path / "site-packages"
+    (site / "example").mkdir(parents=True)
+    (site / "example" / "helper.dll").write_bytes(_pe_bytes(machine))
+
+    with pytest.raises(artifacts.ArtifactError, match=r"example/helper\.dll"):
+        artifacts.prune_foreign_portable_executables(site)
+    assert (site / "example" / "helper.dll").exists()
+
+
+def test_builder_prunes_foreign_pes_before_staging_and_inventory() -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    prune = "'-I', $WindowsArtifactHelper, 'prune-foreign-pe', '--root', $sitePackages"
+    assert build.count(prune) == 1
+    position = build.index(prune)
+    assert build.index("'-I', $WindowsArtifactHelper, 'normalize-site', '--root', $sitePackages") < position
+    assert position < build.index("foreach ($item in Get-ChildItem -LiteralPath $sitePackages -Force)")
+    assert position < build.index("foreach ($file in Get-ChildItem -LiteralPath $sitePackages -File -Recurse")
+
+
 def test_builder_binds_authenticode_inventory_to_payload_provenance_and_sbom() -> None:
     build = BUILD_PS1.read_text(encoding="utf-8")
     helper = AUTHENTICODE_PS1.read_text(encoding="utf-8")
@@ -463,8 +530,11 @@ def test_builder_pins_a_project_supported_embedded_python_and_checks_metadata() 
     assert '$PythonVersion = "3.13.15"' in build
     assert '$PythonTargetVersion = "3.13"' in build
     assert '$PythonEmbedSha256 = "D1F04D990AEE1253D8569E8E5104E30FA9F5FA830899F14843448872D936A2CF"' in build
-    assert "dist.metadata.get('Requires-Python')" in build
-    assert "SpecifierSet(requires_python).contains(platform.python_version(), prereleases=True)" in build
+    # The metadata check is the shared checker (GAP-0020 LiteLLM override allowance).
+    assert "Invoke-CheckedProcess $validationPython @('-I', $DependencyMetadataChecker)" in build
+    checker = (ROOT / "scripts" / "check_python_dependency_metadata.py").read_text(encoding="utf-8")
+    assert 'dist.metadata.get("Requires-Python")' in checker
+    assert "SpecifierSet(requires_python).contains(python_version, prereleases=True)" in checker
     assert "if not magika_result.ok or not magika_result.output.is_text:" in build
 
 
@@ -936,10 +1006,15 @@ def test_offline_chain_and_timeout_helpers_are_strictly_bounded() -> None:
 
 
 def test_binary_identity_accepts_the_gateway_capability_members() -> None:
-    # The gateway's --version-json reports both capabilities in packaged
-    # 1.0.4 binaries. The build identity check must accept that shape.
+    # The gateway's --version-json reports its capabilities (secret_set_bundle
+    # from 1.0.4, identity_refresh from 1.0.6). The build identity check must
+    # accept that shape and still type-check each capability.
     identity = BINARY_IDENTITY_PS1.read_text(encoding="utf-8")
-    assert "$allowed = @($required + 'built' + 'management_contract' + 'secret_set_bundle')" in identity
+    assert (
+        "$allowed = @($required + 'built' + 'management_contract' + 'secret_set_bundle' + 'identity_refresh')"
+        in identity
+    )
+    assert "invalid identity_refresh capability" in identity
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows process identity")
@@ -959,6 +1034,8 @@ def test_stale_or_off_commit_distroot_binary_identity_is_rejected(tmp_path: Path
         '"commit": os.Getenv("DC_IDENTITY_COMMIT")}; '
         'if os.Getenv("DC_IDENTITY_SECRET_BUNDLE") == "1" { '
         'identity["secret_set_bundle"] = true }; '
+        'if os.Getenv("DC_IDENTITY_REFRESH") == "1" { '
+        'identity["identity_refresh"] = true }; '
         '_ = json.NewEncoder(os.Stdout).Encode(identity) }\n',
         encoding="utf-8",
     )
@@ -1009,6 +1086,7 @@ def test_stale_or_off_commit_distroot_binary_identity_is_rejected(tmp_path: Path
         "DC_IDENTITY_VERSION": "1.2.3",
         "DC_IDENTITY_COMMIT": expected_commit,
         "DC_IDENTITY_SECRET_BUNDLE": "1",
+        "DC_IDENTITY_REFRESH": "1",
     })
     accepted = subprocess.run(
         [pwsh, "-NoProfile", "-NonInteractive", "-Command", command],

@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/contracttest"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
 // verifyV2Device signs a bundle whose config names the credential
@@ -148,6 +149,25 @@ func TestManagementContractBundleVerifyV2(t *testing.T) {
 			if strings.Contains(out, "key-2") {
 				t.Fatalf("verify printed a credential value:\n%s", out)
 			}
+			// secret_refs is present exactly with secret_refs_missing and
+			// carries names and booleans only (private #16).
+			switch {
+			case tc.missing == nil && res.SecretRefs != nil:
+				t.Fatalf("secret_refs = %v, want absent", *res.SecretRefs)
+			case tc.missing != nil:
+				want := []enterprisebundle.SecretRefState{{Name: "ai-defense-api-key", Required: true,
+					Present: len(tc.missing) == 0, ValueMatch: len(tc.missing) == 0 && len(tc.mismatch) == 0}}
+				if res.SecretRefs == nil || !slices.Equal(*res.SecretRefs, want) {
+					t.Fatalf("secret_refs = %v, want %v:\n%s", res.SecretRefs, want, out)
+				}
+				for _, entry := range doc["secret_refs"].([]any) {
+					for key := range entry.(map[string]any) {
+						if strings.Contains(key, "sha256") || strings.Contains(key, "digest") || key == "value" {
+							t.Fatalf("secret_refs entry carries %s:\n%s", key, out)
+						}
+					}
+				}
+			}
 			switch {
 			case tc.restart == "" && res.RestartPrediction != nil:
 				t.Fatalf("restart_prediction = %+v, want absent", res.RestartPrediction)
@@ -197,6 +217,9 @@ func TestManagementContractBundleVerifyV2(t *testing.T) {
 	if _, ok := doc["secret_refs_mismatch"]; ok {
 		t.Fatalf("secret_refs_mismatch off a device: %s", out)
 	}
+	if _, ok := doc["secret_refs"]; ok {
+		t.Fatalf("secret_refs off a device: %s", out)
+	}
 	if _, ok := doc["restart_prediction"]; ok {
 		t.Fatalf("restart_prediction off a device: %s", out)
 	}
@@ -206,4 +229,5 @@ func TestManagementContractBundleVerifyV2(t *testing.T) {
 func TestManagementContractBundleVerifyDescribesEveryMember(t *testing.T) {
 	contracttest.RequireMembers(t, "bundle-verify.schema.json", reflect.TypeOf(bundleVerifyResult{}))
 	contracttest.RequireMembers(t, "bundle-verify.schema.json#/$defs/restartPrediction", reflect.TypeOf(bundleRestartPrediction{}))
+	contracttest.RequireMembers(t, "bundle-verify.schema.json#/$defs/secretRefState", reflect.TypeOf(enterprisebundle.SecretRefState{}))
 }

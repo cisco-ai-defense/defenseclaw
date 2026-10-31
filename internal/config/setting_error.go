@@ -12,9 +12,10 @@ package config
 
 import (
 	"errors"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // SettingError is a runtime-loader refusal of one setting (a guardrail
@@ -79,7 +80,7 @@ func profileSettingError(name string, err error) error {
 }
 
 // enterpriseSettingPath finds the enterprise.* setting a refusal names.
-var enterpriseSettingPath = regexp.MustCompile(`\benterprise(?:\.[a-z0-9_]+)+`)
+var enterpriseSettingPath = lazyregexp.New(`\benterprise(?:\.[a-z0-9_]+)+`)
 
 // enterpriseSettingError makes a refusal of the enterprise block a
 // SettingError at the first enterprise.* setting its text names, so `config

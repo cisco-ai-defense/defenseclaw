@@ -16,6 +16,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
+// RetentionStartupDelay is the wait of a standalone gateway between store
+// readiness and its first retention run. The first hook calls after a start
+// (after an upgrade or a reboot, with a cold page cache) answer from the same
+// audit.db; a prune that read its old pages at that moment pushed managed
+// answers past their budget (GAP-1790, #1384).
+const RetentionStartupDelay = time.Minute
+
 // RetentionControllerState is a bounded lifecycle/health label. It never
 // contains a database error, path, SQL text, or retained record content.
 type RetentionControllerState string
@@ -51,6 +58,11 @@ type RetentionControllerStatus struct {
 	LastBatchCount     int64
 	LastRunDuration    time.Duration
 	LastRunCompletedAt time.Time
+
+	// MaxStoreMB is the audit store size cap (observability.local.max_store_mb,
+	// 0: none). Managed status surfaces show it with the retention, because
+	// the per-user status that shows it is refused there (GAP-0141).
+	MaxStoreMB int64
 }
 
 // RetentionControllerReporter receives bounded status changes. Implementations
@@ -67,6 +79,9 @@ type RetentionControllerReporter interface {
 type RetentionControllerOptions struct {
 	SecureClient bool
 	Ready        <-chan struct{}
+	// StartupDelay is the wait between readiness and the first run. A
+	// standalone gateway sets RetentionStartupDelay; zero runs at once.
+	StartupDelay time.Duration
 	Scheduler    audit.RetentionScheduler
 	Clock        func() time.Time
 	Reporter     RetentionControllerReporter
@@ -76,6 +91,13 @@ type retentionReaper interface {
 	RetentionDays() int64
 	UpdateRetentionDays(int64) error
 	Run(context.Context) (audit.RetentionRunResult, error)
+}
+
+// retentionStoreCapper is a reaper with the opt-in size cap
+// (observability.local.max_store_mb).
+type retentionStoreCapper interface {
+	MaxStoreMB() int64
+	UpdateMaxStoreMB(int64) error
 }
 
 // RetentionController owns exactly one audit reaper for the process lifetime.
@@ -88,6 +110,7 @@ type RetentionController struct {
 	clock        func() time.Time
 	reporter     RetentionControllerReporter
 	secureClient bool
+	startupDelay time.Duration
 
 	lifecycleMu   sync.Mutex
 	started       bool
@@ -138,7 +161,7 @@ func newRetentionController(
 	controller := &RetentionController{
 		reaper: reaper, ready: options.Ready, scheduler: scheduler,
 		clock: clock, reporter: options.Reporter, secureClient: options.SecureClient,
-		done: make(chan struct{}), policyWake: make(chan struct{}, 1),
+		startupDelay: options.StartupDelay, done: make(chan struct{}), policyWake: make(chan struct{}, 1),
 		stopRequested: make(chan struct{}),
 	}
 	controller.storeStatus(RetentionControllerStatus{
@@ -197,16 +220,27 @@ func (controller *RetentionController) ApplyPolicy(retentionDays int64) error {
 	if controller.stopped {
 		return errors.New("observability retention controller is stopped")
 	}
-	return controller.applyPolicyLocked(retentionDays)
+	return controller.applyPolicyLocked(retentionDays, controller.maxStoreMB())
 }
 
-func (controller *RetentionController) applyPolicyLocked(retentionDays int64) error {
+func (controller *RetentionController) applyPolicyLocked(retentionDays, maxStoreMB int64) error {
 	previous := controller.reaper.RetentionDays()
 	if err := controller.reaper.UpdateRetentionDays(retentionDays); err != nil {
 		return errors.New("observability retention policy is invalid")
 	}
 	if retentionDays > 0 && (previous == 0 || retentionDays < previous) {
 		controller.promptRun = true
+	}
+	if capper, ok := controller.reaper.(retentionStoreCapper); ok {
+		previousCap := capper.MaxStoreMB()
+		if err := capper.UpdateMaxStoreMB(maxStoreMB); err != nil {
+			return errors.New("observability retention policy is invalid")
+		}
+		if maxStoreMB > 0 && (previousCap == 0 || maxStoreMB < previousCap) {
+			controller.promptRun = true
+		}
+	} else if maxStoreMB != 0 {
+		return errors.New("observability retention policy is invalid")
 	}
 	if controller.started {
 		select {
@@ -228,10 +262,12 @@ func (controller *RetentionController) Status() RetentionControllerStatus {
 	if status == nil {
 		return RetentionControllerStatus{
 			State: RetentionStateWaiting, RetentionDays: controller.reaper.RetentionDays(),
+			MaxStoreMB: controller.maxStoreMB(),
 		}
 	}
 	copyStatus := *status
 	copyStatus.RetentionDays = controller.reaper.RetentionDays()
+	copyStatus.MaxStoreMB = controller.maxStoreMB()
 	return copyStatus
 }
 
@@ -337,7 +373,7 @@ func (controller *RetentionController) run(ctx context.Context) {
 		case <-controller.ready:
 		}
 	}
-	if controller.stopWasRequested() {
+	if controller.stopWasRequested() || !controller.waitStartupDelay(ctx) {
 		return
 	}
 	// Policy activations received while readiness was pending are already
@@ -345,7 +381,7 @@ func (controller *RetentionController) run(ctx context.Context) {
 	// latest such policy, so discard their coalesced prompt to avoid a duplicate
 	// immediate run. An activation racing after this point queues normally.
 	controller.consumePreReadinessPolicy()
-	if controller.reaper.RetentionDays() == 0 {
+	if !controller.enabled() {
 		controller.publishStatus(controller.nextStatus(
 			RetentionStateDisabled, RetentionFailureNone, nil,
 		))
@@ -359,7 +395,7 @@ func (controller *RetentionController) run(ctx context.Context) {
 		}
 		interval := audit.RetentionScheduleInterval
 		switch {
-		case controller.reaper.RetentionDays() == 0:
+		case !controller.enabled():
 			interval = 0
 		case controller.backlog.Load() && !controller.secureClient:
 			// The last run stopped at a time budget with work left: rows to
@@ -382,7 +418,7 @@ func (controller *RetentionController) run(ctx context.Context) {
 		}
 		switch wake {
 		case audit.RetentionScheduleTick:
-			if controller.reaper.RetentionDays() > 0 && !controller.runOnce(ctx) {
+			if controller.enabled() && !controller.runOnce(ctx) {
 				return
 			}
 		case audit.RetentionScheduleReload:
@@ -390,7 +426,7 @@ func (controller *RetentionController) run(ctx context.Context) {
 				return
 			}
 			prompt := controller.consumePromptRun()
-			if controller.reaper.RetentionDays() == 0 {
+			if !controller.enabled() {
 				controller.publishStatus(controller.nextStatus(
 					RetentionStateDisabled, RetentionFailureNone, nil,
 				))
@@ -406,6 +442,37 @@ func (controller *RetentionController) run(ctx context.Context) {
 			))
 			return
 		}
+	}
+}
+
+// maxStoreMB is the reaper's size cap in MiB, zero when it has none.
+func (controller *RetentionController) maxStoreMB() int64 {
+	if capper, ok := controller.reaper.(retentionStoreCapper); ok {
+		return capper.MaxStoreMB()
+	}
+	return 0
+}
+
+// enabled reports whether runs are due: an age or a size cap is set.
+func (controller *RetentionController) enabled() bool {
+	return controller.reaper.RetentionDays() > 0 || controller.maxStoreMB() > 0
+}
+
+// waitStartupDelay waits the startup delay unless retention is off; false
+// means the controller was stopped or cancelled meanwhile.
+func (controller *RetentionController) waitStartupDelay(ctx context.Context) bool {
+	if controller.startupDelay <= 0 || !controller.enabled() {
+		return true
+	}
+	timer := time.NewTimer(controller.startupDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-controller.stopRequested:
+		return false
+	case <-timer.C:
+		return !controller.stopWasRequested()
 	}
 }
 

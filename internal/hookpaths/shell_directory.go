@@ -139,7 +139,11 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			redirectIndex += len(redirects)
 			return
 		}
-		literals := LiteralWriteOperands(statement, s.logical, home)
+		literals, literalCopies := LiteralWriteOperandsWithCopies(statement, s.logical, home)
+		ownCopies := make(map[string]int, len(literalCopies))
+		for _, literal := range literalCopies {
+			ownCopies[literal]++
+		}
 		inner := actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home}
 		facts := actionfacts.Analyze(inner)
 		writes := make([]RedirectOccurrence, 0, len(redirects)+len(literals))
@@ -154,7 +158,20 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			writes = append(writes, occurrence)
 		}
 		for _, literal := range literals {
-			writes = append(writes, RedirectOccurrence{Path: literal})
+			own := ownCopies[literal] > 0
+			if own {
+				ownCopies[literal]--
+			}
+			writes = append(writes, RedirectOccurrence{Path: literal, OwnCopy: own})
+		}
+		// A plain mv onto an existing link to a file replaces the link entry
+		// and writes neither file, as without the directory change: judge
+		// that destination by its entry (GAP-2559, actionPlainMoveOntoLink).
+		// The hook client (record) still lists it: its map describes the
+		// entry for a gateway that cannot read the link (GAP-2558).
+		var movedOntoLinks map[string]bool
+		if s.known && !record {
+			movedOntoLinks = movedOntoLinkEntries(facts)
 		}
 		for _, candidate := range facts.Paths {
 			if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
@@ -163,6 +180,12 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			target := candidate.Resolved
 			if target == "" {
 				target = candidate.Normalized
+			}
+			if movedOntoLinks[target] {
+				if parent, ok := ResolveWriteTarget(filepath.Dir(target)); ok &&
+					!protectedEntry(filepath.Join(parent, filepath.Base(target)), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
+					continue
+				}
 			}
 			if raw, ok := RawDotDotOperand(candidate.Value, s.logical); ok {
 				target = raw
@@ -176,7 +199,16 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 				if slices.Contains(redirects, target) && pathFactIsRedirect(candidate, facts.Commands) {
 					continue
 				}
-				writes = append(writes, RedirectOccurrence{Path: target})
+				// A copy call writing its own destination, as the gateway reads
+				// the path facts of the whole command (GAP-2579).
+				own := false
+				for _, command := range facts.Commands {
+					if command.ID == candidate.CommandID {
+						own = IsCopyProgram(command.Argv) && target == CopyDestination(command.Argv, s.logical)
+						break
+					}
+				}
+				writes = append(writes, RedirectOccurrence{Path: target, OwnCopy: own})
 			}
 		}
 		if s.known {
@@ -459,6 +491,14 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 				} else if tail != nil {
 					walk(&syntax.Stmt{Cmd: tail}, &child)
 				}
+			} else if body := literalShellCallBody(cmd, home); body != "" {
+				// A literal sh -c body runs in a subshell: its directory
+				// changes end with it and its writes are read in the
+				// directories it stands in (GAP-2602).
+				if file, ok := parseShell(body); ok {
+					child := s.clone()
+					walkList(file.Stmts, &child)
+				}
 			}
 			write(stmt, s)
 		default:
@@ -539,6 +579,20 @@ func shellCommandWord(call *syntax.CallExpr, home string) (program string, arg i
 		}
 	}
 	return program, arg, ok
+}
+
+// literalShellCallBody is the literal command body of a static sh -c call
+// (bash -lc BODY too), or "" for any other call.
+func literalShellCallBody(call *syntax.CallExpr, home string) string {
+	words := make([]string, len(call.Args))
+	static := make([]bool, len(call.Args))
+	for i, arg := range call.Args {
+		words[i], static[i] = StaticWord(arg, home)
+	}
+	if len(words) == 0 || !static[0] {
+		return ""
+	}
+	return literalShellBody(programBase(words[0]), words, static)
 }
 
 func shellAuthorizedKeysBase(name string) bool {

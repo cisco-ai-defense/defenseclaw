@@ -55,6 +55,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cmidbroker"
@@ -139,11 +140,13 @@ type Sidecar struct {
 	sandboxRecorderOnce sync.Once
 	sandboxRecorder     *audit.SandboxRecorder
 
-	webhooksMu        sync.RWMutex
-	aiDiscoveryMu     sync.RWMutex
-	aiRuntimeMu       sync.RWMutex
-	apiMu             sync.RWMutex
-	apiServer         *APIServer
+	webhooksMu    sync.RWMutex
+	aiDiscoveryMu sync.RWMutex
+	aiRuntimeMu   sync.RWMutex
+	apiMu         sync.RWMutex
+	apiServer     *APIServer
+	// protectedFiles is the protected-file watch, nil when it is off.
+	protectedFiles    *protectedFileWatch
 	apiProfilesReady  chan struct{}
 	hookGuardsMu      sync.RWMutex
 	hookGuards        map[*HookConfigGuard]struct{}
@@ -1012,6 +1015,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// Report the records an earlier run lost from the local history; the loss
 	// journal kept them across the restart (GAP-1129).
 	go s.recordLocalWriteGapV8()
+	// While it runs, report the hook calls that ran fail-open since
+	// (rel-1-0-2 GAP-0446 item 3); no timer on a managed gateway.
+	go s.watchHookFailOpenCalls(ctx)
 	// Bootstrap-owned workers must retire on every return path, including
 	// failures before the normal shutdown block is reached. The explicit normal
 	// close below preserves close-before-store ordering; this deferred call is
@@ -1030,8 +1036,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	defer runCancel()
 	s.setRunCancel(runCancel)
 	defer s.setRunCancel(nil)
-	// An idle gateway gives back the heap its calls freed (GAP-2013).
-	go runIdleMemoryRelease(runCtx)
+	// An idle gateway gives back the memory its calls left (GAP-2013,
+	// rel-1-0-3 GAP-0244).
+	go runIdleMemoryRelease(runCtx, func() { releaseIdleGatewayMemory(s.apiSnapshot(), s.store) })
+	// Package-level patterns compile on first use (internal/lazyregexp), so
+	// that a hook process does not compile them all at start. The gateway
+	// compiles them now, off the request path, so that its first hook does
+	// not pay for them either.
+	go lazyregexp.CompileAll()
 	// The endpoint inventory cannot be emitted from NewSidecar: schema v8
 	// deliberately binds its generation-owned runtime afterward. Publish the
 	// first complete connector/MCP snapshot immediately after that binding, then
@@ -1292,6 +1304,10 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			errCh <- err
 		}
 	}()
+
+	// The protected-file watch (#1172): alerts on an agent's change to an
+	// SSH authorized keys file, shell startup file or autostart entry.
+	s.startProtectedFileWatch(runCtx)
 
 	// Goroutine 2: Skill/MCP watcher (opt-in via config)
 	wg.Add(1)
@@ -1920,6 +1936,13 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *gen
 		return nil, unavailable, nil
 	}
 	judge.secureClient = cfg.SecureClientIntegration()
+	if !judge.secureClient {
+		judge.decision = newDecisionModel(cfg, dotenvPath)
+		if judge.decision != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] decision model enabled in front of the tool-call judge (model=%s, allow<=%.2f, block>=%.2f)\n",
+				judge.decision.model, judge.decision.allowAt, judge.decision.blockAt)
+		}
+	}
 
 	features := "tool-result-pii"
 	if cfg.Guardrail.Judge.ToolInjection {
@@ -2621,7 +2644,8 @@ func judgeNeedsRebuild(oldCfg, newCfg *config.Config, rulePackChanged bool, oldP
 		oldProviders.digest() != newProviders.digest() ||
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldCfg.LLMProviders, newCfg.LLMProviders) ||
-		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
+		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge) ||
+		!reflect.DeepEqual(oldCfg.DecisionModel, newCfg.DecisionModel)
 }
 
 func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
@@ -2746,6 +2770,7 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 	if api != nil {
 		s.bindAPIServerObservabilityV8Locked(api)
 		api.SetHookRegistrationRepair(s.ensureActiveHookRegistration)
+		api.protectedFiles = s.protectedFiles
 	}
 	s.apiServer = api
 	if api != nil && s.apiProfilesReady != nil {
@@ -4101,6 +4126,12 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		"mcp_take_action":    wcfg.MCP.TakeAction,
 	}))
 
+	// An older watcher created vendor system folders it watched (for
+	// example /etc/codex when the gateway ran as root); remove the empty ones
+	// it recorded so the agent reads no phantom administrator policy.
+	for _, dir := range connector.RemoveVendorSystemCreatedDirs(s.currentConfig().DataDir, connector.DefaultVendorSystemRoots()) {
+		fmt.Printf("[sidecar] watcher: removed vendor system folder %s created by an earlier release\n", dir)
+	}
 	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, nil, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
@@ -4670,6 +4701,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			return fmt.Errorf("%w: %w", errReleaseContractRefusal, err)
 		}
 		return refuseAdmission(err)
+	}
+	if err := connector.RequireOpenCodeV2(conn.Name(), agentVersion); err != nil {
+		return refuseUnverified(fmt.Errorf("%w: %w", ErrHookContractAdmission, err))
 	}
 	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnknown && envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
@@ -6962,6 +6996,9 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 			return fmt.Errorf("%w: %w", errReleaseContractRefusal, err)
 		}
 		return err
+	}
+	if err := connector.RequireOpenCodeV2(conn.Name(), opts.AgentVersion); err != nil {
+		return markUnverified(fmt.Errorf("%w: %w", ErrHookContractAdmission, err))
 	}
 	if contractResolution.Status == connector.HookCompatibilityUnknown &&
 		(actionMode || strictUnknownVersion) &&

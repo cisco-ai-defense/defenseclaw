@@ -152,10 +152,14 @@ It refuses these attempts, also for root, and writes nothing:
 
 The gateway records each refusal in the audit log with
 `outcome=refused reason=managed_device`. On Linux and macOS the launcher (for
-`config`, `guardrail` and `policy` writers and `uninstall`) and the CLI report
-through the hook socket, so a standard user's refusal is recorded with the
-account the kernel reports (`actor=uid:501 user=alice`). Windows has no hook
-socket: only a refusal by an account that holds the gateway token is recorded.
+`config`, `guardrail`, `policy` and asset writers, `setup`, `upgrade`,
+`rollback` and `uninstall`) and the CLI report through the hook socket, so a
+standard user's refusal is recorded with the account the kernel reports
+(`actor=uid:501 user=alice`). On Windows `defenseclaw.exe` reports its refusals
+on the gateway's refusal pipe, which names the account from its Windows token
+(`actor=sid:S-1-5-21-... user=HOST\alice`); a standard account's `enterprise
+windows` lifecycle command is recorded with `reason=elevation_required`
+([Windows](/docs/enterprise/windows)).
 
 To block or allow an asset, add it to `asset_policy` in the admin config and
 apply the config:

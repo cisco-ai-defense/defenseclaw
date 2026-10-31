@@ -42,7 +42,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -50,6 +49,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // StateDirs are the data-directory entries that hold the sandboxes' state:
@@ -235,7 +235,7 @@ func mapValue(m *yaml.Node, key string) *yaml.Node {
 }
 
 // displayName is a sandbox name the installer may print as it is.
-var displayName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
+var displayName = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 
 // sandboxRecords names the sandboxes the daemon of dataDir has records of.
 func sandboxRecords(dataDir string) []string {

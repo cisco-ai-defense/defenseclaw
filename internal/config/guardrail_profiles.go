@@ -10,9 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Identity-based guardrail profiles.
@@ -112,8 +113,8 @@ func (g *GuardrailConfig) HasProfiles() bool {
 }
 
 var (
-	guardrailProfileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	agentIdentityPattern        = regexp.MustCompile(`^agt-[0-9a-f]{16}$`)
+	guardrailProfileNamePattern = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	agentIdentityPattern        = lazyregexp.New(`^agt-[0-9a-f]{16}$`)
 )
 
 // errProfileForbiddenKey explains why enabled and hook_fail_mode cannot live

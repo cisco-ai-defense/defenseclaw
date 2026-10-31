@@ -21,9 +21,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // npmPin pins one npm-distributed harness release: the registry integrity of
@@ -53,9 +54,9 @@ type npmNative struct {
 }
 
 var (
-	npmIntegrityRE = regexp.MustCompile(`^sha512-[A-Za-z0-9+/]{86}==$`)
-	sha256HexRE    = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	npmPathRE      = regexp.MustCompile(`^[A-Za-z0-9@._/-]+$`)
+	npmIntegrityRE = lazyregexp.New(`^sha512-[A-Za-z0-9+/]{86}==$`)
+	sha256HexRE    = lazyregexp.New(`^[0-9a-f]{64}$`)
+	npmPathRE      = lazyregexp.New(`^[A-Za-z0-9@._/-]+$`)
 )
 
 // validate refuses a pin that could not be rendered safely.

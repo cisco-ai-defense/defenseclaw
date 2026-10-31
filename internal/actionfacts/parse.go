@@ -34,6 +34,8 @@ type parseOutput struct {
 	// shortCircuitLists maps the head statement of a && / || list to the
 	// ID of its first command (ShortCircuitListID).
 	shortCircuitLists map[*syntax.Stmt]int64
+	// POSIX exec redirects may persist a literal descriptor for later commands.
+	posixOpenFDs map[int64]string
 }
 
 func newParseOutput(dialect Dialect, startID int64) parseOutput {

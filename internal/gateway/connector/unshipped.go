@@ -22,10 +22,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // maxPluginManifestBytes bounds how much of a plugin.yaml NotShipped reads.
@@ -35,7 +36,7 @@ const maxPluginManifestBytes = 64 << 10
 // RemoveUnshippedConnectorFiles derives: lowercase, no dots or separators, so
 // a name read from the lock or roster can never address anything outside the
 // hooks directory.
-var unshippedFileNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+var unshippedFileNameRE = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 // NotShipped reports whether name is a connector this build cannot provide:
 // Get does not resolve it, plugin discovery (when a plugin directory was

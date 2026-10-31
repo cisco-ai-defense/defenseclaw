@@ -99,20 +99,6 @@ func atomicFilePublish(source, destination string, stagedInfo os.FileInfo, perm 
 	)
 }
 
-func atomicFilePublishNoReplace(source, destination string, stagedInfo os.FileInfo, perm os.FileMode) error {
-	if perm.Perm()&0o077 != 0 {
-		return fmt.Errorf("no-replace private publication requires a private file mode")
-	}
-	return atomicFilePublishPrivateBound(
-		source,
-		destination,
-		stagedInfo,
-		validateAtomicTransformBoundFilePrivatePlatform,
-		false,
-		false,
-	)
-}
-
 func atomicFilePublishHookAPIToken(
 	source, destination string,
 	stagedInfo os.FileInfo,

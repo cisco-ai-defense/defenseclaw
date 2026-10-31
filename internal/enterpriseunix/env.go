@@ -289,6 +289,10 @@ type Env struct {
 	// a bundle whose config change restarts the gateway (restart_deferred,
 	// the retry exit code).
 	DeferRestart bool
+	// AnchorsDeviceGroup pins the trust anchors an install writes (`bundle
+	// anchors install --device-group`, `bundle apply --device-group`) to this
+	// one device group; "" writes the file's own device_groups.
+	AnchorsDeviceGroup string
 	// bundleFault is a test seam: it runs at each named phase of a bundle
 	// apply (received, verified, staged, transaction, applied, committed)
 	// and an error fails the apply there; at committed the run stops before
@@ -296,6 +300,11 @@ type Env struct {
 	// runs before the bundle store creates its private directory <name>
 	// (receipts). Production leaves it nil.
 	bundleFault func(phase string) error
+
+	// StartTransactionWatch starts the watcher that recovers a transaction
+	// whose run pid is killed (txwatch.go, GAP-0276). NewEnv sets it; nil
+	// (tests) starts none.
+	StartTransactionWatch func(ctx context.Context, pid int, snapshotDir string) error
 
 	// SelfUnit names the service unit or launchd job this lifecycle run
 	// executes inside (the config-apply trigger). The lifecycle never stops
@@ -342,6 +351,7 @@ func NewEnv(goos, productVersion string) (*Env, error) {
 	}
 	env.fillDefaults()
 	env.SelfUnit = selfUnitFromEnv(env.Services, os.Getenv(LifecycleUnitEnv))
+	env.StartTransactionWatch = env.startTransactionWatch
 	return env, nil
 }
 

@@ -26,7 +26,7 @@ func TestVerifyRequiresTheForeignHookGuardInStandalonePlugins(t *testing.T) {
 		name, declaration, terminator, agentVersion string
 	}{
 		{name: "amp", declaration: "const DC_FOREIGN_GUARD: string = ", terminator: "\n", agentVersion: "0.0.1785334225"},
-		{name: "opencode", declaration: "const DC_FOREIGN_GUARD = ", terminator: ";\n", agentVersion: "opencode 1.18.11"},
+		{name: "opencode", declaration: "const DC_FOREIGN_GUARD = ", terminator: ";\n", agentVersion: "opencode 2.1.4"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			previous := connector.AMPPluginPathOverride

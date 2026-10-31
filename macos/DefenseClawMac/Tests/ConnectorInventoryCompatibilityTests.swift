@@ -36,7 +36,15 @@ struct ConnectorInventoryCompatibilityTests {
         expect(RuntimeV1Alerts.parse(#"[{"id":"broken"}]"#) == nil, "malformed alerts are not clean success")
         let rows = RuntimeV1Inventory.ideRows(["ide_plugins": [["plugin_id": "fixture.ai", "ide_product": "Code", "user_name": "fixture", "enabled": "disabled", "is_ai": true, "version": "2.0", "secret": "never project"]]])
         expect(rows.count == 1 && rows[0].category == .idePlugins, "IDE-only scan is represented")
-        expect(rows[0].status == "disabled" && rows[0].detail.contains("AI extension"), "IDE filter fields retain enablement and AI classification")
+        // Enablement reads as `defenseclaw agent ide-plugins` words it (yes / no / client side / unknown).
+        expect(rows[0].status == "no" && rows[0].detail.contains("AI extension"), "IDE filter fields retain enablement and AI classification: \(rows[0].status)")
+        let remote = RuntimeV1Inventory.ideRows(["ide_plugins": [["plugin_id": "x", "ide_product": "PyCharm", "ide_version": "2026.2", "remote_kind": "jetbrains_remote_dev", "enabled": "client_side_unknown", "user": "a"],
+                                                                 ["plugin_id": "y", "ide_product": "Code", "scope": "remote", "user": "b"]],
+                                                 "summary": ["ide_plugins": ["partial": true]]])
+        expect(remote[0].status == "client side" && remote[0].detail.hasPrefix("PyCharm 2026.2 (remote dev)"), "a remote-dev plugin names its IDE, version and location: \(remote[0].detail)")
+        expect(remote[1].status == "unknown" && remote[1].detail.hasPrefix("Code (remote)"), "a remote scope without a kind reads remote: \(remote[1].detail)")
+        expect(RuntimeV1Inventory.idePluginsPartial(["summary": ["ide_plugins": ["partial": true]]]) && !RuntimeV1Inventory.idePluginsPartial([:]), "a bounded scan is partial")
+        expect(RuntimeV1Inventory.ideCountSummary(rows + remote) == "3 (1 AI, 1 disabled, 3 users)", "IDE count summary: \(RuntimeV1Inventory.ideCountSummary(rows + remote))")
         expect(rows[0].fields.contains { $0.value == "fixture" }, "IDE user identity is retained")
         expect(!rows[0].fields.contains { $0.value == "never project" }, "only allowlisted IDE fields are displayed")
         let result = RuntimeV1Inventory.agentRows(#"{"identities":[{"agent_id":"agent-1","connector":"codex","user_id":"fixture","sessions_seen":3}],"total":20,"next_cursor":"next"}"#)

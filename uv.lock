@@ -14,12 +14,18 @@ resolution-markers = [
     "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
     "(python_full_version == '3.12.*' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'win32')",
     "(python_full_version == '3.12.*' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version == '3.12.*' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version == '3.12.*' and platform_machine != 'AMD64' and platform_machine != 'x86_64' and sys_platform == 'win32') or (python_full_version == '3.12.*' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
-    "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "(python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'win32')",
-    "(python_full_version < '3.12' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version < '3.12' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine != 'AMD64' and platform_machine != 'x86_64' and sys_platform == 'win32') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.11.4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version < '3.11.4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version < '3.11.4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.11.4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'win32')",
+    "(python_full_version < '3.11.4' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version < '3.11.4' and platform_machine == 'x86_64' and sys_platform == 'win32')",
+    "(python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine != 'AMD64' and platform_machine != 'x86_64' and sys_platform == 'win32') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
+    "(python_full_version < '3.11.4' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version < '3.11.4' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.11.4' and platform_machine != 'AMD64' and platform_machine != 'x86_64' and sys_platform == 'win32') or (python_full_version < '3.11.4' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
 ]
 
 [manifest]
@@ -32,6 +38,7 @@ overrides = [
     { name = "importlib-metadata", specifier = ">=8.7.1,<8.8" },
     { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "litellm", specifier = ">=1.103.10,<1.104.0" },
+    { name = "msgpack", specifier = ">=1.2.1,<2" },
     { name = "multidict", specifier = ">=6.9.1,<7" },
     { name = "openai", specifier = "==2.30.0" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
@@ -205,6 +212,15 @@ wheels = [
 ]
 
 [[package]]
+name = "boolean-py"
+version = "5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c4/cf/85379f13b76f3a69bca86b60237978af17d6aa0bc5998978c3b8cf05abb2/boolean_py-5.0.tar.gz", hash = "sha256:60cbc4bad079753721d32649545505362c754e121570ada4658b852a3a318d95", size = 37047, upload-time = "2025-04-03T10:39:49.734Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/ca/78d423b324b8d77900030fa59c4aa9054261ef0925631cd2501dd015b7b7/boolean_py-5.0-py3-none-any.whl", hash = "sha256:ef28a70bd43115208441b53a045d1549e2f0ec6e3d08a9d142cbc41c1938e8d9", size = 26577, upload-time = "2025-04-03T10:39:48.449Z" },
+]
+
+[[package]]
 name = "boto3"
 version = "1.43.120"
 source = { registry = "https://pypi.org/simple" }
@@ -230,6 +246,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/dd/81/f45d4be966d44d01d9e342fecaacdd95909034c096b56cc8c209ede1f9d7/botocore-1.43.120.tar.gz", hash = "sha256:f479cbb7273b9c0ea589a91a7abe38badda6353fb7c237a22c7461a06d279ee2", size = 16465596, upload-time = "2026-10-27T19:20:24.461Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a1/d4/ea06db5d3dd35b5782faaa7a4ef68b8e7f51e35e62bd4f92758dc73ca01e/botocore-1.43.120-py3-none-any.whl", hash = "sha256:7f54674f26f0d9a500bf44a1f858e88b70b03c82b2aca385ddf51f6e968bfd01", size = 16164042, upload-time = "2026-10-27T19:20:19.875Z" },
+]
+
+[[package]]
+name = "cachecontrol"
+version = "0.14.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "msgpack" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2d/f6/c972b32d80760fb79d6b9eeb0b3010a46b89c0b23cf6329417ff7886cd22/cachecontrol-0.14.4.tar.gz", hash = "sha256:e6220afafa4c22a47dd0badb319f84475d79108100d04e26e8542ef7d3ab05a1", size = 16150, upload-time = "2025-11-14T04:32:13.138Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/79/c45f2d53efe6ada1110cf6f9fca095e4ff47a0454444aefdde6ac4789179/cachecontrol-0.14.4-py3-none-any.whl", hash = "sha256:b7ac014ff72ee199b5f8af1de29d60239954f223e948196fa3d84adaffc71d2b", size = 22247, upload-time = "2025-11-14T04:32:11.733Z" },
+]
+
+[package.optional-dependencies]
+filecache = [
+    { name = "filelock" },
 ]
 
 [[package]]
@@ -341,21 +375,35 @@ wheels = [
 
 [[package]]
 name = "cisco-ai-mcp-scanner"
-version = "4.3.0"
-source = { url = "https://files.pythonhosted.org/packages/af/40/d42943f9e3da40ee9b5f00439fda38b62fc379034383f85a6e06d7825796/cisco_ai_mcp_scanner-4.3.0-py3-none-any.whl" }
+version = "4.8.7"
+source = { url = "https://files.pythonhosted.org/packages/6a/cd/1728f69e5d874010ee62c0a29a23c7edfec0a9b1f3642d21893944145957/cisco_ai_mcp_scanner-4.8.7-py3-none-any.whl" }
 dependencies = [
     { name = "expandvars" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "litellm" },
     { name = "mcp", extra = ["cli"] },
+    { name = "pip-audit" },
+    { name = "puremagic", version = "1.30", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "puremagic", version = "2.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-c-sharp" },
+    { name = "tree-sitter-go" },
+    { name = "tree-sitter-java" },
+    { name = "tree-sitter-javascript" },
+    { name = "tree-sitter-kotlin" },
+    { name = "tree-sitter-php" },
+    { name = "tree-sitter-python" },
+    { name = "tree-sitter-ruby" },
+    { name = "tree-sitter-rust" },
+    { name = "tree-sitter-typescript" },
     { name = "uvicorn" },
     { name = "yara-python" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/af/40/d42943f9e3da40ee9b5f00439fda38b62fc379034383f85a6e06d7825796/cisco_ai_mcp_scanner-4.3.0-py3-none-any.whl", hash = "sha256:ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812" },
+    { url = "https://files.pythonhosted.org/packages/6a/cd/1728f69e5d874010ee62c0a29a23c7edfec0a9b1f3642d21893944145957/cisco_ai_mcp_scanner-4.8.7-py3-none-any.whl", hash = "sha256:55142609f3519b8fd80ec491c1c3bb9e17c2370fb65d6052a07022d4a8906350" },
 ]
 
 [package.metadata]
@@ -363,268 +411,64 @@ requires-dist = [
     { name = "expandvars", specifier = ">=0.12.0" },
     { name = "fastapi", specifier = ">=0.125.0" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "litellm", specifier = ">=1.77.0" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.25.0" },
+    { name = "litellm", specifier = "==1.93.2" },
+    { name = "mcp", extras = ["cli"], specifier = ">=2.0.0" },
+    { name = "pip-audit", specifier = ">=2.7.0" },
+    { name = "puremagic", specifier = ">=1.28" },
     { name = "pydantic", specifier = ">=2.6.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "tree-sitter", specifier = ">=0.23,<0.26" },
+    { name = "tree-sitter", marker = "extra == 'all-languages'", specifier = ">=0.23,<0.26" },
+    { name = "tree-sitter", marker = "extra == 'csharp'", specifier = ">=0.21.0" },
+    { name = "tree-sitter", marker = "extra == 'go'", specifier = ">=0.21.0" },
+    { name = "tree-sitter", marker = "extra == 'java'", specifier = ">=0.21.0" },
+    { name = "tree-sitter", marker = "extra == 'js'", specifier = ">=0.23,<0.26" },
+    { name = "tree-sitter", marker = "extra == 'kotlin'", specifier = ">=0.21.0" },
+    { name = "tree-sitter", marker = "extra == 'php'", specifier = ">=0.21.0" },
+    { name = "tree-sitter", marker = "extra == 'ruby'", specifier = ">=0.21.0" },
+    { name = "tree-sitter", marker = "extra == 'rust'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-c-sharp", specifier = ">=0.21.0" },
+    { name = "tree-sitter-c-sharp", marker = "extra == 'all-languages'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-c-sharp", marker = "extra == 'csharp'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-go", specifier = ">=0.21.0" },
+    { name = "tree-sitter-go", marker = "extra == 'all-languages'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-go", marker = "extra == 'go'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-java", specifier = ">=0.21.0" },
+    { name = "tree-sitter-java", marker = "extra == 'all-languages'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-java", marker = "extra == 'java'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-javascript", specifier = ">=0.23,<0.26" },
+    { name = "tree-sitter-javascript", marker = "extra == 'all-languages'", specifier = ">=0.23,<0.26" },
+    { name = "tree-sitter-javascript", marker = "extra == 'js'", specifier = ">=0.23,<0.26" },
+    { name = "tree-sitter-kotlin", specifier = ">=0.21.0" },
+    { name = "tree-sitter-kotlin", marker = "extra == 'all-languages'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-kotlin", marker = "extra == 'kotlin'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-php", specifier = ">=0.21.0" },
+    { name = "tree-sitter-php", marker = "extra == 'all-languages'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-php", marker = "extra == 'php'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-python", specifier = ">=0.21.0" },
+    { name = "tree-sitter-ruby", specifier = ">=0.21.0" },
+    { name = "tree-sitter-ruby", marker = "extra == 'all-languages'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-ruby", marker = "extra == 'ruby'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-rust", specifier = ">=0.21.0" },
+    { name = "tree-sitter-rust", marker = "extra == 'all-languages'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-rust", marker = "extra == 'rust'", specifier = ">=0.21.0" },
+    { name = "tree-sitter-typescript", specifier = ">=0.23,<0.26" },
+    { name = "tree-sitter-typescript", marker = "extra == 'all-languages'", specifier = ">=0.23,<0.26" },
+    { name = "tree-sitter-typescript", marker = "extra == 'js'", specifier = ">=0.23,<0.26" },
     { name = "uvicorn", specifier = ">=0.29.0" },
     { name = "yara-python", specifier = ">=4.5.4" },
 ]
+provides-extras = ["js", "go", "java", "kotlin", "csharp", "ruby", "rust", "php", "all-languages"]
 
 [[package]]
 name = "cisco-ai-skill-scanner"
-version = "2.2.1"
-source = { url = "https://files.pythonhosted.org/packages/23/21/b52e8b105cdfb0b1f9f8c12ec49e90ceaee0c371180aa0a6e9e1a5bef2f3/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-macosx_13_0_x86_64.whl" }
-resolution-markers = [
-    "python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-]
-dependencies = [
-    { name = "anthropic" },
-    { name = "click" },
-    { name = "confusable-homoglyphs" },
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "litellm" },
-    { name = "magika" },
-    { name = "oletools" },
-    { name = "openai" },
-    { name = "pdfid" },
-    { name = "protobuf" },
-    { name = "pydantic" },
-    { name = "pyjwt" },
-    { name = "python-dotenv" },
-    { name = "python-frontmatter" },
-    { name = "python-multipart" },
-    { name = "pyyaml" },
-    { name = "rich" },
-    { name = "tabulate" },
-    { name = "textual" },
-    { name = "urllib3" },
-    { name = "uvicorn", extra = ["standard"] },
-    { name = "yara-x" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/23/21/b52e8b105cdfb0b1f9f8c12ec49e90ceaee0c371180aa0a6e9e1a5bef2f3/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-macosx_13_0_x86_64.whl", hash = "sha256:e09940589bb93b7b49f131352b1581a030d180fa3775cee676442cf0aebffa59" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", specifier = ">=0.50,<1" },
-    { name = "azure-identity", marker = "extra == 'all'", specifier = ">=1.20,<2" },
-    { name = "azure-identity", marker = "extra == 'azure'", specifier = ">=1.20,<2" },
-    { name = "boto3", marker = "extra == 'all'", specifier = ">=1.40,<2" },
-    { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.40,<2" },
-    { name = "click", specifier = ">=8.3.3" },
-    { name = "confusable-homoglyphs", specifier = ">=3.3,<4" },
-    { name = "fastapi", specifier = ">=0.115,<1" },
-    { name = "google-cloud-aiplatform", marker = "extra == 'all'", specifier = ">=1.130,<2" },
-    { name = "google-cloud-aiplatform", marker = "extra == 'vertex'", specifier = ">=1.130,<2" },
-    { name = "google-genai", marker = "extra == 'all'", specifier = ">=1.60,<2" },
-    { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.60,<2" },
-    { name = "google-generativeai", marker = "extra == 'all'", specifier = ">=0.8,<1" },
-    { name = "google-generativeai", marker = "extra == 'google'", specifier = ">=0.8,<1" },
-    { name = "httplib2", marker = "extra == 'all'", specifier = ">=0.32.0" },
-    { name = "httplib2", marker = "extra == 'google'", specifier = ">=0.32.0" },
-    { name = "httplib2", marker = "extra == 'vertex'", specifier = ">=0.32.0" },
-    { name = "httpx", specifier = ">=0.27,<1" },
-    { name = "litellm", specifier = ">=1.89.7,<2" },
-    { name = "magika", specifier = ">=1.0,<2" },
-    { name = "oletools", specifier = ">=0.60,<1" },
-    { name = "openai", specifier = ">=2.0,<3" },
-    { name = "pdfid", specifier = ">=1.1,<2" },
-    { name = "protobuf", specifier = ">=5.29,<7" },
-    { name = "pyasn1", marker = "extra == 'all'", specifier = ">=0.6.4" },
-    { name = "pyasn1", marker = "extra == 'google'", specifier = ">=0.6.4" },
-    { name = "pyasn1", marker = "extra == 'vertex'", specifier = ">=0.6.4" },
-    { name = "pydantic", specifier = ">=2.10,<3" },
-    { name = "pyjwt", specifier = ">=2.15.0,<3" },
-    { name = "python-dotenv", specifier = ">=1.0,<2" },
-    { name = "python-frontmatter", specifier = ">=1.1,<2" },
-    { name = "python-multipart", specifier = ">=0.0.31,<0.1" },
-    { name = "pyyaml", specifier = ">=6.0,<7" },
-    { name = "rich", specifier = ">=14.0,<15" },
-    { name = "tabulate", specifier = ">=0.9,<1" },
-    { name = "textual", specifier = ">=7.0,<9" },
-    { name = "urllib3", specifier = ">=2.8.0,<3" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
-    { name = "yara-x", specifier = ">=1.10,<2" },
-]
-provides-extras = ["all", "azure", "bedrock", "google", "vertex"]
-
-[[package]]
-name = "cisco-ai-skill-scanner"
-version = "2.2.1"
-source = { url = "https://files.pythonhosted.org/packages/4c/4c/ae046769e2e9dc051c8c0ecc93a0b1e8abd56493a6ba0f1a9a2ed349842e/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-win_amd64.whl" }
-resolution-markers = [
-    "(python_full_version >= '3.13' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'win32')",
-    "(python_full_version == '3.12.*' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'win32')",
-    "(python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'win32')",
-]
-dependencies = [
-    { name = "anthropic" },
-    { name = "click" },
-    { name = "confusable-homoglyphs" },
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "litellm" },
-    { name = "magika" },
-    { name = "oletools" },
-    { name = "openai" },
-    { name = "pdfid" },
-    { name = "protobuf" },
-    { name = "pydantic" },
-    { name = "pyjwt" },
-    { name = "python-dotenv" },
-    { name = "python-frontmatter" },
-    { name = "python-multipart" },
-    { name = "pyyaml" },
-    { name = "rich" },
-    { name = "tabulate" },
-    { name = "textual" },
-    { name = "urllib3" },
-    { name = "uvicorn", extra = ["standard"] },
-    { name = "yara-x" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4c/4c/ae046769e2e9dc051c8c0ecc93a0b1e8abd56493a6ba0f1a9a2ed349842e/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-win_amd64.whl", hash = "sha256:d1bf7bb295f314627c7f6a58d9debba05dce72e9251d65aaad48ca77736e8655" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", specifier = ">=0.50,<1" },
-    { name = "azure-identity", marker = "extra == 'all'", specifier = ">=1.20,<2" },
-    { name = "azure-identity", marker = "extra == 'azure'", specifier = ">=1.20,<2" },
-    { name = "boto3", marker = "extra == 'all'", specifier = ">=1.40,<2" },
-    { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.40,<2" },
-    { name = "click", specifier = ">=8.3.3" },
-    { name = "confusable-homoglyphs", specifier = ">=3.3,<4" },
-    { name = "fastapi", specifier = ">=0.115,<1" },
-    { name = "google-cloud-aiplatform", marker = "extra == 'all'", specifier = ">=1.130,<2" },
-    { name = "google-cloud-aiplatform", marker = "extra == 'vertex'", specifier = ">=1.130,<2" },
-    { name = "google-genai", marker = "extra == 'all'", specifier = ">=1.60,<2" },
-    { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.60,<2" },
-    { name = "google-generativeai", marker = "extra == 'all'", specifier = ">=0.8,<1" },
-    { name = "google-generativeai", marker = "extra == 'google'", specifier = ">=0.8,<1" },
-    { name = "httplib2", marker = "extra == 'all'", specifier = ">=0.32.0" },
-    { name = "httplib2", marker = "extra == 'google'", specifier = ">=0.32.0" },
-    { name = "httplib2", marker = "extra == 'vertex'", specifier = ">=0.32.0" },
-    { name = "httpx", specifier = ">=0.27,<1" },
-    { name = "litellm", specifier = ">=1.89.7,<2" },
-    { name = "magika", specifier = ">=1.0,<2" },
-    { name = "oletools", specifier = ">=0.60,<1" },
-    { name = "openai", specifier = ">=2.0,<3" },
-    { name = "pdfid", specifier = ">=1.1,<2" },
-    { name = "protobuf", specifier = ">=5.29,<7" },
-    { name = "pyasn1", marker = "extra == 'all'", specifier = ">=0.6.4" },
-    { name = "pyasn1", marker = "extra == 'google'", specifier = ">=0.6.4" },
-    { name = "pyasn1", marker = "extra == 'vertex'", specifier = ">=0.6.4" },
-    { name = "pydantic", specifier = ">=2.10,<3" },
-    { name = "pyjwt", specifier = ">=2.15.0,<3" },
-    { name = "python-dotenv", specifier = ">=1.0,<2" },
-    { name = "python-frontmatter", specifier = ">=1.1,<2" },
-    { name = "python-multipart", specifier = ">=0.0.31,<0.1" },
-    { name = "pyyaml", specifier = ">=6.0,<7" },
-    { name = "rich", specifier = ">=14.0,<15" },
-    { name = "tabulate", specifier = ">=0.9,<1" },
-    { name = "textual", specifier = ">=7.0,<9" },
-    { name = "urllib3", specifier = ">=2.8.0,<3" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
-    { name = "yara-x", specifier = ">=1.10,<2" },
-]
-provides-extras = ["all", "azure", "bedrock", "google", "vertex"]
-
-[[package]]
-name = "cisco-ai-skill-scanner"
-version = "2.2.1"
-source = { url = "https://files.pythonhosted.org/packages/52/1a/843c79746aaf75efebc68a14c34112a426db74d167be165792060ad01992/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-manylinux_2_17_x86_64.whl" }
-resolution-markers = [
-    "python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "anthropic" },
-    { name = "click" },
-    { name = "confusable-homoglyphs" },
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "litellm" },
-    { name = "magika" },
-    { name = "oletools" },
-    { name = "openai" },
-    { name = "pdfid" },
-    { name = "protobuf" },
-    { name = "pydantic" },
-    { name = "pyjwt" },
-    { name = "python-dotenv" },
-    { name = "python-frontmatter" },
-    { name = "python-multipart" },
-    { name = "pyyaml" },
-    { name = "rich" },
-    { name = "tabulate" },
-    { name = "textual" },
-    { name = "urllib3" },
-    { name = "uvicorn", extra = ["standard"] },
-    { name = "yara-x" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/52/1a/843c79746aaf75efebc68a14c34112a426db74d167be165792060ad01992/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-manylinux_2_17_x86_64.whl", hash = "sha256:cd6ab22b72c4c8124c7a20f8d0b10582408336f17d340ace1fe7d9e3ba256680" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", specifier = ">=0.50,<1" },
-    { name = "azure-identity", marker = "extra == 'all'", specifier = ">=1.20,<2" },
-    { name = "azure-identity", marker = "extra == 'azure'", specifier = ">=1.20,<2" },
-    { name = "boto3", marker = "extra == 'all'", specifier = ">=1.40,<2" },
-    { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.40,<2" },
-    { name = "click", specifier = ">=8.3.3" },
-    { name = "confusable-homoglyphs", specifier = ">=3.3,<4" },
-    { name = "fastapi", specifier = ">=0.115,<1" },
-    { name = "google-cloud-aiplatform", marker = "extra == 'all'", specifier = ">=1.130,<2" },
-    { name = "google-cloud-aiplatform", marker = "extra == 'vertex'", specifier = ">=1.130,<2" },
-    { name = "google-genai", marker = "extra == 'all'", specifier = ">=1.60,<2" },
-    { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.60,<2" },
-    { name = "google-generativeai", marker = "extra == 'all'", specifier = ">=0.8,<1" },
-    { name = "google-generativeai", marker = "extra == 'google'", specifier = ">=0.8,<1" },
-    { name = "httplib2", marker = "extra == 'all'", specifier = ">=0.32.0" },
-    { name = "httplib2", marker = "extra == 'google'", specifier = ">=0.32.0" },
-    { name = "httplib2", marker = "extra == 'vertex'", specifier = ">=0.32.0" },
-    { name = "httpx", specifier = ">=0.27,<1" },
-    { name = "litellm", specifier = ">=1.89.7,<2" },
-    { name = "magika", specifier = ">=1.0,<2" },
-    { name = "oletools", specifier = ">=0.60,<1" },
-    { name = "openai", specifier = ">=2.0,<3" },
-    { name = "pdfid", specifier = ">=1.1,<2" },
-    { name = "protobuf", specifier = ">=5.29,<7" },
-    { name = "pyasn1", marker = "extra == 'all'", specifier = ">=0.6.4" },
-    { name = "pyasn1", marker = "extra == 'google'", specifier = ">=0.6.4" },
-    { name = "pyasn1", marker = "extra == 'vertex'", specifier = ">=0.6.4" },
-    { name = "pydantic", specifier = ">=2.10,<3" },
-    { name = "pyjwt", specifier = ">=2.15.0,<3" },
-    { name = "python-dotenv", specifier = ">=1.0,<2" },
-    { name = "python-frontmatter", specifier = ">=1.1,<2" },
-    { name = "python-multipart", specifier = ">=0.0.31,<0.1" },
-    { name = "pyyaml", specifier = ">=6.0,<7" },
-    { name = "rich", specifier = ">=14.0,<15" },
-    { name = "tabulate", specifier = ">=0.9,<1" },
-    { name = "textual", specifier = ">=7.0,<9" },
-    { name = "urllib3", specifier = ">=2.8.0,<3" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
-    { name = "yara-x", specifier = ">=1.10,<2" },
-]
-provides-extras = ["all", "azure", "bedrock", "google", "vertex"]
-
-[[package]]
-name = "cisco-ai-skill-scanner"
-version = "2.2.1"
-source = { url = "https://files.pythonhosted.org/packages/81/20/b0d6458007fbac82cb76f1f7dfe139eb2cd6df63ed2ae997459b57b91204/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-macosx_13_0_arm64.whl" }
+version = "2.3.2"
+source = { url = "https://files.pythonhosted.org/packages/64/15/01db90dae5d2456ad513029d827e7c09141be9b5c9e69f634c2d7d4544ec/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-macosx_13_0_arm64.whl" }
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.11.4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 dependencies = [
     { name = "anthropic" },
@@ -652,7 +496,7 @@ dependencies = [
     { name = "yara-x" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/81/20/b0d6458007fbac82cb76f1f7dfe139eb2cd6df63ed2ae997459b57b91204/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-macosx_13_0_arm64.whl", hash = "sha256:233189ed423e343448d0e324979c521d65cfba69cf8a07f8f0207170161ed6fa" },
+    { url = "https://files.pythonhosted.org/packages/64/15/01db90dae5d2456ad513029d827e7c09141be9b5c9e69f634c2d7d4544ec/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-macosx_13_0_arm64.whl", hash = "sha256:dcc22928431cf570285b3de874adec9f5e43b7dfa207a9b259b6f9e9489f34e4" },
 ]
 
 [package.metadata]
@@ -675,7 +519,7 @@ requires-dist = [
     { name = "httplib2", marker = "extra == 'google'", specifier = ">=0.32.0" },
     { name = "httplib2", marker = "extra == 'vertex'", specifier = ">=0.32.0" },
     { name = "httpx", specifier = ">=0.27,<1" },
-    { name = "litellm", specifier = ">=1.89.7,<2" },
+    { name = "litellm", specifier = ">=1.89.7,!=1.107.0,<2" },
     { name = "magika", specifier = ">=1.0,<2" },
     { name = "oletools", specifier = ">=0.60,<1" },
     { name = "openai", specifier = ">=2.0,<3" },
@@ -701,12 +545,13 @@ provides-extras = ["all", "azure", "bedrock", "google", "vertex"]
 
 [[package]]
 name = "cisco-ai-skill-scanner"
-version = "2.2.1"
-source = { url = "https://files.pythonhosted.org/packages/8d/96/9386b30d14702d8a73616db100d5d2c8587a85848350b899ce916a6663e0/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-manylinux_2_17_aarch64.whl" }
+version = "2.3.2"
+source = { url = "https://files.pythonhosted.org/packages/6c/ec/6dcd5e66e943ee884639838e485f9705b7e964df66a5a466f367f8d63c15/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-manylinux_2_17_x86_64.whl" }
 resolution-markers = [
-    "python_full_version >= '3.13' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.11.4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
 dependencies = [
     { name = "anthropic" },
@@ -734,7 +579,7 @@ dependencies = [
     { name = "yara-x" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8d/96/9386b30d14702d8a73616db100d5d2c8587a85848350b899ce916a6663e0/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-manylinux_2_17_aarch64.whl", hash = "sha256:e5e6a3d7f956afccae73c7326e3a1a2d43203a431b7cbd598333f6098b3190e6" },
+    { url = "https://files.pythonhosted.org/packages/6c/ec/6dcd5e66e943ee884639838e485f9705b7e964df66a5a466f367f8d63c15/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-manylinux_2_17_x86_64.whl", hash = "sha256:0222d84c9c98419623d1e2a1b56a52af4b9ca07a6e9767cb6241dc7a16f0efa5" },
 ]
 
 [package.metadata]
@@ -757,7 +602,256 @@ requires-dist = [
     { name = "httplib2", marker = "extra == 'google'", specifier = ">=0.32.0" },
     { name = "httplib2", marker = "extra == 'vertex'", specifier = ">=0.32.0" },
     { name = "httpx", specifier = ">=0.27,<1" },
-    { name = "litellm", specifier = ">=1.89.7,<2" },
+    { name = "litellm", specifier = ">=1.89.7,!=1.107.0,<2" },
+    { name = "magika", specifier = ">=1.0,<2" },
+    { name = "oletools", specifier = ">=0.60,<1" },
+    { name = "openai", specifier = ">=2.0,<3" },
+    { name = "pdfid", specifier = ">=1.1,<2" },
+    { name = "protobuf", specifier = ">=5.29,<7" },
+    { name = "pyasn1", marker = "extra == 'all'", specifier = ">=0.6.4" },
+    { name = "pyasn1", marker = "extra == 'google'", specifier = ">=0.6.4" },
+    { name = "pyasn1", marker = "extra == 'vertex'", specifier = ">=0.6.4" },
+    { name = "pydantic", specifier = ">=2.10,<3" },
+    { name = "pyjwt", specifier = ">=2.15.0,<3" },
+    { name = "python-dotenv", specifier = ">=1.0,<2" },
+    { name = "python-frontmatter", specifier = ">=1.1,<2" },
+    { name = "python-multipart", specifier = ">=0.0.31,<0.1" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "rich", specifier = ">=14.0,<15" },
+    { name = "tabulate", specifier = ">=0.9,<1" },
+    { name = "textual", specifier = ">=7.0,<9" },
+    { name = "urllib3", specifier = ">=2.8.0,<3" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
+    { name = "yara-x", specifier = ">=1.10,<2" },
+]
+provides-extras = ["all", "azure", "bedrock", "google", "vertex"]
+
+[[package]]
+name = "cisco-ai-skill-scanner"
+version = "2.3.2"
+source = { url = "https://files.pythonhosted.org/packages/b5/7d/c3c7a5cdc12645083bddae020f26629ae476c44cccefe699e9d8e8d37f31/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-macosx_13_0_x86_64.whl" }
+resolution-markers = [
+    "python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version < '3.11.4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+]
+dependencies = [
+    { name = "anthropic" },
+    { name = "click" },
+    { name = "confusable-homoglyphs" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "litellm" },
+    { name = "magika" },
+    { name = "oletools" },
+    { name = "openai" },
+    { name = "pdfid" },
+    { name = "protobuf" },
+    { name = "pydantic" },
+    { name = "pyjwt" },
+    { name = "python-dotenv" },
+    { name = "python-frontmatter" },
+    { name = "python-multipart" },
+    { name = "pyyaml" },
+    { name = "rich" },
+    { name = "tabulate" },
+    { name = "textual" },
+    { name = "urllib3" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "yara-x" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b5/7d/c3c7a5cdc12645083bddae020f26629ae476c44cccefe699e9d8e8d37f31/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-macosx_13_0_x86_64.whl", hash = "sha256:2e85840899fe98e116d0e93da08f83c0c58843b4adf1a0ef388c6da92cf7a9a2" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = ">=0.50,<1" },
+    { name = "azure-identity", marker = "extra == 'all'", specifier = ">=1.20,<2" },
+    { name = "azure-identity", marker = "extra == 'azure'", specifier = ">=1.20,<2" },
+    { name = "boto3", marker = "extra == 'all'", specifier = ">=1.40,<2" },
+    { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.40,<2" },
+    { name = "click", specifier = ">=8.3.3" },
+    { name = "confusable-homoglyphs", specifier = ">=3.3,<4" },
+    { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "google-cloud-aiplatform", marker = "extra == 'all'", specifier = ">=1.130,<2" },
+    { name = "google-cloud-aiplatform", marker = "extra == 'vertex'", specifier = ">=1.130,<2" },
+    { name = "google-genai", marker = "extra == 'all'", specifier = ">=1.60,<2" },
+    { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.60,<2" },
+    { name = "google-generativeai", marker = "extra == 'all'", specifier = ">=0.8,<1" },
+    { name = "google-generativeai", marker = "extra == 'google'", specifier = ">=0.8,<1" },
+    { name = "httplib2", marker = "extra == 'all'", specifier = ">=0.32.0" },
+    { name = "httplib2", marker = "extra == 'google'", specifier = ">=0.32.0" },
+    { name = "httplib2", marker = "extra == 'vertex'", specifier = ">=0.32.0" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "litellm", specifier = ">=1.89.7,!=1.107.0,<2" },
+    { name = "magika", specifier = ">=1.0,<2" },
+    { name = "oletools", specifier = ">=0.60,<1" },
+    { name = "openai", specifier = ">=2.0,<3" },
+    { name = "pdfid", specifier = ">=1.1,<2" },
+    { name = "protobuf", specifier = ">=5.29,<7" },
+    { name = "pyasn1", marker = "extra == 'all'", specifier = ">=0.6.4" },
+    { name = "pyasn1", marker = "extra == 'google'", specifier = ">=0.6.4" },
+    { name = "pyasn1", marker = "extra == 'vertex'", specifier = ">=0.6.4" },
+    { name = "pydantic", specifier = ">=2.10,<3" },
+    { name = "pyjwt", specifier = ">=2.15.0,<3" },
+    { name = "python-dotenv", specifier = ">=1.0,<2" },
+    { name = "python-frontmatter", specifier = ">=1.1,<2" },
+    { name = "python-multipart", specifier = ">=0.0.31,<0.1" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "rich", specifier = ">=14.0,<15" },
+    { name = "tabulate", specifier = ">=0.9,<1" },
+    { name = "textual", specifier = ">=7.0,<9" },
+    { name = "urllib3", specifier = ">=2.8.0,<3" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
+    { name = "yara-x", specifier = ">=1.10,<2" },
+]
+provides-extras = ["all", "azure", "bedrock", "google", "vertex"]
+
+[[package]]
+name = "cisco-ai-skill-scanner"
+version = "2.3.2"
+source = { url = "https://files.pythonhosted.org/packages/c9/c3/681409a398063a8822ef51e100d427c3a86caef2cc8f524aba6116050f37/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-manylinux_2_17_aarch64.whl" }
+resolution-markers = [
+    "python_full_version >= '3.13' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version < '3.11.4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+]
+dependencies = [
+    { name = "anthropic" },
+    { name = "click" },
+    { name = "confusable-homoglyphs" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "litellm" },
+    { name = "magika" },
+    { name = "oletools" },
+    { name = "openai" },
+    { name = "pdfid" },
+    { name = "protobuf" },
+    { name = "pydantic" },
+    { name = "pyjwt" },
+    { name = "python-dotenv" },
+    { name = "python-frontmatter" },
+    { name = "python-multipart" },
+    { name = "pyyaml" },
+    { name = "rich" },
+    { name = "tabulate" },
+    { name = "textual" },
+    { name = "urllib3" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "yara-x" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c9/c3/681409a398063a8822ef51e100d427c3a86caef2cc8f524aba6116050f37/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-manylinux_2_17_aarch64.whl", hash = "sha256:e97e9a9cb9bd0ca71116c1b5185dffc3ad7b20c9bec25468fdffa6720f959557" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = ">=0.50,<1" },
+    { name = "azure-identity", marker = "extra == 'all'", specifier = ">=1.20,<2" },
+    { name = "azure-identity", marker = "extra == 'azure'", specifier = ">=1.20,<2" },
+    { name = "boto3", marker = "extra == 'all'", specifier = ">=1.40,<2" },
+    { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.40,<2" },
+    { name = "click", specifier = ">=8.3.3" },
+    { name = "confusable-homoglyphs", specifier = ">=3.3,<4" },
+    { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "google-cloud-aiplatform", marker = "extra == 'all'", specifier = ">=1.130,<2" },
+    { name = "google-cloud-aiplatform", marker = "extra == 'vertex'", specifier = ">=1.130,<2" },
+    { name = "google-genai", marker = "extra == 'all'", specifier = ">=1.60,<2" },
+    { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.60,<2" },
+    { name = "google-generativeai", marker = "extra == 'all'", specifier = ">=0.8,<1" },
+    { name = "google-generativeai", marker = "extra == 'google'", specifier = ">=0.8,<1" },
+    { name = "httplib2", marker = "extra == 'all'", specifier = ">=0.32.0" },
+    { name = "httplib2", marker = "extra == 'google'", specifier = ">=0.32.0" },
+    { name = "httplib2", marker = "extra == 'vertex'", specifier = ">=0.32.0" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "litellm", specifier = ">=1.89.7,!=1.107.0,<2" },
+    { name = "magika", specifier = ">=1.0,<2" },
+    { name = "oletools", specifier = ">=0.60,<1" },
+    { name = "openai", specifier = ">=2.0,<3" },
+    { name = "pdfid", specifier = ">=1.1,<2" },
+    { name = "protobuf", specifier = ">=5.29,<7" },
+    { name = "pyasn1", marker = "extra == 'all'", specifier = ">=0.6.4" },
+    { name = "pyasn1", marker = "extra == 'google'", specifier = ">=0.6.4" },
+    { name = "pyasn1", marker = "extra == 'vertex'", specifier = ">=0.6.4" },
+    { name = "pydantic", specifier = ">=2.10,<3" },
+    { name = "pyjwt", specifier = ">=2.15.0,<3" },
+    { name = "python-dotenv", specifier = ">=1.0,<2" },
+    { name = "python-frontmatter", specifier = ">=1.1,<2" },
+    { name = "python-multipart", specifier = ">=0.0.31,<0.1" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "rich", specifier = ">=14.0,<15" },
+    { name = "tabulate", specifier = ">=0.9,<1" },
+    { name = "textual", specifier = ">=7.0,<9" },
+    { name = "urllib3", specifier = ">=2.8.0,<3" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
+    { name = "yara-x", specifier = ">=1.10,<2" },
+]
+provides-extras = ["all", "azure", "bedrock", "google", "vertex"]
+
+[[package]]
+name = "cisco-ai-skill-scanner"
+version = "2.3.2"
+source = { url = "https://files.pythonhosted.org/packages/e9/4a/2414377b639227f835e198add7743782fb3b1d43fa5551cba905afafdfc8/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-win_amd64.whl" }
+resolution-markers = [
+    "(python_full_version >= '3.13' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'win32')",
+    "(python_full_version == '3.12.*' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'win32')",
+    "(python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'win32')",
+    "(python_full_version < '3.11.4' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version < '3.11.4' and platform_machine == 'x86_64' and sys_platform == 'win32')",
+]
+dependencies = [
+    { name = "anthropic" },
+    { name = "click" },
+    { name = "confusable-homoglyphs" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "litellm" },
+    { name = "magika" },
+    { name = "oletools" },
+    { name = "openai" },
+    { name = "pdfid" },
+    { name = "protobuf" },
+    { name = "pydantic" },
+    { name = "pyjwt" },
+    { name = "python-dotenv" },
+    { name = "python-frontmatter" },
+    { name = "python-multipart" },
+    { name = "pyyaml" },
+    { name = "rich" },
+    { name = "tabulate" },
+    { name = "textual" },
+    { name = "urllib3" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "yara-x" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/4a/2414377b639227f835e198add7743782fb3b1d43fa5551cba905afafdfc8/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-win_amd64.whl", hash = "sha256:cd4d17147604b1623c5caec6e21d093741fb95ab9ee112741e12b60fe758a611" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = ">=0.50,<1" },
+    { name = "azure-identity", marker = "extra == 'all'", specifier = ">=1.20,<2" },
+    { name = "azure-identity", marker = "extra == 'azure'", specifier = ">=1.20,<2" },
+    { name = "boto3", marker = "extra == 'all'", specifier = ">=1.40,<2" },
+    { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.40,<2" },
+    { name = "click", specifier = ">=8.3.3" },
+    { name = "confusable-homoglyphs", specifier = ">=3.3,<4" },
+    { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "google-cloud-aiplatform", marker = "extra == 'all'", specifier = ">=1.130,<2" },
+    { name = "google-cloud-aiplatform", marker = "extra == 'vertex'", specifier = ">=1.130,<2" },
+    { name = "google-genai", marker = "extra == 'all'", specifier = ">=1.60,<2" },
+    { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.60,<2" },
+    { name = "google-generativeai", marker = "extra == 'all'", specifier = ">=0.8,<1" },
+    { name = "google-generativeai", marker = "extra == 'google'", specifier = ">=0.8,<1" },
+    { name = "httplib2", marker = "extra == 'all'", specifier = ">=0.32.0" },
+    { name = "httplib2", marker = "extra == 'google'", specifier = ">=0.32.0" },
+    { name = "httplib2", marker = "extra == 'vertex'", specifier = ">=0.32.0" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "litellm", specifier = ">=1.89.7,!=1.107.0,<2" },
     { name = "magika", specifier = ">=1.0,<2" },
     { name = "oletools", specifier = ">=0.60,<1" },
     { name = "openai", specifier = ">=2.0,<3" },
@@ -923,6 +1017,23 @@ wheels = [
 ]
 
 [[package]]
+name = "cyclonedx-python-lib"
+version = "11.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jsonschema" },
+    { name = "license-expression" },
+    { name = "packageurl-python" },
+    { name = "py-serializable" },
+    { name = "sortedcontainers" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/17/40/6509e6cfd7f2f3255501690f46375fdd224949e21fd1e96f4f4c8a9041b1/cyclonedx_python_lib-11.12.0.tar.gz", hash = "sha256:16767c4039de90c04e9f03348f8f0ed4b8ff842eaa7eefcad3a95685f970dacf", size = 1445378, upload-time = "2026-08-13T07:52:18.675Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cf/f0/b2cb999244f2f4194df63ecff6939228178fa63a33be809c412684ca8db7/cyclonedx_python_lib-11.12.0-py3-none-any.whl", hash = "sha256:0e807521a921a5c3cb8ce1153f8a61d29eedfe76a46aac2796b7c6b573391a54", size = 529453, upload-time = "2026-08-13T07:52:16.836Z" },
+]
+
+[[package]]
 name = "defenseclaw"
 version = "1.0.0"
 source = { editable = "." }
@@ -930,12 +1041,12 @@ dependencies = [
     { name = "aiohttp" },
     { name = "boto3" },
     { name = "certifi" },
-    { name = "cisco-ai-mcp-scanner" },
-    { name = "cisco-ai-skill-scanner", version = "2.2.1", source = { url = "https://files.pythonhosted.org/packages/23/21/b52e8b105cdfb0b1f9f8c12ec49e90ceaee0c371180aa0a6e9e1a5bef2f3/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-macosx_13_0_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
-    { name = "cisco-ai-skill-scanner", version = "2.2.1", source = { url = "https://files.pythonhosted.org/packages/4c/4c/ae046769e2e9dc051c8c0ecc93a0b1e8abd56493a6ba0f1a9a2ed349842e/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-win_amd64.whl" }, marker = "(platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'x86_64' and sys_platform == 'win32')" },
-    { name = "cisco-ai-skill-scanner", version = "2.2.1", source = { url = "https://files.pythonhosted.org/packages/52/1a/843c79746aaf75efebc68a14c34112a426db74d167be165792060ad01992/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-manylinux_2_17_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "cisco-ai-skill-scanner", version = "2.2.1", source = { url = "https://files.pythonhosted.org/packages/81/20/b0d6458007fbac82cb76f1f7dfe139eb2cd6df63ed2ae997459b57b91204/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-macosx_13_0_arm64.whl" }, marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "cisco-ai-skill-scanner", version = "2.2.1", source = { url = "https://files.pythonhosted.org/packages/8d/96/9386b30d14702d8a73616db100d5d2c8587a85848350b899ce916a6663e0/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-manylinux_2_17_aarch64.whl" }, marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
+    { name = "cisco-ai-mcp-scanner", marker = "python_full_version >= '3.11.4'" },
+    { name = "cisco-ai-skill-scanner", version = "2.3.2", source = { url = "https://files.pythonhosted.org/packages/64/15/01db90dae5d2456ad513029d827e7c09141be9b5c9e69f634c2d7d4544ec/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-macosx_13_0_arm64.whl" }, marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
+    { name = "cisco-ai-skill-scanner", version = "2.3.2", source = { url = "https://files.pythonhosted.org/packages/6c/ec/6dcd5e66e943ee884639838e485f9705b7e964df66a5a466f367f8d63c15/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-manylinux_2_17_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "cisco-ai-skill-scanner", version = "2.3.2", source = { url = "https://files.pythonhosted.org/packages/b5/7d/c3c7a5cdc12645083bddae020f26629ae476c44cccefe699e9d8e8d37f31/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-macosx_13_0_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
+    { name = "cisco-ai-skill-scanner", version = "2.3.2", source = { url = "https://files.pythonhosted.org/packages/c9/c3/681409a398063a8822ef51e100d427c3a86caef2cc8f524aba6116050f37/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-manylinux_2_17_aarch64.whl" }, marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
+    { name = "cisco-ai-skill-scanner", version = "2.3.2", source = { url = "https://files.pythonhosted.org/packages/e9/4a/2414377b639227f835e198add7743782fb3b1d43fa5551cba905afafdfc8/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-win_amd64.whl" }, marker = "(platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'x86_64' and sys_platform == 'win32')" },
     { name = "click" },
     { name = "cryptography" },
     { name = "fastapi" },
@@ -946,6 +1057,7 @@ dependencies = [
     { name = "litellm" },
     { name = "magika" },
     { name = "mcp" },
+    { name = "msgpack" },
     { name = "multidict" },
     { name = "opentelemetry-proto" },
     { name = "pydantic-settings" },
@@ -988,12 +1100,12 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.4,<4" },
     { name = "boto3", specifier = ">=1.34" },
     { name = "certifi", specifier = ">=2026.10.19" },
-    { name = "cisco-ai-mcp-scanner", marker = "python_full_version >= '3.11'", url = "https://files.pythonhosted.org/packages/af/40/d42943f9e3da40ee9b5f00439fda38b62fc379034383f85a6e06d7825796/cisco_ai_mcp_scanner-4.3.0-py3-none-any.whl" },
-    { name = "cisco-ai-skill-scanner", marker = "python_full_version >= '3.11' and platform_machine == 'arm64' and sys_platform == 'darwin'", url = "https://files.pythonhosted.org/packages/81/20/b0d6458007fbac82cb76f1f7dfe139eb2cd6df63ed2ae997459b57b91204/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-macosx_13_0_arm64.whl" },
-    { name = "cisco-ai-skill-scanner", marker = "python_full_version >= '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin'", url = "https://files.pythonhosted.org/packages/23/21/b52e8b105cdfb0b1f9f8c12ec49e90ceaee0c371180aa0a6e9e1a5bef2f3/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-macosx_13_0_x86_64.whl" },
-    { name = "cisco-ai-skill-scanner", marker = "python_full_version >= '3.11' and platform_machine == 'aarch64' and sys_platform == 'linux'", url = "https://files.pythonhosted.org/packages/8d/96/9386b30d14702d8a73616db100d5d2c8587a85848350b899ce916a6663e0/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-manylinux_2_17_aarch64.whl" },
-    { name = "cisco-ai-skill-scanner", marker = "python_full_version >= '3.11' and platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://files.pythonhosted.org/packages/52/1a/843c79746aaf75efebc68a14c34112a426db74d167be165792060ad01992/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-manylinux_2_17_x86_64.whl" },
-    { name = "cisco-ai-skill-scanner", marker = "(python_full_version >= '3.11' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version >= '3.11' and platform_machine == 'x86_64' and sys_platform == 'win32')", url = "https://files.pythonhosted.org/packages/4c/4c/ae046769e2e9dc051c8c0ecc93a0b1e8abd56493a6ba0f1a9a2ed349842e/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-win_amd64.whl" },
+    { name = "cisco-ai-mcp-scanner", marker = "python_full_version >= '3.11.4'", url = "https://files.pythonhosted.org/packages/6a/cd/1728f69e5d874010ee62c0a29a23c7edfec0a9b1f3642d21893944145957/cisco_ai_mcp_scanner-4.8.7-py3-none-any.whl" },
+    { name = "cisco-ai-skill-scanner", marker = "python_full_version >= '3.11' and platform_machine == 'arm64' and sys_platform == 'darwin'", url = "https://files.pythonhosted.org/packages/64/15/01db90dae5d2456ad513029d827e7c09141be9b5c9e69f634c2d7d4544ec/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-macosx_13_0_arm64.whl" },
+    { name = "cisco-ai-skill-scanner", marker = "python_full_version >= '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin'", url = "https://files.pythonhosted.org/packages/b5/7d/c3c7a5cdc12645083bddae020f26629ae476c44cccefe699e9d8e8d37f31/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-macosx_13_0_x86_64.whl" },
+    { name = "cisco-ai-skill-scanner", marker = "python_full_version >= '3.11' and platform_machine == 'aarch64' and sys_platform == 'linux'", url = "https://files.pythonhosted.org/packages/c9/c3/681409a398063a8822ef51e100d427c3a86caef2cc8f524aba6116050f37/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-manylinux_2_17_aarch64.whl" },
+    { name = "cisco-ai-skill-scanner", marker = "python_full_version >= '3.11' and platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://files.pythonhosted.org/packages/6c/ec/6dcd5e66e943ee884639838e485f9705b7e964df66a5a466f367f8d63c15/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-manylinux_2_17_x86_64.whl" },
+    { name = "cisco-ai-skill-scanner", marker = "(python_full_version >= '3.11' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version >= '3.11' and platform_machine == 'x86_64' and sys_platform == 'win32')", url = "https://files.pythonhosted.org/packages/e9/4a/2414377b639227f835e198add7743782fb3b1d43fa5551cba905afafdfc8/cisco_ai_skill_scanner-2.3.2-cp311.cp312.cp313.cp314-none-win_amd64.whl" },
     { name = "click", specifier = ">=8.3.3,<9" },
     { name = "cryptography", specifier = ">=50.0.0,<51" },
     { name = "fastapi", specifier = ">=0.137.1,<0.138" },
@@ -1005,7 +1117,8 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.23.0,<5" },
     { name = "litellm", specifier = ">=1.103.10,<1.104.0" },
     { name = "magika", specifier = ">=1.0.2,<2" },
-    { name = "mcp", specifier = ">=1.30.0,<2" },
+    { name = "mcp", specifier = ">=2.2.0,<3" },
+    { name = "msgpack", specifier = ">=1.2.1,<2" },
     { name = "multidict", specifier = ">=6.9.1,<7" },
     { name = "opentelemetry-proto", specifier = ">=1.28.0,<2" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
@@ -1036,6 +1149,15 @@ dev = [
     { name = "pytest-cov", specifier = "==7.1.0" },
     { name = "pytest-xdist", specifier = "==3.8.0" },
     { name = "ruff", specifier = "==0.15.7" },
+]
+
+[[package]]
+name = "defusedxml"
+version = "0.7.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69", size = 75520, upload-time = "2021-03-08T10:59:26.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61", size = 25604, upload-time = "2021-03-08T10:59:24.45Z" },
 ]
 
 [[package]]
@@ -1588,6 +1710,19 @@ wheels = [
 ]
 
 [[package]]
+name = "httpcore2"
+version = "2.16.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "h11" },
+    { name = "truststore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c0/61/afa9d6b7452f9eca73f73d45324eb0bb52f098fd5e6049bf6b8263be9b4e/httpcore2-2.16.0.tar.gz", hash = "sha256:c72cd0413563b17e1cd8354677dff887466f8ec2551679759e93126534428643", size = 69886, upload-time = "2026-10-21T07:09:45.31Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/c2/ce417c397afa5181f0e3c6ff01a4d01639414e1adef08730d97571297151/httpcore2-2.16.0-py3-none-any.whl", hash = "sha256:5c4358319f2602d984ad93182c9fee5160f22e9da7babdda870a5e7c4e2dc34f", size = 85070, upload-time = "2026-10-21T07:09:42.802Z" },
+]
+
+[[package]]
 name = "httptools"
 version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1637,12 +1772,29 @@ http2 = [
 ]
 
 [[package]]
-name = "httpx-sse"
-version = "0.4.3"
+name = "httpx2"
+version = "2.16.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/0f/4c/751061ffa58615a32c31b2d82e8482be8dd4a89154f003147acee90f2be9/httpx_sse-0.4.3.tar.gz", hash = "sha256:9b1ed0127459a66014aec3c56bebd93da3c1bc8bb6618c8082039a44889a755d", size = 15943, upload-time = "2025-10-10T21:48:22.271Z" }
+dependencies = [
+    { name = "anyio", marker = "sys_platform != 'emscripten'" },
+    { name = "httpcore2", marker = "sys_platform != 'emscripten'" },
+    { name = "httpx2-jsfetch", marker = "python_full_version >= '3.12' and sys_platform == 'emscripten'" },
+    { name = "idna" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/73/5ca2cedf5e4e50423d1c258877865a6b62793633b561c58499f8aeb33b7e/httpx2-2.16.0.tar.gz", hash = "sha256:0d54c98128e8f2ff7fbbde0fca8c359e5f032edeaaaac443cdb7f31f685bcd7f", size = 103116, upload-time = "2026-10-21T07:09:46.348Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d2/fd/6668e5aec43ab844de6fc74927e155a3b37bf40d7c3790e49fc0406b6578/httpx_sse-0.4.3-py3-none-any.whl", hash = "sha256:0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc", size = 8960, upload-time = "2025-10-10T21:48:21.158Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/3d/2e4bc4fd1ef9770871669adb348d612a6e4786b303a23f9935b81c48dd60/httpx2-2.16.0-py3-none-any.whl", hash = "sha256:fd2c5d7909e8d86fe92d53020c310ca0e4e431b838c207c5754b9bbf0308d49a", size = 97880, upload-time = "2026-10-21T07:09:44.01Z" },
+]
+
+[[package]]
+name = "httpx2-jsfetch"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cd/c4/0e5636363151a2a1795e0a77617168b9ca438e1748ec05fc9b5687f93d64/httpx2_jsfetch-1.0.tar.gz", hash = "sha256:70a0e3eabfef7cce5ad9c629f7d01ca05e418f586646f4ddf14782e4c1454c60", size = 6872, upload-time = "2026-08-07T00:13:07.492Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/43/832f631d32e4f1211caa2ba368317739fe71f0b8530e4c9d15dc454bac2a/httpx2_jsfetch-1.0-py3-none-any.whl", hash = "sha256:cb916b707601e69a07721aabc8f3f6659be3a6893bc1ff5c6f9e02241df2da32", size = 6382, upload-time = "2026-08-07T00:13:06.567Z" },
 ]
 
 [[package]]
@@ -1824,6 +1976,18 @@ wheels = [
 ]
 
 [[package]]
+name = "license-expression"
+version = "30.4.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "boolean-py" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/40/71/d89bb0e71b1415453980fd32315f2a037aad9f7f70f695c7cec7035feb13/license_expression-30.4.4.tar.gz", hash = "sha256:73448f0aacd8d0808895bdc4b2c8e01a8d67646e4188f887375398c761f340fd", size = 186402, upload-time = "2025-07-22T11:13:32.17Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/40/791891d4c0c4dab4c5e187c17261cedc26285fd41541577f900470a45a4d/license_expression-30.4.4-py3-none-any.whl", hash = "sha256:421788fdcadb41f049d2dc934ce666626265aeccefddd25e162a26f23bcbf8a4", size = 120615, upload-time = "2025-07-22T11:13:31.217Z" },
+]
+
+[[package]]
 name = "linkify-it-py"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1954,15 +2118,15 @@ wheels = [
 
 [[package]]
 name = "mcp"
-version = "1.30.0"
+version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
-    { name = "httpx" },
-    { name = "httpx-sse" },
+    { name = "httpx2" },
     { name = "jsonschema" },
+    { name = "mcp-types" },
+    { name = "opentelemetry-api" },
     { name = "pydantic" },
-    { name = "pydantic-settings" },
     { name = "pyjwt" },
     { name = "python-multipart" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },
@@ -1972,15 +2136,28 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uvicorn", marker = "sys_platform != 'emscripten'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ba/93/0142dc84a666daf8ad51a34268f34c12fd6fda4f3810c4be2504eecc8212/mcp-1.30.0.tar.gz", hash = "sha256:445414625fce5c295faa505bb11bacece661ab6f4028d57c935db57820b7a3e4", size = 680511, upload-time = "2026-09-07T14:34:15.845Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9d/8d/e0d339616f4810e9051d4aba6887afab289ab1f81875fe908b606cdfd0e3/mcp-2.3.0.tar.gz", hash = "sha256:8b147a50441cf059dc88c684e0aeed3687f0aa0f39c6cde7b90330effd2b34d8", size = 4171955, upload-time = "2026-10-02T22:06:56.091Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f5/f4/e58bc33317c92a0203664daaf00bf6f41166cc0149e5d6870a03f7cd004a/mcp-1.30.0-py3-none-any.whl", hash = "sha256:666edb5009503e1047c9d60346a756f94b261f05cc2625f23d41c728ffc484d0", size = 234581, upload-time = "2026-09-07T14:34:14.266Z" },
+    { url = "https://files.pythonhosted.org/packages/20/d7/4a2878f128df729db3ca04e71bfce26405cc2e0c9ebe19c592feeb4c61b9/mcp-2.3.0-py3-none-any.whl", hash = "sha256:dd0c44c089d16453e8ae31a3877a0054d7a2314caaa81f5e0541b9b1734b2377", size = 368664, upload-time = "2026-10-02T22:06:52.119Z" },
 ]
 
 [package.optional-dependencies]
 cli = [
     { name = "python-dotenv" },
     { name = "typer" },
+]
+
+[[package]]
+name = "mcp-types"
+version = "2.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9e/2d/7c251e34207f6c51000312fc8839111ac45cfe02023f90b44e7f1051dd8e/mcp_types-2.3.0.tar.gz", hash = "sha256:d1e46549edb35ee19a94940fcee6d1addd7e589ab7ea92dda83f5d84781fc362", size = 65898, upload-time = "2026-10-02T22:06:57.863Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/48/32583066b155bb5d4507e7887dc88ee23118cc4de8e2a12870c49719e2a8/mcp_types-2.3.0-py3-none-any.whl", hash = "sha256:968efdbdaedfab06adae40d378a34395f1090c5921d4be3c9cde283aaf76d91d", size = 69108, upload-time = "2026-10-02T22:06:54.099Z" },
 ]
 
 [[package]]
@@ -2002,6 +2179,48 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
+]
+
+[[package]]
+name = "msgpack"
+version = "1.2.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/52/1ec7ead2c7528bf3d1db73e886fa4df10f9e6f0eb7854a448b7090cfcef7/msgpack-1.2.4.tar.gz", hash = "sha256:475c44e12f2a5de766a8448783f149c9b33f3f49b88953c6cd739a77d93c732c", size = 197764, upload-time = "2026-10-26T17:55:48.593Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/cb/a3bd4d234c0f2f7e646b9be259b801c5d6a35c97f93dded4f722e6b80acd/msgpack-1.2.4-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:1095b1ebcc8c9d3e70c51240b7160d8e9da66044e0a45c3ef8403d3a9ef0c5ad", size = 90935, upload-time = "2026-10-26T17:53:46.588Z" },
+    { url = "https://files.pythonhosted.org/packages/56/3c/fc87d06bdfc99b302f4379f0eb34bb8695b6ecd90b965652d0a3195d1acd/msgpack-1.2.4-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:a4b47ec7422bef149223786a87df80067ac65bfc7c0565e5cf1dfbdc40acee50", size = 90187, upload-time = "2026-10-26T17:53:48.151Z" },
+    { url = "https://files.pythonhosted.org/packages/05/a3/abebe12c1b589b7eeab60cb87dd5eb398fcf549bdafca8c30d8d73e48493/msgpack-1.2.4-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0c75cfda0d3ccb1f6abc20e0608ad6b226e11f317b5ac297721504d2509e2bd9", size = 466911, upload-time = "2026-10-26T17:53:49.536Z" },
+    { url = "https://files.pythonhosted.org/packages/03/41/ed5517a107628f6f7f3a1f46f19de3aca979bd1fc95861cb56ce0e4bcc02/msgpack-1.2.4-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a45ceb5f199d5e388f28b550ba881096a3740d4bda10e661d77f59d9a2e8187a", size = 480247, upload-time = "2026-10-26T17:53:51.211Z" },
+    { url = "https://files.pythonhosted.org/packages/31/71/14c39858380e11408fcf75aeab1cda0afb253cd8f62a01fbe4ae1838b66f/msgpack-1.2.4-cp311-cp311-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl", hash = "sha256:7ca62b31a873c70b73f367bb2c1efec1d143016642c5191405549578184ff6ff", size = 438298, upload-time = "2026-10-26T17:53:52.919Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/73/ba40b91632e011851e1a397d53e0bd031848751902424a5b37c33f7de412/msgpack-1.2.4-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:f641971d3eec89ffca57fa36d151ad1cf1b6a214b47faca16cb165c7d45ef8be", size = 461600, upload-time = "2026-10-26T17:53:54.8Z" },
+    { url = "https://files.pythonhosted.org/packages/51/f0/c13ce7e7a7d8dabc1a48eecf61eb789084dbcc64374a7f19770eaf96f2c3/msgpack-1.2.4-cp311-cp311-musllinux_1_2_riscv64.whl", hash = "sha256:b9eff629190a4b118549b654df32a56ed535351819f690d0c935d185500cc90b", size = 435020, upload-time = "2026-10-26T17:53:56.433Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/d2/2a4e254f8ee5d5dd5019bd9f99164d79704788dbe16d9d6de77fda4e6727/msgpack-1.2.4-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:4e22c6571ab6ac9036da87d8a6fddb4baf86981844b480c0c60a4a4be417ee48", size = 479138, upload-time = "2026-10-26T17:53:57.918Z" },
+    { url = "https://files.pythonhosted.org/packages/70/b6/28f7eb3f38e3b6ea1f87f36c44cc25ab0eeb451147b5ff61637ce3d0b839/msgpack-1.2.4-cp311-cp311-win32.whl", hash = "sha256:5d7d4d2a5fc6a604f20c546ee1e8327bed1e9329be2417cef9af1f799f3e55e0", size = 67926, upload-time = "2026-10-26T17:53:59.172Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/9e/67a97d5caa41bcbdbb4fae7bf5009b60222c72d0748364ac9e32de334a4e/msgpack-1.2.4-cp311-cp311-win_amd64.whl", hash = "sha256:9db832747bd05834530189e564a3fe31e2617547dc1f3a005f835eafc2b8e048", size = 76117, upload-time = "2026-10-26T17:54:00.403Z" },
+    { url = "https://files.pythonhosted.org/packages/32/43/890b028b2cdb6b75fd56bd9388466c9fea9f10a31ebb685c489c5cb32fa9/msgpack-1.2.4-cp311-cp311-win_arm64.whl", hash = "sha256:deb1730c4c0c1a8c975be2f43efea6ee4834d35031a39075f78917d0ba8b3c04", size = 72632, upload-time = "2026-10-26T17:54:01.798Z" },
+    { url = "https://files.pythonhosted.org/packages/27/fd/45f6cd13cefbb659a8e0128ea64d51b349571163fec3c9c20f99792dc42a/msgpack-1.2.4-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:90cba4996b18ec1201fcaabd01ec48ff4b9755416bcd52105ded2f89fe145c49", size = 91903, upload-time = "2026-10-26T17:54:03.097Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/89/169c2a0b1ffeafe68a4f13d8d96b6ed1cd8d40d8262b3a6690851da7eda1/msgpack-1.2.4-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:112933726919f4239646cca9572e2c2fa5626358c670da8440aac09403100a48", size = 90573, upload-time = "2026-10-26T17:54:04.383Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/8e/272a384f2a001cfced1baab0a8abdd912d6281432670f4609d1aab718d7b/msgpack-1.2.4-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:9ca1e78106675f2aed07dc37b842ce19be70010ab22c5c5c04688f0840d48539", size = 461057, upload-time = "2026-10-26T17:54:05.821Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/d9/f59bd841fc2fd2b74dc50ce85860a6a25f58e588dd48946aeaf2862cf990/msgpack-1.2.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:c4d5bbdbea8f5669b3a734d6c226772804fb120848f99cbe63a0ddee63b049c9", size = 475652, upload-time = "2026-10-26T17:54:07.414Z" },
+    { url = "https://files.pythonhosted.org/packages/00/03/afd000e1b1e28fd535dc8c7bc21ebb88923bc1964a2429fe660fb313ace3/msgpack-1.2.4-cp312-cp312-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl", hash = "sha256:0d9ff7f3aaffd84010f1c501b05406a497584f5cab2f732eb9d89bf960e12f6f", size = 427082, upload-time = "2026-10-26T17:54:09.1Z" },
+    { url = "https://files.pythonhosted.org/packages/f7/7a/e2890b272883c496faad777324ddb70e9cc4a6c63731962a4a39a6a40f44/msgpack-1.2.4-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:aa10dc04c03408f31948ac1896a942141fd8d7a954b3612edac79f19663e4076", size = 451956, upload-time = "2026-10-26T17:54:10.476Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/46/0c1b240b8a580af3e72139c33b018025440a1a42c2579e82e39b1195ee36/msgpack-1.2.4-cp312-cp312-musllinux_1_2_riscv64.whl", hash = "sha256:472a25463678f2795143a7cb42e88a1b59cc2375e9881917e69a9323bde42114", size = 423833, upload-time = "2026-10-26T17:54:12.195Z" },
+    { url = "https://files.pythonhosted.org/packages/80/8e/851415b1a9264e6abf64d8a9617d856769d59e247fb9470106f133aedbae/msgpack-1.2.4-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:cbb8a677da3e845713925e9a203b8a120b1e9da9989836890ba4a4a187902701", size = 470951, upload-time = "2026-10-26T17:54:13.764Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/74/d75bf61aab9cb88b84f7d3a8eca8dd92e19a742b77ded300a1177e88d031/msgpack-1.2.4-cp312-cp312-win32.whl", hash = "sha256:2b0b7dff5beddc10f16ecea6b28c6b98014d1135d7015bd83adff5037f35848d", size = 68786, upload-time = "2026-10-26T17:54:15.049Z" },
+    { url = "https://files.pythonhosted.org/packages/81/c5/dd0e78eb04f9a0773a810d25ef2cd8f16bb941487567d0c63f814881133c/msgpack-1.2.4-cp312-cp312-win_amd64.whl", hash = "sha256:6e38b123681df22373d545520f54bbeddc4706d9235a1161061f12bd6648497d", size = 77272, upload-time = "2026-10-26T17:54:16.491Z" },
+    { url = "https://files.pythonhosted.org/packages/65/e7/b38f63ae82777c0077daa56c4b09af39d29dcb8927ab2ff59268094069c5/msgpack-1.2.4-cp312-cp312-win_arm64.whl", hash = "sha256:6795c588b210b2f13d62c8fcc23bf779b509b839ec5c197a7ab4f5191459e126", size = 71884, upload-time = "2026-10-26T17:54:17.995Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/26/16eaad5fe6e199334fa5bd66070778665717c86e9a273525dc706ddb06a7/msgpack-1.2.4-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:fb811ac3d463a75013b234d2aae56b9f0bdb0105caf4dd2ee65305b6a8a6078d", size = 92057, upload-time = "2026-10-26T17:54:19.616Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/b8/9660be6d120820bc05106f291e824c73d35f4ab77d927788ae67ea80889c/msgpack-1.2.4-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:36258fd0909e1bf26e94604439108846432abe4ffa9a23c9dc2f6f1c60f94b60", size = 90542, upload-time = "2026-10-26T17:54:20.965Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/10/cd55a69fec29df26884b178dc4b1803442ec82abf929604aac619881917a/msgpack-1.2.4-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e9c5ba0f053a7e98f013f083c9d1b2dffb26cad8c897c533d8286e44ed24c669", size = 455798, upload-time = "2026-10-26T17:54:22.434Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/94/562e0733593a780c70b0b18994f30c205149f7f9f4efbe3e9b00b88612c5/msgpack-1.2.4-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7fabd415c41e62006c6641fcdf5b3e866f581c4e11c58328c0d0f69584b9577d", size = 469262, upload-time = "2026-10-26T17:54:24.043Z" },
+    { url = "https://files.pythonhosted.org/packages/bb/92/76d1a5c597e04e1d360b05573d150bdb4502f5a014e6e9cf089c9537c156/msgpack-1.2.4-cp313-cp313-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl", hash = "sha256:7433d340de45003db3ed909a642c9469b598d175530f7a707cbaba64287d27ce", size = 420789, upload-time = "2026-10-26T17:54:25.587Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/c6/b72b8d8022718380db459ced8ffbabc7570ad2d22c7f2fa659c872cb6734/msgpack-1.2.4-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:ccd6e4af5347eb9828147320449bcd30e3321f6397d4583ff16047485dd8be3d", size = 447068, upload-time = "2026-10-26T17:54:27.721Z" },
+    { url = "https://files.pythonhosted.org/packages/cb/dc/f378ef1def4aa135e70325c09e22457f3203ae2a390a192e892267906f33/msgpack-1.2.4-cp313-cp313-musllinux_1_2_riscv64.whl", hash = "sha256:23d1459a1d0b4c9f6629df072d592eb74424b3ed3656b69af507bc9023cc027f", size = 418896, upload-time = "2026-10-26T17:54:29.325Z" },
+    { url = "https://files.pythonhosted.org/packages/62/93/a7e507378f43e91415cb6fda47e0ded0c9de1618a1f4ac4f2887912a92dd/msgpack-1.2.4-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:9e73761fe9fc55a4e9d2df8e8f59b0979231af4dbf80b8bf90cd64c74173d779", size = 465764, upload-time = "2026-10-26T17:54:30.719Z" },
+    { url = "https://files.pythonhosted.org/packages/60/76/7f39f49cbcdaa4aafe64b4941b2640772dbdc1cac3a9332f4c9ba6994da9/msgpack-1.2.4-cp313-cp313-pyemscripten_2025_0_wasm32.whl", hash = "sha256:d088d1f552e129859db830692268747aba0a1ee3e6e0fe6344dbb3aab1df9f6c", size = 53615, upload-time = "2026-10-26T17:54:32.213Z" },
+    { url = "https://files.pythonhosted.org/packages/67/9b/85b93350dbd7b52b358882f7f17a88a03664a7a59a359406e6315c162634/msgpack-1.2.4-cp313-cp313-win32.whl", hash = "sha256:892d4f17d7962bfd2c2928b0a47542bf2948f074a7c04721b73d4138b70481e4", size = 68724, upload-time = "2026-10-26T17:54:33.484Z" },
+    { url = "https://files.pythonhosted.org/packages/02/4a/a7e2778ce09a943c17b6f91c7acb2f9488357657c01f2cccb278297621c4/msgpack-1.2.4-cp313-cp313-win_amd64.whl", hash = "sha256:318d4e634d2b320be10decd9968ad1ae0be1d80cba23b5528c37b429eeb0e3e0", size = 77039, upload-time = "2026-10-26T17:54:35.016Z" },
+    { url = "https://files.pythonhosted.org/packages/64/16/9ff7495a9853e9d7de74965fdadce15017e7213ce564bb5dafc5403c9108/msgpack-1.2.4-cp313-cp313-win_arm64.whl", hash = "sha256:bec3e34749b90cfcf116149aad11295c720ff4a74a7d0a35abdb968a396c1524", size = 71873, upload-time = "2026-10-26T17:54:36.19Z" },
 ]
 
 [[package]]
@@ -2094,12 +2313,18 @@ name = "numpy"
 version = "2.4.6"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "(python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'win32')",
-    "(python_full_version < '3.12' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version < '3.12' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and platform_machine != 'AMD64' and platform_machine != 'x86_64' and sys_platform == 'win32') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.11.4' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version < '3.11.4' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version < '3.11.4' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.11.4' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'win32')",
+    "(python_full_version < '3.11.4' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version < '3.11.4' and platform_machine == 'x86_64' and sys_platform == 'win32')",
+    "(python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine != 'AMD64' and platform_machine != 'x86_64' and sys_platform == 'win32') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
+    "(python_full_version < '3.11.4' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version < '3.11.4' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.11.4' and platform_machine != 'AMD64' and platform_machine != 'x86_64' and sys_platform == 'win32') or (python_full_version < '3.11.4' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d0/ad/fed0499ce6a338d2a03ebae59cd15093910c8875328855781952abf6c2fe/numpy-2.4.6.tar.gz", hash = "sha256:f3a3570c4a2a16746ac2c31a7c7c7b0c186b95ce902e33db6f28094ed7387dda", size = 20735807, upload-time = "2026-05-18T23:37:14.07Z" }
 wheels = [
@@ -2327,6 +2552,15 @@ wheels = [
 ]
 
 [[package]]
+name = "packageurl-python"
+version = "0.17.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/d6/3b5a4e3cfaef7a53869a26ceb034d1ff5e5c27c814ce77260a96d50ab7bb/packageurl_python-0.17.6.tar.gz", hash = "sha256:1252ce3a102372ca6f86eb968e16f9014c4ba511c5c37d95a7f023e2ca6e5c25", size = 50618, upload-time = "2025-11-24T15:20:17.998Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/2f/c7277b7615a93f51b5fbc1eacfc1b75e8103370e786fd8ce2abf6e5c04ab/packageurl_python-0.17.6-py3-none-any.whl", hash = "sha256:31a85c2717bc41dd818f3c62908685ff9eebcb68588213745b14a6ee9e7df7c9", size = 36776, upload-time = "2025-11-24T15:20:16.962Z" },
+]
+
+[[package]]
 name = "packaging"
 version = "26.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2355,6 +2589,61 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/51/83/772024fac3f5f1a439b08bb15351cd23063e3fdcdde343625246dfe2db96/pdfid-1.1.3.tar.gz", hash = "sha256:324ca73bb39f19a438c6a9320317631507209f5c9c9e20c44768778842099a6e", size = 13624, upload-time = "2023-06-06T14:12:17.702Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/29/48/9ba402d773ffac76515720f98f3a01a2802737b6a2b75cac1fb8ba269a7a/pdfid-1.1.3-py3-none-any.whl", hash = "sha256:9b9b72145a81759c6e9f327eb0e115a30a3fbd140fa5bd5da0d1956ec4c9f65a", size = 13539, upload-time = "2023-06-06T14:12:16.721Z" },
+]
+
+[[package]]
+name = "pip"
+version = "26.2.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fa/e8/0842d757e483e895e670f655084cfe8b8c72580c6769a76b30b2789a0608/pip-26.2.2.tar.gz", hash = "sha256:3a8e5c800492787f33a4114ef54444546c340df428974ebba17e0fd47e11af2f", size = 1863336, upload-time = "2026-10-20T16:36:29.008Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl", hash = "sha256:fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70", size = 1819850, upload-time = "2026-10-20T16:36:27.046Z" },
+]
+
+[[package]]
+name = "pip-api"
+version = "0.0.35"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pip" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fc/08/47dfc28aa16ef0dbc38dd7c6e4fe24d124c3ed3a722a4a3e5021584a588c/pip_api-0.0.35.tar.gz", hash = "sha256:14dea05d7b3b68f4c7582213e3ae8932bbba8e1f754bf06b95263d5fa6ab4363", size = 123884, upload-time = "2026-09-08T19:35:12.876Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1d/2e/d424c5b5877be862dd9a2c8b7e9ddb13382bb25e132e6dd50cc09c0a7dde/pip_api-0.0.35-py3-none-any.whl", hash = "sha256:66990d0da25378555cbb538db79384bab92d4617c6350dfd7a2126ba2a3a9894", size = 123943, upload-time = "2026-09-08T19:35:11.537Z" },
+]
+
+[[package]]
+name = "pip-audit"
+version = "2.10.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cachecontrol", extra = ["filecache"] },
+    { name = "cyclonedx-python-lib" },
+    { name = "packaging" },
+    { name = "pip-api" },
+    { name = "pip-requirements-parser" },
+    { name = "platformdirs" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "tomli" },
+    { name = "tomli-w" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/66/a4/f21d5f0a0edabcbce31560b73c7c5a6f72ae87af4236fd1069c8f59a353d/pip_audit-2.10.1.tar.gz", hash = "sha256:1eb4565d19ebe5d48996f4b770b4d2b32887e12cb12cfa637f1a064011b55ffc", size = 54275, upload-time = "2026-06-10T22:17:01.744Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a3/a7/b0c504148114047bd1bc9d97447453c6850ca176bb2f3c0038835994e8b7/pip_audit-2.10.1-py3-none-any.whl", hash = "sha256:99ef3f600a317c1945f1e89e227ef26e1c2d618429b8bd3fa6f4f7c440c4611a", size = 62023, upload-time = "2026-06-10T22:17:00.309Z" },
+]
+
+[[package]]
+name = "pip-requirements-parser"
+version = "32.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pyparsing" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5e/2a/63b574101850e7f7b306ddbdb02cb294380d37948140eecd468fae392b54/pip-requirements-parser-32.0.1.tar.gz", hash = "sha256:b4fa3a7a0be38243123cf9d1f3518da10c51bdb165a2b2985566247f9155a7d3", size = 209359, upload-time = "2022-12-21T15:25:22.732Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/d0/d04f1d1e064ac901439699ee097f58688caadea42498ec9c4b4ad2ef84ab/pip_requirements_parser-32.0.1-py3-none-any.whl", hash = "sha256:4659bc2a667783e7a15d190f6fccf8b2486685b6dba4c19c3876314769c57526", size = 35648, upload-time = "2022-12-21T15:25:21.046Z" },
 ]
 
 [[package]]
@@ -2476,6 +2765,58 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/d7/48cbf6b0c3c39761e47a99cb483405f0fde2be22cf00d71ef316ce52b458/protobuf-5.29.6-cp38-abi3-manylinux2014_aarch64.whl", hash = "sha256:a8866b2cff111f0f863c1b3b9e7572dc7eaea23a7fae27f6fc613304046483e6", size = 320284, upload-time = "2026-02-04T22:54:31.782Z" },
     { url = "https://files.pythonhosted.org/packages/e3/dd/cadd6ec43069247d91f6345fa7a0d2858bef6af366dbd7ba8f05d2c77d3b/protobuf-5.29.6-cp38-abi3-manylinux2014_x86_64.whl", hash = "sha256:e3387f44798ac1106af0233c04fb8abf543772ff241169946f698b3a9a3d3ab9", size = 320478, upload-time = "2026-02-04T22:54:32.909Z" },
     { url = "https://files.pythonhosted.org/packages/5a/cb/e3065b447186cb70aa65acc70c86baf482d82bf75625bf5a2c4f6919c6a3/protobuf-5.29.6-py3-none-any.whl", hash = "sha256:6b9edb641441b2da9fa8f428760fc136a49cf97a52076010cf22a2ff73438a86", size = 173126, upload-time = "2026-02-04T22:54:39.462Z" },
+]
+
+[[package]]
+name = "puremagic"
+version = "1.30"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'win32')",
+    "(python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and platform_machine != 'AMD64' and platform_machine != 'x86_64' and sys_platform == 'win32') or (python_full_version >= '3.11.4' and python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/dd/7f/9998706bc516bdd664ccf929a1da6c6e5ee06e48f723ce45aae7cf3ff36e/puremagic-1.30.tar.gz", hash = "sha256:f9ff7ac157d54e9cf3bff1addfd97233548e75e685282d84ae11e7ffee1614c9", size = 314785, upload-time = "2025-07-04T18:48:36.061Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/91/ed/1e347d85d05b37a8b9a039ca832e5747e1e5248d0bd66042783ef48b4a37/puremagic-1.30-py3-none-any.whl", hash = "sha256:5eeeb2dd86f335b9cfe8e205346612197af3500c6872dffebf26929f56e9d3c1", size = 43304, upload-time = "2025-07-04T18:48:34.801Z" },
+]
+
+[[package]]
+name = "puremagic"
+version = "2.2.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.13' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.13' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.13' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'win32')",
+    "(python_full_version >= '3.13' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.13' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version >= '3.13' and platform_machine != 'AMD64' and platform_machine != 'x86_64' and sys_platform == 'win32') or (python_full_version >= '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
+    "python_full_version == '3.12.*' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "(python_full_version == '3.12.*' and platform_machine == 'AMD64' and sys_platform == 'win32') or (python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'win32')",
+    "(python_full_version == '3.12.*' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version == '3.12.*' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version == '3.12.*' and platform_machine != 'AMD64' and platform_machine != 'x86_64' and sys_platform == 'win32') or (python_full_version == '3.12.*' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/24/74/ce5987ab9b8aec4ced06e2723ebb604205c9eb58abdad91453da93166380/puremagic-2.2.0.tar.gz", hash = "sha256:eb4bddf07c177c4b434554b92165b67449f5a51e152b976202d6254498810eef", size = 1189752, upload-time = "2026-04-08T01:39:55.562Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/95/81/314320aeffd88dadeac553ff9eb10f54507ab41deccd0c69f6221d254a0a/puremagic-2.2.0-py3-none-any.whl", hash = "sha256:c4f7ed7307f056c787199acfda839555921be1df13abba61e8e6db0c787ae1d0", size = 71971, upload-time = "2026-04-08T01:39:54.169Z" },
+]
+
+[[package]]
+name = "py-serializable"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "defusedxml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/73/21/d250cfca8ff30c2e5a7447bc13861541126ce9bd4426cd5d0c9f08b5547d/py_serializable-2.1.0.tar.gz", hash = "sha256:9d5db56154a867a9b897c0163b33a793c804c80cee984116d02d49e4578fc103", size = 52368, upload-time = "2025-07-21T09:56:48.07Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/bf/7595e817906a29453ba4d99394e781b6fabe55d21f3c15d240f85dd06bb1/py_serializable-2.1.0-py3-none-any.whl", hash = "sha256:b56d5d686b5a03ba4f4db5e769dc32336e142fc3bd4d68a8c25579ebb0a67304", size = 23045, upload-time = "2025-07-21T09:56:46.848Z" },
 ]
 
 [[package]]
@@ -3204,6 +3545,15 @@ wheels = [
 ]
 
 [[package]]
+name = "tomli-w"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/19/75/241269d1da26b624c0d5e110e8149093c759b7a286138f4efd61a60e75fe/tomli_w-1.2.0.tar.gz", hash = "sha256:2dd14fac5a47c27be9cd4c976af5a12d87fb1f0b4512f81d69cce3b35ae25021", size = 7184, upload-time = "2025-01-15T12:07:24.262Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c7/18/c86eb8e0202e32dd3df50d43d7ff9854f8e0603945ff398974c1d91ac1ef/tomli_w-1.2.0-py3-none-any.whl", hash = "sha256:188306098d013b691fcadc011abd66727d3c414c571bb01b1a174ba8c983cf90", size = 6675, upload-time = "2025-01-15T12:07:22.074Z" },
+]
+
+[[package]]
 name = "tqdm"
 version = "4.68.4"
 source = { registry = "https://pypi.org/simple" }
@@ -3213,6 +3563,200 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ae/5f/57ff8b434839e70dab45601284ea413e947a63799891b7553e5960a793a8/tqdm-4.68.4.tar.gz", hash = "sha256:19829c9673638f2a0b8617da4cdcb927e831cd88bcfcb6e78d42a4d1af131520", size = 792418, upload-time = "2026-07-07T09:58:18.369Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/22/2a/5e5e750890ada51017d18d0d4c30da696e5b5bd3180947729927628fc3cb/tqdm-4.68.4-py3-none-any.whl", hash = "sha256:5168118b2368f48c561afda8020fd79195b1bdb0bdf8086b88442c267a315dc2", size = 676612, upload-time = "2026-07-07T09:58:16.256Z" },
+]
+
+[[package]]
+name = "tree-sitter"
+version = "0.25.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/66/7c/0350cfc47faadc0d3cf7d8237a4e34032b3014ddf4a12ded9933e1648b55/tree-sitter-0.25.2.tar.gz", hash = "sha256:fe43c158555da46723b28b52e058ad444195afd1db3ca7720c59a254544e9c20", size = 177961, upload-time = "2025-09-25T17:37:59.751Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/22/88a1e00b906d26fa8a075dd19c6c3116997cb884bf1b3c023deb065a344d/tree_sitter-0.25.2-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:b8ca72d841215b6573ed0655b3a5cd1133f9b69a6fa561aecad40dca9029d75b", size = 146752, upload-time = "2025-09-25T17:37:24.775Z" },
+    { url = "https://files.pythonhosted.org/packages/57/1c/22cc14f3910017b7a76d7358df5cd315a84fe0c7f6f7b443b49db2e2790d/tree_sitter-0.25.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:cc0351cfe5022cec5a77645f647f92a936b38850346ed3f6d6babfbeeeca4d26", size = 137765, upload-time = "2025-09-25T17:37:26.103Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/0c/d0de46ded7d5b34631e0f630d9866dab22d3183195bf0f3b81de406d6622/tree_sitter-0.25.2-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1799609636c0193e16c38f366bda5af15b1ce476df79ddaae7dd274df9e44266", size = 604643, upload-time = "2025-09-25T17:37:27.398Z" },
+    { url = "https://files.pythonhosted.org/packages/34/38/b735a58c1c2f60a168a678ca27b4c1a9df725d0bf2d1a8a1c571c033111e/tree_sitter-0.25.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3e65ae456ad0d210ee71a89ee112ac7e72e6c2e5aac1b95846ecc7afa68a194c", size = 632229, upload-time = "2025-09-25T17:37:28.463Z" },
+    { url = "https://files.pythonhosted.org/packages/32/f6/cda1e1e6cbff5e28d8433578e2556d7ba0b0209d95a796128155b97e7693/tree_sitter-0.25.2-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:49ee3c348caa459244ec437ccc7ff3831f35977d143f65311572b8ba0a5f265f", size = 629861, upload-time = "2025-09-25T17:37:29.593Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/19/427e5943b276a0dd74c2a1f1d7a7393443f13d1ee47dedb3f8127903c080/tree_sitter-0.25.2-cp311-cp311-win_amd64.whl", hash = "sha256:56ac6602c7d09c2c507c55e58dc7026b8988e0475bd0002f8a386cce5e8e8adc", size = 127304, upload-time = "2025-09-25T17:37:30.549Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/d9/eef856dc15f784d85d1397a17f3ee0f82df7778efce9e1961203abfe376a/tree_sitter-0.25.2-cp311-cp311-win_arm64.whl", hash = "sha256:b3d11a3a3ac89bb8a2543d75597f905a9926f9c806f40fcca8242922d1cc6ad5", size = 113990, upload-time = "2025-09-25T17:37:31.852Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/9e/20c2a00a862f1c2897a436b17edb774e831b22218083b459d0d081c9db33/tree_sitter-0.25.2-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:ddabfff809ffc983fc9963455ba1cecc90295803e06e140a4c83e94c1fa3d960", size = 146941, upload-time = "2025-09-25T17:37:34.813Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/04/8512e2062e652a1016e840ce36ba1cc33258b0dcc4e500d8089b4054afec/tree_sitter-0.25.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:c0c0ab5f94938a23fe81928a21cc0fac44143133ccc4eb7eeb1b92f84748331c", size = 137699, upload-time = "2025-09-25T17:37:36.349Z" },
+    { url = "https://files.pythonhosted.org/packages/47/8a/d48c0414db19307b0fb3bb10d76a3a0cbe275bb293f145ee7fba2abd668e/tree_sitter-0.25.2-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:dd12d80d91d4114ca097626eb82714618dcdfacd6a5e0955216c6485c350ef99", size = 607125, upload-time = "2025-09-25T17:37:37.725Z" },
+    { url = "https://files.pythonhosted.org/packages/39/d1/b95f545e9fc5001b8a78636ef942a4e4e536580caa6a99e73dd0a02e87aa/tree_sitter-0.25.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b43a9e4c89d4d0839de27cd4d6902d33396de700e9ff4c5ab7631f277a85ead9", size = 635418, upload-time = "2025-09-25T17:37:38.922Z" },
+    { url = "https://files.pythonhosted.org/packages/de/4d/b734bde3fb6f3513a010fa91f1f2875442cdc0382d6a949005cd84563d8f/tree_sitter-0.25.2-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:fbb1706407c0e451c4f8cc016fec27d72d4b211fdd3173320b1ada7a6c74c3ac", size = 631250, upload-time = "2025-09-25T17:37:40.039Z" },
+    { url = "https://files.pythonhosted.org/packages/46/f2/5f654994f36d10c64d50a192239599fcae46677491c8dd53e7579c35a3e3/tree_sitter-0.25.2-cp312-cp312-win_amd64.whl", hash = "sha256:6d0302550bbe4620a5dc7649517c4409d74ef18558276ce758419cf09e578897", size = 127156, upload-time = "2025-09-25T17:37:41.132Z" },
+    { url = "https://files.pythonhosted.org/packages/67/23/148c468d410efcf0a9535272d81c258d840c27b34781d625f1f627e2e27d/tree_sitter-0.25.2-cp312-cp312-win_arm64.whl", hash = "sha256:0c8b6682cac77e37cfe5cf7ec388844957f48b7bd8d6321d0ca2d852994e10d5", size = 113984, upload-time = "2025-09-25T17:37:42.074Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/67/67492014ce32729b63d7ef318a19f9cfedd855d677de5773476caf771e96/tree_sitter-0.25.2-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:0628671f0de69bb279558ef6b640bcfc97864fe0026d840f872728a86cd6b6cd", size = 146926, upload-time = "2025-09-25T17:37:43.041Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/9c/a278b15e6b263e86c5e301c82a60923fa7c59d44f78d7a110a89a413e640/tree_sitter-0.25.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:f5ddcd3e291a749b62521f71fc953f66f5fd9743973fd6dd962b092773569601", size = 137712, upload-time = "2025-09-25T17:37:44.039Z" },
+    { url = "https://files.pythonhosted.org/packages/54/9a/423bba15d2bf6473ba67846ba5244b988cd97a4b1ea2b146822162256794/tree_sitter-0.25.2-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:bd88fbb0f6c3a0f28f0a68d72df88e9755cf5215bae146f5a1bdc8362b772053", size = 607873, upload-time = "2025-09-25T17:37:45.477Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/4c/b430d2cb43f8badfb3a3fa9d6cd7c8247698187b5674008c9d67b2a90c8e/tree_sitter-0.25.2-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b878e296e63661c8e124177cc3084b041ba3f5936b43076d57c487822426f614", size = 636313, upload-time = "2025-09-25T17:37:46.68Z" },
+    { url = "https://files.pythonhosted.org/packages/9d/27/5f97098dbba807331d666a0997662e82d066e84b17d92efab575d283822f/tree_sitter-0.25.2-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:d77605e0d353ba3fe5627e5490f0fbfe44141bafa4478d88ef7954a61a848dae", size = 631370, upload-time = "2025-09-25T17:37:47.993Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/3c/87caaed663fabc35e18dc704cd0e9800a0ee2f22bd18b9cbe7c10799895d/tree_sitter-0.25.2-cp313-cp313-win_amd64.whl", hash = "sha256:463c032bd02052d934daa5f45d183e0521ceb783c2548501cf034b0beba92c9b", size = 127157, upload-time = "2025-09-25T17:37:48.967Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/23/f8467b408b7988aff4ea40946a4bd1a2c1a73d17156a9d039bbaff1e2ceb/tree_sitter-0.25.2-cp313-cp313-win_arm64.whl", hash = "sha256:b3f63a1796886249bd22c559a5944d64d05d43f2be72961624278eff0dcc5cb8", size = 113975, upload-time = "2025-09-25T17:37:49.922Z" },
+]
+
+[[package]]
+name = "tree-sitter-c-sharp"
+version = "0.23.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/fb/7e2962bc1901daf264e7ce263b168e0139304a5f8f66c9b2baf20e550f87/tree_sitter_c_sharp-0.23.5.tar.gz", hash = "sha256:2635c7d5ec93e59f2e831b571bed99c4cc68a5d183a0994020aa769e1b990a71", size = 1147914, upload-time = "2026-04-14T16:11:22.441Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/c4/86d8d469400a856757a464a6ac01af97d8cdacbb595e62bdb98bf1e9db90/tree_sitter_c_sharp-0.23.5-cp310-abi3-macosx_10_9_x86_64.whl", hash = "sha256:61e1981cf21b09ee547b9c4c68e64fb4394325f8fc8d5f6d50d41471eba923ea", size = 333658, upload-time = "2026-04-14T16:11:11.288Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/13/593c8603f834eaf15082b81e079289fc9f062b4c0ab5b9489134084eec06/tree_sitter_c_sharp-0.23.5-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:a75994a11f6fed3f5b8c36ad6a00e5dc43205bd912c43af3a2a54fdf649664eb", size = 376296, upload-time = "2026-04-14T16:11:12.972Z" },
+    { url = "https://files.pythonhosted.org/packages/41/5a/a8855cbb5bbab28adb29c2c7f0e7be5a9f1d21450c13b3c3e613190d9b8c/tree_sitter_c_sharp-0.23.5-cp310-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:aa88a780204cd153c4c1ae2d59c654cee1402212fa0d069823d6d34301587438", size = 358333, upload-time = "2026-04-14T16:11:14.214Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/c8/e0f391e343f5424d0627e3b6886c77baeb1249a3f10986be00b0b64ecdab/tree_sitter_c_sharp-0.23.5-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:3ea38fb095d85d360dc5a0bec2fa605e496228876f798c9e089d5f0e72bcef46", size = 359448, upload-time = "2026-04-14T16:11:15.419Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/fc/10f807ac79f928241c5e0d827fdaf91e97dfba662fc7e07d7bd664140ec1/tree_sitter_c_sharp-0.23.5-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:05a9256415e7f24d4f133133794a9c224c60d19f677a04e2f6a94c25090b6d65", size = 358144, upload-time = "2026-04-14T16:11:17.087Z" },
+    { url = "https://files.pythonhosted.org/packages/de/2a/6c3e12ef0cf09138717fcc02e1de8b76a3928d1bed65c7e3c2bd3172bcef/tree_sitter_c_sharp-0.23.5-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:8636dc70b5a373c35c1036ed5de98e801f2e4d105ae41e2e20b6804c36e3bf33", size = 357525, upload-time = "2026-04-14T16:11:18.214Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/e0/bd287b092d611df95a9149117fd27b5947ce75527113d6898a4b4e2c8858/tree_sitter_c_sharp-0.23.5-cp310-abi3-win_amd64.whl", hash = "sha256:41a28cfa3d9ea50f5629e44550a03188c8fbd5079803dfc03554b6fd594b33fa", size = 338756, upload-time = "2026-04-14T16:11:19.661Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/fb/114ff43fdd256d0befed32f77c1dadee9517867181c70794571f718ed05c/tree_sitter_c_sharp-0.23.5-cp310-abi3-win_arm64.whl", hash = "sha256:2de4ebf95ddc2e92cd3105c8a8e0e7ec646bc82f52bfaf2f3acec0fa2401ec09", size = 337260, upload-time = "2026-04-14T16:11:20.849Z" },
+]
+
+[[package]]
+name = "tree-sitter-go"
+version = "0.25.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/01/05/727308adbbc79bcb1c92fc0ea10556a735f9d0f0a5435a18f59d40f7fd77/tree_sitter_go-0.25.0.tar.gz", hash = "sha256:a7466e9b8d94dda94cae8d91629f26edb2d26166fd454d4831c3bf6dfa2e8d68", size = 93890, upload-time = "2025-08-29T06:20:25.044Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ca/aa/0984707acc2b9bb461fe4a41e7e0fc5b2b1e245c32820f0c83b3c602957c/tree_sitter_go-0.25.0-cp310-abi3-macosx_10_9_x86_64.whl", hash = "sha256:b852993063a3429a443e7bd0aa376dd7dd329d595819fabf56ac4cf9d7257b54", size = 47117, upload-time = "2025-08-29T06:20:14.286Z" },
+    { url = "https://files.pythonhosted.org/packages/32/16/dd4cb124b35e99239ab3624225da07d4cb8da4d8564ed81d03fcb3a6ba9f/tree_sitter_go-0.25.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:503b81a2b4c31e302869a1de3a352ad0912ccab3df9ac9950197b0a9ceeabd8f", size = 48674, upload-time = "2025-08-29T06:20:17.557Z" },
+    { url = "https://files.pythonhosted.org/packages/86/fb/b30d63a08044115d8b8bd196c6c2ab4325fb8db5757249a4ef0563966e2e/tree_sitter_go-0.25.0-cp310-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:04b3b3cb4aff18e74e28d49b716c6f24cb71ddfdd66768987e26e4d0fa812f74", size = 66418, upload-time = "2025-08-29T06:20:18.345Z" },
+    { url = "https://files.pythonhosted.org/packages/26/21/d3d88a30ad007419b2c97b3baeeef7431407faf9f686195b6f1cad0aedf9/tree_sitter_go-0.25.0-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:148255aca2f54b90d48c48a9dbb4c7faad6cad310a980b2c5a5a9822057ed145", size = 72006, upload-time = "2025-08-29T06:20:19.14Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/d0/0dd6442353ced8a88bbda9e546f4ea29e381b59b5a40b122e5abb586bb6c/tree_sitter_go-0.25.0-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:4d338116cdf8a6c6ff990d2441929b41323ef17c710407abe0993c13417d6aad", size = 70603, upload-time = "2025-08-29T06:20:21.544Z" },
+    { url = "https://files.pythonhosted.org/packages/01/e2/ee5e09f63504fc286539535d374d2eaa0e7d489b80f8f744bb3962aff22a/tree_sitter_go-0.25.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:5608e089d2a29fa8d2b327abeb2ad1cdb8e223c440a6b0ceab0d3fa80bdeebae", size = 66088, upload-time = "2025-08-29T06:20:22.336Z" },
+    { url = "https://files.pythonhosted.org/packages/6e/b6/d9142583374720e79aca9ccb394b3795149a54c012e1dfd80738df2d984e/tree_sitter_go-0.25.0-cp310-abi3-win_amd64.whl", hash = "sha256:30d4ada57a223dfc2c32d942f44d284d40f3d1215ddcf108f96807fd36d53022", size = 48152, upload-time = "2025-08-29T06:20:23.089Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/00/9a2638e7339236f5b01622952a4d71c1474dd3783d1982a89555fc1f03b1/tree_sitter_go-0.25.0-cp310-abi3-win_arm64.whl", hash = "sha256:d5d62362059bf79997340773d47cc7e7e002883b527a05cca829c46e40b70ded", size = 46752, upload-time = "2025-08-29T06:20:24.235Z" },
+]
+
+[[package]]
+name = "tree-sitter-java"
+version = "0.23.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fa/dc/eb9c8f96304e5d8ae1663126d89967a622a80937ad2909903569ccb7ec8f/tree_sitter_java-0.23.5.tar.gz", hash = "sha256:f5cd57b8f1270a7f0438878750d02ccc79421d45cca65ff284f1527e9ef02e38", size = 138121, upload-time = "2024-12-21T18:24:26.936Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/67/21/b3399780b440e1567a11d384d0ebb1aea9b642d0d98becf30fa55c0e3a3b/tree_sitter_java-0.23.5-cp39-abi3-macosx_10_9_x86_64.whl", hash = "sha256:355ce0308672d6f7013ec913dee4a0613666f4cda9044a7824240d17f38209df", size = 58926, upload-time = "2024-12-21T18:24:12.53Z" },
+    { url = "https://files.pythonhosted.org/packages/57/ef/6406b444e2a93bc72a04e802f4107e9ecf04b8de4a5528830726d210599c/tree_sitter_java-0.23.5-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:24acd59c4720dedad80d548fe4237e43ef2b7a4e94c8549b0ca6e4c4d7bf6e69", size = 62288, upload-time = "2024-12-21T18:24:14.634Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/6c/74b1c150d4f69c291ab0b78d5dd1b59712559bbe7e7daf6d8466d483463f/tree_sitter_java-0.23.5-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:9401e7271f0b333df39fc8a8336a0caf1b891d9a2b89ddee99fae66b794fc5b7", size = 85533, upload-time = "2024-12-21T18:24:16.695Z" },
+    { url = "https://files.pythonhosted.org/packages/29/09/e0d08f5c212062fd046db35c1015a2621c2631bc8b4aae5740d7adb276ad/tree_sitter_java-0.23.5-cp39-abi3-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:370b204b9500b847f6d0c5ad584045831cee69e9a3e4d878535d39e4a7e4c4f1", size = 84033, upload-time = "2024-12-21T18:24:18.758Z" },
+    { url = "https://files.pythonhosted.org/packages/43/56/7d06b23ddd09bde816a131aa504ee11a1bbe87c6b62ab9b2ed23849a3382/tree_sitter_java-0.23.5-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:aae84449e330363b55b14a2af0585e4e0dae75eb64ea509b7e5b0e1de536846a", size = 82564, upload-time = "2024-12-21T18:24:20.493Z" },
+    { url = "https://files.pythonhosted.org/packages/da/d6/0528c7e1e88a18221dbd8ccee3825bf274b1fa300f745fd74eb343878043/tree_sitter_java-0.23.5-cp39-abi3-win_amd64.whl", hash = "sha256:1ee45e790f8d31d416bc84a09dac2e2c6bc343e89b8a2e1d550513498eedfde7", size = 60650, upload-time = "2024-12-21T18:24:22.902Z" },
+    { url = "https://files.pythonhosted.org/packages/72/57/5bab54d23179350356515526fff3cc0f3ac23bfbc1a1d518a15978d4880e/tree_sitter_java-0.23.5-cp39-abi3-win_arm64.whl", hash = "sha256:402efe136104c5603b429dc26c7e75ae14faaca54cfd319ecc41c8f2534750f4", size = 59059, upload-time = "2024-12-21T18:24:24.934Z" },
+]
+
+[[package]]
+name = "tree-sitter-javascript"
+version = "0.25.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/59/e0/e63103c72a9d3dfd89a31e02e660263ad84b7438e5f44ee82e443e65bbde/tree_sitter_javascript-0.25.0.tar.gz", hash = "sha256:329b5414874f0588a98f1c291f1b28138286617aa907746ffe55adfdcf963f38", size = 132338, upload-time = "2025-09-01T07:13:44.792Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2c/df/5106ac250cd03661ebc3cc75da6b3d9f6800a3606393a0122eca58038104/tree_sitter_javascript-0.25.0-cp310-abi3-macosx_10_9_x86_64.whl", hash = "sha256:b70f887fb269d6e58c349d683f59fa647140c410cfe2bee44a883b20ec92e3dc", size = 64052, upload-time = "2025-09-01T07:13:36.865Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/8f/6b4b2bc90d8ab3955856ce852cc9d1e82c81d7ab9646385f0e75ffd5b5d3/tree_sitter_javascript-0.25.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:8264a996b8845cfce06965152a013b5d9cbb7d199bc3503e12b5682e62bb1de1", size = 66440, upload-time = "2025-09-01T07:13:37.962Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/c4/7da74ecdcd8a398f88bd003a87c65403b5fe0e958cdd43fbd5fd4a398fcf/tree_sitter_javascript-0.25.0-cp310-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:9dc04ba91fc8583344e57c1f1ed5b2c97ecaaf47480011b92fbeab8dda96db75", size = 99728, upload-time = "2025-09-01T07:13:38.755Z" },
+    { url = "https://files.pythonhosted.org/packages/96/c8/97da3af4796495e46421e9344738addb3602fa6426ea695be3fcbadbee37/tree_sitter_javascript-0.25.0-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:199d09985190852e0912da2b8d26c932159be314bc04952cf917ed0e4c633e6b", size = 106072, upload-time = "2025-09-01T07:13:39.798Z" },
+    { url = "https://files.pythonhosted.org/packages/13/be/c964e8130be08cc9bd6627d845f0e4460945b158429d39510953bbcb8fcc/tree_sitter_javascript-0.25.0-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:dfcf789064c58dc13c0a4edb550acacfc6f0f280577f1e7a00de3e89fc7f8ddc", size = 104388, upload-time = "2025-09-01T07:13:40.866Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/89/9b773dee0f8961d1bb8d7baf0a204ab587618df19897c1ef260916f318ec/tree_sitter_javascript-0.25.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:1b852d3aee8a36186dbcc32c798b11b4869f9b5041743b63b65c2ef793db7a54", size = 98377, upload-time = "2025-09-01T07:13:41.838Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/dc/d90cb1790f8cec9b4878d278ad9faf7c8f893189ce0f855304fd704fc274/tree_sitter_javascript-0.25.0-cp310-abi3-win_amd64.whl", hash = "sha256:e5ed840f5bd4a3f0272e441d19429b26eedc257abe5574c8546da6b556865e3c", size = 62975, upload-time = "2025-09-01T07:13:42.828Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/1f/f9eba1038b7d4394410f3c0a6ec2122b590cd7acb03f196e52fa57ebbe72/tree_sitter_javascript-0.25.0-cp310-abi3-win_arm64.whl", hash = "sha256:622a69d677aa7f6ee2931d8c77c981a33f0ebb6d275aa9d43d3397c879a9bb0b", size = 61668, upload-time = "2025-09-01T07:13:43.803Z" },
+]
+
+[[package]]
+name = "tree-sitter-kotlin"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/58/bb/bdab3665eeca21246130eec79c76e42456cfa72d59606266ecdbf37f9a96/tree_sitter_kotlin-1.1.0.tar.gz", hash = "sha256:322a35bdae75e25ae64dae6027be609c5422fab282084117816c4ebcda6168da", size = 1095728, upload-time = "2025-01-09T19:02:18.492Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2c/a5/ce5a2ba7b97db8d90c89516674f5c46e2d41503e00dd743ba7aad4661097/tree_sitter_kotlin-1.1.0-cp39-abi3-macosx_10_9_x86_64.whl", hash = "sha256:6cca5ef06d090e8494ac1d9f0aac71ed32207d412766b5df7da00d94334181a2", size = 312883, upload-time = "2025-01-09T19:02:02.931Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/20/66105b6e94d062440955d374e64d030c3173cf4f592f6a6a3c426b3c94d0/tree_sitter_kotlin-1.1.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:910b41a580dae00d319e555075f3886a41386d1067931b14c7de504eeae3ae2a", size = 337016, upload-time = "2025-01-09T19:02:04.174Z" },
+    { url = "https://files.pythonhosted.org/packages/f7/4c/e1ef38fe412fa9851403fc75a653f2b69bbe1e11e2e7faf219631ebe7e4a/tree_sitter_kotlin-1.1.0-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:906e5444ebb01db439cb3ad65913598a4ea957b0e068aa973265926a17eb00e0", size = 359927, upload-time = "2025-01-09T19:02:06.312Z" },
+    { url = "https://files.pythonhosted.org/packages/65/bd/0f3aac45eb88b6b3173ac9c23bc41d8865943cbbe1caaafc001cd1b73c90/tree_sitter_kotlin-1.1.0-cp39-abi3-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9a92afe24b634cf914c5812af0f5c53184b1c18bdf6ee5505c83afac81f6bf6c", size = 339269, upload-time = "2025-01-09T19:02:08.644Z" },
+    { url = "https://files.pythonhosted.org/packages/08/dc/4944abf3a8bc630262e93e0857bd7044d521995c1f6af50650e4fe1fdde0/tree_sitter_kotlin-1.1.0-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:5960034a5c5bcc7ccb21dc7a29e4267ac4f0ef37884f39d75695eac7f004deff", size = 328921, upload-time = "2025-01-09T19:02:10.346Z" },
+    { url = "https://files.pythonhosted.org/packages/24/c9/5cca0a44db41224f7f10992450af17ff432c1a336852efb312246d5705e5/tree_sitter_kotlin-1.1.0-cp39-abi3-win_amd64.whl", hash = "sha256:d4d3f330f515ba8b91da04a5335eb9ff3ce071c7b7855958912f2560f6e14976", size = 315933, upload-time = "2025-01-09T19:02:12.637Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/b9/12fa97f63d2b7517c6f5d16938f0c5bfe84d925c652c75ff1c5e29bf6a44/tree_sitter_kotlin-1.1.0-cp39-abi3-win_arm64.whl", hash = "sha256:e030f127a7d07952907adb9070248bd42fb86dc76fd92744727551b50e131ee7", size = 310414, upload-time = "2025-01-09T19:02:16.23Z" },
+]
+
+[[package]]
+name = "tree-sitter-php"
+version = "0.25.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1d/40/8ef98dddf080fadf269440fdffa840bf84b4c7f31224f68d1d8e1dd7fa1a/tree_sitter_php-0.25.1.tar.gz", hash = "sha256:db2f82bc9a33664f150750a1b6d3cb0291760d9ab5727455d713141f7dc9e6a9", size = 581293, upload-time = "2026-10-06T16:49:18.135Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/9e/01905af5b672a065d9b580d75d549ca18c17e20942ee02295d5d843cb1ce/tree_sitter_php-0.25.1-cp310-abi3-macosx_10_9_x86_64.whl", hash = "sha256:bc2d4503814c55912e69713623610ddd9c6058f6c6c2f521847d86db0b179cb2", size = 223310, upload-time = "2026-10-06T16:49:09.083Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/df/88c1e045f9b53baf6f50fd81b24737f4f3e5bb8382be0a1356f6920ad9e6/tree_sitter_php-0.25.1-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:3ccacce66119b96e87443750eabcd38613b3fee770582c646e2c8bc29b7089a8", size = 235512, upload-time = "2026-10-06T16:49:10.236Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/51/3e2197838c6e0147d50a4bd31345cebfbe3a6ae48ef4cfef2e3c82401927/tree_sitter_php-0.25.1-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:93d0088bed22facceda229850e2443932ce10206e46aa6296df8065ecea1d68e", size = 329812, upload-time = "2026-10-06T16:49:11.209Z" },
+    { url = "https://files.pythonhosted.org/packages/17/93/01da48c101b4024a56f0f9bd68aacfba4a6656694bbee5424cca119535f1/tree_sitter_php-0.25.1-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3d59f27bc88351f744815e5ff69a40b04b720a94c984fcc804979c71a19afc3e", size = 317902, upload-time = "2026-10-06T16:49:12.475Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/c8/96ac257fc601418dbccba0f438b8f28875b4b30787067fb49a8a2e551cd3/tree_sitter_php-0.25.1-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:22c4ca10a7311ea7d09de902b3a73ba831f993f69a4abff4d2d0f4dd6fdac0ff", size = 327487, upload-time = "2026-10-06T16:49:13.429Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/00/b06c5b5b821f2b1f83bca1150ae9922e6615774c8c88040a37b068863aed/tree_sitter_php-0.25.1-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:ee642411d457f8b0a96b7d5ba24fc1f28d05014b7db98dd9f71d00224858dec1", size = 310697, upload-time = "2026-10-06T16:49:14.505Z" },
+    { url = "https://files.pythonhosted.org/packages/53/c1/ba91917bb428c092d82ab07ffbc7bc1b6ed3c49e08eeb403091ac2fb4aba/tree_sitter_php-0.25.1-cp310-abi3-win_amd64.whl", hash = "sha256:47e828483c19eb38ae6ba2b5b10dc0340111bcaf981575351e5a0f87cff84c40", size = 211255, upload-time = "2026-10-06T16:49:15.797Z" },
+    { url = "https://files.pythonhosted.org/packages/73/4d/ffb811c87131e9e84f2b7515df1b4489230abe87ef29153cc6d8c58e011e/tree_sitter_php-0.25.1-cp310-abi3-win_arm64.whl", hash = "sha256:831dc19ee19fec7d153d57e76cafe382ac5760d07194ee73b079ba0d0e600a55", size = 213164, upload-time = "2026-10-06T16:49:17.033Z" },
+]
+
+[[package]]
+name = "tree-sitter-python"
+version = "0.25.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b8/8b/c992ff0e768cb6768d5c96234579bf8842b3a633db641455d86dd30d5dac/tree_sitter_python-0.25.0.tar.gz", hash = "sha256:b13e090f725f5b9c86aa455a268553c65cadf325471ad5b65cd29cac8a1a68ac", size = 159845, upload-time = "2025-09-11T06:47:58.159Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cf/64/a4e503c78a4eb3ac46d8e72a29c1b1237fa85238d8e972b063e0751f5a94/tree_sitter_python-0.25.0-cp310-abi3-macosx_10_9_x86_64.whl", hash = "sha256:14a79a47ddef72f987d5a2c122d148a812169d7484ff5c75a3db9609d419f361", size = 73790, upload-time = "2025-09-11T06:47:47.652Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/1d/60d8c2a0cc63d6ec4ba4e99ce61b802d2e39ef9db799bdf2a8f932a6cd4b/tree_sitter_python-0.25.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:480c21dbd995b7fe44813e741d71fed10ba695e7caab627fb034e3828469d762", size = 76691, upload-time = "2025-09-11T06:47:49.038Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/cb/d9b0b67d037922d60cbe0359e0c86457c2da721bc714381a63e2c8e35eba/tree_sitter_python-0.25.0-cp310-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:86f118e5eecad616ecdb81d171a36dde9bef5a0b21ed71ea9c3e390813c3baf5", size = 108133, upload-time = "2025-09-11T06:47:50.499Z" },
+    { url = "https://files.pythonhosted.org/packages/40/bd/bf4787f57e6b2860f3f1c8c62f045b39fb32d6bac4b53d7a9e66de968440/tree_sitter_python-0.25.0-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:be71650ca2b93b6e9649e5d65c6811aad87a7614c8c1003246b303f6b150f61b", size = 110603, upload-time = "2025-09-11T06:47:51.985Z" },
+    { url = "https://files.pythonhosted.org/packages/5d/25/feff09f5c2f32484fbce15db8b49455c7572346ce61a699a41972dea7318/tree_sitter_python-0.25.0-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:e6d5b5799628cc0f24691ab2a172a8e676f668fe90dc60468bee14084a35c16d", size = 108998, upload-time = "2025-09-11T06:47:53.046Z" },
+    { url = "https://files.pythonhosted.org/packages/75/69/4946da3d6c0df316ccb938316ce007fb565d08f89d02d854f2d308f0309f/tree_sitter_python-0.25.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:71959832fc5d9642e52c11f2f7d79ae520b461e63334927e93ca46cd61cd9683", size = 107268, upload-time = "2025-09-11T06:47:54.388Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/a2/996fc2dfa1076dc460d3e2f3c75974ea4b8f02f6bc925383aaae519920e8/tree_sitter_python-0.25.0-cp310-abi3-win_amd64.whl", hash = "sha256:9bcde33f18792de54ee579b00e1b4fe186b7926825444766f849bf7181793a76", size = 76073, upload-time = "2025-09-11T06:47:55.773Z" },
+    { url = "https://files.pythonhosted.org/packages/07/19/4b5569d9b1ebebb5907d11554a96ef3fa09364a30fcfabeff587495b512f/tree_sitter_python-0.25.0-cp310-abi3-win_arm64.whl", hash = "sha256:0fbf6a3774ad7e89ee891851204c2e2c47e12b63a5edbe2e9156997731c128bb", size = 74169, upload-time = "2025-09-11T06:47:56.747Z" },
+]
+
+[[package]]
+name = "tree-sitter-ruby"
+version = "0.23.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/09/5b/6d24be4fde4743481bd8e3fd24b434870cb6612238c8544b71fe129ed850/tree_sitter_ruby-0.23.1.tar.gz", hash = "sha256:886ed200bfd1f3ca7628bf1c9fefd42421bbdba70c627363abda67f662caa21e", size = 489602, upload-time = "2024-11-11T04:51:30.328Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/23/2e/2717b9451c712b60f833827a696baf29d8e50a0f7dccbf22a8d7006cc19e/tree_sitter_ruby-0.23.1-cp39-abi3-macosx_10_9_x86_64.whl", hash = "sha256:39f391322d2210843f07081182dbf00f8f69cfbfa4687b9575cac6d324bae443", size = 177959, upload-time = "2024-11-11T04:51:19.958Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/38/c41ecf7692b8ecccd26861d3293a88150a4a52fc081abe60f837030d7315/tree_sitter_ruby-0.23.1-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:aa4ee7433bd42fac22e2dad4a3c0f332292ecf482e610316828c711a0bb7f794", size = 195069, upload-time = "2024-11-11T04:51:21.82Z" },
+    { url = "https://files.pythonhosted.org/packages/d8/01/14ef2d5107e6f42b64a400c3bbc3dd3b8fd24c3cef5306004ae03668f231/tree_sitter_ruby-0.23.1-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:62b36813a56006b7569db7868f6b762caa3f4e419bd0f8cf9ccbb4abb1b6254c", size = 226761, upload-time = "2024-11-11T04:51:23.021Z" },
+    { url = "https://files.pythonhosted.org/packages/23/dd/1171b5dd25da10f768732a20fb62d2e3ae66e3b42329351f2ce5bf723abb/tree_sitter_ruby-0.23.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f7bcd93972b4ca2803856d4fe0fbd04123ff29c4592bbb9f12a27528bd252341", size = 214427, upload-time = "2024-11-11T04:51:24.854Z" },
+    { url = "https://files.pythonhosted.org/packages/60/bc/de76c877a90fd8a62cd60f496d7832efddc1b18a148593d9aa9b4a9ce5e0/tree_sitter_ruby-0.23.1-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:66c65d6c2a629783ca4ab2bab539bd6f271ce6f77cacb62845831e11665b5bd3", size = 210409, upload-time = "2024-11-11T04:51:26.093Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/4a/f5bcca350b84cdf75a53e918b8efa06c46ed650d99d3ef22195e9d8020cc/tree_sitter_ruby-0.23.1-cp39-abi3-win_amd64.whl", hash = "sha256:02e2c19ebefe29226c14aa63e11e291d990f5b5c20a99940ab6e7eda44e744e5", size = 179843, upload-time = "2024-11-11T04:51:27.265Z" },
+    { url = "https://files.pythonhosted.org/packages/71/5c/a2e068ad4b2c4ba9b774a88b24149168d3bcd94f58b964e49dcabfe5fd24/tree_sitter_ruby-0.23.1-cp39-abi3-win_arm64.whl", hash = "sha256:ed042007e89f2cceeb1cbdd8b0caa68af1e2ce54c7eb2053ace760f90657ac9f", size = 178025, upload-time = "2024-11-11T04:51:29.051Z" },
+]
+
+[[package]]
+name = "tree-sitter-rust"
+version = "0.24.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b7/87/75cbd22b927267d310f76cca1ab3c1d9d41035dfa3eb9cc95f96ee199440/tree_sitter_rust-0.24.2.tar.gz", hash = "sha256:54fb02a5911e345308b405174465112479f56dc39e3f1e7744d7568595f00db9", size = 339341, upload-time = "2026-03-27T21:08:55.629Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/24/2b2d33af5e27c84a4fde4e8cd2594bb4ab1e1cf48756a9f40dadc84956cc/tree_sitter_rust-0.24.2-cp39-abi3-macosx_10_9_x86_64.whl", hash = "sha256:3620cfd12340efa43082d45df76349ff511893a9c361da2f8d6d51e307020a59", size = 129507, upload-time = "2026-03-27T21:08:47.585Z" },
+    { url = "https://files.pythonhosted.org/packages/78/2a/cf39f881a545360b5a86bb1accba1f4acc713daab01fb9edd35b6e84f473/tree_sitter_rust-0.24.2-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:01a46622735498493f29f3e628a90de95c96a07bfbeb88996243eb986b1cee36", size = 136812, upload-time = "2026-03-27T21:08:48.761Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/45/a051bbd3045a61182dde25b93ae9a33d2677c935b16952283e12eaf46051/tree_sitter_rust-0.24.2-cp39-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:e033c5a93b57c88e0a835880de39fc802909ff69f57aaff6000211c196ea5190", size = 164706, upload-time = "2026-03-27T21:08:49.605Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/f6/a5a146df5c0a5daea3ffcd5d7245775fe7f084357770d5a313dd6245ae78/tree_sitter_rust-0.24.2-cp39-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:9d76d1208c3638b871236090759dfc13d478921320653a6c9da5336e7c58f65a", size = 170310, upload-time = "2026-03-27T21:08:50.424Z" },
+    { url = "https://files.pythonhosted.org/packages/95/a8/f85b1ca75e01361ca5f92d226593ca4857cea49551b9f6c8fa6fc08ea917/tree_sitter_rust-0.24.2-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:87930163a462408c49ab62c667e74029bc26b4cc7123dd1bdc7352215786c64a", size = 168668, upload-time = "2026-03-27T21:08:51.404Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/e1/3519f866a4679ca36acd9f5a06a779ecb8a92b18887c5546458d521df557/tree_sitter_rust-0.24.2-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:da2b86099028fd42c6cd32878b7b16b01f8aac0f7b0e98742b7fa6bc3cf09b89", size = 162403, upload-time = "2026-03-27T21:08:52.588Z" },
+    { url = "https://files.pythonhosted.org/packages/34/71/7ef609894dbfe5699eb16f7471f9b8af1d958d8ba3e29c238d7607e8cb47/tree_sitter_rust-0.24.2-cp39-abi3-win_amd64.whl", hash = "sha256:4529c125d928882ddfb879fdc6bc0704913261ecc078b6fa7902559e0daf200d", size = 129422, upload-time = "2026-03-27T21:08:54.031Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/d8/050a781172745bc345f98abb7c56e72022ea0790f8e793de981c83c2ef15/tree_sitter_rust-0.24.2-cp39-abi3-win_arm64.whl", hash = "sha256:66ba90f61bd54f4c4f5d30434957daf64507c16b0313df76becb37d63f70a227", size = 128245, upload-time = "2026-03-27T21:08:54.803Z" },
+]
+
+[[package]]
+name = "tree-sitter-typescript"
+version = "0.23.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/fc/bb52958f7e399250aee093751e9373a6311cadbe76b6e0d109b853757f35/tree_sitter_typescript-0.23.2.tar.gz", hash = "sha256:7b167b5827c882261cb7a50dfa0fb567975f9b315e87ed87ad0a0a3aedb3834d", size = 773053, upload-time = "2024-11-11T02:36:11.396Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/28/95/4c00680866280e008e81dd621fd4d3f54aa3dad1b76b857a19da1b2cc426/tree_sitter_typescript-0.23.2-cp39-abi3-macosx_10_9_x86_64.whl", hash = "sha256:3cd752d70d8e5371fdac6a9a4df9d8924b63b6998d268586f7d374c9fba2a478", size = 286677, upload-time = "2024-11-11T02:35:58.839Z" },
+    { url = "https://files.pythonhosted.org/packages/8f/2f/1f36fda564518d84593f2740d5905ac127d590baf5c5753cef2a88a89c15/tree_sitter_typescript-0.23.2-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:c7cc1b0ff5d91bac863b0e38b1578d5505e718156c9db577c8baea2557f66de8", size = 302008, upload-time = "2024-11-11T02:36:00.733Z" },
+    { url = "https://files.pythonhosted.org/packages/96/2d/975c2dad292aa9994f982eb0b69cc6fda0223e4b6c4ea714550477d8ec3a/tree_sitter_typescript-0.23.2-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4b1eed5b0b3a8134e86126b00b743d667ec27c63fc9de1b7bb23168803879e31", size = 351987, upload-time = "2024-11-11T02:36:02.669Z" },
+    { url = "https://files.pythonhosted.org/packages/49/d1/a71c36da6e2b8a4ed5e2970819b86ef13ba77ac40d9e333cb17df6a2c5db/tree_sitter_typescript-0.23.2-cp39-abi3-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e96d36b85bcacdeb8ff5c2618d75593ef12ebaf1b4eace3477e2bdb2abb1752c", size = 344960, upload-time = "2024-11-11T02:36:04.443Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/cb/f57b149d7beed1a85b8266d0c60ebe4c46e79c9ba56bc17b898e17daf88e/tree_sitter_typescript-0.23.2-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:8d4f0f9bcb61ad7b7509d49a1565ff2cc363863644a234e1e0fe10960e55aea0", size = 340245, upload-time = "2024-11-11T02:36:06.473Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/ab/dd84f0e2337296a5f09749f7b5483215d75c8fa9e33738522e5ed81f7254/tree_sitter_typescript-0.23.2-cp39-abi3-win_amd64.whl", hash = "sha256:3f730b66396bc3e11811e4465c41ee45d9e9edd6de355a58bbbc49fa770da8f9", size = 278015, upload-time = "2024-11-11T02:36:07.631Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/e4/81f9a935789233cf412a0ed5fe04c883841d2c8fb0b7e075958a35c65032/tree_sitter_typescript-0.23.2-cp39-abi3-win_arm64.whl", hash = "sha256:05db58f70b95ef0ea126db5560f3775692f609589ed6f8dd0af84b7f19f1cbb7", size = 274052, upload-time = "2024-11-11T02:36:09.514Z" },
+]
+
+[[package]]
+name = "truststore"
+version = "0.10.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ee/9f/c5201d42a484c061e528825fc8e2d565f5abd50a4ced6fb7d29c4ec99b2b/truststore-0.10.5.tar.gz", hash = "sha256:30d36967ccaded5cbb38d602c433f53600036c79d502f4533a49b60a03bbefcd", size = 28091, upload-time = "2026-10-12T22:27:31.808Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/51/e9/3a7820be2bb0fe53b6bc9c3be26d3d1158004e4c3ab953aa6840b955b1e9/truststore-0.10.5-py3-none-any.whl", hash = "sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c", size = 19017, upload-time = "2026-10-12T22:27:30.377Z" },
 ]
 
 [[package]]

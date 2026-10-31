@@ -23,6 +23,8 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
@@ -155,7 +157,11 @@ func (a *APIServer) sandboxEgressUnblockSource(ctx context.Context) func(sandbox
 // the organization's block and allowed lists). The registration outlives
 // a stop and start, and its daemon then ends its own session unblocks
 // (es:GAP-0676), so a session unblock made before that start lifts
-// nothing (GAP-0009). A user block of the host wins. Nothing the daemon
+// nothing (GAP-0009). A user block of the host wins, and so does every
+// block of the registration's own sandbox policy that an unblock does not
+// lift in the egress proxy: its pack's and its repository policy's
+// egress.block, the organization's lists, the deny network mode
+// (sandboxPolicyUnblockAdmits, GAP-0432). Nothing the daemon
 // or the sandbox sends decides it, so no process of the user can make the
 // gateway lift a destination rule the user could not lift with
 // `defenseclaw sandbox unblock` (#1192).
@@ -174,6 +180,24 @@ func (a *APIServer) sandboxRelayUnblock(ctx context.Context, reg sandboxreg.Regi
 		return nil
 	}
 	sessionStart := sandboxreg.SessionStart(reg)
+	// The registration's sandbox policy, resolved again from its run record
+	// at the first stored unblock that passes the floor; nil, or an error,
+	// lifts nothing.
+	var eff *packs.Effective
+	resolved := false
+	policyAdmits := func(host string) bool {
+		if !resolved {
+			resolved = true
+			peer, ok := managedHookPeerFromContext(ctx)
+			if !ok || peer.UID != reg.UID {
+				peer = managedHookPeer{UID: reg.UID}
+			}
+			if e, _, err := sandboxRegistrationEffective(a.liveBaseConfig(ctx), auth, peer, reg, floor); err == nil {
+				eff = e
+			}
+		}
+		return eff != nil && sandboxPolicyUnblockAdmits(eff, host)
+	}
 	return func(b sandboxauth.Binding, host string) (string, bool) {
 		if b.RegistrationID != reg.ID {
 			return "", false
@@ -196,7 +220,7 @@ func (a *APIServer) sandboxRelayUnblock(ctx context.Context, reg sandboxreg.Regi
 					continue
 				}
 				check := sandboxrelay.DecisionRequest{V: sandboxrelay.WireVersion, Registration: reg.ID, Kind: d.Kind, Host: d.Host, Scope: d.Scope}
-				if sandboxCheckDecision(floor, check) != nil {
+				if sandboxCheckDecision(floor, check) != nil || !policyAdmits(host) {
 					continue
 				}
 				if d.Scope == sandboxrelay.DecisionScopeSession {
@@ -208,6 +232,33 @@ func (a *APIServer) sandboxRelayUnblock(ctx context.Context, reg sandboxreg.Regi
 		}
 		return scope, scope != ""
 	}
+}
+
+// sandboxPolicyUnblockAdmits reports whether an unblock of host lets the
+// egress proxy of a sandbox under eff reach it, as the daemon's own lookup
+// (manager.EgressUnblock) decides it: the proxy's decider for eff with an
+// unblock of host allows it by that unblock. A block of the pack or the
+// repository policy, the organization's lists and the deny network mode
+// come first, so the proxy still refuses the host, and a hook verdict
+// lifted for it told the agent a destination was allowed that is not.
+func sandboxPolicyUnblockAdmits(eff *packs.Effective, host string) bool {
+	d, err := eff.EgressDecider(sandboxHostUnblock(host))
+	if err != nil {
+		return false
+	}
+	dec := d.DecideHost(egress.Principal{BindingID: "sandbox-unblock-check"}, host)
+	return dec.Allowed && dec.Source == egress.SourceUnblock
+}
+
+// sandboxHostUnblock is an unblock of one exact host, for
+// sandboxPolicyUnblockAdmits.
+type sandboxHostUnblock string
+
+func (h sandboxHostUnblock) Unblocked(_ egress.Principal, host string) (egress.Unblock, bool) {
+	if !strings.EqualFold(strings.TrimSuffix(host, "."), strings.TrimSuffix(string(h), ".")) {
+		return egress.Unblock{}, false
+	}
+	return egress.Unblock{Pattern: string(h)}, true
 }
 
 // sandboxDestinationRuleIDs returns the canonical IDs of a verdict's

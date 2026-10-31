@@ -1,0 +1,77 @@
+---
+title: Protected files
+description: The gateway watches SSH authorized keys, shell startup files and user autostart entries. A change made while an agent tool call runs raises a HIGH alert that names the agent session. Restore is an opt-in setting.
+keywords:
+  - authorized_keys
+  - protected files
+  - persistence
+---
+
+The hook reads a tool call's text. A program that runs other programs (a
+script, `xargs`, `find -exec`, `make`, a git option) can write a file the
+text never names. The protected-file watch is the layer after the hook: it
+checks a short list of files that let a change outlive the session.
+
+## What it watches
+
+The watch runs in the per-user gateway on Linux, macOS and Windows. A
+managed gateway runs as a service account that cannot read users' homes, so
+it has no watch; on managed Linux the
+[kernel control](/docs/enterprise/tetragon#the-kernel-controls) covers these
+files, and in monitor mode it records the same writes, links and renames.
+
+| Class | Files (in your home) | Systems |
+| --- | --- | --- |
+| `authorized_keys` | `.ssh/authorized_keys`, `.ssh/authorized_keys2` | All |
+| `shell_rc` | `.bashrc`, `.bash_profile`, `.profile`, `.zshrc` | Linux, macOS |
+| `autostart` | Entries of `.config/systemd/user/` and `.config/autostart/` (Linux), `Library/LaunchAgents/` (macOS) | Linux, macOS |
+
+The watch checks each file by its path every two seconds. A write through
+another hard link of the file, a rename over it, and a replaced `.ssh`
+folder all show as a change.
+
+## What happens on a change
+
+- **An agent tool call was running for you** (between its tool call and its
+  result, or a few seconds after): a HIGH `protected-file-changed` alert. It
+  names the file, the agent, the session and the tool call, and gives the
+  first 12 hex characters of the SHA-256 before and after. It never holds the
+  file's content.
+- **No agent tool call was running**: the change is yours, for example
+  `ssh-copy-id` or an edit in your editor. There is no alert, and the new
+  content becomes the accepted one.
+
+The watch blocks nothing. On managed Linux with Tetragon the
+[`kernel.ssh_authorized_keys_write`](/docs/enterprise/tetragon#the-kernel-controls)
+control also refuses the write, once you approve the 1.0.6 digest.
+
+## Settings
+
+```yaml
+guardrail:
+  protected_files:
+    on_change: alert          # alert (default), restore or off
+    paths: [.ssh/authorized_keys, .bashrc]   # optional: replaces the list above
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `guardrail.protected_files.on_change` | `alert` | `restore` also puts back the last accepted content after an agent's change (a file the agent created is removed). `off` turns the watch off. Restart required. |
+| `guardrail.protected_files.paths` | the list above | Home-relative names, at most 64. A trailing `/` watches the entries of a folder. Restart required. |
+
+`restore` is meant for the strict setups only, and is off in every pack. It
+writes only into a folder the gateway's own account owns. Configuration tools
+that rewrite these files during an agent session would be undone; leave
+`restore` off on those hosts.
+
+## Limits
+
+- Attribution is by time. A change you make by hand while an agent tool call
+  runs for you is reported as the agent's. A program an agent left running in
+  the background after its tool call ended is reported as yours.
+- A symlink at a watched name is checked as a link (its target name), not the
+  file it points to.
+- `defenseclaw rollback` to 1.0.5 or older puts back the config from before
+  the upgrade. A 1.0.5 or older release started on a config that sets
+  `guardrail.protected_files` refuses it, so remove the block first if you
+  move the config by hand. Unset, nothing is written.

@@ -186,7 +186,7 @@ def test_tmpfiles_touches_no_path_the_apply_trigger_watches():
     listed = {line.split()[1] for line in _unit("defenseclaw.conf") if line and not line.startswith("#")}
     assert "/etc/defenseclaw/policies" in watched
     assert not watched & listed
-    assert "d /etc/defenseclaw/bundles 0755 root root -" in _unit("defenseclaw.conf")
+    assert "d /etc/defenseclaw/bundles 0711 root root -" in _unit("defenseclaw.conf")
 
 
 def test_windows_bundle_acl_contract_keeps_public_receipt_separate():
@@ -410,7 +410,7 @@ def test_enterprise_package_ships_the_managed_opencode_plugin():
     config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
     (nfpm,) = [n for n in config["nfpms"] if n["id"] == "defenseclaw-enterprise"]
     shipped = {c["dst"]: c for c in nfpm["contents"] if "src" in c}
-    plugin = shipped.get("/opt/defenseclaw/share/opencode/defenseclaw.js")
+    plugin = shipped.get("/opt/defenseclaw/share/opencode/index.js")
     assert plugin is not None and plugin["src"] == "internal/enterprisepolicy/opencode_managed_plugin.js"
     assert plugin.get("file_info", {}).get("mode") == 0o644
 
@@ -2448,6 +2448,36 @@ def test_linux_postremove_drops_the_empty_install_tree(tmp_path: Path) -> None:
     result = host.run(_postremove(host, tmp_path), "remove")
     assert result.returncode == 0, result.stderr
     assert not opt.exists()
+
+
+# rel-1-0-6 GAP-0175: uninstall --purge and the package removal left the
+# scanner runtime's bytecode and the 1.0.5 OpenCode plugin (its old name), so
+# /opt/defenseclaw stayed. A removal drops both; an upgrade keeps them, and a
+# kept deployment keeps the old plugin with the policies.
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+@pytest.mark.parametrize(("argument", "deployment_kept", "gone"), [("0", False, True), ("remove", False, True), ("purge", False, True), ("1", False, False), ("0", True, False)])
+def test_linux_postremove_drops_scanner_bytecode_and_the_old_opencode_plugin(
+    tmp_path: Path, argument: str, deployment_kept: bool, gone: bool
+) -> None:
+    host = _Host(tmp_path)
+    opt = tmp_path / "opt"
+    cache = opt / "scanner-runtime" / "python" / "lib" / "python3.12" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "site.cpython-312.pyc").write_bytes(b"pyc")
+    plugin = opt / "share" / "opencode" / "defenseclaw.js"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text("// defenseclaw-managed-plugin v2\n", encoding="utf-8")
+    if deployment_kept:
+        host.state.mkdir()
+        (host.state / "deployment.json").write_text("{}\n", encoding="utf-8")
+    result = host.run(_postremove(host, tmp_path), argument)
+    assert result.returncode == 0, result.stderr
+    if gone:
+        assert not opt.exists(), sorted(str(p.relative_to(opt)) for p in opt.rglob("*"))
+    elif argument == "1":
+        assert cache.is_dir() and plugin.is_file()
+    else:
+        assert plugin.is_file() and not (opt / "scanner-runtime").exists()
 
 
 # GAP-1254, GAP-1258: the wrapper applied the config before it stored

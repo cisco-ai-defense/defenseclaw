@@ -79,8 +79,8 @@ func TestCommandOpsLinuxRunAsTheUser(t *testing.T) {
 			t.Errorf("not run as the account: %s", call)
 		}
 	}
-	if !runner.called("/usr/bin/defenseclaw sandbox status --output json") {
-		t.Errorf("the launcher was not asked: %v", runner.calls)
+	if !runner.called(ops.env.launcherTarget() + " sandbox status --output json") {
+		t.Errorf("the managed binary was not asked: %v", runner.calls)
 	}
 
 	// An inactive daemon is not asked: nothing runs.
@@ -145,7 +145,7 @@ func TestCommandOpsLinuxStopAndTeardown(t *testing.T) {
 		t.Errorf("daemon-only stop: %v %v", err, runner.calls)
 	}
 	runner.calls = nil
-	if err := ops.Teardown(context.Background(), alice); err != nil || !runner.called("/usr/bin/defenseclaw sandbox teardown --yes") || runner.called("--keep-images") {
+	if err := ops.Teardown(context.Background(), alice); err != nil || !runner.called(ops.env.launcherTarget()+" sandbox teardown --yes") || runner.called("--keep-images") {
 		t.Errorf("purge teardown: %v %v", err, runner.calls)
 	}
 	runner.calls = nil
@@ -180,7 +180,7 @@ func TestCommandOpsMacOS(t *testing.T) {
 	if err != nil || !st.Active || st.Running != 0 {
 		t.Fatalf("Status = %+v %v", st, err)
 	}
-	if !runner.called("sudo -n -u alice -H /usr/bin/env HOME=/Users/alice /usr/local/bin/defenseclaw sandbox status --output json") {
+	if !runner.called("sudo -n -u alice -H /usr/bin/env HOME=/Users/alice " + ops.env.launcherTarget() + " sandbox status --output json") {
 		t.Errorf("calls = %v", runner.calls)
 	}
 	runner.calls = nil

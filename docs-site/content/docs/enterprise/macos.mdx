@@ -43,7 +43,7 @@ Paths are under `/opt/cisco/defenseclaw` unless shown in full.
 | Item | Path | Owner and mode |
 | --- | --- | --- |
 | Binaries | `bin`: `defenseclaw-gateway`, `defenseclaw-hook`, `defenseclaw-sensor-helper`, and `defenseclaw-acp` when present | `root`, `0755` |
-| Managed OpenCode plugin | `share/opencode/defenseclaw.js` | `root`, `0644` |
+| Managed OpenCode plugin | `share/opencode/index.js` | `root`, `0644` |
 | Config | `etc/config.yaml` | `root:_defenseclaw`, `0640` |
 | Policies | `etc/policies` | `root:_defenseclaw`, `0750` |
 | Secrets | `etc/secrets` | Directory `root:_defenseclaw 0750`, files `0640` |
@@ -269,7 +269,10 @@ pkgutil --pkg-info com.cisco.defenseclaw.enterprise   # pkg installs only
 
 `status` reports the state. `verify` also checks every file, permission (including
 macOS ACL entries), LaunchDaemon and readiness check, and exits `1` when anything
-fails. The JSON has the same shape as the [Linux sample](/docs/enterprise/linux#verify-the-install).
+fails. `repair` removes only the ACL entries that are wrong: one that lets another
+account change a DefenseClaw file or reach a private one, or that keeps the
+`_defenseclaw` service account from reading `etc/policies` and the packs in it. Other entries
+stay. The JSON has the same shape as the [Linux sample](/docs/enterprise/linux#verify-the-install).
 
 | Field | Healthy value |
 | --- | --- |
@@ -325,10 +328,20 @@ recipes are in [Sandboxes on managed computers](/docs/enterprise/sandboxes).
 ## Per-user installs
 
 On a Mac with `/opt/cisco/defenseclaw/etc/managed-runtime.json` the per-user
-product refuses to run: `install.sh` refuses and changes nothing, `defenseclaw
-upgrade` refuses, and the per-user gateway refuses to start. An older per-user
-`install.sh` (0.8.x) predates the managed-host check and can install a per-user
-copy; do not use it on a managed Mac.
+product refuses to run: the current `install.sh` (the one-line installer) refuses
+and changes nothing, even when the managed `defenseclaw` launcher is on the user's
+`PATH`; `defenseclaw upgrade` refuses; and the per-user gateway refuses to start.
+
+Installers from 0.8.x predate the managed marker and do not check for it, so a
+user can still run one after you deploy. It installs a per-user copy, but the
+managed gateway keeps enforcing: the per-user copy cannot start its own gateway,
+because the managed gateway holds the port. Ask the user to run
+`defenseclaw uninstall --binaries --yes`.
+
+A 0.8.x installer can also stop with "existing installation detected" and tell
+the user to run `defenseclaw-upgrade.sh`. That text is not meant for managed Macs;
+do not follow it. On a managed Mac, upgrades come from your deployment, not from
+the upgrade resolver.
 
 Nothing migrates a per-user install. Before you deploy, have each user run
 `defenseclaw uninstall --binaries --yes` (add `--all` to delete `~/.defenseclaw`;

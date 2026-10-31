@@ -305,6 +305,21 @@ type fakeRelay struct {
 	eventsFail atomic.Int64
 	// reports are the state reports, "id=running" or "id=stopped".
 	reports []string
+	// restart answers registrations/{id}/restart; nil answers like a
+	// managed gateway without the route (404, no reason).
+	restart func(id string) (sandboxrelay.RegistrationView, error)
+	// restarts are the registrations a restart was asked for.
+	restarts []string
+}
+
+func (f *fakeRelay) Restart(_ context.Context, id string) (sandboxrelay.RegistrationView, error) {
+	f.eventsMu.Lock()
+	f.restarts = append(f.restarts, id)
+	f.eventsMu.Unlock()
+	if f.restart != nil {
+		return f.restart(id)
+	}
+	return sandboxrelay.RegistrationView{}, &sandboxrelay.Error{Status: http.StatusNotFound}
 }
 
 var _ sandboxrelay.Client = (*fakeRelay)(nil)

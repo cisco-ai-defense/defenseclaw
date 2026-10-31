@@ -60,7 +60,7 @@ lists each):
 | Item | Path | Owner and mode |
 | --- | --- | --- |
 | Binaries | `/opt/defenseclaw/bin`: `defenseclaw-gateway`, `defenseclaw-hook`, `defenseclaw-sensor-helper`, and `defenseclaw-acp` when present | `root`, `0755` |
-| Managed OpenCode plugin | `/opt/defenseclaw/share/opencode/defenseclaw.js` | `root`, `0644` |
+| Managed OpenCode plugin | `/opt/defenseclaw/share/opencode/index.js` | `root`, `0644` |
 | Config | `/etc/defenseclaw/config.yaml` | `root:defenseclaw`, `0640` |
 | Policies | `/etc/defenseclaw/policies` | `root:defenseclaw`, `0750` |
 | Secrets | `/etc/defenseclaw/secrets` | See above |
@@ -101,6 +101,10 @@ them to `/etc/systemd/system`. Put host-specific drop-ins in
 (`30-defenseclaw-tetragon.conf`, `40-defenseclaw-agent-prefixes.conf`,
 `50-defenseclaw-paths.conf`, `60-defenseclaw-credentials.conf`,
 `70-defenseclaw-network.conf`) and `verify` does not report them as overrides.
+Those five file names are DefenseClaw's; do not edit them. Every other name is
+yours and the lifecycle never touches it. Use `00-` to `29-` or `80-` to `99-`
+(for example `80-site-proxy.conf`), and leave `defenseclaw` out of the name, so
+a reader can tell your drop-ins from DefenseClaw's.
 
 <Flow
   direction="TB"
@@ -494,8 +498,12 @@ close this limit. Keys, recipes and what people see are in
 
 On a computer with `/etc/defenseclaw/managed-runtime.json` the per-user product
 refuses to run: `install.sh` refuses and changes nothing, `defenseclaw upgrade`
-refuses, and the per-user gateway refuses to start. Nothing migrates a per-user
-install. Before you deploy, have each user run
+refuses, and the per-user gateway refuses to start. Installers from 0.8.x predate
+the managed marker and do not check for it, so a user can still install one after
+you deploy; the managed gateway keeps enforcing and the per-user copy cannot start
+its own gateway. If such an installer says "existing installation detected" and
+points to the upgrade resolver, that text is not meant for managed computers.
+Nothing migrates a per-user install. Before you deploy, have each user run
 `defenseclaw uninstall --binaries --yes` (add `--all` to delete `~/.defenseclaw`;
 [Uninstall](/docs/get-started/download)).
 

@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -1745,8 +1746,8 @@ var exfilTargetRegexes = []*regexp.Regexp{
 	regexp.MustCompile(`(?:^|[/\s'"` + "`" + `])\.aws/(?:credentials|config)\b`),
 }
 
-var exfilReadIntentRegex = regexp.MustCompile(`\b(?:cat|collect|copy|dump|extract|fetch|read|steal)\b`)
-var exfilEgressIntentRegex = regexp.MustCompile(`\b(?:exfil(?:trate|tration)?|post|send|transmit|upload)\b`)
+var exfilReadIntentRegex = lazyregexp.New(`\b(?:cat|collect|copy|dump|extract|fetch|read|steal)\b`)
+var exfilEgressIntentRegex = lazyregexp.New(`\b(?:exfil(?:trate|tration)?|post|send|transmit|upload)\b`)
 
 const exfilIntentContextBytes = 240
 
@@ -2820,14 +2821,14 @@ func containsHeartbeatProbeSignature(s string) bool {
 // Whitespace is permissive so messaging-bridge transport banners that
 // reflow whitespace do not break the bypass; the leading "\bRead\b" word
 // anchor prevents matching arbitrary tokens like "thread HEARTBEAT.md".
-var heartbeatProbeAnchorRe = regexp.MustCompile(`(?i)\bRead\s+HEARTBEAT\.md\b`)
+var heartbeatProbeAnchorRe = lazyregexp.New(`(?i)\bRead\s+HEARTBEAT\.md\b`)
 
 // heartbeatOKFooterRe matches when a message ends with the canonical
 // HEARTBEAT_OK response-token instruction, allowing for trailing
 // punctuation / whitespace. Used by isHeartbeatMessage to reject any
 // "Read HEARTBEAT.md. <injection tail>" smuggling attempt because a
 // legitimate probe ALWAYS ends by telling the LLM to reply HEARTBEAT_OK.
-var heartbeatOKFooterRe = regexp.MustCompile(`(?i)\bHEARTBEAT_OK\b[\s"'.!?)\]]*$`)
+var heartbeatOKFooterRe = lazyregexp.New(`(?i)\bHEARTBEAT_OK\b[\s"'.!?)\]]*$`)
 
 // heartbeatInjectionHintRe matches a small vocabulary of unambiguous
 // prompt-injection / exfil imperatives. If any of them appears anywhere
@@ -2841,7 +2842,7 @@ var heartbeatOKFooterRe = regexp.MustCompile(`(?i)\bHEARTBEAT_OK\b[\s"'.!?)\]]*$
 // match the legitimate probe body ("do not infer or repeat old tasks
 // from prior chats" — the probe text contains "prior" as a bare word,
 // so we only match IGNORE + PRIOR together, not PRIOR alone).
-var heartbeatInjectionHintRe = regexp.MustCompile(
+var heartbeatInjectionHintRe = lazyregexp.New(
 	`(?i)\b(?:` +
 		`IGNORE(?:\s+ALL)?\s+(?:PRIOR|PREVIOUS)|` +
 		`DISREGARD(?:\s+(?:ALL|ANY|PRIOR|PREVIOUS|THE))?\s*(?:INSTRUCTION|PROMPT|RULE|CONTEXT)|` +
@@ -2873,7 +2874,7 @@ var heartbeatInjectionHintRe = regexp.MustCompile(
 // probe go in. The canonical probes are short, imperative, and only
 // reference the in-repo files HEARTBEAT.md / BOOTSTRAP.md, so anything
 // matching here is by definition not part of either probe.
-var heartbeatScannerHintRe = regexp.MustCompile(
+var heartbeatScannerHintRe = lazyregexp.New(
 	`(?i)(?:` +
 		// home-directory secret stores and SSH artifacts
 		`~/\.(?:ssh|aws|kube|gcp|azure|terraform|netrc)\b|` +
@@ -2971,12 +2972,12 @@ const sessionStartupAnchor = "A new session was started via /new or /reset"
 // Secret redaction
 // ---------------------------------------------------------------------------
 
-var secretRedactRe = regexp.MustCompile(
+var secretRedactRe = lazyregexp.New(
 	`(?i)(?:sk-ant-|sk-proj-|sk-|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_` +
 		`|xox[bpors]-|AIza|eyJ)[A-Za-z0-9\-_+/=.]{6,}` +
 		`|AKIA[A-Z0-9]{12,}`)
 
-var kvRedactRe = regexp.MustCompile(
+var kvRedactRe = lazyregexp.New(
 	`(?i)((?:password|secret|token|api_key|apikey|aws_secret_access)[=:\s]+)\S{6,}`)
 
 func redactSecrets(text string) string {

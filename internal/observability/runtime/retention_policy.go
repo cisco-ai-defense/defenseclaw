@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
 )
 
@@ -39,13 +40,14 @@ func (factory *retentionPolicyFactory) Prepare(
 		return nil, &retentionPolicyError{}
 	}
 	days := int64(input.Config.RetentionDays)
-	if !validRetentionPolicyDays(days) {
+	maxStoreMB := int64(input.Config.Plan.Snapshot().Local.MaxStoreMB)
+	if !validRetentionPolicyDays(days) || maxStoreMB < 0 || maxStoreMB > audit.RetentionMaxStoreMB {
 		return nil, &retentionPolicyError{}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	reservation, err := factory.controller.reserveRetentionPolicy(days)
+	reservation, err := factory.controller.reserveRetentionPolicy(days, maxStoreMB)
 	if err != nil {
 		return nil, &retentionPolicyError{}
 	}
@@ -111,11 +113,12 @@ func (component *retentionPolicyComponent) Close(context.Context) error {
 type retentionPolicyReservation struct {
 	controller *RetentionController
 	days       int64
+	maxStoreMB int64
 	released   atomic.Bool
 }
 
 func (controller *RetentionController) reserveRetentionPolicy(
-	days int64,
+	days, maxStoreMB int64,
 ) (*retentionPolicyReservation, error) {
 	if controller == nil || !validRetentionPolicyDays(days) {
 		return nil, errors.New("observability retention policy reservation is invalid")
@@ -125,7 +128,7 @@ func (controller *RetentionController) reserveRetentionPolicy(
 		controller.lifecycleMu.Unlock()
 		return nil, errors.New("observability retention policy controller is unavailable")
 	}
-	return &retentionPolicyReservation{controller: controller, days: days}, nil
+	return &retentionPolicyReservation{controller: controller, days: days, maxStoreMB: maxStoreMB}, nil
 }
 
 func (reservation *retentionPolicyReservation) activate() {
@@ -136,7 +139,7 @@ func (reservation *retentionPolicyReservation) activate() {
 	// Prepare validated the exact same integer domain as audit retention. The
 	// concrete reaper therefore cannot reject this update; activation remains
 	// infallible and does no I/O or blocking work.
-	_ = reservation.controller.applyPolicyLocked(reservation.days)
+	_ = reservation.controller.applyPolicyLocked(reservation.days, reservation.maxStoreMB)
 	reservation.controller.lifecycleMu.Unlock()
 }
 

@@ -63,6 +63,8 @@ func TestManagedSandboxActiveCountsARunningSandboxAfterARestart(t *testing.T) {
 	active("the daemon's first poll after the restart", 1)
 	report(false)
 	active("a stopped report", 0)
+	// A start runs it under a new registration (GAP-0673).
+	id = restartedRegistration(t, restarted, sbxAlice, id)
 	report(true)
 	active("running again", 1)
 	if code, _ := restarted.current(sbxAlice, id); code != http.StatusOK {

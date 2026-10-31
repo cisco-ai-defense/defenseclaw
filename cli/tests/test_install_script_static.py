@@ -2068,6 +2068,26 @@ def test_a_process_gone_since_ps_listed_it_is_skipped_without_lsof(tmp_path: Pat
     assert time.monotonic() - started < 10
 
 
+@pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")
+def test_the_audit_line_goes_to_the_install_log_not_the_console(tmp_path: Path) -> None:
+    # GAP-0103: install.sh printed "audit: live-agent identity unproven ... process vanished during
+    # lookup" in the console. With the install log open (LOG) the line is written there only.
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    stubs, log = tmp_path / "stubs", tmp_path / "install.log"
+    stubs.mkdir()
+    (stubs / "ps").write_text(f"#!/bin/sh\necho '{gone.pid}'\n", encoding="utf-8")
+    (stubs / "ps").chmod(0o755)
+    home = tmp_path / "home"
+    entry = home / ".opencode" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    result = _agent_scan(home, [stubs], LOG=str(log))
+    assert result.returncode == 0 and "scan-passed" in result.stdout, (result.stdout, result.stderr)
+    assert "audit:" not in result.stderr and "audit:" not in result.stdout
+    assert f"audit: live-agent identity unproven for PID {gone.pid}: process vanished during lookup" in log.read_text()
+
+
 @pytest.mark.parametrize("installed", [False, True])
 def test_an_unreadable_process_list_is_audited_without_refusal(tmp_path: Path, installed: bool) -> None:
     stubs = tmp_path / "stubs"
@@ -2698,6 +2718,12 @@ def test_a_rollback_to_an_older_release_drops_the_hook_helper_the_newer_install_
     # After the swap brought the older data back, before its gateway starts.
     assert rollback.index("swap_with_previous || swapped=$?") < drop < rollback.index("start_gateway || rollback_rc=$?")
     assert "version_lt \"${back_to}\" \"${current}\"" in rollback[drop - 200 : drop]
+    # rel-1-0-6:GAP-0047: only back to 1.0.4 or older. 1.0.5 and later ship
+    # the same helper, and their gateway with only OpenCode set up never
+    # writes one, so it refused to start and the rollback undid itself.
+    assert 'version_lt "${back_to}" "${current}" && version_lt "${back_to}" 1.0.5; then' in rollback[drop - 200 : drop]
+    helper = (ROOT / "internal" / "gateway" / "connector" / "hooks" / "_hardening.sh").read_text(encoding="utf-8")
+    assert helper.splitlines()[1] == "# defenseclaw-managed-hook v10", "a new helper schema must revisit the 1.0.5 floor"
 
 
 def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_path: Path) -> None:
@@ -3734,3 +3760,30 @@ def test_a_rollback_to_an_older_release_waits_until_its_gateway_lets_go_of_the_a
 def _audit_lock_free_py() -> str:
     text = INSTALL_SH.read_text(encoding="utf-8")
     return re.search(r'^AUDIT_LOCK_FREE_PY="([^"]+)"$', text, re.M).group(1)
+
+
+@pytest.mark.parametrize("script", [INSTALL_SH, HANDOFF_SH])
+@pytest.mark.parametrize("value", ["http://127.0.0.1:8765/defenseclaw", "ftp://mirror.example/dc", "justaname"])
+def test_a_bad_defenseclaw_repo_is_refused_before_anything_downloads(tmp_path: Path, script: Path, value: str) -> None:
+    # GAP-1065: an http:// mirror built https://github.com/http://... and ended
+    # in a 404. It is refused with the https:// requirement, value not echoed.
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    curl_log = tmp_path / "curl.log"
+    (fake / "curl").write_text(f'#!/bin/sh\necho "$*" >> "{curl_log}"\nexit 22\n', encoding="utf-8")
+    (fake / "curl").chmod(0o755)
+    args = [str(script), "--yes", "--version", "1.0.8200"] if script == INSTALL_SH else [str(script), "--version", "1.0.8200"]
+
+    result = _run(args, tmp_path, PATH=f"{fake}:/usr/bin:/bin", DEFENSECLAW_REPO=value)
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in result.stderr
+    assert value not in result.stdout + result.stderr
+    assert not curl_log.exists()
+
+
+def test_the_windows_installer_refuses_a_bad_defenseclaw_repo_too() -> None:
+    # GAP-1065: the same rule as install.sh (the PowerShell cannot run here).
+    text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in text
+    assert "'^https://\\S+$'" in text and "'^[^\\s/:@]+/[^\\s/:@]+$'" in text

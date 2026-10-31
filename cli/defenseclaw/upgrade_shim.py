@@ -52,6 +52,15 @@ import urllib.request
 DEFAULT_REPO = "cisco-ai-defense/defenseclaw"
 # Deprecated alias of config.yaml update.source: a GitHub owner/name.
 REPO_ENV = "DEFENSECLAW_REPO"
+# DEFENSECLAW_REPO is a GitHub owner/name or an https:// mirror base URL. Any
+# other value (an http:// URL, a path) used to be appended to github.com and
+# ended in an HTTP 404 (GAP-1065). The value is never echoed: a mirror URL can
+# carry credentials.
+_VALID_REPO_ENV = re.compile(r"^(https://\S+|[^\s/:@]+/[^\s/:@]+)$")
+REPO_ENV_REFUSAL = (
+    f"{REPO_ENV} must be a GitHub owner/name or an https:// mirror URL (an http:// URL is not accepted). "
+    f"Fix or unset {REPO_ENV}, or set update.source to an https:// URL"
+)
 OFFICIAL_SOURCE = "https://github.com/" + DEFAULT_REPO
 # The release signing identity is compiled in. update.source and
 # DEFENSECLAW_REPO only change where release bytes are fetched from; a
@@ -65,7 +74,15 @@ _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 # Configuration keys added after 1.0.2, with the first release that has each.
 # The installer of an older release refuses a config.yaml that sets one
 # ("unknown field", GAP-0137), so a downgrade sets them aside first.
-NEWER_CONFIG_KEYS = (("openshell.trusted_ca_bundle", (1, 0, 3)),)
+# guardrail.chains and connectors (connectors.agent_gateway) are set aside
+# whole: an older release refuses the block itself, so taking only the inner
+# key out would leave an empty block behind.
+NEWER_CONFIG_KEYS = (
+    ("openshell.trusted_ca_bundle", (1, 0, 3)),
+    ("guardrail.internal_domains", (1, 0, 6)),
+    ("guardrail.chains", (1, 0, 6)),
+    ("connectors", (1, 0, 6)),
+)
 # Where a downgrade keeps the keys it set aside, in the data folder:
 # {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
 SET_ASIDE_FILE = "config-set-aside.json"
@@ -286,6 +303,8 @@ def release_source() -> str:
         return configured.rstrip("/")
     repo = os.environ.get(REPO_ENV, "").strip()
     if repo:
+        if not _VALID_REPO_ENV.match(repo):
+            raise ShimUsageError(REPO_ENV_REFUSAL)
         return _source_url(repo)
     return OFFICIAL_SOURCE
 
@@ -329,6 +348,8 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
         return 0
     if _key(version) < (1, 0, 0):
         raise ShimError(f"DefenseClaw {installed} cannot install {version}; 1.x installs only 1.0.0 or later")
+    if _key(version) < _key(installed):
+        _refuse_unguarding_downgrade(version)
 
     print(f"  → Installing DefenseClaw {version} (installed: {installed})")
     workdir = tempfile.mkdtemp(prefix="defenseclaw-upgrade-")
@@ -361,8 +382,31 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
         except BaseException:
             shutil.rmtree(workdir, ignore_errors=True)
             raise
-    newer = installed if _key(version) < _key(installed) else None
+    # Only a downgrade to a release that keeps the newer hook helper waits
+    # for its installer and drops the helper (rel-1-0-4:GAP-2503).
+    newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
     return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer)
+
+
+def _refuse_unguarding_downgrade(version: str) -> None:
+    """Stop a downgrade to a release that cannot guard an agent set up here.
+
+    ``defenseclaw rollback`` runs the same check (``migrate
+    --check-rollback-to``); a downgrade runs the older release's installer,
+    which has none, so this install checks before anything changes
+    (rel-1-0-6 GAP-0128: OpenCode V2 under 1.0.5 ran unguarded). The check
+    belongs to the rest of the CLI: when that cannot load, the downgrade goes
+    on as before, since it may be the way out of a broken install.
+    """
+
+    try:
+        from defenseclaw.migrations import MigrationError, check_opencode_rollback
+    except Exception:  # noqa: BLE001 - a broken CLI must not block the way back
+        return
+    try:
+        check_opencode_rollback(_data_home(), version, downgrade=True)
+    except MigrationError as exc:
+        raise ShimError(str(exc)) from None
 
 
 def _active_config_path() -> str:
@@ -753,6 +797,12 @@ def _wait_for_installer(argv: list[str]) -> int:
 
 
 HOOK_HELPER = os.path.join("hooks", "_hardening.sh")
+# A gateway of 1.0.4 or older keeps the newer hooks/_hardening.sh. 1.0.5 and
+# later ship the same helper (schema v10), and a gateway with only plugin
+# connectors (OpenCode) set up never writes one: once the shim dropped it,
+# that gateway refused to start (rel-1-0-6:GAP-0047). A release that changes
+# the helper's schema line must revisit this floor and install.sh's.
+HOOK_HELPER_KEPT_BEFORE = (1, 0, 5)
 _HOOK_HELPER_MAX_BYTES = 4 << 20
 
 

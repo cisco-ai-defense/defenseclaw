@@ -54,9 +54,16 @@ describe('command generator shell safety', () => {
     assert.equal(statuses.size, matrix.connectors.length);
     assert.equal(statuses.get('openclaw'), 'unsupported');
     assert.equal(statuses.get('zeptoclaw'), 'unsupported');
+    assert.equal(statuses.get('opencode'), 'preview');
     for (const status of statuses.values()) {
-      assert.match(status, /^(supported|degraded|unsupported)$/);
+      assert.match(status, /^(supported|preview|degraded|unsupported)$/);
     }
+  });
+
+  it('keeps OpenCode V2 setup available with its native Windows preview notice', () => {
+    const result = buildCommand({ ...DEFAULT_STATE, connector: 'opencode' }, 'powershell');
+    assert.ok(result.lines.includes("--connector 'opencode'"));
+    assert.match(result.warnings.join(' '), /OpenCode.*native Windows preview/);
   });
 
   it('keeps global teardown available for unsupported Windows connectors', () => {

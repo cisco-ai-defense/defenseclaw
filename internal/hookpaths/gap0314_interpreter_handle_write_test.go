@@ -15,7 +15,6 @@ import (
 // blocked; a real Claude Code TUI appended to the file. Every interpreter
 // writer that names the key path is a protected target in action mode.
 func TestActionInterpreterHandleWriteToKeyIsProtected(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	for _, command := range []string{
@@ -31,8 +30,8 @@ func TestActionInterpreterHandleWriteToKeyIsProtected(t *testing.T) {
 		`python3 -c "from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p.write_bytes(b'r105-marker')"`,
 		`python3 -c "from pathlib import Path; (Path.home() / '.ssh' / 'authorized_keys').open('a').write('r105-marker\n')"`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
-			t.Errorf("ActionCommandDecision(%q) = %q, want protected-target", command, got)
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("posixShellDecision(%q) = %q, want protected-target", command, got)
 		}
 	}
 	for _, command := range []string{
@@ -41,8 +40,8 @@ func TestActionInterpreterHandleWriteToKeyIsProtected(t *testing.T) {
 		`python3 -c "from pathlib import Path; Path('notes.txt').open('a').write('x')"`,
 		`node -e "require('fs').appendFileSync('notes.txt','x')"`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "" {
-			t.Errorf("ActionCommandDecision(%q) = %q, want allow", command, got)
+		if got := posixShellDecision(command, cwd, home); got != "" {
+			t.Errorf("posixShellDecision(%q) = %q, want allow", command, got)
 		}
 	}
 }

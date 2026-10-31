@@ -12,8 +12,9 @@ package observability
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Bucket is one stable semantic class in bucket catalog version 1.
@@ -333,7 +334,7 @@ func IsFieldClass(fieldClass FieldClass) bool {
 
 const MaxStableTokenBytes = 128
 
-var stableTokenPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
+var stableTokenPattern = lazyregexp.New(`^[a-z0-9][a-z0-9_.-]*$`)
 
 // ValidateStableToken validates bounded record metadata such as source,
 // connector, action, and phase. It deliberately does not echo a rejected value
@@ -411,7 +412,7 @@ func IsBuiltInSource(source Source) bool {
 // EventName is a stable registry identity. Rendered span names are separate.
 type EventName string
 
-var eventNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$`)
+var eventNamePattern = lazyregexp.New(`^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$`)
 
 func (name EventName) Validate() error {
 	if !eventNamePattern.MatchString(string(name)) {

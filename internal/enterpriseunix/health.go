@@ -88,6 +88,54 @@ func (l *lifecycle) gatewayHealth(ctx context.Context, gateway Unit, serviceUID 
 	return nil, errors.New(message)
 }
 
+// unresponsiveGatewayProcess is a gateway process the service manager ran
+// that did not answer on its hook socket before a repair or ensure restarted
+// it (a stopped or hung process).
+type unresponsiveGatewayProcess struct {
+	unit   string
+	pid    int
+	reason string
+}
+
+// unresponsiveGateway asks the running gateway for its health on the hook
+// socket before a repair or ensure of an installed deployment restarts the
+// services, and returns it when it does not answer; nil otherwise. Any HTTP
+// answer counts as an answer.
+func (l *lifecycle) unresponsiveGateway(ctx context.Context, units []Unit, active []string) *unresponsiveGatewayProcess {
+	env := l.env
+	gateway, ok := gatewayUnitOf(units)
+	if !ok || !l.reportChanges || l.opts.NoStart || !contains(active, gateway.Name) {
+		return nil
+	}
+	_, _, err := env.HealthGet(ctx)
+	if err == nil {
+		return nil
+	}
+	status, _ := env.Services.Status(ctx, gateway)
+	return &unresponsiveGatewayProcess{unit: gateway.Name, pid: status.PID, reason: env.hookSocketProblem(err).Error()}
+}
+
+// replacedNote is the change line for the unresponsive gateway once its unit
+// runs again: it names the process the restart ended and the new one, and
+// is "" when the service manager still runs the same process.
+func (u *unresponsiveGatewayProcess) replacedNote(ctx context.Context, services ServiceManager, unit Unit) string {
+	now := 0
+	if status, err := services.Status(ctx, unit); err == nil {
+		now = status.PID
+	}
+	if u.pid > 0 && now == u.pid {
+		return ""
+	}
+	old, started := "process", "started a new one"
+	if u.pid > 0 {
+		old = fmt.Sprintf("process %d", u.pid)
+	}
+	if now > 0 {
+		started = fmt.Sprintf("started a new one (pid %d)", now)
+	}
+	return fmt.Sprintf("terminated the unresponsive %s %s (%s) and %s", u.unit, old, u.reason, started)
+}
+
 // hookSocketProblem says in words why the hook socket did not answer. The
 // request error names the API address (the request's Host) and Go's dial
 // details, which read as if the TCP API had been asked.

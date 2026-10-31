@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/anchors-install-v1.json",
   "title": "enterprise bundle anchors install --json (Linux, macOS)",
-  "description": "`enterprise bundle anchors install --file F [--lock-wait D] --json` on Linux and macOS. The verb is not registered on Windows, where the call is `enterprise windows ensure --profile standalone --trust-anchors F [--bundle B] --json` and prints lifecycle result v2. Source trust: the verb reads F once, as LoadAnchors(F, TrustAnchorFile) does (internal/enterprisebundle/anchors.go): Lstat, regular file, the file and every folder above it root-owned, not group or other writable, without an ACL write entry and without links; open; SameFile against the Lstat; bounded read; strict decode. A source that fails is refused (anchor_insecure, anchor_missing or anchor_invalid) and nothing is written. The bytes written are exactly the bytes validated in that one read. Then, under the lifecycle lock: a file byte-identical to a trusted installed file is result unchanged and writes nothing; otherwise <etc>/trust/bundle-anchors.json is written atomically (root:root 0644 in a root 0755 folder) and re-checked with TrustAnchorFile, and the previous file is put back when that check fails. From 1.0.4 every install that changes the file, is refused or fails leaves a change event that the gateway reports, when it runs, as one config.trust_anchors.changed audit and OTel event (hashes and key ids only); builds before 1.0.4 record none. An install whose change event cannot be recorded is refused (state_invalid) before the file is written. The result still carries sha256, previous_sha256 and key_ids for the agent's own report. Exit codes: 0; 1 refused (errors[0].code); 2 invalid arguments; 75 lifecycle_busy.",
+  "description": "`enterprise bundle anchors install --file F [--lock-wait D] --json` on Linux and macOS. The verb is not registered on Windows, where the call is `enterprise windows ensure --profile standalone --trust-anchors F [--bundle B] --json` and prints lifecycle result v2. Source trust: the verb reads F once, as LoadAnchors(F, TrustAnchorFile) does (internal/enterprisebundle/anchors.go): Lstat, regular file, the file and every folder above it root-owned, not group or other writable, without an ACL write entry and without links; open; SameFile against the Lstat; bounded read; strict decode. A source that fails is refused (anchor_insecure, anchor_missing or anchor_invalid) and nothing is written. The bytes written are exactly the bytes validated in that one read. Then, under the lifecycle lock: a file byte-identical to a trusted installed file is result unchanged and writes nothing; otherwise <etc>/trust/bundle-anchors.json is written atomically (root:root 0644 in a root 0755 folder) and re-checked with TrustAnchorFile, and the previous file is put back when that check fails. From 1.0.4 every install that changes the file, is refused or fails leaves a change event that the gateway reports, when it runs, as one config.trust_anchors.changed audit and OTel event (hashes and key ids only); builds before 1.0.4 record none. An install whose change event cannot be recorded is refused (state_invalid) before the file is written. The result still carries sha256, previous_sha256 and key_ids for the agent's own report. Exit codes: 0; 1 refused (errors[0].code); 2 invalid arguments; 75 lifecycle_busy. From 1.0.6, --device-group G pins the device to one group: the source must list G or no group (anchor_invalid otherwise, nothing written) and the installed file lists G alone, so a bundle for another group is refused target_mismatch; a source that already lists only G keeps its bytes. To install anchors and apply a bundle as one transaction, use `enterprise bundle apply --bundle B --trust-anchors F`.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -87,6 +87,14 @@
         "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-refused-v1.json#/$defs/bundleError"
       },
       "description": "Codes: anchor_insecure (the source file or a folder above it can be written by a non-root account, is a link, or changed while it was read; or the installed file failed the re-check), anchor_missing (--file does not exist), anchor_invalid, anchor_restore_failed, lifecycle_busy, not_managed, not_supported_secure_client, state_invalid, not_root, invalid_arguments."
+    },
+    "device_groups": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+      },
+      "description": "device_groups of the installed file, in file order: the groups this device is in (empty: any). From 1.0.6, --device-group G installs the file with device_groups [G] and this member is [G]. Absent when refused and when the installed file lists no group."
     }
   },
   "allOf": [
@@ -207,6 +215,23 @@
           "message": "the confirmed bundle's signer acme-2026a is revoked in the installed trust anchors; it keeps enforcing until a bundle signed by an active key replaces it"
         }
       ],
+      "errors": []
+    },
+    {
+      "schema_version": 1,
+      "command": "anchors install",
+      "ok": true,
+      "result": "installed",
+      "anchors": "/etc/defenseclaw/trust/bundle-anchors.json",
+      "sha256": "3b4c5d6e7f80912a3b4c5d6e7f80912a3b4c5d6e7f80912a3b4c5d6e7f809123",
+      "tenant_id": "acme",
+      "device_groups": [
+        "eng-laptops"
+      ],
+      "key_ids": [
+        "acme-2026a"
+      ],
+      "warnings": [],
       "errors": []
     }
   ]

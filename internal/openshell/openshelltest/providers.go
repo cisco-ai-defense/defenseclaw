@@ -19,12 +19,13 @@ package openshelltest
 import (
 	"context"
 	"encoding/json"
-	"regexp"
 	"sort"
 	"strconv"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // providerClient adds error injection to the SDK fake's provider store and
@@ -152,7 +153,7 @@ type profileClient struct{ f *Fake }
 
 var _ v1.ProfileInterface = (*profileClient)(nil)
 
-var profileIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+var profileIDPattern = lazyregexp.New(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 
 func (p *profileClient) List(workspace string, _ ...types.ListOptions) (*v1.Pager[*types.ProviderProfile], error) {
 	if err := p.f.enter(MethodListProfiles); err != nil {

@@ -58,11 +58,11 @@ func onDriver(t *testing.T, e *harnessEnv, name openshell.ComputeDriver) openshe
 // useOpenCode makes e's images OpenCode's, a harness without per-run files.
 func useOpenCode(t *testing.T, e *harnessEnv) {
 	t.Helper()
-	res := connector.ResolveSandboxHookContract("opencode", "1.18.31")
+	res := connector.ResolveSandboxHookContract("opencode", "2.1.4")
 	if res.Status != connector.HookCompatibilityKnown {
-		t.Fatalf("opencode 1.18.31 has no known contract: %+v", res)
+		t.Fatalf("opencode 2.1.4 has no known contract: %+v", res)
 	}
-	e.images.rec.HarnessVersion, e.images.rec.HookContract = "1.18.31", res.Contract.ContractID
+	e.images.rec.HarnessVersion, e.images.rec.HookContract = "2.1.4", res.Contract.ContractID
 }
 
 // A live mount is for a driver that mounts host folders: a create that got

@@ -171,6 +171,7 @@ func TestManagementContractBundleApplyRefusals(t *testing.T) {
 func TestManagementContractBundleStatusDescribesEveryMember(t *testing.T) {
 	contracttest.RequireMembers(t, "bundle-status.schema.json#/$defs/full", reflect.TypeOf(bundleStatusResult{}))
 	contracttest.RequireMembers(t, "bundle-status.schema.json#/$defs/anchorsSummary", reflect.TypeOf(enterprisebundle.AnchorsSummary{}))
+	contracttest.RequireMembers(t, "bundle-status.schema.json#/$defs/currentRef", reflect.TypeOf(bundleStatusRef{}))
 	contracttest.RequireMembers(t, "bundle-status.schema.json#/$defs/anchorsSummary/properties/keys/items", reflect.TypeOf(enterprisebundle.AnchorKeySummary{}))
 	contracttest.RequireMembers(t, "bundle-verify.schema.json#/$defs/warning", reflect.TypeOf(enterprisebundle.Warning{}))
 	contracttest.RequireMembers(t, "bundle-refused.schema.json#/$defs/bundleError", reflect.TypeOf(bundleError{}))

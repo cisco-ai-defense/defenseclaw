@@ -53,7 +53,7 @@ The `quiet` preset is the one with the fewest false positives, and it is measure
 
 ### Before you start
 
-These `defenseclaw skill` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands, so an administrator scans the skill with the managed gateway: `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan skill /path/to/skill` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan skill /path/to/skill` on macOS, for a folder outside home folders (and, on Linux, temporary folders; see [Known limits](/docs/support-matrix#managed-linux-and-macos-scans)), and sets any allow rule in the admin config. On managed Windows, use the administrator's `defenseclaw.exe scan skill` command for a folder outside user profiles. An administrator scan outside the watcher reports the verdict and the findings only: it never blocks or quarantines the skill. On managed Windows and macOS it prints the preset (`policy: quiet`) but no policy result line. The scan output shows the highest severity, for example `verdict: INFO (1 findings)`; the scan's audit row shows `verdict=warn` for any skill with findings, a CRITICAL one included.
+These `defenseclaw skill` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands, so an administrator scans the skill with the managed gateway: `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan skill /path/to/skill` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan skill /path/to/skill` on macOS, for a folder outside home folders (and, on Linux, temporary folders; see [Known limits](/docs/support-matrix#managed-linux-and-macos-scans)), and sets any allow rule in the admin config. On managed Windows, use the administrator's `defenseclaw.exe scan skill` command for a folder outside user profiles. An administrator scan outside the watcher never blocks or quarantines the skill. It prints the preset (`preset: quiet`), the highest severity (for example `verdict: INFO (1 findings)`), the findings, and a `policy:` line with what install admission would decide for the skill, as the per-user scan does: `policy: rejected - the policy would refuse this skill at install (...)` for a skill the policy refuses (a CRITICAL one with the default policy), `policy: accepted - the policy would admit this skill at install (...)` for one it admits (an INFO-only one). The scan's audit row carries that decision, as an install-time scan's row does: `verdict=block` for a skill the policy refuses, `verdict=clean` for one it admits, `verdict=warn` for one it admits with a warning.
 
 `defenseclaw-gateway scan code` needs to read the whole folder. A directory it cannot list or a file it cannot read, including a macOS privacy-protected folder, makes the scan incomplete: it prints `code scan incomplete: part of <folder> could not be read, so nothing was reported as clean`, exits 1 and reports nothing.
 
@@ -239,6 +239,10 @@ The rules, which the validator enforces: `inherit` with a filled `llm` block is 
 When one of these cross-key rules fails, `config set` names the key and the rule and leaves the file as it was, for example `config.yaml was not changed: scanners.skill_scanner.llm.model: judge_source: override needs a model. Correct the value, then run again.` The `inherit` case names `scanners.skill_scanner.llm` instead. Follow the order above and it goes through.
 </Callout>
 
+### Decision model score
+
+With the [decision model](/docs/guardrail/decision-model) on, `defenseclaw skill scan` also asks it whether the skill is unsafe to install and prints the score (`Decision model: ... scored 0.12 unsafe`). The score is advisory: it never adds a finding or changes the verdict, because the skill scanner's own measurements found it does not separate malicious from benign skills. The judge above still decides.
+
 ## No LLM configured
 
 Start with a judge. Run `defenseclaw setup llm` and pick a provider, or serve a local model and point DefenseClaw at it.
@@ -408,6 +412,8 @@ The order is **check the lists → scan in place → act on the verdict**. The s
 
 A `SKILL.md` saved as UTF-16 (Notepad's "Unicode", PowerShell 5.1 redirection) or as UTF-8 with a byte order mark is read as text: the watcher and `defenseclaw skill scan` scan a copy re-encoded as UTF-8 (the skill's own file is not changed), and `skill list` shows its front matter description. A skill too large to copy (64 MiB, 2,000 files) or holding links is refused with that reason instead.
 
+Files the operating system adds when a skill is copied from macOS or through Windows Explorer do not count against the skill: a macOS AppleDouble file (`._SKILL.md`, also under `__MACOSX/`), a Finder `.DS_Store` and an Explorer `Thumbs.db` are checked by format and left out of the content scan, each reported as an INFO `OS_METADATA_FILE` finding; a UTF-16 `desktop.ini` is scanned as UTF-8 text. A file with one of those names that can hold content (an AppleDouble file with a data fork, resource data or an unknown attribute, or without the file it describes next to it) is scanned like any other file. To leave the AppleDouble files out of a macOS archive, create it with `COPYFILE_DISABLE=1 tar ...`.
+
 On top of the skill scanner, the install watcher and `defenseclaw skill scan` both apply the connector's guardrail rule pack to the skill's text files, and they agree on what it finds: Python files are matched as raw source, comments and docstrings included, so an example key in a docstring is a finding in both. That false positive is accepted to keep install admission and `skill scan` on one verdict; move the example out of the skill or accept the skill with `skill allow` after review. Only the rules for writes to a path (such as `MEMORY.md`) skip Python comments and docstrings, because they need a write call that uses the path.
 
 Two cases do not end in quarantine storage, and both say so in `defenseclaw alerts`, `defenseclaw skill list` and `defenseclaw skill info`:
@@ -457,10 +463,10 @@ DefenseClaw pins the scanner versions below. `defenseclaw doctor` compares the i
 
 | Package | Pinned | Needs |
 | --- | --- | --- |
-| `cisco-ai-skill-scanner` | 2.2.1 | Python 3.11 to 3.13 |
+| `cisco-ai-skill-scanner` | 2.3.2 | Python 3.11 to 3.13 |
 | `cisco-ai-mcp-scanner` | 4.3.0 | Python 3.11 or newer; see [MCP scanner](/docs/scanning/mcp-scanner#pinned-version) |
 
-`cisco-ai-skill-scanner` 2.2.1 ships platform wheels only, each bundling a native helper, so there is no pure-Python wheel. DefenseClaw pins the wheel for macOS 13 or newer (Apple silicon and Intel), Linux with glibc (x86_64 and aarch64) and Windows x64. There is no wheel for Windows on ARM or for musl-based Linux, and DefenseClaw does not ship for either.
+`cisco-ai-skill-scanner` 2.3.2 ships platform wheels only, each bundling a native helper, so there is no pure-Python wheel. DefenseClaw pins the wheel for macOS 13 or newer (Apple silicon and Intel), Linux with glibc (x86_64 and aarch64) and Windows x64. There is no wheel for Windows on ARM or for musl-based Linux, and DefenseClaw does not ship for either.
 
 DefenseClaw needs Python 3.11 to 3.13 (the package refuses Python 3.10), so every supported runtime includes the scanner. The installers ship Python 3.12 or 3.13.
 

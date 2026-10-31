@@ -28,7 +28,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -262,6 +264,22 @@ type ACPBinding struct {
 	Profile string `mapstructure:"profile" yaml:"profile,omitempty"`
 }
 
+// AllowListRefusals says which allow-list of the profile named name leaves
+// out the pair, by the gateway's rule: an empty allowed_clients or
+// allowed_agents admits every client or agent. The gateway refuses such a
+// pair ("outside the selected profile"); enterprise acp verify and list say
+// so with the same rule, they used to stay green (GAP-1155).
+func (p ACPProfile) AllowListRefusals(name, client, agent string) []string {
+	var refusals []string
+	if len(p.AllowedClients) > 0 && !slices.Contains(p.AllowedClients, client) {
+		refusals = append(refusals, fmt.Sprintf("acp.profiles.%s.allowed_clients does not name %s", name, client))
+	}
+	if len(p.AllowedAgents) > 0 && !slices.Contains(p.AllowedAgents, agent) {
+		refusals = append(refusals, fmt.Sprintf("acp.profiles.%s.allowed_agents does not name %s", name, agent))
+	}
+	return refusals
+}
+
 type ACPProfile struct {
 	Mode           string   `mapstructure:"mode" yaml:"mode,omitempty" json:"mode,omitempty"`
 	FailMode       string   `mapstructure:"fail_mode" yaml:"fail_mode,omitempty" json:"fail_mode,omitempty"`
@@ -340,6 +358,12 @@ type Config struct {
 	// source bytes, not viper, so map keys keep their case.
 	LLMProviders LLMProvidersConfig `mapstructure:"-" yaml:"llm_providers,omitempty"`
 
+	// DecisionModel is the unified decision model (System One protocol):
+	// the guardrail's fast first pass in front of the LLM judge on tool
+	// calls, and the skill scanner's advisory score. Off by default. See
+	// decision_model.go.
+	DecisionModel DecisionModelConfig `mapstructure:"decision_model" yaml:"decision_model,omitempty"`
+
 	DataDir string `mapstructure:"data_dir"              yaml:"data_dir"`
 	AuditDB string `mapstructure:"audit_db"         yaml:"audit_db"`
 	// JudgeBodiesDB is the standalone SQLite file that holds
@@ -403,6 +427,9 @@ type Config struct {
 	// Update holds the self-update settings (config_version 9).
 	Update UpdateConfig `mapstructure:"update" yaml:"update,omitempty"`
 	Fleet  FleetConfig  `mapstructure:"fleet"            yaml:"fleet,omitempty"`
+	// Connectors holds settings of connectors that install nothing into an
+	// agent, such as the agent-gateway hook route (trusted_connectors.go).
+	Connectors ConnectorsConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -1060,7 +1087,27 @@ func (l LLMConfig) ProviderPrefix() string {
 	if idx := strings.Index(l.Model, "/"); idx > 0 {
 		return strings.ToLower(l.Model[:idx])
 	}
+	if IsBedrockModelID(l.Model) {
+		return "bedrock"
+	}
 	return ""
+}
+
+// bedrockModelIDPattern matches Amazon Bedrock model ids and cross-region
+// inference profile ids: "<vendor>.<model>" or "<geo>.<vendor>.<model>", for
+// example "anthropic.claude-haiku-4-5-20251001-v1:0",
+// "us.anthropic.claude-haiku-4-5-20251001-v1:0", "us.openai.gpt-5.6-luna" or
+// "amazon.nova-pro-v1:0". Ids of the other providers never start with a
+// vendor name and a dot ("gpt-4o", "claude-haiku-4-5", "gemini-2.5-pro").
+// Mirrors BEDROCK_MODEL_ID_RE in cli/defenseclaw/config.py.
+var bedrockModelIDPattern = regexp.MustCompile(`^(?:(?:us|eu|apac|jp|au|ca|global|us-gov)\.)?(?:anthropic|amazon|meta|mistral|cohere|ai21|openai|deepseek|qwen|writer|twelvelabs|stability|luma|google|nvidia|minimax|moonshot|moonshotai)\.[a-z0-9]`)
+
+// IsBedrockModelID reports whether model, written without a provider
+// prefix, is a Bedrock model or inference profile id. An unprefixed Bedrock
+// id then resolves to the bedrock provider everywhere (gateway judge,
+// scanners, credential injection) instead of to no provider (GAP-2640).
+func IsBedrockModelID(model string) bool {
+	return bedrockModelIDPattern.MatchString(strings.ToLower(strings.TrimSpace(model)))
 }
 
 // IsLocalProvider returns true when the resolved provider prefix points
@@ -1757,6 +1804,11 @@ type GuardrailConfig struct {
 	CiscoTrustLevel string      `mapstructure:"cisco_trust_level" yaml:"cisco_trust_level,omitempty"`
 	Judge           JudgeConfig `mapstructure:"judge"                yaml:"judge"`
 	HILT            HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
+	// InternalDomains are the organization's own domains (corp.example.com):
+	// a host equal to or under one is inside its network, so a download
+	// from it does not start chain.download_then_execute_same_artifact
+	// (#1390). Empty by default. Read through IsInternalDomainHost.
+	InternalDomains []string `mapstructure:"internal_domains" yaml:"internal_domains,omitempty"`
 
 	// BlockAt and AlertAt replace the block and alert levels the rule
 	// pack's profile implies (strict / default / permissive) when the
@@ -1906,6 +1958,15 @@ type GuardrailConfig struct {
 	Profiles           map[string]GuardrailProfile `mapstructure:"profiles"            yaml:"profiles,omitempty"`
 	ProfileAssignments []ProfileAssignment         `mapstructure:"profile_assignments" yaml:"profile_assignments,omitempty"`
 	DefaultProfile     string                      `mapstructure:"default_profile"     yaml:"default_profile,omitempty"`
+
+	// ProtectedFiles configures the gateway's protected-file watch
+	// (protected_files.go). Unset keeps the default: alert on a change an
+	// agent tool call made, restore nothing. Never written while unset, so
+	// a rollback to a release without the key reads the file unchanged.
+	ProtectedFiles ProtectedFilesConfig `mapstructure:"protected_files" yaml:"protected_files,omitempty"`
+
+	// Chains tunes tool-call chain evaluation (trusted_connectors.go).
+	Chains GuardrailChainsConfig `mapstructure:"chains" yaml:"chains,omitempty"`
 
 	// profileConnectors is set only on a configuration DerivedForProfile
 	// returns: the profile's own connectors map, keyed by normalized
@@ -2273,7 +2334,7 @@ func (g *GuardrailConfig) Validate() error {
 	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {
 		return err
 	}
-	return nil
+	return validateInternalDomains(g.InternalDomains)
 }
 
 // validateGuardrailMode accepts the empty string (inherit/default) and
@@ -2399,6 +2460,13 @@ type JudgeConfig struct {
 	// scripts abandon the gateway call at curl --max-time 10; the
 	// gateway applies a 5s default when unset.
 	HookTimeout float64 `mapstructure:"hook_timeout" yaml:"hook_timeout,omitempty"`
+
+	// MaxParallel bounds how many judge calls the gateway sends to the
+	// judge model at once; 0 (the default) sets no bound. With a bound,
+	// tool-call judging goes ahead of prompt judging and keeps one of the
+	// slots when there are two or more, so a slow local model does not
+	// queue a pending tool call behind a turn's prompt checks (#1395).
+	MaxParallel int `mapstructure:"max_parallel" yaml:"max_parallel,omitempty"`
 
 	// LLM overrides the top-level llm: block for the LLM judge. Prefer
 	// Config.ResolveLLM("guardrail.judge") over reading LLM / legacy
@@ -3153,11 +3221,29 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
 	}
+	if err := cfg.DecisionModel.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "decision_model_invalid")
+		}
+		return nil, fmt.Errorf("config: decision_model: %w", settingErrorAt("decision_model", err))
+	}
 	if err := cfg.ValidateGuardrailProfiles(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	if err := cfg.ValidateIdentityChainSettings(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "connectors_invalid")
+		}
+		return nil, err
+	}
+	if err := cfg.Guardrail.ProtectedFiles.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "guardrail_invalid")
+		}
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	if err := cfg.Scanners.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -3936,6 +4022,7 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.rule_pack_dir", join(dataDir, "policies", "guardrail", "default"))
 	viper.SetDefault("guardrail.hilt.enabled", false)
 	viper.SetDefault("guardrail.hilt.min_severity", "HIGH")
+	viper.SetDefault("decision_model.enabled", false)
 	viper.SetDefault("guardrail.judge.enabled", false)
 	viper.SetDefault("guardrail.judge.injection", true)
 	viper.SetDefault("guardrail.judge.pii", true)

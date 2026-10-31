@@ -27,7 +27,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -46,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -189,6 +189,12 @@ type agentHookResponse struct {
 	// connector hook scripts ignore the fields.
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	// AgentIdentityID (agt-) and AgentInstanceID (ais-, the session or
+	// sub-agent instance) are the ids the gateway derived for this hook,
+	// the ones its audit rows and telemetry carry. hookAnswerBody stamps
+	// them; additive, and omitted when the hook has none.
+	AgentIdentityID string `json:"agent_identity_id,omitempty"`
+	AgentInstanceID string `json:"agent_instance_id,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive from the evaluator back to the HTTP handler
 	// so finalizeAgentHookAnswer can re-inject it onto the context before it
@@ -496,6 +502,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			})
 			return
 		}
+		a.noteProtectedFileActivity(r.Context(), connectorName, req, identityFacts.ID)
 		toolRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
 		if (connectorName == "claudecode" || connectorName == "codex") &&
 			req.HookEventName == "PreToolUse" && !preToolFieldsValid(payload) {
@@ -648,8 +655,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		ctx = enrichAgentHookContext(ctx, req)
 		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
 		ctx = withHookPanicCapture(ctx)
-		if judge := a.judgeFor(ctx); judge != nil && shouldResetToolJudgeSession(req) {
-			judge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, req.SessionID))
+		if shouldResetToolJudgeSession(req) {
+			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
+			if judge := a.judgeFor(ctx); judge != nil {
+				judge.ResetToolJudgeSession(sessionKey)
+			}
+			a.resetUserDownloadRequests(sessionKey)
 		}
 		t0 := time.Now()
 		// attemptedWrite covers BOTH "writeJSON returned successfully"
@@ -811,6 +822,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// per-profile evaluators (claudeCode / codex / generic) so
 		// they round-trip back to the HTTP response and onto the
 		// audit envelope without a second pass here.
+		// The judge fallback of this call, for its audit row and record (#1395).
+		ctx = withHookJudgeFallbackNote(ctx)
+		if cfg := a.decisionConfig(ctx); shellHookBoundsToolGate(connectorName, req.HookEventName, r) &&
+			(cfg == nil || !cfg.SecureClientIntegration()) {
+			ctx = withShellToolGateBound(ctx, r)
+		}
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
 		// An argumentless Copilot permission callback is bound to the call of
@@ -1081,7 +1098,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// Without this projection, agentHookResponse always
 		// renders the output under "hook_output", which Claude
 		// Code and Codex agent CLIs reject. See
-		// renderAgentHookResponse() for the canonical
+		// renderAgentHookResponseForProfile() for the canonical
 		// connector → field-name mapping. hookAnswerBody cannot
 		// panic, so the native hook always gets the finalized answer.
 		if delivery == nil {
@@ -1106,6 +1123,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 // does not change the answer, which may already be finalized. It cannot
 // panic.
 func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse, receiptID string) []byte {
+	resp = a.withHookAnswerAgentIDs(ctx, resp)
 	counted := false
 	onPanic := func(recovered any) {
 		defer func() { _ = recover() }()
@@ -1139,6 +1157,29 @@ func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookPr
 	fallback.HookOutput = nil
 	body, _ = encodeHookAnswer(profile, fallback, receiptID, onPanic)
 	return body
+}
+
+// withHookAnswerAgentIDs puts the agent identity (agt-) and the session or
+// sub-agent instance (ais-) that enrichAgentHookContext derived for this hook
+// on its answer, next to evaluation_id, so a caller can join the answer to
+// DefenseClaw's audit rows and telemetry without deriving the ids itself.
+// Only the derived forms are copied. Secure Client keeps its process-scoped
+// instance ids and its answer shape, so it gets neither field.
+func (a *APIServer) withHookAnswerAgentIDs(ctx context.Context, resp agentHookResponse) agentHookResponse {
+	if ManagedEnterpriseActive() || a.managedAIDOnly() {
+		return resp
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return resp
+	}
+	identity := AgentIdentityFromContext(ctx)
+	if resp.AgentIdentityID == "" && strings.HasPrefix(identity.IdentityID, agentidentity.AgentIDPrefix) {
+		resp.AgentIdentityID = identity.IdentityID
+	}
+	if resp.AgentInstanceID == "" && strings.HasPrefix(identity.AgentInstanceID, agentidentity.InstanceIDPrefix) {
+		resp.AgentInstanceID = identity.AgentInstanceID
+	}
+	return resp
 }
 
 // encodeHookAnswer renders and encodes resp as writeJSON did (HTML-escaped
@@ -1288,6 +1329,10 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		env.BodyBytes = req.pendingBodyBytes
 	}
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
+	if reason := hookJudgeFallbackReason(ctx); reason != "" {
+		// The rules decided because the judge gave no verdict in time (#1395).
+		env.Extra = mergeHookEnvelopeExtra(env.Extra, map[string]string{hookJudgeFallbackExtraKey: reason})
+	}
 	// Every panic recovered before the call's audit row is written is an
 	// evaluator failure on its row and export, whatever verdict was kept: the
 	// evaluator's, a later additive check's, a renderer's or the identity
@@ -1648,31 +1693,11 @@ func (a *APIServer) hookDecisionMeta(
 	return meta, source, true
 }
 
-// renderAgentHookResponse projects the unified agentHookResponse
-// shape onto the wire JSON shape each connector's agent CLI
-// expects. The fixed agentHookResponse JSON tag for HookOutput
-// ("hook_output") works for generic hookOnly connectors
-// (hermes/cursor/devin/copilot) but Claude Code and
-// Codex agents expect "claude_code_output" and "codex_output"
-// respectively. Rendering as a map[string]interface{} lets us pick
-// the right top-level key per connector while keeping
-// agentHookResponse a single struct for all internal callers.
-//
-// Field name choice is driven by hookOutputFieldName(connectorName)
-// — a single function so adding a new connector with a different
-// output key (e.g. a future zeptoclaw_output) is a one-line change.
-// HookProfile.Respond.FieldName would be the obvious source of
-// truth here, but consulting it requires loading the registry and
-// constructing a profile per request; this hot-path helper inlines
-// the mapping for sub-microsecond cost. The connector_hook_profile
-// tests still assert FieldName parity so the two cannot drift.
-func renderAgentHookResponse(connectorName string, resp agentHookResponse) map[string]interface{} {
-	return renderAgentHookResponseForProfile(connector.HookProfile{
-		Name:              connectorName,
-		ResponseFieldName: hookOutputFieldName(connectorName),
-	}, resp)
-}
-
+// renderAgentHookResponseForProfile projects the unified
+// agentHookResponse onto the wire JSON each connector's agent CLI expects:
+// the output map goes under the profile's ResponseFieldName, else
+// hookOutputFieldName (Claude Code and Codex read "claude_code_output" and
+// "codex_output"; the others read "hook_output").
 func renderAgentHookResponseForProfile(profile connector.HookProfile, resp agentHookResponse) map[string]interface{} {
 	severity := resp.Severity
 	if severity == "" {
@@ -1717,6 +1742,12 @@ func renderAgentHookResponseForProfile(profile connector.HookProfile, resp agent
 	}
 	if len(resp.RuleIDs) > 0 {
 		out["rule_ids"] = resp.RuleIDs
+	}
+	if resp.AgentIdentityID != "" {
+		out["agent_identity_id"] = resp.AgentIdentityID
+	}
+	if resp.AgentInstanceID != "" {
+		out["agent_instance_id"] = resp.AgentInstanceID
 	}
 	return out
 }
@@ -3194,8 +3225,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// lifecycle events) can repeat or contain model-generated material;
 		// letting them replace the user's task would make the judge trust the
 		// very content it is meant to evaluate.
-		if judge := a.judgeFor(ctx); judge != nil && isToolJudgeIntentEvent(req.HookEventName) {
-			judge.ObserveSessionPrompt(ctx, req.Content)
+		if isToolJudgeIntentEvent(req.HookEventName) {
+			if judge := a.judgeFor(ctx); judge != nil {
+				judge.ObserveSessionPrompt(ctx, req.Content)
+			}
+			a.observeUserDownloadRequest(ctx, req.Content)
 		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
 	case isResultLikeEvent(req.HookEventName):
@@ -3467,7 +3501,7 @@ const (
 
 // unparsedToolCallReasonConnector is the connector name the reason may hold:
 // a registry name from the hook route, never payload text.
-var unparsedToolCallReasonConnector = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+var unparsedToolCallReasonConnector = lazyregexp.New(`^[a-z][a-z0-9-]{0,31}$`)
 
 // unparsedToolCallReason is the reason of the hookToolCallUnparsedRuleID
 // block for connectorName.
@@ -3548,21 +3582,20 @@ func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 }
 
 // agentHookTrustedActionTool preserves the official connector tool label for
-// policy and telemetry while selecting the host shell grammar used for trusted
-// action facts. OpenCode calls its built-in terminal tool "bash" on every
-// platform, while Copilot calls the same Windows surface "powershell" even for
-// ordinary native executables such as az.cmd. Treat those labels as a generic
-// shell only at this server-owned boundary so dialect inference can recognize
-// exact PowerShell/CMD syntax and bare native commands without trusting a
-// payload-supplied dialect hint or changing the recorded tool identity.
+// policy and telemetry while selecting the parser used for trusted action
+// facts. OpenCode V2's native patch tool uses the reviewed apply_patch envelope.
+// Copilot calls its Windows shell surface "powershell" even for ordinary native
+// executables such as az.cmd; its generic shell label lets dialect inference
+// recognize exact PowerShell/CMD syntax and bare native commands. Both mappings
+// belong at this server-owned boundary, without trusting a payload-supplied
+// dialect hint or changing the recorded tool identity.
 func agentHookTrustedActionTool(connectorName, toolName, platformName string) string {
+	if strings.EqualFold(strings.TrimSpace(connectorName), "opencode") && toolName == "patch" {
+		return "apply_patch"
+	}
 	if strings.EqualFold(strings.TrimSpace(platformName), "windows") {
 		connectorName = strings.TrimSpace(connectorName)
 		toolName = strings.TrimSpace(toolName)
-		if strings.EqualFold(connectorName, "opencode") &&
-			strings.EqualFold(toolName, "bash") {
-			return "shell"
-		}
 		if strings.EqualFold(connectorName, "copilot") &&
 			strings.EqualFold(toolName, "powershell") {
 			return "shell"
@@ -3606,7 +3639,8 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 // shell input rather than not at all. The recorded ToolArgs never change.
 //
 // cwd is the directory the tool call names for its command (agy's Cwd, and
-// the working-directory argument of the shell tools that have one), or "".
+// the working-directory argument of the shell tools that have one, also
+// when the projection refuses the call: connector.ShellCommandCWD), or "".
 // It is the command's working directory, so the caller uses it in place of
 // the session's; left in the arguments, any directory other than the
 // workspace conflicted with the request's working directory and the parse
@@ -3637,7 +3671,10 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 	if out, dir, ok := connector.TrustedShellArgs(connectorName, toolName, args); ok {
 		return out, dir
 	}
-	return args, ""
+	// A shell call whose projection was refused (an extra or mistyped
+	// argument) still runs its command in the directory it names; judged
+	// in the session's, the command alone could miss a rule (GAP-0694).
+	return args, connector.ShellCommandCWD(connectorName, toolName, args)
 }
 
 // agentHookWindowsDialectHint reports whether a structured tool call's
@@ -3907,6 +3944,11 @@ func (a *APIServer) agentHookEnabled(ctx context.Context, name string) bool {
 		return false
 	}
 	if cfg.ConnectorHookConfig(name).Enabled {
+		return true
+	}
+	// The agent-gateway route exists only while connectors.agent_gateway is
+	// on (agent_gateway_hook.go); every call that reaches it is evaluated.
+	if name == connector.AgentGatewayConnectorName && cfg.Connectors.AgentGateway.Enabled && !cfg.SecureClientIntegration() {
 		return true
 	}
 	if a.health != nil && a.health.HasConnectorSource(name, "automatic") && cfg.ApplicationProtection.EffectiveEnabled(name) {

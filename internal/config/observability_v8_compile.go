@@ -17,13 +17,13 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"golang.org/x/text/unicode/norm"
 )
@@ -49,11 +49,11 @@ const (
 )
 
 var (
-	observabilityV8StableNamePattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	observabilityV8EnvNamePattern     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,255}$`)
-	observabilityV8SelectorPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
-	observabilityV8ResourceKeyPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,127}$`)
-	observabilityV8HostnamePattern    = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
+	observabilityV8StableNamePattern  = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	observabilityV8EnvNamePattern     = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]{0,255}$`)
+	observabilityV8SelectorPattern    = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
+	observabilityV8ResourceKeyPattern = lazyregexp.New(`^[A-Za-z][A-Za-z0-9_.-]{0,127}$`)
+	observabilityV8HostnamePattern    = lazyregexp.New(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 	observabilityV8ReservedPrefixes   = []netip.Prefix{
 		netip.MustParsePrefix("0.0.0.0/8"),
 		netip.MustParsePrefix("192.0.0.0/24"),
@@ -248,7 +248,20 @@ func compileObservabilityV8Local(source ObservabilityV8LocalSource) (Observabili
 			ObservabilityV8MaxRetentionDays,
 		)
 	}
-	return ObservabilityV8EffectiveLocal{Path: source.Path, JudgeBodiesPath: source.JudgeBodiesPath, RetentionDays: retentionDays}, nil
+	maxStoreMB := 0
+	if source.MaxStoreMB != nil {
+		maxStoreMB = *source.MaxStoreMB
+	}
+	if maxStoreMB != 0 && (maxStoreMB < ObservabilityV8MinStoreMB || maxStoreMB > ObservabilityV8MaxStoreMB) {
+		return ObservabilityV8EffectiveLocal{}, fmt.Errorf(
+			"observability.local.max_store_mb: got %d, want 0 (no size cap) or %d to %d",
+			maxStoreMB, ObservabilityV8MinStoreMB, ObservabilityV8MaxStoreMB,
+		)
+	}
+	return ObservabilityV8EffectiveLocal{
+		Path: source.Path, JudgeBodiesPath: source.JudgeBodiesPath, RetentionDays: retentionDays,
+		MaxStoreMB: maxStoreMB,
+	}, nil
 }
 
 func compileObservabilityV8TracePolicy(
@@ -1800,6 +1813,11 @@ func compileObservabilityV8Provenance(
 		ObservabilityV8Provenance{Path: "observability.local.judge_bodies_path", Origin: originObservabilityV8Path(source.Local.JudgeBodiesPath, source.judgePathDefaulted)},
 		ObservabilityV8Provenance{Path: "observability.local.retention_days", Origin: originObservabilityV8Pointer(source.Local.RetentionDays)},
 	)
+	if source.Local.MaxStoreMB != nil {
+		result = append(result, ObservabilityV8Provenance{
+			Path: "observability.local.max_store_mb", Origin: originObservabilityV8Pointer(source.Local.MaxStoreMB),
+		})
+	}
 	resourceNames := make([]string, 0, len(source.Resource.Attributes))
 	for name := range source.Resource.Attributes {
 		resourceNames = append(resourceNames, name)

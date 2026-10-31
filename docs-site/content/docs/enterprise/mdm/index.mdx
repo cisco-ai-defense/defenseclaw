@@ -93,10 +93,12 @@ On a Mac use `shasum -a 256 -c`. If you stage releases on an internal mirror, co
 
 ## Deliver the config
 
-For signed bundles on Windows, install the base app first and make the bundle app
-depend on it. The packager checks only specific base-config blocks against the
-bundle; [check which settings must match](/docs/enterprise/mdm/intune-windows)
-and put any other required enforcement settings in the base config too.
+For signed bundles on Windows, deliver one app that carries the config and the
+first bundle: Setup installs with the services stopped and starts them on the
+signed bundle, so nothing runs on the config
+(the single app in [Intune on Windows](/docs/enterprise/mdm/intune-windows)).
+Devices installed earlier with a base app and a dependent bundle app take the
+same single app.
 
 The config decides which agents are protected and how, and it is the only policy a
 managed host enforces. Content: [Settings](/docs/enterprise/configuration) and

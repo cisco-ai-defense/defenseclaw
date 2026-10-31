@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"reflect"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -67,9 +68,9 @@ const openCodeManagedPluginVendorLimit = "OpenCode skips the managed plugin in p
 // only while a trusted file is installed there.
 func OpenCodeManagedPluginPath(layout managed.StandaloneLayout) string {
 	if layout.GOOS == "windows" {
-		return strings.TrimRight(layout.InstallRoot, `\`) + `\share\opencode\defenseclaw.js`
+		return strings.TrimRight(layout.InstallRoot, `\`) + `\share\opencode\index.js`
 	}
-	return path.Join(layout.InstallRoot, "share", "opencode", "defenseclaw.js")
+	return path.Join(layout.InstallRoot, "share", "opencode", "index.js")
 }
 
 // OpenCodeManagedConfigPath returns the managed config file, preferring an
@@ -199,12 +200,28 @@ func (opencodeTarget) Paths(opts Options) ([]string, error) {
 	return []string{path}, nil
 }
 
+// openCodePluginSpec names the V2 directory entrypoint containing index.js.
+// Retain the old defenseclaw.js ownership alias through DefenseClaw 1.x for
+// the supported 0.8.x-to-1.x upgrade/teardown path; remove it with that path
+// before DefenseClaw 2.0. It never activates a V1 runtime.
+func openCodePluginSpec(opts Options) string {
+	return dirFor(opts, opts.OpenCodePluginPath)
+}
+
 func opencodeEntryIsOwned(opts Options, raw any) bool {
+	if object, ok := raw.(map[string]any); ok {
+		raw = object["package"]
+	}
+	if object, ok := raw.(*object); ok {
+		raw, _ = object.get("package")
+	}
 	value, ok := raw.(string)
 	if !ok || opts.OpenCodePluginPath == "" {
 		return false
 	}
-	return value == opts.OpenCodePluginPath || value == "file://"+opts.OpenCodePluginPath
+	value = strings.TrimPrefix(value, "file://")
+	directory := openCodePluginSpec(opts)
+	return value == opts.OpenCodePluginPath || value == directory || value == joinFor(opts, directory, "defenseclaw.js")
 }
 
 func mergeOpenCodeConfig(opts Options, current []byte) ([]byte, bool, error) {
@@ -212,54 +229,68 @@ func mergeOpenCodeConfig(opts Options, current []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("parse OpenCode managed config (comments in .jsonc cannot be merged): %w", err)
 	}
-	value, _ := doc.get("plugin")
-	list, _ := value.([]any)
-	if value != nil && list == nil {
-		return nil, false, fmt.Errorf("OpenCode managed config plugin has unsupported type %T", value)
+	// Preserve the operator's config dialect. V2 also migrates the v1 key.
+	key := "plugin"
+	if _, native := doc.get("plugins"); native {
+		key = "plugins"
 	}
-	kept := make([]any, 0, len(list)+1)
-	owned := 0
-	for _, item := range list {
-		if opencodeEntryIsOwned(opts, item) {
-			owned++
-			if owned > 1 {
-				continue
+	changed := false
+	for _, field := range []string{"plugin", "plugins"} {
+		value, exists := doc.get(field)
+		list, ok := value.([]any)
+		if exists && !ok {
+			return nil, false, fmt.Errorf("OpenCode managed config %s has unsupported type %T", field, value)
+		}
+		kept := make([]any, 0, len(list)+1)
+		for _, item := range list {
+			if !opencodeEntryIsOwned(opts, item) {
+				kept = append(kept, item)
 			}
 		}
-		kept = append(kept, item)
+		if field == key {
+			kept = append(kept, openCodePluginSpec(opts))
+		}
+		if (exists || field == key) && !reflect.DeepEqual(list, kept) {
+			changed = true
+		}
+		if len(kept) > 0 {
+			doc.set(field, kept)
+		} else {
+			doc.delete(field)
+		}
 	}
-	exact := owned == 1
-	if owned == 0 {
-		kept = append(kept, opts.OpenCodePluginPath)
-	}
-	doc.set("plugin", kept)
 	rendered, err := encodeOrdered(doc)
-	return rendered, exact && len(kept) == len(list), err
+	return rendered, !changed, err
 }
 
-// stripOpenCodeConfig is the ownership stripFunc for the managed OpenCode
-// config.
+// stripOpenCodeConfig removes only owned entries in either vendor dialect.
 func stripOpenCodeConfig(opts Options, current []byte) ([]byte, bool, error) {
 	doc, err := decodeOrderedObject(current)
 	if err != nil {
 		return nil, false, err
 	}
-	value, _ := doc.get("plugin")
-	list, _ := value.([]any)
-	kept := make([]any, 0, len(list))
-	for _, item := range list {
-		if !opencodeEntryIsOwned(opts, item) {
-			kept = append(kept, item)
+	changed := false
+	for _, field := range []string{"plugin", "plugins"} {
+		value, _ := doc.get(field)
+		list, _ := value.([]any)
+		kept := make([]any, 0, len(list))
+		for _, item := range list {
+			if !opencodeEntryIsOwned(opts, item) {
+				kept = append(kept, item)
+			}
+		}
+		if len(kept) == len(list) {
+			continue
+		}
+		changed = true
+		if len(kept) == 0 {
+			doc.delete(field)
+		} else {
+			doc.set(field, kept)
 		}
 	}
-	if len(kept) == len(list) {
-		// Nothing of ours: leave the administrator's bytes alone.
+	if !changed {
 		return current, false, nil
-	}
-	if len(kept) == 0 {
-		doc.delete("plugin")
-	} else {
-		doc.set("plugin", kept)
 	}
 	if doc.len() == 0 {
 		return nil, true, nil
@@ -273,13 +304,18 @@ func inspectOpenCode(opts Options, current []byte, state *State) error {
 	if err != nil {
 		return err
 	}
-	value, _ := doc.get("plugin")
-	list, _ := value.([]any)
-	for _, item := range list {
-		if opencodeEntryIsOwned(opts, item) {
-			state.OwnedEntries++
-		} else {
-			state.ForeignEntries++
+	for _, key := range []string{"plugin", "plugins"} {
+		value, _ := doc.get(key)
+		list, _ := value.([]any)
+		for _, item := range list {
+			if opencodeEntryIsOwned(opts, item) {
+				state.OwnedEntries++
+				if item != openCodePluginSpec(opts) {
+					state.conflict("OpenCode managed plugin must reference its directory for v2 compatibility")
+				}
+			} else {
+				state.ForeignEntries++
+			}
 		}
 	}
 	if state.OwnedEntries != 1 {

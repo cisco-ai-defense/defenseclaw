@@ -704,3 +704,27 @@ def test_destructive_intent_modal_is_danger_gated() -> None:
     assert model.action_for_hotkey("d").danger is True
     assert model.border_color == TOKENS.accent_red
     assert "plugin remove foo" in model.details[0]
+
+
+@pytest.mark.parametrize(
+    ("error", "shown"),
+    [
+        (NoMatches("No nodes match '#hint' on Screen(id='_default')"), False),
+        (RuntimeError("disk read failed"), True),
+    ],
+)
+def test_overview_disk_refresh_ignores_a_screen_that_is_going_away(monkeypatch, error, shown) -> None:
+    """The refresh outliving the widgets is not a data error for the status line (ci10)."""
+
+    import asyncio
+
+    app = DefenseClawTUI()
+    statuses: list[str] = []
+
+    def build(_detached, _source):
+        raise error
+
+    monkeypatch.setattr(app, "_build_overview_disk_refresh_snapshot", build)
+    monkeypatch.setattr(app, "_set_status", statuses.append)
+    asyncio.run(app._run_overview_disk_refresh(app, ("", None)))  # noqa: SLF001
+    assert statuses == (["Overview refresh deferred after transient error: disk read failed"] if shown else [])

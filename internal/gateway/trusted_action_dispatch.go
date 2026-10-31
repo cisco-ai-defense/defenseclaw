@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
@@ -200,6 +201,10 @@ type trustedActionRequest struct {
 	recordTelemetry func(trustedActionTelemetry)
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
+	// overBudgetOmission, when set, is told that the authorized-keys proof
+	// found only an operand that the client's bounded map left out because
+	// it was full (hookpaths.BudgetKey, GAP-0146).
+	overBudgetOmission *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
@@ -294,7 +299,7 @@ func dispatchTrustedAction(
 			if !analyzed {
 				facts = actionfacts.Analyze(request.Input)
 			}
-			request.record(facts, findings)
+			request.record(toolChainPlacedFacts(facts, request), findings)
 		}()
 	}
 	if parent == nil {
@@ -338,6 +343,18 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, twinFindings)
 		}()
 	}
+	// A managed hook peer call that reaches the gateway without a cwd is also read
+	// in the directory the hook client ran it in, as a per-user gateway
+	// reads it; only a private-key read block of that reading counts
+	// (GAP-0179).
+	if twin, ok := protectedHomePrivateKeyTwinRequest(request); ok {
+		defer func() {
+			twinFindings := slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
+				return trustedActionFindingKey(f.RuleID) != "PATH-SSH-KEY"
+			})
+			findings = withTwinProvenBlocks(findings, twinFindings)
+		}()
+	}
 	// A file writer run through nohup, nice, time, timeout, env NAME=value,
 	// command, sudo or exec (or after a word that may expand to nothing)
 	// writes what the plain call writes (GAP-2512); the plain reading is
@@ -350,6 +367,11 @@ func dispatchTrustedAction(
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
+	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {
 		// Two argument keys name one field: judge each candidate (GAP-0678).
 		return dispatchConflictingToolArguments(parent, request, conflict)
@@ -409,6 +431,14 @@ func dispatchTrustedActionWith(
 			wholeWriteSafe := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
 			simples := actionfacts.SimpleCommands(request.Input, facts)
+			if len(simples) == 0 && wholeCommandKnown && trustedStatementBudgetExceeded(request.Input, facts, wholeCommand) {
+				// The analysis stopped at its node or input bound before the
+				// per-command split, so no simple command of the call was
+				// judged: the call is over the statement budget at every size,
+				// as it is between 129 statements and those bounds (GAP-0146,
+				// GAP-0568).
+				simples = []actionfacts.SimpleCommand{{EvaluationFailure: "limit"}}
+			}
 			evidenceCWDs := trustedSimpleCommandEvidenceCWDs(request, simples)
 			for index, simple := range simples {
 				if simple.EvaluationFailure != "" {
@@ -910,7 +940,7 @@ func withActiveStateTargetMention(
 		(!placed || !globbedStateMutation(linkFacts)) && !throughLink(globbedStateMutationThroughLink) &&
 		!findGlobTwinStateMutation(facts, request) &&
 		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) &&
-		!provenFollowedInPlaceStateWrite(facts, request) {
+		!provenFollowedInPlaceStateWrite(facts, request) && !fileToolWriteThroughLinkToState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known {
 			return findings
@@ -1010,7 +1040,7 @@ func provenBashAggregateStateWrite(request trustedActionRequest) bool {
 // %ComSpec% and PowerShell's $env:ComSpec / ${env:ComSpec}, at the start of
 // the command or of a statement, after the PowerShell call operator & or a
 // pipe.
-var cmdProgramWord = regexp.MustCompile(`(?i)(?:^|[\s;|&(){}])(?:"[^"\r\n]*?[\\/]|'[^'\r\n]*?[\\/]|"|'|[^\s"';|&(){}]*[\\/])?(?:cmd(?:\.exe)?|\$\{?env:comspec\}?|%comspec%)["']?`)
+var cmdProgramWord = lazyregexp.New(`(?i)(?:^|[\s;|&(){}])(?:"[^"\r\n]*?[\\/]|'[^'\r\n]*?[\\/]|"|'|[^\s"';|&(){}]*[\\/])?(?:cmd(?:\.exe)?|\$\{?env:comspec\}?|%comspec%)["']?`)
 
 // cmdOuterReading is a grammar the outer shell may read a command with. A
 // Windows tool call does not say which shell runs it (Codex names its
@@ -1346,14 +1376,14 @@ func cmdHeredocFeeds(line string, op int, trust bool) (runs, cmdFeed bool) {
 	return runs, cmdFeed
 }
 
-var cmdAssignmentWord = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
+var cmdAssignmentWord = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
 
 // cmdRedefinesCommand matches a function definition, name() or "name"()
 // (the quoted name is blanked by cmdCodeOutsideText), on the code outside
 // here-document bodies, quoted words and comments: prose in a body or a
 // title is no definition (GAP-2530 checker it2). An empty ( ) after =, $,
 // <, > or an extglob operator is an array or a substitution.
-var cmdRedefinesCommand = regexp.MustCompile(`(^|[^=$<>@!*+?])\s*\(\s*\)`)
+var cmdRedefinesCommand = lazyregexp.New(`(^|[^=$<>@!*+?])\s*\(\s*\)`)
 
 // cmdRedefiningCommands are the command words that can make a text
 // consumer's name run something else (alias, function, hash -p, enable) or
@@ -2418,7 +2448,7 @@ func cmdShellWord(word string) string {
 	return ""
 }
 
-var cmdShellRunFlag = regexp.MustCompile(`^-[a-zA-Z]*c[a-zA-Z]*$`)
+var cmdShellRunFlag = lazyregexp.New(`^-[a-zA-Z]*c[a-zA-Z]*$`)
 
 func cmdArgumentListWord(word string) bool {
 	word = strings.TrimSuffix(word, ":")
@@ -2577,11 +2607,11 @@ func cmdSubexpressions(inner string, reading cmdOuterReading) []string {
 }
 
 var (
-	cmdSwitchWord = regexp.MustCompile(`(?i)^/{1,2}[a-z](?::\S*)?$`)
-	cmdRunWord    = regexp.MustCompile(`(?i)^/{1,2}[ck]`)
+	cmdSwitchWord = lazyregexp.New(`(?i)^/{1,2}[a-z](?::\S*)?$`)
+	cmdRunWord    = lazyregexp.New(`(?i)^/{1,2}[ck]`)
 	// cmdStartProcessWord: Start-Process (or its aliases) right before the
 	// program word cmd.
-	cmdStartProcessWord = regexp.MustCompile(`(?i)(?:^|[\s;|&(){}])(?:start-process|saps|start)\s+(?:-filepath\s+)?["']?$`)
+	cmdStartProcessWord = lazyregexp.New(`(?i)(?:^|[\s;|&(){}])(?:start-process|saps|start)\s+(?:-filepath\s+)?["']?$`)
 )
 
 // cmdSwitchRunBody reads the switch run of a cmd.exe command line (after the
@@ -3187,8 +3217,25 @@ func walkParent(value string) string {
 // (GAP-2569). ok is false when the gateway knows the cwd or the client's is
 // not a plain directory in the caller's home.
 func managedLinkWalkView(request trustedActionRequest) (actionfacts.Facts, trustedActionRequest, bool) {
-	if !request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) {
+	cwd, ok := protectedHomeClientDirectory(request)
+	if !ok {
 		return actionfacts.Facts{}, request, false
+	}
+	placed := request
+	placed.Input.CWD = cwd
+	return actionfacts.Analyze(placed.Input), placed, true
+}
+
+// protectedHomeClientDirectory is the directory a managed hook call runs in
+// when the gateway behind ProtectHome receives no cwd of its own, as the
+// hook client keyed its evidence: the directory a static cd placed a simple
+// command in (evidenceCWD), else the client cwd (hookpaths.CWDKey). ok is
+// false when the call is not a managed hook peer call, the gateway knows the
+// cwd, or the directory is not an absolute path without ".." in the caller
+// home or its project root.
+func protectedHomeClientDirectory(request trustedActionRequest) (string, bool) {
+	if !request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) {
+		return "", false
 	}
 	cwd, home := request.evidenceCWD, request.Input.ActiveHome
 	if !filepath.IsAbs(cwd) {
@@ -3196,11 +3243,34 @@ func managedLinkWalkView(request trustedActionRequest) (actionfacts.Facts, trust
 	}
 	if !filepath.IsAbs(cwd) || !filepath.IsAbs(home) || hasParentElement(cwd) || strings.ContainsRune(cwd, 0) ||
 		projectRootKey(cwd) != projectRootKey(home) && !insideHome(home, cwd) {
-		return actionfacts.Facts{}, request, false
+		return "", false
 	}
-	placed := request
-	placed.Input.CWD = filepath.Clean(cwd)
-	return actionfacts.Analyze(placed.Input), placed, true
+	return filepath.Clean(cwd), true
+}
+
+// protectedHomePrivateKeyTwinRequest returns the call of a managed hook
+// peer placed in the directory the hook client ran it in
+// (protectedHomeClientDirectory), when its text names an SSH private key
+// file. Without a cwd of its own the gateway left a key read spelled
+// relative to that directory (cat .ssh/id_ed25519 in the home, cat
+// ../.ssh/id_rsa in a project) outside ~/.ssh, so a managed peer was
+// allowed what a per-user gateway blocks (GAP-0179). The placed reading is
+// the per-user one; the caller keeps only its private-key read block.
+func protectedHomePrivateKeyTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	cwd, ok := protectedHomeClientDirectory(request)
+	if !ok || request.SkipLocalFilesystemResolution {
+		return trustedActionRequest{}, false
+	}
+	text := strings.ToLower(trustedActionInputText(request.Input, request.LegacyText))
+	if !strings.Contains(text, "id_rsa") && !strings.Contains(text, "id_ed25519") &&
+		!strings.Contains(text, "id_ecdsa") && !strings.Contains(text, "id_dsa") {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.conflictSource = nil
+	twin.Input.CWD = cwd
+	return twin, true
 }
 
 // stateLinkResolver resolves a path through links: the hook's resolved
@@ -3530,6 +3600,54 @@ func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionReque
 	return false
 }
 
+// fileToolWriteThroughLinkToState reports a file tool write (write_file,
+// an edit, a patch target: a call with no shell command) whose target is an
+// existing link that leads into the active DefenseClaw state. The tool opens
+// the path it names and the kernel follows the link, so it writes the state
+// file, while the path names no state: the mention and path checks let a
+// Hermes V4A patch of a project link to ~/.defenseclaw/... through
+// (GAP-0684). The hook client's resolved target decides when it lists one;
+// otherwise the target is resolved here, as for the SSH key files (a home
+// the gateway cannot read resolves to nothing and proves nothing). A link
+// to an ordinary file is judged by that file.
+func fileToolWriteThroughLinkToState(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if _, shell := trustedBashCommandInput(request.Input); shell {
+		return false
+	}
+	projected := facts.EnforcementProjection()
+	if projected.ActiveHome == "" {
+		return false
+	}
+	for _, candidate := range projected.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
+			continue
+		}
+		command, ok := integrityCommandByID(projected, candidate.CommandID)
+		if !ok || !stateCommandMutatesPath(command, candidate) {
+			continue
+		}
+		physical := ""
+		for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
+			if value, found := request.ResolvedWriteTargets[spelling]; found {
+				physical = value
+				break
+			}
+		}
+		if physical == "" && filepath.IsAbs(candidate.Resolved) && !request.SkipLocalFilesystemResolution {
+			physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
+		}
+		if !filepath.IsAbs(physical) || filepath.Clean(physical) == filepath.Clean(candidate.Resolved) {
+			continue
+		}
+		linked := candidate
+		linked.Value, linked.Normalized, linked.Resolved = physical, physical, physical
+		if matchesActiveDefenseClawState(projected, linked) {
+			return true
+		}
+	}
+	return false
+}
+
 // provenLinkedStateWrite reports a command whose writer, proven for its
 // own command, writes through a link that an earlier part of the same
 // command makes to active DefenseClaw state: ln -s ~/.defenseclaw hc;
@@ -3596,19 +3714,11 @@ func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionReques
 // adds a block of those readings: it must be absolute, without "..", and
 // in the caller's home or its project root.
 func protectedHomePlacedReading(facts actionfacts.Facts, request trustedActionRequest) (actionfacts.Facts, trustedActionRequest) {
-	if !request.ProtectedHomeHook || request.SkipLocalFilesystemResolution || filepath.IsAbs(request.Input.CWD) {
+	client, ok := protectedHomeClientDirectory(request)
+	if !ok || request.SkipLocalFilesystemResolution {
 		return facts, request
 	}
-	home := request.Input.ActiveHome
-	client := request.evidenceCWD
-	if !filepath.IsAbs(client) {
-		client = request.ResolvedWriteTargets[hookpaths.CWDKey]
-	}
-	if !filepath.IsAbs(home) || !filepath.IsAbs(client) || hasParentElement(client) || strings.ContainsRune(client, 0) ||
-		projectRootKey(client) != projectRootKey(home) && !insideHome(home, client) {
-		return facts, request
-	}
-	request.Input.CWD = filepath.Clean(client)
+	request.Input.CWD = client
 	return actionfacts.Analyze(request.Input), request
 }
 
@@ -4772,6 +4882,24 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 		alertOnly: true,
 	},
+	"CMD-WRAPPED-DOWNLOAD-EXEC": {
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return wrappedDownloadExecProof(facts)
+		},
+		codeOwnedDetection: true,
+	},
+	"CMD-SUBST-DOWNLOAD-EXEC": {
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXDownloadSubstitution(facts, input)
+		},
+		codeOwnedDetection: true,
+	},
+	"CMD-PYTHON-SOCKET-CONNECT": {
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPythonExternalSocketConnect(facts)
+		},
+		codeOwnedDetection: true,
+	},
 	"secrets.cloud_secret_manager_read": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return cloudSecretManagerPrerequisite(facts)
@@ -4797,7 +4925,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 				"wget.exe",
 			)
 		},
-		detectionOnly: true,
+		alertOnly: true,
 	},
 	"CMD-PIPE-BASE64": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -4834,6 +4962,10 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return devTCPFallbackProof(facts, false) ||
 				scriptDevTCPReverseShellProof(facts)
 		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXDescriptorFeedbackShell(facts)
+		},
+		codeOwnedDetection: true,
 	},
 	"CMD-REVSHELL-PYTHON": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -4979,10 +5111,10 @@ const (
 var (
 	trustedPerlInlineRegexp                   = regexp.MustCompile(trustedPerlInlinePattern)
 	trustedRubyInlineRegexp                   = regexp.MustCompile(trustedRubyInlinePattern)
-	trustedPythonSocketAssignmentPattern      = regexp.MustCompile(`(?is)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*socket\s*\.\s*socket\s*\(\s*([^)]*)\)`)
-	trustedPythonStaticShellLaunchPattern     = regexp.MustCompile(`(?is)\b(?:pty\s*\.\s*spawn|subprocess\s*\.\s*(?:Popen|call|run)|os\s*\.\s*(?:system|execl|execle|execlp|execv|execve))\s*\(\s*(?:\[\s*)?["'](?:(?:/usr)?/bin/(?:ba|z|k|da)?sh|(?:cmd|powershell)(?:\.exe)?)["']`)
-	trustedPythonStaticHostnamePattern        = regexp.MustCompile(`(?i)^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$`)
-	trustedRemotePayloadExecuteCleanupPattern = regexp.MustCompile(
+	trustedPythonSocketAssignmentPattern      = lazyregexp.New(`(?is)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*socket\s*\.\s*socket\s*\(\s*([^)]*)\)`)
+	trustedPythonStaticShellLaunchPattern     = lazyregexp.New(`(?is)\b(?:pty\s*\.\s*spawn|subprocess\s*\.\s*(?:Popen|call|run)|os\s*\.\s*(?:system|execl|execle|execlp|execv|execve))\s*\(\s*(?:\[\s*)?["'](?:(?:/usr)?/bin/(?:ba|z|k|da)?sh|(?:cmd|powershell)(?:\.exe)?)["']`)
+	trustedPythonStaticHostnamePattern        = lazyregexp.New(`(?i)^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$`)
+	trustedRemotePayloadExecuteCleanupPattern = lazyregexp.New(
 		`(?is)\b(?:curl|wget)\b[^;\r\n]*https?://(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?/[^\s;]+(?:;|\s{2,})[^\r\n]*?\bchmod\s+(?:\+x|[0-7]*7[0-7]*)\s+\S+(?:;|\s{2,})[^\r\n]*?(?:\./|(?:ba)?sh\s+)\S+(?:[ \t][^;\r\n \t]+)*(?:;|[ \t]{2,})[^\r\n]*?(?:rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(?:\*|[A-Za-z0-9_.-]+\*)|history\s+-c)`,
 	)
 )
@@ -5534,14 +5666,15 @@ func filterExactFallbackFindings(
 				getNestedActions(),
 			)
 		}
+		boundedSubgraphProven := contract.boundedSubgraphProves != nil &&
+			contract.boundedSubgraphProves(input, facts)
+		matched = matched || boundedSubgraphProven
 		if contract.requiresExactDetectionProof && !matched {
 			continue
 		}
 		if !preserveUnstructured && !matched {
 			continue
 		}
-		boundedSubgraphProven := contract.boundedSubgraphProves != nil &&
-			contract.boundedSubgraphProves(input, facts)
 		proofBoundary := facts.Authoritative() &&
 			enforcementFacts.EnforcementEligible() &&
 			enforcementFacts.Parse.Status == actionfacts.StatusComplete
@@ -6245,6 +6378,11 @@ func filterTrustedLegacyActionContext(
 			continue
 		}
 		if contract, ok := exactFallbackContracts[finding.RuleID]; ok {
+			if contract.codeOwnedDetection && contract.boundedSubgraphProves != nil &&
+				contract.boundedSubgraphProves(input, facts) {
+				filtered = append(filtered, finding)
+				continue
+			}
 			proven := contract.proves != nil && contract.proves(input, facts)
 			if contract.requiresExactDetectionProof && !proven {
 				continue
@@ -8347,6 +8485,38 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 		return trustedActionRequest{}, false
 	}
 	return bashReadingRequest(request, command, rewritten), true
+}
+
+// trustedStatementBudgetExceeded reports whether a POSIX shell call whose
+// analysis is limit-exceeded has more statements than one action evaluates
+// (actionfacts.ShellStatementsOverBudget). A PowerShell or CMD call, and a
+// call of no known dialect on a Windows gateway without a POSIX hint, is not
+// read here.
+func trustedStatementBudgetExceeded(input actionfacts.Input, facts actionfacts.Facts, command string) bool {
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded || trustedPowerShellExecutionTool(input.Tool) {
+		return false
+	}
+	switch facts.Parse.Dialect {
+	case actionfacts.DialectPOSIX:
+	case actionfacts.DialectNone, "":
+		if input.DialectHint != "" && input.DialectHint != actionfacts.DialectPOSIX ||
+			input.DialectHint == "" && runtime.GOOS == "windows" {
+			return false
+		}
+	default:
+		return false
+	}
+	return actionfacts.ShellStatementsOverBudget(command)
+}
+
+// withTrustedActionLimitFinding adds the over-limit verdict once.
+func withTrustedActionLimitFinding(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+	for _, finding := range findings {
+		if finding.RuleID == "ACTION-COMPOUND-LIMIT" {
+			return findings
+		}
+	}
+	return append(findings, trustedActionLimitFindings(enforcementCapable)...)
 }
 
 // trustedActionLimitFindings is the over-limit verdict of a shell command

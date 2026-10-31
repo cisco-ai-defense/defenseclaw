@@ -517,6 +517,14 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			)
 		}
 	}
+	// A config.toml that went missing after DefenseClaw managed it gets the
+	// account's settings back before the hooks go in (GAP-0581). The
+	// runtime snapshot was taken before, so a rollback removes it again.
+	if err := seedMissingPerUserSettings(c.Name(), opts); err != nil {
+		return c.rollbackSetupAfterSnapshot(
+			opts, runtimeSnapshot, fmt.Errorf("codex config.toml put back: %w", err), false, false,
+		)
+	}
 	if err := c.patchCodexConfig(opts, hookScript); err != nil {
 		return c.rollbackSetupAfterSnapshot(
 			opts,
@@ -551,6 +559,8 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			)
 		}
 	}
+	// The file as it is now is the last known good copy.
+	recordPerUserSettingsCopy(c.Name(), opts)
 
 	return nil
 }
@@ -599,6 +609,9 @@ func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) err
 	}
 	if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
 		return fmt.Errorf("codex teardown: revoke scoped OTLP token: %w", err)
+	}
+	if err := removePerUserSettingsCopies(c.Name(), opts.DataDir); err != nil {
+		return fmt.Errorf("codex teardown: remove the config copy: %w", err)
 	}
 	return nil
 }
@@ -2605,6 +2618,9 @@ func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	if codexValueMatches(v, codexShellNotifyCommand(opts)) {
 		return true
 	}
+	if codexNotifyRunsDefenseClawNotify(v) {
+		return true
+	}
 	argv, ok := codexNotifyArgv(v)
 	if !ok || len(argv) != 2 {
 		return false
@@ -2625,6 +2641,17 @@ func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	// our exact argv, so teardown removes it instead of leaving Codex pointing at
 	// a program that does not exist (GAP-1248).
 	return argv[1] == "notify" &&
+		(isDefenseClawHookExecutable(argv[0]) || isRenamedDefenseClawHookExecutable(argv[0]))
+}
+
+// codexNotifyRunsDefenseClawNotify recognizes DefenseClaw's notify launcher
+// called with more arguments after "notify" (an older form, or one edited by
+// hand). It runs DefenseClaw's own executable, which an uninstall removes, so
+// teardown removes the entry rather than leave Codex calling a program that
+// is gone (GAP-0376).
+func codexNotifyRunsDefenseClawNotify(v interface{}) bool {
+	argv, ok := codexNotifyArgv(v)
+	return ok && len(argv) > 2 && argv[1] == "notify" &&
 		(isDefenseClawHookExecutable(argv[0]) || isRenamedDefenseClawHookExecutable(argv[0]))
 }
 

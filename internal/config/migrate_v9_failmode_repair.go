@@ -21,13 +21,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // The Cursor fail-mode paths the 1.0.0-1.0.2 config_version 9 migration
@@ -41,7 +41,7 @@ const (
 
 // migrationRecordDigest is the hex SHA-256 a migration record names the
 // config bytes by.
-var migrationRecordDigest = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+var migrationRecordDigest = lazyregexp.New(`^[0-9a-fA-F]{64}$`)
 
 // DecodeMigrationRecord decodes a migration-v9.json that is there, for the
 // Cursor fail-mode repair. Every release since 1.0.0 writes a JSON object

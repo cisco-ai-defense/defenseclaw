@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,13 +17,14 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/secretshape"
 )
 
 // envPlaceholderPattern is a ${NAME} environment placeholder. Nothing in the
 // config loader expands it, so only the name form counts as a reference: a
 // literal wrapped in ${...} is still a literal.
-var envPlaceholderPattern = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]{0,127}\}$`)
+var envPlaceholderPattern = lazyregexp.New(`^\$\{[A-Za-z_][A-Za-z0-9_]{0,127}\}$`)
 
 // configKey is key as the config loader reads it. The loader matches keys
 // case-insensitively and reads a dotted key as a path (llm.api_key at the top
@@ -204,6 +204,19 @@ func CheckCredentialChange(confirmed, rotation *Manifest, name string, value []b
 		return refuse(CodeSecretRefMismatch, "secret_refs", "%s does not reference credential %s", source, safePath(name))
 	}
 	return nil
+}
+
+// SecretRefState is what bundle verify reports for one secret_refs entry on
+// a device: its credential name, whether the bundle requires it, whether the
+// device stores a value for it and whether that value is the one the bundle
+// signs. Every listed entry binds a value (CheckSecretRefs refuses one that
+// does not), so there is no separate bound flag. It never carries a value
+// or any digest.
+type SecretRefState struct {
+	Name       string `json:"name"`
+	Required   bool   `json:"required"`
+	Present    bool   `json:"present"`
+	ValueMatch bool   `json:"value_match"`
 }
 
 // CheckSecretRefs refuses a bundle whose config.yaml names a credential that

@@ -22,12 +22,13 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -93,9 +94,9 @@ var (
 	modelProvenanceOnce       sync.Once
 	modelProvenanceBuiltin    modelProvenanceCatalog
 	modelProvenanceBuiltinErr error
-	quantizationTokenPattern  = regexp.MustCompile(`(?i)(^|[^a-z0-9])(iq[1-4](?:_[a-z0-9]+)*|q[2-8](?:_[a-z0-9]+)*|[2-8](?:\.[0-9]+)?bpw|awq|gptq|exl[23]|nf4|int[48]|[48]bit|fp8|nvfp4|mxfp[48]|w4a16|w8a8)($|[^a-z0-9])`)
-	distillationTokenPattern  = regexp.MustCompile(`(?i)(^|[^a-z0-9])distill(?:ed|ation)?($|[^a-z0-9])`)
-	mergeTokenPattern         = regexp.MustCompile(`(?i)(^|[^a-z0-9])(frankenmerge|mergekit|merged|merge)($|[^a-z0-9])`)
+	quantizationTokenPattern  = lazyregexp.New(`(?i)(^|[^a-z0-9])(iq[1-4](?:_[a-z0-9]+)*|q[2-8](?:_[a-z0-9]+)*|[2-8](?:\.[0-9]+)?bpw|awq|gptq|exl[23]|nf4|int[48]|[48]bit|fp8|nvfp4|mxfp[48]|w4a16|w8a8)($|[^a-z0-9])`)
+	distillationTokenPattern  = lazyregexp.New(`(?i)(^|[^a-z0-9])distill(?:ed|ation)?($|[^a-z0-9])`)
+	mergeTokenPattern         = lazyregexp.New(`(?i)(^|[^a-z0-9])(frankenmerge|mergekit|merged|merge)($|[^a-z0-9])`)
 )
 
 func loadModelProvenanceCatalog() (modelProvenanceCatalog, error) {

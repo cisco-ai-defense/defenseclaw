@@ -129,16 +129,17 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	"CMD-PIPE-CURL": {
 		prerequisite:     curlDownloadExecPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
-		// Download-and-execute is a strong risk signal, but a known installer
-		// has the same observable shape. Keep the generic POSIX compatibility
-		// rule alert-only. Native PowerShell download-and-execute retains
-		// its distinct CMD-WIN-IWR-IEX proof and enforcement contract.
-		alertOnly: true,
+		alertOnly:        true,
 	},
 	"CMD-PIPE-WGET": {
 		prerequisite:     wgetDownloadExecPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
-		detectionOnly:    true,
+		alertOnly:        true,
+	},
+	"CMD-PYTHON-SOCKET-CONNECT": {
+		prerequisite: func(facts actionfacts.Facts) bool {
+			return facts.Authoritative()
+		},
 	},
 	"CMD-PIPE-BASE64": {
 		prerequisite:     base64DecodeExecPrerequisite,

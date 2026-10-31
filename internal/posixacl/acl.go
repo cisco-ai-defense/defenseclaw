@@ -91,17 +91,18 @@ func (v View) Denied(want uint16) string {
 	}
 	var denied []string
 	if v.Group&v.Mask&want != want {
-		denied = append(denied, "group::"+rwx(v.Group&v.Mask))
+		denied = append(denied, "group::"+RWX(v.Group&v.Mask))
 	}
 	for _, e := range append(append([]Entry(nil), v.Users...), v.Groups...) {
 		if e.Perm&v.Mask&want != want {
-			denied = append(denied, fmt.Sprintf("%s:%d:%s", e.Kind, e.ID, rwx(e.Perm&v.Mask)))
+			denied = append(denied, fmt.Sprintf("%s:%d:%s", e.Kind, e.ID, RWX(e.Perm&v.Mask)))
 		}
 	}
 	return strings.Join(denied, ", ")
 }
 
-func rwx(perm uint16) string {
+// RWX spells perm the way getfacl does (r-x).
+func RWX(perm uint16) string {
 	out := []byte("---")
 	for i, c := range "rwx" {
 		if perm&(4>>i) != 0 {

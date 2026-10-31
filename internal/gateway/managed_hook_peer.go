@@ -45,6 +45,9 @@ const (
 	managedHookReasonConnectorUnknown  = "enterprise_managed_connector_unknown"
 	managedHookReasonSurfaceUnverified = "enterprise_managed_surface_unverified"
 	managedHookReasonGuardianOnly      = "enterprise_managed_guardian_only"
+	// managedHookReasonTrustedConnectorRoute refuses a trusted connector's
+	// service account on any route but agent-gateway.
+	managedHookReasonTrustedConnectorRoute = "enterprise_managed_trusted_connector_route_only"
 )
 
 // managedHookPeer is the kernel-verified identity of a caller on the
@@ -187,6 +190,11 @@ type managedHookDecision struct {
 	Status int
 	Reason string
 	Exempt bool
+	// Excluded marks an enterprise_managed_uid_unregistered refusal of an
+	// account enterprise.enrollment.exclude_users names: the refusal body
+	// says so (enrollment: excluded), so the hook does not tell the account
+	// to wait for an enrollment that never comes (identity-round GAP-1181).
+	Excluded bool
 }
 
 func allowManagedHook() managedHookDecision {
@@ -345,6 +353,15 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 	if connectorName == "" {
 		return denyManagedHook(http.StatusForbidden, managedHookReasonConnectorUnknown)
 	}
+	if connectorName == connector.AgentGatewayConnectorName {
+		return z.decideAgentGateway(peer)
+	}
+	if trustedConnectorAccountListed(strconv.Itoa(peer.UID)) {
+		// A trusted connector's account calls for people on the
+		// agent-gateway route only; it never gets its own profile on
+		// another hook or inspect route.
+		return denyManagedHook(http.StatusForbidden, managedHookReasonTrustedConnectorRoute)
+	}
 	if peer.UID == 0 {
 		if strings.EqualFold(strings.TrimSpace(z.enrollment.Root), config.EnterpriseRootDeny) {
 			return denyManagedHook(http.StatusForbidden, managedHookReasonRootDenied)
@@ -385,12 +402,53 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 		if ledger.enrolledAny(peer) {
 			return allowManagedHook()
 		}
-		return denyManagedHook(http.StatusForbidden, managedHookReasonUIDUnregistered)
+		return z.unenrolledRefusal(peer)
 	}
 	if ledger.enrolled(peer, connectorName) {
 		return allowManagedHook()
 	}
-	return denyManagedHook(http.StatusForbidden, managedHookReasonUIDUnregistered)
+	return z.unenrolledRefusal(peer)
+}
+
+// unenrolledRefusal refuses a caller the ledger does not enroll, and marks
+// one exclude_users names as the guardian's enumerator matches it: its
+// account name or its decimal uid. The mark changes only the refusal text;
+// the caller is refused either way.
+func (z *managedHookAuthorizer) unenrolledRefusal(peer managedHookPeer) managedHookDecision {
+	decision := denyManagedHook(http.StatusForbidden, managedHookReasonUIDUnregistered)
+	uid := strconv.Itoa(peer.UID)
+	for _, entry := range z.enrollment.ExcludeUsers {
+		if entry = strings.TrimSpace(entry); entry != "" && (entry == uid || entry == peer.Name) {
+			decision.Excluded = true
+			break
+		}
+	}
+	return decision
+}
+
+// decideAgentGateway authorizes a call to the agent-gateway route, which no
+// agent install registers: the caller must be the service account of a
+// trusted connector (honoured from a signed bundle) or an enrolled user
+// calling for themselves. Anything else, root included, is refused as an
+// unknown connector.
+func (z *managedHookAuthorizer) decideAgentGateway(peer managedHookPeer) managedHookDecision {
+	if peer.UID == 0 {
+		return denyManagedHook(http.StatusForbidden, managedHookReasonConnectorUnknown)
+	}
+	if trustedConnectorAccountListed(strconv.Itoa(peer.UID)) {
+		return allowManagedHook()
+	}
+	if z.loadLedger == nil {
+		return denyManagedHook(http.StatusServiceUnavailable, managedHookReasonLedgerUnavailable)
+	}
+	ledger, err := z.loadLedger()
+	if err != nil {
+		return denyManagedHook(http.StatusServiceUnavailable, managedHookReasonLedgerUnavailable)
+	}
+	if ledger.enrolledAny(peer) {
+		return allowManagedHook()
+	}
+	return denyManagedHook(http.StatusForbidden, managedHookReasonConnectorUnknown)
 }
 
 // managedHookLedgerLoader reads the root-owned authorization ledger with
@@ -564,6 +622,9 @@ func managedHookPeerIdentityMiddleware(next http.Handler) http.Handler {
 // managedHookRouteScope maps a hook-socket request to the connector whose
 // authority it uses and the context marker the handlers expect.
 func (a *APIServer) managedHookRouteScope(r *http.Request) (connectorName string, inspect bool) {
+	if r.URL.Path == connector.AgentGatewayHookPath {
+		return connector.AgentGatewayConnectorName, false
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") {
 		name := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
 		if name == "" || a.connectorRegistry == nil {
@@ -593,6 +654,11 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		if route == "" {
 			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
+		if r.URL.Path == connector.AgentGatewayHookPath && !a.agentGatewayEnabled() {
+			// The route is absent while connectors.agent_gateway is off.
+			http.NotFound(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, sandboxrelay.PathPrefix) {
 			// The managed sandbox routes refuse uid 0 outright, take their
 			// class's budget, and decide once the registration or the
@@ -618,9 +684,10 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			return
 		}
 		defer release()
-		if r.URL.Path == managedRefusalAuditPath {
+		if r.URL.Path == managedRefusalAuditPath || r.URL.Path == managed.OwnProfileExplainPath {
 			// Any kernel-verified local account may report its own refused
-			// policy write; the route has no connector to enroll for.
+			// policy write, or read its own guardrail profile; the routes have
+			// no connector to enroll for.
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -668,7 +735,7 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s\n",
 				peer.UID, connectorName, route, decision.Reason)
 			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, decision.Reason, connectorName)
-			writeManagedHookRefusal(w, decision.Status, decision.Reason)
+			writeManagedHookDecisionRefusal(w, decision)
 			return
 		}
 		if decision.Exempt {
@@ -738,6 +805,23 @@ func (a *APIServer) refuseUnverifiedSurface(w http.ResponseWriter, r *http.Reque
 	return true
 }
 
+// managedHookEnrollmentExcluded is the refusal body's enrollment value for
+// an account the administrator excludes (managedHookDecision.Excluded).
+const managedHookEnrollmentExcluded = "excluded"
+
+// writeManagedHookDecisionRefusal writes decide's refusal: the reason, and
+// for an excluded account enrollment: excluded. Only the caller's own
+// enrollment is named, never another account's.
+func writeManagedHookDecisionRefusal(w http.ResponseWriter, decision managedHookDecision) {
+	if !decision.Excluded {
+		writeManagedHookRefusal(w, decision.Status, decision.Reason)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(decision.Status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "forbidden", "reason": decision.Reason, "enrollment": managedHookEnrollmentExcluded})
+}
+
 func writeManagedHookRefusal(w http.ResponseWriter, status int, reason string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -763,7 +847,8 @@ var loadStandaloneRuntimeDescriptor = func(goos string) (*managed.RuntimeDescrip
 
 // managedHookSocketMux registers only the agent-facing routes on the hook
 // socket: connector hook endpoints, the inspect endpoints, the Codex
-// notifier, the refused-write report of a standard user CLI, the root
+// notifier, the refused-write report of a standard user CLI, a user's
+// explain of their own guardrail profile, the root
 // guardian's repair report, the root lifecycle's credential rotation proof,
 // and the managed sandbox authority routes a user's sandbox daemon calls.
 // Management, status, configuration, policy and scan routes are not reachable
@@ -779,8 +864,10 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	inspectMux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
 	mux.Handle("/api/v1/inspect/", limiter(a.guardrailProfileInspectMiddleware(inspectMux)))
 	a.registerConnectorHookRoutes(mux, limiter)
+	a.registerAgentGatewayRoute(mux, true, limiter)
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
+	mux.HandleFunc(managed.OwnProfileExplainPath, a.handleOwnProfileExplain)
 	mux.HandleFunc(managedGuardianRepairAuditPath, a.handleManagedGuardianRepairAudit)
 	mux.HandleFunc(managed.LaunchCoverageReportPath, a.handleManagedLaunchCoverageAudit)
 	mux.HandleFunc(connector.UserScopedRotationProofPath, a.serveRotationListenerProof)

@@ -1343,8 +1343,8 @@ attributes:
   normalization:
     id: enum-v1
     overrides:
-      enum: [kernel.ssh_private_key_read, kernel.persistence_write]
-    notes: The two built-in controls. kernel.ssh_private_key_read maps to the guardrail rule PATH-SSH-KEY and kernel.persistence_write to persistence.shell_profile_write
+      enum: [kernel.ssh_private_key_read, kernel.persistence_write, kernel.ssh_authorized_keys_write]
+    notes: The three built-in controls. kernel.ssh_private_key_read maps to the guardrail rule PATH-SSH-KEY, kernel.persistence_write to persistence.shell_profile_write and kernel.ssh_authorized_keys_write to persistence.ssh_authorized_keys_write
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.kernel.event
   type: string
@@ -1575,7 +1575,7 @@ attributes:
   normalization:
     id: numeric-range-v1
     overrides: {min: 1, max: 1000000000}
-    notes: The sensor helper folds repeats of the same policy, process, function, action and target within a minute into one record
+    notes: The sensor helper folds repeats of the same policy, process, function, action and target within a minute into one record. On ai.runtime.activity it is how many kernel events of the activity's kernel outcome and control the tactic carries, so a chart counts each native hit
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.hook_action
   type: string
@@ -1791,7 +1791,7 @@ attributes:
   normalization:
     id: enum-v1
     overrides:
-      enum: [kernel.ssh_private_key_read, kernel.persistence_write, customer]
+      enum: [kernel.ssh_private_key_read, kernel.persistence_write, kernel.ssh_authorized_keys_write, customer]
     notes: The DefenseClaw control of a denial or would-block, or customer for an event of the host's own Tetragon policy
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.model.provenance.quantized
@@ -6584,6 +6584,8 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.ai.runtime.hook_join
     requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.count
+    requirement_level: recommended
 - id: body.ai.runtime.plane_health
   type: body_group
   brief: One detection plane's state, emitted every cycle including when it is down.
@@ -10834,56 +10836,6 @@ groups:
     legacy_bindings:
     - source: schemas/otel/metrics.schema.json x-emitted-metrics
       disposition: preserved
-- id: metric.defenseclaw.judge.semaphore.depth
-  type: metric
-  brief: 'Judge concurrency semaphore: slots currently held'
-  stability: stable
-  introduced_in: telemetry-registry-v1
-  extends: []
-  attributes: []
-  body_fields: []
-  metric:
-    instrument_name: defenseclaw.judge.semaphore.depth
-    instrument_type: updowncounter
-    value_type: int64
-    unit: '{slot}'
-    description: 'Judge concurrency semaphore: slots currently held'
-    temporality: delta
-    empty_labels_reason: All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider.
-  x-defenseclaw:
-    bucket: platform.health
-    family_schema_version: 1
-    route_selector: true
-    compatibility_profiles:
-    - local-observability-v1
-    legacy_bindings:
-    - source: schemas/otel/metrics.schema.json x-emitted-metrics
-      disposition: preserved
-- id: metric.defenseclaw.judge.semaphore.drops
-  type: metric
-  brief: Judge semaphore drops (queue full)
-  stability: stable
-  introduced_in: telemetry-registry-v1
-  extends: []
-  attributes: []
-  body_fields: []
-  metric:
-    instrument_name: defenseclaw.judge.semaphore.drops
-    instrument_type: counter
-    value_type: int64
-    unit: '{drop}'
-    description: Judge semaphore drops (queue full)
-    temporality: delta
-    empty_labels_reason: All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider.
-  x-defenseclaw:
-    bucket: platform.health
-    family_schema_version: 1
-    route_selector: true
-    compatibility_profiles:
-    - local-observability-v1
-    legacy_bindings:
-    - source: schemas/otel/metrics.schema.json x-emitted-metrics
-      disposition: preserved
 - id: metric.defenseclaw.managed_aid.fail_open.decisions
   type: metric
   brief: Managed AI Defense decisions that fail open instead of enforcing a remote verdict
@@ -13858,6 +13810,9 @@ producer_identity_sets:
   - event_name: legacy.audit.guardrail.hilt
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.identity.refresh.completed
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.init.gateway
     bucket: compliance.activity
     compatibility_only: true
@@ -15329,6 +15284,9 @@ producer_identity_sets:
   - event_name: legacy.audit.gateway.tool.call.judge.flagged
     bucket: security.finding
     compatibility_only: true
+  - event_name: legacy.audit.protected.file.changed
+    bucket: security.finding
+    compatibility_only: true
   - event_name: legacy.audit.scan.finding
     bucket: security.finding
     compatibility_only: true
@@ -15519,6 +15477,9 @@ producer_identity_sets:
     compatibility_only: true
   - event_name: legacy.audit.llm.judge.response
     bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.protected.file.changed
+    bucket: security.finding
     compatibility_only: true
   - event_name: legacy.audit.scan.finding
     bucket: security.finding
@@ -16649,6 +16610,26 @@ producer_mappings:
     bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action
+  key: identity-refresh-completed
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.identity.refresh.completed
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
   key: connector-hook-synthetic
   source: internal/audit/actions.go
   event_name_policy: context_optional
@@ -16679,6 +16660,22 @@ producer_mappings:
     disposition: translate_to_v8
   default_identity:
     event_name: legacy.audit.connector.hook.tampered
+    bucket: security.finding
+    compatibility_only: true
+- producer: audit_action
+  key: protected-file-changed
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.security_finding
+  severity_policy: finding_required
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.protected.file.changed
     bucket: security.finding
     compatibility_only: true
 - producer: audit_action

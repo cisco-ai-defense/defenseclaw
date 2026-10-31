@@ -100,6 +100,10 @@ def _helpers() -> str:
         "Protect-BackupsFolder",
         # Invoke-Rollback reads the older install's recorded Codex program first (GAP-2299).
         "Get-StaleAgentEvidence",
+        # A rollback or downgrade asks the installed CLI whether the older
+        # release can guard the agents set up here (rel-1-0-6 GAP-0028,
+        # GAP-0128). These fixtures have no installed CLI, so it allows.
+        "Assert-OlderReleaseGuardsAgents",
     )
     return "\n".join(_function(name) for name in names)
 
@@ -1196,6 +1200,9 @@ $RunByUpgrade = $false
 $Run = @{{ Owner = [IntPtr]::Zero; Lock = $false; Transcript = $false; Log = '' }}
 $Version = '{target}'
 $DcVersion = '1.0.2'
+# The installer's top level sets $Repo to the default owner/name when
+# DEFENSECLAW_REPO is unset; Invoke-Install refuses any other shape (GAP-1065).
+$Repo = 'cisco-ai-defense/defenseclaw'
 $Local = {_literal(assets)}
 $LocalGiven = $true
 $BinDir = {_literal(data / 'bin')}

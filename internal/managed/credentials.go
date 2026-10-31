@@ -16,8 +16,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // ServiceCredentialLimit bounds a protected credential read. API keys are a
@@ -77,7 +78,7 @@ func ServiceCredentialValue(value []byte, err error) ([]byte, error) {
 	return nil, err
 }
 
-var serviceCredentialNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+var serviceCredentialNamePattern = lazyregexp.New(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // ValidCredentialName reports whether name is a safe credential name. It
 // becomes a file name, so path separators and dots are refused.

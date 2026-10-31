@@ -120,6 +120,11 @@
     },
     "last_refusal": {
       "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/bundleRefusal"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "From 1.0.6: the delivery sequence of this device. It grows by one for each new delivery (a retry of a bundle is a new delivery), never goes back while the receipt history exists, and orders receipts without a clock. Absent on receipts written by an earlier build."
     }
   },
   "allOf": [
@@ -165,7 +170,8 @@
       "sessions_restart_required": 0,
       "finished_at": "2026-10-16T21:05:09.874Z",
       "current_bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
-      "current_version": 13
+      "current_version": 13,
+      "seq": 3
     },
     {
       "schema_version": 1,

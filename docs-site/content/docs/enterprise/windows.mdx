@@ -268,8 +268,8 @@ Setup properties use `NAME=value`; names are case-insensitive and ignore dashes.
 | --- | --- |
 | `CONFIG=<path>` | The administrator config. Required for the first install; later runs reuse the installed config |
 | `MANIFEST=<path>` | A target manifest you publish. Required for `/install` and for `enterprise.enrollment.mode: manifest` |
-| `BUNDLE=<path>` | With `/ensure` on an installed computer: apply this signed policy bundle. Not with `CONFIG=` |
-| `TRUSTANCHORS=<path>` | With `/ensure`: install this administrator-only bundle trust anchor file first. Not with `CONFIG=` |
+| `BUNDLE=<path>` | With `/ensure`: apply this signed policy bundle. With `CONFIG=` on a computer without DefenseClaw, Setup installs from `CONFIG=` with every service stopped, then applies the bundle and starts the services on it; if the bundle is not applied it removes that install and exits `1603`. On an installed computer `CONFIG=` is then ignored |
+| `TRUSTANCHORS=<path>` | With `/ensure` and `BUNDLE=`: install this administrator-only bundle trust anchor file with the bundle. Not with `CONFIG=` alone |
 | `REFUSECAPABILITYLOSS=1` | With `/ensure` and `BUNDLE=`: refuse a bundle that turns off an enforced capability |
 | `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the Claude Code attestation ([Verify the install](#verify-the-install)) |
 | `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accept only these Authenticode signer thumbprints |
@@ -475,6 +475,17 @@ and reason `enterprise_managed_sid_unregistered` or
 Windows token of the refused process. Repeated refusals of one account and agent
 are one row a minute.
 
+A command `defenseclaw.exe` refuses an account is in the export as well: the
+`setup`, `upgrade`, `rollback`, `config set` and `config unset` answers, the
+`guardrail` writers, `skill`, `mcp`, `plugin` and `tool` `block`, `allow` and
+`unblock`, and a standard account's `enterprise windows` lifecycle commands and
+`enterprise secret set` or `remove`. Each is an `action` row whose target is the
+command, with `outcome=refused`, the reason (`managed_device`, or
+`elevation_required` for a command only an administrator runs), the account's
+SID and name, and the number of attempts. The gateway takes the account from the
+Windows token of the refusing process, and repeated refusals of one account and
+command are one row a minute. Arguments are never recorded.
+
 ## Review AI Discovery
 
 With `ai_discovery.enabled: true` in the config, the gateway scans each user
@@ -626,7 +637,9 @@ by name, change its `asset_policy.skill.denied` rule.
 An administrator scans a folder or remote MCP server with the same scanners,
 policy and judge. The gateway reads the folder as LocalSystem and refuses any
 folder inside a user profile, so copy what you want to scan to a folder outside
-profiles such as `C:\DefenseClawReview`. Variables like `SKILL_SCANNER_LLM_MODEL`
+profiles such as `C:\DefenseClawReview`. That refusal (HTTP 403) prints the
+`Copy-Item` and `scan` commands for the folder. Standard accounts cannot run
+managed scans. Variables like `SKILL_SCANNER_LLM_MODEL`
 in your shell are ignored.
 
 ```powershell title="Elevated Administrator prompt"
@@ -678,8 +691,9 @@ A lifecycle that fails normally rolls back. If the rollback cannot finish, the
 transaction stays pending: the result reports `transaction_pending: true` and names
 the services that stay stopped. `status` shows it and `verify` refuses until it is
 recovered. While the gateway is stopped, users' agents block with
-`enterprise_managed_gateway_not_running`. Starting a service by hand does not
-recover it.
+`enterprise_managed_gateway_not_running`, and the block asks them to have an
+administrator run `enterprise windows status`. Starting a service by hand does
+not recover it.
 
 A run that hits `TIMEOUTSECONDS` (`lifecycle_timeout`) is stopped, and Setup then
 runs one recovery of its own, limited to 10 minutes, that replays the pending
@@ -891,6 +905,17 @@ not remove a lock an earlier uninstall left.
   `C:\ProgramData\Cisco\DefenseClaw` (a SIEM forwarder reading `runtime\audit.db`,
   for example) blocks it the same way. Close it and run again. The Intune
   launcher's uninstall retries and then exits `1618`.
+- A file or folder under `C:\Program Files\Cisco\DefenseClaw` that DefenseClaw did not
+  install stops a standalone uninstall with `1603` before it changes anything, and the result
+  names that item, also inside the `lib\defenseclaw` folder that 1.0.2 installed (for example
+  `lib\defenseclaw\operator-note.txt`). Move it out of `C:\Program Files\Cisco\DefenseClaw`,
+  then run the uninstall again.
+- A junction or symbolic link inside `C:\ProgramData\Cisco\DefenseClaw` (for example at
+  `secrets`) is removed as a link before the uninstall changes that folder, and never
+  followed: the folder or file it points to keeps its content and permissions, and the log
+  names each link removed. A link at `C:\ProgramData\Cisco\DefenseClaw` itself, or one
+  Setup cannot remove, stops the uninstall with `1603` (`state_invalid`) while DefenseClaw is
+  still installed, and the result names the command that removes only the link.
 - **Per-user registrations.** Uninstall revokes every enrollment, then removes
   DefenseClaw's own registrations and plugins (Amp, Antigravity, Devin, Hermes,
   Kiro, OpenCode, a Copilot user hook file) from the agent config of users with an

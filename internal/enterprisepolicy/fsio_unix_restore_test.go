@@ -278,7 +278,8 @@ func TestRestorePublishedDirsRemovesOnlyTheDenyingMacOSACLEntries(t *testing.T) 
 
 // GAP-1323 on Linux: the repair removed the whole access ACL of the
 // drop-in directory. It gives the entries without access search and list,
-// raises the mask, and keeps every other entry as it was.
+// raises the mask, and keeps every other read-only entry as it was (an
+// entry with write goes: GAP-0410).
 func TestRestorePublishedDirsKeepsUnrelatedLinuxACLEntries(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("POSIX ACL xattrs are Linux-only")
@@ -291,7 +292,7 @@ func TestRestorePublishedDirsKeepsUnrelatedLinuxACLEntries(t *testing.T) {
 	dir := filepath.Join(opts.Root, "etc/claude-code/managed-settings.d")
 	start := posixacl.View{
 		Present: true, Owner: 7, Group: 5, Mask: 1, Other: 5,
-		Users:  []posixacl.Entry{{Kind: "user", ID: 54321, Perm: 0}, {Kind: "user", ID: 54322, Perm: 7}},
+		Users:  []posixacl.Entry{{Kind: "user", ID: 54321, Perm: 0}, {Kind: "user", ID: 54322, Perm: 5}},
 		Groups: []posixacl.Entry{{Kind: "group", ID: 54400, Perm: 4}},
 	}
 	if err := unix.Setxattr(dir, linuxAccessACLXattr, linuxAccessACLData(start), 0); errors.Is(err, unix.ENOTSUP) {
@@ -322,7 +323,7 @@ func TestRestorePublishedDirsKeepsUnrelatedLinuxACLEntries(t *testing.T) {
 	}
 	want := posixacl.View{
 		Present: true, Owner: 7, Group: 5, Mask: 5, Other: 5,
-		Users:  []posixacl.Entry{{Kind: "user", ID: 54321, Perm: 5}, {Kind: "user", ID: 54322, Perm: 7}},
+		Users:  []posixacl.Entry{{Kind: "user", ID: 54321, Perm: 5}, {Kind: "user", ID: 54322, Perm: 5}},
 		Groups: []posixacl.Entry{{Kind: "group", ID: 54400, Perm: 5}},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -353,7 +354,8 @@ func groupClassPerms(acl posixacl.View) map[string]uint16 {
 // here the owning group -w-) under a mask rwx came out rwx: usable write on
 // the root-owned drop-in folder, where that account can add or replace
 // machine policy, while verify reported the connector covered. The repaired
-// group class has search and list, and no write.
+// group class has search and list, and no write: the named entries with
+// write are gone (GAP-0410) and the owning group entry is r-x.
 func TestRestorePublishedDirsGivesNoWriteThroughTheLinuxACL(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("POSIX ACL xattrs are Linux-only")
@@ -386,7 +388,11 @@ func TestRestorePublishedDirsGivesNoWriteThroughTheLinuxACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]uint16{"group::": 5, "user:54321:": 5, "group:54400:": 5}
+	want := map[string]uint16{"group::": 5}
+	if !got.Present {
+		// No named entry left: the kernel keeps the ACL as the mode bits.
+		got.Group = uint16(info.Mode().Perm()>>3) & 7
+	}
 	if perms := groupClassPerms(got); !reflect.DeepEqual(perms, want) {
 		t.Fatalf("effective ACL permissions after the repair %v (ACL %+v), want r-x and no write: %v", perms, got, want)
 	}

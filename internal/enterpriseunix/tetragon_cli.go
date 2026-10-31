@@ -488,6 +488,8 @@ var perInstanceCodes = map[string]bool{
 	kernelpolicy.WarnGuardrailObserve: true,
 	kernelpolicy.WarnOperatorOverride: true,
 	kernelpolicy.WarnPolicyLoadError:  true,
+	kernelpolicy.NoteExtraLinks:       true,
+	kernelpolicy.NoteDentryMount:      true,
 	codeCustomerEventsCapped:          true,
 }
 
@@ -644,7 +646,7 @@ func inactiveFacts(detail string, in tetragonInputs) tetragonFacts {
 			rows[connector] = true
 		}
 		if user.State == kernelpolicy.UIDInactive && user.Reason == kernelpolicy.ReasonNoAnchors {
-			facts.Users = append(facts.Users, userName(user))
+			facts.UserCount++
 		}
 	}
 	for _, connector := range append(append([]string{}, intent.EnforceConnectors...), intent.GuardrailObserve...) {

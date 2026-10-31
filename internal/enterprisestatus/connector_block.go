@@ -11,9 +11,10 @@
 package enterprisestatus
 
 import (
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // The status v2 blocks (connectors, openshell, identity) are optional
@@ -39,11 +40,11 @@ const (
 const connectorVersionsMax = 8
 
 var (
-	connectorIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
+	connectorIDPattern = lazyregexp.New(`^[a-z][a-z0-9_-]*$`)
 	// versionTokenPattern is every version string status v2 prints: an agent
 	// binary in a user home can report any string, so anything else is
 	// dropped, never printed.
-	versionTokenPattern = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$`)
+	versionTokenPattern = lazyregexp.New(`^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$`)
 )
 
 // ValidVersionToken reports whether version may be printed in a status v2

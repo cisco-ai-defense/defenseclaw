@@ -163,20 +163,29 @@ func TestTrustedActionReadPathsInEveryListPosition(t *testing.T) {
 func TestTrustedActionResolutionPrefixMatchesStandaloneInList(t *testing.T) {
 	const connector = "compound-resolution-prefix-test"
 	installToolCallCorpusProfileConnector(t, connector, "strict")
+	// A PATH prefix can only pick another rm, so the call is also judged
+	// without it (GAP-1200): in a list it gets the finding it gets alone.
 	standalone := "PATH=/definitely/missing $'rm' -rf /"
-	for _, command := range []string{
-		standalone,
-		standalone + "; true",
-		"true && " + standalone,
-		"false || " + standalone,
-	} {
+	dispatch := func(command string) *RuleFinding {
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: actionfacts.Input{Tool: "Bash", Command: command, CWD: "/repo",
 				DialectHint: actionfacts.DialectPOSIX},
 			LegacyText: command, Connector: connector, EnforcementCapable: true,
 		})
-		if finding := findingWithID(findings, "CMD-RM-RF"); finding != nil {
-			t.Errorf("%q invented an executable rm: %+v", command, *finding)
+		return findingWithID(findings, "CMD-RM-RF")
+	}
+	alone := dispatch(standalone)
+	if alone == nil {
+		t.Fatalf("%q: no CMD-RM-RF finding", standalone)
+	}
+	for _, command := range []string{
+		standalone + "; true",
+		"true && " + standalone,
+		"false || " + standalone,
+	} {
+		if finding := dispatch(command); finding == nil ||
+			finding.contributesToEnforcement() != alone.contributesToEnforcement() {
+			t.Errorf("%q: CMD-RM-RF finding=%+v, standalone=%+v", command, finding, *alone)
 		}
 	}
 }
@@ -233,7 +242,10 @@ func TestTrustedActionFunctionCallSpellingsMatchBody(t *testing.T) {
 			}
 		})
 	}
-	command := "f() { rm -rf /; }; x=f; $x"
+	// $x names no function the walk can read (x comes from the
+	// environment): no refusal for parse uncertainty. x=f; $x calls f and
+	// is judged by its body (GAP-0934).
+	command := "f() { rm -rf /; }; $x"
 	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 		Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: actionfacts.DialectPOSIX},
 		LegacyText: command, Connector: connector, EnforcementCapable: true,
@@ -241,6 +253,15 @@ func TestTrustedActionFunctionCallSpellingsMatchBody(t *testing.T) {
 	if got := findingWithID(findings, "ACTION-COMPOUND-UNPROVEN"); got != nil ||
 		buildVerdict(findings, "tool_call").Action == guardrailActionBlock {
 		t.Errorf("unresolved function call was refused by parse uncertainty: %v", FindingStrings(findings))
+	}
+	command = "f() { rm -rf /; }; x=f; $x"
+	findings = dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: actionfacts.DialectPOSIX},
+		LegacyText: command, Connector: connector, EnforcementCapable: true,
+	})
+	if got := findingWithID(findings, "CMD-RM-RF"); got == nil || !got.contributesToEnforcement() ||
+		findingWithID(findings, "ACTION-COMPOUND-UNPROVEN") != nil {
+		t.Errorf("assignment-bound function call was not judged by its body: %v", FindingStrings(findings))
 	}
 	for _, command := range []string{
 		"f() { cat ~/.ssh/id_rsa; }; 'f'",

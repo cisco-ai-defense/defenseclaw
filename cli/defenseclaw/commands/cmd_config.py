@@ -652,6 +652,76 @@ def _unloaded_signature_pack_notes(cfg: object) -> list[str]:
     ]
 
 
+def _custom_pack_registration_notes(changes: list) -> list[str]:
+    """Registered ``guardrail.custom_packs`` pins the gateway will not load.
+
+    ``config set guardrail.custom_packs.<name>`` stores a path and a pin without
+    reading the pack, so a pin that does not match the files (a CRLF copy of an
+    LF pack, a pack edited after it was pinned) or a pack that fails validation
+    was accepted in silence and only ``guardrail use-pack`` refused it later.
+    The change still applies, as before; name what will not load and the command
+    that pins the files, with the strict digest check unchanged (GAP-1076)."""
+    from defenseclaw.config_writer import parse_path
+
+    names: list[str] = []
+    for change in changes:
+        if getattr(change, "unset", False):
+            continue
+        try:
+            parts = list(parse_path(getattr(change, "path", "")))
+        except ValueError:
+            continue
+        if parts[:2] != ["guardrail", "custom_packs"]:
+            continue
+        value = getattr(change, "value", None)
+        if len(parts) == 2 and isinstance(value, dict):
+            names.extend(name for name in value if isinstance(name, str))
+        elif len(parts) >= 3 and isinstance(parts[2], str):
+            names.append(parts[2])
+    if not names:
+        return []
+    try:
+        from defenseclaw import policy_catalog, rulepack_validation
+
+        packs = getattr(config_module.load().guardrail, "custom_packs", None) or {}
+        notes: list[str] = []
+        for name in dict.fromkeys(names):
+            pin = packs.get(name)
+            if pin is None:
+                continue
+            path = policy_catalog.normalize_pack_path(str(getattr(pin, "path", "") or ""))
+            shown = rulepack_validation.safe_display_path(path)
+            head = f"Warning: guardrail.custom_packs.{name} is registered but will not load"
+            if not path or not os.path.isdir(path):
+                notes.append(
+                    f"{head}: {shown} is not a folder. "
+                    f"Fix the path: defenseclaw config set guardrail.custom_packs.{name}.path <folder>"
+                )
+                continue
+            try:
+                result = rulepack_validation.validate_rule_pack(path)
+            except rulepack_validation.RulePackValidationBridgeError:
+                continue
+            if not result.valid:
+                issue = result.error
+                detail = f" ({issue.code} at {issue.path}: {issue.reason})" if issue is not None else ""
+                notes.append(
+                    f"{head}: the pack at {shown} is invalid{detail}. See: defenseclaw guardrail validate-pack {shown}"
+                )
+                continue
+            files_digest = str((result.summary or {}).get("files_digest", "") or "").lower()
+            pinned = str(getattr(pin, "digest", "") or "").strip().lower().removeprefix("sha256:")
+            if files_digest and pinned and files_digest != pinned:
+                notes.append(
+                    f"{head}: its digest sha256:{pinned} does not match the files in {shown} (sha256:{files_digest}). "
+                    "Review the pack, then pin it: defenseclaw config set "
+                    f"guardrail.custom_packs.{name}.digest sha256:{files_digest}"
+                )
+        return notes
+    except Exception:  # noqa: BLE001 - the change is committed; the note is best effort
+        return []
+
+
 def _shadowed_mode_notes(changes: list) -> list[str]:
     """Connectors that keep their own mode after a ``guardrail.mode`` change.
 
@@ -818,6 +888,8 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     for note in _shadowed_hilt_notes(changes):
         click.echo(note)
     for note in _unloaded_signature_pack_notes(cfg):
+        click.echo(note)
+    for note in _custom_pack_registration_notes(changes):
         click.echo(note)
     for note in _seed_moved_data_dir(changes):
         click.echo(note, err=note.startswith("warning:"))

@@ -187,6 +187,20 @@ def non_executable_hook_scripts(cfg: Any, connector: str) -> list[Path]:
     return found
 
 
+def missing_hook_scripts(cfg: Any, connector: str) -> list[Path]:
+    """Sealed hook scripts of *connector* that are gone from disk (POSIX), for ``doctor --fix``.
+
+    The gateway renders every generated script, and reseals its digest, each
+    time it starts, so a missing file is repaired by the same restart that
+    replaces an edited one (p0-round GAP-0402). A link to a gone target is
+    reported separately and is not listed here.
+    """
+
+    if _is_windows():
+        return []
+    return [script for script in _locked_hook_scripts(cfg, connector)[0] if not os.path.lexists(script)]
+
+
 def _moved_install_root(script: Path, data_dir: str) -> str:
     """The old DefenseClaw folder a sealed hook script names, when the install moved.
 
@@ -692,7 +706,35 @@ def _hook_config_paths(cfg: Any, connector: str) -> list[Path]:
     return [Path(str(raw)) for raw in raw_paths if str(raw or "").strip()]
 
 
-def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
+# Connectors whose per-user Windows registration status reads from Doctor's
+# native validator (cmd_doctor._windows_native_hook_check).
+_WINDOWS_NATIVE_STATUS_CONNECTORS = frozenset({"claudecode", "copilot"})
+
+
+def _windows_native_problem(cfg: Any, connector: str) -> HookProblem | None:
+    """Doctor's verdict on the Windows registration of *connector* as a problem, or None when healthy."""
+
+    from defenseclaw.commands.cmd_doctor import _windows_native_hook_check
+
+    label = "Claude Code" if connector == "claudecode" else "Copilot"
+    try:
+        native = _windows_native_hook_check(cfg, connector)
+    except Exception as exc:  # noqa: BLE001 - an uninspectable hook is not healthy.
+        detail = f"inspection failed: {type(exc).__name__}"
+        repair = ""
+    else:
+        if native.healthy:
+            return None
+        detail = f"{native.state}: {native.detail}"
+        repair = native.repair
+    return HookProblem(
+        f"Windows {label} hook registration is not current: {detail}",
+        repair or f"run `{setup_command(connector)} --yes --restart`",
+        blocking=True,
+    )
+
+
+def _scanned_registration_problems(cfg: Any, connector: str) -> list[str]:
     """Report hook config files that no longer register DefenseClaw hooks.
 
     Setup records the agent config files it registered hooks in
@@ -735,28 +777,30 @@ def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
         problems = commands or unguarded_tool_call_hooks(cfg, connector) or agent_hook_switch_problems(cfg, connector)
         if problems:
             return problems
-        if windows and connector == "copilot":
-            # Status and Setup read-back use this function; the Windows native
-            # validator already supplies Doctor and fail-mode's deeper check.
-            from defenseclaw.commands.cmd_doctor import _windows_native_hook_check
-
-            try:
-                native = _windows_native_hook_check(cfg, connector)
-            except Exception as exc:  # noqa: BLE001 - an uninspectable hook is not healthy.
-                detail = f"inspection failed: {type(exc).__name__}"
-            else:
-                if native.healthy:
-                    return []
-                detail = f"{native.state}: {native.detail}"
-            return [
-                HookProblem(
-                    f"Windows Copilot hook registration is not current: {detail}",
-                    "run `defenseclaw setup copilot --yes --restart`",
-                    blocking=True,
-                )
-            ]
         return []
     return agent_hook_switch_problems(cfg, connector)
+
+
+def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
+    """Report a hook registration that leaves *connector* unguarded: the recorded files, then Doctor.s verdict.
+
+    Per-user Windows registrations of Claude Code and Copilot are judged by
+    the validator Doctor uses (cmd_doctor._windows_native_hook_check), so
+    status cannot call a registration healthy that Doctor fails. The lock may
+    record no hook file there, so a settings file cut down to no PreToolUse
+    entry kept the connector RUNNING in status while Doctor failed it
+    (GAP-0645, GAP-0068).
+    """
+
+    problems = _scanned_registration_problems(cfg, connector)
+    if problems:
+        return problems
+    managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    if _is_windows() and not managed and connector in _WINDOWS_NATIVE_STATUS_CONNECTORS:
+        native = _windows_native_problem(cfg, connector)
+        if native:
+            return [native]
+    return problems
 
 
 def _tool_inspection_strict(cfg: Any) -> bool:

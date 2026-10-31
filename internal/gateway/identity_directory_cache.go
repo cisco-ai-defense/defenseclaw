@@ -222,24 +222,7 @@ func (c *identityCache[T]) getWithColdWait(key string, block, waitCold bool) (T,
 		return zero, false
 	}
 	c.mu.Lock()
-	now := c.now()
-	entry := c.entries[key]
-	first := entry == nil
-	if first {
-		if len(c.entries) >= identityDirectoryMax {
-			c.evictLocked()
-		}
-		entry = &identityCacheEntry[T]{}
-		c.entries[key] = entry
-	}
-	entry.usedByHook = true
-	c.dropAgedLocked(key, entry, now)
-	age := now.Sub(entry.fetchedAt)
-	invalidated := c.invalidatedLocked(entry)
-	expired := age >= c.lifetime(entry.facts) || invalidated
-	if (!entry.ok || expired) && entry.inflight == nil && !now.Before(entry.nextAttempt) {
-		c.refreshLocked(key, entry)
-	}
+	entry, first, expired, invalidated := c.serveLocked(key)
 	if entry.ok {
 		facts, wait, fetchedAt := entry.facts, entry.inflight, entry.fetchedAt
 		// An incomplete answer past its lifetime (a group no name answered
@@ -299,6 +282,32 @@ func (c *identityCache[T]) getWithColdWait(key string, block, waitCold bool) (T,
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return entry.facts, entry.ok
+}
+
+// serveLocked is the start of every read that serves cached facts: it finds
+// or creates key's entry, drops facts no longer served (dropAgedLocked), and
+// starts the refresh that an unresolved, expired or invalidated entry is due.
+// expired covers facts past their lifetime and invalidated ones
+// (invalidatedLocked).
+func (c *identityCache[T]) serveLocked(key string) (entry *identityCacheEntry[T], first, expired, invalidated bool) {
+	now := c.now()
+	entry = c.entries[key]
+	first = entry == nil
+	if first {
+		if len(c.entries) >= identityDirectoryMax {
+			c.evictLocked()
+		}
+		entry = &identityCacheEntry[T]{}
+		c.entries[key] = entry
+	}
+	entry.usedByHook = true
+	c.dropAgedLocked(key, entry, now)
+	invalidated = c.invalidatedLocked(entry)
+	expired = now.Sub(entry.fetchedAt) >= c.lifetime(entry.facts) || invalidated
+	if (!entry.ok || expired) && entry.inflight == nil && !now.Before(entry.nextAttempt) {
+		c.refreshLocked(key, entry)
+	}
+	return entry, first, expired, invalidated
 }
 
 // dropAgedLocked stops serving entry's facts once they are maxAge old, or
@@ -421,6 +430,54 @@ func (c *identityCache[T]) explain(key string, wait time.Duration) identityExpla
 	answer.facts, answer.fetchedAt, answer.ok = entry.facts, entry.fetchedAt, entry.ok
 	answer.failedSince, answer.reason = entry.failedSince, entry.lastErr
 	return answer
+}
+
+// reread looks key up again with a lookup that starts after the call, once
+// any lookup of it already running has finished, and waits at most wait for
+// it. `enterprise identity refresh` re-reads an account the directory has
+// just changed: explain reuses a lookup from the last identityExplainFresh,
+// and one that started before the change answers with the facts from before
+// it, so a refresh run seconds after a group change reported the account
+// unchanged and its hooks kept the old profile (rel-1-0-6 GAP-0143). The
+// explain lookup that follows reuses this answer. A key the cache holds
+// nothing for is left alone: nothing older can be reused for it, and a
+// lookup started for an account no hook has used would only add it to the
+// directory health report.
+func (c *identityCache[T]) reread(key string, wait time.Duration) {
+	if c == nil || key == "" || c.resolve == nil {
+		return
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	c.mu.Lock()
+	entry := c.entries[key]
+	if entry == nil {
+		c.mu.Unlock()
+		return
+	}
+	earlier := entry.inflight
+	c.mu.Unlock()
+	if earlier != nil {
+		select {
+		case <-earlier:
+		case <-timer.C:
+			return
+		}
+	}
+	c.mu.Lock()
+	if entry = c.entries[key]; entry == nil {
+		c.mu.Unlock()
+		return
+	}
+	if entry.inflight == nil {
+		c.refreshLocked(key, entry)
+	}
+	done := entry.inflight
+	c.mu.Unlock()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
 }
 
 // explainDirectoryFacts returns the directory facts a hook call of key gets
@@ -603,6 +660,29 @@ func (c *identityCache[T]) refreshSoon(key string) {
 		entry.staleBefore = c.now()
 		entry.nextAttempt = time.Time{}
 	}
+}
+
+// accounts returns the keys (uid or SID) of the accounts the cache holds
+// facts for or whose lookups failed, sorted, at most limit of them (no limit
+// when limit is 0), and how many it left out. `enterprise identity refresh`
+// re-reads these accounts.
+func (c *identityCache[T]) accounts(limit int) (keys []string, skipped int) {
+	if c == nil {
+		return nil, 0
+	}
+	c.mu.Lock()
+	for key, entry := range c.entries {
+		if entry.ok || !entry.failedSince.IsZero() {
+			keys = append(keys, key)
+		}
+	}
+	c.mu.Unlock()
+	sort.Strings(keys)
+	if limit > 0 && len(keys) > limit {
+		skipped = len(keys) - limit
+		keys = keys[:limit]
+	}
+	return keys, skipped
 }
 
 // forget drops key's entry, so the next get resolves it afresh. A lookup in

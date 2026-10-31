@@ -8,7 +8,10 @@ targets a PID that may have been reused.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ctypes
+import os
+import subprocess
 import time
 from ctypes import wintypes
 
@@ -263,3 +266,54 @@ class WindowsJob:
     def _raise_last_error(operation: str) -> None:
         error = ctypes.get_last_error()
         raise OSError(error, f"{operation} failed", None, error)
+
+
+def run_in_job(argv, *, timeout: float, reap: float = 2.0, **kwargs) -> subprocess.CompletedProcess:
+    """``subprocess.run`` whose timeout ends the whole process tree on Windows.
+
+    On a timeout ``subprocess.run`` kills only the process it started, then
+    waits with no bound for pipes a descendant still holds: the node.exe of
+    a ``.cmd`` shim (npm, an npm-installed agent). A slow npm probe held
+    ``defenseclaw setup claude-code`` past its whole budget on a busy Windows
+    host (rel-1-0-6:GAP-0059). Here the suspended process joins a
+    kill-on-close job before it runs, so a timeout ends every process it
+    started and the call returns within about timeout + reap. Raises
+    ``subprocess.TimeoutExpired`` and ``OSError`` as ``subprocess.run`` does.
+    When no job can be made it runs as ``subprocess.run``, as it does
+    elsewhere.
+    """
+
+    if os.name != "nt":
+        return subprocess.run(argv, timeout=timeout, **kwargs)
+    options = dict(kwargs)
+    if options.pop("capture_output", False):
+        options["stdout"] = subprocess.PIPE
+        options["stderr"] = subprocess.PIPE
+    options["creationflags"] = options.get("creationflags", 0) | getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
+    process = subprocess.Popen(argv, **options)
+    try:
+        job = WindowsJob(process.pid, allow_breakaway=False)
+    except OSError:
+        # Still suspended, so it ran nothing. Without a job the probe runs as
+        # before rather than not at all.
+        process.kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            process.communicate(timeout=reap)
+        return subprocess.run(argv, timeout=timeout, **kwargs)
+    except BaseException:
+        process.kill()
+        raise
+    with process:
+        try:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                with contextlib.suppress(OSError):
+                    job.terminate_sync(timeout=reap)
+                with contextlib.suppress(OSError, ValueError, subprocess.TimeoutExpired):
+                    exc.stdout, exc.stderr = process.communicate(timeout=reap)
+                raise
+        finally:
+            # Kill-on-close: nothing the probe started outlives it.
+            job.close()
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)

@@ -477,14 +477,17 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 		// A daemon that is not running does not mean no sandbox runs: it
 		// crashed, was killed or (macOS) left when idle, and the account's
 		// OpenShell gateway unit (setup mode) keeps hosting its sandboxes.
-		// The launcher starts the daemon on demand and the daemon counts what
-		// the gateway runs, so ask it. When neither service runs, durable
+		// `sandbox status` starts the daemon on demand and the daemon counts
+		// what the gateway runs, so ask it. When neither service runs, durable
 		// guest records still need checking before calling the account idle.
 		if !o.unitRunning(ctx, a, userUnitGatewayService, labelOpenShellGateway) {
 			return st, e.retainedComputeRefusal(a)
 		}
 	}
-	res, err := o.runAs(ctx, a, userCommandTimeout, e.launcherPath(), "sandbox", "status", "--output", "json")
+	// The managed binary, not the launcher path: a foreign file there (a
+	// Python install, say) is its own row (checkLauncher), and its output
+	// is no answer from the account's daemon (GAP-0016).
+	res, err := o.runAs(ctx, a, userCommandTimeout, e.launcherTarget(), "sandbox", "status", "--output", "json")
 	if err != nil {
 		return st, fmt.Errorf("ask the sandbox daemon of %s: %w", a.Name, err)
 	}
@@ -501,8 +504,7 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 	if err := json.Unmarshal(res.Stdout, &reply); err != nil {
 		return st, fmt.Errorf("read the sandbox status of %s: %w", a.Name, err)
 	}
-	// The launcher's command started the daemon when the gateway ran without
-	// one.
+	// The command started the daemon when the gateway ran without one.
 	st.Active = true
 	st.Running = reply.Running
 	// A daemon before 1.0.4 does not say which sandboxes may hold compute:
@@ -802,7 +804,7 @@ func (o *commandUserOps) Reload(ctx context.Context, a SandboxAccount) error {
 }
 
 func (o *commandUserOps) Teardown(ctx context.Context, a SandboxAccount) error {
-	res, err := o.runAs(ctx, a, teardownTimeout, o.env.launcherPath(), "sandbox", "teardown", "--yes")
+	res, err := o.runAs(ctx, a, teardownTimeout, o.env.launcherTarget(), "sandbox", "teardown", "--yes")
 	if err == nil || res.ExitCode <= 0 {
 		return err
 	}
@@ -1048,6 +1050,16 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 	for _, entry := range state.sortedPending() {
 		key := strconv.Itoa(entry.UID)
 		account := SandboxAccount{Name: entry.User, UID: entry.UID, Home: entry.Home, GID: -1}
+		if env.sandboxAccountRemoved(ctx, account) {
+			// The account was removed from this computer: no user manager,
+			// daemon or sandbox of it can run again, so nothing waits, and
+			// the warning would never clear (its status and its drain both
+			// fail on the missing account, GAP-0155). Its sandbox records
+			// stay for the administrator's purge.
+			delete(state.Pending, key)
+			l.openshellChange("dropped the pending %s change of %s: the account no longer exists on this computer", entry.Kind, entry.User)
+			continue
+		}
 		status, err := ops.Status(ctx, account)
 		switch {
 		case err != nil && entry.Kind != "launchd" && !env.hasHomeSandboxState(account):
@@ -2072,6 +2084,26 @@ func (e *Env) hasHomeSandboxState(a SandboxAccount) bool {
 		}
 	}
 	return false
+}
+
+// sandboxAccountRemoved reports whether the host's account database answers
+// that a is gone: `getent passwd UID` exits 2 (not found) on Linux, and
+// `dscl . -read /Users/NAME` finds no record on macOS. A lookup that fails
+// any other way (a directory outage, for one) is no answer, so a change an
+// account waits for is never dropped for a directory that did not answer.
+func (e *Env) sandboxAccountRemoved(ctx context.Context, a SandboxAccount) bool {
+	if a.UID <= 0 {
+		return false
+	}
+	if e.GOOS == "darwin" {
+		if !plainAccountName(a.Name) {
+			return false
+		}
+		_, err := e.Runner.Run(ctx, "dscl", ".", "-read", "/Users/"+a.Name, "UniqueID")
+		return err != nil && strings.Contains(err.Error(), "eDSRecordNotFound")
+	}
+	res, err := e.Runner.Run(ctx, "getent", "passwd", strconv.Itoa(a.UID))
+	return err != nil && res.ExitCode == 2
 }
 
 // sandboxRecorded reports whether the managed gateway keeps a registration or

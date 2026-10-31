@@ -21,7 +21,7 @@ This page inventories the detectors currently shipped in the repository and
 explains which layer owns each decision. Benchmark scores for these layers are
 published in [Deterministic Detection Benchmarks](/docs/guardrail/benchmarks).
 
-The balanced/default enabled rule catalog contains 239 local rules across seven families. The repository also contains 26 fixed bounded chains, eleven MCP-description YARA signatures, two post-event correlator patterns, five selectable high-assurance packs and one staged SSH integrity policy contract. The YAML and Go files in [Source of truth](#source-of-truth-and-validation) are authoritative if these counts change.
+The balanced/default enabled rule catalog contains 242 local rules across seven families. The repository also contains 26 fixed bounded chains, eleven MCP-description YARA signatures, two post-event correlator patterns, five selectable high-assurance packs and one staged SSH integrity policy contract. The YAML and Go files in [Source of truth](#source-of-truth-and-validation) are authoritative if these counts change.
 
 ## Decision architecture
 
@@ -56,22 +56,24 @@ rules and lexical fallback posture:
 
 | Profile | Declared rules | Enabled rules | CEL declarations | Tool-call-only | Never-match `a^` fallbacks |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Balanced/default | 243 | 239 | 134 | 122 | 65 |
-| Permissive | 243 | 235 | 134 | 122 | 65 |
-| Strict | 255 | 255 | 147 | 140 | 66 |
+| Balanced/default | 246 | 242 | 137 | 125 | 69 |
+| Permissive | 246 | 238 | 137 | 125 | 69 |
+| Strict | 258 | 258 | 150 | 143 | 69 |
 
 `a^` is an intentionally impossible RE2 pattern. It is used when a broad raw
 text fallback would add noise or could not safely prove the same semantic
-effect. In balanced and permissive, ten CEL declarations are explicit `false`
+effect. In balanced and permissive, twelve CEL declarations are explicit `false`
 placeholders for rules that remain lexical-only in those profiles; strict
-enables tighter variants of those candidates.
+enables tighter variants of ten of those candidates. In every profile,
+`CMD-WRAPPED-DOWNLOAD-EXEC` and `CMD-SUBST-DOWNLOAD-EXEC` keep a `false`
+declaration because only their exact action proof can match them.
 
-The 239 enabled balanced/default rules are generated from
+The 242 enabled balanced/default rules are generated from
 `policies/guardrail/default/rules/*.yaml`:
 
 | Family | Rules | What it detects |
 | --- | ---: | --- |
-| `command` | 128 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
+| `command` | 131 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
 | `sensitive-path` | 26 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
 | `secret` | 23 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and high-confidence secret assignments |
 | `trust-exploit` | 22 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, and obfuscation signals |
@@ -84,22 +86,28 @@ sources, not `internal/gateway/rules_catalog_generated.go`.
 
 ### Download piped into a shell
 
-`CMD-PIPE-CURL` is off in the default and permissive profiles, so a command such
-as `curl ... | bash` is not recorded as a finding there. Many legitimate
-installers use that pattern. The strict profile enables the rule at `CRITICAL`.
-`wget ... | sh` (`CMD-PIPE-WGET`) is still reported in every profile, and so is
-PowerShell `iwr ... | iex` or `irm ... | iex` (`CMD-WIN-IWR-IEX`) when PowerShell
-runs it: a PowerShell command on Windows, or `pwsh -Command "..."` or
+The same parsed download-to-shell proof applies to `curl` and `wget`:
+
+| Profile | Severity | Action mode |
+| --- | --- | --- |
+| `default` | HIGH (off) | Allow; no finding |
+| `permissive` | HIGH (off) | Allow; no finding |
+| `strict` | CRITICAL | Alert; allow |
+
+Common installer pipelines remain quiet in the balanced profiles. The strict
+finding requires a parsed stdout-to-interpreter flow. A plain download or a
+pipeline into `tee` is not a match. A download piped through a privilege wrapper
+to a shell, or used as a shell command substitution, has a separate exact action proof.
+PowerShell `iwr ... | iex` or `irm ... | iex` is reported (`CMD-WIN-IWR-IEX`) when PowerShell runs it:
+a PowerShell command on Windows, or `pwsh -Command "..."` or
 `powershell -Command "..."` on any OS, with or without `-NoProfile` (a profile
 runs before the command, so it cannot stop it). Typed into bash or sh on Linux
 or macOS, `iwr` and `iex` are not
 commands, so there is no finding for them.
 
-To get the finding for `curl` pipelines, switch to the strict pack with
-`defenseclaw guardrail use-pack strict`, or add your own rule in a pack of your
-own. [Authoring CEL rules](/docs/policies/cel/authoring) shows the rule format,
-and [Rules and custom packs](/docs/policies/rules) shows how to
-activate it.
+To get alerts for generic installer pipelines, set `guardrail.rule_pack: strict`
+in `config.yaml` or run `defenseclaw guardrail use-pack strict`. The shipped
+default is `guardrail.rule_pack: default`; connector-specific choices take precedence.
 
 ## ActionFacts
 
@@ -255,6 +263,30 @@ mutated sequences cannot complete an enforcement proof.
 | Sensitive SQLite read → unbounded delete | Exact database/table identity and ordered destructive mutation | Enforcement-capable proof |
 | File read → email transfer | Exact artifact identity and addressed transfer | Alert-only |
 
+### Download → execute
+
+`chain.download_then_execute_same_artifact` alerts when an agent downloads a
+file with `curl` or `wget` and then runs that same file within eight calls and
+30 minutes. It never blocks, in any profile.
+
+- **Source.** A public IP address, or a host name with at least one dot that
+  is not under a local or internal suffix (`.local`, `.localhost`,
+  `.localdomain`, `.internal`, `.intranet`, `.lan`, `.home`, `.home.arpa`,
+  `.corp`, `.private`, `.test`, `.invalid`). DefenseClaw does not look the name up.
+- **Paths.** A relative path such as `-o runner` and a later `./runner` are
+  resolved against the call's working directory, so they join.
+- **Your mirrors.** Add your own domains to
+  [`guardrail.internal_domains`](/docs/reference/configuration). A download
+  from one of them, or from a name under one, does not start the chain.
+- **Downloads the user asked for.** When the user's prompt in this turn or one
+  of the two before it names the download host and asks to run, execute or
+  install (for example "download the installer from example.net and run
+  it", then "yes, go ahead"), the download does not start the chain. Asking
+  only to run the `curl` or `wget` command does not count. This
+  works with or without the LLM judge. DefenseClaw keeps only the host names
+  from those prompts, in memory, for at most 30 minutes. A prompt can only
+  silence this alert; it never allows a call.
+
 “Enforcement-capable” means the chain can set the enforcement-safe result bit;
 the connector must still be synchronous and block-capable, the same-rule proof
 gate must accept it, and the active profile (or the connector's
@@ -368,7 +400,7 @@ With the balanced (default) rule pack, action mode blocks CRITICAL findings; ins
 
 In action mode a plain read of the active user's `authorized_keys` is allowed: `cat`, `head`, `tail`, `less`, `ls`, `stat`, `grep`, `egrep`, `fgrep`, `wc` and `ssh-keygen -l` (list mode only), and on Windows `type`, `findstr` and `Select-String`, Git Bash included. A shell wrapper that only reports `$?` after the read does not change that. Any other use is a protected write and is blocked: a redirect, a pipe into a command that writes, an in-place flag, `ssh-keygen -R`, `tee`, or the file as a copy source. Reads through an interpreter, `diff | head` and a nested `sh -c` stay blocked. In observe mode the write raises the CRITICAL would-block alert and runs.
 
-A read of a private key under `~/.ssh` is blocked in action mode (`PATH-SSH-KEY`) whichever program prints it, not only `cat`. A key read also includes a stdin redirect (`xxd < ~/.ssh/id_ed25519`), a recursive read of the key directory (`grep -r`, `rg`, or `Get-ChildItem` piped into `Select-String`) and `python -c`, `node -e`, `perl -e` or `ruby -e` code that opens the key. A named file that is not a key (`grep -r Host ~/.ssh/config`), a `.pub` file and a listing are not key reads.
+A read of a private key under `~/.ssh` is blocked in action mode (`PATH-SSH-KEY`) whichever program prints it, not only `cat`. A key read also includes a stdin redirect (`xxd < ~/.ssh/id_ed25519`), a recursive read of the key directory (`grep -r`, `rg`, or `Get-ChildItem` piped into `Select-String`) and `python -c`, `node -e`, `perl -e` or `ruby -e` code that opens the key. A named file that is not a key (`grep -r Host ~/.ssh/config`), a `.pub` file and a listing are not key reads. Everyday key use never puts the key's content in front of the agent and is allowed by the default and strict packs: `ssh-keygen -y`, `ssh-add`, `ssh -i` and a signed `git commit -S`. Observe mode records the read as a would-block alert. On managed Linux with Tetragon, the kernel control `kernel.ssh_private_key_read` also refuses the open once the admin has acknowledged enforce ([Tetragon](/docs/enterprise/tetragon)).
 
 ### Instruction files
 

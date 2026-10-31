@@ -228,6 +228,11 @@ type Store struct {
 	// (WithSecureClientSchema).
 	secureClientSchema bool
 
+	// fieldClassSets: rows name their field class set (field_class_sets.go);
+	// fieldClassSetCount is the number of sets, for the table bound.
+	fieldClassSets     atomic.Bool
+	fieldClassSetCount atomic.Int64
+
 	// prepared holds the repeated hook-call inserts, prepared once the store
 	// is ready (prepareStatements).
 	prepared atomic.Pointer[map[string]*sql.Stmt]
@@ -237,6 +242,14 @@ type Store struct {
 	lifecycleMu sync.RWMutex
 	ready       atomic.Bool
 	closed      bool
+	// toolChainRootTablesReady is set once the root-scope chain tables exist
+	// (tool_chain_root.go); they are created on first use, not by a migration.
+	toolChainRootTablesReady atomic.Bool
+	// findingsRetentionInstant is set once scan_findings has its
+	// retention_timestamp_unix_nano column (the retention migration only adds
+	// it), so a hook's correlation read stops asking the schema for it on the
+	// store's one connection on every call (rel-1-0-6 GAP-0152).
+	findingsRetentionInstant atomic.Bool
 
 	// checkpointDB is a second connection used only for PASSIVE WAL
 	// checkpoints. It is opened on first use and closed with the store.
@@ -2156,6 +2169,9 @@ func (s *Store) Init() error {
 		return err
 	}
 	if err := s.keepSecureClientSparseKeyIndexes(); err != nil {
+		return err
+	}
+	if err := s.ensureFieldClassSets(); err != nil {
 		return err
 	}
 	if purgedHistory {
@@ -4093,6 +4109,18 @@ func (s *Store) SelectAlertAcknowledgementTargets(
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}
+	// A block that a rule finding explains is one alert: the finding row.
+	// `defenseclaw alerts` does not list the connector-hook row of the same
+	// request, so a selector must not match it either (GAP-0166).
+	query += ` AND NOT (
+			LOWER(COALESCE(event.action,'')) = 'connector-hook'
+			AND COALESCE(event.request_id,'') <> ''
+			AND EXISTS (
+				SELECT 1 FROM audit_events AS finding
+				WHERE finding.request_id = event.request_id
+				  AND finding.action = 'scan-finding'
+			)
+		)`
 	// An empty or "all" severity needs no extra predicate: eligibility already
 	// excludes clean lifecycle telemetry and accepts promoted INFO non-allow
 	// outcomes plus ERROR health records.
@@ -4756,6 +4784,32 @@ func (s *Store) GetTargetSnapshot(targetType, targetPath string) (*SnapshotRow, 
 		r.CapturedAt, _ = time.Parse("2006-01-02 15:04:05", ts)
 	}
 	return &r, nil
+}
+
+// ReleaseMemory has SQLite free the page cache of every connection the store
+// holds (PRAGMA shrink_memory). Each connection keeps up to cache_size of
+// pages in memory outside the Go heap; a hook flood fills them and nothing
+// gave them back while the gateway sat idle (rel-1-0-3 GAP-0244). The gateway
+// calls it once the calls stop; the next reads load their pages again.
+func (s *Store) ReleaseMemory(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.closed {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, "PRAGMA shrink_memory")
+	s.checkpointMu.Lock()
+	defer s.checkpointMu.Unlock()
+	for _, db := range []*sql.DB{s.checkpointDB, s.durableDB} {
+		if db != nil {
+			_, shrinkErr := db.ExecContext(ctx, "PRAGMA shrink_memory")
+			err = errors.Join(err, shrinkErr)
+		}
+	}
+	return err
 }
 
 func (s *Store) Close() error {

@@ -462,6 +462,26 @@ func projectPOSIXStatement(
 		out.markPartial(IssueDynamicWord)
 	}
 	projectPOSIXRedirects(stmt.Redirs, &command, out)
+	if command.Program == "exec" && command.ParentCommandID == 0 {
+		if len(command.Argv) != 1 || command.ControlFlowUncertain ||
+			command.PipelineID != 0 || command.Background {
+			clear(out.posixOpenFDs)
+		} else {
+			for _, redirect := range command.Redirects {
+				if redirect.FD < 3 {
+					continue
+				}
+				if !redirect.Expands && strings.HasPrefix(redirect.Target, "/dev/tcp/") {
+					if out.posixOpenFDs == nil {
+						out.posixOpenFDs = make(map[int64]string)
+					}
+					out.posixOpenFDs[redirect.FD] = redirect.Target
+				} else {
+					delete(out.posixOpenFDs, redirect.FD)
+				}
+			}
+		}
+	}
 	classifyPOSIXGitConfigEnvironmentOutput(out, &command, call.Assigns)
 	return command, true
 }
@@ -826,6 +846,16 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			}
 			target := projectPOSIXWord(redirection.Word)
 			targetFD, targetFDErr := strconv.ParseInt(target.Value, 10, 64)
+			if !target.Expands && targetFDErr == nil &&
+				target.Value == strconv.FormatInt(targetFD, 10) &&
+				command.ParentCommandID == 0 && !command.ControlFlowUncertain {
+				if path := out.posixOpenFDs[targetFD]; path != "" {
+					if !out.appendRedirects(command, RedirectFact{FD: fd, Access: access, Target: path}) {
+						return
+					}
+					continue
+				}
+			}
 			if redirection.Op == syntax.DplOut && !target.Expands &&
 				targetFDErr == nil &&
 				target.Value == strconv.FormatInt(targetFD, 10) &&

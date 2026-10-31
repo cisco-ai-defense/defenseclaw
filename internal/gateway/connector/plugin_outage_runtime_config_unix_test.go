@@ -91,7 +91,7 @@ func TestPerUserPluginOutageReadsOnlyItsRuntimesConfig(t *testing.T) {
 				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", plugin.harness, path)
+				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", withOpenCodeV2Fixture(t, plugin.harness), path)
 				cmd.Env = append(append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0"), tc.env(other)...)
 				out, err := cmd.Output()
 				if err != nil {

@@ -22,6 +22,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
 	"gopkg.in/yaml.v3"
@@ -39,8 +40,8 @@ var (
 )
 
 var (
-	observabilityV8AdditionalPropertyPattern = regexp.MustCompile(`additionalProperties ((?:'(?:\\'|[^'])+'(?:, )?)+) not allowed`)
-	observabilityV8QuotedPropertyPattern     = regexp.MustCompile(`'((?:\\'|[^'])+)'`)
+	observabilityV8AdditionalPropertyPattern = lazyregexp.New(`additionalProperties ((?:'(?:\\'|[^'])+'(?:, )?)+) not allowed`)
+	observabilityV8QuotedPropertyPattern     = lazyregexp.New(`'((?:\\'|[^'])+)'`)
 )
 
 type V8SchemaError struct {
@@ -483,7 +484,18 @@ func v8SchemaExpectation(validation *jsonschema.ValidationError, unknown string)
 		location = validation.KeywordLocation
 	}
 	properties := v8SchemaSiblingProperties(location)
+	if home, removed := v8RemovedTopLevelPathKeys[unknown]; removed && len(v8SchemaPointerSegments(validation.InstanceLocation)) == 0 {
+		return "a declared field name (config_version 8 moved this key)", home
+	}
 	return "a declared field name", v8SchemaNearestName(unknown, properties)
+}
+
+// v8RemovedTopLevelPathKeys are the 0.8.x (config_version 7) store paths that
+// config_version 8 moved under observability.local. The schema refuses them
+// at the top level; the refusal names where the path now goes.
+var v8RemovedTopLevelPathKeys = map[string]string{
+	"audit_db":        "observability.local.path",
+	"judge_bodies_db": "observability.local.judge_bodies_path",
 }
 
 // v8SchemaKeywordValue is the value of the schema keyword validation failed
@@ -621,8 +633,8 @@ func v8SchemaPatternWords(value any) string {
 }
 
 var (
-	v8SchemaAnyCaseWord = regexp.MustCompile(`^(?:\[[A-Za-z][A-Za-z]\])+$`)
-	v8SchemaPlainWord   = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	v8SchemaAnyCaseWord = lazyregexp.New(`^(?:\[[A-Za-z][A-Za-z]\])+$`)
+	v8SchemaPlainWord   = lazyregexp.New(`^[A-Za-z0-9_-]+$`)
 )
 
 // v8SchemaSizeExpectation words a length, item or key count limit: "a string

@@ -532,11 +532,11 @@ func TestHookOnlyHarnessContexts(t *testing.T) {
 		files    map[string]int // in-image path -> expected uid
 		install  string
 	}{
-		{harness.OpenCode, "opencode-hooks-v1", map[string]int{
+		{harness.OpenCode, "opencode-hooks-v2", map[string]int{
 			connector.OpenCodeSandboxManagedConfigPath: 0,
 			connector.OpenCodeSandboxPluginPath:        0,
 			harness.OpenCodeLauncherPath:               0,
-		}, "'opencode-ai@1.18.31'"},
+		}, "'@opencode/cli@2.1.4'"},
 		{harness.Copilot, "copilot-hooks-v2", map[string]int{
 			connector.CopilotSandboxPolicyPath:                 0,
 			connector.CopilotSandboxManagedSettingsPath:        0,

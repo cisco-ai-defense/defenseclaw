@@ -18,11 +18,11 @@ package enterprisehooks
 
 import (
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // standaloneNotGatedAgentFloors are the lowest agent versions the standalone
@@ -134,7 +134,7 @@ func kiroActionVersionRefusal(resolution connector.HookContractResolution) strin
 
 // kiroCLIVersionBannerRE matches the banner `kiro-cli --version` prints
 // (Python's _KIRO_CLI_VERSION_RE in connector_contracts.py).
-var kiroCLIVersionBannerRE = regexp.MustCompile(`(?i)^kiro-cli\s+v?[0-9]`)
+var kiroCLIVersionBannerRE = lazyregexp.New(`(?i)^kiro-cli\s+v?[0-9]`)
 
 // cachedSetupAgentVersion is the agent version an install or verify uses
 // when its caller named none: the one per-user discovery recorded in

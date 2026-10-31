@@ -18,10 +18,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // A gateway that fails to start during install or upgrade usually says why
@@ -100,7 +101,7 @@ func tailString(value string, limit int) string {
 
 // gatewayBannerRow matches the indented rows of the gateway's start banner
 // (runSidecar in internal/cli/sidecar.go).
-var gatewayBannerRow = regexp.MustCompile(`^ {2,}(Gateway|Auto-approve|Auth|API port|Watcher|Guardrail|Skill|Skill dirs|Model|API key|Judge):\s`)
+var gatewayBannerRow = lazyregexp.New(`^ {2,}(Gateway|Auto-approve|Auth|API port|Watcher|Guardrail|Skill|Skill dirs|Model|API key|Judge):\s`)
 
 // isGatewayBannerLine reports whether a line of the gateway's output belongs
 // to its start banner: the box and its settings rows. The banner says nothing

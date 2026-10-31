@@ -73,7 +73,7 @@ exec @MAKE@ "$@"
 
 // WorkloadMakeStep is the image step that lets the workload's GNU make
 // start its recipes in a sandbox: it builds makeSpawnSource and installs
-// MakeWrapper. Like WorkloadPythonStep it is a compatibility fix, not a
+// MakeWrapper. It is a compatibility fix, not a
 // control. A base image without make or a C compiler, or with a make of its
 // own at MakeWrapper, builds on without it.
 func WorkloadMakeStep() InstallStep {

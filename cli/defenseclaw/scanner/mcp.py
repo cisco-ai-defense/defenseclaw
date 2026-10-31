@@ -33,6 +33,7 @@ import json
 import logging
 import ntpath
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -72,12 +73,90 @@ from defenseclaw.scanner._llm_env import (
     inject_llm_env,
     litellm_model,
     llm_analyzer_ready,
+    model_refuses_temperature,
 )
 
 if TYPE_CHECKING:
     pass
 
 _T = TypeVar("_T")
+
+# MCP Scanner 4.8 lists a custom analyzer that ran by its name, but folds a
+# name equal to a built-in analyzer's ("YARA" == AnalyzerEnum.YARA) into the
+# built-in entry, so the GAP-0209 check could not tell that the DefenseClaw
+# rules ran. Each pack gets its own name; findings keep the "YARA" label
+# (``mcp-scanner/YARA``) that policies and telemetry use.
+_BUNDLED_YARA_ANALYZER_NAME = "DefenseClaw YARA"
+_EXTRA_YARA_ANALYZER_NAME = "DefenseClaw YARA extra"
+_DEFENSECLAW_YARA_ANALYZER_NAMES = (_BUNDLED_YARA_ANALYZER_NAME, _EXTRA_YARA_ANALYZER_NAME)
+
+
+def _named_analyzer(analyzer: object, name: str) -> object:
+    analyzer.name = name
+    return analyzer
+
+
+# MCP Scanner 4.8.7 retries the legacy initialize() handshake after a failed
+# server/discover (protocol 2026-07-28) over HTTP only for the exact
+# "Bad Request: Missing session ID" rejection. MCP TypeScript SDK servers that
+# predate 2026-07-28 (for example mcp.deepwiki.com) reject it with
+# -32600 "Bad Request: Unsupported protocol version: 2026-07-28 ..." and still
+# accept initialize(), so the scan failed where 4.3.0 scanned them (GAP-0020).
+# Accept that one rejection too, for legacy HTTP only; every other error
+# keeps its upstream meaning. Remove once a pinned scanner release includes
+# cisco-ai-defense/mcp-scanner#296.
+_LEGACY_HTTP_VERSION_REJECTION = "Bad Request: Unsupported protocol version: "
+
+
+def _accept_legacy_http_version_rejection(scanner_cls: type) -> None:
+    original = getattr(scanner_cls, "_should_fallback_to_initialize", None)
+    if not callable(original) or getattr(original, "_defenseclaw_legacy_http_version", False):
+        return
+
+    def should_fallback(error: Exception, *, legacy_stdio: bool = False, legacy_http: bool = False) -> bool:
+        if original(error, legacy_stdio=legacy_stdio, legacy_http=legacy_http):
+            return True
+        rpc_error = getattr(error, "error", None)
+        code = getattr(error, "code", None)
+        if code is None:
+            code = getattr(rpc_error, "code", None)
+        message = str(getattr(rpc_error, "message", None) or error)
+        return (
+            legacy_http
+            and code == -32600
+            and getattr(rpc_error, "data", None) in (None, "")
+            and message.startswith(_LEGACY_HTTP_VERSION_REJECTION)
+        )
+
+    should_fallback._defenseclaw_legacy_http_version = True  # type: ignore[attr-defined]
+    scanner_cls._should_fallback_to_initialize = staticmethod(should_fallback)
+
+
+# MCP Scanner 4.8.7 sets temperature=1 for every "gpt-5" model
+# (mcpscanner.utils.llm_request_params.apply_model_constraints, used by the
+# LLM and behavioral analyzers). LiteLLM's drop_params keeps a 1, and Bedrock
+# refuses the field for its OpenAI models ("This model doesn't support the
+# temperature field"), so with GPT-5.6 Luna the LLM analyzer failed with
+# BadRequestError, where 4.3.0 sent 0.1, which LiteLLM dropped (GAP-0112).
+# Leave temperature out for the models that take only their default, the
+# rule the gateway judge uses; 1 is their default, so the request does not
+# otherwise change. Remove once a pinned scanner release omits it upstream.
+def _omit_refused_temperature() -> None:
+    try:
+        from mcpscanner.utils import llm_request_params
+    except ImportError:
+        return
+    original = getattr(llm_request_params, "apply_model_constraints", None)
+    if not callable(original) or getattr(original, "_defenseclaw_omit_temperature", False):
+        return
+
+    def apply_model_constraints(model: str, params: dict) -> None:
+        original(model, params)
+        if model_refuses_temperature(model):
+            params.pop("temperature", None)
+
+    apply_model_constraints._defenseclaw_omit_temperature = True  # type: ignore[attr-defined]
+    llm_request_params.apply_model_constraints = apply_model_constraints
 
 
 def _supplemental_yara_analyzers(yara_analyzer_cls: type, yara_cfg: MCPScannerYARAConfig | None = None) -> list[object]:
@@ -105,7 +184,7 @@ def _bundled_yara_analyzers(yara_analyzer_cls: type) -> list[object]:
             "repair the DefenseClaw installation"
         )
     try:
-        return [yara_analyzer_cls(rules_dir=rules_dir)]
+        return [_named_analyzer(yara_analyzer_cls(rules_dir=rules_dir), _BUNDLED_YARA_ANALYZER_NAME)]
     except Exception as exc:
         raise MCPScanIncompleteError(
             "the bundled DefenseClaw MCP YARA rules could not be loaded, so the MCP scan has no verdict; "
@@ -120,7 +199,7 @@ def _extra_yara_analyzer(yara_analyzer_cls: type, refs: list[AssetFileRef]) -> o
             data = settings.verified_asset_bytes(ref.path, ref.digest)
             with open(os.path.join(tmp, f"extra-{index}.yar"), "wb") as fh:
                 fh.write(data)
-        return yara_analyzer_cls(rules_dir=tmp)
+        return _named_analyzer(yara_analyzer_cls(rules_dir=tmp), _EXTRA_YARA_ANALYZER_NAME)
 
 
 # env vars whose names contain any of these
@@ -330,46 +409,45 @@ class _StdioLaunchPlan:
 
 
 class _ContainedWindowsProcess:
-    """Delegate an AnyIO/MCP process while retaining a race-free Job Object."""
+    """Delegate an AnyIO/MCP process while retaining a race-free Job Object.
+
+    The MCP SDK 2.x stdio client never enters the process as a context
+    manager. It stops the server itself (close stdin, wait, kill the tree),
+    then calls ``close_process_job`` and closes the subprocess transport,
+    which it reaches as ``process._process._transport``. The wrapped process
+    is kept as ``_inner`` so that lookup falls through ``__getattr__`` to the
+    real process; ``close_job`` is what the scoped ``close_process_job``
+    calls.
+    """
 
     def __init__(self, process: object, job: object) -> None:
-        self._process = process
+        self._inner = process
         self._job = job
 
     def __getattr__(self, name: str) -> object:
-        return getattr(self._process, name)
+        return getattr(self._inner, name)
 
     @property
     def pid(self) -> int:
-        return int(getattr(self._process, "pid"))
+        return int(getattr(self._inner, "pid"))
 
-    async def __aenter__(self) -> _ContainedWindowsProcess:
-        enter = getattr(self._process, "__aenter__")
-        await enter()
-        _trace_windows_stdio_lifecycle("process-context-entered", pid=self.pid)
-        return self
-
-    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-        try:
-            exit_process = getattr(self._process, "__aexit__")
-            await exit_process(exc_type, exc_value, traceback)
-        finally:
-            _trace_windows_stdio_lifecycle(
-                "process-context-exited",
-                pid=self.pid,
-                returncode=getattr(self._process, "returncode", None),
-            )
-            self._job.close()
-            _trace_windows_stdio_lifecycle("job-containment-closed", pid=self.pid)
+    def close_job(self) -> None:
+        """Close the Job Object; KILL_ON_JOB_CLOSE ends surviving members."""
+        self._job.close()
+        _trace_windows_stdio_lifecycle(
+            "job-containment-closed",
+            pid=self.pid,
+            returncode=getattr(self._inner, "returncode", None),
+        )
 
     async def wait(self):
-        return await self._process.wait()
+        return await self._inner.wait()
 
     def terminate(self) -> None:
-        self._process.terminate()
+        self._inner.terminate()
 
     def kill(self) -> None:
-        self._process.kill()
+        self._inner.kill()
 
     async def terminate_tree(self, timeout_seconds: float) -> None:
         _trace_windows_stdio_lifecycle("job-cleanup-started", pid=self.pid)
@@ -381,7 +459,7 @@ class _ContainedWindowsProcess:
         _trace_windows_stdio_lifecycle(
             "job-cleanup-completed",
             pid=self.pid,
-            returncode=getattr(self._process, "returncode", None),
+            returncode=getattr(self._inner, "returncode", None),
         )
 
 
@@ -394,7 +472,8 @@ async def _create_contained_windows_process(
 ) -> _ContainedWindowsProcess:
     """Create suspended, assign to a Job Object, then resume.
 
-    MCP 1.26 creates the process running and assigns its Job Object afterward.
+    The MCP SDK (1.26 through 2.3) creates the process running and assigns
+    its Job Object afterward.
     Fast package launchers can spawn outside the job in that interval. This
     focused factory reuses DefenseClaw's established suspended-start
     ``WindowsJob`` owner, closing the launch-to-assignment race.
@@ -448,7 +527,8 @@ async def _terminate_contained_windows_process(
         return
     from mcp.os.win32.utilities import terminate_windows_process_tree
 
-    await terminate_windows_process_tree(process, timeout_seconds)
+    # MCP SDK 2.x: a hard Job Object kill with no timeout argument.
+    await terminate_windows_process_tree(process)
 
 
 @contextmanager
@@ -469,13 +549,26 @@ def _contained_mcp_windows_process_factory(started: list[object] | None = None) 
     with _MCP_WINDOWS_PROCESS_FACTORY_LOCK:
         original_create = mcp_stdio._create_platform_compatible_process
         original_terminate = mcp_stdio._terminate_process_tree
+        original_close_job = mcp_stdio.close_process_job
+
+        def close_job(process: object) -> None:
+            # The SDK's own job table does not know DefenseClaw's job, so its
+            # close_process_job would leave the job (and any server child that
+            # outlived a graceful exit) open until this process exits.
+            if isinstance(process, _ContainedWindowsProcess):
+                process.close_job()
+                return
+            original_close_job(process)
+
         mcp_stdio._create_platform_compatible_process = create
         mcp_stdio._terminate_process_tree = _terminate_contained_windows_process
+        mcp_stdio.close_process_job = close_job
         try:
             yield
         finally:
             mcp_stdio._create_platform_compatible_process = original_create
             mcp_stdio._terminate_process_tree = original_terminate
+            mcp_stdio.close_process_job = original_close_job
 
 
 def _trusted_codex_runtime_roots() -> tuple[str, ...]:
@@ -1110,7 +1203,7 @@ async def _scan_windows_stdio_tools(
 
     selected = analyzers
     if selected is None:
-        # Preserve scanner 4.3's stdio default exactly. Its remote
+        # Preserve the scanner's stdio default exactly (4.3 through 4.8). Its remote
         # ``DEFAULT_ANALYZERS`` omits LLM, while ``scan_stdio_server_tools``
         # explicitly defaults to API + YARA + LLM.
         from mcpscanner.core.models import AnalyzerEnum
@@ -1465,6 +1558,7 @@ class MCPScannerWrapper:
         if not is_local:
             self._inject_env()
         drop_unsupported_litellm_params()
+        _omit_refused_temperature()
 
         # ``llm_model`` must be LiteLLM-shaped (``provider/model``) —
         # the mcp-scanner SDK passes it straight through to LiteLLM.
@@ -1514,6 +1608,7 @@ class MCPScannerWrapper:
                 )
             else:
                 supplemental_analyzers = _supplemental_yara_analyzers(YaraAnalyzer, getattr(self.config, "yara", None))
+        _accept_legacy_http_version_rejection(MCPSDKScanner)
         scanner = MCPSDKScanner(
             sdk_config,
             custom_analyzers=supplemental_analyzers,
@@ -1659,7 +1754,7 @@ class MCPScannerWrapper:
             _raise_if_analysis_incomplete(entry.name, errors, results, scanner)
             llm_errors = [
                 m for (name, m) in errors
-                if _is_llm_backend_error(name, m, self._llm) or str(m or "").lstrip().startswith("LLM analysis failed")
+                if self._is_llm_error(name, m)
             ]
             if llm_errors:
                 self._warn_llm_skipped(entry.name, llm_errors[0])
@@ -1710,8 +1805,8 @@ class MCPScannerWrapper:
             # connection failure — the stdio server we spawned — is fatal.
             # Pre-fix this conflated the two and turned an unreachable LLM
             # into a misleading "failed to connect to local server".
-            llm_errors = [m for (name, m) in errors if _is_llm_backend_error(name, m, self._llm)]
-            other_errors = [m for (name, m) in errors if not _is_llm_backend_error(name, m, self._llm)]
+            llm_errors = [m for (name, m) in errors if self._is_llm_error(name, m)]
+            other_errors = [m for (name, m) in errors if not self._is_llm_error(name, m)]
 
             connection_errors = [
                 e for e in other_errors
@@ -1756,19 +1851,24 @@ class MCPScannerWrapper:
         with _capture_sdk_error_logs(errors):
             findings = self._scan_remote_uncaptured(scanner, target, analyzers)
         _raise_if_analysis_incomplete(target, errors, [], scanner)
-        llm_errors = [m for (name, m) in errors if _is_llm_backend_error(name, m, self._llm)]
+        llm_errors = [m for (name, m) in errors if self._is_llm_error(name, m)]
         if llm_errors:
             self._warn_llm_skipped(target, llm_errors[0])
         return findings
+
+    def _is_llm_error(self, logger_name: str, message: str) -> bool:
+        """An LLM-lane ERROR log: a backend error or the SDK's LLM failure line."""
+        return _is_llm_backend_error(logger_name, message, self._llm) or _is_llm_failure_log(message)
 
     def _warn_llm_skipped(self, target: str, error: str) -> None:
         """Print one bounded skip line and mark the scan result partial."""
         detail = " ".join(str(error).split())
         if len(detail) > 200:
             detail = detail[:197] + "..."
-        self._llm_skipped = f"LLM analysis skipped (backend unreachable): {detail}"
+        cause = _llm_failure_cause(detail)
+        self._llm_skipped = f"LLM analysis skipped ({cause}): {detail}"
         print(
-            f"warning: LLM skipped (backend unreachable) while scanning "
+            f"warning: LLM skipped ({cause}) while scanning "
             f"{target!r}: {detail}",
             file=sys.stderr,
         )
@@ -1877,6 +1977,8 @@ class MCPScannerWrapper:
                     description = details.get("evidence", "") or details.get("reason", "")
 
             analyzer = getattr(sf, "analyzer", "")
+            if analyzer in _DEFENSECLAW_YARA_ANALYZER_NAMES:
+                analyzer = "YARA"
             scanner_name = f"mcp-scanner/{analyzer}" if analyzer else "mcp-scanner"
 
             findings.append(Finding(
@@ -1908,19 +2010,31 @@ class MCPScanIncompleteError(RuntimeError):
 # on: that tool then reports no findings from it, which read as clean. The
 # LLM analyzer is the exception the scan already degrades on with a warning
 # (``_warn_llm_skipped``). The labels never copy the logged text, which can
-# carry server-controlled tool names.
+# carry server-controlled tool names. Prefixes match case-insensitively:
+# 4.3 logs "API/YARA/Readiness analysis failed" and 'Custom analyzer "x"
+# failed'; 4.8 logs "<enum value or custom name> analysis failed", for
+# example "yara analysis failed" or "DefenseClaw YARA analysis failed".
 _ANALYZER_FAILURE_LOGS = (
-    ("API analysis failed", "the Cisco AI Defense API analyzer"),
-    ("YARA analysis failed", "the YARA analyzer"),
-    ("Readiness analysis failed", "the readiness analyzer"),
-    ("Custom analyzer ", "the DefenseClaw YARA rules"),
+    ("api analysis failed", "the Cisco AI Defense API analyzer"),
+    ("yara analysis failed", "the YARA analyzer"),
+    ("readiness analysis failed", "the readiness analyzer"),
+    ("custom analyzer ", "the DefenseClaw YARA rules"),
+    *(
+        (f"{name.casefold()} analysis failed", "the DefenseClaw YARA rules")
+        for name in _DEFENSECLAW_YARA_ANALYZER_NAMES
+    ),
 )
+_LLM_FAILURE_LOG = "llm analysis failed"
+
+
+def _is_llm_failure_log(message: object) -> bool:
+    return str(message or "").lstrip().casefold().startswith(_LLM_FAILURE_LOG)
 
 
 def _analysis_gap(errors: list[tuple[str, str]], results: list[object], scanner: object) -> str:
     """Why the analyzers did not inspect every tool, or "" when they did."""
     for _logger, message in errors:
-        text = str(message or "").lstrip()
+        text = str(message or "").lstrip().casefold()
         for prefix, label in _ANALYZER_FAILURE_LOGS:
             if text.startswith(prefix):
                 return f"{label} failed on a tool of the server"
@@ -1998,6 +2112,29 @@ _LLM_ERROR_MESSAGE_SIGNALS = (
     "ollama", "vllm", "lm studio", "lmstudio",
     "apiconnectionerror", "api_base", "chat/completions", "11434",
 )
+
+
+# The SDK logs only the LiteLLM exception class ("LLM API final error:
+# BadRequestError"), never the provider text, which can carry credentials or
+# scanned input. The class still tells a refused request from an unreachable
+# backend; before, every failure read "backend unreachable" (GAP-0112).
+_LLM_FAILURE_CAUSES = (
+    (("BadRequestError", "UnsupportedParamsError", "UnprocessableEntityError",
+      "ContextWindowExceededError", "ContentPolicyViolationError"),
+     "the model refused the request; check llm.model"),
+    (("AuthenticationError", "PermissionDeniedError"), "the LLM provider refused the credentials"),
+    (("NotFoundError",), "the LLM model was not found; check llm.model"),
+    (("RateLimitError",), "the LLM provider is rate limiting"),
+)
+
+
+def _llm_failure_cause(detail: str) -> str:
+    """A short cause for an LLM-lane failure line, from its exception class."""
+    names = set(re.findall(r"[A-Za-z]+(?:Error|Exception)", detail))
+    for classes, cause in _LLM_FAILURE_CAUSES:
+        if names.intersection(classes):
+            return cause
+    return "backend unreachable"
 
 
 def _is_llm_backend_error(logger_name: str, message: str, llm: LLMConfig) -> bool:

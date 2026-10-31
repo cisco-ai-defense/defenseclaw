@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -45,6 +46,11 @@ const (
 	// BundlesDirName is the store directory under the configuration
 	// directory.
 	BundlesDirName = "bundles"
+	// StoreDirMode is the mode of the store directory on Linux and macOS:
+	// other accounts can open the public receipt.json and receipt-events/
+	// by name but cannot list the version, staging or inbox names
+	// (GAP-0082). Windows uses the store ACL instead.
+	StoreDirMode = 0o711
 	// StateFileName is the store state in the lifecycle directory.
 	StateFileName = "bundle-state.json"
 	// ReceiptsDirName holds one receipt per bundle in the lifecycle
@@ -97,7 +103,7 @@ const (
 )
 
 var (
-	receiptIDPattern  = regexp.MustCompile(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	receiptIDPattern  = lazyregexp.New(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
 	versionDirPattern = regexp.MustCompile(`^v[1-9][0-9]{0,15}-[0-9A-HJKMNP-TV-Z]{8}(?:-[br]-[0-7][0-9A-HJKMNP-TV-Z]{25})?$`)
 )
 
@@ -634,7 +640,7 @@ func (s *Store) PublicReceiptEventsDir() string {
 // quote loader detail), the manifest hash and the version directory.
 func (s *Store) writePublicReceipt(r *Receipt) error {
 	out := enterprisestatus.PublicReceipt{
-		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID, DeliveryID: r.DeliveryID,
+		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID, DeliveryID: r.DeliveryID, Seq: r.Sequence,
 		BundleID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID, Principal: r.Principal, Actor: r.Actor,
 		ChangeSummary: r.ChangeSummary, RollbackOf: r.RollbackOf, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, EnforcingDigest: r.EnforcingDigest,
@@ -851,7 +857,7 @@ func (s *Store) publishReceipt(out enterprisestatus.PublicReceipt) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.BundlesDir, 0o755); err != nil {
+	if err := os.MkdirAll(s.BundlesDir, StoreDirMode); err != nil {
 		return err
 	}
 	if err := configwrite.WriteFileDurable(s.PublicReceiptPath(), append(data, '\n'), 0o644); err != nil {
@@ -911,8 +917,13 @@ func GenerationOptions(r *Receipt) (opt configwrite.Options, ok bool) {
 	if r == nil || r.Principal == "" {
 		return configwrite.Options{}, false
 	}
+	ref := configwrite.BundleRef{ID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID}
+	if receiptIDPattern.MatchString(r.ReceiptID) {
+		// Promote names the version directory of a receipt this way.
+		ref.Dir = VersionDirNameForReceipt(r.Version, r.BundleID, r.ReceiptID)
+	}
 	return configwrite.Options{Actor: r.Principal, LocalActor: configwrite.CurrentOSActor(), Reason: configwrite.BundleReason(r.BundleID, r.Version, r.ChangeSummary),
-		Lifecycle: true, Bundle: configwrite.BundleRef{ID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID}}, true
+		Lifecycle: true, Bundle: ref}, true
 }
 
 // Receive starts the receipt of a bundle in state received. bundleID and
@@ -1099,7 +1110,7 @@ func (s *Store) Stage(r *Receipt, b *Bundle) (string, error) {
 	if err := removeTree(dir); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(s.BundlesDir, 0o755); err != nil {
+	if err := os.MkdirAll(s.BundlesDir, StoreDirMode); err != nil {
 		return "", err
 	}
 	if s.EnsureStageDirectory != nil {

@@ -14,7 +14,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -984,7 +984,7 @@ func normalizeSeverity(s string) string {
 
 // v8RecordActionPattern is the action shape the audit-event schema accepts
 // for v8 runtime records.
-var v8RecordActionPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+var v8RecordActionPattern = lazyregexp.New(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 // isV8RecordAction reports whether a row is a v8 runtime record whose action
 // the export keeps as is. A v8 record (event_name set and not a

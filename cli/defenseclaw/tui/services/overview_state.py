@@ -25,6 +25,12 @@ from defenseclaw.connector_paths import (
     hermes_home,
 )
 from defenseclaw.connector_paths import normalize as normalize_connector
+from defenseclaw.enforce.admission_overrides import (  # re-exported for the TUI
+    admission_action_overrides as admission_action_overrides,
+)
+from defenseclaw.enforce.admission_overrides import (
+    format_scanner_overrides_summary as format_scanner_overrides_summary,
+)
 from defenseclaw.observability.custody_status import (
     NativeDeliveryStatus,
     NativeDeliverySummary,
@@ -1710,12 +1716,33 @@ class OverviewPanelModel:
         others = [f"{counts[mode]} {mode}" for mode in sorted(counts) if mode != main]
         return ", ".join([main, *others])
 
+    def judge_fallbacks(self) -> int:
+        """Hook checks the rules decided without a judge verdict (0 when unknown)."""
+
+        details = self.health.guardrail.details if self.health else {}
+        fallbacks = details.get("judge_fallbacks", 0)
+        if isinstance(fallbacks, int) and not isinstance(fallbacks, bool) and fallbacks > 0:
+            return fallbacks
+        return 0
+
     def guardrail_detail(self) -> str:
         if self.cfg is None or not self.cfg.guardrail_enabled:
             return ""
         parts: list[str] = []
         if mode := self.guardrail_mode_label():
             parts.append(mode)
+        # The judge's state comes right after the mode: in a narrow SERVICES
+        # column the row wraps, and a trailing count was cut (GAP-0180).
+        # Recent judge calls that failed (gateway judge_* details, GAP-1288).
+        details = self.health.guardrail.details if self.health else {}
+        judge_state = str(details.get("judge_state") or "")
+        if judge_state in ("failing", "degraded"):
+            failed = details.get("judge_failed_calls", 0)
+            total = details.get("judge_recent_calls", 0)
+            parts.append(f"judge {judge_state}: {failed}/{total} calls failed")
+        # Hook checks the rules decided without a judge verdict (#1395).
+        if fallbacks := self.judge_fallbacks():
+            parts.append(f"judge fallbacks: {fallbacks}")
         if self.cfg.guardrail_port and self.cfg.uses_guardrail_proxy_port():
             parts.append(f"port {self.cfg.guardrail_port}")
         roster = [name for name, _ in self.cfg.connector_modes if name and not self.cfg.connector_is_disabled(name)]
@@ -1726,13 +1753,6 @@ class OverviewPanelModel:
             parts.append(f"{pack} pack")
         if self.cfg.guardrail_judge_enabled and self.cfg.guardrail_judge_model:
             parts.append(f"judge:{self.cfg.guardrail_judge_model}")
-        # Recent judge calls that failed (gateway judge_* details, GAP-1288).
-        details = self.health.guardrail.details if self.health else {}
-        judge_state = str(details.get("judge_state") or "")
-        if judge_state in ("failing", "degraded"):
-            failed = details.get("judge_failed_calls", 0)
-            total = details.get("judge_recent_calls", 0)
-            parts.append(f"judge {judge_state}: {failed}/{total} calls failed")
         return ", ".join(parts)
 
     def ai_discovery_detail(self) -> str:
@@ -1860,7 +1880,7 @@ class OverviewPanelModel:
             health_state, health_failure = retention_health_from_gateway(
                 {"details": self.health.telemetry.details} if self.health is not None else None
             )
-        retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+        retention = status.retention_label
         return ObservabilityStorageStatus(
             retention=retention,
             judge_capture="enabled" if status.judge_bodies_enabled else "disabled",
@@ -2219,86 +2239,6 @@ def active_connector_name(health: HealthSnapshot | None, mode: str) -> str:
     if mode.strip():
         return mode.strip()
     return ""
-
-
-def admission_action_overrides(
-    config: object | None,
-) -> tuple[tuple[str, str, str, str], ...]:
-    """Effective explicit admission actions that differ from built-in policy.
-
-    Per-type actions win over scanner-derived skill actions, which win over
-    admission.defaults.actions. Only effective differences are shown to the
-    Overview and status views.
-    """
-
-    admission = getattr(config, "admission", None)
-    if admission is None:
-        return ()
-    try:
-        from defenseclaw.enforce.admission import (  # noqa: PLC0415
-            _builtin_admission,
-            _compile_action_map,
-            _derived_scanner_gate,
-        )
-    except Exception:  # noqa: BLE001 - the override summary is purely informational.
-        return ()
-    defaults = _compile_action_map(getattr(getattr(admission, "defaults", None), "actions", None))
-    flat: list[tuple[str, str, str, str]] = []
-    for target_type in ("skill", "mcp", "plugin"):
-        own = _compile_action_map(getattr(getattr(admission, target_type, None), "actions", None))
-        derived = {}
-        if target_type == "skill":
-            scanner = getattr(getattr(config, "scanners", None), "skill_scanner", None)
-            derived = _derived_scanner_gate(
-                getattr(scanner, "fail_on_severity", ""), getattr(scanner, "review_queue_min", "")
-            )
-        builtin = _builtin_admission(target_type).actions
-        for severity in dict.fromkeys((*own, *defaults)):
-            if severity in own:
-                compiled = own[severity]
-            elif severity in derived:
-                continue
-            else:
-                compiled = defaults[severity]
-            if compiled == builtin.get(severity):
-                continue
-            action, allowed = compiled
-            for surface in ("install", "file", "runtime"):
-                flat.append((target_type, severity, surface, str(getattr(action, surface))))
-            if allowed:
-                flat.append((target_type, severity, "verdict", "allow"))
-    return tuple(flat)
-
-
-def format_scanner_overrides_summary(
-    overrides: tuple[tuple[str, str, str, str], ...],
-) -> str:
-    """One-line summary of active-policy scanner action overrides (N3).
-
-    ``overrides`` is the flattened ``(asset_type, severity, surface, action)``
-    view of :func:`admission_action_overrides`. Returns ``""`` when empty, so the Overview / ``defenseclaw status`` render nothing for the
-    common default config. Groups by scanner then severity, e.g.::
-
-        secrets: HIGH file=block, install=warn | pii: MEDIUM runtime=allow
-
-    Malformed entries (not 4 fields, or missing scanner/surface) are skipped so
-    a bad adapter payload degrades to a partial line rather than raising.
-    """
-    grouped: dict[str, dict[str, list[str]]] = {}
-    for entry in overrides:
-        if len(entry) != 4:
-            continue
-        scanner, severity, surface, action = (str(part).strip() for part in entry)
-        if not scanner or not surface:
-            continue
-        grouped.setdefault(scanner, {}).setdefault(severity.upper(), []).append(f"{surface}={action}")
-    parts: list[str] = []
-    for scanner, sevs in grouped.items():
-        sev_parts = [
-            f"{severity + ' ' if severity else ''}{', '.join(surfaces)}" for severity, surfaces in sevs.items()
-        ]
-        parts.append(f"{scanner}: {'; '.join(sev_parts)}")
-    return " | ".join(parts)
 
 
 def sort_ai_discovery_signals_for_overview(signals: tuple[AIUsageSignal, ...]) -> tuple[AIUsageSignal, ...]:

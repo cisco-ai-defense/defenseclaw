@@ -15,12 +15,13 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/secretshape"
 )
 
-var ssnListCandidatePattern = regexp.MustCompile(`\b(?:\d{3}-\d{2}-\d{4}|\d{9})\b`)
+var ssnListCandidatePattern = lazyregexp.New(`\b(?:\d{3}-\d{2}-\d{4}|\d{9})\b`)
 
-var literalHTTPIPv4Pattern = regexp.MustCompile(`(?i)https?://((?:[0-9]{1,3}\.){3}[0-9]{1,3})(?::[0-9]+)?/`)
+var literalHTTPIPv4Pattern = lazyregexp.New(`(?i)https?://((?:[0-9]{1,3}\.){3}[0-9]{1,3})(?::[0-9]+)?/`)
 
 var nonPublicLiteralIPv4Blocks = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
@@ -42,9 +43,9 @@ var nonPublicLiteralIPv4Blocks = []netip.Prefix{
 }
 
 var (
-	nodeEvalInvocationPattern    = regexp.MustCompile(`(?i)\bnode(?:js)?\s+(?:-e|--eval)(?:\s+|=)`)
-	childProcessExecSinkPattern  = regexp.MustCompile(`(?is)(?:\brequire\s*\(\s*["'](?:node:)?child_process["']\s*\)|\bchild_process)\s*\.\s*exec(?:Sync)?\s*\(\s*$`)
-	childProcessSpawnSinkPattern = regexp.MustCompile(`(?is)(?:\brequire\s*\(\s*["'](?:node:)?child_process["']\s*\)|\bchild_process)\s*\.\s*spawn(?:Sync)?\s*\(\s*["'](?:/bin/)?(?:ba|da|z|k)?sh["']\s*,\s*\[\s*["']-c["']\s*,\s*$`)
+	nodeEvalInvocationPattern    = lazyregexp.New(`(?i)\bnode(?:js)?\s+(?:-e|--eval)(?:\s+|=)`)
+	childProcessExecSinkPattern  = lazyregexp.New(`(?is)(?:\brequire\s*\(\s*["'](?:node:)?child_process["']\s*\)|\bchild_process)\s*\.\s*exec(?:Sync)?\s*\(\s*$`)
+	childProcessSpawnSinkPattern = lazyregexp.New(`(?is)(?:\brequire\s*\(\s*["'](?:node:)?child_process["']\s*\)|\bchild_process)\s*\.\s*spawn(?:Sync)?\s*\(\s*["'](?:/bin/)?(?:ba|da|z|k)?sh["']\s*,\s*\[\s*["']-c["']\s*,\s*$`)
 )
 
 var windowsRegistryPersistencePatterns = []*regexp.Regexp{
@@ -615,7 +616,7 @@ func wordHoldsRemoteURL(word string) bool {
 
 // isoDatePlus is "+YYYY-MM-DD": a date after a plus sign (a diff's added
 // line, a UTC offset), not a country code.
-var isoDatePlus = regexp.MustCompile(`^\+\d{4}-\d{2}-\d{2}`)
+var isoDatePlus = lazyregexp.New(`^\+\d{4}-\d{2}-\d{2}`)
 
 // credibleE164Context rejects the two plus signs that are not a phone
 // number's (GAP-1284): a date right after the plus, and the "+" that starts

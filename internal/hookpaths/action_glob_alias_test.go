@@ -15,9 +15,6 @@ import (
 // through directory aliases, before it is compared with the protected
 // files. project/keydir is a link to ~/.ssh; project/sub/inner is another.
 func TestR104GlobParentThroughDirectoryAlias(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("native POSIX fixture")
-	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	ssh := filepath.Join(home, ".ssh")
@@ -54,7 +51,7 @@ func TestR104GlobParentThroughDirectoryAlias(t *testing.T) {
 		`cp payload keyd*`,
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 				t.Fatalf("decision = %q, want protected-target", got)
 			}
 		})
@@ -69,7 +66,7 @@ func TestR104GlobParentThroughDirectoryAlias(t *testing.T) {
 		`cd build && cp payload ../b*/notes.txt`,
 	} {
 		t.Run("allow/"+command, func(t *testing.T) {
-			if got := ActionCommandDecision(command, cwd, home); got != "" {
+			if got := posixShellDecision(command, cwd, home); got != "" {
 				t.Fatalf("decision = %q, want allow", got)
 			}
 		})

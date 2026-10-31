@@ -1,9 +1,9 @@
-# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:08b71155b713
+# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:720bcdb296c7
 # Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-observe-03acb3aa
+  name: defenseclaw-observe-4d98cb54
 spec:
   lsmhooks:
     - hook: file_open
@@ -103,10 +103,14 @@ spec:
                 - /home/alice/.bash_profile
                 - /home/alice/.bashrc
                 - /home/alice/.profile
+                - /home/alice/.ssh/authorized_keys
+                - /home/alice/.ssh/authorized_keys2
                 - /home/alice/.zshrc
                 - /home/bob/.bash_profile
                 - /home/bob/.bashrc
                 - /home/bob/.profile
+                - /home/bob/.ssh/authorized_keys
+                - /home/bob/.ssh/authorized_keys2
                 - /home/bob/.zshrc
             - args: [1]
               operator: Mask
@@ -138,7 +142,7 @@ spec:
               rateLimit: 1m
               rateLimitScope: process
 ---
-# defenseclaw-derived: tetragon-policy family=connect kernel_policy=sha256:08b71155b713
+# defenseclaw-derived: tetragon-policy family=connect kernel_policy=sha256:720bcdb296c7
 # Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
@@ -163,12 +167,12 @@ spec:
               rateLimit: 1m
               rateLimitScope: process
 ---
-# defenseclaw-derived: tetragon-policy family=controls kernel_policy=sha256:08b71155b713
+# defenseclaw-derived: tetragon-policy family=controls kernel_policy=sha256:720bcdb296c7
 # Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-693d4a92
+  name: defenseclaw-controls-752629da
 spec:
   options:
     - name: policy-mode
@@ -261,10 +265,14 @@ spec:
                 - /home/alice/.bash_profile
                 - /home/alice/.bashrc
                 - /home/alice/.profile
+                - /home/alice/.ssh/authorized_keys
+                - /home/alice/.ssh/authorized_keys2
                 - /home/alice/.zshrc
                 - /home/bob/.bash_profile
                 - /home/bob/.bashrc
                 - /home/bob/.profile
+                - /home/bob/.ssh/authorized_keys
+                - /home/bob/.ssh/authorized_keys2
                 - /home/bob/.zshrc
             - args: [1]
               operator: Mask
@@ -304,6 +312,193 @@ spec:
               operator: Mask
               values:
                 - "2"
+            - args: [2]
+              operator: InMap
+              values:
+                - "1001"
+                - "1002"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+    - hook: path_link
+      args:
+        - index: 0
+          type: dentry
+        - index: 2
+          type: dentry
+        - index: 0
+          type: uint32
+          resolve: d_inode.i_uid.val
+          label: owner_uid
+      selectors:
+        - matchPIDs:
+            - operator: In
+              followForks: true
+              isNamespacePID: false
+              values:
+                - 4001
+                - 4002
+                - 5001
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /home/alice/.ssh/authorized_keys
+                - /home/alice/.ssh/authorized_keys2
+                - /home/bob/.ssh/authorized_keys
+                - /home/bob/.ssh/authorized_keys2
+            - args: [2]
+              operator: InMap
+              values:
+                - "1001"
+                - "1002"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+        - matchPIDs:
+            - operator: In
+              followForks: true
+              isNamespacePID: false
+              values:
+                - 4001
+                - 4002
+                - 5001
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [1]
+              operator: Equal
+              values:
+                - /home/alice/.ssh/authorized_keys
+                - /home/alice/.ssh/authorized_keys2
+                - /home/bob/.ssh/authorized_keys
+                - /home/bob/.ssh/authorized_keys2
+            - args: [2]
+              operator: InMap
+              values:
+                - "1001"
+                - "1002"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+    - hook: path_rename
+      args:
+        - index: 1
+          type: dentry
+        - index: 3
+          type: dentry
+        - index: 1
+          type: uint32
+          resolve: d_inode.i_uid.val
+          label: owner_uid
+      selectors:
+        - matchPIDs:
+            - operator: In
+              followForks: true
+              isNamespacePID: false
+              values:
+                - 4001
+                - 4002
+                - 5001
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /home/alice/.ssh
+                - /home/alice/.ssh/authorized_keys
+                - /home/alice/.ssh/authorized_keys2
+                - /home/bob/.ssh
+                - /home/bob/.ssh/authorized_keys
+                - /home/bob/.ssh/authorized_keys2
+            - args: [2]
+              operator: InMap
+              values:
+                - "1001"
+                - "1002"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+        - matchPIDs:
+            - operator: In
+              followForks: true
+              isNamespacePID: false
+              values:
+                - 4001
+                - 4002
+                - 5001
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [1]
+              operator: Equal
+              values:
+                - /home/alice/.ssh
+                - /home/alice/.ssh/authorized_keys
+                - /home/alice/.ssh/authorized_keys2
+                - /home/bob/.ssh
+                - /home/bob/.ssh/authorized_keys
+                - /home/bob/.ssh/authorized_keys2
+            - args: [2]
+              operator: InMap
+              values:
+                - "1001"
+                - "1002"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+    - hook: path_symlink
+      args:
+        - index: 1
+          type: dentry
+        - index: 0
+          type: path
+        - index: 0
+          type: uint32
+          resolve: dentry.d_inode.i_uid.val
+          label: owner_uid
+      selectors:
+        - matchPIDs:
+            - operator: In
+              followForks: true
+              isNamespacePID: false
+              values:
+                - 4001
+                - 4002
+                - 5001
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /home/alice/.ssh/authorized_keys
+                - /home/alice/.ssh/authorized_keys2
+                - /home/bob/.ssh/authorized_keys
+                - /home/bob/.ssh/authorized_keys2
             - args: [2]
               operator: InMap
               values:

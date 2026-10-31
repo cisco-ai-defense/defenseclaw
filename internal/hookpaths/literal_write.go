@@ -5,27 +5,32 @@ package hookpaths
 
 import (
 	"maps"
-	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 var (
-	literalOpenCall         = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync|os\.open|(?:io\.)?FileIO)\s*\(`)
-	literalWriteCall        = regexp.MustCompile(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
-	literalNodeStream       = regexp.MustCompile(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
-	literalPathWrite        = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
-	literalPathOpen         = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
-	literalPythonPathCall   = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(`)
-	literalPerlOpen         = regexp.MustCompile(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
-	literalCopyCall         = regexp.MustCompile(`\b(?:shutil\.(?:copyfile|copy|copy2)|copyFileSync|copyFile|copyfile|copy2|(?:File::Copy::)?copy)\s*\(`)
-	literalPythonCopyImport = regexp.MustCompile(`\bfrom\s+shutil\s+import\s+copyfile\b`)
-	literalPerlCopy         = regexp.MustCompile(`\b(?:File::Copy::)?copy\s+['"][^'"]+['"]\s*,\s*(['"][^'"]+['"])`)
-	literalPerlImport       = regexp.MustCompile(`\buse\s+File::Copy\b`)
+	literalOpenCall = lazyregexp.New(`\b(?:open|File\.open|fs\.openSync|os\.open|(?:io\.)?FileIO)\s*\(`)
+	// The writer APIs whose first argument is the file they write. writeFile
+	// and appendFile are Node's callback and fs.promises forms (GAP-0366).
+	literalWriteCall      = lazyregexp.New(`\b(?:appendFileSync|writeFileSync|appendFile|writeFile|File\.write|File\.binwrite)\s*\(`)
+	literalNodeStream     = lazyregexp.New(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
+	literalPathWrite      = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
+	literalPathOpen       = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
+	literalPythonPathCall = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(`)
+	literalPerlOpen       = lazyregexp.New(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
+	// The copy and move APIs whose second argument is the file they write;
+	// literalCopyAPI says which names each language really has
+	// (rel-1-0-2:GAP-0429).
+	literalCopyCall         = lazyregexp.New(`\b(?:shutil\.(?:copyfile|copy2|copy|move)|copyFileSync|copyFile|cpSync|copyfile|copy2|FileUtils\.(?:copy_file|copy|cp|install|move|mv)|IO\.copy_stream|(?:File::Copy::)?(?:copy|cp|move|mv))\s*\(`)
+	literalPythonCopyImport = lazyregexp.New(`\bfrom\s+shutil\s+import\s+copyfile\b`)
+	literalPerlCopy         = lazyregexp.New(`\b((?:File::Copy::)?(?:copy|cp|move|mv))\s+['"][^'"]+['"]\s*,\s*(['"][^'"]+['"])`)
+	literalPerlImport       = lazyregexp.New(`\buse\s+File::Copy\b`)
 )
 
 // LiteralWriteOperands lists fixed write paths inside a directly invoked
@@ -35,22 +40,36 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 	return literalWriteOperandsDepth(command, cwd, home, 0)
 }
 
-func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands []string) {
+// LiteralWriteOperandsWithCopies is LiteralWriteOperands that also lists,
+// once for each call, the operands a plain cp call of the command names as
+// its own destination. Only that write of the cp may skip the own copy
+// scope of the cp, as the path facts of the same call do (GAP-2582).
+func LiteralWriteOperandsWithCopies(command, cwd, home string) (operands, copies []string) {
+	return literalWriteOperandsWithCopies(command, cwd, home, 0)
+}
+
+func literalWriteOperandsDepth(command, cwd, home string, depth int) []string {
+	operands, _ := literalWriteOperandsWithCopies(command, cwd, home, depth)
+	return operands
+}
+
+func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (operands, copies []string) {
 	if depth > 4 {
-		return nil
+		return nil, nil
 	}
 	file, ok := parseShell(command)
 	if !ok {
-		return nil
+		return nil, nil
 	}
-	add := func(name string) {
+	add := func(name string) bool {
 		if name == "" || strings.ContainsAny(name, "\x00\r\n") {
-			return
+			return false
 		}
 		if !filepath.IsAbs(name) && !filepath.IsAbs(cwd) {
-			return
+			return false
 		}
 		operands = append(operands, OperandPath(name, cwd))
+		return true
 	}
 	boundName, boundValue := boundedProgramAssignment(file, home)
 	// The values the command assigns before each top-level statement, so an
@@ -124,14 +143,33 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 				return true
 			}
 		}
-		for _, name := range literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1) {
-			add(name)
+		names := literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1)
+		// A plain cp call lists only its own destination; a literal shell
+		// body (sh -c BODY) lists the own destinations of its cp calls.
+		var own []string
+		switch program := programBase(words[0]); program {
+		case "cp", "gcp":
+			own = names
+		case "sh", "bash", "dash", "ash", "zsh", "ksh":
+			if body, ok := shellCommandBodyIndex(words); ok {
+				_, own = literalWriteOperandsWithCopies(words[body], cwd, home, depth+1)
+			}
+		}
+		credit := make(map[string]int, len(own))
+		for _, name := range own {
+			credit[OperandPath(name, cwd)]++
+		}
+		for _, name := range names {
+			if add(name) && credit[operands[len(operands)-1]] > 0 {
+				credit[operands[len(operands)-1]]--
+				copies = append(copies, operands[len(operands)-1])
+			}
 		}
 		return true
 	})
 	operands = append(operands, literalPipelineOperands(file, called, cwd, home, depth)...)
 	operands = append(operands, literalGeneratedScriptOperands(file, cwd, home, depth)...)
-	return operands
+	return operands, copies
 }
 
 // SedReplacedOperands names sed -i operands whose directory entry is
@@ -474,6 +512,9 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 		if !literalCodePosition(code, loc[0], language) {
 			continue
 		}
+		if name := strings.TrimSpace(code[loc[0] : loc[1]-1]); (name == "writeFile" || name == "appendFile") && language != "node" {
+			continue
+		}
 		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
 			args := literalCallArgs(call)
 			if len(args) > 0 {
@@ -532,10 +573,10 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 				}
 				if path, ok := pathString(destination); ok {
 					paths = append(paths, path)
-					if language == "python" && (name == "shutil.copy" || name == "shutil.copy2") {
+					if language == "python" && (name == "shutil.copy" || name == "shutil.copy2" || name == "shutil.move") {
 						source := literalCallArgument(args, 0, "src")
 						if sourcePath, fixed := pathString(source); fixed {
-							if info, err := os.Stat(OperandPath(path, cwd)); err == nil && info.IsDir() {
+							if info, err := pathStat(OperandPath(path, cwd)); err == nil && info.IsDir() {
 								paths = append(paths, filepath.Join(path, filepath.Base(sourcePath)))
 							}
 						}
@@ -546,13 +587,9 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 	}
 	if language == "perl" {
 		for _, match := range literalPerlCopy.FindAllStringSubmatchIndex(code, -1) {
-			name := "copy"
-			if strings.HasPrefix(code[match[0]:match[1]], "File::Copy::copy") {
-				name = "File::Copy::copy"
-			}
 			if literalCodePosition(code, match[0], language) &&
-				literalCopyAPI(language, name, perlCopyImported) {
-				if path, ok := pathString(code[match[2]:match[3]]); ok {
+				literalCopyAPI(language, code[match[2]:match[3]], perlCopyImported) {
+				if path, ok := pathString(code[match[4]:match[5]]); ok {
 					paths = append(paths, path)
 				}
 			}
@@ -660,14 +697,24 @@ func literalCallArgument(args []string, position int, keyword string) string {
 	return ""
 }
 
+// literalCopyAPI reports the copy and move APIs of a language that write
+// their second argument: Python shutil, Node fs copies, Perl File::Copy
+// (copy and move are exported, cp and mv on request) and Ruby FileUtils.
+// A move renames when it can and copies through a link across file systems,
+// so it is a write of its destination (rel-1-0-2:GAP-0429).
 func literalCopyAPI(language, name string, perlImported bool) bool {
 	switch language {
 	case "python":
 		return strings.HasPrefix(name, "shutil.")
 	case "node":
-		return name == "copyFileSync" || name == "copyFile"
+		return name == "copyFileSync" || name == "copyFile" || name == "cpSync" || name == "cp"
 	case "perl":
-		return name == "File::Copy::copy" || name == "copy" && perlImported
+		if base, qualified := strings.CutPrefix(name, "File::Copy::"); qualified {
+			name, perlImported = base, true
+		}
+		return perlImported && (name == "copy" || name == "cp" || name == "move" || name == "mv")
+	case "ruby":
+		return strings.HasPrefix(name, "FileUtils.") || name == "IO.copy_stream"
 	}
 	return false
 }

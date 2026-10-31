@@ -27,12 +27,12 @@ import (
 	"net/http"
 	"net/url"
 	pathpkg "path"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -187,6 +187,20 @@ func (c *UnixClient) Report(ctx context.Context, registration string, running bo
 	return out, err
 }
 
+// Restart is POST registrations/{id}/restart: the registration's sandbox
+// starts again under the new registration it answers.
+func (c *UnixClient) Restart(ctx context.Context, registration string) (RegistrationView, error) {
+	if err := validRegistration(registration); err != nil {
+		return RegistrationView{}, err
+	}
+	body := struct {
+		V int `json:"v"`
+	}{WireVersion}
+	var out RegistrationView
+	err := c.call(ctx, http.MethodPost, PathRegistrations+url.PathEscape(registration)+RegistrationRestartSub, nil, nil, body, &out)
+	return out, err
+}
+
 // Current is GET policy/current.
 func (c *UnixClient) Current(ctx context.Context, registration string) (CurrentPolicy, error) {
 	if err := validRegistration(registration); err != nil {
@@ -320,7 +334,7 @@ func (c *UnixClient) Events(ctx context.Context, batch EventBatch) error {
 }
 
 // connectorTarget is a connector name in a relayed path.
-var connectorTarget = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+var connectorTarget = lazyregexp.New(`^[a-z][a-z0-9-]{0,31}$`)
 
 // inspectTargets are the inspect kinds of a relayed inspect call.
 var inspectTargets = map[string]bool{"tool": true, "request": true, "response": true, "tool-response": true}

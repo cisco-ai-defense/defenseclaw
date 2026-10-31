@@ -29,7 +29,9 @@
     this Setup's /ensure upgrades it. The upgrade must report the applied
     policy, keep the secrets (a protected credential the lane stores on the
     previous release with enterprise secret set) and the guardian ledger. The
-    version 9 config keeps its bytes and its generation. The previous release
+    version 9 config keeps its bytes and its generation (a version 8 config,
+    written for a previous release older than the first that reads 9, is
+    migrated). The previous release
     must be 1.x: no 0.x release ships a standalone enterprise Setup.
     Steps 2-5 then run on the upgraded deployment. The source and upgraded
     config are kept in -ResultsRoot for
@@ -108,6 +110,16 @@ $script:CreatedFixturePaths = [Collections.Generic.List[string]]::new()
 
 function Fail([string]$Message) {
     throw "FAIL: $Message"
+}
+
+# The config_version of a release's administrator config: 8 for a release older
+# than the first taken to read version 9 (1.0.0 builds an earlier round tested
+# rejected it with config_version_unsupported, GAP-1424; every 1.x reads 8 and
+# migrates it), 9 for any other, including an unparsable version.
+function Get-AdminConfigVersion([string]$Release) {
+    $match = [regex]::Match($Release, '^v?(\d+\.\d+\.\d+)(?:[-+].*)?$')
+    if ($match.Success -and [version]$match.Groups[1].Value -lt [version]'1.0.1') { return 8 }
+    return 9
 }
 
 function Step([string]$Title) {
@@ -481,8 +493,9 @@ try {
     # packs only while the config names none: rule_pack: default would select
     # the default pack of a policy_dir this host does not have, and the Setup
     # refuses it ("policy_dir is not set").
+    $adminConfigVersion = if ($UpgradeFrom) { Get-AdminConfigVersion $PreviousVersion } else { 9 }
     $configText = @(
-        'config_version: 9'
+        "config_version: $adminConfigVersion"
         'deployment_mode: managed_enterprise'
         'enterprise:'
         '  profile: standalone'
@@ -519,8 +532,9 @@ try {
         $run = Invoke-Lifecycle -Name '01-previous-status' -FilePath $cli -Arguments @('enterprise', 'windows', 'status', '--profile', 'standalone', '--json')
         Assert-Result $run 'previous-status' (@('--action', 'status', '--installed', '--version', $PreviousVersion) + $installedChecks)
         $previousGeneration = Get-ConfigGeneration $run.Result
-        # The version 9 config keeps its bytes, so its generation does not drop.
-        $generationFloor = $previousGeneration - 1
+        # A version 9 config keeps its bytes, so its generation does not drop; a
+        # version 8 one is migrated, which applies a new config generation.
+        $generationFloor = if ($adminConfigVersion -eq 8) { $previousGeneration } else { $previousGeneration - 1 }
         $previousSecretsSha = Get-TreeSha $secretsDirectory
         $previousLedgerTargets = Get-LedgerTargets $guardianLedger
 
@@ -530,6 +544,13 @@ try {
             $installedChecks + @('--allow-warning', 'ensure_upgrade', '--policy-applied', '--config-generation-above', [string]$generationFloor))
         Assert-ServicesRunning
         Copy-Item -LiteralPath $installedConfig -Destination (Join-Path $ResultsRoot 'config-upgraded.yaml')
+        if ($adminConfigVersion -eq 8) {
+            # Setup migrated the version 8 config. The steps below apply the same
+            # CONFIG= and expect a no-op, so they apply the migrated file.
+            Copy-Item -LiteralPath $installedConfig -Destination $config -Force
+            & icacls.exe $config /setowner '*S-1-5-32-544' | Out-Null
+            if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $config" }
+        }
         if ((Get-TreeSha $secretsDirectory) -ne $previousSecretsSha) { Fail "the upgrade changed the secrets under $secretsDirectory" }
         if (-not (Test-UpgradeSecretKept)) { Fail "the upgrade did not keep the bytes of the protected credential $upgradeSecretName" }
         if ((Get-LedgerTargets $guardianLedger) -ne $previousLedgerTargets) { Fail "the upgrade changed the protected targets in the guardian ledger $guardianLedger" }

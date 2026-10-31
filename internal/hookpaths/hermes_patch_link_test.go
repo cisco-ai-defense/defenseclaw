@@ -12,7 +12,9 @@ import (
 )
 
 func TestR104LeadHermesPatchLinkTarget(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
+	if !hookWriteEvidenceHost() {
+		t.Skip("the managed hook sends write evidence on Linux and macOS only")
+	}
 	home := t.TempDir()
 	project := filepath.Join(home, "project")
 	if err := os.Mkdir(project, 0o700); err != nil {

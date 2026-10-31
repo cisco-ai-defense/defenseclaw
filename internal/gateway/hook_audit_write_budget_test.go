@@ -55,8 +55,10 @@ func walCommits(before, after []byte) (commits, frames int, ok bool) {
 // TestClaudeCodePreToolUseAuditCommitBudget drives the real Claude Code hook
 // handler, audit store and v8 runtime, and counts the audit.db commits and
 // rows of each PreToolUse from the store's write-ahead log. The rows pin that
-// batching lost no record: every call still writes its 7 audit rows and the
-// 21 correlation observations (7 logs, 13 metrics, 1 span) it wrote before.
+// batching lost no record: every call writes its 5 audit rows and 19
+// correlation observations (5 logs, 13 metrics, 1 span). The 2 relationship
+// change records it also exports are kept in correlation_relationships, not
+// again as audit rows (#1384).
 func TestClaudeCodePreToolUseAuditCommitBudget(t *testing.T) {
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, "claudecode")
@@ -130,11 +132,11 @@ func TestClaudeCodePreToolUseAuditCommitBudget(t *testing.T) {
 		totalFrames += frames
 	}
 	t.Logf("per PreToolUse: %.1f commits, %.1f WAL frames", float64(totalCommits)/measured, float64(totalFrames)/measured)
-	if got := (rows("audit_events") - auditRows) / measured; got != 7 {
-		t.Fatalf("audit rows per call = %d, want 7", got)
+	if got := (rows("audit_events") - auditRows) / measured; got != 5 {
+		t.Fatalf("audit rows per call = %d, want 5", got)
 	}
-	if got := (rows("correlation_observations") - observationRows) / measured; got != 21 {
-		t.Fatalf("correlation observations per call = %d, want 21", got)
+	if got := (rows("correlation_observations") - observationRows) / measured; got != 19 {
+		t.Fatalf("correlation observations per call = %d, want 19", got)
 	}
 	// rel-1-0-3 GAP-0320: the unique keys a hook call writes are time
 	// ordered, so each lands at the end of its index instead of on a random

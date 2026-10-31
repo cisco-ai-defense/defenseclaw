@@ -131,7 +131,7 @@ func fullTetragonFacts(variant string) tetragonFacts {
 		Owner: "uid 1000", Perm: "0777", Version: "v1.8.0",
 		Pause:        &kernelpolicy.Pause{Until: at.Add(4 * time.Hour), SetByUID: 1001, SetAt: at, Reason: "dccert maintenance"},
 		PauseInvalid: "tetragon-pause: not a root-owned regular file", SetBy: "alice (uid 1001)", At: at, Verb: "deleted",
-		Names: []string{"defenseclaw-controls-0a1b2c3d"}, Users: []string{"dcr-std2 (uid 1002)"}, Connectors: []string{"cursor"},
+		Names: []string{"defenseclaw-controls-0a1b2c3d"}, UserCount: 1, Connectors: []string{"cursor"},
 		Count: 3, State: "load_error", Error: "selector rejected", ETA: "~9 days", Why: "the sensor helper binary is gone",
 	}
 }
@@ -253,5 +253,65 @@ func TestEveryTetragonCodeIsDocumented(t *testing.T) {
 	sort.Strings(missing)
 	if len(missing) > 0 {
 		t.Fatalf("enterprise/troubleshooting.mdx does not list:\n  %s", strings.Join(missing, "\n  "))
+	}
+}
+
+// The helper reports a protected file with a second hard link by its path;
+// status and verify print the path, one line per file (rel-1-0-6 GAP-0124).
+func TestExtraLinkWarningsNameTheFile(t *testing.T) {
+	first, second := "/home/alice/.ssh/authorized_keys", "/home/bob/.ssh/authorized_keys"
+	var state kernelpolicy.State
+	state.Warnings = []string{
+		kernelpolicy.NoteExtraLinks + ":" + first,
+		kernelpolicy.NoteExtraLinks + ":" + second,
+		kernelpolicy.NoteDentryMount + ":" + first,
+	}
+	var codes []string
+	for _, finding := range findingsOf("linux", tetragonIntent{}, false, state, true, tetragonHost{}) {
+		codes = append(codes, finding.Code)
+		if strings.Contains(finding.Message, "reported by the sensor helper") {
+			t.Errorf("%s printed as an unknown code: %s", finding.Code, finding.Message)
+		}
+		_, file, _ := strings.Cut(finding.Code, ":")
+		if file == "" || !strings.Contains(finding.Message, file) {
+			t.Errorf("%s: the message does not name the file: %s", finding.Code, finding.Message)
+		}
+	}
+	want := []string{
+		kernelpolicy.NoteExtraLinks + ":" + first, kernelpolicy.NoteExtraLinks + ":" + second,
+		kernelpolicy.NoteDentryMount + ":" + first,
+	}
+	sort.Strings(codes)
+	sort.Strings(want)
+	if strings.Join(codes, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("codes %v, want %v", codes, want)
+	}
+}
+
+// A code only a newer helper reports keeps its detail when it prints.
+func TestUnknownTetragonCodeKeepsItsDetail(t *testing.T) {
+	got := tetragonMessage("kernel_something_new", tetragonFacts{Detail: "/home/a"})
+	if !strings.HasPrefix(got, "kernel_something_new:/home/a (reported by the sensor helper)") {
+		t.Fatalf("message %q", got)
+	}
+}
+
+// status-v2 GAP-0005: the enforce-inactive warning that status, verify and
+// ensure carry counts the enrolled users without an agent and names none.
+func TestEnforceInactiveCountsTheUsersWithoutAnAgent(t *testing.T) {
+	in := tetragonInputs{GOOS: "linux"}
+	in.State.UIDs = []kernelpolicy.UIDStatus{
+		{UID: 1002, User: "dcr-std2", State: kernelpolicy.UIDInactive, Reason: kernelpolicy.ReasonNoAnchors},
+		{UID: 1003, User: "dcr-std3", State: kernelpolicy.UIDInactive, Reason: kernelpolicy.ReasonNoAnchors},
+		{UID: 1004, User: "dcr-std4", Connectors: []string{"claudecode"}, State: kernelpolicy.UIDEnforcing},
+	}
+	message := tetragonMessage(kernelpolicy.WarnEnforceInactive, inactiveFacts("", in))
+	if !strings.Contains(message, "no agent installed for 2 enrolled users") {
+		t.Fatalf("enforce-inactive warning does not count the users: %q", message)
+	}
+	for _, name := range []string{"dcr-std2", "dcr-std3", "dcr-std4", "1002", "1003"} {
+		if strings.Contains(message, name) {
+			t.Fatalf("enforce-inactive warning names %s: %q", name, message)
+		}
 	}
 }

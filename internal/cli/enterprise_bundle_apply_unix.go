@@ -47,6 +47,22 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 		}
 		bundle = abs
 	}
+	anchors := opts.trustAnchors
+	switch {
+	case cmd.Flags().Changed("trust-anchors") && (anchors == "" || opts.inbox):
+		return bundleUsage("--trust-anchors takes an anchor file and goes with --bundle, not --inbox")
+	case cmd.Flags().Changed("device-group") && anchors == "":
+		return bundleUsage("--device-group pins the trust anchors that --trust-anchors installs; give both, or use enterprise bundle anchors install --device-group")
+	case cmd.Flags().Changed("device-group") && !enterprisebundle.ValidDeviceGroup(opts.deviceGroup):
+		return bundleUsage("--device-group: want 1-128 characters of [A-Za-z0-9._-]")
+	}
+	if anchors != "" {
+		abs, err := filepath.Abs(anchors)
+		if err != nil {
+			return bundleUsage("--trust-anchors: %v", err)
+		}
+		anchors = abs
+	}
 	env, err := newUnixLifecycleEnv(runtime.GOOS)
 	if err != nil {
 		return withExitCode(err, enterprisestatus.UnixExitFailure)
@@ -56,11 +72,13 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 	}
 	env.RefuseCapabilityLoss = opts.refuseCapabilityLoss
 	env.DeferRestart = opts.deferRestart
+	env.AnchorsDeviceGroup = opts.deviceGroup
 	platform := "linux"
 	if runtime.GOOS == "darwin" {
 		platform = "macos"
 	}
 	applyOptions := unixBundleApplyOptions(opts, bundle)
+	applyOptions.TrustAnchors = anchors
 	var stop func()
 	applyOptions.Interrupted, stop = settleInterruptedLifecycle(cmd.ErrOrStderr(), "enterprise bundle apply", platform)
 	defer stop()

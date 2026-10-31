@@ -334,16 +334,11 @@ def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = Non
 
     current = keys(cfg)
     sources = _policy_sources(policy_dir)
-    if (
-        getattr(cfg, "admission", None) == AdmissionConfig()
-        and current[1:] == ("", "", "full", True, 60)
-        and "default" in sources
-    ):
-        return "default"
-    for stem, (path, _bundled) in sorted(sources.items()):
-        data = load_policy_yaml(path)
+
+    def holds(stem: str) -> bool:
+        data = load_policy_yaml(sources[stem][0])
         if data is None or not is_named_policy(data):
-            continue
+            return False
         preset = copy.copy(cfg)
         preset.guardrail = copy.copy(cfg.guardrail)
         preset.watch = copy.copy(cfg.watch)
@@ -352,16 +347,96 @@ def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = Non
             _apply_policy_guardrail(preset, data)
             watch = data.get("watch") or {}
             if not isinstance(watch, dict):
-                continue
+                return False
             if "rescan_enabled" in watch:
                 preset.watch.rescan_enabled = watch["rescan_enabled"]
             if "rescan_interval_min" in watch:
                 preset.watch.rescan_interval_min = watch["rescan_interval_min"]
         except (TypeError, ValueError):
-            continue
-        if keys(preset) == current:
+            return False
+        return keys(preset) == current
+
+    # Two presets can hold the same values (a policy created from strict is
+    # strict until edited). The one `policy activate` named last wins while
+    # the config still holds it (the data-dir record, then the audit trail
+    # of releases that kept no record); otherwise the first match by name,
+    # as before (GAP-1022).
+    activated = _activated_policy_name(cfg)
+    if activated in sources and holds(activated):
+        return activated
+    # Releases before 1.0.6 recorded no name, but their `policy activate`
+    # wrote a policy-activate audit event: the newest one that the config
+    # still holds is the policy the user activated (GAP-1341).
+    for audited in _audited_activations(cfg):
+        if audited in sources and holds(audited):
+            return audited
+    if (
+        getattr(cfg, "admission", None) == AdmissionConfig()
+        and current[1:] == ("", "", "full", True, 60)
+        and "default" in sources
+    ):
+        return "default"
+    for stem in sorted(sources):
+        if holds(stem):
             return stem
     return ""
+
+
+#: The policy `policy activate` applied last, beside config.yaml in the data
+#: directory. It only breaks a tie between presets with the same values.
+_ACTIVATED_POLICY_FILE = "policy_activated.json"
+
+
+def record_activated_policy(cfg: Any, name: str) -> None:
+    """Remember *name* as the policy `policy activate` applied (best effort)."""
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir or not name:
+        return
+    from defenseclaw.file_permissions import atomic_write_private_bytes
+
+    body = json.dumps({"version": 1, "name": name}).encode("utf-8")
+    try:
+        atomic_write_private_bytes(os.path.join(data_dir, _ACTIVATED_POLICY_FILE), body)
+    except OSError:
+        pass  # the list then falls back to the first preset with these values
+
+
+def _audited_activations(cfg: Any, limit: int = 20) -> list[str]:
+    """Policy names of the newest policy-activate audit events, newest first.
+
+    Read-only and best effort: no audit database, a locked one or an old
+    schema gives an empty list, and the list then falls back to the first
+    preset with these values.
+    """
+    audit_db = str(getattr(cfg, "audit_db", "") or "")
+    if not audit_db or not os.path.isfile(audit_db):
+        return []
+    from defenseclaw.audit_actions import ACTION_POLICY_ACTIVATE
+    from defenseclaw.db import Store
+
+    try:
+        store = Store.open_read_only(audit_db)
+    except Exception:  # noqa: BLE001 - sqlite3.Error, ValueError, OSError: the audit trail is only a hint
+        return []
+    try:
+        return store.recent_action_targets(ACTION_POLICY_ACTIVATE, limit)
+    except Exception:  # noqa: BLE001 - same: never fail `policy list` over the hint
+        return []
+    finally:
+        store.close()
+
+
+def _activated_policy_name(cfg: Any) -> str:
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return ""
+    try:
+        with open(os.path.join(data_dir, _ACTIVATED_POLICY_FILE), encoding="utf-8") as stream:
+            record = json.loads(stream.read(4096))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return ""
+    name = record.get("name") if isinstance(record, dict) and record.get("version") == 1 else None
+    return name if isinstance(name, str) else ""
 
 
 def _policy_sources(policy_dir: str | os.PathLike[str] | None) -> dict[str, tuple[str, bool]]:

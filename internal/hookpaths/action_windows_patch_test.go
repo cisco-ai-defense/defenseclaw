@@ -5,8 +5,8 @@ package hookpaths
 
 import (
 	"bufio"
+	_ "embed"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 )
@@ -114,14 +114,15 @@ func TestActionWindowsHereStringTerminatorMatrix(t *testing.T) {
 	}
 }
 
+// The corpus is compiled into the test binary, so a native Windows run of
+// hookpaths.test.exe outside the package folder reads it too (GAP-1717).
+//
+//go:embed testdata/action-windows-protected.jsonl
+var actionWindowsProtectedCorpus string
+
 func TestActionWindowsProtectedHereStringCorpus(t *testing.T) {
 	const home, cwd = `C:\Users\Alice`, `C:\Users\Alice\project`
-	f, err := os.Open("testdata/action-windows-protected.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(strings.NewReader(actionWindowsProtectedCorpus))
 	count := 0
 	for scanner.Scan() {
 		var item struct {

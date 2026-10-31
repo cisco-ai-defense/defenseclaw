@@ -226,8 +226,9 @@ func ExactRemoteArtifactDownload(facts Facts) (PathFact, bool) {
 	return exactSingleCommandPath(facts, command.ID, PathAccessWrite)
 }
 
-// ExactRemoteArtifactDownloadIntent returns one exact literal-public-IP
-// download from an unconditional top-level command inside a larger action.
+// ExactRemoteArtifactDownloadIntent returns one exact remote download (a
+// literal public IP or an external hostname, remoteDownloadIntentPath) from
+// an unconditional top-level command inside a larger action.
 // Unlike ExactRemoteArtifactDownload, this detection-only helper permits
 // unrelated sibling commands. It rejects multiple candidate downloads and
 // any sibling write, append, move, or delete of the downloaded path because
@@ -237,7 +238,7 @@ func ExactRemoteArtifactDownloadIntent(facts Facts) (PathFact, bool) {
 }
 
 // BoundedRemoteArtifactDownloadIntent returns the exact artifact path named by
-// one literal-public-IP curl/wget candidate even when shell short-circuiting
+// one remote curl/wget candidate even when shell short-circuiting
 // makes reachability uncertain. It is detection-only evidence: callers must
 // join it to a later exact use of the same path and must never authorize a
 // synchronous deny from this fact alone.
@@ -245,37 +246,130 @@ func BoundedRemoteArtifactDownloadIntent(facts Facts) (PathFact, bool) {
 	return remoteArtifactDownloadIntent(facts, true)
 }
 
+// RemoteArtifactDownloadIntentHost returns the normalized source host of the
+// download BoundedRemoteArtifactDownloadIntent selects, so a caller can tell
+// whether the user asked for that download (#1390).
+func RemoteArtifactDownloadIntentHost(facts Facts) (string, bool) {
+	_, host, ok := remoteArtifactDownloadIntentSource(facts, true)
+	return host, ok
+}
+
 func remoteArtifactDownloadIntent(facts Facts, allowUncertainControlFlow bool) (PathFact, bool) {
+	artifact, _, ok := remoteArtifactDownloadIntentSource(facts, allowUncertainControlFlow)
+	return artifact, ok
+}
+
+func remoteArtifactDownloadIntentSource(facts Facts, allowUncertainControlFlow bool) (PathFact, string, bool) {
 	if facts.Parse.Dialect != DialectPOSIX {
-		return PathFact{}, false
+		return PathFact{}, "", false
 	}
 	var selected PathFact
+	selectedHost := ""
 	selectedCommandID := int64(0)
 	count := 0
 	for _, command := range facts.Commands {
 		if command.ControlFlowUncertain && !allowUncertainControlFlow {
 			continue
 		}
-		artifact, ok := staticRemoteIPDownloadPath(facts, command)
+		artifact, host, ok := remoteDownloadIntentPath(facts, command)
 		if !ok {
 			continue
 		}
-		selected = artifact
+		selected, selectedHost = artifact, host
 		selectedCommandID = command.ID
 		count++
 	}
 	if count != 1 {
-		return PathFact{}, false
+		return PathFact{}, "", false
 	}
 	for _, command := range facts.Commands {
 		if command.ID == selectedCommandID {
 			continue
 		}
 		if commandMutatesResolvedPath(facts, command.ID, selected.Resolved) {
-			return PathFact{}, false
+			return PathFact{}, "", false
 		}
 	}
-	return selected, true
+	return selected, selectedHost, true
+}
+
+// remoteDownloadIntentPath is the detection-only download step of
+// chain.download_then_execute_same_artifact (#1390): one static curl or wget
+// that fetches from one remote host into one file. A remote host is a
+// literal public IP or a hostname that is not a local, internal or reserved
+// name (remoteDownloadHostname). The file may be named relative to the
+// call's directory: its resolved path is the join identity, as on the
+// execution side. staticRemoteIPDownloadPath stays the narrower same-action
+// proof.
+func remoteDownloadIntentPath(facts Facts, command CommandFact) (PathFact, string, bool) {
+	if !staticTopLevelProcess(command) || !onlyNullOutputRedirects(command.Redirects) ||
+		(command.Program != "curl" && command.Program != "wget") ||
+		!hasFactOperation(command, OperationFetch) {
+		return PathFact{}, "", false
+	}
+	host := ""
+	networkCount := 0
+	for _, candidate := range facts.Network {
+		if candidate.CommandID != command.ID || candidate.Action != NetworkDownload {
+			continue
+		}
+		if candidate.TargetKind != NetworkTargetSingleHost || !remoteDownloadSource(candidate) {
+			return PathFact{}, "", false
+		}
+		host = candidate.NormalizedHost
+		networkCount++
+	}
+	if networkCount != 1 {
+		return PathFact{}, "", false
+	}
+	var artifact PathFact
+	pathCount := 0
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID != command.ID || candidate.Access != PathAccessWrite ||
+			candidate.Flavor == PathFlavorDevice {
+			continue
+		}
+		if candidate.Flavor != PathFlavorPOSIX || !strings.HasPrefix(candidate.Resolved, "/") {
+			return PathFact{}, "", false
+		}
+		artifact = candidate
+		pathCount++
+	}
+	return artifact, host, pathCount == 1
+}
+
+// remoteDownloadSource reports a download source outside the machine and its
+// local network: a literal public IP, or a hostname (whose scope stays
+// unknown, since facts never resolve DNS) that remoteDownloadHostname admits.
+func remoteDownloadSource(candidate NetworkFact) bool {
+	host := strings.Trim(candidate.NormalizedHost, "[]")
+	if net.ParseIP(host) != nil {
+		return candidate.Scope == NetworkScopePublic
+	}
+	return candidate.Scope == NetworkScopeUnknown && remoteDownloadHostname(host)
+}
+
+// internalHostSuffixes are name suffixes for local, internal or reserved
+// networks (RFC 6761, 6762, 8375 and common private zones). A download from
+// such a mirror is not a remote source.
+var internalHostSuffixes = []string{
+	".localhost", ".local", ".localdomain", ".internal", ".intranet", ".lan",
+	".home", ".home.arpa", ".corp", ".private", ".test", ".invalid",
+}
+
+// remoteDownloadHostname reports a fully qualified hostname that is not
+// single-label (an internal short name) and not under internalHostSuffixes.
+func remoteDownloadHostname(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "" || !strings.Contains(host, ".") {
+		return false
+	}
+	for _, suffix := range internalHostSuffixes {
+		if host == suffix[1:] || strings.HasSuffix(host, suffix) {
+			return false
+		}
+	}
+	return true
 }
 
 // ExactArtifactDecodeTransition returns the exact input and output of one
