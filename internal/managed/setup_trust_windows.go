@@ -401,9 +401,11 @@ func CreateSetupFile(path string) (*os.File, error) {
 		if err != nil {
 			return windows.InvalidHandle, err
 		}
+		// WRITE_OWNER and READ_CONTROL let the ERROR_INVALID_OWNER fallback
+		// re-own the new file on this handle; GENERIC_WRITE grants neither.
 		return windows.CreateFile(
 			pointer,
-			windows.GENERIC_READ|windows.GENERIC_WRITE,
+			windows.GENERIC_READ|windows.GENERIC_WRITE|windows.WRITE_OWNER|windows.READ_CONTROL,
 			windows.FILE_SHARE_READ,
 			attributes,
 			windows.CREATE_NEW,

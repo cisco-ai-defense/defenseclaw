@@ -473,13 +473,14 @@ func osRootAncestor(path string) bool {
 	if dir, err := windows.GetSystemDirectory(); err == nil && dir != "" {
 		roots = append(roots, dir)
 	}
-	for _, resolve := range []func() (string, error){winpath.TrustedProgramData, winpath.TrustedProgramFiles} {
+	// Every root comes from Windows or the HKLM machine registration, never
+	// the process environment, which the invoking user controls.
+	for _, resolve := range []func() (string, error){
+		winpath.TrustedProgramData, winpath.TrustedProgramFiles, winpath.TrustedProgramFilesX86,
+	} {
 		if dir, err := resolve(); err == nil && dir != "" {
 			roots = append(roots, dir)
 		}
-	}
-	if dir := os.Getenv("ProgramFiles(x86)"); dir != "" {
-		roots = append(roots, dir)
 	}
 	for _, root := range roots {
 		if strings.EqualFold(clean, filepath.Clean(root)) {

@@ -328,10 +328,10 @@ type canonicalAttributeTagInfo struct {
 }
 
 // acceptBenignFileReparseTag reports whether the regular file open as handle
-// carries a storage reparse tag that redirects nothing (WOF compression,
-// deduplication, a cloud-files placeholder, an AF_UNIX socket), logging the
-// acceptance once. Symbolic links, mount points and unknown tags stay fatal,
-// and the strict pin makes every tag fatal again, as in the installer module.
+// carries a storage reparse tag that keeps its content local (WOF
+// compression, deduplication), logging the acceptance once. Cloud-files
+// placeholders, AF_UNIX sockets, symbolic links, mount points and unknown
+// tags stay fatal, and the strict pin makes every tag fatal again.
 func acceptBenignFileReparseTag(handle windows.Handle, path string) bool {
 	if trustStrictAncestors() {
 		return false
@@ -345,7 +345,7 @@ func acceptBenignFileReparseTag(handle windows.Handle, path string) bool {
 	); err != nil {
 		return false
 	}
-	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 || !IsBenignFileReparseTag(info.ReparseTag) {
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 || !isLocalContentFileReparseTag(info.ReparseTag) {
 		return false
 	}
 	fields := map[string]string{

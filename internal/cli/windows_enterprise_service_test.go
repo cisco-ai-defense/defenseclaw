@@ -1298,6 +1298,7 @@ func TestPrepareWindowsEnterprisePowerShellTempOpsCreatesExactProtectedCapabilit
 		createdPath       string
 		createdDescriptor string
 		validatePaths     []string
+		structurePaths    []string
 		removedPath       string
 	)
 	ops := windowsEnterprisePowerShellTempOps{
@@ -1328,6 +1329,10 @@ func TestPrepareWindowsEnterprisePowerShellTempOpsCreatesExactProtectedCapabilit
 		},
 		validate: func(path string) error {
 			validatePaths = append(validatePaths, path)
+			return nil
+		},
+		validateStructure: func(path string) error {
+			structurePaths = append(structurePaths, path)
 			return nil
 		},
 		remove: func(path string) error {
@@ -1371,8 +1376,11 @@ func TestPrepareWindowsEnterprisePowerShellTempOpsCreatesExactProtectedCapabilit
 	if err := cleanup(); err != nil {
 		t.Fatalf("cleanup protected capability: %v", err)
 	}
-	if !reflect.DeepEqual(validatePaths, []string{want, want}) {
-		t.Fatalf("validation paths after cleanup = %#v", validatePaths)
+	if !reflect.DeepEqual(validatePaths, []string{want}) {
+		t.Fatalf("descriptor validation ran during cleanup: %#v", validatePaths)
+	}
+	if !reflect.DeepEqual(structurePaths, []string{want}) {
+		t.Fatalf("structure validation paths after cleanup = %#v", structurePaths)
 	}
 	if removedPath != want {
 		t.Fatalf("RemoveAll path = %q, want %q", removedPath, want)

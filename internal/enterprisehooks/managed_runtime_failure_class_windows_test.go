@@ -297,3 +297,36 @@ func TestReadWindowsManagedRuntimeAuthenticatedBundleRejectsForgedBytes(t *testi
 		t.Fatalf("forged bundle error = %v", err)
 	}
 }
+
+// The user can delete or enlarge the bundle the protected selector pins.
+// Neither may fall back to the configured fail mode, so both are findings;
+// a bundle whose bytes match the digest is not.
+func TestWindowsManagedRuntimeSelectedBundleFinding(t *testing.T) {
+	dir := t.TempDir()
+	valid := []byte(`{"generation_id":"g1"}`)
+	entry := windowsManagedRuntimeSelectorTarget{BundleSHA256: windowsManagedRuntimeSHA256(valid)}
+	if err := windowsManagedRuntimeSelectedBundleFinding(entry, filepath.Join(dir, "missing.json")); err == nil {
+		t.Fatal("missing selected bundle was not a finding")
+	}
+	oversized := filepath.Join(dir, "oversized.json")
+	if err := os.WriteFile(oversized, make([]byte, windowsManagedRuntimeBundleMaxBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedRuntimeSelectedBundleFinding(entry, oversized); err == nil {
+		t.Fatal("oversized selected bundle was not a finding")
+	}
+	forged := filepath.Join(dir, "forged.json")
+	if err := os.WriteFile(forged, []byte(`{"fail_mode":"open"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedRuntimeSelectedBundleFinding(entry, forged); !errors.Is(err, errWindowsManagedRuntimeBundleForged) {
+		t.Fatalf("forged selected bundle finding = %v", err)
+	}
+	intact := filepath.Join(dir, "intact.json")
+	if err := os.WriteFile(intact, valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedRuntimeSelectedBundleFinding(entry, intact); err != nil {
+		t.Fatalf("intact selected bundle reported a finding: %v", err)
+	}
+}

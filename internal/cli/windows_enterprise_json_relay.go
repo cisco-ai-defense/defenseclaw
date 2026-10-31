@@ -23,8 +23,9 @@ const windowsEnterpriseJSONRelayMax = 4 << 20
 
 // windowsEnterpriseJSONRelay keeps the installer's stdout a single JSON
 // result: it holds the child's stdout and, when the child exits, writes the
-// last top-level JSON object to stdout and every other byte to stderr. With
-// no JSON object at all, the output goes to stdout unchanged.
+// last top-level JSON object to stdout and every other byte to stderr. It is
+// only used under -Json, so output with no JSON object at all goes to stderr
+// too; the caller then writes its own failure result to stdout.
 type windowsEnterpriseJSONRelay struct {
 	stdout io.Writer
 	stderr io.Writer
@@ -55,7 +56,7 @@ func (relay *windowsEnterpriseJSONRelay) Finish() {
 	body := relay.held.Bytes()
 	start, end, ok := lastWindowsEnterpriseJSONObjectSpan(body)
 	if !ok {
-		_, _ = relay.stdout.Write(body)
+		_, _ = relay.stderr.Write(body)
 		relay.held.Reset()
 		return
 	}

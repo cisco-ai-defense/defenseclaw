@@ -35,12 +35,12 @@ func TestWindowsEnterpriseJSONRelayKeepsStdoutOneResult(t *testing.T) {
 	}
 }
 
-func TestWindowsEnterpriseJSONRelayPassesThroughOutputWithoutJSON(t *testing.T) {
+func TestWindowsEnterpriseJSONRelaySendsOutputWithoutJSONToStderr(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	relay := newWindowsEnterpriseJSONRelay(&stdout, &stderr)
 	_, _ = relay.Write([]byte("plain text\n"))
 	relay.Finish()
-	if stdout.String() != "plain text\n" || stderr.Len() != 0 {
+	if stdout.Len() != 0 || stderr.String() != "plain text\n" {
 		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
 	}
 }

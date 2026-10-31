@@ -79,3 +79,20 @@ func TestIsBenignFileReparseTag(t *testing.T) {
 		}
 	}
 }
+
+// Managed content checks accept only tags that keep the data local.
+func TestIsLocalContentFileReparseTag(t *testing.T) {
+	for tag, want := range map[uint32]bool{
+		reparseTagWOF:          true,
+		reparseTagDedup:        true,
+		reparseTagAFUnix:       false,
+		reparseTagCloudPattern: false,
+		0x9000101A:             false,
+		0xA000000C:             false,
+		0xA0000003:             false,
+	} {
+		if got := isLocalContentFileReparseTag(tag); got != want {
+			t.Fatalf("isLocalContentFileReparseTag(0x%08x) = %t, want %t", tag, got, want)
+		}
+	}
+}

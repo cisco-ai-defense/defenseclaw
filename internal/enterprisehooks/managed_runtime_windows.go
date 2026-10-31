@@ -284,8 +284,8 @@ var windowsManagedRuntimeBoundaryProbe = probeWindowsManagedRuntimeBoundary
 
 // probeWindowsManagedRuntimeBoundary returns the first integrity finding on
 // the hook's resolution path, or nil when only drift remains. It reports
-// positive evidence only: a check that cannot run (a denied handle, a missing
-// bundle) is not a finding.
+// positive evidence only: a check that cannot run (a denied handle) is not a
+// finding. The selected bundle missing, oversized or forged is one.
 func probeWindowsManagedRuntimeBoundary(opts WindowsManagedRuntimeGenerationResolveOptions) error {
 	opts, target, err := validateWindowsManagedRuntimeGenerationResolveOptions(opts)
 	if err != nil {
@@ -328,6 +328,25 @@ func probeWindowsManagedRuntimeBoundary(opts WindowsManagedRuntimeGenerationReso
 	}
 	if err := windowsManagedRuntimeObjectTypeFinding(bundlePath, false, true); err != nil {
 		return err
+	}
+	return windowsManagedRuntimeSelectedBundleFinding(entry, bundlePath)
+}
+
+// windowsManagedRuntimeSelectedBundleFinding reports the bundle the protected
+// selector pins as a boundary when it is missing, larger than the bounded
+// read or forged. The target user can delete or rewrite the bundle, so none
+// of those may recover the configured fail mode. A bundle that exists but
+// cannot be opened (ACL or owner drift, a busy handle) is not a finding.
+func windowsManagedRuntimeSelectedBundleFinding(entry windowsManagedRuntimeSelectorTarget, bundlePath string) error {
+	info, err := os.Lstat(bundlePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("enterprise hooks: managed runtime bundle pinned by the protected selector is missing: %s", bundlePath)
+	}
+	if err == nil && info.Size() > windowsManagedRuntimeBundleMaxBytes {
+		return fmt.Errorf(
+			"enterprise hooks: managed runtime bundle pinned by the protected selector exceeds %d bytes: %s",
+			windowsManagedRuntimeBundleMaxBytes, bundlePath,
+		)
 	}
 	if _, err := readWindowsManagedRuntimeAuthenticatedBundle(entry, bundlePath); errors.Is(err, errWindowsManagedRuntimeBundleForged) {
 		return err

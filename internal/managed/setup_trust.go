@@ -103,6 +103,16 @@ const (
 	reparseTagCloudPattern uint32 = 0x9000001A
 )
 
+// isLocalContentFileReparseTag reports whether tag leaves a regular file's
+// content fully local: WOF compression and data deduplication only. Checks
+// that trust a managed file's content use it; a cloud-files placeholder may
+// not hold its data locally and an AF_UNIX socket holds none, so both stay
+// structural failures there. IsBenignFileReparseTag, used where files are
+// only walked or removed, keeps the wider list.
+func isLocalContentFileReparseTag(tag uint32) bool {
+	return tag == reparseTagWOF || tag == reparseTagDedup
+}
+
 // IsBenignFileReparseTag reports whether tag is one of the storage reparse
 // tags that is safe on a regular file: WOF compression, data deduplication,
 // AF_UNIX sockets and every cloud-files placeholder variant. Symbolic links,
