@@ -358,11 +358,18 @@ def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = Non
 
     # Two presets can hold the same values (a policy created from strict is
     # strict until edited). The one `policy activate` named last wins while
-    # the config still holds it; otherwise the first match by name, as
-    # before (GAP-1022).
+    # the config still holds it (the data-dir record, then the audit trail
+    # of releases that kept no record); otherwise the first match by name,
+    # as before (GAP-1022).
     activated = _activated_policy_name(cfg)
     if activated in sources and holds(activated):
         return activated
+    # Releases before 1.0.6 recorded no name, but their `policy activate`
+    # wrote a policy-activate audit event: the newest one that the config
+    # still holds is the policy the user activated (GAP-1341).
+    for audited in _audited_activations(cfg):
+        if audited in sources and holds(audited):
+            return audited
     if (
         getattr(cfg, "admission", None) == AdmissionConfig()
         and current[1:] == ("", "", "full", True, 60)
@@ -392,6 +399,31 @@ def record_activated_policy(cfg: Any, name: str) -> None:
         atomic_write_private_bytes(os.path.join(data_dir, _ACTIVATED_POLICY_FILE), body)
     except OSError:
         pass  # the list then falls back to the first preset with these values
+
+
+def _audited_activations(cfg: Any, limit: int = 20) -> list[str]:
+    """Policy names of the newest policy-activate audit events, newest first.
+
+    Read-only and best effort: no audit database, a locked one or an old
+    schema gives an empty list, and the list then falls back to the first
+    preset with these values.
+    """
+    audit_db = str(getattr(cfg, "audit_db", "") or "")
+    if not audit_db or not os.path.isfile(audit_db):
+        return []
+    from defenseclaw.audit_actions import ACTION_POLICY_ACTIVATE
+    from defenseclaw.db import Store
+
+    try:
+        store = Store.open_read_only(audit_db)
+    except Exception:  # noqa: BLE001 - sqlite3.Error, ValueError, OSError: the audit trail is only a hint
+        return []
+    try:
+        return store.recent_action_targets(ACTION_POLICY_ACTIVATE, limit)
+    except Exception:  # noqa: BLE001 - same: never fail `policy list` over the hint
+        return []
+    finally:
+        store.close()
 
 
 def _activated_policy_name(cfg: Any) -> str:
