@@ -34,10 +34,18 @@ var actionGitBashWindowsRoots = regexp.MustCompile("\\\\[^\"'$`\\\\nt\n]|" +
 	`(?i)\$\{?[!#]?(userprofile|homedrive|homepath|appdata|localappdata|programdata|allusersprofile|` +
 	`onedrive\w*|public|systemdrive|systemroot|windir)\b`)
 
+// actionGitBashPowerShellSyntax is PowerShell syntax in the text of a call:
+// a cmdlet (Verb-Noun), a $variable assignment, a .NET type member and a
+// here-string opener (@' or @" at the end of a line). A call that carries it may be PowerShell text whatever the
+// hint says, so it keeps every reading.
+var actionGitBashPowerShellSyntax = regexp.MustCompile(`(?i)(^|[^\w-])(get|set|add|out|write|remove|new|copy|move|rename|invoke|start|stop|select|foreach|where|test|import|export|read|clear|format|join|split|resolve|push|pop|convertto|convertfrom)-[a-z]+|` +
+	`\$[A-Za-z_][A-Za-z0-9_:]*\s*[+-]?=|\]::|@['"]\r?\n`)
+
 // actionGitBashReadsAlone reports a call a POSIX shell runs on a native
 // Windows host (Git Bash runs Claude Code's Bash tool; the gateway passes
 // the POSIX dialect hint) that the POSIX grammar reads completely there: it
-// parses, and it spells nothing only Windows reads (actionGitBashSpellings).
+// parses, and it spells nothing only Windows reads (actionGitBashSpellings,
+// actionGitBashWindowsRoots) and no PowerShell syntax.
 // Such a call is read with the POSIX grammar on the Windows file system
 // alone, as Git Bash runs it, so the POSIX rules hold on Windows: a quoted
 // word is text, a pattern skips dot names, an uncalled function never runs
@@ -56,9 +64,16 @@ func actionGitBashReadsAlone(command, home string, dialect actionfacts.Dialect) 
 			return false
 		}
 	}
-	if actionGitBashWindowsRoots.MatchString(command) {
+	if actionGitBashWindowsRoots.MatchString(command) || actionGitBashPowerShellSyntax.MatchString(command) {
 		return false
 	}
 	_, parsed := parseShell(command)
 	return parsed
+}
+
+// GitBashReadsAlone reports a Claude Code Bash call on a native Windows host
+// (Git Bash runs it) whose text the POSIX grammar reads completely there
+// (actionGitBashReadsAlone): the gateway may read it as POSIX.
+func GitBashReadsAlone(command, home string) bool {
+	return actionGitBashReadsAlone(command, home, actionfacts.DialectPOSIX)
 }

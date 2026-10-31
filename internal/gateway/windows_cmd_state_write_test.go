@@ -181,7 +181,7 @@ func TestR105WindowsCMDSlashCStateWrite(t *testing.T) {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
 			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
-			input.DialectHint = agentHookWindowsShellDialect("", input)
+			input.DialectHint = agentHookWindowsShellDialect(input)
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: string(args), Connector: connectorName,
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
@@ -226,7 +226,7 @@ func TestR105WindowsCMDStateDirectoryRemove(t *testing.T) {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
 			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
-			input.DialectHint = agentHookWindowsShellDialect("", input)
+			input.DialectHint = agentHookWindowsShellDialect(input)
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: string(args), Connector: connectorName,
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
@@ -298,7 +298,7 @@ func TestR105WindowsCMDHeredocReceiverReadIsLinear(t *testing.T) {
 			command := strings.Repeat(tc.unit, n/len(tc.unit)) + tc.tail
 			args, _ := json.Marshal(map[string]string{"command": command})
 			input := actionfacts.Input{Tool: "Bash", Args: args, CWD: home + `\project`, ActiveHome: home}
-			input.DialectHint = agentHookWindowsShellDialect("", input)
+			input.DialectHint = agentHookWindowsShellDialect(input)
 			start := time.Now()
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: string(args), Connector: connectorName,
@@ -341,7 +341,7 @@ func TestR105WindowsCMDHeredocDelimiterSearchIsLinear(t *testing.T) {
 	decide := func(command string, runs int) (bool, time.Duration) {
 		args, _ := json.Marshal(map[string]string{"command": command})
 		input := actionfacts.Input{Tool: "Bash", Args: args, CWD: home + `\project`, ActiveHome: home}
-		input.DialectHint = agentHookWindowsShellDialect("", input)
+		input.DialectHint = agentHookWindowsShellDialect(input)
 		best := time.Duration(-1)
 		block := false
 		for range runs {
@@ -468,7 +468,7 @@ func TestR105WindowsCMDMentionsAndManyCalls(t *testing.T) {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
 			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
-			input.DialectHint = agentHookWindowsShellDialect("", input)
+			input.DialectHint = agentHookWindowsShellDialect(input)
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: string(args), Connector: connectorName,
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
@@ -687,7 +687,7 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
 			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
-			input.DialectHint = agentHookWindowsShellDialect("", input)
+			input.DialectHint = agentHookWindowsShellDialect(input)
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: string(args), Connector: connectorName,
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,

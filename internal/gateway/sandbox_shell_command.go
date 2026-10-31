@@ -126,7 +126,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		// not complete, so it may be empty; the command alone is judged in
 		// the dialect inferred from it, as the same call without the extra
 		// keys is (GAP-0686).
-		input.DialectHint = agentHookWindowsShellDialect(connectorName, input)
+		input.DialectHint = agentHookWindowsShellDialect(input)
 	}
 	findings := dispatchTrustedAction(ctx, trustedActionRequest{
 		Input:                         input,

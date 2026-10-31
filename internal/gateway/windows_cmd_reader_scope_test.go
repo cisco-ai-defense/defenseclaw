@@ -65,7 +65,7 @@ func TestR105WindowsCMDReaderSkipsCommandsWithoutCMD(t *testing.T) {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
 			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
-			input.DialectHint = agentHookWindowsShellDialect("", input)
+			input.DialectHint = agentHookWindowsShellDialect(input)
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: string(args), Connector: connectorName,
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,

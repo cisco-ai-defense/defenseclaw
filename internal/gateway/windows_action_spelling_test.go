@@ -149,7 +149,7 @@ func TestR104ActionClassWindowsProtectedSpellings(t *testing.T) {
 			}
 			input := actionfacts.Input{Tool: "Bash", Args: args, CWD: home + `\project`, ActiveHome: home, DialectHint: tc.dialect}
 			if tc.dialect != actionfacts.DialectCMD {
-				input.DialectHint = agentHookWindowsShellDialect("", input)
+				input.DialectHint = agentHookWindowsShellDialect(input)
 			}
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, LegacyText: string(args), Connector: connector, EnforcementCapable: true})
 			got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock

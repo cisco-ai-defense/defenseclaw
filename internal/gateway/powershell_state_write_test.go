@@ -196,7 +196,7 @@ func TestR105WindowsPowerShellStateWriteSpellings(t *testing.T) {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
 			input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
-			input.DialectHint = agentHookWindowsShellDialect("", input)
+			input.DialectHint = agentHookWindowsShellDialect(input)
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: string(args), Connector: connectorName,
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
@@ -292,7 +292,7 @@ func TestR105WindowsPowerShellBalancedNestingIsLinear(t *testing.T) {
 			judge := func(n int) ([]RuleFinding, time.Duration) {
 				args, _ := json.Marshal(map[string]string{"command": tc.build(n)})
 				input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
-				input.DialectHint = agentHookWindowsShellDialect("", input)
+				input.DialectHint = agentHookWindowsShellDialect(input)
 				start := time.Now()
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, LegacyText: string(args), Connector: connectorName,
