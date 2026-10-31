@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -175,6 +176,19 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		// replacedEntries: the link entries plain mv calls replaced so far,
 		// in the order the walk reads the statements.
 		var replacedEntries []string
+		// removedEntries: the link entries plain rm calls remove. A word of
+		// a read-only statement outside a pipeline (ls -l link, cat link)
+		// that names such an entry reads the link, before or after the rm,
+		// not a key write target (GAP-2590): pendingReads holds those words
+		// until the walk has seen every rm.
+		var removedEntries []string
+		type pendingRead struct {
+			word *syntax.Word
+			cwd  string
+			vals actionValues
+		}
+		var pendingReads []pendingRead
+		direct := actionDirectStatements(file)
 		checkWord := func(word *syntax.Word) bool {
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
@@ -248,8 +262,8 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				judgedWords = append(judgedWords, inert...)
 				// A read-only call after a plain mv replaced a link reads the
 				// moved file under that name (rel-1-0-6:GAP-0217).
-				readsReplaced := len(replacedEntries) > 0 && !stateOnly &&
-					actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home)
+				readOnly := !stateOnly && actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home)
+				readsReplaced := len(replacedEntries) > 0 && readOnly
 				for _, word := range call.Args {
 					if readsReplaced && actionReplacedEntryWord(word, values, effectiveCWD, home, replacedEntries) {
 						judgedWords = append(judgedWords, word)
@@ -267,6 +281,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 							found = true
 							return false
 						}
+						removedEntries = append(removedEntries, entry)
 						judgedWords = append(judgedWords, word)
 						continue
 					}
@@ -274,6 +289,11 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						continue
 					}
 					if checkWord(word) {
+						if readOnly && direct[stmt] {
+							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values)})
+							judgedWords = append(judgedWords, word)
+							continue
+						}
 						found = true
 						return false
 					}
@@ -285,6 +305,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			}
 			return true
 		})
+		for _, read := range pendingReads {
+			if found {
+				break
+			}
+			found = !actionReplacedEntryWord(read.word, read.vals, read.cwd, home, removedEntries)
+		}
 		if found {
 			return true
 		}

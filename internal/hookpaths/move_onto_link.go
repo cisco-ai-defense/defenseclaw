@@ -593,3 +593,31 @@ func WindowsMovedOntoLinkEntries(command, cwd, home string) map[string]bool {
 func WindowsMovedOntoLinkKey(path string) string {
 	return strings.ToLower(filepath.Clean(filepath.FromSlash(PlainMovePath(path))))
 }
+
+// actionDirectStatements marks the statements of a command list that run on
+// their own: top-level statements and the operands of && and ||, not a side
+// of a pipeline, a subshell or a substitution, whose output could feed
+// another command (GAP-2590).
+func actionDirectStatements(file *syntax.File) map[*syntax.Stmt]bool {
+	direct := map[*syntax.Stmt]bool{}
+	var mark func(stmt *syntax.Stmt)
+	mark = func(stmt *syntax.Stmt) {
+		if stmt == nil {
+			return
+		}
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+			if binary.Op == syntax.AndStmt || binary.Op == syntax.OrStmt {
+				mark(binary.X)
+				mark(binary.Y)
+			}
+			return
+		}
+		direct[stmt] = true
+	}
+	if file != nil {
+		for _, stmt := range file.Stmts {
+			mark(stmt)
+		}
+	}
+	return direct
+}
