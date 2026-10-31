@@ -78,6 +78,7 @@ func TestGAP1717GitBashCallIsReadWithThePOSIXGrammar(t *testing.T) {
 	}{
 		{`head -n 5 */*`, false},
 		{`cat */id_*`, false},
+		{`head -n 1 */* | wc -l`, false},
 		{`cat ~/.ssh/id_ed25519`, true},
 		{`cat .ssh/id_*`, true},
 	} {
