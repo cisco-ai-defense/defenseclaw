@@ -1646,6 +1646,42 @@ def test_live_inventory_checks_tempo_before_search(monkeypatch: pytest.MonkeyPat
     assert inventory[0]["panels"][0]["status"] == "data"
 
 
+def test_live_audit_sends_log_line_tables_to_query_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1028: Loki refuses a log query as an instant query (HTTP 400), so a
+    # table that lists log lines must be compiled like a logs panel.
+    audit = _load_audit_module()
+    endpoints: dict[str, str] = {}
+
+    def fake_request(
+        url: str,
+        params: dict[str, str] | None = None,
+        *,
+        timeout_seconds: float = 0,
+    ) -> dict[str, object]:
+        if url.endswith("/api/health"):
+            return {"database": "ok"}
+        assert params is not None
+        endpoints[params["query"]] = url
+        return {"status": "success", "data": {"result": []}}
+
+    datasource = {"type": "loki", "uid": "defenseclaw-loki"}
+    dashboard = {
+        "uid": "log-table-fixture",
+        "title": "Log table fixture",
+        "panels": [
+            {"type": "table", "title": "Lines", "datasource": datasource, "targets": [{"expr": "{a=\"1\"} | json", "queryType": "range", "maxLines": 1000}]},
+            {"type": "stat", "title": "Count", "datasource": datasource, "targets": [{"expr": "sum(count_over_time({a=\"1\"} [5m]))", "instant": True}]},
+        ],
+    }
+    monkeypatch.setattr(audit, "request_json", fake_request)
+    monkeypatch.setattr(audit, "tempo_readiness_error", lambda: None)
+
+    assert audit.live_audit([(Path("fixture.json"), dashboard)]) == []
+
+    assert endpoints['{a="1"} | json'].endswith("/loki/api/v1/query_range")
+    assert endpoints['sum(count_over_time({a="1"} [5m]))'].endswith("/loki/api/v1/query")
+
+
 def test_live_inventory_caps_each_query_by_shared_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
