@@ -65,7 +65,7 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 			return fmt.Errorf(
 				"%s %s: the gateway service account %s cannot list or read the permissions of the parent folder %s; "+
 					"grant it Read & execute on that folder, for example: icacls \"%s\" /grant \"%s:RX\"%s, or move the rule pack out of %s to a folder whose parents it can read",
-				label, root, serviceAccount, parent, parent, serviceGrantPrincipal(serviceAccount), beforeServiceExistsHint(parent, serviceAccount), parent)
+				label, root, serviceAccount, parent, parent, serviceGrantPrincipal(serviceAccount), beforeServiceExistsParentHint(parent, serviceAccount), parent)
 		}
 	}
 	entries := 0
@@ -396,13 +396,26 @@ func serviceDACLGrants(path string, sids []*windows.SID, want windows.ACCESS_MAS
 }
 
 // beforeServiceExistsHint is the sentence that follows an icacls example for
-// the gateway service SID: icacls fails with error 1332 until the service
-// exists, so a first install is given the PowerShell form that does not
-// (GAP-0087). It is empty for an account that is not an NT SERVICE name.
+// the gateway service SID on a rule-pack folder: icacls fails with error
+// 1332 until the service exists, so a first install is given the PowerShell
+// form that does not (GAP-0087). It is empty for an account that is not an
+// NT SERVICE name.
 func beforeServiceExistsHint(path, serviceAccount string) string {
-	command := ServiceReadGrantPowerShell(path, serviceAccount)
+	return serviceExistsHint(path, serviceAccount, true)
+}
+
+// beforeServiceExistsParentHint is beforeServiceExistsHint for a parent
+// folder of a rule pack: the grant is on that folder only, as its icacls RX
+// example.
+func beforeServiceExistsParentHint(path, serviceAccount string) string {
+	return serviceExistsHint(path, serviceAccount, false)
+}
+
+func serviceExistsHint(path, serviceAccount string, tree bool) string {
+	command := serviceReadGrantPowerShell(path, serviceAccount, tree)
 	if command == "" {
 		return ""
 	}
-	return " (icacls fails with error 1332 until the service exists; before that run: " + command + ")"
+	return " (icacls fails with error 1332 until the service exists; before that run, from an elevated cmd or PowerShell prompt: " +
+		command + "; " + serviceReadGrantEffect(path, serviceAccount, tree) + ")"
 }

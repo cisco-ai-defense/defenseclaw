@@ -397,6 +397,14 @@ The first managed install fails with `api_port_held` (Linux and macOS) or `not_r
 
 **Check.** `enterprise <os> status` shows the gateway running.
 
+#### A Windows `ensure` with nothing to change takes more than a minute
+
+A Setup `/ensure` returns `noop: true` with `noop_reason: compliant`, but takes 1 to 2 minutes, or up to 5 minutes for the first one after an upgrade. This is expected: each `ensure` checks the SHA-256 of every scanner runtime file. See [No-op ensure time on managed Windows](/docs/support-matrix#no-op-ensure-time-on-managed-windows) for the measured times.
+
+**Fix.** None needed. Give the MDM script a time limit of several minutes, and run `ensure` while agents are idle when you can.
+
+**Check.** The result has `ok: true` and `noop: true`.
+
 #### The first Windows install stops with `preflight_failed` naming `.defenseclaw`
 
 The message names `C:\Users\<user>\.defenseclaw`, or says "committed, but its protected managed-hook lifecycle journal could not be retired". A per-user install left that folder, and the managed install does not take it over. The first install refuses before it changes anything; a run that had already committed is installed and running.

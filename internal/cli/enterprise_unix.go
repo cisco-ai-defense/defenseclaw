@@ -453,10 +453,8 @@ func init() {
 		newEnterpriseSecretCommand("set", "Store a protected credential and apply it"),
 		newEnterpriseSecretCommand("status", "List protected credentials without revealing values"),
 		newEnterpriseSecretCommand("remove", "Remove a protected credential and apply the change"),
+		newEnterpriseSecretCheckCommand(),
 	)
-	if check := newEnterpriseSecretCheckCommand(); check != nil {
-		enterpriseSecretCmd.AddCommand(check)
-	}
 	enterpriseCmd.AddCommand(enterpriseLinuxCmd, enterpriseMacOSCmd, enterpriseSecretCmd)
 }
 

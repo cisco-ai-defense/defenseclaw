@@ -174,6 +174,16 @@ A managed host fails closed. When the gateway does not answer a tool-call hook w
 
 An agent that runs a few tool calls at a time is not affected. To reduce the effect, lower the number of tool calls the agent runs in parallel, and keep the audit store small: an administrator can lower `observability.local.retention_days` (default 7) in the managed config and apply it with `enterprise <os> ensure` ([Local history](/docs/observability#local-history)). Upgrade while agents are idle.
 
+## No-op ensure time on managed Windows
+
+On managed Windows, an `ensure` that finds nothing to change (`noop: true`, `noop_reason: compliant`) still takes about a minute or more. It checks the Setup signature, runs the installer `status` and `verify` checks, and checks the SHA-256 of every file of the scanner runtime (about 14,000 files, 390 MB), so that a changed file is put back. DefenseClaw keeps that full check: skipping it would let a changed scanner file run. Measured in 1.0.5 on quiet Windows Server 2025 hosts:
+
+- **Fresh install.** A second `ensure` took 46 s.
+- **Upgraded install.** Later no-op `ensure` runs took 62 to 100 s, of which the scanner runtime check took 36 to 45 s. The first no-op `ensure` after an upgrade took 154 to 308 s, because the scanner runtime check took 98 s to 4 min 25 s.
+- **Busy host.** With four hook clients and an agent session running, a no-op `ensure` took 383 s.
+
+Of a 100 s no-op `ensure`, about 16 s is the Setup signature check and staging, 25 s the installer `status` and `verify` checks, 45 s the scanner runtime check and 14 s the rest. Give the MDM compliance script a time limit of several minutes, not one, and do not run `ensure` in a tight loop.
+
 ## Linux sign-out
 
 On Linux, the OpenShell gateway runs in your systemd user manager. Without linger, signing out of your last session stops the gateway and its MicroVMs, even when a disk sync failed, so unsynced work in the guest is lost. This is how systemd works: without linger it ends a user's services when their last session ends. Save your work and stop the sandbox before you sign out, or ask an administrator to enable linger for your account with `sudo loginctl enable-linger USER`. See [A Linux sign-out ends a running MicroVM](/docs/sandboxes/guide#a-linux-sign-out-ends-a-running-microvm).
