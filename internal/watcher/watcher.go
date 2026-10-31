@@ -1836,7 +1836,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		if evt.Type == InstallMCP {
 			// Admitted without the scan whose failure blocked it: an allow
 			// rule or scan_on_install false (GAP-0910).
-			w.releaseScanFailureBlock(evt, targetType)
+			w.releaseScanFailureBlock(evt, targetType, "admitted without a scan ("+out.Reason+")")
 		}
 		w.recordAdmission(ctx, "allowed", targetType)
 		res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
@@ -1951,7 +1951,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		}
 		return res
 	}
-	w.releaseScanFailureBlock(evt, targetType)
+	w.releaseScanFailureBlock(evt, targetType, "its scan succeeded (the verdict decides)")
 
 	// Phase 3: post-scan evaluation. Re-read the live config so a block or
 	// allow added while the scan was running wins.
@@ -2673,7 +2673,7 @@ const unverifiedMCPReason = "scan did not finish, kept unverified (scanners.mcp_
 // and its marked baseline makes the rescan retry admission until a scan decides.
 func (w *InstallWatcher) keepUnverifiedMCPServer(ctx context.Context, evt InstallEvent, targetType, scannerName string, err error) AdmissionResult {
 	reason := unverifiedMCPReason + err.Error()
-	w.releaseScanFailureBlock(evt, targetType)
+	w.releaseScanFailureBlock(evt, targetType, "kept unverified (scanners.mcp_scanner.unverified_server: warn)")
 	_ = w.logger.LogEventCtx(ctx, audit.Event{
 		Action:   string(audit.ActionInstallAllowed),
 		Target:   evt.Path,
@@ -2697,9 +2697,11 @@ func (w *InstallWatcher) recordScanFailureBlock(evt InstallEvent, targetType, re
 }
 
 // releaseScanFailureBlock clears the block and runtime disable a failed scan
-// of this asset left, once a scan of it succeeds. The Secure Client profile
-// journals no such block.
-func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType string) {
+// of this asset left, once a scan of it succeeds (or admission decides it
+// without one; cause says how), and writes an enable audit row naming the
+// cleared block, as releaseSupersededRejection does (GAP-0289). The Secure
+// Client profile journals no such block.
+func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType, cause string) {
 	if w.secureClientActive() || w.store == nil {
 		return
 	}
@@ -2709,9 +2711,24 @@ func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType st
 		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path) && !blockedPathGone(entry.SourcePath)) {
 		return
 	}
-	for _, field := range []string{"runtime", "install"} {
-		_ = w.store.ClearActionFieldForConnector(targetType, journalName(evt), scope, field)
+	var cleared []string
+	for _, field := range []struct{ name, value string }{
+		{"install", entry.Actions.Install}, {"runtime", entry.Actions.Runtime},
+	} {
+		if field.value == "" {
+			continue
+		}
+		if err := w.store.ClearActionFieldForConnector(targetType, journalName(evt), scope, field.name); err == nil {
+			cleared = append(cleared, field.name+"="+field.value)
+		}
 	}
+	if len(cleared) == 0 || w.logger == nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[watch] %s %s: %s; the block its failed scan left no longer applies\n", targetType, evt.Name, cause)
+	_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
+		fmt.Sprintf("type=%s released: %s; cleared the scan-failure block %s connector=%s",
+			targetType, cause, strings.Join(cleared, " "), scope))
 }
 
 // blockedPathGone reports a scan-failure block recorded for a folder that no

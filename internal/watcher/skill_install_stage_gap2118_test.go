@@ -112,7 +112,7 @@ func TestScanFailureOfAVanishedSkillLeavesNoBlock(t *testing.T) {
 	w.recordScanFailureBlock(InstallEvent{Type: InstallSkill, Name: "fxshare1", Path: gone, Connector: "claudecode"},
 		"skill", scanFailureReason+"stat "+gone+": no such file or directory")
 	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
-	w.releaseScanFailureBlock(real, "skill")
+	w.releaseScanFailureBlock(real, "skill", "its scan succeeded")
 	if entry, err := store.GetActionForConnector("skill", "fxshare1", "claudecode"); err != nil || (entry != nil && !entry.Actions.IsEmpty()) {
 		t.Fatalf("journal %+v (err %v), want the block of the vanished copy lifted", entry, err)
 	}
