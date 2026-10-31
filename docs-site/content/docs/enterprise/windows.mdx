@@ -1037,6 +1037,14 @@ add the output of `enterprise policy export --connector wsl` (`reg`, `json` or
 `claude_desktop_key: create`. Uninstall removes only the values DefenseClaw wrote
 that are unchanged.
 
+If `claude_desktop_key: create` is later removed from the config (or the
+organization removes its own values from the key), DefenseClaw keeps the
+`disableWslSessions` value it wrote, so WSL sessions stay off. The `wsl` row stays
+covered, with a detail line naming the value as DefenseClaw's own, while no account
+has `HKCU` Claude Desktop policy or local third-party configuration that the value
+overrides and the key stays closed to standard accounts; otherwise the row names
+what the value overrides as a conflict. Uninstall removes the value.
+
 Limits:
 
 - The vendor documents only `false` and `0`; whether REG_SZ `true` forces the gate
