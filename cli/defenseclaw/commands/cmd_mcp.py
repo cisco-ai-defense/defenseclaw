@@ -2560,6 +2560,32 @@ def _openclaw_config_unset(path: str) -> None:
         raise click.ClickException(f"openclaw config unset failed: {detail}")
 
 
+def _is_write_failure(exc: Exception) -> bool:
+    """An OS error, or the refusal to write through a symlink that a connector
+    writer re-raises as a ValueError (GAP-1390): both end in one plain line."""
+    from defenseclaw.file_permissions import UnsafePathError
+
+    return isinstance(exc, OSError) or isinstance(exc.__cause__, UnsafePathError)
+
+
+def _connector_label(connector: str) -> str:
+    """The connector as ``mcp set`` and ``mcp unset`` report it: Claude Code
+    also names the profile it wrote, the default one or the CLAUDE_CONFIG_DIR
+    folder (GAP-1390)."""
+    if connector_paths.normalize(connector) != "claudecode":
+        return connector
+    if not (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip():
+        return f"{connector}, default profile"
+    return f"{connector}, profile {connector_paths.claude_config_dir()}"
+
+
+def _connector_labels(connectors: list[str]) -> str:
+    """The labels of *connectors* as one list; a label with a profile contains a
+    comma, so the list is then separated with semicolons."""
+    labels = [_connector_label(c) for c in connectors]
+    return ("; " if any("," in label for label in labels) else ", ").join(labels)
+
+
 def _connector_write_error(exc: Exception) -> str:
     """Return one plain line for an unexpected connector config write failure.
 
@@ -3039,7 +3065,7 @@ def set_server(
             # leave a silent partial write, so it is isolated and surfaced via a
             # non-zero exit below.
             if len(connectors) == 1:
-                if isinstance(exc, OSError):
+                if _is_write_failure(exc):
                     raise click.ClickException(
                         f"MCP server {name!r} was not saved for {c}: {_connector_write_error(exc)}"
                     ) from exc
@@ -3098,12 +3124,12 @@ def set_server(
         prep = "on" if verb == "Updated" else "to"
         click.secho(
             f"[mcp] {verb} {name!r} {prep} {len(applied)} connectors: "
-            f"{', '.join(applied)}{not_applied_suffix}.",
+            f"{_connector_labels(applied)}{not_applied_suffix}.",
             fg="green",
         )
     else:
         click.secho(
-            f"[mcp] {verb} {name!r} ({applied[0]}){not_applied_suffix}.",
+            f"[mcp] {verb} {name!r} ({_connector_label(applied[0])}){not_applied_suffix}.",
             fg="green",
         )
 
@@ -3215,7 +3241,7 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
             # verbatim for a single-connector target, otherwise isolate it so a
             # writable peer is still cleaned up (surfaced via non-zero exit).
             if len(connectors) == 1:
-                if isinstance(exc, OSError):
+                if _is_write_failure(exc):
                     raise click.ClickException(
                         f"MCP server {name!r} was not removed from {c}: {_connector_write_error(exc)}"
                     ) from exc
@@ -3275,9 +3301,12 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
     skipped_note = f" ({len(skipped)} skipped: {', '.join(skipped)})" if skipped else ""
     if gone:
         if len(gone) == 1 and len(connectors) == 1:
-            click.secho(f"[mcp] Removed {name!r} ({gone[0]}).", fg="yellow")
+            click.secho(f"[mcp] Removed {name!r} ({_connector_label(gone[0])}).", fg="yellow")
         else:
-            click.secho(f"[mcp] Removed {name!r} from {', '.join(gone)}{skipped_note}.", fg="yellow")
+            click.secho(
+                f"[mcp] Removed {name!r} from {_connector_labels(gone)}{skipped_note}.",
+                fg="yellow",
+            )
     for c in restored:
         click.secho(
             f"Restored your previous {name} entry on {c} (DefenseClaw's version removed); "
