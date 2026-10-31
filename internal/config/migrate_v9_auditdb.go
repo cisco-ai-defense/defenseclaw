@@ -237,25 +237,8 @@ func resumeV9ActionCleanup(ctx context.Context, cleanup MigrationAuditCleanup) e
 	return err
 }
 
-// clearV9ActionRows removes the install field of moved rows in a transaction.
-func clearV9ActionRows(path string, moved []v9ActionRow) error {
-	db, err := openV9AuditDB(path, "_pragma=busy_timeout(5000)")
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("BEGIN IMMEDIATE"); err != nil {
-		return err
-	}
-	defer func() { _, _ = db.Exec("ROLLBACK") }()
-	if err := clearV9ActionRowsDB(db, moved); err != nil {
-		return err
-	}
-	_, err = db.Exec("COMMIT")
-	return err
-}
-
+// clearV9ActionRowsDB removes the install field of moved rows inside the
+// caller's write transaction.
 func clearV9ActionRowsDB(db *sql.DB, moved []v9ActionRow) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, row := range moved {
