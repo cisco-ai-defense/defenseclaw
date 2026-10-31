@@ -283,13 +283,17 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			defer func() { windowsScannerProgress = previous }()
 		}
 		source := windowsScannerRuntimeStagedSource(opts)
+		var before *enterprisestatus.ScannerRuntime
 		if source == "" {
 			// No staged copy to install from (a repair or ensure run from the installed
 			// CLI): a runtime that is installed but not unpacked is prepared again, so a
 			// prepare that failed half way is not left for a hand clean-up (GAP-0263),
 			// and a missing one is reported with the Setup command that installs it.
-			reprepareInstalledWindowsScannerRuntime(result, opts)
+			before = reprepareInstalledWindowsScannerRuntime(result, opts)
 		} else {
+			if windowsScannerRuntimeRepairAction(action) {
+				before = windowsScannerRuntimeReader()
+			}
 			var superseded *windowsScannerRuntimeSupersededError
 			if err := windowsScannerRuntimeInstaller(source, action, opts); errors.As(err, &superseded) {
 				result.AddWarning("scanner_runtime_superseded", superseded.Error())
@@ -307,6 +311,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 				result.AddError("scanner_runtime_unavailable", message)
 			}
 		}
+		noteWindowsScannerRuntimeMadeReady(result, action, before)
 	case "uninstall":
 		if len(result.Errors) != 0 && !windowsScannerRuntimeUninstallRemovedTheDeployment(result, opts) {
 			return
@@ -373,6 +378,41 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			}
 		}
 	}
+}
+
+// windowsScannerRuntimeRepairAction reports whether action is a repair or
+// an ensure: the runs whose changes list says what they repaired on an
+// installed deployment.
+func windowsScannerRuntimeRepairAction(action string) bool {
+	return action == "repair" || action == "ensure"
+}
+
+// noteWindowsScannerRuntimeMadeReady records, for a repair or an ensure, a
+// scanner runtime this run made ready again as a change, so the run is not
+// a no-op. An ensure that prepared again a runtime that had lost its Python
+// interpreter (minutes of work) reported noop with no changes, and the MDM
+// Fix script said "no repair needed after verify" (GAP-0679). before is the
+// runtime as the run found it; one that was already ready adds nothing, so
+// a healthy host stays a no-op.
+func noteWindowsScannerRuntimeMadeReady(result *enterprisestatus.Result, action string, before *enterprisestatus.ScannerRuntime) {
+	if !windowsScannerRuntimeRepairAction(action) || before == nil || before.State == "ready" ||
+		result.Scanners == nil || result.Scanners.State != "ready" ||
+		windowsEnterpriseResultHasError(result, "scanner_runtime_unavailable") ||
+		windowsEnterpriseResultHasWarning(result, "scanner_runtime_superseded") {
+		// A run another deployment overtook did not make it ready.
+		return
+	}
+	was := "it was " + before.State
+	switch before.State {
+	case "missing":
+		was = "it was missing"
+	case "not_prepared":
+		was = "it was installed but not prepared"
+	case "untrusted":
+		was = "it was not one this release's trust policy admitted"
+	}
+	result.Changes = append(result.Changes, "made the skill, MCP and plugin scanner runtime ready again ("+was+")")
+	result.Noop, result.NoopReason = false, ""
 }
 
 // windowsScannerRuntimeInstaller is installWindowsScannerRuntime; a seam for
@@ -1340,8 +1380,10 @@ func windowsScannerRuntimeUnavailable(scanners *enterprisestatus.ScannerRuntime)
 // alone. A missing one can only come from a Setup payload, which this run
 // does not have, so it is reported. The prepare runs under the scanner
 // runtime lock and only while the deployment record names this run's
-// deployment, as the install from a payload does.
-func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) {
+// deployment, as the install from a payload does. It returns the runtime
+// as it found it (nil when it could not read it), so the caller can tell a
+// runtime it made ready from one that was ready (GAP-0679).
+func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) *enterprisestatus.ScannerRuntime {
 	// An admission record that does not prove a production admission is
 	// proven again by this run's payload trust policy, or quarantined, before
 	// the runtime is read (W2B-G-win review loop round 1).
@@ -1349,7 +1391,7 @@ func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result, op
 	if err != nil {
 		result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
 		result.Scanners = windowsScannerRuntimeReader()
-		return
+		return nil
 	}
 	if why != "" {
 		result.AddWarning("scanner_runtime_admission_quarantined", windowsScannerRuntimeAdmissionQuarantined+" (not proven: "+why+")")
@@ -1357,30 +1399,35 @@ func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result, op
 	current := windowsScannerRuntimeReader()
 	if current.State == "ready" {
 		result.Scanners = current
-		return
+		return current
 	}
 	if current.State == "missing" || current.State == "untrusted" {
 		result.AddWarning("scanner_runtime_unavailable", windowsScannerRuntimeUnavailable(current))
 		result.Scanners = current
-		return
+		return current
 	}
-	if err := reprepareWindowsScannerRuntimeLocked(result.Action, opts); err != nil {
+	if err := windowsScannerRuntimeRepreparer(result.Action, opts); err != nil {
 		var superseded *windowsScannerRuntimeSupersededError
 		switch {
 		case errors.As(err, &superseded):
 			result.AddWarning("scanner_runtime_superseded", superseded.Error())
 		case errors.Is(err, windows.ERROR_PATH_NOT_FOUND):
 			// The root went (an uninstall step) after it was read.
-			current = windowsScannerRuntimeReader()
-			result.AddWarning("scanner_runtime_unavailable", windowsScannerRuntimeUnavailable(current))
-			result.Scanners = current
-			return
+			after := windowsScannerRuntimeReader()
+			result.AddWarning("scanner_runtime_unavailable", windowsScannerRuntimeUnavailable(after))
+			result.Scanners = after
+			return current
 		default:
 			result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
 		}
 	}
 	result.Scanners = windowsScannerRuntimeReader()
+	return current
 }
+
+// windowsScannerRuntimeRepreparer is reprepareWindowsScannerRuntimeLocked; a
+// seam for tests.
+var windowsScannerRuntimeRepreparer = reprepareWindowsScannerRuntimeLocked
 
 func reprepareWindowsScannerRuntimeLocked(action string, opts *windowsEnterpriseLifecycleOptions) error {
 	root, err := windowsScannerRuntimeDir()

@@ -99,6 +99,12 @@ function Invoke-DefenseClawNative {
                 'noop' {
                     $out = @{ ok = $true; noop = $true; errors = @(); warnings = @() } | ConvertTo-Json -Depth 6
                 }
+                'scanner_made_ready' {
+                    # GAP-0679: the CLI's ensure prepared the scanner runtime
+                    # again; the result lists it as a change, not a noop.
+                    $out = @{ ok = $true; noop = $false; errors = @(); warnings = @()
+                        changes = @('made the skill, MCP and plugin scanner runtime ready again (it was installed but not prepared)') } | ConvertTo-Json -Depth 6
+                }
                 'cannot_restore' {
                     # What the CLI reports: the restore error, then the health
                     # check's bundle_not_applied with the same reason.
@@ -292,6 +298,21 @@ def test_base_only_device_is_unaffected(engine, scripts, tmp_path):
     assert code == 0, out
     assert out.endswith("no repair needed after verify"), out
     assert "enterprise bundle status" not in _calls(device)
+
+
+def test_remediation_that_made_the_scanner_runtime_ready_says_repaired(engine, scripts, tmp_path):
+    # GAP-0679: the ensure re-prepared the scanner runtime (minutes of work);
+    # Fix printed 'no repair needed after verify' while the ensure result was
+    # a noop. With the change in the result it says what it repaired.
+    _, fix = scripts
+    device = _device(tmp_path, marker={"ProductVersion": "9.9.9", "Profile": "standalone"}, ensure="scanner_made_ready")
+    code, out = _run(engine, fix, device)
+    assert code == 0, out
+    assert out == (
+        "DefenseClaw 9.9.9: repaired (drift): made the skill, MCP and plugin scanner runtime ready again "
+        "(it was installed but not prepared)"
+    ), out
+    assert "no repair needed" not in out, out
 
 
 def test_bundle_check_is_identical_in_detect_and_fix():
