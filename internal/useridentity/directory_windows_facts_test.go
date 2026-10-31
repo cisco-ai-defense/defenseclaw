@@ -4,6 +4,7 @@
 package useridentity
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,10 +60,19 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 		entra.Source != SourceWindowsIdentityStore || entra.Assurance != AssuranceVerified || entra.AccountDomain != "AzureAD" {
 		t.Fatalf("entra facts = %+v", entra)
 	}
-	hybrid := resolveWindowsDirectoryFacts(reader, adSID, func(string, string) string { return "ignored@corp.example.com" }, now)
+	// A hybrid user's identity store UPN stands in only until the domain
+	// controller answers; its answer wins when they differ, as after a rename
+	// of the AD UPN (identity-round GAP-1238).
+	hybrid := resolveWindowsDirectoryFacts(reader, adSID, func(string, string) string { return "" }, now)
 	if hybrid.Directory != DirectoryActiveDirectory || hybrid.Domain != "corp.example.com" || hybrid.Realm != "CORP.EXAMPLE.COM" ||
-		hybrid.Principal != "bob@corp.example.com" || hybrid.TenantID != tenant || hybrid.AccountDomain != "CORP" {
-		t.Fatalf("hybrid AD facts = %+v", hybrid)
+		hybrid.Principal != "bob@corp.example.com" || hybrid.TenantID != tenant || hybrid.AccountDomain != "CORP" ||
+		hybrid.Source != SourceWindowsIdentityStore {
+		t.Fatalf("hybrid AD facts before the directory answers = %+v", hybrid)
+	}
+	renamed := resolveWindowsDirectoryFacts(reader, adSID, func(string, string) string { return "Robert@corp.example.com" }, now)
+	if renamed.UPN != "robert@corp.example.com" || renamed.Principal != "robert@corp.example.com" || renamed.TenantID != tenant ||
+		renamed.Source != SourceWindowsLSA {
+		t.Fatalf("hybrid AD facts with the directory answer = %+v; want the TranslateNameW UPN over the identity store one", renamed)
 	}
 	// The identity store may retain a cloud sign-in for a hybrid AD SID
 	// while the AD name lookup is temporarily unavailable. It cannot by
@@ -168,6 +178,35 @@ func TestADUPNCacheRetranslatesBeforeDirectoryRefresh(t *testing.T) {
 	now = now.Add(15 * time.Minute)
 	if got := cache.lookup(sid, sam, time.Second); got != upn || calls != 2 {
 		t.Fatalf("UPN after directory refresh = %q after %d translations; want %q after 2", got, calls, upn)
+	}
+}
+
+// `enterprise identity refresh` expires an identity's cached UPN, so the
+// next lookup translates again inside adUPNTTL and takes a renamed UPN
+// (identity-round GAP-1238); other identities keep theirs.
+func TestADUPNCacheExpireRetranslatesOneIdentity(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	upn := "old@corp.example.com"
+	calls := 0
+	cache := newADUPNCache(func(string) string { calls++; return upn })
+	cache.now = func() time.Time { return now }
+	const sid, other = "S-1-5-21-1-2-3-1105", "S-1-5-21-1-2-3-1106"
+	const sam = `CORP\alice`
+	if got := cache.lookup(sid, sam, time.Second); got != upn {
+		t.Fatalf("initial UPN = %q", got)
+	}
+	cache.lookup(other, `CORP\bob`, time.Second)
+	upn = "new@corp.example.com"
+	now = now.Add(time.Minute)
+	if got := cache.lookup(sid, sam, time.Second); got != "old@corp.example.com" || calls != 2 {
+		t.Fatalf("UPN inside its lifetime = %q after %d translations; want the cached old one", got, calls)
+	}
+	cache.expire(strings.ToLower(sid))
+	if got := cache.lookup(sid, sam, time.Second); got != upn || calls != 3 {
+		t.Fatalf("UPN after expire = %q after %d translations; want %q after 3", got, calls, upn)
+	}
+	if got := cache.lookup(other, `CORP\bob`, time.Second); got != "old@corp.example.com" || calls != 3 {
+		t.Fatalf("another identity after expire = %q after %d translations; want its cached answer", got, calls)
 	}
 }
 

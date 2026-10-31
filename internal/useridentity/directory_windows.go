@@ -32,6 +32,12 @@ func WindowsDirectoryFacts(sid string, wait time.Duration) DirectoryFacts {
 	return facts
 }
 
+// ExpireWindowsADUPN makes the next lookup of sid's AD UPN ask TranslateNameW
+// again rather than reuse the answer cached for up to adUPNTTL, so
+// `enterprise identity refresh` applies a renamed UPN now (identity-round
+// GAP-1238).
+func ExpireWindowsADUPN(sid string) { adUPNs.expire(sid) }
+
 // WindowsGroupNames renders group SIDs as DOMAIN\name where LookupAccountSid
 // answers, keeping the SID otherwise. At most limit SIDs are looked up and
 // no lookup can hold the caller past the budget. Remaining SIDs stay as SIDs.
