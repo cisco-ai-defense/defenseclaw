@@ -63,7 +63,7 @@ func planStandaloneEnsure(opts enterpriseSetupOptions, installed bool) standalon
 		return standaloneEnsurePlan{steps: []standaloneEnsureStep{{name: "apply", opts: apply}}}
 	}
 	stage := opts
-	stage.Bundle, stage.TrustAnchors, stage.RefuseCapabilityLoss = "", "", false
+	stage.Bundle, stage.TrustAnchors, stage.DeviceGroup, stage.RefuseCapabilityLoss = "", "", "", false
 	stage.NoStart = true
 	rollback := enterpriseSetupOptions{
 		Action:                 "uninstall",

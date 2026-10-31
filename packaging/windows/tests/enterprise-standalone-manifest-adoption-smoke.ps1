@@ -61,7 +61,7 @@ try {
         $script:TestGuardianCatchUp = $null
         $script:TestGuardianSources = [Collections.Generic.List[object]]::new()
         function Get-DefenseClawGuardianStatusReport {
-            param($Layout, $GatewayServiceName, $GatewaySource)
+            param($Layout, $GatewayServiceName, $GatewaySource, $TimeoutSeconds)
             $script:TestGuardianProbes++
             $script:TestGuardianSources.Add($GatewaySource)
             if ($null -ne $script:TestGuardianCatchUp -and $script:TestGuardianProbes -ge 2) {
