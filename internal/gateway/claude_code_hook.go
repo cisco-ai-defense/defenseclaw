@@ -334,6 +334,15 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		action = "block"
 	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	// The alert-only SQL rule says so in the chat, as on the Codex and generic
+	// hook paths, so block_at is not read as a way to turn it into a block
+	// (GAP-0914). Secure Client keeps the plain finding line.
+	if action == "alert" && hasAlertOnlySQLFinding(verdict.Findings) {
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			resp.AdditionalContext = strings.TrimSpace(resp.AdditionalContext + sqlAlertOnlyHookNotice)
+			resp.ClaudeCodeOutput = claudeCodeOutput(req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext)
+		}
+	}
 	resp.SourceReason = verdict.Reason
 	// Stamp the unified-pipeline correlation keys so the agent-hook
 	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
