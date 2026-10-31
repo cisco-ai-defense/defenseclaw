@@ -2303,6 +2303,47 @@ func actionPowerShellListOnlyBody(body, home string) bool {
 	return listOnly && calls > 0
 }
 
+// actionWindowsLaunchText is the text a list-only PowerShell launch may hold
+// on a native Windows host: words, paths, wildcards, double quotes and
+// backslashes. No reading of it (Git Bash, PowerShell, cmd) finds a
+// variable, a single quote, a backtick, a caret, a percent, a parenthesis,
+// a redirect or a background operator in it.
+var actionWindowsLaunchText = lazyregexp.New(`^[A-Za-z0-9_./~:*?,|; \t"\\-]+$`)
+
+// actionWindowsPowerShellListOnlyLaunch reports a command that is one pwsh
+// or powershell call whose -Command body only lists names
+// (actionPowerShellListOnlyBody), as the POSIX read-only list reads it
+// (actionKnownReadOnlyShell, rel-1-0-6:GAP-0145). Git Bash, PowerShell and
+// cmd pass that body alike, because the text holds nothing only one of them
+// reads (actionWindowsLaunchText). PowerShell reads a backslash in a path as
+// a separator, never as an escape, so the body is checked with forward
+// slashes: a backslash cannot hide a statement end from the check.
+func actionWindowsPowerShellListOnlyLaunch(command, home string) bool {
+	if len(command) > MaxPayloadBytes || !actionWindowsLaunchText.MatchString(command) {
+		return false
+	}
+	file, parsed := parseShell(command)
+	if !parsed || len(file.Stmts) != 1 {
+		return false
+	}
+	stmt := file.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(stmt.Redirs) != 0 || stmt.Background || stmt.Coprocess || stmt.Negated ||
+		len(call.Assigns) != 0 || len(call.Args) < 3 {
+		return false
+	}
+	program, static := StaticWord(call.Args[0], home)
+	if !static || !strings.EqualFold(program, "pwsh") && !strings.EqualFold(program, "powershell") {
+		return false
+	}
+	j, ok := actionPowerShellCommandBodyIndex(call.Args, 0, home)
+	if !ok {
+		return false
+	}
+	body, static := StaticWord(call.Args[j], home)
+	return static && actionPowerShellListOnlyBody(strings.ReplaceAll(body, `\`, "/"), home)
+}
+
 // actionExitStatusAssignment reports a bare NAME=$? assignment: it keeps the
 // previous command's exit status and changes no file or program lookup.
 func actionExitStatusAssignment(call *syntax.CallExpr) bool {
@@ -2460,6 +2501,9 @@ func actionLessWritesFile(option string) bool {
 // not a write, so Git Bash echo \$HOME/.ssh/authorized_keys and a PowerShell
 // comment are not blocked by the reading of a shell that does not run them.
 func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool, dialect actionfacts.Dialect) bool {
+	if depth == 0 && actionWindowsPowerShellListOnlyLaunch(command, home) {
+		return false
+	}
 	for _, grammar := range []actionWindowsGrammar{0, actionWindowsPlainGrammar} {
 		if grammar != 0 && (dialect == actionfacts.DialectPowerShell || dialect == actionfacts.DialectPOSIX) {
 			grammar |= actionWindowsPlainComments

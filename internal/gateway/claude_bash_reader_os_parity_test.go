@@ -135,3 +135,28 @@ func TestClaudeBashDirectoryStackCopyMatchesAcrossOS(t *testing.T) {
 		{name: "rsync after a cd that may fail", command: `cd /nonexistent-zz && true; rsync -a ~-/ x/`, block: true},
 	})
 }
+
+// A pwsh or powershell -Command body that only lists names reads, as an ls
+// of ~/.ssh does (rel-1-0-6:GAP-0145); any writer, redirect or other syntax
+// in the body keeps the check. On Windows the listing blocked.
+func TestClaudeBashPowerShellListingOfSSHMatchesAcrossOS(t *testing.T) {
+	judgeClaudeBashParityRows(t, []claudeBashParityRow{
+		{name: "Get-ChildItem", command: `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh"`},
+		{name: "Get-ChildItem piped to Select-Object", command: `pwsh -Command "Get-ChildItem -Force ~/.ssh | Select-Object Name"`},
+		{name: "Test-Path", command: `pwsh -Command "Test-Path ~/.ssh/authorized_keys"`},
+		{name: "powershell ls", command: `powershell -Command "ls ~/.ssh"`},
+		{name: "drive path with slashes", command: `pwsh -NoProfile -Command "Get-ChildItem {H}/.ssh"`, windowsOnly: true},
+		{name: "drive path with backslashes", command: `pwsh -NoProfile -Command "Get-ChildItem {PB}\..\.ssh"`, windowsOnly: true},
+		{name: "case form", command: `pwsh -NoProfile -Command "get-childitem ~/.SSH"`, windowsOnly: true},
+		{name: "Add-Content to the keys file", command: `pwsh -NoProfile -Command "Add-Content -Path ~/.ssh/authorized_keys -Value k"`, block: true},
+		{name: "listing then Set-Content", command: `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh; Set-Content ~/.ssh/authorized_keys k"`, block: true},
+		{name: "Copy-Item onto the keys file", command: `pwsh -NoProfile -Command "Copy-Item notes.txt ~/.ssh/authorized_keys"`, block: true},
+		{name: "listing piped to Remove-Item", command: `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh | Remove-Item"`, block: true},
+		{name: "New-Item in .ssh", command: `pwsh -NoProfile -Command "New-Item -ItemType File ~/.ssh/authorized_keys2"`, block: true},
+		{name: "listing redirected onto the keys file", command: `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh > ~/.ssh/authorized_keys"`, block: true},
+		{name: "listing with a subexpression", command: `pwsh -NoProfile -Command "Get-ChildItem $(Set-Content ~/.ssh/authorized_keys k)"`, block: true},
+		{name: "listing with sort", command: `pwsh -NoProfile -Command "Get-ChildItem ~/.ssh | sort -o ~/.ssh/authorized_keys"`, block: true},
+		{name: "backslash before a statement end", command: `pwsh -NoProfile -Command "Get-ChildItem x\; Set-Content ~/.ssh/authorized_keys k"`, block: true},
+		{name: "Set-Content by a backslash drive path", command: `pwsh -NoProfile -Command "Set-Content {PB}\..\.ssh\authorized_keys k"`, block: true, windowsOnly: true},
+	})
+}
