@@ -202,19 +202,28 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			callerCWD:     req.CWD,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, toolName, actionTool, toolArgs)
+		actionInput := actionfacts.Input{
+			Tool:                                     actionTool,
+			Args:                                     toolArgs,
+			CWD:                                      req.CWD,
+			ActiveHome:                               hookActiveHome(ctx),
+			ToolResourceIdentity:                     resourceIdentity,
+			CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
+			ActiveAgentFiles:                         activeAgentContext.files,
+			ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
+			ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
+			ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
+		}
+		// On Windows the call is read in the shell Claude Code runs it in
+		// (Bash: Git Bash, PowerShell: PowerShell), as the generic agent
+		// hook reads its connectors' shells (GAP-0147, GAP-1717).
+		windowsShellDialect := a.agentHookWindowsDialectHint(ctx)
+		if windowsShellDialect {
+			actionInput.DialectHint = agentHookWindowsShellDialect("claudecode", actionInput)
+		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input: actionfacts.Input{
-				Tool:                                     actionTool,
-				Args:                                     toolArgs,
-				CWD:                                      req.CWD,
-				ActiveHome:                               hookActiveHome(ctx),
-				ToolResourceIdentity:                     resourceIdentity,
-				CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
-				ActiveAgentFiles:                         activeAgentContext.files,
-				ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
-				ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
-				ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
-			},
+			Input:                         actionInput,
+			windowsShellDialect:           windowsShellDialect,
 			LegacyText:                    string(toolArgs),
 			Connector:                     "claudecode",
 			EnforcementCapable:            true,
