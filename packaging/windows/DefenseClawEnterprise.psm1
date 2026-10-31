@@ -27365,7 +27365,8 @@ function Wait-DefenseClawFreshGuardianReconcile {
     }
     $priorReport = Get-DefenseClawGuardianStatusReport `
         -Layout $Layout `
-        -GatewayServiceName $GatewayServiceName
+        -GatewayServiceName $GatewayServiceName `
+        -TimeoutSeconds ([Math]::Max(30, [Math]::Min(300, $TimeoutSeconds + 30)))
     $priorReconcileID = [string](Get-DefenseClawGuardianReconcileID `
         -Report $priorReport)
     $priorGeneration = [string](Get-DefenseClawGuardianGeneration `
