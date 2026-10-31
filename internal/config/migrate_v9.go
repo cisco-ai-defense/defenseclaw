@@ -499,12 +499,47 @@ func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record Mi
 	latest.Pending = false
 	if ack {
 		latest.Acknowledged = true
-		if cleanup := latest.AuditCleanup; latest.ActionsRowsMoved > 0 && (cleanup == nil || !cleanup.Skipped) {
-			latest.Notes = append(latest.Notes, "`config migrate --ack` completed the migration without the audit.db "+
-				"cleanup: the operator rows it moved to config.yaml may still be in audit.db")
+		if note := v9AckCleanupNote(latest); note != "" {
+			latest.Notes = append(latest.Notes, note)
 		}
 	}
 	return writeMigrationRecord(MigrationRecordPath(configPath), latest)
+}
+
+// v9AckCleanupNote is the note `config migrate --ack` adds to the record it
+// completes without the audit.db cleanup, or "" when no moved row is left
+// there. The commit clears the rows before a later step (the pre-9 Rego
+// refresh) can leave the record pending, so the note is written only when a
+// row of the snapshot is still an operator row in audit.db, or when that
+// cannot be checked (GAP-1552).
+func v9AckCleanupNote(record MigrationRecord) string {
+	const left = "`config migrate --ack` completed the migration without the audit.db cleanup: " +
+		"the operator rows it moved to config.yaml may still be in audit.db"
+	cleanup := record.AuditCleanup
+	switch {
+	case record.ActionsRowsMoved == 0, cleanup != nil && cleanup.Skipped:
+		return ""
+	case cleanup == nil, len(cleanup.Rows) != record.ActionsRowsMoved, strings.TrimSpace(cleanup.Path) == "":
+		return left
+	}
+	if _, err := os.Stat(cleanup.Path); errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	current, err := readV9ActionRows(cleanup.Path)
+	if err != nil {
+		return fmt.Sprintf("`config migrate --ack` completed the migration without the audit.db cleanup and could not "+
+			"check audit.db (%v): the operator rows it moved to config.yaml may still be in audit.db", err)
+	}
+	moved := make(map[string]bool, len(cleanup.Rows))
+	for _, row := range cleanup.Rows {
+		moved[row.ID] = true
+	}
+	for _, row := range current {
+		if moved[row.id] {
+			return left
+		}
+	}
+	return ""
 }
 
 // finishV9ActionCleanup clears the operator rows a pending record moved from
