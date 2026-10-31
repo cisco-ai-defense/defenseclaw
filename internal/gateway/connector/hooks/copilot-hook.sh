@@ -519,7 +519,13 @@ fail_unreachable() {
   # through (defenseclaw_per_user_outage_open): the tool runs, with the
   # warning above and a hook-failures.jsonl row.
   if ! defenseclaw_should_fail_closed_on_unreachable; then
-    exit 0
+{{if not .Sandbox}}    # Copilot CLI shows nothing a hook prints on an allow except a
+    # postToolUse additionalContext, which it adds under the tool's output:
+    # the session's one outage warning goes there (rel-1-0-4 GAP-1320).
+    if [ "$1" = "gateway unreachable" ] && [ "$_DC_COPILOT_EVENT" = postToolUse ]; then
+      defenseclaw_unreachable_notice_json additionalContext
+    fi
+{{end}}    exit 0
   fi
   local next=""
   [ "$1" != "gateway unreachable" ] || next="$(defenseclaw_unreachable_next_step)"

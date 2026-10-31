@@ -224,15 +224,20 @@ func conflictingKeysProjectedAndAliasCases() []conflictingKeysCase {
 		cases = append(cases, conflictingKeysCase{connector + conflictingKeysControl + name, connector, tool, args, block, rules})
 	}
 	// A case twin of an argument the projection takes out.
-	add("workdir+Workdir", "opencode", "shell", shell(wipe, `"workdir":"{PROJ}"`, `"Workdir":"{PROJ}"`))
-	add("workdir+WORKDIR", "opencode", "shell", shell(wipe, `"workdir":"{PROJ}"`, `"WORKDIR":"{PROJ}"`))
+	add("workdir+Workdir", "opencode", "shell", shell(wipe, `"workdir":"{PROJ}"`, `"Workdir":"{PROJ}/sub"`))
+	add("workdir+WORKDIR", "opencode", "shell", shell(wipe, `"workdir":"{PROJ}"`, `"WORKDIR":"{PROJ}/sub"`))
 	add("workdir+Workdir-other", "opencode", "shell", shell(wipe, `"workdir":"{PROJ}"`, `"Workdir":"/tmp"`))
-	add("working_dir+Working_dir", "kiro", "execute_bash", shell(wipe, `"working_dir":"{PROJ}"`, `"Working_dir":"{PROJ}"`))
-	add("description+Description", "kiro", "execute_bash", shell(wipe, `"description":"d"`, `"Description":"d"`))
-	add("timeout+Timeout", "kiro", "execute_bash", shell(wipe, `"timeout":5000`, `"Timeout":5000`))
-	add("summary+Summary", "kiro", "execute_bash", shell(wipe, `"summary":"s"`, `"Summary":"s"`))
+	// The same twins with one value name one action: the command's rule
+	// decides and the conflict is not named (GAP-0696).
+	control("workdir+Workdir-same", "opencode", "shell", shell(wipe, `"workdir":"{PROJ}"`, `"Workdir":"{PROJ}"`), true)
+	control("timeout+Timeout-same", "kiro", "execute_bash", shell(wipe, `"timeout":5000`, `"Timeout":5000`), true)
+	control("benign-workdir+Workdir-same", "opencode", "shell", shell("ls -la", `"workdir":"{PROJ}"`, `"Workdir":"{PROJ}"`), false)
+	add("working_dir+Working_dir", "kiro", "execute_bash", shell(wipe, `"working_dir":"{PROJ}"`, `"Working_dir":"{PROJ}/sub"`))
+	add("description+Description", "kiro", "execute_bash", shell(wipe, `"description":"d"`, `"Description":"e"`))
+	add("timeout+Timeout", "kiro", "execute_bash", shell(wipe, `"timeout":5000`, `"Timeout":6000`))
+	add("summary+Summary", "kiro", "execute_bash", shell(wipe, `"summary":"s"`, `"Summary":"t"`))
 	for _, harness := range []struct{ connector, tool string }{{"hermes", "terminal"}, {"devin", "exec"}} {
-		add("timeout+Timeout", harness.connector, harness.tool, shell(wipe, `"timeout":5000`, `"Timeout":5000`))
+		add("timeout+Timeout", harness.connector, harness.tool, shell(wipe, `"timeout":5000`, `"Timeout":6000`))
 		add("workdir+Workdir-other", harness.connector, harness.tool, shell(wipe, `"workdir":"{PROJ}"`, `"Workdir":"/tmp"`))
 	}
 	// A second key ActionFacts reads as the command.
@@ -395,7 +400,9 @@ func TestConflictingToolArgumentKeysInspectToolProjection(t *testing.T) {
 		conflict   bool
 	}{
 		{"alone", `{"command":"rm -rf /","timeout":5}`, false},
-		{"timeout+Timeout", `{"command":"rm -rf /","timeout":5,"Timeout":5}`, true},
+		{"timeout+Timeout", `{"command":"rm -rf /","timeout":5,"Timeout":6}`, true},
+		// One value under both spellings is one action (GAP-0696).
+		{"timeout+Timeout same value", `{"command":"rm -rf /","timeout":5,"Timeout":5}`, false},
 		{"workdir+Workdir", `{"command":"rm -rf /","workdir":"/srv","Workdir":"/tmp"}`, true},
 		{"command+input.command", `{"command":"rm -rf /","input":{"command":"true"}}`, true},
 		{"input.command+command", `{"command":"true","input":{"command":"rm -rf /"}}`, true},

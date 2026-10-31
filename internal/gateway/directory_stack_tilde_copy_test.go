@@ -43,9 +43,9 @@ func TestDirectoryStackTildeCopyIsNotAKeysWrite(t *testing.T) {
 		{"pushd /tmp && tar czf out.tgz ~1", false},
 		{"pushd src && tar czf out.tgz ~1", false},
 		{"pushd src; pushd ..; cp ~1/../a.txt c.txt", false},
-		// A recursive copy keeps links; the walk does not place the
-		// directory the stack word names, so it stays a possible link copy.
-		{"pushd src && cp -r ~1/src src-copy", true},
+		// A recursive copy keeps links; the walk reads the directory the
+		// stack word names and finds none there (GAP-2586).
+		{"pushd src && cp -r ~1/src src-copy", false},
 		{"pushd ~/.ssh && pushd /tmp && cp ~1/id_ed25519 /tmp/k", true},
 		{"pushd ~/.ssh; dirs -c; ls ~1", false},
 		{"pushd ~/.ssh; dirs -v", false},

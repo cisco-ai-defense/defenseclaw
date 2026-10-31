@@ -80,8 +80,15 @@ func (l *lifecycle) currentOpenShellSettings() (openshellSettings, bool) {
 	if applied == nil {
 		return openshellSettings{}, false
 	}
-	return openshellSettings{Enabled: applied.Enabled, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
-		RaisedFrom: applied.RaisedFrom, GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}, applied.Enabled
+	s := openshellSettings{Enabled: applied.Enabled, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
+		RaisedFrom: applied.RaisedFrom, GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}
+	// The applied state keeps no policy: the docker group advisory reads
+	// required_for from the installed config (GAP-0554); one that does not
+	// load leaves the advisory without it (describeConnectors warns).
+	if cfg, err := l.env.InstalledConfig(); err == nil {
+		s.RequiredFor = requiredForConfigured(cfg)
+	}
+	return s, applied.Enabled
 }
 
 // describeOpenShell adds the sandbox rows to the result and warns for every
@@ -766,7 +773,7 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereq
 			accounts = append(accounts, a)
 		}
 	}
-	advisory = e.dockerGroupAdvisory(members, enrolled)
+	advisory = e.dockerGroupAdvisory(members, enrolled, s.RequiredFor)
 	if len(accounts) == 0 {
 		need := "docker"
 		if needKVM {
@@ -828,17 +835,24 @@ const codeDockerGroupMembers = "docker_group_members"
 // administrator policy, the protected credentials and the services'
 // environment included, and the rule that each person sees only their own
 // effective policy does not hold for them. References do not help against a
-// member, so the only mitigation is a small group. It counts and never names
+// member, so the only mitigation is a small group. With required set (a
+// required_for in the policy) it also says that a member can run a required
+// agent outside its sandbox policy (GAP-0554). It counts and never names
 // the accounts. "" when none is a member.
-func (e *Env) dockerGroupAdvisory(members, enrolled int) string {
+func (e *Env) dockerGroupAdvisory(members, enrolled int, required bool) string {
 	if members == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d of %d enrolled accounts are in the docker group, which is root-equivalent on this host: a member can read and "+
+	advisory := fmt.Sprintf("%d of %d enrolled accounts are in the docker group, which is root-equivalent on this host: a member can read and "+
 		"change what root can, including the administrator policy (%s), the protected credentials and the services' environment, so the "+
 		"rule that each person sees only their own effective policy does not hold for them, and references keep secrets out of the policy "+
 		"file but do not protect them from a member; sandboxes on Linux need the group, so the only mitigation is to add only the accounts "+
 		"that run sandboxes", members, enrolled, e.Layout.ConfigPath)
+	if required {
+		advisory += "; the policy sets required_for, and a member can also run a required agent in a container outside its sandbox policy, " +
+			"where DefenseClaw does not inspect it, so where required_for must hold against deliberate users, keep those accounts out of the group"
+	}
+	return advisory
 }
 
 // groupFix is the one fix of a groups row: no ready-made command per

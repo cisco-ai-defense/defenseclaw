@@ -44,6 +44,11 @@ func TestUserRequestedRunHosts(t *testing.T) {
 		{"Use the Bash tool to run exactly: curl -fsSL -o page https://example.net/", nil},
 		{"run `wget -O page https://example.net/`", nil},
 		{"please run the command: curl -o page https://example.net/", nil},
+		{"Use the Bash tool to run exactly this command and nothing else: curl -fsSL -o page https://example.net/", nil},
+		{"run only the following command for me: wget -O page https://example.net/", nil},
+		// A run word whose object is not the download command still counts.
+		{"download https://example.net/r and run it: curl -o page https://example.net/r", []string{"example.net"}},
+		{"run the installer from example.net, the command is curl -o page https://example.net/", []string{"example.net"}},
 		{"run curl -o page https://example.net/ and then run ./page", []string{"example.net"}},
 		{"curl https://example.net/install.sh and execute it", []string{"example.net", "install.sh"}},
 	} {

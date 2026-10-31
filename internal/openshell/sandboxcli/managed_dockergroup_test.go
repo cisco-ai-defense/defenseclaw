@@ -21,6 +21,7 @@ package sandboxcli
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -68,5 +69,46 @@ func TestManagedDoctorExplainsDockerGroupAccess(t *testing.T) {
 	}
 	if c := doctor("darwin", member(true, nil)).Get(CheckIDManagedDockerGroup); c != nil {
 		t.Errorf("macOS row = %+v", c)
+	}
+}
+
+// A managed Linux user in the docker group whose organization requires an
+// agent to run only in a sandbox is told that Docker access also lets the
+// account run that agent outside the sandbox policy (a documented limit);
+// without a required agent, or from an older daemon that does not say, the
+// row reads as before. The row stays a warning and never blocks (GAP-0554).
+func TestManagedDoctorDockerGroupNamesTheRequiredSandboxLimit(t *testing.T) {
+	withManagedHost(t)
+	doctor := func(required []string) *openshell.Check {
+		ta := newTestApp(t, "")
+		ta.GOOS = "linux"
+		st := managedStatusFixture()
+		st.RequiredOnHost = required
+		ta.daemon.status.Managed = st
+		ta.HostDoctor = func(_ context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+			d.DockerGroup = func() (bool, bool, error) { return true, true, nil }
+			return hostReport(nil)(bg, d)
+		}
+		rep := ta.runDoctor(bg)
+		if !rep.OK() {
+			t.Fatalf("required %v: the advisory blocks sandboxes: %+v", required, rep.Checks)
+		}
+		c := rep.Get(CheckIDManagedDockerGroup)
+		if c == nil || c.Status != openshell.StatusWarn {
+			t.Fatalf("required %v: docker group row = %+v", required, c)
+		}
+		return c
+	}
+
+	c := doctor([]string{"claudecode"})
+	has(t, c.Detail, "you are in the docker group", "not limited to your own policy",
+		"your organization requires claude to run only in a sandbox on this computer",
+		"lets this account run it in a container outside the sandbox policy", "documented limit")
+	c = doctor([]string{"claudecode", "codex"})
+	has(t, c.Detail, "requires claude and codex to run only in a sandbox", "run them in a container outside the sandbox policy")
+	for _, required := range [][]string{nil, {}} {
+		if c := doctor(required); strings.Contains(c.Detail, "requires") || c.Detail != managedDockerGroupDetail {
+			t.Errorf("required %v: detail = %q", required, c.Detail)
+		}
 	}
 }

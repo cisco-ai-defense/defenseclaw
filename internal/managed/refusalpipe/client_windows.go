@@ -19,7 +19,11 @@ import (
 // clientPipeAccess is all a reporting client asks for: write the one
 // message and read the server process ID. FILE_APPEND_DATA would be
 // FILE_CREATE_PIPE_INSTANCE on a pipe, so GENERIC_WRITE is never used.
-const clientPipeAccess = windows.FILE_WRITE_DATA | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
+const clientPipeAccess = windows.FILE_READ_DATA | windows.FILE_WRITE_DATA | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
+
+// clientReceiptTimeout bounds the wait for the server's receipt when ctx
+// has no earlier deadline.
+const clientReceiptTimeout = 2 * time.Second
 
 const clientRetryInterval = 25 * time.Millisecond
 
@@ -50,7 +54,7 @@ func Send(ctx context.Context, report Report) error {
 			0,
 			nil,
 			windows.OPEN_EXISTING,
-			windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION,
+			windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION|windows.FILE_FLAG_OVERLAPPED,
 			0,
 		)
 		if err == nil {
@@ -79,13 +83,22 @@ func Send(ctx context.Context, report Report) error {
 	}
 	// The server buffers a whole message (MaxMessageBytes), so the write
 	// completes without waiting for the server to read it.
-	var written uint32
-	if err := windows.WriteFile(handle, message, &written, nil); err != nil {
+	written, err := overlapped(ctx, clientReceiptTimeout, handle, func(done *uint32, o *windows.Overlapped) error {
+		return windows.WriteFile(handle, message, done, o)
+	})
+	if err != nil {
 		return err
 	}
 	if int(written) != len(message) {
 		return errors.New("refusal report was not written whole")
 	}
+	// Keep this end open until the server has read the report and named
+	// its sender (Receipt). A server that writes none, a gateway from
+	// before the receipt, ends the read when it closes its end.
+	receipt := make([]byte, len(Receipt))
+	_, _ = overlapped(ctx, clientReceiptTimeout, handle, func(done *uint32, o *windows.Overlapped) error {
+		return windows.ReadFile(handle, receipt, done, o)
+	})
 	return nil
 }
 

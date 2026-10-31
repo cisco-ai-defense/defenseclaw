@@ -295,7 +295,7 @@ func dispatchTrustedAction(
 			if !analyzed {
 				facts = actionfacts.Analyze(request.Input)
 			}
-			request.record(facts, findings)
+			request.record(toolChainPlacedFacts(facts, request), findings)
 		}()
 	}
 	if parent == nil {
@@ -351,6 +351,11 @@ func dispatchTrustedAction(
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
+	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {
 		// Two argument keys name one field: judge each candidate (GAP-0678).
 		return dispatchConflictingToolArguments(parent, request, conflict)

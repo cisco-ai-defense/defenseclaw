@@ -15,6 +15,9 @@ package enterpriseunix
 import (
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"gopkg.in/yaml.v3"
 )
 
 // status and verify say how many enrolled accounts are in the
@@ -54,5 +57,56 @@ func TestDockerGroupMembersAdvisory(t *testing.T) {
 	h.ops.groups["carol"] = []string{"carol"}
 	if r := h.run(Options{Action: ActionStatus}); hasWarning(r, codeDockerGroupMembers) {
 		t.Fatalf("no member still warns: %+v", r.Warnings)
+	}
+}
+
+// GAP-0554: where the policy sets required_for, the docker group advisory
+// also says that a member can run a required agent outside its sandbox
+// policy, still as a count that names no account; without required_for it
+// reads as before.
+func TestDockerGroupMembersAdvisoryCoversRequiredFor(t *testing.T) {
+	h := newOSHost(t, "linux")
+	h.ops.groups["alice"] = []string{"alice", "docker"}
+	plain := sandboxConfig(t, "linux", true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5"})
+	var doc map[string]any
+	if err := yaml.Unmarshal(plain, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["openshell"] = map[string]any{"enabled": true, "admin": map[string]any{"required_for": []string{"claudecode"}}}
+	required, err := yaml.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const limit = "a member can also run a required agent in a container outside its sandbox policy"
+	requireOK(t, h.ensure(required))
+	h.registerSandboxUser(t, h.alice)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		message := messagesOf(h.run(Options{Action: action}).Warnings, codeDockerGroupMembers)
+		if !strings.Contains(message, "1 of 1 enrolled accounts are in the docker group") || !strings.Contains(message, "the policy sets required_for") ||
+			!strings.Contains(message, limit) || strings.Contains(message, "alice") {
+			t.Fatalf("%s with required_for: advisory = %q", action, message)
+		}
+	}
+	requireOK(t, h.ensure(plain))
+	if message := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeDockerGroupMembers); message == "" || strings.Contains(message, "required_for") {
+		t.Fatalf("without required_for: advisory = %q", message)
+	}
+}
+
+// A required_for in a profile's sandbox section counts as much as the
+// organization floor's (GAP-0554).
+func TestRequiredForConfiguredReadsTheFloorAndProfiles(t *testing.T) {
+	cfg := &config.Config{}
+	if requiredForConfigured(cfg) || requiredForConfigured(nil) {
+		t.Fatal("an empty policy sets required_for")
+	}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"devs": {}, "contractors": {Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"claudecode"}}}}
+	if !requiredForConfigured(cfg) {
+		t.Fatal("a profile's required_for is not seen")
+	}
+	cfg.Guardrail.Profiles = nil
+	cfg.OpenShell.Admin.RequiredFor = []string{"codex"}
+	if !requiredForConfigured(cfg) {
+		t.Fatal("the floor's required_for is not seen")
 	}
 }

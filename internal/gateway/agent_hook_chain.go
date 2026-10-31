@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -36,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v12-sqlite-database-table-lineage"
@@ -151,6 +153,46 @@ func (capture *toolChainHookCapture) recordTrustedAction(
 	capture.facts = facts
 	capture.findings = append([]RuleFinding(nil), findings...)
 	capture.recorded = true
+}
+
+// toolChainPlacedFacts is a call's facts as the tool-chain state records
+// them. A managed POSIX gateway runs as a service account behind
+// ProtectHome (and PrivateTmp on Linux): it cannot resolve a working
+// directory in the caller's home, or in /tmp on Linux, so a call there had
+// facts without one, and a relative download and the later run of the same
+// file had no path to join on. The download-then-execute chain fired for
+// absolute paths and in directories the service can read, never in a
+// project in the user's home, where agents work (rel-1-0-6:GAP-0115 macOS,
+// GAP-0118 Linux). The chain joins paths lexically, so such a call is placed
+// in the directory the managed hook client ran it in as the user
+// (hookpaths.CWDKey; absolute, no ".."), as a per-user gateway places it. The
+// gateway still reads nothing there. A call whose facts hold no unplaced
+// relative path, a call the gateway placed itself, and a per-user or sandbox
+// call are recorded as they are.
+func toolChainPlacedFacts(facts actionfacts.Facts, request trustedActionRequest) actionfacts.Facts {
+	if !request.ProtectedHomeHook || request.SkipLocalFilesystemResolution ||
+		filepath.IsAbs(request.Input.CWD) || !hasUnplacedRelativePath(facts) {
+		return facts
+	}
+	client := request.evidenceCWD
+	if !filepath.IsAbs(client) {
+		client = request.ResolvedWriteTargets[hookpaths.CWDKey]
+	}
+	if !filepath.IsAbs(client) || hasParentElement(client) || strings.ContainsRune(client, 0) {
+		return facts
+	}
+	placed := request.Input
+	placed.CWD = filepath.Clean(client)
+	return actionfacts.Analyze(placed)
+}
+
+func hasUnplacedRelativePath(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		if !candidate.Absolute && candidate.Resolved == "" {
+			return true
+		}
+	}
+	return false
 }
 
 type toolChainHookFinalization struct {
