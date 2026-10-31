@@ -339,6 +339,18 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, twinFindings)
 		}()
 	}
+	// A managed hook peer call that reaches the gateway without a cwd is also read
+	// in the directory the hook client ran it in, as a per-user gateway
+	// reads it; only a private-key read block of that reading counts
+	// (GAP-0179).
+	if twin, ok := protectedHomePrivateKeyTwinRequest(request); ok {
+		defer func() {
+			twinFindings := slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
+				return trustedActionFindingKey(f.RuleID) != "PATH-SSH-KEY"
+			})
+			findings = withTwinProvenBlocks(findings, twinFindings)
+		}()
+	}
 	// A file writer run through nohup, nice, time, timeout, env NAME=value,
 	// command, sudo or exec (or after a word that may expand to nothing)
 	// writes what the plain call writes (GAP-2512); the plain reading is
@@ -3188,8 +3200,25 @@ func walkParent(value string) string {
 // (GAP-2569). ok is false when the gateway knows the cwd or the client's is
 // not a plain directory in the caller's home.
 func managedLinkWalkView(request trustedActionRequest) (actionfacts.Facts, trustedActionRequest, bool) {
-	if !request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) {
+	cwd, ok := protectedHomeClientDirectory(request)
+	if !ok {
 		return actionfacts.Facts{}, request, false
+	}
+	placed := request
+	placed.Input.CWD = cwd
+	return actionfacts.Analyze(placed.Input), placed, true
+}
+
+// protectedHomeClientDirectory is the directory a managed hook call runs in
+// when the gateway behind ProtectHome receives no cwd of its own, as the
+// hook client keyed its evidence: the directory a static cd placed a simple
+// command in (evidenceCWD), else the client cwd (hookpaths.CWDKey). ok is
+// false when the call is not a managed hook peer call, the gateway knows the
+// cwd, or the directory is not an absolute path without ".." in the caller
+// home or its project root.
+func protectedHomeClientDirectory(request trustedActionRequest) (string, bool) {
+	if !request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) {
+		return "", false
 	}
 	cwd, home := request.evidenceCWD, request.Input.ActiveHome
 	if !filepath.IsAbs(cwd) {
@@ -3197,11 +3226,34 @@ func managedLinkWalkView(request trustedActionRequest) (actionfacts.Facts, trust
 	}
 	if !filepath.IsAbs(cwd) || !filepath.IsAbs(home) || hasParentElement(cwd) || strings.ContainsRune(cwd, 0) ||
 		projectRootKey(cwd) != projectRootKey(home) && !insideHome(home, cwd) {
-		return actionfacts.Facts{}, request, false
+		return "", false
 	}
-	placed := request
-	placed.Input.CWD = filepath.Clean(cwd)
-	return actionfacts.Analyze(placed.Input), placed, true
+	return filepath.Clean(cwd), true
+}
+
+// protectedHomePrivateKeyTwinRequest returns the call of a managed hook
+// peer placed in the directory the hook client ran it in
+// (protectedHomeClientDirectory), when its text names an SSH private key
+// file. Without a cwd of its own the gateway left a key read spelled
+// relative to that directory (cat .ssh/id_ed25519 in the home, cat
+// ../.ssh/id_rsa in a project) outside ~/.ssh, so a managed peer was
+// allowed what a per-user gateway blocks (GAP-0179). The placed reading is
+// the per-user one; the caller keeps only its private-key read block.
+func protectedHomePrivateKeyTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	cwd, ok := protectedHomeClientDirectory(request)
+	if !ok || request.SkipLocalFilesystemResolution {
+		return trustedActionRequest{}, false
+	}
+	text := strings.ToLower(trustedActionInputText(request.Input, request.LegacyText))
+	if !strings.Contains(text, "id_rsa") && !strings.Contains(text, "id_ed25519") &&
+		!strings.Contains(text, "id_ecdsa") && !strings.Contains(text, "id_dsa") {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.conflictSource = nil
+	twin.Input.CWD = cwd
+	return twin, true
 }
 
 // stateLinkResolver resolves a path through links: the hook's resolved
@@ -3645,19 +3697,11 @@ func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionReques
 // adds a block of those readings: it must be absolute, without "..", and
 // in the caller's home or its project root.
 func protectedHomePlacedReading(facts actionfacts.Facts, request trustedActionRequest) (actionfacts.Facts, trustedActionRequest) {
-	if !request.ProtectedHomeHook || request.SkipLocalFilesystemResolution || filepath.IsAbs(request.Input.CWD) {
+	client, ok := protectedHomeClientDirectory(request)
+	if !ok || request.SkipLocalFilesystemResolution {
 		return facts, request
 	}
-	home := request.Input.ActiveHome
-	client := request.evidenceCWD
-	if !filepath.IsAbs(client) {
-		client = request.ResolvedWriteTargets[hookpaths.CWDKey]
-	}
-	if !filepath.IsAbs(home) || !filepath.IsAbs(client) || hasParentElement(client) || strings.ContainsRune(client, 0) ||
-		projectRootKey(client) != projectRootKey(home) && !insideHome(home, client) {
-		return facts, request
-	}
-	request.Input.CWD = filepath.Clean(client)
+	request.Input.CWD = client
 	return actionfacts.Analyze(request.Input), request
 }
 
