@@ -3661,6 +3661,13 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			return 0
 		}
 	}
+	// Nothing is stopped or removed while a machine-state folder or file
+	// cannot be removed: the binaries go before the state, so the failed
+	// uninstall could not be rerun (GAP-1440).
+	if blocked := l.stateRemovalBlockers(); len(blocked) > 0 {
+		r.AddError(codeUninstall, l.stateRemovalBlockedMessage(blocked))
+		return 0
+	}
 	// Read before the machine state, and the accounts record with it, go.
 	// A Unix purge also needs this snapshot to report enrolled OSS data that
 	// the per-user worker leaves untouched (GAP-0727).

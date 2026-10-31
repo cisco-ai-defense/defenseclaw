@@ -372,6 +372,12 @@ decision does not change: the call is still blocked.
   - Linux, macOS and Windows: an OpenCode or Amp session started under 1.0.2. The plugin runs in
     the agent, so nothing on disk reaches it; restart the session after the upgrade. 1.0.3 managed
     plugins already block.
+- On Windows, a program that opens a managed policy file without delete sharing can find it missing
+  while a policy update replaces it, if Windows is slow to finish that atomic replace.
+  The file always holds the old or the new policy.
+  DefenseClaw readers and the Node and Rust agents (Claude Code, Codex, Cursor) open it with delete
+  sharing and never see this. A reader of your own should share delete access or retry a missing
+  file once.
 
 ## Symptoms
 

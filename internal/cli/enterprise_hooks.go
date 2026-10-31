@@ -3004,6 +3004,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				AllowMissingHookConfigRepair:       previousProtection.PreviouslyProtected,
 				RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
 				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
+				WindowsDeferredFirstEnrollment:     enterpriseHookDeferredFirstEnrollment(target, previousProtection),
 				// Standalone Amp and OpenCode only; empty on Secure Client.
 				ForeignHookGuardBinary:  standaloneForeignHookGuardBinary(target.Connector),
 				ManagedHookBinary:       standaloneManagedHookBinary(),
@@ -4539,6 +4540,15 @@ type enterpriseHookPreviousProtection struct {
 	PreviouslyProtected        bool
 	HookContractLockUpdatedAt  string
 	HookContractEntryUpdatedAt string
+}
+
+// enterpriseHookDeferredFirstEnrollment reports the first enrollment of a
+// deferred row the guardian never protected: an account that stayed pending
+// while it was signed out. Only that enrollment may move aside the
+// account's own link at its DefenseClaw folder (GAP-0193); a repair of a
+// protected account and any row that is not deferred refuse it.
+func enterpriseHookDeferredFirstEnrollment(target enterprisehooks.ManifestTarget, previous enterpriseHookPreviousProtection) bool {
+	return target.IsDeferred() && !previous.PreviouslyProtected
 }
 
 func previousEnterpriseHookProtection(

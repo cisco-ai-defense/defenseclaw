@@ -51,7 +51,7 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 			subject.cachedFactsAge.Round(time.Second)))
 	}
 	if runtime.GOOS == "windows" && subject != nil {
-		if note := spoolRecordNote(subject.UserID, time.Now()); note != "" {
+		if note := spoolRecordNote(subject.UserID, time.Now(), decision.Assignment > 0); note != "" {
 			warnings = append(warnings, note)
 		}
 	}

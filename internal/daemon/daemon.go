@@ -51,6 +51,13 @@ const (
 	maxProcessIdentityBytes = 16 * 1024
 )
 
+// ParentEnvFilter, when set, drops variables of the starting process from
+// the daemon's environment. internal/config sets it to leave out the inline
+// v8 scanner key its own load exported: the daemon loads the configuration
+// itself, and an inherited key read there as set outside the process, so a
+// rotated inline key did not apply on reload (GAP-0995).
+var ParentEnvFilter func([]string) []string
+
 var gatewayTokenEnvNames = []string{
 	"DEFENSECLAW_GATEWAY_TOKEN",
 	"OPENCLAW_GATEWAY_TOKEN",
@@ -792,6 +799,9 @@ func (d *Daemon) childEnv(parentEnv []string) []string {
 	hasDotenvToken := len(dotenv) > 0
 
 	cleanEnv := make([]string, 0, len(parentEnv)+2+len(dotenv))
+	if ParentEnvFilter != nil {
+		parentEnv = ParentEnvFilter(parentEnv)
+	}
 	for _, kv := range parentEnv {
 		key, _, ok := strings.Cut(kv, "=")
 		if !ok {

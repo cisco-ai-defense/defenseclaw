@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // encodeTrustedShellArgs is shared by the supported shell-tool adapters.
@@ -302,11 +304,32 @@ func shellCommandTool(connectorName, toolName string) (key, out string) {
 // such a twin instead. Refused (ok false) for any other tool, or unless the
 // arguments are a JSON object with such a command.
 func ShellCommandArgs(connectorName, toolName string, args json.RawMessage) (json.RawMessage, bool) {
-	key, out := shellCommandTool(connectorName, toolName)
+	key, out := shellCommandArgsKey(connectorName, toolName)
 	if key == "" {
 		return nil, false
 	}
 	return shellCommandOnly(key, out, args)
+}
+
+// shellCommandArgsKey is shellCommandTool, and for any other tool name the
+// trusted-action parser reads as a shell execution tool
+// (actionfacts.IsImmediateShellExecutionTool: async_shell_command,
+// run_command, terminal, exec, execute, run_shell_command, run_terminal_cmd
+// and the rest) the command under "command" (or "cmd"). Such a call with
+// one extra argument left the parse partial and was never judged on its
+// command alone, so on the Amp route a protected-path block of the same
+// command became a detection-only allow (rel-1-0-6:GAP-0201). These names
+// stay outside IsShellTool: a call with no command is judged as before
+// (the conflicting-arguments check covers two different commands,
+// rel-1-0-6:GAP-0132), so the reduced shape only ever adds a verdict.
+func shellCommandArgsKey(connectorName, toolName string) (key, out string) {
+	if key, out = shellCommandTool(connectorName, toolName); key != "" {
+		return key, out
+	}
+	if actionfacts.IsImmediateShellExecutionTool(strings.ToLower(strings.TrimSpace(toolName))) {
+		return "command", "command"
+	}
+	return "", ""
 }
 
 // IsShellTool reports whether toolName is the connector's shell tool, as
@@ -319,12 +342,12 @@ func IsShellTool(connectorName, toolName string) bool {
 // ShellCommandCWD returns the working directory a shell tool call names
 // under its tool's working-directory argument (shellCommandWorkdirKeys,
 // the TrustedShellArgs working directories, cwd or workdir for the tools
-// shellCommandTool reads by name), or "" when it names none or more than one.
+// shellCommandArgsKey reads by name), or "" when it names none or more than one.
 // It is for a call whose projection was refused: the command judged on its
 // own still runs there (GAP-0694: Amp's Bash and agy's run_command with an
 // extra key were judged in the session's directory).
 func ShellCommandCWD(connectorName, toolName string, args json.RawMessage) string {
-	if !IsShellTool(connectorName, toolName) {
+	if key, _ := shellCommandArgsKey(connectorName, toolName); key == "" {
 		return ""
 	}
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))

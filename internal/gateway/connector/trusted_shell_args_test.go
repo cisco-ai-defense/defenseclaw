@@ -249,7 +249,15 @@ func TestShellCommandArgs(t *testing.T) {
 		{"not-an-object", "opencode", "shell", `"ls"`, ""},
 		{"invalid-json", "opencode", "shell", `{"command":"ls"`, ""},
 		{"other-tool", "opencode", "read", `{"command":"ls"}`, ""},
-		{"tool-case", "devin", "Exec", `{"command":"ls"}`, ""},
+		// A letter-case variant of a shell execution name is still a shell
+		// name to the action parser, so its command is judged alone too
+		// (rel-1-0-6:GAP-0201); a non-shell name in any case is not.
+		{"tool-case", "devin", "Exec", `{"command":"ls"}`, `{"command":"ls"}`},
+		{"tool-case-not-shell", "devin", "Read", `{"command":"ls"}`, ""},
+		// Generic shell execution names on any connector (rel-1-0-6:GAP-0201).
+		{"generic-async-shell-unknown", "amp", "async_shell_command", `{"command":"ls","zz":1}`, `{"command":"ls"}`},
+		{"generic-run-command-cmd-timeout", "opencode", "run_command", `{"cmd":"ls","timeout":5}`, `{"command":"ls"}`},
+		{"generic-terminal-both-differ", "amp", "terminal", `{"cmd":"ls","command":"date"}`, ""},
 		{"other-connector", "zed", "read", `{"command":"ls"}`, ""},
 		// Amp's Bash holds its command under cmd (also reported as bash),
 		// and any connector's bash, powershell or shell tool is read by name

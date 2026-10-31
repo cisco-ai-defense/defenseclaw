@@ -64,12 +64,16 @@ func platformAccountGroupIDs(ctx context.Context, runner commandRunner, account 
 			return nil, errors.Join(listErr, err)
 		}
 	}
-	extra, err := namedGroupIDs(ctx, named, lookupNamedGroupGID)
+	extra, err := namedGroupIDs(ctx, named, darwinNamedGroups.lookup(lookupNamedGroupGID))
 	if err != nil {
 		return nil, err
 	}
 	return uidVerifiedGroupIDs(ctx, runner, account, ids, extra)
 }
+
+// darwinNamedGroups keeps the gids of assignment groups Open Directory named
+// before, for a partial directory outage (GAP-0592).
+var darwinNamedGroups = &namedGroupMemory{now: time.Now}
 
 // lookupNamedGroupGID resolves a group name through Open Directory; ok is
 // false when no group has the name. Tests replace it.

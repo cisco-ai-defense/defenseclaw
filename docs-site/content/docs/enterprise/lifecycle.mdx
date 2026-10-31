@@ -696,7 +696,9 @@ keeps sandboxes, the gateway's registration store (`/var/lib/defenseclaw/sandbox
 (`redaction-correlation.key` in the same parent) stays if it is a regular file. They are
 root-owned while the service account is gone; the next `ensure` adopts them. The lifecycle
 directory also keeps the root-only record of the sandbox setup those sandboxes were made under
-(`openshell-state.kept.json`). The root-owned `lifecycle.lock` stays so waiting runs keep using
+(`openshell-state.kept.json`) and `retained-state.json`, the root-only record of the state folders the
+uninstall kept, and the kept data folder holds a root-only `.defenseclaw-retained` marker. The next
+`ensure` uses them to adopt the kept state, then removes them. The root-owned `lifecycle.lock` stays so waiting runs keep using
 the same lock. Use `--purge` for a clean image or to remove the retained sandbox store, key and
 setup record. Purge in the first removal: a purge runs the deployment's own binary, which a
 payload uninstall, `apt remove`, `dnf remove` and the MDM removal scripts delete. After one of
