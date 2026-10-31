@@ -510,10 +510,28 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 // lost, before it stops it with sandboxapi.StopRequest.DiscardUnsynced.
 func unsyncedStopRefusal(name string, err error) error {
 	return &sandboxapi.Error{Code: sandboxapi.CodeUnsynced,
-		Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first (" + truncate(sandboxapi.DisplayText(err.Error()), 200) +
+		Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first (" + flushFailureText(err) +
 			"), so a stop now would lose what it wrote since its last sync; it keeps running",
 		Detail: "save the work you need and stop it again, or stop it anyway, losing that: `defenseclaw sandbox stop " + name +
 			" --discard-unsynced` (on a terminal, `defenseclaw sandbox stop " + name + "` asks first)"}
+}
+
+// gatewayLostErrors are gRPC's words for an OpenShell gateway that went
+// away under a call (it was stopped or killed, or Docker restarted).
+var gatewayLostErrors = []string{"client connection is closing", "transport is closing", "error reading from server", "connection error: desc", "code = unavailable"}
+
+// flushFailureText is why a MicroVM's disk could not be synced (err), for
+// the person: an OpenShell gateway lost under the sync reads as the managed
+// CLI words a lost gateway, with the way on, instead of gRPC's own text
+// ("Cancelled: grpc: the client connection is closing", GAP-0186).
+func flushFailureText(err error) string {
+	lower := strings.ToLower(err.Error())
+	for _, raw := range gatewayLostErrors {
+		if strings.Contains(lower, raw) {
+			return "the connection to the OpenShell gateway closed; `defenseclaw sandbox doctor` checks it, then retry the stop"
+		}
+	}
+	return truncate(sandboxapi.DisplayText(err.Error()), 200)
 }
 
 // containedStopRefusal is the error of a stop DefenseClaw made for a
@@ -528,7 +546,7 @@ func containedStopRefusal(name string, flushErr, containErr error) error {
 		state = "and DefenseClaw could not confirm it contained (" + truncate(sandboxapi.DisplayText(containErr.Error()), 300) + ")"
 	}
 	return &sandboxapi.Error{Code: sandboxapi.CodeUnsynced,
-		Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first (" + truncate(sandboxapi.DisplayText(flushErr.Error()), 200) +
+		Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first (" + flushFailureText(flushErr) +
 			"), so it keeps running, " + containedUnprotected + "; " + state,
 		Detail: "save the work you need, then stop it: `defenseclaw sandbox stop " + name + "` (on a terminal it asks before it stops the VM without the sync)"}
 }

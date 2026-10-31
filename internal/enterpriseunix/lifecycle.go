@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -1388,9 +1389,24 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		return nil, &codedError{code: codeConfig, err: fmt.Errorf("%s changed while %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
 			env.Layout.ConfigPath, writable, env.lifecycleCommand(ActionEnsure))}
 	}
+	// The applied config, unchanged, on the release that applied it, refused
+	// because a sandbox pack it names (the required pack of openshell.admin
+	// or of a profile) was edited in place into one that does not load: no
+	// config to refuse but a policy that does not build, as
+	// policyAssetsChanged reports one the gateway's policy digest refuses:
+	// nothing is applied and the running gateway keeps the last good policy
+	// (GAP-0286). Any other refusal (a destination's ACL, say) stays a
+	// config refusal.
+	unchangedApplied := record != nil && record.ProductVersion == p.version && sha256Bytes(raw) == record.ConfigSHA256
+	assetRefusal := func(err error) error {
+		if unchangedApplied && sandboxPackLoadError(err) {
+			return &codedError{code: codeConfigRefused, err: &policyAssetRefusedError{reason: err.Error()}}
+		}
+		return &codedError{code: codeConfig, err: err}
+	}
 	validated, err := env.validateConfigSource(raw, l.opts.ConfigFile)
 	if err != nil {
-		return nil, &codedError{code: codeConfig, err: err}
+		return nil, assetRefusal(err)
 	}
 	if err := refuseUnknownGuardrailConnectors(validated.Loaded, l.opts.ConfigFile, env.Layout.ConfigPath); err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
@@ -1526,7 +1542,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		return nil, &codedError{code: codeConfig, err: err}
 	}
 	if err := env.checkRequiredSandboxPacks(validated.Loaded); err != nil {
-		return nil, &codedError{code: codeConfig, err: err}
+		return nil, assetRefusal(err)
 	}
 	p.configFromInstalled = fromInstalled
 	p.configWritable = writable
@@ -1930,6 +1946,16 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		// A plan that failed before commit must never supply prerequisite
 		// settings to describe; the prior applied record remains in force.
 		l.osPlan = nil
+		var refused *policyAssetRefusedError
+		if record != nil && errors.As(err, &refused) {
+			// The deployment is as applied and runs its last good policy:
+			// the run is a noop that fails with the reason, as the noop path
+			// reports a policy asset that does not load.
+			r.AddError(codeConfigRefused, env.policyAssetRefusedMessage(refused.reason))
+			r.Noop, r.NoopReason = true, "policy_refused"
+			l.describe(ctx, record, false)
+			return 0
+		}
 		if committedConfig == nil && code == codeConfig {
 			// An edit written after the check above, while this run planned
 			// (a standard user writing a config.yaml whose mode was just
@@ -3490,6 +3516,20 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	}
 	return true, "up_to_date"
 }
+
+// sandboxPackLoadError reports a refusal that a sandbox pack file caused
+// (packs.Error, or its words where a loader flattened it).
+func sandboxPackLoadError(err error) bool {
+	var pe *packs.Error
+	return errors.As(err, &pe) || strings.Contains(err.Error(), "sandbox pack /")
+}
+
+// policyAssetRefusedError is a policy file the applied, unchanged config
+// names that does not load (a required sandbox pack edited in place):
+// reason says why.
+type policyAssetRefusedError struct{ reason string }
+
+func (e *policyAssetRefusedError) Error() string { return e.reason }
 
 // policyAssetsChanged reports whether the installed config computes to an
 // effective policy the running gateway does not report while config.yaml

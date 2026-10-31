@@ -494,7 +494,10 @@ def replace_file_durable(source: str | os.PathLike[str], target: str | os.PathLi
         ctypes.get_last_error,
     )
     if code:
-        raise ctypes.WinError(code)
+        # ctypes.WinError carries no file name; callers name the file they
+        # could not save from filename2, as os.replace sets it on POSIX.
+        error = ctypes.WinError(code)
+        raise OSError(error.errno, error.strerror, source_path, error.winerror, target_path)
 
 
 # ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION: a reader that opened the
