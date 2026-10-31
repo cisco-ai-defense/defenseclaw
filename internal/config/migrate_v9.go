@@ -44,6 +44,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/policy/regodata"
@@ -796,6 +797,28 @@ func exportInMemoryKey(key, value string) {
 	if err := os.Setenv(key, value); err == nil {
 		inMemoryExportedKeys.Store(key, value)
 	}
+}
+
+func init() { daemon.ParentEnvFilter = WithoutInMemoryExportedKeys }
+
+// WithoutInMemoryExportedKeys returns env without the variables this process
+// set from an inline v8 scanner key (exportInMemoryKey) that still hold that
+// value. A process this one starts, the gateway daemon of `defenseclaw-gateway
+// start`, loads the configuration itself: inherited, the variable read there
+// as a value set outside the process, which wins over the inline key, so a
+// rotated inline key did not apply on that gateway's reload, only after a
+// restart (GAP-0995). A value set outside this process stays.
+func WithoutInMemoryExportedKeys(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if name, value, ok := strings.Cut(kv, "="); ok {
+			if exported, set := inMemoryExportedKeys.Load(name); set && exported.(string) == value {
+				continue
+			}
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // InMemoryMigrationError is the load error for a config_version 8 file whose

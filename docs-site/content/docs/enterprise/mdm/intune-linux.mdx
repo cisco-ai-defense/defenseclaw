@@ -117,6 +117,10 @@ For a local-group profile assignment, upload `packaging/mdm/intune/linux/sync-lo
 as a **second** root platform script, after editing `GROUP_NAME` and the complete
 `MEMBERS` array. It refuses pre-existing groups unless a root administrator has
 claimed them (see [Identity through Intune](/docs/enterprise/mdm/intune-tenant#identity-through-intune)).
+An account removed from `MEMBERS` whose primary group is the synced group moves to its own
+group (the one named after it, created when missing) with `usermod -g`; its open sessions keep
+the old group until the next sign-in. When that group is not local, is a system group or has other
+members, the script names the account and exits `1`; change its primary group by hand.
 
 For unattended root scripts, authorize only your enrolled Intune users for the
 daemon's polkit action. Without it, an xrdp or SSH session has no active local seat

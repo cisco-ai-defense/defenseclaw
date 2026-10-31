@@ -1148,3 +1148,24 @@ func TestChildPIDRegistrationWaitsAsLongAsWindowsReadiness(t *testing.T) {
 		t.Fatalf("childPIDRegistrationTimeout = %s, want at least the 240s Windows readiness wait", childPIDRegistrationTimeout)
 	}
 }
+
+// GAP-0995: childEnv runs the parent environment through ParentEnvFilter
+// (internal/config sets it), so the daemon does not inherit what the
+// starting command's own config load exported.
+func TestChildEnvAppliesTheParentEnvFilter(t *testing.T) {
+	saved := ParentEnvFilter
+	t.Cleanup(func() { ParentEnvFilter = saved })
+	ParentEnvFilter = func(env []string) []string {
+		var out []string
+		for _, kv := range env {
+			if !strings.HasPrefix(kv, "DROPPED=") {
+				out = append(out, kv)
+			}
+		}
+		return out
+	}
+	got := envMap(New(t.TempDir()).childEnv([]string{"PATH=/bin", "DROPPED=x"}))
+	if _, ok := got["DROPPED"]; ok || got["PATH"] != "/bin" {
+		t.Fatalf("the filter was not applied: %v", got)
+	}
+}
