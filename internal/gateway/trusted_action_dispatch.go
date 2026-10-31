@@ -205,6 +205,11 @@ type trustedActionRequest struct {
 	// found only an operand that the client's bounded map left out because
 	// it was full (hookpaths.BudgetKey, GAP-0146).
 	overBudgetOmission *bool
+	// unresolvedTarget, when set, is told that the authorized-keys proof
+	// failed closed on an operand the managed hook client could not
+	// resolve (an empty map value: an unreadable folder, a link loop) and
+	// this gateway cannot resolve either (rel-1-0-2:GAP-0690).
+	unresolvedTarget *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.

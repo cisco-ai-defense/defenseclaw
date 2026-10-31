@@ -1513,9 +1513,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	commandText := strings.ToLower(input.Command)
-	overBudget := false
+	overBudget, unresolved := false, false
 	evidence := request
 	evidence.overBudgetOmission = &overBudget
+	evidence.unresolvedTarget = &unresolved
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
 	if symlinkWrite && overBudget {
 		// The only write found is an operand the client's full bounded map
@@ -1566,6 +1567,13 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			title := named.Title
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
+			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
+				!trustedAuthorizedKeysWriteProof(input, facts, false, clientGlobFacts(request)) &&
+				!trustedSandboxGuestAuthorizedKeysWrite(request) {
+				// The only write found is one the hook client and this
+				// gateway could not resolve: it still fails closed, named as
+				// what it is, not as a key write (rel-1-0-2:GAP-0690).
+				title = unresolvedWriteTargetTitle
 			}
 			return append(kept, adjustConfidence(input.Tool, RuleFinding{
 				RuleID: named.ID, Title: title, Severity: rule.Severity,
@@ -1700,6 +1708,11 @@ func trustedAwkOutputAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	}
 	return false
 }
+
+// unresolvedWriteTargetTitle is the title of the authorized-keys block of a
+// write whose target neither the managed hook client nor the gateway could
+// resolve (rel-1-0-2:GAP-0690).
+const unresolvedWriteTargetTitle = "A write target could not be resolved (unreadable folder or link loop) and may be a protected file"
 
 // archiveBeforeWriteTitle is the title of an authorized-keys block whose
 // write follows an archive extraction. It is ship-authored, so it reaches
