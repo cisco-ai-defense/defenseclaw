@@ -2247,7 +2247,7 @@ func actionDiscardRedirect(redirect *syntax.Redirect, home string) bool {
 		return false
 	}
 	switch redirect.Op {
-	case syntax.RdrOut, syntax.AppOut, syntax.RdrAll, syntax.AppAll, syntax.ClbOut:
+	case syntax.RdrOut, syntax.AppOut, syntax.RdrAll, syntax.AppAll, syntax.RdrClob:
 		return target == "/dev/null"
 	case syntax.DplOut:
 		return target == "-" || target != "" && strings.Trim(target, "0123456789") == ""
