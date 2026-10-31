@@ -1291,8 +1291,11 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 		literal = filepath.Clean(cwd)
 	}
 	pattern = OperandPath(pattern, cwd)
+	dots := sync.OnceValue(func() bool { return windows || globs.dotNames() || actionShellProfileMayDotglob(home) })
 	for _, target := range append([]string{ssh}, ProtectedAuthorizedKeysPaths(home)...) {
-		if matched, _ := filepath.Match(pattern, target); matched {
+		// In a POSIX shell * and ? skip a leading dot: at the home folder
+		// echo * names no .ssh unless dotglob may be on (rel-1-0-6:GAP-0211).
+		if matched, _ := filepath.Match(pattern, target); matched && (actionGlobDotComponentsMatch(pattern, target) || dots()) {
 			return true
 		}
 	}
@@ -1300,7 +1303,6 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 		return false
 	}
 	hidden := actionGlobViewHidden(cwd, home)
-	dots := sync.OnceValue(func() bool { return windows || globs.dotNames() || actionShellProfileMayDotglob(home) })
 	userView := !hidden && actionProcessOwnsHome(home)
 	candidates, complete, unseen := actionExpandGlob(pattern, literal, hidden, userView, dots)
 	for _, candidate := range candidates {
@@ -1341,6 +1343,30 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 	// a bound or at a directory it could not read, so an alias of any name
 	// may be among the names it did not see: the pattern is unproved,
 	// never an allow (GAP-1481).
+	return true
+}
+
+// actionGlobDotComponentsMatch reports, for a pattern that filepath.Match
+// matches to name, that every component of name that starts with a dot is
+// matched by a pattern component that starts with a dot (escaped or not),
+// as a POSIX shell requires without dotglob.
+func actionGlobDotComponentsMatch(pattern, name string) bool {
+	separator := string(filepath.Separator)
+	patterns, names := strings.Split(pattern, separator), strings.Split(name, separator)
+	if len(patterns) != len(names) {
+		return false
+	}
+	for i, component := range names {
+		if !strings.HasPrefix(component, ".") {
+			continue
+		}
+		if runtime.GOOS != "windows" {
+			patterns[i] = strings.TrimPrefix(patterns[i], "\\")
+		}
+		if !strings.HasPrefix(patterns[i], ".") {
+			return false
+		}
+	}
 	return true
 }
 
@@ -1505,6 +1531,12 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 			directory, err := actionGlobOpenDir(dir)
 			if err != nil {
 				if errors.Is(err, fs.ErrNotExist) && !hidden || errors.Is(err, syscall.ENOTDIR) || actionGlobInvalidName(err) {
+					continue
+				}
+				// A file the previous component matched that cannot be
+				// opened (NTUSER.DAT, which Windows holds open in a profile)
+				// has no entries either (rel-1-0-6:GAP-0211).
+				if !hidden && actionGlobNotDirectory(dir, err) {
 					continue
 				}
 				// A process that runs as the user cannot list what the
