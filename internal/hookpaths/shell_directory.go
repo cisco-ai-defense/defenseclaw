@@ -181,9 +181,11 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			if target == "" {
 				target = candidate.Normalized
 			}
-			if movedOntoLinks[target] {
-				if parent, ok := ResolveWriteTarget(filepath.Dir(target)); ok &&
-					!protectedEntry(filepath.Join(parent, filepath.Base(target)), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
+			// The facts spell a Windows path with slashes (and Git Bash a
+			// drive /c/...); the entry list keys the file system name.
+			if moved := PlainMovePath(target); movedOntoLinks[moved] {
+				if parent, ok := ResolveWriteTarget(filepath.Dir(moved)); ok &&
+					!protectedEntry(filepath.Join(parent, filepath.Base(moved)), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 					continue
 				}
 			}

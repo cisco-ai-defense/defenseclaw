@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -1104,6 +1105,26 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if !cannotResolveLocally {
 		movedOntoLinks = hookpaths.MovedOntoLinkEntries(facts)
 	}
+	// On Windows the same move spelled in PowerShell (Move-Item) or read by
+	// the Windows scan, whose facts may not name a move. Read once, and
+	// only for a write target that is a link on the disk.
+	var windowsMovedOntoLinks map[string]bool
+	windowsMovedRead := false
+	windowsMovedOntoLink := func(target string) bool {
+		if cannotResolveLocally || runtime.GOOS != "windows" {
+			return false
+		}
+		if info, err := os.Lstat(target); err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			return false
+		}
+		if !windowsMovedRead {
+			windowsMovedRead = true
+			if command, ok := trustedBashCommandInput(request.Input); ok {
+				windowsMovedOntoLinks = hookpaths.WindowsMovedOntoLinkEntries(command, clientCWD, facts.ActiveHome)
+			}
+		}
+		return windowsMovedOntoLinks[hookpaths.WindowsMovedOntoLinkKey(target)]
+	}
 	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
 		if !filepath.IsAbs(target) && (target == "" || !filepath.IsAbs(clientCWD)) {
 			// No directory places this operand: the gateway cannot see the
@@ -1143,9 +1164,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if isProtected(target) {
 			return true
 		}
-		if movedOntoLinks[target] {
-			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(target))
-			return !ok || isProtected(filepath.Join(parent, filepath.Base(target)))
+		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
+			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))
+			return !ok || isProtected(filepath.Join(parent, filepath.Base(moved)))
 		}
 		if physicalCWD := request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+clientCWD]; filepath.IsAbs(physicalCWD) &&
 			strings.HasPrefix(target, clientCWD+string(filepath.Separator)) {

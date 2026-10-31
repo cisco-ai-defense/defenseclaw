@@ -2687,8 +2687,37 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 	}
 	effectiveCWD := cwd
 	var directoryStack []string
+	// A plain move onto an existing link replaces the link entry and
+	// writes nothing it names: its destination is judged by that entry,
+	// in the directory the statement runs in and in the request cwd
+	// (GAP-2559, actionPlainMoveOntoLink in the POSIX reading).
+	powerShell := grammar&actionWindowsPlainGrammar == 0
+	var protectedMoveFiles *protectedFiles
+	movedEntry := func(statement []string, dir string) (int, bool, bool) {
+		if stateOnly {
+			return 0, false, false
+		}
+		index, entry, moved := actionWindowsPlainMoveOntoLink(statement, dir, home, powerShell)
+		if !moved {
+			return 0, false, false
+		}
+		if protectedMoveFiles == nil {
+			files := newProtectedFiles(home)
+			protectedMoveFiles = &files
+		}
+		return index, protectedEntry(entry, *protectedMoveFiles, filepath.Join(home, ".ssh")), true
+	}
+	moveSpans := map[int]actionWindowsResolvedSpan{}
 	for _, span := range actionWindowsResolvedSpans(words, cwd, home) {
+		destination, protectedMove, moved := movedEntry(span.words, effectiveCWD)
+		if moved && protectedMove {
+			return true
+		}
 		for j, word := range span.words {
+			if moved && j == destination {
+				moveSpans[span.start+j] = span
+				continue
+			}
 			if !skip[span.start+j] && !printBodies[word] && mentions(word, effectiveCWD) {
 				return true
 			}
@@ -2696,6 +2725,14 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 		actionWindowsAdvanceDirectory(span.words, home, &effectiveCWD, &directoryStack)
 	}
 	for i, word := range words {
+		if span, ok := moveSpans[i]; ok {
+			if destination, protectedMove, moved := movedEntry(span.words, cwd); moved && span.start+destination == i {
+				if protectedMove {
+					return true
+				}
+				continue
+			}
+		}
 		if !skip[i] && !printBodies[word] && mentions(word, cwd) {
 			return true
 		}
