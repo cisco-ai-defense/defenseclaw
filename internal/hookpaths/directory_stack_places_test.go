@@ -4,6 +4,9 @@
 package hookpaths
 
 import (
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -12,8 +15,21 @@ import (
 // failed (;, ||), a stack editor, a function, an OLDPWD or DIRSTACK name
 // or a cd outside the list keeps it unknown (GAP-2586).
 func TestDirectoryStackPlacesExpandLikeBash(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
-	const cwd, home = "/w/project", "/w"
+	// A Git Bash call on Windows names drive paths (GAP-1717): the rows
+	// root their directories on C: there.
+	root := func(p string) string { return p }
+	if runtime.GOOS == "windows" {
+		root = func(p string) string {
+			for _, dir := range []string{"/w", "/a", "/b", "/missing"} {
+				p = strings.ReplaceAll(p, " "+dir, " C:"+dir)
+			}
+			if strings.HasPrefix(p, "/") {
+				p = "C:" + p
+			}
+			return p
+		}
+	}
+	cwd, home := root("/w/project"), root("/w")
 	for _, tc := range []struct {
 		command, word, want string
 	}{
@@ -37,6 +53,7 @@ func TestDirectoryStackPlacesExpandLikeBash(t *testing.T) {
 		{"for d in a; do cd $d; done; pushd /b && cp -r ~1 x", "~1", ""},
 		{"(cd /a) && pushd /b && cp -r ~1 x", "~1", "/w/project"},
 	} {
+		tc.command, tc.want = root(tc.command), root(tc.want)
 		file, ok := parseShell(tc.command)
 		if !ok {
 			t.Fatalf("%q does not parse", tc.command)
@@ -52,6 +69,7 @@ func TestDirectoryStackPlacesExpandLikeBash(t *testing.T) {
 		if !ok {
 			got = ""
 		}
+		got = filepath.ToSlash(got)
 		if got != tc.want {
 			t.Errorf("%q %s: got %q, want %q", tc.command, tc.word, got, tc.want)
 		}
