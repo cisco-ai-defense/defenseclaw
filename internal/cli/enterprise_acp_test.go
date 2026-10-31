@@ -286,6 +286,23 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		t.Fatalf("a moved pair is not flagged: list %v, verify %v", row, verified)
 	}
 	cfg.ACP.Clients["zed"], cfg.ACP.Agents["kiro"] = config.ACPBinding{Enabled: true, Profile: "locked"}, config.ACPBinding{Enabled: true, Profile: "locked"}
+	// A profile whose allow-list no longer names the client, while the
+	// binding stays, is refused by the gateway; verify and list say so with
+	// the gateway's rule (GAP-1155).
+	allowed := cfg.ACP.Profiles["locked"]
+	narrowed := allowed
+	narrowed.AllowedClients = []string{"vscode"}
+	cfg.ACP.Profiles["locked"] = narrowed
+	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
+	verified = run(runEnterpriseACPVerify)
+	if row, _ := listed[0].(map[string]any); !strings.Contains(fmt.Sprint(row["note"]), "acp.profiles.locked.allowed_clients does not name zed") ||
+		!strings.Contains(fmt.Sprint(verified["central_note"]), "no longer allows zed/kiro in profile locked") {
+		t.Fatalf("a pair outside the profile allow-list is not flagged: list %v, verify %v", row, verified)
+	}
+	cfg.ACP.Profiles["locked"] = allowed
+	if verified = run(runEnterpriseACPVerify); verified["central_note"] != nil {
+		t.Fatalf("verify flags an allowed pair: %v", verified)
+	}
 	// After an account rename the recorded data directory names the old
 	// home; list reads the default one of the new home (GAP-0869).
 	renamedHome := t.TempDir()

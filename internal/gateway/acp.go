@@ -181,7 +181,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		refuse("ACP client or agent binding is disabled or pinned to another profile", acp.RefusalBinding, nil)
 		return
 	}
-	if !acpBindingAllowed(profile.AllowedClients, req.ClientID) || !acpBindingAllowed(profile.AllowedAgents, req.AgentID) {
+	if len(profile.AllowListRefusals(profileName, req.ClientID, req.AgentID)) > 0 {
 		refuse("ACP client or agent is outside the selected profile", acp.RefusalBinding, nil)
 		return
 	}
@@ -662,10 +662,6 @@ func effectiveACPMode(cfg config.ACPConfig, profileName string) string {
 		return "action"
 	}
 	return "observe"
-}
-
-func acpBindingAllowed(allow []string, value string) bool {
-	return len(allow) == 0 || slices.Contains(allow, value)
 }
 
 type acpEnterpriseCredentialContextKey struct{}
