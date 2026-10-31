@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from defenseclaw.config import default_config
 from defenseclaw.tui.services.overview_state import OVERVIEW_NOTICE_WIDTH
-from fixtures import screen_text, snapshot_app
+from fixtures import screen_text, settle_panel, snapshot_app
 from rich.text import Text
 
 
@@ -82,6 +82,6 @@ async def test_doctor_failure_notice_keeps_the_remediation_command(tmp_path, mon
         assert Text.from_markup(notice.message).cell_len <= OVERVIEW_NOTICE_WIDTH
         await app.workers.wait_for_complete()
         app.action_switch_panel("overview")
-        await pilot.pause()
+        await settle_panel(app, pilot)  # the Overview renders on a deferred lane
         screen = screen_text(app)
         assert "defenseclaw doctor" in screen, screen
