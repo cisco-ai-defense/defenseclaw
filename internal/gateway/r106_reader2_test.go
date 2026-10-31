@@ -86,3 +86,23 @@ func TestR106PythonLiteralLinkIsReadAsLn(t *testing.T) {
 		{"computed link source", "project", `python3 -c "import os; s='{K}'; os.link(s,'kl'); open('kl','a').write('k')"`, "block"},
 	})
 }
+
+// TestR106DiscardRedirectKeepsAReadOnlyCommand: a read whose only redirect
+// sends output to /dev/null or copies a descriptor writes no file, so from
+// the home folder a */* read that skips dot names stays allowed, as it is
+// without the redirect (rel-1-0-6:GAP-0160).
+func TestR106DiscardRedirectKeepsAReadOnlyCommand(t *testing.T) {
+	r106Reader2Check(t, []r106Reader2Row{
+		{"head of */* with stderr discarded, piped", "home", `head -n 1 */* 2>/dev/null | wc -l`, "allow"},
+		{"head of */* without the redirect", "home", `head -n 1 */* | wc -l`, "allow"},
+		{"cat of */* with stderr discarded", "home", `cat */* 2>/dev/null`, "allow"},
+		{"ls of */* with stderr discarded", "home", `ls */* 2>/dev/null`, "allow"},
+		{"wc of */* with stdout discarded", "home", `wc -l */* > /dev/null`, "allow"},
+		{"head of */* with stderr copied", "home", `head */* 2>&1`, "allow"},
+		{"append to the keys file after a discard", "home", `echo x 2>/dev/null >> .ssh/authorized_keys`, "block"},
+		{"read redirected onto the keys file", "home", `head -n 1 */* > .ssh/authorized_keys`, "block"},
+		{"read appended onto the keys file", "home", `head */* 2>/dev/null >> .ssh/authorized_keys`, "block"},
+		{"tee into */* reaches the keys link", "home", `tee -a */* < project/README.md 2>/dev/null`, "block"},
+		{"copy onto the keys file", "home", `cp project/README.md .*/authorized_keys 2>/dev/null`, "block"},
+	})
+}

@@ -2123,8 +2123,15 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		if !safe {
 			return false
 		}
-		switch node.(type) {
-		case *syntax.Redirect, *syntax.FuncDecl, *syntax.DeclClause:
+		switch node := node.(type) {
+		case *syntax.Redirect:
+			// Output sent to /dev/null, or a descriptor copy such as 2>&1,
+			// writes no file (rel-1-0-6:GAP-0160).
+			if !actionDiscardRedirect(node, home) {
+				safe = false
+			}
+			return false
+		case *syntax.FuncDecl, *syntax.DeclClause:
 			safe = false
 			return false
 		}
@@ -2200,6 +2207,25 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		return safe
 	})
 	return seen && safe
+}
+
+// actionDiscardRedirect reports a redirect that writes no file: output or
+// append to /dev/null, or a copy of a descriptor (2>&1, >&-).
+func actionDiscardRedirect(redirect *syntax.Redirect, home string) bool {
+	if redirect.Word == nil || redirect.Hdoc != nil {
+		return false
+	}
+	target, static := StaticWord(redirect.Word, home)
+	if !static {
+		return false
+	}
+	switch redirect.Op {
+	case syntax.RdrOut, syntax.AppOut, syntax.RdrAll, syntax.AppAll, syntax.ClbOut:
+		return target == "/dev/null"
+	case syntax.DplOut:
+		return target == "-" || target != "" && strings.Trim(target, "0123456789") == ""
+	}
+	return false
 }
 
 // actionExitStatusAssignment reports a bare NAME=$? assignment: it keeps the
