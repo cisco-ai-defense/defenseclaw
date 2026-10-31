@@ -47,6 +47,20 @@ func TestUnquotedCopySourceIsOneKnownWordOnlyWithOneFixedPlainValue(t *testing.T
 		`f=--target-directory=x; cp $f out.txt`,
 		`f=a.txt; export f=b; cp $f out.txt`,
 		`f=a.txt; (( f = 1 )); cp $f out.txt`,
+		// rel-1-0-2:GAP-0004 review: a wrapper, a deferred string or a
+		// binding builtin outside the old deny list rebinds the name.
+		`f=a.txt; command read f; cp $f out.txt`,
+		`f=a.txt; wait -p f; cp $f out.txt`,
+		`f=a.txt; trap "read f" DEBUG; cp $f out.txt`,
+		`f=a.txt; command eval "$X"; cp $f out.txt`,
+		`for f in a.txt; do command read f; cp $f build/; done`,
+		`f=a.txt; builtin read f; cp $f out.txt`,
+		`f=a.txt; exec 3<x; cp $f out.txt`,
+		`f=a.txt; env -S x; cp $f out.txt`,
+		`f=a.txt; cd build; cp $f out.txt`,
+		`f=a.txt; mapfile f; cp $f out.txt`,
+		`f=a.txt; getopts ab f; cp $f out.txt`,
+		`f=a.txt; \read f; cp $f out.txt`,
 	}
 	source := func(t *testing.T, command string) (*syntax.File, *syntax.Word) {
 		t.Helper()
@@ -70,17 +84,35 @@ func TestUnquotedCopySourceIsOneKnownWordOnlyWithOneFixedPlainValue(t *testing.T
 	}
 	for _, command := range known {
 		file, word := source(t, command)
-		if !knownWordParameterUses(file, home)[word] {
+		if !knownWordParameterUses(command, file, home)[word] {
 			t.Errorf("%s: copy source not read as one known word", command)
 		}
 	}
 	for _, command := range unknown {
 		file, word := source(t, command)
-		if knownWordParameterUses(file, home)[word] {
+		if knownWordParameterUses(command, file, home)[word] {
 			t.Errorf("%s: copy source read as one known word", command)
 		}
 	}
 	if got := QuotedDynamicCopyDestinations(`f=a.txt; cp $f out.txt`, "/p", home); !slices.Equal(got, []string{"/p/out.txt"}) {
 		t.Errorf("fixed destination of a known unquoted source = %v", got)
+	}
+}
+
+// rel-1-0-2:GAP-0004 review: a command with no parameter word or no copy
+// program leaves at the text gate, without a second walk.
+func BenchmarkKnownWordParameterUses(b *testing.B) {
+	const home = "/home/u"
+	for _, command := range []string{
+		`go test ./... > out.log; echo done > report.txt`,
+		`for f in a.txt README.md; do cp $f build/; done; echo hi > report.txt`,
+	} {
+		file, _ := parseShell(command)
+		b.Run(command[:8], func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				knownWordParameterUses(command, file, home)
+			}
+		})
 	}
 }

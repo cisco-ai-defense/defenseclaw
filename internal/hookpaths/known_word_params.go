@@ -4,32 +4,56 @@
 package hookpaths
 
 import (
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// knownWordBuiltins can bind a shell variable without an assignment word, or
-// run text the walk does not read. A command that calls one has no known
-// parameter words.
-var knownWordBuiltins = []string{
-	".", "alias", "builtin", "declare", "enable", "eval", "export", "getopts", "let", "local",
-	"mapfile", "printf", "read", "readarray", "readonly", "set", "source", "typeset", "unset",
+// knownWordPrograms cannot set a variable of the calling shell: external
+// programs and builtins without a binding form. A command that runs any
+// other program (read, wait -p, printf -v, eval, source, trap, command,
+// builtin, exec, env, cd, a function or a dynamic program word) has no known
+// parameter words: a wrapper or a deferred string can rebind the name
+// (rel-1-0-2:GAP-0004 review). The list is an allowlist on purpose.
+var knownWordPrograms = []string{
+	":", "[", "awk", "cat", "chmod", "cmp", "cp", "diff", "echo", "false", "find", "gcp", "git", "go",
+	"grep", "head", "ln", "ls", "make", "mkdir", "mv", "rm", "rmdir", "sed", "sort", "tail", "tar",
+	"test", "touch", "true", "uniq", "wc",
+}
+
+// mayHaveKnownCopyWord is the cheap gate of knownWordParameterUses: the
+// command names a copy program and has a parameter expansion.
+func mayHaveKnownCopyWord(command string) bool {
+	return strings.IndexByte(command, '$') >= 0 && strings.Contains(command, "cp")
+}
+
+// literalProgramWord reads a program word spelled as one plain literal
+// without the expansion StaticWord does; others take the slow path.
+func literalProgramWord(word *syntax.Word, home string) (string, bool) {
+	if word != nil && len(word.Parts) == 1 {
+		if lit, ok := word.Parts[0].(*syntax.Lit); ok && !strings.ContainsAny(lit.Value, "\\~*?[$") {
+			return lit.Value, true
+		}
+	}
+	return StaticWord(word, home)
 }
 
 // knownWordParameterUses returns the unquoted copy-operand parameter words of
 // file ($f, ${f}) that the shell expands to exactly one fixed word which is
 // not an option: f is bound only by plain assignments and for loops whose
 // values are fixed plain names (no blank, pattern or quoting character, no
-// leading dash), and the use sits in the body of such a loop or after a
-// top-level assignment that always runs. Such a word reads as a quoted
-// single parameter ("$f"), so for f in a.txt b.txt; do cp $f build/; done
-// and f=a.txt; cp $f out.txt read as their quoted spellings do
-// (rel-1-0-2:GAP-0004). Any other binding (read, eval, an arithmetic, a
-// default expansion, a function, an IFS change, a dynamic program word)
-// leaves every word unknown.
-func knownWordParameterUses(file *syntax.File, home string) map[*syntax.Word]bool {
-	if file == nil {
+// leading dash), the use sits in the body of such a loop or after a
+// top-level assignment that always runs, and every program the command runs
+// is in knownWordPrograms. Such a word reads as a quoted single parameter
+// ("$f"), so for f in a.txt b.txt; do cp $f build/; done and
+// f=a.txt; cp $f out.txt read as their quoted spellings do
+// (rel-1-0-2:GAP-0004). Any other binding (an arithmetic, a default
+// expansion, a function, an IFS change) or program leaves every word
+// unknown. command is the text file was parsed from; most commands leave at
+// its cheap gate.
+func knownWordParameterUses(command string, file *syntax.File, home string) map[*syntax.Word]bool {
+	if file == nil || !mayHaveKnownCopyWord(command) {
 		return nil
 	}
 	safe := func(value string) bool {
@@ -98,15 +122,9 @@ func knownWordParameterUses(file *syntax.File, home string) map[*syntax.Word]boo
 			if len(node.Args) == 0 {
 				break
 			}
-			program, static := StaticWord(node.Args[0], home)
-			if !static {
+			program, static := literalProgramWord(node.Args[0], home)
+			if !static || !slices.Contains(knownWordPrograms, programBase(program)) {
 				rejected = true
-				break
-			}
-			for _, builtin := range knownWordBuiltins {
-				if programBase(program) == builtin {
-					rejected = true
-				}
 			}
 		}
 		return !rejected

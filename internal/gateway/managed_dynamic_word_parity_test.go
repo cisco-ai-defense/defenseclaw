@@ -177,5 +177,12 @@ func TestUnquotedCopyWordWithOneKnownValueGetsTheQuotedVerdictInEveryCell(t *tes
 			`for f in a.txt README.md; do cp $f build/; done; echo hi > disklink`,
 			`f=a.txt; read f; cp $f build/ && echo hi > report.txt`,
 			`for f in a.txt; do IFS=.; cp $f build/; done; echo hi > report.txt`,
+			// rel-1-0-2:GAP-0004 review: rebinding through a wrapper or a
+			// deferred string keeps the word unknown.
+			`f=a.txt; command read f; cp $f build/ && echo hi > report.txt`,
+			`f=a.txt; wait -p f; cp $f build/ && echo hi > report.txt`,
+			`f=a.txt; trap "read f" DEBUG; cp $f build/ && echo hi > report.txt`,
+			`f=a.txt; command eval "$X"; cp $f build/ && echo hi > report.txt`,
+			`for f in a.txt; do command read f; cp $f build/; done; echo hi > report.txt`,
 		})
 }
