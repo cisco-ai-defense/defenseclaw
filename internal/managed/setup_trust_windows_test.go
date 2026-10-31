@@ -13,10 +13,13 @@
 package managed
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -251,6 +254,51 @@ func TestRemoveSetupTreeNeverFollowsReparsePoints(t *testing.T) {
 	}
 	if err := RemoveSetupTree(root); err != nil {
 		t.Fatalf("removing a missing tree: %v", err)
+	}
+}
+
+// The removal walk lists through the handle it holds, one 64 KiB buffer at a
+// time. A directory whose records exceed one buffer must still be listed in
+// full (compared as a set, since order is not guaranteed) and removed.
+func TestRemoveSetupTreeListsBeyondOneBuffer(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "stage")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	// Each record is about 68 + 2*125 bytes, so 400 entries need roughly
+	// 125 KiB, about two buffers, while full paths stay under MAX_PATH.
+	want := make(map[string]bool)
+	for index := 0; index < 400; index++ {
+		name := fmt.Sprintf("%04d-%s", index, strings.Repeat("n", 120))
+		if err := os.WriteFile(filepath.Join(root, name), nil, 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		want[name] = true
+	}
+	handle, _, err := openSetupForDelete(root)
+	if err != nil {
+		t.Fatalf("openSetupForDelete: %v", err)
+	}
+	names, err := listSetupDirectoryByHandle(handle)
+	_ = windows.CloseHandle(handle)
+	if err != nil {
+		t.Fatalf("listSetupDirectoryByHandle: %v", err)
+	}
+	got := make(map[string]bool, len(names))
+	for _, name := range names {
+		if got[name] {
+			t.Fatalf("listing repeated %q", name)
+		}
+		got[name] = true
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("listing returned %d names, want %d", len(got), len(want))
+	}
+	if err := RemoveSetupTree(root); err != nil {
+		t.Fatalf("RemoveSetupTree: %v", err)
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staging root survived removal: %v", err)
 	}
 }
 
