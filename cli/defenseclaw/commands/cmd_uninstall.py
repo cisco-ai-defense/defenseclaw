@@ -2739,7 +2739,8 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
             "scheduled",
             # The result file stays for the operator to read; the next
             # uninstall's helper removes it.
-            f"result: {status[0]}, kept for you to read",
+            f"result: {status[0]}, kept for you to read. If another DefenseClaw window still holds a "
+            "file, the removal fails and DefenseClaw stays; the next defenseclaw command then says why",
         )
     elif plan.remove_data_dir:
         run_phase(

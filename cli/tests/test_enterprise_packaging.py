@@ -2450,6 +2450,36 @@ def test_linux_postremove_drops_the_empty_install_tree(tmp_path: Path) -> None:
     assert not opt.exists()
 
 
+# rel-1-0-6 GAP-0175: uninstall --purge and the package removal left the
+# scanner runtime's bytecode and the 1.0.5 OpenCode plugin (its old name), so
+# /opt/defenseclaw stayed. A removal drops both; an upgrade keeps them, and a
+# kept deployment keeps the old plugin with the policies.
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+@pytest.mark.parametrize(("argument", "deployment_kept", "gone"), [("0", False, True), ("remove", False, True), ("purge", False, True), ("1", False, False), ("0", True, False)])
+def test_linux_postremove_drops_scanner_bytecode_and_the_old_opencode_plugin(
+    tmp_path: Path, argument: str, deployment_kept: bool, gone: bool
+) -> None:
+    host = _Host(tmp_path)
+    opt = tmp_path / "opt"
+    cache = opt / "scanner-runtime" / "python" / "lib" / "python3.12" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "site.cpython-312.pyc").write_bytes(b"pyc")
+    plugin = opt / "share" / "opencode" / "defenseclaw.js"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text("// defenseclaw-managed-plugin v2\n", encoding="utf-8")
+    if deployment_kept:
+        host.state.mkdir()
+        (host.state / "deployment.json").write_text("{}\n", encoding="utf-8")
+    result = host.run(_postremove(host, tmp_path), argument)
+    assert result.returncode == 0, result.stderr
+    if gone:
+        assert not opt.exists(), sorted(str(p.relative_to(opt)) for p in opt.rglob("*"))
+    elif argument == "1":
+        assert cache.is_dir() and plugin.is_file()
+    else:
+        assert plugin.is_file() and not (opt / "scanner-runtime").exists()
+
+
 # GAP-1254, GAP-1258: the wrapper applied the config before it stored
 # --secret-name, so a config that references the credential never applied,
 # and the store then failed busy against the apply its own config change
