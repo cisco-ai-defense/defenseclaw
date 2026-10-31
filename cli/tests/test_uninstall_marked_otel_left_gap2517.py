@@ -160,3 +160,69 @@ def test_uninstall_does_not_replace_a_linked_claude_settings_file_gap2517(tmp_pa
     assert os.path.islink(claude_settings)
     assert real.read_bytes() == before
     assert "could not be removed safely" in " ".join(out.split())
+
+
+LEGACY_SETUP_CODEX = """model = "fx-user-codex"
+
+[mcp_servers.keepme]
+command = "cmd.exe"
+
+[otel]
+environment = "windows"
+log_user_prompt = false
+
+[otel.exporter.otlp-http]
+endpoint = "http://127.0.0.1:19488/v1/logs"
+protocol = "json"
+
+[otel.trace_exporter.otlp-http]
+endpoint = "http://127.0.0.1:19488/v1/traces"
+protocol = "json"
+
+[otel.metrics_exporter.otlp-http]
+endpoint = "http://127.0.0.1:19488/v1/metrics"
+protocol = "json"
+"""
+
+
+def test_uninstall_removes_the_credential_less_exporters_at_the_gateway_port_gap0376(tmp_path, monkeypatch):
+    """rel-1-0-2 GAP-0376 (LEAD 10-31): Setup's exporters at the configured gateway port go; the user's stay."""
+    monkeypatch.setattr(cmd_uninstall, "_configured_gateway_ports", lambda: frozenset({19488}))
+    codex_config, _ = _homes(tmp_path, monkeypatch, LEGACY_SETUP_CODEX, {})
+    out = _run_uninstall(monkeypatch)
+    codex = codex_toml.loads(open(codex_config, "rb").read())
+    assert codex == {"model": "fx-user-codex", "mcp_servers": {"keepme": {"command": "cmd.exe"}}}
+    assert "otel.exporter" in out and "127.0.0.1:19488" in out
+
+
+def test_uninstall_keeps_exporters_that_are_not_the_gateway_port_or_carry_settings_gap0376(tmp_path, monkeypatch):
+    monkeypatch.setattr(cmd_uninstall, "_configured_gateway_ports", lambda: frozenset({19488}))
+    config = LEGACY_SETUP_CODEX.replace(
+        '[otel.trace_exporter.otlp-http]\nendpoint = "http://127.0.0.1:19488/v1/traces"',
+        '[otel.trace_exporter.otlp-http]\nendpoint = "http://127.0.0.1:4318/v1/traces"',
+    ).replace(
+        '[otel.metrics_exporter.otlp-http]\nendpoint = "http://127.0.0.1:19488/v1/metrics"\nprotocol = "json"',
+        '[otel.metrics_exporter.otlp-http]\nendpoint = "http://127.0.0.1:19488/v1/metrics"\nprotocol = "json"\n'
+        'headers = { x-tenant = "mine" }',
+    )
+    codex_config, _ = _homes(tmp_path, monkeypatch, config, {})
+    _run_uninstall(monkeypatch)
+    otel = codex_toml.loads(open(codex_config, "rb").read())["otel"]
+    # Only the logs exporter (gateway port, nothing else in it) is Setup's.
+    assert "exporter" not in otel
+    assert otel["trace_exporter"]["otlp-http"]["endpoint"] == "http://127.0.0.1:4318/v1/traces"
+    assert otel["metrics_exporter"]["otlp-http"]["headers"] == {"x-tenant": "mine"}
+    assert otel["environment"] == "windows"
+
+
+def test_uninstall_keeps_a_table_that_mixes_the_gateway_port_with_another_exporter_gap0376(tmp_path, monkeypatch):
+    monkeypatch.setattr(cmd_uninstall, "_configured_gateway_ports", lambda: frozenset({19488}))
+    config = LEGACY_SETUP_CODEX + """
+[otel.exporter.user-collector]
+endpoint = "http://127.0.0.1:4318/v1/logs"
+"""
+    codex_config, _ = _homes(tmp_path, monkeypatch, config, {})
+    _run_uninstall(monkeypatch)
+    otel = codex_toml.loads(open(codex_config, "rb").read())["otel"]
+    assert "user-collector" in otel["exporter"] and "otlp-http" in otel["exporter"]
+    assert "trace_exporter" not in otel and "metrics_exporter" not in otel
