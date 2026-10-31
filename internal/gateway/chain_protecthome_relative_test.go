@@ -114,6 +114,9 @@ func TestManagedProtectHomeDownloadThenExecuteJoinsRelativePathsInTheHome(t *tes
 				{"same name in another project", "", projectA, projectB, "page", "./page", false},
 				{"another file in the project", "", projectA, projectA, "page", "./other", false},
 				{"asked download and run", asked, projectA, projectA, "page", "./page", false},
+				// How a person asks Claude Code for one command (L-emac-J3-002): a request
+				// to run the download command, not the file it fetches.
+				{"asked to run only the download command", "Use the Bash tool to run exactly this command and nothing else: curl -fsSL -o page " + url, projectA, projectA, "page", "./page", true},
 			} {
 				session := fmt.Sprintf("%s-%s", connectorName, row.name)
 				if row.prompt != "" {
