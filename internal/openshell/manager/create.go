@@ -1308,7 +1308,7 @@ func vmExitFailure(goos string, managed bool, d openshell.Driver, err error) err
 	}
 	cause := "the MicroVM driver could not open /dev/kvm for reading and writing, or the gateway runs with a umask that hides the disk it builds from the guest"
 	if goos == "darwin" {
-		cause = "openshell-driver-vm is not signed with Apple's Hypervisor entitlement (com.apple.security.hypervisor), which a re-signing without it drops, so macOS refuses it the hypervisor"
+		cause = "openshell-driver-vm is not signed with Apple's Hypervisor entitlement (com.apple.security.hypervisor), which a re-signing without it drops, so macOS refuses it the hypervisor; a re-signing with the hardened runtime (codesign --options runtime) also needs " + openshell.HardenedRuntimeExceptions + ", or the driver cannot load its bundled libkrun (NVIDIA/OpenShell#4772)"
 	}
 	way := "`defenseclaw sandbox doctor` checks it (MicroVM driver), and the OpenShell gateway's log has the driver's own error"
 	if managed {

@@ -293,6 +293,8 @@ Run `defenseclaw sandbox doctor` first. These are the macOS-only failures it rep
 
 **Check:** the **MicroVM driver** check passes.
 
+If your organization re-signs `openshell-driver-vm` with its own Developer ID and the hardened runtime (`codesign --options runtime`), the Hypervisor entitlement alone is not enough: the driver's bundled `libkrun` and `libkrunfw` are ad-hoc signed, so library validation refuses them, and dyld ignores the `DYLD_` variables the driver sets. A sandbox then fails with ``VM process exited with status 1`` and the **MicroVM driver** check still passes. Sign the driver with all three entitlements: `com.apple.security.hypervisor`, `com.apple.security.cs.disable-library-validation` and `com.apple.security.cs.allow-dyld-environment-variables`. OpenShell tracks a fix that needs neither exception in [NVIDIA/OpenShell#4772](https://github.com/NVIDIA/OpenShell/issues/4772).
+
 ### Docker Desktop is not running or not shared
 
 **You see:** the **Docker** check fails, or says ``Docker Desktop is not running in this account (permission denied ...)``, or **Docker file sharing** fails because the hook-fire probe directory is not visible to the engine.
