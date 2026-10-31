@@ -29,12 +29,15 @@ func TestLiteralInterpreterCodeSurvivesDynamicTrailingArguments(t *testing.T) {
 }
 
 // windowsPathSemanticsAuditRows are audit-class rows (UnprovenProtectedWrite
-// names no deny decision) whose Windows answer follows the Windows path
-// functions: cd ~ before unmodelled Ruby code does not place the home, and
-// an IPv6 bracket after a scheme colon reads as a pattern.
-var windowsPathSemanticsAuditRows = map[string]bool{
-	"home directory reaches unmodelled Ruby code": true,
-	"IPv6 URL brackets are not file globs":        true,
+// names no deny decision) whose Windows class follows the Windows path
+// functions, which the POSIX reading of a Git Bash call uses on that host
+// (rel-1-0-4 GAP-1717): cd ~ before unmodelled Ruby code does not place the
+// home, and an IPv6 bracket after a scheme colon reads as a pattern. The
+// value is the Windows class; the decision of these calls is the same on
+// every host (none), which the rows check too.
+var windowsPathSemanticsAuditRows = map[string]string{
+	"home directory reaches unmodelled Ruby code": "",
+	"IPv6 URL brackets are not file globs":        "dynamic-argument",
 }
 
 func TestUnprovenProtectedWriteEvidence(t *testing.T) {
@@ -122,11 +125,17 @@ func TestUnprovenProtectedWriteEvidence(t *testing.T) {
 					t.Fatalf("function redirect reachability = %q", operands)
 				}
 			}
-			if runtime.GOOS == "windows" && windowsPathSemanticsAuditRows[tc.name] {
-				t.Skip("audit class only; the Windows path functions read this word another way (GAP-1717 follow-up)")
+			want := tc.reason
+			if windowsClass, audit := windowsPathSemanticsAuditRows[tc.name]; audit {
+				if runtime.GOOS == "windows" {
+					want = windowsClass
+				}
+				if decision := posixShellDecision(tc.command, cwd, home); decision != "" {
+					t.Fatalf("audit-class row decided %q", decision)
+				}
 			}
-			if got := UnprovenProtectedWrite(tc.command, cwd, home); got != tc.reason {
-				t.Fatalf("class = %q, want %q", got, tc.reason)
+			if got := UnprovenProtectedWrite(tc.command, cwd, home); got != want {
+				t.Fatalf("class = %q, want %q", got, want)
 			}
 			if hookWriteEvidenceHost() {
 				payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
