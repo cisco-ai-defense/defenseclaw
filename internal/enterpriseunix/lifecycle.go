@@ -2356,7 +2356,16 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if !l.opts.NoStart {
 		// Inputs written during this transaction are applied by a follow-up
 		// (settleInputChanges); they do not fail this one.
-		if problems := l.verifyDeployment(ctx, newRecord, false, l.inputsChanged()); len(problems) > 0 {
+		problems := l.verifyDeployment(ctx, newRecord, false, l.inputsChanged())
+		if len(problems) > 0 && l.inputsChanged() {
+			// A push that landed while verify ran: its config.yaml is the
+			// follow-up's, so verify again without the inputs it replaced
+			// instead of rolling this transaction back for it. Two config
+			// pushes five seconds apart rolled the first back and left the
+			// second for another run (rel-1-0-3 GAP-0142).
+			problems = l.verifyDeployment(ctx, newRecord, false, true)
+		}
+		if len(problems) > 0 {
 			return failAndRollback(codeVerify, errors.New(strings.Join(problems, "; ")))
 		}
 	}

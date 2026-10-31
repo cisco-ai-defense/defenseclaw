@@ -4235,6 +4235,11 @@ func planHermesAllowlistApprovals(path string, approvals []interface{}, command 
 		_, requiredEvent := events[event]
 		owned, _ := entry[hermesAllowlistOwnerField].(bool)
 		_, recognized := recognizedCommands[entryCommand]
+		if owned && !recognized && hermesMovedHomeCommand(entryCommand, command) {
+			// DefenseClaw's approval from before a true move of the home is
+			// replaced like any historical command (rel-1-0-2 GAP-0642).
+			recognized = true
+		}
 		if owned {
 			if !recognized {
 				return nil, nil, fmt.Errorf("Hermes allowlist entry %q has a tampered DefenseClaw command; refusing non-exact repair", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
@@ -4334,6 +4339,11 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup,
 		}
 	}
 	events := hermesHookEventSet()
+	// ours is DefenseClaw's hook command for this home, or the same hook
+	// script of this install at the home the account had before a move.
+	ours := func(entryCommand string) bool {
+		return entryCommand == command || hermesMovedHomeCommand(entryCommand, command)
+	}
 	approvals := document["approvals"].([]interface{})
 	kept := make([]interface{}, 0, len(approvals))
 	for _, raw := range approvals {
@@ -4347,15 +4357,15 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup,
 		owned, _ := entry[hermesAllowlistOwnerField].(bool)
 		_, requiredEvent := events[event]
 		pair := event + "\x00" + entryCommand
-		if retireManagedConsent && requiredEvent && entryCommand == command &&
-			(owned || hermesConsentForCommand(entry, command)) {
+		if retireManagedConsent && requiredEvent && ours(entryCommand) &&
+			(owned || hermesConsentForCommand(entry, entryCommand)) {
 			// A standalone uninstall removes the product, including consent for
 			// its exact hook retained by a supported upgrade. Restoring that
 			// consent would leave a registration pointing into removed state.
 			continue
 		}
 		if owned && requiredEvent && !pristinePairs[pair] {
-			if entryCommand != command {
+			if !ours(entryCommand) {
 				return fmt.Errorf("Hermes allowlist entry %s has a tampered DefenseClaw command; refusing non-exact cleanup", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
 			continue
@@ -4371,6 +4381,11 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup,
 				continue
 			}
 			return fmt.Errorf("Hermes allowlist entry %s lost its DefenseClaw ownership marker; refusing ambiguous cleanup", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+		} else if backup != nil && requiredEvent && entryCommand != command && ours(entryCommand) && !pristinePairs[pair] &&
+			hermesConsentForCommand(entry, entryCommand) {
+			// Consent Hermes recorded for the hook in the earlier home goes
+			// with it too; any other unmarked entry stays.
+			continue
 		}
 		kept = append(kept, raw)
 	}
@@ -4380,6 +4395,58 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup,
 		return err
 	}
 	return atomicWriteFile(path, append(data, '\n'), 0o600)
+}
+
+// hermesMovedHomeCommand reports whether entryCommand, on an approval that
+// carries DefenseClaw's ownership marker, is command as Setup wrote it in the
+// home the account had before a true move (usermod -d -m): the same hook
+// script, at the same place below the home, in the same shell-word form, only
+// below another root. A move carries the approvals with the home, and they
+// still name the script under the old home, so teardown and repair took them
+// for a tampered DefenseClaw command and refused every run (rel-1-0-2
+// GAP-0642). This is the install's own identity, not the old path: no record
+// of the old home is needed (the account record is updated by then and a
+// re-homed row may already name the new home). A file at that path that is
+// not a DefenseClaw-generated hook script keeps the refusal, as does any other
+// command on a marked entry. Windows commands name the hook binary, not the
+// home.
+func hermesMovedHomeCommand(entryCommand, command string) bool {
+	if runtime.GOOS == "windows" || entryCommand == command {
+		return false
+	}
+	unquote := func(word string) (string, bool) {
+		word = strings.TrimSpace(word)
+		if len(word) >= 2 && strings.HasPrefix(word, "'") && strings.HasSuffix(word, "'") {
+			return word[1 : len(word)-1], true
+		}
+		return word, false
+	}
+	script, quoted := unquote(command)
+	moved, movedQuoted := unquote(entryCommand)
+	if quoted != movedQuoted {
+		return false
+	}
+	for _, p := range []string{script, moved} {
+		if !filepath.IsAbs(p) || filepath.Clean(p) != p || strings.ContainsAny(p, "'\x00\r\n") {
+			return false
+		}
+	}
+	home := filepath.Clean(userHomeDir())
+	rel, err := filepath.Rel(home, script)
+	if home == "" || !filepath.IsAbs(home) || err != nil || rel == "." || rel == ".." ||
+		strings.HasPrefix(rel, ".."+string(filepath.Separator)) || !strings.HasSuffix(moved, string(filepath.Separator)+rel) {
+		return false
+	}
+	previous := strings.TrimSuffix(moved, string(filepath.Separator)+rel)
+	if !filepath.IsAbs(previous) || previous == filepath.Dir(previous) || managedPathWithin(previous, home) || managedPathWithin(home, previous) {
+		return false
+	}
+	if _, err := os.Lstat(moved); err == nil && !defenseClawHookFile(moved) {
+		return false
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	return true
 }
 
 // hermesConfigBackupHoldsOwnedHooks reports whether the config.yaml copy

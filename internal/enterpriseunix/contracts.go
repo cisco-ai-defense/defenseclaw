@@ -466,7 +466,7 @@ func (l *lifecycle) describeUnprotectedAgents() {
 	}
 	// One machine-wide OpenCode V1 copy is one warning with the user count,
 	// not one per account (GAP-0071); every account still counts below.
-	sharedLines, sharedEntry := enterprisehooks.CollapseSharedOpenCodeV1(agents)
+	sharedLines, sharedEntry := enterprisehooks.CollapseSharedOpenCodeV1(agents, enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath))
 	for _, line := range sharedLines {
 		r.AddWarning(line.Code, line.Message())
 	}

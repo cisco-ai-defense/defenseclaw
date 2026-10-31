@@ -2319,7 +2319,7 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 	}
 	// One machine-wide OpenCode V1 copy is one warning with the user count
 	// (GAP-0071); every account still counts below.
-	sharedLines, sharedEntry := enterprisehooks.CollapseSharedOpenCodeV1(agents)
+	sharedLines, sharedEntry := enterprisehooks.CollapseSharedOpenCodeV1(agents, "")
 	for _, line := range sharedLines {
 		result.AddWarning(line.Code, line.Message())
 	}

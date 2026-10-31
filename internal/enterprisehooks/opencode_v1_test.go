@@ -107,14 +107,20 @@ func TestCollapseSharedOpenCodeV1(t *testing.T) {
 	other := UnprotectedAgent{User: "alice", Connector: "claudecode", Version: "9.9.9", Code: UnprotectedCodeHookContractUnverified, Reason: "unverified"}
 	agents = append(agents, own, other)
 
-	lines, collapsed := CollapseSharedOpenCodeV1(agents)
+	lines, collapsed := CollapseSharedOpenCodeV1(agents, "/etc/defenseclaw/hook-guardian/unprotected-agents.json")
 	if len(lines) != 1 || len(lines[0].Members) != 5 {
 		t.Fatalf("want one line for the 5 accounts, got %+v", lines)
 	}
 	message := lines[0].Message()
-	for _, want := range []string{"opencode 1.18.34 at " + machine, "machine-wide copy", "5 users", "alice, bob, carol and 2 more", "npm install -g @opencode/cli@2", "opencode service restart"} {
+	for _, want := range []string{"opencode 1.18.34 at " + machine, "machine-wide copy", "5 users", "the root-only /etc/defenseclaw/hook-guardian/unprotected-agents.json names them", "npm install -g @opencode/cli@2", "opencode service restart"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("combined line %q lacks %q", message, want)
+		}
+	}
+	// status-v2 GAP-0005: the shared line counts the accounts and names none.
+	for _, user := range []string{"alice", "bob", "carol", "dave", "erin"} {
+		if strings.Contains(message, user) {
+			t.Fatalf("combined line %q names account %s", message, user)
 		}
 	}
 	for _, agent := range agents[:5] {
@@ -126,7 +132,7 @@ func TestCollapseSharedOpenCodeV1(t *testing.T) {
 		t.Fatal("a per-user copy or another connector was folded into the machine-wide line")
 	}
 	// One account with the copy keeps its own line.
-	if lines, _ := CollapseSharedOpenCodeV1(agents[:1]); len(lines) != 0 {
+	if lines, _ := CollapseSharedOpenCodeV1(agents[:1], ""); len(lines) != 0 {
 		t.Fatalf("a copy only one account has must not be combined: %+v", lines)
 	}
 }
