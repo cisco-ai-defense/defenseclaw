@@ -87,27 +87,60 @@ func TestRehomedCleanupRemovesTheApprovalsOfTheRecordedHome(t *testing.T) {
 	requireOnlyUserApproval(t, allowlist)
 }
 
-func TestRehomedCleanupFindsTheEarlierHomeInTheReceipt(t *testing.T) {
-	oldHome, newHome, allowlist, command, oldCommand := rehomedHermesFixture(t)
+func TestCleanupAfterAMoveNeedsNoRecordOfTheOldHome(t *testing.T) {
+	_, newHome, allowlist, command, oldCommand := rehomedHermesFixture(t)
 	commands := map[string]string{}
 	for event := range hermesHookEventSet() {
 		commands[event] = oldCommand
 	}
 	writeRehomedHermesAllowlist(t, allowlist, commands)
-	// No bound previous home: the row already names the new home. The
-	// receipt Setup wrote still records where the file was captured.
-	receipt := &managedFileBackup{Connector: "hermes", LogicalName: hermesAllowlistLogicalName,
-		Path: filepath.Join(oldHome, ".hermes", hermesAllowlistFileName), Existed: false}
-	err := WithUserHomeDir(newHome, func() error { return removeHermesOwnedApprovals(allowlist, command, receipt, true) })
+	// No bound previous home and no receipt: the row already names the new
+	// home (the live second and later remove-all runs).
+	err := WithUserHomeDir(newHome, func() error { return removeHermesOwnedApprovals(allowlist, command, nil, true) })
 	if err != nil {
-		t.Fatalf("cleanup refused DefenseClaw's approvals of the home its receipt records: %v", err)
+		t.Fatalf("cleanup refused DefenseClaw's approvals from before the move: %v", err)
 	}
 	requireOnlyUserApproval(t, allowlist)
 }
 
+func TestRepairAfterAMoveReplacesTheApprovalsOfTheOldHome(t *testing.T) {
+	_, newHome, allowlist, command, oldCommand := rehomedHermesFixture(t)
+	commands := map[string]string{}
+	for event := range hermesHookEventSet() {
+		commands[event] = oldCommand
+	}
+	writeRehomedHermesAllowlist(t, allowlist, commands)
+	if err := WithUserHomeDir(newHome, func() error { return checkHermesAllowlistRepairable(allowlist, command) }); err != nil {
+		t.Fatalf("repair refused DefenseClaw's approvals from before the move: %v", err)
+	}
+}
+
+func TestMovedHomeCommandKeepsTheRefusalForAScriptThatIsNotDefenseClaws(t *testing.T) {
+	oldHome, newHome, allowlist, command, oldCommand := rehomedHermesFixture(t)
+	script := strings.Trim(oldCommand, "'")
+	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec /usr/local/bin/user-hook\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	commands := map[string]string{}
+	for event := range hermesHookEventSet() {
+		commands[event] = oldCommand
+		break
+	}
+	writeRehomedHermesAllowlist(t, allowlist, commands)
+	_ = oldHome
+	err := WithUserHomeDir(newHome, func() error { return removeHermesOwnedApprovals(allowlist, command, nil, true) })
+	if err == nil || !strings.Contains(err.Error(), "tampered DefenseClaw command") {
+		t.Fatalf("a marked entry naming a script that is not DefenseClaw's = %v, want the tampered-command refusal", err)
+	}
+}
+
 func TestRehomedCleanupStillRefusesAnotherCommandOnAMarkedEntry(t *testing.T) {
 	oldHome, newHome, allowlist, command, _ := rehomedHermesFixture(t)
-	other := hermesConfiguredHookCommand(filepath.Join(filepath.Dir(oldHome), "elsewhere", ".defenseclaw", "hooks", hermesHookScriptName), "")
+	// The script name at another place below a home: not this install.
+	other := hermesConfiguredHookCommand(filepath.Join(filepath.Dir(oldHome), "elsewhere", "bin", hermesHookScriptName), "")
 	commands := map[string]string{}
 	for event := range hermesHookEventSet() {
 		commands[event] = other
@@ -118,19 +151,5 @@ func TestRehomedCleanupStillRefusesAnotherCommandOnAMarkedEntry(t *testing.T) {
 	err := WithUserHomeDir(newHome, func() error { return removeHermesOwnedApprovals(allowlist, command, nil, true) })
 	if err == nil || !strings.Contains(err.Error(), "tampered DefenseClaw command") {
 		t.Fatalf("a marked entry naming a path outside the recorded homes = %v, want the tampered-command refusal", err)
-	}
-}
-
-func TestDifferingPathRoots(t *testing.T) {
-	for _, tc := range []struct{ captured, current, old, new string }{
-		{"/home/a/.hermes/x.json", "/home/a2/.hermes/x.json", "/home/a", "/home/a2"},
-		{"/home/a/.hermes/x.json", "/home/a/.hermes/x.json", "", ""},
-		{"/home/a/.hermes/x.json", "/srv/users/a/.hermes/x.json", "/home", "/srv/users"},
-		{"/a/x.json", "/b/y.json", "/a/x.json", "/b/y.json"},
-	} {
-		old, current := differingPathRoots(tc.captured, tc.current)
-		if old != tc.old || current != tc.new {
-			t.Errorf("differingPathRoots(%q, %q) = %q, %q; want %q, %q", tc.captured, tc.current, old, current, tc.old, tc.new)
-		}
 	}
 }

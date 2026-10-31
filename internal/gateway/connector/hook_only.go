@@ -4235,6 +4235,11 @@ func planHermesAllowlistApprovals(path string, approvals []interface{}, command 
 		_, requiredEvent := events[event]
 		owned, _ := entry[hermesAllowlistOwnerField].(bool)
 		_, recognized := recognizedCommands[entryCommand]
+		if owned && !recognized && hermesMovedHomeCommand(entryCommand, command) {
+			// DefenseClaw's approval from before a true move of the home is
+			// replaced like any historical command (rel-1-0-2 GAP-0642).
+			recognized = true
+		}
 		if owned {
 			if !recognized {
 				return nil, nil, fmt.Errorf("Hermes allowlist entry %q has a tampered DefenseClaw command; refusing non-exact repair", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
@@ -4334,10 +4339,11 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup,
 		}
 	}
 	events := hermesHookEventSet()
-	earlier := hermesEarlierHomeCommands(command, path, backup)
-	// ours is the exact command of DefenseClaw's hook, for this home or for
-	// an earlier home of the same account the cleanup or the receipt records.
-	ours := func(entryCommand string) bool { return entryCommand == command || earlier[entryCommand] }
+	// ours is DefenseClaw's hook command for this home, or the same hook
+	// script of this install at the home the account had before a move.
+	ours := func(entryCommand string) bool {
+		return entryCommand == command || hermesMovedHomeCommand(entryCommand, command)
+	}
 	approvals := document["approvals"].([]interface{})
 	kept := make([]interface{}, 0, len(approvals))
 	for _, raw := range approvals {
@@ -4375,7 +4381,7 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup,
 				continue
 			}
 			return fmt.Errorf("Hermes allowlist entry %s lost its DefenseClaw ownership marker; refusing ambiguous cleanup", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-		} else if backup != nil && requiredEvent && earlier[entryCommand] && !pristinePairs[pair] &&
+		} else if backup != nil && requiredEvent && entryCommand != command && ours(entryCommand) && !pristinePairs[pair] &&
 			hermesConsentForCommand(entry, entryCommand) {
 			// Consent Hermes recorded for the hook in the earlier home goes
 			// with it too; any other unmarked entry stays.
@@ -4391,74 +4397,56 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup,
 	return atomicWriteFile(path, append(data, '\n'), 0o600)
 }
 
-// hermesEarlierHomeCommands are the commands DefenseClaw rendered for its
-// Hermes hook in an earlier home of the same account: the recorded home a
-// re-homed cleanup binds (BindManagedBackupPreviousHome) and the home the
-// allowlist receipt Setup wrote was captured in. A true move of a home
-// (usermod -d -m) carries the approvals DefenseClaw wrote along with the
-// receipt, and they still name the hook script below the old home, so
-// teardown matched none of them as DefenseClaw's and refused every run
-// (rel-1-0-2 GAP-0642). Only the command for that recorded home, in the form
-// Setup writes, qualifies: any other command on a marked entry stays a
-// tampered one. Windows commands name the hook binary, not the home.
-func hermesEarlierHomeCommands(command, path string, backup *managedFileBackup) map[string]bool {
-	out := map[string]bool{}
-	if runtime.GOOS == "windows" {
-		return out
+// hermesMovedHomeCommand reports whether entryCommand, on an approval that
+// carries DefenseClaw's ownership marker, is command as Setup wrote it in the
+// home the account had before a true move (usermod -d -m): the same hook
+// script, at the same place below the home, in the same shell-word form, only
+// below another root. A move carries the approvals with the home, and they
+// still name the script under the old home, so teardown and repair took them
+// for a tampered DefenseClaw command and refused every run (rel-1-0-2
+// GAP-0642). This is the install's own identity, not the old path: no record
+// of the old home is needed (the account record is updated by then and a
+// re-homed row may already name the new home). A file at that path that is
+// not a DefenseClaw-generated hook script keeps the refusal, as does any other
+// command on a marked entry. Windows commands name the hook binary, not the
+// home.
+func hermesMovedHomeCommand(entryCommand, command string) bool {
+	if runtime.GOOS == "windows" || entryCommand == command {
+		return false
 	}
-	script, quoted := strings.TrimSpace(command), false
-	if len(script) >= 2 && strings.HasPrefix(script, "'") && strings.HasSuffix(script, "'") {
-		script, quoted = script[1:len(script)-1], true
-	}
-	if !filepath.IsAbs(script) || filepath.Clean(script) != script || strings.ContainsAny(script, "'\x00\r\n") {
-		return out
-	}
-	add := func(oldRoot, newRoot string) {
-		oldRoot, newRoot = filepath.Clean(oldRoot), filepath.Clean(newRoot)
-		if oldRoot == newRoot || !filepath.IsAbs(oldRoot) || !filepath.IsAbs(newRoot) ||
-			managedPathWithin(oldRoot, newRoot) || managedPathWithin(newRoot, oldRoot) {
-			return
+	unquote := func(word string) (string, bool) {
+		word = strings.TrimSpace(word)
+		if len(word) >= 2 && strings.HasPrefix(word, "'") && strings.HasSuffix(word, "'") {
+			return word[1 : len(word)-1], true
 		}
-		rel, err := filepath.Rel(newRoot, script)
-		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return
-		}
-		previous := filepath.Join(oldRoot, rel)
-		if quoted {
-			out[shellWord(previous)] = true
-		} else {
-			out[previous] = true
+		return word, false
+	}
+	script, quoted := unquote(command)
+	moved, movedQuoted := unquote(entryCommand)
+	if quoted != movedQuoted {
+		return false
+	}
+	for _, p := range []string{script, moved} {
+		if !filepath.IsAbs(p) || filepath.Clean(p) != p || strings.ContainsAny(p, "'\x00\r\n") {
+			return false
 		}
 	}
-	if previous := boundManagedBackupPreviousHome(); previous != "" {
-		if home := userHomeDir(); home != "" {
-			add(previous, home)
-		}
+	home := filepath.Clean(userHomeDir())
+	rel, err := filepath.Rel(home, script)
+	if home == "" || !filepath.IsAbs(home) || err != nil || rel == "." || rel == ".." ||
+		strings.HasPrefix(rel, ".."+string(filepath.Separator)) || !strings.HasSuffix(moved, string(filepath.Separator)+rel) {
+		return false
 	}
-	if backup != nil && strings.TrimSpace(backup.Path) != "" {
-		if oldRoot, newRoot := differingPathRoots(backup.Path, path); oldRoot != "" {
-			add(oldRoot, newRoot)
-		}
+	previous := strings.TrimSuffix(moved, string(filepath.Separator)+rel)
+	if !filepath.IsAbs(previous) || previous == filepath.Dir(previous) || managedPathWithin(previous, home) || managedPathWithin(home, previous) {
+		return false
 	}
-	return out
-}
-
-// differingPathRoots strips the trailing path elements captured and current
-// share and returns what is left of each: the old and new home of a file
-// that moved with its home (/home/a/.hermes/x and /home/a2/.hermes/x give
-// /home/a and /home/a2). Both empty when the paths are the same.
-func differingPathRoots(captured, current string) (string, string) {
-	captured, current = filepath.Clean(captured), filepath.Clean(current)
-	if captured == current || !filepath.IsAbs(captured) || !filepath.IsAbs(current) {
-		return "", ""
+	if _, err := os.Lstat(moved); err == nil && !defenseClawHookFile(moved) {
+		return false
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false
 	}
-	for filepath.Base(captured) == filepath.Base(current) && filepath.Dir(captured) != captured && filepath.Dir(current) != current {
-		captured, current = filepath.Dir(captured), filepath.Dir(current)
-	}
-	if captured == current || captured == filepath.Dir(captured) || current == filepath.Dir(current) {
-		return "", ""
-	}
-	return captured, current
+	return true
 }
 
 // hermesConfigBackupHoldsOwnedHooks reports whether the config.yaml copy
