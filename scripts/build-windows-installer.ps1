@@ -1095,6 +1095,12 @@ $validationPython = Join-Path $validationRuntime 'python.exe'
 Invoke-CheckedProcess $validationPython @(
     '-I', $WindowsArtifactHelper, 'normalize-site', '--root', $sitePackages
 )
+# Setup installs Windows x64 only and refuses any other PE in its payload.
+# Drop the reviewed non-x64 launchers pip vendors; any other non-x64 PE
+# fails the build here.
+Invoke-CheckedProcess $validationPython @(
+    '-I', $WindowsArtifactHelper, 'prune-foreign-pe', '--root', $sitePackages
+)
 $validationSite = Join-Path $validationRuntime 'Lib\site-packages'
 [IO.Directory]::CreateDirectory($validationSite) | Out-Null
 foreach ($item in Get-ChildItem -LiteralPath $sitePackages -Force) {

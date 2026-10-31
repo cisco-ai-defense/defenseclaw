@@ -380,46 +380,45 @@ class _StdioLaunchPlan:
 
 
 class _ContainedWindowsProcess:
-    """Delegate an AnyIO/MCP process while retaining a race-free Job Object."""
+    """Delegate an AnyIO/MCP process while retaining a race-free Job Object.
+
+    The MCP SDK 2.x stdio client never enters the process as a context
+    manager. It stops the server itself (close stdin, wait, kill the tree),
+    then calls ``close_process_job`` and closes the subprocess transport,
+    which it reaches as ``process._process._transport``. The wrapped process
+    is kept as ``_inner`` so that lookup falls through ``__getattr__`` to the
+    real process; ``close_job`` is what the scoped ``close_process_job``
+    calls.
+    """
 
     def __init__(self, process: object, job: object) -> None:
-        self._process = process
+        self._inner = process
         self._job = job
 
     def __getattr__(self, name: str) -> object:
-        return getattr(self._process, name)
+        return getattr(self._inner, name)
 
     @property
     def pid(self) -> int:
-        return int(getattr(self._process, "pid"))
+        return int(getattr(self._inner, "pid"))
 
-    async def __aenter__(self) -> _ContainedWindowsProcess:
-        enter = getattr(self._process, "__aenter__")
-        await enter()
-        _trace_windows_stdio_lifecycle("process-context-entered", pid=self.pid)
-        return self
-
-    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-        try:
-            exit_process = getattr(self._process, "__aexit__")
-            await exit_process(exc_type, exc_value, traceback)
-        finally:
-            _trace_windows_stdio_lifecycle(
-                "process-context-exited",
-                pid=self.pid,
-                returncode=getattr(self._process, "returncode", None),
-            )
-            self._job.close()
-            _trace_windows_stdio_lifecycle("job-containment-closed", pid=self.pid)
+    def close_job(self) -> None:
+        """Close the Job Object; KILL_ON_JOB_CLOSE ends surviving members."""
+        self._job.close()
+        _trace_windows_stdio_lifecycle(
+            "job-containment-closed",
+            pid=self.pid,
+            returncode=getattr(self._inner, "returncode", None),
+        )
 
     async def wait(self):
-        return await self._process.wait()
+        return await self._inner.wait()
 
     def terminate(self) -> None:
-        self._process.terminate()
+        self._inner.terminate()
 
     def kill(self) -> None:
-        self._process.kill()
+        self._inner.kill()
 
     async def terminate_tree(self, timeout_seconds: float) -> None:
         _trace_windows_stdio_lifecycle("job-cleanup-started", pid=self.pid)
@@ -431,7 +430,7 @@ class _ContainedWindowsProcess:
         _trace_windows_stdio_lifecycle(
             "job-cleanup-completed",
             pid=self.pid,
-            returncode=getattr(self._process, "returncode", None),
+            returncode=getattr(self._inner, "returncode", None),
         )
 
 
@@ -521,13 +520,26 @@ def _contained_mcp_windows_process_factory(started: list[object] | None = None) 
     with _MCP_WINDOWS_PROCESS_FACTORY_LOCK:
         original_create = mcp_stdio._create_platform_compatible_process
         original_terminate = mcp_stdio._terminate_process_tree
+        original_close_job = mcp_stdio.close_process_job
+
+        def close_job(process: object) -> None:
+            # The SDK's own job table does not know DefenseClaw's job, so its
+            # close_process_job would leave the job (and any server child that
+            # outlived a graceful exit) open until this process exits.
+            if isinstance(process, _ContainedWindowsProcess):
+                process.close_job()
+                return
+            original_close_job(process)
+
         mcp_stdio._create_platform_compatible_process = create
         mcp_stdio._terminate_process_tree = _terminate_contained_windows_process
+        mcp_stdio.close_process_job = close_job
         try:
             yield
         finally:
             mcp_stdio._create_platform_compatible_process = original_create
             mcp_stdio._terminate_process_tree = original_terminate
+            mcp_stdio.close_process_job = original_close_job
 
 
 def _trusted_codex_runtime_roots() -> tuple[str, ...]:
