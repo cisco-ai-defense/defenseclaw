@@ -110,3 +110,28 @@ func TestClaudeBashMoveWithBackupOntoKeysLinkMatchesAcrossOS(t *testing.T) {
 		{name: "Git Bash drive of the moved link", command: `mv -b a.txt {M}/alias; echo x >> {M}/alias~`, block: true, windowsOnly: true},
 	})
 }
+
+// After pushd DIR a recursive copy or rsync of a project folder spelled
+// with a directory-stack word reads the word as the directory the stack
+// holds (rel-1-0-4:GAP-2586); copies into or out of ~/.ssh still block. On
+// Windows the rsync forms blocked.
+func TestClaudeBashDirectoryStackCopyMatchesAcrossOS(t *testing.T) {
+	judgeClaudeBashParityRows(t, []claudeBashParityRow{
+		{name: "pushd rsync stack folder", command: `pushd src && rsync -a ~1/ordinary/ out/`},
+		{name: "pushd rsync stack folder no slash", command: `pushd src && rsync -a ~1/ordinary out/`},
+		{name: "pushd rsync stack src", command: `pushd src && rsync -a ~1/src out/`},
+		{name: "pushd rsync plus stack word", command: `pushd src && rsync -a ~+1/ordinary/ out/`},
+		{name: "pushd rsync oldpwd", command: `pushd src && rsync -a ~-/ordinary/ out/`},
+		{name: "cd rsync oldpwd", command: `cd src && rsync -a ~-/ordinary/ out/`},
+		{name: "pushd rsync dotdot", command: `pushd src && rsync -a ../ordinary/ out/`},
+		{name: "pushd cp stack folder", command: `pushd src && cp -r ~1/ordinary ord2`},
+		{name: "cd cp oldpwd", command: `cd src && cp -r ~-/ordinary x`},
+		{name: "pushd rsync into .ssh", command: `pushd src && rsync -a ~1/ordinary/ ~/.ssh/`, block: true},
+		{name: "pushd cp into .ssh", command: `pushd src && cp -r ~1/ordinary ~/.ssh/`, block: true},
+		{name: "pushd rsync onto the keys file", command: `pushd src && rsync -a ~1/a.txt ~/.ssh/authorized_keys`, block: true},
+		{name: "pushd rsync through the link", command: `pushd src && rsync -a ~1/a.txt ~1/alias`, block: true},
+		{name: "rsync out of .ssh by the stack", command: `pushd ~/.ssh && pushd ~/project && rsync -a ~1/ k/`, block: true},
+		{name: "cp out of .ssh by the stack", command: `pushd ~/.ssh && pushd ~/project && cp -r ~1 k`, block: true},
+		{name: "rsync after a cd that may fail", command: `cd /nonexistent-zz && true; rsync -a ~-/ x/`, block: true},
+	})
+}
