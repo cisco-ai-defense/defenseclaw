@@ -167,6 +167,8 @@ The enumerator applies these checks to each account, in this order:
 
 `enterprise policy show --user <name>` prints an `enrollment:` line when `exclude_users`, `exempt_users` or uid 0 keeps that account out of enrollment.
 
+On Windows, `enterprise windows status` and `enterprise windows verify` list the `exclude_users` and `exclude_groups` entries (`enrollment.excluded_users` and `enrollment.excluded_groups` in `--json`), so an account held out by policy is not mistaken for one that is not enrolled yet.
+
 ```yaml title="config.yaml (Linux example)"
 enterprise:
   enrollment:

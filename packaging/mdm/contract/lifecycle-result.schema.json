@@ -70,6 +70,8 @@
         "pending": { "type": "integer", "minimum": 0 },
         "failed": { "type": "integer", "minimum": 0 },
         "exempt": { "type": "integer", "minimum": 0 },
+        "excluded_users": { "type": "array", "items": { "type": "string" }, "description": "The installed config's enterprise.enrollment.exclude_users entries: accounts held out of enrollment by policy (Windows standalone)." },
+        "excluded_groups": { "type": "array", "items": { "type": "string" }, "description": "The installed config's enterprise.enrollment.exclude_groups entries (Windows standalone)." },
         "accounts": {
           "type": "array",
           "items": {

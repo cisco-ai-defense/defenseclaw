@@ -111,6 +111,12 @@ type Enrollment struct {
 	// Accounts names each enrolled account and its connectors' states, where
 	// the platform reports them (Windows standalone).
 	Accounts []EnrollmentAccount `json:"accounts,omitempty"`
+	// ExcludedUsers and ExcludedGroups are the installed config's
+	// enterprise.enrollment.exclude_users and exclude_groups entries (Windows
+	// standalone), so an administrator can tell an account held out by policy
+	// from one that is not enrolled yet (GAP-1243).
+	ExcludedUsers  []string `json:"excluded_users,omitempty"`
+	ExcludedGroups []string `json:"excluded_groups,omitempty"`
 }
 
 // EnrollmentAccount is one enrolled account and the state of each of its
