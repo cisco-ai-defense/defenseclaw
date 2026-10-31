@@ -181,6 +181,11 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			if target == "" {
 				target = candidate.Normalized
 			}
+			// The facts spell a Windows path with slashes (C:/...), the file
+			// system and the gateway with backslashes: a copy destination
+			// after a directory change listed as C:\h/proj-bak never matched
+			// the link list of the copy and blocked (rel-1-0-4:GAP-2579).
+			target = filepath.FromSlash(target)
 			// The facts spell a Windows path with slashes (and Git Bash a
 			// drive /c/...); the entry list keys the file system name.
 			if moved := PlainMovePath(target); movedOntoLinks[moved] {
