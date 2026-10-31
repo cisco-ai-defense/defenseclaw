@@ -41,11 +41,18 @@ var actionGitBashWindowsRoots = regexp.MustCompile("\\\\[^\"'$`\\\\nt\n]|" +
 var actionGitBashPowerShellSyntax = regexp.MustCompile(`(?i)(^|[^\w-])(get|set|add|out|write|remove|new|copy|move|rename|invoke|start|stop|select|foreach|where|test|import|export|read|clear|format|join|split|resolve|push|pop|convertto|convertfrom)-[a-z]+|` +
 	`\$[A-Za-z_][A-Za-z0-9_:]*\s*[+-]?=|\]::|@['"]\r?\n`)
 
+// actionGitBashEvalText is a build tool's or interpreter's --eval text, or a
+// make -E text. The POSIX reading judges a make eval text by the rules the
+// call selects (GAP-2169); on Windows such a call keeps every reading, so a
+// key path in the text stays a mention there as it was before GAP-1717
+// (TestBalancedActionSelectedMakeRecipes, the unselected eval rows).
+var actionGitBashEvalText = regexp.MustCompile(`(?i)--eval|(^|[\s;|&(])(g?make|gnumake|mingw32-make)(\.exe)?\s[^\n;|&]*\s-[A-Za-z]*E`)
+
 // actionGitBashReadsAlone reports a call a POSIX shell runs on a native
 // Windows host (Git Bash runs Claude Code's Bash tool; the gateway passes
 // the POSIX dialect hint) that the POSIX grammar reads completely there: it
 // parses, and it spells nothing only Windows reads (actionGitBashSpellings,
-// actionGitBashWindowsRoots) and no PowerShell syntax.
+// actionGitBashWindowsRoots), no PowerShell syntax and no eval text.
 // Such a call is read with the POSIX grammar on the Windows file system
 // alone, as Git Bash runs it, so the POSIX rules hold on Windows: a quoted
 // word is text, a pattern skips dot names, an uncalled function never runs
@@ -64,7 +71,8 @@ func actionGitBashReadsAlone(command, home string, dialect actionfacts.Dialect) 
 			return false
 		}
 	}
-	if actionGitBashWindowsRoots.MatchString(command) || actionGitBashPowerShellSyntax.MatchString(command) {
+	if actionGitBashWindowsRoots.MatchString(command) || actionGitBashPowerShellSyntax.MatchString(command) ||
+		actionGitBashEvalText.MatchString(command) {
 		return false
 	}
 	_, parsed := parseShell(command)

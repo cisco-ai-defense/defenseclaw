@@ -59,6 +59,7 @@ func TestGAP1717GitBashCallIsReadWithThePOSIXGrammar(t *testing.T) {
 		{"drive path with slashes", project, `cp payload ` + slashHome + `/.ssh/authorized_keys`, true, true},
 		{"drive path with backslashes", project, `cp payload "` + home + `\.ssh\authorized_keys"`, true, true},
 		{"MSYS drive root", project, `cp payload /` + slashHome[:1] + slashHome[2:] + `/.ssh/authorized_keys`, true, true},
+		{"unselected make eval text keeps every reading", project, `make --eval 'unused: ; printf ok >> ~/.ssh/authorized_keys' safe`, true, true},
 		{"PowerShell launcher", project, `powershell -NoProfile -Command "Add-Content ~/.ssh/authorized_keys k"`, true, true},
 		{"case form of the key", home, `echo k >> ~/.SSH/AUTHORIZED_KEYS`, true, true},
 	} {
