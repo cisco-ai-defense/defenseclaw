@@ -861,3 +861,64 @@ func TestAFollowUpTransactionReportsEachWarningOnce(t *testing.T) {
 		t.Fatalf("unit_failed reported %d times: %+v", count, r.Warnings)
 	}
 }
+
+// lookupHookedAccounts runs onLookup before each account lookup.
+type lookupHookedAccounts struct {
+	AccountManager
+	onLookup func()
+}
+
+func (a *lookupHookedAccounts) Lookup(ctx context.Context, name string) (Account, bool, error) {
+	if a.onLookup != nil {
+		a.onLookup()
+	}
+	return a.AccountManager.Lookup(ctx, name)
+}
+
+// rel-1-0-3 GAP-0142: a second config push that lands while the first run
+// verifies the services it just started (after the run last looked for a
+// newer input) failed that verify with "config.yaml changed since it was
+// applied", rolled the first push back and reverted the second for another
+// run. The run now verifies again without the replaced input, commits the
+// first push and applies the second in its follow-up transaction.
+func TestConfigPushedWhileTheRunVerifiesIsTheFollowUpNotARollback(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			second := []byte(strings.Replace(string(DefaultConfig(h.env.Layout)), "mode: observe", "mode: action", 1))
+			armed, done := false, false
+			hooked := &hookedServices{fakeServices: h.services}
+			hooked.onStart = func(unit string) {
+				if unit == unitOf(goos, "gateway") {
+					armed = true
+				}
+			}
+			h.env.Services = hooked
+			h.env.Accounts = &lookupHookedAccounts{AccountManager: h.env.Accounts, onLookup: func() {
+				if !armed || done {
+					return
+				}
+				done = true
+				if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), second, 0o640); err != nil {
+					t.Errorf("write config: %v", err)
+				}
+			}}
+			r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")})
+			if !done {
+				t.Fatal("the second push was not written during the run")
+			}
+			requireOK(t, r)
+			if hasMessageCode(r.Errors, codeVerify) || hasMessageCode(r.Warnings, codeConfigReverted) {
+				t.Fatalf("the push during verify failed or reverted the run: errors %+v warnings %+v", r.Errors, r.Warnings)
+			}
+			record, _ := h.env.loadDeployment()
+			if record.ConfigSHA256 != sha256Bytes(second) || record.ProductVersion != "1.0.1" {
+				t.Fatalf("the second push is not applied: config %s version %s", record.ConfigSHA256[:8], record.ProductVersion)
+			}
+			if !hasWarning(r, codeInputChanged) {
+				t.Fatalf("the result does not say a follow-up applied the second push: %+v", r.Warnings)
+			}
+		})
+	}
+}
