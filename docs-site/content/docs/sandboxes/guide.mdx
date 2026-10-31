@@ -542,6 +542,7 @@ If the OpenShell gateway does not answer, or a global OpenShell policy prevents 
 These are OpenShell defects DefenseClaw cannot fix. Each has an upstream issue, and DefenseClaw works around it as far as it can.
 
 - **A driver switch drops the old driver's sandboxes** ([NVIDIA/OpenShell#4769](https://github.com/NVIDIA/OpenShell/issues/4769)). One gateway runs one driver. A few minutes after you switch, the gateway deletes every sandbox the previous driver made, also when you switch back. Setup and the doctor list those sandboxes before they restart the gateway. Run `defenseclaw sandbox pull NAME` for each one first, then switch.
+- **Ctrl+C on a gateway you started in a terminal leaves its `--no-keep` MicroVM sandbox in Error** ([#4770](https://github.com/NVIDIA/OpenShell/issues/4770)). The gateway DefenseClaw sets up runs as a service and is not affected. If you run `openshell-gateway` yourself, stop its sandboxes first, and delete one left in Error as described in [A sandbox is in OpenShell's error state](#a-sandbox-is-in-openshells-error-state).
 
 #### A raw `openshell` sandbox stops a restart or rollback
 
