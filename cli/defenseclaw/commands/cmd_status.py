@@ -1132,6 +1132,63 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
     return {**health, "pid": trust.pid} if "pid" not in health else health
 
 
+def print_gateway_while_config_unloadable(config_error: str, *, as_json: bool = False) -> None:
+    """The running gateway's state while config.yaml does not load (GAP-0006).
+
+    The gateway keeps enforcing the last configuration it loaded, but status
+    printed only the load error: the gateway state, the digest it enforces
+    and the reload it rejected were in /health alone. The live process's own
+    runtime record (gateway-api.json in the data directory, bound to the PID
+    in gateway.pid) names its listener without config.yaml. Doctor's
+    process and listener proof, run over the built-in defaults with that
+    data directory, checks that this account's gateway holds the listener
+    before the unauthenticated /health is read; no token is sent.
+    """
+    from defenseclaw import config as cfg_mod
+    from defenseclaw.gateway import policy_reload_rejection
+    from defenseclaw.logger import _running_gateway_address
+
+    data_dir = str(cfg_mod.default_data_path())
+    address = _running_gateway_address(data_dir)
+    health = None
+    if address is not None:
+        try:
+            import requests
+
+            from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
+
+            defaults = cfg_mod.default_config()
+            defaults.data_dir = data_dir
+            if _trusted_gateway_listener(defaults, api_port=address[1]).trusted:
+                with requests.Session() as session:
+                    session.trust_env = False  # never through a proxy
+                    shown = f"[{address[0]}]" if ":" in address[0] else address[0]
+                    response = session.get(f"http://{shown}:{address[1]}/health", timeout=3, allow_redirects=False)
+                    response.raise_for_status()
+                    health = response.json()
+        except Exception:  # noqa: BLE001 - any transport or ownership failure: not answering
+            health = None
+    policy = _policy_status(health if isinstance(health, dict) else None)
+    if as_json:
+        click.echo(json.dumps({
+            "config_error": config_error,
+            "sidecar": {"running": isinstance(health, dict), "api": f"{address[0]}:{address[1]}" if address else ""},
+            "policy": policy,
+        }, indent=2))
+        return
+    if address is None:
+        _status_row("Sidecar", "not running")
+        return
+    if not isinstance(health, dict):
+        _status_row("Sidecar", "not answering" + _sidecar_running_detail({}, *address))
+        return
+    _status_row("Sidecar", "running on its last good configuration" + _sidecar_running_detail(health, *address))
+    _print_policy(health)
+    rejected = policy_reload_rejection((health or {}).get("policy") or {})
+    if rejected:
+        _status_row("Reload error", " ".join(rejected.split())[:300])
+
+
 def _policy_status(health: dict | None) -> dict | None:
     """The applied effective policy from /status, or None when not reported."""
     from defenseclaw.gateway import policy_reload_rejection

@@ -818,14 +818,27 @@ var ErrMultipleDocuments = errors.New("configwrite: config.yaml holds more than 
 	"starts another); DefenseClaw reads only the first and does not rewrite the file. Merge the documents into one " +
 	"or remove the later one, then try again")
 
+// ErrInvalidDocument marks a config.yaml the writer cannot edit as it is: a
+// second YAML document (ErrMultipleDocuments), a YAML syntax error or a root
+// that is not a mapping. The operator fixes the file, not the request, so the
+// REST API answers 409 for it, not 500 (GAP-1421).
+var ErrInvalidDocument = errors.New("configwrite: config.yaml cannot be edited as it is")
+
+// invalidDocument keeps the cause's text and matches both the cause and
+// ErrInvalidDocument with errors.Is.
+type invalidDocument struct{ cause error }
+
+func (e invalidDocument) Error() string   { return e.cause.Error() }
+func (e invalidDocument) Unwrap() []error { return []error{ErrInvalidDocument, e.cause} }
+
 func parseDocument(current []byte) (*yaml.Node, error) {
 	var doc yaml.Node
 	if len(bytes.TrimSpace(current)) > 0 {
 		if err := yaml.Unmarshal(current, &doc); err != nil {
-			return nil, fmt.Errorf("configwrite: parse config.yaml: %w", err)
+			return nil, invalidDocument{fmt.Errorf("configwrite: parse config.yaml: %w", err)}
 		}
 		if err := singleDocument(current); err != nil {
-			return nil, err
+			return nil, invalidDocument{err}
 		}
 	}
 	if doc.Kind == 0 {
@@ -835,7 +848,7 @@ func parseDocument(current []byte) (*yaml.Node, error) {
 		doc.Content = []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}
 	}
 	if doc.Content[0].Kind != yaml.MappingNode {
-		return nil, errors.New("configwrite: config.yaml root must be a mapping")
+		return nil, invalidDocument{errors.New("configwrite: config.yaml root must be a mapping")}
 	}
 	return &doc, nil
 }

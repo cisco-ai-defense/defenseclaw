@@ -193,6 +193,28 @@ def test_a_field_of_an_unlisted_destination_names_the_range(tmp_path, monkeypatc
     assert open(path, encoding="utf-8").read() == before
 
 
+def test_a_field_under_a_scalar_shorthand_names_the_whole_key_form(tmp_path, monkeypatch):
+    # GAP-0943: admission.skill.actions.high stored as "block" has no install field to set.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path, "admission:\n  skill:\n    actions:\n      high: block\n")
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(config_writer.ConfigWriteError) as caught:
+        config_writer.apply([Change("admission.skill.actions.high.install", "none")], "cli:test", "t", path=path)
+    message = str(caught.value)
+    assert 'admission.skill.actions.high is stored as the single value "block"' in message
+    assert (
+        "defenseclaw config set --json admission.skill.actions.high "
+        '\'{"install": "none", "file": "none", "runtime": "disable"}\'' in message
+    )
+    assert open(path, encoding="utf-8").read() == before
+    # The suggested form is one the writer accepts.
+    config_writer.apply(
+        [Change("admission.skill.actions.high", {"install": "none", "file": "none", "runtime": "disable"})],
+        "cli:test", "t", path=path,
+    )
+    assert "install: none" in open(path, encoding="utf-8").read()
+
+
 def test_every_write_re_renders_custom_providers_from_llm_providers(tmp_path, monkeypatch):
     import json
 
