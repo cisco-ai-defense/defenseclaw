@@ -1212,7 +1212,14 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		// A server error is the running gateway's answer, never an outage:
 		// it closes outside Secure Client in every tier and fail mode.
 		if !opts.SecureClient {
-			return failResponse(opts, sp, answeredFailMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+			reason := fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode)
+			if managedStandaloneHook(opts) && gatewayAuditUnavailable(resp.StatusCode, body) {
+				// The gateway could not journal the call's audit record
+				// (a full audit disk): say so, not "an answer DefenseClaw
+				// could not use" (rel-1-0-6 GAP-0174).
+				reason = managedAuditUnavailableReason
+			}
+			return failResponse(opts, sp, answeredFailMode, reason)
 		}
 		return failUnreachable(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	case (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusRequestEntityTooLarge) &&
@@ -1400,6 +1407,24 @@ func retryAfterDelay(value string) time.Duration {
 
 // refusalReason is the reason of a gateway refusal body
 // ({"error":"forbidden","reason":...}), or "".
+// managedAuditUnavailableReason is the hook-failure reason of a managed call
+// the gateway refused because it could not write the call's audit record
+// (gatewayAuditUnavailable).
+const managedAuditUnavailableReason = "gateway could not write the hook audit record (HTTP 503)"
+
+// gatewayAuditUnavailable reports the gateway's 503 for a call whose audit
+// record it could not journal before answering (agent_hook.go: "hook audit
+// is unavailable"), which a full audit disk causes.
+func gatewayAuditUnavailable(status int, body []byte) bool {
+	if status != http.StatusServiceUnavailable {
+		return false
+	}
+	var answer struct {
+		Error string `json:"error"`
+	}
+	return json.Unmarshal(body, &answer) == nil && strings.TrimSpace(answer.Error) == "hook audit is unavailable"
+}
+
 func refusalReason(body []byte) string {
 	var refusal struct {
 		Reason string `json:"reason"`
@@ -3779,6 +3804,13 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 	case layer == "input":
 		cause, advice = "its hook input names two different events, so DefenseClaw cannot tell what to check",
 			"Try again; if this continues, contact your administrator."
+	case reason == managedAuditUnavailableReason:
+		// As the gateway's own audit-failure answer says it (agent_hook.go
+		// hookAuditFailureResponse), with what the administrator checks
+		// (rel-1-0-6 GAP-0174).
+		cause, advice = "DefenseClaw could not write the call's audit record (the disk that holds its audit log may be full)",
+			"Try again later; if this continues, ask your administrator to check DefenseClaw on this computer: `"+
+				managedStatusCommand(runtime.GOOS)+"` names what to do."
 	case layer == "response":
 		cause, advice = "the DefenseClaw gateway returned an answer DefenseClaw could not use",
 			"Try again; if this continues, contact your administrator."
