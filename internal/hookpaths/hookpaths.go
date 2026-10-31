@@ -2297,7 +2297,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
-	knownWords := knownWordParameterUses(command, file, home)
+	knownWords, knownValues := knownWordParameters(command, file, home)
 	stackPlaces := directoryStackPlaces(file, command, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds, wrappedCds := false, false, false
@@ -2393,6 +2393,13 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		// non-static word would open an unbounded copy scope that makes
 		// every write of the call opaque (rel-1-0-6 GAP-0202).
 		if slices.Contains(copyPrograms, program) {
+			// A copy operand named by a parameter with one known plain
+			// value is that fixed word (rel-1-0-6:GAP-0235).
+			for i := 1; i < len(args); i++ {
+				if value, known := knownValues[args[i]]; known && !static[i] {
+					words[i], static[i] = value, true
+				}
+			}
 			args, words, static = spliceCopyBraceWords(args, words, static, copyBraceWordFields(args, static, env))
 		}
 		// A directory-stack tilde (~1, ~-) in a copy or archive argv is one

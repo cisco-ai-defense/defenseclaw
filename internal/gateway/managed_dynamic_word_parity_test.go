@@ -186,3 +186,27 @@ func TestUnquotedCopyWordWithOneKnownValueGetsTheQuotedVerdictInEveryCell(t *tes
 			`for f in a.txt; do command read f; cp $f build/; done; echo hi > report.txt`,
 		})
 }
+
+// rel-1-0-6:GAP-0235: a copy destination named by a parameter with one
+// known plain value writes that file, so managed hooks give the per-user
+// verdict; the same word naming the keys link blocks in every cell, and a
+// destination word that may hold another value stays unknown.
+func TestCopyDestinationWordWithOneKnownValueGetsThePerUserVerdictInEveryCell(t *testing.T) {
+	checkDynamicWordParity(t,
+		[]string{
+			`f=out2.txt; cp a.txt $f`,
+			`f=out2.txt; cp a.txt "$f" && echo hi > report.txt`,
+			`f=out2.txt; cp a.txt $f && echo hi > report.txt`,
+			`for d in build; do cp a.txt $d; done; echo hi > report.txt`,
+			`f=a.txt; g=out3.txt; cp $f $g && echo hi >> report.txt`,
+		},
+		[]string{
+			`f=disklink; cp a.txt $f`,
+			`f=disklink; cp a.txt "$f" && echo hi > report.txt`,
+			`for d in disklink; do cp a.txt $d; done`,
+			`f=out2.txt; f=disklink; cp a.txt $f`,
+			`for f in out2.txt disklink; do cp a.txt $f; done`,
+			`f=out2.txt; command read f; cp a.txt $f && echo hi > report.txt`,
+			`f=out2.txt; trap "read f" DEBUG; cp a.txt $f && echo hi > report.txt`,
+		})
+}

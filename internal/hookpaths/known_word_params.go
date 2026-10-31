@@ -53,8 +53,24 @@ func literalProgramWord(word *syntax.Word, home string) (string, bool) {
 // unknown. command is the text file was parsed from; most commands leave at
 // its cheap gate.
 func knownWordParameterUses(command string, file *syntax.File, home string) map[*syntax.Word]bool {
+	uses, _ := knownWordParameters(command, file, home)
+	return uses
+}
+
+// knownWordParameterValues returns, for the uses knownWordParameterUses
+// accepts, the one value every binding of the name gives (f=out.txt, or a
+// for loop over that single name). A copy operand spelled with such a word
+// is that fixed file, so f=out.txt; cp a.txt $f reads as cp a.txt out.txt
+// on the hook client and the gateway alike (rel-1-0-6:GAP-0235). A name
+// bound to more than one value has none.
+func knownWordParameterValues(command string, file *syntax.File, home string) map[*syntax.Word]string {
+	_, values := knownWordParameters(command, file, home)
+	return values
+}
+
+func knownWordParameters(command string, file *syntax.File, home string) (map[*syntax.Word]bool, map[*syntax.Word]string) {
 	if file == nil || !mayHaveKnownCopyWord(command) {
-		return nil
+		return nil, nil
 	}
 	safe := func(value string) bool {
 		return value != "" && !strings.HasPrefix(value, "-") &&
@@ -64,6 +80,14 @@ func knownWordParameterUses(command string, file *syntax.File, home string) map[
 		from, to uint
 	}
 	unsafeNames := map[string]bool{}
+	// bound: the distinct values the bindings of each name give.
+	bound := map[string]map[string]bool{}
+	bind := func(name, value string) {
+		if bound[name] == nil {
+			bound[name] = map[string]bool{}
+		}
+		bound[name][value] = true
+	}
 	loops := map[string][]loop{}
 	after := map[string]uint{}
 	rejected := false
@@ -93,6 +117,7 @@ func knownWordParameterUses(command string, file *syntax.File, home string) map[
 			if node.Append || node.Naked || node.Array != nil || node.Index != nil || !fixed || !safe(value) {
 				unsafeNames[name] = true
 			}
+			bind(name, value)
 		case *syntax.ForClause:
 			iter, ok := node.Loop.(*syntax.WordIter)
 			if !ok || iter.Name == nil || node.Select {
@@ -109,9 +134,11 @@ func knownWordParameterUses(command string, file *syntax.File, home string) map[
 				break
 			}
 			for _, item := range iter.Items {
-				if value, fixed := StaticWord(item, home); !fixed || !safe(value) {
+				value, fixed := StaticWord(item, home)
+				if !fixed || !safe(value) {
 					unsafeNames[name] = true
 				}
+				bind(name, value)
 			}
 			loops[name] = append(loops[name], loop{node.DoPos.Offset(), node.DonePos.Offset()})
 		case *syntax.ParamExp:
@@ -130,7 +157,7 @@ func knownWordParameterUses(command string, file *syntax.File, home string) map[
 		return !rejected
 	})
 	if rejected {
-		return nil
+		return nil, nil
 	}
 	// A top-level assignment statement, or the first statement of a
 	// top-level AND list, always runs before what follows it.
@@ -162,6 +189,7 @@ func knownWordParameterUses(command string, file *syntax.File, home string) map[
 		}
 	}
 	uses := map[*syntax.Word]bool{}
+	values := map[*syntax.Word]string{}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) < 2 {
@@ -172,6 +200,13 @@ func knownWordParameterUses(command string, file *syntax.File, home string) map[
 				continue
 			}
 			param, ok := word.Parts[0].(*syntax.ParamExp)
+			quoted := false
+			if double, isQuoted := word.Parts[0].(*syntax.DblQuoted); isQuoted && len(double.Parts) == 1 {
+				// "$f" with a known plain value is the same one word; it
+				// only gets a value, the source rule already reads it.
+				param, ok = double.Parts[0].(*syntax.ParamExp)
+				quoted = true
+			}
 			if !ok || !simpleScalarParameter(param) || unsafeNames[param.Param.Value] {
 				continue
 			}
@@ -184,12 +219,19 @@ func knownWordParameterUses(command string, file *syntax.File, home string) map[
 				known = known || at > body.from && at < body.to
 			}
 			if known {
-				uses[word] = true
+				if !quoted {
+					uses[word] = true
+				}
+				if len(bound[name]) == 1 {
+					for value := range bound[name] {
+						values[word] = value
+					}
+				}
 			}
 		}
 		return true
 	})
-	return uses
+	return uses, values
 }
 
 // simpleScalarParameter accepts $name or ${name} of a plain variable name.

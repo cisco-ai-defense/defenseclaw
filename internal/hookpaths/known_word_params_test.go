@@ -116,3 +116,42 @@ func BenchmarkKnownWordParameterUses(b *testing.B) {
 		})
 	}
 }
+
+// rel-1-0-6:GAP-0235: only a name every binding gives the same plain value
+// has a value; a name with two values, or any unknown binding, has none.
+func TestCopyWordValueIsKnownOnlyWhenEveryBindingGivesTheSameValue(t *testing.T) {
+	const home = "/home/u"
+	rows := []struct {
+		command, want string
+	}{
+		{`f=out.txt; cp a.txt $f`, "out.txt"},
+		{`f=out.txt; cp a.txt "$f"`, "out.txt"},
+		{`f=out.txt; f=out.txt; cp a.txt ${f}`, "out.txt"},
+		{`for f in out.txt; do cp a.txt $f; done`, "out.txt"},
+		{`for f in out.txt b.txt; do cp a.txt $f; done`, ""},
+		{`f=out.txt; f=b.txt; cp a.txt $f`, ""},
+		{`f=out.txt; command read f; cp a.txt $f`, ""},
+		{`cp a.txt $f`, ""},
+		{`f=-t; cp a.txt $f`, ""},
+	}
+	for _, row := range rows {
+		file, ok := parseShell(row.command)
+		if !ok {
+			t.Fatalf("%s does not parse", row.command)
+		}
+		values := knownWordParameterValues(row.command, file, home)
+		got := ""
+		syntax.Walk(file, func(node syntax.Node) bool {
+			if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) == 3 {
+				got = values[call.Args[2]]
+			}
+			return true
+		})
+		if got != row.want {
+			t.Errorf("%s: destination value %q, want %q", row.command, got, row.want)
+		}
+	}
+	if got := LiteralWriteOperands(`f=out.txt; cp a.txt $f`, "/p", home); !slices.Contains(got, "/p/out.txt") {
+		t.Errorf("literal operands of a known destination word = %v", got)
+	}
+}

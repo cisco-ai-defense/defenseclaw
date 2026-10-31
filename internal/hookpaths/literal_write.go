@@ -93,6 +93,8 @@ func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (opera
 	// A definition runs nothing. A body is read once, where it is defined,
 	// when the command may call it, so an uncalled body stays inert.
 	called := calledFunctions(file, home)
+	var knownValues map[*syntax.Word]string
+	knownValuesRead := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
 			return declaration.Name != nil && called[declaration.Name.Value]
@@ -111,16 +113,30 @@ func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (opera
 		// GAP-0202): the hook client resolves it like any operand.
 		var braces map[int][]string
 		var argStatic []bool
+		// A copy operand named by a parameter with one known plain value
+		// is that fixed word, so its destination is listed and resolved
+		// (rel-1-0-6:GAP-0235).
+		var copyValues map[*syntax.Word]string
 		if first, ok := StaticWord(call.Args[0], home); ok && slices.Contains(copyPrograms, programBase(first)) {
+			if !knownValuesRead {
+				knownValues, knownValuesRead = knownWordParameterValues(command, file, home), true
+			}
+			copyValues = knownValues
 			argStatic = make([]bool, len(call.Args))
 			for i, arg := range call.Args {
 				_, argStatic[i] = StaticWord(arg, home)
+				if _, known := copyValues[arg]; known && i > 0 {
+					argStatic[i] = true
+				}
 			}
 			braces = copyBraceWordFields(call.Args, argStatic, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")))
 		}
 		for i, arg := range call.Args {
 			var static bool
 			words[i], static = StaticWord(arg, home)
+			if value, known := copyValues[arg]; known && !static && i > 0 {
+				words[i], static = value, true
+			}
 			if braces[i] != nil {
 				continue
 			}
