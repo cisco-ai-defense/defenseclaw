@@ -4694,6 +4694,12 @@ func (l *shellLinks) record(source, name string, literal, symbolic bool, cwd str
 	if source == "" || name == "" {
 		return
 	}
+	if runtime.GOOS == "windows" {
+		// Git Bash names a drive by its MSYS mount (/c/x): the link is at,
+		// and to, that drive path. Read as a relative word, ln -s /c/x/y L
+		// inside bash -c reached nothing (rel-1-0-6:GAP-0213).
+		source, name = actionMSYSDrivePath(source), actionMSYSDrivePath(name)
+	}
 	l.relative = l.relative || !filepath.IsAbs(source) || !filepath.IsAbs(name)
 	name = absolutePath(name, cwd)
 	target := source
