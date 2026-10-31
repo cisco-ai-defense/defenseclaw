@@ -159,7 +159,6 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 	if call.onUnauthorized != nil {
 		maxAttempts = 3
 	}
-	triedWithoutRules := false
 	retriedAfter401 := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		body, err := json.Marshal(call.payload)
@@ -225,7 +224,12 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 			return nil
 		}
 
-		if resp.StatusCode == http.StatusBadRequest && !triedWithoutRules {
+		// A rules-related 400 is retried without the config block, so it is
+		// retried only while the request still carries one: a request that
+		// sent no enabled_rules (or already dropped them) would be re-sent
+		// byte-for-byte (GAP-0660).
+		_, sentConfig := call.payload["config"]
+		if resp.StatusCode == http.StatusBadRequest && sentConfig {
 			lower := strings.ToLower(string(respBody))
 			// Multiple known 400 shapes from AID across deployments:
 			//   1. legacy: "already has rules configured" /
@@ -245,7 +249,6 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 				strings.Contains(lower, "enabled_rules") ||
 				strings.Contains(lower, "configuration") {
 				delete(call.payload, "config")
-				triedWithoutRules = true
 				fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] HTTP 400 with rules-related body, retrying without config\n")
 				recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeRejected, "")
 				continue

@@ -911,7 +911,7 @@ func withActiveStateTargetMention(
 		(!placed || !globbedStateMutation(linkFacts)) && !throughLink(globbedStateMutationThroughLink) &&
 		!findGlobTwinStateMutation(facts, request) &&
 		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) &&
-		!provenFollowedInPlaceStateWrite(facts, request) {
+		!provenFollowedInPlaceStateWrite(facts, request) && !fileToolWriteThroughLinkToState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known {
 			return findings
@@ -3526,6 +3526,54 @@ func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionReque
 			if physical, ok := resolve(walkParent(walked)); ok && inState(physical) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// fileToolWriteThroughLinkToState reports a file tool write (write_file,
+// an edit, a patch target: a call with no shell command) whose target is an
+// existing link that leads into the active DefenseClaw state. The tool opens
+// the path it names and the kernel follows the link, so it writes the state
+// file, while the path names no state: the mention and path checks let a
+// Hermes V4A patch of a project link to ~/.defenseclaw/... through
+// (GAP-0684). The hook client's resolved target decides when it lists one;
+// otherwise the target is resolved here, as for the SSH key files (a home
+// the gateway cannot read resolves to nothing and proves nothing). A link
+// to an ordinary file is judged by that file.
+func fileToolWriteThroughLinkToState(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if _, shell := trustedBashCommandInput(request.Input); shell {
+		return false
+	}
+	projected := facts.EnforcementProjection()
+	if projected.ActiveHome == "" {
+		return false
+	}
+	for _, candidate := range projected.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
+			continue
+		}
+		command, ok := integrityCommandByID(projected, candidate.CommandID)
+		if !ok || !stateCommandMutatesPath(command, candidate) {
+			continue
+		}
+		physical := ""
+		for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
+			if value, found := request.ResolvedWriteTargets[spelling]; found {
+				physical = value
+				break
+			}
+		}
+		if physical == "" && filepath.IsAbs(candidate.Resolved) && !request.SkipLocalFilesystemResolution {
+			physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
+		}
+		if !filepath.IsAbs(physical) || filepath.Clean(physical) == filepath.Clean(candidate.Resolved) {
+			continue
+		}
+		linked := candidate
+		linked.Value, linked.Normalized, linked.Resolved = physical, physical, physical
+		if matchesActiveDefenseClawState(projected, linked) {
+			return true
 		}
 	}
 	return false
