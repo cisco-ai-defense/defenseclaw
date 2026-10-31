@@ -358,12 +358,27 @@ const privateInstallUntrustedReason = "another account can change this copy, so 
 
 func privateInstallReason(connector, version string) string {
 	if version == "" {
-		return "the installed agent's version could not be read, so its managed hook contract cannot be verified"
+		return privateInstallUnreadVersionReason(connector)
 	}
 	if refused := privateInstallContractReason(connector, version); refused != "" {
 		return refused + "; this copy may ignore managed hooks or the documented version floor, so its tool calls are not protected"
 	}
 	return ""
+}
+
+// privateInstallUnreadVersionReason is the reason for a copy whose version
+// the scan could not read (a native Claude Code build whose file name is not
+// a version, a package.json without one). It named the cause only (GAP-0163,
+// the GAP-2479 criterion): the step is to remove the copy or have the user
+// put a readable version in place with the agent's own installer.
+func privateInstallUnreadVersionReason(connector string) string {
+	installer := "the agent's own installer"
+	if connector == "claudecode" {
+		installer = "Claude Code's own installer (`claude install` or `claude update`)"
+	}
+	return "the installed agent's version could not be read, so its managed hook contract cannot be verified; " +
+		"remove this copy, or have the user reinstall or update the agent with " + installer +
+		" so its version can be read; the next enumeration (every five minutes) checks the account again"
 }
 
 // privateInstallUnprotected is the unprotected-agents entry for one scan
