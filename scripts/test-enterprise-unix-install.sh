@@ -271,7 +271,7 @@ retry_busy() { # step-name verb
     [ "$kind" = pkg ] || return 0
     local deadline=$((SECONDS + 180))
     while [ "$(cat "$results/$1.rc")" = 75 ] && [ "$SECONDS" -lt "$deadline" ]; do
-        "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if any(e.get("code") == "lifecycle_busy" for e in r.get("errors", [])) else 1)' "$results/$1.json" || break
+        "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if any(e.get("code") == "lifecycle_busy" for e in r.get("errors", []) + r.get("warnings", [])) else 1)' "$results/$1.json" || break
         sleep 2
         lifecycle "$1" "$2"
     done

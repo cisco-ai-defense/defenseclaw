@@ -68,7 +68,8 @@ A pending agent install scan is a warning, not a failure: when the enumerator's 
 On Linux and macOS, `verify` waits up to 5 seconds for another lifecycle run to
 finish and holds no lock while it checks. If that run is still going, `verify`
 skips its checks and exits `75` with `lifecycle_busy`. `status` run as root waits
-the same way, then reports the installed version, skips its checks and exits `75`.
+the same way, then reports the change as pending apply (`ok: true`, `pending_apply: true`,
+a `lifecycle_busy` warning) with the installed version, skips its checks and exits `75`.
 The Linux verify unit accepts that exit, so a daily run that met an administrator's
 change is not left failed. On Windows, `verify` does not wait: while another run's
 transaction is pending it fails (`1603`); run it again after that run finishes. A

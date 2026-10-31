@@ -178,6 +178,14 @@ type Result struct {
 	SecurityComplete   bool                          `json:"security_complete"`
 	Errors             []Message                     `json:"errors"`
 	Warnings           []Message                     `json:"warnings,omitempty"`
+	// PendingApply marks a Linux or macOS status that found another
+	// lifecycle run applying a change (the apply trigger applying a pushed
+	// config.yaml, secret or policy file, or an ensure, repair or upgrade
+	// that holds the lifecycle lock). Such a status checked nothing but the
+	// installed version, which is not a failure: it is ok, names the run in
+	// a lifecycle_busy warning and still exits 75, so a management agent
+	// asks again (GAP-0129). Omitted otherwise.
+	PendingApply bool `json:"pending_apply,omitempty"`
 	// Changes lists, in plain words, what a Linux or macOS repair or ensure
 	// changed on a deployment that was already installed (files rewritten,
 	// services started, per-account hooks rewritten), which key a
@@ -531,6 +539,11 @@ func (r *Result) Finish(goos string, failureCode int) int {
 		r.nameIncompleteFields()
 	}
 	switch {
+	case r.OK && r.PendingApply:
+		// A status that found a change being applied is not a failure, but
+		// its caller asks again for the full state: 75, as before
+		// pending_apply existed.
+		r.ExitCode = BusyExitCode(goos)
 	case r.OK:
 		r.ExitCode = ExitOK
 	case failureCode != 0:

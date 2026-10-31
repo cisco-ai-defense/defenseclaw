@@ -171,7 +171,14 @@ func TestManagementContractSecretAndBusyResults(t *testing.T) {
 			h.env.LockTimeout = 50 * time.Millisecond
 			for _, action := range []string{ActionEnsure, ActionStatus} {
 				busy := h.run(Options{Action: action})
-				requireError(t, busy, codeBusy)
+				if action == ActionStatus {
+					// A pending apply: ok, the busy code as a warning (GAP-0129).
+					if !busy.OK || !busy.PendingApply || !hasMessageCode(busy.Warnings, codeBusy) {
+						t.Fatalf("status busy: ok=%v pending_apply=%v warnings=%+v", busy.OK, busy.PendingApply, busy.Warnings)
+					}
+				} else {
+					requireError(t, busy, codeBusy)
+				}
 				if busy.ExitCode != enterprisestatus.UnixExitBusy {
 					t.Fatalf("%s busy exit %d, want %d", action, busy.ExitCode, enterprisestatus.UnixExitBusy)
 				}

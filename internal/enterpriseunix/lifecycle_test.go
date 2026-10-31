@@ -1111,11 +1111,14 @@ func TestStatusDuringAnotherRunReportsBusy(t *testing.T) {
 			}
 			status := h.run(Options{Action: ActionStatus})
 			held.release()
-			requireError(t, status, codeBusy)
+			// GAP-0129: a pending apply, not a failure.
+			if !status.OK || !status.PendingApply || len(status.Errors) != 0 {
+				t.Fatalf("busy status: ok=%v pending_apply=%v errors=%+v", status.OK, status.PendingApply, status.Errors)
+			}
 			// GAP-2409: it says how long it waited, as ensure does.
-			if len(status.Errors) != 1 || !strings.Contains(status.Errors[0].Message, "rerun status") ||
-				!strings.Contains(status.Errors[0].Message, "; waited "+FormatLockWait(h.env.LockTimeout)+" for it;") {
-				t.Fatalf("busy status must be the one busy error naming its next step: %+v", status.Errors)
+			if busy := messagesOf(status.Warnings, codeBusy); !strings.Contains(busy, "rerun status") ||
+				!strings.Contains(busy, "; waited "+FormatLockWait(h.env.LockTimeout)+" for it;") {
+				t.Fatalf("busy status must name its next step in the busy warning: %+v", status.Warnings)
 			}
 			if !status.Installed || status.InstalledVersion != "1.0.0" || status.ExitCode != enterprisestatus.UnixExitBusy {
 				t.Fatalf("busy status: installed=%v version=%q exit=%d", status.Installed, status.InstalledVersion, status.ExitCode)
