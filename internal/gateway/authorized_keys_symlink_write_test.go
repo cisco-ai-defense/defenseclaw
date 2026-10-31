@@ -410,7 +410,9 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		block              bool
 	}{
 		{"known hosts", "hostname > ~/.ssh/known_hosts", project, false},
-		{"ssh config", "hostname > ~/.ssh/config", project, false},
+		// ~/.ssh/config is protected like the keys (lead ruling 10-31,
+		// rel-1-0-4:GAP-2586): ssh runs commands it names.
+		{"ssh config", "hostname > ~/.ssh/config", project, true},
 		{"known hosts again", "date > ~/.ssh/known_hosts", project, false},
 		{"relative known hosts", "date > known_hosts", filepath.Join(home, ".ssh"), false},
 		{"project redirect", "echo hi > ~/proj/e1.txt", project, false},

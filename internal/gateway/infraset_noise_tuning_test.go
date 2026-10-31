@@ -415,7 +415,9 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"read redirect", `hostname < ~/.ssh/authorized_keys`, "", "", true},
 		{"error log redirect", `hostname 2> /tmp/err`, "", "", false},
 		{"known hosts redirect", `hostname > ~/.ssh/known_hosts`, "", "", false},
-		{"ssh config redirect", `hostname > ~/.ssh/config`, "", "", false},
+		// ~/.ssh/config is protected like the keys (lead ruling 10-31,
+		// rel-1-0-4:GAP-2586); other new files under ~/.ssh are not.
+		{"ssh config redirect", `hostname > ~/.ssh/config`, "", "", true},
 		{"other ssh file redirect", `hostname 2> ~/.ssh/other`, "", "", false},
 		{"other home file redirect", `hostname > /home/alice/notes.txt`, "", "", false},
 		{"structured Write", `{"file_path":"/home/alice/.ssh/authorized_keys","content":"key"}`, "", "", true},

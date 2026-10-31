@@ -546,6 +546,10 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 // and a direct write are judged against this one list.
 var AuthorizedKeysFiles = [...]string{"authorized_keys", "authorized_keys2"}
 
+// SSHControlFiles are the other files under ~/.ssh that sshd or ssh run or
+// read as policy for the user: protected like the authorized-keys files.
+var SSHControlFiles = [...]string{"config", "environment", "rc"}
+
 // AuthorizedKeysPaths returns the AuthorizedKeysFiles paths under home.
 func AuthorizedKeysPaths(home string) []string {
 	paths := make([]string, 0, len(AuthorizedKeysFiles))
@@ -564,7 +568,17 @@ func AuthorizedKeysPaths(home string) []string {
 // protect ~/.ssh/authorized_keys before it exists (GAP-1725).
 func ProtectedAuthorizedKeysPaths(home string) []string {
 	paths := AuthorizedKeysPaths(home)
-	for _, path := range AuthorizedKeysPaths(home) {
+	// sshd and ssh read these as the user's login policy: environment and
+	// rc run at every login, config can run a command for every connection
+	// (ProxyCommand, LocalCommand, Match exec). A write to one is as much a
+	// persistence write as one to authorized_keys (lead ruling 10-31 for
+	// rel-1-0-4:GAP-2586). Other new files under ~/.ssh are not listed.
+	if home != "" {
+		for _, name := range SSHControlFiles {
+			paths = append(paths, filepath.Join(home, ".ssh", name))
+		}
+	}
+	for _, path := range slices.Clone(paths) {
 		if resolved, ok := ResolveWriteTarget(path); ok && resolved != path && !slices.Contains(paths, resolved) {
 			paths = append(paths, resolved)
 		}
@@ -617,6 +631,28 @@ type protectedFile struct {
 }
 
 type protectedFiles []protectedFile
+
+// keysOnly drops the SSHControlFiles (and the files they link to): the
+// target-mention scan reads every word that names a protected file, a read
+// too, and a read of ~/.ssh/config (ssh -F, a backup copy) is ordinary
+// work. Writes to those files are judged by the write readings.
+func (p protectedFiles) keysOnly(home string) protectedFiles {
+	control := map[string]bool{}
+	for _, name := range SSHControlFiles {
+		path := filepath.Join(home, ".ssh", name)
+		control[path] = true
+		if resolved, ok := ResolveWriteTarget(path); ok {
+			control[resolved] = true
+		}
+	}
+	keys := make(protectedFiles, 0, len(p))
+	for _, file := range p {
+		if !control[file.path] {
+			keys = append(keys, file)
+		}
+	}
+	return keys
+}
 
 func newProtectedFiles(home string) protectedFiles {
 	files := make(protectedFiles, 0, len(AuthorizedKeysFiles))
