@@ -228,6 +228,11 @@ type Store struct {
 	// (WithSecureClientSchema).
 	secureClientSchema bool
 
+	// fieldClassSets: rows name their field class set (field_class_sets.go);
+	// fieldClassSetCount is the number of sets, for the table bound.
+	fieldClassSets     atomic.Bool
+	fieldClassSetCount atomic.Int64
+
 	// prepared holds the repeated hook-call inserts, prepared once the store
 	// is ready (prepareStatements).
 	prepared atomic.Pointer[map[string]*sql.Stmt]
@@ -2156,6 +2161,9 @@ func (s *Store) Init() error {
 		return err
 	}
 	if err := s.keepSecureClientSparseKeyIndexes(); err != nil {
+		return err
+	}
+	if err := s.ensureFieldClassSets(); err != nil {
 		return err
 	}
 	if purgedHistory {

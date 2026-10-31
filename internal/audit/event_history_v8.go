@@ -54,10 +54,7 @@ const (
 	projectionIntegrityDomain = "defenseclaw-observability-projection-integrity-v1"
 )
 
-const (
-	maxEventHistoryVerificationRange          = 1000
-	maxCanonicalLogCorrelationIdentifierBytes = 256
-)
+const maxCanonicalLogCorrelationIdentifierBytes = 256
 
 // EventHistoryVerificationStatus is a bounded, machine-readable local
 // integrity result. No status embeds persisted record content or database
@@ -82,13 +79,6 @@ type EventHistoryVerification struct {
 	ProjectionHashValid bool                           `json:"projection_hash_valid"`
 	IntegrityVerified   bool                           `json:"integrity_verified"`
 	IntegrityKeyID      string                         `json:"integrity_key_id,omitempty"`
-}
-
-// EventHistoryVerificationRange is explicit about bounded output. Callers must
-// not treat a truncated page as a complete range attestation.
-type EventHistoryVerificationRange struct {
-	Records   []EventHistoryVerification `json:"records"`
-	Truncated bool                       `json:"truncated"`
 }
 
 // ErrIntegrityKeyUnavailable lets a signer report expected boot-order or key
@@ -580,10 +570,19 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	if err != nil {
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(EventHistoryHealthProjectionRejected, err)
 	}
-	contentDigest := sha256.Sum256(projectedEnvelope)
+	// The row keeps the projection with its field classes named by set
+	// (field_class_sets.go); the hash and the signature cover those bytes.
+	storedEnvelope, err := writer.store.storedProjection(ctx, tx, projectedEnvelope)
+	if err != nil {
+		return eventHistoryAppendOutcome{}, eventHistoryFailure(
+			EventHistoryHealthWriteFailed,
+			&eventHistoryWriteError{cause: err},
+		)
+	}
+	contentDigest := sha256.Sum256(storedEnvelope)
 	projectionHash := ProjectionHashAlgorithm + ":" + hex.EncodeToString(contentDigest[:])
 
-	payloadHMAC, integrityAlgorithm, integrityKeyID, unsigned, err := writer.integrity(ctx, projectedEnvelope)
+	payloadHMAC, integrityAlgorithm, integrityKeyID, unsigned, err := writer.integrity(ctx, storedEnvelope)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return eventHistoryAppendOutcome{}, err
@@ -732,7 +731,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		nullStr(correlation.AgentID), nullStr(correlation.SidecarInstanceID),
 		nullStr(record.Connector()), legacyStepIndex, legacyEnforced, legacyRulePackDir,
 		string(record.Bucket()), string(record.EventName()), string(record.Source()), string(record.Signal()),
-		record.BucketCatalogVersion(), string(payloadJSON), string(projectedEnvelope),
+		record.BucketCatalogVersion(), string(payloadJSON), string(storedEnvelope),
 		record.SchemaVersion(), projectionHash,
 		metadata.RedactionProfile, boolInt(record.Mandatory()),
 		nullStr(correlation.EvaluationID), nullStr(correlation.ScanID),
@@ -1588,63 +1587,6 @@ func (writer *EventHistoryWriter) VerifyEventHistoryRecord(
 	return writer.verifyStoredProjection(ctx, recordID, []byte(projected), projectionHash, payloadHMAC, algorithm, keyID)
 }
 
-// VerifyEventHistoryRange verifies a half-open UTC timestamp range. The result
-// order is stable and contains no record content.
-func (writer *EventHistoryWriter) VerifyEventHistoryRange(
-	ctx context.Context,
-	from, until time.Time,
-	limit int,
-) (EventHistoryVerificationRange, error) {
-	if writer == nil || writer.store == nil || writer.store.db == nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: v8 event-history writer is not initialized")
-	}
-	if ctx == nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: v8 event-history context is required")
-	}
-	if from.IsZero() || until.IsZero() || !from.Before(until) {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: v8 event-history verification range is invalid")
-	}
-	if limit <= 0 || limit > maxEventHistoryVerificationRange {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: v8 event-history verification limit is invalid")
-	}
-	rows, err := writer.store.db.QueryContext(ctx, `
-		SELECT id, COALESCE(projected_record_json,''), COALESCE(projection_hash,''),
-		       COALESCE(payload_hmac,''), COALESCE(integrity_algorithm,''),
-		       COALESCE(integrity_key_id,'')
-		FROM audit_events
-		WHERE julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)
-		ORDER BY julianday(timestamp) ASC, id ASC LIMIT ?`,
-		from.UTC().Format(time.RFC3339Nano), until.UTC().Format(time.RFC3339Nano), limit+1,
-	)
-	if err != nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: read v8 event-history verification range: %w", err)
-	}
-	defer rows.Close()
-	results := make([]EventHistoryVerification, 0, limit+1)
-	for rows.Next() {
-		var recordID, projected, projectionHash, payloadHMAC, algorithm, keyID string
-		if err := rows.Scan(&recordID, &projected, &projectionHash, &payloadHMAC, &algorithm, &keyID); err != nil {
-			return EventHistoryVerificationRange{}, fmt.Errorf("audit: scan v8 event-history verification range")
-		}
-		result, err := writer.verifyStoredProjection(
-			ctx, recordID, []byte(projected), projectionHash, payloadHMAC, algorithm, keyID,
-		)
-		if err != nil {
-			return EventHistoryVerificationRange{}, err
-		}
-		results = append(results, result)
-	}
-	if err := rows.Err(); err != nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: iterate v8 event-history verification range: %w", err)
-	}
-	page := EventHistoryVerificationRange{Records: results}
-	if len(page.Records) > limit {
-		page.Records = page.Records[:limit]
-		page.Truncated = true
-	}
-	return page, nil
-}
-
 func (writer *EventHistoryWriter) verifyStoredProjection(
 	ctx context.Context,
 	recordID string,
@@ -1660,6 +1602,16 @@ func (writer *EventHistoryWriter) verifyStoredProjection(
 	wantHash := ProjectionHashAlgorithm + ":" + hex.EncodeToString(digest[:])
 	result.ProjectionHashValid = subtle.ConstantTimeCompare([]byte(projectionHash), []byte(wantHash)) == 1
 	if !result.ProjectionHashValid {
+		result.Status = EventHistoryHashMismatch
+		return result, nil
+	}
+	// A projection that names its field class set is whole only with that
+	// set, unchanged (field_class_sets.go).
+	if err := writer.store.checkFieldClassSet(ctx, projected); err != nil {
+		if !errors.Is(err, errFieldClassSetMissing) {
+			return EventHistoryVerification{}, err
+		}
+		result.ProjectionHashValid = false
 		result.Status = EventHistoryHashMismatch
 		return result, nil
 	}
