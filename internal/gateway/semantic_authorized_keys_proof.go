@@ -1190,7 +1190,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				// is unknown, so fail closed. An operand the client did list,
 				// which connector scoping removed, keeps the local checks.
 				if _, described := clientTargets[target]; !described {
-					return !windowsLocationOrdinaryWriteTarget(target)
+					omitted := !windowsLocationOrdinaryWriteTarget(target)
+					if omitted && request.overBudgetOmission != nil && clientTargets[hookpaths.BudgetKey] == "1" {
+						*request.overBudgetOmission = true
+					}
+					return omitted
 				}
 			}
 		}
