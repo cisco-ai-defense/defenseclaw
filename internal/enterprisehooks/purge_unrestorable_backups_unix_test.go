@@ -55,7 +55,8 @@ func TestPurgeUserStateRemovesAFailedInstallsLeftovers(t *testing.T) {
 }
 
 // A record that carries a backup version or a path is a backup DefenseClaw
-// reads: it is never moved aside.
+// reads, and one that is not JSON may be a damaged backup (rel-1-0-3
+// GAP-0258): neither is moved aside.
 func TestUnrestorableConnectorBackupKeepsReadableRecords(t *testing.T) {
 	dir := t.TempDir()
 	for name, body := range map[string]bool{
@@ -63,7 +64,8 @@ func TestUnrestorableConnectorBackupKeepsReadableRecords(t *testing.T) {
 		`{"version":0}`:                    false,
 		`{"path":"/home/sample/.codex/x"}`: false,
 		`{"orphan":true}`:                  true,
-		`not json`:                         true,
+		`not json`:                         false,
+		`null`:                             false,
 	} {
 		path := filepath.Join(dir, "r.json")
 		if err := os.WriteFile(path, []byte(name), 0o600); err != nil {

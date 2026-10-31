@@ -88,10 +88,12 @@ func unrestorableConnectorBackupsKeptRoot(dataDir string) string {
 }
 
 // unrestorableConnectorBackup reports a record in connector_backups/<name>/
-// that names no file DefenseClaw can put back: not a JSON object, or one with
-// neither a backup version nor a path (what an earlier failed install, or a
-// hand edit, can leave). Its connector's teardown refuses it, and the purge
-// kept the whole folder for it (rel-1-0-2 GAP-0576).
+// that names no file DefenseClaw can put back: a JSON object with neither a
+// backup version nor a path (what an earlier failed install, or a hand edit,
+// can leave). Its connector's teardown refuses it, and the purge kept the
+// whole folder for it (rel-1-0-2 GAP-0576). A record that is not JSON may be
+// a damaged backup of a file DefenseClaw still has in place, so it keeps the
+// state as before (rel-1-0-3 GAP-0258).
 func unrestorableConnectorBackup(path string) bool {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
@@ -102,8 +104,8 @@ func unrestorableConnectorBackup(path string) bool {
 		return false
 	}
 	var record map[string]json.RawMessage
-	if json.Unmarshal(data, &record) != nil {
-		return true
+	if json.Unmarshal(data, &record) != nil || record == nil {
+		return false
 	}
 	_, version := record["version"]
 	_, named := record["path"]
