@@ -2263,7 +2263,7 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 					break
 				}
 			}
-		case "uniq", "tar", "gtar", "bsdtar":
+		case "uniq", "tar", "gtar", "bsdtar", "find", "gfind":
 			words, known := actionStaticWords(call.Args, home)
 			safe = known && actionReadsOnlyWords(words)
 		case "pwsh", "powershell":
@@ -3359,7 +3359,7 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 			}
 		}
 		return true
-	case "uniq", "tar", "gtar", "bsdtar":
+	case "uniq", "tar", "gtar", "bsdtar", "find", "gfind":
 		return actionReadsOnlyWords(words)
 	}
 	return false
@@ -3383,16 +3383,34 @@ func actionStaticWords(args []*syntax.Word, home string) ([]string, bool) {
 // most one operand: a second one is the file uniq writes) and a tar listing
 // (-t, --list) with only archive, directory, compression and verbosity
 // options: both read their operands and write no file, so a link operand to
-// a protected file or directory is a read there (GAP-2590). words starts
-// with the program.
+// a protected file or directory is a read there (GAP-2590); so is a find
+// that only lists (actionFindListsOnly). words starts with the program.
 func actionReadsOnlyWords(words []string) bool {
 	if len(words) == 0 {
 		return false
 	}
-	if program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe"); program == "uniq" {
+	switch strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe") {
+	case "uniq":
 		return actionUniqPrintsOnly(words[1:])
+	case "find", "gfind":
+		return actionFindListsOnly(words[1:])
 	}
 	return actionTarListsOnly(words[1:])
+}
+
+// actionFindListsOnly reports a find that only prints names to standard
+// output: no action that deletes, runs a program or writes a file (-delete,
+// -exec, -execdir, -ok, -okdir, -fprint, -fprint0, -fprintf, -fls). A
+// listing of the SSH folder (find ~/.ssh -maxdepth 1 -type f) reads, as ls
+// does (rel-1-0-6:GAP-0119). args are the words after the program.
+func actionFindListsOnly(args []string) bool {
+	for _, arg := range args {
+		switch strings.ToLower(arg) {
+		case "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls":
+			return false
+		}
+	}
+	return true
 }
 
 func actionUniqPrintsOnly(args []string) bool {

@@ -3332,6 +3332,7 @@ func CommandLinksWithFacts(tool, command, cwd, home string, facts map[string]str
 // OpaqueScopeFactPrefix entries for a gateway that cannot walk the user's
 // home; nil keeps the local walk as the only evidence.
 func (l Links) OpaqueTargetWithFacts(path string, ownCopy bool, facts map[string]string) bool {
+	path = linksDrivePath(path)
 	if ownCopy {
 		return l.links.opaqueTargetWithFacts(path, path, facts)
 	}
@@ -3411,7 +3412,20 @@ func (l Links) PlacedCopyDestinations(word string) []string {
 // IsCopyDestination reports a copy destination of the command, placed as
 // the statement walk places its call.
 func (l Links) IsCopyDestination(path string) bool {
-	return slices.Contains(l.links.copyDestinations, path)
+	return slices.Contains(l.links.copyDestinations, linksDrivePath(path))
+}
+
+// linksDrivePath spells a Windows drive path as the link reading records its
+// scopes and copy destinations (backslashes, cleaned). The gateway reads a
+// Git Bash operand as C:/x/y, so env -C ~ cp -r project project-bak was not
+// its own copy destination and the copy of a project holding a link to the
+// keys file blocked on Windows only (rel-1-0-4:GAP-2579). Elsewhere, and for
+// any other path, it is path.
+func linksDrivePath(path string) string {
+	if runtime.GOOS == "windows" && filepath.VolumeName(path) != "" {
+		return filepath.Clean(path)
+	}
+	return path
 }
 
 // Target maps an absolute write operand through the links the command

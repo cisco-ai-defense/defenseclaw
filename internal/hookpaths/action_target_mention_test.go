@@ -364,6 +364,8 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 		`cd ~/.ssh && ls -la`,
 		`ls -la ~/.ssh`,
 		`stat ~/.ssh`,
+		// A find that only lists reads (rel-1-0-6:GAP-0119).
+		`find ~/.ssh -name '*.pub'`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := posixShellDecision(command, cwd, home); got != "" {
@@ -373,7 +375,7 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 	}
 	for _, command := range []string{
 		`ls -la ~/.ssh; pwd`,
-		`find ~/.ssh -name '*.pub'`,
+		`find ~/.ssh -name '*.pub' -delete`,
 		`cd ~/.ssh && pwd`,
 		`ls ~/.ssh && echo done`,
 	} {
@@ -470,6 +472,31 @@ func TestActionKnownReadOnlyWindowsSizeReaders(t *testing.T) {
 		{"du", "-sh", "/c/Users/a/.ssh/", ">", "/c/Users/a/.ssh/authorized_keys"},
 		{"du", "--output=x", "/c/Users/a/.ssh/"},
 		{"du", "-sh", "/c/Users/a/.ssh/", "&&", "rm", "x"},
+	} {
+		if actionKnownReadOnlyWindows(words) {
+			t.Errorf("%v: want not read-only", words)
+		}
+	}
+}
+
+// A find that only lists reads its operands on a Windows home too; one that
+// deletes, runs a program or writes a file does not (rel-1-0-6:GAP-0119).
+func TestActionKnownReadOnlyWindowsFindListing(t *testing.T) {
+	for _, words := range [][]string{
+		{"find", "/c/Users/a/.ssh", "-maxdepth", "1", "-type", "f"},
+		{"find", "/c/Users/a/.ssh", "-name", "*.pub"},
+		{"find.exe", "/c/Users/a/.ssh", "-type", "f", "-print"},
+	} {
+		if !actionKnownReadOnlyWindows(words) {
+			t.Errorf("%v: want read-only", words)
+		}
+	}
+	for _, words := range [][]string{
+		{"find", "/c/Users/a/.ssh", "-name", "authorized_keys", "-delete"},
+		{"find", "/c/Users/a/.ssh", "-exec", "rm", "{}", ";"},
+		{"find", "/c/Users/a/.ssh", "-fprint", "/c/Users/a/.ssh/authorized_keys"},
+		{"find", "/c/Users/a/.ssh", "-fls", "x"},
+		{"find", "/c/Users/a/.ssh", ">", "/c/Users/a/.ssh/authorized_keys"},
 	} {
 		if actionKnownReadOnlyWindows(words) {
 			t.Errorf("%v: want not read-only", words)

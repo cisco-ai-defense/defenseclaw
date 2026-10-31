@@ -207,11 +207,14 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 					continue
 				}
 				// A copy call writing its own destination, as the gateway reads
-				// the path facts of the whole command (GAP-2579).
+				// the path facts of the whole command (GAP-2579). The facts
+				// spell a Windows drive path with slashes, the destination
+				// with backslashes (rel-1-0-4:GAP-2579 Windows leg).
 				own := false
 				for _, command := range facts.Commands {
 					if command.ID == candidate.CommandID {
-						own = IsCopyProgram(command.Argv) && target == CopyDestination(command.Argv, s.logical)
+						own = IsCopyProgram(command.Argv) &&
+							linksDrivePath(target) == linksDrivePath(CopyDestination(command.Argv, s.logical))
 						break
 					}
 				}
