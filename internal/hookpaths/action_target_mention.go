@@ -2282,6 +2282,9 @@ func actionLessWritesFile(option string) bool {
 // comment are not blocked by the reading of a shell that does not run them.
 func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool, dialect actionfacts.Dialect) bool {
 	for _, grammar := range []actionWindowsGrammar{0, actionWindowsPlainGrammar} {
+		if grammar != 0 && (dialect == actionfacts.DialectPowerShell || dialect == actionfacts.DialectPOSIX) {
+			grammar |= actionWindowsPlainComments
+		}
 		if !actionWindowsTargetMentionAs(command, cwd, home, depth, stateOnly, grammar) {
 			continue
 		}

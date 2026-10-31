@@ -13,8 +13,10 @@ import (
 // GAP-1982: the plain reading of a Windows command (the Git Bash and cmd
 // grammar) read a PowerShell comment as words, so a project write followed
 // by a comment that names ~/.ssh/authorized_keys was denied in Codex action
-// mode. A comment that Git Bash and PowerShell both skip, and through which
-// cmd cannot reach a file, is skipped there too. The escaped forms (a #
+// mode. In a call the hook reads as PowerShell (or POSIX), a comment that
+// Git Bash and PowerShell both skip, and through which cmd cannot reach a
+// file, is skipped there too; a call of unknown dialect keeps every word
+// (TestR104WindowsActionExplicitDialect). The escaped forms (a #
 // after a backtick-escaped blank), writes before or after a comment, and
 // comment text that cmd would run or expand keep blocking.
 func TestGAP1982PowerShellCommentNamingAProtectedPath(t *testing.T) {
@@ -43,14 +45,16 @@ func TestGAP1982PowerShellCommentNamingAProtectedPath(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The dialect the Codex hook picks on Windows (codex_hook.go).
 		input := actionfacts.Input{Tool: "shell_command", Args: args, CWD: cwd, ActiveHome: home}
-		for _, hint := range []actionfacts.Dialect{"", selectWindowsShellDialect("shell_command", row.command, input)} {
-			input.DialectHint = hint
-			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, LegacyText: string(args),
-				Connector: "codex", EnforcementCapable: true})
-			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
-				t.Errorf("hint=%q %q: block=%v, want %v (%v)", hint, row.command, blocked, row.block, FindingStrings(findings))
-			}
+		input.DialectHint = selectWindowsShellDialect("shell_command", row.command, input)
+		if !row.block && input.DialectHint != actionfacts.DialectPowerShell {
+			t.Fatalf("%q: hook dialect %q, want powershell", row.command, input.DialectHint)
+		}
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, LegacyText: string(args),
+			Connector: "codex", EnforcementCapable: true})
+		if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+			t.Errorf("hint=%q %q: block=%v, want %v (%v)", input.DialectHint, row.command, blocked, row.block, FindingStrings(findings))
 		}
 	}
 }

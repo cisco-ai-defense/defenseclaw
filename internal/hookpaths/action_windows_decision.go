@@ -113,12 +113,16 @@ const (
 	// A shell other than PowerShell (Git Bash, cmd) may run a command sent
 	// from a Windows home, and it reads comments, smart quotes and the
 	// backtick differently; a protected decision holds when either reading
-	// finds the target (GAP-1500 refix 2). Its one comment rule is the one
-	// Git Bash and PowerShell share (actionWindowsPlainComment).
+	// finds the target (GAP-1500 refix 2).
 	actionWindowsPlainGrammar actionWindowsGrammar = 1 << iota
 	// actionWindowsLiteralDollar keeps a $ inside a single-quoted string or
 	// an @'...'@ here-string from reading as a home variable ($ -> @).
 	actionWindowsLiteralDollar
+	// actionWindowsPlainComments gives the plain reading the comment rule
+	// Git Bash and PowerShell share (actionWindowsPlainComment), for a call
+	// whose shell is known to be one of them (GAP-1982). A call of unknown
+	// dialect or a cmd call keeps every word.
+	actionWindowsPlainComments
 )
 
 // actionWindowsScanResult is one reading of a command. quoted[i] reports a
@@ -182,6 +186,7 @@ func actionWindowsWords(command string) (words []string, literal []bool, ok bool
 func actionWindowsScan(command string, grammar actionWindowsGrammar) (result actionWindowsScanResult) {
 	plain := grammar&actionWindowsPlainGrammar != 0
 	literalDollar := grammar&actionWindowsLiteralDollar != 0
+	plainComments := plain && grammar&actionWindowsPlainComments != 0
 	var word strings.Builder
 	var quote byte
 	hereLen := -1
@@ -254,7 +259,7 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 			i = escaped(i)
 			continue
 		}
-		if plain && c == '#' && word.Len() == 0 && !quoted {
+		if plainComments && c == '#' && word.Len() == 0 && !quoted {
 			if end, ok := actionWindowsPlainComment(command, i); ok {
 				i = end - 1
 				continue
