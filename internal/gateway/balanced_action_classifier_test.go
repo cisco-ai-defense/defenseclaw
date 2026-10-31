@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -303,8 +304,10 @@ func TestBalancedActionSelectedMakeRecipes(t *testing.T) {
 		{"eval", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys' x", true},
 		// An --eval text that only defines a rule the call does not select
 		// is parsed and never run (GAP-2169); any other --eval text is read.
-		{"unselected eval", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", false},
-		{"unselected eval word", "safe:\n\tprintf ok > report.txt\n", "make --eval 'unused: ; printf ok >> ~/.ssh/authorized_keys' safe", false},
+		// A Windows home also reads the call with the Windows grammars,
+		// which do not read make, so the text stays a mention there.
+		{"unselected eval", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", runtime.GOOS == "windows"},
+		{"unselected eval word", "safe:\n\tprintf ok > report.txt\n", "make --eval 'unused: ; printf ok >> ~/.ssh/authorized_keys' safe", runtime.GOOS == "windows"},
 		{"eval prerequisite of the goal", "safe:\n\tprintf ok > report.txt\n", "make --eval='safe: x' --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", true},
 		{"eval default goal", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys'", true},
 		{"eval function", "safe:\n\tprintf ok > report.txt\n", "make --eval='$(shell printf marker >> ~/.ssh/authorized_keys)' safe", true},
