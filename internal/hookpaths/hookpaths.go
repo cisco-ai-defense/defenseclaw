@@ -962,6 +962,17 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				statementMoves = PlainMoveDestinationsWithStatements(fallback, fallbackFacts)
 				facts.Paths = append(facts.Paths, fallbackFacts.Paths...)
 				truncated = truncated || fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded
+				// Past the ActionFacts limits (a touch, chmod or mkdir of more
+				// than 256 operands) no path fact names the operands, so the
+				// concrete reading above and a gateway behind ProtectHome see
+				// none of them. A per-user gateway still finds a protected one
+				// with its whole-command decision; the client runs that same
+				// decision as the user, so the managed answer is the same
+				// (GAP-0151). Only a protected target sets the fact.
+				if !protectedDecision && !isApplyPatchToolName(tool) &&
+					fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded {
+					protectedDecision = ActionCommandDecision(command, cwd, home) != ""
+				}
 				// A command over the analysis limits has no path facts, but
 				// the gateway still checks each literal redirect operand.
 				var parsed bool
@@ -1069,6 +1080,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// exceeds the budget.
 	protected := newProtectedFiles(home)
 	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3
+	if protectedDecision {
+		// The protected-target reading goes in first, so no operand list,
+		// however long, can push it out of the bounded map (GAP-0151): an
+		// operand the map omits must never read as no protected target.
+		targets[ActionDecisionKey] = ProtectedTargetDecision
+		size += len(jsonString(ActionDecisionKey)) + 1 + len(jsonString(ProtectedTargetDecision)) + 1
+	}
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
 	var dotDotOperands []string
@@ -1328,15 +1346,6 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		entry := len(jsonString(LinksStableKey)) + 1 + len(jsonString("1")) + 1
 		if size+entry <= maxEncodedTargets && len(targets) < MaxWriteTargets+2 {
 			targets[LinksStableKey] = "1"
-			size += entry
-		}
-	}
-	if protectedDecision {
-		entry := len(jsonString(ActionDecisionKey)) + 1 + len(jsonString(ProtectedTargetDecision)) + 1
-		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
-			truncated = true
-		} else {
-			targets[ActionDecisionKey] = ProtectedTargetDecision
 			size += entry
 		}
 	}
