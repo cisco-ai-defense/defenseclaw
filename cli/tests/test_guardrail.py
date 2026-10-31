@@ -2846,7 +2846,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
     def test_wait_for_connector_runtime_requires_fresh_matching_state(self):
         from defenseclaw.commands.cmd_setup import (
             _active_connector_state_marker,
-            _hook_contract_lock_marker,
+            _regular_file_marker,
             _wait_for_connector_runtime,
         )
 
@@ -2861,7 +2861,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                     lock_file,
                 )
             state_marker = _active_connector_state_marker(tmpdir)
-            lock_marker = _hook_contract_lock_marker(tmpdir)
+            lock_marker = _regular_file_marker(lock_path)
             self.assertIsNotNone(state_marker)
             self.assertIsNotNone(lock_marker)
 
