@@ -655,8 +655,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		ctx = enrichAgentHookContext(ctx, req)
 		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
 		ctx = withHookPanicCapture(ctx)
-		if judge := a.judgeFor(ctx); judge != nil && shouldResetToolJudgeSession(req) {
-			judge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, req.SessionID))
+		if shouldResetToolJudgeSession(req) {
+			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
+			if judge := a.judgeFor(ctx); judge != nil {
+				judge.ResetToolJudgeSession(sessionKey)
+			}
+			a.resetUserDownloadRequests(sessionKey)
 		}
 		t0 := time.Now()
 		// attemptedWrite covers BOTH "writeJSON returned successfully"
@@ -818,6 +822,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// per-profile evaluators (claudeCode / codex / generic) so
 		// they round-trip back to the HTTP response and onto the
 		// audit envelope without a second pass here.
+		// The judge fallback of this call, for its audit row and record (#1395).
+		ctx = withHookJudgeFallbackNote(ctx)
+		if cfg := a.decisionConfig(ctx); shellHookBoundsToolGate(connectorName, req.HookEventName, r) &&
+			(cfg == nil || !cfg.SecureClientIntegration()) {
+			ctx = withShellToolGateBound(ctx, r)
+		}
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
 		// An argumentless Copilot permission callback is bound to the call of
@@ -1319,6 +1329,10 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		env.BodyBytes = req.pendingBodyBytes
 	}
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
+	if reason := hookJudgeFallbackReason(ctx); reason != "" {
+		// The rules decided because the judge gave no verdict in time (#1395).
+		env.Extra = mergeHookEnvelopeExtra(env.Extra, map[string]string{hookJudgeFallbackExtraKey: reason})
+	}
 	// Every panic recovered before the call's audit row is written is an
 	// evaluator failure on its row and export, whatever verdict was kept: the
 	// evaluator's, a later additive check's, a renderer's or the identity
@@ -3211,8 +3225,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// lifecycle events) can repeat or contain model-generated material;
 		// letting them replace the user's task would make the judge trust the
 		// very content it is meant to evaluate.
-		if judge := a.judgeFor(ctx); judge != nil && isToolJudgeIntentEvent(req.HookEventName) {
-			judge.ObserveSessionPrompt(ctx, req.Content)
+		if isToolJudgeIntentEvent(req.HookEventName) {
+			if judge := a.judgeFor(ctx); judge != nil {
+				judge.ObserveSessionPrompt(ctx, req.Content)
+			}
+			a.observeUserDownloadRequest(ctx, req.Content)
 		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
 	case isResultLikeEvent(req.HookEventName):
@@ -3565,21 +3582,20 @@ func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 }
 
 // agentHookTrustedActionTool preserves the official connector tool label for
-// policy and telemetry while selecting the host shell grammar used for trusted
-// action facts. OpenCode calls its built-in terminal tool "bash" on every
-// platform, while Copilot calls the same Windows surface "powershell" even for
-// ordinary native executables such as az.cmd. Treat those labels as a generic
-// shell only at this server-owned boundary so dialect inference can recognize
-// exact PowerShell/CMD syntax and bare native commands without trusting a
-// payload-supplied dialect hint or changing the recorded tool identity.
+// policy and telemetry while selecting the parser used for trusted action
+// facts. OpenCode V2's native patch tool uses the reviewed apply_patch envelope.
+// Copilot calls its Windows shell surface "powershell" even for ordinary native
+// executables such as az.cmd; its generic shell label lets dialect inference
+// recognize exact PowerShell/CMD syntax and bare native commands. Both mappings
+// belong at this server-owned boundary, without trusting a payload-supplied
+// dialect hint or changing the recorded tool identity.
 func agentHookTrustedActionTool(connectorName, toolName, platformName string) string {
+	if strings.EqualFold(strings.TrimSpace(connectorName), "opencode") && toolName == "patch" {
+		return "apply_patch"
+	}
 	if strings.EqualFold(strings.TrimSpace(platformName), "windows") {
 		connectorName = strings.TrimSpace(connectorName)
 		toolName = strings.TrimSpace(toolName)
-		if strings.EqualFold(connectorName, "opencode") &&
-			strings.EqualFold(toolName, "bash") {
-			return "shell"
-		}
 		if strings.EqualFold(connectorName, "copilot") &&
 			strings.EqualFold(toolName, "powershell") {
 			return "shell"

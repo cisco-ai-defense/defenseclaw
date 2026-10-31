@@ -1025,6 +1025,42 @@ def test_upgrade_keeps_keys_the_target_release_has(
     assert not _set_aside(home).exists()
 
 
+# #1390: guardrail.internal_domains is new in 1.0.6; 1.0.5 and 1.0.4 refuse it.
+_DOMAINS_CONFIG = "config_version: 9\nguardrail:\n  internal_domains:\n  - corp.example.com\n"
+
+
+@pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
+def test_downgrade_below_1_0_6_sets_aside_internal_domains(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    (home / "config.yaml").write_text(_DOMAINS_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, target)))
+
+    assert upgrade_shim.run(["upgrade", "--version", target, "--yes"]) == 0
+
+    assert len(execs) == 1
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert "internal_domains" not in (config.get("guardrail") or {})
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record == {"version": 1, "for": target, "keys": {"guardrail.internal_domains": ["corp.example.com"]}}
+
+
+def test_upgrade_to_1_0_6_keeps_internal_domains(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    (home / "config.yaml").write_text(_DOMAINS_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.6")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.6", "--yes"]) == 0
+
+    assert (home / "config.yaml").read_text(encoding="utf-8") == _DOMAINS_CONFIG
+    assert not _set_aside(home).exists()
+
+
 def test_downgrade_stops_with_the_unset_command_when_the_key_cannot_be_set_aside(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:

@@ -255,6 +255,30 @@ mutated sequences cannot complete an enforcement proof.
 | Sensitive SQLite read → unbounded delete | Exact database/table identity and ordered destructive mutation | Enforcement-capable proof |
 | File read → email transfer | Exact artifact identity and addressed transfer | Alert-only |
 
+### Download → execute
+
+`chain.download_then_execute_same_artifact` alerts when an agent downloads a
+file with `curl` or `wget` and then runs that same file within eight calls and
+30 minutes. It never blocks, in any profile.
+
+- **Source.** A public IP address, or a host name with at least one dot that
+  is not under a local or internal suffix (`.local`, `.localhost`,
+  `.localdomain`, `.internal`, `.intranet`, `.lan`, `.home`, `.home.arpa`,
+  `.corp`, `.private`, `.test`, `.invalid`). DefenseClaw does not look the name up.
+- **Paths.** A relative path such as `-o runner` and a later `./runner` are
+  resolved against the call's working directory, so they join.
+- **Your mirrors.** Add your own domains to
+  [`guardrail.internal_domains`](/docs/reference/configuration). A download
+  from one of them, or from a name under one, does not start the chain.
+- **Downloads the user asked for.** When the user's prompt in this turn or one
+  of the two before it names the download host and asks to run, execute or
+  install (for example "download the installer from example.net and run
+  it", then "yes, go ahead"), the download does not start the chain. Asking
+  only to run the `curl` or `wget` command does not count. This
+  works with or without the LLM judge. DefenseClaw keeps only the host names
+  from those prompts, in memory, for at most 30 minutes. A prompt can only
+  silence this alert; it never allows a call.
+
 “Enforcement-capable” means the chain can set the enforcement-safe result bit;
 the connector must still be synchronous and block-capable, the same-rule proof
 gate must accept it, and the active profile (or the connector's

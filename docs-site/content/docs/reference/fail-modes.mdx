@@ -214,7 +214,7 @@ defenseclaw guardrail fail-mode   # effective value per connector
 defenseclaw doctor --passive      # no synthetic telemetry, LLM or inspection probes
 ```
 
-These commands are for a per-user install. On a managed standalone Linux or macOS computer `defenseclaw` offers users only `sandbox` commands, `help` and `--version` (anything else exits 2), and `defenseclaw-gateway` is not on their `PATH`. On native Windows the managed `defenseclaw` is the administrator's command, with no `guardrail` group and no `version` command. The administrator reads each connector's `effective_hook_fail_mode` from `status --json` or `verify --json`:
+These commands are for a per-user install. On a managed standalone Linux or macOS computer `defenseclaw` offers users only `sandbox` commands, `help` and `--version` (anything else exits 2), and `defenseclaw-gateway` is not on their `PATH`. On native Windows the managed `defenseclaw` is the administrator's command, which refuses `guardrail` commands (exit `3`) and has no `version` command. The administrator reads each connector's `effective_hook_fail_mode` from `status --json` or `verify --json`:
 
 ```bash title="Linux"
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
@@ -234,6 +234,8 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --js
 The shell hook scripts, native hook and OpenCode plugin record hook delivery and response failures in `$DEFENSECLAW_HOME/logs/hook-failures.jsonl` (`%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl` on packaged native Windows). The per-user Amp plugin writes an eligible outage-open call to the same file. The file is sensitive; do not publish it whole.
 
 For those connectors, a per-user gateway reads the lines added since its last start. Historical fail-open lines from an earlier release can produce a `guardrail-degraded` alert; `defenseclaw alerts` lists it. Fail-closed calls and lines older than 7 days are not reported.
+
+On a managed standalone computer a call the hook blocked while the gateway service was stopped (fail mode `closed`) is recorded only in that user's `hook-failures.jsonl`, with `outcome` `fail_closed`. No gateway took the call, so the gateway audit has no row for it, and the managed gateway does not read the file when it starts again. In the audit export the outage shows as the gateway's stop and start rows (`sidecar-stop`, `sidecar-start`) around it; read the blocked calls from the user's `hook-failures.jsonl`.
 
 The Amp plugin writes a record only for a call an outage let run; when the per-user gateway resumes, it reads that row and records a `guardrail-degraded` alert. The managed and sandbox Amp plugins write no record. Amp blocks an actionable call when its per-user gateway cannot be verified. Check Amp's visible hook answer and gateway health during an outage.
 

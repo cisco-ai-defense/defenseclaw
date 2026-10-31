@@ -6,6 +6,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -265,5 +266,54 @@ func TestProfileMatchCacheForgetUser(t *testing.T) {
 	var none *profileMatchCache
 	if none.forgetUser("1201") != 0 {
 		t.Fatal("nil cache")
+	}
+}
+
+// Right after an OS cache flush the first lookup of a directory account can
+// time out while SSSD resolves it cold: the refresh retries once.
+func TestIdentityRefreshRetriesALookupThatFailedOnce(t *testing.T) {
+	clock := time.Now()
+	calls := 0
+	cache := newIdentityCache(func(string) (useridentity.DirectoryFacts, error) {
+		calls++
+		if calls == 2 {
+			return useridentity.DirectoryFacts{}, errors.New("unixidentity: getent timed out: context deadline exceeded")
+		}
+		return useridentity.DirectoryFacts{Groups: []string{"dc-sbx-contractors"}, ResolvedAt: clock}, nil
+	})
+	cache.now = func() time.Time { return clock }
+	savedAccounts, savedDelay := identityRefreshAccounts, identityRefreshRetryDelay
+	identityRefreshAccounts = cache.accounts
+	identityRefreshRetryDelay = 0
+	t.Cleanup(func() { identityRefreshAccounts, identityRefreshRetryDelay = savedAccounts, savedDelay })
+	api, _ := identityRefreshTestAPI(t)
+	if _, ok := cache.get("1201", true); !ok {
+		t.Fatal("seeding the cache failed")
+	}
+	explainProfileFromCache(t, cache, "1201", "eng2")
+	prevFacts := profileExplainDirectoryFacts
+	profileExplainDirectoryFacts = func(key string) (useridentity.DirectoryFacts, error) {
+		clock = clock.Add(10 * time.Second) // each lookup starts past the explain freshness window
+		return explainDirectoryFacts(cache, key)
+	}
+	t.Cleanup(func() { profileExplainDirectoryFacts = prevFacts })
+	_, answer, refusal := identityRefreshCall(t, api, `{"user":"1201"}`)
+	if refusal != nil || answer.Refreshed != 1 || answer.Failed != 0 || calls != 3 {
+		t.Fatalf("answer %+v %v after %d lookups: want the retry to succeed", answer, refusal, calls)
+	}
+	// A directory that keeps failing: the account keeps its cached facts, and
+	// the refresh reports it as failed instead of re-read.
+	calls = 1
+	failAll := cache.resolve
+	cache.resolve = func(key string) (useridentity.DirectoryFacts, error) {
+		calls++
+		if calls > 1 {
+			return useridentity.DirectoryFacts{}, errors.New("unixidentity: getent timed out: context deadline exceeded")
+		}
+		return failAll(key)
+	}
+	_, answer, _ = identityRefreshCall(t, api, `{"user":"1201"}`)
+	if answer.Refreshed != 0 || answer.Failed != 1 || len(answer.Failures) != 1 || answer.Failures[0].Code != identityRefreshLookupFailed {
+		t.Fatalf("answer %+v: want the failing account reported as lookup_failed", answer)
 	}
 }

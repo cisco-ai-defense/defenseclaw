@@ -76,10 +76,9 @@ WINDOWS_SUPPORTED: set[str] = {
     "hermes",
     "kiro",
     "devin",
-    "opencode",
     "antigravity",
 }
-WINDOWS_PREVIEW: set[str] = set()
+WINDOWS_PREVIEW: set[str] = {"opencode"}
 WINDOWS_NOT_CERTIFIED: set[str] = set()
 WINDOWS_UNSUPPORTED = {"openclaw", "zeptoclaw"}
 ALL_CONNECTORS = WINDOWS_SUPPORTED | WINDOWS_PREVIEW | WINDOWS_NOT_CERTIFIED | WINDOWS_UNSUPPORTED
@@ -185,7 +184,7 @@ def test_non_windows_behavior_is_unchanged() -> None:
     for os_name in ("linux", "darwin"):
         for name in ALL_CONNECTORS:
             support = connector_platform_support(name, os_name)
-            assert support.status == SUPPORTED
+            assert support.status == (PREVIEW if name == "opencode" else SUPPORTED)
             assert support.available
 
 
@@ -257,13 +256,19 @@ def test_windows_views_include_supported_and_labeled_preview_connectors() -> Non
     win_modes = visible_mode_picker_choices("windows")
     assert {choice.wire for choice in win_modes} == expected
     labels = {choice.wire: choice.label.lower() for choice in win_modes}
-    assert all("preview" not in label for label in labels.values())
+    assert all(("preview" in label) == (name in WINDOWS_PREVIEW) for name, label in labels.items())
     assert {"copilot", "antigravity"} <= set(labels)
 
 
 def test_non_windows_views_are_unfiltered() -> None:
     assert supported_connector_choices("linux") == tuple(CONNECTORS)
-    assert visible_mode_picker_choices("darwin") == tuple(MODE_PICKER_CHOICES)
+    modes = visible_mode_picker_choices("darwin")
+    assert tuple(choice.wire for choice in modes) == tuple(choice.wire for choice in MODE_PICKER_CHOICES)
+    for original, shown in zip(MODE_PICKER_CHOICES, modes, strict=True):
+        if shown.wire == "opencode":
+            assert "preview" in shown.label.lower()
+        else:
+            assert shown == original
     assert visible_connector_choices("linux") == tuple(CONNECTOR_CHOICES)
 
 

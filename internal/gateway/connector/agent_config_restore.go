@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,6 +42,12 @@ import (
 // install, which removes only the names it knows in
 // connector_backups\<connector>, knows theirs (AgentConfigBackupLeaves,
 // GAP-0588).
+//
+// The per-user Claude Code (~/.claude/settings.json) and Codex
+// (~/.codex/config.toml) setups keep the same copy and put the file back the
+// same way (GAP-0581); `defenseclaw setup` reads the notice and says what it
+// put back. Managed installs keep their own setup path for them, and the
+// standalone guardian reports only Hermes and Devin.
 
 // Where a missing agent config was put back from.
 const (
@@ -65,16 +72,35 @@ type agentConfigSpec struct {
 	// keys returns the top-level keys of a document the agent reads
 	// (false: not one).
 	keys func([]byte) ([]string, bool)
+	// owned are the top-level keys DefenseClaw's setup writes; any other
+	// key is the account's own setting.
+	owned []string
+	// perUserOnly: only an unmanaged per-user setup keeps the copy, and the
+	// standalone guardian does not report the file (Claude Code, Codex).
+	perUserOnly bool
 }
 
 func agentConfigSpecFor(connectorName string) (agentConfigSpec, bool) {
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "hermes":
-		return agentConfigSpec{connector: "hermes", logical: "config.yaml", label: "Hermes config", path: hermesConfigPath, keys: yamlTopKeys}, true
+		return agentConfigSpec{connector: "hermes", logical: "config.yaml", label: "Hermes config", path: hermesConfigPath, keys: yamlTopKeys, owned: []string{"hooks"}}, true
 	case "devin":
-		return agentConfigSpec{connector: "devin", logical: "config", label: "Devin config", path: devinHooksPath, keys: jsoncTopKeys}, true
+		return agentConfigSpec{connector: "devin", logical: "config", label: "Devin config", path: devinHooksPath, keys: jsoncTopKeys, owned: []string{"hooks"}}, true
+	case "claudecode":
+		return agentConfigSpec{connector: "claudecode", logical: "settings.json", label: "Claude Code settings",
+			path: func(SetupOpts) string { return claudeCodeSettingsPath() }, keys: jsoncTopKeys,
+			owned: []string{"hooks", "env"}, perUserOnly: true}, true
+	case "codex":
+		return agentConfigSpec{connector: "codex", logical: "config.toml", label: "Codex config",
+			path: func(SetupOpts) string { return codexConfigPath() }, keys: tomlTopKeys,
+			owned: []string{"hooks", "features", "notify", "otel"}, perUserOnly: true}, true
 	}
 	return agentConfigSpec{}, false
+}
+
+// keepsCopy reports whether this setup keeps and puts back the file.
+func (s agentConfigSpec) keepsCopy(opts SetupOpts) bool {
+	return !s.perUserOnly || (!opts.ManagedEnterprise && !opts.sandboxNativeOTLP)
 }
 
 // agentConfigCopy is the last known good copy of an agent config file.
@@ -160,6 +186,20 @@ func jsoncTopKeys(data []byte) ([]string, bool) {
 	return agentConfigTopKeys(doc), true
 }
 
+func tomlTopKeys(data []byte) ([]string, bool) {
+	if len(data) > agentConfigMaxBytes {
+		return nil, false
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, true
+	}
+	doc := map[string]interface{}{}
+	if err := parseCodexTOML(data, &doc); err != nil {
+		return nil, false
+	}
+	return agentConfigTopKeys(doc), true
+}
+
 func agentConfigTopKeys(doc map[string]interface{}) []string {
 	keys := make([]string, 0, len(doc))
 	for key := range doc {
@@ -168,15 +208,15 @@ func agentConfigTopKeys(doc map[string]interface{}) []string {
 	return keys
 }
 
-// hasSettings reports whether a file holds anything but DefenseClaw's hooks
-// field.
+// hasSettings reports whether a file holds anything but the fields
+// DefenseClaw's setup writes.
 func (s agentConfigSpec) hasSettings(data []byte) bool {
 	keys, ok := s.keys(data)
 	if !ok {
 		return true // not a document setup wrote: the account's own
 	}
 	for _, key := range keys {
-		if key != "hooks" {
+		if !slices.Contains(s.owned, key) {
 			return true
 		}
 	}
@@ -353,6 +393,33 @@ func recordAgentConfigCopy(connectorName, dataDir, configPath string) {
 	}
 }
 
+// seedMissingPerUserSettings and recordPerUserSettingsCopy are the Claude
+// Code and Codex setup's: their settings file, on an unmanaged per-user
+// install only (GAP-0581).
+func seedMissingPerUserSettings(connectorName string, opts SetupOpts) error {
+	spec, ok := agentConfigSpecFor(connectorName)
+	if !ok || !spec.keepsCopy(opts) {
+		return nil
+	}
+	_, err := spec.seedMissing(opts.DataDir, spec.path(opts))
+	return err
+}
+
+func recordPerUserSettingsCopy(connectorName string, opts SetupOpts) {
+	if spec, ok := agentConfigSpecFor(connectorName); ok && spec.keepsCopy(opts) {
+		_ = spec.recordCopy(opts.DataDir, spec.path(opts)) // best effort: the next setup keeps it too
+	}
+}
+
+// removePerUserSettingsCopies is teardown's: the copy holds the account's
+// settings and describes a file DefenseClaw no longer manages.
+func removePerUserSettingsCopies(connectorName, dataDir string) error {
+	if spec, ok := agentConfigSpecFor(connectorName); ok {
+		return spec.removeCopies(dataDir)
+	}
+	return nil
+}
+
 // What the standalone guardian reports for an account's agent config
 // (AgentConfigStatus). The enterprise status and verify word them; the
 // worker's answer carries only the code, as the account controls the worker.
@@ -412,7 +479,7 @@ func ValidAgentConfigStatus(code string) bool {
 // for other connectors.
 func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, refresh bool) string {
 	spec, ok := agentConfigSpecFor(connectorName)
-	if !ok {
+	if !ok || spec.perUserOnly {
 		return ""
 	}
 	configPath := spec.path(opts)

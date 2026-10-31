@@ -13,6 +13,8 @@
 package cli
 
 import (
+	"fmt"
+
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
@@ -21,7 +23,11 @@ func identityRefreshPlatformPrivileged() bool { return windowsEnterpriseIsElevat
 
 // identityRefreshPlatformResolveUser resolves --user through the LSA.
 func identityRefreshPlatformResolveUser(user string) (string, string, error) {
-	return gateway.LookupWindowsAccount(user)
+	id, name, err := gateway.LookupWindowsAccount(user)
+	if err != nil {
+		return "", "", fmt.Errorf("no account %q on this computer (%v); --user takes the account name, DOMAIN\\name, .\\name or the SID", user, err)
+	}
+	return id, name, nil
 }
 
 // identityRefreshPlatformFlushOSCache flushes nothing: an account takes its

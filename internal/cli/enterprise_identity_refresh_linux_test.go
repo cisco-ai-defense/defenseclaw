@@ -11,6 +11,7 @@ package cli
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,12 +41,17 @@ func TestIdentityRefreshSSSDFlushIsPerUserWithUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	flush, warning := identityRefreshPlatformFlushOSCache("eng2@corp.example.com")
-	if flush.Flushed != "user" || flush.Method != "sss_cache" || warning != nil || ran[0] != "sss_cache -u eng2@corp.example.com" {
+	if flush.Flushed != "user" || flush.Method != "sss_cache" || warning != nil || ran[0] != "sss_cache -u eng2@corp.example.com" || ran[1] != "getent initgroups eng2@corp.example.com" {
 		t.Fatalf("--user: %+v %v ran %v", flush, warning, ran)
 	}
 	flush, _ = identityRefreshPlatformFlushOSCache("")
-	if flush.Flushed != "all" || ran[1] != "sss_cache -E" {
+	if flush.Flushed != "all" || len(ran) != 3 || ran[2] != "sss_cache -E" {
 		t.Fatalf("all: %+v ran %v", flush, ran)
+	}
+	// A local account is not in the SSSD cache: sss_cache exits 2, nothing to flush, no warning.
+	identityRefreshRun = func(string, ...string) error { return exec.Command("sh", "-c", "exit 2").Run() }
+	if flush, warning := identityRefreshPlatformFlushOSCache("r106pi1"); flush.Flushed != "none" || flush.Reason != "not_in_sssd_cache" || warning != nil {
+		t.Fatalf("local account: %+v %v", flush, warning)
 	}
 	identityRefreshRun = func(string, ...string) error { return errors.New("exit status 1") }
 	if flush, warning := identityRefreshPlatformFlushOSCache(""); flush.Flushed != "none" || flush.Reason != "failed" || warning == nil || warning.Code != "os_cache_flush_failed" {

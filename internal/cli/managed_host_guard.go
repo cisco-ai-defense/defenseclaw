@@ -104,9 +104,18 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 	for _, verb := range []string{"set", "unset"} {
 		verb := verb
 		addManagedWindowsAnswer(configCmd, verb, func([]string) error {
-			return withExitCode(fmt.Errorf("This device is managed: change config.yaml in the admin config (MDM or management plane); config %s did not change it", verb), 3)
+			return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: change config.yaml in the admin config (MDM or management plane); config %s did not change it", verb)), 3)
 		})
 	}
+	// The guardrail writers were an unknown command here, so a refused
+	// `guardrail disable` left no audit row (GAP-2639).
+	addManagedWindowsAnswer(root, "guardrail", func(args []string) error {
+		if command, ok := launcherAuditedWriter(append([]string{"guardrail"}, args...)); ok {
+			return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: change config.yaml in the admin config (MDM or management plane); %s did not change it", command)), 3)
+		}
+		return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: the guardrail is set in the admin config (MDM or management plane). %s",
+			windowsManagedStandardUserViewAnswer("The admission policy and guardrail thresholds", "policy show"))), 3)
+	})
 	for _, kind := range []string{"skill", "mcp", "plugin", "tool"} {
 		kind := kind
 		addManagedWindowsAnswer(root, kind, func(args []string) error {
@@ -117,22 +126,33 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 				if kind == "mcp" {
 					target = "<url>"
 				}
-				return withExitCode(fmt.Errorf("This device is managed: scan a %s with `defenseclaw scan %s %s`, "+
-					"which runs the gateway's %s scanner", kind, kind, target, kind), 3)
+				return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: scan a %s with `defenseclaw scan %s %s`, "+
+					"which runs the gateway's %s scanner", kind, kind, target, kind)), 3)
 			}
+			// The refusal named no next step (GAP-0523): the compiled
+			// admission policy is the administrator's view of these rules.
+			next := windowsManagedStandardUserViewAnswer("The admission policy", "policy show")
 			if len(args) == 0 || (args[0] != "block" && args[0] != "allow" && args[0] != "unblock") {
-				return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane)", kind), 3)
+				return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane). %s", kind, next)), 3)
 			}
-			return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it", kind, kind, args[0]), 3)
+			return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it. %s", kind, kind, args[0], next)), 3)
 		})
 	}
 }
+
+// managedDeviceAnswer is a managed Windows answer: a sentence that starts
+// like the per-user CLI's "This device is managed" refusal.
+type managedDeviceAnswer string
+
+func (a managedDeviceAnswer) Error() string { return string(a) }
 
 // addManagedWindowsAnswer adds a hidden root command name that only returns
 // answer, unless root already has that command. The answer needs no per-user
 // config: without the skip annotation the root pre-run tried to load
 // ~/.defenseclaw/config.yaml, which a managed computer never has, and printed
-// "failed to load config" instead.
+// "failed to load config" instead. With flag parsing off, --help reached the
+// answer too: `doctor --help` exited 1 with the refusal and no usage
+// (GAP-0536). Help prints the answer as the description and exits 0.
 func addManagedWindowsAnswer(root *cobra.Command, name string, answer func(args []string) error) {
 	for _, command := range root.Commands() {
 		if command.Name() == name {
@@ -145,10 +165,40 @@ func addManagedWindowsAnswer(root *cobra.Command, name string, answer func(args 
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
 		Annotations:        map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if rest, help := managedAnswerHelpArgs(args); help {
+				cmd.Long = answer(rest).Error()
+				return cmd.Help()
+			}
+			// A refused writer is a row in the managed audit log, as on
+			// Linux and macOS (GAP-2639). The words come from the
+			// writer table, never from the arguments.
+			words := append(strings.Fields(cmd.CommandPath())[1:], args...)
+			if command, ok := launcherAuditedWriter(words); ok {
+				reportManagedCommandRefusal(command, "")
+			}
 			return answer(args)
 		},
 	})
+}
+
+// managedAnswerHelpArgs reports whether args ask for help (-h or --help
+// before a "--") and returns them without the help flags.
+func managedAnswerHelpArgs(args []string) ([]string, bool) {
+	rest := make([]string, 0, len(args))
+	help := false
+	for i, arg := range args {
+		if arg == "--" {
+			rest = append(rest, args[i:]...)
+			break
+		}
+		if arg == "-h" || arg == "--help" {
+			help = true
+			continue
+		}
+		rest = append(rest, arg)
+	}
+	return rest, help
 }
 
 // managedWindowsAdminCommandAnswer tells a user on a managed Windows computer
@@ -180,13 +230,7 @@ func managedWindowsVersionChangeAnswer(where, command, done string) error {
 // Windows standalone computer. Setup puts no DefenseClaw command on PATH and
 // the docs name this path, so a hint naming a bare `defenseclaw-gateway` was
 // "not recognized" (GAP-1183). A seam for tests.
-var managedWindowsAdminCLI = func() string {
-	root := strings.TrimRight(strings.TrimSpace(os.Getenv("ProgramFiles")), `\`)
-	if root == "" {
-		root = `C:\Program Files`
-	}
-	return root + `\Cisco\DefenseClaw\bin\defenseclaw.exe`
-}
+var managedWindowsAdminCLI = managed.WindowsStandaloneAdminCLI
 
 // managedWindowsAdminStatusHint is the administrator's status check on a
 // managed Windows computer, as a PowerShell command that runs as typed.
@@ -426,9 +470,10 @@ func managedWindowsSetupRefusal(where string, args []string) error {
 			"users in a folder that only administrators can change, such as one under Program Files (Node.js installs npx in " +
 			"C:\\Program Files\\nodejs), so an administrator installs it there. "
 	}
+	// It named no command to run next (GAP-0523).
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so per-user setup "+
 		"commands are not available; your administrator manages its connectors and credentials. "+
-		"%sNothing was changed.", where, detail)
+		"%sYour administrator checks your account's connectors %s. Nothing was changed.", where, detail, managedWindowsAdminStatusHint())
 }
 
 func managedHostUnixRecord(warn io.Writer) (string, bool) {

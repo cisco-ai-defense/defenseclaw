@@ -316,7 +316,10 @@ func (a *APIServer) writeAssetListError(w http.ResponseWriter, r *http.Request, 
 		return
 	case errors.Is(err, configwrite.ErrLockBusy):
 		status = http.StatusServiceUnavailable
-	case errors.Is(err, configwrite.ErrConflict):
+	case errors.Is(err, configwrite.ErrConflict), errors.Is(err, configwrite.ErrInvalidDocument):
+		// A config.yaml the writer cannot edit (a second YAML document, a
+		// syntax error) is the operator's to fix, not a gateway fault
+		// (GAP-1421).
 		status = http.StatusConflict
 	}
 	a.writeJSON(w, status, map[string]string{"error": err.Error()})

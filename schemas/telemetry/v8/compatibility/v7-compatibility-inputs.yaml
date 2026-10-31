@@ -337,8 +337,6 @@ classes:
       "defenseclaw.judge.persist.batch_size": {type: "histogram", unit: "{row}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
       "defenseclaw.judge.persist.drops": {type: "counter", unit: "{drop}", labels: ["reason"]}
       "defenseclaw.judge.persist.queue_depth": {type: "gauge", unit: "{item}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
-      "defenseclaw.judge.semaphore.depth": {type: "updowncounter", unit: "{slot}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
-      "defenseclaw.judge.semaphore.drops": {type: "counter", unit: "{drop}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
       "defenseclaw.llm_bridge.latency": {type: "histogram", unit: "ms", labels: ["gen_ai.request.model", "status"]}
       "defenseclaw.otel.ingest.bytes": {type: "counter", unit: "By", labels: ["connector", "signal", "source"]}
       "defenseclaw.otel.ingest.last_seen_ts": {type: "gauge", unit: "s", labels: ["connector", "signal", "source"]}

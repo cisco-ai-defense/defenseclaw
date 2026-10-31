@@ -638,8 +638,14 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 	}
 	if len(report.Unprotected) != 0 {
 		fmt.Fprintln(out, "\nUnprotected agents (each runs without DefenseClaw hooks for that account only):")
+		sharedLines, sharedEntry := enterprisehooks.CollapseSharedOpenCodeV1(report.Unprotected)
+		for _, line := range sharedLines {
+			fmt.Fprintf(out, "    %s: %s\n", line.Code, line.Message())
+		}
 		for _, agent := range report.Unprotected {
-			fmt.Fprintf(out, "    %s: %s\n", agent.Code, agent.Message())
+			if !sharedEntry(agent) {
+				fmt.Fprintf(out, "    %s: %s\n", agent.Code, agent.Message())
+			}
 		}
 	}
 	if report.UnprotectedScanError != "" {

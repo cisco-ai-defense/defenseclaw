@@ -884,10 +884,12 @@ npm_config_prefixes() {
 
 # The installer's entry evidence: native fixed locations and npm/Bun
 # launcher symlinks to their exact entry: the Node script, or the native
-# bin/opencode.exe that current opencode-ai links (GAP-1356). The links are
-# looked for in the usual prefixes, npm's configured prefix and each PATH
-# folder. A folder name, manifest or plain command on PATH is not an entry
-# record: only a launcher link to the package's own entry is.
+# bin/opencode.exe the package links (GAP-1356). The links are looked for in
+# the usual prefixes, npm's configured prefix and each PATH folder. A folder
+# name, manifest or plain command on PATH is not an entry record: only a
+# launcher link to the package's own entry is. The V1 opencode-ai entries
+# remain only to stop a running V1 install safely during an upgrade
+# (setup requires V2); remove them with the 1.0.x upgrade path.
 installed_agent_programs() {
     local agent name path target base link prefix seen=":"
     local -a bases folders
@@ -913,7 +915,8 @@ installed_agent_programs() {
             [[ -L "${link}" ]] || continue
             target="$(resolved_agent_path "${link}")" || continue
             case "${agent}:${target}" in
-                OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+                OpenCode:*/node_modules/@opencode/cli/bin/opencode | OpenCode:*/node_modules/@opencode/cli/bin/opencode.exe | \
+                    OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
                     Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                     printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
             esac
@@ -933,7 +936,8 @@ runtime_agent_programs() {
         [[ -L "${link}" ]] || continue
         target="$(resolved_agent_path "${link}")" || continue
         case "${agent}:${target}" in
-            OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+            OpenCode:*/node_modules/@opencode/cli/bin/opencode | OpenCode:*/node_modules/@opencode/cli/bin/opencode.exe | \
+                OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
                 Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                 printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
         esac
@@ -1112,7 +1116,7 @@ loaded_plugin_agents() {
 assert_no_loaded_plugin_agents() {
     local agents
     agents="$(loaded_plugin_agents)"
-    [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: ${agents//$'\n'/, }"
+    [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw (OpenCode V2 keeps a background server after its window closes: stop it with 'opencode service stop'), then run this installer again; gateway still running: ${agents//$'\n'/, }"
 }
 
 stop_gateway() {
@@ -1408,6 +1412,14 @@ if [[ "${ROLLBACK}" == true ]]; then
     # the saved data before anything of this install changes.
     AUDIT_DAMAGED=""
     if version_lt "${back_to}" 1.0.0; then check_rollback_data; fi
+    # rel-1-0-6 GAP-0028: a release that cannot guard an agent here (OpenCode
+    # V2 before 1.0.6) says so before anything changes. A CLI without the
+    # check (a roll forward runs the older CLI) answers 2: no refusal.
+    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}" && [[ -x "${BIN_DIR}/defenseclaw" ]]; then
+        rollback_check_rc=0
+        "${BIN_DIR}/defenseclaw" migrate --check-rollback-to "${back_to}" || rollback_check_rc=$?
+        [[ ${rollback_check_rc} -ne 1 ]] || die "Rollback cancelled; nothing was changed (see above)"
+    fi
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true
     # The swap overwrites previous/GATEWAY_WAS_RUNNING with this install's state.

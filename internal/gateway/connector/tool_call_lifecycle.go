@@ -260,33 +260,7 @@ func (contract ToolCallLifecycleContract) ClassifyTerminalOutcome(
 		if !ok {
 			return ToolLifecycleOutcomeUnknown
 		}
-		output, exists := firstPresent(response, "output")
-		if !exists {
-			return ToolLifecycleOutcomeUnknown
-		}
-		// OpenCode's reviewed after-hook result always owns a string output
-		// field. The empty string is a valid result; a missing or differently
-		// typed field is a malformed bridge payload and cannot prove success.
-		if _, ok := output.(string); !ok {
-			return ToolLifecycleOutcomeUnknown
-		}
-		toolNameValue, _ := firstPresent(payload, "tool_name", "toolName")
-		toolName, _ := toolNameValue.(string)
-		if strings.EqualFold(strings.TrimSpace(toolName), "bash") {
-			metadata, ok := nestedMap(response, "metadata")
-			if !ok {
-				return ToolLifecycleOutcomeUnknown
-			}
-			exitValue, exists := firstPresent(metadata, "exit")
-			exitCode, ok := numericInt64(exitValue)
-			if !exists || !ok {
-				return ToolLifecycleOutcomeUnknown
-			}
-			if exitCode != 0 {
-				return ToolLifecycleOutcomeFailure
-			}
-		}
-		return ToolLifecycleOutcomeSuccess
+		return classifyOpenCodeV2Result(payload, response)
 	case "amp":
 		return classifyAmpResult(payload)
 	case AgentGatewayConnectorName:
@@ -949,7 +923,7 @@ func openCodeToolCallLifecycle() ToolCallLifecycleContract {
 		Version:                           ToolCallLifecycleContractVersion,
 		PreProposalEvents:                 []string{"tool.execute.before"},
 		AuthoritativeSuccessEvents:        []string{"tool.execute.after"},
-		AuthoritativeFailureEvents:        []string{},
+		AuthoritativeFailureEvents:        []string{"tool.execute.after"},
 		AuthoritativeDenialEvents:         []string{},
 		AuthoritativePendingDiscardEvents: []string{"session.idle"},
 		AuthoritativeTerminalEvents:       []string{"session.deleted"},
@@ -960,7 +934,7 @@ func openCodeToolCallLifecycle() ToolCallLifecycleContract {
 			StructuredActionEvents: []string{"tool.execute.before"},
 			ResultContentEvents:    []string{"tool.execute.after"},
 			StateTransitionEvents:  []string{},
-			AuditOnlyEvents:        []string{"session.created", "session.error", "session.idle", "session.deleted"},
+			AuditOnlyEvents:        []string{"session.created", "session.status", "session.idle", "session.error", "session.deleted"},
 		},
 		CoveredToolSurfaces: []ToolSurface{
 			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,
@@ -968,12 +942,12 @@ func openCodeToolCallLifecycle() ToolCallLifecycleContract {
 			ToolSurfaceSkills,
 		},
 		OfficialSourceURLs: []string{
-			"https://github.com/anomalyco/opencode/blob/014614d35b397775e5d397a490fc72368c894ec2/packages/plugin/src/index.ts",
-			"https://github.com/anomalyco/opencode/blob/014614d35b397775e5d397a490fc72368c894ec2/packages/opencode/src/session/tools.ts",
+			"https://github.com/anomalyco/opencode/blob/f669c46c9604ea3d70b8a7ed1f0c10f3a5ac1f61/packages/plugin/src/promise/tool.ts",
+			"https://github.com/anomalyco/opencode/blob/f669c46c9604ea3d70b8a7ed1f0c10f3a5ac1f61/packages/core/src/tool.ts",
 		},
 		Limitations: []string{
-			"Stateful success requires the v7 bridge, which forwards input.args plus the actual output and awaits delivery before returning to the agent.",
-			"Exceptions can skip tool.execute.after, and delegated-task paths can emit it without a result; only a validated result payload is authoritative success. Bash additionally requires metadata.exit=0.",
+			"V2 binds event.id to tool_call_id and preserves native status and structured results. Missing or malformed results never prove success; shell requires a completed result with exit zero.",
+			"Lifecycle delivery is best-effort and disposed on plugin unload; it is not an enforcement boundary.",
 		},
 	}
 }

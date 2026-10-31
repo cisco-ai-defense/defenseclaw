@@ -262,7 +262,7 @@ func TestGatewayStatusShowsTheKernelSensor(t *testing.T) {
 	if got, want := kernelSensorStatusLine(&snap), "Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing"; got != want {
 		t.Fatalf("line %q, want %q", got, want)
 	}
-	if out := captureStdout(t, func() { printSubsystems(&snap) }); !strings.Contains(out, "Kernel sensor: Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing") {
+	if out := captureStdout(t, func() { printSubsystems(&snap, 0) }); !strings.Contains(out, "Kernel sensor: Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing") {
 		t.Fatalf("subsystems:\n%s", out)
 	}
 	var native gateway.HealthSnapshot
@@ -272,7 +272,7 @@ func TestGatewayStatusShowsTheKernelSensor(t *testing.T) {
 	}
 	var plain gateway.HealthSnapshot
 	_ = json.Unmarshal([]byte(`{"ai_runtime":{"details":{"planes":{"c":{"running":true}}}}}`), &plain)
-	if out := captureStdout(t, func() { printSubsystems(&plain) }); strings.Contains(out, "Kernel sensor") || kernelSensorStatusLine(&plain) != "" {
+	if out := captureStdout(t, func() { printSubsystems(&plain, 0) }); strings.Contains(out, "Kernel sensor") || kernelSensorStatusLine(&plain) != "" {
 		t.Fatalf("a gateway without a backend prints a kernel line:\n%s", out)
 	}
 }

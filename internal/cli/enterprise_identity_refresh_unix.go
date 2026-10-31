@@ -13,9 +13,8 @@
 package cli
 
 import (
-	"context"
+	"fmt"
 	"os"
-	"os/exec"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
@@ -26,15 +25,12 @@ func identityRefreshPlatformPrivileged() bool { return os.Geteuid() == 0 }
 // identityRefreshPlatformResolveUser resolves --user through the account
 // database as root (NSS, Open Directory).
 func identityRefreshPlatformResolveUser(user string) (string, string, error) {
-	return gateway.LookupIdentityRefreshAccount(user)
+	id, name, err := gateway.LookupIdentityRefreshAccount(user)
+	if err != nil {
+		return "", "", fmt.Errorf("no account %q on this host (%v); --user takes the account name as id prints it, user@domain or the uid", user, err)
+	}
+	return id, name, nil
 }
 
 // identityRefreshCommandTimeout bounds one OS cache flush command.
 const identityRefreshCommandTimeout = 30 * time.Second
-
-// identityRefreshRun runs one OS cache command; replaceable in tests.
-var identityRefreshRun = func(path string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), identityRefreshCommandTimeout)
-	defer cancel()
-	return exec.CommandContext(ctx, path, args...).Run()
-}

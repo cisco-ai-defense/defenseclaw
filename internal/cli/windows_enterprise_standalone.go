@@ -2317,14 +2317,17 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 		result.CoverageComplete, result.SecurityComplete = false, false
 		return
 	}
+	// One machine-wide OpenCode V1 copy is one warning with the user count
+	// (GAP-0071); every account still counts below.
+	sharedLines, sharedEntry := enterprisehooks.CollapseSharedOpenCodeV1(agents)
+	for _, line := range sharedLines {
+		result.AddWarning(line.Code, line.Message())
+	}
 	for _, agent := range agents {
-		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified ||
-			agent.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete ||
-			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
-			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
-			// No contract, an incomplete install scan, a headless CLI path
-			// without hooks, or an IDE that cannot read global hooks: the
-			// deployment does not cover it (GAP-0151).
+		if enterprisehooks.UnprotectedCodeLeavesCoverageIncomplete(agent.Code) {
+			// The deployment does not cover it: no contract, an incomplete
+			// install scan, a CLI path or IDE without hooks (GAP-0151), or
+			// OpenCode V1 (rel-1-0-6 GAP-0037).
 			result.CoverageComplete = false
 		}
 		// unverified_versions: refuse that nothing enforces fails verify.
@@ -2332,7 +2335,7 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
 			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor) {
 			result.AddError(agent.Code, agent.Message())
-		} else {
+		} else if !sharedEntry(agent) {
 			result.AddWarning(agent.Code, agent.Message())
 		}
 		result.SecurityComplete = false
@@ -3541,6 +3544,22 @@ func runWindowsEnterpriseStandaloneEnsure(
 	return err
 }
 
+// windowsEnterpriseStagedNotStarted reports a deployment installed with
+// NOSTART=1 that never started: no pending transaction, the gateway not
+// ready, and the gateway and hook guardian services both disabled. Nothing
+// enforces a policy there yet.
+func windowsEnterpriseStagedNotStarted(report *windowsEnterpriseInstallerReport) bool {
+	if report == nil || !report.Installed || report.TransactionPending || report.GatewayReady || report.probeFailed {
+		return false
+	}
+	for _, name := range []string{report.GatewayService, report.GuardianService} {
+		if strings.TrimSpace(name) == "" || !strings.EqualFold(strings.TrimSpace(report.ServiceStartModes[name]), "disabled") {
+			return false
+		}
+	}
+	return true
+}
+
 var windowsEnterpriseRestoreStartModes = restoreWindowsEnterpriseStartModes
 var windowsEnterpriseRestoreServiceName = lazyregexp.New(`^DefenseClaw[A-Za-z0-9_]+$`)
 
@@ -3937,7 +3956,15 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 
 	keptConfig := ""
 	var startOnlyKeys []string
-	if plan.Action == "upgrade" && (plan.Reason == "drift:config" || plan.Reason == "drift:bundle") {
+	if plan.Action == "upgrade" && (plan.Reason == "drift:config" || plan.Reason == "drift:bundle") &&
+		opts.bundle != nil && windowsEnterpriseStagedNotStarted(statusReport) {
+		// A deployment staged with NOSTART=1 runs no gateway, so a signed
+		// bundle has no hot path there: the transaction that starts the
+		// services applies it, and finish confirms it against the running
+		// gateway. This is how a single-app first install (Setup /ensure
+		// CONFIG= BUNDLE=) starts on the signed config.
+		keptConfig = keepInstalledWindowsEnterpriseEditedConfig()
+	} else if plan.Action == "upgrade" && (plan.Reason == "drift:config" || plan.Reason == "drift:bundle") {
 		applied, keys := windowsEnterpriseHotConfigApply(ctx, cmd, opts, script, statusReport, result)
 		if applied || opts.hotConfigRestoreFailed {
 			// A failed apply whose restore could not be proven stops here:

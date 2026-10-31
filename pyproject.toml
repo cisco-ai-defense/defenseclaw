@@ -68,21 +68,28 @@ dependencies = [
     # selects a supported ONNX Runtime for each Python line. Keep that floor in
     # published-wheel metadata as well as the native installer's uv lock.
     "magika>=1.0.2,<2",
-    # MCP scanner >=4.3.1 pins vulnerable LiteLLM releases exactly. 4.3.0 is
-    # the newest trusted release whose METADATA permits the project's secure
-    # LiteLLM floor. Pin its PyPI-attested wheel and hash until upstream ships
-    # a release compatible with LiteLLM >=1.103.10.
-    # TODO(mcp-scanner 4.8.x): the newest release, 4.8.7 (2026-10-20), pins
-    # litellm==1.93.2, which still carries GHSA-g5ff-637f-6q2m (fixed in
-    # 1.95.0) and CVE-2026-114612, and requires mcp>=2.0 where DefenseClaw
-    # caps mcp<2; a plain pip install of the wheel cannot resolve it. Move to
-    # 4.8.x only when upstream relaxes the LiteLLM pin (for example
-    # litellm>=1.103.10,<2) and DefenseClaw's stdio scan path supports mcp 2.
-    "cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/af/40/d42943f9e3da40ee9b5f00439fda38b62fc379034383f85a6e06d7825796/cisco_ai_mcp_scanner-4.3.0-py3-none-any.whl#sha256=ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812 ; python_version>='3.11'",
-    # CVE-2026-52869, CVE-2026-52870, and CVE-2026-59950 affect older MCP
-    # SDK releases. DefenseClaw imports the SDK directly for stdio scanning,
-    # so keep the fixed floor in published-wheel metadata as well as uv.lock.
-    "mcp>=1.30.0,<2",
+    # MCP Scanner 4.8.7 (the newest release, PyPI-attested; pin its wheel and
+    # hash). Its METADATA pins litellm==1.93.2, which carries
+    # GHSA-w4c7-34wj-hqm8, GHSA-g5ff-637f-6q2m and CVE-2026-114612. DefenseClaw
+    # overrides that pin (tool.uv override-dependencies, litellm below), so
+    # uv.lock, the hash-pinned release requirements and every installer that
+    # installs them (--require-hashes --no-deps) get the secure litellm. The
+    # one metadata conflict this leaves is allowed, and only that one, by
+    # scripts/check_python_dependency_metadata.py (GAP-0020). 4.8.x requires
+    # Python >=3.11.4 and the MCP SDK 2.x.
+    # TODO(mcp-scanner 4.8.8): cisco-ai-defense/mcp-scanner#295 relaxes the pin
+    # to litellm>=1.103.10,<2; once it ships, pin 4.8.8 and drop the allowance.
+    "cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/6a/cd/1728f69e5d874010ee62c0a29a23c7edfec0a9b1f3642d21893944145957/cisco_ai_mcp_scanner-4.8.7-py3-none-any.whl#sha256=55142609f3519b8fd80ec491c1c3bb9e17c2370fb65d6052a07022d4a8906350 ; python_full_version>='3.11.4'",
+    # MCP Scanner 4.8.x requires the MCP SDK 2.x (server/discover protocol
+    # negotiation). 2.2.0 fixes CVE-2026-59951, CVE-2026-116684,
+    # CVE-2026-116685 and CVE-2026-116686 in 2.0.0-2.1.1; the older
+    # CVE-2026-52869, CVE-2026-52870 and CVE-2026-59950 are 1.x-only.
+    # DefenseClaw imports the SDK directly for stdio scanning, so keep the
+    # floor in published-wheel metadata as well as uv.lock.
+    "mcp>=2.2.0,<3",
+    # GHSA-6v7p-g79w-8964 is fixed in msgpack 1.2.1. It comes in through
+    # mcp-scanner 4.8 -> pip-audit -> cachecontrol, which accept older releases.
+    "msgpack>=1.2.1,<2",
     # Declare MCP Scanner's YARA engine directly so uv can select the local,
     # Native Setup substitutes the repository-owned, YARA-X-backed compatibility
     # wheel and validates the exact MCP Scanner API; source installs use
@@ -285,6 +292,7 @@ override-dependencies = [
     # which carries CVE-2026-48817/48818 and CVE-2026-54282/54283 fixes.
     "starlette>=1.3.1,<1.4",
     "fastapi>=0.137.1,<0.138",
+    "msgpack>=1.2.1,<2",  # GHSA-6v7p-g79w-8964 fixed in 1.2.1
     "textual>=8.2.8,<9",
     "pygments>=2.20,<3",
 ]

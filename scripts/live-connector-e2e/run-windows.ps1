@@ -6418,7 +6418,7 @@ function New-DangerousCommandPayload(
         [IO.File]::WriteAllText($path, ($payload | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
         return $path
     }
-    $effectiveToolName = if ($Connector -eq 'opencode') { 'bash' } else { $ToolName }
+    $effectiveToolName = if ($Connector -eq 'opencode') { 'shell' } else { $ToolName }
     $toolEvent = switch ($Connector) {
         'amp' { 'tool.call' }
         'copilot' { 'preToolUse' }
@@ -6697,6 +6697,9 @@ function Assert-OpenCodePluginContract {
     }
     $plugin = [IO.File]::ReadAllText($pluginPath)
     foreach ($marker in @(
+        'export default {',
+        'ctx.tool.hook("execute.before"',
+        'ctx.tool.hook("execute.after"',
         '"tool.execute.before": async',
         'const verdict = await defenseclawPost(',
         'if (verdict && verdict.reason) throw defenseclawBlock(client, verdict.reason);',
@@ -6723,7 +6726,7 @@ function Assert-OpenCodePluginContract {
 
     Invoke-OpenCodePluginProbe allow 'Write-Output defenseclaw-opencode-allow' 'contract-allow' | Out-Null
     Invoke-OpenCodePluginProbe block 'Remove-Item -Force C:\ -Recurse' 'contract-block' | Out-Null
-    Write-Result 'opencode:plugin-before' pass 'allow returned and denied tool threw synchronously; after remained observe-only'
+    Write-Result 'opencode:plugin-before' pass 'V2 awaited before callback allowed or rejected; after remained observe-only'
 
     $original = [IO.File]::ReadAllBytes($pluginPath)
     Invoke-Tool 'defenseclaw-gateway' @('stop') @(0, 1) -Timeout 60 | Out-Null
@@ -8994,7 +8997,7 @@ function Install-Agent {
             'codex' { '@openai/codex@' + ($env:CODEX_VERSION ?? 'latest') }
             'amp' { '@ampcode/cli@' + ($env:AMP_VERSION ?? 'latest') }
             'copilot' { '@github/copilot@' + ($env:COPILOT_VERSION ?? 'latest') }
-            'opencode' { 'opencode-ai@' + ($env:OPENCODE_VERSION ?? 'latest') }
+            'opencode' { '@opencode/cli@' + ($env:OPENCODE_VERSION ?? '2.1.4') }
         }
         Invoke-Tool 'npm.cmd' @('install', '--no-audit', '--no-fund', '--prefix', $script:ToolRoot, $package) -Timeout 300 | Out-Null
         $command = switch ($Connector) {

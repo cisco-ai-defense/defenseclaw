@@ -89,6 +89,12 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 		t.Fatalf("a host without a standalone deployment got %v", root.Commands())
 	}
 	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	// GAP-2639: a refused writer is reported for the managed audit log; a
+	// reader, a scan and help are not.
+	var reported []string
+	restoreReport := reportManagedCommandRefusal
+	t.Cleanup(func() { reportManagedCommandRefusal = restoreReport })
+	reportManagedCommandRefusal = func(command, reason string) { reported = append(reported, command+"/"+reason) }
 	addManagedWindowsSetupAnswer(root)
 	// The installed managed Windows binary answers the documented writer
 	// commands before Cobra can fall through to generic usage.
@@ -100,6 +106,9 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	}{
 		{configCmd, "set", []string{"guardrail.mode", "observe"}, "admin config"},
 		{root, "skill", []string{"block", "dc-x"}, "asset_policy.skill"},
+		// GAP-0523: the refusals name the administrator's view of the rules.
+		{root, "skill", []string{"list"}, "defenseclaw.exe' policy show`. Nothing was changed."},
+		{root, "mcp", []string{"allow", "x"}, "mcp allow did not change it. The admission policy"},
 		{root, "plugin", []string{"scan", "--json", `C:\p`}, "defenseclaw scan plugin <path>"},
 	} {
 		child, _, err := tc.parent.Find([]string{tc.name})
@@ -123,7 +132,8 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	for _, args := range [][]string{{"setup"}, {"setup", "claude-code"}, {"setup", "codex"}, {"setup", "guardrail", "--disable"}, {"setup", "llm"}, {"setup", "kiro"}, {"setup", "trusted-paths"}} {
 		root.SetArgs(args)
 		if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "per-user setup commands are not available") ||
-			strings.Contains(err.Error(), "Rotating") || !strings.HasSuffix(err.Error(), "Nothing was changed.") {
+			strings.Contains(err.Error(), "Rotating") || !strings.HasSuffix(err.Error(), "Nothing was changed.") ||
+			!strings.Contains(err.Error(), "checks your account's connectors from an elevated PowerShell prompt with `& '") {
 			t.Fatalf("%v on a managed Windows computer: %v", args, err)
 		}
 	}
@@ -144,6 +154,35 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") ||
 		!strings.Contains(err.Error(), "session-only HERMES_HOME is NOT COVERED") {
 		t.Fatalf("doctor on a managed Windows computer: %v", err)
+	}
+	// GAP-0536: --help of an answer printed the refusal and exited 1; it
+	// prints usage with the answer as the description and exits 0.
+	for _, args := range [][]string{{"doctor", "--help"}, {"doctor", "-h"}, {"setup", "codex", "--help"}, {"skill", "list", "-h"}} {
+		var out strings.Builder
+		root.SetOut(&out)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil || !strings.Contains(out.String(), "Usage:") ||
+			!strings.Contains(out.String(), "managed") {
+			t.Fatalf("%v on a managed Windows computer: err %v, output %q", args, err, out.String())
+		}
+	}
+	root.SetOut(io.Discard)
+	reported = nil
+	for _, args := range [][]string{
+		{"guardrail", "disable"}, {"guardrail", "status"}, {"setup", "codex", "--yes"},
+		{"skill", "block", "dc-x"}, {"skill", "list"}, {"plugin", "scan", `C:\p`}, {"doctor"}, {"doctor", "--help"},
+	} {
+		root.SetArgs(args)
+		err := root.Execute()
+		if args[0] == "guardrail" && (commandExitCode(err) != 3 || !strings.Contains(err.Error(), "This device is managed")) {
+			t.Fatalf("%v on a managed Windows computer: %v", args, err)
+		}
+	}
+	if set, _, err := configCmd.Find([]string{"set"}); err == nil {
+		_ = set.RunE(set, []string{"guardrail.mode", "observe"})
+	}
+	if want := []string{"guardrail disable/", "setup/", "skill block/", "config set/"}; strings.Join(reported, ",") != strings.Join(want, ",") {
+		t.Fatalf("reported refusals %v, want %v", reported, want)
 	}
 	// GAP-1719: `upgrade` was a bare unknown command.
 	root.SetArgs([]string{"upgrade"})

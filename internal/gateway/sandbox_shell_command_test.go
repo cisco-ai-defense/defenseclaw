@@ -45,7 +45,7 @@ type workdirShellCall struct {
 }
 
 // workdirShellCalls are the shell tool shapes of the installed harnesses
-// whose shell tool names a working directory (OpenCode 1.18 bash workdir,
+// whose shell tool names a working directory (OpenCode V2 shell workdir,
 // Hermes 0.21 terminal workdir, Amp shell_command workdir, Cursor Agent
 // preToolUse Shell cwd and beforeShellExecution cwd, Devin 3000.10 exec
 // workdir, Kiro CLI 2.24 shell/execute_bash working_dir, agy run_command
@@ -56,8 +56,8 @@ func workdirShellCalls() []workdirShellCall {
 	const c = workdirMarkerCommand
 	return []workdirShellCall{
 		{
-			name: "opencode-bash", connector: "opencode", version: "1.18.10", contract: "opencode-hooks-v1", path: "/api/v1/opencode/hook",
-			body: `{"hook_event_name":"tool.execute.before","tool_name":"bash","tool_input":{"command":"` + c + `","timeout":120000,"workdir":"{DIR}"},` +
+			name: "opencode-shell", connector: "opencode", version: "2.1.4", contract: "opencode-hooks-v2", path: "/api/v1/opencode/hook",
+			body: `{"hook_event_name":"tool.execute.before","tool_name":"shell","tool_input":{"command":"` + c + `","timeout":120000,"workdir":"{DIR}","background":false},` +
 				`"session_id":"s1","turn_id":"m1","tool_call_id":"c1","agent_name":"build","cwd":"/work/app","load_heartbeat":true,"arguments_authoritative":true,"mcp_identity_status":"not_mcp"}`,
 			dirs: []string{"/work/app/sub", "/work/app", "/tmp", "sub"},
 		},
@@ -268,8 +268,8 @@ func TestSandboxShellCommandOnlyAddsVerdicts(t *testing.T) {
 		`{"command":"ls -la","workdir":"/work/app","dc_unlisted_arg":"DCE2E-BLOCK-MARKER"}`,
 	} {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			_, token := f.mint(t, "dc-opencode-harmless-"+strconv.Itoa(i), "opencode", "1.18.10", "opencode-hooks-v1", f.project)
-			resp := f.hook(t, "/api/v1/opencode/hook", token, `{"hook_event_name":"tool.execute.before","tool_name":"bash","tool_input":`+args+
+			_, token := f.mint(t, "dc-opencode-harmless-"+strconv.Itoa(i), "opencode", "2.1.4", "opencode-hooks-v2", f.project)
+			resp := f.hook(t, "/api/v1/opencode/hook", token, `{"hook_event_name":"tool.execute.before","tool_name":"shell","tool_input":`+args+
 				`,"session_id":"s1","turn_id":"m1","tool_call_id":"c1","agent_name":"build","cwd":"/work/app","load_heartbeat":true,`+
 				`"arguments_authoritative":true,"mcp_identity_status":"not_mcp"}`)
 			if resp["action"] == "block" || resp["raw_action"] == "block" {
@@ -283,7 +283,7 @@ func TestSandboxShellCommandScope(t *testing.T) {
 	args := json.RawMessage(`{"command":"ls","dc_unlisted_arg":1}`)
 	// Host requests are judged on the command too (GAP-0686), except a Codex
 	// shell call where Codex runs it in PowerShell (codexPowerShellCommand).
-	if command, tool := sandboxShellCommand(context.Background(), "opencode", "tool.execute.before", "bash", "bash", args); string(command) != `{"command":"ls"}` || tool != "bash" {
+	if command, tool := sandboxShellCommand(context.Background(), "opencode", "tool.execute.before", "shell", "shell", args); string(command) != `{"command":"ls"}` || tool != "shell" {
 		t.Fatalf("host request = %s, %q", command, tool)
 	}
 	previous := codexShellRunsPowerShell
@@ -294,7 +294,7 @@ func TestSandboxShellCommandScope(t *testing.T) {
 	}
 	codexShellRunsPowerShell = previous
 	ctx := sandboxauth.WithRequest(context.Background(), sandboxTestBinding("opencode"), nil)
-	if command, tool := sandboxShellCommand(ctx, "opencode", "tool.execute.before", "bash", "bash", args); string(command) != `{"command":"ls"}` || tool != "bash" {
+	if command, tool := sandboxShellCommand(ctx, "opencode", "tool.execute.before", "shell", "shell", args); string(command) != `{"command":"ls"}` || tool != "shell" {
 		t.Fatalf("sandbox request = %s, %q", command, tool)
 	}
 	// Another connector's binding is judged as host traffic; a tool that is

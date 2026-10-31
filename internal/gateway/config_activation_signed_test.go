@@ -322,6 +322,13 @@ func TestManagedStartupRunsTheSignedBundleInMemory(t *testing.T) {
 			if err := mgr.Reload(t.Context(), "watch"); err == nil {
 				t.Fatal("the edited config.yaml was activated after the start fallback")
 			}
+			// The repair puts the signed config back: the refusal clears.
+			if err := os.WriteFile(path, rendered, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := mgr.Reload(t.Context(), "watch"); err != nil || liveReloadErrorText() != "" {
+				t.Fatalf("after the repair: err=%v last reload error %q", err, liveReloadErrorText())
+			}
 		})
 	}
 }

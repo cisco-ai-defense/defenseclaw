@@ -657,7 +657,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             original_save()
 
         def select(_data_dir, connectors):
-            events.append("select-exact-1.18.11")
+            events.append("select-exact-2.1.4")
             self.assertEqual(tuple(connectors), ("opencode",))
             return record_test_setup_agent_selections(_data_dir, connectors)
 
@@ -696,9 +696,9 @@ class TestAdditiveSetupCommand(unittest.TestCase):
                 allow_trusted_path_prompt=True,
             )
 
-        self.assertEqual(events[0], "select-exact-1.18.11")
-        self.assertLess(events.index("select-exact-1.18.11"), events.index("generic-trust-prompt"))
-        self.assertLess(events.index("select-exact-1.18.11"), events.index("save"))
+        self.assertEqual(events[0], "select-exact-2.1.4")
+        self.assertLess(events.index("select-exact-2.1.4"), events.index("generic-trust-prompt"))
+        self.assertLess(events.index("select-exact-2.1.4"), events.index("save"))
         selected.assert_called_once()
         trusted.assert_called_once()
         generic.assert_not_called()
@@ -728,7 +728,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             patch(
                 "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
                 side_effect=click.ClickException(
-                    "exact SST OpenCode 1.18.20 rejected; PATH OpenCode 1.18.19 is not authority"
+                    "exact SST OpenCode 1.18.20 rejected; PATH OpenCode 2.1.4 is not authority"
                 ),
             ),
             patch(

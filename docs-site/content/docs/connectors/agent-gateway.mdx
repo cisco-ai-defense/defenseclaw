@@ -28,7 +28,7 @@ The setting takes effect at the next gateway restart.
 - **Managed device.** Only the lifecycle or your administrator's managed policy sets the key. The route is served only on the managed hook socket (`/run/defenseclaw-hook/hook.sock` on Linux), where the kernel names the caller. The caller must be an enrolled user calling for themselves, or the service account of a [trusted connector](/docs/enterprise/trusted-connectors). Any other caller, root included, is refused with `enterprise_managed_connector_unknown`.
 - **Windows managed devices** have no hook socket, so the route is not served there in 1.0.6.
 
-Releases before 1.0.6 refuse the setting.
+Builds before 1.0.6 refuse `connectors.agent_gateway` as unknown, so a managed policy that sets it must require release 1.0.6 or later.
 
 ## Event contract
 

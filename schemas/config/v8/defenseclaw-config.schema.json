@@ -1570,6 +1570,13 @@
           "minimum": 0,
           "maximum": 86400
         },
+        "max_parallel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256,
+          "default": 0,
+          "description": "Most LLM judge calls sent to the judge model at once; 0 = no limit. With a limit, tool-call judging goes first and keeps one slot, so a slow local model does not queue it behind prompt checks. Releases before 1.0.6 refuse this key."
+        },
         "llm": {
           "$ref": "#/$defs/llm"
         },
@@ -1903,6 +1910,18 @@
             "none"
           ],
           "default": "full"
+        },
+        "internal_domains": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 254,
+            "pattern": "^\\.?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.?$"
+          },
+          "description": "The organization's own domains. A download from a host equal to or under one does not start the download-then-execute alert."
         },
         "detection_strategy": {
           "$ref": "#/$defs/detectionStrategy"

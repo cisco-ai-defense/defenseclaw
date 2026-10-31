@@ -395,6 +395,10 @@ type APIServer struct {
 	// boot via SetHookJudge. Per-connector gating happens in
 	// hookJudgeInspect via guardrail.judge.hook_connectors.
 	hookJudge atomic.Pointer[LLMJudge]
+
+	// userDownloads remembers the hosts recent user prompts ask to download
+	// from and run (#1390), per session, judge or not.
+	userDownloads userDownloadRequests
 	// hookJudgeSem bounds concurrent hook-lane judge executions,
 	// mirroring EventRouter.judgeSem on the proxy lane. At capacity
 	// the judge is skipped (fail-open to the regex/AID verdict)
@@ -3232,7 +3236,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if a.rejectWindowsGatewayPath(w, req.Target) {
+	if a.rejectWindowsGatewayPath(w, "skill", req.Target, req.Target) {
 		return
 	}
 	if isBundledSkillScanPath(req.Target) {
@@ -3242,7 +3246,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.rejectUnreadableScanTarget(w, "target directory", req.Target, "SKILL.md") {
+	if a.rejectUnreadableScanTarget(w, "skill", "target directory", req.Target, "SKILL.md") {
 		return
 	}
 
@@ -3295,8 +3299,8 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 // would otherwise die on the same error and the caller would get its process
 // name, its exit code or its Python traceback (GAP-0229, GAP-0256). A path that
 // exists but is not a directory is only logged: the scanner reports it.
-func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string, mustRead ...string) bool {
-	if a.rejectWindowsGatewayPath(w, target) {
+func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, kind, what, target string, mustRead ...string) bool {
+	if a.rejectWindowsGatewayPath(w, kind, target, target) {
 		return true
 	}
 	info, err := os.Stat(target)
@@ -3326,7 +3330,7 @@ func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, targ
 	}
 	for _, name := range mustRead {
 		file := filepath.Join(target, name)
-		if a.rejectWindowsGatewayPath(w, file) {
+		if a.rejectWindowsGatewayPath(w, kind, file, target) {
 			return true
 		}
 		handle, openErr := os.Open(file)
@@ -3343,12 +3347,42 @@ func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, targ
 	return false
 }
 
-func (a *APIServer) rejectWindowsGatewayPath(w http.ResponseWriter, path string) bool {
-	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+// requireGatewayPathOutsideUserProfiles is the managed Windows profile
+// check of a scan path (a seam for tests).
+var requireGatewayPathOutsideUserProfiles = managed.RequireWindowsGatewayPathOutsideUserProfiles
+
+// rejectWindowsGatewayPath answers 403 for a path the managed Windows gateway
+// may not read. For a scan of kind ("" for none) it adds how an
+// administrator scans target instead.
+func (a *APIServer) rejectWindowsGatewayPath(w http.ResponseWriter, kind, path, target string) bool {
+	if err := requireGatewayPathOutsideUserProfiles(path); err != nil {
+		message := err.Error()
+		if kind != "" {
+			message += "; " + windowsProfileScanNextStep(kind, target)
+		}
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": message})
 		return true
 	}
 	return false
+}
+
+// windowsProfileScanNextStep is the next step of a managed Windows scan of a
+// folder inside a user profile. The refusal said to scan it as the signed-in
+// user, which managed scans refuse a standard account (GAP-0526); the
+// documented route is an administrator's copy outside the profiles.
+func windowsProfileScanNextStep(kind, target string) string {
+	trimmed := strings.TrimRight(target, `\/`)
+	name := trimmed[strings.LastIndexAny(trimmed, `\/`)+1:]
+	if name == "" || strings.HasSuffix(name, ":") {
+		name = kind
+	}
+	review := `C:\DefenseClawReview`
+	copyTo := review + `\` + name
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	return "standard accounts cannot run managed scans, so an administrator copies the folder out of the profiles and scans the copy " +
+		"from an elevated PowerShell prompt: `New-Item -ItemType Directory -Force " + quote(review) + " | Out-Null; " +
+		"Copy-Item -Recurse -Force -LiteralPath " + quote(target) + " -Destination " + quote(copyTo) + "`, then `& " +
+		quote(managed.WindowsStandaloneAdminCLI()) + " scan " + kind + " " + quote(copyTo) + "`"
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
@@ -3428,7 +3462,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if a.rejectWindowsGatewayPath(w, req.Target) {
+	if a.rejectWindowsGatewayPath(w, "plugin", req.Target, req.Target) {
 		return
 	}
 	if a.isManagedPluginScanTarget(req.Target) {
@@ -3438,7 +3472,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.rejectUnreadableScanTarget(w, "plugin target directory", req.Target) {
+	if a.rejectUnreadableScanTarget(w, "plugin", "plugin target directory", req.Target) {
 		return
 	}
 
@@ -3585,7 +3619,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if a.rejectWindowsGatewayPath(w, req.Target) {
+	if a.rejectWindowsGatewayPath(w, "", req.Target, req.Target) {
 		return
 	}
 

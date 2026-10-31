@@ -118,6 +118,26 @@ func TestEnsureRefusesAnEditedInstalledConfigWithWriteACL(t *testing.T) {
 	}
 }
 
+// GAP-1450: a folder ACL entry let a standard user replace config.yaml; the
+// plain ensure refused the edit but left the entry in place, so verify kept
+// naming it until a second ensure. The refusing ensure removes it.
+func TestRefusedInPlaceEditRemovesTheConfigFolderACL(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	applied := h.read(h.env.Layout.ConfigPath)
+	edited := editConfigInPlace(t, h, "mode: observe", "mode: action")
+	etc := h.env.P(filepath.Dir(h.env.Layout.ConfigPath))
+	h.runner.acls = map[string][]string{etc: {"user:standard allow list,add_file,search,delete_child,writeattr"}}
+	r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireError(t, r, codeConfig)
+	if got := h.runner.acls[etc]; len(got) != 0 {
+		t.Fatalf("the refused ensure left the config folder ACL entries %v", got)
+	}
+	if got := h.read(h.env.Layout.ConfigPath); got == edited || got != applied {
+		t.Fatal("the refused edit is in place")
+	}
+}
+
 // chmodHookRunner calls onChmod with the path before the fake removes its ACL.
 type chmodHookRunner struct {
 	*fakeRunner

@@ -1787,6 +1787,11 @@ type GuardrailConfig struct {
 	CiscoTrustLevel string      `mapstructure:"cisco_trust_level" yaml:"cisco_trust_level,omitempty"`
 	Judge           JudgeConfig `mapstructure:"judge"                yaml:"judge"`
 	HILT            HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
+	// InternalDomains are the organization's own domains (corp.example.com):
+	// a host equal to or under one is inside its network, so a download
+	// from it does not start chain.download_then_execute_same_artifact
+	// (#1390). Empty by default. Read through IsInternalDomainHost.
+	InternalDomains []string `mapstructure:"internal_domains" yaml:"internal_domains,omitempty"`
 
 	// BlockAt and AlertAt replace the block and alert levels the rule
 	// pack's profile implies (strict / default / permissive) when the
@@ -2312,7 +2317,7 @@ func (g *GuardrailConfig) Validate() error {
 	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {
 		return err
 	}
-	return nil
+	return validateInternalDomains(g.InternalDomains)
 }
 
 // validateGuardrailMode accepts the empty string (inherit/default) and
@@ -2438,6 +2443,13 @@ type JudgeConfig struct {
 	// scripts abandon the gateway call at curl --max-time 10; the
 	// gateway applies a 5s default when unset.
 	HookTimeout float64 `mapstructure:"hook_timeout" yaml:"hook_timeout,omitempty"`
+
+	// MaxParallel bounds how many judge calls the gateway sends to the
+	// judge model at once; 0 (the default) sets no bound. With a bound,
+	// tool-call judging goes ahead of prompt judging and keeps one of the
+	// slots when there are two or more, so a slow local model does not
+	// queue a pending tool call behind a turn's prompt checks (#1395).
+	MaxParallel int `mapstructure:"max_parallel" yaml:"max_parallel,omitempty"`
 
 	// LLM overrides the top-level llm: block for the LLM judge. Prefer
 	// Config.ResolveLLM("guardrail.judge") over reading LLM / legacy

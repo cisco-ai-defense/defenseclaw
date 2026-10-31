@@ -2411,10 +2411,14 @@ class JudgeConfig:
     # (the proxy lane is unaffected); ``"*"`` enables every connector.
     hook_connectors: list[str] = field(default_factory=list)
     # Hook-lane judge timeout in seconds (Go ``JudgeConfig.HookTimeout``).
-    # 0 means the gateway default (5s, sized under the hook scripts'
+    # 0 means the gateway default (8s, sized under the hook scripts'
     # ``curl --max-time 10`` budget — the proxy lane's 30s would let the
     # client hang up before a verdict lands).
     hook_timeout: float = 0.0
+    # Most judge calls sent to the judge model at once (Go
+    # ``JudgeConfig.MaxParallel``); 0 = no limit. With a limit, tool-call
+    # judging goes ahead of prompt judging (#1395).
+    max_parallel: int = 0
     # Log judge prompts and responses (was DEFENSECLAW_JUDGE_TRACE).
     trace: bool = False
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
@@ -2694,6 +2698,10 @@ class GuardrailConfig:
     custom_packs: dict[str, CustomRulePack] = field(default_factory=dict)
     rules: GuardrailRulesConfig = field(default_factory=GuardrailRulesConfig)
     cisco_trust_level: str = ""  # full | advisory | none ("" = full)
+    # The organization's own domains: a download from a host equal to or
+    # under one does not start the download-then-execute alert (#1390).
+    # Mirrors ``GuardrailConfig.InternalDomains`` in internal/config/config.go.
+    internal_domains: list[str] = field(default_factory=list)
     # Lowest severity a tool call is blocked / alerted at (``CRITICAL``
     # | ``HIGH`` | ``MEDIUM`` | ``LOW``). Empty keeps the rule pack's
     # profile levels (strict: MEDIUM / LOW, permissive: CRITICAL / HIGH,
@@ -5053,6 +5061,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             judge.pop("hook_connectors", None)
         if not judge.get("hook_timeout"):
             judge.pop("hook_timeout", None)
+        if not judge.get("max_parallel"):
+            judge.pop("max_parallel", None)
     # Mirror Go's ``yaml:"connectors,omitempty"`` — drop the empty
     # per-connector overrides map so existing single-connector configs
     # stay byte-identical after a load/save round-trip. The block
@@ -5194,6 +5204,8 @@ def _serialize_v9_guardrail_keys(guardrail: Any) -> None:
     _prune_v9_block(guardrail, "custom_packs")
     if not guardrail.get("cisco_trust_level"):
         guardrail.pop("cisco_trust_level", None)
+    if not guardrail.get("internal_domains"):
+        guardrail.pop("internal_domains", None)
     judge = guardrail.get("judge")
     if isinstance(judge, dict) and not judge.get("trace"):
         judge.pop("trace", None)
@@ -5502,6 +5514,8 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "guardrail.judge.hook_connectors",
         # Hook-lane judge timeout: 0 = gateway default, stripped on save.
         "guardrail.judge.hook_timeout",
+        # Judge call bound: 0 = no limit, stripped on save.
+        "guardrail.judge.max_parallel",
         # Identity-based guardrail profile selection: empty = no profiles.
         "guardrail.profile_assignments",
         "guardrail.default_profile",
@@ -6399,6 +6413,16 @@ def _merge_cisco_ai_defense(raw: dict[str, Any] | None) -> CiscoAIDefenseConfig:
     )
 
 
+def _judge_max_parallel(value: Any) -> int:
+    """guardrail.judge.max_parallel as an int (0 = no limit), as Go reads it."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
     if not raw:
         return JudgeConfig()
@@ -6413,6 +6437,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         timeout=raw.get("timeout", 30.0),
         hook_connectors=raw.get("hook_connectors", []),
         hook_timeout=raw.get("hook_timeout", 0.0),
+        max_parallel=_judge_max_parallel(raw.get("max_parallel", 0)),
         trace=raw.get("trace", False) is True,
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
@@ -6457,6 +6482,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
         rules=_merge_guardrail_rules(raw.get("rules")) or GuardrailRulesConfig(),
         cisco_trust_level=str(raw.get("cisco_trust_level", "") or ""),
+        internal_domains=_string_list(raw.get("internal_domains")),
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
         connector=raw.get("connector", ""),

@@ -981,7 +981,7 @@ func TestEventHistoryWriterSignedAndUnavailableIntegrity(t *testing.T) {
 	}
 }
 
-func TestEventHistoryVerificationDetectsStoredTamperingAndSupportsRange(t *testing.T) {
+func TestEventHistoryVerificationDetectsStoredTampering(t *testing.T) {
 	store := newV8HistoryStore(t)
 	signer := &testProjectionSigner{key: bytes.Repeat([]byte{0x31}, 32), keyID: "integrity-key-v1"}
 	writer, err := NewEventHistoryWriter(store, signer, nil, testLocalProfileResolver{profile: observabilityredaction.ProfileNone})
@@ -1003,44 +1003,20 @@ func TestEventHistoryVerificationDetectsStoredTamperingAndSupportsRange(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
-	page, err := writer.VerifyEventHistoryRange(
-		t.Context(), base, base.Add(time.Second), 10,
-	)
+	legacy, err := writer.VerifyEventHistoryRecord(t.Context(), "legacy-range")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Truncated || len(page.Records) != 3 || page.Records[0].RecordID != first.RecordID() ||
-		page.Records[1].RecordID != "legacy-range" || page.Records[2].RecordID != second.RecordID() {
-		t.Fatalf("range verification order/results = %#v", page)
-	}
-	if legacy := page.Records[1]; legacy.Status != EventHistoryNotProjected || legacy.ProjectionHashValid ||
-		legacy.IntegrityVerified {
+	if legacy.Status != EventHistoryNotProjected || legacy.ProjectionHashValid || legacy.IntegrityVerified {
 		t.Fatalf("legacy verification = %#v", legacy)
 	}
-	for _, result := range []EventHistoryVerification{page.Records[0], page.Records[2]} {
-		if result.Status != EventHistoryVerified || !result.ProjectionHashValid || !result.IntegrityVerified {
-			t.Fatalf("range verification = %#v", result)
+	for _, record := range []observability.Record{first, second} {
+		result, err := writer.VerifyEventHistoryRecord(t.Context(), record.RecordID())
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	truncated, err := writer.VerifyEventHistoryRange(t.Context(), base, base.Add(time.Second), 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !truncated.Truncated || len(truncated.Records) != 2 {
-		t.Fatalf("bounded range did not report truncation: %#v", truncated)
-	}
-	for _, invalid := range []struct {
-		from, until time.Time
-		limit       int
-	}{
-		{from: time.Time{}, until: base.Add(time.Second), limit: 1},
-		{from: base, until: base, limit: 1},
-		{from: base.Add(time.Second), until: base, limit: 1},
-		{from: base, until: base.Add(time.Second), limit: 0},
-		{from: base, until: base.Add(time.Second), limit: maxEventHistoryVerificationRange + 1},
-	} {
-		if _, err := writer.VerifyEventHistoryRange(t.Context(), invalid.from, invalid.until, invalid.limit); err == nil {
-			t.Fatalf("invalid range accepted: %#v", invalid)
+		if result.Status != EventHistoryVerified || !result.ProjectionHashValid || !result.IntegrityVerified {
+			t.Fatalf("verification = %#v", result)
 		}
 	}
 

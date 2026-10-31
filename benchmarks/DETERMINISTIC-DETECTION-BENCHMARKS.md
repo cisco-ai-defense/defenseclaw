@@ -368,6 +368,7 @@ estimate population prevalence or FPR.
 | SQL Server command execution enable → invoke | 2 | 8 | 0 |
 | Wireless capture → deauthentication, same BSSID | 2 | 10 | 0 |
 | Reverse-shell artifact write → persistence install | 4 | 10 | 4 |
+| Download → execute, same file, public IP or external hostname (#1390) | 9 | 11 | 0 |
 
 Only the last row carries block-eligible fixture truth. Every profile scored
 4 TP, 10 TN, 0 FP, and 0 FN and blocked the four complete proofs.

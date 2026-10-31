@@ -971,13 +971,18 @@ function Get-InstalledAgentPrograms([object[]]$Processes = @()) {
     $roaming = [string]$env:APPDATA
     if ($roaming) {
         $npm = Join-Path $roaming "npm"
-        $native = Resolve-AgentPath (Join-Path $npm "node_modules\opencode-ai\bin\opencode.exe")
-        if ($native) { $installed[$native.ToLowerInvariant()] = "opencode" }
+        # Recognize a previous V1 process only so upgrades can stop it; setup admits V2 only.
+        foreach ($relative in @("node_modules\@opencode\cli\bin\opencode.exe", "node_modules\opencode-ai\bin\opencode.exe")) {
+            $native = Resolve-AgentPath (Join-Path $npm $relative)
+            if ($native) { $installed[$native.ToLowerInvariant()] = "opencode" }
+        }
         foreach ($name in @("opencode", "amp")) {
-            $relative = if ($name -eq "opencode") { "node_modules\opencode-ai\bin\opencode" } else { "node_modules\@sourcegraph\amp\dist\main.js" }
+            $relatives = if ($name -eq "opencode") { @("node_modules\@opencode\cli\bin\opencode", "node_modules\opencode-ai\bin\opencode") } else { @("node_modules\@sourcegraph\amp\dist\main.js") }
             if (-not (Test-Path -LiteralPath (Join-Path $npm ($name + ".cmd")) -PathType Leaf)) { continue }
-            $entry = Resolve-AgentPath (Join-Path $npm $relative)
-            if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+            foreach ($relative in $relatives) {
+                $entry = Resolve-AgentPath (Join-Path $npm $relative)
+                if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+            }
         }
     }
     foreach ($process in $Processes) {
@@ -987,9 +992,11 @@ function Get-InstalledAgentPrograms([object[]]$Processes = @()) {
         if (-not $folder) { continue }
         foreach ($name in @("opencode", "amp")) {
             if (-not (Test-Path -LiteralPath (Join-Path $folder ($name + ".cmd")) -PathType Leaf)) { continue }
-            $relative = if ($name -eq "opencode") { "node_modules\opencode-ai\bin\opencode" } else { "node_modules\@sourcegraph\amp\dist\main.js" }
-            $entry = Resolve-AgentPath (Join-Path $folder $relative)
-            if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+            $relatives = if ($name -eq "opencode") { @("node_modules\@opencode\cli\bin\opencode", "node_modules\opencode-ai\bin\opencode") } else { @("node_modules\@sourcegraph\amp\dist\main.js") }
+            foreach ($relative in $relatives) {
+                $entry = Resolve-AgentPath (Join-Path $folder $relative)
+                if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+            }
         }
     }
     try {
@@ -1140,7 +1147,7 @@ function Assert-NoLoadedPluginAgents {
         if (("$($owner.Domain)\$($owner.User)") -ieq $current) { $loaded += "$agent (PID $($process.ProcessId))" }
     }
     if ($loaded.Count) {
-        Die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: $($loaded -join ', ')"
+        Die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw (OpenCode V2 keeps a background server after its window closes: stop it with 'opencode service stop'), then run this installer again; gateway still running: $($loaded -join ', ')"
     }
 }
 
@@ -5182,6 +5189,13 @@ function Invoke-Rollback {
     }
     Assert-NoActiveConnectorRecovery "Rollback to $backTo"
     if (-not $rollForward) {
+        # rel-1-0-6 GAP-0028: a release that cannot guard an agent here
+        # (OpenCode V2 before 1.0.6) says so before anything changes.
+        $rollbackVenv = Get-Variable -Name Venv -ValueOnly -ErrorAction SilentlyContinue
+        $rollbackCli = if ($rollbackVenv) { Join-Path $rollbackVenv "Scripts\defenseclaw.exe" } else { "" }
+        if ($rollbackCli -and (Test-Path -LiteralPath $rollbackCli) -and ((Invoke-Native $rollbackCli @("migrate", "--check-rollback-to", $backTo)) -eq 1)) {
+            Die "Rollback cancelled; nothing was changed (see above)"
+        }
         Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
         $stale = @(Get-StaleAgentEvidence (Join-Path $Previous "data"))
         if ($stale.Count -and $backTo -match '^(?:0\.8\.10|1\.0\.[0-3])$') {

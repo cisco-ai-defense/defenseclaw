@@ -1435,31 +1435,33 @@ def discover_plugin_directories(
     claimed = PluginInstallClaims()
     for plugin in plugins:
         claimed.add_directory(plugin, root)
-    if (connector or "").casefold().replace("-", "") != "opencode":
-        for entry, path in _child_directories(root):
-            if entry in {"cache", "__pycache__"} or entry.startswith(".") or (
-                claude_root and entry == "marketplaces"
+    # V2 auto-loads every immediate directory alongside direct JS/TS files.
+    # Keep the shared no-follow discovery and manifest validation for both.
+    opencode_root = (connector or "").casefold().replace("-", "") == "opencode"
+    for entry, path in _child_directories(root):
+        if (
+            not opencode_root and (entry in {"cache", "__pycache__"} or entry.startswith("."))
+        ) or (claude_root and entry == "marketplaces"):
+            continue
+        try:
+            plugin_id, manifest = canonical_plugin_id(path)
+        except PluginIdentityError as exc:
+            if not str(exc).startswith(
+                ("invalid plugin manifest", "could not read plugin manifest")
             ):
-                continue
-            try:
-                plugin_id, manifest = canonical_plugin_id(path)
-            except PluginIdentityError as exc:
-                if not str(exc).startswith(
-                    ("invalid plugin manifest", "could not read plugin manifest")
-                ):
-                    raise
-                plugin_id, manifest = entry, ""
-            if not claimed.add(plugin_id, path, root):
-                continue
-            plugins.append(
-                PluginDirectory(
-                    id=plugin_id,
-                    name=plugin_id,
-                    path=path,
-                    origin=root,
-                    manifest=manifest,
-                )
+                raise
+            plugin_id, manifest = entry, ""
+        if not claimed.add(plugin_id, path, root):
+            continue
+        plugins.append(
+            PluginDirectory(
+                id=plugin_id,
+                name=plugin_id,
+                path=path,
+                origin=root,
+                manifest=manifest,
             )
+        )
     for plugin_id, path in _amp_plugin_files(root, connector):
         if not claimed.add(plugin_id, path, root):
             continue

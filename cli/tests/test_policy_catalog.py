@@ -68,6 +68,32 @@ def test_firewall_template_is_not_a_named_policy(policy_dir: Path) -> None:
     assert not pc.is_named_policy(["not", "a", "mapping"])  # type: ignore[arg-type]
 
 
+def test_active_policy_is_the_activated_one_of_two_equal_presets(policy_dir: Path, tmp_path: Path) -> None:
+    # GAP-1022: a policy created from strict holds strict's values; the one
+    # `policy activate` named is the active one, until the config changes.
+    from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
+
+    (policy_dir / "w5-team.yaml").write_text(
+        open(pc.policy_file("strict", policy_dir), encoding="utf-8").read().replace("name: strict", "name: w5-team")
+    )
+    cfg = default_config()
+    cfg.policy_dir = str(policy_dir)
+    cfg.data_dir = str(tmp_path)
+    strict = pc.load_policy_yaml(pc.policy_file("strict", policy_dir))
+    cfg.admission = _admission_from_policy(strict)
+    _apply_policy_guardrail(cfg, strict)
+    cfg.watch.rescan_enabled = strict["watch"]["rescan_enabled"]
+    cfg.watch.rescan_interval_min = strict["watch"]["rescan_interval_min"]
+    assert pc.active_policy_name(policy_dir, cfg) == "strict"  # nothing activated: first match
+    pc.record_activated_policy(cfg, "w5-team")
+    assert [p.name for p in pc.list_named_policies(policy_dir, cfg) if p.active] == ["w5-team"]
+    pc.record_activated_policy(cfg, "strict")
+    assert pc.active_policy_name(policy_dir, cfg) == "strict"
+    pc.record_activated_policy(cfg, "w5-team")
+    cfg.guardrail.block_at = "LOW"  # no longer the preset's values
+    assert pc.active_policy_name(policy_dir, cfg) == ""
+
+
 def test_active_policy_is_the_preset_the_config_holds(policy_dir: Path) -> None:
     # config_version 9 records no active policy: it is the preset whose
     # keys the config holds (no keys set is the shipped default).

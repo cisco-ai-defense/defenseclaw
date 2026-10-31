@@ -1716,7 +1716,7 @@ class TestCheckHookContractLock(unittest.TestCase):
                     {
                         "connectors": {
                             "opencode": {
-                                "contract_id": "opencode-hooks-v1",
+                                "contract_id": "opencode-hooks-v2",
                                 "compatibility_status": "unversioned",
                                 "hook_script_version": "v7",
                             }
@@ -1738,10 +1738,10 @@ class TestCheckHookContractLock(unittest.TestCase):
                     {
                         "connectors": {
                             "opencode": {
-                                "contract_id": "opencode-hooks-v1",
+                                "contract_id": "opencode-hooks-v2",
                                 "compatibility_status": "known",
-                                "raw_agent_version": "1.18.19",
-                                "normalized_agent_version": "1.18.19",
+                                "raw_agent_version": "2.1.4",
+                                "normalized_agent_version": "2.1.4",
                                 "hook_script_version": "v7",
                             }
                         }
@@ -1763,10 +1763,10 @@ class TestCheckHookContractLock(unittest.TestCase):
                     {
                         "connectors": {
                             "opencode": {
-                                "contract_id": "opencode-hooks-v1",
+                                "contract_id": "opencode-hooks-v2",
                                 "compatibility_status": "known",
-                                "raw_agent_version": "1.18.19",
-                                "normalized_agent_version": "1.18.19",
+                                "raw_agent_version": "2.1.4",
+                                "normalized_agent_version": "2.1.4",
                                 "hook_script_version": "v7",
                                 "agent_executable_source": "setup-selected",
                                 "agent_executable": os.path.join(tmp, "opencode.exe"),
@@ -1796,10 +1796,10 @@ class TestCheckHookContractLock(unittest.TestCase):
                     {
                         "connectors": {
                             "opencode": {
-                                "contract_id": "opencode-hooks-v1",
+                                "contract_id": "opencode-hooks-v2",
                                 "compatibility_status": "known",
-                                "raw_agent_version": "1.18.19",
-                                "normalized_agent_version": "1.18.19",
+                                "raw_agent_version": "2.1.4",
+                                "normalized_agent_version": "2.1.4",
                                 "hook_script_version": "v7",
                                 "agent_executable_source": "setup-selected",
                                 "agent_executable": "/opt/opencode/bin/opencode",

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	osuser "os/user"
 	"path/filepath"
@@ -1707,6 +1708,15 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "profile resolution needs the gateway token"})
 		return
 	}
+	a.serveGuardrailProfileResolve(w, r, r.URL.Query(), false)
+}
+
+// serveGuardrailProfileResolve answers a profile resolution for query
+// (user, connector, agent, caller_facts). own is the caller's own view on
+// the hook socket (handleOwnProfileExplain): the subject is the caller,
+// administrator caller_facts are not taken, and the digests of the other
+// profiles are left out.
+func (a *APIServer) serveGuardrailProfileResolve(w http.ResponseWriter, r *http.Request, query url.Values, own bool) {
 	base := a.runtimeConfigSnapshot()
 	// Explain the base that decisions use: the published generation.
 	if g := a.generation(); g != nil && g.Config != nil && (base == nil || !base.SecureClientIntegration()) {
@@ -1716,7 +1726,6 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		a.writeJSON(w, http.StatusNotFound, map[string]string{"error": "guardrail profiles are not supported with the Secure Client integration"})
 		return
 	}
-	query := r.URL.Query()
 	user := strings.TrimSpace(query.Get("user"))
 	connectorName := config.NormalizeConnectorName(query.Get("connector"))
 	agent := strings.TrimSpace(query.Get("agent"))
@@ -1741,6 +1750,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		"connector":           connectorName,
 		"agent":               agent,
 	}
+	if own {
+		out["own"] = true
+	}
 	// The subject is resolved with or without profiles, so the identity check
 	// (`profile explain --user U --json | jq .subject`) answers on every
 	// install (GAP-0280).
@@ -1749,7 +1761,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	refreshedFacts := false
 	if user != "" {
 		found, err := profileExplainSubjectLookup(user)
-		if caller, ok := profileExplainCallerSubject(query.Get("caller_facts"), user); ok {
+		if caller, ok := profileExplainCallerSubject(query.Get("caller_facts"), user); ok && !own {
 			// The administrator's own NSS lookup as root resolved the account
 			// (GAP-0500); the gateway's lookup above still refreshed what the
 			// hooks read, and the cache block says what they use.
@@ -1908,9 +1920,48 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		out["warnings"] = warnings
 	}
 	out["effective"] = profileEffectiveView(effective, connectorName)
-	digests := guardrailProfileDigests(set)
-	out["profiles"] = digests
+	if !own {
+		// The other profiles are the administrator's (owner rule: users see
+		// only their own policy).
+		out["profiles"] = guardrailProfileDigests(set)
+	}
 	a.writeJSON(w, http.StatusOK, out)
+}
+
+// handleOwnProfileExplain serves GET managed.OwnProfileExplainPath on the
+// hook socket: the guardrail profile the gateway applies to the socket's
+// kernel-verified caller, for `defenseclaw guardrail profile explain` and
+// `enterprise linux|macos profile-explain` of a standard user on a managed
+// computer, who holds no gateway token (GAP-0431, GAP-0422). Users see only
+// their own policy: the subject is always the caller, and a user parameter
+// that names anyone else is refused.
+func (a *APIServer) handleOwnProfileExplain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	peer, ok := managedHookPeerFromContext(r.Context())
+	if !ok {
+		writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonPeerUnverified)
+		return
+	}
+	query := r.URL.Query()
+	self := strconv.Itoa(peer.UID)
+	if user := strings.TrimSpace(query.Get("user")); user != "" && user != self && (peer.Name == "" || !useridentity.EqualFold(user, peer.Name)) {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "own_profile_only",
+			"message": "you can explain only your own guardrail profile (omit --user, or give your account name or uid); " +
+				"an administrator explains other accounts",
+		})
+		return
+	}
+	own := url.Values{"user": {self}}
+	for _, key := range []string{"connector", "agent"} {
+		if value := strings.TrimSpace(query.Get(key)); value != "" {
+			own.Set(key, value)
+		}
+	}
+	a.serveGuardrailProfileResolve(w, r, own, true)
 }
 
 // profileCacheWindowNote says how long a group membership change takes to

@@ -19,6 +19,7 @@ internal/gateway/connector/hooks/amp-plugin-secure-client.ts text eol=lf
 internal/gateway/connector/hooks/opencode-plugin-secure-client.js text eol=lf
 internal/gateway/connector/hooks/*.sh text eol=lf
 internal/enterprisepolicy/opencode_managed_plugin.js text eol=lf
+internal/opencodebridge/adapter.js text eol=lf
 # The host variants of the Amp and OpenCode bridges; the plugin scanner pins
 # their SHA-256, so a Windows checkout must keep them LF as well.
 internal/gateway/connector/testdata/bridge_host/** text eol=lf

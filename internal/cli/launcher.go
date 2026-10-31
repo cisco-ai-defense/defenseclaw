@@ -90,6 +90,10 @@ func launcherOffers(args []string) bool {
 	switch args[0] {
 	case "sandbox", "-h", "--help", "--version":
 		return true
+	case "guardrail":
+		// The user's own guardrail profile (GAP-0431, GAP-0422), and nothing
+		// else of the guardrail tree.
+		return len(args) >= 3 && args[1] == "profile" && args[2] == "explain"
 	case "help":
 		// `help` explains the sandbox tree; cobra would answer `help status`
 		// with the root help, as if status existed. `help --help` is the
@@ -118,6 +122,9 @@ func prepareLauncherRoot(root *cobra.Command) {
 		}
 	}
 	root.RemoveCommand(others...)
+	if guardrail := newLauncherGuardrailCommand(); guardrail != nil {
+		root.AddCommand(guardrail)
+	}
 	root.Use = launcherCommand
 	root.Short = "Run coding agents in sandboxes on this managed computer"
 	root.Long = `Your organization manages DefenseClaw on this computer. Here defenseclaw runs
@@ -127,7 +134,8 @@ your coding agents in sandboxes under the policy your organization set for you:
   defenseclaw sandbox status         show your sandbox and managed policy state
   defenseclaw sandbox policy explain show the policy that applies to you
 
-Every other DefenseClaw command is for administrators.`
+"defenseclaw guardrail profile explain" shows the guardrail profile that
+applies to your agents. Every other DefenseClaw command is for administrators.`
 	root.CompletionOptions.DisableDefaultCmd = true
 	// The gateway's own flags (--host, --port, --version-json, ...) belong to
 	// the commands removed above; the launcher refuses them, so its help does
@@ -344,15 +352,23 @@ var launcherWriters = map[string]map[string]bool{
 		"rule": true, "suppress": true, "use-pack": true,
 	},
 	"policy": {"activate": true, "create": true, "delete": true, "edit": true},
+	"skill":  {"allow": true, "block": true, "unblock": true},
+	"mcp":    {"allow": true, "block": true, "unblock": true},
+	"plugin": {"allow": true, "block": true, "unblock": true},
+	"tool":   {"allow": true, "block": true, "unblock": true},
 }
+
+// launcherSingleWordWriters are the writers named by one word: they change
+// the installation or its connectors.
+var launcherSingleWordWriters = map[string]bool{"uninstall": true, "setup": true, "upgrade": true, "rollback": true}
 
 // launcherAuditedWriter returns the command words of a refused writer.
 func launcherAuditedWriter(args []string) (string, bool) {
 	if len(args) == 0 {
 		return "", false
 	}
-	if args[0] == "uninstall" {
-		return "uninstall", true
+	if launcherSingleWordWriters[args[0]] {
+		return args[0], true
 	}
 	if len(args) > 1 && launcherWriters[args[0]][args[1]] {
 		if args[0] == "guardrail" && args[1] == "protection" && len(args) > 2 && args[2] == "list" {

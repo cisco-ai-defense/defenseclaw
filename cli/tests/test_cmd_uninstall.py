@@ -35,7 +35,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import click
+import pytest
 from click.testing import CliRunner
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_agent_configs(monkeypatch):
+    # The sweep also reads the real Codex and Claude Code configs of the account (GAP-0376).
+    monkeypatch.setattr(cmd_uninstall, "_agent_config_wiring_files", lambda: [])
 
 
 @contextlib.contextmanager
@@ -1326,6 +1333,30 @@ class RenderPlanConnectorTests(unittest.TestCase):
                 include_openclaw=True,
             )
         self.assertEqual(got, ("openclaw", "codex"))
+
+    def test_teardown_connectors_include_an_inactive_agent_config_that_names_defenseclaw(self):
+        # GAP-0376: Codex inactive, no backup marker, but config.toml still
+        # runs DefenseClaw's notify launcher: uninstall tears Codex down too.
+        with tempfile.TemporaryDirectory() as data_dir, tempfile.TemporaryDirectory() as home:
+            codex = os.path.join(home, "config.toml")
+            claude = os.path.join(home, "settings.json")
+            with open(codex, "w") as fh:
+                fh.write("notify = ['C:/Users/u/.local/bin/defenseclaw-hook.exe', 'notify']\nmodel = 'keep'\n")
+            with open(claude, "w") as fh:
+                fh.write('{"model": "keep"}')
+            with patch.object(
+                cmd_uninstall, "_agent_config_wiring_files", return_value=[("codex", codex), ("claudecode", claude)]
+            ):
+                got = cmd_uninstall._teardown_connectors(
+                    "claudecode", data_dir=data_dir, openclaw_config_file="", include_openclaw=False
+                )
+                with open(codex, "w") as fh:
+                    fh.write("model = 'keep'\n")
+                clean = cmd_uninstall._teardown_connectors(
+                    "claudecode", data_dir=data_dir, openclaw_config_file="", include_openclaw=False
+                )
+        self.assertEqual(got, ("claudecode", "codex"))
+        self.assertEqual(clean, ("claudecode",))
 
     def test_teardown_connectors_include_inactive_amp_backup(self):
         with tempfile.TemporaryDirectory() as data_dir:

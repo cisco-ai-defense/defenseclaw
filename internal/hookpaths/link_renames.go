@@ -709,6 +709,64 @@ func commandWords(text string) []string {
 	})
 }
 
+// movedEntriesAwayFromState reports that no entry a followed move takes is a
+// disk link to SSH or DefenseClaw state, a directory that holds one, or an
+// entry of state: the links of the command follow a move, a disk link moved
+// to a new name does not. A find -exec mv takes the entries of its start
+// trees that match its pattern. A tree too large to read is not clear.
+// The moves after a directory change are read so (GAP-2602).
+func movedEntriesAwayFromState(ops []renameOp, moves []findMove, home string) bool {
+	state := newStateReach(home)
+	entryClear := func(path string) bool {
+		if parent, ok := ResolveWriteTarget(filepath.Dir(path)); !ok || state.within(parent) {
+			return false
+		}
+		info, err := os.Lstat(path)
+		switch {
+		case os.IsNotExist(err):
+			return true
+		case err != nil:
+			return false
+		case info.Mode()&os.ModeSymlink != 0:
+			resolved, ok := ResolveWriteTarget(path)
+			return ok && !state.hits(resolved)
+		case info.IsDir():
+			return treesAwayFromState([]string{path}, state)
+		}
+		return true
+	}
+	for _, op := range ops {
+		for _, source := range op.sources {
+			if !entryClear(absolutePath(source, op.wd)) {
+				return false
+			}
+		}
+	}
+	entries := 0
+	deadline := time.Now().Add(linkedTreeBudget)
+	for _, move := range moves {
+		for _, start := range move.starts {
+			clear := true
+			err := filepath.WalkDir(start, func(path string, entry fs.DirEntry, err error) error {
+				entries++
+				if err != nil || entries > maxLinkedTreeEntries || entries%256 == 0 && time.Now().After(deadline) {
+					clear = false
+					return filepath.SkipAll
+				}
+				if matched, _ := filepath.Match(move.pattern, entry.Name()); matched && !entryClear(path) {
+					clear = false
+					return filepath.SkipAll
+				}
+				return nil
+			})
+			if err != nil || !clear {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // treesAwayFromState walks dirs and the directories their disk links reach,
 // and reports that no disk link reaches state.
 func treesAwayFromState(dirs []string, state stateReach) bool {
