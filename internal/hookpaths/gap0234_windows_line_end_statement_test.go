@@ -119,3 +119,38 @@ func TestPosixLineEndEndsStatement(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-6:GAP-0234 (lead, BATCH36): PowerShell runs a (...), $(...) or
+// @(...) argument of echo, Write-Output or Write-Host as a nested
+// statement, so a writer inside it is checked as a writer, not as text.
+func TestWindowsNestedStatementOfPrintIsChecked(t *testing.T) {
+	const home = `C:\Users\b00`
+	dialects := []actionfacts.Dialect{"", actionfacts.DialectPowerShell}
+	for _, printer := range []string{"echo", "Write-Output", "Write-Host"} {
+		for _, open := range []string{"(", "$(", "@("} {
+			for _, writer := range gap0234SecondLineWriters {
+				command := printer + " " + open + writer + ")"
+				for _, dialect := range dialects {
+					if got := ActionCommandDecisionWithDialectAndGlobFacts(command, home, home, dialect, nil); got != "protected-target" {
+						t.Errorf("dialect %q %q = %q, want protected-target", dialect, command, got)
+					}
+				}
+			}
+		}
+	}
+	for _, command := range []string{
+		"echo (Get-Date)",
+		"Write-Output $(git status)",
+		"echo ('a' + 'b')",
+		"Write-Host @(1, 2, 3)",
+		"echo '(cp a.txt b.txt)'",
+		"Write-Output \"done (ok)\"",
+		"echo (Get-ChildItem -Name)\ngit status",
+	} {
+		for _, dialect := range dialects {
+			if got := ActionCommandDecisionWithDialectAndGlobFacts(command, home, home, dialect, nil); got != "" {
+				t.Errorf("dialect %q %q = %q, want allow", dialect, command, got)
+			}
+		}
+	}
+}
