@@ -25,4 +25,8 @@ func runUnixLifecycle(_ *cobra.Command, platform, _ string, _ *unixLifecycleOpti
 	return withExitCode(errors.New("`enterprise "+platform+"` manages Linux and macOS hosts; use `enterprise windows` on Windows"), 1639)
 }
 
+func runUnixTransactionWatch(_ *cobra.Command, platform string, _ int, _ string) error {
+	return runUnixLifecycle(nil, platform, "", nil)
+}
+
 // runEnterpriseSecret is implemented in enterprise_secret_windows.go.

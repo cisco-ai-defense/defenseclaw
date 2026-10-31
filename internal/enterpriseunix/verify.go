@@ -410,13 +410,7 @@ func (l *lifecycle) recoverPendingFromVerify(ctx context.Context) string {
 	if env.Geteuid() != 0 {
 		return "the next mutating run recovers it"
 	}
-	var err error
-	if env.GOOS == "darwin" {
-		_, err = env.Runner.Run(ctx, "launchctl", "kickstart", "system/"+labelApply)
-	} else {
-		_, err = env.Runner.Run(ctx, "systemctl", "start", "--no-block", unitApplyService)
-	}
-	if err != nil {
+	if err := env.startApplyTrigger(ctx); err != nil {
 		return "run `" + env.lifecycleCommand("repair") + "` to roll it back"
 	}
 	return "started the apply trigger, which rolls it back and starts the stopped services again"

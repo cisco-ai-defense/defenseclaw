@@ -2075,6 +2075,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		l.reportDiskFull(err)
 		return 0
 	}
+	if record != nil {
+		// Before anything stops: a killed run's stopped services come back
+		// without an administrator (GAP-0276).
+		l.armTransactionWatch(ctx, pending)
+	}
 
 	l.rememberGeneration()
 	failAndRollback := func(code string, cause error) int {
