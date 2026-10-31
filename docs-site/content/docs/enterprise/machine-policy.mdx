@@ -116,6 +116,8 @@ Per-user registrations differ by OS. On Windows every one runs the same hook bin
   </Tab>
 </Tabs>
 
+On Linux and macOS, only root may write the folders that hold these files. `verify` and `status` report a folder above them that another account can write (group or other write in the mode, or a POSIX or macOS ACL entry that grants write), and the connector does not count as covered. `ensure`, `repair` and the guardian remove those ACL entries and the write bits; read-only entries stay.
+
 For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode.json`, as long as it holds no comments. The Cascade refusal goes into the pre-rename Cascade hooks file when only that file exists; see [Cascade on older builds](/docs/connectors/devin). Cascade is published while `devin` is protected and is not a connector of its own: it enrolls no user.
 
 ## Who writes machine policy

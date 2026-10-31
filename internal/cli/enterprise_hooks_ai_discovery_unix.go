@@ -164,7 +164,7 @@ func init() {
 
 // restoreEnterprisePolicyDirs gives the vendor directories DefenseClaw
 // publishes machine policy into back the mode every user's agent needs to
-// read it (GAP-0913). The guardian may write these directories: the
+// read it (GAP-0913), and takes away the write of other accounts (GAP-0410). The guardian may write these directories: the
 // lifecycle lists them in its sandbox.
 func restoreEnterprisePolicyDirs(stderr io.Writer) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
@@ -180,7 +180,7 @@ func restoreEnterprisePolicyDirs(stderr io.Writer) {
 	}
 	restored, err := enterprisepolicy.RestorePublishedPolicyDirs(opts)
 	if len(restored) > 0 {
-		fmt.Fprintf(stderr, "[hook-guardian] gave users access through %s again: they could not read DefenseClaw's machine policy there\n", strings.Join(restored, ", "))
+		fmt.Fprintf(stderr, "[hook-guardian] restored the access of %s: users could not read DefenseClaw's machine policy there, or other accounts could change it\n", strings.Join(restored, ", "))
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "[hook-guardian] machine policy directories: %v\n", err)

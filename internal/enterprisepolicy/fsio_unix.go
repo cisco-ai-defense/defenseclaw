@@ -523,9 +523,10 @@ var writeLinuxAccessACL = func(path string, acl posixacl.View) error {
 // usable only with search, so an allow-write entry the deny kept unusable
 // would let its account add or replace machine policy once the deny is
 // gone (status and verify name such an entry, and ensure clears it). On
-// Linux it rewrites the access ACL with the missing access added to each
-// entry without it and to the mask, and no group-class write
-// (grantPublishedDirAccess).
+// Linux it removes each named entry with write and the write of the owning
+// group entry and the mask (withoutPublishedDirWrite), then adds the
+// missing access to each entry without it and to the mask, with no
+// group-class write (grantPublishedDirAccess).
 var clearPublishedDirACL = func(opts Options, dir string, listed bool) error {
 	want := uint16(publishedDirAccess(listed))
 	if opts.goos() == "linux" {
@@ -539,10 +540,14 @@ var clearPublishedDirACL = func(opts Options, dir string, listed bool) error {
 		if err != nil {
 			return err
 		}
-		if acl.Denied(want) == "" {
+		next, changed := withoutPublishedDirWrite(acl)
+		if next.Denied(want) != "" {
+			next, changed = grantPublishedDirAccess(next, want), true
+		}
+		if !changed {
 			return nil
 		}
-		return writeLinuxAccessACL(dir, grantPublishedDirAccess(acl, want))
+		return writeLinuxAccessACL(dir, next)
 	}
 	entries, err := publishedDirACLEntries(dir)
 	if err != nil {
@@ -557,6 +562,59 @@ var clearPublishedDirACL = func(opts Options, dir string, listed bool) error {
 		}
 	}
 	return nil
+}
+
+// linuxACLWriteEntries lists the entries of a Linux access ACL that give
+// write to an account other than the owner: a named user or group, the
+// owning group entry and the mask. An entry the mask holds back counts: the
+// next ACL edit recalculates the mask (setfacl -m does by default) and
+// makes that write usable.
+func linuxACLWriteEntries(acl posixacl.View) []string {
+	const write = 0o2
+	if !acl.Present {
+		return nil
+	}
+	var entries []string
+	for _, entry := range append(append([]posixacl.Entry(nil), acl.Users...), acl.Groups...) {
+		if entry.Perm&write != 0 {
+			entries = append(entries, fmt.Sprintf("%s:%d:%s", entry.Kind, entry.ID, posixacl.RWX(entry.Perm)))
+		}
+	}
+	if acl.Group&write != 0 {
+		entries = append(entries, "group::"+posixacl.RWX(acl.Group))
+	}
+	if len(acl.Users)+len(acl.Groups) > 0 && acl.Mask&write != 0 {
+		entries = append(entries, "mask::"+posixacl.RWX(acl.Mask))
+	}
+	return entries
+}
+
+// withoutPublishedDirWrite is acl without the named entries that grant write
+// and without the write of the owning group entry and the mask; the owner,
+// other and every read-only entry stay. It reports whether anything
+// changed. Removing the whole entry, not only its write bit, matches the
+// macOS repair (an allow entry with a write right goes) and leaves no named
+// account with access the administrator did not give read-only.
+func withoutPublishedDirWrite(acl posixacl.View) (posixacl.View, bool) {
+	const write = 0o2
+	if !acl.Present || len(linuxACLWriteEntries(acl)) == 0 {
+		return acl, false
+	}
+	out := acl
+	out.Users, out.Groups = nil, nil
+	for _, entry := range acl.Users {
+		if entry.Perm&write == 0 {
+			out.Users = append(out.Users, entry)
+		}
+	}
+	for _, entry := range acl.Groups {
+		if entry.Perm&write == 0 {
+			out.Groups = append(out.Groups, entry)
+		}
+	}
+	out.Group &^= write
+	out.Mask &^= write
+	return out, true
 }
 
 // grantPublishedDirAccess is acl with want added to the owning group entry,
@@ -681,13 +739,78 @@ func publishedDirProblem(opts Options, path string) string {
 	return strings.Join(problems, ", ")
 }
 
+// publishedDirWriteACLProblem names the ACL entries of dir that give an
+// account other than its owner write: on Linux a POSIX access ACL entry
+// with write (linuxACLWriteEntries), on macOS an allow entry with a write
+// right. "" when there is none.
+func publishedDirWriteACLProblem(opts Options, dir string) (string, error) {
+	switch opts.goos() {
+	case "linux":
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return "", err
+		}
+		acl, err := publishedACLReader.Read(dir, info.Mode())
+		if err != nil {
+			return "", err
+		}
+		if entries := linuxACLWriteEntries(acl); len(entries) > 0 {
+			return fmt.Sprintf("%s has POSIX ACL entries with write %s", dir, strings.Join(entries, ", ")), nil
+		}
+	case "darwin":
+		entries, err := publishedDirACLEntries(dir)
+		if err != nil {
+			return "", err
+		}
+		var texts []string
+		for _, entry := range entries {
+			if entry.GrantsWrite() {
+				texts = append(texts, strconv.Quote(entry.Text))
+			}
+		}
+		if len(texts) > 0 {
+			return fmt.Sprintf("%s has macOS ACL entries %s", dir, strings.Join(texts, ", ")), nil
+		}
+	}
+	return "", nil
+}
+
+// publishedDirWriteProblem names the directories above a policy file
+// DefenseClaw published that an account other than the administrator can
+// write: group or other write in the mode, or an ACL entry with write
+// (publishedDirWriteACLProblem). Such an account can add a drop-in that
+// sorts after DefenseClaw's or replace the published file. A named user
+// rwx with mask rwx on /etc/claude-code/managed-settings.d (mode 0775) was
+// reported covered, and the repair only lowered the mask and kept the entry
+// (GAP-0410). An ACL that cannot be read is publishedDirProblem's to
+// report. "" when no other account can write.
+func publishedDirWriteProblem(opts Options, path string) string {
+	var problems []string
+	for _, dir := range publishedDirs(opts, path) {
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if perm := info.Mode().Perm(); perm&0o022 != 0 {
+			problems = append(problems, fmt.Sprintf("%s has mode %04o", dir, perm))
+		}
+		if problem, err := publishedDirWriteACLProblem(opts, dir); err == nil && problem != "" {
+			problems = append(problems, problem)
+		}
+	}
+	return strings.Join(problems, ", ")
+}
+
 // restorePublishedDirs gives the administrator-owned directories above a
 // published policy file the access users need, and nothing more: the mode
 // bits publishedDirModeAccess names, and no macOS ACL entry or Linux POSIX
 // access ACL entry denying list or search. The repair made every one 0755,
 // so a vendor folder an administrator kept at 0700 listed its unrelated
 // files to every account, where users need only search, also on the
-// directory of a file the agent opens by name (GAP-0924). Even search lets
+// directory of a file the agent opens by name (GAP-0924). It also takes
+// away the write of every other account: group and other write in the mode
+// and the ACL entries that grant write (publishedDirWriteACLProblem;
+// GAP-0410), keeping the read-only entries. Even search lets
 // any account open a file it can name, so a directory whose other files
 // grant access to the accounts it would let in is left as it is, and the
 // error (errPublishedDirExposes) names those files. It returns the
@@ -708,7 +831,11 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 		if err != nil {
 			return restored, err
 		}
-		if !needMode && aclProblem == "" {
+		aclWrite, err := publishedDirWriteACLProblem(opts, dir)
+		if err != nil {
+			return restored, err
+		}
+		if !needMode && aclProblem == "" && aclWrite == "" {
 			continue
 		}
 		if stat, ok := info.Sys().(*syscall.Stat_t); !opts.SkipTrustChecks && (!ok || !trustedOwner(stat.Uid)) {
@@ -731,9 +858,9 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 			return restored, fmt.Errorf("%w: users cannot pass %s, and giving them access would also let them open %s; take the access of other accounts away from those files (chmod go-rwx) or move them out of %s, then run ensure",
 				errPublishedDirExposes, dir, strings.Join(exposed, ", "), dir)
 		}
-		if aclProblem != "" {
+		if aclProblem != "" || aclWrite != "" {
 			if err := clearPublishedDirACL(opts, dir, listed); err != nil {
-				return restored, fmt.Errorf("remove the ACL entries denying access to %s: %w", dir, err)
+				return restored, fmt.Errorf("remove the ACL entries denying access to %s or giving other accounts write: %w", dir, err)
 			}
 			// A Linux ACL rewrite changes the group bits (the mask).
 			if info, err = os.Lstat(dir); err != nil {
