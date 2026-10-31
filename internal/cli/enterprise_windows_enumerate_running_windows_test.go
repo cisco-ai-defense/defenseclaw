@@ -58,11 +58,11 @@ func resetEnumerateKnownSIDs(t *testing.T) {
 	t.Helper()
 	known := &enterpriseWindowsEnumerateKnownSIDs
 	known.Lock()
-	known.byAccount = map[string]string{}
+	known.byAccount = map[string]enterpriseWindowsKnownSID{}
 	known.Unlock()
 	t.Cleanup(func() {
 		known.Lock()
-		known.byAccount = map[string]string{}
+		known.byAccount = map[string]enterpriseWindowsKnownSID{}
 		known.Unlock()
 	})
 }
@@ -244,7 +244,7 @@ func TestEnterpriseWindowsEnumerateRunningAgentBudgetExhaustedForLaterAccount(t 
 	}, nil, nil)
 	known := &enterpriseWindowsEnumerateKnownSIDs
 	known.Lock()
-	known.byAccount[`dclab\later`] = knownSID
+	known.byAccount[`dclab\later`] = enterpriseWindowsKnownSID{sid: knownSID, resolved: time.Now()}
 	known.Unlock()
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })

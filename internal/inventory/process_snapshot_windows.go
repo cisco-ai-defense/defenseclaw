@@ -58,7 +58,8 @@ func (nativeWindowsSnapshotReader) List() ([]windowsProcessEntry, error) {
 		entries = append(entries, windowsProcessEntry{
 			PID: int(entry.ProcessID), PPID: int(entry.ParentProcessID),
 			Comm:           windows.UTF16ToString(entry.ExeFile[:]),
-			SessionOwnerID: owners[int(entry.ProcessID)],
+			SessionOwnerID:          owners[int(entry.ProcessID)].sid,
+			SessionOwnerFromSession: owners[int(entry.ProcessID)].fromSession,
 		})
 		entry.Size = uint32(unsafe.Sizeof(windows.ProcessEntry32{}))
 		if err := windows.Process32Next(snapshot, &entry); err != nil {
@@ -142,7 +143,14 @@ const (
 // of the processes the caller may see; session 0 has no user. It refuses
 // the managed gateway's restricted service token, which gets the owner from
 // the sensor helper instead (SetProcessAccountLookup).
-func windowsProcessSessionOwners() map[int]string {
+// windowsSessionOwner is one process's owner SID and whether it is the
+// session's signed-in account rather than the process token's.
+type windowsSessionOwner struct {
+	sid         string
+	fromSession bool
+}
+
+func windowsProcessSessionOwners() map[int]windowsSessionOwner {
 	var info *wtsProcessInfo
 	var count uint32
 	if r, _, _ := procWTSEnumerateProcessesW.Call(0, 0, 1, uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&count))); r == 0 || info == nil {
@@ -150,21 +158,21 @@ func windowsProcessSessionOwners() map[int]string {
 	}
 	defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(info)))
 	sessions := map[uint32]string{}
-	owners := make(map[int]string, count)
+	owners := make(map[int]windowsSessionOwner, count)
 	for _, row := range unsafe.Slice(info, count) {
-		sid := ""
+		owner := windowsSessionOwner{}
 		if row.UserSid != nil && row.UserSid.IsValid() {
-			sid = row.UserSid.String()
+			owner.sid = row.UserSid.String()
 		} else if row.SessionID != 0 {
 			cached, ok := sessions[row.SessionID]
 			if !ok {
 				cached = windowsSessionUserSID(row.SessionID)
 				sessions[row.SessionID] = cached
 			}
-			sid = cached
+			owner = windowsSessionOwner{sid: cached, fromSession: true}
 		}
-		if sid != "" {
-			owners[int(row.ProcessID)] = sid
+		if owner.sid != "" {
+			owners[int(row.ProcessID)] = owner
 		}
 	}
 	return owners
