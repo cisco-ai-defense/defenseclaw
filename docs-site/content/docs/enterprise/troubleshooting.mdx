@@ -288,7 +288,10 @@ Wrapper logs: `/var/log/defenseclaw-enterprise-mdm.log` on Linux,
 ## Hook refusal codes
 
 When DefenseClaw refuses a hook call, the agent shows a sentence that names the cause. Some of
-these sentences end with the code; an unenrolled account's does not. For a refusal the gateway
+these sentences end with the code, as the outage codes and the runtime-state codes
+(`enterprise_managed_runtime_descriptor_missing`, `enterprise_managed_runtime_state_invalid`,
+`enterprise_managed_hook_socket_missing`, `enterprise_machine_policy_summary_untrusted`) do; an
+unenrolled account's does not. For a refusal the gateway
 made, such as `enterprise_managed_uid_unregistered` or `enterprise_managed_root_denied`, the
 gateway log has the code (`journalctl -u defenseclaw-gateway` on Linux), and so does the audit
 log, as the `defenseclaw.admin.reason` of an `api-auth-failure` event
@@ -330,7 +333,7 @@ stopped, restarting or silent, a managed hook that would block for an outage say
 being installed or upgraded on this computer, and its gateway is stopped until that run finishes or
 is recovered. Try again in a moment; if this continues, ask your administrator to check DefenseClaw
 on this computer: `enterprise windows status` names what to do." (`enterprise linux status` or
-`enterprise macos status` on those systems), followed by the outage code. Retry after the run ends.
+`enterprise macos status` on those systems), followed by the outage or runtime-state code. Retry after the run ends.
 A run that was stopped before it finished leaves the same block until it is recovered: `status`
 shows `transaction_pending` and names the recovery. A refusal with its own cause (another program
 on the port, SELinux, a missing DefenseClaw folder, a bad hook input) keeps its own text. The
