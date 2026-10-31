@@ -2930,8 +2930,9 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 	skip := make([]bool, len(words))
 	// The printed ~ is text only in a command whose statements all print,
 	// read or run git: a writer elsewhere keeps the TGT-0194 mention rule.
-	// The scanner does not split statements at a line end, so a command of
-	// several lines is not text only.
+	// The scanner ends a statement at a line end (GAP-0234), but a command
+	// of several lines may be one script block or a here-string body, so
+	// it is not text only.
 	textOnly := !multiline
 	for start, i := 0, 0; i <= len(words); i++ {
 		if i < len(words) && words[i] != ";" && words[i] != "|" && words[i] != "||" && words[i] != "&" && words[i] != "&&" {
