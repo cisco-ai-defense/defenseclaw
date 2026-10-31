@@ -950,6 +950,14 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 	rootAgentID := agentNodeID(agentIdentityID, source, sessionID, "root")
 	lineageProvenance := "inferred"
 	agentID = strings.TrimSpace(agentID)
+	// Copilot CLI hook inputs (camelCase sessionId; the VS Code Local surface
+	// sends session_id) name agents by session (GAP-0721). Secure Client keeps
+	// the lineage of main (issue #1092).
+	copilotLineage := strings.EqualFold(strings.TrimSpace(source), "copilot") && !ManagedEnterpriseActive() &&
+		firstString(payload, "sessionId") != ""
+	if copilotLineage {
+		agentID = copilotAgentNodeID(agentIdentityID, agentID)
+	}
 	if agentID == "" && (lifecycleEvent == "subagent_start" || lifecycleEvent == "subagent_stop") {
 		childIdentity := firstNonEmpty(
 			firstString(payload, "subagent_id", "subagentId", "agent_transcript_path", "agentTranscriptPath", "tool_call_id", "toolCallId"),
@@ -971,6 +979,9 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 		firstString(payload, "parent_agent_id", "parentAgentId", "parent_id", "parentId"),
 		firstString(objectAt(payload, "extra"), "parent_subagent_id", "parentSubagentId", "parent_agent_id", "parentAgentId"),
 	)
+	if copilotLineage {
+		reportedParentAgentID, parentSessionID = copilotReportedParent(agentIdentityID, sessionID, agentID, reportedParentAgentID, parentSessionID)
+	}
 	parentAgentID := reportedParentAgentID
 	reportedRootAgentID := firstNonEmpty(
 		firstString(payload, "root_agent_id", "rootAgentId", "rootAgentID"),
