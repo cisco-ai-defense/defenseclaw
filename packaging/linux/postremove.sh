@@ -47,7 +47,15 @@ case "${1:-}" in
         # these policies for a rerun, so the policies stay with them.
         if [ ! -e "$lifecycle/deployment.json" ]; then
             rm -rf /opt/defenseclaw/share/policies
+            # The OpenCode plugin 1.0.5 and earlier wrote under its old
+            # name; this release ships share/opencode/index.js (rel-1-0-6
+            # GAP-0175).
+            rm -f /opt/defenseclaw/share/opencode/defenseclaw.js
         fi
+        # What the package removal leaves of the scanner runtime is the
+        # bytecode its Python wrote while it ran, not package files: with the
+        # package gone nothing runs it (rel-1-0-6 GAP-0175).
+        rm -rf /opt/defenseclaw/scanner-runtime
         rmdir /opt/defenseclaw/share/opencode /opt/defenseclaw/share/fleet /opt/defenseclaw/share /opt/defenseclaw/bin /opt/defenseclaw >/dev/null 2>&1 || true
         # The override `enterprise linux uninstall` wrote over this package's
         # tmpfiles.d entries leaves with the package.
