@@ -1147,7 +1147,7 @@ describe('agent identity rows (rel-1-0-4 GAP-0596)', () => {
     assert.ok(cache.includes('!entry.failedSince.IsZero()'));
     assert.ok(cache.includes('entry.fetchedAt.Add(c.lifetime(entry.facts))'));
     assert.ok(ad.includes('return entry.kept || entry.superseded || entry.upn != upn'));
-    assert.ok(spool.includes('KeepLastKnownUPN(record, entry.previous)'));
+    assert.ok(spool.includes('KeepLastKnownUPN(record, windowsCarriedUPNRecord(entry.previous, facts))'));
     assert.ok(identity.includes('if record.UPNKept() {'));
     assert.ok(identity.includes('if facts.UPNKept {'));
     assert.match(windows, /wait := time\.Duration\(0\)[\s\S]*?if identityLookupBlocking\.Load\(\)/);
