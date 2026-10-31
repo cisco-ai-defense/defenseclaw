@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -3787,3 +3788,113 @@ def test_the_windows_installer_refuses_a_bad_defenseclaw_repo_too() -> None:
     text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
     assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in text
     assert "'^https://\\S+$'" in text and "'^[^\\s/:@]+/[^\\s/:@]+$'" in text
+
+
+def test_cli_links_are_published_by_rename_after_the_new_cli_starts() -> None:
+    """rel-1-0-6 GAP-0105: a CLI call during the upgrade found a missing or
+    partly written entry. Every link switch is one rename, made after the new
+    CLI ran, so the call finds the old entry, the busy shim or the new one."""
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    swap = script[script.index("swap_in() {"):]
+    swap = swap[: swap.index("\n}\n")]
+    assert 'ln -sfn "${target}"' not in script
+    assert swap.index('"${VENV}/bin/defenseclaw" --version') < swap.index('publish_link "${target}" "${link}"')
+    publish = script[script.index("publish_link() {"):]
+    publish = publish[: publish.index("\n}\n")]
+    assert 'ln -s "$1" "${new}" && mv -f "${new}" "${BIN_DIR}/$2"' in publish
+    restore = script[script.index("restore_links() {"):]
+    restore = restore[: restore.index("\n}\n")]
+    assert 'rm -f "${BIN_DIR:?}/${link}" && cp -P' not in restore
+    assert 'mv -f "${new}" "${BIN_DIR}/${link}"' in restore
+
+
+def test_the_old_venv_moves_only_after_running_cli_calls_finish() -> None:
+    """rel-1-0-6 GAP-0105: a CLI call that started from the old venv crashed
+    (ModuleNotFoundError) when the snapshot moved the venv under it."""
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    snapshot = script[script.index("\nsnapshot() {"):]
+    snapshot = snapshot[: snapshot.index("\n}\n")]
+    assert snapshot.index("write_busy_shim") < snapshot.index("wait_cli_calls_done") < snapshot.index('mv "${VENV}" "${SNAP}/venv"')
+    helper = script[script.index("wait_cli_calls_done() {"):]
+    helper = helper[: helper.index("\n}\n")]
+    assert "SECONDS + 15" in helper and 'prefix="${VENV}/bin/"' in helper
+
+
+def _wait_cli_calls_done_source() -> str:
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    helper = script[script.index("wait_cli_calls_done() {"):]
+    return helper[: helper.index("\n}\n") + 3]
+
+
+def test_waiting_for_cli_calls_opens_no_descriptor_per_process() -> None:
+    """rel-1-0-6 GAP-0185: macOS bash 3.2 keeps the descriptor of every <(...)
+    a function opens; one per process of the account made install.sh abort
+    (Abort trap: 6) in the macOS install-and-upgrade job. The wait reads one ps
+    listing per poll through one awk."""
+    helper = _wait_cli_calls_done_source()
+    assert "<(" not in helper and "<<<" not in helper
+    assert "process_argv" not in helper and "pgrep" not in helper
+    assert helper.count("ps -A -ww -o uid= -o pid= -o ppid= -o command=") == 1
+    assert helper.count("awk") == 1
+    for bash4 in ("mapfile", "readarray", "declare -A", "local -A", ",,}", "^^}"):
+        assert bash4 not in helper
+
+
+def _run_wait(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
+    script = tmp_path / "wait.sh"
+    script.write_text(
+        "set -euo pipefail\n" + _wait_cli_calls_done_source() + body,
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, timeout=60, check=False
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="install.sh runs on macOS and Linux")
+def test_waiting_for_cli_calls_waits_for_a_call_from_the_old_venv(tmp_path: Path) -> None:
+    """rel-1-0-6 GAP-0105: a call that started from the old venv is waited for
+    (bounded); with none the wait returns at once; under set -euo pipefail."""
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    sleeper = venv / "bin" / "defenseclaw-sleep"
+    sleeper.symlink_to(shutil.which("sleep"))
+    body = f"""
+VENV={shlex.quote(str(venv))}
+t0=$SECONDS; wait_cli_calls_done; echo "idle=$((SECONDS - t0))"
+"$VENV/bin/defenseclaw-sleep" 3 & pid=$!
+sleep 0.5; t0=$SECONDS; wait_cli_calls_done; waited=$((SECONDS - t0))
+kill -0 "$pid" 2>/dev/null && echo still-running || echo finished
+echo "busy=$waited"
+"$VENV/bin/defenseclaw-sleep" 40 & long=$!
+sleep 0.5; t0=$SECONDS; wait_cli_calls_done; echo "bounded=$((SECONDS - t0))"; kill "$long"
+VENV={shlex.quote(str(tmp_path / "absent"))}; wait_cli_calls_done; echo no-venv
+"""
+    out = _run_wait(tmp_path, body)
+    assert out.returncode == 0, out.stderr
+    lines = dict(line.split("=", 1) for line in out.stdout.split() if "=" in line)
+    assert int(lines["idle"]) <= 1
+    assert "finished" in out.stdout and 2 <= int(lines["busy"]) <= 5
+    assert 14 <= int(lines["bounded"]) <= 17
+    assert "no-venv" in out.stdout
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="install.sh runs on macOS and Linux")
+def test_waiting_for_cli_calls_skips_the_installers_own_parents(tmp_path: Path) -> None:
+    """A CLI from the old venv that started this installer (a parent) is not
+    waited for: it waits for the installer, so the wait would only run out."""
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "defenseclaw-bash").symlink_to(shutil.which("bash"))
+    inner = tmp_path / "inner.sh"
+    inner.write_text(
+        "set -euo pipefail\n" + _wait_cli_calls_done_source()
+        + f"VENV={shlex.quote(str(venv))}\nt0=$SECONDS; wait_cli_calls_done; echo \"waited=$((SECONDS - t0))\"\n",
+        encoding="utf-8",
+    )
+    out = subprocess.run(
+        [str(venv / "bin" / "defenseclaw-bash"), "-c", f"bash {shlex.quote(str(inner))}; true"],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert out.returncode == 0, out.stderr
+    assert int(out.stdout.strip().split("=", 1)[1]) <= 1
