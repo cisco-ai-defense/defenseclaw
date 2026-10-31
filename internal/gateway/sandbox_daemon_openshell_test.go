@@ -1462,3 +1462,36 @@ func TestAMacOSGatewayStopSyncsTheRunningMicroVMsFirst(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0554: status names the configured agents the managed gateway refuses
+// to run on the host for the caller (required_for, not exempt), which the
+// doctor's Docker access row explains; an exempt caller and an agent the
+// floor does not require are not named.
+func TestSandboxDaemonStatusNamesTheAgentsRequiredInASandbox(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		gate string
+		want []string
+	}{
+		{"refused", "refused", []string{"claudecode"}},
+		{"older gateway without a gate", "", []string{"claudecode"}},
+		{"exempt", "exempt", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+				o.Settings.Operational.Harnesses = []string{"claudecode", "codex"}
+			})
+			f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				return sandboxapi.ManagedExplain{Allowed: true, RequiredFor: []string{"claudecode"}, HostRunGate: tc.gate}, nil
+			}
+			f.run(t)
+			st, err := sandboxapi.NewUnixClient(f.socket).Status(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Managed == nil || !slices.Equal(st.Managed.RequiredOnHost, tc.want) {
+				t.Fatalf("status managed = %+v, want required_on_host %v", st.Managed, tc.want)
+			}
+		})
+	}
+}
