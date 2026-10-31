@@ -338,7 +338,8 @@ func (l *lifecycle) clearSupersededUnitFailures(ctx context.Context) {
 }
 
 // interruptedTransactionProblem names a transaction a reset or a killed run
-// left pending, and the commands that finish it.
+// left pending, and the commands that finish it: the config it was applying
+// when the intent records one (GAP-0098).
 func (e *Env) interruptedTransactionProblem(pending *Pending) string {
 	action, phase, started := pending.Action, pending.Phase, pending.StartedAt
 	if action == "" {
@@ -350,9 +351,22 @@ func (e *Env) interruptedTransactionProblem(pending *Pending) string {
 	if started == "" {
 		started = "an unknown time"
 	}
+	finish := "to apply the config it was applying run `" + e.lifecycleCommand(ActionEnsure) + " --config <file>` again"
+	if pending.ConfigFile != "" {
+		finish = "to apply the config it was applying (" + pending.ConfigFile + ") run `" +
+			e.lifecycleCommand(ActionEnsure) + " --config " + shellWord(pending.ConfigFile) + "` again"
+	}
 	return fmt.Sprintf("a lifecycle %s that started at %s was interrupted in its %s phase (a reset or a killed run), so files differ from the deployment record; "+
-		"`%s` rolls it back to the last committed deployment, and to apply the config it was applying run `%s --config <file>` again",
-		action, started, phase, e.lifecycleCommand("repair"), e.lifecycleCommand(ActionEnsure))
+		"`%s` rolls it back to the last committed deployment, and %s",
+		action, started, phase, e.lifecycleCommand("repair"), finish)
+}
+
+// shellWord is value as one POSIX shell word, quoted only when it needs it.
+func shellWord(value string) string {
+	if value != "" && strings.Trim(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-+=:@,") == "" {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 // withoutTransactionDrift drops the file and config drift an interrupted

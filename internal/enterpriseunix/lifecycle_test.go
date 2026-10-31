@@ -356,6 +356,54 @@ func TestStatusNamesAnInterruptedTransactionInsteadOfAnEdit(t *testing.T) {
 	}
 }
 
+// GAP-0098: an ensure --config killed in its transaction left an intent
+// without the config it was applying, and status named a generic `ensure
+// --config <file>`. The intent records the config, and status names the
+// exact command, on Linux and macOS.
+func TestStatusNamesTheConfigAnInterruptedEnsureWasApplying(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			source := writeTempConfig(t, []byte("# pushed\n"+h.read(h.env.Layout.ConfigPath)))
+			var recorded *Pending
+			capture := func(string) {
+				if recorded == nil {
+					recorded, _ = h.env.loadPending()
+				}
+			}
+			h.env.Services = &hookedServices{fakeServices: h.services, onStop: capture, onStart: capture}
+			requireOK(t, h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.1"), ConfigFile: source}))
+			if recorded == nil || recorded.ConfigFile != source {
+				t.Fatalf("the intent of an ensure --config does not record the config: %+v", recorded)
+			}
+			snap, err := h.env.takeSnapshot("killed", []string{h.env.Layout.ConfigPath}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.env.savePending(&Pending{Action: ActionEnsure, StartedAt: "2026-10-30T00:10:00Z", SnapshotDir: snap.Dir,
+				Phase: "quiesce", ConfigFile: recorded.ConfigFile}); err != nil {
+				t.Fatal(err)
+			}
+			got := messagesOf(h.run(Options{Action: ActionStatus}).Errors, codeVerify)
+			if !strings.Contains(got, "ensure that started at 2026-10-30T00:10:00Z was interrupted in its quiesce phase") ||
+				!strings.Contains(got, " repair` rolls it back") ||
+				!strings.Contains(got, h.env.lifecycleCommand(ActionEnsure)+" --config "+source+"` again") ||
+				strings.Contains(got, "<file>") {
+				t.Fatalf("status does not name the config the interrupted ensure was applying: %s", got)
+			}
+		})
+	}
+	h := newTestHost(t, "linux")
+	got := h.env.interruptedTransactionProblem(&Pending{Action: ActionEnsure, Phase: "apply", ConfigFile: "/root/g 18/it's.yaml"})
+	if !strings.Contains(got, ` --config '/root/g 18/it'\''s.yaml'`+"` again") {
+		t.Fatalf("a config path with a space or a quote is not one shell word: %s", got)
+	}
+	if got := h.env.interruptedTransactionProblem(&Pending{Action: ActionUpgrade, Phase: "apply"}); !strings.Contains(got, "--config <file>` again") {
+		t.Fatalf("an intent without a config lost the generic command: %s", got)
+	}
+}
+
 func TestInstallRefusals(t *testing.T) {
 	h := newTestHost(t, "linux")
 	payload := h.payload("1.0.0")
