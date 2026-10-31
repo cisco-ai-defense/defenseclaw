@@ -847,9 +847,22 @@ func runWindowsEnterprisePowerShell(
 	child.Dir = workingDirectory
 	child.Stdin = cmd.InOrStdin()
 	var childOutput, childErrors windowsEnterpriseOutputCapture
-	child.Stdout = io.MultiWriter(cmd.OutOrStdout(), &childOutput)
+	_, jsonOutput := windowsEnterprisePowerShellArgsAction(args)
+	var relay *windowsEnterpriseJSONRelay
+	if jsonOutput {
+		// Windows PowerShell writes warnings to stdout. With -Json the
+		// caller parses stdout as one JSON result, so everything else the
+		// child printed goes to stderr and only the result reaches stdout.
+		relay = newWindowsEnterpriseJSONRelay(cmd.OutOrStdout(), cmd.ErrOrStderr())
+		child.Stdout = io.MultiWriter(relay, &childOutput)
+	} else {
+		child.Stdout = io.MultiWriter(cmd.OutOrStdout(), &childOutput)
+	}
 	child.Stderr = io.MultiWriter(cmd.ErrOrStderr(), &childErrors)
 	runErr := child.Run()
+	if relay != nil {
+		relay.Finish()
+	}
 	// A temp that cannot be removed never changes the lifecycle result: it
 	// is logged, scheduled for removal at restart and swept by a later run.
 	if cleanupErr := cleanupTemp(); cleanupErr != nil {

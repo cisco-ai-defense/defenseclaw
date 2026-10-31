@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -553,15 +554,34 @@ func TestWindowsCallbackAllowACEIsJudgedByTrustee(t *testing.T) {
 	}
 }
 
-// The advisory downgrade is scoped to the platform installer's roots, so a
-// parent outside them keeps the pre-AIFW-34262 fatal verdict while retaining the
-// narrow mask that stock known-folder grants depend on.
+// The advisory downgrade covers the platform installer's roots and the fixed
+// operating system roots (the system drive root, Windows, System32,
+// ProgramData, Program Files). Any other parent, such as a temp folder, keeps
+// the fatal verdict while retaining the narrow mask that stock known-folder
+// grants depend on.
 func TestWindowsAncestorScopeFollowsInstallerOwnedRoots(t *testing.T) {
 	inside := filepath.Join(`C:\ProgramData\Cisco`, "Cisco Secure Client", "DefenseClaw")
 	if scope := windowsAncestorScope(inside); !scope.advisory || !scope.narrowMask {
 		t.Errorf("windowsAncestorScope(%q) = %+v, want advisory and narrow-mask", inside, scope)
 	}
-	for _, outside := range []string{`C:\`, `C:\ProgramData`, os.TempDir()} {
+	systemDir, err := windows.GetSystemDirectory()
+	if err != nil {
+		t.Fatalf("GetSystemDirectory: %v", err)
+	}
+	windowsDir, err := windows.GetWindowsDirectory()
+	if err != nil {
+		t.Fatalf("GetWindowsDirectory: %v", err)
+	}
+	osRoots := []string{filepath.VolumeName(windowsDir) + `\`, windowsDir, systemDir}
+	if programData, err := winpath.TrustedProgramData(); err == nil {
+		osRoots = append(osRoots, programData)
+	}
+	for _, root := range osRoots {
+		if scope := windowsAncestorScope(root); !scope.advisory || !scope.narrowMask {
+			t.Errorf("windowsAncestorScope(%q) = %+v, want advisory and narrow-mask for an OS root", root, scope)
+		}
+	}
+	for _, outside := range []string{os.TempDir()} {
 		scope := windowsAncestorScope(outside)
 		if scope.advisory {
 			t.Errorf("windowsAncestorScope(%q) is advisory outside the installer roots", outside)
