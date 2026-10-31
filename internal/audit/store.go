@@ -4109,6 +4109,18 @@ func (s *Store) SelectAlertAcknowledgementTargets(
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}
+	// A block that a rule finding explains is one alert: the finding row.
+	// `defenseclaw alerts` does not list the connector-hook row of the same
+	// request, so a selector must not match it either (GAP-0166).
+	query += ` AND NOT (
+			LOWER(COALESCE(event.action,'')) = 'connector-hook'
+			AND COALESCE(event.request_id,'') <> ''
+			AND EXISTS (
+				SELECT 1 FROM audit_events AS finding
+				WHERE finding.request_id = event.request_id
+				  AND finding.action = 'scan-finding'
+			)
+		)`
 	// An empty or "all" severity needs no extra predicate: eligibility already
 	// excludes clean lifecycle telemetry and accepts promoted INFO non-allow
 	// outcomes plus ERROR health records.

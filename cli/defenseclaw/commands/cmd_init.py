@@ -2243,7 +2243,7 @@ def _apply_first_run_decision_model(report, request: dict, data_dir: str | os.Pa
         report.setup.append(StepResult(
             "Decision Model",
             "warn",
-            f"{detail} saved but not reachable ({result.detail}); the LLM judge decides alone until it is",
+            f"{detail} saved but not reachable ({result.detail}); the LLM judge decides alone until it is reachable",
             "defenseclaw setup decision-model --show --ping",
         ))
         return

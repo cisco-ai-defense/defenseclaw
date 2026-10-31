@@ -310,6 +310,18 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
                 "local stack)."
             )
         raise click.ClickException(message) from exc
+    except OSError as exc:
+        # A file that cannot be replaced (config.generation.json that is a
+        # folder, a read-only data folder) is one plain line, not a traceback
+        # (GAP-0944). The writer has already put config.yaml back.
+        name_of_file = os.path.basename(str(exc.filename2 or exc.filename or "")).strip(".")
+        if name_of_file.endswith(".tmp"):
+            name_of_file = ""
+        reason = exc.strerror or exc.__class__.__name__
+        raise click.ClickException(
+            f"Could not save {name_of_file or 'the observability settings'}: {reason}. "
+            "Nothing was changed; fix that file and run the command again."
+        ) from exc
     mode = "DRY-RUN " if dry_run else ""
     if not result.changed:
         changed = "key updated, already configured" if setup_secret_changed() else "already configured"

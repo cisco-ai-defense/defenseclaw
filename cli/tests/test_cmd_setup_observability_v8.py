@@ -137,6 +137,24 @@ def test_add_reserved_destination_name_is_plain(tmp_path: Path, monkeypatch: pyt
     assert "$." not in result.output
 
 
+def test_add_with_unwritable_generation_file_is_one_plain_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0944: config.generation.json that is a folder raised a 50-line traceback.
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    before = (tmp_path / "config.yaml").read_bytes()
+    (tmp_path / "config.generation.json").mkdir()
+    result = CliRunner().invoke(
+        observability,
+        ["add", "otlp", "--non-interactive", "--name", "cloud", "--endpoint", "https://otel.example.test"],
+        obj=app,
+    )
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert "config.generation.json" in result.output
+    assert len(result.output.strip().splitlines()) == 1
+    assert (tmp_path / "config.yaml").read_bytes() == before
+
+
 def test_setup_v8_accepts_observability_token_from_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

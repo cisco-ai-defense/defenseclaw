@@ -30,7 +30,7 @@ Everything is set in the one admin `config.yaml`. The user types `defenseclaw sa
 This page assumes a standalone install with an admin-owned `config.yaml`. Policy reaches the host with the package and `enterprise <os> ensure --config`; there is no MDM step. Identity is what the host's account database says; see [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources).
 
 <Callout type="info" title="Limits">
-- **Copy mode only.** A managed sandbox works on a copy of the project; changes come back with `defenseclaw sandbox pull`.
+- **Copy mode only.** A managed sandbox works on a copy of the project; changes come back with `defenseclaw sandbox pull NAME --apply` (or `--branch`, `--patch-out FILE`).
 - **One sandbox account per host at a time.** The first account to run a sandbox holds the sandbox ports.
 - **Docker is root-equivalent.** On Linux a member of the `docker` group can do anything root can. Where `required_for` must hold against deliberate users, do not give them Docker access.
 - **No bundling.** DefenseClaw never ships OpenShell. You provide it (`prerequisite`) or each user's daemon downloads NVIDIA's release at first use (`setup`). All limits: [Limits of managed sandboxes](#limits-of-managed-sandboxes).
