@@ -516,9 +516,12 @@ func unsyncedStopRefusal(name string, err error) error {
 			" --discard-unsynced` (on a terminal, `defenseclaw sandbox stop " + name + "` asks first)"}
 }
 
-// gatewayLostErrors are gRPC's words for an OpenShell gateway that went
-// away under a call (it was stopped or killed, or Docker restarted).
-var gatewayLostErrors = []string{"client connection is closing", "transport is closing", "error reading from server", "connection error: desc", "code = unavailable"}
+// gatewayLostErrors are gRPC's and OpenShell's words for an OpenShell gateway
+// that went away under a call (it was stopped or killed, or Docker restarted).
+// "supervisor relay failed" is the macOS MicroVM driver's form: the sandbox's
+// supervisor answers the gateway that replaced the killed one with "sandbox is
+// owned by gateway ..." (GAP-2437).
+var gatewayLostErrors = []string{"client connection is closing", "transport is closing", "error reading from server", "connection error: desc", "code = unavailable", "supervisor relay failed"}
 
 // flushFailureText is why a MicroVM's disk could not be synced (err), for
 // the person: an OpenShell gateway lost under the sync reads as the managed
