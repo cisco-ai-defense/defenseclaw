@@ -1075,6 +1075,13 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		}
 	}
 	blocked := []string{
+		// rel-1-0-2 GAP-0409: a redirect target that only the shell knows
+		// (eval, an unset default, a command substitution, a here-string
+		// read) and that lands on the keys link, in per-user cells too.
+		`f=other; eval f=disklink; echo marker >> "$f"`,
+		`f=report.txt; if true; then unset f; fi; echo marker >> ${f:-disklink}`,
+		`f=$(echo disklink); echo marker >> "$f"`,
+		`read f <<< disklink; echo marker >> "$f"`,
 		// TGT-0194: a compound command or script argument names the active
 		// protected target even when its eventual write goes elsewhere.
 		`python3 -c 'open("disklink","r").read()'`,
@@ -1229,6 +1236,10 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp --archive disklink notes.txt`,
 	}
 	allowed := []string{
+		// The GAP-0409 forms on an ordinary file.
+		`f=report.txt; if true; then unset f; fi; echo marker >> ${f:-notes.txt}`,
+		`f=$(echo report.txt); echo marker >> "$f"`,
+		`read f <<< report.txt; echo marker >> "$f"`,
 		// A bare copy of a tree that carries a link is not a write: it copies a
 		// project as it is (GAP-2579); a write through the carried link still
 		// blocks in the copy rows above.
@@ -1302,11 +1313,14 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 				body := mustJSON(t, map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
 					"tool_name": "Bash", "cwd": eventCWD, "tool_input": map[string]any{"command": command, "description": "d"}})
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(body)))
-				req.Header.Set(hookpaths.Header, hookpaths.Resolve(body))
 				if connector == "codex" {
 					setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
 				}
 				if managed {
+					// Only a managed hook client sends its write evidence
+					// (hookexec setHookRequestFacts); a per-user cell is judged
+					// without it, as shipped (rel-1-0-2 GAP-0409).
+					req.Header.Set(hookpaths.Header, hookpaths.Resolve(body))
 					req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
 				}
 				recorder := httptest.NewRecorder()
