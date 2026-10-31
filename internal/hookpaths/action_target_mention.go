@@ -1541,8 +1541,9 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 				}
 				// A process that runs as the user cannot list what the
 				// user's shell cannot list: the shell expands nothing there
-				// (GAP-1739).
-				if userView && errors.Is(err, fs.ErrPermission) {
+				// (GAP-1739). Nor can any account list a Windows folder
+				// that denies listing to Everyone (rel-1-0-6:GAP-0211).
+				if errors.Is(err, fs.ErrPermission) && (userView || actionGlobDirDeniesEveryoneList(dir)) {
 					continue
 				}
 				// Permission denied, or a home this process cannot see:
