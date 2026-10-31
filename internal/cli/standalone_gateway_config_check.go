@@ -50,7 +50,15 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 			if errors.As(err, &syntax) && syntax.Line > 0 {
 				location = fmt.Sprintf("line %d", syntax.Line)
 			}
-			return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, location, failure.Reason)
+			reason := failure.Reason
+			var schemaErr *config.V8SchemaError
+			if errors.As(err, &schemaErr) {
+				// The same words as the Linux and macOS refusal (GAP-0188).
+				if hint, moved := schemaErr.MovedKeyHint(); moved {
+					reason = strings.TrimPrefix(schemaErr.Path, "$.") + " is an unknown setting; " + hint
+				}
+			}
+			return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, location, reason)
 		}
 		// The service may resolve environment references that Setup cannot.
 		// Continue both observability and runtime validation with the missing

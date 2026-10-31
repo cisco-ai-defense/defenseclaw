@@ -485,7 +485,7 @@ func v8SchemaExpectation(validation *jsonschema.ValidationError, unknown string)
 	}
 	properties := v8SchemaSiblingProperties(location)
 	if home, removed := v8RemovedTopLevelPathKeys[unknown]; removed && len(v8SchemaPointerSegments(validation.InstanceLocation)) == 0 {
-		return "a declared field name (config_version 8 moved this key)", home
+		return "a declared field name (" + v8MovedKeyNote + ")", home
 	}
 	return "a declared field name", v8SchemaNearestName(unknown, properties)
 }
@@ -496,6 +496,26 @@ func v8SchemaExpectation(validation *jsonschema.ValidationError, unknown string)
 var v8RemovedTopLevelPathKeys = map[string]string{
 	"audit_db":        "observability.local.path",
 	"judge_bodies_db": "observability.local.judge_bodies_path",
+}
+
+const v8MovedKeyNote = "config_version 8 moved this key"
+
+// MovedKeyHint is what every refusal of a top-level 0.8.x store-path key
+// (audit_db, judge_bodies_db) adds after "is an unknown setting": the key that
+// replaced it. config validate and config migrate name it through Error()
+// ("did you mean ..."), and the managed ensure and validate refusals on
+// Linux, macOS and Windows add this hint, so every path names the same key
+// (rel-1-0-6 GAP-0188). ok is false for any other error, including a nested
+// key of the same name.
+func (e *V8SchemaError) MovedKeyHint() (hint string, ok bool) {
+	if e == nil || e.Keyword != "additionalProperties" {
+		return "", false
+	}
+	home, removed := v8RemovedTopLevelPathKeys[strings.TrimPrefix(e.Path, "$.")]
+	if !removed || e.Suggestion != home {
+		return "", false
+	}
+	return "it moved to " + home, true
 }
 
 // v8SchemaKeywordValue is the value of the schema keyword validation failed
