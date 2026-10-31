@@ -32,6 +32,30 @@ func TestV9SchemaErrorDoesNotPointToV8(t *testing.T) {
 	}
 }
 
+// A top-level audit_db or judge_bodies_db (the 0.8.x store paths that
+// config_version 8 moved under observability.local) is still refused, and
+// the refusal names the key that replaced it. A nested key of the same name
+// keeps the plain unknown-field answer.
+func TestV9SchemaRefusalNamesMovedStorePathKey(t *testing.T) {
+	for key, home := range map[string]string{
+		"audit_db":        "observability.local.path",
+		"judge_bodies_db": "observability.local.judge_bodies_path",
+	} {
+		err := ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\n"+key+": /tmp/store.db\n"))
+		var schemaErr *V8SchemaError
+		if !errors.As(err, &schemaErr) || schemaErr.Path != "$."+key || schemaErr.Suggestion != home ||
+			!strings.Contains(err.Error(), "config_version 9: "+key+" is invalid") ||
+			!strings.Contains(err.Error(), "did you mean "+home+"?") {
+			t.Errorf("top-level %s = %v (%+v)", key, err, schemaErr)
+		}
+	}
+	err := ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\nguardrail:\n  audit_db: /tmp/store.db\n"))
+	var schemaErr *V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Suggestion == "observability.local.path" {
+		t.Errorf("nested audit_db = %v (%+v)", err, schemaErr)
+	}
+}
+
 // GAP-0940: an http_jsonl destination with bearer_env and bearer_credential
 // is reported as those two fields, not as the kind of another destination
 // type ("kind must be the literal jsonl").
