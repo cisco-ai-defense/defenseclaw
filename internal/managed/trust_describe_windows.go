@@ -72,8 +72,24 @@ func DescribeUntrustedRulePack(label, pack, serviceAccount string, err error) (s
 	if !inside {
 		return text + `. Copy the pack into a folder that only administrators can write, such as C:\ProgramData\DefenseClaw-RulePacks, set that path in the config, and run it again (nothing was changed)`, true
 	}
-	fix := untrustedFolderFix(pack, principal, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", RulePackServiceReadGrant(serviceAccount))
-	return text + ". From an elevated prompt run " + strings.Join(fix, ", then ") + ", and run it again (nothing was changed)", true
+	serviceGrant := RulePackServiceReadGrant(serviceAccount)
+	fix := untrustedFolderFix(pack, principal, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", serviceGrant)
+	return text + ". From an elevated prompt run " + strings.Join(fix, ", then ") + ", and run it again (nothing was changed)" +
+		serviceGrantLeftOutHint(pack, serviceAccount, serviceGrant), true
+}
+
+// serviceGrantLeftOutHint is the sentence after a fix whose icacls commands
+// carry the gateway service grant: icacls refuses the whole command with
+// error 1332 until the service exists (a first install), so it says to leave
+// that grant out and give it with the PowerShell form instead (GAP-0087). It is empty
+// for an account that is not an NT SERVICE name.
+func serviceGrantLeftOutHint(path, serviceAccount, serviceGrant string) string {
+	command := ServiceReadGrantPowerShell(path, serviceAccount)
+	if command == "" {
+		return ""
+	}
+	return ". Before the gateway service exists (a first install) icacls fails with error 1332: leave \"" + serviceGrant +
+		"\" out of the icacls commands and then run: " + command
 }
 
 // DefaultGatewayServiceAccount is the standalone gateway's virtual account.
@@ -102,6 +118,32 @@ func serviceGrantPrincipal(serviceAccount string) string {
 		return "*" + WindowsServiceSIDString(name)
 	}
 	return account
+}
+
+// ServiceReadGrantPowerShell is the PowerShell command that gives the gateway
+// service Read & execute on path (and what it contains) by its service SID.
+// icacls refuses every SID Windows cannot map yet, also in the *S-1-5-80-...
+// form, with error 1332, and the service SID maps only once the service
+// exists; Set-Acl with a SecurityIdentifier accepts it before (GAP-0087). It
+// is empty for an account that is not an NT SERVICE name.
+func ServiceReadGrantPowerShell(path, serviceAccount string) string {
+	script := serviceReadGrantScript(path, serviceAccount)
+	if script == "" {
+		return ""
+	}
+	return "powershell -NoProfile -Command \"" + script + "\""
+}
+
+// serviceReadGrantScript is the script of ServiceReadGrantPowerShell.
+func serviceReadGrantScript(path, serviceAccount string) string {
+	sid, ok := strings.CutPrefix(serviceGrantPrincipal(serviceAccount), "*")
+	if !ok {
+		return ""
+	}
+	quoted := strings.ReplaceAll(path, "'", "''")
+	return "$p = '" + quoted + "'; $a = Get-Acl -LiteralPath $p; " +
+		"$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('" + sid + "'), " +
+		"'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')); Set-Acl -LiteralPath $p -AclObject $a"
 }
 
 // StandardUserReadersOf returns the SIDs of the groups every standard user is in (Users,
