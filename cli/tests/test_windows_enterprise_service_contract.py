@@ -3666,7 +3666,13 @@ def test_timeout_recovery_replays_the_pending_journal_under_the_lifecycle_lock()
     # test_timeout_recovery_reports_settled_only_when_no_lifecycle_record_remains
     # and the Setup kill and recovery by
     # TestTimeoutKillsTheLifecycleChildThenRecoversBeforeReturning.
-    assert setup.index("lifecycle := runEnterpriseLifecycleChild(") < setup.index("\n\tcleanupErr := cleanup()")
+    # Each step of the standalone /ensure plan (one, or install then bundle
+    # for the single app) runs the lifecycle child with its recovery; the
+    # staged CLI is cleaned up only after the whole plan returns.
+    run_child = setup.index("runChild := func(runOpts enterpriseSetupOptions) (enterpriseLifecycleChildRun, error) {")
+    plan = setup.index("lifecycle, last, err := runStandaloneEnsurePlan(plan, runChild)")
+    assert run_child < setup.index("return runEnterpriseLifecycleChild(parent, runOpts,", run_child) < plan
+    assert plan < setup.index("\n\tcleanupErr := cleanup()")
 
 
 def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:
