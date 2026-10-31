@@ -1878,21 +1878,17 @@ _OPENSHELL_ADMIN_FLOOR_KEYS = (
 
 @dataclass
 class EnterpriseOpenShellConfig:
-    """``enterprise.openshell``: how the lifecycle provides and pins OpenShell.
+    """``enterprise.openshell`` as far as Python reads it: the compute driver.
 
-    Mirrors ``EnterpriseOpenShellConfig`` in internal/config/enterprise.go.
-    Every key is lifecycle (restart-required); DefenseClaw never ships
-    OpenShell.
+    The other keys (``install``, ``driver_fallback``, ``version``,
+    ``gateway_port``, ``e2fsprogs_dir``) are the administrator's and the
+    lifecycle's (internal/config/enterprise.go); Python never reads them, so
+    it does not model them. They are not per-user ``openshell.*`` keys: a
+    per-user config.yaml that carries one under ``openshell:`` is refused by
+    the schema, and the per-user OpenShell gateway port is fixed (17670).
     """
 
-    install: str = ""  # prerequisite | setup ("" = prerequisite)
     driver: str = ""  # docker | vm | auto ("" = vm on macOS, docker on Linux)
-    # Linux, driver vm or auto, KVM not available for the user: docker
-    # (the default) or none (refuse the sandbox).
-    driver_fallback: str = ""  # docker | none ("" = docker)
-    version: str = ""  # "0.1.3" or a range such as ">=0.1.1 <0.2.0"
-    gateway_port: int = 0  # 0 = 17670
-    e2fsprogs_dir: str = ""  # macOS only; absolute, root-owned chain
 
 
 @dataclass
@@ -7251,14 +7247,7 @@ def _merge_openshell_admin(raw: Any) -> OpenShellAdminConfig:
 def _merge_enterprise_openshell(raw: Any) -> EnterpriseOpenShellConfig:
     """Parse ``enterprise.openshell`` (load only; Go validates it)."""
     section = _openshell_mapping(_openshell_mapping(raw).get("openshell"))
-    return EnterpriseOpenShellConfig(
-        install=_openshell_str(section.get("install")),
-        driver=_openshell_str(section.get("driver")),
-        version=_openshell_str(section.get("version")),
-        gateway_port=_openshell_int(section.get("gateway_port")),
-        e2fsprogs_dir=_openshell_str(section.get("e2fsprogs_dir")),
-        driver_fallback=_openshell_str(section.get("driver_fallback")),
-    )
+    return EnterpriseOpenShellConfig(driver=_openshell_str(section.get("driver")))
 
 
 def _serialize_openshell(d: dict[str, Any]) -> None:
