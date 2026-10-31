@@ -312,7 +312,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		}
 		// A running agent no row enrolls is recorded too (GAP-0226), and so is
 		// one whose account resolves to no SID.
-		enumerateOpts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg))
+		enumerateOpts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg), manifestPath)
 	}
 	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enumerateOpts)
 	if err != nil {
@@ -428,7 +428,7 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 	}
 	enterprisehooks.SetUnverifiedVersionsPolicy(cfg.Enterprise.Enrollment.UnverifiedVersionsFor)
 	var ownerUnknown []enterprisehooks.UnprotectedAgent
-	opts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg))
+	opts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg), manifestPath)
 	// The scan never decides targets in manifest mode, so a scan that did not
 	// finish (the cycle ran out of time, ProfileList was unreadable, a call
 	// stalled) never fails or holds the cycle or the install: the accounts it

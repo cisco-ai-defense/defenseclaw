@@ -2192,6 +2192,23 @@ func loadWindowsManagedRuntimeBundle(
 	entry windowsManagedRuntimeSelectorTarget,
 	target *windows.SID,
 ) (windowsManagedRuntimeBundle, []byte, string, error) {
+	bundle, data, path, err := loadWindowsManagedRuntimeBundleBytes(entry, target)
+	if err != nil {
+		return bundle, nil, path, err
+	}
+	if err := validateWindowsManagedRuntimeBundleAgainstSelector(bundle, entry); err != nil {
+		return bundle, nil, path, err
+	}
+	return bundle, data, path, nil
+}
+
+// loadWindowsManagedRuntimeBundleBytes reads the bundle a selector entry
+// names from its owned path and checks the digest the entry pins and the
+// canonical encoding. The caller authenticates the fields it relies on.
+func loadWindowsManagedRuntimeBundleBytes(
+	entry windowsManagedRuntimeSelectorTarget,
+	target *windows.SID,
+) (windowsManagedRuntimeBundle, []byte, string, error) {
 	var bundle windowsManagedRuntimeBundle
 	if err := validateWindowsManagedRuntimeSelectorTarget(entry, ""); err != nil {
 		return bundle, nil, "", err
@@ -2209,9 +2226,6 @@ func loadWindowsManagedRuntimeBundle(
 	}
 	bundle, err = decodeWindowsManagedRuntimeBundle(data)
 	if err != nil {
-		return bundle, nil, path, err
-	}
-	if err := validateWindowsManagedRuntimeBundleAgainstSelector(bundle, entry); err != nil {
 		return bundle, nil, path, err
 	}
 	return bundle, data, path, nil
@@ -2851,11 +2865,45 @@ func retireWindowsManagedRuntimeSelectorTargetBundle(
 	} else if err != nil {
 		return err
 	}
-	_, data, _, err := loadWindowsManagedRuntimeBundle(entry, target)
+	bundle, data, path, err := loadWindowsManagedRuntimeBundleBytes(entry, target)
+	if err == nil {
+		err = validateRetiredWindowsManagedRuntimeBundle(bundle, entry)
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("enterprise hooks: retire managed runtime bundle %s: %w", path, err)
 	}
 	return deleteWindowsManagedRuntimeBundle(entry, target, data)
+}
+
+// validateRetiredWindowsManagedRuntimeBundle authorizes deleting the bundle a
+// protected selector entry named before it was revoked or replaced. The
+// entry pins the bundle's digest, so the bundle's identity (connector,
+// account, generation, paths, gateway) authorizes the deletion, as for an
+// unselected bundle (GAP-1322); its token and hook-contract fields are
+// content. A bundle an older release selected can name a contract this build
+// no longer ships: 1.0.5 selected OpenCode bundles with the V1 contract that
+// 1.0.6 removed, and every revoke or replacement of such a selection after
+// the upgrade failed with "invalid authenticated fields" and left the bundle
+// behind (rel-1-0-6:GAP-0199). Nothing is resolved or run from a retired
+// bundle, so its contract is not checked here.
+func validateRetiredWindowsManagedRuntimeBundle(
+	bundle windowsManagedRuntimeBundle,
+	entry windowsManagedRuntimeSelectorTarget,
+) error {
+	if !windowsManagedRuntimeBundleMatchesSelectorIdentity(bundle, entry) {
+		return errors.New("enterprise hooks: managed runtime bundle does not match its protected selector")
+	}
+	if _, err := validateWindowsManagedRuntimeGenerationIdentity(WindowsManagedRuntimeGenerationDesired{
+		Connector:          bundle.Connector,
+		TargetSID:          bundle.TargetSID,
+		DataDir:            bundle.DataDir,
+		HookExecutable:     bundle.HookExecutable,
+		GatewayAddr:        bundle.GatewayAddr,
+		GatewayServiceName: bundle.GatewayServiceName,
+	}); err != nil {
+		return errors.New("enterprise hooks: managed runtime bundle contains an invalid identity")
+	}
+	return nil
 }
 
 func deleteWindowsManagedRuntimeBundle(
