@@ -78,3 +78,17 @@ func TestStandaloneGatewayHealthReportsTheAIDefensePosture(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1111: the gateway's exclude_users warning gets its own code in the
+// Windows lifecycle result.
+func TestStandaloneGatewayExcludeEntryWarningCode(t *testing.T) {
+	result := enterprisestatus.New("status", "standalone", "windows", "test")
+	const warning = "enterprise.enrollment.exclude_users: 1 entry (position 2 in the list) matches no account this host knows, so it excludes nobody"
+	appendStandaloneGatewayWarnings(result, []byte(`{}`), []byte(`{"profile_warnings":["`+warning+`"]}`))
+	for _, got := range result.Warnings {
+		if got.Message == warning && got.Code == "enrollment_exclude_unmatched" {
+			return
+		}
+	}
+	t.Fatalf("warnings = %+v, want enrollment_exclude_unmatched", result.Warnings)
+}

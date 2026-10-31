@@ -1459,6 +1459,12 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			break
 		}
 		if warning = strings.TrimSpace(warning); warning != "" && len(warning) <= 1024 {
+			// An exclude_users entry that matches no account has its own
+			// code (GAP-1111); the gateway starts it with this key.
+			if strings.HasPrefix(warning, enrollmentExcludeWarningPrefix) {
+				l.result.AddWarning(codeEnrollmentExcludeUnmatched, warning)
+				continue
+			}
 			// A warning about a setting ("guardrail: human approval ...")
 			// already names where it is.
 			if !strings.HasPrefix(warning, "guardrail") {
@@ -1513,6 +1519,14 @@ func (e *Env) guardianLogHint() string {
 // another way after an SSSD naming switch), so its members get the default
 // profile (GAP-0704).
 const codeProfileAssignment = "profile_assignment_unmatched"
+
+// codeEnrollmentExcludeUnmatched and enrollmentExcludeWarningPrefix are the
+// code and the gateway's text prefix (gateway.EnrollmentExcludeWarningPrefix)
+// for exclude_users entries that match no account (GAP-1111).
+const (
+	codeEnrollmentExcludeUnmatched = "enrollment_exclude_unmatched"
+	enrollmentExcludeWarningPrefix = "enterprise.enrollment.exclude_users:"
+)
 
 // profileWarningsMax bounds the assignment warnings status and verify list.
 const profileWarningsMax = 20
