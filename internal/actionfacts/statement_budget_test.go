@@ -87,6 +87,7 @@ func TestPowerShellStatementsOverBudget(t *testing.T) {
 		{"background chain after a greater-than", strings.Repeat("Write-Output a> & ", 200) + "Remove-Item -Recurse -Force x", true},
 		{"background chain after a block comment", strings.Repeat("Get-Date <#c#> & ", 200) + "Remove-Item -Recurse -Force x", true},
 		{"call operator after a comma", "$a = @(" + strings.Repeat("& git status, ", 200) + "1)", false},
+		{"call operator after an assignment and a block comment", strings.ReplaceAll(statements(70, "$o%d = <#c#> & git rev-parse HEAD"), "; ", "\n"), false},
 		// Block comments are not statements (item 5c).
 		{"block comments ending each line", strings.ReplaceAll(statements(200, "Write-Output %d <# , #>"), "; ", "\n"), true},
 		{"block comments on 100 lines", strings.ReplaceAll(statements(100, "Write-Output %d <# , ; | #>"), "; ", "\n"), false},
