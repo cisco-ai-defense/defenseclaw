@@ -367,11 +367,14 @@ fi
 {{else}}# A helper that does not load (a path the agent's BASH_SOURCE moved, a
 # missing or broken file) is a local failure: block, whatever the fail
 # mode (review 2 of sandbox-visibility:GAP-0028).
-command . "${HOOK_DIR}/_hardening.sh" || {
+# bash 3.2 can return 0 from a "." of a file that is not there: the helper
+# counts as loaded only when its functions are defined.
+if [ ! -r "${HOOK_DIR}/_hardening.sh" ] || ! command . "${HOOK_DIR}/_hardening.sh" ||
+  ! declare -F defenseclaw_harden_env >/dev/null; then
   _DC_BOOT_FAIL_MODE=closed
   echo "defenseclaw: hook hardening helper unavailable; blocking (fail mode closed)" >&2
   exit 2
-}
+fi
 {{end}}{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.

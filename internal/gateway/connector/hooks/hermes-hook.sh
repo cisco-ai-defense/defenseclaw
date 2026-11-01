@@ -339,12 +339,15 @@ fi
 {{if .SecureClient}}command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
 {{else}}# A helper that does not load is a local failure: block, whatever the
 # fail mode. Hermes acts on the JSON block, not on the exit status.
-command . "${HOOK_DIR}/_hardening.sh" || {
+# bash 3.2 can return 0 from a "." of a file that is not there: the helper
+# counts as loaded only when its functions are defined.
+if [ ! -r "${HOOK_DIR}/_hardening.sh" ] || ! command . "${HOOK_DIR}/_hardening.sh" ||
+  ! declare -F defenseclaw_harden_env >/dev/null; then
   _DC_BOOT_FAIL_MODE=closed
   echo "defenseclaw: hermes hook hardening helper unavailable; blocking (fail mode closed)" >&2
   printf '%s\n' '{"action":"block","message":"DefenseClaw hook failed closed"}'
   exit 0
-}
+fi
 {{end}}{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.
