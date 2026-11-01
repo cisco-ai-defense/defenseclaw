@@ -534,6 +534,12 @@ func flushFailureText(err error) string {
 			return "the connection to the OpenShell gateway closed; `defenseclaw sandbox doctor` checks it, then retry the stop"
 		}
 	}
+	if strings.Contains(lower, notReadyConflict) {
+		// OpenShell's own refusal, "Conflict: sandbox is not ready", when its
+		// gateway restarted and was still bringing the sandbox back (rel-1-0-6
+		// GAP-0340).
+		return "OpenShell was still bringing the sandbox back up; wait until `defenseclaw sandbox list` shows it Ready, then retry the stop"
+	}
 	return truncate(sandboxapi.DisplayText(err.Error()), 200)
 }
 

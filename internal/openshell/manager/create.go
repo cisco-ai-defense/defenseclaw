@@ -1318,7 +1318,44 @@ func vmExitFailure(goos string, managed bool, d openshell.Driver, err error) err
 	return e
 }
 
+// OpenShell's refusals of a call on a sandbox it is still bringing up (after
+// its gateway restarted, say), in the words gRPC carries them. They reached
+// the person as "Conflict: ..." (rel-1-0-6 GAP-0340, the GAP-0186 class).
+const (
+	notReadyConflict  = "conflict: sandbox is not ready"
+	stopPhaseConflict = "sandbox must be ready, error, or in an automatic restart to stop"
+)
+
+// conflictWording is the plain DefenseClaw message for an OpenShell conflict
+// about a sandbox that is not up yet (ok false: any other error keeps its
+// words). It says what happened and what to do, and keeps none of
+// OpenShell's own text.
+func conflictWording(op string, err error) (message, detail string, ok bool) {
+	lower := strings.ToLower(err.Error())
+	name := strings.TrimSpace(op[strings.LastIndex(op, " ")+1:])
+	switch {
+	case strings.Contains(lower, stopPhaseConflict):
+		phase := ""
+		if _, after, found := strings.Cut(lower, "current phase: "); found {
+			phase = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(after), ")"))
+		}
+		state := "OpenShell is still bringing it up"
+		if phase != "" {
+			state += " (phase: " + phase + ")"
+		}
+		return "sandbox " + name + " was not stopped: " + state,
+			"wait until `defenseclaw sandbox list` shows it Ready (or Error), then stop it again; if it stays like this, `defenseclaw sandbox doctor` checks the OpenShell gateway", true
+	case strings.Contains(lower, notReadyConflict):
+		return "sandbox " + name + " is not ready yet: OpenShell is still bringing it up (its gateway restarted, for one)",
+			"wait until `defenseclaw sandbox list` shows it Ready, then run the command again; if it stays like this, `defenseclaw sandbox doctor` checks the OpenShell gateway", true
+	}
+	return "", "", false
+}
+
 func upstream(op string, err error) error {
+	if message, detail, ok := conflictWording(op, err); ok {
+		return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: message, Detail: detail}
+	}
 	code := sandboxapi.CodeUpstream
 	switch {
 	case openshell.IsUnavailable(err):

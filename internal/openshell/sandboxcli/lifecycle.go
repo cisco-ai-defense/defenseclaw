@@ -840,11 +840,14 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 	// to end stops what the command left running before it exits.
 	runCtx, stop := untilTerminated(ctx, tty)
 	var code int
+	var gatewayFilter *gatewayLostFilter
 	if tty {
 		code, err = a.Terminal.Run(runCtx, inv)
 	} else {
-		code, err = a.Streamer.Stream(runCtx, inv, a.IO.Out, a.IO.Err)
+		gatewayFilter = newGatewayLostFilter(a.IO.Err)
+		code, err = a.Streamer.Stream(runCtx, inv, a.IO.Out, gatewayFilter)
 	}
+	gatewayLost := gatewayFilter != nil && gatewayFilter.finish(code)
 	ended := runCtx.Err() != nil
 	sig := stop()
 	if ended {
@@ -856,6 +859,12 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 	}
 	if err != nil {
 		return a.clientMissingOr(ctx, sb.Name, err)
+	}
+	if code != 0 && gatewayLost {
+		// The OpenShell command could not connect to its gateway (it was
+		// killed or is restarting): said in DefenseClaw's words (GAP-0340).
+		a.warn(a.gatewayLostExecText(ctx, sb.Name))
+		return &ExitError{Code: code}
 	}
 	if code != 0 {
 		// OpenShell's own line ("exec relay closed before the command
