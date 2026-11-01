@@ -108,17 +108,49 @@ func TestLinuxDirectoryAgentNormalLaunchUsesNSSHome(t *testing.T) {
 	}
 }
 
-func TestDarwinLaunchEnvironmentKeepsOnlyPluginSelectors(t *testing.T) {
+func TestDarwinLaunchEnvironmentKeepsOnlyRelevantSelectors(t *testing.T) {
 	raw := make([]byte, 4)
 	binary.LittleEndian.PutUint32(raw, 2)
-	raw = append(raw, []byte("/usr/local/bin/opencode\x00\x00opencode\x00--pure\x00OPENCODE_PURE=1\x00OPENCODE_CONFIG_DIR=/tmp/extra\x00KIRO_AGENT_CONFIG_DIR=/tmp/agents\x00API_TOKEN=secret\x00")...)
+	raw = append(raw, []byte("/usr/local/bin/opencode\x00\x00opencode\x00--pure\x00OPENCODE_PURE=1\x00OPENCODE_CONFIG_DIR=/tmp/extra\x00KIRO_AGENT_CONFIG_DIR=/tmp/agents\x00BASH_ENV=/private/startup\x00SHELLOPTS=braceexpand:noexec\x00API_TOKEN=secret\x00")...)
 	env, err := parseProcArgs2Environment(raw)
-	if err != nil || env["OPENCODE_PURE"] != "1" || env["KIRO_AGENT_CONFIG_DIR"] != "/tmp/agents" || len(env) != 2 {
+	if err != nil || env["OPENCODE_PURE"] != "1" || env["KIRO_AGENT_CONFIG_DIR"] != "/tmp/agents" ||
+		env["BASH_ENV"] != "set" || env["SHELLOPTS"] != "noexec" || len(env) != 4 {
 		t.Fatalf("plugin selectors = %v, %v", env, err)
 	}
 	binary.LittleEndian.PutUint32(raw, 1000)
 	if _, err := parseProcArgs2Environment(raw); err == nil {
 		t.Fatal("accepted truncated process arguments as a known environment")
+	}
+}
+
+func TestManagedBashHookStartupLowersStatusAndVerifyOnUnix(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			for _, name := range []string{"codex", "copilot", "devin"} {
+				t.Run(name, func(t *testing.T) {
+					for _, action := range []string{ActionStatus, ActionVerify} {
+						result := enterprisestatus.New(action, managed.ProfileStandalone, goos, "1.0.7")
+						result.CoverageComplete, result.SecurityComplete = true, true
+						l := lifecycle{env: h.env, result: result, opts: Options{Action: action}}
+						l.describePluginLaunchSession(context.Background(), agentSession{
+							PID: 7133, UID: os.Getuid(), Agent: name, Args: []string{name}, ArgsKnown: true,
+							Env: map[string]string{"BASH_ENV": "set"}, EnvKnown: true,
+						}, name)
+						warning := messagesOf(result.Warnings, codeManagedLaunchUninspected)
+						if !strings.Contains(warning, "BASH_ENV is set") || !strings.Contains(warning, name+" (pid 7133)") ||
+							result.CoverageComplete || result.SecurityComplete {
+							t.Fatalf("%s %s missed the startup risk: %+v", name, action, result)
+						}
+						if action == ActionVerify {
+							requireError(t, result, codeManagedLaunchUninspected)
+						} else if len(result.Errors) != 0 {
+							t.Fatalf("status added errors: %+v", result.Errors)
+						}
+					}
+				})
+			}
+		})
 	}
 }
 

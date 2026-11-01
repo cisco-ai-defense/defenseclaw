@@ -66,7 +66,8 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 		enabled[name] = true
 	}
 	if !enabled["claudecode"] && !enabled["opencode"] && !enabled["amp"] && !enabled["kiro"] &&
-		!enabled["devin"] && !enabled["hermes"] && !enabled["antigravity"] {
+		!enabled["devin"] && !enabled["hermes"] && !enabled["antigravity"] &&
+		!enabled["codex"] && !enabled["copilot"] {
 		return
 	}
 	var sessions []agentSession
@@ -183,6 +184,10 @@ func launchCoverageExplanation(reason string) string {
 		return "Kiro may resume a cloud session outside local managed hooks; its placement could not be verified"
 	case "devin_config_override":
 		return "Devin selected another config file"
+	case "bash_hook_startup":
+		return "BASH_ENV is set in the agent process; Bash reads that file before the managed hook command, and it can exit before the hook runs"
+	case "bash_hook_noexec":
+		return "SHELLOPTS contains noexec in the agent process; Bash can skip the managed hook command"
 	case "hermes_safe_mode":
 		return "Hermes safe mode skips its user hooks"
 	case "hermes_config_relocated":
