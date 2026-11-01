@@ -20,8 +20,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+func checkAIDefenseForPlatform(ctx context.Context, cfg *config.Config) (string, error) {
+	return gateway.CheckStandaloneAIDefense(ctx, cfg)
+}
 
 // loadInstalledConfig reads the config the check needs; tests replace it.
 var loadInstalledConfig = func(env *enterpriseunix.Env) (*config.Config, error) { return env.InstalledConfig() }
@@ -32,9 +37,10 @@ func newEnterpriseSecretCheckCommand() *cobra.Command {
 		Use:   "check",
 		Short: "Prove the Cisco AI Defense key with one request that carries no content (root, Linux and macOS)",
 		Long: `Make one authenticated request to Cisco AI Defense with the stored credential,
-through the administrator's egress proxy, and report what inspection.ai_defense
-reports once a prompt has been inspected: ok, or unavailable:<code> (auth_failed,
-credential_unavailable, unreachable, proxy_auth_required, proxy_config, error).
+through the administrator's egress proxy, and report ok when the key is accepted,
+rejected for HTTP 401 or 403, or unavailable:<code> when the credential or
+request cannot be checked (credential_unavailable, unreachable,
+proxy_auth_required, proxy_config, error).
 Today a device reports unknown until the first prompt is inspected. The request
 carries a single full stop, no prompt or file text, and the command changes and
 stores nothing. --name must be the credential that

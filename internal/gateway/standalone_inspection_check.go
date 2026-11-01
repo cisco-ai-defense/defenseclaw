@@ -15,6 +15,7 @@ import (
 	"errors"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // aiDefenseProbeContent is the one message of the key check: a single
@@ -31,10 +32,18 @@ const aiDefenseProbeContent = "."
 // "unavailable:<code>". It reads only; it stores and changes nothing. The
 // error is set for a config that is not a standalone deployment.
 func CheckStandaloneAIDefense(ctx context.Context, cfg *config.Config) (string, error) {
+	return checkStandaloneAIDefense(ctx, cfg, managed.ResolveServiceCredential)
+}
+
+func checkStandaloneAIDefense(
+	ctx context.Context,
+	cfg *config.Config,
+	resolve func(string, string) ([]byte, managed.CredentialSource, error),
+) (string, error) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return "", errors.New("not a standalone managed deployment")
 	}
-	client, err := newStandaloneCiscoInspectClient(cfg)
+	client, err := newStandaloneCiscoInspectClientWithCredential(cfg, resolve)
 	switch {
 	case errors.Is(err, errStandaloneAIDefenseDisabled):
 		return "disabled", nil

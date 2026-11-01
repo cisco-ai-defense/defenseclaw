@@ -64,6 +64,13 @@ func (s *Sidecar) adoptStandaloneInspector(c *CiscoInspectClient) Inspector {
 }
 
 func newStandaloneCiscoInspectClient(cfg *config.Config) (*CiscoInspectClient, error) {
+	return newStandaloneCiscoInspectClientWithCredential(cfg, managed.ResolveServiceCredential)
+}
+
+func newStandaloneCiscoInspectClientWithCredential(
+	cfg *config.Config,
+	resolve func(string, string) ([]byte, managed.CredentialSource, error),
+) (*CiscoInspectClient, error) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return nil, errors.New("not a standalone managed deployment")
 	}
@@ -72,7 +79,7 @@ func newStandaloneCiscoInspectClient(cfg *config.Config) (*CiscoInspectClient, e
 		return nil, errStandaloneAIDefenseDisabled
 	}
 	secretsDir := managed.StandaloneSecretsDirForConfig(runtime.GOOS, cfg.ConfigFilePath)
-	key, _, err := managed.ResolveServiceCredential(ai.Credential, secretsDir)
+	key, _, err := resolve(ai.Credential, secretsDir)
 	if err != nil {
 		return nil, fmt.Errorf("credential %q: %w", ai.Credential, err)
 	}
