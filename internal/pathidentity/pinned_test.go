@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -80,6 +81,9 @@ func TestPinnedStatMatchesOS(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths := []string{file, sub, longFile, dir + string(os.PathSeparator)}
+	if runtime.GOOS == "windows" {
+		paths = append(paths, "NUL") // a device: no file information, no reparse tag
+	}
 	link := filepath.Join(dir, "link")
 	if err := os.Symlink(file, link); err == nil {
 		paths = append(paths, link)

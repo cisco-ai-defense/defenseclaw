@@ -41,10 +41,21 @@ func pinnedStat(op, path string, follow bool) (os.FileInfo, error) {
 		return nil, &os.PathError{Op: op, Path: path, Err: err}
 	}
 	handle, err := openForIdentity(name, windows.FILE_FLAG_OPEN_REPARSE_POINT)
+	if err == windows.ERROR_SHARING_VIOLATION {
+		// No handle at all (pagefile.sys and the like): os answers from
+		// FindFirstFile. Its FileInfo loads the ID lazily and that open fails
+		// the same way, so os.SameFile refuses it: the guard fails closed.
+		if follow {
+			return os.Stat(path)
+		}
+		return os.Lstat(path)
+	}
 	if err != nil {
 		return nil, &os.PathError{Op: op, Path: path, Err: err}
 	}
-	if follow {
+	// Only a disk file can be a reparse point; a device such as NUL has no
+	// file information to read.
+	if fileType, typeErr := windows.GetFileType(handle); follow && typeErr == nil && fileType == windows.FILE_TYPE_DISK {
 		surrogate, err := isNameSurrogate(handle)
 		if err != nil {
 			_ = windows.CloseHandle(handle)
@@ -111,7 +122,12 @@ func isNameSurrogate(handle windows.Handle) (bool, error) {
 // characters or more), so a short path keeps the Win32 normalization that
 // os.Open applies to the same spelling.
 func longPath(path string) string {
-	if len(path) < 248 || strings.HasPrefix(path, `\\?\`) || strings.HasPrefix(path, `\\.\`) {
+	if len(path) < 248 {
+		return path
+	}
+	// Already a device or NT namespace path in either slash spelling
+	// (\\?\, \\.\, \??\, //?/, //./): leave it to Win32 as os does.
+	if prefix := strings.ReplaceAll(path[:4], "/", `\`); prefix == `\\?\` || prefix == `\\.\` || prefix == `\??\` {
 		return path
 	}
 	absolute, err := filepath.Abs(path)
