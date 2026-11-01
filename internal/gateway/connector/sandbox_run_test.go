@@ -112,8 +112,8 @@ func TestClaudeCodeSandboxRunFiles(t *testing.T) {
 			if _, ok := env["MY_FLAG"]; ok {
 				t.Fatal("a non-provider variable was pinned")
 			}
-			if len(env) != len(claudeCodeSandboxProviderEnv)-1 {
-				t.Fatalf("pinned %d provider variables", len(env))
+			if len(env) != len(claudeCodeSandboxProviderEnv)-1+len(claudeCodeSandboxRunShellPins()) {
+				t.Fatalf("pinned %d variables", len(env))
 			}
 			perms, _ := dropIn["permissions"].(map[string]interface{})
 			if tc.safe != (perms["disableBypassPermissionsMode"] == "disable") || tc.safe != (dropIn["skipDangerousModePermissionPrompt"] == false) {
@@ -413,5 +413,49 @@ func TestCodexSandboxRunFiles(t *testing.T) {
 				t.Fatalf("the image's disabled features were lost: %v", features)
 			}
 		})
+	}
+}
+
+// rel-1-0-6:GAP-0334: every run drop-in pins the shell variables that stop a
+// shell-form hook command and that the image drop-in leaves open, to "", and
+// the merged managed tier (image drop-in, then run drop-in) holds "" for every
+// name of HookShellEnvPins. The image drop-in itself is unchanged, so images
+// built by an earlier release keep their content hash.
+func TestClaudeCodeSandboxRunFilesPinHookShellEnv(t *testing.T) {
+	if got, want := claudeCodeSandboxRunShellPins(), []string{"BASHOPTS", "FUNCNEST", "SHELLOPTS"}; !slices.Equal(got, want) {
+		t.Fatalf("run shell pins = %v, want %v", got, want)
+	}
+	for _, key := range claudeCodeSandboxRunShellPins() {
+		if _, inImage := claudeCodeSandboxPinnedEnv[key]; inImage {
+			t.Fatalf("%s is pinned by the image drop-in too", key)
+		}
+	}
+	rt, err := resolveSandboxTarget("claudecode", claudeRunTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := renderClaudeCodeSandboxDropIn(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []SandboxRunConfig{{}, {Safe: true}, {AllowProjectMCPServers: true}} {
+		files, err := NewClaudeCodeConnector().SandboxRunFiles(claudeRunTarget, run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dropIn := runFileMap(t, files)[ClaudeCodeSandboxRunDropInPath]
+		source, err := stageClaudeCodeManagedSettings(map[string][]byte{
+			claudeCodeSandboxDropInName:    base,
+			claudeCodeSandboxRunDropInName: dropIn,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		merged, _ := source.settings["env"].(map[string]interface{})
+		for _, key := range HookShellEnvPins() {
+			if value, ok := merged[key]; !ok || value != "" {
+				t.Fatalf("run %+v: merged managed env %s = %#v (present %v), want \"\"", run, key, value, ok)
+			}
+		}
 	}
 }

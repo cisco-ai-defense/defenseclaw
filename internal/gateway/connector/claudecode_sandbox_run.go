@@ -190,6 +190,9 @@ func claudeCodeSandboxRunSettings(run SandboxRunConfig, servers []SandboxMCPServ
 		}
 		env[key] = value
 	}
+	for _, key := range claudeCodeSandboxRunShellPins() {
+		env[key] = ""
+	}
 	settings := map[string]interface{}{"env": env}
 	if run.Safe {
 		settings["permissions"] = map[string]interface{}{"disableBypassPermissionsMode": "disable"}
@@ -212,6 +215,28 @@ func claudeCodeSandboxRunSettings(run SandboxRunConfig, servers []SandboxMCPServ
 		settings["allowedMcpServers"] = allowed
 	}
 	return settings, nil
+}
+
+// claudeCodeSandboxRunShellPins are the shell variables of HookShellEnvPins
+// that the image drop-in (claudeCodeSandboxPinnedEnv) does not pin: SHELLOPTS,
+// BASHOPTS and FUNCNEST (rel-1-0-6:GAP-0334, the sandbox case of GAP-0322).
+// Claude Code starts each shell-form hook command through /bin/sh with the
+// merged settings env, and a user or project env block with SHELLOPTS=noexec
+// made bash, where /bin/sh is bash, run none of it. The run drop-in pins them
+// to "" (managed env outranks user, project and process values) because the
+// sandbox manager renders it at each sandbox create and layers it onto the
+// verified overlay image as the run image (internal/openshell/image
+// runimage.go): an overlay image built by an earlier release gets the pins
+// with no `sandbox setup` rebuild, and the image drop-in, whose bytes the
+// overlay's content hash and the workload check cover, stays as it was built.
+func claudeCodeSandboxRunShellPins() []string {
+	var out []string
+	for _, key := range HookShellEnvPins() {
+		if _, pinned := claudeCodeSandboxPinnedEnv[key]; !pinned {
+			out = append(out, key)
+		}
+	}
+	return out
 }
 
 // claudeCodeSandboxMCPConfig renders {"mcpServers": {...}} in the shape of
