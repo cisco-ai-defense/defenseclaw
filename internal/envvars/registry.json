@@ -2481,14 +2481,14 @@
     {
       "name": "DEFENSECLAW_CODEX_NOTIFY_CHAINED",
       "category": "hook_internal",
-      "purpose": "Set by the per-user native Codex notifier (defenseclaw-hook notify) on the notifier it chains, the one setup displaced. A defenseclaw-hook notify that starts with it set forwards nothing and chains nothing, so a wrapper such as Codex computer-use that runs DefenseClaw's notifier again ends the chain instead of looping. Managed and Secure Client installs do not chain and do not read it.",
+      "purpose": "Set by the per-user native Codex notifier (defenseclaw-hook notify) on the notifier it chains, the one setup displaced. The value is the hex SHA-256 of the turn payload handed to that notifier. A defenseclaw-hook notify whose own payload has that digest forwards nothing and chains nothing, so a wrapper such as Codex computer-use that runs DefenseClaw's notifier again ends the chain instead of looping. Any other value, such as a constant or one inherited by a nested Codex for another turn, suppresses nothing. Managed and Secure Client installs ignore it and never set it.",
       "default": "(unset; set only on the chained notifier's process)",
       "accepted_values": [
-        "1"
+        "hex SHA-256 of the notify payload"
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "managed": "allow",
+      "managed": "ignore",
       "since": "1.0.7",
       "consumers": [
         {
