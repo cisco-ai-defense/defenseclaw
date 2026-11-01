@@ -169,6 +169,9 @@ def _cascade_cfg(*, judge_on=True, judge_gate=(), dm_on=True, dm_gate=(), strate
     }
     cfg.guardrail.judge.enabled = judge_on
     cfg.guardrail.judge.hook_connectors = list(judge_gate)
+    # A judge the gateway can build: a local model needs no key.
+    cfg.guardrail.judge.llm.model = "ollama/llama3"
+    cfg.guardrail.judge.llm.provider = "ollama"
     if strategy:
         cfg.guardrail.detection_strategy = strategy
     cfg.guardrail.detection_strategy_tool_call = tool_strategy
@@ -548,3 +551,32 @@ def test_tui_section_and_float_fields():
     assert setup_state.validate_config_field(field).severity == "error"
     url = setup_state.ConfigField(label="Endpoint URL", key="decision_model.base_url", kind="string", value="http://10.0.0.1/x", original="")
     assert "loopback" in setup_state.validate_config_field(url).message
+
+
+def test_cascade_matches_the_gateway_when_the_judge_cannot_start(tmp_path, monkeypatch):
+    """A judge that is on and listed but has no model (or no key) is not built
+    by the gateway, so the connector gets cascade 2 there, not cascade 3."""
+    from defenseclaw import decision_model as dmod
+    from defenseclaw.config import Config, DecisionModelConfig
+
+    monkeypatch.delenv("DEFENSECLAW_LLM_KEY", raising=False)
+    cfg = Config()
+    cfg.data_dir = str(tmp_path)
+    cfg.decision_model = DecisionModelConfig(
+        enabled=True, model="m", base_url="http://127.0.0.1:8791/v1/systemone", hook_connectors=["claude-code", " "]
+    )
+    cfg.guardrail.judge.enabled = True
+    cfg.guardrail.judge.hook_connectors = ["claudecode"]
+    cfg.guardrail.detection_strategy = "regex_judge"
+    cfg.guardrail.judge.llm.model = ""
+    cfg.llm.model = ""
+    assert not dmod.judge_runs_for(cfg, "claudecode")
+    assert dmod.cascade_for(cfg, "claudecode") == "rules -> decision model"
+    cfg.guardrail.judge.llm.model = "anthropic/claude-haiku-4-5"
+    cfg.guardrail.judge.llm.provider = "anthropic"
+    assert not dmod.judge_runs_for(cfg, "claudecode")  # no key: the gateway does not build the judge
+    monkeypatch.setenv("DEFENSECLAW_LLM_KEY", "test-key")
+    assert dmod.judge_runs_for(cfg, "claudecode")
+    assert dmod.cascade_for(cfg, "claudecode") == "rules -> decision model -> LLM judge"
+    # A blank entry matches nothing, as in the gateway.
+    assert not dmod.answers_alone_for(cfg, "")

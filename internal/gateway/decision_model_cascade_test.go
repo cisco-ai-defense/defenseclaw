@@ -406,3 +406,58 @@ func TestDecisionModelCompletionActionsAreRecorded(t *testing.T) {
 		t.Fatalf("other judge kinds keep their action, got %q", got)
 	}
 }
+
+// A rule (HILT) confirm on the same call keeps its own mapping (a block where
+// the agent cannot ask) in every merge that folds it with a cascade-2
+// confirm; only a confirm the decision model made alone maps to the HIGH
+// alert.
+func TestRuleConfirmBesideDecisionConfirmKeepsTheRuleMapping(t *testing.T) {
+	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg.Guardrail.HILT = config.HILTConfig{Enabled: true, MinSeverity: "HIGH"}
+	ruleConfirm := []RuleFinding{{RuleID: "RULE-CONFIRM", Title: "marker", Severity: "HIGH"}}
+	ruleLow := []RuleFinding{{RuleID: "RULE-LOW", Title: "marker", Severity: "LOW"}}
+	dmConfirm := func() *ToolInspectVerdict {
+		return &ToolInspectVerdict{Action: guardrailActionConfirm, Severity: "HIGH", decisionConfirm: true,
+			Findings: []string{"llm-judge:" + decisionModelFindingID}}
+	}
+	noAsk := func(v *ToolInspectVerdict) string { return decisionConfirmWithoutAsk(v, guardrailActionBlock) }
+	if got := profileMeetActionForFindings(context.Background(), cfg, "codex", ruleConfirm, true, false); got != guardrailActionConfirm {
+		t.Fatalf("fixture: the HIGH rule finding maps to %q, want a HILT confirm", got)
+	}
+
+	// Sandbox shell command view: the unverified or partial command view
+	// adds a rule confirm to a verdict the decision model confirmed.
+	shell := mergeSandboxShellCommandVerdict(context.Background(), cfg, "codex", dmConfirm(), ruleConfirm)
+	if shell.decisionConfirm || noAsk(shell) != guardrailActionBlock {
+		t.Errorf("sandbox shell view: %+v maps to %q, want the rule confirm's block", shell, noAsk(shell))
+	}
+	// Hermes extra write views: a view that adds nothing keeps the decision
+	// model's confirm, a later view with a rule confirm takes it over.
+	view := mergeSandboxShellCommandVerdict(context.Background(), cfg, "hermes", dmConfirm(), ruleLow)
+	if !view.decisionConfirm || noAsk(view) != guardrailActionAlert {
+		t.Errorf("hermes view without a rule confirm: %+v maps to %q, want the HIGH alert", view, noAsk(view))
+	}
+	view = mergeSandboxShellCommandVerdict(context.Background(), cfg, "hermes", view, ruleConfirm)
+	if view.decisionConfirm || noAsk(view) != guardrailActionBlock {
+		t.Errorf("hermes extra view: %+v maps to %q, want the rule confirm's block", view, noAsk(view))
+	}
+	// Codex tool-result fold of two verdicts.
+	folded := mergeCodexToolResultVerdicts(dmConfirm(), &ToolInspectVerdict{Action: guardrailActionConfirm, Severity: "HIGH"})
+	if folded.decisionConfirm || noAsk(folded) != guardrailActionBlock {
+		t.Errorf("codex fold: %+v maps to %q, want the rule confirm's block", folded, noAsk(folded))
+	}
+	if both := mergeCodexToolResultVerdicts(dmConfirm(), dmConfirm()); !both.decisionConfirm {
+		t.Errorf("codex fold of two decision-model confirms: %+v, want the HIGH alert mapping", both)
+	}
+	// Inspect lane merge: a rule confirm and a decision-model confirm, and a
+	// decision-model confirm and another lane's confirm.
+	lane := mergeWithLaneVerdict(&ToolInspectVerdict{Action: guardrailActionConfirm, Severity: "HIGH", Findings: []string{"RULE-CONFIRM"}},
+		&ScanVerdict{Action: guardrailActionConfirm, Severity: "HIGH", decisionConfirm: true}, "llm-judge:")
+	if lane.decisionConfirm {
+		t.Errorf("lane merge onto a rule confirm: %+v, want the rule mapping", lane)
+	}
+	lane = mergeWithLaneVerdict(dmConfirm(), &ScanVerdict{Action: guardrailActionConfirm, Severity: "HIGH"}, "aid:")
+	if lane.decisionConfirm {
+		t.Errorf("another lane's confirm beside the decision model's: %+v, want the lane mapping", lane)
+	}
+}

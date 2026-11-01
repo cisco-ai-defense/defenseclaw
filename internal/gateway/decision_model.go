@@ -562,6 +562,27 @@ func decisionModelConfirmAction(cfg *config.Config, connector, severity string) 
 	return guardrailActionForRank(rank, blockThreshold, alertThreshold, true, rank)
 }
 
+// mergedDecisionConfirm reports whether a confirm folded from verdicts is the
+// decision model's alone: some verdict carries a cascade-2 confirm and no
+// verdict confirms for any other source (a rule or HILT confirm keeps its
+// own mapping).
+func mergedDecisionConfirm(action string, verdicts ...*ToolInspectVerdict) bool {
+	if normalizedGuardrailAction(action) != guardrailActionConfirm {
+		return false
+	}
+	found := false
+	for _, v := range verdicts {
+		if v == nil || normalizedGuardrailAction(v.Action) != guardrailActionConfirm {
+			continue
+		}
+		if !v.decisionConfirm {
+			return false
+		}
+		found = true
+	}
+	return found
+}
+
 // decisionConfirmWithoutAsk is the hook action of a confirm the agent cannot
 // ask about: a decision-model confirm made without the judge (cascade 2)
 // stays the HIGH alert the judge mapping gives below block_at (the hook

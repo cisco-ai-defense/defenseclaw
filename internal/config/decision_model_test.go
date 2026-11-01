@@ -164,8 +164,11 @@ func TestDecisionModelHookConnectorsCompat(t *testing.T) {
 	if d.AnswersAlone("cursor") {
 		t.Fatal("a disabled decision model must not answer alone")
 	}
-	d.Enabled, d.HookConnectors = true, []string{" "}
-	if err := d.Validate(); err == nil {
-		t.Fatal("an empty connector name must be refused")
+	d.Enabled, d.HookConnectors = true, []string{" ", "claude-code"}
+	if err := d.Validate(); err != nil {
+		t.Fatalf("a blank entry is ignored, as the CLI does: %v", err)
+	}
+	if !d.AnswersAlone("claudecode") || !d.AnswersAlone("Claude_Code") || d.AnswersAlone("") {
+		t.Fatal("names must match in canonical form and a blank entry must match nothing")
 	}
 }

@@ -90,15 +90,17 @@ func (d DecisionModelConfig) Active() bool {
 
 // AnswersAlone reports whether the decision model answers the connector's
 // hook tool calls on its own where the LLM judge does not run (cascade 2).
-// Matching is case-insensitive; "*" matches every connector.
+// Names are matched in canonical form (NormalizeConnectorName: case and the
+// claude-code alias folded, as the CLI's connector_paths.normalize does);
+// "*" matches every connector and a blank entry matches none.
 func (d DecisionModelConfig) AnswersAlone(connector string) bool {
-	connector = strings.TrimSpace(connector)
+	connector = NormalizeConnectorName(connector)
 	if !d.Active() || connector == "" {
 		return false
 	}
 	for _, entry := range d.HookConnectors {
 		entry = strings.TrimSpace(entry)
-		if entry == "*" || strings.EqualFold(entry, connector) {
+		if entry == "*" || (entry != "" && NormalizeConnectorName(entry) == connector) {
 			return true
 		}
 	}
@@ -164,11 +166,6 @@ func (d DecisionModelConfig) Validate() error {
 	case DecisionModelEscalate, DecisionModelDecide:
 	default:
 		return fmt.Errorf("on_confident_block must be %q or %q, got %q", DecisionModelEscalate, DecisionModelDecide, d.OnConfidentBlock)
-	}
-	for _, entry := range d.HookConnectors {
-		if strings.TrimSpace(entry) == "" {
-			return fmt.Errorf("hook_connectors must not contain an empty name")
-		}
 	}
 	if strings.TrimSpace(d.BaseURL) != "" {
 		if err := ValidateDecisionModelURL(d.BaseURL); err != nil {

@@ -129,10 +129,14 @@ def _listed(names: list[str], connector: str) -> bool:
 
 def judge_runs_for(cfg: Config, connector: str) -> bool:
     """Whether the LLM judge reviews this connector's hook-lane tool calls.
-    Mirrors the gateway: judge on, connector in guardrail.judge.hook_connectors
-    and the effective tool-call strategy is not regex_only."""
+    Mirrors the gateway (hookLaneJudge): the judge is built (on, with a model
+    and, unless its provider signs without one, an API key), the connector is
+    in guardrail.judge.hook_connectors and the effective tool-call strategy is
+    not regex_only."""
     guardrail = cfg.guardrail
     if not guardrail.judge.enabled or not _listed(list(guardrail.judge.hook_connectors or []), connector):
+        return False
+    if not _judge_builds(cfg):
         return False
     strategy = (
         (guardrail.detection_strategy_tool_call or "").strip()
@@ -140,6 +144,23 @@ def judge_runs_for(cfg: Config, connector: str) -> bool:
         or "regex_judge"
     )
     return strategy.lower() != "regex_only"
+
+
+def _judge_builds(cfg: Config) -> bool:
+    """Whether the gateway can build the LLM judge (newLLMJudgeWithReason):
+    a model, and a key unless the provider needs none."""
+    try:
+        llm = cfg.resolve_llm("guardrail.judge")
+    except Exception:  # noqa: BLE001 - a config the CLI cannot resolve has no judge
+        return False
+    if not (llm.model or "").strip():
+        return False
+    if not llm.needs_api_key() or llm.resolved_api_key():
+        return True
+    from defenseclaw import credentials
+
+    env = (llm.api_key_env or "").strip() or "DEFENSECLAW_LLM_KEY"
+    return bool(credentials.resolve(env, cfg.data_dir).value)
 
 
 def answers_alone_for(cfg: Config, connector: str) -> bool:

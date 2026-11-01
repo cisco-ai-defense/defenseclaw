@@ -483,6 +483,10 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 	if rank(aid.Action) > rank(local.Action) {
 		local.Action = aid.Action
 		local.decisionConfirm = aid.decisionConfirm && strings.EqualFold(aid.Action, guardrailActionConfirm)
+	} else if rank(aid.Action) == rank(local.Action) && !aid.decisionConfirm {
+		// Another lane confirms too: the confirm is not the decision
+		// model's alone.
+		local.decisionConfirm = false
 	}
 	if sevRank(aid.Severity) > sevRank(local.Severity) {
 		local.Severity = aid.Severity
@@ -1524,6 +1528,9 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 				}
 				if strongerGuardrailAction(combined.Action, verdict.Action) != combined.Action {
 					combined.Action, combined.Reason = verdict.Action, verdict.Reason
+					combined.decisionConfirm = verdict.decisionConfirm && verdict.Action == guardrailActionConfirm
+				} else if verdict.Action == combined.Action && !verdict.decisionConfirm {
+					combined.decisionConfirm = false
 				}
 				if guardrailSeverityRank(verdict.Severity) > guardrailSeverityRank(combined.Severity) {
 					combined.Severity = verdict.Severity

@@ -1087,6 +1087,7 @@ func mergeCodexToolResultVerdicts(
 	}
 	merged.WouldBlock = source.WouldBlock || untrusted.WouldBlock
 	merged.laneVerdict = source.laneVerdict || untrusted.laneVerdict
+	merged.decisionConfirm = mergedDecisionConfirm(merged.Action, source, untrusted)
 	if source.RedactionEnabled != nil || untrusted.RedactionEnabled != nil {
 		enabled := source.RedactionEnabled != nil && *source.RedactionEnabled ||
 			untrusted.RedactionEnabled != nil && *untrusted.RedactionEnabled
