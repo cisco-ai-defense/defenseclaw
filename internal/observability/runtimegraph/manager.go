@@ -1197,21 +1197,9 @@ func restartRequiredField(old *Graph, candidate Config) string {
 	if old.config.RetainJudgeBodies != candidate.RetainJudgeBodies {
 		return FieldRetainJudgeBodies
 	}
-	oldDestinations := old.config.Plan.Snapshot().Destinations
-	candidateDestinations := candidate.Plan.Snapshot().Destinations
-	for _, candidateDestination := range candidateDestinations {
-		if candidateDestination.Kind != config.ObservabilityV8DestinationPrometheus ||
-			!candidateDestination.Enabled || candidateDestination.Transport.Listen == "" {
-			continue
-		}
-		for _, oldDestination := range oldDestinations {
-			if oldDestination.Kind == config.ObservabilityV8DestinationPrometheus &&
-				oldDestination.Enabled &&
-				oldDestination.Transport.Listen == candidateDestination.Transport.Listen {
-				return "observability.destinations." + candidateDestination.Name + ".listen"
-			}
-		}
-	}
+	// A Prometheus destination that keeps its listen address is not a
+	// restart: the successor generation joins the socket the process already
+	// holds (prometheus.processListeners, GAP-2072).
 	return ""
 }
 

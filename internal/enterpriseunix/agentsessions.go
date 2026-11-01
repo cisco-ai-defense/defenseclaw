@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/procboot"
 )
 
 // codeAgentSessionsRestart names agent sessions that started before the
@@ -43,17 +45,14 @@ var agentCLINames = map[string]bool{
 	"devin": true, "hermes": true, "agy": true, "kiro-cli": true,
 }
 
-// agentsReadingHooksLive pick up DefenseClaw's hooks without a restart: a
-// Codex session open before the install is inspected at once when its
-// app-server reads the managed requirements per turn, so naming it asked
-// users to restart sessions that were already inspected (GAP-0936). The
-// Codex background server (the app-server daemon) is the exception: one
-// started before the install keeps the requirements it read then, so the
-// sessions it serves ran tool calls with no decision, and a new Codex
-// session refuses it ("Cannot use the shared background server") until it
-// is restarted (GAP-0988, GAP-0983). It and the Codex sessions of its user
-// are named.
-var agentsReadingHooksLive = map[string]bool{"codex": true}
+// Codex is named like every other agent: a Codex session (TUI only, or
+// served by the app-server daemon) keeps the managed requirements it read
+// when it started and loads no DefenseClaw hook later (Codex 0.159.3, live
+// on RHEL 2026-10-30; private #12). An older allowlist skipped Codex
+// sessions on the premise that Codex reads the requirements per turn. A
+// Codex background server started before the install is named with how to
+// restart it: a new Codex session refuses it ("Cannot use the shared
+// background server") until it is restarted (GAP-0988, GAP-0983).
 
 // codexBackgroundServer reports the Codex app-server daemon process (not
 // its "app-server daemon" supervisor or an IDE stdio server).
@@ -81,6 +80,10 @@ var scriptHosts = map[string]bool{"node": true, "nodejs": true, "bun": true, "de
 // agentModuleNames are agents launched through a script host's -c or -m argument.
 var agentModuleNames = map[string]string{"hermes_cli": "hermes"}
 
+// packageRunnerTitles are the package runners whose process title names the
+// runner first.
+var packageRunnerTitles = map[string]bool{"npm": true, "npx": true, "pnpm": true, "pnpx": true, "yarn": true, "bunx": true}
+
 func isScriptHost(name string) bool {
 	return scriptHosts[name] || strings.HasPrefix(name, "python3.")
 }
@@ -95,6 +98,13 @@ func agentCLIOf(argv []string) string {
 	}
 	// Node can replace its argv area with a short process title padded by
 	// spaces. Claude Code does this during an interactive npm session.
+	// npm exec and npx replace their argv with one title, "npm exec <package>
+	// <arguments>". That process is the package runner, not the agent: an MCP
+	// server it runs for Claude Code ends in a project path that may be named
+	// claude (GAP-1273). An agent the runner starts is its own process.
+	if title := strings.Fields(argv[0]); len(argv) == 1 && len(title) > 1 && packageRunnerTitles[filepath.Base(title[0])] {
+		return ""
+	}
 	name := strings.TrimSpace(filepath.Base(argv[0]))
 	if agentCLINames[name] {
 		return name
@@ -146,6 +156,9 @@ type agentSession struct {
 	Unknown bool
 	// CodexServer marks the Codex background server.
 	CodexServer bool
+	// ContainerID is the Docker container the process runs in, read from
+	// its cgroup on Linux ("" outside a container or when unknown).
+	ContainerID string
 }
 
 // agentSessionsStartedBefore lists the agent CLI processes of accounts
@@ -158,21 +171,72 @@ func (e *Env) agentSessionsStartedBefore(ctx context.Context, since time.Time, s
 	case "darwin":
 		all = e.darwinAgentSessions(ctx)
 	}
-	oldServer := map[int]bool{}
-	for _, session := range all {
-		if session.CodexServer && session.Started.Before(since) {
-			oldServer[session.UID] = true
-		}
-	}
+	all = oneProcessPerSession(all)
 	var out []agentSession
 	for _, session := range all {
-		if session.UID == 0 || session.UID == serviceUID || !session.Started.Before(since) ||
-			(agentsReadingHooksLive[session.Agent] && !session.CodexServer && !oldServer[session.UID]) {
+		if session.UID == 0 || session.UID == serviceUID || !session.Started.Before(since) {
 			continue
 		}
 		out = append(out, session)
 	}
 	return out
+}
+
+// oneProcessPerSession keeps the topmost process of each agent session: an
+// agent with a launcher (npm Codex: a node script and the native codex it
+// starts) is one session, so a warning names its launcher pid once
+// (GAP-2439). The Codex background server is restarted its own way, and an
+// unreadable process is not known to be an agent, so both stay listed as
+// they are.
+func oneProcessPerSession(sessions []agentSession) []agentSession {
+	processes := make([]enterprisestatus.SessionProcess, 0, len(sessions))
+	for _, session := range sessions {
+		if session.Unknown || session.CodexServer {
+			continue
+		}
+		processes = append(processes, enterprisestatus.SessionProcess{PID: session.PID, PPID: session.PPID,
+			User: strconv.Itoa(session.UID), Agent: session.Agent})
+	}
+	leaders := enterprisestatus.SessionLeaders(processes)
+	out := make([]agentSession, 0, len(sessions))
+	for _, session := range sessions {
+		if leader, ok := leaders[session.PID]; ok && !session.Unknown && !session.CodexServer && leader != session.PID {
+			continue
+		}
+		out = append(out, session)
+	}
+	return out
+}
+
+// bootFromClock is procboot.FromClock; tests replace it.
+var bootFromClock = procboot.FromClock
+
+// linuxBootSeconds is the boot instant (Unix seconds) that the start times in
+// /proc/<pid>/stat count from: the btime line of /proc/stat. A /proc mounted
+// with subset=pid has no /proc/stat but still serves the process table, so
+// there the instant comes from the clocks, the way the kernel computes btime
+// (GAP-2101). Any other unreadable /proc/stat stays an error, and the scan is
+// reported as unknown.
+func (e *Env) linuxBootSeconds() (int64, error) {
+	stat, err := readBounded(e.P("/proc/stat"), 1<<20)
+	if err != nil {
+		if procboot.SubsetPID(e.P("/proc")) {
+			if boot, ok := bootFromClock(); ok {
+				return boot, nil
+			}
+		}
+		return 0, err
+	}
+	var boot int64
+	for _, line := range strings.Split(string(stat), "\n") {
+		if value, ok := strings.CutPrefix(line, "btime "); ok {
+			boot, _ = strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		}
+	}
+	if boot == 0 {
+		return 0, fmt.Errorf("missing Linux boot time")
+	}
+	return boot, nil
 }
 
 // linuxAgentSessions reads the agent processes from /proc: the start time is
@@ -183,18 +247,9 @@ func (e *Env) linuxAgentSessions() []agentSession {
 }
 
 func (e *Env) linuxAgentSessionsWithError() ([]agentSession, error) {
-	stat, err := readBounded(e.P("/proc/stat"), 1<<20)
+	boot, err := e.linuxBootSeconds()
 	if err != nil {
 		return nil, err
-	}
-	var boot int64
-	for _, line := range strings.Split(string(stat), "\n") {
-		if value, ok := strings.CutPrefix(line, "btime "); ok {
-			boot, _ = strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-		}
-	}
-	if boot == 0 {
-		return nil, fmt.Errorf("missing Linux boot time")
 	}
 	entries, err := os.ReadDir(e.P("/proc"))
 	if err != nil {
@@ -248,6 +303,9 @@ func (e *Env) linuxAgentSessionsWithError() ([]agentSession, error) {
 		ppid, _ := strconv.Atoi(fields[1])
 		session := agentSession{PID: pid, PPID: ppid, UID: int(owner.Uid), Agent: agent, Started: started, Args: argv, Executable: executable,
 			ArgsKnown: argvKnown, CodexServer: codexBackgroundServer(argv)}
+		if cgroup, err := readBounded(filepath.Join(dir, "cgroup"), 64<<10); err == nil {
+			session.ContainerID = linuxCgroupContainer(cgroup)
+		}
 		if pluginLaunchConnector(agent) {
 			raw, err := readBounded(filepath.Join(dir, "environ"), 64<<10)
 			if err == nil {
@@ -273,6 +331,9 @@ func (e *Env) darwinAgentSessionsWithError(ctx context.Context) ([]agentSession,
 	now := e.Now()
 	var out []agentSession
 	for _, line := range strings.Split(string(result.Stdout), "\n") {
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
 		fields := strings.Fields(line)
 		if len(fields) < 4 {
 			continue
@@ -364,6 +425,62 @@ func parseElapsed(text string) (time.Duration, bool) {
 	return time.Duration(days)*24*time.Hour + time.Duration(total)*time.Second, true
 }
 
+// connectorActivations dates the machine-policy connectors this run places
+// that the previous record did not have: a config change that enables one
+// gives running sessions of that agent no hooks. A first or staged install
+// has none (the deployment activation covers it); a connector still placed
+// keeps its date; a run that does not start the services dates nothing new.
+func connectorActivations(previous *Deployment, placed []string, started bool, now string) map[string]string {
+	if previous == nil || previous.NoStart {
+		return nil
+	}
+	before := map[string]bool{}
+	for _, name := range previous.MachinePolicyConnectors {
+		before[name] = true
+	}
+	out := map[string]string{}
+	for _, name := range placed {
+		switch {
+		case !before[name] && started:
+			out[name] = now
+		case before[name] && previous.ConnectorActivatedAt[name] != "":
+			out[name] = previous.ConnectorActivatedAt[name]
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// describeAgentSessionsBeforeConnector warns about the sessions of each
+// connector a config change enabled after the activation that started
+// before that change (GAP-0018).
+func (l *lifecycle) describeAgentSessionsBeforeConnector(ctx context.Context, record *Deployment, activated time.Time) {
+	names := make([]string, 0, len(record.ConnectorActivatedAt))
+	for name := range record.ConnectorActivatedAt {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		raw := record.ConnectorActivatedAt[name]
+		at, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil || !at.After(activated) {
+			continue
+		}
+		var stale []agentSession
+		for _, session := range l.env.agentSessionsStartedBefore(ctx, at, record.ServiceUID) {
+			if session.Unknown || agentConnectors[session.Agent] != name || session.Started.Before(activated) {
+				continue
+			}
+			stale = append(stale, session)
+		}
+		l.warnAgentSessions(stale, func(sessions string) string {
+			return fmt.Sprintf("runs %s, started before its connector was enabled at %s; an agent reads its hooks when it starts, so ask that user to restart these sessions", sessions, raw)
+		})
+	}
+}
+
 // describeAgentSessionsBeforeActivation warns, per account, about agent
 // sessions that started before this deployment was activated, about
 // sessions that started before the guardian put back hooks a user changed or
@@ -392,6 +509,7 @@ func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, r
 	l.warnAgentSessions(known, func(sessions string) string {
 		return fmt.Sprintf("runs %s, started before DefenseClaw was activated on this computer at %s; an agent reads its hooks when it starts, so these sessions run without DefenseClaw until they are restarted: ask that user to restart them", sessions, activationTime)
 	})
+	l.describeAgentSessionsBeforeConnector(ctx, record, activated)
 	if l.env.GOOS == "darwin" {
 		// An unreadable record is reported by
 		// describeAgentSessionsBeforeGuardianRestore below.
@@ -438,7 +556,7 @@ func (l *lifecycle) warnUnknownAgentSessions(sessions []agentSession) {
 	l.warnAgentSessions(sessions, func(labels string) string {
 		return fmt.Sprintf("restart status unknown: the arguments of %s could not be read, so DefenseClaw cannot tell whether these are agents that started before hooks were installed, enabled or put back and run without DefenseClaw; ask that these sessions be restarted", labels)
 	})
-	l.result.SecurityComplete = false
+	l.result.MarkSecurityIncomplete(codeAgentSessionsRestart)
 }
 
 // warnAgentSessions adds one agent_sessions_restart_required warning per
@@ -457,6 +575,11 @@ func (l *lifecycle) warnAgentSessions(sessions []agentSession, reason func(sessi
 			server[session.UID] = true
 		}
 		byUID[session.UID] = append(byUID[session.UID], label)
+		connector := ""
+		if !session.Unknown {
+			connector = agentConnectors[session.Agent]
+		}
+		l.result.NotePendingSession(connector, session.PID)
 	}
 	uids := make([]int, 0, len(byUID))
 	for uid := range byUID {
@@ -518,17 +641,8 @@ func (e *Env) hostProcesses(ctx context.Context) []hostProcess {
 // linuxProcesses reads the processes from /proc: the start time is field
 // 22 of /proc/<pid>/stat, in clock ticks (USER_HZ, 100) after btime.
 func (e *Env) linuxProcesses() []hostProcess {
-	stat, err := readBounded(e.P("/proc/stat"), 1<<20)
+	boot, err := e.linuxBootSeconds()
 	if err != nil {
-		return nil
-	}
-	var boot int64
-	for _, line := range strings.Split(string(stat), "\n") {
-		if value, ok := strings.CutPrefix(line, "btime "); ok {
-			boot, _ = strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-		}
-	}
-	if boot == 0 {
 		return nil
 	}
 	entries, _ := os.ReadDir(e.P("/proc"))

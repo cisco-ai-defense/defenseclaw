@@ -269,13 +269,17 @@ func TestManagedIgnoredOptOutsAreReadThroughLookup(t *testing.T) {
 	t.Cleanup(func() { SetManagedStandalone(false) })
 	t.Setenv("DEFENSECLAW_REVEAL_PII", "1")
 	t.Setenv("DEFENSECLAW_FAIL_MODE", "closed")
+	t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "1")
 	if got := Getenv("DEFENSECLAW_REVEAL_PII"); got != "" {
 		t.Fatalf("an ignored opt-out read %q on a managed host", got)
 	}
-	if got := Getenv("DEFENSECLAW_FAIL_MODE"); got != "closed" {
+	if got := Getenv("DEFENSECLAW_FAIL_MODE"); got != "" {
+		t.Fatalf("fail mode comes only from installed policy, got process value %q", got)
+	}
+	if got := Getenv("DEFENSECLAW_STRICT_AVAILABILITY"); got != "1" {
 		t.Fatalf("a tighten_only variable read %q, want the raw value", got)
 	}
-	if names := IgnoredNames(); len(names) != 1 || names[0] != "DEFENSECLAW_REVEAL_PII" {
+	if names := IgnoredNames(); len(names) != 2 || names[0] != "DEFENSECLAW_FAIL_MODE" || names[1] != "DEFENSECLAW_REVEAL_PII" {
 		t.Fatalf("IgnoredNames = %v", names)
 	}
 

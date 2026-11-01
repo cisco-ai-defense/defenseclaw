@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -34,8 +35,6 @@ const (
 	gatewayColdStartFailedName = "gateway.cold-start-failed"
 	// gatewayStartLockName serializes start, restart and hook starts.
 	gatewayStartLockName = "gateway.start.lock"
-	// installLockName is install.sh's upgrade lock directory.
-	installLockName = ".install.lock"
 	// gatewayLoginPathName records the PATH of the last start or restart run
 	// from the account's own session. A hook cold start runs with the hook's
 	// locked-down PATH, and the gateway it starts needs the account's PATH to
@@ -192,10 +191,11 @@ func recordHookColdStartFailure(dataDir string, cause error) {
 
 // hookInstallInProgress reports an install or upgrade of this account's
 // DefenseClaw (install.sh or install.ps1 hold .install.lock in the data
-// directory while they run).
+// directory while they run), or an interrupted one whose recovery waits for
+// the next installer run: a start would run the half-done install
+// (hookexec.InstallRecoveryPending, GAP-2082).
 func hookInstallInProgress(dataDir string) bool {
-	_, err := os.Lstat(filepath.Join(dataDir, installLockName))
-	return err == nil
+	return hookexec.InstallLockHeld(dataDir) || hookexec.InstallRecoveryPending(dataDir)
 }
 
 // hookColdStartRefusal returns why a hook may not start the gateway now, or

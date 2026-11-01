@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -210,6 +211,13 @@ type Env struct {
 	Lchown func(path string, uid, gid int) error
 	// OwnerOf reports a path's uid and gid without following a symlink.
 	OwnerOf func(path string) (int, int, error)
+	// clearDirFlags clears the macOS immutable and append-only flags of a
+	// folder and names the ones it found ("uchg,schg"; "" when none were
+	// set), also when clearing them failed. Tests replace it.
+	clearDirFlags func(path string) (string, error)
+	// dirFlagsCleared is told when ensureDir cleared such a flag; a
+	// lifecycle run lists it among its changes.
+	dirFlagsCleared func(path, flags string)
 	// Fchown changes the owner of an open file: the state folders the service
 	// account can write are re-owned through descriptors (settleStateModes).
 	Fchown func(f *os.File, uid, gid int) error
@@ -258,6 +266,15 @@ type Env struct {
 	// installs, which tags the macOS LaunchAgent labels (launchAgentLabel);
 	// "" outside a plan, where the installed gateway is read.
 	agentDigest string
+	// boundedHomeLookups is set by status and verify: an account's home is
+	// looked up in a bounded child before it is opened in this process, so a
+	// home on a stalled mount cannot keep them from answering (GAP-1751).
+	boundedHomeLookups bool
+	// homeLookups holds each home's bounded lookup answer for this run.
+	homeLookups struct {
+		sync.Mutex
+		answered map[string]bool
+	}
 
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string
@@ -272,6 +289,10 @@ type Env struct {
 	// a bundle whose config change restarts the gateway (restart_deferred,
 	// the retry exit code).
 	DeferRestart bool
+	// AnchorsDeviceGroup pins the trust anchors an install writes (`bundle
+	// anchors install --device-group`, `bundle apply --device-group`) to this
+	// one device group; "" writes the file's own device_groups.
+	AnchorsDeviceGroup string
 	// bundleFault is a test seam: it runs at each named phase of a bundle
 	// apply (received, verified, staged, transaction, applied, committed)
 	// and an error fails the apply there; at committed the run stops before
@@ -279,6 +300,11 @@ type Env struct {
 	// runs before the bundle store creates its private directory <name>
 	// (receipts). Production leaves it nil.
 	bundleFault func(phase string) error
+
+	// StartTransactionWatch starts the watcher that recovers a transaction
+	// whose run pid is killed (txwatch.go, GAP-0276). NewEnv sets it; nil
+	// (tests) starts none.
+	StartTransactionWatch func(ctx context.Context, pid int, snapshotDir string) error
 
 	// SelfUnit names the service unit or launchd job this lifecycle run
 	// executes inside (the config-apply trigger). The lifecycle never stops
@@ -325,6 +351,7 @@ func NewEnv(goos, productVersion string) (*Env, error) {
 	}
 	env.fillDefaults()
 	env.SelfUnit = selfUnitFromEnv(env.Services, os.Getenv(LifecycleUnitEnv))
+	env.StartTransactionWatch = env.startTransactionWatch
 	return env, nil
 }
 
@@ -333,6 +360,19 @@ func NewEnv(goos, productVersion string) (*Env, error) {
 // they get the answer promptly; the config-apply trigger passes a longer
 // --lock-wait so a change made during another run is applied after it.
 const DefaultLockWait = 5 * time.Second
+
+// ApplyTriggerLockWait is the wait of an ensure run for the config-apply
+// trigger (--reason path): the launchd apply job and the systemd apply
+// service pass it as --lock-wait, so a change made during another run is
+// applied once that run ends. An ensure --reason path started any other way
+// (configuration management that runs what the trigger runs) waits as long
+// unless --lock-wait says otherwise; with the MDM default a second push five
+// seconds after the first exited lifecycle_busy after 5 s instead of being
+// applied (rel-1-0-3 GAP-0142).
+const ApplyTriggerLockWait = 10 * time.Minute
+
+// ApplyTriggerReason is the --reason of the config-apply trigger.
+const ApplyTriggerReason = "path"
 
 // MaxLockWait bounds --lock-wait.
 const MaxLockWait = 15 * time.Minute
@@ -368,6 +408,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.Lchown == nil {
 		e.Lchown = os.Lchown
+	}
+	if e.clearDirFlags == nil {
+		e.clearDirFlags = clearBlockingFlags
 	}
 	if e.Fchown == nil {
 		e.Fchown = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }

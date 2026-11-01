@@ -64,7 +64,8 @@ func TestRemoveWindowsCodexRequirementsTakesTheGroupsOfAnEarlierRelease(t *testi
 			if !strings.Contains(text, "approval_policy_floor") {
 				t.Fatalf("the administrator's setting was dropped:\n%s", text)
 			}
-			if strings.Contains(text, "EncodedCommand") {
+			// The 1.0.4 bridge and the direct cmd.exe form (GAP-1908).
+			if strings.Contains(text, "EncodedCommand") || strings.Contains(text, " /d /v:off /c ") {
 				t.Fatalf("a DefenseClaw group survived the removal:\n%s", text)
 			}
 			if got := strings.Contains(text, `C:\Tools\audit.exe`); got != tc.wantAdminHook {

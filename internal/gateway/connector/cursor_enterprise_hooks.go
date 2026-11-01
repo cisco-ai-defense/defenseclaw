@@ -24,8 +24,9 @@ import (
 	"fmt"
 	"io"
 	"math/big"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 var cursorHookEvents = []string{
@@ -160,8 +161,8 @@ func RenderWindowsCursorEnterpriseAdapterForTargets(hookBinary string, modes map
 	return renderWindowsCursorAdapterWithTargets(hookBinary, "closed", true, cursorAdapterTimeoutMS, encoded)
 }
 
-var windowsCursorAdapterSIDPattern = regexp.MustCompile(`^S-[0-9]+(?:-[0-9]+)+$`)
-var windowsCursorAdapterModesPattern = regexp.MustCompile(`(?m)^        \$targetModesJSON64 = '([A-Za-z0-9+/=]+)'\r?$`)
+var windowsCursorAdapterSIDPattern = lazyregexp.New(`^S-[0-9]+(?:-[0-9]+)+$`)
+var windowsCursorAdapterModesPattern = lazyregexp.New(`(?m)^        \$targetModesJSON64 = '([A-Za-z0-9+/=]+)'\r?$`)
 
 // WindowsCursorEnterpriseAdapterTargetModes recognizes only exact canonical
 // mapped adapters. Used to authenticate partial publication rollback before

@@ -8,10 +8,10 @@ package enterprisebundle
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Reachability warning codes. A warning never blocks a bundle (owner
@@ -44,7 +44,7 @@ const (
 	GroupSIDMalformed  GroupKind = "sid_malformed"   // S-1-... that is not a SID
 )
 
-var objectIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+var objectIDPattern = lazyregexp.New(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // ClassifyGroup returns the kind of a group identifier.
 func ClassifyGroup(group string) GroupKind {

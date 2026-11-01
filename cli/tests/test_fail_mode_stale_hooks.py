@@ -1,11 +1,10 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Legacy per-user open config never reopens or unnecessarily rewrites hooks.
+"""A stopped gateway reconciles hooks only when the saved outage mode changes.
 
-The runtime and rendered hooks are closed even if an older config persists
-``hook_fail_mode: open``. The managed administrator's outage setting is
-installed by the managed hook guardian.
+An explicit per-user ``hook_fail_mode: open`` is an outage choice. The managed
+administrator's outage setting is installed by the managed hook guardian.
 """
 
 from __future__ import annotations
@@ -50,18 +49,23 @@ def _run(tmp_path: Path, monkeypatch, args: list[str], *, gateway_running: bool,
         return CliRunner().invoke(cmd_config.config_cmd, args)
 
 
-@pytest.mark.parametrize("args", [["unset", "guardrail.hook_fail_mode"], ["set", "guardrail.hook_fail_mode", "closed"]])
-def test_legacy_per_user_open_edit_leaves_closed_hooks_intact(tmp_path: Path, monkeypatch, args) -> None:
+@pytest.mark.parametrize(
+    "args,reconciles",
+    [(["unset", "guardrail.hook_fail_mode"], False), (["set", "guardrail.hook_fail_mode", "closed"], True)],
+)
+def test_per_user_open_edit_reconciles_only_when_effective_mode_changes(tmp_path: Path, monkeypatch, args, reconciles) -> None:
     reconcile = MagicMock()
     result = _run(tmp_path, monkeypatch, args, gateway_running=False, reconcile=reconcile)
     assert result.exit_code == 0, result.output
-    reconcile.assert_not_called()
-    assert "re-rendered the hooks now" not in result.output
+    if reconciles:
+        reconcile.assert_called_once()
+    else:
+        reconcile.assert_not_called()
 
 
-def test_native_deny_connectors_stay_closed_on_legacy_open_edit(tmp_path: Path, monkeypatch) -> None:
-    # Per-user Antigravity, Copilot and Hermes are already closed regardless
-    # of the persisted legacy fail mode (GAP-0027).
+def test_native_deny_connectors_need_no_refresh_when_open_choice_is_unset(tmp_path: Path, monkeypatch) -> None:
+    # The default tier is also outage-open, so unsetting a saved open does not
+    # change their effective mode. Other failure classes remain closed.
     reconcile = MagicMock()
     config = _CONFIG + "".join(f"    {name}: {{mode: action}}\n" for name in ("antigravity", "copilot", "hermes"))
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))

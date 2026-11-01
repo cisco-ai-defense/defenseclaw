@@ -239,6 +239,14 @@ try {
                 $failures.Add('Secure Client Uninstall gained a staged gateway source')
             }
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+            # A helper that removes hooks after the commit also answers the
+            # read-only pre-commit check (GAP-0571); that check has its own
+            # cases in enterprise-standalone-uninstall-hook-commit-smoke.ps1.
+            # Here it passes, so the uninstall reaches the stale journal.
+            function script:Invoke-DefenseClawManagedHooksTeardownCommand {
+                param($Layout, $GatewayServiceName, $GuardianServiceName, $Action, [switch]$PurgeContractLocks)
+                if ($Action -cne 'check') { throw "unexpected managed-hook teardown action $Action before the stale journal" }
+            }
             function script:Get-DefenseClawDeploymentMetadata {
                 param([hashtable]$Layout, [switch]$Required)
                 return [pscustomobject]@{ managed_hooks_activation = [pscustomobject]@{ state = 'activated' } }
@@ -255,7 +263,7 @@ try {
             function script:Assert-DefenseClawStandaloneInstallRootNotHeld { param($Layout, $GatewayServiceName, $GuardianServiceName, $SelfUninstallCallerPID) }
             function script:Assert-DefenseClawStandaloneUninstallInstallTree { param($Layout) }
             function script:Assert-DefenseClawRecordedArtifactHashes { param($Metadata, $Layout, $Action) }
-            function script:Assert-DefenseClawUninstallStateTreeNoReparse { param($Layout) }
+            function script:Remove-DefenseClawUninstallStateTreeLinks { param($Layout) }
             # This deployment's helper prepares the hook removal against the
             # tombstone (teardown-managed-hooks capabilities); the older-helper
             # paths are covered by enterprise-standalone-uninstall-hook-commit-smoke.ps1.

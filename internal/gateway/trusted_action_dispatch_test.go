@@ -619,10 +619,8 @@ func TestDetectorStateFallbackRequiresSemanticMutationProofForEnforcement(t *tes
 			legacyText: `{"path":"/home/alice/.defenseclaw/audit.db","query":"SELECT 1"}`,
 		},
 		{
-			// sqlite3 can execute extensions and shell commands, so -readonly
-			// does not make the whole program a known read-only command.
-			// The action target-mention ruling applies to the active audit DB.
-			name: "sqlite readonly flag still names protected state",
+			// Naming the active DB in a SELECT does not prove a mutation.
+			name: "sqlite readonly query is not a state mutation",
 			input: actionfacts.Input{
 				Tool:       "shell",
 				Command:    "sqlite3 -readonly /home/alice/.defenseclaw/audit.db 'SELECT 1'",
@@ -630,8 +628,6 @@ func TestDetectorStateFallbackRequiresSemanticMutationProofForEnforcement(t *tes
 				ActiveHome: "/home/alice",
 			},
 			legacyText: "sqlite3 -readonly /home/alice/.defenseclaw/audit.db 'SELECT 1'",
-			want:       true,
-			enforce:    true,
 		},
 		{
 			name: "malformed action is diagnostic only",
@@ -1650,7 +1646,8 @@ func TestTrustedActionDynamicExecutableQuietControls(t *testing.T) {
 	}{
 		{command: dangerous, wantEnforce: true},
 		{command: "command " + dangerous, wantEnforce: true},
-		{command: "env MODE=check " + dangerous},
+		// env NAME=v rm is judged as NAME=v rm is (GAP-1200).
+		{command: "env MODE=check " + dangerous, wantEnforce: true},
 		{command: "exec " + dangerous, wantEnforce: true},
 		{command: "sudo -n " + dangerous, wantEnforce: true},
 		{command: "sudo -h remote " + dangerous, wantEnforce: true},
@@ -2248,9 +2245,12 @@ func TestTrustedActionBashStaticExpansionUsesExecutionDialect(t *testing.T) {
 			wantFinding: true,
 		},
 		{
-			name:    "path assignment makes executable resolution uncertain",
-			command: `PATH=/definitely/missing $'rm' -rf /`,
-			ruleID:  "CMD-RM-RF",
+			// A PATH prefix can only pick another rm: the call is also
+			// judged without it, so a match over-blocks at worst (GAP-1200).
+			name:        "path assignment is judged without the prefix too",
+			command:     `PATH=/definitely/missing $'rm' -rf /`,
+			ruleID:      "CMD-RM-RF",
+			wantFinding: true,
 		},
 		{
 			name:    "dynamic option before static suffix is not omitted",

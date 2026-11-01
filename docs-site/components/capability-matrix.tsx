@@ -202,9 +202,6 @@ interface OutageRow {
   // connector), and with foreign_hooks report or allow.
   managedOpen: ManagedOpen | 'runs-blocks-with-hooks-only-preserve';
   managedOpenNoGuard: ManagedOpen;
-  // Where the guard blocks the outage, an agent started during it stays
-  // blocked until it restarts.
-  heldUntilRestart: boolean;
   secureClientClosed: 'blocks' | 'runs';
   strictAvailability: 'yes' | 'no' | 'n/a';
 }
@@ -226,7 +223,7 @@ const strictText: Record<OutageRow['strictAvailability'], string> = {
   'n/a': 'No hooks',
 };
 
-function Outcome({ value, heldUntilRestart = false }: { value: string; heldUntilRestart?: boolean }) {
+function Outcome({ value }: { value: string }) {
   const blocks = value === 'blocks';
   return (
     <>
@@ -239,11 +236,6 @@ function Outcome({ value, heldUntilRestart = false }: { value: string; heldUntil
       >
         {outageText[value] ?? value}
       </span>
-      {heldUntilRestart && (
-        <div className="mt-1 text-xs leading-relaxed text-fd-muted-foreground">
-          Where it blocks, an agent started during the outage stays blocked until it restarts.
-        </div>
-      )}
     </>
   );
 }
@@ -279,7 +271,7 @@ export function OutageMatrix() {
               <Td><Outcome value={c.outage.perUserClosed} /></Td>
               <Td><Outcome value={c.outage.perUserOpen} /></Td>
               <Td className="max-w-[240px]">
-                <Outcome value={c.outage.managedOpen} heldUntilRestart={c.outage.heldUntilRestart} />
+                <Outcome value={c.outage.managedOpen} />
               </Td>
               <Td className="max-w-[240px]"><Outcome value={c.outage.managedOpenNoGuard} /></Td>
               <Td><Outcome value={c.outage.secureClientClosed} /></Td>

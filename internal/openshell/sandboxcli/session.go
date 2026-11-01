@@ -198,6 +198,10 @@ type session struct {
 	// unblocked since, whose summary line offers no unblock.
 	blockedHosts   map[string]bool
 	unblockedHosts map[string]bool
+	// modelSide are the model hosts the session announced only a side
+	// request of (sandboxapi.ReasonModelHostSide): no site blocked, so the
+	// summary does not count them (GAP-2447).
+	modelSide map[string]bool
 	// refused are the host:port destinations of OpenShell's own refusals
 	// the session announced, with their host; otherBlocks the hosts blocked
 	// another way too; approved the destinations an approval opened since
@@ -218,6 +222,21 @@ type session struct {
 	policyStop string
 }
 
+// openShellClientMissingError is a probe that could not run the OpenShell
+// command at all (not installed for the account, or not on its PATH): the
+// sandbox may run fine, only this command cannot reach it. It happened
+// after an administrator switched the sandbox setup away and back, until
+// the account's sandbox service installed its copy again (GAP-0196).
+type openShellClientMissingError struct {
+	sandbox string
+	err     error
+}
+
+func (e *openShellClientMissingError) Error() string {
+	return "the OpenShell command that reaches your sandboxes is not installed for your account right now, so " + e.sandbox + " can't be reached"
+}
+func (e *openShellClientMissingError) Unwrap() error { return e.err }
+
 // probe runs a trivial command in workdir until the sandbox answers; ""
 // is the sandbox's default directory. The harness's workdir exists only
 // once a copy-mode project is uploaded, so a probe there comes after the
@@ -233,6 +252,11 @@ func (s *session) probe(ctx context.Context, workdir string) error {
 		code, err := s.app.Streamer.Stream(ctx, inv, &out, &out)
 		if err == nil && code == 0 {
 			return nil
+		}
+		if errors.Is(err, exec.ErrNotFound) {
+			// The OpenShell command is not there to reach the sandbox with:
+			// retrying finds it no more (GAP-0196).
+			return &openShellClientMissingError{sandbox: s.sb.Name, err: err}
 		}
 		last = err
 		if err == nil {
@@ -652,6 +676,11 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	direct := ev.Source == sandboxapi.SourceOpenShell && ev.Category == ""
 	networkOff := s.networkOff()
 	switch why := firstNonEmpty(ev.Category, ev.Reason); {
+	case ev.Reason == sandboxapi.ReasonModelHostSide:
+		// A side request on the sandbox's model host is no block of the model
+		// provider: the model calls go on through its provider rule, under any
+		// network mode, network.mode deny included (GAP-2447, #1134).
+		text = "⚠ " + where + ": " + modelHostSideText
 	case direct && networkOff:
 		text += ": " + s.networkOffText()
 	case sshPort(ev):
@@ -672,6 +701,18 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 		text += " (" + sandboxapi.BlockedText(why, ev.Host) + ")"
 	}
 	host := strings.ToLower(ev.Host)
+	if ev.Reason == sandboxapi.ReasonModelHostSide {
+		s.noticeMu.Lock()
+		if s.modelSide == nil {
+			s.modelSide = map[string]bool{}
+		}
+		if len(s.modelSide) < maxSeenEvents {
+			s.modelSide[host] = true
+		}
+		s.noticeMu.Unlock()
+		s.notice(key, text, text)
+		return
+	}
 	n := sessionNotice{summary: text}
 	if ev.Unblockable && !sshPort(ev) {
 		// Once the host is unblocked the summary gives the block without
@@ -707,6 +748,10 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	s.noticeMu.Unlock()
 	s.noticeWith(key, text, n)
 }
+
+// modelHostSideText is the session's line for an OpenShell refusal on the
+// sandbox's model host (sandboxapi.ReasonModelHostSide).
+const modelHostSideText = "a side request outside the model channel was refused; model calls are unaffected (no OpenShell rule allows it)"
 
 // networkOff reports a sandbox whose policy denies all network access
 // (network.mode deny): no approval opens a destination there.
@@ -1600,6 +1645,13 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		}
 		sb, err := s.api.Stop(ctx, name)
 		if err != nil {
+			if sandboxapi.IsCode(err, sandboxapi.CodeUnsynced) {
+				// Its disk could not be synced: it keeps running, and the
+				// user's own stop says what is lost and asks (GAP-0902).
+				s.stopFailed = true
+				a.warn(apiError(err).Error())
+				return nil
+			}
 			if sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
 				// OpenShell's error state: nothing runs in it (GAP-0333).
 				a.warn("could not stop " + name + ": " + apiError(err).Error())
@@ -1884,7 +1936,13 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	parts = append(parts, contacted)
 	s.noticeMu.Lock()
 	lifted := s.liftedBlocks()
-	sitesBlocked := max(len(s.blockedHosts), after.Egress.Blocked-egressBefore.Blocked) - lifted
+	side := 0
+	for host := range s.modelSide {
+		if !s.blockedHosts[host] {
+			side++
+		}
+	}
+	sitesBlocked := max(len(s.blockedHosts), after.Egress.Blocked-egressBefore.Blocked-side) - lifted
 	s.noticeMu.Unlock()
 	if sitesBlocked > 0 {
 		parts = append(parts, plural(int64(sitesBlocked), "site blocked", "sites blocked"))
@@ -1994,29 +2052,78 @@ func fullDiskKeepText(name string) string {
 }
 
 // overlayDiskEvery paces the session's look at its MicroVM's own disk
-// (watchOverlayDisk); tests shorten it.
-var overlayDiskEvery = 2 * time.Minute
+// (watchOverlayDisk) when it is larger than smallOverlayBytes, and
+// smallOverlayDiskEvery when it is not, and the first look; tests shorten
+// them.
+var (
+	overlayDiskEvery      = 2 * time.Minute
+	smallOverlayDiskEvery = 15 * time.Second
+)
+
+// smallOverlayBytes is the size up to which a MicroVM's own disk is looked at
+// every smallOverlayDiskEvery: an agent writing 50 MiB a second filled a
+// 2 GiB one between two looks two minutes apart (GAP-1140).
+const smallOverlayBytes = 4 << 30
 
 // watchOverlayDisk looks at the own disk of the session's copy-mode
-// MicroVM every overlayDiskEvery and says once, while the session runs,
-// that it is full or filling: a write that fails there said nothing before
-// the end of the session (#1148). A look that does not answer is tried
-// again at the next tick.
+// MicroVM and says once, while the session runs, that it is full or
+// filling: a write that fails there said nothing before the end of the
+// session (#1148). It looks soon after the start, then every
+// smallOverlayDiskEvery on a disk of up to smallOverlayBytes and every
+// overlayDiskEvery on a larger one, and warns before the 90% mark too when,
+// at the rate it filled since the last look, it would be full before the
+// look after next (GAP-1140). That early warning comes once and the watch
+// goes on, so a disk that really fills later is still named (GAP-1785). A
+// look that does not answer is tried again at the next tick.
 func (s *session) watchOverlayDisk(ctx context.Context) {
-	t := time.NewTicker(overlayDiskEvery)
-	defer t.Stop()
+	wait := smallOverlayDiskEvery
+	var last overlayDisk
+	var lastAt time.Time
+	rateWarned := false
 	for {
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-t.C:
+		case <-timer.C:
 		}
-		if disk := s.app.overlayDiskOf(ctx, s.cli, s.sb.Name); disk.filling() {
+		disk := s.app.overlayDiskOf(ctx, s.cli, s.sb.Name)
+		now := time.Now()
+		if disk.known {
+			wait = overlayDiskEvery
+			if disk.size <= smallOverlayBytes {
+				wait = smallOverlayDiskEvery
+			}
+		}
+		if disk.filling() {
 			text := "⚠ " + overlayDiskFillingText(s.sb.Name, disk, true)
 			s.notice("overlay disk", text, text)
+			s.reportDisk(ctx, disk, false)
 			return
 		}
+		if !rateWarned && disk.fillsWithin(last, now.Sub(lastAt), 2*wait) {
+			rateWarned = true
+			text := "⚠ " + overlayDiskFillingText(s.sb.Name, disk, true)
+			s.notice("overlay disk filling fast", text, text)
+			s.reportDisk(ctx, disk, true)
+		}
+		if disk.known {
+			last, lastAt = disk, now
+		}
 	}
+}
+
+// reportDisk has the daemon name the disk warning just given in the
+// activity feed too, while the session runs (GAP-1140). A daemon that does
+// not take the report (an older one) leaves the warning to this terminal.
+func (s *session) reportDisk(ctx context.Context, disk overlayDisk, fast bool) {
+	if s.api == nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = s.api.ReportDisk(rctx, s.sb.Name, sandboxapi.DiskReport{SizeBytes: disk.size, FreeBytes: disk.avail, Fast: fast})
 }
 
 // endCopy pulls a copy-mode sandbox's work and asks where it goes.

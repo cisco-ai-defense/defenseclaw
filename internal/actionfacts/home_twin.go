@@ -17,9 +17,11 @@
 package actionfacts
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -77,6 +79,40 @@ func HomeResolvedTwin(input Input) (twin Facts, ok bool) {
 	return twin, true
 }
 
+// HomeSpelledTwin returns the analysis of a partial POSIX action with its
+// home-anchored words (as HomeResolvedTwin reads them: an unquoted ~/, or a
+// plain $HOME/ or ${HOME}/) spelled as the same path under input.ActiveHome.
+// Unlike HomeResolvedTwin, the twin may itself be partial (a subshell, a
+// bare cd ~), so it proves nothing on its own: a caller may use it only for
+// a check that adds a block, such as a write through a link the action
+// makes (GAP-2555). ok is false when the action has no such word, mentions
+// HOME elsewhere or has a here-document, or the twin is not POSIX.
+func HomeSpelledTwin(input Input) (twin Facts, ok bool) {
+	defer func() {
+		if recover() != nil {
+			twin, ok = Facts{}, false
+		}
+	}()
+	original, capture := analyzeWithRedirectTargets(input, "")
+	if original.Parse.Status != StatusPartial || original.Parse.Dialect != DialectPOSIX ||
+		!containsIssue(original.Parse.Issues, IssueDynamicWord) {
+		return Facts{}, false
+	}
+	home := strings.TrimRight(original.ActiveHome, "/")
+	if !posixShellHome(home) || strings.ContainsAny(home, "\x00\r\n") {
+		return Facts{}, false
+	}
+	resolved, ok := homeResolvedSource(capture.source, home)
+	if !ok {
+		return Facts{}, false
+	}
+	twin, _ = analyzeWithRedirectTargets(input, resolved)
+	if twin.Parse.Dialect != DialectPOSIX || len(twin.Commands) == 0 {
+		return Facts{}, false
+	}
+	return twin, true
+}
+
 // posixShellHome reports whether home, a normalized ActiveHome without a
 // trailing slash, can be written for $HOME in a POSIX command: an absolute
 // POSIX path, or a Windows drive path such as C:/Users/alice. The agents that
@@ -98,7 +134,7 @@ func homeResolvedSource(source, home string) (string, bool) {
 		return "", false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
-		Parse(strings.NewReader(source), "")
+		Parse(shellparse.Reader(source), "")
 	if err != nil {
 		return "", false
 	}
@@ -116,12 +152,19 @@ func homeResolvedSource(source, home string) (string, bool) {
 		case *syntax.Redirect:
 			declined = typed.Op == syntax.Hdoc || typed.Op == syntax.DashHdoc
 		case *syntax.Word:
+			target := typed
 			suffix, anchored := homeAnchoredLiteralWord(typed)
+			key := ""
+			if !anchored {
+				// dd of=$HOME/f, "of=$HOME/f", 'of='$HOME/f: the home word
+				// after an option key; the whole word is respelled.
+				key, suffix, anchored = optionHomeAnchoredPath(typed)
+			}
 			if !anchored {
 				return true
 			}
-			start, end := int(typed.Pos().Offset()), int(typed.End().Offset())
-			path := home + suffix
+			start, end := int(target.Pos().Offset()), int(target.End().Offset())
+			path := key + home + suffix
 			if start < 0 || end <= start || end > len(source) ||
 				strings.ContainsAny(path, "\x00\r\n") {
 				declined = true
@@ -137,20 +180,24 @@ func homeResolvedSource(source, home string) (string, bool) {
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
 	var out, rest strings.Builder
+	// A comment never runs, so a HOME inside one cannot change what ~ and
+	// $HOME name (GAP-2473); the guard below reads the text without them.
+	scan := withoutShellComments(source, syntax.LangPOSIX)
 	last := 0
 	for _, word := range spans {
 		if word.start < last {
 			return "", false
 		}
 		out.WriteString(source[last:word.start])
-		rest.WriteString(source[last:word.start])
+		rest.WriteString(scan[last:word.start])
 		out.WriteString("'" + strings.ReplaceAll(word.path, "'", `'\''`) + "'")
 		last = word.end
 	}
 	out.WriteString(source[last:])
-	rest.WriteString(source[last:])
-	// Any other mention of HOME (an assignment, export, unset or read) could
-	// change what ~ and $HOME name when the command runs.
+	rest.WriteString(scan[last:])
+	// Any other mention of HOME outside a comment (an assignment, export,
+	// unset or read) could change what ~ and $HOME name when the command
+	// runs.
 	if strings.Contains(rest.String(), "HOME") {
 		return "", false
 	}
@@ -224,4 +271,156 @@ func homeAnchoredLiteralWord(word *syntax.Word) (string, bool) {
 		return "", false
 	}
 	return path, true
+}
+
+// homeOptionKey is a literal option or operand key that ends at "=" (of=,
+// --output=, --target-directory=).
+var homeOptionKey = regexp.MustCompile(`^-{0,2}[A-Za-z_][A-Za-z0-9_-]*=$`)
+
+// optionHomeAnchoredWord splits a word that is a literal key ending at "="
+// followed by a home-anchored word ($HOME/..., ${HOME}/..., "$HOME/...")
+// into the key and that home word. The shell expands HOME anywhere in a
+// word, so dd of=$HOME/f writes the file of=<home>/f names, as the ~/,
+// ~<login>/ and absolute spellings already read (GAP-2399).
+func optionHomeAnchoredWord(word *syntax.Word) (*syntax.Lit, *syntax.Word, bool) {
+	if word == nil || len(word.Parts) < 2 {
+		return nil, nil, false
+	}
+	key, ok := word.Parts[0].(*syntax.Lit)
+	if !ok || !homeOptionKey.MatchString(key.Value) {
+		return nil, nil, false
+	}
+	rest := &syntax.Word{Parts: word.Parts[1:]}
+	if _, anchored := homeAnchoredLiteralWord(rest); !anchored {
+		return nil, nil, false
+	}
+	return key, rest, true
+}
+
+// optionHomeAnchoredPath reads a word that is an option key ending at "="
+// and then a plain $HOME or ${HOME} followed by "/" and literal text, where
+// the key may be literal, single-quoted or double-quoted and the home word
+// may sit inside double quotes ("of=$HOME/f", 'of='$HOME/f, of="${HOME}/f").
+// The shell expands HOME inside double quotes, so each of these writes the
+// file of=$HOME/f names (GAP-2399). It returns the key and the path below
+// the home.
+func optionHomeAnchoredPath(word *syntax.Word) (string, string, bool) {
+	if word == nil {
+		return "", "", false
+	}
+	type piece struct {
+		lit    string
+		home   bool
+		quoted bool
+	}
+	var pieces []piece
+	for _, part := range word.Parts {
+		switch typed := part.(type) {
+		case *syntax.Lit:
+			pieces = append(pieces, piece{lit: typed.Value})
+		case *syntax.SglQuoted:
+			if typed.Dollar {
+				return "", "", false
+			}
+			pieces = append(pieces, piece{lit: typed.Value, quoted: true})
+		case *syntax.ParamExp:
+			if !plainHomeParameter(typed) {
+				return "", "", false
+			}
+			pieces = append(pieces, piece{home: true})
+		case *syntax.DblQuoted:
+			if typed.Dollar {
+				return "", "", false
+			}
+			for _, inner := range typed.Parts {
+				switch value := inner.(type) {
+				case *syntax.Lit:
+					pieces = append(pieces, piece{lit: value.Value, quoted: true})
+				case *syntax.ParamExp:
+					if !plainHomeParameter(value) {
+						return "", "", false
+					}
+					pieces = append(pieces, piece{home: true})
+				default:
+					return "", "", false
+				}
+			}
+		default:
+			return "", "", false
+		}
+	}
+	var key, suffix strings.Builder
+	homeAt := -1
+	for index, item := range pieces {
+		if item.home {
+			homeAt = index
+			break
+		}
+		if strings.ContainsAny(item.lit, "\\\x00") || (!item.quoted && strings.ContainsAny(item.lit, "*?[~$`")) {
+			return "", "", false
+		}
+		key.WriteString(item.lit)
+	}
+	if homeAt < 1 || !homeOptionKey.MatchString(key.String()) {
+		return "", "", false
+	}
+	for _, item := range pieces[homeAt+1:] {
+		if item.home || strings.ContainsAny(item.lit, "\\\x00") ||
+			(!item.quoted && strings.ContainsAny(item.lit, "*?[~")) {
+			return "", "", false
+		}
+		suffix.WriteString(item.lit)
+	}
+	path := suffix.String()
+	if !strings.HasPrefix(path, "/") || path == "/" {
+		return "", "", false
+	}
+	return key.String(), path, true
+}
+
+// optionHomeRewriteWord is optionHomeAnchoredWord for a home word the
+// trusted-home rewrite can spell as ActiveHome exactly.
+func optionHomeRewriteWord(word *syntax.Word) (*syntax.Word, bool) {
+	_, rest, ok := optionHomeAnchoredWord(word)
+	if !ok || (!plainHomeRewriteWord(rest) && !quotedPlainHomeRewriteWord(rest)) {
+		return nil, false
+	}
+	return rest, true
+}
+
+// withoutShellComments returns source with the text of every shell comment
+// ("# ..." up to its line end) replaced by spaces, so every byte offset into
+// source is unchanged. A comment is never run, so it cannot change what HOME,
+// ~ or USERPROFILE name; the home twins read their raw-text HOME, USER and
+// USERPROFILE guards from this text, and a trailing "# HOME" no longer turns
+// a twin off (GAP-2473). Only comments the parser reports are blanked, so a
+// "#" inside a word, a quote, $# or ${#x} is kept. source is returned
+// unchanged when it has no "#" or does not parse.
+func withoutShellComments(source string, lang syntax.LangVariant) string {
+	if !strings.Contains(source, "#") {
+		return source
+	}
+	file, err := syntax.NewParser(syntax.Variant(lang), syntax.KeepComments(true)).
+		Parse(shellparse.Reader(source), "")
+	if err != nil {
+		return source
+	}
+	out := []byte(source)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		comment, ok := node.(*syntax.Comment)
+		if !ok {
+			return true
+		}
+		start, end := int(comment.Pos().Offset()), int(comment.End().Offset())
+		if start < 0 || end <= start || end > len(out) || out[start] != '#' {
+			return true
+		}
+		for i := start; i < end; i++ {
+			if out[i] != '\n' && out[i] != '\r' {
+				out[i] = ' '
+			}
+		}
+		return true
+	})
+	return string(out)
 }

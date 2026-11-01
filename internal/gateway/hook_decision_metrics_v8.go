@@ -100,10 +100,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 	case severity.Severity == observability.SeverityInfo:
 		logLevel = observability.Present(observability.LogLevelInfo)
 	}
-	result := "ok"
-	if panicked || env.Result == "panic" {
-		result = "panic"
-	}
+	result := hookDecisionResult(env, panicked)
 	effectiveAction := normalizeHookActionLabel(resp.Action)
 	sandboxID, sandboxName := hookV8Sandbox(audit.EnvelopeFromContext(ctx))
 	classification := observability.ClassificationContext{
@@ -216,6 +213,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailLatencyMs:       observability.Present(max(float64(env.ElapsedMs), 0)),
 			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes),
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
+			DefenseClawGuardrailJudgeFallback:   hookDecisionV8JudgeFallback(env),
 			DefenseClawSandboxID:                sandboxID,
 			DefenseClawSandboxName:              sandboxName,
 			DefenseClawSandboxDriver:            managed.Driver,
@@ -244,6 +242,18 @@ func (a *APIServer) emitHookDecisionLogV8(
 	return hookDecisionLogFailed
 }
 
+// hookDecisionResult is the result every sink of a hook decision carries:
+// panic when the evaluator panicked or the decision's audit envelope
+// recorded a panic recovered elsewhere on the call (finalizeAgentHookAnswer),
+// else ok. The hook_decision log and the hook invocation and latency metrics
+// read it, so they agree with the audit row and the span.
+func hookDecisionResult(env HookAuditEnvelope, panicked bool) string {
+	if panicked || env.Result == "panic" {
+		return "panic"
+	}
+	return "ok"
+}
+
 func (a *APIServer) recordHookDecisionMetricsV8(
 	ctx context.Context,
 	req agentHookRequest,
@@ -265,10 +275,10 @@ func (a *APIServer) recordHookDecisionMetricsV8(
 	// event still needs the same bounded dashboard label vocabulary.
 	eventLabel := telemetry.NormalizeHookEventTypeLabel(normalizeHookEventLabel(req.HookEventName))
 	decisionLabel := normalizeHookActionLabel(resp.Action)
-	result := "ok"
+	result := hookDecisionResult(env, panicked)
 	reason := normalizeHookReasonLabel(resp.Action, resp.WouldBlock)
-	if panicked {
-		result, reason = "panic", "panic"
+	if result == "panic" {
+		reason = "panic"
 	}
 	severity := observability.NormalizeSeverity(firstNonEmpty(resp.Severity, "NONE"))
 	if !severity.Valid || !severity.Present {
@@ -555,4 +565,18 @@ func hookDecisionV8RuleIDs(values []string) observability.Optional[[]string] {
 		return observability.Absent[[]string]()
 	}
 	return observability.Present(result)
+}
+
+// hookJudgeFallbackExtraKey is the audit-row extra that says why the rules
+// decided a check the LLM judge was asked to review (#1395).
+const hookJudgeFallbackExtraKey = "judge_fallback"
+
+// hookDecisionV8JudgeFallback is the decision's judge fallback, when it had
+// one.
+func hookDecisionV8JudgeFallback(env HookAuditEnvelope) observability.Optional[string] {
+	switch reason := env.Extra[hookJudgeFallbackExtraKey]; reason {
+	case judgeFallbackTimeout, judgeFallbackError, judgeFallbackLate, judgeFallbackBusy, judgeFallbackBudget:
+		return observability.Present(reason)
+	}
+	return observability.Absent[string]()
 }

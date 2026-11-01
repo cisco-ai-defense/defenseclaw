@@ -69,7 +69,7 @@ Every sandbox runs one policy pack. The three built-in packs are named after the
 | Your project | Mounted live | Mounted live | Copied |
 | Skip-permissions mode | On | On | Off: the harness keeps its prompts |
 
-`--pack` applies every row. `--profile` changes only web access, the banner and connection requests, and keeps the rest of the pack the run uses. `sandbox status NAME` shows both on its Policy row, for example `profile balanced, pack open`. `openshell.pack` and `openshell.profile` set them for every run. On a Mac every run works on a copy whichever pack it uses.
+`--pack` applies every row. `--profile` changes only web access, the banner and connection requests, and keeps the rest of the pack the run uses. `sandbox status NAME` shows both on its Policy row, for example `pack open (sha256:…), network allowlist (balanced), approvals triage`: the pack and its digest, the network mode with the profile in brackets, and how asks are handled. `openshell.pack` and `openshell.profile` set them for every run. On a Mac every run works on a copy whichever pack it uses.
 
 ```bash
 defenseclaw sandbox run claude --pack balanced

@@ -149,6 +149,6 @@ func dropRetiredConnectorSettings(cfg *Config) {
 	}
 	if changed {
 		cfg.LegacyConnectorNotices = append(cfg.LegacyConnectorNotices,
-			"OpenHands and OmniGent connectors were removed; their configuration was dropped until 1.1; run defenseclaw migrate to update config.yaml")
+			"OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it. Their settings were dropped; run defenseclaw migrate to update config.yaml")
 	}
 }

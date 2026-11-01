@@ -193,6 +193,47 @@ func TestRunEnterpriseWindowsEnumerateOnceRetainsPreCommitPublication(t *testing
 	}
 }
 
+// The installer's --once publishes again when a profile walk its cycle gave
+// up on finishes complete (rel-1-0-6 r106 CI), and only then.
+func TestRunEnterpriseWindowsEnumerateOnceRunsOneMoreCycleForALateWalk(t *testing.T) {
+	previousConfigLoader := enterpriseWindowsEnumerateConfigLoader
+	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	previousWaiter := enterpriseWindowsEnumerateOnceWalkWaiter
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateConfigLoader = previousConfigLoader
+		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter = previousWriter
+		enterpriseWindowsEnumerateOnceWalkWaiter = previousWaiter
+	})
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) {
+		return &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}, nil
+	}
+	cycles := 0
+	enterpriseWindowsEnumerateProfileEnumerator = func(context.Context, *config.Config, enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		cycles++
+		return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{}}, nil
+	}
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) { return true, nil }
+	for _, late := range []bool{false, true} {
+		cycles = 0
+		enterpriseWindowsEnumerateOnceWalkWaiter = func(context.Context) bool { return late }
+		cmd := newEnterpriseWindowsEnumerateCommand()
+		cmd.SetErr(new(bytes.Buffer))
+		err := runEnterpriseWindowsEnumerate(context.Background(), cmd, &enterpriseWindowsEnumerateOptions{
+			manifestPath: filepath.Join(t.TempDir(), "targets.yaml"),
+			once:         true,
+		})
+		want := 1
+		if late {
+			want = 2
+		}
+		if err != nil || cycles != want {
+			t.Fatalf("late walk %t: cycles = %d err = %v, want %d cycles", late, cycles, err, want)
+		}
+	}
+}
+
 // TestIsEnterpriseWindowsEnumerateConfigMissingRecognisesBothOSes
 // asserts the "config missing" detector recognises Windows'
 // "The system cannot find the file specified" AND Unix's

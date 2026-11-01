@@ -43,7 +43,9 @@ const (
 
 // Account is one enrolled account of the enrolled-user table.
 type Account struct {
-	// Name is DOMAIN\name, or COMPUTER\name for a local Windows account.
+	// Name is DOMAIN\name, or COMPUTER\name for a local Windows account;
+	// on Linux and macOS the account name, which then identifies it (SID
+	// is empty there).
 	Name string
 	SID  string
 	// Home is the account's profile folder.
@@ -667,6 +669,12 @@ func (r *ownerResolver) named(user, sid, attribution string) owner {
 // profileOwner is the enrolled account whose profile holds the agent's
 // configuration files. Paths in more than one profile name no account, and
 // paths outside every profile (a project's AGENTS.md) say nothing.
+//
+// A Windows account is identified by its SID. A Linux or macOS account has
+// none and is identified by its name: the enrolled-account table there
+// (the hook guardian's identity records) had no entry at all, so an exited
+// session could not be attributed to the one enrolled profile it wrote
+// (p0-round GAP-1389).
 func (r *ownerResolver) profileOwner(paths []string) (owner, bool) {
 	var found *Account
 	for _, path := range paths {
@@ -674,20 +682,40 @@ func (r *ownerResolver) profileOwner(paths []string) (owner, bool) {
 		switch {
 		case account == nil:
 			continue
-		case found != nil && !strings.EqualFold(found.SID, account.SID):
+		case found != nil && accountKey(*found) != accountKey(*account):
 			return owner{}, false
 		}
 		found = account
 	}
-	if found == nil || found.SID == "" {
+	if found == nil || accountKey(*found) == "" {
 		return owner{}, false
 	}
 	return owner{User: found.Name, SID: found.SID, Attribution: AttributionEnrolledProfile}, true
 }
 
+// accountKey identifies an enrolled account: its SID (Windows, any case),
+// or the name of an account with a POSIX home (Linux, macOS); "" when it
+// has neither.
+func accountKey(account Account) string {
+	if sid := strings.TrimSpace(account.SID); sid != "" {
+		return "sid\x00" + strings.ToUpper(sid)
+	}
+	if !posixOwnerPath(account.Home) || strings.TrimSpace(account.Name) == "" {
+		return ""
+	}
+	return "name\x00" + strings.TrimSpace(account.Name)
+}
+
+// posixOwnerPath reports a Linux or macOS path (absolute, no backslash).
+func posixOwnerPath(path string) bool {
+	path = strings.TrimSpace(path)
+	return strings.HasPrefix(path, "/") && !strings.Contains(path, `\`)
+}
+
 // accountForPath returns the account whose profile folder holds path, the
-// deepest one when profiles nest. Comparison ignores case and separator
-// style, as Windows paths do.
+// deepest one when profiles nest. Windows paths compare without case and
+// separator style, as Windows does; Linux and macOS paths compare exactly
+// (/home/Ann and /home/ann are two accounts' homes).
 func (r *ownerResolver) accountForPath(path string) *Account {
 	path = normalizeOwnerPath(path)
 	var best *Account
@@ -705,5 +733,8 @@ func (r *ownerResolver) accountForPath(path string) *Account {
 }
 
 func normalizeOwnerPath(path string) string {
+	if posixOwnerPath(path) {
+		return strings.TrimSpace(path)
+	}
 	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(path), `\`, "/"))
 }

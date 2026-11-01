@@ -107,6 +107,25 @@ func TestBundleStateWriteOnAFullVolumeIsDiskFull(t *testing.T) {
 	}
 }
 
+// GAP-1339: the applied-receipt write of a staged bundle that runs out of
+// space is disk_full with the free-space step, not not_confirmed; a
+// confirmation the gateway refused keeps its code.
+func TestBundleConfirmationWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	enospc := fmt.Errorf("configwrite: write %w", &fs.PathError{Op: "write", Path: "/opt/cisco/defenseclaw/lifecycle/receipts/.b.json.1.tmp", Err: syscall.ENOSPC})
+	if got := bundleConfirmationCode(enospc); got != enterprisebundle.CodeDiskFull {
+		t.Fatalf("receipt write on a full volume = %s, want disk_full", got)
+	}
+	if got := bundleConfirmationCode(errors.New("the gateway did not report its effective policy")); got != enterprisebundle.CodeNotConfirmed {
+		t.Fatalf("unconfirmed bundle = %s, want not_confirmed", got)
+	}
+	if got := bundleConfirmationCode(&enterprisebundle.Error{Code: enterprisebundle.CodeDigestMismatch}); got != enterprisebundle.CodeDigestMismatch {
+		t.Fatalf("digest mismatch = %s", got)
+	}
+	if !strings.Contains(stateWriteAction(enospc), "free space on that filesystem") {
+		t.Fatal("the full-volume failure does not name the free-space step")
+	}
+}
+
 // GAP-0609: a trust anchor install whose file write runs out of space is
 // disk_full with the next step, and records a failed anchor install with
 // that code, not state_invalid.

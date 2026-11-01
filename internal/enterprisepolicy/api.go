@@ -74,7 +74,7 @@ func Publish(opts Options, connectors []string) (Result, error) {
 	result := Result{}
 	var errs []error
 	for _, name := range published {
-		var restored []string
+		var restored, restoredDirs []string
 		if opts.PolicyFor(name).Ownership == config.MachinePolicyOwnershipMerge {
 			for _, recordName := range ownershipRecordNames(opts, name) {
 				record, recordErr := loadRecord(opts, recordName)
@@ -84,6 +84,16 @@ func Publish(opts Options, connectors []string) (Result, error) {
 				}
 				if record == nil {
 					continue
+				}
+				// The read below refuses a group- or other-writable directory
+				// above the file, so the write is taken away first, as the hook
+				// guardian does on its next pass: a repair otherwise exited 1
+				// machine_policy_incomplete although the guardian fixed the
+				// directory moments later (GAP-2181). A directory it leaves as it
+				// is (errPublishedDirExposes) still fails the read below, which
+				// names the problem.
+				if dirs, _ := restoreWritablePublishedDirs(opts, record.Path); len(dirs) > 0 {
+					restoredDirs = appendUnique(restoredDirs, dirs...)
 				}
 				fixed, fixErr := restoreRecordedPolicyFileMode(opts, record.Path, record.PostimageSHA256)
 				if fixErr != nil {
@@ -99,6 +109,10 @@ func Publish(opts Options, connectors []string) (Result, error) {
 			}
 		}
 		state, err := reconcileOne(opts, name)
+		for _, dir := range restoredDirs {
+			state.Changed = true
+			state.detail("took group and other write away from %s, a directory above DefenseClaw's machine policy that other accounts could change", dir)
+		}
 		for _, path := range restored {
 			state.Changed = true
 			state.detail("restored the recorded machine-policy file %s to mode 0644", path)

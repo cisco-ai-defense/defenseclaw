@@ -108,6 +108,9 @@ var (
 	windowsBundleSyncMarker             = syncWindowsBundleMarker
 	// windowsBundleReadAnchors reads and checks an anchor file once.
 	windowsBundleReadAnchors = enterprisebundle.ReadAnchorsFile
+	// windowsBundleDeploymentInstalled reads the deployment record again
+	// after a run waited for bundle.lock (GAP-2438).
+	windowsBundleDeploymentInstalled = windowsEnterpriseStandaloneInstalled
 )
 
 func init() {
@@ -755,7 +758,9 @@ func recordWindowsEarlyAnchorsRefusal(cmd *cobra.Command, opts *windowsEnterpris
 	// Only an elevated caller on an installed computer records into the
 	// administrator-only change spool (r104 W5b: a fresh or unelevated run
 	// creates no installed-host audit).
-	if opts.trustAnchors == "" || !opts.installedBeforeRun || !windowsSecretIsElevated() {
+	if opts.trustAnchors == "" || !opts.installedBeforeRun || !windowsSecretIsElevated() ||
+		opts.profile == managed.ProfileSecureClient {
+		// A Secure Client profile has no standalone change spool (GAP-0447).
 		return
 	}
 	layout, err := windowsBundleLayout()
@@ -804,6 +809,12 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	}
 	if opts.refuseCapabilityLoss && opts.bundlePath == "" {
 		return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) requires BUNDLE= (--bundle); nothing was changed: deliver both with Setup /ensure (defenseclaw enterprise windows ensure)")
+	}
+	if opts.deviceGroup != "" && opts.trustAnchors == "" {
+		return refuseArguments("invalid_arguments", "DEVICEGROUP= (--device-group) pins the trust anchors that TRUSTANCHORS= (--trust-anchors) installs; give both; nothing was changed")
+	}
+	if opts.deviceGroup != "" && !enterprisebundle.ValidDeviceGroup(opts.deviceGroup) {
+		return refuseArguments("invalid_arguments", "DEVICEGROUP= (--device-group): want 1-128 characters of [A-Za-z0-9._-]; nothing was changed")
 	}
 	// --mode/--connector is the QA shorthand the installer renders a
 	// config from: a config all the same (Setup refused it with these too).
@@ -872,13 +883,36 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		}
 		return refuse(code, message)
 	}
-	unlock, err := lockWindowsBundleStoreWithin(ctx, layout.LifecycleDir, opts.bundleLockWait)
+	// A run that finds bundle.lock held and waits for it (--lock-wait) may
+	// wait out an uninstall: Setup /uninstall PURGE=1 holds bundle.lock until
+	// its state purge. Such a run reads the deployment record again once it
+	// has the lock and refuses before it creates or runs anything, so the
+	// uninstall finishes (GAP-2438: the apply ran an ensure transaction
+	// against the removed deployment, 1639, and kept the uninstall from
+	// retiring its teardown journal, 1603).
+	unlock, err := lockWindowsBundleStore(layout.LifecycleDir)
+	waited := false
+	if err != nil && opts.bundleLockWait > 0 && errors.Is(err, errWindowsBundleStoreBusy) {
+		waited = true
+		unlock, err = lockWindowsBundleStoreWhileInstalled(ctx, layout.LifecycleDir, opts.bundleLockWait)
+	}
+	if errors.Is(err, errWindowsBundleDeploymentGone) {
+		// The wait ends as soon as the uninstall commits (its record is no
+		// longer an installed deployment), not when it frees the lock: this
+		// process runs from the installed gateway binary, and an uninstall
+		// cannot remove that file while it runs.
+		return refuseAnchors(string(enterprisebundle.CodeNotManaged), windowsBundleUninstalledWhileWaiting)
+	}
 	if err != nil {
 		if errors.Is(err, errWindowsBundleStoreBusy) {
 			return refuseAnchors("lifecycle_busy", err.Error())
 		}
 		failure := enterprisebundle.StateWriteError("cannot prepare the policy bundle lock", err)
 		return refuseAnchors(string(failure.Code), failure.Detail)
+	}
+	if waited && !windowsBundleDeploymentInstalled() {
+		unlock()
+		return refuseAnchors(string(enterprisebundle.CodeNotManaged), windowsBundleUninstalledWhileWaiting)
 	}
 	run = &windowsBundleRun{ctx: ctx, layout: layout, driver: driver, unlock: unlock, stderr: cmd.ErrOrStderr()}
 	opts.bundle = run
@@ -921,7 +955,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 			run.anchorOnly = &anchorOnlyChange{path: anchorPath, existed: !errors.Is(readErr, fs.ErrNotExist), previous: previous}
 		}
 		anchorRefusalPending = false
-		installed, replaced, err := installWindowsBundleAnchors(opts.trustAnchors, driver.AnchorsPath)
+		installed, replaced, err := installWindowsBundleAnchorsPinned(opts.trustAnchors, driver.AnchorsPath, opts.deviceGroup)
 		if err != nil {
 			code := string(windowsBundleCode(err, enterprisebundle.CodeAnchorInsecure))
 			// A write that failed (on a full volume too) is a failed change.
@@ -1552,7 +1586,7 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 		rollback.bundleRollbackTo = &windowsBundleRollbackTarget{store: run.driver.Store, ref: ref,
 			before: run.previousGeneration, restored: configwrite.SHA256Hex(last)}
 	}
-	rollback.bundlePath, rollback.trustAnchors, rollback.configPath = "", "", path
+	rollback.bundlePath, rollback.trustAnchors, rollback.deviceGroup, rollback.configPath = "", "", "", path
 	rollback.jsonOutput = true
 	out := cmd.OutOrStdout()
 	cmd.SetOut(io.Discard)
@@ -1831,10 +1865,22 @@ func writeWindowsBundleAdminFile(path string, data []byte) error {
 // check failed) leaves dst changed, which the caller puts back and records
 // as a failed change.
 func installWindowsBundleAnchors(src, dst string) (installed []byte, replaced bool, err error) {
+	return installWindowsBundleAnchorsPinned(src, dst, "")
+}
+
+// installWindowsBundleAnchorsPinned is installWindowsBundleAnchors with the
+// anchors pinned to deviceGroup first when one is given
+// (enterprisebundle.PinDeviceGroup: a pin only narrows what the file trusts).
+func installWindowsBundleAnchorsPinned(src, dst, deviceGroup string) (installed []byte, replaced bool, err error) {
 	// One read: the bytes written are the ones decoded and trust-checked.
-	_, raw, err := windowsBundleReadAnchors(src, bundleAnchorTrust)
+	anchors, raw, err := windowsBundleReadAnchors(src, bundleAnchorTrust)
 	if err != nil {
 		return nil, false, err
+	}
+	if deviceGroup != "" {
+		if _, raw, err = enterprisebundle.PinDeviceGroup(anchors, raw, deviceGroup); err != nil {
+			return nil, false, err
+		}
 	}
 	if err := windowsBundleEnsurePrivateDirectory(filepath.Dir(dst)); err != nil {
 		return nil, false, enterprisebundle.StateWriteError("prepare the trust anchor folder", err)
@@ -1884,6 +1930,32 @@ func lockWindowsBundleStore(lifecycleDir string) (func(), error) {
 		_ = windows.UnlockFileEx(handle, 0, 1, 0, overlapped)
 		_ = windows.CloseHandle(handle)
 	}, nil
+}
+
+// errWindowsBundleDeploymentGone ends a bundle run's wait for bundle.lock
+// once the deployment it waits for is no longer installed (GAP-2438).
+var errWindowsBundleDeploymentGone = errors.New("the DefenseClaw enterprise deployment was uninstalled")
+
+// windowsBundleUninstalledWhileWaiting is the not_managed refusal of a run
+// that waited out an uninstall.
+const windowsBundleUninstalledWhileWaiting = "DefenseClaw enterprise was uninstalled while this run waited for the policy " +
+	"bundle lock; nothing was changed. Install it first with /ensure CONFIG=<config.yaml>, then deliver policy bundles"
+
+// lockWindowsBundleStoreWhileInstalled is lockWindowsBundleStoreWithin for a
+// policy bundle run: each try first reads the deployment record, and a record
+// that no longer says installed ends the wait with
+// errWindowsBundleDeploymentGone.
+func lockWindowsBundleStoreWhileInstalled(ctx context.Context, lifecycleDir string, wait time.Duration) (func(), error) {
+	unlock, err := acquireWindowsLockWithin(ctx, wait, func() (func(), error) {
+		if !windowsBundleDeploymentInstalled() {
+			return nil, errWindowsBundleDeploymentGone
+		}
+		return lockWindowsBundleStore(lifecycleDir)
+	}, func(err error) bool { return errors.Is(err, errWindowsBundleStoreBusy) })
+	if err != nil && errors.Is(err, errWindowsBundleStoreBusy) {
+		return nil, fmt.Errorf("%w (still held after --lock-wait %s)", err, formatWindowsLockWait(wait))
+	}
+	return unlock, err
 }
 
 // lockWindowsBundleStoreWithin takes the bundle store lock, waiting up to

@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -45,6 +46,18 @@ HANDOFF_SH = ROOT / "scripts" / "defenseclaw-upgrade.sh"
 BASH = shutil.which("bash")
 
 pytestmark = pytest.mark.skipif(os.name == "nt" or BASH is None, reason="POSIX installer")
+
+
+def test_install_data_dir_refresh_shell_contract() -> None:
+    """Run the real refresh and hold function regression, including custom data_dir."""
+    result = subprocess.run(
+        [BASH, str(ROOT / "scripts" / "test-install-data-dir-refresh.sh")],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _stamped(tmp_path: Path, version: str = "1.0.0") -> Path:
@@ -267,7 +280,7 @@ def test_windows_upgrade_says_it_is_cleaning_up_before_the_long_deletes() -> Non
     windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
     body = windows[windows.index("function Complete-Swap") :]
     body = body[: body.index("\n}\n")]
-    assert body.index('Write-Info "Cleaning up') < body.index("Remove-Tree $Previous")
+    assert body.index('Write-Info "Cleaning up') < body.index("Publish-PreviousSlot $Snap")
 
 
 def test_installer_never_uses_retired_asset_names() -> None:
@@ -1403,7 +1416,10 @@ def test_a_full_disk_is_checked_before_the_lock() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
     assert text.index("|| require_free_space") < text.index("# ── Lock and log")
     lock = text[text.index("# ── Lock and log") : text.index('LOG="${DEFENSECLAW_HOME}/logs/install-')]
-    assert 'die "Could not write the install lock ${LOCK_DIR}/pid: ${LOCK_HINT}"' in lock
+    # take_lock reports a write failure with the hint its caller gives; the
+    # home lock's is LOCK_HINT (free space, nothing changed).
+    assert 'die "Could not write the install lock ${lock}/pid: ${hint}"' in lock
+    assert '\ntake_lock "${LOCK_DIR}" "${LOCK_HINT}"\n' in lock
     assert "check the free space" in lock and "nothing was changed" in lock
     assert 'rm -rf "${STAGING}"' in text[text.index("if ! snapshot; then") :][:200]
 
@@ -1454,17 +1470,21 @@ def _install_sh_functions(*names: str) -> str:
     return helpers + "".join(bodies)
 
 
-_AGENT_SCAN = ("loaded_plugin_agents", "process_argv", "process_cwd", "process_programs", "resolved_agent_path",
-               "agent_identity_audit", "installed_agent_programs", "runtime_agent_programs", "agent_of",
+_AGENT_SCAN = ("loaded_plugin_agents", "process_argv_heads", "argv_heads_load", "argv_head", "process_cwd", "process_programs", "resolved_agent_path",
+               "agent_identity_audit", "npm_config_prefixes", "installed_agent_programs", "runtime_agent_programs", "entry_prefix_agent_programs", "agent_of",
                "assert_no_loaded_plugin_agents")
 
 
-def _agent_scan(home: Path, path: list[Path]) -> subprocess.CompletedProcess[str]:
+def _agent_scan(home: Path, path: list[Path], pids: list[int] | None = None,
+                **env: str) -> subprocess.CompletedProcess[str]:
     # The installer's agent check, as the upgrade runs it before the gateway stops.
+    # pids: the only processes it lists (GAP-1309): a real OpenCode or Amp the
+    # same account runs on the test host is not one of the test's processes.
+    listed = "" if pids is None else "ps() { printf '%s\\n' " + " ".join(map(str, pids)) + "; }\n"
     return subprocess.run(
         [BASH, "-c", 'set -euo pipefail\ndie() { printf "%s\\n" "$*" >&2; exit 1; }\n'
-         + _install_sh_functions(*_AGENT_SCAN) + "assert_no_loaded_plugin_agents\necho scan-passed\n"],
-        env={"HOME": str(home), "PATH": ":".join([*map(str, path), "/usr/bin", "/bin"])},
+         + _install_sh_functions(*_AGENT_SCAN) + listed + "assert_no_loaded_plugin_agents\necho scan-passed\n"],
+        env={"HOME": str(home), "PATH": ":".join([*map(str, path), "/usr/bin", "/bin"]), **env},
         capture_output=True, text=True, timeout=60, check=False,
     )
 
@@ -1556,6 +1576,27 @@ def _started(argv: list[str], program: Path, executable: str | None = None) -> s
         ("nvm launcher points to another script", None),
         ("pnpm shell shim", None),
         ("opencode replaced while running", "OpenCode"),
+        # GAP-1308: npm launcher beside a Node runtime replaced while it runs.
+        ("opencode npm launcher beside a replaced nvm node", "OpenCode"),
+        # GAP-1356: current npm opencode-ai links bin/opencode to its native
+        # bin/opencode.exe, in the usual, the configured and a PATH prefix.
+        ("opencode npm native exe in ~/.npm-global", "OpenCode"),
+        ("opencode npm native exe in the .npmrc prefix", "OpenCode"),
+        ("opencode npm native exe in NPM_CONFIG_PREFIX", "OpenCode"),
+        # GAP-1761: npm expands ${VAR} in a prefix and reads the user config
+        # NPM_CONFIG_USERCONFIG names and the global npmrc.
+        ("opencode npm native exe in a ${HOME} .npmrc prefix", "OpenCode"),
+        ("opencode npm native exe in the NPM_CONFIG_USERCONFIG prefix", "OpenCode"),
+        ("opencode npm native exe in the NPM_CONFIG_GLOBALCONFIG prefix", "OpenCode"),
+        ("opencode npm native exe in a PATH prefix", "OpenCode"),
+        ("opencode npm native exe run by its platform hard link", "OpenCode"),
+        # GAP-1761 case B: the prefix is named only in the agent's own shell
+        # (NPM_CONFIG_USERCONFIG there): the running entry names its prefix,
+        # and npm's launcher in <prefix>/bin must resolve to it.
+        ("opencode npm native exe in a prefix only the agent's shell names", "OpenCode"),
+        ("amp npm package in a prefix only the agent's shell names", "Amp"),
+        ("opencode npm native exe without its prefix launcher", None),
+        ("opencode.exe of another package in a PATH prefix", None),
         ("amp npm package", "Amp"),
         ("native installer amp", "Amp"),
     ],
@@ -1571,6 +1612,7 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
     assert upgrade_guard < source.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"', upgrade_guard)
 
     sleep, home, path = shutil.which("sleep", path="/usr/bin:/bin"), tmp_path / "home", []
+    env: dict[str, str] = {}
     node = _program(tmp_path / "nodejs" / "bin" / "node", BASH)
     script_body = "sleep 60\n"
 
@@ -1644,8 +1686,62 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         else:
             path.append(link.parent)
             program, argv = node, [str(node), str(link)]
+    elif case.endswith("only the agent's shell names") or case == "opencode npm native exe without its prefix launcher":
+        prefix = tmp_path / "agent prefix"
+        if case.startswith("amp"):
+            entry = prefix / "lib" / "node_modules" / "@sourcegraph" / "amp" / "dist" / "main.js"
+            entry.parent.mkdir(parents=True)
+            entry.write_text(script_body, encoding="utf-8")
+            link = prefix / "bin" / "amp"
+            link.parent.mkdir(parents=True)
+            link.symlink_to(entry)
+            program, argv = node, [str(node), str(link)]
+        else:
+            program = _program(prefix / "lib" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe", sleep)
+            if not case.endswith("launcher"):
+                link = prefix / "bin" / "opencode"
+                link.parent.mkdir(parents=True)
+                link.symlink_to(program)
+            argv = [str(program), "60"]
+    elif case.startswith("opencode npm native exe") or case == "opencode.exe of another package in a PATH prefix":
+        prefix = {
+            "opencode npm native exe in ~/.npm-global": home / ".npm-global",
+            "opencode npm native exe in the .npmrc prefix": tmp_path / "opt agents",
+            "opencode npm native exe in NPM_CONFIG_PREFIX": tmp_path / "env-prefix",
+            "opencode npm native exe in a ${HOME} .npmrc prefix": home / ".npm-packages",
+            "opencode npm native exe in the NPM_CONFIG_USERCONFIG prefix": tmp_path / "user-prefix",
+            "opencode npm native exe in the NPM_CONFIG_GLOBALCONFIG prefix": tmp_path / "global-prefix",
+        }.get(case, tmp_path / "dc-agents")
+        package = "opencode-ai-fork" if case.startswith("opencode.exe of another") else "opencode-ai"
+        program = _program(prefix / "lib" / "node_modules" / package / "bin" / "opencode.exe", sleep)
+        _manifest(program.parents[1], package)
+        link = prefix / "bin" / "opencode"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(program)
+        if case.endswith(".npmrc prefix"):
+            home.mkdir(parents=True, exist_ok=True)
+            (home / ".npmrc").write_text(f"cache=/tmp/x\nprefix = {prefix}\n", encoding="utf-8")
+        elif case.endswith("NPM_CONFIG_PREFIX"):
+            env["NPM_CONFIG_PREFIX"] = str(prefix)
+        elif case.endswith("${HOME} .npmrc prefix"):
+            (home / ".npmrc").write_text("prefix=${HOME}/.npm-packages\n", encoding="utf-8")
+        elif case.endswith("CONFIG prefix"):
+            config = tmp_path / "npm-config" / ("user-npmrc" if "USERCONFIG" in case else "global-npmrc")
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(f'prefix="{prefix}"\n', encoding="utf-8")
+            env["NPM_CONFIG_USERCONFIG" if "USERCONFIG" in case else "NPM_CONFIG_GLOBALCONFIG"] = str(config)
+        elif not case.endswith("~/.npm-global"):
+            path.append(link.parent)
+        argv = [str(link), "60"]
+        if case.endswith("hard link"):
+            # npm's postinstall hard-links the platform package's binary.
+            platform = prefix / "lib" / "node_modules" / "opencode-linux-x64" / "bin" / "opencode"
+            platform.parent.mkdir(parents=True)
+            os.link(program, platform)
+            program, argv = platform, [str(platform), "60"]
     elif case in ("opencode npm launcher beside nvm node", "amp npm launcher beside fnm node",
-                  "nvm launcher points to another script", "pnpm shell shim"):
+                  "nvm launcher points to another script", "pnpm shell shim",
+                  "opencode npm launcher beside a replaced nvm node"):
         if case.startswith("opencode") or case.startswith("nvm"):
             agent_name, package = "opencode", "opencode-ai"
             entry_name = "bin/worker.js" if case.startswith("nvm") else "bin/opencode"
@@ -1685,10 +1781,10 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
 
     proc = _started(argv, program, executable=sleep if case == "argv0 opencode" else None)
     try:
-        if case == "opencode replaced while running":
+        if case in ("opencode replaced while running", "opencode npm launcher beside a replaced nvm node"):
             program.unlink()
             _program(program, sleep)
-        result = _agent_scan(home, path)
+        result = _agent_scan(home, path, [proc.pid], **env)
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -1745,6 +1841,33 @@ def test_live_agent_identity_uses_only_an_exact_entry(tmp_path: Path, case: str,
     assert result.stdout == want, (case, result.stdout, result.stderr)
 
 
+@pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="reads /proc/<pid>/exe")
+def test_agent_scan_tests_list_only_their_own_processes(tmp_path: Path) -> None:
+    # GAP-1309: the scan lists every process of the account, so a real nvm
+    # OpenCode this user runs on the test host failed expected-pass tests.
+    # Here such an agent runs beside an unrelated process: the scan the tests
+    # use sees only the process it is given.
+    home = tmp_path / "home"
+    runtime = home / ".nvm" / "versions" / "node" / "v22.0.0" / "bin"
+    entry = runtime.parent / "lib" / "node_modules" / "opencode-ai" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("sleep 60\n", encoding="utf-8")
+    node = _program(runtime / "node", BASH)
+    (runtime / "opencode").symlink_to(entry)
+    agent = _started([str(node), str(entry)], node)
+    sleep = shutil.which("sleep", path="/usr/bin:/bin")
+    other = _started([sleep, "60"], Path(sleep))
+    try:
+        alone = _agent_scan(home, [], [other.pid])
+        seen = _agent_scan(home, [], [agent.pid])
+    finally:
+        for proc in (agent, other):
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+    assert alone.returncode == 0 and "scan-passed" in alone.stdout, (alone.stdout, alone.stderr)
+    assert seen.returncode == 1 and f"OpenCode (PID {agent.pid})" in seen.stderr, (seen.stdout, seen.stderr)
+
+
 @pytest.mark.skipif(shutil.which("node") is None or not Path("/proc/self/exe").exists(), reason="runs Node, reads /proc")
 @pytest.mark.parametrize("manifest", [
     '{"author":{"name":"opencode-ai"},"name":"innocent-tool"}',
@@ -1761,7 +1884,7 @@ def test_manifest_names_never_establish_a_live_entry(tmp_path: Path, manifest: s
     node = Path(shutil.which("node")).resolve()
     proc = _started([str(node), str(script)], node)
     try:
-        result = _agent_scan(home, [])
+        result = _agent_scan(home, [], [proc.pid])
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -1785,7 +1908,7 @@ def test_the_installed_agents_are_those_of_the_native_installers(tmp_path: Path)
     unrelated_link.parent.mkdir(parents=True)
     unrelated_link.symlink_to(tools / "opencode")
     result = subprocess.run(
-        [BASH, "-c", _install_sh_functions("resolved_agent_path", "installed_agent_programs") + "installed_agent_programs"],
+        [BASH, "-c", _install_sh_functions("resolved_agent_path", "npm_config_prefixes", "installed_agent_programs") + "installed_agent_programs"],
         env={"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin"}, capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -1825,7 +1948,7 @@ def test_a_real_node_option_value_naming_opencode_ai_does_not_refuse(tmp_path: P
     script = launcher if case.startswith("agent") else worker
     proc = _started([str(node), *options, str(script)], node)
     try:
-        result = _agent_scan(home, [])
+        result = _agent_scan(home, [], [proc.pid])
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -1858,7 +1981,7 @@ def test_only_the_installed_node_entry_is_a_live_agent(tmp_path: Path, script_na
     launcher.symlink_to(package / "bin" / "opencode")
     proc = _started([str(node), str(package / script_name)], node)
     try:
-        result = _agent_scan(home, [])
+        result = _agent_scan(home, [], [proc.pid])
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -1870,24 +1993,61 @@ def test_only_the_installed_node_entry_is_a_live_agent(tmp_path: Path, script_na
 
 @pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")
 def test_the_arguments_are_read_with_their_boundaries(tmp_path: Path) -> None:
-    # Review loop 2: process_argv gives each argument whole, as the kernel
-    # keeps it; ps would join "a b" and "c  d" into one line of words.
-    words = ["-c", "sleep 60; :", "a b", "c  d", "", "e"]
-    proc = subprocess.Popen([BASH, *words], start_new_session=True)
+    # Review loop 2: the lookup gets each argument whole, as the kernel keeps
+    # it; ps would join "a b" and "c  d" into one line of words. The first two
+    # words of every PID come back from one call (rel-1-0-6 GAP-0203), escaped
+    # so a tab, newline or % in a word survives the round trip.
+    word0 = "a b\tc%09 %0A x\ny%"
+    script_path = tmp_path / "s p\tq%25.sh"
+    script_path.write_text("sleep 60\n", encoding="utf-8")
+    proc = subprocess.Popen([word0, str(script_path), "c  d", "", "e"], executable=BASH, start_new_session=True)
     try:
         for _ in range(500):
-            if Path(f"/proc/{proc.pid}/cmdline").read_bytes().count(b"\0") == len(words) + 1:
+            if Path(f"/proc/{proc.pid}/cmdline").read_bytes().count(b"\0") == 5:
                 break
             time.sleep(0.01)
-        script = _install_sh_functions("process_argv") + 'OSTYPE=linux-gnu\nprocess_argv "$1"'
-        own = subprocess.run([BASH, "-c", script, "argv", str(proc.pid)], capture_output=True, timeout=30, check=False)
+        script = (_install_sh_functions("process_argv_heads", "argv_heads_load", "argv_head")
+                  + 'OSTYPE=linux-gnu\nprocess_argv_heads 999999999 "$1" x > "$2"\n'
+                  + 'argv_heads_load 999999999 "$1" x; argv_head "$1"; printf "%s\\0" "${#argv[@]}" "${argv[@]}"')
+        own = subprocess.run([BASH, "-c", script, "argv", str(proc.pid), str(tmp_path / "heads")],
+                             capture_output=True, timeout=30, check=False)
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
     assert own.returncode == 0, own.stderr
-    assert own.stdout.split(b"\0")[1:-1] == [w.encode() for w in words]
-    gone = subprocess.run([BASH, "-c", script, "argv", str(proc.pid)], capture_output=True, timeout=30, check=False)
-    assert (gone.returncode != 0, gone.stdout) == (True, b"")
+    assert own.stdout.split(b"\0")[:-1] == [b"2", word0.encode(), str(script_path).encode()]
+    assert (tmp_path / "heads").read_text(encoding="utf-8").count("\n") == 1
+    gone = subprocess.run([BASH, "-c", script, "argv", str(proc.pid), str(tmp_path / "heads")],
+                          capture_output=True, timeout=30, check=False)
+    assert (gone.returncode, gone.stdout) == (0, b"0\0")
+
+
+def test_argv_heads_keep_each_pids_own_words() -> None:
+    # PID 12 must not take the words of PID 112 or 123; an empty word stays a
+    # word; an unreadable PID has none.
+    heads = "112\t2\t=wrong\t=wrong\n123\t2\t=also\t=wrong\n12\t1\t=node%25%09\t=\n7\t2\t=\t=/x%0Ay\n9\t0\t=\t=\n"
+    script = (_install_sh_functions("argv_heads_load", "argv_head")
+              + 'process_argv_heads() { printf "%s" "$HEADS"; }\nlocal_test() { local -a argv head_n head_w0 head_w1\n'
+              + 'argv_heads_load 112 123 12 7 9; for p in 12 7 9 1; do argv_head "$p"; printf "%s:%s|" "$p" "${#argv[@]}"; '
+              + 'for w in ${argv[@]+"${argv[@]}"}; do printf "[%s]" "$w"; done; printf "\\n"; done; }\nlocal_test')
+    out = subprocess.run([BASH, "-c", "set -euo pipefail\n" + script], env={"HEADS": heads, "PATH": "/usr/bin:/bin"},
+                         capture_output=True, text=True, timeout=30, check=False)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout == "12:1|[node%\t]\n7:2|[][/x\ny]\n9:0|\n1:0|\n"
+
+
+def test_the_agent_lookup_opens_no_descriptor_per_process() -> None:
+    """rel-1-0-6 GAP-0203: macOS bash 3.2 keeps the descriptor of every <(...)
+    a function opens; the running-agent lookup read each node process's argv
+    through one. It now reads every node process's first words in one call."""
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    for name in ("loaded_plugin_agents", "entry_prefix_agent_programs", "process_argv_heads", "argv_heads_load", "argv_head", "agent_of"):
+        body = _install_sh_functions(name).split(f"{name}() {{", 1)[1]
+        assert "<(" not in body, name
+    lookup = _install_sh_functions("loaded_plugin_agents").split("loaded_plugin_agents() {", 1)[1]
+    assert lookup.count("argv_heads_load") == 1 and "process_argv " not in source
+    heads = _install_sh_functions("process_argv_heads").split("process_argv_heads() {", 1)[1]
+    assert heads.count("/usr/bin/perl") == 2 and 'for my $pid (@ARGV)' in heads
 
 
 def test_a_relative_script_is_the_process_folders_not_the_installers(tmp_path: Path) -> None:
@@ -1946,6 +2106,26 @@ def test_a_process_gone_since_ps_listed_it_is_skipped_without_lsof(tmp_path: Pat
     assert time.monotonic() - started < 10
 
 
+@pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")
+def test_the_audit_line_goes_to_the_install_log_not_the_console(tmp_path: Path) -> None:
+    # GAP-0103: install.sh printed "audit: live-agent identity unproven ... process vanished during
+    # lookup" in the console. With the install log open (LOG) the line is written there only.
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    stubs, log = tmp_path / "stubs", tmp_path / "install.log"
+    stubs.mkdir()
+    (stubs / "ps").write_text(f"#!/bin/sh\necho '{gone.pid}'\n", encoding="utf-8")
+    (stubs / "ps").chmod(0o755)
+    home = tmp_path / "home"
+    entry = home / ".opencode" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    result = _agent_scan(home, [stubs], LOG=str(log))
+    assert result.returncode == 0 and "scan-passed" in result.stdout, (result.stdout, result.stderr)
+    assert "audit:" not in result.stderr and "audit:" not in result.stdout
+    assert f"audit: live-agent identity unproven for PID {gone.pid}: process vanished during lookup" in log.read_text()
+
+
 @pytest.mark.parametrize("installed", [False, True])
 def test_an_unreadable_process_list_is_audited_without_refusal(tmp_path: Path, installed: bool) -> None:
     stubs = tmp_path / "stubs"
@@ -1981,7 +2161,8 @@ def test_a_refused_upgrade_leaves_no_staged_release(tmp_path: Path) -> None:
     # failed check, a cancel) now drops what it staged and the uv files it
     # added; from the swap on, its own undo does (drop_staging).
     source = INSTALL_SH.read_text(encoding="utf-8")
-    exit_trap = next(line for line in source.splitlines() if line.startswith("trap ") and line.endswith("' EXIT") and "LOCK_DIR" in line)
+    # The EXIT trap gives back the locks that are still this run's (release_locks).
+    exit_trap = next(line for line in source.splitlines() if line.startswith("trap ") and line.endswith("' EXIT") and "release_locks" in line)
     staged = source.index('mkdir -p "${STAGING}/bin"\nUNSWAPPED_STAGE=1\n')
     assert source.index(exit_trap) < staged
     assert staged < source.index("assert_no_loaded_plugin_agents\nWAS_RUNNING=false") < source.index('UNSWAPPED_STAGE=""\n')
@@ -1998,8 +2179,9 @@ def test_a_refused_upgrade_leaves_no_staged_release(tmp_path: Path) -> None:
             "set -euo pipefail\n"
             'err() { echo "x $*" >&2; }\ndie() { err "$@"; exit 1; }\n'
             f'DEFENSECLAW_HOME="{home}" STAGING="{home}/.staging" LOCK_DIR="{lock}" BIN_DIR="{tmp_path}/bin" SELF_TMP=""\n'
-            'UV_DIR_NEW=1 UV_INSTALLED=""\n'
-            + _install_sh_functions("drop_unswapped_stage")
+            'UV_DIR_NEW=1 UV_INSTALLED="" LOCK_STARTED=1 DATA_LOCK_DIRS=() MADE_DATA_DIRS=()\n'
+            'echo $$ > "${LOCK_DIR}/pid"; echo 1 > "${LOCK_DIR}/started"\n'
+            + _install_sh_functions("drop_unswapped_stage", "lock_is_ours", "release_locks")
             + exit_trap + "\nUNSWAPPED_STAGE=1\n"
             + ('UNSWAPPED_STAGE=""\n' if swapped else "")
             + 'die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: OpenCode (PID 1)"\n'
@@ -2522,6 +2704,66 @@ def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configu
     assert 'prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway"' in swap  # an upgrade heals a host already hit
 
 
+def test_a_rollback_to_an_older_release_drops_the_hook_helper_the_newer_install_left(tmp_path: Path) -> None:
+    # rel-1-0-4:GAP-2503: after a downgrade to 1.0.2 the data of 1.0.2 held
+    # the 1.0.5 hooks/_hardening.sh, which a 1.0.2 gateway keeps (its schema
+    # line is newer) and whose native commands the 1.0.2 binaries lack: after
+    # the rollback every hook call was refused until the helper was removed.
+    # The rollback drops the restored helper when it is the one of the
+    # install it leaves, so the older gateway writes its own when it starts.
+    home = tmp_path / "dc"
+    left = tmp_path / "previous" / "data"
+
+    def run(live: bytes | None, theirs: bytes | None) -> Path:
+        for root, body in ((home, live), (left, theirs)):
+            helper = root / "hooks" / "_hardening.sh"
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.unlink(missing_ok=True)
+            if body is not None:
+                helper.write_bytes(body)
+        script = tmp_path / "drop.sh"
+        script.write_text(
+            "set -euo pipefail\nwarn() { echo \"warn: $*\"; }\n"
+            + "has() { command -v \"$1\" >/dev/null 2>&1; }\n"
+            + _install_sh_functions("sha256_of", "drop_newer_hook_helper")
+            + f"DEFENSECLAW_HOME=\"{home}\"\ndrop_newer_hook_helper \"{left}\"\n",
+            encoding="utf-8",
+        )
+        proc = _run([str(script)], tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert "warn:" not in proc.stdout
+        return home / "hooks" / "_hardening.sh"
+
+    newer = b"#!/bin/bash\n# defenseclaw-managed-hook v10\n"
+    older = b"#!/bin/bash\n# defenseclaw-managed-hook v8\n"
+    assert not run(newer, newer).exists()
+    assert run(older, newer).read_bytes() == older
+    assert run(newer, None).read_bytes() == newer
+    # rel-1-0-4:GAP-2626: the newer install's fail-mode refresh appended a
+    # block to the older helper before its snapshot, so the restored helper
+    # is neither the older release's nor the newer one's. It goes too, with
+    # or without the newer helper in previous/; an older helper without the
+    # block, or one naming a marker only in its text, stays.
+    for marker in ("install-window-text", "listener-check"):
+        refreshed = older + f"# defenseclaw-legacy-{marker}-v1 (GAP-x): written by the upgrade's fail-mode refresh;\n".encode()
+        assert not run(refreshed, newer).exists()
+        assert not run(refreshed, None).exists()
+    quoted = older + b"echo '# defenseclaw-legacy-listener-check-v1 '\n"
+    assert run(quoted, newer).read_bytes() == quoted
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    rollback = text[text.index("if [[ \"${ROLLBACK}\" == true ]]; then") : text.index("# ── Stage: nothing live changes")]
+    drop = rollback.index("drop_newer_hook_helper \"${PREVIOUS}/data\"")
+    # After the swap brought the older data back, before its gateway starts.
+    assert rollback.index("swap_with_previous || swapped=$?") < drop < rollback.index("start_gateway || rollback_rc=$?")
+    assert "version_lt \"${back_to}\" \"${current}\"" in rollback[drop - 200 : drop]
+    # rel-1-0-6:GAP-0047: only back to 1.0.4 or older. 1.0.5 and later ship
+    # the same helper, and their gateway with only OpenCode set up never
+    # writes one, so it refused to start and the rollback undid itself.
+    assert 'version_lt "${back_to}" "${current}" && version_lt "${back_to}" 1.0.5; then' in rollback[drop - 200 : drop]
+    helper = (ROOT / "internal" / "gateway" / "connector" / "hooks" / "_hardening.sh").read_text(encoding="utf-8")
+    assert helper.splitlines()[1] == "# defenseclaw-managed-hook v10", "a new helper schema must revisit the 1.0.5 floor"
+
+
 def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_path: Path) -> None:
     # An earlier release's hooks can hold or bake an open nobody chose, which
     # they follow while the gateway is down for the swap. The staged gateway
@@ -2551,7 +2793,9 @@ def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_pat
     assert run(newer).returncode == 0
     assert calls.read_text(encoding="utf-8").splitlines() == [
         "connector refresh-fail-modes --help",
-        f"connector refresh-fail-modes --data-dir {home}",
+        # The staged command loads config.yaml and uses its data_dir. An
+        # installer-supplied home would override a custom data_dir.
+        "connector refresh-fail-modes",
     ]
     calls.unlink()
     older = _fake_gateway(tmp_path / "older", "defenseclaw-gateway connector [command]", calls)
@@ -2563,7 +2807,10 @@ def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_pat
         encoding="utf-8",
     )
     failing.chmod(0o755)
-    assert run(failing).returncode != 0
+    result = run(failing)
+    assert result.returncode != 0
+    # rel-1-0-5 GAP-0058: the die says "see above", so a silent failure is named.
+    assert "'connector refresh-fail-modes' failed (exit 1)" in result.stderr, result.stderr
     for name, body in (
         ("probe-fails", "#!/bin/sh\necho 'error: cannot run' >&2\nexit 1\n"),
         ("probe-silent", "#!/bin/sh\nexit 0\n"),
@@ -2643,7 +2890,7 @@ def test_a_running_gateway_cannot_reopen_its_hooks_while_it_stops(tmp_path: Path
     assert result.returncode == 0, result.stdout + result.stderr
     lines = calls.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "connector refresh-fail-modes --help", lines
-    assert lines[1].startswith(f"connector refresh-fail-modes --data-dir {home} --hold-until-exit "), lines
+    assert lines[1].startswith("connector refresh-fail-modes --hold-timeout 10m --hold-until-exit "), lines
     assert lines[2:] == ["holding", "stopping", "second refresh", "finished"], lines
     assert "Hook fail modes set from the config: codex" in result.stdout
     assert "Holding the hook fail modes" not in result.stdout
@@ -2681,6 +2928,61 @@ def test_a_running_gateway_cannot_reopen_its_hooks_while_it_stops(tmp_path: Path
     # A gateway whose shutdown waits on the hold is killed, as on Windows.
     stop_fn = text[text.index("stop_gateway() {") : text.index("\n}\n", text.index("stop_gateway() {"))]
     assert 'kill -KILL "${pid}"' in stop_fn, stop_fn
+
+
+def test_a_hold_with_nothing_to_hold_lets_the_upgrade_go_on(tmp_path: Path) -> None:
+    # rel-1-0-5 GAP-0058: with no hooks folder (1.0.4 initialized without a
+    # connector, as the release's macos-app lane runs it) the staged gateway
+    # prints the hold marker and exits at once. When that fell between the
+    # installer's look for the marker and its check that the hold still runs,
+    # the 1.0.5 upgrade died "see above" with nothing above. The kill below
+    # answers that check only once the hold has exited, so this order is the
+    # one every run takes.
+    home = tmp_path / "dc"
+    home.mkdir()
+    staging = tmp_path / "staging"
+    (staging / "bin").mkdir(parents=True)
+    gateway = staging / "bin" / "defenseclaw-gateway"
+
+    def run(hold: str) -> subprocess.CompletedProcess[str]:
+        gateway.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in *--help*) echo "  defenseclaw-gateway connector refresh-fail-modes [flags]"; exit 0;; esac\n'
+            "sleep 0.3\n" + hold,
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+        script = tmp_path / "hold.sh"
+        script.write_text(
+            "set -euo pipefail\nwarn() { echo \"warn: $*\" >&2; }\n"
+            + _install_sh_functions(
+                "hook_fail_mode_refresh_probe", "hold_hook_fail_modes",
+                "finish_hook_fail_mode_hold", "end_hook_fail_mode_hold",
+            )
+            + f'HOLD_PID="" HOLD_LOG="" DEFENSECLAW_HOME="{home}" STAGING="{staging}"\n'
+            + 'kill() {\n'
+            '    if [[ "$1" == -0 && "$2" == "${HOLD_PID}" ]]; then\n'
+            '        while command kill -0 "$2" 2>/dev/null; do sleep 0.05; done\n'
+            '        return 1\n'
+            '    fi\n'
+            '    command kill "$@"\n'
+            '}\n'
+            'sleep 30 & old=$!\n'
+            'if hold_hook_fail_modes "$old"; then echo held; else echo refused; fi\n'
+            'command kill "$old"\n',
+            encoding="utf-8",
+        )
+        return _run([str(script)], tmp_path)
+
+    result = run('echo "Holding the hook fail modes until the gateway (process 1) exits"\n')
+    assert result.returncode == 0 and result.stdout.splitlines() == ["held"], result.stdout + result.stderr
+    # Still refused, and named, when it fails or exits without holding.
+    result = run("exit 3\n")
+    assert "refused" in result.stdout, result.stdout + result.stderr
+    assert "'connector refresh-fail-modes' failed (exit 3)" in result.stderr, result.stderr
+    result = run("exit 0\n")
+    assert "refused" in result.stdout, result.stdout + result.stderr
+    assert "exited before it held the hooks' fail modes" in result.stderr, result.stderr
 
 
 def test_rollback_says_a_later_upgrade_keeps_the_data_instead_of_bringing_it_back() -> None:
@@ -2956,95 +3258,68 @@ def test_a_signature_that_does_not_verify_stops_the_install(tmp_path: Path) -> N
 # ── 1.0.4 (T8 smoke review loop round 3) ────────────────────────────────────
 
 
-def test_an_upgrade_finishes_the_removed_connector_cleanup_or_fails(tmp_path: Path) -> None:
-    # A gateway start that brought the other connectors up only logged a
-    # removed connector (OpenHands, OmniGent) whose teardown it could not
-    # finish, and the upgrade exited 0. The installer now checks each: one not
-    # done is torn down again, and one still not done is named with its cause
-    # and the install exits 3.
+def test_an_upgrade_removes_what_defenseclaw_wrote_for_openhands_and_omnigent_and_never_fails(
+    tmp_path: Path,
+) -> None:
+    # 1.0.5: when something of OpenHands or OmniGent is still here, the
+    # installer runs their gateway teardown (an upgrade of a stopped gateway
+    # does not start it). The teardown never blocks or fails the install;
+    # with nothing left, nothing runs.
     home = tmp_path / "dc"
     home.mkdir()
-    (home / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
     calls = tmp_path / "calls"
     gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text(f'#!/bin/sh\necho "$*" >> "{calls}"\nexit 1\n', encoding="utf-8")
+    gateway.chmod(0o755)
+    python = venv / "bin" / "python"
+    script = tmp_path / "finish.sh"
+    script.write_text(
+        'set -euo pipefail\nerr() { echo "err: $*" >&2; }\n'
+        + _install_sh_functions("finish_retired_connector_cleanup")
+        + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" VENV="{venv}" LOG="{tmp_path / "log"}" VERSION=1.0.5\n'
+        + "finish_retired_connector_cleanup\n",
+        encoding="utf-8",
+    )
 
-    def run(dirty: dict[str, str]) -> subprocess.CompletedProcess[str]:
-        # dirty: connector -> "once" (clean after a teardown) or "always".
-        state = tmp_path / "state"
-        state.mkdir(exist_ok=True)
-        for name, how in dirty.items():
-            (state / name).write_text(how, encoding="utf-8")
-        gateway.write_text(
-            "#!/bin/sh\n"
-            f'echo "$*" >> "{calls}"\n'
-            "name=$4; action=$2\n"
-            f'state="{state}/$name"\n'
-            '[ -f "$state" ] || exit 0\n'
-            'if [ "$action" = teardown ]; then\n'
-            '  [ "$(cat "$state")" = once ] && rm -f "$state"\n'
-            "  exit 1\n"
-            "fi\n"
-            'echo "  X $name: $name cleanup incomplete: /h/openhands-hook.sh is gone, but /w/.openhands/hooks.json still runs it. To finish: run defenseclaw-gateway connector teardown --connector $name" >&2\n'
-            "exit 1\n",
-            encoding="utf-8",
-        )
-        gateway.chmod(0o755)
-        script = tmp_path / "finish.sh"
-        script.write_text(
-            'set -euo pipefail\nerr() { echo "err: $*" >&2; }\n'
-            + _install_sh_functions("finish_retired_connector_cleanup")
-            + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" LOG="{tmp_path / "log"}" VERSION=1.0.4\n'
-            + "finish_retired_connector_cleanup\n",
-            encoding="utf-8",
-        )
+    def run(leftovers: bool) -> subprocess.CompletedProcess[str]:
+        python.write_text(f"#!/bin/sh\nexit {0 if leftovers else 1}\n", encoding="utf-8")
+        python.chmod(0o755)
         if calls.exists():
             calls.unlink()
         return _run([str(script)], tmp_path)
 
-    verify = f"connector verify --connector {{}} --data-dir {home}"
+    unconfigured = run(True)
+    assert unconfigured.returncode == 0 and not calls.exists(), unconfigured.stderr
+
+    (home / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    clean = run(False)
+    assert clean.returncode == 0 and not calls.exists(), clean.stderr
+
+    left = run(True)
+    assert left.returncode == 0, left.stderr
     teardown = f"connector teardown --connector {{}} --data-dir {home}"
+    assert calls.read_text(encoding="utf-8").splitlines() == [teardown.format("openhands"), teardown.format("omnigent")]
 
-    clean = run({})
-    assert clean.returncode == 0, clean.stderr
-    assert calls.read_text(encoding="utf-8").splitlines() == [verify.format("openhands"), verify.format("omnigent")]
-
-    healed = run({"omnigent": "once"})
-    assert healed.returncode == 0, healed.stderr
-    assert calls.read_text(encoding="utf-8").splitlines() == [
-        verify.format("openhands"),
-        verify.format("omnigent"),
-        teardown.format("omnigent"),
-        verify.format("omnigent"),
-    ]
-
-    stuck = run({"openhands": "always"})
-    assert stuck.returncode == 1
-    assert "could not finish removing the openhands connector" in stuck.stderr
-    assert "/w/.openhands/hooks.json still runs it" in stuck.stderr
-    assert "To finish: run defenseclaw-gateway connector teardown --connector openhands" in stuck.stderr
-    assert "omnigent" not in stuck.stderr
-
-
-
-# ── 1.0.4 (T8 smoke review loop round 2 of the Hermes/upgrade class) ────────
+    gateway.unlink()
+    missing = run(True)
+    assert missing.returncode == 0 and not missing.stderr, missing.stderr
 
 
 @pytest.mark.parametrize("was_running", ["true", "false"])
-def test_every_upgrade_checks_the_removed_connectors_whatever_the_gateway_state(
+def test_every_upgrade_runs_the_openhands_omnigent_cleanup_and_it_never_sets_exit_3(
     tmp_path: Path, was_running: str
 ) -> None:
-    # An upgrade of a stopped gateway skipped the removed-connector check
-    # (it ran only when WAS_RUNNING), so a 1.0.3 OpenHands or OmniGent hook
-    # could stay registered unsealed and the upgrade exited 0.
     text = INSTALL_SH.read_text(encoding="utf-8")
     start = text.index("finish_swap\n# until 1.1")
     main = text[start : text.index("report_retired_connector_leftovers\n", start)]
     script = tmp_path / "main.sh"
     script.write_text(
         "set -euo pipefail\nfinish_swap() { :; }\n"
-        'finish_retired_connector_cleanup() { echo "checked" >&2; return 1; }\n'
+        'finish_retired_connector_cleanup() { echo "checked" >&2; }\n'
         f"PREV_VERSION=1.0.3 WAS_RUNNING={was_running} START_RC=0\n" + main + 'echo "START_RC=${START_RC}"\n',
         encoding="utf-8",
     )
@@ -3052,36 +3327,7 @@ def test_every_upgrade_checks_the_removed_connectors_whatever_the_gateway_state(
     result = _run([str(script)], tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert "checked" in result.stderr and "START_RC=3" in result.stdout, result.stdout + result.stderr
-
-
-def test_the_removed_connector_check_fails_loudly_without_the_gateway_and_skips_an_unconfigured_install(
-    tmp_path: Path,
-) -> None:
-    # The check returned 0 when the gateway binary was not there, so nothing
-    # proved the removed connectors' hooks were sealed. With no config there
-    # was never a connector, and the gateway cannot read one.
-    home = tmp_path / "dc"
-    home.mkdir()
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    script = tmp_path / "finish.sh"
-    script.write_text(
-        'set -euo pipefail\nerr() { echo "err: $*" >&2; }\n'
-        + _install_sh_functions("finish_retired_connector_cleanup")
-        + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" LOG="{tmp_path / "log"}" VERSION=1.0.4\n'
-        + "finish_retired_connector_cleanup\n",
-        encoding="utf-8",
-    )
-
-    unconfigured = _run([str(script)], tmp_path)
-    assert unconfigured.returncode == 0 and not unconfigured.stderr, unconfigured.stderr
-
-    (home / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
-    missing = _run([str(script)], tmp_path)
-    assert missing.returncode == 1
-    assert "could not check that the removed OpenHands and OmniGent connectors are blocked" in missing.stderr
-    assert f"{bin_dir}/defenseclaw-gateway is missing" in missing.stderr
+    assert "checked" in result.stderr and "START_RC=0" in result.stdout, result.stdout + result.stderr
 
 
 # ── 1.0.4 (T8 smoke review loop round 4: GAP-0878, GAP-0899) ────────────────
@@ -3219,6 +3465,35 @@ def test_a_restored_gateway_that_needs_attention_is_not_reported_down(tmp_path: 
     assert "did not start again" not in out.stdout
 
 
+def test_a_restore_kept_stopped_points_at_the_gateway_cause_not_a_guess(tmp_path: Path) -> None:
+    # GAP-2478: after a rollback the installer added "close the agent if its
+    # settings are in use" to every startup refusal, also when the gateway had
+    # just said the cause was a failed agent version probe.
+    script = tmp_path / "restart.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\n'
+        + _install_sh_functions("restart_old")
+        + f'BIN_DIR="{tmp_path}/bin" WAS_RUNNING=true DEFENSECLAW_HOME="{tmp_path}"\nrestart_old true\necho "note=$RESTORED_NOTE"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path)
+
+    assert out.returncode == 0, out.stderr
+    assert "info: Fix the startup error shown above, then run: " in out.stdout, out.stdout
+    assert "close the agent" not in out.stdout, out.stdout
+    assert "note=Your previous install is back, with its gateway kept stopped" in out.stdout
+
+
+def test_the_windows_kept_stopped_restore_does_not_guess_the_startup_cause() -> None:
+    # GAP-2478 (install.ps1 twin): both kept-stopped messages defer to the
+    # gateway's own cause and next step.
+    text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert "if its settings are in use" not in text
+    assert text.count("Fix the startup error shown above, then run: $gatewayCommand") == 1
+    assert "Fix the startup error the earlier install reported (its install log has it), then run: $gatewayCommand" in text
+
+
 # ── 1.0.4 (T8 smoke review loop round 3 of the Hermes/upgrade class) ────────
 
 
@@ -3344,6 +3619,7 @@ def _swap_decision(tmp_path: Path, version: str, prev: str, installed: str | Non
         "set -euo pipefail\n"
         'info() { echo "info: $*"; }\nask_yes_no() { echo "ask: $1"; }\ndie() { echo "die: $*"; exit 1; }\n'
         "warn_running_sandboxes() { :; }\n"
+        "refuse_legacy_sandboxes() { :; }\n"
         + _install_sh_functions("other_build_installed")
         + f'VERSION={version} PREV_VERSION={prev} BIN_DIR="{bin_dir}" STAGING="{staging}"\n'
         + f'DEFENSECLAW_HOME="{tmp_path}/dc" PREVIOUS="{tmp_path}/dc/previous"\n'
@@ -3460,3 +3736,269 @@ def test_the_saved_installer_is_recorded_in_the_form_rollback_checks(
 def test_no_saved_installer_leaves_no_record(tmp_path: Path) -> None:
     home = _record_saved_installer(tmp_path, saved=False)
     assert not (home / "receipts" / "installer.sha256").exists()
+
+
+def test_a_rollback_to_an_older_release_waits_until_its_gateway_lets_go_of_the_audit_lock(tmp_path: Path) -> None:
+    # rel-1-0-4:GAP-2546: a restored 1.0.2/1.0.4 gateway takes its planner
+    # statistics (ANALYZE) as it starts and holds audit.db's write lock while
+    # /health already answers; its hook calls wait on that lock past their
+    # budget, so the first call after "Now running" was refused (fail closed).
+    # The rollback waits, bounded, until the lock is free twice in a row.
+    import sqlite3
+
+    home = tmp_path / "dc"
+    home.mkdir()
+    db = home / "audit.db"
+    sqlite3.connect(db).execute("create table t(x)").connection.close()
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(sys.executable)
+    holder = (
+        "import sqlite3,sys,time;c=sqlite3.connect(sys.argv[1],isolation_level=None);"
+        "c.execute('begin immediate');print('held',flush=True);time.sleep(float(sys.argv[2]));c.execute('rollback')"
+    )
+
+    def run(hold: float, bound: int) -> tuple[subprocess.CompletedProcess[str], float]:
+        lock = subprocess.Popen([sys.executable, "-I", "-c", holder, str(db), str(hold)],
+                                stdout=subprocess.PIPE, text=True)
+        try:
+            assert lock.stdout is not None and lock.stdout.readline().strip() == "held"
+            script = tmp_path / "wait.sh"
+            script.write_text(
+                "set -euo pipefail\ninfo() { echo \"info: $*\"; }\ngateway_pid() { echo 4242; }\n"
+                + _install_sh_functions("wait_audit_unlocked")
+                + f"DEFENSECLAW_HOME=\"{home}\"\nVENV=\"{venv}\"\n"
+                + f"AUDIT_LOCK_FREE_PY=\"{_audit_lock_free_py()}\"\n"
+                + f"rc=0; wait_audit_unlocked {bound} || rc=$?; echo rc=$rc\n",
+                encoding="utf-8",
+            )
+            started = time.monotonic()
+            proc = _run([str(script)], tmp_path)
+            return proc, time.monotonic() - started
+        finally:
+            lock.wait(timeout=30)
+
+    proc, took = run(hold=2.5, bound=30)
+    assert proc.returncode == 0, proc.stderr
+    assert "rc=0" in proc.stdout and took >= 2.0
+    assert "info: Waiting up to 30 seconds for the gateway to finish its start-up work on the audit database" in proc.stdout
+    proc, took = run(hold=6, bound=2)
+    assert "rc=1" in proc.stdout and took < 5.5
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    rollback = text[text.index("if [[ \"${ROLLBACK}\" == true ]]; then") : text.index("# ── Stage: nothing live changes")]
+    wait = rollback.index("wait_audit_unlocked 180")
+    # Only for an older release (1.0.5 answers its hooks while the lock is held),
+    # after its gateway started and before the rollback says it is done.
+    assert rollback.index("start_gateway || rollback_rc=$?") < wait < rollback.index("ok \"Now running DefenseClaw ${back_to}.\"")
+    assert "version_lt \"${back_to}\" \"${VERSION}\"" in rollback[wait - 200 : wait]
+    restart_old = text[text.index("restart_old() {") :][:1600]
+    assert "wait_audit_unlocked 180" in restart_old
+
+
+def _audit_lock_free_py() -> str:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    return re.search(r'^AUDIT_LOCK_FREE_PY="([^"]+)"$', text, re.M).group(1)
+
+
+@pytest.mark.parametrize("script", [INSTALL_SH, HANDOFF_SH])
+@pytest.mark.parametrize("value", ["http://127.0.0.1:8765/defenseclaw", "ftp://mirror.example/dc", "justaname"])
+def test_a_bad_defenseclaw_repo_is_refused_before_anything_downloads(tmp_path: Path, script: Path, value: str) -> None:
+    # GAP-1065: an http:// mirror built https://github.com/http://... and ended
+    # in a 404. It is refused with the https:// requirement, value not echoed.
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    curl_log = tmp_path / "curl.log"
+    (fake / "curl").write_text(f'#!/bin/sh\necho "$*" >> "{curl_log}"\nexit 22\n', encoding="utf-8")
+    (fake / "curl").chmod(0o755)
+    args = [str(script), "--yes", "--version", "1.0.8200"] if script == INSTALL_SH else [str(script), "--version", "1.0.8200"]
+
+    result = _run(args, tmp_path, PATH=f"{fake}:/usr/bin:/bin", DEFENSECLAW_REPO=value)
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in result.stderr
+    assert value not in result.stdout + result.stderr
+    assert not curl_log.exists()
+
+
+def test_the_windows_installer_refuses_a_bad_defenseclaw_repo_too() -> None:
+    # GAP-1065: the same rule as install.sh (the PowerShell cannot run here).
+    text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in text
+    assert "'^https://\\S+$'" in text and "'^[^\\s/:@]+/[^\\s/:@]+$'" in text
+
+
+def test_cli_links_are_published_by_rename_after_the_new_cli_starts() -> None:
+    """rel-1-0-6 GAP-0105: a CLI call during the upgrade found a missing or
+    partly written entry. Every link switch is one rename, made after the new
+    CLI ran, so the call finds the old entry, the busy shim or the new one."""
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    swap = script[script.index("swap_in() {"):]
+    swap = swap[: swap.index("\n}\n")]
+    assert 'ln -sfn "${target}"' not in script
+    assert swap.index('"${VENV}/bin/defenseclaw" --version') < swap.index('publish_link "${target}" "${link}"')
+    publish = script[script.index("publish_link() {"):]
+    publish = publish[: publish.index("\n}\n")]
+    assert 'ln -s "$1" "${new}" && mv -f "${new}" "${BIN_DIR}/$2"' in publish
+    restore = script[script.index("restore_links() {"):]
+    restore = restore[: restore.index("\n}\n")]
+    assert 'rm -f "${BIN_DIR:?}/${link}" && cp -P' not in restore
+    assert 'mv -f "${new}" "${BIN_DIR}/${link}"' in restore
+
+
+def test_the_old_venv_moves_only_after_running_cli_calls_finish() -> None:
+    """rel-1-0-6 GAP-0105: a CLI call that started from the old venv crashed
+    (ModuleNotFoundError) when the snapshot moved the venv under it."""
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    snapshot = script[script.index("\nsnapshot() {"):]
+    snapshot = snapshot[: snapshot.index("\n}\n")]
+    assert snapshot.index("write_busy_shim") < snapshot.index("wait_cli_calls_done") < snapshot.index('mv "${VENV}" "${SNAP}/venv"')
+    helper = script[script.index("wait_cli_calls_done() {"):]
+    helper = helper[: helper.index("\n}\n")]
+    assert "SECONDS + 15" in helper and 'prefix="${VENV}/bin/"' in helper
+
+
+def _wait_cli_calls_done_source() -> str:
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    helper = script[script.index("wait_cli_calls_done() {"):]
+    return helper[: helper.index("\n}\n") + 3]
+
+
+def test_waiting_for_cli_calls_opens_no_descriptor_per_process() -> None:
+    """rel-1-0-6 GAP-0185: macOS bash 3.2 keeps the descriptor of every <(...)
+    a function opens; one per process of the account made install.sh abort
+    (Abort trap: 6) in the macOS install-and-upgrade job. The wait reads one ps
+    listing per poll through one awk."""
+    helper = _wait_cli_calls_done_source()
+    assert "<(" not in helper and "<<<" not in helper
+    assert "process_argv" not in helper and "pgrep" not in helper
+    assert helper.count("ps -A -ww -o uid= -o pid= -o ppid= -o command=") == 1
+    assert helper.count("awk") == 1
+    for bash4 in ("mapfile", "readarray", "declare -A", "local -A", ",,}", "^^}"):
+        assert bash4 not in helper
+
+
+def _run_wait(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
+    script = tmp_path / "wait.sh"
+    script.write_text(
+        "set -euo pipefail\n" + _wait_cli_calls_done_source() + body,
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, timeout=60, check=False
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="install.sh runs on macOS and Linux")
+def test_waiting_for_cli_calls_waits_for_a_call_from_the_old_venv(tmp_path: Path) -> None:
+    """rel-1-0-6 GAP-0105: a call that started from the old venv is waited for
+    (bounded); with none the wait returns at once; under set -euo pipefail."""
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    sleeper = venv / "bin" / "defenseclaw-sleep"
+    sleeper.symlink_to(shutil.which("sleep"))
+    body = f"""
+VENV={shlex.quote(str(venv))}
+t0=$SECONDS; wait_cli_calls_done; echo "idle=$((SECONDS - t0))"
+"$VENV/bin/defenseclaw-sleep" 3 & pid=$!
+sleep 0.5; t0=$SECONDS; wait_cli_calls_done; waited=$((SECONDS - t0))
+kill -0 "$pid" 2>/dev/null && echo still-running || echo finished
+echo "busy=$waited"
+"$VENV/bin/defenseclaw-sleep" 40 & long=$!
+sleep 0.5; t0=$SECONDS; wait_cli_calls_done; echo "bounded=$((SECONDS - t0))"; kill "$long"
+VENV={shlex.quote(str(tmp_path / "absent"))}; wait_cli_calls_done; echo no-venv
+"""
+    out = _run_wait(tmp_path, body)
+    assert out.returncode == 0, out.stderr
+    lines = dict(line.split("=", 1) for line in out.stdout.split() if "=" in line)
+    assert int(lines["idle"]) <= 1
+    assert "finished" in out.stdout and 2 <= int(lines["busy"]) <= 5
+    assert 14 <= int(lines["bounded"]) <= 17
+    assert "no-venv" in out.stdout
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="install.sh runs on macOS and Linux")
+def test_waiting_for_cli_calls_skips_the_installers_own_parents(tmp_path: Path) -> None:
+    """A CLI from the old venv that started this installer (a parent) is not
+    waited for: it waits for the installer, so the wait would only run out."""
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "defenseclaw-bash").symlink_to(shutil.which("bash"))
+    inner = tmp_path / "inner.sh"
+    inner.write_text(
+        "set -euo pipefail\n" + _wait_cli_calls_done_source()
+        + f"VENV={shlex.quote(str(venv))}\nt0=$SECONDS; wait_cli_calls_done; echo \"waited=$((SECONDS - t0))\"\n",
+        encoding="utf-8",
+    )
+    out = subprocess.run(
+        [str(venv / "bin" / "defenseclaw-bash"), "-c", f"bash {shlex.quote(str(inner))}; true"],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert out.returncode == 0, out.stderr
+    assert int(out.stdout.strip().split("=", 1)[1]) <= 1
+
+
+def _shell_and_shim_functions() -> str:
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    out = []
+    for name in ("shell_runnable_entry", "write_busy_shim"):
+        start = script.index(f"\n{name}() {{") + 1
+        out.append(script[start : script.index("\n}\n", start) + 3])
+    mark = script[script.index('readonly BUSY_SHIM_MARK="') + len("readonly ") :].split("\n", 1)[0]
+    return mark + "\n" + "".join(out)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="install.sh runs on macOS and Linux")
+def test_the_cli_entry_and_the_busy_shim_run_under_sh_and_python(tmp_path: Path) -> None:
+    """rel-1-0-6 GAP-0105: the interpreter the kernel picked opens the CLI path
+    again by name. A call that started from the busy shim (sh) read the new
+    Python entry there, and one that started from the old Python entry read
+    the shim. Both files now run the same under either interpreter."""
+    python = shutil.which("python3")
+    assert python
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(python)
+    entry = venv / "bin" / "defenseclaw"
+    entry.write_text(f"#!{venv}/bin/python\n# -*- coding: utf-8 -*-\nimport sys\nprint('entry', sys.argv[1:])\nsys.exit(3)\n", encoding="utf-8")
+    entry.chmod(0o755)
+    sh_form = venv / "bin" / "long"
+    uv_sh_form = "#!/bin/sh\n'''exec' \"/a b/python\" \"$0\" \"$@\"\n' '''\nimport sys\n"
+    sh_form.write_text(uv_sh_form, encoding="utf-8")
+    spaced = venv / "bin" / "spaced"
+    spaced.write_text("#!/usr/bin/env python3 -E\nimport sys\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    files = " ".join(shlex.quote(str(f)) for f in (entry, entry, sh_form, spaced))
+    script = ("set -euo pipefail\n" + _shell_and_shim_functions()
+              + f"BIN_DIR={shlex.quote(str(bin_dir))}\n"
+              + f'for f in {files}; do shell_runnable_entry "$f"; done\n'
+              + "write_busy_shim\n")
+    done = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60, check=False)
+    assert done.returncode == 0, done.stderr
+    lines = entry.read_text(encoding="utf-8").splitlines()
+    assert lines[:4] == [f"#!{venv}/bin/python", '""":"', f"exec '{venv}/bin/python' \"$0\" \"$@\"", '":"""']
+    assert lines.count('""":"') == 1 and lines[4] == "# -*- coding: utf-8 -*-"
+    assert sh_form.read_text(encoding="utf-8") == uv_sh_form
+    assert spaced.read_text(encoding="utf-8") == "#!/usr/bin/env python3 -E\nimport sys\n"
+    for runner in ("/bin/sh", python):
+        ran = subprocess.run([runner, str(entry), "a b", "c"], capture_output=True, text=True, timeout=30, check=False)
+        assert (ran.returncode, ran.stdout.strip()) == (3, "entry ['a b', 'c']"), (runner, ran.stderr)
+    shim = bin_dir / "defenseclaw"
+    head = shim.read_text(encoding="utf-8").splitlines()
+    assert head[0] == "#!/bin/sh" and "Written by the DefenseClaw installer" in head[1] and head[2] == '""":"'
+    outputs = set()
+    for runner in ("/bin/sh", python):
+        ran = subprocess.run([runner, str(shim), "keys", "list"], capture_output=True, text=True, timeout=30, check=False)
+        assert ran.returncode == 1 and "defenseclaw: a DefenseClaw install" in ran.stderr, (runner, ran.stderr)
+        outputs.add(ran.stderr)
+    assert len(outputs) == 1
+
+
+def test_the_new_entry_runs_under_sh_before_any_link_names_it() -> None:
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    swap = script[script.index("swap_in() {"):]
+    swap = swap[: swap.index("\n}\n")]
+    assert swap.index('shell_runnable_entry "${VENV}/bin/defenseclaw"') < swap.index('"${VENV}/bin/defenseclaw" --version')
+    assert swap.index('"${VENV}/bin/defenseclaw" --version') < swap.index('publish_link "${target}" "${link}"')
+    restore = script[script.index("restore_links() {"):]
+    restore = restore[: restore.index("\n}\n")]
+    assert restore.index("shell_runnable_entry") < restore.index('mv -f "${new}" "${BIN_DIR}/${link}"')

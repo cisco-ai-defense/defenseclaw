@@ -186,6 +186,34 @@ def _no_host_gateway_listener(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_live_cli_observability(monkeypatch: pytest.MonkeyPatch):
+    """Keep the CLI's canonical audit events off whatever listens on the API port.
+
+    A config set or unset that saved its change then sent its audit event to
+    the configured API port. On a shared build box another checkout's
+    gateway (or a race test) can hold that port and answer ambiguously, so
+    full -n6/-n8 suites failed at different audit-ack sites while each file
+    passed alone (GAP-1336). Every in-process event now sees the same thing
+    as a host with no gateway: a definite pre-connect failure. Tests that
+    exercise the transport patch ``defenseclaw.logger.OrchestratorClient``
+    (or the session of a real client) themselves.
+    """
+    from defenseclaw import gateway, logger
+
+    class _NoGateway:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def emit_cli_observability(self, _payload) -> None:
+            raise gateway.GatewayNotRunningError("test isolation: no gateway")
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(logger, "OrchestratorClient", _NoGateway)
+
+
+@pytest.fixture(autouse=True)
 def _no_live_gateway_policy_reload(monkeypatch: pytest.MonkeyPatch):
     """Keep ``policy activate`` (reload on by default) off any real gateway.
 

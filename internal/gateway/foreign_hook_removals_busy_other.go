@@ -5,6 +5,6 @@
 
 package gateway
 
-// foreignHookRemovalsReadBusy is Windows-only: a rename never leaves the
-// ledger unopenable here.
-func foreignHookRemovalsReadBusy(error) bool { return false }
+// guardianRecordReplaceBusy is Windows-only: a rename never leaves a
+// guardian record unopenable here.
+func guardianRecordReplaceBusy(error) bool { return false }

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // The standalone enumerator records installed agents and surfaces that
@@ -44,6 +45,34 @@ const UnprotectedAgentsMaxAge = 16 * time.Minute
 // unchanged result.
 func UnprotectedAgentsRecordStale(modTime, now time.Time) bool {
 	return now.Sub(modTime) > UnprotectedAgentsMaxAge || modTime.After(now.Add(5*time.Minute))
+}
+
+// UnprotectedAgentsGeneration is the install generation a record carries:
+// the DefenseClaw build that wrote it. The enumerator and status/verify run
+// the same installed build, so a record whose generation differs was
+// written before the current install, upgrade or downgrade and proves
+// nothing about the agents runnable now, however recent it is (GAP-1454).
+func UnprotectedAgentsGeneration() string { return version.Current().BinaryVersion }
+
+// UnprotectedAgentsRecordGeneration is the generation data carries; ""
+// for a record written before records carried one (1.0.4 and earlier).
+func UnprotectedAgentsRecordGeneration(data []byte) string {
+	var record struct {
+		Generation string `json:"generation"`
+	}
+	if json.Unmarshal(data, &record) != nil {
+		return ""
+	}
+	return record.Generation
+}
+
+// UnprotectedAgentsRecordFromEarlierInstall describes a record of another
+// generation for UnprotectedAgentsScanPending.
+func UnprotectedAgentsRecordFromEarlierInstall(written string) string {
+	if written == "" {
+		written = "an earlier release"
+	}
+	return "from an earlier install (written by " + boundedStatusText(written, 64) + ", this install is " + UnprotectedAgentsGeneration() + ")"
 }
 
 // UnprotectedAgentsRecordMissing describes a record no scan has published.
@@ -99,7 +128,26 @@ const (
 	// untrusted and that has no agent the enumerator could list; the entry
 	// names the account, not a connector.
 	UnprotectedCodeHomeUntrusted = "home_untrusted"
+	// UnprotectedCodeOpenCodeV1: the account can run OpenCode V1, which
+	// cannot run the OpenCode V2 plugin DefenseClaw installs, so OpenCode is
+	// not protected for it (opencode_v1.go).
+	UnprotectedCodeOpenCodeV1 = "opencode_v1_unprotected"
 )
+
+// UnprotectedCodeLeavesCoverageIncomplete reports whether an unprotected
+// agent with code makes coverage_complete false, on every OS: no hook
+// contract, an incomplete install scan, a headless CLI path without hooks,
+// an IDE that cannot read global hooks (GAP-0151), or OpenCode V1, which
+// cannot run the V2 plugin (rel-1-0-6 GAP-0037). Every entry makes
+// security_complete false.
+func UnprotectedCodeLeavesCoverageIncomplete(code string) bool {
+	switch code {
+	case UnprotectedCodeHookContractUnverified, UnprotectedCodeInstallScanIncomplete, UnprotectedCodeKiroCLIBelowHookFloor,
+		UnprotectedCodeKiroIDEBelowGlobalHooksFloor, UnprotectedCodeOpenCodeV1:
+		return true
+	}
+	return false
+}
 
 // unprotectedReasonMaxRunes bounds the user-influenced reason text.
 const unprotectedReasonMaxRunes = 400
@@ -129,8 +177,9 @@ type UnprotectedAgent struct {
 }
 
 type unprotectedAgentsFile struct {
-	Version int                `json:"version"`
-	Agents  []UnprotectedAgent `json:"agents"`
+	Version    int                `json:"version"`
+	Generation string             `json:"generation,omitempty"`
+	Agents     []UnprotectedAgent `json:"agents"`
 }
 
 // UnprotectedAgentsPath is the unprotected-agents record for manifestPath.
@@ -192,7 +241,7 @@ func (a UnprotectedAgent) Message() string {
 // so an unchanged set rewrites nothing.
 func MarshalUnprotectedAgents(agents []UnprotectedAgent) ([]byte, error) {
 	normalized := normalizeUnprotectedAgents(agents)
-	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Agents: normalized}, "", "  ")
+	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Generation: UnprotectedAgentsGeneration(), Agents: normalized}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +271,7 @@ func ParseUnprotectedAgents(data []byte) ([]UnprotectedAgent, error) {
 		}
 		if agent.Code != UnprotectedCodeHookContractUnverified && agent.Code != UnprotectedCodeInstallScanIncomplete && agent.Code != UnprotectedCodeSurfaceUnverified &&
 			agent.Code != UnprotectedCodeKiroCLIBelowHookFloor &&
-			agent.Code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor && !accountOnly {
+			agent.Code != UnprotectedCodeKiroIDEBelowGlobalHooksFloor && agent.Code != UnprotectedCodeOpenCodeV1 && !accountOnly {
 			agent.Code = UnprotectedCodeAgentUnprotected
 		}
 		if agent.Refusal != RefusalEnforced && agent.Refusal != RefusalMissing {
@@ -248,6 +297,7 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 		if agent.Code == "" {
 			agent.Code = UnprotectedCodeForReason(agent.Reason)
 		}
+		agent = classifyOpenCodeV1(agent)
 		key := strings.ToLower(agent.SID) + "\x00" + agent.User + "\x00" + agent.Connector + "\x00" + agent.Surface + "\x00" + agent.Host + "\x00" + agent.InstallPath + "\x00" + agent.Version + "\x00" + agent.Code
 		if agent.Connector == "kiro" {
 			// One Kiro row can describe two installed products (kiro-cli and

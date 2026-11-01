@@ -440,6 +440,32 @@ def test_app_packages_are_container_readable_under_private_umask(tmp_path: Path,
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the Unix bridge runs under bash")
+def test_bridge_readiness_sends_no_hec_token(tmp_path: Path) -> None:
+    # GAP-1172: the bridge's readiness loop POSTed the HEC token to whatever
+    # listened on 127.0.0.1:8088, without verifying its certificate, every
+    # five seconds; a peer that took the port while the stack started or
+    # after it stopped got the token. It asks the token-free health endpoint.
+    curl_log = tmp_path / "curl.log"
+    probe = _readiness_probe(
+        tmp_path / "readiness.sh",
+        'curl() { printf "%s\\n" "$*" >> "$CURL_LOG"; printf 503; }\n'
+        "run_compose() { return 1; }\nservice_restart_count() { echo 0; }",
+        2,
+    )
+    result = subprocess.run(
+        ["bash", str(probe)], env={**os.environ, "CURL_LOG": str(curl_log)},
+        capture_output=True, text=True, timeout=20, check=False,
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    calls = curl_log.read_text(encoding="utf-8").splitlines()
+    assert calls, "the readiness loop made no HEC probe"
+    for call in calls:
+        assert "fixture credential" not in call and "Authorization" not in call, call
+        assert "https://127.0.0.1:8088/services/collector/health" in call, call
+        assert " -d " not in f" {call} ", call
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Unix bridge runs under bash")
 @pytest.mark.parametrize("ignores_term", [False, True], ids=["stalls", "stalls-ignoring-term"])
 def test_bridge_readiness_deadline_bounds_a_stalled_app_probe(tmp_path: Path, ignores_term: bool) -> None:
     # HEC answers, but docker compose exec never returns. The readiness

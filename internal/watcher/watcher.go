@@ -275,6 +275,10 @@ type InstallWatcher struct {
 	liveSlots    chan struct{}
 	startupSlots chan struct{}
 	admissions   sync.WaitGroup
+	// loops tracks the rescan, added-MCP and MCP discovery loops Run starts;
+	// Run returns only after they ended, so the store a caller closes next
+	// is not read by a cycle still running (p0-round GAP-1423).
+	loops sync.WaitGroup
 	// admitMu serializes onAdmit, which admission workers call.
 	admitMu sync.Mutex
 	// movedOut are the paths whose asset admission quarantined or whose link
@@ -916,6 +920,10 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	w.addWatch = func(dir string) { addDirWatches(fsw, dir, 0, watchedDirs) }
 	w.addContentWatch = func(dir string) { addSkillContentWatches(fsw, dir, watchedDirs) }
 	var deferredDirs [][2]string // {dir, kind} not created because an agent installer owns them
+	// missingDirs are configured roots the watcher could not create (an
+	// admin-only parent made later, GAP-2628). Each tick checks them again;
+	// once one exists it is watched and what it already holds is admitted.
+	var missingDirs [][2]string
 	watchKey := func(dir string) (string, string) {
 		absolute, absErr := filepath.Abs(dir)
 		if absErr != nil {
@@ -991,6 +999,11 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 		}
 		if err != nil {
+			if errors.Is(err, errWatchDirNotCreated) {
+				missingDirs = append(missingDirs, [2]string{dir, kind})
+				fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (watching it once it exists)\n", kind, dir, err)
+				return false
+			}
 			fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (skipping)\n", kind, dir, err)
 			return false
 		}
@@ -1024,23 +1037,39 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		}
 	}
 
-	if watched == 0 && !w.admitNewMCP {
+	if watched == 0 && len(missingDirs) == 0 && !w.admitNewMCP {
 		return fmt.Errorf("watcher: no directories to watch — check claw.mode and claw.home_dir")
 	}
 
 	_ = w.logger.LogAction(string(audit.ActionWatchStart), "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
 
+	// The background loops stop with Run, whichever way it returns, and Run
+	// waits for them: a rescan cycle reading baselines after Run returned
+	// hit a closed store ("sql: database is closed") and ran beside the
+	// cycle of the watcher that replaced this one (p0-round GAP-1423).
+	loopCtx, stopLoops := context.WithCancel(ctx)
+	defer func() {
+		stopLoops()
+		w.loops.Wait()
+	}()
+	startLoop := func(loop func(context.Context)) {
+		w.loops.Add(1)
+		go func() {
+			defer w.loops.Done()
+			loop(loopCtx)
+		}()
+	}
 	if w.cfg.Watch.RescanEnabled {
-		go w.rescanLoop(ctx)
+		startLoop(w.rescanLoop)
 	}
 	if w.admitNewMCP {
-		go w.addedMCPLoop(ctx)
+		startLoop(w.addedMCPLoop)
 	}
 	if w.pollMCP {
 		if !w.cfg.Watch.RescanEnabled {
 			w.firstCycleDone.Store(true)
 		}
-		go w.mcpDiscoveryLoop(ctx)
+		startLoop(w.mcpDiscoveryLoop)
 	}
 
 	ticker := time.NewTicker(w.debounce)
@@ -1050,7 +1079,10 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			// In-flight admissions see the stop and end without a verdict
-			// (GAP-0335); wait for them before the store goes away.
+			// (GAP-0335); wait for them and the loops before the store goes
+			// away.
+			stopLoops()
+			w.loops.Wait()
 			w.admissions.Wait()
 			w.state.reset()
 			_ = w.logger.LogAction(string(audit.ActionWatchStop), "", "context cancelled")
@@ -1080,10 +1112,18 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					if w.inClaudePluginStaging(event.Name, 0) {
 						continue
 					}
+					copyRoot, copied := w.cachePluginCopyRoot(event.Name)
 					if info, statErr := os.Stat(event.Name); statErr == nil &&
 						info.IsDir() && depth < 3 {
 						addClaudeCacheWatches(fsw, event.Name, watchedDirs)
-						w.queueExistingClaudePlugins(ctx, event.Name, depth)
+						if !copied {
+							w.queueExistingClaudePlugins(ctx, event.Name, depth)
+						}
+					}
+					if copied {
+						w.recordWatcherEvent(ctx, "create", string(InstallPlugin), "")
+						w.queuePending(copyRoot)
+						continue
 					}
 					if depth != 3 {
 						continue
@@ -1153,6 +1193,20 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 					if watchOnce(entry[0], entry[1]) && entry[1] == "plugin" {
 						w.watchExistingPluginFolders(entry[0])
+					}
+				}
+			}
+			if len(missingDirs) > 0 {
+				waiting := missingDirs
+				missingDirs = nil
+				for _, entry := range waiting {
+					if info, statErr := os.Stat(entry[0]); statErr != nil || !info.IsDir() {
+						missingDirs = append(missingDirs, entry)
+						continue
+					}
+					if watchOnce(entry[0], entry[1]) {
+						fmt.Printf("[watch] %s dir %s exists now; admitting what it holds\n", entry[1], entry[0])
+						w.admitReplacedRoot(ctx, fsw, entry[0], entry[1], watchedDirs)
 					}
 				}
 			}
@@ -1264,6 +1318,13 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 			w.endAdmission(path)
 			continue
 		}
+		// A folder queued before the plugin copy around it had its
+		// manifest is part of that plugin (GAP-0017).
+		if root, copied := w.cachePluginCopyRoot(path); copied && !sameWatcherPath(root, path) {
+			w.endAdmission(path)
+			w.queuePending(root)
+			continue
+		}
 		events := w.pendingInstallEvents(path) // Run goroutine state
 		w.admissions.Add(1)
 		go func() {
@@ -1342,13 +1403,16 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 		if discover == nil || !watcherPathAtOrBelow(path, root) {
 			continue
 		}
+		if w.inSkillInstallStaging(root, path, 0) {
+			return nil
+		}
 		entries, err := discover(root, hermesskills.DefaultDirectoryLimit)
 		if err != nil {
 			return []InstallEvent{fallback}
 		}
 		out := make([]InstallEvent, 0, len(entries))
 		for _, entry := range entries {
-			if !watcherPathAtOrBelow(entry.Path, path) {
+			if !watcherPathAtOrBelow(entry.Path, path) || w.inSkillInstallStaging(root, entry.Path, 0) {
 				continue
 			}
 			out = append(out, InstallEvent{
@@ -1634,6 +1698,9 @@ func (w *InstallWatcher) claudePluginIdentity(path string) (string, bool) {
 		switch {
 		case strings.EqualFold(filepath.Base(rootAbs), "cache") && len(parts) == 3:
 			return parts[1] + "@" + parts[0], true
+		case strings.EqualFold(filepath.Base(rootAbs), "cache") && len(parts) == 1 &&
+			isCachePluginCopy(pathAbs):
+			return parts[0], true
 		case strings.EqualFold(filepath.Base(rootAbs), "skills") &&
 			len(parts) == 1 && isClaudeSkillsPlugin(pathAbs):
 			return claudeSkillsPluginIdentity(pathAbs), true
@@ -1769,7 +1836,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		if evt.Type == InstallMCP {
 			// Admitted without the scan whose failure blocked it: an allow
 			// rule or scan_on_install false (GAP-0910).
-			w.releaseScanFailureBlock(evt, targetType)
+			w.releaseScanFailureBlock(evt, targetType, "admitted without a scan ("+out.Reason+")")
 		}
 		w.recordAdmission(ctx, "allowed", targetType)
 		res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
@@ -1827,8 +1894,20 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
 			fmt.Sprintf("type=%s scanner=%s error=%v", targetType, s.Name(), err))
 		w.recordScanError(ctx, s.Name(), targetType, classifyWatcherScanError(err))
+		w.logFailedMCPScan(ctx, evt, s.Name(), target, result, err)
 		if w.keepsUnverifiedMCPServer(evt, targetType, connector, result, err) {
 			return w.keepUnverifiedMCPServer(ctx, evt, targetType, s.Name(), err)
+		}
+		if assetPathGone(evt) && !w.secureClientActive() {
+			// The folder went away before or during its scan (a removed
+			// copy, an installer's staging folder): nothing is there to
+			// load or move, and a block on the name would keep a later
+			// install of the same name disabled (GAP-2118).
+			fmt.Fprintf(os.Stderr, "[watch] %s %s: %s is gone; nothing to admit\n", evt.Type, evt.Name, evt.Path)
+			w.recordAdmission(ctx, "scan-error", targetType)
+			res = AdmissionResult{Event: evt, Verdict: VerdictScanError,
+				Reason: fmt.Sprintf("%s is gone; nothing to admit", evt.Path)}
+			return res
 		}
 		// Avarice F-3187: a scanner error must NOT leave the
 		// freshly-detected install in place. The legacy code
@@ -1872,7 +1951,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		}
 		return res
 	}
-	w.releaseScanFailureBlock(evt, targetType)
+	w.releaseScanFailureBlock(evt, targetType, "its scan succeeded (the verdict decides)")
 
 	// Phase 3: post-scan evaluation. Re-read the live config so a block or
 	// allow added while the scan was running wins.
@@ -1943,6 +2022,14 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	w.applyPostScanEnforcement(ctx, out, evt, targetType, result, s.Name())
 	scanID := w.logScanID(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)
+	if evt.Type != InstallMCP {
+		switch v := toVerdict(out.Verdict); v {
+		case VerdictClean, VerdictAllowed, VerdictWarning:
+			// A reinstall or rescan that admission now allows replaces
+			// this watcher's own earlier rejection of the asset (GAP-1911).
+			w.releaseSupersededRejection(evt, targetType, v)
+		}
+	}
 	res = AdmissionResult{
 		ScanID: scanID,
 		Event:  evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
@@ -2447,17 +2534,31 @@ func (w *InstallWatcher) hasRecoverableMCPBlock(evt InstallEvent) bool {
 // shares (a release there could free that server's rejection). Secure
 // Client never readmits a changed server (issue #1092).
 func (w *InstallWatcher) releaseSupersededMCPRejection(evt InstallEvent, verdict Verdict) {
-	if evt.Type != InstallMCP || w.store == nil || w.secureClientActive() {
+	if evt.Type != InstallMCP {
+		return
+	}
+	w.releaseSupersededRejection(evt, string(InstallMCP), verdict)
+}
+
+// releaseSupersededRejection is releaseSupersededMCPRejection for every
+// asset type. A skill or plugin the watcher rejected (for example under an
+// explicit admission high=block) kept that install block and runtime disable
+// after the administrator relaxed the setting and the user reinstalled it:
+// the new admission warned, but the old auto-block row still refused it
+// (GAP-1911). The same rule applies: only the watcher's own rejection of
+// this asset at this path is lifted when admission now allows it.
+func (w *InstallWatcher) releaseSupersededRejection(evt InstallEvent, targetType string, verdict Verdict) {
+	if w.store == nil || w.secureClientActive() {
 		return
 	}
 	name := journalName(evt)
 	scope := w.journalScope(w.eventConnector(evt))
-	entry, err := w.store.GetActionForConnector(string(InstallMCP), name, scope)
+	entry, err := w.store.GetActionForConnector(targetType, name, scope)
 	if err != nil || entry == nil || entry.Actions.IsEmpty() || !strings.HasPrefix(entry.Reason, autoBlockReasonPrefix) ||
 		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
 		return
 	}
-	if name != evt.Path && w.mcpNameSharedByAnotherServer(evt) {
+	if evt.Type == InstallMCP && name != evt.Path && w.mcpNameSharedByAnotherServer(evt) {
 		fmt.Fprintf(os.Stderr, "[watch] mcp %s: its changed definition was admitted (%s), but another server of that name shares its block, which stays\n",
 			evt.Name, verdict)
 		return
@@ -2469,17 +2570,24 @@ func (w *InstallWatcher) releaseSupersededMCPRejection(evt InstallEvent, verdict
 		if field.value == "" {
 			continue
 		}
-		if err := w.store.ClearActionFieldForConnector(string(InstallMCP), name, scope, field.name); err == nil {
+		if err := w.store.ClearActionFieldForConnector(targetType, name, scope, field.name); err == nil {
 			cleared = append(cleared, field.name+"="+field.value)
 		}
 	}
 	if len(cleared) == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[watch] mcp %s: admission allowed its changed definition (%s); its earlier rejection no longer applies\n", evt.Name, verdict)
+	if evt.Type == InstallMCP {
+		fmt.Fprintf(os.Stderr, "[watch] mcp %s: admission allowed its changed definition (%s); its earlier rejection no longer applies\n", evt.Name, verdict)
+		_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
+			fmt.Sprintf("type=mcp released: admission allowed its changed definition (verdict=%s); cleared %s connector=%s",
+				verdict, strings.Join(cleared, " "), scope))
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[watch] %s %s: admission now allows it (%s); the watcher's earlier rejection no longer applies\n", targetType, evt.Name, verdict)
 	_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
-		fmt.Sprintf("type=mcp released: admission allowed its changed definition (verdict=%s); cleared %s connector=%s",
-			verdict, strings.Join(cleared, " "), scope))
+		fmt.Sprintf("type=%s released: admission now allows it (verdict=%s); cleared %s connector=%s",
+			targetType, verdict, strings.Join(cleared, " "), scope))
 }
 
 // mcpNameSharedByAnotherServer reports whether another listed MCP server
@@ -2524,6 +2632,39 @@ func (w *InstallWatcher) keepsUnverifiedMCPServer(evt InstallEvent, targetType, 
 	return !w.admissionInputFor(cfg, evt, targetType, connector).BlockListed()
 }
 
+// logFailedMCPScan records an MCP admission scan that did not finish as a
+// failed scan row, so mcp list shows the server's last scan failed instead
+// of an older clean result (GAP-1869). The Secure Client profile keeps the
+// scan log of main.
+func (w *InstallWatcher) logFailedMCPScan(ctx context.Context, evt InstallEvent, scannerName, target string, result *scanner.ScanResult, err error) {
+	if evt.Type != InstallMCP || w.secureClientActive() || err == nil {
+		return
+	}
+	failed := &scanner.ScanResult{
+		Scanner:    scannerName,
+		Target:     target,
+		Timestamp:  time.Now(),
+		TargetType: scanner.InferTargetType(scannerName),
+	}
+	if result != nil {
+		copied := *result
+		failed = &copied
+		if failed.Target == "" {
+			failed.Target = target
+		}
+	}
+	if failed.Target == "" {
+		return
+	}
+	if failed.ExitCode == 0 {
+		failed.ExitCode = -1
+	}
+	if failed.ScanError == "" {
+		failed.ScanError = err.Error()
+	}
+	_ = w.logScan(ctx, evt, failed, "scan-error")
+}
+
 // unverifiedMCPReason leads the reason of an MCP server kept unverified.
 const unverifiedMCPReason = "scan did not finish, kept unverified (scanners.mcp_scanner.unverified_server: warn): "
 
@@ -2532,7 +2673,7 @@ const unverifiedMCPReason = "scan did not finish, kept unverified (scanners.mcp_
 // and its marked baseline makes the rescan retry admission until a scan decides.
 func (w *InstallWatcher) keepUnverifiedMCPServer(ctx context.Context, evt InstallEvent, targetType, scannerName string, err error) AdmissionResult {
 	reason := unverifiedMCPReason + err.Error()
-	w.releaseScanFailureBlock(evt, targetType)
+	w.releaseScanFailureBlock(evt, targetType, "kept unverified (scanners.mcp_scanner.unverified_server: warn)")
 	_ = w.logger.LogEventCtx(ctx, audit.Event{
 		Action:   string(audit.ActionInstallAllowed),
 		Target:   evt.Path,
@@ -2556,21 +2697,46 @@ func (w *InstallWatcher) recordScanFailureBlock(evt InstallEvent, targetType, re
 }
 
 // releaseScanFailureBlock clears the block and runtime disable a failed scan
-// of this asset left, once a scan of it succeeds. The Secure Client profile
-// journals no such block.
-func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType string) {
+// of this asset left, once a scan of it succeeds (or admission decides it
+// without one; cause says how), and writes an enable audit row naming the
+// cleared block, as releaseSupersededRejection does (GAP-0289). The Secure
+// Client profile journals no such block.
+func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType, cause string) {
 	if w.secureClientActive() || w.store == nil {
 		return
 	}
 	scope := w.journalScope(w.eventConnector(evt))
 	entry, err := w.store.GetActionForConnector(targetType, journalName(evt), scope)
 	if err != nil || entry == nil || !strings.HasPrefix(entry.Reason, scanFailureReason) ||
-		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
+		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path) && !blockedPathGone(entry.SourcePath)) {
 		return
 	}
-	for _, field := range []string{"runtime", "install"} {
-		_ = w.store.ClearActionFieldForConnector(targetType, journalName(evt), scope, field)
+	var cleared []string
+	for _, field := range []struct{ name, value string }{
+		{"install", entry.Actions.Install}, {"runtime", entry.Actions.Runtime},
+	} {
+		if field.value == "" {
+			continue
+		}
+		if err := w.store.ClearActionFieldForConnector(targetType, journalName(evt), scope, field.name); err == nil {
+			cleared = append(cleared, field.name+"="+field.value)
+		}
 	}
+	if len(cleared) == 0 || w.logger == nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[watch] %s %s: %s; the block its failed scan left no longer applies\n", targetType, evt.Name, cause)
+	_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
+		fmt.Sprintf("type=%s released: %s; cleared the scan-failure block %s connector=%s",
+			targetType, cause, strings.Join(cleared, " "), scope))
+}
+
+// blockedPathGone reports a scan-failure block recorded for a folder that no
+// longer exists (an installer's staging copy, a removed copy): a successful
+// scan of the same name at its real place lifts it (GAP-2118).
+func blockedPathGone(path string) bool {
+	_, err := os.Lstat(path)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // journalFailedQuarantine records on the journal that the quarantine of a
@@ -3149,7 +3315,11 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 			continue
 		}
 		child := filepath.Join(dir, entry.Name())
-		if depth+1 < 3 {
+		if root, copied := w.cachePluginCopyRoot(child); copied {
+			if !sameWatcherPath(root, child) {
+				continue
+			}
+		} else if depth+1 < 3 {
 			w.queueExistingClaudePlugins(ctx, child, depth+1)
 			continue
 		}
@@ -3194,7 +3364,7 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 			continue
 		}
 		first := strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })[0]
-		if !strings.HasPrefix(strings.ToLower(first), "temp_local_") || len(first) <= len("temp_local_") {
+		if !isPluginStagingFolder(first) {
 			return false
 		}
 		if grace <= 0 {
@@ -3204,6 +3374,114 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 		return statErr == nil && time.Since(info.ModTime()) < grace
 	}
 	return false
+}
+
+// isPluginStagingFolder names a staging folder in a plugin cache: Claude
+// Code's temp_local_<id>, and the .dclaw-stage-<name>-<random> folder that
+// "defenseclaw plugin install" copies a plugin into, scans and decides
+// itself before it moves the copy to cache/<name> (GAP-0017).
+func isPluginStagingFolder(name string) bool {
+	lower := strings.ToLower(name)
+	for _, prefix := range []string{"temp_local_", ".dclaw-stage-"} {
+		if strings.HasPrefix(lower, prefix) && len(lower) > len(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// inSkillInstallStaging reports a path at or below a ".dclaw-stage-<name>-*"
+// folder directly in the skill root root: "defenseclaw skill install" copies
+// a skill there, scans and decides it for each connector, then moves it into
+// place or removes it. Hermes discovery walks hidden folders, so the watcher
+// scanned that private copy under ~/.hermes/skills (the other roots skip
+// hidden folders), found it gone and left a fail-closed block on the skill
+// name that kept a later admitted install disabled (GAP-2118). grace, when
+// set, is how long the folder is left alone; one that stays longer is
+// scanned. The Secure Client profile keeps the earlier behaviour.
+func (w *InstallWatcher) inSkillInstallStaging(root, path string, grace time.Duration) bool {
+	if w.secureClientActive() {
+		return false
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil || relative == "." || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+	first := strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })[0]
+	lower := strings.ToLower(first)
+	if !strings.HasPrefix(lower, skillStagePrefix) || len(lower) == len(skillStagePrefix) {
+		return false
+	}
+	if grace <= 0 {
+		return true
+	}
+	info, statErr := os.Lstat(filepath.Join(rootAbs, first))
+	return statErr == nil && time.Since(info.ModTime()) < grace
+}
+
+// skillStagePrefix leads the private staging folder of "defenseclaw skill
+// install" (cli/defenseclaw/commands/cmd_skill.py _stage_skill_install).
+const skillStagePrefix = ".dclaw-stage-"
+
+// assetPathGone reports a skill or plugin whose folder no longer exists:
+// there is nothing an agent can load, so a failed scan of it is no verdict
+// on the name (GAP-2118).
+func assetPathGone(evt InstallEvent) bool {
+	if evt.Type != InstallSkill && evt.Type != InstallPlugin {
+		return false
+	}
+	_, err := os.Lstat(evt.Path)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// isCachePluginCopy reports a folder directly in a plugin cache that holds a
+// plugin manifest: a whole plugin copied there ("defenseclaw plugin install"
+// writes cache/<name>), not a <marketplace> folder of <plugin>/<version>
+// folders.
+func isCachePluginCopy(path string) bool {
+	return !strings.HasPrefix(filepath.Base(path), ".") && hasPluginManifest(path)
+}
+
+// cachePluginCopyRoot returns the plugin copy (isCachePluginCopy) that path
+// is or lies in, for a cache-layout plugin root. Its sub-folders (skills,
+// skills/<skill>, .git, ...) are part of that one plugin: the watcher read
+// them as <marketplace>/<plugin>/<version> folders and blocked each for a
+// missing manifest (GAP-0017). The whole copy is scanned as one plugin.
+func (w *InstallWatcher) cachePluginCopyRoot(path string) (string, bool) {
+	if w.secureClientActive() || !w.cacheLayoutPlugins(path) {
+		return "", false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	for _, root := range w.pluginDirs {
+		rootAbs, absErr := filepath.Abs(root)
+		if absErr != nil || !strings.EqualFold(filepath.Base(rootAbs), "cache") {
+			continue
+		}
+		relative, relErr := filepath.Rel(rootAbs, pathAbs)
+		if relErr != nil || relative == "." || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		first := strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })[0]
+		candidate := filepath.Join(rootAbs, first)
+		if isCachePluginCopy(candidate) {
+			return candidate, true
+		}
+		return "", false
+	}
+	return "", false
 }
 
 // cacheLayoutPlugins reports whether the plugin root that holds path is read
@@ -3624,20 +3902,7 @@ func createsAgentOwnedDir(dir string) bool {
 // /etc/codex/skills watch. An absent vendor system folder is watched once an
 // administrator or installer creates it, like an agent-owned folder
 // (GAP-2354). Tests substitute a private root.
-var vendorSystemRoots = defaultVendorSystemRoots()
-
-func defaultVendorSystemRoots() []string {
-	if runtime.GOOS == "windows" {
-		var roots []string
-		for _, name := range []string{"ProgramData", "ProgramFiles", "ProgramFiles(x86)", "SystemRoot"} {
-			if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-				roots = append(roots, filepath.Clean(value))
-			}
-		}
-		return roots
-	}
-	return []string{"/etc", "/private/etc", "/Library"}
-}
+var vendorSystemRoots = gatewayconnector.DefaultVendorSystemRoots()
 
 // errAbsentVendorSystemDir reports a watch root under vendorSystemRoots that
 // does not exist; the watcher never creates it.
@@ -3659,25 +3924,12 @@ func isAbsentVendorSystemDir(dir string) bool {
 }
 
 func underVendorSystemRoot(absolute string) bool {
-	cleaned := filepath.Clean(absolute)
-	for _, root := range vendorSystemRoots {
-		root = filepath.Clean(root)
-		if root == "" || root == "." || root == string(filepath.Separator) {
-			continue
-		}
-		if runtime.GOOS == "windows" {
-			if strings.EqualFold(cleaned, root) ||
-				strings.HasPrefix(strings.ToLower(cleaned), strings.ToLower(root)+string(filepath.Separator)) {
-				return true
-			}
-			continue
-		}
-		if cleaned == root || strings.HasPrefix(cleaned, root+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
+	return gatewayconnector.UnderVendorSystemRoot(absolute, vendorSystemRoots)
 }
+
+// errWatchDirNotCreated reads "create dir": the watcher could not create a
+// missing root (for example under a parent only an administrator may write).
+var errWatchDirNotCreated = errors.New("create dir")
 
 // ensureAndWatch creates dir when it is missing and watches it. It returns
 // the absolute paths of the folders it created: dir and any missing parents.
@@ -3700,7 +3952,7 @@ func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
 		}
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create dir: %w", err)
+		return nil, fmt.Errorf("%w: %w", errWatchDirNotCreated, err)
 	}
 
 	if err := fsw.Add(dir); err != nil {

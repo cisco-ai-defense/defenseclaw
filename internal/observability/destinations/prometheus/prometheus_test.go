@@ -291,7 +291,9 @@ func TestListenerPathConflictAndCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := firstValue.(*Reader)
-	if _, err := secondFactory.Prepare(2, deltaSpec()); !IsError(err, ErrorListenFailed) || strings.Contains(err.Error(), address) {
+	// One generation cannot bind the address twice; a successor generation
+	// joins it instead (TestSuccessorGenerationServesTheSameListenAddressWhileTheOldOneDrains).
+	if _, err := secondFactory.Prepare(1, deltaSpec()); !IsError(err, ErrorListenFailed) || strings.Contains(err.Error(), address) {
 		t.Fatalf("listen conflict error=%v", err)
 	}
 	if err := first.Shutdown(context.Background()); err != nil {

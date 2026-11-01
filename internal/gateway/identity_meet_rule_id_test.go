@@ -33,6 +33,9 @@ func meetOfTwoAssignments(t *testing.T, mode string, profiles map[string]config.
 		t.Fatalf("profile set: %v", err)
 	}
 	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, identityTestSubject(p, p.providers[0], stateProven, true))
+	// Requests pin the profile generation before scanning. Keep this test's
+	// profile set independent of another test's process-wide live set.
+	ctx = withPinnedGeneration(ctx, &Generation{N: 1, Config: cfg, Profiles: set})
 	return set, withGuardrailProfile(ctx, set, scope)
 }
 

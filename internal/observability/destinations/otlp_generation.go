@@ -447,6 +447,7 @@ func (factory *Factory) prepareOTLPTelemetryFactory(
 			ExportInterval:      metricSpec.ExportInterval,
 			ExportTimeout:       metricSpec.ExportTimeout,
 		},
+		ManagedService: factory.managedService,
 	}, otlp.Dependencies{
 		Resolver: factory.resolver,
 		Dialer:   factory.dialer,

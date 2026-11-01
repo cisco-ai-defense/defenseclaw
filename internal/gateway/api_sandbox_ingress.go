@@ -27,7 +27,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -39,6 +38,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -602,10 +602,7 @@ func (a *APIServer) newSandboxIngressHandler(st *sandboxIngressState) http.Handl
 	h = CorrelationMiddleware(reg)(h)
 	h = sandboxRequestIDMiddleware(h)
 	h = inboundTraceContextMiddleware(h)
-	h = a.sandboxIngressAuthenticate(st, h)
-	// until 1.1: a removed connector's hook route blocks every call before
-	// the binding check (retired_connector_hook.go).
-	return retiredConnectorHookFirst(h)
+	return a.sandboxIngressAuthenticate(st, h)
 }
 
 // sandboxIngressMux registers the only handlers the ingress serves and
@@ -994,8 +991,8 @@ func (a *APIServer) sandboxAlertsLow(ctx context.Context, connectorName string) 
 // ..." text; sandboxModelErrorClass matches the error classes its
 // StopFailure names (authentication_failed, rate_limit, ...).
 var (
-	sandboxModelStatus     = regexp.MustCompile(`API Error: ([45][0-9]{2})\b`)
-	sandboxModelErrorClass = regexp.MustCompile(`^[a-z][a-z_]{0,39}$`)
+	sandboxModelStatus     = lazyregexp.New(`API Error: ([45][0-9]{2})\b`)
+	sandboxModelErrorClass = lazyregexp.New(`^[a-z][a-z_]{0,39}$`)
 )
 
 // sandboxModelError is the model API failure a StopFailure hook reports

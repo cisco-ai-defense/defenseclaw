@@ -1,0 +1,228 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package connector
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// oss-outage-open review (round g, loop round 2): a per-user Claude Code
+// setup wrote DEFENSECLAW_FAIL_MODE=closed into ~/.claude/settings.json on
+// every run, so after a 1.0.2 upgrade (or a fresh install) the settings kept a
+// product-owned closed while an unset default-tier outage opens, and status
+// reported claude-env-closed. No 1.0.4 render reads that variable. A per-user
+// setup now writes no carrier and takes back the value an earlier setup or
+// release wrote, unchanged; a value the user set stays. Managed and Secure
+// Client installs keep theirs.
+func TestClaudeCodePerUserSetupTakesBackTheFailModeCarrier(t *testing.T) {
+	const carrier = "DEFENSECLAW_FAIL_MODE"
+	for _, tc := range []struct {
+		name     string
+		opts     func(SetupOpts) SetupOpts
+		recorded string // what an earlier setup wrote and recorded; "" for a fresh install
+		absent   bool   // the backup records the carrier taken away; current is written back over it
+		current  string // what settings.json holds before the setup ("" for absent)
+		want     string // "" for absent
+	}{
+		{name: "fresh per-user install"},
+		{name: "1.0.2 upgrade, product-owned closed", recorded: "closed", current: "closed"},
+		{name: "1.0.3 upgrade, product-owned open of a saved open", recorded: "open", current: "open"},
+		{name: "earlier 1.0.4 build, product-owned closed", recorded: "closed", current: "closed"},
+		{name: "the user changed it", recorded: "closed", current: "open", want: "open"},
+		// GAP-2388: rollback to 1.0.3 and roll forward. The live backup is the
+		// one this setup wrote (carrier recorded absent); the 1.0.3 gateway put
+		// the saved mode back.
+		{name: "an earlier release wrote back the saved mode", absent: true, current: "open"},
+		// GAP-2460: a rollback to 1.0.4 (or 1.0.2) writes closed back under a
+		// saved open; the roll forward takes that back too.
+		{name: "an earlier release wrote back closed under a saved open", absent: true, current: "closed"},
+		{name: "an earlier release wrote back open under a saved closed", absent: true, current: "open",
+			opts: func(o SetupOpts) SetupOpts { o.HookFailMode = "closed"; return o }},
+		{name: "a value no release writes after the absence stays", absent: true, current: "CLOSED", want: "CLOSED"},
+		{name: "managed install keeps the administrator's mode",
+			opts: func(o SetupOpts) SetupOpts { o.ManagedEnterprise = true; o.HookFailMode = "open"; return o },
+			want: "open"},
+		{name: "Secure Client keeps its carrier",
+			opts: func(o SetupOpts) SetupOpts { o.SecureClientHookDelivery = true; o.HookFailMode = "open"; return o },
+			want: "closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			settingsPath := filepath.Join(dir, "claude", "settings.json")
+			if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			previous := ClaudeCodeSettingsPathOverride
+			ClaudeCodeSettingsPathOverride = settingsPath
+			t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+			c := NewClaudeCodeConnector()
+			opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", HookFailMode: "open"}
+			if tc.opts != nil {
+				opts = tc.opts(opts)
+			}
+			readEnv := func() map[string]interface{} {
+				t.Helper()
+				data, err := os.ReadFile(settingsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var settings map[string]interface{}
+				if err := json.Unmarshal(data, &settings); err != nil {
+					t.Fatal(err)
+				}
+				env, _ := settings["env"].(map[string]interface{})
+				return env
+			}
+			if err := c.Setup(context.Background(), opts); err != nil {
+				t.Fatal(err)
+			}
+			if tc.absent {
+				data, err := os.ReadFile(settingsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var settings map[string]interface{}
+				if err := json.Unmarshal(data, &settings); err != nil {
+					t.Fatal(err)
+				}
+				env, _ := settings["env"].(map[string]interface{})
+				if env == nil {
+					env = map[string]interface{}{}
+					settings["env"] = env
+				}
+				env[carrier] = tc.current
+				if data, err = json.Marshal(settings); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.recorded != "" {
+				// The settings and backup an earlier setup or release left.
+				data, err := os.ReadFile(settingsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var settings map[string]interface{}
+				if err := json.Unmarshal(data, &settings); err != nil {
+					t.Fatal(err)
+				}
+				env := settings["env"].(map[string]interface{})
+				env[carrier] = tc.current
+				if data, err = json.Marshal(settings); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				backup, err := c.loadBackup(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				backup.ManagedEnv[carrier] = tc.recorded
+				absent := backup.ManagedAbsentEnv[:0]
+				for _, key := range backup.ManagedAbsentEnv {
+					if key != carrier {
+						absent = append(absent, key)
+					}
+				}
+				backup.ManagedAbsentEnv = absent
+				if err := c.saveBackup(dir, backup); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The upgrade's setup, and one more run: the result is stable.
+			for run := 1; run <= 2; run++ {
+				if err := c.Setup(context.Background(), opts); err != nil {
+					t.Fatalf("setup run %d: %v", run, err)
+				}
+				got, present := readEnv()[carrier]
+				switch {
+				case tc.want == "" && present:
+					t.Fatalf("run %d: settings env keeps %s=%v, want it taken back", run, carrier, got)
+				case tc.want != "" && got != tc.want:
+					t.Fatalf("run %d: settings env %s = %v, want %q", run, carrier, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// GAP-2388: a rollback to 1.0.3 starts its gateway, whose setup writes its
+// native telemetry block back (protocols, service name, resource attributes);
+// the roll forward must take back exactly those renders, like the carrier, and
+// keep a value the user set.
+func TestClaudeCodePerUserSetupTakesBackAnEarlierReleaseTelemetryRenderAfterARollbackPair(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", HookFailMode: "open"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := settings["env"].(map[string]interface{})
+	if env == nil {
+		env = map[string]interface{}{}
+		settings["env"] = env
+	}
+	earlier := map[string]string{
+		"DEFENSECLAW_FAIL_MODE":               "open",
+		"OTEL_EXPORTER_OTLP_PROTOCOL":         "http/json",
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL":    "http/json",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
+		"OTEL_SERVICE_NAME":                   "claudecode",
+		"OTEL_RESOURCE_ATTRIBUTES":            "defenseclaw.connector=claudecode,service.name=claudecode",
+	}
+	for key, value := range earlier {
+		env[key] = value
+	}
+	env["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "grpc" // the user's own value
+	if data, err = json.Marshal(settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for run := 1; run <= 2; run++ {
+		if err := c.Setup(context.Background(), opts); err != nil {
+			t.Fatalf("setup run %d: %v", run, err)
+		}
+		data, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		gotEnv, _ := got["env"].(map[string]interface{})
+		for key := range earlier {
+			if value, present := gotEnv[key]; present {
+				t.Errorf("run %d: %s=%v an earlier release wrote back stays, want it taken back", run, key, value)
+			}
+		}
+		if gotEnv["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] != "grpc" {
+			t.Errorf("run %d: the user's own traces protocol was changed: %v", run, gotEnv["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"])
+		}
+	}
+}

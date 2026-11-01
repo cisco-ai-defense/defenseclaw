@@ -191,7 +191,7 @@ class MCPServerEntry:
 
 @dataclass(frozen=True)
 class OpenCodeConfigLayer:
-    """One locally representable OpenCode v1.18.10-v1.18.19 config layer."""
+    """One locally representable OpenCode v1 or v2 config layer."""
 
     source: str
     source_scope: str
@@ -4262,7 +4262,7 @@ def _opencode_config_paths(
     *,
     infer_from_cwd: bool = False,
 ) -> list[str]:
-    """Return locally representable file layers in v1.18.10 merge order."""
+    """Return locally representable file layers in OpenCode V2 precedence order."""
     return [
         layer.path
         for layer in _resolve_opencode_config(
@@ -4270,6 +4270,37 @@ def _opencode_config_paths(
         ).layers
         if layer.path
     ]
+
+
+def _opencode_direct_mcp_entry(value: Any) -> bool:
+    """V2 recognizes typed compatible entries even at reserved container names."""
+    return isinstance(value, dict) and value.get("type") in ("local", "remote")
+
+
+def _opencode_mcp_container(mcp: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Return the mutable server container without discarding malformed members."""
+    servers = mcp.get("servers")
+    if "servers" in mcp:
+        if _opencode_direct_mcp_entry(servers):
+            return mcp, False
+        return (servers if isinstance(servers, dict) else {}), True
+    if "timeout" in mcp and not _opencode_direct_mcp_entry(mcp["timeout"]):
+        return {}, True
+    return mcp, False
+
+
+def _opencode_mcp_map(mcp: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Combine compatible direct entries and native entries; native names win."""
+    container, native = _opencode_mcp_container(mcp)
+    selected = {
+        name: value
+        for name, value in mcp.items()
+        if name not in ("servers", "timeout") or _opencode_direct_mcp_entry(value)
+        if not (isinstance(value, dict) and "type" not in value and isinstance(value.get("enabled"), bool))
+    }
+    if native:
+        selected.update(container)
+    return selected, native
 
 
 def _opencode_mcp_servers(
@@ -4298,36 +4329,25 @@ def _opencode_mcp_servers(
         servers = data.get("mcp") if isinstance(data, dict) else None
         if not isinstance(servers, dict):
             continue
+        servers, _ = _opencode_mcp_map(servers)
         for name_raw, cfg in servers.items():
             if not isinstance(cfg, dict):
                 continue
+            cfg = dict(cfg)
+            if "disabled" in cfg:
+                cfg["enabled"] = cfg.pop("disabled") is not True
             name = str(name_raw)
             if name not in entries:
                 order.append(name)
-            # OpenCode deep-merges config objects. Merge the raw entry before
-            # projecting it into MCPServerEntry so a higher-precedence
-            # enabled-only override preserves the lower command/url.
-            entries[name] = _merge_opencode_mcp_config(entries.get(name, {}), cfg)
+            # V2 normalizes compatible syntax before applying config layers.
+            # A same-name server replaces the entire object, so an override
+            # cannot inherit another endpoint's headers or environment.
+            entries[name] = cfg
             provenance[name] = (layer.source, layer.source_scope)
     return [
         _opencode_entry_to_mcp(name, entries[name], *provenance[name])
         for name in order
     ]
-
-
-def _merge_opencode_mcp_config(
-    base: dict[str, Any],
-    override: dict[str, Any],
-) -> dict[str, Any]:
-    """Deep-merge one OpenCode MCP config layer over another."""
-    merged = dict(base)
-    for key, value in override.items():
-        previous = merged.get(key)
-        if isinstance(previous, dict) and isinstance(value, dict):
-            merged[key] = _merge_opencode_mcp_config(previous, value)
-        else:
-            merged[key] = value
-    return merged
 
 
 def _opencode_entry_to_mcp(
@@ -5622,7 +5642,21 @@ def _set_opencode_mcp_server(
     mcp = data.get("mcp")
     if not isinstance(mcp, dict):
         mcp = {}
-    mcp[name] = _opencode_mcp_entry_from_generic(entry)
+    converted = _opencode_mcp_entry_from_generic(entry)
+    servers, native = _opencode_mcp_container(mcp)
+    if native:
+        if "servers" in mcp and not isinstance(mcp["servers"], dict):
+            raise MCPWriteUnsupportedError(
+                "refusing to replace malformed OpenCode mcp.servers; repair that field before adding a server",
+            )
+        if "enabled" in converted:
+            converted["disabled"] = not converted.pop("enabled")
+        servers[name] = converted
+        mcp["servers"] = servers
+        if name in mcp and _opencode_direct_mcp_entry(mcp[name]):
+            del mcp[name]
+    else:
+        mcp[name] = converted
     data["mcp"] = mcp
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
@@ -5655,9 +5689,18 @@ def _unset_opencode_mcp_server(
         _reject_symlink_config(path)
         data = _read_opencode_doc_for_write(path)
         mcp = data.get("mcp")
-        if not isinstance(mcp, dict) or name not in mcp:
+        if not isinstance(mcp, dict):
             continue
-        del mcp[name]
+        servers, native = _opencode_mcp_container(mcp)
+        changed = False
+        if native and name in servers:
+            del servers[name]
+            changed = True
+        if name in mcp and (name not in ("servers", "timeout") or _opencode_direct_mcp_entry(mcp[name])):
+            del mcp[name]
+            changed = True
+        if not changed:
+            continue
         data["mcp"] = mcp
         updates.append((path, data))
     for path, data in updates:

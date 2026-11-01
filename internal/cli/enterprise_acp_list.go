@@ -126,6 +126,9 @@ func describeEnterpriseACPEnrollment(enrollment acp.EnterpriseEnrollment) enterp
 	row.Created = row.Created.Truncate(time.Second)
 	row.Note = enterpriseACPCentralNote(enrollment.ClientID, enrollment.AgentID, enrollment.Profile)
 	account, err := enterpriseACPDescribePrincipal(enrollment.Principal)
+	if err != nil && strings.HasPrefix(enrollment.Principal, "home:") {
+		account, err = enterpriseACPDescribeHomePrincipal(enrollment.Principal, enrollment.UserDataDir)
+	}
 	switch {
 	case err != nil:
 		return row

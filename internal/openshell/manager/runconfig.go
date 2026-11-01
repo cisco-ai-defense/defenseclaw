@@ -30,7 +30,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -39,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
@@ -913,7 +913,7 @@ func projectMCPList(names []string, other int) string {
 }
 
 // safeMCPName is a server or variable name a notice can show verbatim.
-var safeMCPName = regexp.MustCompile(`^[A-Za-z0-9 _.:@/-]{1,64}$`)
+var safeMCPName = lazyregexp.New(`^[A-Za-z0-9 _.:@/-]{1,64}$`)
 
 func displayMCPName(name string) string {
 	if safeMCPName.MatchString(name) {

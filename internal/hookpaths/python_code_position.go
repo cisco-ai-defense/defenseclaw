@@ -4,11 +4,12 @@
 package hookpaths
 
 import (
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
-var pythonInertPathPrefix = regexp.MustCompile(`^from\s+pathlib\s+import\s+Path\s*;\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*Path\.home\(\)\s*(?:/\s*(?:"[^"\\]*"|'[^'\\]*')\s*)+;\s*$`)
+var pythonInertPathPrefix = lazyregexp.New(`^from\s+pathlib\s+import\s+Path\s*;\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*Path\.home\(\)\s*(?:/\s*(?:"[^"\\]*"|'[^'\\]*')\s*)+;\s*$`)
 
 type pythonCodeRegion uint8
 

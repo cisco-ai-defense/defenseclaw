@@ -357,6 +357,8 @@ def status(app: AppContext, as_json: bool) -> None:
         problems = list(getattr(app, "config_problems", None) or [])
         if problems:
             payload["config_errors"] = problems
+        if not_checked := getattr(app, "config_not_checked", ""):
+            payload["config_not_checked"] = not_checked
         click.echo(json.dumps(payload, indent=2))
         if problems:
             raise SystemExit(1)
@@ -386,6 +388,8 @@ def status(app: AppContext, as_json: bool) -> None:
             ux._style(f"{len(config_problems)} problem(s), listed above", fg="yellow")
             + ux.dim(" (details: defenseclaw config validate)"),
         )
+    elif not_checked := getattr(app, "config_not_checked", ""):
+        _status_row("Config check", ux._style(f"not run: {not_checked}", fg="yellow"))
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
     _print_removed_connector_cleanup(cfg)
@@ -522,7 +526,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_guardrail_profile(cfg)
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
-        _print_llm_judge(health)
+        _print_llm_judge(health, cfg)
         _print_hook_guardian(cfg)
         _print_fleet_health(cfg, client)
         hint(
@@ -602,6 +606,8 @@ def status(app: AppContext, as_json: bool) -> None:
             first_hint = "Check access:   defenseclaw doctor"
         elif hung_pid:
             first_hint = "Check sidecar:  defenseclaw-gateway status (restart it if it stays this way)"
+        elif listener_reason == SANDBOX_HIDES_GATEWAY:
+            first_hint = "Check sidecar:  run defenseclaw status outside the sandbox"
         elif unconfirmed:
             first_hint = "Check sidecar:  defenseclaw doctor"
         else:
@@ -609,6 +615,13 @@ def status(app: AppContext, as_json: bool) -> None:
         hint(first_hint, "Subsystems:    defenseclaw-gateway status")
     if config_problems:
         raise SystemExit(1)
+
+
+SANDBOX_HIDES_GATEWAY = (
+    "not visible from this sandbox: this command runs inside a sandbox (a user namespace) "
+    "that hides the gateway's process and port, so it cannot tell whether the gateway runs; "
+    "run defenseclaw status outside the sandbox to check"
+)
 
 
 def _sidecar_listener_state(port: int, host: str) -> tuple[bool | None, str]:
@@ -628,7 +641,15 @@ def _sidecar_listener_state(port: int, host: str) -> tuple[bool | None, str]:
         return None, reason
 
     stopped_reason = "no gateway process or API listener; start it: defenseclaw-gateway start"
-    if sys.platform.startswith("linux") or sys.platform == "win32":
+    if sys.platform.startswith("linux"):
+        from defenseclaw.file_permissions import in_child_user_namespace
+
+        # A sandbox (another user namespace, as Codex runs its tools in)
+        # hides the host's gateway process and its listener (GAP-2206).
+        if in_child_user_namespace():
+            return None, SANDBOX_HIDES_GATEWAY
+        return False, stopped_reason
+    if sys.platform == "win32":
         return False, stopped_reason
 
     target = host.strip("[]")
@@ -711,16 +732,13 @@ def _status_refused_detail(cfg, client, public) -> str:
 
 
 def _print_removed_connector_cleanup(cfg) -> None:
-    """until 1.1: name a removed connector that left things to remove by hand."""
-    from defenseclaw.removed_connectors import leftovers
+    """until 1.1: one row when OpenHands or OmniGent left something on this host (information)."""
+    from defenseclaw.removed_connectors import NOTICE, leftovers
 
     workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
-    for left in leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
-        _status_row(
-            "Cleanup",
-            ux._style(f"{left.label} was removed in 1.0.4; {len(left.items)} item(s) to remove by hand", fg="yellow")
-            + ux.dim(" (steps: defenseclaw doctor)"),
-        )
+    if found := leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
+        count = sum(len(left.items) for left in found)
+        _status_row("Removed", NOTICE + ux.dim(f" ({count} item(s) left; steps: defenseclaw doctor)"))
 
 
 def _live_gateway_pid(cfg) -> int:
@@ -1114,6 +1132,63 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
     return {**health, "pid": trust.pid} if "pid" not in health else health
 
 
+def print_gateway_while_config_unloadable(config_error: str, *, as_json: bool = False) -> None:
+    """The running gateway's state while config.yaml does not load (GAP-0006).
+
+    The gateway keeps enforcing the last configuration it loaded, but status
+    printed only the load error: the gateway state, the digest it enforces
+    and the reload it rejected were in /health alone. The live process's own
+    runtime record (gateway-api.json in the data directory, bound to the PID
+    in gateway.pid) names its listener without config.yaml. Doctor's
+    process and listener proof, run over the built-in defaults with that
+    data directory, checks that this account's gateway holds the listener
+    before the unauthenticated /health is read; no token is sent.
+    """
+    from defenseclaw import config as cfg_mod
+    from defenseclaw.gateway import policy_reload_rejection
+    from defenseclaw.logger import _running_gateway_address
+
+    data_dir = str(cfg_mod.default_data_path())
+    address = _running_gateway_address(data_dir)
+    health = None
+    if address is not None:
+        try:
+            import requests
+
+            from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
+
+            defaults = cfg_mod.default_config()
+            defaults.data_dir = data_dir
+            if _trusted_gateway_listener(defaults, api_port=address[1]).trusted:
+                with requests.Session() as session:
+                    session.trust_env = False  # never through a proxy
+                    shown = f"[{address[0]}]" if ":" in address[0] else address[0]
+                    response = session.get(f"http://{shown}:{address[1]}/health", timeout=3, allow_redirects=False)
+                    response.raise_for_status()
+                    health = response.json()
+        except Exception:  # noqa: BLE001 - any transport or ownership failure: not answering
+            health = None
+    policy = _policy_status(health if isinstance(health, dict) else None)
+    if as_json:
+        click.echo(json.dumps({
+            "config_error": config_error,
+            "sidecar": {"running": isinstance(health, dict), "api": f"{address[0]}:{address[1]}" if address else ""},
+            "policy": policy,
+        }, indent=2))
+        return
+    if address is None:
+        _status_row("Sidecar", "not running")
+        return
+    if not isinstance(health, dict):
+        _status_row("Sidecar", "not answering" + _sidecar_running_detail({}, *address))
+        return
+    _status_row("Sidecar", "running on its last good configuration" + _sidecar_running_detail(health, *address))
+    _print_policy(health)
+    rejected = policy_reload_rejection((health or {}).get("policy") or {})
+    if rejected:
+        _status_row("Reload error", " ".join(rejected.split())[:300])
+
+
 def _policy_status(health: dict | None) -> dict | None:
     """The applied effective policy from /status, or None when not reported."""
     from defenseclaw.gateway import policy_reload_rejection
@@ -1250,10 +1325,12 @@ def _refused_scoped_hook_credentials(cfg, health: dict | None) -> set[str]:
 
 
 def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bool = False) -> str:
-    """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)."""
+    """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)
+    or the agent's own settings turn its hooks off (GAP-1634)."""
     try:
         from defenseclaw.hook_integrity import (
             HookProblem,
+            agent_hook_switch_problems,
             hook_registration_problems,
             hook_runtime_problems,
             repair_command,
@@ -1266,7 +1343,12 @@ def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bo
                 blocking=True,
             )]
             if credential_refused
-            else hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+            # An agent setting that turns every hook off (Claude Code or
+            # Copilot disableAllHooks, Codex [features] hooks = false) is
+            # DEGRADED here as in the alert and doctor (GAP-1634).
+            else hook_runtime_problems(cfg, connector)
+            or hook_registration_problems(cfg, connector)
+            or agent_hook_switch_problems(cfg, connector)
         )
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""
@@ -1646,7 +1728,44 @@ def gateway_audit_write_failure(cfg) -> str:
         return ""
 
 
-def _print_llm_judge(health: dict | None) -> None:
+def judge_fallback_summary(details: dict) -> str:
+    """Hook checks the rules decided because the judge gave no verdict in time (#1395), or ""."""
+    try:
+        total = int(details.get("judge_fallbacks") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if total <= 0:
+        return ""
+    text = f"the rules decided {total} hook check(s) because the judge gave no verdict in time"
+    by_connector = details.get("judge_fallbacks_by_connector")
+    if isinstance(by_connector, dict) and by_connector:
+        text += " (" + ", ".join(f"{name} {by_connector[name]}" for name in sorted(by_connector)) + ")"
+    last = str(details.get("judge_last_fallback") or "").strip()
+    if last:
+        text += f"; last: {last}"
+    return text
+
+
+JUDGE_MAX_PARALLEL_HINT = "a slow judge model: set guardrail.judge.max_parallel"
+
+
+def judge_max_parallel_hint(cfg) -> str:
+    """The max_parallel suggestion, only while guardrail.judge.max_parallel is 0 (off)."""
+    judge = getattr(getattr(cfg, "guardrail", None), "judge", None)
+    value = getattr(judge, "max_parallel", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value > 0:
+        return ""
+    return JUDGE_MAX_PARALLEL_HINT
+
+
+def _print_judge_fallbacks(details: dict, cfg=None) -> None:
+    summary = judge_fallback_summary(details)
+    if summary:
+        hint = judge_max_parallel_hint(cfg)
+        _status_row("Judge fallbacks", ux._style(summary + ("; " + hint if hint else ""), fg="yellow"))
+
+
+def _print_llm_judge(health: dict | None, cfg=None) -> None:
     """Show the LLM judge row when the gateway has made judge calls.
 
     A judge whose provider failed every call was invisible here: the hook
@@ -1654,7 +1773,10 @@ def _print_llm_judge(health: dict | None) -> None:
     """
     guardrail = health.get("guardrail") if isinstance(health, dict) else None
     details = guardrail.get("details") if isinstance(guardrail, dict) else None
-    if not isinstance(details, dict) or not details.get("judge_state"):
+    if not isinstance(details, dict):
+        return
+    _print_judge_fallbacks(details, cfg)
+    if not details.get("judge_state"):
         return
     state = str(details.get("judge_state"))
     total = details.get("judge_recent_calls", 0)
@@ -1772,7 +1894,7 @@ def _print_observability_status(cfg, *, config_has_problems: bool = False) -> No
         _print_native_delivery_status(_native_delivery_summary(cfg), configured=_configured_connectors(cfg))
         return
 
-    retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+    retention = status.retention_label
     ux.echo(f"    {ux.dim('plan:')} {status.plan_digest[:12]}  {ux.dim('retention:')} {retention}")
     for destination in status.destinations:
         state = ux._style("enabled", fg="green") if destination.enabled else ux._style("disabled", fg="bright_black")
@@ -1879,7 +2001,7 @@ def _scanner_overrides_summary(cfg) -> str:
     """Summarize v9 admission actions or Secure Client v8 scanner overrides."""
     try:
         from defenseclaw.enforce import asset_lists
-        from defenseclaw.tui.services.overview_state import (
+        from defenseclaw.enforce.admission_overrides import (
             admission_action_overrides,
             format_scanner_overrides_summary,
         )
@@ -2089,7 +2211,7 @@ def _status_payload(app) -> dict:
 
     workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
     if left := [item.as_json() for item in leftovers(str(cfg.data_dir or ""), workspace=workspace)]:
-        # until 1.1: what the removed OpenHands/OmniGent teardown left.
+        # until 1.1: what the OpenHands/OmniGent teardown could not remove.
         payload["removed_connector_cleanup"] = left
 
     if app.store:

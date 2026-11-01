@@ -7,8 +7,23 @@ package hookpaths
 
 import (
 	"os"
+	"strconv"
 	"syscall"
 )
+
+// fileIdentity is the device and inode of info, in hex.
+func fileIdentity(info os.FileInfo) string {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	return strconv.FormatUint(uint64(stat.Dev), 16) + ":" + strconv.FormatUint(uint64(stat.Ino), 16)
+}
+
+func fileIdentityForPath(_ string, info os.FileInfo) string { return fileIdentity(info) }
+
+// directoryIdentityForPath is fileIdentityForPath for a directory.
+func directoryIdentityForPath(_ string, info os.FileInfo) string { return fileIdentity(info) }
 
 // linkCount returns the number of hard links to a file. An unknown count is
 // reported as more than one so the caller fails closed.

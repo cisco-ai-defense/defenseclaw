@@ -20,7 +20,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -130,7 +132,10 @@ const (
 	// enterpriseSetupStageStaleAge is the age after which a staging folder
 	// belongs to no Setup still staging: unpacking the payload takes
 	// seconds to minutes. A Setup whose lifecycle still runs holds its
-	// folder as the working directory, which the rename below needs free.
+	// folder as the working directory, which the rename below needs free;
+	// a Setup of this release holds it from its creation
+	// (holdEnterpriseSetupStage). After an interrupted transaction the age
+	// is not waited for (enterpriseSetupStageSweepAge).
 	enterpriseSetupStageStaleAge = 30 * time.Minute
 )
 
@@ -224,8 +229,15 @@ func executeEnterpriseSetup(
 			if opts.JSON {
 				progress = io.Discard
 			}
-			removeStaleEnterpriseSetupStages(programData, time.Now(), progress, stderr)
+			removeStaleEnterpriseSetupStages(programData, time.Now(), enterpriseSetupStageSweepAge(), progress, stderr)
 			if err := requireEnterpriseSetupFreeSpace(programData, payload, opts.Action); err != nil {
+				return 0, err
+			}
+		}
+		// Refuse an upgrade on saturated processors before staging: it
+		// could not finish within TIMEOUTSECONDS (GAP-2265).
+		if deployment, err := standaloneSetupDeployment(); err == nil {
+			if err := requireEnterpriseSetupHostCapacity(opts.Action, deployment, payload.Manifest.Version); err != nil {
 				return 0, err
 			}
 		}
@@ -245,42 +257,62 @@ func executeEnterpriseSetup(
 		}
 	}()
 
-	arguments := enterpriseLifecycleArguments(stageRoot, opts)
 	childEnvironment, err := trustedEnterpriseSetupEnvironment(stageRoot)
 	if err != nil {
 		return 0, err
 	}
-	if opts.Standalone && opts.Action == "uninstall" {
-		// The worker can be killed after it removes managed hook wiring and
-		// before it commits. Arm an independent journal replay first.
-		if err := enterpriseSetupArmUninstallRecovery(); err != nil {
-			return 0, fmt.Errorf("cannot arm uninstall recovery before changing the installation: %w", err)
+	// A standalone /ensure with CONFIG= and BUNDLE= is the single-app form:
+	// on a new computer it stages the install with every service stopped and
+	// then applies the signed bundle, so the first policy any service runs is
+	// the signed one (first_bundle.go).
+	plan := standaloneEnsurePlan{steps: []standaloneEnsureStep{{opts: opts}}}
+	if opts.Standalone && standaloneFirstBundleRequested(opts) {
+		deployment, err := standaloneSetupDeployment()
+		if err != nil {
+			return 0, fmt.Errorf("cannot establish whether a standalone deployment is already installed: %w", err)
 		}
+		plan = planStandaloneEnsure(opts, deployment.State != winpath.EnterpriseDeploymentAbsent &&
+			deployment.State != winpath.EnterpriseDeploymentTombstone)
 	}
 	cliPath := filepath.Join(stageRoot, "defenseclaw.exe")
-	lifecycle := runEnterpriseLifecycleChild(parent, opts, func(ctx context.Context) ([]byte, error) {
-		child := processutil.CommandContext(ctx, cliPath, arguments...)
-		child.Dir = stageRoot
-		child.Env = childEnvironment
-		if !opts.Standalone {
-			return processutil.CombinedOutputTree(child, false)
+	runChild := func(runOpts enterpriseSetupOptions) (enterpriseLifecycleChildRun, error) {
+		arguments := enterpriseLifecycleArguments(stageRoot, runOpts)
+		if runOpts.Standalone && runOpts.Action == "uninstall" {
+			// The worker can be killed after it removes managed hook wiring and
+			// before it commits. Arm an independent journal replay first.
+			if err := enterpriseSetupArmUninstallRecovery(); err != nil {
+				return enterpriseLifecycleChildRun{}, fmt.Errorf("cannot arm uninstall recovery before changing the installation: %w", err)
+			}
 		}
-		// Pass the lifecycle's stderr (diagnostics of a failing run) on at
-		// once. Its scanner runtime progress goes to stdout for a person and
-		// to the lifecycle log in a JSON run, never to stderr, which an MDM
-		// reads as a failed script (GAP-0642, GAP-1069). stdout is the result.
-		var captured bytes.Buffer
-		child.Stdout = &captured
-		child.Stderr = lifecycleProgress{stderr}
-		err := processutil.RunTree(child)
-		return captured.Bytes(), err
-	}, func(ctx context.Context) ([]byte, error) {
-		// The trusted staged CLI and module stay until this recovery ends:
-		// cleanup runs below. It replays pending rollback or committed
-		// uninstall hook teardown using the protected lifecycle evidence.
-		return enterpriseSetupRecoveryRunner(ctx, cliPath,
-			enterpriseLifecycleArguments(stageRoot, standaloneRecoveryOptions(opts)), stageRoot, childEnvironment)
-	})
+		return runEnterpriseLifecycleChild(parent, runOpts, func(ctx context.Context) ([]byte, error) {
+			child := processutil.CommandContext(ctx, cliPath, arguments...)
+			child.Dir = stageRoot
+			child.Env = childEnvironment
+			if !runOpts.Standalone {
+				return processutil.CombinedOutputTree(child, false)
+			}
+			// Pass the lifecycle stderr (diagnostics of a failing run) on at
+			// once. Its scanner runtime progress goes to stdout for a person and
+			// to the lifecycle log in a JSON run, never to stderr, which an MDM
+			// reads as a failed script (GAP-0642, GAP-1069). stdout is the result.
+			var captured bytes.Buffer
+			child.Stdout = &captured
+			child.Stderr = lifecycleProgress{stderr}
+			err := processutil.RunTree(child)
+			return captured.Bytes(), err
+		}, func(ctx context.Context) ([]byte, error) {
+			// The trusted staged CLI and module stay until this recovery ends:
+			// cleanup runs below. It replays pending rollback or committed
+			// uninstall hook teardown using the protected lifecycle evidence.
+			return enterpriseSetupRecoveryRunner(ctx, cliPath,
+				enterpriseLifecycleArguments(stageRoot, standaloneRecoveryOptions(runOpts)), stageRoot, childEnvironment)
+		}), nil
+	}
+	lifecycle, last, err := runStandaloneEnsurePlan(plan, runChild)
+	if err != nil {
+		return 0, err
+	}
+	opts = last
 	output, runErr, timedOut := lifecycle.output, lifecycle.runErr, lifecycle.timedOut
 	if len(output) > maximumLifecycleOutput {
 		if !timedOut {
@@ -542,6 +574,13 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 	if err != nil {
 		return "", nil, err
 	}
+	hold, err := holdEnterpriseSetupStage(stageRoot)
+	if err != nil {
+		return "", nil, errors.Join(fmt.Errorf("hold the enterprise Setup staging directory: %w", err), cleanupEnterpriseSetupStage(stageRoot, programData))
+	}
+	release := sync.OnceFunc(func() { _ = windows.CloseHandle(hold) })
+	// The folder can be removed only once this Setup lets go of it.
+	cleanup := func() error { release(); return cleanupEnterpriseSetupStage(stageRoot, programData) }
 	// Create a dedicated scratch subdirectory that TEMP/TMP/LOCALAPPDATA/
 	// APPDATA/USERPROFILE/HOME all point at, so PowerShell and the
 	// lifecycle can write scratch files without breaking the strict
@@ -549,9 +588,8 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 	// on stageRoot itself.
 	scratchDir := filepath.Join(stageRoot, enterpriseSetupScratchDirName)
 	if err := os.Mkdir(scratchDir, 0o700); err != nil {
-		return "", nil, errors.Join(fmt.Errorf("create enterprise Setup scratch directory: %w", err), cleanupEnterpriseSetupStage(stageRoot, programData))
+		return "", nil, errors.Join(fmt.Errorf("create enterprise Setup scratch directory: %w", err), cleanup())
 	}
-	cleanup := func() error { return cleanupEnterpriseSetupStage(stageRoot, programData) }
 	required := payload.Required
 	if len(required) == 0 {
 		required = requiredPayloadFiles
@@ -668,6 +706,49 @@ func createEnterpriseSetupStage(programData string) (string, error) {
 	return "", errors.New("create enterprise Setup staging directory: random path collisions exhausted")
 }
 
+// holdEnterpriseSetupStage opens this Setup's staging folder for listing
+// without delete sharing, for as long as the Setup runs: no other Setup's
+// removeStaleEnterpriseSetupStages can rename it then, also while the
+// payload is still unpacked and before the lifecycle child holds it as its
+// working directory. A killed Setup's handle closes with its process, so its
+// folder can be taken (GAP-0165).
+func holdEnterpriseSetupStage(path string) (windows.Handle, error) {
+	name, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	return windows.CreateFile(name, windows.FILE_LIST_DIRECTORY, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+}
+
+// standaloneSetupTransactionPending reports a protected pending.json in the
+// standalone lifecycle folder: a lifecycle transaction that has not finished.
+// A variable for tests.
+var standaloneSetupTransactionPending = func() bool {
+	layout, err := setupRecoveryLayout()
+	if err != nil {
+		return false
+	}
+	path := filepath.Join(layout.LifecycleDir, "pending.json")
+	if _, err := os.Lstat(path); err != nil {
+		return false
+	}
+	return managed.ValidateTrustedFilePath(path, "standalone pending transaction") == nil
+}
+
+// enterpriseSetupStageSweepAge is how old a staging folder must be before
+// this Setup takes it. A pending transaction means a Setup run was stopped
+// before it finished: this run recovers it, and the staging folder the
+// stopped run left (the whole payload, about 700 MB) is taken now instead
+// of by a run 30 minutes later (GAP-0165). A folder a running Setup or
+// lifecycle still holds is kept either way: the rename fails for it.
+func enterpriseSetupStageSweepAge() time.Duration {
+	if standaloneSetupTransactionPending() {
+		return 0
+	}
+	return enterpriseSetupStageStaleAge
+}
+
 func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 	cleanStage := filepath.Clean(stageRoot)
 	cleanProgramData := filepath.Clean(programData)
@@ -736,8 +817,8 @@ func removeEnterpriseSetupStageEntry(path string) error {
 	delay := 25 * time.Millisecond
 	for {
 		err := removeEnterpriseSetupStageFile(path)
-		if err == nil || !(errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED)) ||
-			!time.Now().Add(delay).Before(deadline) {
+		retryable := errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
+		if err == nil || !retryable || !time.Now().Add(delay).Before(deadline) {
 			return err
 		}
 		time.Sleep(delay)
@@ -753,13 +834,14 @@ var cleanupStaleEnterpriseSetupStage = cleanupEnterpriseSetupStage
 // removeStaleEnterpriseSetupStages removes the staging folders that
 // interrupted standalone Setup runs left in ProgramData (a stopped Setup
 // cannot clean up; each holds the whole payload, GAP-0525). Only a folder
-// older than enterpriseSetupStageStaleAge that can be renamed is taken: a
-// Setup whose lifecycle still runs holds its folder as the working
-// directory, so the rename fails for it. The renamed folder keeps the stage
+// at least minimumAge old (enterpriseSetupStageSweepAge) that can be renamed
+// is taken: a Setup of this release holds its folder from its creation, and
+// a Setup whose lifecycle still runs holds it as the working directory, so
+// the rename fails for it. The renamed folder keeps the stage
 // prefix, so one this run cannot clean (unexpected content) is swept by a
 // later run or by uninstall. A removed folder is reported to progress, one
 // it had to keep to diagnostics.
-func removeStaleEnterpriseSetupStages(programData string, now time.Time, progress, diagnostics io.Writer) {
+func removeStaleEnterpriseSetupStages(programData string, now time.Time, minimumAge time.Duration, progress, diagnostics io.Writer) {
 	entries, err := os.ReadDir(programData)
 	if err != nil {
 		return
@@ -776,7 +858,7 @@ func removeStaleEnterpriseSetupStages(programData string, now time.Time, progres
 			continue
 		}
 		attributes, ok := info.Sys().(*syscall.Win32FileAttributeData)
-		if !ok || now.Sub(time.Unix(0, attributes.CreationTime.Nanoseconds())) < enterpriseSetupStageStaleAge {
+		if !ok || now.Sub(time.Unix(0, attributes.CreationTime.Nanoseconds())) < minimumAge {
 			continue
 		}
 		retired := ""
@@ -889,12 +971,34 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 			// action itself, and records a refused anchor install (GAP-0608).
 			appendValue("--bundle", opts.Bundle)
 			appendValue("--trust-anchors", opts.TrustAnchors)
+			appendValue("--device-group", opts.DeviceGroup)
 			if opts.RefuseCapabilityLoss {
 				arguments = append(arguments, "--refuse-capability-loss")
 			}
 		}
+		if opts.Action == "ensure" {
+			// What is left of TIMEOUTSECONDS after the payload checks and
+			// unpacking (GAP-2509).
+			remaining := time.Until(enterpriseSetupLifecycleDeadline(opts, time.Now()))
+			if seconds := enterpriseEnsureChildTimeoutSeconds(remaining); seconds > 0 {
+				arguments = append(arguments, "--timeout-seconds", strconv.Itoa(seconds))
+			}
+		}
 	}
 	return arguments
+}
+
+// enterpriseSetupProcessStarted is this process's creation time, so the time
+// Windows took to load and start the Setup image counts toward
+// TIMEOUTSECONDS too (GAP-2509).
+func enterpriseSetupProcessStarted() time.Time {
+	var creation, exit, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(windows.CurrentProcess(), &creation, &exit, &kernel, &user); err == nil {
+		if started := enterpriseSetupStartFromCreation(time.Now(), time.Unix(0, creation.Nanoseconds())); !started.IsZero() {
+			return started
+		}
+	}
+	return enterpriseSetupInitTime
 }
 
 func trustedEnterpriseSetupEnvironment(stageRoot string) ([]string, error) {

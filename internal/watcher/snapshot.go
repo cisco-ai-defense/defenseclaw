@@ -25,10 +25,11 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // TargetSnapshot captures the hashed state of a skill/MCP directory
@@ -73,7 +74,7 @@ var codeExtensions = map[string]bool{
 }
 
 // Matches http(s) URLs and common IP:port patterns in source code.
-var urlPattern = regexp.MustCompile(
+var urlPattern = lazyregexp.New(
 	`https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+` +
 		`|` +
 		`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d{1,5})?\b`,

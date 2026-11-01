@@ -193,3 +193,38 @@ func patchFactsHavePath(
 	}
 	return false
 }
+
+// GAP-2180: an apply_patch call whose "input" is a patch envelope is that
+// patch (Codex and Copilot CLI form); another "input" value keeps the nested
+// reading.
+func TestAnalyzeApplyPatchInputFieldIsTheEnvelope(t *testing.T) {
+	patch := "*** Begin Patch\n*** Add File: notes.txt\n+benign\n*** End Patch\n"
+	args, err := json.Marshal(map[string]string{"input": patch, "cwd": "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := Analyze(Input{Tool: "apply_patch", Args: args})
+	if !facts.Authoritative() || !facts.EnforcementEligible() || len(facts.Paths) != 1 ||
+		!patchFactsHavePath(facts, "notes.txt", "/workspace/notes.txt", PathAccessWrite) {
+		t.Fatalf("facts = %#v", facts)
+	}
+	for _, other := range []string{"echo hi", " *** Begin Patch\n*** End Patch"} {
+		args, err := json.Marshal(map[string]string{"input": other})
+		if err != nil {
+			t.Fatal(err)
+		}
+		facts := Analyze(Input{Tool: "apply_patch", Args: args})
+		if patchFactsHavePath(facts, "notes.txt", "/workspace/notes.txt", PathAccessWrite) {
+			t.Fatalf("%q read as a patch: %#v", other, facts)
+		}
+	}
+	// The field is only the patch for a patch tool.
+	args, err = json.Marshal(map[string]string{"input": patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if facts := Analyze(Input{Tool: "shell", Args: args}); len(facts.Paths) != 0 &&
+		patchFactsHavePath(facts, "notes.txt", "notes.txt", PathAccessWrite) {
+		t.Fatalf("shell input read as a patch: %#v", facts)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,6 +30,10 @@ import (
 // count when the window ends. Each account holds at most one entry per
 // connector and reason, and the table is bounded, so a refusal loop writes
 // at most two rows a window per account and connector.
+//
+// The managed CLI reports, on the same pipe, the commands it refuses an
+// account (GAP-2639); those reports are coalesced the same way per account
+// and command and become the refused-command row (auditManagedCommandRefusal).
 const (
 	unenrolledRefusalWindow     = time.Minute
 	unenrolledRefusalMaxEntries = 512
@@ -43,7 +48,11 @@ const (
 )
 
 type unenrolledRefusalKey struct {
-	sid, connector, reason string
+	sid, connector, command, reason string
+}
+
+func newUnenrolledRefusalKey(sid string, report refusalpipe.Report) unenrolledRefusalKey {
+	return unenrolledRefusalKey{sid: sid, connector: report.Connector, command: report.Command, reason: report.Reason}
 }
 
 type unenrolledRefusalEntry struct {
@@ -77,7 +86,7 @@ func newUnenrolledRefusalAuditor(write func(unenrolledRefusalRow)) *unenrolledRe
 // record takes one verified report.
 func (u *unenrolledRefusalAuditor) record(sid string, report refusalpipe.Report) {
 	now := u.now()
-	key := unenrolledRefusalKey{sid: sid, connector: report.Connector, reason: report.Reason}
+	key := newUnenrolledRefusalKey(sid, report)
 	var rows []unenrolledRefusalRow
 	u.mu.Lock()
 	entry := u.entries[key]
@@ -242,7 +251,7 @@ func newUnenrolledRefusalQueue(limit int) *unenrolledRefusalQueue {
 }
 
 func (q *unenrolledRefusalQueue) push(row unenrolledRefusalRow, drain bool) {
-	key := unenrolledRefusalKey{sid: row.SID, connector: row.Report.Connector, reason: row.Report.Reason}
+	key := newUnenrolledRefusalKey(row.SID, row.Report)
 	q.mu.Lock()
 	switch at, waiting := q.index[key]; {
 	case q.closed:
@@ -311,6 +320,10 @@ func (a *APIServer) auditUnenrolledRefusal(ctx context.Context, row unenrolledRe
 		return
 	}
 	defer func() { _ = recover() }()
+	if row.Report.Command != "" {
+		a.auditManagedCommandRefusal(ctx, row)
+		return
+	}
 	sid := row.SID
 	name := sanitizeLLMEventUser(userScopedIdentityName(sid))
 	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, sid)
@@ -352,5 +365,24 @@ func (a *APIServer) auditUnenrolledRefusal(ctx context.Context, row unenrolledRe
 	}, env, false)
 	if a.logger != nil {
 		_ = a.logConnectorHookAuditEnvelope(ctx, env)
+	}
+}
+
+// auditManagedCommandRefusal writes the row of a command the managed CLI
+// refused an account, in the form of the Unix refused-command row
+// (handleManagedRefusalAudit): action "action", the command as the target and
+// outcome=refused, the reason, the account the pipe client token named and
+// the coalesced count.
+func (a *APIServer) auditManagedCommandRefusal(ctx context.Context, row unenrolledRefusalRow) {
+	if a.logger == nil {
+		return
+	}
+	details := fmt.Sprintf("outcome=refused reason=%s actor=sid:%s", row.Report.Reason, row.SID)
+	if name := strings.TrimSpace(stripLogInjectionRunes(sanitizeLLMEventUser(userScopedIdentityName(row.SID)))); name != "" {
+		details += " user=" + strings.ReplaceAll(name, " ", "_")
+	}
+	details += " command=" + row.Report.Command + " attempts=" + strconv.Itoa(row.Attempts)
+	if err := a.logger.LogCLIAction(ctx, "action", row.Report.Command, details); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar-api] managed command refusal by %s was not recorded: %v\n", row.SID, err)
 	}
 }

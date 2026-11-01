@@ -38,7 +38,7 @@ func TestExchangeForeignHookSessionUsesOnlyManagedTransportAuthority(t *testing.
 					t.Fatalf("authorization = %q, want %q", got, wantAuth)
 				}
 				body, err := io.ReadAll(req.Body)
-				if err != nil || string(body) != `{"key":{"connector":"claudecode"}}` {
+				if err != nil || withoutRetryUntil(t, body) != `{"key":{"connector":"claudecode"}}` {
 					t.Fatalf("update = %q, error %v", body, err)
 				}
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"deny":false}`))}, nil

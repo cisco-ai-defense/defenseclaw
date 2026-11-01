@@ -150,18 +150,9 @@ func (e *Env) bundleManagedSettingsTimes() (map[string]time.Time, error) {
 }
 
 func (e *Env) bundleLinuxProcesses(ctx context.Context, aliases map[string]string) ([]enterprisestatus.SessionProcess, error) {
-	stat, err := readBounded(e.P("/proc/stat"), 1<<20)
+	boot, err := e.linuxBootSeconds()
 	if err != nil {
 		return nil, err
-	}
-	var boot int64
-	for _, line := range strings.Split(string(stat), "\n") {
-		if text, ok := strings.CutPrefix(line, "btime "); ok {
-			boot, _ = strconv.ParseInt(strings.TrimSpace(text), 10, 64)
-		}
-	}
-	if boot == 0 {
-		return nil, errors.New("missing Linux boot time")
 	}
 	entries, err := os.ReadDir(e.P("/proc"))
 	if err != nil {
@@ -220,43 +211,53 @@ func (e *Env) bundleLinuxProcesses(ctx context.Context, aliases map[string]strin
 		if account, err := user.LookupId(who); err == nil {
 			who = account.Username
 		}
-		out = append(out, enterprisestatus.SessionProcess{PID: pid, User: who, Agent: connector,
+		ppid, _ := strconv.Atoi(fields[1])
+		out = append(out, enterprisestatus.SessionProcess{PID: pid, PPID: ppid, User: who, Agent: connector,
 			StartedAt: time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)})
 	}
 	return out, nil
 }
 
+// bundleDarwinProcesses lists the agent processes of the bundle scan from the
+// lifecycle's own macOS process scan (darwinAgentSessionsWithError: the
+// kern.procargs2 arguments and the parent pid), so bundle status and the
+// lifecycle's agent_sessions_restart_required name one session by the same
+// pid. This scan matched the process name instead, which is node for the npm
+// Codex launcher, so it named the native codex child while the lifecycle
+// named the launcher, and enforcement_pending of an ensure, a bundle apply or
+// status counted each such session twice (rel-1-0-6 GAP-0183). A process
+// whose arguments cannot be read still counts when its name is an agent's,
+// as before.
 func (e *Env) bundleDarwinProcesses(ctx context.Context, aliases map[string]string) ([]enterprisestatus.SessionProcess, error) {
-	result, err := e.Runner.Run(ctx, "ps", "-axww", "-o", "pid=,user=,lstart=,comm=")
+	sessions, err := e.darwinAgentSessionsWithError(ctx)
+	if err == nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}
+	if len(sessions) > bundleSessionProcessCap {
+		return nil, errors.New("process cap reached")
+	}
+	names := map[int]string{}
 	var out []enterprisestatus.SessionProcess
-	for i, line := range strings.Split(string(result.Stdout), "\n") {
-		if i > bundleSessionProcessCap {
-			return nil, errors.New("process cap reached")
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 8 {
+	for _, session := range sessions {
+		if session.Unknown && !agentCLINames[session.Agent] {
 			continue
 		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
+		connector := bundleAgentName(session.Agent, aliases)
+		if connector == "" {
 			continue
 		}
-		started, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", strings.Join(fields[2:7], " "), time.Local)
-		if err != nil {
-			continue
+		who, ok := names[session.UID]
+		if !ok {
+			who = strconv.Itoa(session.UID)
+			if account, err := user.LookupId(who); err == nil {
+				who = account.Username
+			}
+			names[session.UID] = who
 		}
-		if !agentCLINames[filepath.Base(fields[7])] {
-			continue
-		}
-		if connector := bundleAgentName(fields[7], aliases); connector != "" {
-			out = append(out, enterprisestatus.SessionProcess{PID: pid, User: fields[1], Agent: connector, StartedAt: started})
-		}
+		out = append(out, enterprisestatus.SessionProcess{PID: session.PID, PPID: session.PPID, User: who, Agent: connector, StartedAt: session.Started})
 	}
 	return out, nil
 }

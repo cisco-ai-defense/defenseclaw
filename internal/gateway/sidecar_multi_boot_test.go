@@ -469,12 +469,12 @@ func TestSetupOneConnector_ObserveModeUnsupportedVersionSkipsBeforeSetup(t *test
 	s.cfg.Guardrail.Mode = "observe"
 	conn := &bootStubConnector{stubConnector: stubConnector{name: "opencode"}}
 	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
-	opts.AgentVersion = "opencode 1.18.9" // below the first tested release
+	opts.AgentVersion = "opencode 1.18.9" // V1 is no longer supported in any mode.
 
 	err := s.setupOneConnector(
 		context.Background(), conn, opts, "master", guardrail.NewRulePackCache(),
 	)
-	if err == nil || !strings.Contains(err.Error(), "not covered by a known hook contract") {
+	if err == nil || !strings.Contains(err.Error(), "OpenCode V2 is required") {
 		t.Fatalf("error = %v, want observe-mode unsupported-version refusal", err)
 	}
 	if conn.setupCalls != 0 {
@@ -1015,12 +1015,18 @@ func TestMultiConnectorActivePublicationFailureRestoresPreviouslyActivePosture(t
 	s.cfg.Guardrail.Enabled = true
 	s.cfg.Guardrail.Mode = "observe"
 	s.cfg.Guardrail.HookFailMode = "closed"
-	// The default tier: the current outage mode is open (oss-outage-open),
-	// changed from the prior install's closed.
+	// An explicit current open choice differs from the prior install's closed
+	// choice; publication failure must restore the prior registration.
 	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"codex": {Mode: "observe", HookFailMode: "closed"},
+		"codex": {Mode: "observe", HookFailMode: "open"},
 	}
 	s.health = NewSidecarHealth()
+	// Changing the saved outage choice refreshes the hook. Supply a known
+	// agent contract so this rollback test reaches publication on every host.
+	if err := os.WriteFile(filepath.Join(s.cfg.DataDir, "agent_discovery.json"),
+		[]byte(`{"agents":{"codex":{"version":"codex 0.146.0"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	artifactPath := filepath.Join(testenv.PrivateTempDir(t), "codex-registration-posture")
 	if err := os.WriteFile(artifactPath, []byte("closed\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1029,12 +1035,14 @@ func TestMultiConnectorActivePublicationFailureRestoresPreviouslyActivePosture(t
 		t.Fatal(err)
 	}
 	priorLockEntry := connector.HookContractLockEntry{
-		Connector:           "codex",
-		ContractID:          "codex-hooks-v4",
-		CompatibilityStatus: connector.HookCompatibilityKnown,
-		HookScriptVersion:   "v8",
-		HookFailMode:        "closed",
-		DefenseClawVersion:  "prior-build",
+		Connector:              "codex",
+		RawAgentVersion:        "codex 0.146.0",
+		NormalizedAgentVersion: "0.146.0",
+		ContractID:             "codex-hooks-v4",
+		CompatibilityStatus:    connector.HookCompatibilityKnown,
+		HookScriptVersion:      "v8",
+		HookFailMode:           "closed",
+		DefenseClawVersion:     "prior-build",
 		RegistrationPosture: &connector.HookRegistrationPosture{
 			GuardrailMode: "observe",
 			HILTEnabled:   false,
@@ -1677,7 +1685,7 @@ func TestMultiConnectorPublicationFailureRestoresSuccessfullyRemovedConnector(t 
 		t.Fatal(err)
 	}
 	seed := multiConnectorSetupTransaction{activeState: activeState, hookLockState: hookLockState}
-	candidates, unavailable := s.removedConnectorRollbackCandidates(
+	candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
 		registry, []string{"cursor"}, []string{"claudecode"},
 		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
 		hookLockState,
@@ -1803,7 +1811,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 		t.Fatal(err)
 	}
 	seed := multiConnectorSetupTransaction{activeState: activeState, hookLockState: hookLockState}
-	candidates, unavailable := s.removedConnectorRollbackCandidates(
+	candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
 		registry, []string{"cursor"}, []string{"claudecode"},
 		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
 		hookLockState,
@@ -1861,7 +1869,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidates, unavailable = s.removedConnectorRollbackCandidates(
+	candidates, unavailable, _ = s.removedConnectorRollbackCandidates(
 		registry, connector.LoadActiveConnectors(s.cfg.DataDir), []string{"claudecode"},
 		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
 		retryLock,
@@ -2115,8 +2123,8 @@ func TestSingleConnectorSwitchOpenCodeSnapshotFailureLeavesPriorConnectorUntouch
 		DataDir:        s.cfg.DataDir,
 		GuardrailMode:  "observe",
 		HookFailMode:   "open",
-		AgentVersion:   "1.18.11",
-		HookContractID: "opencode-hooks-v1",
+		AgentVersion:   "2.1.4",
+		HookContractID: "opencode-hooks-v2",
 	}
 
 	_, err = s.prepareSingleConnectorSetupTransaction(
@@ -2813,6 +2821,41 @@ func TestRunGuardrailSingleConnectorDisabledOnItsOwnTearsDown(t *testing.T) {
 	}
 	if body, err := os.ReadFile(codexConfig); err == nil && strings.Contains(string(body), "codex-hook") {
 		t.Fatalf("disabled codex kept DefenseClaw hooks in config.toml:\n%s", body)
+	}
+	if snap := s.health.Snapshot(); snap.Guardrail.State != StateDisabled {
+		t.Fatalf("guardrail state = %s (%s), want %s", snap.Guardrail.State, snap.Guardrail.LastError, StateDisabled)
+	}
+}
+
+// GAP-2511: a single-connector boot with guardrail.enabled=false tears the
+// hooks down and must report the guardrail disabled, not running, or doctor
+// tells the user to restart the gateway the disable just restarted.
+func TestRunGuardrailSingleConnectorGloballyDisabledReportsDisabled(t *testing.T) {
+	dir := t.TempDir()
+	codexConfig := filepath.Join(t.TempDir(), ".codex", "config.toml")
+	prevCodex := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = codexConfig
+	t.Cleanup(func() { connector.CodexConfigPathOverride = prevCodex })
+	s := &Sidecar{
+		cfg: &config.Config{
+			DataDir: dir,
+			Gateway: config.GatewayConfig{APIPort: 18972},
+			Guardrail: config.GuardrailConfig{
+				Enabled:   false,
+				Connector: "codex",
+				Mode:      "observe",
+			},
+		},
+		health: NewSidecarHealth(),
+		router: routerWithDefaultRulePack(t),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.runGuardrail(ctx); err != nil {
+		t.Fatalf("runGuardrail: %v", err)
+	}
+	if body, err := os.ReadFile(codexConfig); err == nil && strings.Contains(string(body), "codex-hook") {
+		t.Fatalf("disabled guardrail kept DefenseClaw hooks in config.toml:\n%s", body)
 	}
 	if snap := s.health.Snapshot(); snap.Guardrail.State != StateDisabled {
 		t.Fatalf("guardrail state = %s (%s), want %s", snap.Guardrail.State, snap.Guardrail.LastError, StateDisabled)

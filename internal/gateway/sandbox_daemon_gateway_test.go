@@ -37,9 +37,19 @@ import (
 // the linger after its last ready passed, so the next account gets the one
 // gateway port at once, not when the daemon idles out (GAP-0465). A running
 // sandbox keeps it, and another account's gateway is not this daemon's.
+//
+// GAP-1062: under the 16-shard race load the last idle pass found the
+// lifecycle still held by the daemon's own pass at start, or the gateway's
+// foreign sandbox sweep (a reconcile of the manager, which its own loop
+// may hold) cut short, and stopped nothing. The test now waits out the
+// pass at start (settle), and the sweep, which other tests cover, finds no
+// foreign sandbox.
 func TestSandboxDaemonStopsGatewayWhenNoSandboxRuns(t *testing.T) {
-	f := newSandboxDaemonFixture(t)
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.sweepForeign = func(context.Context) (bool, error) { return false, nil }
+	})
 	f.run(t)
+	f.settle(t)
 	ctx := context.Background()
 	f.os.holder.Store(int64(os.Getuid()))
 	f.d.openShellUsed.Store(time.Now().Add(-2 * openShellGatewayLinger).UnixNano())
@@ -260,6 +270,28 @@ func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
 	}
 }
 
+// GAP-1421: with sandboxes off a managed list or get of a kept sandbox
+// answers at once from its record, never starting (and waiting for) the
+// account's OpenShell gateway, which cannot start without the managed setup.
+func TestManagedReadsWithSandboxesOffStartNoGateway(t *testing.T) {
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		seedSandboxRecord(t, o.StateDir, "kept", map[string]any{})
+		o.Settings.Enabled = false
+	})
+	f.run(t)
+	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	list, err := ctl.List(t.Context())
+	if err != nil || len(list) != 1 || list[0].Name != "kept" {
+		t.Fatalf("list with sandboxes off = %+v, %v", list, err)
+	}
+	if _, err := ctl.Get(t.Context(), "kept"); err != nil {
+		t.Fatalf("get with sandboxes off: %v", err)
+	}
+	if n := f.os.prepared.Load(); n != 0 {
+		t.Fatalf("readied the account's gateway %d times for a read with sandboxes off", n)
+	}
+}
+
 // A deleted sandbox with only a retained snapshot needs no gateway. A
 // different account can hold the shared port while its record is removed.
 func TestSandboxDaemonDeleteRetainedWhileOtherAccountHoldsGateway(t *testing.T) {
@@ -396,5 +428,37 @@ func TestAccountOpenShellReportsChangedManagedRender(t *testing.T) {
 	}
 	if !r.o.RenderedConfigDrift(s) {
 		t.Fatal("status missed the malformed edited render")
+	}
+}
+
+// GAP-0730: install setup (the managed default on these hosts) runs the
+// administrator's rendered gateway.toml too, so the daemon reports its hand
+// edit as drift (the settings_drift event and counter) as status does; it is
+// no pause, and a render setup mode cannot read is no refusal.
+func TestAccountOpenShellReportsChangedRenderInSetupMode(t *testing.T) {
+	r := newOpenShellRig(t, "linux")
+	r.holder = func(int) int { return 5001 }
+	r.active, r.pid = true, 77
+	configPath := filepath.Join(t.TempDir(), openshell.GatewayTOMLFile)
+	r.args = filepath.Join(r.o.home, ".local", "bin", "openshell-gateway") + " --config " + configPath
+	r.o.readRendered = func(string, string) (openshell.RenderedGateway, string, error) {
+		return openshell.RenderedGateway{BindAddress: "127.0.0.1:17671"}, "sha256:edited", nil
+	}
+	s := sandboxrelay.DaemonSettings{Enterprise: sandboxrelay.EnterpriseOpenShell{
+		Install: "setup", Driver: "docker", GatewayPort: 17670,
+		GatewayConfigPath: configPath, GatewayConfigDigest: "sha256:installed",
+	}}
+	drift, err := r.o.Drift(s)
+	if err != nil || len(drift) != 1 || driftEventField(drift[0].Field) != "gateway_configuration" {
+		t.Fatalf("setup mode, edited render: drift = %v, %v", drift, err)
+	}
+	if len(blockingOpenShellDrift(drift)) != 0 {
+		t.Fatalf("the edited render pauses sandboxes: %v", drift)
+	}
+	r.o.readRendered = func(string, string) (openshell.RenderedGateway, string, error) {
+		return openshell.RenderedGateway{}, "", errors.New("unreadable")
+	}
+	if drift, err := r.o.Drift(s); err != nil || len(drift) != 0 {
+		t.Fatalf("setup mode, unreadable render: drift = %v, %v", drift, err)
 	}
 }

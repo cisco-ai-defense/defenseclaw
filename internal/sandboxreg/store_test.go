@@ -127,25 +127,34 @@ func TestStoreReportTracksTheSandboxLifecycle(t *testing.T) {
 		t.Fatalf("stopped report: %+v %v", got, err)
 	}
 	clock.t = clock.t.Add(time.Minute)
-	if got, err := s.Report(1001, r.ID, true); err != nil || got.State != StateLive || !got.SeenAt.Equal(clock.t) {
-		t.Fatalf("running report: %+v %v", got, err)
+	// A report only moves a registration toward stopped (GAP-0673).
+	if got, err := s.Report(1001, r.ID, true); !errors.Is(err, ErrStopped) || got.State != StateStopped {
+		t.Fatalf("running report after a reported stop: %+v %v", got, err)
+	}
+	live, err = s.Restart(1001, r.ID)
+	if err != nil || live.State != StateLive || live.ID == r.ID || !live.SeenAt.Equal(clock.t) {
+		t.Fatalf("restart: %+v %v", live, err)
 	}
 	// The daemon goes silent: the lease lapses, and a restarted store agrees.
 	clock.t = clock.t.Add(LiveLease)
 	reopened := NewFileStore(s.dir)
 	reopened.Now = clock.now
-	if got, _, _ := reopened.Get(1001, r.ID); EffectiveState(got, clock.t) != StateStopped {
+	if got, _, _ := reopened.Get(1001, live.ID); EffectiveState(got, clock.t) != StateStopped {
 		t.Fatalf("a registration past its lease is %q", EffectiveState(got, clock.t))
 	}
+	// A lapsed lease is a lost connection, not a stop: it runs on.
+	if got, err := reopened.Report(1001, live.ID, true); err != nil || got.State != StateLive {
+		t.Fatalf("running report after a lapsed lease: %+v %v", got, err)
+	}
 	// A revoked registration never comes back.
-	if _, err := reopened.Report(1001, r.ID, true); err != nil {
+	if err := reopened.Revoke(1001, live.ID, ReasonPolicyChanged); err != nil {
 		t.Fatal(err)
 	}
-	if err := reopened.Revoke(1001, r.ID, ReasonPolicyChanged); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := reopened.Report(1001, r.ID, true); !errors.Is(err, ErrRevoked) {
+	if _, err := reopened.Report(1001, live.ID, true); !errors.Is(err, ErrRevoked) {
 		t.Fatalf("a revoked registration came back: %v", err)
+	}
+	if _, err := reopened.Restart(1001, live.ID); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("a revoked registration restarted: %v", err)
 	}
 }
 

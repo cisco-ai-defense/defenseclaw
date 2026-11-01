@@ -24,7 +24,6 @@ import (
 	"net"
 	"net/netip"
 	"path"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -690,11 +690,11 @@ const maxSyntheticNames = 512
 // syntheticMapping is OpenShell's record of a synthetic address it handed
 // out: "Policy DNS mapped <name> resolved=… synthetic=<addr> …" or "Policy
 // DNS staged unapproved name <name> synthetic=<addr> …".
-var syntheticMapping = regexp.MustCompile(`^Policy DNS (?:mapped|staged unapproved name) (\S+) (?:\S+ )*?synthetic=(\S+)`)
+var syntheticMapping = lazyregexp.New(`^Policy DNS (?:mapped|staged unapproved name) (\S+) (?:\S+ )*?synthetic=(\S+)`)
 
 // mappingPorts is the port list of a "Policy DNS mapped" record: the ports
 // the name's transparent mapping covers ("ports=38821,38871,38872").
-var mappingPorts = regexp.MustCompile(`(?:^| )ports=([0-9,]+)(?: |$)`)
+var mappingPorts = lazyregexp.New(`(?:^| )ports=([0-9,]+)(?: |$)`)
 
 // maxMappedPorts bounds the host alias ports a record keeps.
 const maxMappedPorts = 64

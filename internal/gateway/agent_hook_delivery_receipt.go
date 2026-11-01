@@ -142,9 +142,12 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 //     so only a block is known.
 //   - A 1.0.4 hook that released its request before the gateway's late 103
 //     took the answer without a receipt, the same as an earlier binary.
+//   - A managed shell hook post (shellBridge, HookShellBridgeHeader) has no
+//     answer watchdog and never sends a receipt: the agent got the answer
+//     the gateway sent unless the caller hung up first (GAP-2614).
 //   - Every other call keeps its evaluated decision. In-agent plugins, policy
 //     bridges and events without an answer deadline send no receipt.
-func (a *APIServer) unreceiptedHookDecision(hungUpBeforeAnswer bool, connectorName, event string, resp agentHookResponse) agentHookResponse {
+func (a *APIServer) unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer bool, connectorName, event string, resp agentHookResponse) agentHookResponse {
 	if a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() || hookexec.NeutralLifecycleEvent(connectorName, event) {
 		return resp
 	}
@@ -152,7 +155,7 @@ func (a *APIServer) unreceiptedHookDecision(hungUpBeforeAnswer bool, connectorNa
 	switch {
 	case closed && resp.Action == "block":
 		return resp
-	case hungUpBeforeAnswer, hookexec.DeliveryReceiptEvent(connectorName, event):
+	case hungUpBeforeAnswer, !shellBridge && hookexec.DeliveryReceiptEvent(connectorName, event):
 		return unconfirmedHookDelivery(resp)
 	}
 	return resp

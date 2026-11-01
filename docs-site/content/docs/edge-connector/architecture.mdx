@@ -66,7 +66,7 @@ The C evaluation path has no local tool-hash deny-list lookup or policy YAML has
 
 ### Stage 4 — Destination filtering + SSRF validation
 
-For network capabilities, the engine requires a destination, checks SSRF rules first, then matches the destination against the compiled allowlist. Hostname destinations are blocked across build profiles until an enforced egress resolver/proxy exists. Only canonical public IPv4 or bracketed globally scoped IPv6 literals can pass to the allowlist; this parsing does not prove that an address is actually routable. Private and link-local addresses, numeric aliases such as octal/hex/decimal forms, and malformed ports are blocked. An unlisted destination is blocked with reason `DEST_DENY`; the policy compiler does not implement `destination_denylist`.
+For network capabilities, the engine requires a destination, checks SSRF rules first, then matches the destination against the compiled allowlist. Hostname destinations are blocked across build profiles until an enforced egress resolver/proxy exists. Only canonical public IPv4 or globally scoped IPv6 literals can pass to the allowlist (write an IPv6 entry without brackets; the policy compiler refuses a bracketed one); this parsing does not prove that an address is actually routable. Private and link-local addresses, numeric aliases such as octal/hex/decimal forms, and malformed ports are blocked. An unlisted destination is blocked with reason `DEST_DENY`; the policy compiler does not implement `destination_denylist`.
 
 **Built-in SSRF validation** blocks requests targeting:
 - Private ranges (`10.x`, `172.16–31.x`, `192.168.x`, `127.x`)

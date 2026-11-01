@@ -36,6 +36,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -90,6 +91,21 @@ type SandboxStatus struct {
 	// which that stop ends with no flush; a stop of it ends it first
 	// (StopKill).
 	Legacy bool
+	// Unprotected are the account's live legacy guests, as a daemon of
+	// DefenseClaw 1.0.4 or later reports them (sandboxapi.Status.Unprotected):
+	// each runs unprotected until its user ends it.
+	Unprotected []UnprotectedSandbox
+}
+
+// UnprotectedSandbox is one live legacy or contained guest of an account,
+// or one that may be either whose gateway has not said: its name, the
+// command its user runs to end it, why it is unprotected and what else its
+// user does (sandboxapi.UnprotectedSandbox.Reason, Detail).
+type UnprotectedSandbox struct {
+	Name   string `json:"name"`
+	Stop   string `json:"stop"`
+	Reason string `json:"reason,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // daemonStop is scope for a stop of the sandbox daemon that st describes:
@@ -461,14 +477,17 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 		// A daemon that is not running does not mean no sandbox runs: it
 		// crashed, was killed or (macOS) left when idle, and the account's
 		// OpenShell gateway unit (setup mode) keeps hosting its sandboxes.
-		// The launcher starts the daemon on demand and the daemon counts what
-		// the gateway runs, so ask it. When neither service runs, durable
+		// `sandbox status` starts the daemon on demand and the daemon counts
+		// what the gateway runs, so ask it. When neither service runs, durable
 		// guest records still need checking before calling the account idle.
 		if !o.unitRunning(ctx, a, userUnitGatewayService, labelOpenShellGateway) {
 			return st, e.retainedComputeRefusal(a)
 		}
 	}
-	res, err := o.runAs(ctx, a, userCommandTimeout, e.launcherPath(), "sandbox", "status", "--output", "json")
+	// The managed binary, not the launcher path: a foreign file there (a
+	// Python install, say) is its own row (checkLauncher), and its output
+	// is no answer from the account's daemon (GAP-0016).
+	res, err := o.runAs(ctx, a, userCommandTimeout, e.launcherTarget(), "sandbox", "status", "--output", "json")
 	if err != nil {
 		return st, fmt.Errorf("ask the sandbox daemon of %s: %w", a.Name, err)
 	}
@@ -480,12 +499,12 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 		Managed   *struct {
 			PendingRestart bool `json:"pending_restart"`
 		} `json:"managed"`
+		Unprotected []UnprotectedSandbox `json:"unprotected"`
 	}
 	if err := json.Unmarshal(res.Stdout, &reply); err != nil {
 		return st, fmt.Errorf("read the sandbox status of %s: %w", a.Name, err)
 	}
-	// The launcher's command started the daemon when the gateway ran without
-	// one.
+	// The command started the daemon when the gateway ran without one.
 	st.Active = true
 	st.Running = reply.Running
 	// A daemon before 1.0.4 does not say which sandboxes may hold compute:
@@ -497,6 +516,7 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 	}
 	st.StartedAt = reply.StartedAt
 	st.PendingRestart = reply.Managed != nil && reply.Managed.PendingRestart
+	st.Unprotected = reply.Unprotected
 	if st.busy() == 0 {
 		// A daemon restarted on new inputs may no longer see a guest left by
 		// the old gateway. Its zero count is not a disposition of that guest.
@@ -669,6 +689,28 @@ func (o *commandUserOps) Stop(ctx context.Context, a SandboxAccount, scope StopS
 	return nil
 }
 
+// gatewayStopSyncer is a SandboxUserOps that can have the account sync its
+// running MicroVMs before the macOS lifecycle boots its gateway agent out.
+type gatewayStopSyncer interface {
+	syncBeforeGatewayStop(ctx context.Context, a SandboxAccount)
+}
+
+// syncBeforeGatewayStop has the account sync the disk of every MicroVM its
+// running OpenShell gateway lists ready before the macOS bootout of the
+// gateway's LaunchAgent ends them (GAP-0380): the drain checked none ran,
+// but a raw openshell client can start one before the bootout. It runs once
+// the drain holds (drainAccount). It is the
+// sync the Linux unit's second ExecStop runs (sandbox-daemon sync-sandboxes
+// --managed, which notes one it could not sync for the account's feed);
+// like that ExecStop's leading "-", a failed sync does not hold the stop.
+func (o *commandUserOps) syncBeforeGatewayStop(ctx context.Context, a SandboxAccount) {
+	if !o.unitRunning(ctx, a, userUnitGatewayService, labelOpenShellGateway) {
+		return
+	}
+	_, _ = o.runAs(ctx, a, openshell.StopSyncTimeout+15*time.Second,
+		filepath.Join(o.env.Layout.BinDir, binGateway), "sandbox-daemon", "sync-sandboxes", "--managed")
+}
+
 // daemonKillWait bounds how long a stop with StopKill waits for systemd to
 // see the killed daemon go; daemonKillPoll paces the look. Variables for
 // tests.
@@ -762,7 +804,7 @@ func (o *commandUserOps) Reload(ctx context.Context, a SandboxAccount) error {
 }
 
 func (o *commandUserOps) Teardown(ctx context.Context, a SandboxAccount) error {
-	res, err := o.runAs(ctx, a, teardownTimeout, o.env.launcherPath(), "sandbox", "teardown", "--yes")
+	res, err := o.runAs(ctx, a, teardownTimeout, o.env.launcherTarget(), "sandbox", "teardown", "--yes")
 	if err == nil || res.ExitCode <= 0 {
 		return err
 	}
@@ -1008,6 +1050,16 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 	for _, entry := range state.sortedPending() {
 		key := strconv.Itoa(entry.UID)
 		account := SandboxAccount{Name: entry.User, UID: entry.UID, Home: entry.Home, GID: -1}
+		if env.sandboxAccountRemoved(ctx, account) {
+			// The account was removed from this computer: no user manager,
+			// daemon or sandbox of it can run again, so nothing waits, and
+			// the warning would never clear (its status and its drain both
+			// fail on the missing account, GAP-0155). Its sandbox records
+			// stay for the administrator's purge.
+			delete(state.Pending, key)
+			l.openshellChange("dropped the pending %s change of %s: the account no longer exists on this computer", entry.Kind, entry.User)
+			continue
+		}
 		status, err := ops.Status(ctx, account)
 		switch {
 		case err != nil && entry.Kind != "launchd" && !env.hasHomeSandboxState(account):
@@ -1130,6 +1182,14 @@ func (l *lifecycle) drainAccount(ctx context.Context, ops SandboxUserOps, a Sand
 	if err != nil {
 		return nil, &drainHeld{err: err}
 	}
+	// Every change that stops the gateway runs under this drain (a stop, a
+	// switch, a LaunchAgent reload or label migration). launchd gives the
+	// gateway agent no stop command, so on macOS the account syncs its
+	// running MicroVMs here, before the bootout ends them (GAP-0380); on
+	// Linux the gateway unit's second ExecStop does it.
+	if s, ok := ops.(gatewayStopSyncer); ok && l.env.GOOS == "darwin" {
+		s.syncBeforeGatewayStop(ctx, a)
+	}
 	return func() {
 		if err := done(); err != nil {
 			l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("the gateway of %s was stopped, but its drain ended badly: %v", a.Name, err))
@@ -1251,9 +1311,67 @@ func (e *Env) removesInstalledOpenShell(from, to *openshellApplied) bool {
 // ---------------------------------------------------------------------------
 // Files in an account's home, as root, without following links.
 
+// errHomeNotAnswering is the openHome error of a status or verify run for a
+// home that did not answer a bounded lookup: it is not opened in process.
+var errHomeNotAnswering = errors.New("the home did not answer a lookup in time (a stalled home mount?), so it is not read")
+
+// homeLookupAnswers looks a home up in a bounded stat(1) child. Tests
+// replace it.
+var homeLookupAnswers = enterprisestatus.PathAnswers
+
+// homeAnswers reports whether a home may be looked up in this process. In
+// status and verify the home's file system is asked first, in a bounded
+// child, for a name that does not exist below the home: a lookup of a home
+// on a stalled FUSE or NFS mount blocks a thread in the kernel, and status
+// and verify never answered (GAP-1751). The home itself is no probe: its
+// attributes can come from a cache while every lookup below it stalls. The
+// answer is kept for the run; describeUnansweredHomes reports the homes
+// that did not answer.
+func (e *Env) homeAnswers(path string) bool {
+	if !e.boundedHomeLookups {
+		return true
+	}
+	path = filepath.Clean(path)
+	e.homeLookups.Lock()
+	defer e.homeLookups.Unlock()
+	if answered, ok := e.homeLookups.answered[path]; ok {
+		return answered
+	}
+	answered := homeLookupAnswers(filepath.Join(path, homeLookupProbeName()))
+	if e.homeLookups.answered == nil {
+		e.homeLookups.answered = map[string]bool{}
+	}
+	e.homeLookups.answered[path] = answered
+	return answered
+}
+
+// unansweredHomes are the homes whose lookup did not answer in this run.
+func (e *Env) unansweredHomes() []string {
+	e.homeLookups.Lock()
+	defer e.homeLookups.Unlock()
+	var homes []string
+	for home, answered := range e.homeLookups.answered {
+		if !answered {
+			homes = append(homes, home)
+		}
+	}
+	sort.Strings(homes)
+	return homes
+}
+
+// homeLookupProbeName is a name no home holds, new for each lookup, so no
+// cached answer stands in for the file system's.
+func homeLookupProbeName() string {
+	return fmt.Sprintf(".defenseclaw-lookup-%d-%d", os.Getpid(), time.Now().UnixNano())
+}
+
 // openHome opens the account's home directory, which must be owned by it.
 func (e *Env) openHome(a SandboxAccount) (int, error) {
-	fd, err := openOwnedDir(unix.AT_FDCWD, e.P(filepath.Clean(a.Home)), a.UID)
+	path := e.P(filepath.Clean(a.Home))
+	if !e.homeAnswers(path) {
+		return -1, fmt.Errorf("account home %s: %w", path, errHomeNotAnswering)
+	}
+	fd, err := openOwnedDir(unix.AT_FDCWD, path, a.UID)
 	if err != nil {
 		return -1, err
 	}
@@ -1595,6 +1713,21 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 		// (planPackagedMacOSSandbox), and launchd loads them at every
 		// sign-in, so they are unloaded all the same.
 		l.bootOutMacOSAgents(ctx, nil)
+		if env.GOOS == "linux" {
+			// The package's socket unit is enabled for every account whatever
+			// the setup, so a sandbox command of a signed-in account started
+			// its daemon, which has no sandbox to keep. Left running after the
+			// uninstall, it could no longer be asked which sandboxes run, and
+			// the package's pre-install guard refused the next install of
+			// the package for it (GAP-0181). DefenseClaw's own units are
+			// stopped, quietly, as for an account the subsystem never served.
+			ops := env.sandboxOps()
+			for _, a := range ops.LoggedIn(ctx) {
+				if env.usableSandboxAccount(a) {
+					_ = ops.Stop(ctx, a, StopDaemon|StopGateway|StopSocket)
+				}
+			}
+		}
 		return
 	}
 	// A purge stops each account's units below, which on macOS boots its
@@ -1966,6 +2099,26 @@ func (e *Env) hasHomeSandboxState(a SandboxAccount) bool {
 		}
 	}
 	return false
+}
+
+// sandboxAccountRemoved reports whether the host's account database answers
+// that a is gone: `getent passwd UID` exits 2 (not found) on Linux, and
+// `dscl . -read /Users/NAME` finds no record on macOS. A lookup that fails
+// any other way (a directory outage, for one) is no answer, so a change an
+// account waits for is never dropped for a directory that did not answer.
+func (e *Env) sandboxAccountRemoved(ctx context.Context, a SandboxAccount) bool {
+	if a.UID <= 0 {
+		return false
+	}
+	if e.GOOS == "darwin" {
+		if !plainAccountName(a.Name) {
+			return false
+		}
+		_, err := e.Runner.Run(ctx, "dscl", ".", "-read", "/Users/"+a.Name, "UniqueID")
+		return err != nil && strings.Contains(err.Error(), "eDSRecordNotFound")
+	}
+	res, err := e.Runner.Run(ctx, "getent", "passwd", strconv.Itoa(a.UID))
+	return err != nil && res.ExitCode == 2
 }
 
 // sandboxRecorded reports whether the managed gateway keeps a registration or

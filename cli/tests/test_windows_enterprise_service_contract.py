@@ -1968,6 +1968,29 @@ def test_bootstrap_rejects_raw_per_logon_dos_device_aliases() -> None:
     assert "raw_dos_device_cleanup_verified = $rawAliasCleanupVerified" in smoke
 
 
+def test_bootstrap_cleanup_drains_compiler_scratch_finalizers_first() -> None:
+    """Windows PowerShell 5.1 Add-Type retires its CodeDom scratch folder only
+    from a finalizer; a finalizer that ran in the middle of the exact cleanup
+    walk failed the 5.1 race worker with Access denied (Windows Native CI,
+    Python shard 8). The cleanup queues the finalizers before the walk and
+    treats an Access denied entry below the root as retired only when it is
+    gone within a bounded wait; anything still there stays refused. It must
+    never call GC.WaitForPendingFinalizers: in PowerShell that can block for
+    good (it hung the smoke on dc-win2)."""
+    bootstrap = read(INSTALLER)
+    remove = bootstrap[bootstrap.index("function Remove-DefenseClawBootstrapEnvironment"):]
+    remove = remove[: remove.index("\nfunction ")]
+    assert remove.index("Complete-DefenseClawBootstrapCompilerScratch") < remove.index(
+        "EnumerateFileSystemEntries"
+    )
+    assert "Test-DefenseClawBootstrapRetiredCompilerScratch" in remove
+    assert "[GC]::WaitForPendingFinalizers()" not in bootstrap
+    assert "[GC]::WaitForPendingFinalizers()" not in read(BOOTSTRAP_ENVIRONMENT_SMOKE)
+    smoke = read(BOOTSTRAP_ENVIRONMENT_SMOKE)
+    assert "[DefenseClawSmoke.RetiringScratch]::new($scratch)" in smoke
+    assert "Invoke-RetiringScratchCleanup -KeepScratch $true" in smoke
+
+
 def test_bootstrap_compiler_environment_is_one_shot_and_protected() -> None:
     bootstrap = read(INSTALLER)
     smoke = read(BOOTSTRAP_ENVIRONMENT_SMOKE)
@@ -2257,6 +2280,14 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     # GAP-1940: pending rows of signed-out accounts are counted, not failures.
     assert "PSObject.Properties['pending']" in guardian_failure
     assert "are pending " in guardian_failure
+    # GAP-2290: a row's SID is named as its account, "DOMAIN\user (SID)".
+    assert "Get-DefenseClawGuardianDiagnosticAccountLabel" in guardian_failure
+    account_label = module[
+        module.index("function Get-DefenseClawGuardianDiagnosticAccountLabel") :
+        module.index("function Get-DefenseClawGuardianVerificationFailureDiagnostic")
+    ]
+    assert "Translate(" in account_label
+    assert '"$account ($Sid)"' in account_label
     assert "ready = $ready" in guardian_probe
     assert "return [bool]$readiness.ready" in guardian_boolean
     assert "Get-DefenseClawGuardianReadinessProbe `" in deployment_assertion
@@ -3658,7 +3689,13 @@ def test_timeout_recovery_replays_the_pending_journal_under_the_lifecycle_lock()
     # test_timeout_recovery_reports_settled_only_when_no_lifecycle_record_remains
     # and the Setup kill and recovery by
     # TestTimeoutKillsTheLifecycleChildThenRecoversBeforeReturning.
-    assert setup.index("lifecycle := runEnterpriseLifecycleChild(") < setup.index("\n\tcleanupErr := cleanup()")
+    # Each step of the standalone /ensure plan (one, or install then bundle
+    # for the single app) runs the lifecycle child with its recovery; the
+    # staged CLI is cleaned up only after the whole plan returns.
+    run_child = setup.index("runChild := func(runOpts enterpriseSetupOptions) (enterpriseLifecycleChildRun, error) {")
+    plan = setup.index("lifecycle, last, err := runStandaloneEnsurePlan(plan, runChild)")
+    assert run_child < setup.index("return runEnterpriseLifecycleChild(parent, runOpts,", run_child) < plan
+    assert plan < setup.index("\n\tcleanupErr := cleanup()")
 
 
 def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:

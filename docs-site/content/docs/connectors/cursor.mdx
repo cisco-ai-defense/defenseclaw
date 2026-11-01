@@ -12,6 +12,7 @@ import { ConnectorSupport } from '@/components/support-matrix';
 
 DefenseClaw adds entries to Cursor's user-scoped [hooks.json](https://cursor.com/docs/hooks). This is a hook connector: Cursor talks to its own upstream and no proxy is involved. There is no proxy path, and DefenseClaw claims no enterprise-wide authority or native human approval.
 
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/fail-modes).
 ## Platform support
 
 <ConnectorSupport id="cursor" />
@@ -30,7 +31,7 @@ defenseclaw setup cursor  # first setup defaults to observe
 defenseclaw setup cursor --mode action --no-human-approval
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Action mode turns on event-native deny and leaves native approval off. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell. Action mode turns on event-native deny and leaves native approval off. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 
 Action setup requires an installed Cursor version covered by a hook contract. If that check fails, setup exits with an error before changing the connector roster or hooks. Install a supported version and rerun `defenseclaw setup cursor --yes --mode action --no-human-approval`. To stage observation explicitly, run `defenseclaw setup cursor --yes --mode observe`.
 
@@ -102,7 +103,7 @@ The contract covers Cursor Desktop application versions `>=2.4.0, <4.0.0`, and f
 
 - In action mode these events deny with Cursor's own response: `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead` and `beforeSubmitPrompt`.
 - DefenseClaw does not turn on Cursor's native ask. A confirm verdict stays an alert.
-- Observe mode records policy findings without blocking on those findings. On a per-user install, a gateway outage blocks supported events by default while its hook runs ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)).
+- Observe mode records policy findings without blocking on those findings. On a per-user install, while its hook runs, a gateway outage lets the call run with a warning in the default and permissive policies and blocks it in strict ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)).
 - `sessionStart`, `sessionEnd`, `stop` and `subagentStop` never gate.
 
 ### Verdict mapping
@@ -112,11 +113,11 @@ Cursor runs every matching hook and merges conflicts in **Enterprise > Team > Pr
 | Mode | Registration | Behavior |
 | --- | --- | --- |
 | Action | `failClosed: true` | Returns the documented native deny on supported pre-action events. `beforeSubmitPrompt` blocks with `continue: false`. The permission-gated events use `permission: "deny"`. Confirm verdicts stay attributed alerts. Native ask is not enabled. |
-| Observe | `failClosed: true` | Allows on policy findings and records `would_block` audit state; on a per-user install, the running hook still blocks supported events during a gateway outage by default. If the hook process never answers, Cursor blocks the call. |
+| Observe | `failClosed: true` | Allows on policy findings and records `would_block` audit state; on a per-user install, a gateway outage follows an explicit saved mode or, when unset, the policy tier: default and permissive run the call with a warning, strict blocks it. If the hook process never answers, Cursor blocks the call. |
 
 Blocking events are `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead` and `beforeSubmitPrompt`. `sessionStart` and `sessionEnd` are not gates. `stop` and `subagentStop` accept only a follow-up message. Result inspection reads `tool_output`, `error_message`, shell `output`, MCP `result_json`, file `edits`, agent `text` and subagent `summary`. `beforeMCPExecution` keeps its exact `tool_input` and URL or command, and derives a stable digest identity without inventing a vendor name.
 
-A conflicting `--fail-mode` is ignored with a warning; outside Secure Client, observe and action registrations both stay `failClosed: true`. The running hook's outage mode is described below. Setup reports readiness only after the current 21-event `type: command`, 30-second, mode-matched registration, the managed runtime adapter, the contract lock and the complete active-connector roster agree. Adding or repairing another connector waits for that full roster.
+An explicit `--fail-mode` is saved as Cursor's outage choice; outside Secure Client, observe and action registrations both stay `failClosed: true`. The running hook's outage mode is described below. Setup reports readiness only after the current 21-event `type: command`, 30-second, mode-matched registration, the managed runtime adapter, the contract lock and the complete active-connector roster agree. Adding or repairing another connector waits for that full roster.
 
 ### Native ask
 
@@ -124,14 +125,14 @@ DefenseClaw does not enable Cursor native approval. Confirm verdicts stay attrib
 
 ### Fail mode
 
-Fail closed: yes. A per-user Cursor hook makes the outage decision of its policy tier in observe and action mode: the default and permissive policies let the call run with a warning, strict blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Outside Secure Client, action and observe both register `failClosed: true`, so a stopped, killed or timed-out hook cannot silently let a tool run; a conflicting `--fail-mode` during setup is ignored with a warning. Managed Cursor's running hook follows the administrator's resolved fail mode. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes).
+Can fail closed: yes. A per-user Cursor hook uses an explicit saved outage mode; when unset, its policy tier decides in observe and action mode: the default and permissive policies let the call run with a warning, strict blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Outside Secure Client, action and observe both register `failClosed: true`, so a stopped, killed or timed-out hook cannot silently let a tool run. Managed Cursor's running hook follows the administrator's resolved fail mode. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes).
 
 ### Agent CLI behavior
 
 | Build | Behavior | Check |
 | --- | --- | --- |
 | Agent CLI 2026.10.01-14929f9 | Did not emit `beforeSubmitPrompt` in a managed standalone run although `hooks.json` registered it. Prompts reached the model with the gateway stopped. Tool hooks still ran and blocked. | Look for `beforeSubmitPrompt` rows with `hook_decision` in the audit log. DefenseClaw status and enterprise verify warn about this. |
-| Same build, gateway down, action mode | A refused prompt is dropped without a message: the input clears and the start screen returns. The hook answers `continue: false` with a reason, but the CLI does not display `user_message` for that event. Tool calls show their reason. | Run `defenseclaw-gateway status` (or `defenseclaw-gateway start` on a per-user install). Refusals are the `"connector":"cursor"` lines with `"fail_mode":"closed"` in `~/.defenseclaw/logs/hook-failures.jsonl`. |
+| 2026.10.01-14929f9 and 2026.10.22-27dcf5f, action mode | A refused prompt is dropped without a message, with the gateway running or stopped: the input clears and the start screen returns. The hook answers `continue: false` with a reason, but the CLI does not display `user_message` for that event. Tool calls show their reason. | Gateway running: `defenseclaw alerts --connector cursor` lists the block and its rule. Gateway stopped: `defenseclaw-gateway status` says so (start it with `defenseclaw-gateway start` on a per-user install), and the refusals are the `"connector":"cursor"` lines with `"fail_mode":"closed"` in `~/.defenseclaw/logs/hook-failures.jsonl`. |
 | 2026.10.01-e373342 and -14929f9, managed Windows | After you answer `[a] Trust this workspace` on the first start in a folder, the CLI can stay on "Trusting workspace..." and ignore typing and Ctrl+C. The folder is already trusted. | Close the tab and start `cursor-agent` again, or start new folders with `cursor-agent --trust`. |
 
 ## Enterprise (standalone profile)
@@ -166,7 +167,7 @@ DefenseClaw builds the image, but it is **unverified**, so `defenseclaw sandbox 
 - Cursor runs Enterprise, Team, Project and User hooks and merges them by that priority. DefenseClaw owns only the user hook and cannot prove a higher-priority source is absent or detect a conflict.
 - Cursor applies the Enterprise hooks file only on plans that support enterprise hooks. The macOS route is a preview and is not verified live.
 - Cursor Agent CLI builds that do not emit `beforeSubmitPrompt` let prompts reach the model, even when the gateway is down. Tool hooks still block. Check `hook_decision` audit rows before you claim prompt coverage.
-- When the gateway is down in action mode, Cursor Agent CLI drops a refused prompt without showing why. Run `defenseclaw-gateway status`.
+- In action mode, Cursor Agent CLI drops a refused prompt without showing why, whether the gateway is running or stopped. `defenseclaw alerts --connector cursor` shows the block and its rule; if it lists nothing, run `defenseclaw-gateway status`.
 - On managed Windows, the first start in a new folder can stall at "Trusting workspace...". Close the tab and start again, or start with `cursor-agent --trust`.
 - Cursor Agent cannot run in an OpenShell sandbox yet.
 

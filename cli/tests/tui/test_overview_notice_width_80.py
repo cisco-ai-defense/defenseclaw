@@ -28,7 +28,7 @@ from defenseclaw.tui.panels.overview import (
 from defenseclaw.tui.services.overview_state import DoctorRepairSummary, RuntimeOverview
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fixtures import screen_text, snapshot_app  # noqa: E402
+from fixtures import screen_text, settle_panel, snapshot_app  # noqa: E402
 
 NOW = datetime(2026, 10, 3, 16, 0, tzinfo=timezone.utc)
 # Text cells of one Overview notice line in an 80-column terminal. At 80x24
@@ -153,7 +153,7 @@ async def test_stale_failure_notice_shows_its_refresh_hint_at_80x24(tmp_path) ->
             )
         )
         app.action_switch_panel("overview")
-        await pilot.pause()
+        await settle_panel(app, pilot)  # the Overview renders on a deferred lane
         lines = screen_text(app).splitlines()
         notice = [line for line in lines if "stale" in line and "[>]" in line]
         assert notice and "press [d] to refresh" in notice[0], "\n".join(lines)

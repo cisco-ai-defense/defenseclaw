@@ -66,6 +66,19 @@ var enterpriseWindowsEnumerateSessionSettle = 15 * time.Second
 // replace it to fire the window on an explicit event instead of a clock.
 var enterpriseWindowsEnumerateSessionSettleAfter = time.After
 
+// enterpriseWindowsEnumeratePrivateWalkLate fires when a profile walk the last
+// cycle could not wait for has finished. Tests replace it.
+var enterpriseWindowsEnumeratePrivateWalkLate = enterprisehooks.WindowsPrivateWalkCompletedLate
+
+// enterpriseWindowsEnumerateOnceWalkWait bounds how long enumerate --once
+// waits after its cycle for a profile walk the cycle could not wait for.
+// Each walk stops itself at its own 2-minute bound; the installer allows the
+// standalone --once 900 seconds. Tests replace the waiter.
+var (
+	enterpriseWindowsEnumerateOnceWalkWait   = 150 * time.Second
+	enterpriseWindowsEnumerateOnceWalkWaiter = enterprisehooks.WaitWindowsPrivateWalksReported
+)
+
 // enterpriseWindowsEnumerateSessionNow reads the clock for sign-in times.
 // Tests replace it so a late sign-in's remaining settle time is exact.
 var enterpriseWindowsEnumerateSessionNow = time.Now
@@ -181,10 +194,34 @@ func runEnterpriseWindowsEnumerate(
 		manifestPath, opts.interval, opts.once, opts.initialDelay)
 
 	if opts.once {
-		return runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath)
+		if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
+			return err
+		}
+		runEnterpriseWindowsEnumerateOnceLateWalk(ctx, stderr, manifestPath)
+		return nil
 	}
 
 	return runEnterpriseWindowsEnumerateInterval(ctx, stderr, opts, manifestPath)
+}
+
+// runEnterpriseWindowsEnumerateOnceLateWalk runs, for --once, the extra
+// cycle the interval loop runs when a profile walk outlasts its share of a
+// cycle (GAP-2002): it waits for that walk and publishes again with it, so
+// a first install reports the account inspected instead of
+// agent_install_scan_incomplete. A walk that does not finish complete keeps
+// the first publication, which names the account incomplete. The extra
+// cycle's own failure keeps that publication too.
+func runEnterpriseWindowsEnumerateOnceLateWalk(ctx context.Context, stderr io.Writer, manifestPath string) {
+	waitCtx, cancel := context.WithTimeout(ctx, enterpriseWindowsEnumerateOnceWalkWait)
+	finished := enterpriseWindowsEnumerateOnceWalkWaiter(waitCtx)
+	cancel()
+	if !finished {
+		return
+	}
+	fmt.Fprintf(stderr, "[hook-enumerator] a slow profile scan finished after the cycle: running one more cycle\n")
+	if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] extra cycle failed; the first publication stands: %v\n", err)
+	}
 }
 
 // runEnterpriseWindowsEnumerateSingleCycle runs one bounded cycle,
@@ -275,7 +312,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		}
 		// A running agent no row enrolls is recorded too (GAP-0226), and so is
 		// one whose account resolves to no SID.
-		enumerateOpts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg))
+		enumerateOpts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg), manifestPath)
 	}
 	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enumerateOpts)
 	if err != nil {
@@ -391,7 +428,7 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 	}
 	enterprisehooks.SetUnverifiedVersionsPolicy(cfg.Enterprise.Enrollment.UnverifiedVersionsFor)
 	var ownerUnknown []enterprisehooks.UnprotectedAgent
-	opts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg))
+	opts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg), manifestPath)
 	// The scan never decides targets in manifest mode, so a scan that did not
 	// finish (the cycle ran out of time, ProfileList was unreadable, a call
 	// stalled) never fails or holds the cycle or the install: the accounts it
@@ -702,6 +739,16 @@ func runEnterpriseWindowsEnumerateInterval(
 			}
 		case <-mcpRefresh.C:
 			_ = enterpriseWindowsMCPRefresh.Run(ctx, func() error { return refreshEnterpriseWindowsMCPServers(stderr, manifestPath) })
+		case <-enterpriseWindowsEnumeratePrivateWalkLate():
+			// A profile's private-install walk outlasted its share of the
+			// last cycle and has now finished: publish the account as
+			// inspected without waiting for the next tick (GAP-2002).
+			fmt.Fprintf(stderr, "[hook-enumerator] a slow profile scan finished: running an extra cycle\n")
+			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
+				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
+					fmt.Fprintf(stderr, "[hook-enumerator] cycle failed: %v\n", err)
+				}
+			}
 		case <-ticker.C:
 			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
 				if !isEnterpriseWindowsEnumerateConfigMissing(err) {

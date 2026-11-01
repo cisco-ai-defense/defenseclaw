@@ -96,7 +96,7 @@ func TestWindowsCodexRemovalCleansTheRecordedPreimageOfAnEarlierShape(t *testing
 						windowsCodexTestCountGroup(t, candidate, "SessionStart", windowsCodexTestNormalized(t, earlier)) != 0 {
 						t.Fatalf("a DefenseClaw group survived the removal:\n%s", candidate)
 					}
-					if leftovers, err := windowsCodexRecordedRequirementsHoldOwnedLeftovers(candidate, current); err != nil || leftovers {
+					if leftovers, err := windowsCodexRequirementsHoldOwnedLeftovers(candidate, current); err != nil || leftovers {
 						t.Fatalf("DefenseClaw content left = %t, %v:\n%s", leftovers, err, candidate)
 					}
 					references, err := windowsCodexOwnedPathReferenceCount(candidate, current)
@@ -122,38 +122,96 @@ func TestWindowsCodexRemovalCleansTheRecordedPreimageOfAnEarlierShape(t *testing
 	}
 }
 
-// The live leftover check keeps its meaning: this install's command in a
-// shape it does not render, in a file DefenseClaw did not record, is an
-// administrator's edit and not DefenseClaw's (TestWindowsCodexUninstall-
-// KeepsAnAdministratorNarrowedSessionStart). Only the recorded preimage
-// counts it as DefenseClaw's.
-func TestWindowsCodexRecordedLeftoversDifferOnlyForTheEarlierShape(t *testing.T) {
+// GAP-0907: a standalone removal takes this install's command in the
+// SessionStart shape of 1.0.2 and 1.0.3 from any file, not only from a
+// recorded preimage. A live file that is not DefenseClaw's exact publication
+// (a guardian or Codex rewrite, a recovered earlier release's bytes) over an
+// administrator preimage that never held the group kept it as an
+// administrator's edit: its windows_managed_dir stayed, teardown refused with
+// "1 surviving Codex managed hook references ... explicit ownership transfer
+// is required", and only /uninstall FORCE=1 finished. An administrator hook
+// beside it still keeps the managed directory and the removal unsafe.
+func TestWindowsCodexRemovalTakesTheEarlierSessionStartShapeFromALiveFile(t *testing.T) {
 	for _, contract := range KnownHookContracts("codex") {
 		if !codexContractCertifiesCompactSessionStart(contract.ContractID) {
 			continue
 		}
-		current := testWindowsCodexMachineOptions()
-		current.HookContractID = contract.ContractID
-		command := windowsCodexBoundManagedHookCommand(current.HookBinary, "SessionStart", contract.ContractID)
-		var earlierMatcher string
-		for _, group := range codexHookGroups {
-			if group.eventType == "SessionStart" {
-				earlierMatcher = group.matcher
+		t.Run(contract.ContractID, func(t *testing.T) {
+			current := testWindowsCodexMachineOptions()
+			current.HookContractID = contract.ContractID
+			command := windowsCodexBoundManagedHookCommand(current.HookBinary, "SessionStart", contract.ContractID)
+			var earlierMatcher string
+			for _, group := range codexHookGroups {
+				if group.eventType == "SessionStart" {
+					earlierMatcher = group.matcher
+				}
 			}
-		}
-		raw, err := toml.Marshal(map[string]interface{}{"hooks": map[string]interface{}{
-			"SessionStart": []interface{}{windowsCodexTestGroup(earlierMatcher, windowsCodexMachineHandler(command, 30))},
-		}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		live, err := windowsCodexRequirementsHoldOwnedLeftovers(raw, current)
-		if err != nil || live {
-			t.Fatalf("%s: live leftovers = %t, %v", contract.ContractID, live, err)
-		}
-		recorded, err := windowsCodexRecordedRequirementsHoldOwnedLeftovers(raw, current)
-		if err != nil || !recorded {
-			t.Fatalf("%s: recorded leftovers = %t, %v", contract.ContractID, recorded, err)
-		}
+			earlier := windowsCodexTestGroup(earlierMatcher, windowsCodexMachineHandler(command, 30))
+			adminGroup := windowsCodexTestGroup("*", windowsCodexMachineHandler(`C:\Tools\audit.exe --codex`, 30))
+			admin := []byte("approval_policy_floor = \"on-request\"\n")
+			for _, tc := range []struct {
+				name      string
+				extra     map[string]interface{}
+				wantAdmin bool
+			}{
+				{"the earlier group alone", nil, false},
+				{"the earlier group beside an administrator hook", map[string]interface{}{"PreToolUse": []interface{}{adminGroup}}, true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					published, _, err := reconcileWindowsCodexRequirements(admin, current, true)
+					if err != nil {
+						t.Fatal(err)
+					}
+					cfg, err := parseWindowsCodexRequirements(published)
+					if err != nil {
+						t.Fatal(err)
+					}
+					hooks := cfg["hooks"].(map[string]interface{})
+					groups, _ := hooks["SessionStart"].([]interface{})
+					hooks["SessionStart"] = append([]interface{}{earlier}, groups...)
+					for event, value := range tc.extra {
+						hooks[event] = value
+					}
+					live, err := toml.Marshal(cfg)
+					if err != nil {
+						t.Fatal(err)
+					}
+					state := windowsCodexMachineOwnership{
+						SchemaVersion:   windowsCodexMachineRequirementsSchema,
+						PreimageExisted: true,
+						Preimage:        admin,
+						PreimageSHA256:  windowsCodexMachineHash(admin),
+						PostimageSHA256: windowsCodexMachineHash(published),
+					}
+					candidate, exists, _, disposition, err := windowsCodexRemovalCandidate(live, true, state, current)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !exists || disposition != "surgical_preservation" {
+						t.Fatalf("removal = exists %t, %q", exists, disposition)
+					}
+					if windowsCodexTestCountGroup(t, candidate, "SessionStart", windowsCodexTestNormalized(t, earlier)) != 0 {
+						t.Fatalf("the earlier DefenseClaw SessionStart group survived the removal:\n%s", candidate)
+					}
+					if leftovers, err := windowsCodexRequirementsHoldOwnedLeftovers(candidate, current); err != nil || leftovers {
+						t.Fatalf("DefenseClaw content left = %t, %v:\n%s", leftovers, err, candidate)
+					}
+					references, err := windowsCodexOwnedPathReferenceCount(candidate, current)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if tc.wantAdmin {
+						if references == 0 || windowsCodexTestCountGroup(t, candidate, "PreToolUse", windowsCodexTestNormalized(t, adminGroup)) != 1 {
+							t.Fatalf("the administrator hook or its managed directory was dropped (references %d):\n%s", references, candidate)
+						}
+					} else if references != 0 {
+						t.Fatalf("references = %d after removal; the uninstall would refuse:\n%s", references, candidate)
+					}
+					if !strings.Contains(string(candidate), "approval_policy_floor") {
+						t.Fatalf("the administrator setting was dropped:\n%s", candidate)
+					}
+				})
+			}
+		})
 	}
 }

@@ -57,6 +57,7 @@ printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
 // the gateway after a refused call.
 const coldStartGatewayStub = `#!/bin/bash
 [ "$1" = hook ] && exit 0
+if [ "$1" = hook-outage-mode ]; then printf '%s\n' "${DC_COLD_OUTAGE_MODE:-closed}"; exit 0; fi
 if [ "$1" = hook-post ]; then
   n=0
   if [ -f "$DC_COLD_CAP/count" ]; then IFS= read -r n < "$DC_COLD_CAP/count" || true; fi
@@ -66,9 +67,8 @@ if [ "$1" = hook-post ]; then
   ts=$(date +%s%N 2>/dev/null)
   case "$ts" in ""|*[!0-9]*) ts=$(perl -MTime::HiRes=time -e 'printf("%.0f", time()*1e9)' 2>/dev/null) ;; esac
   [ -z "$ts" ] || echo "$ts" >> "$DC_COLD_CAP/tries"
-  IFS= read -r -d '' payload || true
-  printf '%s' "$payload" > "$DC_COLD_CAP/body.$n"
-  printf '%s' "$payload" > "$DC_COLD_CAP/config.$n"
+  cat > "$DC_COLD_CAP/body.$n"
+  cp "$DC_COLD_CAP/body.$n" "$DC_COLD_CAP/config.$n"
   if [ "$n" -le "${DC_COLD_FAILS:-1}" ]; then
     if [ "${DC_COLD_DROP_LISTENER:-0}" = 1 ]; then
       : > "$DC_COLD_CAP/drop.$n"
@@ -78,6 +78,8 @@ if [ "$1" = hook-post ]; then
         i=$((i + 1))
       done
     fi
+    # The installer lets go of its lock while the request waits (GAP-2443).
+    [ "${DC_COLD_RELEASE_INSTALL_LOCK:-0}" != 1 ] || rmdir "$DEFENSECLAW_HOME/.install.lock"
     exit "${DC_COLD_FIRST_RC:-7}"
   fi
   printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
@@ -104,7 +106,14 @@ func runHookForColdStart(t *testing.T, c Connector, script string, args []string
 
 func runHookForColdStartWithManaged(t *testing.T, c Connector, script string, args []string, prepare func(dataDir string), managed bool, extraEnv ...string) coldStartHookRun {
 	t.Helper()
-	hooksDir := t.TempDir()
+	// The hooks live in the account's data directory, as an install renders
+	// them: a cold start reads that runtime's config and recorded helper.
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	hooksDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	apiAddr := freeAPIAddr(t)
 	// Bind the endpoint as this account to let these retry tests reach the
 	// native transport stub; free and foreign listeners have separate tests.
@@ -137,8 +146,6 @@ func runHookForColdStartWithManaged(t *testing.T, c Connector, script string, ar
 		bakeHookPathForTest(t, hookPath, stubDir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 	}
 
-	home := t.TempDir()
-	dataDir := filepath.Join(home, ".defenseclaw")
 	binDir := filepath.Join(home, ".local", "bin")
 	for _, dir := range []string{dataDir, binDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -151,6 +158,7 @@ func runHookForColdStartWithManaged(t *testing.T, c Connector, script string, ar
 	if err := os.WriteFile(filepath.Join(binDir, "defenseclaw-gateway"), []byte(coldStartGatewayStub), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	linkGatewayBinaryToHookDirForTest(t, hooksDir, filepath.Join(binDir, "defenseclaw-gateway"))
 	if prepare != nil {
 		prepare(dataDir)
 	}
@@ -456,14 +464,16 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 // A frozen or hung gateway keeps its listener, so the request times out
 // (native post exit 28) while gateway.pid names a live process. The line says so once,
 // with the next step, instead of "gateway unreachable ...: gateway
-// unreachable" (GAP-1204).
+// unreachable" (GAP-1204). The call is no outage, so it is blocked in every
+// fail mode and the line says that, not "fail mode closed", which read as a
+// saved open mode ignored (GAP-2279, as the native line since GAP-1735).
 func TestShellHookNamesTheNextStepForAHungGateway(t *testing.T) {
 	alive := func(dataDir string) {
 		_ = os.WriteFile(filepath.Join(dataDir, "gateway.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
 	}
 	run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, alive,
 		"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FIRST_RC=28")
-	want := "defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): " +
+	want := "defenseclaw: gateway unreachable, blocking claude-code tool (not a gateway outage, so it is blocked in every fail mode): " +
 		"the gateway is running but did not answer; check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
 	if got := strings.TrimSpace(run.stderr); got != want {
 		t.Fatalf("stderr = %q\nwant %q", got, want)
@@ -482,6 +492,44 @@ func TestShellHookNamesTheNextStepForAHungGateway(t *testing.T) {
 		"DEFENSECLAW_FAIL_MODE=open", "DC_COLD_FIRST_RC=28")
 	if reason := failClosedDenyReason(t, open); !strings.Contains(reason, "the gateway is running but did not answer") {
 		t.Errorf("per-user open request yielded %q, want a closed deny naming the hung gateway", reason)
+	}
+	if got := strings.TrimSpace(open.stderr); got != want {
+		t.Errorf("per-user open stderr = %q\nwant %q (a saved open mode must not read as closed)", got, want)
+	}
+
+	// An outage a closed mode blocks (no gateway took the connection) keeps
+	// "fail mode closed".
+	down := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, nil,
+		"DEFENSECLAW_FAIL_MODE=closed", "DEFENSECLAW_GATEWAY_AUTOSTART=0", "DC_COLD_FAILS=1000")
+	if !strings.Contains(down.stderr, "blocking claude-code tool (fail mode closed): ") {
+		t.Errorf("outage stderr = %q, want the fail mode closed line", down.stderr)
+	}
+}
+
+// GAP-2443: a call that found this account being installed is closed for
+// the install. When the installer lets go of its lock before the request
+// times out (the new gateway runs, its API does not answer yet), the answer
+// still names the install, not a hung gateway.
+func TestShellHookNamesTheInstallWhenTheLockGoesDuringTheCall(t *testing.T) {
+	installing := func(dataDir string) {
+		_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
+		_ = os.WriteFile(filepath.Join(dataDir, "gateway.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+	}
+	for _, failMode := range []string{"open", "closed"} {
+		t.Run(failMode, func(t *testing.T) {
+			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, installing,
+				"DEFENSECLAW_FAIL_MODE="+failMode, "DC_COLD_FIRST_RC=28", "DC_COLD_RELEASE_INSTALL_LOCK=1")
+			if _, err := os.Stat(filepath.Join(run.dataDir, ".install.lock")); !os.IsNotExist(err) {
+				t.Fatalf("install lock still present (%v): the stub did not let go of it during the request", err)
+			}
+			if strings.Contains(run.stderr, "running but did not answer") || !strings.Contains(run.stderr, "is being installed or upgraded for this account") {
+				t.Fatalf("stderr = %q, want the install named", run.stderr)
+			}
+			reason := failClosedDenyReason(t, run)
+			if strings.Contains(reason, "running but did not answer") || !strings.Contains(reason, "is being installed or upgraded for this account") {
+				t.Fatalf("deny reason = %q, want the install named", reason)
+			}
+		})
 	}
 }
 
@@ -515,7 +563,7 @@ func TestClaudeShellHookFailClosedDenyIsOnePlainSentence(t *testing.T) {
 	run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, stopped,
 		"DEFENSECLAW_FAIL_MODE=closed")
 	reason := failClosedDenyReason(t, run)
-	want := "DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection."
+	want := "DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection (defenseclaw-gateway status shows its state)."
 	if reason != want {
 		t.Fatalf("deny reason = %q\nwant %q", reason, want)
 	}
@@ -581,10 +629,11 @@ func TestCodexShellHookShowsTheStartStepWhenTheGatewayWasStopped(t *testing.T) {
 	}
 }
 
-// GAP-0094, GAP-0102, GAP-0107: a per-user hook retries a refused or dropped
-// call while its three-second budget remains. A heavily loaded host may spend
-// that budget starting the hook and helper; it must then block, not allow.
-func TestShellHookRetriesUntilTheGatewayAnswersOrBudgetExpires(t *testing.T) {
+// GAP-0094, GAP-0102, GAP-0107: only a refused connection is retried. A
+// dropped or cut-off answer may have processed the call and must not become
+// a later outage allow, even if the listener disappears. A heavily loaded
+// host may spend the retry budget starting the hook and helper; it blocks.
+func TestShellHookOnlyRetriesRefusedConnections(t *testing.T) {
 	for _, tc := range []struct {
 		name, rc string
 	}{
@@ -605,14 +654,21 @@ func TestShellHookRetriesUntilTheGatewayAnswersOrBudgetExpires(t *testing.T) {
 				if hook.script == "codex-hook.sh" {
 					args = codexBoundShellHookArgsForTest(t, hook.script, "PreToolUse")[1:]
 				}
+				failMode := "closed"
+				if tc.rc != "7" {
+					failMode = "open"
+				}
 				run := runHookForColdStart(t, hook.c, hook.script, args, nil,
-					"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=2", "DC_COLD_FIRST_RC="+tc.rc, "DC_COLD_DROP_LISTENER=1")
+					"DEFENSECLAW_FAIL_MODE="+failMode, "DC_COLD_OUTAGE_MODE=open", "DC_COLD_FAILS=2", "DC_COLD_FIRST_RC="+tc.rc, "DC_COLD_DROP_LISTENER=1")
 				if run.elapsed > 4*time.Second {
 					t.Fatalf("the call took %s", run.elapsed)
 				}
 				count := strings.TrimSpace(readColdStartCapture(t, run.capDir, "count"))
 				if count != "1" && count != "2" && count != "3" {
 					t.Fatalf("native post ran %q times, want 1-3 bounded attempts", count)
+				}
+				if tc.rc != "7" && count != "1" {
+					t.Fatalf("classified non-outage was retried %s times", count)
 				}
 				blockedByOutage := strings.Contains(run.stderr, "gateway unreachable")
 				if blockedByOutage {
@@ -628,10 +684,17 @@ func TestShellHookRetriesUntilTheGatewayAnswersOrBudgetExpires(t *testing.T) {
 				} else if run.err != nil || strings.Contains(run.stdout, "deny") || count != "3" {
 					t.Fatalf("gateway answer was not the third attempt's allow: err=%v stdout=%q stderr=%q count=%q", run.err, run.stdout, run.stderr, count)
 				}
-				log := strings.TrimSpace(waitColdStartCapture(t, run.capDir, "gateway.log"))
+				log := strings.TrimSpace(readColdStartCapture(t, run.capDir, "gateway.log"))
+				if tc.rc == "7" {
+					log = strings.TrimSpace(waitColdStartCapture(t, run.capDir, "gateway.log"))
+				}
 				starts := strings.Count(log, "start --hook-cold-start")
-				if starts > 1 || (!blockedByOutage && starts != 1) {
-					t.Fatalf("gateway starts = %q, want at most one on a block and exactly one on recovery", log)
+				wantStarts := 0
+				if tc.rc == "7" && !blockedByOutage {
+					wantStarts = 1
+				}
+				if starts > 1 || (!blockedByOutage && starts != wantStarts) || (tc.rc != "7" && starts != 0) {
+					t.Fatalf("gateway starts = %q, want only a refused connection to start it", log)
 				}
 			})
 		}
@@ -641,6 +704,9 @@ func TestShellHookRetriesUntilTheGatewayAnswersOrBudgetExpires(t *testing.T) {
 // A restart or outage longer than the budget blocks the call within about
 // 3 seconds and names this account's unavailable gateway.
 func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
+	// A reset (56) is classified as a possibly processed call and blocks
+	// immediately (rc.11 T12b and fix/r104-oss-outage-open); only a refused
+	// connection (7) waits for a restart.
 	for _, rc := range []string{"7"} {
 		t.Run("claude-code/"+rc, func(t *testing.T) {
 			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, nil,
@@ -666,6 +732,37 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 				(!strings.Contains(run.stderr, "this account's gateway is not running") &&
 					!strings.Contains(run.stderr, "restarting or not running")) {
 				t.Fatalf("exit %d stderr %q, want a block naming this account's unavailable gateway", code, run.stderr)
+			}
+		})
+	}
+}
+
+// A reset (56) after the native helper's peer check may have reached a
+// gateway that processed the call: it is final, so the hook blocks on the
+// first attempt without waiting for a restart (rc.11 T12b loop 2, kept by
+// the carry over the older-base rows that waited for it).
+func TestShellHookBlocksAResetWithoutWaitingForARestart(t *testing.T) {
+	for _, hook := range []struct {
+		c      Connector
+		script string
+	}{
+		{NewClaudeCodeConnector(), "claude-code-hook.sh"},
+		{NewCodexConnector(), "codex-hook.sh"},
+	} {
+		t.Run(hook.script, func(t *testing.T) {
+			var args []string
+			if hook.script == "codex-hook.sh" {
+				args = codexBoundShellHookArgsForTest(t, hook.script, "PreToolUse")[1:]
+			}
+			run := runHookForColdStart(t, hook.c, hook.script, args, nil,
+				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=56", "DC_COLD_DROP_LISTENER=1")
+			if count := strings.TrimSpace(readColdStartCapture(t, run.capDir, "count")); count != "1" {
+				t.Fatalf("native post ran %q times for a reset, want 1", count)
+			}
+			if hook.script == "claude-code-hook.sh" {
+				_ = failClosedDenyReason(t, run)
+			} else if !codexBlockedOrExit2(exitCodeOf(run.err), run.stdout) {
+				t.Fatalf("Codex reset did not block: err=%v stdout=%q stderr=%q", run.err, run.stdout, run.stderr)
 			}
 		})
 	}

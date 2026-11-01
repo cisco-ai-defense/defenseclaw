@@ -57,12 +57,25 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 		}
 		pending := false
 		hermesLimited := false
+		var earlier []string
+		for _, row := range rows {
+			if windowsEnterpriseEnrollmentKey(row.SID, row.User, row.UserHome) ==
+				windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome) && enterpriseHookEarlierMatrixRow(row) {
+				earlier = append(earlier, strings.TrimSpace(row.Connector)+": "+enterpriseHookEarlierMatrixState)
+			}
+		}
 		for _, connector := range entry.Connectors {
 			account.Connectors[connector.Connector] = connector.State
 			pending = pending || connector.State == "pending"
 			hermesLimited = hermesLimited || connector.Connector == "hermes" && connector.State == "enrolled"
 		}
 		account.Reason = windowsEnterpriseEnrollmentReason(pending, failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)])
+		for _, note := range earlier {
+			if account.Reason != "" {
+				account.Reason += "; "
+			}
+			account.Reason += note
+		}
 		if hermesLimited {
 			if limit := enterprisehooks.ManagedHermesSessionHomeAttestation("windows", "hermes", true, false); limit != nil {
 				if account.Reason != "" {

@@ -14,7 +14,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -105,7 +105,7 @@ func openManagedAuditStoreReadOnly(path string) (*audit.Store, error) {
 // keeps the help of main (issue #1092, GAP-0270).
 const auditExportLongIntro = `Write one JSON object per line. Each audit row is validated against
 schemas/audit-event.json before it is written. Configuration changes and
-operator actions are audit rows too (action config-update and others).
+operator actions are audit rows too (action config.change.applied and others).
 --include-activity appends the rows of the activity_events table, which
 holds only history from releases before 1.0, validated against
 activity-event.json.
@@ -475,7 +475,7 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy(hasExactTime)
 // since 1.0 operator changes are audit rows in the export itself, and
 // activity_events holds only history from older databases.
 const activityHistoryNote = "note: --include-activity added no rows. Configuration changes and operator " +
-	"actions are already audit rows in this export (action config-update and others); " +
+	"actions are already audit rows in this export (action config.change.applied and others); " +
 	"activity_events holds only history from releases before 1.0."
 
 // appendActivityLines appends the activity_events rows and notes on stderr
@@ -984,7 +984,7 @@ func normalizeSeverity(s string) string {
 
 // v8RecordActionPattern is the action shape the audit-event schema accepts
 // for v8 runtime records.
-var v8RecordActionPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+var v8RecordActionPattern = lazyregexp.New(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 // isV8RecordAction reports whether a row is a v8 runtime record whose action
 // the export keeps as is. A v8 record (event_name set and not a

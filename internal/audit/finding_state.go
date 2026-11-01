@@ -338,8 +338,18 @@ func (s *Store) PersistScanLifecycle(
 	meta scanner.ScanFindingMeta,
 ) (scanner.FindingLifecycleDelta, error) {
 	delta := scanner.FindingLifecycleDelta{}
-	s.findingLifecycleMu.Lock()
-	defer s.findingLifecycleMu.Unlock()
+	eligible := findingLifecycleEligible(summary)
+	if eligible {
+		// Only the current-state projection and its gauge baselines need the
+		// lock. A runtime scan (every hook's rule scan) writes its summary and
+		// occurrences only: holding the lock around its transaction, and
+		// around the wait for the store's one connection, queued every hook
+		// behind every other one's scan write. On a cold multi-gigabyte store
+		// 21 of the 32 requests an account may hold waited here, and the rest
+		// were refused and blocked as a gateway no-answer (GAP-1790).
+		s.findingLifecycleMu.Lock()
+		defer s.findingLifecycleMu.Unlock()
+	}
 	if summary.Timestamp.IsZero() {
 		summary.Timestamp = meta.Timestamp
 		if summary.Timestamp.IsZero() {
@@ -356,7 +366,7 @@ func (s *Store) PersistScanLifecycle(
 	if err := insertScanSummary(tx, summary); err != nil {
 		return delta, err
 	}
-	if findingLifecycleEligible(summary) {
+	if eligible {
 		delta, err = applyFindingLifecycle(tx, summary, findings, meta)
 		if err != nil {
 			return scanner.FindingLifecycleDelta{}, err
@@ -391,7 +401,70 @@ func (s *Store) PersistScanLifecycle(
 	return delta, nil
 }
 
-// insertFindingLifecycleTransitions keeps scan_findings useful as a forensic
+// callScanPersistence is the store a scan made inside a hook call persists
+// through: it carries the call's context, so the scan's summary can join the
+// call's open write batch (callScanSummaryDeferred).
+type callScanPersistence struct {
+	*Store
+	ctx context.Context
+}
+
+// PersistScanLifecycle commits a runtime scan without findings with the
+// call's other writes; every other scan commits as Store.PersistScanLifecycle
+// does.
+func (p callScanPersistence) PersistScanLifecycle(
+	summary scanner.ScanSummaryParams,
+	findings []scanner.Finding,
+	meta scanner.ScanFindingMeta,
+) (scanner.FindingLifecycleDelta, error) {
+	if p.callScanSummaryDeferred(p.ctx, summary, findings, meta) {
+		return scanner.FindingLifecycleDelta{}, nil
+	}
+	return p.Store.PersistScanLifecycle(summary, findings, meta)
+}
+
+// callScanSummaryDeferred queues the summary row of a hook's runtime scan
+// without findings on the call's open write batch, so it commits in the
+// call's one transaction, before the answer, instead of a transaction of its
+// own (GAP-1790, GAP-1791). A benign tool call's rule scan made one more
+// commit, on the store's one connection, before its verdict. A scan with
+// findings keeps its own transaction: their rows reference the summary, and
+// the session correlator reads them right after. An asset scan sets current
+// state and keeps its own path too. A summary the shared transaction does not
+// commit is written again on its own.
+func (s *Store) callScanSummaryDeferred(
+	ctx context.Context,
+	summary scanner.ScanSummaryParams,
+	findings []scanner.Finding,
+	meta scanner.ScanFindingMeta,
+) bool {
+	if s == nil || len(findings) != 0 || findingLifecycleEligible(summary) {
+		return false
+	}
+	batch := deferringBatch(ctx, s)
+	if batch == nil {
+		return false
+	}
+	if summary.Timestamp.IsZero() {
+		summary.Timestamp = meta.Timestamp
+		if summary.Timestamp.IsZero() {
+			summary.Timestamp = time.Now().UTC()
+		}
+	}
+	meta.Timestamp = summary.Timestamp
+	return batch.add(&deferredCallWrite{
+		ctx: ctx,
+		run: func(_ context.Context, tx *sql.Tx) error {
+			return insertScanSummary(tx, summary)
+		},
+		alone: func(context.Context) error {
+			_, err := s.PersistScanLifecycle(summary, nil, meta)
+			return err
+		},
+	})
+}
+
+// insertFindingLifecycleTransitions keeps scan_findings useful as a forensic// insertFindingLifecycleTransitions keeps scan_findings useful as a forensic
 // transition ledger without repeating the same static finding on every scan.
 // New, reopened, and materially updated findings are emitted by the canonical
 // log/metric path and retain a matching occurrence row. Repeated observations

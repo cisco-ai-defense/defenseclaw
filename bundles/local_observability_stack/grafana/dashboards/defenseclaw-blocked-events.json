@@ -72,7 +72,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_enforced=\"true\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_enforced=\"true\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -131,7 +131,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_would_block=\"true\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_would_block=\"true\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -190,7 +190,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_hook_event=~\"(?i)userpromptsubmit|beforesubmitprompt|pre_user_prompt|userpromptsubmitted|user_prompt_submit|prompt\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_hook_event=~\"(?i)userpromptsubmit|beforesubmitprompt|pre_user_prompt|userpromptsubmitted|user_prompt_submit|prompt\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -249,7 +249,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_hook_event!~\"(?i)userpromptsubmit|beforesubmitprompt|pre_user_prompt|userpromptsubmitted|user_prompt_submit|prompt\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_hook_event!~\"(?i)userpromptsubmit|beforesubmitprompt|pre_user_prompt|userpromptsubmitted|user_prompt_submit|prompt\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -308,7 +308,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "count(sum by (agent_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_gen_ai_agent_id!=\"\" | label_format agent_id=\"{{.body_gen_ai_agent_id}}\" [$__range]))) or vector(0)",
+          "expr": "count(sum by (agent_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_gen_ai_agent_id!=\"\" | label_format agent_id=\"{{.body_gen_ai_agent_id}}\" [$__range]))) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -367,7 +367,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "count(sum by (rule_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<rule_id>[^\\\\\\\"]+)\\\\\\\".*\" [$__range]))) or vector(0)",
+          "expr": "count(sum by (rule_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<rule_id>[^\\\\\\\"]+)\\\\\\\".*\" [$__range]))) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -438,7 +438,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_enforced=\"true\" [$__interval])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_enforced=\"true\" [$__interval])) or vector(0)",
           "refId": "A",
           "legendFormat": "enforced"
         },
@@ -447,7 +447,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_would_block=\"true\" [$__interval])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_would_block=\"true\" [$__interval])) or vector(0)",
           "refId": "B",
           "legendFormat": "would block"
         }
@@ -499,7 +499,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(15, sum by (rule_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<rule_id>[^\\\\\\\"]+)\\\\\\\".*\" [$__range])))",
+          "expr": "topk(15, sum by (rule_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<rule_id>[^\\\\\\\"]+)\\\\\\\".*\" [$__range])))",
           "refId": "A",
           "instant": true,
           "queryType": "instant",
@@ -560,7 +560,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (connector, decision, hook_event, severity, target, primary_rule) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<primary_rule>[^\\\\\\\"]+)\\\\\\\".*\" | label_format hook_event=\"{{if .body_defenseclaw_hook_event}}{{.body_defenseclaw_hook_event}}{{else}}unreported{{end}}\", severity=\"{{if .body_defenseclaw_security_severity}}{{.body_defenseclaw_security_severity}}{{else}}unreported{{end}}\", target=\"{{if .body_defenseclaw_destination_app}}{{.body_defenseclaw_destination_app}}{{else}}unreported{{end}}\" [$__range])))",
+          "expr": "topk(50, sum by (connector, decision, hook_event, severity, target, primary_rule) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<primary_rule>[^\\\\\\\"]+)\\\\\\\".*\" | label_format hook_event=\"{{if .body_defenseclaw_hook_event}}{{.body_defenseclaw_hook_event}}{{else}}unreported{{end}}\", severity=\"{{if .body_defenseclaw_security_severity}}{{.body_defenseclaw_security_severity}}{{else}}unreported{{end}}\", target=\"{{if .body_defenseclaw_destination_app}}{{.body_defenseclaw_destination_app}}{{else}}unreported{{end}}\" [$__range])))",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -641,13 +641,300 @@
       }
     },
     {
+      "id": 22,
+      "type": "row",
+      "title": "Who was blocked, where, and under which policy",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 18,
+      "type": "bargauge",
+      "title": "Enforced blocks by machine",
+      "description": "Enforced blocks per computer (host.name of the gateway that decided). Respects the Machine, Profile, Rule, Connector, Severity, Hook surface, Agent and User boxes.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(15, sum by (machine) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | body_defenseclaw_guardrail_enforced=\"true\" | label_format profile=`{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}none{{end}}` | profile=~\"$profile\" | label_format machine=`{{.host_name}}` [$__range])))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant",
+          "legendFormat": "{{machine}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No enforced blocks in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 19,
+      "type": "bargauge",
+      "title": "Enforced blocks by guardrail profile",
+      "description": "Enforced blocks per identity-based guardrail profile; none means no profile applied and the global configuration decided. Respects the Machine, Profile, Rule, Connector, Severity, Hook surface, Agent and User boxes.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(15, sum by (profile) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | body_defenseclaw_guardrail_enforced=\"true\" | label_format profile=`{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}none{{end}}` | profile=~\"$profile\" | label_format machine=`{{.host_name}}` [$__range])))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant",
+          "legendFormat": "{{profile}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No enforced blocks in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 20,
+      "type": "bargauge",
+      "title": "Enforced blocks by primary rule",
+      "description": "First verdict rule ID of each enforced block. Respects the Machine, Profile, Rule, Connector, Severity, Hook surface, Agent and User boxes.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(15, sum by (rule) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | body_defenseclaw_guardrail_enforced=\"true\" | label_format profile=`{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}none{{end}}` | profile=~\"$profile\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<rule>[^\\\\\\\"]+)\\\\\\\".*\" | label_format rule=`{{if .rule}}{{.rule}}{{else}}unreported{{end}}` | label_format machine=`{{.host_name}}` [$__range])))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant",
+          "legendFormat": "{{rule}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No enforced blocks in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 21,
+      "type": "table",
+      "title": "Enforced decisions: who, where, under which policy, by which rule",
+      "description": "One row per enforced guardrail decision (the newest 1000 in range): the user, the computer, the connector, the guardrail profile, the directory group whose assignment selected that profile, the rule IDs, the action and the time. Profile and group are empty when no identity-based profile applied. Narrow it with the Machine, Profile and Rule boxes; the bars above count the same decisions per machine, profile and rule. Export it with Inspect > Data > Download CSV.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 24,
+        "h": 12
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | body_defenseclaw_guardrail_enforced=\"true\" | label_format profile=`{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}none{{end}}` | profile=~\"$profile\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | label_format machine=`{{.host_name}}`, user=`{{if .body_defenseclaw_user_name}}{{.body_defenseclaw_user_name}}{{else if .body_defenseclaw_user_principal}}{{.body_defenseclaw_user_principal}}{{else}}{{.body_user_id}}{{end}}`, group=`{{.body_defenseclaw_guardrail_profile_matched_group}}`, rule=`{{.rule_ids | replace \"\\\"\" \"\"}}`, action=`{{.body_defenseclaw_guardrail_effective_action}}` | keep machine, user, connector, profile, group, rule, action",
+          "refId": "A",
+          "queryType": "range",
+          "maxLines": 1000
+        }
+      ],
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "source": "labels",
+            "format": "json"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "labels": true,
+              "Line": true,
+              "tsNs": true,
+              "id": true,
+              "labelTypes": true,
+              "trace_id": true
+            },
+            "indexByName": {
+              "Time": 0,
+              "user": 1,
+              "machine": 2,
+              "connector": 3,
+              "profile": 4,
+              "group": 5,
+              "rule": 6,
+              "action": 7
+            },
+            "renameByName": {
+              "Time": "Time",
+              "user": "User",
+              "machine": "Machine",
+              "connector": "Connector",
+              "profile": "Profile",
+              "group": "Directory group",
+              "rule": "Rule IDs",
+              "action": "Action"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "-",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Time",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
       "id": 12,
       "type": "row",
       "title": "Blocked decision detail",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 44,
         "w": 24,
         "h": 1
       }
@@ -663,7 +950,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 24,
+        "y": 45,
         "w": 24,
         "h": 13
       },
@@ -673,7 +960,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}BLOCKED{{else}}WOULD BLOCK{{end}} · {{.connector}} · {{.body_defenseclaw_hook_event}} · {{.body_defenseclaw_security_severity}} · agent {{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}{{.body_gen_ai_agent_id}}{{end}}\\nRules: {{.rule_ids}}\\nWhy: {{.body_defenseclaw_guardrail_reason}}\"",
+          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}BLOCKED{{else}}WOULD BLOCK{{end}} · {{.connector}} · {{.body_defenseclaw_hook_event}} · {{.body_defenseclaw_security_severity}} · agent {{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}{{.body_gen_ai_agent_id}}{{end}}\\nRules: {{.rule_ids}}\\nWhy: {{.body_defenseclaw_guardrail_reason}}\"",
           "refId": "A"
         }
       ],
@@ -693,7 +980,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 37,
+        "y": 58,
         "w": 24,
         "h": 1
       }
@@ -709,7 +996,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 38,
+        "y": 59,
         "w": 15,
         "h": 11
       },
@@ -719,7 +1006,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"Rules: {{.rule_ids}}\\nMeaning: {{.body_defenseclaw_guardrail_reason}}\\nSeen on: {{.connector}} · {{.body_defenseclaw_hook_event}}\"",
+          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"Rules: {{.rule_ids}}\\nMeaning: {{.body_defenseclaw_guardrail_reason}}\\nSeen on: {{.connector}} · {{.body_defenseclaw_hook_event}}\"",
           "refId": "A"
         }
       ],
@@ -739,7 +1026,7 @@
       "description": "A quick guide to the stable built-in rule ID families.",
       "gridPos": {
         "x": 15,
-        "y": 38,
+        "y": 59,
         "w": 9,
         "h": 11
       },
@@ -755,7 +1042,7 @@
       "description": "A simple operator workflow, with advanced correlation only when needed.",
       "gridPos": {
         "x": 0,
-        "y": 49,
+        "y": 70,
         "w": 24,
         "h": 5
       },
@@ -769,7 +1056,7 @@
       "title": "Kernel denials (Linux)",
       "gridPos": {
         "x": 0,
-        "y": 54,
+        "y": 75,
         "w": 24,
         "h": 1
       },
@@ -785,13 +1072,13 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 55,
+        "y": 76,
         "w": 6,
         "h": 5
       },
       "targets": [
         {
-          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"enforcement.block.applied\" | body_defenseclaw_enforcement_initiator=\"kernel\")[$__range])) or vector(0)",
+          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"enforcement.block.applied\" | body_defenseclaw_enforcement_initiator=\"kernel\")[$__range])) or vector(0)",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -840,13 +1127,13 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 55,
+        "y": 76,
         "w": 6,
         "h": 5
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"ai.runtime.kernel_event\" | body_defenseclaw_ai_runtime_kernel_outcome=\"blocked\" | unwrap body_defenseclaw_ai_runtime_kernel_count | __error__=\"\")[$__range])) or vector(0)",
+          "expr": "sum(sum_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"ai.runtime.kernel_event\" | body_defenseclaw_ai_runtime_kernel_outcome=\"blocked\" | unwrap body_defenseclaw_ai_runtime_kernel_count | __error__=\"\")[$__range])) or vector(0)",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -895,13 +1182,13 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 60,
+        "y": 81,
         "w": 24,
         "h": 8
       },
       "targets": [
         {
-          "expr": "sum by (control, connector, user, process) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"enforcement.block.applied\" | body_defenseclaw_enforcement_initiator=\"kernel\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\", user=\"{{if .body_defenseclaw_user_name}}{{.body_defenseclaw_user_name}} ({{.body_user_id}}){{else}}{{.body_user_id}}{{end}}\", process=\"{{.body_defenseclaw_ai_runtime_process}}\")[$__range]))",
+          "expr": "sum by (control, connector, user, process) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$machine\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"enforcement.block.applied\" | body_defenseclaw_enforcement_initiator=\"kernel\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\", user=\"{{if .body_defenseclaw_user_name}}{{.body_defenseclaw_user_name}} ({{.body_user_id}}){{else}}{{.body_user_id}}{{end}}\", process=\"{{.body_defenseclaw_ai_runtime_process}}\")[$__range]))",
           "refId": "DENIALS",
           "datasource": {
             "type": "loki",
@@ -1016,6 +1303,46 @@
         ],
         "skipUrlSync": false,
         "hide": 0
+      },
+      {
+        "name": "machine",
+        "label": "Machine",
+        "description": "host.name of the computer whose gateway made the decision. Applies to every Loki panel on this board; the metric panels stay fleet-wide. Defaults to All.",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "defenseclaw-loki"
+        },
+        "definition": "label_values({service_name=\"defenseclaw\"}, host_name)",
+        "query": {
+          "label": "host_name",
+          "refId": "LokiVariableQueryEditor-VariableQuery",
+          "stream": "{service_name=\"defenseclaw\"}",
+          "type": 1
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "skipUrlSync": false,
+        "hide": 0,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ]
       },
       {
         "name": "decision",
@@ -1184,6 +1511,26 @@
         "name": "user",
         "label": "User regex",
         "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows every Loki panel on this board to records that carry that user. Prometheus metric panels have no per-user label and stay fleet-wide.",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
+        "hide": 0
+      },
+      {
+        "name": "profile",
+        "label": "Profile regex",
+        "description": "Regex over the guardrail profile name an enforced decision ran under (none when no profile applied). Narrows the Who-was-blocked row. Defaults to every profile.",
         "type": "textbox",
         "query": ".*",
         "current": {

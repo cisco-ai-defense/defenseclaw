@@ -124,8 +124,8 @@ PASS  group defenseclaw-windows           1 member(s)
 ```
 
 `devices --noncompliant` and `status --app ... --remediation ...` read device and
-install state. Credentials, Graph permissions, every command and a troubleshooting
-table are in the [tenant reference](/docs/enterprise/mdm/intune-tenant).
+install state. Credentials, Graph permissions and every command are in
+[The helper](#the-helper); failures are in [Troubleshooting](#troubleshooting).
 
 ## Identity through Intune
 
@@ -145,8 +145,8 @@ as a separate root platform script. Its `MEMBERS` setting is the complete local 
 membership list; the script refuses an existing group it did not create or a root
 administrator did not explicitly claim ([Linux setup](/docs/enterprise/mdm/intune-linux)).
 Intune enrollment alone does not synchronize Entra group membership to Linux. Example
-profiles, the Entra group mapping on Windows and a config-only change are in the
-[tenant reference](#guardrail-profiles-and-entra-groups).
+profiles, the Entra group mapping on Windows and a config-only change are in
+[Guardrail profiles and Entra groups](#guardrail-profiles-and-entra-groups) below.
 A device in bundle mode takes config changes only as signed bundles and refuses a
 plain config with `bundle_required`.
 

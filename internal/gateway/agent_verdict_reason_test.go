@@ -149,6 +149,61 @@ func TestObserveNoticeNamesTheRuleLikeTheBlock(t *testing.T) {
 	}
 }
 
+// The observe-mode notice for an MCP server its install admission rejected
+// names the server and the verdict kind as the action-mode block does, not a
+// row of "<redacted len=N sha=...>" spans (rel-1-0-6:GAP-0198). The scanner
+// error inside the reason stays out of the agent's view in both modes.
+func TestObserveNoticeNamesTheRejectedMCPServerLikeTheBlock(t *testing.T) {
+	source := `mcp server "fcpend" is disabled because its install admission rejected it (scanner failure (fail-closed): scanner: mcp-scanner exited 1: ValueError: refusing to scan local MCP server 'fcpend': command 'node' is not an allowlisted stdio launcher (allowed: npx, uvx)); asset_policy.mode does not apply to admission verdicts`
+	subject := "MCP server fcpend is disabled because its install admission rejected it (scanner failure (fail-closed))"
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__fcpend__ping"}
+	for _, standalone := range []bool{true, false} {
+		useAgentVerdictProfile(t, standalone, false)
+		resp := claudeCodeResponseFor(req, "allow", "block", "HIGH", source, nil, "observe", true)
+		want := "DefenseClaw would block this in action mode: HIGH Claude Code hook finding: " + subject
+		if resp.AdditionalContext != want {
+			t.Fatalf("standalone=%v observe notice = %q\nwant %q", standalone, resp.AdditionalContext, want)
+		}
+		block := claudeCodeResponseFor(req, "block", "block", "HIGH", source, nil, "action", true)
+		if !strings.Contains(block.Reason, "("+subject+")") {
+			t.Fatalf("standalone=%v action block = %q, want it to name %q", standalone, block.Reason, subject)
+		}
+		codex := codexResponseFor("PreToolUse", "allow", "block", "HIGH", source, nil, "observe", true)
+		if !strings.HasSuffix(codex.AdditionalContext, ": "+subject) {
+			t.Fatalf("standalone=%v codex observe notice = %q", standalone, codex.AdditionalContext)
+		}
+		generic := agentHookResponseForProfile(connector.HookProfile{Name: "hermes"}, agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call"},
+			"allow", "block", "HIGH", source, nil, "observe", true, connector.HookCapability{})
+		if !strings.HasSuffix(generic.AdditionalContext, ": "+subject) {
+			t.Fatalf("standalone=%v generic observe notice = %q", standalone, generic.AdditionalContext)
+		}
+		for _, notice := range []string{resp.AdditionalContext, codex.AdditionalContext, generic.AdditionalContext} {
+			if strings.Contains(notice, redactedTokenPrefix) || strings.Contains(notice, "allowlisted") {
+				t.Fatalf("standalone=%v notice kept redacted or scanner text: %q", standalone, notice)
+			}
+		}
+	}
+	// An asset-policy reason is worded in the notice the same way.
+	useAgentVerdictProfile(t, true, false)
+	asset := "ASSET-POLICY reason_code=admin-deny asset_type=mcp asset_name=fcdeny connector=claudecode surface=hook"
+	resp := claudeCodeResponseFor(req, "allow", "block", "HIGH", asset, nil, "observe", true)
+	if want := "DefenseClaw would block this in action mode: HIGH Claude Code hook finding: MCP server fcdeny is denied by asset policy"; resp.AdditionalContext != want {
+		t.Fatalf("asset-policy observe notice = %q\nwant %q", resp.AdditionalContext, want)
+	}
+	// A reason outside the known shapes keeps the redaction.
+	odd := `mcp server "fcpend" is disabled because its install admission rejected it (something else); asset_policy.mode does not apply to admission verdicts`
+	resp = claudeCodeResponseFor(req, "allow", "block", "HIGH", odd, nil, "observe", true)
+	if !strings.Contains(resp.AdditionalContext, redactedTokenPrefix) {
+		t.Fatalf("unknown admission verdict reached the notice: %q", resp.AdditionalContext)
+	}
+	// Secure Client keeps its pinned (redacted) wording.
+	useAgentVerdictProfile(t, false, true)
+	resp = claudeCodeResponseFor(req, "allow", "block", "HIGH", source, nil, "observe", true)
+	if !strings.Contains(resp.AdditionalContext, redactedTokenPrefix) {
+		t.Fatalf("Secure Client observe notice = %q, want the redacted reason", resp.AdditionalContext)
+	}
+}
+
 func applyMarkerRulePack(t *testing.T, connectorName string) {
 	t.Helper()
 	pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), "default"))

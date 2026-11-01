@@ -403,6 +403,39 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(restart.call_count, 2)
         self.assertEqual(restart.call_args_list[1].kwargs["connectors"], ["claudecode"])
 
+    def test_bare_batch_that_drops_connectors_names_them_and_the_add_command_gap2615(self):
+        # GAP-2615: setup -c amp --yes on a multi-connector install sets the
+        # exact roster; when the gateway refuses that switch, the error must
+        # say the batch tried to remove the others and how to add one instead.
+        self._seed_map("claudecode", "codex")
+        prior = tuple(self.app.cfg.active_connectors())
+        with (
+            _setup_patches() as restart,
+            patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False),
+        ):
+            restart.side_effect = [click.ClickException("connector switch rollback boundary"), None]
+            result = _invoke(["-c", "cursor", "--mode", "action", "--yes"], self.app)
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("sets the exact connector list, so it removes: claudecode, codex", result.output)
+        self.assertIn("tried to remove claudecode, codex", result.output)
+        self.assertIn("defenseclaw setup cursor --mode action --yes", result.output)
+        self.assertNotIn("run the same setup command again", result.output)
+        self.assertEqual(tuple(self.app.cfg.active_connectors()), prior)
+
+    def test_bare_batch_that_keeps_the_roster_has_no_replace_hint_gap2615(self):
+        self._seed_map("codex", "cursor")
+        with (
+            _setup_patches() as restart,
+            patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False),
+        ):
+            restart.side_effect = [click.ClickException("connector runtime readiness failed"), None]
+            result = _invoke(["-c", "codex", "-c", "cursor", "--yes"], self.app)
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("tried to remove", result.output)
+        self.assertNotIn("sets the exact connector list", result.output)
+
     def test_failed_restart_restores_the_discovery_cache_from_before_the_version_check(self):
         # GAP-0547: `setup codex --mode action` republished agent_discovery.json
         # in its version check, before the rollback point was taken. The
@@ -624,7 +657,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             original_save()
 
         def select(_data_dir, connectors):
-            events.append("select-exact-1.18.11")
+            events.append("select-exact-2.1.4")
             self.assertEqual(tuple(connectors), ("opencode",))
             return record_test_setup_agent_selections(_data_dir, connectors)
 
@@ -663,9 +696,9 @@ class TestAdditiveSetupCommand(unittest.TestCase):
                 allow_trusted_path_prompt=True,
             )
 
-        self.assertEqual(events[0], "select-exact-1.18.11")
-        self.assertLess(events.index("select-exact-1.18.11"), events.index("generic-trust-prompt"))
-        self.assertLess(events.index("select-exact-1.18.11"), events.index("save"))
+        self.assertEqual(events[0], "select-exact-2.1.4")
+        self.assertLess(events.index("select-exact-2.1.4"), events.index("generic-trust-prompt"))
+        self.assertLess(events.index("select-exact-2.1.4"), events.index("save"))
         selected.assert_called_once()
         trusted.assert_called_once()
         generic.assert_not_called()
@@ -695,7 +728,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             patch(
                 "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
                 side_effect=click.ClickException(
-                    "exact SST OpenCode 1.18.20 rejected; PATH OpenCode 1.18.19 is not authority"
+                    "exact SST OpenCode 1.18.20 rejected; PATH OpenCode 2.1.4 is not authority"
                 ),
             ),
             patch(
@@ -1394,10 +1427,8 @@ class TestWriteConnectorIdentityUnit(unittest.TestCase):
         gc.hook_fail_mode = "closed"
         _write_connector_identity(self.app.cfg, "codex", "add")
         self.assertEqual(gc.connectors["claudecode"].hook_fail_mode, "")
-        # A per-user outage follows the default tier, whatever is saved
-        # (oss-outage-open); Secure Client keeps the global closed in observe
-        # and action mode.
-        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "open")
+        # The saved global closed choice applies to the seeded connector.
+        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
         gc._secure_client = True
         self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
         gc.connectors["claudecode"].mode = "action"
@@ -1614,6 +1645,29 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertEqual(set(gc.connectors), {"codex", "cursor"})
         self.assertEqual(gc.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
+
+    # GAP-2125: a running gateway tears the connector down on its config
+    # reload, so --no-restart must not say the hooks stay until a restart.
+    def test_remove_no_restart_says_the_running_gateway_applies_it_on_reload(self):
+        self._seed_map("codex", "cursor", "devin")
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "devin", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        text = " ".join(result.output.split())
+        self.assertNotIn("still installed until you restart", text)
+        self.assertIn("removes the connector's hooks when it reloads the config", text)
+        self.assertIn("a stopped one removes them when it next starts", text)
+
+    # GAP-2125: a new primary (here the last connector) waits for a restart,
+    # so the restart text stays true there.
+    def test_remove_no_restart_of_the_primary_says_a_restart_applies_it(self):
+        self._seed_single("codex")
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "codex", "--force", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        text = " ".join(result.output.split())
+        self.assertIn("still installed until you restart defenseclaw-gateway", text)
+        self.assertNotIn("when it reloads the config", text)
 
     # Removing the next-to-last retains its map entry so overrides stay lossless.
     def test_remove_retains_one_entry_map(self):
@@ -3078,6 +3132,34 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         snapshot = cmd_setup._capture_setup_desired_snapshot_once(self.app.cfg)
         self.assertFalse(snapshot.picked_connector_existed)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit repair test")
+    def test_setup_snapshot_repairs_owner_readable_config_yaml_gap2603(self):
+        config_path = os.path.abspath(os.fspath(cmd_setup.config_path_for_data_dir(self.app.cfg.data_dir)))
+        with open(config_path, "w", encoding="utf-8") as fh:
+            fh.write("config_version: 9\n")
+        os.chmod(config_path, 0o644)
+
+        snapshot = cmd_setup._capture_setup_desired_snapshot_once(self.app.cfg)
+
+        self.assertTrue(snapshot.config_existed)
+        self.assertEqual(snapshot.config_bytes, b"config_version: 9\n")
+        self.assertEqual(os.stat(config_path).st_mode & 0o777, 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit rejection test")
+    def test_setup_snapshot_refuses_group_writable_config_yaml_and_names_the_fix(self):
+        config_path = os.path.abspath(os.fspath(cmd_setup.config_path_for_data_dir(self.app.cfg.data_dir)))
+        with open(config_path, "w", encoding="utf-8") as fh:
+            fh.write("config_version: 9\n")
+        os.chmod(config_path, 0o664)
+
+        with self.assertRaises(OSError) as raised:
+            cmd_setup._capture_setup_desired_snapshot_once(self.app.cfg)
+
+        self.assertIn("config.yaml rollback source is not private", str(raised.exception))
+        self.assertIn("chmod 600", str(raised.exception))
+        self.assertNotIn(config_path, str(raised.exception))
+        self.assertEqual(os.stat(config_path).st_mode & 0o777, 0o664)
+
     def test_name_stable_failed_registration_path_cannot_report_exact_success(self):
         prior_path = os.path.abspath(os.path.join(self.tmp_dir, "registrations", "prior-a.json"))
         failed_path = os.path.abspath(os.path.join(self.tmp_dir, "private-profile", "failed-b.json"))
@@ -4012,8 +4094,8 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
                 self.assertEqual(gc.connectors[connector].mode, "action")
                 self.assertEqual(gc.connectors[connector].hook_fail_mode, "closed")
                 self.assertEqual(gc.effective_mode(connector), "action")
-                # Saved, but a per-user outage follows the default tier.
-                self.assertEqual(gc.effective_hook_fail_mode(connector), "open")
+                # An explicit saved closed choice wins over the default tier.
+                self.assertEqual(gc.effective_hook_fail_mode(connector), "closed")
 
 
     def test_toggling_one_connector_mode_lands_per_connector(self):

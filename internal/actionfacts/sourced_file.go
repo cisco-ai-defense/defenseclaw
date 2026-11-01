@@ -18,8 +18,8 @@ package actionfacts
 
 import (
 	"sort"
-	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -144,7 +144,7 @@ func sourcedFileTwin(source string) (string, bool) {
 		return "", false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
-		Parse(strings.NewReader(source), "")
+		Parse(shellparse.Reader(source), "")
 	if err != nil {
 		return "", false
 	}

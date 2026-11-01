@@ -4,10 +4,10 @@
 package gateway
 
 import (
-	"regexp"
 	"sort"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -22,7 +22,7 @@ import (
 // identitySourcesMax bounds the (source, directory) pairs the cache keeps.
 const identitySourcesMax = 8
 
-var identitySourceToken = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+var identitySourceToken = lazyregexp.New(`^[a-z][a-z0-9_]{0,31}$`)
 
 // identityHealthDirectories are the directory values /health names.
 var identityHealthDirectories = map[string]bool{

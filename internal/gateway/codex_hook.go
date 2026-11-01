@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -145,7 +146,7 @@ type codexHookResponse struct {
 	RuleIDs      []string `json:"rule_ids,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive back through the unified dispatch so
-	// finalizeAgentHook can honor it on the hook_decision event +
+	// finalizeAgentHookAnswer can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled     *bool  `json:"-"`
 	SourceReason         string `json:"-"`
@@ -221,6 +222,14 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	req codexHookRequest,
 	profile connector.HookProfile,
 ) codexHookResponse {
+	callCWD := req.CWD
+	if req.HookEventName == "PreToolUse" || req.HookEventName == "PermissionRequest" {
+		callCWD = codexToolCallCWD(ctx, req)
+	}
+	// The snapshot takes the folder the call runs in, not only the session
+	// folder, before the call is judged (GAP-1388).
+	startup := a.applyInstructionStartup(ctx, "codex", req.SessionID, req.HookEventName, req.Source, callCWD)
+	ctx = a.withInstructionStartup(ctx, "codex", req.SessionID, startup)
 	mode := sandboxHookMode(ctx, "codex", a.codexMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "codex") && !a.codexEnabled() {
@@ -250,6 +259,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			if judge := a.judgeFor(ctx); judge != nil {
 				judge.ObserveSessionPrompt(ctx, req.Prompt)
 			}
+			a.observeUserDownloadRequest(ctx, req.Prompt)
 		}
 		// Secure Client keeps the prompt of main, so AI Defense is sent the
 		// text it was sent before (issue #1092).
@@ -273,12 +283,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	case "PreToolUse", "PermissionRequest":
 		toolName := codexToolName(req)
 		toolArgs := codexToolArgs(req)
-		toolCWD := req.CWD
-		if codexShellExecutionTool(toolName) {
-			if workdir, ok := req.ToolInput["workdir"].(string); ok && workdir != "" {
-				toolCWD = agentHookTrustedActionCWD(ctx, req.CWD, workdir)
-			}
-		}
+		toolCWD := callCWD
 		actionTool, resourceIdentity := trustedToolActionFromContext(
 			ctx, "codex", toolName, toolName,
 		)
@@ -349,8 +354,17 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	wouldBlock := rawAction == "block" && mode != "action"
-	if mode != "action" && rawAction == "block" {
+	stateMutation := a.provenActiveStateMutation(ctx, verdict)
+	effectiveMode := mode
+	if stateMutation {
+		effectiveMode = "action"
+	}
+	if capable, _ := mapHookActionForProfile("block", effectiveMode, req.HookEventName,
+		profile.Capabilities, profile, nil); capable != "block" {
+		stateMutation = false
+	}
+	wouldBlock := rawAction == "block" && mode != "action" && !stateMutation
+	if mode != "action" && rawAction == "block" && !stateMutation {
 		action = "allow"
 	}
 	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {
@@ -369,7 +383,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		if mergedAction == "block" {
 			capable, capableWouldBlock := mapHookActionForProfile(
 				"block",
-				mode,
+				effectiveMode,
 				req.HookEventName,
 				caps,
 				profile,
@@ -437,7 +451,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 // prompt. It tells the model to name the task and "Do not answer the request",
 // so the injection judge read it, next to the user prompt after it, as an
 // instruction override and blocked a benign prompt (GAP-0230).
-var codexTitleHelperPreamble = regexp.MustCompile(`^\s*` +
+var codexTitleHelperPreamble = lazyregexp.New(`^\s*` +
 	regexp.QuoteMeta("Generate a concise, single-line task title of at most ") + `\d+` +
 	regexp.QuoteMeta(" characters and under five words where possible. Start with an imperative verb."+
 		" Capitalize only the first word unless the user's language, proper nouns, acronyms, or code terms require otherwise."+
@@ -545,7 +559,7 @@ func (a *APIServer) codexEnabled() bool {
 	if cfg.Guardrail.HasConnector("codex") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "codex")
+	return cfg.Guardrail.NamesConnector("codex")
 }
 
 func (a *APIServer) codexMode(ctx context.Context) string {
@@ -838,6 +852,23 @@ func reasonOrDefault(reason string) string {
 
 func normalizeCodexAction(action string) string {
 	return normalizedGuardrailAction(action)
+}
+
+// codexToolCallCWD is the folder a Codex tool call runs in: a shell call
+// runs in its workdir, from tool_input or, since the Codex hook leaves it
+// out, from the call in the session rollout (codexTranscriptCallWorkdir).
+func codexToolCallCWD(ctx context.Context, req codexHookRequest) string {
+	if !codexShellExecutionTool(codexToolName(req)) {
+		return req.CWD
+	}
+	workdir, _ := req.ToolInput["workdir"].(string)
+	if workdir == "" {
+		workdir = codexTranscriptCallWorkdir(ctx, req)
+	}
+	if workdir == "" {
+		return req.CWD
+	}
+	return agentHookTrustedActionCWD(ctx, req.CWD, workdir)
 }
 
 func codexToolName(req codexHookRequest) string {
@@ -2527,7 +2558,7 @@ func codexReaderTargetWithType(
 func codexCatInputs(argv []string) (codexStaticReaderInputs, bool) {
 	var inputs codexStaticReaderInputs
 	options := true
-	for _, arg := range argv[1:] {
+	for _, arg := range argvOperands(argv) {
 		if options && arg == "--" {
 			options = false
 			continue

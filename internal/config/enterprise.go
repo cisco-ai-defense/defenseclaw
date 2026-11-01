@@ -17,7 +17,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -28,6 +27,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 )
@@ -47,6 +47,9 @@ type EnterpriseConfig struct {
 	// OpenShell is how the lifecycle provides and pins OpenShell for
 	// managed sandboxes. Every key is lifecycle (restart-required).
 	OpenShell EnterpriseOpenShellConfig `mapstructure:"openshell" yaml:"openshell,omitempty"`
+	// Identity names trusted connectors (trusted_connectors.go). Lifecycle
+	// (restart-required); honoured only from a signed bundle.
+	Identity EnterpriseIdentityConfig `mapstructure:"identity" yaml:"identity,omitempty"`
 }
 
 // enterprise.openshell values.
@@ -443,8 +446,8 @@ const (
 const MaxTetragonEnforceAcks = 4
 
 var (
-	tetragonBurnInPattern     = regexp.MustCompile(`^[0-9]{1,4}h$`)
-	tetragonEnforceAckPattern = regexp.MustCompile(`^sha256:[0-9a-f]{12}$`)
+	tetragonBurnInPattern     = lazyregexp.New(`^[0-9]{1,4}h$`)
+	tetragonEnforceAckPattern = lazyregexp.New(`^sha256:[0-9a-f]{12}$`)
 )
 
 // TetragonEnforceAcks is enterprise.tetragon.enforce_ack: the kernel_policy
@@ -808,8 +811,8 @@ func (e EnterpriseCoexistenceConfig) SelfUpdateDisabled() bool {
 }
 
 var (
-	enterpriseConnectorNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
-	enterpriseSHA256Pattern        = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	enterpriseConnectorNamePattern = lazyregexp.New(`^[a-z][a-z0-9_-]{0,63}$`)
+	enterpriseSHA256Pattern        = lazyregexp.New(`^[0-9a-f]{64}$`)
 )
 
 const secureClientFleetUnsupported = "fleet.enabled is unsupported for the Secure Client enterprise profile: its managed installers do not ship the Fleet policy compiler and Python runtime; disable Fleet or deploy the standalone profile on a separate host"
@@ -922,8 +925,8 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 }
 
 var (
-	enterpriseOpenShellExactVersion = regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.([0-9]+)$`)
-	enterpriseOpenShellVersionRange = regexp.MustCompile(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9]+\.[0-9]+))?$`)
+	enterpriseOpenShellExactVersion = lazyregexp.New(`^([0-9]+)\.([0-9]+)\.([0-9]+)$`)
+	enterpriseOpenShellVersionRange = lazyregexp.New(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9]+\.[0-9]+))?$`)
 )
 
 // validateEnterpriseOpenShell checks enterprise.openshell (standalone only;
@@ -1107,6 +1110,16 @@ func standaloneRulePackDefaultWithExists(cfg *Config, dataDir, goos string, exis
 	if cfg.rulePackDirDeclared {
 		// An explicit value that happens to equal the implicit path stays
 		// for the lifecycle to refuse (it is inside data_dir).
+		return
+	}
+	if strings.TrimSpace(cfg.Guardrail.RulePack) != "" {
+		// guardrail.rule_pack names the pack, so the implicit rule_pack_dir
+		// loads nothing, but it is part of the config and guardrail policy
+		// digests. A standard account cannot stat the root-only policy_dir
+		// pack, kept it, and computed another digest than root for the same
+		// signed bundle (GAP-1003). It no longer depends on what the caller
+		// may read.
+		cfg.Guardrail.RulePackDir = path.Join(layout.VendorPolicyDir, "guardrail", "default")
 		return
 	}
 	if policyPack != "" {
@@ -1354,7 +1367,8 @@ func enterpriseBlockEmpty(e EnterpriseConfig) bool {
 		strings.TrimSpace(e.Coexistence.PerUserInstall) == "" && e.Coexistence.DisableSelfUpdate == nil &&
 		strings.TrimSpace(e.Network.HTTPSProxy) == "" && strings.TrimSpace(e.Network.NoProxy) == "" &&
 		tetragonEmpty(e.Tetragon) &&
-		e.OpenShell == (EnterpriseOpenShellConfig{})
+		e.OpenShell == (EnterpriseOpenShellConfig{}) &&
+		len(e.Identity.TrustedConnectors) == 0
 }
 
 // standaloneInlineSecrets lists the inline secret keys cfg sets.
@@ -1526,6 +1540,9 @@ func validateEnterpriseConfig(cfg *Config) error {
 				"(the AI Defense key); the lifecycle provisions the gateway token",
 		}
 	}
+	if err := ValidateTrustedConnectors(e.Identity); err != nil {
+		return err
+	}
 	en := e.Enrollment
 	if err := oneOf("enterprise.enrollment.mode", en.Mode, EnterpriseEnrollmentAuto, EnterpriseEnrollmentManifest); err != nil {
 		return err
@@ -1633,7 +1650,7 @@ func validateEnterpriseConfig(cfg *Config) error {
 			return &V8SemanticError{
 				Path:    "$.enterprise.network.https_proxy",
 				Summary: err.Error(),
-				Action:  netguard.ProxyURLAdvice,
+				Action:  netguard.ProxyURLAdviceFor(err),
 				cause:   err,
 			}
 		}
@@ -1724,6 +1741,52 @@ func validateEnterpriseHomeRoot(root string) error {
 	return nil
 }
 
+// policyInputInspectError words a policy input the gateway cannot even
+// stat. A folder above it that the gateway's account cannot traverse (a
+// custom pack folder made with mkdir -p under a umask 077 root shell is 0700)
+// failed every later reload with a bare "lstat ...: permission denied" that
+// named neither the folder nor the fix (GAP-0757); it now names the folder,
+// its mode and the chmod that fixes it, as ensure does.
+func policyInputInspectError(label, dir string, err error) error {
+	if runtime.GOOS != "windows" && errors.Is(err, os.ErrPermission) {
+		if folder, mode, ok := untraversableAncestor(dir); ok {
+			return fmt.Errorf("config: inspect %s %s: %s is %04o, so the gateway cannot reach the folders below it; "+
+				"make it traversable (for example: chmod o+x %s): %w", label, dir, folder, mode.Perm(), folder, os.ErrPermission)
+		}
+	}
+	return fmt.Errorf("config: inspect %s %s: %w", label, dir, err)
+}
+
+// untraversableAncestor returns the deepest folder above path that this
+// process can stat but not pass through: stat of its child fails with
+// permission denied.
+func untraversableAncestor(path string) (string, os.FileMode, bool) {
+	path = filepath.Clean(path)
+	var chain []string
+	for current := path; ; {
+		chain = append(chain, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	for i := len(chain) - 1; i > 0; i-- {
+		folder, child := chain[i], chain[i-1]
+		info, err := os.Lstat(folder)
+		if err != nil || !info.IsDir() {
+			return "", 0, false
+		}
+		if _, err := os.Lstat(child); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				return folder, info.Mode(), true
+			}
+			return "", 0, false
+		}
+	}
+	return "", 0, false
+}
+
 // validateManagedStandalonePolicyInputs requires every policy input the
 // standalone local engine reads to be unwritable by standard users. The
 // Secure Client profile never consults these (its local detectors are off),
@@ -1745,7 +1808,7 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
-			return fmt.Errorf("config: inspect %s %s: %w", label, dir, err)
+			return policyInputInspectError(label, dir, err)
 		}
 		if err := validate(dir, label, serviceAccount); err != nil {
 			return fmt.Errorf("config: managed standalone %s is not administrator-controlled: %w", label, err)
@@ -1755,20 +1818,135 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 		}
 		return nil
 	}
-	// The Rego modules in policy_dir are enforcement policy too, so the
-	// whole tree is checked, not only the folder (GAP-1499).
-	if err := check("policy_dir", cfg.PolicyDir, managed.ValidateTrustedServiceRuntimeTree); err != nil {
-		return err
-	}
 	// Every pack the gateway can load: the v9 rule_pack and custom_packs
 	// selections, profile packs and the v8 rule_pack_dir alike.
 	dirs := cfg.ReferencedRulePackDirs()
+	// The Rego modules in policy_dir are enforcement policy too, so the
+	// whole tree is checked, not only the folder (GAP-1499), except the
+	// rule pack folders under <policy_dir>/guardrail that no setting names:
+	// the gateway never loads them, and one a standard user could write
+	// failed every admin command and the gateway's reload (GAP-1694).
+	var referenced []string
+	for _, dir := range dirs {
+		if dir = strings.TrimSpace(dir); dir != "" {
+			referenced = append(referenced, filepath.Clean(dir))
+		}
+	}
+	policyTree := func(root, label, serviceAccount string) error {
+		return validatePolicyTree(root, label, serviceAccount, referenced, managedPolicyTreeChecks)
+	}
+	if err := check("policy_dir", cfg.PolicyDir, policyTree); err != nil {
+		return err
+	}
 	for _, label := range RulePackCheckOrder(dirs) {
 		if err := check(label, dirs[label], managed.ValidateTrustedServiceRuntimeDir); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// policyTreeChecks are the trust checks of validatePolicyTree: a folder
+// alone, a folder with everything below it, and a file.
+type policyTreeChecks struct {
+	dir, tree, file func(path, label, serviceAccount string) error
+}
+
+// managedPolicyTreeChecks are the checks of a managed standalone policy_dir
+// tree (a test replaces them: the real ones need root-owned folders).
+var managedPolicyTreeChecks = policyTreeChecks{
+	dir: managed.ValidateTrustedServiceRuntimeDir, tree: managed.ValidateTrustedServiceRuntimeTree, file: managed.ValidateTrustedServiceRuntimeFilePath,
+}
+
+// ValidateManagedPolicyDir is the trust check of a managed standalone
+// policy_dir: dir and everything below it, except the rule pack folders
+// under <dir>/guardrail that no setting of cfg names. The config validation
+// and the gateway's policy build both use it, so a folder the CLI accepts
+// is one the gateway loads: the gateway kept its own whole-tree check and
+// refused to start on an unreferenced 0777 folder the CLI accepted
+// (GAP-1694).
+func ValidateManagedPolicyDir(cfg *Config, dir, serviceAccount string) error {
+	var referenced []string
+	for _, pack := range cfg.ReferencedRulePackDirs() {
+		if pack = strings.TrimSpace(pack); pack != "" {
+			referenced = append(referenced, filepath.Clean(pack))
+		}
+	}
+	return validatePolicyTree(dir, "policy_dir", serviceAccount, referenced, managedPolicyTreeChecks)
+}
+
+// validatePolicyTree checks root and everything below it, except the
+// folders directly under <root>/guardrail that hold none of the referenced
+// rule pack directories.
+func validatePolicyTree(root, label, serviceAccount string, referenced []string, checks policyTreeChecks) error {
+	if err := checks.dir(root, label, serviceAccount); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return managed.UnreadableServiceFolder(root, label, err)
+	}
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		if !entry.IsDir() {
+			if err := checks.file(path, label, serviceAccount); err != nil {
+				return err
+			}
+			continue
+		}
+		if entry.Name() != "guardrail" {
+			if err := checks.tree(path, label, serviceAccount); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := checks.dir(path, label, serviceAccount); err != nil {
+			return err
+		}
+		packs, err := os.ReadDir(path)
+		if err != nil {
+			// A guardrail folder made under umask 077 is 0700 and the
+			// gateway service account cannot list it (GAP-2432).
+			return managed.UnreadableServiceFolder(path, label, err)
+		}
+		for _, pack := range packs {
+			packPath := filepath.Join(path, pack.Name())
+			switch {
+			case !pack.IsDir():
+				err = checks.file(packPath, label, serviceAccount)
+			case PathHoldsAny(packPath, referenced):
+				err = checks.tree(packPath, label, serviceAccount)
+			}
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// PathHoldsAny reports whether dir is one of paths or a folder above one.
+// On macOS and Windows, whose volumes ignore case, a path spelled with
+// another case names the same folder: a referenced pack "guardrail/Strict"
+// is the folder "strict", which must keep its full check (GAP-1802).
+func PathHoldsAny(dir string, paths []string) bool {
+	return pathHoldsAny(runtime.GOOS, dir, paths)
+}
+
+func pathHoldsAny(goos, dir string, paths []string) bool {
+	fold := goos == "darwin" || goos == "windows"
+	if fold {
+		dir = strings.ToLower(dir)
+	}
+	for _, p := range paths {
+		if fold {
+			p = strings.ToLower(p)
+		}
+		if p == dir || strings.HasPrefix(p, dir+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 func oneOf(name, value string, allowed ...string) error {

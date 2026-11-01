@@ -79,8 +79,11 @@ access-control boundary when exposed beyond loopback.
   local storage configuration.
 - [`grafana/provisioning/`](grafana/provisioning/): datasource and dashboard
   provisioning.
-- [`grafana/dashboards/`](grafana/dashboards/): the nineteen shipped dashboard
-  JSON definitions.
+- [`grafana/dashboards/`](grafana/dashboards/): the dashboard JSON
+  definitions: 18 core dashboards, which the wheel ships, plus the optional
+  Fleet dashboard (`defenseclaw-fleet.json`), which releases ship in
+  `defenseclaw-fleet-assets.tar.gz`. That makes 19 from a source checkout,
+  which seeds this directory as is.
 - [`bin/openclaw-observability-bridge`](bin/openclaw-observability-bridge):
   low-level bundle controller; [`run.sh`](run.sh) is its compatibility shim.
 

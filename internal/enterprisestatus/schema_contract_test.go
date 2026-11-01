@@ -82,6 +82,8 @@ func sampleResults() map[string]*Result {
 		{Name: "local-sqlite", Kind: "local_sqlite", Enabled: true, Signals: []string{"logs"}, RedactionProfiles: []string{"none"}},
 		{Name: "galileo", Kind: "otlp", Enabled: true, Preset: "galileo", Signals: []string{"traces"}, RedactionProfiles: []string{"strict"}},
 	}
+	storeBytes := int64(3 << 20)
+	installed.AuditStore = &AuditStore{RetentionDays: 7, MaxStoreMB: 64, SizeBytes: &storeBytes}
 	installed.CoverageComplete = true
 	installed.SecurityComplete = true
 	installed.AddWarning("not_started", "installed with --no-start")

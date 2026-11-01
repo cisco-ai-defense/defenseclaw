@@ -565,7 +565,16 @@ func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) 
 // credential references from credentialsDir; empty derives it from a
 // standalone source's own path.
 func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string) (*loadedConfigV8File, error) {
-	return loadConfigV8Source(path, defaultDataDir, credentialsDir, false)
+	return loadConfigV8SourceView(path, defaultDataDir, credentialsDir, false, nil)
+}
+
+// loadManagedCandidateV8File is loadConfigV8FileWithCredentials for a
+// managed config candidate: a config_version 8 file is checked through
+// config.V8ManagedChecksView, as the Linux and macOS lifecycle checks it, so
+// the top-level update_check the 1.0.x CLI wrote, which the migration moves to
+// update.check, is not refused as an unknown setting (rel-1-0-2 GAP-0145).
+func loadManagedCandidateV8File(path, defaultDataDir, credentialsDir string) (*loadedConfigV8File, error) {
+	return loadConfigV8SourceView(path, defaultDataDir, credentialsDir, false, config.V8ManagedChecksView)
 }
 
 // loadConfigV8Source loads and strict-parses the file. With migrate, a
@@ -582,6 +591,12 @@ func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string
 // the caller would decode again. Each decode is a full pass over every
 // guardrail profile (GAP-0276).
 func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate bool) (loaded *loadedConfigV8File, err error) {
+	return loadConfigV8SourceView(path, defaultDataDir, credentialsDir, migrate, nil)
+}
+
+// loadConfigV8SourceView is loadConfigV8Source with the bytes it checks read
+// through view (nil: as read).
+func loadConfigV8SourceView(path, defaultDataDir, credentialsDir string, migrate bool, view func([]byte) []byte) (loaded *loadedConfigV8File, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		path = config.ConfigPath()
@@ -593,6 +608,9 @@ func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate boo
 	raw, err := readConfigV8Source(absPath)
 	if err != nil {
 		return nil, err
+	}
+	if view != nil {
+		raw = view(raw)
 	}
 	sourceRaw := append([]byte(nil), raw...)
 	legacyV8 := migrate && config.NeedsMigrationV9(raw)

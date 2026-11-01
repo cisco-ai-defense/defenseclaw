@@ -207,7 +207,7 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 	check(3, assetID, false, configDiffAssets)
 	if err := logger.LogPolicyBundleReceipt("operator:manual-r3", audit.PolicyBundle{ID: hotID, Version: 2},
 		audit.PolicyBundleReceipt{ReceiptID: hotID, State: audit.PolicyBundleConfirmed,
-			ConfigGeneration: 2, EnforcingVersion: 2, Restart: false}); err != nil {
+			ConfigGeneration: 2, EnforcingVersion: 2, Restart: false}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	records := capture.snapshot()

@@ -147,6 +147,10 @@ def _build_fixture(
     (repo / "scripts").mkdir(parents=True)
     shutil.copy(BUILDER, repo / "scripts" / BUILDER.name)
     shutil.copy(PACKAGE_CHECK, repo / "scripts" / PACKAGE_CHECK.name)
+    # The preinstall is stamped with the legacy sandbox guard.
+    shutil.copy(ROOT / "scripts" / "stamp-package-script.sh", repo / "scripts" / "stamp-package-script.sh")
+    (repo / "packaging" / "scripts" / "lib").mkdir(parents=True)
+    shutil.copy(ROOT / "packaging" / "scripts" / "lib" / "legacy-sandbox-guard.sh", repo / "packaging" / "scripts" / "lib" / "legacy-sandbox-guard.sh")
     e2fs_builder = repo / "scripts" / "build-macos-e2fsprogs.sh"
     e2fs_builder.write_text(
         "#!/bin/sh\n"
@@ -157,6 +161,22 @@ def _build_fixture(
         encoding="utf-8",
     )
     e2fs_builder.chmod(0o755)
+    # The scanner runtime (GAP-1527) is built with uv and a CPython download;
+    # the fixture lays down the shape the real builder writes.
+    runtime_builder = repo / "packaging" / "unix" / "build-scanner-runtime.sh"
+    runtime_builder.parent.mkdir(parents=True)
+    runtime_builder.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'while [ "$#" -gt 0 ]; do case "$1" in --out-dir) out=$2; shift 2 ;; *) shift ;; esac; done\n'
+        'install -d -m 0755 "$out/python/bin" "$out/python/lib/python3.13/lib-dynload"\n'
+        'install -m 0755 /dev/null "$out/python/bin/python3.13"\n'
+        'install -m 0644 /dev/null "$out/python/lib/python3.13/lib-dynload/_ssl.cpython-313-darwin.so"\n'
+        'printf \'{"schema": 1}\\n\' >"$out/runtime.json"\n'
+        'chmod 0644 "$out/runtime.json"\n',
+        encoding="utf-8",
+    )
+    runtime_builder.chmod(0o755)
     launchd = repo / "packaging" / "launchd-standalone" / "agents"
     launchd.mkdir(parents=True)
     for label in agents:
@@ -304,7 +324,15 @@ def test_macos_pkg_signs_all_executables_with_hardened_runtime(tmp_path: Path):
         *E2FSPROGS_TOOLS,
     }
     calls = tmp_path / "codesign-calls"
-    assert {path.name for path in calls.iterdir()} == set(executables)
+    # The scanner runtime's interpreter and extension modules are signed too
+    # (GAP-1527); the interpreter with the scanner entitlements.
+    runtime_signed = {"python3.13", "_ssl.cpython-313-darwin.so"}
+    assert {path.name for path in calls.iterdir()} == set(executables) | runtime_signed
+    python_args = (calls / "python3.13").read_text(encoding="utf-8").splitlines()
+    assert python_args[:6] == ["--force", "--timestamp", "--options", "runtime", "--sign", "fixture-developer-id"]
+    assert "--entitlements" in python_args and "com.cisco.defenseclaw.scanner-python" in python_args
+    module_args = (calls / "_ssl.cpython-313-darwin.so").read_text(encoding="utf-8").splitlines()
+    assert module_args[:6] == ["--force", "--timestamp", "--options", "runtime", "--sign", "fixture-developer-id"]
     for name, executable in executables.items():
         args = (calls / name).read_text(encoding="utf-8").splitlines()
         assert args[:-1] == [

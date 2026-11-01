@@ -264,12 +264,22 @@ func TestPendingUnprotectedRecordKeepsRealVerifyFailures(t *testing.T) {
 		t.Helper()
 		var wantWarnings, gotWarnings []string
 		for _, w := range want.Warnings {
-			wantWarnings = append(wantWarnings, w.Code)
+			if w.Code != enterprisestatus.CodeSecurityIncomplete {
+				wantWarnings = append(wantWarnings, w.Code)
+			}
 		}
 		pending := 0
 		for _, w := range got.Warnings {
 			if w.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete && strings.Contains(w.Message, "NOT COVERED (scan pending)") {
 				pending++
+				continue
+			}
+			if w.Code == enterprisestatus.CodeSecurityIncomplete {
+				// The summary of why the fields are false now also names
+				// the pending scan (GAP-1863).
+				if !strings.Contains(w.Message, enterprisehooks.UnprotectedCodeInstallScanIncomplete) {
+					t.Fatalf("%s: the security_incomplete summary does not name the pending scan: %q", name, w.Message)
+				}
 				continue
 			}
 			gotWarnings = append(gotWarnings, w.Code)

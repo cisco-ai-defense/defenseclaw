@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/forward/bundle-receipt-forward-v1.json",
+  "title": "forwardable bundle receipt",
+  "description": "Forwardable members of bundle-receipt.schema.json (receipt.json and receipt-events/<receipt_id>.json, 4.9). The actor, principal and change summary stay on the device. Forward schema (private #14 option A): the members a management agent may send off the device. Project with allowlist-and-drop (forward/project.py): a member not listed here, or a value outside its pattern or enum, is removed, never rejected, so members a newer DefenseClaw adds are not forwarded until this file lists them. Only DefenseClaw-minted ids, bundle and receipt ids, digests, counts, codes, booleans, enums, versions and times pass; account names and identifiers (user, uid, SID, UPN, group), paths and messages never do.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "receipt_id": {
+      "type": "string",
+      "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "delivery_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+    },
+    "bundle_id": {
+      "type": "string",
+      "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "received",
+        "verified",
+        "staged",
+        "applied",
+        "confirmed",
+        "failed"
+      ]
+    },
+    "error_code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "warning_codes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      },
+      "maxItems": 64
+    },
+    "disabled_by_bundle": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      },
+      "maxItems": 64
+    },
+    "effective_policy_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "enforcing_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "config_generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "current_bundle_id": {
+      "type": "string",
+      "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "current_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "restart": {
+      "type": "boolean"
+    },
+    "restart_required": {
+      "type": "boolean"
+    },
+    "rolled_back": {
+      "type": "boolean"
+    },
+    "rollback_of": {
+      "type": "string",
+      "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "sessions_restart_required": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "applied_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "confirmed_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "finished_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    }
+  }
+}

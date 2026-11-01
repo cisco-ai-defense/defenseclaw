@@ -31,7 +31,7 @@ func TestEnterpriseHookWorkerRemoveReportsPathsAndRemainingEntries(t *testing.T)
 		ConnectorName: "opencode", UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(),
 		APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000",
 		APIToken: strings.Repeat("a", 64), OTLPPathToken: strings.Repeat("b", 64),
-		GuardrailMode: "action", HookFailMode: "closed", AgentVersion: "1.18.33",
+		GuardrailMode: "action", HookFailMode: "closed", AgentVersion: "2.1.4",
 		Registry: connector.NewDefaultRegistry(),
 	}
 	if _, err := enterprisehooks.Install(context.Background(), opts); err != nil {

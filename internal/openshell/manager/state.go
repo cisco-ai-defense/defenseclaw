@@ -190,6 +190,16 @@ type record struct {
 	// why it is in the error phase, in words (errorPhaseReason).
 	Phase       string `json:"phase,omitempty"`
 	PhaseReason string `json:"phase_reason,omitempty"`
+	// PlacePhase is the last phase the sandbox's own place said of it, and
+	// PlacePhaseOf that place (its recordPlace then): a phase given while
+	// DefenseClaw was connected there, or a read of it (proveGuests). It
+	// outlives a daemon restart and a later read that failed: a guest
+	// whose place's last word is that it holds no compute (stopped,
+	// deleted, missing) stays released while that place cannot be read
+	// (provenPhase, GAP-1176). A start there later is a new word, read
+	// once the place answers.
+	PlacePhase   string `json:"place_phase,omitempty"`
+	PlacePhaseOf string `json:"place_phase_of,omitempty"`
 	// ReadyAt is when DefenseClaw saw the sandbox become ready (zero while
 	// it is not): a restarted daemon that finds it still ready reports its
 	// uptime from then. OpenShell 0.1.1 reports no transition times.
@@ -233,6 +243,15 @@ type record struct {
 	// after a change (a policy OpenShell did not load, a record that could
 	// not be saved) still has the next start restore it.
 	OldSupervisorNetworkRestore bool `json:"old_supervisor_network_restore,omitempty"`
+	// Contained is why DefenseClaw keeps running, contained, a MicroVM it
+	// had to stop on its own (a hook alarm, repeated foreign network rules,
+	// a lost listener, a revoked registration, a start that failed) but
+	// could not stop without losing what its guest had not synced
+	// (containUnsynced, GAP-0902). Its network is withdrawn as a legacy
+	// guest's is (the OldSupervisor fields), it is reported unprotected and
+	// no new sandbox runs while it lives (containedLive); the next
+	// successful start restores its create-time network and clears it.
+	Contained string `json:"contained,omitempty"`
 	// HookCounts are the hook counters as the daemon last kept them
 	// (keepHookCounts): a restarted daemon goes on from them. Copies of a
 	// record share them, so they are replaced, never changed in place.

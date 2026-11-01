@@ -1124,7 +1124,7 @@ def _supported_path(path: YAMLPath) -> bool:
     if section == "redaction_profiles":
         return _supported_profile_path(path)
     if section == "local":
-        return len(path) == 3 and path[2] in {"path", "judge_bodies_path", "retention_days"}
+        return len(path) == 3 and path[2] in {"path", "judge_bodies_path", "retention_days", "max_store_mb"}
     if section == "connectors":
         return (
             len(path) == 4

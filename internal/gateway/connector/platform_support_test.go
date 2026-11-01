@@ -23,10 +23,10 @@ import (
 )
 
 var windowsSupportedConnectorNames = []string{
-	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode",
+	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro",
 }
 
-var windowsPreviewConnectorNames = []string{}
+var windowsPreviewConnectorNames = []string{"opencode"}
 
 var windowsNotCertifiedConnectorNames = []string{}
 
@@ -132,6 +132,9 @@ func TestConnectorSupportOnOS(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		for _, name := range allWindowsConnectorNames() {
 			want := PlatformSupported
+			if name == "opencode" {
+				want = PlatformPreview
+			}
 			if got := ConnectorSupportOnOS(name, goos).Status; got != want {
 				t.Errorf("%s on %s status=%q, want %q", name, goos, got, want)
 			}

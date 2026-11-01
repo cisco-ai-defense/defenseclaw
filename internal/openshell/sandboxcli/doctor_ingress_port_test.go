@@ -37,3 +37,31 @@ func TestDoctorDoesNotCallAnAdvertisedButUnboundIngressPortServed(t *testing.T) 
 		}
 	}
 }
+
+// GAP-1875: with sandboxes unavailable because another account holds the
+// ingress port, a daemon whose status names only the ports it holds still
+// serves its egress port: the doctor does not call that port another
+// process's.
+func TestDoctorKeepsTheEgressPortTheDaemonHoldsWhileIngressIsTaken(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.status.Available = false
+	ta.daemon.status.ListenersProven = true
+	ta.daemon.status.IngressAddr = ""
+	ta.daemon.status.EgressAddr = "127.0.0.1:19073"
+	var ingress, egress bool
+	ta.HostDoctor = func(_ context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+		for _, port := range d.Ports {
+			switch port.Name {
+			case "ingress":
+				ingress = port.ServedByDaemon
+			case "egress":
+				egress = port.ServedByDaemon
+			}
+		}
+		return &openshell.DoctorReport{}
+	}
+	ta.runDoctor(bg)
+	if ingress || !egress {
+		t.Fatalf("ports served by the daemon: ingress=%t egress=%t, want the egress port only", ingress, egress)
+	}
+}

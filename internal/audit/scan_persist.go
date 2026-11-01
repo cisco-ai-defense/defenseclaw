@@ -299,7 +299,10 @@ func (s *Store) ListRecentFindingsInSession(
 		candidateLimit = limit * correlationCandidateMultiplier
 	}
 	instant := "julianday(timestamp)"
-	if ok, err := hasColumnDB(s.db, "scan_findings", "retention_timestamp_unix_nano"); err == nil && ok {
+	if s.findingsRetentionInstant.Load() {
+		instant = "retention_timestamp_unix_nano"
+	} else if ok, err := hasColumnDB(s.db, "scan_findings", "retention_timestamp_unix_nano"); err == nil && ok {
+		s.findingsRetentionInstant.Store(true)
 		instant = "retention_timestamp_unix_nano"
 	}
 	query := fmt.Sprintf(`

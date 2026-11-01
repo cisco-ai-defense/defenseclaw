@@ -28,12 +28,12 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -103,7 +103,7 @@ const (
 	cliGrace = 10 * time.Second
 )
 
-var envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var envKeyPattern = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func (c CLI) base(verbs ...string) ([]string, error) {
 	if !ValidGatewayName(c.Gateway) {

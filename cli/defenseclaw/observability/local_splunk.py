@@ -965,12 +965,10 @@ class NativeLocalSplunkController:
         if parsed.scheme != "https" or parsed.hostname != "127.0.0.1" or parsed.port != 8088:
             raise LocalStackError("Local Splunk HEC readiness URL must be loopback HTTPS")
         health_url = urllib.parse.urlunparse(parsed._replace(path="/services/collector/health", query=""))
-        token = values.get("DEFENSECLAW_HEC_TOKEN", "")
-        request = urllib.request.Request(
-            health_url,
-            headers={"Authorization": f"Splunk {token}"},
-            method="GET",
-        )
+        # The health endpoint checks all HEC queues without a token. The
+        # listener's local certificate is not verified, so never send a
+        # credential on this readiness probe.
+        request = urllib.request.Request(health_url, method="GET")
         context = ssl.create_default_context()
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE

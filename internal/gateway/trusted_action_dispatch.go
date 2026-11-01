@@ -24,17 +24,24 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	osuser "os/user"
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
@@ -168,10 +175,21 @@ type trustedActionRequest struct {
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
+	// gitBashDrive marks a gitBashDriveView request (GAP-2577).
+	gitBashDrive bool
+	// staticOperandReading marks a DynamicOperandTwins reading judged behind
+	// ProtectHome: for an operand the call as written left unknown in the
+	// hook client map, the answer of the reading
+	// (hookpaths.ReadingTargetPrefix) decides (GAP-2477).
+	staticOperandReading bool
 	// ResolvedWriteTargets comes from the hook running as the real user.
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
 	ResolvedWriteTargets map[string]string
+	// ActiveAgentFileIdentities maps the hook client's file identity of each
+	// instruction file the session loaded to that file, for a gateway that
+	// cannot read it (hookpaths.LoadedIdentityPrefix).
+	ActiveAgentFileIdentities map[string]string // loaded file -> identity
 	// Hermes' native patch parser can reinterpret a symlink target containing
 	// a line break as another file directive. Its write views require the
 	// narrower patch-target proof, including in guest-directory views.
@@ -183,10 +201,25 @@ type trustedActionRequest struct {
 	recordTelemetry func(trustedActionTelemetry)
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
+	// overBudgetOmission, when set, is told that the authorized-keys proof
+	// found only an operand that the client's bounded map left out because
+	// it was full (hookpaths.BudgetKey, GAP-0146).
+	overBudgetOmission *bool
+	// unresolvedTarget, when set, is told that the authorized-keys proof
+	// failed closed on an operand the managed hook client could not
+	// resolve (an empty map value: an unreadable folder, a link loop) and
+	// this gateway cannot resolve either (rel-1-0-2:GAP-0690).
+	unresolvedTarget *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
 	evidenceCWD string
+	// parentPatch is the whole shell call of a simple-command child. A stage
+	// such as the apply_patch of @'...'@ | apply_patch reads an envelope that
+	// only the whole text shows: when every apply_patch of that text reads a
+	// literal envelope (hookpaths.ApplyPatchWriteTargets known), the child is
+	// judged on those directive targets, not as a file-fed patch.
+	parentPatch *actionfacts.Input
 	// SandboxGuestCWD is a sandbox call's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); Input.CWD is its host mount. Only
 	// the authorized-keys proofs read it, and only to add a match.
@@ -248,6 +281,12 @@ func dispatchTrustedAction(
 	if _, ok := managedHookPeerFromContext(parent); ok {
 		request.ProtectedHomeHook = true
 	}
+	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
+	if trustedActionCommandTooDeep(request.Input) {
+		// Past the reading bounds: no reader below parses it, and the call
+		// takes the over-limit path (GAP-2537).
+		return trustedActionLimitFindings(request.EnforcementCapable)
+	}
 	var (
 		facts     actionfacts.Facts
 		analyzed  bool
@@ -265,15 +304,79 @@ func dispatchTrustedAction(
 			if !analyzed {
 				facts = actionfacts.Analyze(request.Input)
 			}
-			request.record(facts, findings)
+			request.record(toolChainPlacedFacts(facts, request), findings)
 		}()
 	}
 	if parent == nil {
 		parent = context.Background()
 	}
+	// A ~<active user> tilde-prefix names the active home from the password
+	// database (GAP-2378), and under a Windows home an MSYS drive mount
+	// (/c/...) names the drive path (GAP-2375): the twin with that spelling
+	// is judged too, and a block proven there counts, as for the plain one.
+	if twin, ok := homeSpellingTwinRequest(request, trustedActiveLogins(parent, request.Input.ActiveHome)...); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	// A cp, mv, install, ln, dd or tee call with a runtime-expanded operand word has
+	// a partial argv that ties no path to the call, so a literal destination
+	// went unjudged (cp a.txt ~/.defenseclaw/config.yaml $(true), GAP-2477).
+	// Each reading with static operands is one way the call can run, and a
+	// block proven on one counts.
+	for _, twin := range dynamicOperandTwinRequests(request) {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	// A pathname pattern under ~/.defenseclaw names the state files it
+	// matches when the shell runs the call (cp a.txt ~/.defenseclaw/conf*.yaml,
+	// GAP-2496); the reading with the matches is judged, and only its block
+	// counts.
+	if twin, ok := stateGlobTwinRequest(request); ok {
+		defer func() {
+			twinFindings := dispatchTrustedAction(parent, twin)
+			if request.ProtectedHomeHook {
+				// The named reading lists state names that may not exist,
+				// and its other operands are not in the client map, which
+				// was walked for the call as written: only its state-write
+				// block counts there.
+				twinFindings = slices.DeleteFunc(twinFindings, func(f RuleFinding) bool {
+					return f.RuleID != "tamper.detector_state_write"
+				})
+			}
+			findings = withTwinProvenBlocks(findings, twinFindings)
+		}()
+	}
+	// A managed hook peer call that reaches the gateway without a cwd is also read
+	// in the directory the hook client ran it in, as a per-user gateway
+	// reads it; only a private-key read block of that reading counts
+	// (GAP-0179).
+	if twin, ok := protectedHomePrivateKeyTwinRequest(request); ok {
+		defer func() {
+			twinFindings := slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
+				return trustedActionFindingKey(f.RuleID) != "PATH-SSH-KEY"
+			})
+			findings = withTwinProvenBlocks(findings, twinFindings)
+		}()
+	}
+	// A file writer run through nohup, nice, time, timeout, env NAME=value,
+	// command, sudo or exec (or after a word that may expand to nothing)
+	// writes what the plain call writes (GAP-2512); the plain reading is
+	// judged, and only its block counts.
+	if twin, ok := wrapperUnwrapTwinRequest(request); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
+	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {
 		// Two argument keys name one field: judge each candidate (GAP-0678).
 		return dispatchConflictingToolArguments(parent, request, conflict)
@@ -325,7 +428,7 @@ func dispatchTrustedActionWith(
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
 	}()
 	defer func() {
-		findings = withActiveStateTargetMention(generation, request, findings)
+		findings = withActiveStateTargetMention(generation, request, facts, findings)
 	}()
 	if !request.simpleCommandPass {
 		defer func() {
@@ -333,6 +436,14 @@ func dispatchTrustedActionWith(
 			wholeWriteSafe := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
 			simples := actionfacts.SimpleCommands(request.Input, facts)
+			if len(simples) == 0 && wholeCommandKnown && trustedStatementBudgetExceeded(request.Input, facts, wholeCommand) {
+				// The analysis stopped at its node or input bound before the
+				// per-command split, so no simple command of the call was
+				// judged: the call is over the statement budget at every size,
+				// as it is between 129 statements and those bounds (GAP-0146,
+				// GAP-0568).
+				simples = []actionfacts.SimpleCommand{{EvaluationFailure: "limit"}}
+			}
 			evidenceCWDs := trustedSimpleCommandEvidenceCWDs(request, simples)
 			for index, simple := range simples {
 				if simple.EvaluationFailure != "" {
@@ -341,19 +452,20 @@ func dispatchTrustedActionWith(
 						// evaluation. It is not itself an enforcement finding.
 						continue
 					}
-					const ruleID = "ACTION-COMPOUND-LIMIT"
-					failure := RuleFinding{
-						RuleID: ruleID, Title: "Shell command exceeds policy evaluation limit",
-						Severity: "CRITICAL", Confidence: 1,
-						enforcement: findingEnforcementAllowed,
-					}.withTrustedActionProof(newEvaluationFailureFindingProof(ruleID))
-					findings = withSimpleCommandFindings(findings,
-						applyTrustedActionProofBoundary([]RuleFinding{failure}, request.EnforcementCapable))
+					findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
 					break
 				}
 				child := request
 				child.Input.Command = simple.Text
 				child.Input.CWD = simple.CWD
+				// An earlier cd, pushd or env -C of the action moved a Git
+				// Bash shell to another native Windows directory: the
+				// child's operands resolve there (GAP-2473). The flag stays
+				// off for the action itself and for a child in the hook's
+				// own directory, whose readings are unchanged.
+				child.Input.MovedWindowsShellCWD = request.Input.MovedWindowsShellCWD ||
+					simple.CWD != "" && !strings.HasPrefix(simple.CWD, "/") &&
+						filepath.VolumeName(simple.CWD) != "" && !strings.EqualFold(filepath.Clean(simple.CWD), filepath.Clean(request.Input.CWD))
 				if evidenceCWDs != nil {
 					child.evidenceCWD = evidenceCWDs[index]
 				}
@@ -372,10 +484,24 @@ func dispatchTrustedActionWith(
 				child.conflictSource = nil
 				child.record, child.recordTelemetry = nil, nil
 				child.simpleCommandPass = true
+				parent := request.Input
+				if wholeCommandKnown {
+					parent.Command = wholeCommand
+				}
+				child.parentPatch = &parent
 				// The child is judged by this generation (a meet member) within
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
+				if child.Input.MovedWindowsShellCWD && !request.Input.MovedWindowsShellCWD {
+					// The moved-directory reading only adds findings: the
+					// child's reading without it (a hooks-dir removal or move
+					// under a home spelling) keeps every block it proved
+					// (GAP-2473 RV-r10-1).
+					unmoved := child
+					unmoved.Input.MovedWindowsShellCWD = false
+					childFindings = withSimpleCommandFindings(childFindings, dispatchTrustedAction(ctx, unmoved))
+				}
 				if simple.ZshHistoryBuiltin {
 					// Zsh's history builtin lists events (fc -l). The Bash-only
 					// history -c clear rule does not apply inside that shell.
@@ -387,8 +513,8 @@ func dispatchTrustedActionWith(
 					if !checkedWholeWrite {
 						checkedWholeWrite = true
 						wholeWriteSafe = wholeCommandKnown &&
-							hookpaths.ActionCommandDecisionWithGlobFacts(wholeCommand,
-								request.Input.CWD, request.Input.ActiveHome, clientGlobFacts(request)) == ""
+							hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(wholeCommand,
+								request.Input.CWD, request.Input.ActiveHome, request.Input.DialectHint, clientGlobFacts(request)) == ""
 					}
 					if wholeWriteSafe {
 						// A child with a missing action-local value cannot prove a
@@ -771,17 +897,86 @@ func dispatchTrustedActionWith(
 	return withTwinProvenBlocks(finalized, twinFindings)
 }
 
-// The action target check treats a resolved active security-state mention as
-// a protected target independently of the command's operand roles. Keep its
-// finding separate from the SSH-key proof and honor the selected rule pack.
+// The action target check uses a resolved active security-state mention to
+// find candidates, then requires the executing operand's mutation role and
+// physical target before adding a finding. Keep it separate from SSH keys.
 func withActiveStateTargetMention(
 	generation *compiledRulePackCategories,
 	request trustedActionRequest,
+	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
-	command, known := trustedBashCommandInput(request.Input)
-	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+	// A pattern, brace list, rsync or git clean that expands onto the
+	// state names no path fact, so it is proved from the shell words
+	// (GAP-2047); so is an archive extraction into it (GAP-2415).
+	// A bash here-string, which the POSIX parse rejects, is judged by its
+	// POSIX twin alone (GAP-2047 row a): a read through one names state but
+	// changes none.
+	// A find with an unquoted -name/-path pattern is judged by its quoted
+	// twin (GAP-2498); xargs fed by a static printf or echo by the call it
+	// makes (GAP-0052).
+	// `cat <<< WORD | xargs rm -rf` is a here-string too: its xargs twin
+	// is judged before the here-string verdict ends the check (pod check31).
+	// A Git Bash call on Windows names its home as a drive path (C:/Users/x)
+	// that the POSIX link, pattern and xargs checks do not read as absolute:
+	// they also judge its drive view (GAP-2577).
+	driveFacts, driveRequest, driven := gitBashDriveView(facts, request)
+	hereStringMutates, hereStringJudged := hereStringStateMutation(facts, request)
+	xargsMutates := xargsStaticInputStateMutation(facts, request) ||
+		driven && xargsStaticInputStateMutation(driveFacts, driveRequest)
+	if hereStringJudged && !hereStringMutates && !xargsMutates {
 		return findings
+	}
+	// A managed call whose cwd the gateway cannot see is also judged for
+	// links in the directory the hook client walked its words from
+	// (GAP-2569), and its relative patterns are walked from there through
+	// the cd, pushd and popd of the call (GAP-2485, T11 managed RHEL: the
+	// nested-cd rows Y5 and Y6 started nowhere and proved nothing).
+	linkFacts, linkRequest, placed := managedLinkWalkView(request)
+	throughLink := func(check func(actionfacts.Facts, trustedActionRequest) bool) bool {
+		return check(facts, request) || placed && check(linkFacts, linkRequest) ||
+			driven && check(driveFacts, driveRequest)
+	}
+	// A write through a link the command makes to active state is proven by
+	// the link reading: the mention scan and the whole-action proof do not
+	// follow the new link (GAP-2522), nor read sed -i --follow-symlinks
+	// (GAP-2529).
+	if !hereStringMutates && !xargsMutates && !globbedStateMutation(facts) &&
+		(!placed || !globbedStateMutation(linkFacts)) && !throughLink(globbedStateMutationThroughLink) &&
+		!findGlobTwinStateMutation(facts, request) &&
+		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) &&
+		!provenFollowedInPlaceStateWrite(facts, request) && !fileToolWriteThroughLinkToState(facts, request) {
+		command, known := trustedBashCommandInput(request.Input)
+		if !known {
+			return findings
+		}
+		if !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
+			!factsHaveFindHandOff(facts) && !throughLink(stateOperandThroughLink) &&
+			(!driven || !globbedStateMutation(driveFacts)) {
+			// Behind ProtectHome the gateway cannot open the user's home, so the
+			// mention scan cannot place a home target. A redirect target the
+			// shell opens is still proven against the hook client's resolved
+			// target map (GAP-2328: $CMD; echo $X > ~/.defenseclaw/config.yaml).
+			// So is a proven writer or delete whose operand the client
+			// followed into the state tree through a link the gateway cannot
+			// read (GAP-2549: rm /dev/shm/x/y/config.yaml, y -> ~/.defenseclaw).
+			if !request.ProtectedHomeHook ||
+				!provenShellRedirectStateWrite(request) && !provenStateMutationPath(facts, request) {
+				// The mention scan places files below the state directory; a
+				// cmd /c body that removes or moves the directory itself (cmd
+				// /c rd /s /q %USERPROFILE%\.defenseclaw) names none, while the
+				// cmd twin (or the PowerShell reading, GAP-2414) proves the mutation of
+				// the state root (classifier-ps checker it9 RV9-2 X02, X07).
+				if !strings.Contains(strings.ToLower(command), ".defenseclaw") ||
+					!provenCMDSlashCStateWrite(request) && !provenPowerShellStateWrite(request) {
+					return findings
+				}
+			}
+		} else if !throughLink(provenStateMutationPath) && !provenBashAggregateStateWrite(request) &&
+			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
+			!provenPowerShellStateWrite(request) {
+			return findings
+		}
 	}
 	const ruleID = "tamper.detector_state_write"
 	_, rule, ok := trustedActionCatalogRule(generation, ruleID)
@@ -794,21 +989,3117 @@ func withActiveStateTargetMention(
 		Confidence: rule.Confidence, Tags: append([]string(nil), rule.Tags...),
 		Evidence: trustedActionInputText(request.Input, ""), LineNumber: 1,
 	}
-	if index >= 0 {
+	if index >= 0 && findings[index].contributesToEnforcement() && findings[index].proof.authorizes(ruleID) &&
+		(findings[index].proof.kind == findingProofActionFactsSemantic ||
+			findings[index].proof.kind == findingProofActionFactsSubgraph) {
+		// Keep the stronger ActionFacts proof of an actual state mutation.
+		return findings
+	}
+	if index >= 0 && findings[index].disposition == findingDispositionUnspecified &&
+		!slices.Contains(findings[index].Tags, trustedParserUncertaintyTag) {
 		finding = findings[index]
 	} else {
+		// A parser-uncertainty or audit-only finding of the rule is replaced
+		// by the rule itself: the mutation is proven ($CMD > ~/f, GAP-2225).
 		finding = adjustConfidence(request.Input.Tool, finding)
 	}
 	finding.enforcement = findingEnforcementDetectionOnly
 	if request.EnforcementCapable {
 		finding.enforcement = findingEnforcementAllowed
 	}
-	finding = finding.withTrustedActionProof(newExactFallbackFindingProof(ruleID, true, true, true, true))
+	finding = finding.withTrustedActionProof(newFindingProof(findingProofActiveStateMutation, ruleID, true))
 	if index >= 0 {
 		findings[index] = finding
 		return findings
 	}
 	return append(findings, finding)
+}
+
+// provenBashAggregateStateWrite judges the Bash reading of an all-output
+// redirect (true &> ~/.defenseclaw/config.yaml, echo x &>> f, : >& f):
+// bash and zsh write f, while the POSIX facts read "cmd &" and "> f" and
+// tie no write of f to a command (GAP-2143). The command is analyzed again
+// with the redirects spelled > f 2> f, which proves the write as it does
+// for the ordinary redirect.
+func provenBashAggregateStateWrite(request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return false
+	}
+	spelled, ok := actionfacts.BashAggregateRedirectsAsPOSIX(command)
+	if !ok {
+		return false
+	}
+	input := request.Input
+	input.Command, input.Args, input.Argv = spelled, nil, nil
+	twin := request
+	twin.Input = input
+	return provenStateMutationPath(actionfacts.Analyze(input), twin)
+}
+
+// cmdProgramWord finds a word that starts cmd.exe in an agent's shell
+// command: cmd or cmd.exe, bare or with a (single- or double-quoted) path,
+// %ComSpec% and PowerShell's $env:ComSpec / ${env:ComSpec}, at the start of
+// the command or of a statement, after the PowerShell call operator & or a
+// pipe.
+var cmdProgramWord = lazyregexp.New(`(?i)(?:^|[\s;|&(){}])(?:"[^"\r\n]*?[\\/]|'[^'\r\n]*?[\\/]|"|'|[^\s"';|&(){}]*[\\/])?(?:cmd(?:\.exe)?|\$\{?env:comspec\}?|%comspec%)["']?`)
+
+// cmdOuterReading is a grammar the outer shell may read a command with. A
+// Windows tool call does not say which shell runs it (Codex names its
+// PowerShell tool Bash, shell_command may be Git Bash), so a cmd program word
+// counts when any reading runs it: a text span hides it only when every
+// reading hides it (over-block, never under-block; checker it10 RV10-1).
+type cmdOuterReading int
+
+const (
+	cmdReadingPowerShell cmdOuterReading = iota
+	cmdReadingGitBash
+	cmdReadingCMD
+)
+
+// cmdTextSpan is a part of a shell command the outer shell reads as text,
+// not as a statement: a terminated quoted word, a # comment, a PowerShell
+// <# #> block comment or here-string. runs marks a quoted word that is itself
+// run as a command line (any string of a powershell/pwsh/Invoke-Expression
+// statement, a string after a bash/sh -c flag); args marks a Start-Process
+// -ArgumentList string, which is the command line of the program it starts.
+//
+// expands marks a span whose $(...) (and Git Bash `...`) bodies run: a
+// double-quoted word or an unquoted Git Bash here-document body. heredoc
+// marks a Git Bash here-document body, whose runs (fed to a shell) and
+// cmdFeed (fed to cmd.exe) are set from its command line (checker it11
+// RV11-1). argvRuns marks a Git Bash double-quoted word whose command
+// substitution holds a here-document and whose output is the argv or input
+// of a launcher, an unknown program, a shell or cmd (env "$(cat <<EOF)"):
+// the bodies of those here-documents are read as run by a shell and cmd
+// (GAP-2539).
+type cmdTextSpan struct {
+	start, end       int
+	inner            string
+	runs, args       bool
+	expands, heredoc bool
+	cmdFeed          bool
+	argvRuns         bool
+}
+
+func cmdSingleQuote(r rune, reading cmdOuterReading) bool {
+	switch reading {
+	case cmdReadingCMD:
+		return false
+	case cmdReadingPowerShell:
+		// PowerShell also reads the typographic single quotes as quotes.
+		return r == '\'' || r == '‘' || r == '’' || r == '‚' || r == '‛'
+	}
+	return r == '\''
+}
+
+func cmdDoubleQuote(r rune, reading cmdOuterReading) bool {
+	if reading == cmdReadingPowerShell {
+		return r == '"' || r == '“' || r == '”' || r == '„'
+	}
+	return r == '"'
+}
+
+// cmdQuotedWord reads the quoted word that starts at i. ok is false when no
+// quote starts there or the word is not terminated: an unterminated quote is
+// not text, the scan goes on (RV10-1). In the Git Bash reading a $(...)
+// inside a double-quoted word is a command substitution that bash parses on
+// its own, so a quote inside it (or inside a here-document it opens) does
+// not end the word (pod it17: git commit -m "$(cat <<'EOF' ... "cmd //c"
+// ... EOF )" was read as two words and the mention blocked). budget bounds
+// that nested reading; past it the word ends at the next quote as before.
+func cmdQuotedWord(command string, i int, reading cmdOuterReading, budget *int) (end int, inner string, ok bool) {
+	open, size := utf8.DecodeRuneInString(command[i:])
+	single, double := cmdSingleQuote(open, reading), cmdDoubleQuote(open, reading)
+	if !single && !double {
+		return 0, "", false
+	}
+	closes := func(r rune) bool {
+		if single {
+			return cmdSingleQuote(r, reading)
+		}
+		return cmdDoubleQuote(r, reading)
+	}
+	for j := i + size; j < len(command); {
+		r, w := utf8.DecodeRuneInString(command[j:])
+		if double && j+w < len(command) &&
+			((reading == cmdReadingPowerShell && r == '`') || (reading == cmdReadingGitBash && r == '\\')) {
+			_, next := utf8.DecodeRuneInString(command[j+w:])
+			j += w + next
+			continue
+		}
+		if double && reading != cmdReadingCMD && r == '$' && j+1 < len(command) && command[j+1] == '(' &&
+			budget != nil && *budget > 0 {
+			end, ok := 0, false
+			if reading == cmdReadingGitBash {
+				end, ok = cmdGitBashSubstitutionEnd(command, j+2, budget)
+			} else {
+				end, ok = cmdPowerShellSubexpressionEnd(command, j+2, budget)
+			}
+			if ok {
+				j = end
+				continue
+			}
+		}
+		if closes(r) {
+			if reading == cmdReadingPowerShell && j+w < len(command) {
+				if r2, w2 := utf8.DecodeRuneInString(command[j+w:]); closes(r2) {
+					j += w + w2 // PowerShell '' or "" inside the word.
+					continue
+				}
+			}
+			inner = command[i+size : j]
+			if single && reading == cmdReadingPowerShell {
+				inner = strings.ReplaceAll(inner, "''", "'")
+			}
+			return j + w, inner, true
+		}
+		j += w
+	}
+	return 0, "", false
+}
+
+// cmdGitBashSubstitutionEnd returns the offset after the ) that closes the
+// Git Bash command substitution whose body starts at start: quotes,
+// backticks, nested parentheses and here-document bodies inside it are
+// skipped as bash parses them. ok is false when it does not close (or the
+// budget runs out): the caller keeps its plain reading.
+func cmdGitBashSubstitutionEnd(command string, start int, budget *int) (int, bool) {
+	depth := 1
+	var pending []cmdHeredoc
+	for j := start; j < len(command); {
+		*budget--
+		if *budget <= 0 {
+			return 0, false
+		}
+		c := command[j]
+		switch {
+		case c == '\\':
+			j += 2
+			continue
+		case c == '\'':
+			k := strings.IndexByte(command[j+1:], '\'')
+			if k < 0 {
+				return 0, false
+			}
+			*budget -= k
+			j += k + 2
+			continue
+		case c == '"':
+			end, _, ok := cmdQuotedWord(command, j, cmdReadingGitBash, budget)
+			if !ok {
+				return 0, false
+			}
+			*budget -= end - j
+			j = end
+			continue
+		case c == '`':
+			k := strings.IndexByte(command[j+1:], '`')
+			if k < 0 {
+				return 0, false
+			}
+			*budget -= k
+			j += k + 2
+			continue
+		case c == '<' && j+1 < len(command) && command[j+1] == '<' && (j+2 >= len(command) || command[j+2] != '<'):
+			if doc, end, ok := cmdHeredocDelimiter(command, j+2); ok {
+				pending = append(pending, doc)
+				j = end
+				continue
+			}
+		case c == '\n' && len(pending) > 0:
+			bodies, end := cmdHeredocBodies(command, j+1, pending, nil)
+			if len(bodies) < len(pending) {
+				// The search read the rest of the command (GAP-2557).
+				*budget -= len(command) - j
+				return 0, false
+			}
+			*budget -= end - j
+			pending = nil
+			j = end
+			continue
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				return j + 1, true
+			}
+		}
+		j++
+	}
+	return 0, false
+}
+
+// cmdPowerShellSubexpressionEnd returns the offset after the ) that closes
+// the PowerShell $(...) of a double-quoted string whose body starts at
+// start: strings, backtick escapes, comments and nested parentheses inside
+// it are skipped as PowerShell parses them. ok is false when it does not
+// close (or the budget runs out).
+func cmdPowerShellSubexpressionEnd(command string, start int, budget *int) (int, bool) {
+	depth := 1
+	for j := start; j < len(command); {
+		*budget--
+		if *budget <= 0 {
+			return 0, false
+		}
+		c := command[j]
+		tokenStart := j == 0 || strings.IndexByte(" \t\r\n;|&(){}", command[j-1]) >= 0
+		switch {
+		case c == '`':
+			j += 2
+			continue
+		case c == '#' && tokenStart:
+			k := strings.IndexByte(command[j:], '\n')
+			if k < 0 {
+				return 0, false
+			}
+			*budget -= k
+			j += k
+			continue
+		case c == '<' && j+1 < len(command) && command[j+1] == '#':
+			k := strings.Index(command[j+2:], "#>")
+			if k < 0 {
+				return 0, false
+			}
+			*budget -= k
+			j += k + 4
+			continue
+		case c == '\'' || c == '"':
+			end, _, ok := cmdQuotedWord(command, j, cmdReadingPowerShell, budget)
+			if !ok {
+				return 0, false
+			}
+			*budget -= end - j
+			j = end
+			continue
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				return j + 1, true
+			}
+		}
+		j++
+	}
+	return 0, false
+}
+
+// cmdHeredoc is a pending Git Bash here-document of cmdTextSpans.
+type cmdHeredoc struct {
+	delim             string
+	stripTabs, quoted bool
+	level             int
+	runs, cmdFeed     bool
+	// op is the offset of the << operator and lineStart the start of its
+	// logical command line (cmdTextSpansRead).
+	op, lineStart int
+}
+
+// cmdHeredocDelimiter reads the delimiter word after a Git Bash << at start
+// (quote removal as bash does it, $'EOF' and $"EOF" included). ok is false
+// for a here-string (<<<) or no word.
+func cmdHeredocDelimiter(command string, start int) (doc cmdHeredoc, end int, ok bool) {
+	j := start
+	if j < len(command) && command[j] == '<' {
+		return doc, 0, false
+	}
+	if j < len(command) && command[j] == '-' {
+		doc.stripTabs = true
+		j++
+	}
+	for j < len(command) && (command[j] == ' ' || command[j] == '\t') {
+		j++
+	}
+	var word strings.Builder
+	for j < len(command) && strings.IndexByte(" \t\r\n;|&<>()", command[j]) < 0 {
+		switch c := command[j]; c {
+		case '$':
+			if j+1 < len(command) && (command[j+1] == '\'' || command[j+1] == '"') {
+				j++
+				continue
+			}
+			word.WriteByte(c)
+			j++
+		case '\'', '"':
+			q := strings.IndexByte(command[j+1:], c)
+			if q < 0 {
+				return doc, 0, false
+			}
+			word.WriteString(command[j+1 : j+1+q])
+			doc.quoted = true
+			j += q + 2
+		case '\\':
+			doc.quoted = true
+			if j+1 < len(command) {
+				word.WriteByte(command[j+1])
+			}
+			j += 2
+		default:
+			word.WriteByte(c)
+			j++
+		}
+	}
+	doc.delim = word.String()
+	return doc, min(j, len(command)), doc.delim != ""
+}
+
+// cmdHeredocFeeds reports whether the logical command line around a
+// here-document operator at offset op of line hands its body to a shell
+// (bash <<EOF, cat <<EOF | sh) or to cmd.exe (cmd <<EOF): then the body runs
+// (over-block, never under-block). Every word of the line counts except,
+// with trust on, the arguments of a known text consumer (grep cmd <<EOF,
+// cat <<EOF | rg bash): they name text the consumer reads, not a receiver
+// (GAP-2530). The line is the whole command line as bash reads it: lines
+// joined by a backslash-newline, quoted words and substitutions that span
+// lines included (bash \<newline><<EOF, cat <<EOF \<newline>| bash;
+// GAP-2538).
+func cmdHeredocFeeds(line string, op int, trust bool) (runs, cmdFeed bool) {
+	for _, word := range cmdLineReceiverWords(line, op, trust) {
+		if word == cmdUnknownReceiver {
+			// "$BASH" -s <<EOF, $0 <<EOF, env "$BASH" -s <<EOF: the program
+			// is not known, so the body is read as a shell's and as cmd's
+			// (GAP-2536).
+			return true, true
+		}
+		if cmdShellWord(word) != "" {
+			runs = true
+		}
+		w := strings.NewReplacer("{", "", "}", "").Replace(strings.ToLower(strings.Trim(word, `"'`)))
+		if k := strings.LastIndexAny(w, `\/`); k >= 0 {
+			w = w[k+1:]
+		}
+		switch strings.TrimSuffix(w, ".exe") {
+		case "cmd", "%comspec%", "$env:comspec":
+			runs, cmdFeed = true, true
+		}
+	}
+	return runs, cmdFeed
+}
+
+var cmdAssignmentWord = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
+
+// cmdRedefinesCommand matches a function definition, name() or "name"()
+// (the quoted name is blanked by cmdCodeOutsideText), on the code outside
+// here-document bodies, quoted words and comments: prose in a body or a
+// title is no definition (GAP-2530 checker it2). An empty ( ) after =, $,
+// <, > or an extglob operator is an array or a substitution.
+var cmdRedefinesCommand = lazyregexp.New(`(^|[^=$<>@!*+?])\s*\(\s*\)`)
+
+// cmdRedefiningCommands are the command words that can make a text
+// consumer's name run something else (alias, function, hash -p, enable) or
+// run a string or file in the current shell (eval, source, ., trap). They
+// are matched as command words after quote removal with backslashes
+// dropped (\alias, al""ias, "eval"; GAP-2536), so a keyword that is only an
+// argument (grep -n alias) or prose stays text.
+var cmdRedefiningCommands = map[string]bool{
+	"function": true, "alias": true, "unalias": true, "hash": true, "enable": true,
+	"eval": true, "source": true, "trap": true, ".": true,
+}
+
+// cmdUnknownReceiver marks a statement that can run a program named by an
+// expansion ($BASH, "$0", ${SHELL:-sh}, $(...)) as its command word or
+// through a launcher (env "$BASH" -s): the program it runs is not known
+// (GAP-2536). Among cmdRedefines command words it marks an expansion.
+const cmdUnknownReceiver = "\x00unknown-receiver"
+
+// cmdPathAssignment marks a statement that assigns PATH (PATH=.:$PATH,
+// export PATH=...): a consumer name may then run another program
+// (GAP-2536 checker it4).
+const cmdPathAssignment = "\x00path-assignment"
+
+// cmdReservedMark prefixes a reserved word that opens or closes a compound
+// command (cmdCompoundReserved) among the cmdRedefines command words.
+const cmdReservedMark = "\x00reserved:"
+
+// cmdCompoundReserved are the reserved words, read before a statement's
+// command word, that open (+1) or close (-1) a compound command whose
+// output can still go on to a pipe (done | bash, } | bash; GAP-2547).
+var cmdCompoundReserved = map[string]int{
+	"{": 1, "if": 1, "while": 1, "until": 1,
+	"}": -1, "fi": -1, "done": -1, "esac": -1,
+}
+
+// cmdCompoundShape returns how many compound commands the Git Bash text
+// opens less the ones it closes (for, case and select count as command
+// words), and whether a statement of it starts with a closer (or the text
+// with a ) ), so the output of what it closes goes on to the rest of the
+// line (GAP-2547).
+func cmdCompoundShape(text string) (delta int, closes bool) {
+	var words []string
+	cmdScanReceiverWords(text, 0, 0, false, -1, &words, nil)
+	for _, w := range words {
+		switch w {
+		case "for", "case", "select":
+			delta++
+		}
+		if r, ok := strings.CutPrefix(w, cmdReservedMark); ok {
+			delta += cmdCompoundReserved[r]
+			closes = closes || cmdCompoundReserved[r] < 0
+		}
+	}
+	return delta, closes || strings.HasPrefix(strings.TrimLeft(text, " \t"), ")")
+}
+
+// cmdLineContinues reports a Git Bash line that ends in a pipe or list
+// operator (|, |&, ||, &&), before any comment: the command goes on on the
+// next line that holds a word, after any here-document bodies (GAP-2547).
+func cmdLineContinues(line string) bool {
+	t := strings.TrimRight(cmdLineCode(line), " \t\r")
+	return strings.HasSuffix(t, "|") || strings.HasSuffix(t, "|&") || strings.HasSuffix(t, "&&")
+}
+
+// cmdLineHasWord reports a Git Bash line with a word outside its comment.
+// Bash reads a pipe or list left open across blank and comment-only lines
+// (GAP-2547 checker it7 X03, X04), so such a line neither continues nor
+// ends the command.
+func cmdLineHasWord(line string) bool {
+	return strings.Trim(cmdLineCode(line), " \t\r") != ""
+}
+
+// cmdLineCode returns Git Bash text with its comments removed: a # that
+// starts a word outside quotes, up to the end of its physical line. The
+// logical line of a here-document inside ( ) or $( ) spans several physical
+// lines, so a comment on an earlier one hides nothing after its newline
+// (GAP-2547 checker it8 Y01, Y05, Y06).
+func cmdLineCode(line string) string {
+	var b strings.Builder
+	var quote byte
+	from := 0
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case c == '\\' && quote != '\'':
+			i++
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '#' && (i == 0 || strings.IndexByte(" \t\r\n;|&()<>", line[i-1]) >= 0):
+			b.WriteString(line[from:i])
+			j := strings.IndexByte(line[i:], '\n')
+			if j < 0 {
+				return b.String()
+			}
+			i += j
+			from = i
+		}
+	}
+	if from == 0 {
+		return line
+	}
+	b.WriteString(line[from:])
+	return b.String()
+}
+
+// cmdExpansionInertCommands never run an argument or hand standard input to
+// one, so an expansion among their arguments (cd "$REPO", echo "$X") names
+// no receiver. A path to one of them may be any program.
+var cmdExpansionInertCommands = map[string]bool{
+	"cd": true, "pushd": true, "echo": true, "printf": true, "test": true, "[": true, "[[": true,
+	"mkdir": true, "ls": true, "rm": true, "cp": true, "mv": true, "touch": true, "export": true,
+	"true": true, "false": true, ":": true,
+}
+
+// cmdRedefines reports whether the Git Bash command, with the text spans of
+// its untrusted reading, redefines a command (cmdRedefinesCommand,
+// cmdRedefiningCommands). The command words are read from the command with
+// only here-document bodies and comments blanked.
+func cmdRedefines(command string, spans []cmdTextSpan) bool {
+	if cmdRedefinesCommand.MatchString(cmdCodeOutsideText(command, spans)) {
+		return true
+	}
+	var prose []cmdTextSpan
+	for _, span := range spans {
+		if span.heredoc || (span.start >= 0 && span.start < len(command) && command[span.start] == '#') {
+			prose = append(prose, span)
+		}
+	}
+	var words []string
+	cmdScanReceiverWords(cmdCodeOutsideText(command, prose), 0, 0, false, -1, &words, nil)
+	for _, w := range words {
+		// An expansion command word can be any of them ($E 'grep() { bash; }'
+		// after E=eval, $'alias' grep=bash), and a PATH assignment changes
+		// which program a consumer name runs (GAP-2536 checker it4).
+		if cmdRedefiningCommands[w] || w == cmdUnknownReceiver || w == cmdPathAssignment {
+			return true
+		}
+	}
+	return false
+}
+
+// cmdCodeOutsideText returns command with the text spans of one reading
+// (here-document bodies, quoted words, comments) blanked. A quoted word
+// that runs in the current shell needs eval, source, . or trap outside it;
+// a command substitution runs in a subshell.
+func cmdCodeOutsideText(command string, spans []cmdTextSpan) string {
+	b := []byte(command)
+	for _, span := range spans {
+		for k := max(0, span.start); k < min(span.end, len(b)); k++ {
+			if b[k] != '\n' {
+				b[k] = ' '
+			}
+		}
+	}
+	return string(b)
+}
+
+// cmdHeredocTextConsumers read standard input as text and never run it, so a
+// shell or cmd word among their arguments is a pattern or a title, not a
+// receiver (GAP-2530). Programs with a way to run their input (sed e, awk
+// system, sort --compress-program, git aliases, a pager) are not listed.
+var cmdHeredocTextConsumers = map[string]bool{
+	"grep": true, "egrep": true, "fgrep": true, "rg": true, "wc": true, "head": true, "tail": true,
+	"cut": true, "tr": true, "cat": true, "tac": true, "tee": true, "diff": true, "nl": true,
+	"fold": true, "fmt": true, "rev": true, "base64": true, "od": true, "xxd": true, "jq": true,
+	"md5sum": true, "sha1sum": true, "sha256sum": true, "gh": true,
+}
+
+// cmdLineReceiverWords returns the words of one Git Bash line that can name
+// the program that receives a here-document body: every word of every
+// statement (split at ; | & ( ) and read inside $( ), backticks and process
+// substitutions, quoted or not), less redirect targets, except the
+// arguments of a statement whose command word (past reserved words and time
+// options) is a bare known text consumer (grep cmd <<EOF). It over-reads,
+// never under-reads: with trust false every word counts. op is the offset of
+// the here-document operator in line (-1 for none): a substitution that
+// holds it (git commit -m "$(cat <<EOF) is where the body goes, not an
+// expansion naming the outer program.
+func cmdLineReceiverWords(line string, op int, trust bool) []string {
+	words, _ := cmdScanReceiverWords(line, 0, 0, trust, op, nil, nil)
+	return words
+}
+
+// cmdScanReceiverWords scans line from i to the unquoted closer () or a
+// backtick, 0 for the end of the line) and returns the receiver words and
+// the offset of the closer. An unquoted newline ends a statement. A non-nil
+// commandWords gets the command word of every statement with backslashes
+// dropped, and the word after builtin or command, followed by
+// cmdUnknownReceiver when it is an expansion, and cmdPathAssignment for a
+// statement that assigns PATH (cmdRedefines).
+func cmdScanReceiverWords(line string, i int, closer byte, trust bool, op int, commandWords *[]string, lines *hookpaths.HeredocLines) (words []string, end int) {
+	if lines == nil {
+		// One finder for line and every substitution read in it (GAP-2557).
+		lines = &hookpaths.HeredocLines{}
+	}
+	end = cmdScanReceiverWordsInto(line, i, closer, trust, op, commandWords, lines, &words)
+	return words, end
+}
+
+// cmdScanReceiverWordsInto is cmdScanReceiverWords appending to words, which
+// the substitutions read in it share: copying the words of each nested
+// $( up a level was quadratic in the nesting (GAP-2557).
+func cmdScanReceiverWordsInto(line string, i int, closer byte, trust bool, op int, commandWords *[]string, lines *hookpaths.HeredocLines, words *[]string) int {
+	var stmt []string
+	var stmtExp []bool // stmtExp[k]: stmt[k] holds an expansion
+	var stmtOp []bool  // stmtOp[k]: stmt[k] is a substitution that holds op
+	// docs are the here-documents opened on the current line: their bodies
+	// are text read by their own receiver, skipped as bash skips them.
+	var docs []cmdHeredoc
+	var word strings.Builder
+	inWord, wordExp, wordOp, redirect, depth := false, false, false, false, 0
+	flush := func() {
+		if !inWord {
+			return
+		}
+		w, exp, holds := word.String(), wordExp, wordOp
+		word.Reset()
+		inWord, wordExp, wordOp = false, false, false
+		if redirect {
+			redirect = false
+			return
+		}
+		stmt = append(stmt, w)
+		stmtExp = append(stmtExp, exp)
+		stmtOp = append(stmtOp, holds)
+	}
+	finish := func() {
+		flush()
+		redirect = false
+		if commandWords != nil {
+			k, _ := cmdStatementCommand(stmt)
+			if cmdAssignsPath(stmt, k) {
+				*commandWords = append(*commandWords, cmdPathAssignment)
+			}
+			for _, w := range stmt[:k] {
+				if cmdCompoundReserved[w] != 0 {
+					*commandWords = append(*commandWords, cmdReservedMark+w)
+				}
+			}
+			for ; k < len(stmt); k++ {
+				w := strings.ReplaceAll(stmt[k], `\`, "")
+				*commandWords = append(*commandWords, w)
+				if stmtExp[k] || strings.HasPrefix(stmt[k], "$") {
+					*commandWords = append(*commandWords, cmdUnknownReceiver)
+				}
+				if w != "builtin" && w != "command" && !strings.HasPrefix(w, "-") {
+					break
+				}
+			}
+		}
+		*words = append(*words, cmdStatementReceiverWords(stmt, stmtExp, stmtOp, trust)...)
+		stmt, stmtExp, stmtOp = stmt[:0], stmtExp[:0], stmtOp[:0]
+	}
+	// nested reads a command substitution: its statements are commands of
+	// their own, and no consumer in them is trusted: a consumer printing
+	// its argument is how a substitution yields a program name
+	// ("$(grep -m1 bash /etc/shells)" <<EOF, checker it2). The outer word
+	// only gets a marker, so it never reads as a consumer name.
+	nested := func(j int, cl byte) int {
+		e := cmdScanReceiverWordsInto(line, j, cl, false, op, commandWords, lines, words)
+		word.WriteString("$()")
+		inWord = true
+		// Its output is an expansion, unless it holds the here-document
+		// operator: git commit -m "$(cat <<EOF hands the body to cat, whose
+		// output is the word (cmdArgvHeredocReceiver, GAP-2539).
+		if op < j || op > e {
+			wordExp = true
+		} else {
+			wordOp = true
+		}
+		return e
+	}
+	var quote byte
+	for ; i < len(line); i++ {
+		c := line[i]
+		switch quote {
+		case '\'':
+			if c == '\'' {
+				quote = 0
+			} else {
+				word.WriteByte(c)
+			}
+			continue
+		case '"':
+			switch {
+			case c == '"':
+				quote = 0
+			case c == '\\' && i+1 < len(line) && line[i+1] == '\n':
+				i++ // a backslash-newline is removed (GAP-2538).
+			case c == '\\' && i+1 < len(line):
+				word.WriteByte(c)
+				word.WriteByte(line[i+1])
+				i++
+			case c == '$' && i+1 < len(line) && line[i+1] == '(':
+				i = nested(i+2, ')')
+			case c == '`':
+				i = nested(i+1, '`')
+			default:
+				word.WriteByte(c)
+				wordExp = wordExp || c == '$'
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+			inWord = true
+		case '\\':
+			if i+1 < len(line) && line[i+1] == '\n' {
+				// A backslash-newline joins the lines: bash removes it
+				// (bash \<newline><<EOF; GAP-2538).
+				i++
+				continue
+			}
+			word.WriteByte(c)
+			if i+1 < len(line) {
+				word.WriteByte(line[i+1])
+				i++
+			}
+			inWord = true
+		case ' ', '\t', '\r':
+			flush()
+		case '<', '>':
+			// An fd number before the operator (2>file) is part of it.
+			if w := word.String(); inWord && w != "" && strings.Trim(w, "0123456789") == "" {
+				word.Reset()
+				inWord = false
+			}
+			flush()
+			redirect = true
+			// One operator: > >> >| >& < << <<- <<< <& <>. A | or & after
+			// it that is not part of it separates statements.
+			if i+1 < len(line) {
+				switch n := line[i+1]; {
+				case c == '>' && (n == '>' || n == '|' || n == '&'), c == '<' && (n == '&' || n == '>'):
+					i++
+				case c == '<' && n == '<':
+					i++
+					if doc, _, ok := cmdHeredocDelimiter(line, i+1); ok {
+						docs = append(docs, doc)
+					}
+					if i+1 < len(line) && (line[i+1] == '<' || line[i+1] == '-') {
+						i++
+					}
+				}
+			}
+			if line[i] == '&' && i+1 < len(line) && line[i+1] == '-' {
+				// >&- and <&- close a descriptor: no target word.
+				i++
+				redirect = false
+			}
+		case '&':
+			if i+1 < len(line) && line[i+1] == '>' {
+				flush()
+				i++
+				if i+1 < len(line) && line[i+1] == '>' {
+					i++
+				}
+				redirect = true
+				continue
+			}
+			finish()
+		case ';', '|', '\n':
+			finish()
+			if c == '\n' && len(docs) > 0 {
+				// The bodies start after this line; a body that does not
+				// end stays scanned (over-read).
+				if bodies, bodyEnd := cmdHeredocBodies(line, i+1, docs, lines); len(bodies) == len(docs) {
+					i = bodyEnd
+				}
+				docs = nil
+			}
+		case '(':
+			if w := word.String(); inWord && strings.HasSuffix(w, "$") {
+				i = nested(i+1, ')')
+				continue
+			}
+			finish()
+			depth++
+		case ')':
+			if closer == ')' && depth == 0 {
+				finish()
+				return i
+			}
+			depth--
+			finish()
+		case '`':
+			if closer == '`' {
+				finish()
+				return i
+			}
+			i = nested(i+1, '`')
+		default:
+			word.WriteByte(c)
+			inWord = true
+			// $( is read by the ( case.
+			wordExp = wordExp || c == '$' && (i+1 >= len(line) || line[i+1] != '(')
+		}
+	}
+	finish()
+	return len(line)
+}
+
+// cmdStatementCommand returns the index of the command word of stmt, past
+// assignments, reserved words and time with its options, and whether an
+// assignment comes before it.
+func cmdStatementCommand(stmt []string) (k int, assigned bool) {
+	for k < len(stmt) {
+		switch w := stmt[k]; {
+		case cmdAssignmentWord.MatchString(w):
+			assigned = true
+			k++
+		case w == "{" || w == "}" || w == "!" || w == "if" || w == "then" || w == "else" || w == "elif" ||
+			w == "fi" || w == "do" || w == "done" || w == "while" || w == "until" || w == "esac":
+			k++
+		case w == "time":
+			k++
+			for k < len(stmt) && strings.HasPrefix(stmt[k], "-") {
+				k++
+			}
+		default:
+			return k, assigned
+		}
+	}
+	return k, assigned
+}
+
+// cmdStatementReceiverWords returns the words of one statement that can
+// name a receiver: none when its command word is a bare known text consumer
+// (no assignment before it, trust on), every word otherwise, plus
+// cmdUnknownReceiver when it can run a program named by an expansion
+// (cmdExpansionReceiver).
+func cmdStatementReceiverWords(stmt []string, exp, ops []bool, trust bool) []string {
+	k, assigned := cmdStatementCommand(stmt)
+	if k < len(stmt) && trust && !assigned && cmdTextConsumerStatement(stmt[k:]) {
+		// PATH=... grep runs another program: never a trusted consumer.
+		return nil
+	}
+	words := cmdSplitQuotedWords(stmt)
+	if k < len(stmt) && (cmdExpansionReceiver(stmt, exp, k) || cmdArgvHeredocReceiver(stmt, ops, k)) {
+		words = append(words[:len(words):len(words)], cmdUnknownReceiver)
+	}
+	return words
+}
+
+// cmdExpansionReceiver reports whether the statement with command word k
+// can run a program named by an expansion: the command word itself
+// ("$BASH" -s, $0) or, unless the command word runs no argument
+// (cmdExpansionInertCommands), any later word: env "$BASH" -s, nice $0 -s,
+// timeout 5 "$BASH", xargs -0 "$BASH" -c (GAP-2536 checker it4). Launchers
+// are not listed, so an unknown one over-reads, never under-reads.
+func cmdExpansionReceiver(stmt []string, exp []bool, k int) bool {
+	if exp[k] || strings.HasPrefix(stmt[k], "$") {
+		return true
+	}
+	if cmdExpansionInertCommands[stmt[k]] {
+		return false
+	}
+	for _, e := range exp[k+1:] {
+		if e {
+			return true
+		}
+	}
+	return false
+}
+
+// cmdArgvHeredocReceiver reports whether a word of the statement with
+// command word k is a substitution that holds the here-document operator
+// (ops) and hands the body over as the argv of a program that may run it:
+// the command word itself ($(cat <<EOF)), or an argument of any command but
+// a known text consumer, a command that runs no argument
+// (cmdExpansionInertCommands) and git commit, tag or notes, whose argument
+// is a message: env $(cat <<EOF), exec, timeout `cat <<EOF`, xargs
+// (GAP-2539). Unknown programs over-read, never under-read.
+func cmdArgvHeredocReceiver(stmt []string, ops []bool, k int) bool {
+	if !slices.Contains(ops[k:], true) {
+		return false
+	}
+	if ops[k] {
+		return true
+	}
+	return !cmdExpansionInertCommands[stmt[k]] && !cmdTextConsumerStatement(stmt[k:]) && !cmdGitMessageStatement(stmt[k:])
+}
+
+// cmdGitMessageStatement reports git commit, tag or notes (past -C and -c
+// with their values and other options): a git alias cannot shadow a git
+// command, and their arguments are a message or names, never a program.
+func cmdGitMessageStatement(args []string) bool {
+	if strings.TrimSuffix(strings.ToLower(args[0]), ".exe") != "git" {
+		return false
+	}
+	for i := 1; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "-C" || a == "-c":
+			i++
+		case strings.HasPrefix(a, "-"):
+		default:
+			return a == "commit" || a == "tag" || a == "notes"
+		}
+	}
+	return false
+}
+
+// cmdAssignsPath reports whether the statement with command word k assigns
+// PATH: before the command word (PATH=.:$PATH; or PATH=... grep) or as an
+// argument of export, declare, typeset, local or readonly.
+func cmdAssignsPath(stmt []string, k int) bool {
+	path := func(w string) bool { return strings.HasPrefix(w, "PATH=") || strings.HasPrefix(w, "PATH+=") }
+	for _, w := range stmt[:k] {
+		if path(w) {
+			return true
+		}
+	}
+	if k < len(stmt) {
+		switch stmt[k] {
+		case "export", "declare", "typeset", "local", "readonly":
+			for _, w := range stmt[k+1:] {
+				if path(w) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// cmdSplitQuotedWords returns words plus the pieces of every word that
+// holds a blank or an operator (a quoted word): eval 'bash -s' <<EOF hands
+// the body to bash as the whole-line split read it (over-read, never
+// under-read; GAP-2530 checker it2).
+func cmdSplitQuotedWords(words []string) []string {
+	out := words
+	for _, w := range words {
+		if strings.ContainsAny(w, " \t\r;|&()<>{}") {
+			if len(out) == len(words) {
+				out = append([]string(nil), words...)
+			}
+			out = append(out, strings.FieldsFunc(w, func(r rune) bool {
+				return strings.ContainsRune(" \t\r;|&()<>{}", r)
+			})...)
+		}
+	}
+	return out
+}
+
+// cmdTextConsumerStatement reports whether args (command word first) runs
+// a known text consumer that cannot run its input: a bare name (a path may
+// be any program), gh only for pr, issue, release, api and gist (an alias
+// may run a shell), and no --pre or --pager option.
+func cmdTextConsumerStatement(args []string) bool {
+	name := strings.TrimSuffix(strings.ToLower(args[0]), ".exe")
+	if !cmdHeredocTextConsumers[name] {
+		return false
+	}
+	if name == "gh" {
+		if len(args) < 2 {
+			return false
+		}
+		switch args[1] {
+		case "pr", "issue", "release", "api", "gist":
+		default:
+			return false
+		}
+	}
+	for _, a := range args[1:] {
+		if strings.HasPrefix(a, "--pre") || strings.HasPrefix(a, "--pager") {
+			return false
+		}
+	}
+	return true
+}
+
+// cmdHeredocBodies reads the bodies of the pending here-documents from start
+// (the line after the one that ends the command) and returns their spans and
+// the offset after the last one read. A delimiter line that is never found
+// ends the reading there: the rest stays scanned (over-block, never
+// under-block).
+//
+// lines finds the delimiter lines; nil scans line by line, which costs the
+// text up to the delimiter (or the rest of the command when none comes).
+func cmdHeredocBodies(command string, start int, docs []cmdHeredoc, lines *hookpaths.HeredocLines) (spans []cmdTextSpan, end int) {
+	pos := start
+	end = start
+	for _, doc := range docs {
+		bodyStart := pos
+		lineStart, lineEnd, found := lines.Next(command, doc.delim, doc.stripTabs, pos)
+		if !found {
+			break
+		}
+		spans = append(spans, cmdTextSpan{start: bodyStart, end: lineEnd, inner: command[bodyStart:lineStart],
+			expands: !doc.quoted, heredoc: true, runs: doc.runs, cmdFeed: doc.cmdFeed})
+		end = lineEnd
+		pos = lineEnd + 1
+	}
+	return spans, end
+}
+
+// cmdTextSpans scans command for the parts the outer shell reads as text in
+// one reading. Spans are in order and do not overlap. A Git Bash
+// here-document body at command level is a span (checker it11 RV11-1).
+// stops is true when the PowerShell reading meets a << that starts a token:
+// PowerShell cannot parse the command, so it runs none of it (as in
+// hookpaths actionWindowsExpressionBodies, RV5-1, RV6-1).
+func cmdTextSpans(command string, reading cmdOuterReading) (spans []cmdTextSpan, stops bool) {
+	// A here-document receiver trusts a text consumer only when the code
+	// outside the text spans redefines no command (GAP-2530 checker it2):
+	// span offsets do not depend on trust, so the untrusted reading finds
+	// the spans first.
+	spans, stops = cmdTextSpansRead(command, reading, false)
+	if reading != cmdReadingGitBash || stops || !strings.Contains(command, "<<") {
+		return spans, stops
+	}
+	if cmdRedefines(command, spans) {
+		// A redefinition can make any consumer name a shell or cmd (alias
+		// grep=bash on an earlier line): every here-document body is read
+		// as run by both (over-read, never under-read; GAP-2536).
+		for k := range spans {
+			if spans[k].heredoc {
+				spans[k].runs, spans[k].cmdFeed = true, true
+			}
+		}
+		return spans, stops
+	}
+	return cmdTextSpansRead(command, reading, true)
+}
+
+// cmdTextSpansRead is cmdTextSpans with the here-document consumer trust
+// of cmdHeredocFeeds.
+func cmdTextSpansRead(command string, reading cmdOuterReading, trust bool) (spans []cmdTextSpan, stops bool) {
+	// Git Bash: open ${...}, arithmetic (( )), name[...] and ( ) frames; a
+	// << inside the first three is no here-document operator (RV5-2).
+	braces, arith, subscript, parens := 0, 0, 0, 0
+	var pending []cmdHeredoc
+	// nestBudget bounds the nested $(...) reading of double-quoted words
+	// (linear in the command, RV10-3).
+	nestBudget := 8*len(command) + 1<<16
+	// lines finds the delimiter lines of the bodies in linear time (GAP-2557).
+	lines := &hookpaths.HeredocLines{}
+	// stopParsing is the end of a PowerShell --% tail: verbatim text.
+	stopParsing := -1
+	commentSeparators := " \t\r\n;|&()<>"
+	if reading == cmdReadingPowerShell {
+		commentSeparators = " \t\r\n;|&(){}"
+	}
+	commentStart := func(i int) bool {
+		return i == 0 || strings.IndexByte(commentSeparators, command[i-1]) >= 0
+	}
+	n := len(command)
+	// lineStart is the start of the Git Bash logical command line: after
+	// the last newline outside ( ) frames, quoted words, here-document
+	// bodies and backslash-newlines (GAP-2538). lineQuoted are the double-
+	// quoted spans of that line with a << inside (GAP-2539).
+	lineStart := 0
+	var lineQuoted []int
+	// feedBudget bounds the receiver reads (cmdHeredocFeeds, cmdCompoundShape)
+	// of one command: each costs its text, and a command needing more is
+	// read as feeding every body to a shell and cmd (over-read, never
+	// under-read; linear in the command, GAP-2539 checker it6).
+	feedBudget := 8*len(command) + 1<<16
+	feeds := func(text string, op int) (runs, cmdFeed bool) {
+		if feedBudget -= len(text) + 1; feedBudget < 0 {
+			return true, true
+		}
+		return cmdHeredocFeeds(text, op, trust)
+	}
+	shape := func(text string) (int, bool) {
+		if feedBudget -= len(text) + 1; feedBudget < 0 {
+			return 1, true
+		}
+		return cmdCompoundShape(text)
+	}
+	// awaiting are the here-document bodies whose command goes on after
+	// them (GAP-2547): the line of << ended in a pipe or list operator
+	// (cat <<EOF |, reading), or the body is inside a ( ), $( ) or compound
+	// command that a later line closes and pipes on (( cat <<EOF .. ) | bash,
+	// } | bash, done | bash). The lines that continue the command, and the
+	// lines that close a construct, are read as the bodies' receivers too.
+	// compound counts the compound commands open at lineStart; physStart is
+	// the start of the current physical line and skipNL the newline that
+	// ends the last body read.
+	//
+	// The bodies still reading a pipe or list (open) all read every line
+	// with a word and stop together; the others (closing) read only the
+	// lines that close a construct. Each group logs its reads once and a
+	// body takes the reads logged after it joined when the group lets it
+	// go, so a line costs the same for one body or many (GAP-2557: a
+	// { } of many bodies read every line once per body).
+	type awaitRead struct{ runs, cmdFeed bool }
+	type awaitGroup struct {
+		span, join []int
+		log        []awaitRead
+	}
+	var open, closing awaitGroup
+	release := func(g *awaitGroup) {
+		if len(g.span) == 0 {
+			g.log = g.log[:0]
+			return
+		}
+		runs, cmdFeed := make([]bool, len(g.log)+1), make([]bool, len(g.log)+1)
+		for e := len(g.log) - 1; e >= 0; e-- {
+			runs[e], cmdFeed[e] = runs[e+1] || g.log[e].runs, cmdFeed[e+1] || g.log[e].cmdFeed
+		}
+		for k, at := range g.span {
+			spans[at].runs = spans[at].runs || runs[g.join[k]]
+			spans[at].cmdFeed = spans[at].cmdFeed || cmdFeed[g.join[k]]
+		}
+		g.span, g.join, g.log = g.span[:0], g.join[:0], g.log[:0]
+	}
+	await := func(g *awaitGroup, span int) {
+		g.span = append(g.span, span)
+		g.join = append(g.join, len(g.log))
+	}
+	compound, physStart, skipNL := 0, 0, -1
+	awaitLine := func(text string) {
+		if len(open.span) == 0 && len(closing.span) == 0 || !cmdLineHasWord(text) {
+			return
+		}
+		_, closes := shape(text)
+		if len(open.span) == 0 && (!closes || len(closing.span) == 0) {
+			return
+		}
+		runs, cmdFeed := feeds(text, -1)
+		if closes && len(closing.span) > 0 {
+			closing.log = append(closing.log, awaitRead{runs, cmdFeed})
+		}
+		if len(open.span) > 0 {
+			open.log = append(open.log, awaitRead{runs, cmdFeed})
+		}
+		// Every body that read the line reads on when it continues a pipe
+		// or list (} |, done |), and waits for a closing line otherwise.
+		from, to := &open, &closing
+		if cmdLineContinues(text) {
+			if !closes {
+				return
+			}
+			from, to = &closing, &open
+		}
+		moved := slices.Clone(from.span)
+		release(from)
+		for _, at := range moved {
+			await(to, at)
+		}
+	}
+	argvQuoted := func(end int) {
+		for _, k := range lineQuoted {
+			span := spans[k]
+			for from := 0; ; {
+				at := strings.Index(span.inner[from:], "<<")
+				if at < 0 {
+					break
+				}
+				op := span.start + 1 + from + at
+				if runs, cmdFeed := feeds(command[lineStart:end], op-lineStart); runs || cmdFeed {
+					spans[k].argvRuns = true
+					break
+				}
+				from += at + 2
+			}
+		}
+		lineQuoted = lineQuoted[:0]
+	}
+	for i := 0; i < n; {
+		c := command[i]
+		switch {
+		case (reading == cmdReadingPowerShell && c == '`' ||
+			reading == cmdReadingGitBash && c == '\\' ||
+			reading == cmdReadingCMD && c == '^') && i+1 < n:
+			i += 2
+			continue
+		case reading == cmdReadingPowerShell && c == '$' && i+1 < n && command[i+1] == '$':
+			i += 2 // $$ is one variable: a { after it opens a script block (RV7-1).
+			continue
+		case reading == cmdReadingPowerShell && c == '$' && i+1 < n && command[i+1] == '{':
+			// A braced variable name (${a<<b}, ${a'b}) is one token up to
+			// its first unescaped } (RV6-1); unterminated: scanned on.
+			j := i + 2
+			for j < n && command[j] != '}' {
+				if command[j] == '`' {
+					j++
+				}
+				j++
+			}
+			if j < n {
+				i = j + 1
+				continue
+			}
+		case reading == cmdReadingPowerShell && c == '-' && strings.HasPrefix(command[i:], "--%") &&
+			(i == 0 || command[i-1] == ' ' || command[i-1] == '\t') &&
+			(i+3 == n || strings.IndexByte(" \t\r\n", command[i+3]) >= 0):
+			stopParsing = n
+			if k := strings.IndexAny(command[i:], "\r\n|"); k >= 0 {
+				stopParsing = i + k
+			}
+		case reading == cmdReadingPowerShell && c == '<' && i+1 < n && command[i+1] == '<' && i >= stopParsing &&
+			(i == 0 || strings.IndexByte(" \t\r\n;|&(){}", command[i-1]) >= 0):
+			return spans, true
+		case reading == cmdReadingGitBash && c == '$' && i+1 < n && command[i+1] == '{':
+			braces++
+			i += 2
+			continue
+		case reading == cmdReadingGitBash && c == '{' && braces > 0:
+			braces++
+		case reading == cmdReadingGitBash && c == '}' && braces > 0:
+			braces--
+		case reading == cmdReadingGitBash && c == '(' && i+1 < n && command[i+1] == '(':
+			arith++
+			i += 2
+			continue
+		case reading == cmdReadingGitBash && c == ')' && arith > 0 && i+1 < n && command[i+1] == ')':
+			arith--
+			i += 2
+			continue
+		case reading == cmdReadingGitBash && c == '(':
+			parens++
+		case reading == cmdReadingGitBash && c == ')':
+			parens = max(0, parens-1)
+		case reading == cmdReadingGitBash && c == '[' && i > 0 && cmdNameByte(command[i-1]):
+			subscript++
+		case reading == cmdReadingGitBash && c == ']' && subscript > 0:
+			subscript--
+		case reading == cmdReadingGitBash && c == '<' && i+1 < n && command[i+1] == '<' &&
+			(i == 0 || command[i-1] != '<') && braces == 0 && arith == 0 && subscript == 0:
+			doc, end, ok := cmdHeredocDelimiter(command, i+2)
+			if !ok {
+				i += 2
+				for i < n && command[i] == '<' {
+					i++ // a here-string (<<<) word is scanned on.
+				}
+				continue
+			}
+			doc.level = parens
+			doc.op, doc.lineStart = i, lineStart
+			pending = append(pending, doc)
+			i = end
+			continue
+		case reading == cmdReadingGitBash && c == '\n':
+			subscript = 0
+			if i != skipNL {
+				awaitLine(command[physStart:i])
+			}
+			physStart = i + 1
+			if parens == 0 {
+				argvQuoted(i)
+			}
+			if len(pending) > 0 && parens <= pending[0].level {
+				// The receivers are read on the logical line that ends here;
+				// the bodies start after it.
+				for k := range pending {
+					doc := &pending[k]
+					doc.runs, doc.cmdFeed = feeds(command[doc.lineStart:i], doc.op-doc.lineStart)
+				}
+				bodies, end := cmdHeredocBodies(command, i+1, pending, lines)
+				// The pending docs share one logical line: read it once
+				// (cmdLineContinues is linear in the line).
+				readFrom, continues := -1, false
+				for k := range bodies {
+					if pending[k].lineStart != readFrom {
+						readFrom, continues = pending[k].lineStart, cmdLineContinues(command[pending[k].lineStart:i])
+					}
+					if continues {
+						await(&open, len(spans)+k)
+					} else {
+						await(&closing, len(spans)+k)
+					}
+				}
+				pending = nil
+				if len(bodies) > 0 {
+					spans = append(spans, bodies...)
+					i, skipNL, physStart = end, end, end+1
+					continue
+				}
+			}
+			if parens == 0 {
+				delta, _ := shape(command[lineStart:i])
+				if compound = max(0, compound+delta); compound == 0 {
+					// The command is complete: a body waits only for the
+					// next line of a pipe or list it continues.
+					release(&closing)
+				}
+				lineStart = i + 1
+			}
+		case reading == cmdReadingPowerShell && c == '<' && i+1 < n && command[i+1] == '#':
+			if end := strings.Index(command[i+2:], "#>"); end >= 0 {
+				stop := i + 2 + end + 2
+				spans = append(spans, cmdTextSpan{start: i, end: stop, inner: command[i+2 : stop-2]})
+				i = stop
+				continue
+			}
+		case reading == cmdReadingPowerShell && c == '@' && i+2 < n && (command[i+1] == '\'' || command[i+1] == '"') &&
+			(command[i+2] == '\n' || command[i+2] == '\r'):
+			closing := "\n" + string(command[i+1]) + "@"
+			if end := strings.Index(command[i+2:], closing); end >= 0 {
+				stop := i + 2 + end + len(closing)
+				spans = append(spans, cmdTextSpan{start: i, end: stop, inner: command[i+2 : i+2+end]})
+				i = stop
+				continue
+			}
+		case reading != cmdReadingCMD && c == '#' && commentStart(i):
+			end := strings.IndexAny(command[i:], "\r\n")
+			if end < 0 {
+				end = n - i
+			}
+			spans = append(spans, cmdTextSpan{start: i, end: i + end, inner: command[i : i+end]})
+			i += end
+			continue
+		case reading == cmdReadingGitBash && c == '$' && i+1 < n && command[i+1] == '\'':
+			// Bash ANSI-C quoting: a backslash escapes the next byte.
+			j := i + 2
+			for j < n && command[j] != '\'' {
+				if command[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			if j < n {
+				spans = append(spans, cmdTextSpan{start: i, end: j + 1, inner: command[i+2 : j]})
+				i = j + 1
+			} else {
+				i += 2
+			}
+			continue
+		case c == '"' || c == '\'' || c >= utf8.RuneSelf:
+			if end, inner, ok := cmdQuotedWord(command, i, reading, &nestBudget); ok {
+				if reading == cmdReadingPowerShell && c == '"' && cmdPowerShellSubexpressionStops(inner) {
+					// PowerShell parses a $(...) of a string as code: a
+					// token-start << there is a parse error too, so it
+					// runs none of the command (pod it17: a Git Bash
+					// git commit -m "$(cat <<'EOF' ... EOF)" message).
+					return spans, true
+				}
+				if reading == cmdReadingGitBash && c == '"' && strings.Contains(inner, "<<") {
+					lineQuoted = append(lineQuoted, len(spans))
+				}
+				spans = append(spans, cmdTextSpan{start: i, end: end, inner: inner, expands: c == '"'})
+				i = end
+				continue
+			}
+		}
+		i++
+	}
+	if reading == cmdReadingGitBash && physStart < n {
+		awaitLine(command[physStart:n])
+	}
+	release(&open)
+	release(&closing)
+	argvQuoted(n)
+	cmdMarkRunStrings(command, spans)
+	return spans, false
+}
+
+// cmdPowerShellSubexpressionStops reports a $(...) of the double-quoted
+// PowerShell string inner with a << that starts a token outside its quotes,
+// which PowerShell cannot parse. One level is read (linear).
+func cmdPowerShellSubexpressionStops(inner string) bool {
+	if !strings.Contains(inner, "<<") {
+		return false
+	}
+	for _, sub := range cmdSubexpressions(inner, cmdReadingPowerShell) {
+		for i := 0; i < len(sub); i++ {
+			c := sub[i]
+			tokenStart := i == 0 || strings.IndexByte(" \t\r\n;|&(){}", sub[i-1]) >= 0
+			switch {
+			case c == '`':
+				i++
+			case c == '#' && tokenStart:
+				// A comment: a << in it is text.
+				if k := strings.IndexByte(sub[i:], '\n'); k >= 0 {
+					i += k
+				} else {
+					i = len(sub)
+				}
+			case c == '<' && i+1 < len(sub) && sub[i+1] == '#':
+				if k := strings.Index(sub[i+2:], "#>"); k >= 0 {
+					i += k + 3
+				} else {
+					i = len(sub)
+				}
+			case c == '\'' || c == '"':
+				if end, _, ok := cmdQuotedWord(sub, i, cmdReadingPowerShell, nil); ok {
+					i = end - 1
+				}
+			case c == '<' && i+1 < len(sub) && sub[i+1] == '<' && tokenStart:
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func cmdNameByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+}
+
+// cmdBodyEnds lists, in order, where the outer shell of reading ends the
+// statement a cmd call is in, so a cmd /c body stops there and is not read
+// again as the rest of the command (checker it11 RV11-2): ; | and newlines
+// outside text spans and escapes, also && in PowerShell and a & that is not
+// part of a redirection in Git Bash. The cmd reading lists none: cmd's own
+// & | stay in the body.
+func cmdBodyEnds(command string, spans []cmdTextSpan, reading cmdOuterReading) []int {
+	if reading == cmdReadingCMD {
+		return nil
+	}
+	escape := byte('`')
+	if reading == cmdReadingGitBash {
+		escape = '\\'
+	}
+	var ends []int
+	k := 0
+	for i := 0; i < len(command); i++ {
+		if k < len(spans) && i == spans[k].start {
+			i = spans[k].end - 1
+			k++
+			continue
+		}
+		switch c := command[i]; {
+		case c == escape:
+			i++
+		case reading == cmdReadingPowerShell && c == '-' && strings.HasPrefix(command[i:], "--%") &&
+			(i == 0 || command[i-1] == ' ' || command[i-1] == '\t'):
+			// The stop-parsing tail goes verbatim to the program up to
+			// the line end or a pipe: its ; is cmd's text.
+			if k := strings.IndexAny(command[i:], "\r\n|"); k >= 0 {
+				i += k - 1
+			} else {
+				i = len(command)
+			}
+		case c == ';' || c == '|' || c == '\r' || c == '\n':
+			ends = append(ends, i)
+		case c == '&' && reading == cmdReadingPowerShell:
+			if i+1 < len(command) && command[i+1] == '&' {
+				ends = append(ends, i)
+			}
+		case c == '&':
+			redirect := i > 0 && (command[i-1] == '>' || command[i-1] == '<') ||
+				i+1 < len(command) && command[i+1] == '>'
+			if !redirect {
+				ends = append(ends, i)
+			}
+		}
+	}
+	return ends
+}
+
+// cmdShellWord names the shell a word starts: "ps" for PowerShell and
+// Invoke-Expression, whose strings run as command lines, "sh" for a POSIX
+// shell, whose -c (also -lc, -ic, ...) string runs.
+func cmdShellWord(word string) string {
+	w := strings.ToLower(strings.Trim(word, `"'`))
+	if k := strings.LastIndexAny(w, `\/`); k >= 0 {
+		w = w[k+1:]
+	}
+	switch strings.TrimSuffix(w, ".exe") {
+	case "powershell", "pwsh", "iex", "invoke-expression":
+		return "ps"
+	case "bash", "sh", "zsh", "dash", "ksh":
+		return "sh"
+	}
+	return ""
+}
+
+var cmdShellRunFlag = lazyregexp.New(`^-[a-zA-Z]*c[a-zA-Z]*$`)
+
+func cmdArgumentListWord(word string) bool {
+	word = strings.TrimSuffix(word, ":")
+	name, dashed := strings.CutPrefix(word, "-")
+	return dashed && name != "" && (strings.HasPrefix("argumentlist", name) || name == "args")
+}
+
+// cmdMarkRunStrings sets runs and args on spans in one pass over command: a
+// span runs when its statement (up to ; | or a newline) has a PowerShell or
+// Invoke-Expression word before it, or a POSIX shell word and a -c flag
+// cluster (RV10-1); a -c of another program (grep -c, rg -c) is no runner
+// (RV10-2). args: the word before it is -ArgumentList (or a prefix, -Args),
+// or a comma after an args span.
+func cmdMarkRunStrings(command string, spans []cmdTextSpan) {
+	ps, sh, shRun := false, false, false
+	lastWord, wordStart := "", -1
+	finish := func(end int) {
+		if wordStart < 0 {
+			return
+		}
+		word := command[wordStart:end]
+		wordStart = -1
+		switch cmdShellWord(word) {
+		case "ps":
+			ps = true
+		case "sh":
+			sh = true
+		default:
+			if sh && cmdShellRunFlag.MatchString(word) {
+				shRun = true
+			}
+		}
+		lastWord = strings.ToLower(word)
+	}
+	k := 0
+	for i := 0; i < len(command); {
+		if k < len(spans) && i == spans[k].start {
+			finish(i)
+			if !spans[k].heredoc {
+				spans[k].runs = ps || shRun
+				spans[k].args = cmdArgumentListWord(lastWord) || (lastWord == "," && k > 0 && spans[k-1].args)
+			}
+			lastWord = "\x00"
+			i = spans[k].end
+			k++
+			continue
+		}
+		switch c := command[i]; {
+		case c == ';' || c == '|' || c == '\n' || c == '\r':
+			finish(i)
+			ps, sh, shRun, lastWord = false, false, false, ""
+		case c == ',':
+			finish(i)
+			lastWord = ","
+		case strings.IndexByte(" \t(){}&=@", c) >= 0:
+			finish(i)
+		default:
+			if wordStart < 0 {
+				wordStart = i
+			}
+		}
+		i++
+	}
+}
+
+// cmdSpanAt returns the span that holds pos (binary search: spans are in
+// order and do not overlap).
+func cmdSpanAt(spans []cmdTextSpan, pos int) (cmdTextSpan, bool) {
+	k, _ := slices.BinarySearchFunc(spans, pos, func(span cmdTextSpan, pos int) int {
+		if span.end <= pos {
+			return -1
+		}
+		return 1
+	})
+	if k < len(spans) && spans[k].start <= pos {
+		return spans[k], true
+	}
+	return cmdTextSpan{}, false
+}
+
+// cmdFirstSpanFrom returns the index of the first span that starts at or
+// after pos.
+func cmdFirstSpanFrom(spans []cmdTextSpan, pos int) int {
+	k, _ := slices.BinarySearchFunc(spans, pos, func(span cmdTextSpan, pos int) int {
+		if span.start < pos {
+			return -1
+		}
+		return 1
+	})
+	return k
+}
+
+// cmdStatementBreaks lists, in order, the ; | and newline bytes outside the
+// text spans: the statement ends of the outer shell.
+func cmdStatementBreaks(command string, spans []cmdTextSpan) []int {
+	var breaks []int
+	k := 0
+	for i := 0; i < len(command); i++ {
+		if k < len(spans) && i == spans[k].start {
+			i = spans[k].end - 1
+			k++
+			continue
+		}
+		switch command[i] {
+		case ';', '|', '\r', '\n':
+			breaks = append(breaks, i)
+		}
+	}
+	return breaks
+}
+
+// cmdSubexpressions returns the bodies a double-quoted word runs: each
+// $(...) (one pass with a stack; an unclosed one runs to the end), and in
+// the Git Bash reading each `...`.
+func cmdSubexpressions(inner string, reading cmdOuterReading) []string {
+	var subs []string
+	var open []int // body start of each open (, -1 for a plain one
+	for i := 0; i < len(inner); i++ {
+		if len(open) > 0 && (inner[i] == '\'' || inner[i] == '"') {
+			// A quoted word inside a $(...) is text of it: a ) there does
+			// not close it (pod it17); an unterminated one is scanned on.
+			if end, _, ok := cmdQuotedWord(inner, i, reading, nil); ok {
+				i = end - 1
+				continue
+			}
+		}
+		switch inner[i] {
+		case '(':
+			if i > 0 && inner[i-1] == '$' {
+				open = append(open, i+1)
+			} else {
+				open = append(open, -1)
+			}
+		case ')':
+			if len(open) > 0 {
+				start := open[len(open)-1]
+				open = open[:len(open)-1]
+				if start >= 0 {
+					subs = append(subs, inner[start:i])
+				}
+			}
+		}
+	}
+	for _, start := range open {
+		if start >= 0 {
+			subs = append(subs, inner[start:])
+		}
+	}
+	if reading == cmdReadingGitBash {
+		parts := strings.Split(inner, "`")
+		for k := 1; k < len(parts); k += 2 {
+			subs = append(subs, parts[k])
+		}
+	}
+	return subs
+}
+
+var (
+	cmdSwitchWord = lazyregexp.New(`(?i)^/{1,2}[a-z](?::\S*)?$`)
+	cmdRunWord    = lazyregexp.New(`(?i)^/{1,2}[ck]`)
+	// cmdStartProcessWord: Start-Process (or its aliases) right before the
+	// program word cmd.
+	cmdStartProcessWord = lazyregexp.New(`(?i)(?:^|[\s;|&(){}])(?:start-process|saps|start)\s+(?:-filepath\s+)?["']?$`)
+)
+
+// cmdSwitchRunBody reads the switch run of a cmd.exe command line (after the
+// program word, or the start of a Start-Process argument string) and returns
+// the text after its /c or /k (also //c, //k from Git Bash), or false when
+// another word comes first: then cmd runs no body.
+func cmdSwitchRunBody(rest string) (string, bool) {
+	for {
+		trimmed := strings.TrimLeft(rest, " \t")
+		if trimmed == "" {
+			return "", false
+		}
+		end := strings.IndexAny(trimmed, " \t\r\n")
+		if end < 0 {
+			end = len(trimmed)
+		}
+		word := trimmed[:end]
+		if word == "--%" {
+			// PowerShell's stop-parsing token: the rest goes verbatim to
+			// cmd (checker it11 note K01).
+			rest = trimmed[end:]
+			continue
+		}
+		if loc := cmdRunWord.FindStringIndex(word); loc != nil {
+			after := word[loc[1]:]
+			if after == "" || after[0] == '"' || after[0] == '\'' {
+				return trimmed[loc[1]:], true
+			}
+		}
+		if !cmdSwitchWord.MatchString(word) {
+			return "", false
+		}
+		rest = trimmed[end:]
+	}
+}
+
+// Bounds of one cmd body reading. A command that needs more is judged as a
+// state write when it names DefenseClaw state (over-block, never
+// under-block), so a crafted command cannot outlast the hook budget
+// (checker it10 RV10-3).
+const (
+	cmdMaxBodies    = 64
+	cmdMaxArgSpans  = 64
+	cmdMaxNestDepth = 6
+)
+
+type cmdBodyReader struct {
+	readings []cmdOuterReading
+	bodies   []string
+	seen     map[string]bool
+	budget   int
+	overflow bool
+}
+
+func (r *cmdBodyReader) add(body string) {
+	body = strings.TrimSpace(body)
+	if body == "" || r.seen[body] {
+		return
+	}
+	if len(r.bodies) >= cmdMaxBodies {
+		r.overflow = true
+		return
+	}
+	r.seen[body] = true
+	r.bodies = append(r.bodies, body)
+}
+
+func (r *cmdBodyReader) read(command string, depth int) {
+	cost := len(command) * len(r.readings)
+	if r.overflow || depth > cmdMaxNestDepth || cost > r.budget {
+		r.overflow = true
+		return
+	}
+	r.budget -= cost
+	for _, reading := range r.readings {
+		r.readWith(command, reading, depth)
+	}
+}
+
+// readArgvHeredocs reads the here-document bodies of the Git Bash
+// substitution body sub, whose output a launcher or a shell runs
+// (cmdTextSpan.argvRuns): as a shell's and as cmd's (GAP-2539).
+func (r *cmdBodyReader) readArgvHeredocs(sub string, depth int) {
+	spans, _ := cmdTextSpans(sub, cmdReadingGitBash)
+	for _, span := range spans {
+		if span.heredoc && !r.overflow {
+			r.add(span.inner)
+			r.read(span.inner, depth+1)
+		}
+	}
+}
+
+func (r *cmdBodyReader) readWith(command string, reading cmdOuterReading, depth int) {
+	spans, stops := cmdTextSpans(command, reading)
+	if stops {
+		return // PowerShell runs nothing of a command it cannot parse.
+	}
+	for _, span := range spans {
+		if r.overflow {
+			return
+		}
+		if span.cmdFeed {
+			r.add(span.inner) // cmd <<EOF: cmd.exe runs the body lines.
+		}
+		if span.runs {
+			if span.args {
+				// Start-Process powershell -ArgumentList '-c "..."': the
+				// string is the argument list of a PowerShell.
+				r.read("powershell "+span.inner, depth+1)
+			} else {
+				r.read(span.inner, depth+1)
+			}
+		}
+		if reading != cmdReadingCMD && span.expands {
+			for _, sub := range cmdSubexpressions(span.inner, reading) {
+				r.read(sub, depth+1)
+				if span.argvRuns {
+					r.readArgvHeredocs(sub, depth+1)
+				}
+			}
+		}
+	}
+	var argSpans []int
+	for k, span := range spans {
+		if span.args {
+			argSpans = append(argSpans, k)
+		}
+	}
+	breaks := cmdStatementBreaks(command, spans)
+	ends := cmdBodyEnds(command, spans, reading)
+	for _, loc := range cmdProgramWord.FindAllStringIndex(command, -1) {
+		if r.overflow {
+			return
+		}
+		start := loc[0]
+		if strings.ContainsRune(" \t\r\n;|&(){}", rune(command[start])) {
+			start++
+		}
+		if span, in := cmdSpanAt(spans, start); in && (span.start != start || span.end != loc[1]) {
+			continue // Text the outer shell does not run (a quoted program path is run).
+		}
+		rest := command[loc[1]:]
+		if rest != "" && !strings.ContainsRune(" \t\r\n/'\"", rune(rest[0])) {
+			continue // cmdlet, cmdkey, ...: another program.
+		}
+		body, ok := cmdSwitchRunBody(rest)
+		if !ok {
+			r.addArgumentList(command, spans, argSpans, breaks, start, loc[1], rest)
+			continue
+		}
+		bodyStart := len(command) - len(body)
+		if k, _ := slices.BinarySearch(ends, bodyStart); k < len(ends) {
+			body = command[bodyStart:ends[k]]
+		}
+		r.add(body)
+		trimmed := strings.TrimSpace(body)
+		if trimmed == "" {
+			continue
+		}
+		quote := trimmed[0]
+		if quote != '\'' && quote != '"' {
+			continue
+		}
+		if end := strings.IndexByte(trimmed[1:], quote); end >= 0 {
+			// The outer shell's quoted word.
+			r.add(trimmed[1 : end+1])
+		}
+		if last := strings.LastIndexByte(trimmed, quote); last > 0 {
+			// cmd /c strips the first and the last quote of the line.
+			r.add(trimmed[1:last] + trimmed[last+1:])
+		}
+	}
+}
+
+// addArgumentList reads Start-Process cmd -ArgumentList '/c ...': the
+// argument string (an array is joined with spaces, as PowerShell does) of the
+// same statement, after or before the program word, or the positional
+// argument right after Start-Process cmd, is the cmd command line.
+func (r *cmdBodyReader) addArgumentList(command string, spans []cmdTextSpan, argSpans, breaks []int, start, wordEnd int, rest string) {
+	statementEnd := len(command)
+	if k, _ := slices.BinarySearch(breaks, wordEnd); k < len(breaks) {
+		statementEnd = breaks[k]
+	}
+	statementStart := 0
+	if k, _ := slices.BinarySearch(breaks, start); k > 0 {
+		statementStart = breaks[k-1] + 1
+	}
+	collect := func(from, to int) []string {
+		var args []string
+		k, _ := slices.BinarySearchFunc(argSpans, from, func(index, pos int) int {
+			if spans[index].start < pos {
+				return -1
+			}
+			return 1
+		})
+		for ; k < len(argSpans) && spans[argSpans[k]].start < to; k++ {
+			if len(args) >= cmdMaxArgSpans {
+				r.overflow = true
+				return nil
+			}
+			args = append(args, spans[argSpans[k]].inner)
+		}
+		return args
+	}
+	args := collect(wordEnd, statementEnd)
+	if len(args) == 0 {
+		// -ArgumentList before the program word (-FilePath last).
+		args = collect(statementStart, start)
+	}
+	if len(args) == 0 && cmdStartProcessWord.MatchString(command[max(0, start-64):start]) {
+		// Start-Process cmd '/c ...': the positional argument list.
+		after := wordEnd + len(rest) - len(strings.TrimLeft(rest, " \t"))
+		if k := cmdFirstSpanFrom(spans, after); k < len(spans) && spans[k].start == after {
+			args = append(args, spans[k].inner)
+		}
+	}
+	if len(args) == 0 || r.overflow {
+		return
+	}
+	if argBody, ok := cmdSwitchRunBody(strings.Join(args, " ")); ok {
+		r.add(argBody)
+	}
+}
+
+// cmdInvocationReadings returns the command lines a shell command hands to
+// cmd.exe through cmd /c or cmd /k, read after the outer shell's own quote
+// removal: a single-quoted (PowerShell, Git Bash) body is its text, a
+// double-quoted one loses its first and last quote as cmd /c does, and a
+// Start-Process -ArgumentList string is the cmd command line. The program
+// word counts only where some reading of the outer shell (PowerShell, Git
+// Bash, and cmd itself for a CMD tool call) runs it: in command position, not
+// inside a quoted word, a comment or a here-string that every reading reads
+// as text (RV9-1), except a string that is itself run (powershell, pwsh,
+// Invoke-Expression, bash -c, $(...) or a Git Bash `...` inside double
+// quotes), which is read again. complete is false when the command needs
+// more reading than the bounds allow.
+func cmdInvocationReadings(command string, includeCMD bool) (bodies []string, complete bool) {
+	if !cmdSpellingPossible(command) {
+		// No reading can run cmd.exe: the bounds below must not turn a
+		// large or deeply nested command into a write (rows17 B08).
+		return nil, true
+	}
+	r := &cmdBodyReader{
+		readings: []cmdOuterReading{cmdReadingPowerShell, cmdReadingGitBash},
+		seen:     map[string]bool{},
+		budget:   8*len(command) + 1<<16,
+	}
+	if includeCMD {
+		r.readings = append(r.readings, cmdReadingCMD)
+	}
+	r.read(command, 0)
+	return r.bodies, !r.overflow
+}
+
+// cmdSpellingPossible reports whether some reading of command may name
+// cmd.exe: "cmd" or "comspec" in the text with every quote, escape and
+// continuation character (quotes, backtick, caret, backslash, CR, LF) and
+// every non-ASCII rune taken out. It only ever over-reports, so a command it
+// rejects has no cmd program word in any reading.
+func cmdSpellingPossible(command string) bool {
+	var b strings.Builder
+	b.Grow(len(command))
+	for _, r := range command {
+		switch {
+		case r >= utf8.RuneSelf, r == 0x22, r == 0x27, r == 0x60, r == 0x5e, r == 0x5c, r == 0x0d, r == 0x0a:
+			continue
+		case r >= 0x41 && r <= 0x5a:
+			b.WriteRune(r + 0x20)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	folded := b.String()
+	return strings.Contains(folded, "cmd") || strings.Contains(folded, "comspec")
+}
+
+// provenCMDSlashCStateWrite judges the body of a cmd /c or cmd /k call as
+// the cmd command it is (GAP-2408). Without /d the parser keeps cmd /c opaque,
+// because a Command Processor AutoRun entry may run first; AutoRun cannot stop
+// the body from running, so a body that writes, empties, moves or deletes
+// DefenseClaw state (cmd /c "type nul > %USERPROFILE%\.defenseclaw\config.yaml",
+// & cmd /c, cmd //c from Git Bash, cmd /v:on /c, cmd /k, $env:ComSpec /c,
+// Start-Process cmd -ArgumentList '/c ...') still does. Only the state-write
+// proof reads the twin. The caller has already seen a DefenseClaw state
+// mention, so a command too large to read within the bounds counts as the
+// write (RV10-3).
+func provenCMDSlashCStateWrite(request trustedActionRequest) bool {
+	home := request.Input.ActiveHome
+	windowsHome := len(home) >= 2 && home[1] == ':'
+	switch request.Input.DialectHint {
+	case actionfacts.DialectCMD, actionfacts.DialectPowerShell:
+	case "", actionfacts.DialectPOSIX:
+		// No grammar or the Git Bash one: only a Windows home has cmd.
+		if !windowsHome {
+			return false
+		}
+	default:
+		return false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return false
+	}
+	includeCMD := request.Input.DialectHint == actionfacts.DialectCMD
+	// The bounds count distinct bodies: a body two readings or two depths
+	// yield is judged once (RV11-2).
+	const maxReadings, maxReadBytes = 128, 1 << 20
+	pending, readings, readBytes := []string{command}, 0, 0
+	seen := map[string]bool{}
+	for depth := 0; depth < 3 && len(pending) > 0; depth++ {
+		var next []string
+		for _, outer := range pending {
+			bodies, complete := cmdInvocationReadings(outer, includeCMD)
+			if !complete {
+				return true
+			}
+			for _, body := range bodies {
+				if seen[body] {
+					continue
+				}
+				seen[body] = true
+				readings++
+				readBytes += len(body)
+				if readings > maxReadings || readBytes > maxReadBytes {
+					return true
+				}
+				input := request.Input
+				input.Command, input.Args, input.Argv = body, nil, nil
+				input.DialectHint = actionfacts.DialectCMD
+				twin := request
+				twin.Input = input
+				if provenStateMutationPath(actionfacts.Analyze(input), twin) {
+					return true
+				}
+				next = append(next, body)
+			}
+		}
+		pending = next
+	}
+	return false
+}
+
+// provenShellRedirectStateWrite judges each output redirect target the
+// shell opens (actionfacts.ShellRedirectTargets: a literal absolute path or
+// a home spelling written as the active home) as the command-less redirect
+// ": > target": the shell opens the target before it runs the command,
+// whatever the program word is, whatever its other words expand to, for
+// every operator that opens the file for writing and in Bash-only syntax,
+// so the target is the write its absolute spelling is (GAP-2225, GAP-2268,
+// GAP-2298).
+func provenShellRedirectStateWrite(request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return false
+	}
+	targets, ok := actionfacts.ShellRedirectTargets(command, request.Input.ActiveHome)
+	if !ok {
+		return false
+	}
+	for _, target := range targets {
+		if strings.ContainsAny(target, "'\n") {
+			continue
+		}
+		input := request.Input
+		input.Command, input.Args, input.Argv = ": > '"+target+"'", nil, nil
+		input.DialectHint = actionfacts.DialectPOSIX
+		twin := request
+		twin.Input = input
+		if !strings.HasPrefix(target, "/") {
+			// A drive path below a Windows home (Git Bash): the POSIX reading
+			// places it as a relative word, so the twin carries the physical
+			// target the gateway resolves for it, as a hook target map does.
+			if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
+				continue
+			}
+			physical, ok := hookpaths.ResolveWriteTarget(target)
+			if !ok {
+				continue
+			}
+			twin.ResolvedWriteTargets = make(map[string]string, len(request.ResolvedWriteTargets)+1)
+			for spelling, value := range request.ResolvedWriteTargets {
+				twin.ResolvedWriteTargets[spelling] = value
+			}
+			twin.ResolvedWriteTargets[target] = physical
+		}
+		if provenStateMutationPath(actionfacts.Analyze(input), twin) {
+			return true
+		}
+	}
+	return false
+}
+
+// ActionFacts' executing mutation role plus the physical active target
+// authorize the observe-mode exception. A static shell redirect is independently
+// proven even when unrelated command analysis leaves the action partial. The
+// hook's resolved target map is preferred; a managed call can use only an
+// OS-proved active-state hard link when that map has no entry.
+func provenStateMutationPath(facts actionfacts.Facts, request trustedActionRequest) bool {
+	projected := facts.EnforcementProjection()
+	if projected.ActiveHome == "" {
+		return false
+	}
+	wholeActionProven := projected.Authoritative() && projected.EnforcementEligible()
+	lineStaysOff := findStripLineStaysOffOf(request, path.Join(path.Clean(projected.ActiveHome), ".defenseclaw"))
+	for _, candidate := range projected.Paths {
+		command, ok := integrityCommandByID(projected, candidate.CommandID)
+		if !ok {
+			continue
+		}
+		provenMutation := wholeActionProven && stateCommandMutatesPath(command, candidate)
+		if !provenMutation {
+			provenMutation = provenPartialStateRedirect(facts, command, candidate)
+		}
+		if !provenMutation {
+			provenMutation = provenPartialFindHandOff(facts, command, candidate)
+		}
+		if !provenMutation {
+			continue
+		}
+		// The spelling the kernel walks first (GAP-2047 L5), then the
+		// lexical one the path fact keeps.
+		if walked, ok := stateWalkSpelling(candidate, request.Input.CWD, projected.ActiveHome); ok {
+			physicalCandidate := candidate
+			physicalCandidate.Resolved = walked
+			if provenStateCandidateMatches(projected, command, physicalCandidate, request, lineStaysOff) {
+				return true
+			}
+		}
+		if provenStateCandidateMatches(projected, command, candidate, request, lineStaysOff) {
+			return true
+		}
+	}
+	return !wholeActionProven && placedStatementStateWrite(facts, request)
+}
+
+// placedStatementStateWrite reads each top-level statement of a ; / && / ||
+// list alone, in every directory the shell may run it in, when the whole
+// list is not proven: a pushd leaves the analysis partial, so pushd
+// /missing; cp a.txt ../.defenseclaw/config.yaml had no proof, although the
+// failed pushd leaves the shell where it was and the cp writes the state
+// file (GAP-2574). A statement proven alone that mutates active state is
+// the state write; it only adds this block.
+func placedStatementStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	text, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(text, "cd") && !strings.Contains(text, "pushd") && !strings.Contains(text, "popd") {
+		return false
+	}
+	facts, request = protectedHomePlacedReading(facts, request)
+	home := facts.EnforcementProjection().ActiveHome
+	if home == "" || !filepath.IsAbs(request.Input.CWD) {
+		return false
+	}
+	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
+	if !placed || len(statements) < 2 {
+		return false
+	}
+	for _, statement := range statements {
+		input := request.Input
+		input.Args, input.Argv, input.Command, input.CWD = nil, nil, statement.Command, statement.Dir
+		projected := actionfacts.Analyze(input).EnforcementProjection()
+		if projected.ActiveHome == "" || !projected.Authoritative() || !projected.EnforcementEligible() {
+			continue
+		}
+		for _, candidate := range projected.Paths {
+			command, ok := integrityCommandByID(projected, candidate.CommandID)
+			if !ok || !stateCommandMutatesPath(command, candidate) {
+				continue
+			}
+			if active, same := hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome); same {
+				candidate.Resolved = active
+			}
+			if matchesActiveDefenseClawState(projected, candidate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// provenStateCandidateMatches places one proven mutating operand (a
+// directory entry, the hook's resolved target or the local link walk) and
+// reports it in the active state.
+func provenStateCandidateMatches(
+	projected actionfacts.Facts,
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+	request trustedActionRequest,
+	lineStaysOff func() bool,
+) bool {
+	if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
+		spellings := []string{candidate.Resolved, candidate.Value, candidate.Normalized}
+		candidate.Resolved = entry
+		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
+			return true
+		}
+		if request.ProtectedHomeHook && candidate.Access == actionfacts.PathAccessDelete {
+			// The gateway cannot follow the directory through a link
+			// the user can make; the hook placed the entry as the user
+			// and lists it only when it is in the state tree (GAP-2549).
+			for _, spelling := range spellings {
+				if placed := request.ResolvedWriteTargets[spelling]; filepath.IsAbs(placed) {
+					candidate.Resolved = placed
+					if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	physical := ""
+	for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
+		if value, found := request.ResolvedWriteTargets[spelling]; found {
+			physical = value
+			break
+		}
+	}
+	if physical == "" && !request.SkipLocalFilesystemResolution {
+		if request.ProtectedHomeHook {
+			// Only an OS-proved alias is safe to resolve here when the
+			// authenticated hook supplied no target-map entry. The home
+			// itself is the peer's home from the account database: a
+			// find that starts there (`yes | find ~ ...`, which the
+			// client lists no target for) is judged from it (GAP-2404
+			// pod ip21, managed RHEL).
+			physical, _ = hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
+			if physical == "" && path.IsAbs(candidate.Resolved) &&
+				path.Clean(candidate.Resolved) == path.Clean(projected.ActiveHome) {
+				physical = path.Clean(candidate.Resolved)
+			}
+			if physical == "" {
+				// A link-walk spelling the client walked (GAP-2569).
+				physical, _ = hookpaths.WalkFactTarget(request.ResolvedWriteTargets, candidate.Resolved)
+			}
+		} else {
+			physical, _ = hookpaths.ResolveWriteTarget(driveFSPath(request, gitBashOperandSpelling(candidate)))
+			physical = driveViewPath(request, physical)
+		}
+	}
+	if physical == "" {
+		return false
+	}
+	if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+		physical = active
+	}
+	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
+		physical = filepath.ToSlash(physical)
+	}
+	candidate.Resolved = physical
+	return matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets)
+}
+
+// stateWalkSpelling is the spelling of an operand with a `..` component
+// as the kernel walks it: a `..` after a link ascends from the link's
+// target, so with dclink -> ~/.defenseclaw `rm -rf dclink/../.defenseclaw/hooks`
+// removes ~/.defenseclaw/hooks while its lexical spelling (the path fact)
+// is ./.defenseclaw/hooks (GAP-2047 L5, T10). It is the operand joined to
+// the call cwd, uncleaned, when that join cleans to the fact's resolved
+// path (an operand placed after a cd keeps its lexical spelling only); ok
+// is false for any other operand, which keeps its lexical spelling.
+func stateWalkSpelling(candidate actionfacts.PathFact, cwd, home string) (string, bool) {
+	if candidate.Flavor == actionfacts.PathFlavorWindows || !hasDotDotComponent(candidate.Value) {
+		return "", false
+	}
+	trimmed := strings.TrimRight(candidate.Value, "/")
+	if strings.HasSuffix(trimmed, "/..") || strings.HasSuffix(trimmed, "/.") || trimmed == ".." {
+		return "", false
+	}
+	full, ok := stateHomePath(candidate.Value, strings.TrimRight(home, "/"), cwd)
+	if !ok || !path.IsAbs(full) || path.Clean(full) != path.Clean(filepath.ToSlash(candidate.Resolved)) {
+		return "", false
+	}
+	return full, true
+}
+
+// hasDotDotComponent reports a slash path with a `..` component.
+func hasDotDotComponent(word string) bool {
+	return slices.Contains(strings.Split(word, "/"), "..")
+}
+
+// walkParent is the parent of a slash path without removing its `..`
+// components (filepath.Dir cleans them lexically).
+func walkParent(value string) string {
+	value = strings.TrimRight(value, "/")
+	index := strings.LastIndex(value, "/")
+	if index <= 0 {
+		return "/"
+	}
+	return value[:index]
+}
+
+// managedLinkWalkView is a managed hook call placed in the directory the
+// hook client keyed its link-walk facts in (hookpaths.WalkFactPrefix): the
+// client's cwd, or the directory a static cd placed a simple command in
+// (evidenceCWD). A gateway behind ProtectHome receives no cwd of its own, so
+// a relative link spelling (`git -C dclink clean -fdx`) could not be placed
+// (GAP-2569). ok is false when the gateway knows the cwd or the client's is
+// not a plain directory in the caller's home.
+func managedLinkWalkView(request trustedActionRequest) (actionfacts.Facts, trustedActionRequest, bool) {
+	cwd, ok := protectedHomeClientDirectory(request)
+	if !ok {
+		return actionfacts.Facts{}, request, false
+	}
+	placed := request
+	placed.Input.CWD = cwd
+	return actionfacts.Analyze(placed.Input), placed, true
+}
+
+// protectedHomeClientDirectory is the directory a managed hook call runs in
+// when the gateway behind ProtectHome receives no cwd of its own, as the
+// hook client keyed its evidence: the directory a static cd placed a simple
+// command in (evidenceCWD), else the client cwd (hookpaths.CWDKey). ok is
+// false when the call is not a managed hook peer call, the gateway knows the
+// cwd, or the directory is not an absolute path without ".." in the caller
+// home or its project root.
+func protectedHomeClientDirectory(request trustedActionRequest) (string, bool) {
+	if !request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) {
+		return "", false
+	}
+	cwd, home := request.evidenceCWD, request.Input.ActiveHome
+	if !filepath.IsAbs(cwd) {
+		cwd = request.ResolvedWriteTargets[hookpaths.CWDKey]
+	}
+	if !filepath.IsAbs(cwd) || !filepath.IsAbs(home) || hasParentElement(cwd) || strings.ContainsRune(cwd, 0) ||
+		projectRootKey(cwd) != projectRootKey(home) && !insideHome(home, cwd) {
+		return "", false
+	}
+	return filepath.Clean(cwd), true
+}
+
+// protectedHomePrivateKeyTwinRequest returns the call of a managed hook
+// peer placed in the directory the hook client ran it in
+// (protectedHomeClientDirectory), when its text names an SSH private key
+// file. Without a cwd of its own the gateway left a key read spelled
+// relative to that directory (cat .ssh/id_ed25519 in the home, cat
+// ../.ssh/id_rsa in a project) outside ~/.ssh, so a managed peer was
+// allowed what a per-user gateway blocks (GAP-0179). The placed reading is
+// the per-user one; the caller keeps only its private-key read block.
+func protectedHomePrivateKeyTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	cwd, ok := protectedHomeClientDirectory(request)
+	if !ok || request.SkipLocalFilesystemResolution {
+		return trustedActionRequest{}, false
+	}
+	text := strings.ToLower(trustedActionInputText(request.Input, request.LegacyText))
+	if !strings.Contains(text, "id_rsa") && !strings.Contains(text, "id_ed25519") &&
+		!strings.Contains(text, "id_ecdsa") && !strings.Contains(text, "id_dsa") {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.conflictSource = nil
+	twin.Input.CWD = cwd
+	return twin, true
+}
+
+// stateLinkResolver resolves a path through links: the hook's resolved
+// write targets first, then the local filesystem when the hook allows it.
+func stateLinkResolver(request trustedActionRequest) func(string) (string, bool) {
+	return func(value string) (string, bool) {
+		if physical, found := request.ResolvedWriteTargets[value]; found {
+			return physical, true
+		}
+		if request.SkipLocalFilesystemResolution {
+			return "", false
+		}
+		if request.ProtectedHomeHook {
+			// A managed gateway may not read the user's home: the hook
+			// client's walk of the command's words places a link spelling
+			// (GAP-2569).
+			return hookpaths.WalkFactTarget(request.ResolvedWriteTargets, value)
+		}
+		physical, ok := hookpaths.ResolveWriteTarget(driveFSPath(request, value))
+		return driveViewPath(request, physical), ok
+	}
+}
+
+// gitBashDriveView is a Git Bash call on Windows with its drive home and
+// cwd (C:/Users/x) spelled as rooted POSIX paths (/C:/Users/x), so the link,
+// pattern and xargs state checks, which read only a rooted home, judge it
+// as they judge the call on Linux and macOS (GAP-2577). The view's
+// filesystem reads go through driveFSPath and come back through
+// driveViewPath. ok is false off Windows, for a managed or sandbox call and
+// for a home that is not a drive path.
+func gitBashDriveView(facts actionfacts.Facts, request trustedActionRequest) (actionfacts.Facts, trustedActionRequest, bool) {
+	if runtime.GOOS != "windows" || request.gitBashDrive || request.ProtectedHomeHook ||
+		request.SkipLocalFilesystemResolution {
+		return actionfacts.Facts{}, request, false
+	}
+	home := filepath.ToSlash(facts.ActiveHome)
+	if !actionfacts.DriveSlashPath(home) {
+		home = filepath.ToSlash(request.Input.ActiveHome)
+	}
+	if !actionfacts.DriveSlashPath(home) {
+		return actionfacts.Facts{}, request, false
+	}
+	posix := false
+	for _, command := range facts.Commands {
+		posix = posix || command.Dialect == actionfacts.DialectPOSIX
+	}
+	if !posix {
+		return actionfacts.Facts{}, request, false
+	}
+	view := request
+	view.gitBashDrive = true
+	view.Input.ActiveHome = "/" + strings.TrimRight(home, "/")
+	view.Input.CWD = ""
+	if cwd := filepath.ToSlash(request.Input.CWD); actionfacts.DriveSlashPath(cwd) {
+		view.Input.CWD = "/" + cwd
+	}
+	view.Input.DialectHint = actionfacts.DialectPOSIX
+	// Git Bash expands an unquoted leading ~ to the drive home; the view
+	// spells it so (`rm -rf ~/proj/dclink/../.defenseclaw/x`).
+	if command, ok := trustedBashCommandInput(request.Input); ok {
+		if rewritten, changed := driveViewTildeCommand(command, view.Input.ActiveHome); changed {
+			view.Input.Command, view.Input.Args = rewritten, nil
+		}
+	}
+	return actionfacts.Analyze(view.Input), view, true
+}
+
+// driveViewTildeCommand respells every unquoted leading ~ or ~/ of a call
+// word as home. changed is false when nothing was respelled, the command
+// does not parse, or home needs quoting.
+func driveViewTildeCommand(command, home string) (string, bool) {
+	if strings.ContainsAny(home, " \t\n'\"$`*?[]{}()<>|&;#!\\") {
+		return "", false
+	}
+	file, ok := shellparse.Parse(command)
+	if !ok {
+		return "", false
+	}
+	changed := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok {
+			return true
+		}
+		for _, word := range call.Args {
+			if len(word.Parts) == 0 {
+				continue
+			}
+			lit, ok := word.Parts[0].(*syntax.Lit)
+			if !ok || lit.Value != "~" && !strings.HasPrefix(lit.Value, "~/") {
+				continue
+			}
+			lit.Value = home + lit.Value[1:]
+			changed = true
+		}
+		return true
+	})
+	if !changed {
+		return "", false
+	}
+	var out bytes.Buffer
+	if err := syntax.NewPrinter().Print(&out, file); err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(out.String()), true
+}
+
+// driveFSPath is the Windows spelling of a drive view path (/C:/x -> C:/x).
+func driveFSPath(request trustedActionRequest, value string) string {
+	if request.gitBashDrive && strings.HasPrefix(value, "/") && actionfacts.DriveSlashPath(value[1:]) {
+		return value[1:]
+	}
+	return value
+}
+
+// driveViewPath is the drive view spelling of a Windows path (C:\x -> /C:/x).
+func driveViewPath(request trustedActionRequest, value string) string {
+	if slashed := filepath.ToSlash(value); request.gitBashDrive && actionfacts.DriveSlashPath(slashed) {
+		return "/" + slashed
+	}
+	return value
+}
+
+// gitBashOperandSpelling is the local file system path of a POSIX operand.
+// On a native Windows host the POSIX reading of a Git Bash call leaves a
+// drive path (C:/x, C:\x) unresolved and keeps an MSYS drive mount (/c/x)
+// as written, while Git Bash opens the drive path: a write through a disk
+// link or junction outside the home to ~/.defenseclaw was not placed in the
+// state, though its ~/.ssh twin was (rel-1-0-6:GAP-0213). Elsewhere, and for
+// any other operand, it is the resolved path.
+func gitBashOperandSpelling(candidate actionfacts.PathFact) string {
+	if runtime.GOOS != "windows" || candidate.Flavor != actionfacts.PathFlavorPOSIX {
+		return candidate.Resolved
+	}
+	if candidate.Resolved == "" {
+		if value := filepath.ToSlash(candidate.Value); actionfacts.DriveSlashPath(value) {
+			return path.Clean(value)
+		}
+		return ""
+	}
+	return actionfacts.MSYSDrivePath(candidate.Resolved)
+}
+
+// stateRootOf returns the physical state root and a test for a path in it.
+func stateRootOf(home string, resolve func(string) (string, bool)) (string, func(string) bool) {
+	spelled, separator := filepath.Join(home, ".defenseclaw"), string(filepath.Separator)
+	if strings.HasPrefix(home, "/") {
+		// A rooted slash home (a Git Bash drive view on Windows, GAP-2577)
+		// keeps its slash spelling.
+		spelled, separator = path.Join(home, ".defenseclaw"), "/"
+	}
+	root, ok := resolve(spelled)
+	if !ok {
+		root = spelled
+	}
+	return root, func(value string) bool {
+		return value == root || strings.HasPrefix(value, root+separator)
+	}
+}
+
+// globbedStateMutationThroughLink is globbedStateMutation for operands
+// spelled through a link to the state (`rm -rf dclink/*`, `rm -rf
+// ./dclink/hooks/*`, `cp -a /tmp/x/. dclink/` with dclink ->
+// ~/.defenseclaw; pod check17 GAP-2047): the static directory part of each
+// word (up to the first pattern component; the parent of a plain word, the
+// word itself when it ends in / or /.) is resolved, and a word whose
+// directory is physically in the state is judged by its ~/.defenseclaw
+// spelling.
+func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedActionRequest) bool {
+	home := strings.TrimRight(facts.ActiveHome, "/")
+	if !strings.HasPrefix(home, "/") {
+		return false
+	}
+	resolve := stateLinkResolver(request)
+	root, inState := stateRootOf(home, resolve)
+	dirs := posixCommandDirectories(facts, home)
+	for commandIndex, command := range facts.Commands {
+		if command.Effect == actionfacts.EffectPreview || command.Dialect != actionfacts.DialectPOSIX {
+			continue
+		}
+		words, ok := stateOperandWords(command)
+		if !ok {
+			continue
+		}
+		git := path.Base(command.Program) == "git"
+		rewritten, changed := slices.Clone(words), false
+		for index, word := range words {
+			if git {
+				// `git -C dclink clean -fdx`: a -C or --work-tree value is
+				// a directory git enters, so the whole word is resolved
+				// (GAP-2047 L11).
+				if spelled, ok := gitDirectoryWordThroughLink(words, index, home, facts.CWD, root, resolve, inState); ok {
+					rewritten[index], changed = spelled, true
+					continue
+				}
+			}
+			if spelled, ok := stateWordThroughLink(word, home, facts.CWD, root, resolve, inState); ok {
+				rewritten[index], changed = spelled, true
+			}
+		}
+		if changed && globbedStateCommandMutates(command, rewritten, home, facts.CWD) {
+			return true
+		}
+		// `cd dclink && git clean -fdx`: a directory the command runs in
+		// after a cd, physically in the state but spelled outside it, is
+		// judged by its ~/.defenseclaw spelling (GAP-2047 L11).
+		if commandIndex >= len(dirs) {
+			continue
+		}
+		program, programWords := unwrapStateWrapper(command, words)
+		for _, dir := range dirs[commandIndex] {
+			if !strings.HasPrefix(dir, "/") {
+				continue
+			}
+			spelled, ok := stateWordThroughLink(strings.TrimRight(dir, "/")+"/", home, facts.CWD, root, resolve, inState)
+			if ok && globbedStateCommandMutates(program, programWords, home, strings.TrimRight(spelled, "/")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// gitDirectoryWordThroughLink spells the value of a git -C or --work-tree
+// option (its own word or attached with =) under ~/.defenseclaw when the
+// directory it names is physically in the state.
+func gitDirectoryWordThroughLink(
+	words []string, index int, home, cwd, root string,
+	resolve func(string) (string, bool),
+	inState func(string) bool,
+) (string, bool) {
+	word, prefix := words[index], ""
+	switch {
+	case strings.HasPrefix(word, "--work-tree="):
+		prefix, word = "--work-tree=", strings.TrimPrefix(word, "--work-tree=")
+	case index > 0 && (words[index-1] == "-C" || words[index-1] == "--work-tree"):
+	default:
+		return "", false
+	}
+	if word == "" || strings.HasPrefix(word, "-") || stateWordExpands(word) {
+		return "", false
+	}
+	spelled, ok := stateWordThroughLink(strings.TrimRight(word, "/")+"/", home, cwd, root, resolve, inState)
+	if !ok {
+		return "", false
+	}
+	return prefix + strings.TrimRight(spelled, "/"), true
+}
+
+// stateWordThroughLink returns word spelled under ~/.defenseclaw when its
+// static directory part is physically in the state but not spelled there.
+func stateWordThroughLink(
+	word, home, cwd, root string,
+	resolve func(string) (string, bool),
+	inState func(string) bool,
+) (string, bool) {
+	if word == "" || strings.HasPrefix(word, "-") {
+		return "", false
+	}
+	full, ok := stateHomePath(word, home, cwd)
+	if !ok {
+		return "", false
+	}
+	components := strings.Split(full, "/")
+	split := len(components) - 1
+	if strings.HasSuffix(full, "/") || strings.HasSuffix(full, "/.") {
+		split = len(components)
+	}
+	for index, component := range components {
+		if stateWordExpands(component) {
+			split = min(split, index)
+			break
+		}
+	}
+	directory := path.Clean("/" + strings.Join(components[:split], "/"))
+	// A `..` after a link ascends from the link's target, so the directory
+	// part is resolved as the kernel walks it and its lexical spelling
+	// proves nothing (`rm -rf dclink/../.defenseclaw/*`, GAP-2047 L5).
+	walked := hasDotDotComponent(strings.Join(components[:split], "/"))
+	spelledRoot := home + "/.defenseclaw"
+	if !walked && (directory == "/" || directory == home ||
+		directory == spelledRoot || strings.HasPrefix(directory, spelledRoot+"/")) {
+		return "", false
+	}
+	walkSpelling := directory
+	if walked {
+		walkSpelling = "/" + strings.TrimLeft(strings.Join(components[:split], "/"), "/")
+	}
+	physical, ok := resolve(walkSpelling)
+	if !ok || !inState(physical) {
+		return "", false
+	}
+	rest := strings.Join(components[split:], "/")
+	spelled := spelledRoot + strings.TrimPrefix(physical, root)
+	if rest != "" {
+		spelled += "/" + rest
+	} else if strings.HasSuffix(word, "/") {
+		spelled += "/"
+	}
+	return spelled, true
+}
+
+// stateOperandThroughLink reports a changing operand spelled outside the
+// state whose place is in it: a project symlink to the state root as a
+// parent (`rm -rf dclink/installer`), or as the operand itself when a
+// trailing separator makes the kernel follow it (`rm -rf dclink/`). Such a
+// call names no state path, so the mention check alone let it through
+// (GAP-2047); provenStateMutationPath then judges it on the physical
+// target, as it does every other operand.
+func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionRequest) bool {
+	home := facts.ActiveHome
+	if !filepath.IsAbs(home) && (!request.gitBashDrive || !path.IsAbs(home)) {
+		return false
+	}
+	resolve := stateLinkResolver(request)
+	_, inState := stateRootOf(home, resolve)
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessDelete, actionfacts.PathAccessWrite,
+			actionfacts.PathAccessAppend, actionfacts.PathAccessMetadata:
+		default:
+			continue
+		}
+		value := gitBashOperandSpelling(candidate)
+		drive := request.gitBashDrive && candidate.Flavor == actionfacts.PathFlavorPOSIX && path.IsAbs(value)
+		if !filepath.IsAbs(value) && !drive || inState(value) {
+			continue
+		}
+		target := filepath.Dir(value)
+		if drive {
+			target = path.Dir(value)
+		}
+		if strings.HasSuffix(candidate.Value, "/") || strings.HasSuffix(candidate.Value, "/.") {
+			target = value
+		}
+		if physical, ok := resolve(target); ok && inState(physical) {
+			return true
+		}
+		// `rm -rf dclink/../.defenseclaw/hooks`: the parent as the kernel
+		// walks it (GAP-2047 L5).
+		if walked, ok := stateWalkSpelling(candidate, request.Input.CWD, home); ok {
+			if physical, ok := resolve(walkParent(walked)); ok && inState(physical) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// fileToolWriteThroughLinkToState reports a file tool write (write_file,
+// an edit, a patch target: a call with no shell command) whose target is an
+// existing link that leads into the active DefenseClaw state. The tool opens
+// the path it names and the kernel follows the link, so it writes the state
+// file, while the path names no state: the mention and path checks let a
+// Hermes V4A patch of a project link to ~/.defenseclaw/... through
+// (GAP-0684). The hook client's resolved target decides when it lists one;
+// otherwise the target is resolved here, as for the SSH key files (a home
+// the gateway cannot read resolves to nothing and proves nothing). A link
+// to an ordinary file is judged by that file.
+func fileToolWriteThroughLinkToState(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if _, shell := trustedBashCommandInput(request.Input); shell {
+		return false
+	}
+	projected := facts.EnforcementProjection()
+	if projected.ActiveHome == "" {
+		return false
+	}
+	for _, candidate := range projected.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
+			continue
+		}
+		command, ok := integrityCommandByID(projected, candidate.CommandID)
+		if !ok || !stateCommandMutatesPath(command, candidate) {
+			continue
+		}
+		physical := ""
+		for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
+			if value, found := request.ResolvedWriteTargets[spelling]; found {
+				physical = value
+				break
+			}
+		}
+		if physical == "" && filepath.IsAbs(candidate.Resolved) && !request.SkipLocalFilesystemResolution {
+			physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
+		}
+		if !filepath.IsAbs(physical) || filepath.Clean(physical) == filepath.Clean(candidate.Resolved) {
+			continue
+		}
+		linked := candidate
+		linked.Value, linked.Normalized, linked.Resolved = physical, physical, physical
+		if matchesActiveDefenseClawState(projected, linked) {
+			return true
+		}
+	}
+	return false
+}
+
+// provenLinkedStateWrite reports a command whose writer, proven for its
+// own command, writes through a link that an earlier part of the same
+// command makes to active DefenseClaw state: ln -s ~/.defenseclaw hc;
+// cp a.txt hc/config.yaml, plain or behind a prefix wrapper (GAP-2522).
+// The analysis marks such an action partial (a new link makes later
+// targets unknown), so the whole-action proof never holds for it; the
+// link reading here is the proof. A write that only may run (after &&)
+// counts, as the ~/.ssh alias does.
+func provenLinkedStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	text, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(text, "ln") && !strings.Contains(text, "link") && !strings.Contains(text, "cp") {
+		return false
+	}
+	facts, request = protectedHomePlacedReading(facts, request)
+	projected := facts.EnforcementProjection()
+	if projected.ActiveHome == "" {
+		return false
+	}
+	var links *hookpaths.Links
+	linkedWrite := func(projected actionfacts.Facts) bool {
+		for _, candidate := range projected.Paths {
+			command, ok := integrityCommandByID(projected, candidate.CommandID)
+			if !ok || !stateCommandMutatesPath(command, candidate) {
+				continue
+			}
+			if links == nil {
+				made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)
+				links = &made
+			}
+			if linkedActiveStateWrite(projected, command, candidate, *links, request, request.Input.CWD, false) {
+				return true
+			}
+		}
+		return false
+	}
+	if linkedWrite(projected) {
+		return true
+	}
+	// The analysis leaves ~/ and $HOME/ operands dynamic, so a write under
+	// the home through a link the command makes (ln -s ~/.defenseclaw/hooks
+	// ~/hk; cp a.txt ~/hk/x.sh, or the link made in a subshell after cd ~)
+	// has no writer path here; the home-spelled twin places it as the
+	// literal home spelling does (GAP-2555). It only adds this block.
+	// CommandLinks reads the original text, which expands ~ itself.
+	if twin, ok := actionfacts.HomeSpelledTwin(request.Input); ok && linkedWrite(twin.EnforcementProjection()) {
+		return true
+	}
+	if links == nil {
+		made := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, projected.ActiveHome)
+		links = &made
+	}
+	return links.HasAliases() && placedLinkedStateWrite(request, text, projected.ActiveHome, *links)
+}
+
+// protectedHomePlacedReading places a call of a managed hook peer whose
+// working directory the gateway could not resolve (ProtectHome keeps it out
+// of the user's home, so the hook CWD is empty) in the directory the hook
+// client reported, as the client keyed its evidence (managedClientCWD): the
+// link readings need absolute operands, so ln -s ~/.defenseclaw hc; cp a.txt
+// hc/config.yaml was not read there (GAP-2544). The client's directory only
+// adds a block of those readings: it must be absolute, without "..", and
+// in the caller's home or its project root.
+func protectedHomePlacedReading(facts actionfacts.Facts, request trustedActionRequest) (actionfacts.Facts, trustedActionRequest) {
+	client, ok := protectedHomeClientDirectory(request)
+	if !ok || request.SkipLocalFilesystemResolution {
+		return facts, request
+	}
+	request.Input.CWD = client
+	return actionfacts.Analyze(request.Input), request
+}
+
+// placedLinkedStateWrite reads each top-level statement in the directory
+// it runs in, so a write after a cd through a link the command makes is
+// placed where the shell places it (cd ~ && ln -s .defenseclaw hc && cp
+// project/a.txt hc/config.yaml), and an in-place editor operand (sed -i,
+// perl -i) through a linked directory is the write it is on the state file
+// itself (ln -s ~/.defenseclaw hc; sed -i s/a/b/ hc/config.yaml, GAP-2522).
+// An in-place editor replaces the directory entry, so only a link to one of
+// its directories is followed. The statements are the ones the link reading
+// placed; a command whose directory changes it cannot place is read whole
+// in its own directory.
+func placedLinkedStateWrite(request trustedActionRequest, text, home string, links hookpaths.Links) bool {
+	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
+	if !placed || len(statements) == 0 {
+		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
+	}
+	for _, statement := range statements {
+		input := request.Input
+		input.Args, input.Argv, input.Command, input.CWD = nil, nil, statement.Command, statement.Dir
+		projected := actionfacts.Analyze(input).EnforcementProjection()
+		if projected.ActiveHome == "" {
+			continue
+		}
+		// Each statement is read alone, in its directory, even when that is
+		// the starting directory: a lone statement gets the trusted home
+		// for its ~ and $HOME words, which the whole list does not, so
+		// ln -s ~/.defenseclaw/hooks ~/hk; cp a.txt ~/hk/x.sh names its
+		// write here only (GAP-2555).
+		for _, candidate := range projected.Paths {
+			command, ok := integrityCommandByID(projected, candidate.CommandID)
+			if ok && stateCommandMutatesPath(command, candidate) &&
+				linkedActiveStateWrite(projected, command, candidate, links, request, statement.Dir, true) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home) {
+			targets := links.AliasTargets(operand, true)
+			if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
+				// The linked entry's parent can go on through an existing
+				// disk link to state (GAP-2534); the entry keeps its name.
+				for _, target := range slices.Clone(targets) {
+					if parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(target)); ok {
+						targets = append(targets, filepath.Join(parent, filepath.Base(target)))
+					}
+				}
+			}
+			for _, target := range targets {
+				written := actionfacts.PathFact{
+					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+					Value: target, Normalized: target, Absolute: true, Resolved: target,
+				}
+				if matchesActiveDefenseClawState(projected, written) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// provenFollowedInPlaceStateWrite reports sed -i --follow-symlinks (gsed
+// too, the option abbreviated or not) whose operand is active DefenseClaw
+// state, directly, through an existing link or through a link the same
+// command makes: GNU sed then rewrites the file the link names instead of
+// replacing the link (GAP-2529). The facts leave --follow-symlinks and a
+// clustered -i (-si, -Ei) partial, so no path proof holds for them. Without
+// --follow-symlinks sed -i and perl -i replace the directory entry: the
+// entry itself is judged (the operand name, its parent read through links),
+// never the file a final link names, so an edit of a link to state stays an
+// ordinary write (GAP-2531).
+func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	text, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(text, "sed") && !strings.Contains(text, "perl") {
+		return false
+	}
+	facts, request = protectedHomePlacedReading(facts, request)
+	home := facts.EnforcementProjection().ActiveHome
+	if home == "" {
+		return false
+	}
+	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
+	if !placed || len(statements) == 0 {
+		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
+	}
+	links := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, home)
+	for _, statement := range statements {
+		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home)
+		entries := hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home)
+		if len(operands) == 0 && len(entries) == 0 {
+			continue
+		}
+		input := request.Input
+		input.Args, input.Argv, input.Command, input.CWD = nil, nil, statement.Command, statement.Dir
+		projected := actionfacts.Analyze(input).EnforcementProjection()
+		if projected.ActiveHome == "" {
+			continue
+		}
+		for _, operand := range operands {
+			targets := append([]string{operand}, links.AliasTargets(operand, false)...)
+			if physical, found := request.ResolvedWriteTargets[operand]; found {
+				targets = append(targets, physical)
+			} else if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
+				if physical, ok := hookpaths.ResolveWriteTarget(operand); ok {
+					targets = append(targets, physical)
+				}
+			}
+			for _, target := range targets {
+				if active, same := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); same {
+					target = active
+				}
+				written := actionfacts.PathFact{
+					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+					Value: target, Normalized: target, Absolute: true, Resolved: target,
+				}
+				if matchesActiveDefenseClawState(projected, written) {
+					return true
+				}
+			}
+		}
+		for _, entry := range entries {
+			if slices.Contains(operands, entry) {
+				continue
+			}
+			targets := append([]string{entry}, links.AliasTargets(entry, true)...)
+			if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
+				if parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(entry)); ok {
+					targets = append(targets, filepath.Join(parent, filepath.Base(entry)))
+				}
+			}
+			for _, target := range targets {
+				written := actionfacts.PathFact{
+					Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+					Value: target, Normalized: target, Absolute: true, Resolved: target,
+				}
+				if matchesActiveDefenseClawState(projected, written) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// linkedActiveStateWrite reports a write operand that reaches active
+// state through a link the same command makes: ln -s ~/.defenseclaw hc;
+// cp a.txt hc/config.yaml writes ~/.defenseclaw/config.yaml, plain or
+// behind a prefix wrapper, as the ~/.ssh alias reaches authorized_keys
+// (GAP-1521, GAP-2522). The link does not exist when the hook runs, so
+// the name is followed through the links of the same command only. ln,
+// a delete or a move acts on the final name: only a link to one of its
+// directories is followed.
+func linkedActiveStateWrite(
+	projected actionfacts.Facts,
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+	links hookpaths.Links,
+	request trustedActionRequest,
+	cwd string,
+	placed bool,
+) bool {
+	value := candidate.Resolved
+	if value == "" {
+		value = candidate.Normalized
+	}
+	if !filepath.IsAbs(value) {
+		// A POSIX operand under a Windows working directory (Git Bash) has
+		// no resolved form in the facts; the link reading places it in the
+		// directory the statement runs in, as the shell does (GAP-2550).
+		if value = placedPOSIXOperand(value, cwd); value == "" {
+			return false
+		}
+	}
+	// ln, a delete and a move replace or remove the final name itself.
+	entry := candidate.Access == actionfacts.PathAccessDelete ||
+		slices.Contains([]string{"ln", "link", "gln", "glink"}, filepath.Base(command.Program)) ||
+		candidate.Access == actionfacts.PathAccessWrite && hasOperation(command, actionfacts.OperationMove) &&
+			!hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend, actionfacts.OperationCopy)
+	targets := links.AliasTargets(value, entry)
+	for _, target := range targets {
+		linked := candidate
+		linked.Resolved = target
+		if matchesActiveDefenseClawState(projected, linked) {
+			return true
+		}
+	}
+	// The linked name can go on through a disk link that already exists:
+	// ln -s /opt/ext e; echo z > e/y/config.yaml, with /opt/ext/y ->
+	// ~/.defenseclaw, writes the state file. The names the command links
+	// reach (and, for a statement placed in a directory the links name, the
+	// operand itself) are resolved on disk as the direct spelling is in
+	// provenStateMutationPath (GAP-2534). An entry operand keeps its final
+	// name: only its parent is resolved.
+	if request.ProtectedHomeHook {
+		// Behind ProtectHome, PrivateTmp and PrivateDevices the gateway
+		// cannot read a directory the user can make, so the hook's map,
+		// which follows the operand through the command's links as the
+		// user, is the proof. Only an operand whose directory goes
+		// through a command link is read from it: a link that is the final
+		// name may be replaced, not followed (sed -i on the link).
+		if len(links.AliasTargets(filepath.Dir(value), false)) == 0 {
+			return false
+		}
+		physical := request.ResolvedWriteTargets[value]
+		if physical == "" || physical == value || !filepath.IsAbs(physical) {
+			return false
+		}
+		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+			physical = active
+		}
+		linked := candidate
+		linked.Resolved = physical
+		return matchesActiveDefenseClawState(projected, linked)
+	}
+	if request.SkipLocalFilesystemResolution {
+		return false
+	}
+	if placed {
+		targets = append(targets, value)
+	}
+	for _, target := range targets {
+		physical, ok := "", false
+		if entry {
+			if parent, found := hookpaths.ResolveWriteTarget(filepath.Dir(target)); found {
+				physical, ok = filepath.Join(parent, filepath.Base(target)), true
+			}
+		} else {
+			physical, ok = hookpaths.ResolveWriteTarget(target)
+		}
+		if !ok || physical == target {
+			continue
+		}
+		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+			physical = active
+		}
+		linked := candidate
+		linked.Resolved = physical
+		if matchesActiveDefenseClawState(projected, linked) {
+			return true
+		}
+	}
+	return false
+}
+
+// placedPOSIXOperand places a plain relative POSIX operand (no tilde,
+// parameter, substitution or pattern) in an absolute working directory, or
+// returns "".
+func placedPOSIXOperand(value, cwd string) string {
+	if value == "" || !filepath.IsAbs(cwd) || strings.HasPrefix(value, "-") ||
+		strings.ContainsAny(value, "~$`*?[\x00\r\n") || path.IsAbs(value) {
+		return ""
+	}
+	return hookpaths.OperandPath(filepath.FromSlash(value), cwd)
+}
+
+// stateDirectoryEntryTarget places an operand that removes or replaces a
+// directory entry: a delete or move source and a move destination. rm,
+// unlink and mv act on the final name itself, so removing, moving or
+// replacing a project symlink or hard link to active state leaves the state
+// untouched. Only the parent directories are followed. ok is false, and the
+// operand is resolved as a write, when the command also writes through the
+// name (shred -u), a trailing separator makes the kernel follow a link, a
+// move lands inside a (linked) directory, a Windows delete may recurse
+// through a directory link, or the gateway cannot place the parent.
+func stateDirectoryEntryTarget(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+	request trustedActionRequest,
+) (string, bool) {
+	moveDestination := candidate.Access == actionfacts.PathAccessWrite &&
+		hasOperation(command, actionfacts.OperationMove)
+	if candidate.Access != actionfacts.PathAccessDelete && !moveDestination ||
+		request.SkipLocalFilesystemResolution ||
+		hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend,
+			actionfacts.OperationCopy) {
+		return "", false
+	}
+	windows := candidate.Flavor == actionfacts.PathFlavorWindows
+	value := candidate.Resolved
+	// A drive view operand (/C:/x, GAP-2577) is a rooted slash path.
+	drive := request.gitBashDrive && !windows && path.IsAbs(value)
+	if !filepath.IsAbs(value) && !drive || strings.HasSuffix(candidate.Value, "/") ||
+		strings.HasSuffix(candidate.Value, "/.") ||
+		windows && (strings.HasSuffix(candidate.Value, `\`) || strings.HasSuffix(candidate.Value, `\.`)) {
+		return "", false
+	}
+	parentSpelling := filepath.Dir(value)
+	if drive {
+		parentSpelling = path.Dir(value)
+	}
+	if !windows && hasDotDotComponent(value) {
+		// A walked spelling (stateWalkSpelling): the kernel follows a link
+		// before the `..` after it.
+		parentSpelling = walkParent(value)
+	}
+	parent, ok := "", false
+	if request.ProtectedHomeHook {
+		// The client walked the parent as the user (GAP-2569).
+		parent, ok = hookpaths.WalkFactTarget(request.ResolvedWriteTargets, filepath.ToSlash(parentSpelling))
+	}
+	if !ok {
+		parent, ok = hookpaths.ResolveWriteTarget(driveFSPath(request, parentSpelling))
+	}
+	if !ok {
+		return "", false
+	}
+	entry := filepath.Join(parent, path.Base(filepath.ToSlash(value)))
+	if info, err := os.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
+		return "", false
+	}
+	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
+		// A Git Bash operand on Windows keeps its slash spelling, so the
+		// state checks read the entry the way they read the operand.
+		entry = filepath.ToSlash(entry)
+	}
+	return driveViewPath(request, entry), true
+}
+
+func provenPartialStateRedirect(
+	facts actionfacts.Facts,
+	projected actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	if !integrityCommandOwnsStaticRedirect(projected, candidate) {
+		return false
+	}
+	// The shell opens a static redirect target before it runs the program,
+	// so the write does not depend on what the program is: a program named
+	// by a relative path (./build.sh, scripts/gen.sh) has an uncertain
+	// effect, yet its redirect writes the target as `make > f` does
+	// (GAP-2268).
+	original, ok := integrityCommandByID(facts, projected.ID)
+	return ok && (original.Effect == actionfacts.EffectExecute ||
+		original.Effect == actionfacts.EffectPreview ||
+		original.Effect == actionfacts.EffectUncertain) &&
+		(!original.ControlFlowUncertain ||
+			// One side of a plain && or || list attempts its redirect
+			// (cd sub && make >& ~/f, GAP-2225 RV13-3).
+			original.ControlFlowOperator == actionfacts.ControlFlowOperatorAnd ||
+			original.ControlFlowOperator == actionfacts.ControlFlowOperatorOr) &&
+		integrityCommandOwnsStaticRedirect(original, candidate)
+}
+
+func stateCommandMutatesPath(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
+	if integrityCommandMutatesPath(command, candidate) {
+		return true
+	}
+	if command.Effect != actionfacts.EffectExecute {
+		return false
+	}
+	return candidate.Access == actionfacts.PathAccessDelete && hasOperation(command, actionfacts.OperationMove) ||
+		candidate.Access == actionfacts.PathAccessMetadata && hasOperation(command, actionfacts.OperationPermissionChange)
 }
 
 // withMigratedLiteralRuleFindings blocks a tool call that a migrated 0.8.x
@@ -945,8 +4236,27 @@ func appendJSONStrings(texts []string, raw json.RawMessage) []string {
 // withTwinProvenBlocks returns findings, the finalized findings of a
 // redirect-target action, with each finding of twin, the same lanes judged on
 // its static-target twin, that may block there in place of the finding of the
-// same rule or owner that may not.
+// same rule or owner that may not, or that may block on a stronger proof: an
+// authorized proof over an unauthorized one, and a proven mutation of
+// DefenseClaw's own state (the observe-mode self-protection block,
+// provenActiveStateMutation) over any other. A weaker finding the original
+// spelling raised (a ~<login> path the gateway cannot place, GAP-2378) must
+// not hide the twin's proof.
 func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
+	strength := func(finding RuleFinding) int {
+		switch {
+		case !finding.contributesToEnforcement():
+			return 0
+		case !finding.proof.authorizes(finding.RuleID):
+			return 1
+		case finding.proof.kind == findingProofActionFactsSemantic ||
+			finding.proof.kind == findingProofActionFactsSubgraph ||
+			finding.proof.kind == findingProofActiveStateMutation:
+			return 3
+		default:
+			return 2
+		}
+	}
 	for _, proven := range twin {
 		if !proven.contributesToEnforcement() {
 			continue
@@ -958,7 +4268,7 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 		switch {
 		case index < 0:
 			findings = append(findings, proven)
-		case !findings[index].contributesToEnforcement():
+		case strength(proven) > strength(findings[index]):
 			findings[index] = proven
 		}
 	}
@@ -1597,6 +4907,24 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 		alertOnly: true,
 	},
+	"CMD-WRAPPED-DOWNLOAD-EXEC": {
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return wrappedDownloadExecProof(facts)
+		},
+		codeOwnedDetection: true,
+	},
+	"CMD-SUBST-DOWNLOAD-EXEC": {
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXDownloadSubstitution(facts, input)
+		},
+		codeOwnedDetection: true,
+	},
+	"CMD-PYTHON-SOCKET-CONNECT": {
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPythonExternalSocketConnect(facts)
+		},
+		codeOwnedDetection: true,
+	},
 	"secrets.cloud_secret_manager_read": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return cloudSecretManagerPrerequisite(facts)
@@ -1622,7 +4950,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 				"wget.exe",
 			)
 		},
-		detectionOnly: true,
+		alertOnly: true,
 	},
 	"CMD-PIPE-BASE64": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -1659,6 +4987,10 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return devTCPFallbackProof(facts, false) ||
 				scriptDevTCPReverseShellProof(facts)
 		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXDescriptorFeedbackShell(facts)
+		},
+		codeOwnedDetection: true,
 	},
 	"CMD-REVSHELL-PYTHON": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -1804,10 +5136,10 @@ const (
 var (
 	trustedPerlInlineRegexp                   = regexp.MustCompile(trustedPerlInlinePattern)
 	trustedRubyInlineRegexp                   = regexp.MustCompile(trustedRubyInlinePattern)
-	trustedPythonSocketAssignmentPattern      = regexp.MustCompile(`(?is)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*socket\s*\.\s*socket\s*\(\s*([^)]*)\)`)
-	trustedPythonStaticShellLaunchPattern     = regexp.MustCompile(`(?is)\b(?:pty\s*\.\s*spawn|subprocess\s*\.\s*(?:Popen|call|run)|os\s*\.\s*(?:system|execl|execle|execlp|execv|execve))\s*\(\s*(?:\[\s*)?["'](?:(?:/usr)?/bin/(?:ba|z|k|da)?sh|(?:cmd|powershell)(?:\.exe)?)["']`)
-	trustedPythonStaticHostnamePattern        = regexp.MustCompile(`(?i)^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$`)
-	trustedRemotePayloadExecuteCleanupPattern = regexp.MustCompile(
+	trustedPythonSocketAssignmentPattern      = lazyregexp.New(`(?is)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*socket\s*\.\s*socket\s*\(\s*([^)]*)\)`)
+	trustedPythonStaticShellLaunchPattern     = lazyregexp.New(`(?is)\b(?:pty\s*\.\s*spawn|subprocess\s*\.\s*(?:Popen|call|run)|os\s*\.\s*(?:system|execl|execle|execlp|execv|execve))\s*\(\s*(?:\[\s*)?["'](?:(?:/usr)?/bin/(?:ba|z|k|da)?sh|(?:cmd|powershell)(?:\.exe)?)["']`)
+	trustedPythonStaticHostnamePattern        = lazyregexp.New(`(?i)^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$`)
+	trustedRemotePayloadExecuteCleanupPattern = lazyregexp.New(
 		`(?is)\b(?:curl|wget)\b[^;\r\n]*https?://(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?/[^\s;]+(?:;|\s{2,})[^\r\n]*?\bchmod\s+(?:\+x|[0-7]*7[0-7]*)\s+\S+(?:;|\s{2,})[^\r\n]*?(?:\./|(?:ba)?sh\s+)\S+(?:[ \t][^;\r\n \t]+)*(?:;|[ \t]{2,})[^\r\n]*?(?:rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(?:\*|[A-Za-z0-9_.-]+\*)|history\s+-c)`,
 	)
 )
@@ -2359,14 +5691,15 @@ func filterExactFallbackFindings(
 				getNestedActions(),
 			)
 		}
+		boundedSubgraphProven := contract.boundedSubgraphProves != nil &&
+			contract.boundedSubgraphProves(input, facts)
+		matched = matched || boundedSubgraphProven
 		if contract.requiresExactDetectionProof && !matched {
 			continue
 		}
 		if !preserveUnstructured && !matched {
 			continue
 		}
-		boundedSubgraphProven := contract.boundedSubgraphProves != nil &&
-			contract.boundedSubgraphProves(input, facts)
 		proofBoundary := facts.Authoritative() &&
 			enforcementFacts.EnforcementEligible() &&
 			enforcementFacts.Parse.Status == actionfacts.StatusComplete
@@ -2517,6 +5850,7 @@ func trustedFallbackLanes(
 	findings []RuleFinding,
 	facts actionfacts.Facts,
 ) ([]RuleFinding, trustedActionTelemetry) {
+	legacyFindings := append([]RuleFinding(nil), findings...)
 	findings = appendTrustedFIFOListenerBindShellFinding(
 		findings,
 		generation,
@@ -2566,7 +5900,41 @@ func trustedFallbackLanes(
 		facts,
 		request.EnforcementCapable,
 	)
+	// The exact body of a pwsh -Command call runs as written whatever left
+	// the whole action partial (a profile, a runtime-expanded redirect
+	// target), so a fallback that body proves, and that commands around it
+	// cannot undo, stands for the call: `pwsh -Command "iwr ... | iex"`
+	// blocks as the -NoProfile form does (GAP-0033).
+	for _, body := range actionfacts.PowerShellCommandBodyActions(request.Input, facts) {
+		bodyFindings := filterExactFallbackFindings(
+			powerShellBodyMonotoneFindings(legacyFindings),
+			request.Input,
+			body,
+			request.EnforcementCapable,
+		)
+		findings = withSequenceProvenFindings(findings, bodyFindings)
+	}
 	return findings, laneTelemetry
+}
+
+// powerShellBodyMonotoneFallbacks are the exact fallback rules whose proof
+// reads only a PowerShell body's own commands and the data flow between them.
+var powerShellBodyMonotoneFallbacks = map[string]struct{}{
+	"CMD-WIN-IWR-IEX": {},
+}
+
+// powerShellBodyMonotoneFindings keeps the findings whose rule is in
+// powerShellBodyMonotoneFallbacks. Only those are judged on a body, so
+// another rule's legacy finding (strict CMD-PIPE-CURL) cannot stand in for
+// them there.
+func powerShellBodyMonotoneFindings(findings []RuleFinding) []RuleFinding {
+	kept := make([]RuleFinding, 0, len(findings))
+	for _, finding := range findings {
+		if _, ok := powerShellBodyMonotoneFallbacks[finding.RuleID]; ok {
+			kept = append(kept, finding)
+		}
+	}
+	return kept
 }
 
 // neutralizeTrustedSecretStoreValue keeps credential detectors focused on
@@ -3035,6 +6403,11 @@ func filterTrustedLegacyActionContext(
 			continue
 		}
 		if contract, ok := exactFallbackContracts[finding.RuleID]; ok {
+			if contract.codeOwnedDetection && contract.boundedSubgraphProves != nil &&
+				contract.boundedSubgraphProves(input, facts) {
+				filtered = append(filtered, finding)
+				continue
+			}
 			proven := contract.proves != nil && contract.proves(input, facts)
 			if contract.requiresExactDetectionProof && !proven {
 				continue
@@ -3692,7 +7065,7 @@ func trustedBashFallbackActions(
 	}
 	file, err := syntax.NewParser(
 		syntax.Variant(syntax.LangBash),
-	).Parse(strings.NewReader(command), "")
+	).Parse(shellparse.Reader(command), "")
 	if err != nil {
 		// macOS generic shell boundaries may execute zsh syntax that mvdan's
 		// Bash grammar cannot represent. The input is still a valid, trusted
@@ -4982,8 +8355,234 @@ func trustedShellHeredocAt(
 	return heredoc, true
 }
 
+// homeSpellingTwinRequest returns request with its Bash command's
+// ~<active user> tilde-prefixes (the home's base name or one of logins)
+// spelled as the active home (actionfacts.ActiveUserTildeTwin) or, under a Windows home, its MSYS
+// drive mounts spelled as drive paths (actionfacts.MSYSDrivePathTwin). A
+// hook client's resolved target for the original spelling is kept for the
+// new one. The twin records no audit or telemetry of its own.
+func homeSpellingTwinRequest(request trustedActionRequest, logins ...string) (trustedActionRequest, bool) {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	var respell func(string) string
+	rewritten, prefixes, ok := actionfacts.ActiveUserTildeTwin(command, request.Input.ActiveHome, logins...)
+	if ok {
+		home := strings.TrimRight(filepath.ToSlash(request.Input.ActiveHome), "/")
+		respell = func(spelling string) string {
+			for _, prefix := range prefixes {
+				if spelling == prefix || strings.HasPrefix(spelling, prefix+"/") {
+					return home + spelling[len(prefix):]
+				}
+			}
+			return spelling
+		}
+	} else if rewritten, ok = actionfacts.MSYSDrivePathTwin(command, request.Input.ActiveHome); ok {
+		respell = actionfacts.MSYSDrivePath
+	} else {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.Input.Command, twin.Input.Args, twin.Input.Argv = rewritten, nil, nil
+	twin.conflictSource = nil
+	if strings.Contains(request.LegacyText, command) {
+		twin.LegacyText = strings.ReplaceAll(request.LegacyText, command, rewritten)
+	} else {
+		twin.LegacyText = rewritten
+	}
+	if request.ResolvedWriteTargets != nil {
+		twin.ResolvedWriteTargets = make(map[string]string, len(request.ResolvedWriteTargets))
+		for spelling, value := range request.ResolvedWriteTargets {
+			twin.ResolvedWriteTargets[spelling] = value
+		}
+		for spelling, value := range request.ResolvedWriteTargets {
+			if respelled := respell(spelling); respelled != spelling {
+				if _, taken := twin.ResolvedWriteTargets[respelled]; !taken {
+					twin.ResolvedWriteTargets[respelled] = value
+				}
+			}
+		}
+	}
+	return twin, true
+}
+
+// dynamicOperandTwinRequests returns the request for each reading of
+// actionfacts.DynamicOperandTwins of a POSIX Bash call. Behind ProtectHome
+// (managed hook peer) the hook client map lists the targets of the same
+// readings (hookpaths), so they are judged there too (GAP-2477).
+func dynamicOperandTwinRequests(request trustedActionRequest) []trustedActionRequest {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return nil
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return nil
+	}
+	var twins []trustedActionRequest
+	for _, rewritten := range actionfacts.DynamicOperandTwins(command, request.Input.ActiveHome) {
+		if rewritten != command {
+			twin := bashReadingRequest(request, command, rewritten)
+			twin.staticOperandReading = request.ProtectedHomeHook
+			twins = append(twins, twin)
+		}
+	}
+	return twins
+}
+
+// bashReadingRequest returns request with its Bash command replaced by
+// another reading of it; the reading records nothing of its own.
+func bashReadingRequest(request trustedActionRequest, command, rewritten string) trustedActionRequest {
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.Input.Command, twin.Input.Args, twin.Input.Argv = rewritten, nil, nil
+	twin.conflictSource = nil
+	if strings.Contains(request.LegacyText, command) {
+		twin.LegacyText = strings.ReplaceAll(request.LegacyText, command, rewritten)
+	} else {
+		twin.LegacyText = rewritten
+	}
+	return twin
+}
+
+// wrapperUnwrapTwinRequest returns the request for
+// actionfacts.WrapperUnwrapTwin of a POSIX Bash call. Behind ProtectHome
+// (managed hook peer) the hook client map lists the targets of the same
+// reading (hookpaths), so the wrapped call is judged there too (GAP-2563).
+func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	rewritten, ok := actionfacts.WrapperUnwrapTwin(command)
+	if !ok || rewritten == command {
+		return trustedActionRequest{}, false
+	}
+	// The hook client reads a link made by a wrapper that moves the
+	// directory (env -C DIR ln ...) with its cautious unknown-link reading,
+	// which the map carries; judged here, the "( cd DIR && ln ... )" twin
+	// would turn that caution into a block of every benign link there.
+	// Behind ProtectHome such a twin is left to the client reading.
+	if request.ProtectedHomeHook && strings.Count(rewritten, "( cd ") > strings.Count(command, "( cd ") &&
+		tactics.RunsProgram(rewritten, "ln", "gln", "link", "glink") {
+		return trustedActionRequest{}, false
+	}
+	return bashReadingRequest(request, command, rewritten), true
+}
+
+// stateGlobTwinRequest returns the request for actionfacts.StateGlobTwin of
+// a POSIX Bash call. The gateway expands the pattern on its own host, so a
+// gateway that may not read the user home (ProtectHome, or a request that
+// skips local resolution) has no reading.
+//
+// Behind ProtectHome the pattern is read against the names of the protected
+// state files and trees instead (actionfacts.StateGlobTwinNamed): cp a.txt
+// ~/.def*/config.yaml and cp a.txt ~/.defenseclaw/conf*.yaml name
+// config.yaml there too (GAP-2544). Only a block of that reading counts.
+func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.SkipLocalFilesystemResolution {
+		return trustedActionRequest{}, false
+	}
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	var (
+		rewritten string
+		ok        bool
+	)
+	if request.ProtectedHomeHook {
+		rewritten, ok = actionfacts.StateGlobTwinNamed(command, request.Input.ActiveHome, activeDefenseClawStateNames)
+	} else {
+		rewritten, ok = actionfacts.StateGlobTwin(command, request.Input.ActiveHome)
+	}
+	if !ok || rewritten == command {
+		return trustedActionRequest{}, false
+	}
+	return bashReadingRequest(request, command, rewritten), true
+}
+
+// trustedStatementBudgetExceeded reports whether a POSIX shell call whose
+// analysis is limit-exceeded has more statements than one action evaluates
+// (actionfacts.ShellStatementsOverBudget). A PowerShell or CMD call, and a
+// call of no known dialect on a Windows gateway without a POSIX hint, is not
+// read here.
+func trustedStatementBudgetExceeded(input actionfacts.Input, facts actionfacts.Facts, command string) bool {
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded || trustedPowerShellExecutionTool(input.Tool) {
+		return false
+	}
+	switch facts.Parse.Dialect {
+	case actionfacts.DialectPOSIX:
+	case actionfacts.DialectNone, "":
+		if input.DialectHint != "" && input.DialectHint != actionfacts.DialectPOSIX ||
+			input.DialectHint == "" && runtime.GOOS == "windows" {
+			return false
+		}
+	default:
+		return false
+	}
+	return actionfacts.ShellStatementsOverBudget(command)
+}
+
+// withTrustedActionLimitFinding adds the over-limit verdict once.
+func withTrustedActionLimitFinding(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+	for _, finding := range findings {
+		if finding.RuleID == "ACTION-COMPOUND-LIMIT" {
+			return findings
+		}
+	}
+	return append(findings, trustedActionLimitFindings(enforcementCapable)...)
+}
+
+// trustedActionLimitFindings is the over-limit verdict of a shell command
+// past the policy reading bounds.
+func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
+	const ruleID = "ACTION-COMPOUND-LIMIT"
+	failure := RuleFinding{
+		RuleID: ruleID, Title: "Shell command exceeds policy evaluation limit",
+		Severity: "CRITICAL", Confidence: 1,
+		enforcement: findingEnforcementAllowed,
+	}.withTrustedActionProof(newEvaluationFailureFindingProof(ruleID))
+	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
+}
+
+// trustedActionCommandTooDeep reports whether the call's command (the
+// command input, or the top-level command argument of any tool but
+// apply_patch) nests past
+// shellparse.MaxNestingDepth. Every shell reader of the gateway, the hook
+// proofs and actionfacts recurse per nesting level; such a command
+// overflowed the Windows gateway's stack (GAP-2537).
+func trustedActionCommandTooDeep(input actionfacts.Input) bool {
+	// The command of an apply_patch call is a patch envelope: file text,
+	// not shell. Its targets are read from the envelope, and every shell
+	// reader parses through shellparse.Reader, so a patch of ordinary text
+	// with many unclosed (, { or [ (ANSI colour escapes) is judged by its
+	// targets, not by the shell bound (GAP-2561).
+	if actionfacts.ApplyPatchTool(input.Tool) {
+		return false
+	}
+	if shellparse.TooDeep(input.Command) {
+		return true
+	}
+	if input.Command != "" || len(bytes.TrimSpace(input.Args)) == 0 {
+		return false
+	}
+	command, present, valid := trustedTopLevelCommandField(input.Args)
+	return valid && present && shellparse.TooDeep(command)
+}
+
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
-	if !trustedBashExecutionTool(input.Tool) {
+	if !trustedBashExecutionTool(input.Tool) && !trustedPowerShellExecutionTool(input.Tool) {
 		return "", false
 	}
 	command := input.Command
@@ -5010,6 +8609,20 @@ func trustedBashExecutionTool(tool string) bool {
 		"run_command", "run_shell", "run_shell_command", "runshellcommand",
 		"run_terminal_cmd", "execute", "execute_command", "exec",
 		"exec_command", "command", "subprocess", "system.run":
+		return true
+	default:
+		return false
+	}
+}
+
+// trustedPowerShellExecutionTool names the PowerShell shell tools (Claude
+// Code PowerShell, a Codex or Copilot call that names the executable). Their
+// command is read by the same whole-command proofs as a Bash call, so the
+// same text gets the same decision whichever shell tool carries it
+// (GAP-1779, GAP-2389). The dialect hint still chooses the grammar.
+func trustedPowerShellExecutionTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
 		return true
 	default:
 		return false
@@ -6475,6 +10088,49 @@ func trustedActiveHome(ctx context.Context) string {
 	}
 	return trustedSameHostHome()
 }
+
+// trustedActiveLogins names the login of the account whose home is
+// activeHome, from the same trusted identity trustedActiveHome reads (the
+// kernel-verified managed hook peer, the per-user credential's account, or
+// the account this gateway runs as), so a ~<login> tilde-prefix is read
+// as that home even when the login is not the home's base name or holds
+// '@' (AD user@domain, GAP-2378). A Windows DOMAIN\user name gives user.
+// nil when the request's home is not that account's home.
+func trustedActiveLogins(ctx context.Context, activeHome string) []string {
+	if ctx == nil || activeHome == "" || isSandboxHookRequest(ctx) {
+		return nil
+	}
+	if filepath.Clean(trustedActiveHome(ctx)) != filepath.Clean(activeHome) {
+		return nil
+	}
+	var name string
+	if peer, ok := managedHookPeerFromContext(ctx); ok {
+		name = peer.Name
+	} else if serviceAccountGatewayFromContext(ctx) {
+		if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
+			name = userScopedIdentityName(identity)
+		}
+	} else {
+		name = trustedSameHostLogin()
+	}
+	if index := strings.LastIndexByte(name, '\\'); index >= 0 {
+		name = name[index+1:]
+	}
+	if name = strings.TrimSpace(name); name == "" {
+		return nil
+	}
+	return []string{name}
+}
+
+// trustedSameHostLogin is the login name of the account this gateway runs
+// as, looked up once.
+var trustedSameHostLogin = sync.OnceValue(func() string {
+	account, err := osuser.Current()
+	if err != nil {
+		return ""
+	}
+	return account.Username
+})
 
 // unresolvedCallerHome stands in for a standalone caller whose home cannot
 // be resolved (a directory lookup that failed, a home of "/", or an

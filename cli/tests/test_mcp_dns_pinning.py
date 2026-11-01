@@ -33,7 +33,7 @@ from defenseclaw.scanner.mcp import (
     _run_with_pinned_dns,
     _scope_network_analyzer_dns,
 )
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 pytestmark = pytest.mark.skipif(
@@ -270,13 +270,7 @@ def _serve_mcp(transport: str):
     listener.listen()
     port = listener.getsockname()[1]
 
-    app = FastMCP(
-        "dns-pin-test",
-        log_level="ERROR",
-        transport_security=TransportSecuritySettings(
-            enable_dns_rebinding_protection=False,
-        ),
-    )
+    app = MCPServer("dns-pin-test", log_level="ERROR")
 
     @app.tool()
     def ping() -> str:
@@ -286,7 +280,11 @@ def _serve_mcp(transport: str):
     def status() -> str:
         return "ready"
 
-    asgi = app.sse_app() if transport == "sse" else app.streamable_http_app()
+    security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    if transport == "sse":
+        asgi = app.sse_app(transport_security=security)
+    else:
+        asgi = app.streamable_http_app(transport_security=security)
     server = uvicorn.Server(
         uvicorn.Config(
             asgi,

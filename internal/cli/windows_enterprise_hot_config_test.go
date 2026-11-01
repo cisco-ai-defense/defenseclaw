@@ -279,18 +279,112 @@ func TestWindowsEnterpriseHotConfigClosureSurvivesUntilPolicyProof(t *testing.T)
 				windowsEnterpriseHotConfigReleaseHooks = func(managed.StandaloneLayout) error { return errors.New("release refused") }
 			}
 			result := newWindowsEnterpriseStandaloneResult("ensure", ensureTestOptions())
-			result.OK, result.Installed = tc.verified, true
-			code := 1
-			if tc.verified {
-				code = 0
+			// OK is left as Finish leaves it before it runs (false): the
+			// error list decides (GAP-1599).
+			result.Installed = true
+			if !tc.verified {
+				result.AddError("lifecycle_error", "ensure failed")
 			}
-			err := windowsEnterpriseReleaseHotConfigClosureIfProven(context.Background(), result, code)
+			err := windowsEnterpriseReleaseHotConfigClosureIfProven(context.Background(), result)
 			if tc.wantRelease {
 				if err != nil || host.closureHeld || host.releases != 1 {
 					t.Fatalf("proven recovery: err=%v held=%t releases=%d", err, host.closureHeld, host.releases)
 				}
 			} else if !host.closureHeld || host.releases != 0 || (tc.verified && err == nil) {
 				t.Fatalf("unproven recovery: err=%v held=%t releases=%d", err, host.closureHeld, host.releases)
+			}
+		})
+	}
+}
+
+// GAP-1599: status names a held closure, and a clean repair or verify
+// releases it once the gateway proves the installed policy; a verify that
+// cannot release it fails.
+func TestWindowsEnterpriseHeldHookClosureIsReportedAndReleased(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	for _, tc := range []struct {
+		action      string
+		digestFails bool
+		wantRelease bool
+		wantCode    string
+		wantError   bool
+	}{
+		{action: "status", wantCode: "hook_closure_held"},
+		{action: "verify", wantRelease: true},
+		{action: "repair", wantRelease: true},
+		{action: "verify", digestFails: true, wantCode: "hook_closure_held", wantError: true},
+	} {
+		t.Run(fmt.Sprintf("%s digestFails=%t", tc.action, tc.digestFails), func(t *testing.T) {
+			host, _ := newHotConfigHost(t, config, config)
+			host.closureHeld, host.adopted = true, true
+			digest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = digest })
+			windowsEnterprisePolicyDigest = host.digest
+			if tc.digestFails {
+				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("readback unavailable") }
+			}
+			result := newWindowsEnterpriseStandaloneResult(tc.action, ensureTestOptions())
+			result.Installed = true
+			settleWindowsEnterpriseHotConfigClosure(context.Background(), result, tc.action)
+			if tc.wantRelease {
+				if host.closureHeld || host.releases != 1 || len(result.Errors) != 0 || len(result.Warnings) != 0 {
+					t.Fatalf("release: held=%t releases=%d errors=%v warnings=%v", host.closureHeld, host.releases, result.Errors, result.Warnings)
+				}
+				return
+			}
+			if !host.closureHeld || host.releases != 0 {
+				t.Fatalf("closure released: held=%t releases=%d", host.closureHeld, host.releases)
+			}
+			messages := result.Warnings
+			if tc.wantError {
+				messages = result.Errors
+			}
+			if !windowsBundleHasCode(messages, tc.wantCode) || !strings.Contains(messages[len(messages)-1].Message, "/repair") {
+				t.Fatalf("held closure not named: errors=%v warnings=%v", result.Errors, result.Warnings)
+			}
+		})
+	}
+}
+
+// GAP-2087: a clean ensure releases a held closure once the gateway proves
+// the installed config, through the exit every ensure takes (its failure
+// code is nonzero even for a clean run); when the gateway proves nothing,
+// ensure fails and names the closure instead of reporting compliant.
+func TestWindowsEnterpriseEnsureSettlesAHeldHookClosure(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	for _, digestFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("digestFails=%t", digestFails), func(t *testing.T) {
+			host, opts := newHotConfigHost(t, config, config)
+			host.closureHeld, host.adopted = true, true
+			digest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = digest })
+			opts.configPath = ""
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+			stub.install(t)
+			windowsEnterprisePolicyDigest = host.digest
+			if digestFails {
+				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("readback unavailable") }
+			}
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			runErr := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("ensure output: %v\n%s", err, stdout.String())
+			}
+			if !digestFails {
+				if runErr != nil || host.closureHeld || host.releases != 1 || !result.OK || result.Noop {
+					t.Fatalf("clean ensure kept the closure: err=%v held=%t releases=%d ok=%t noop=%t errors=%v",
+						runErr, host.closureHeld, host.releases, result.OK, result.Noop, result.Errors)
+				}
+				return
+			}
+			if runErr == nil || !host.closureHeld || host.releases != 0 || result.OK ||
+				!windowsBundleHasCode(result.Errors, "hook_closure_held") {
+				t.Fatalf("unproven ensure: err=%v held=%t releases=%d ok=%t errors=%v",
+					runErr, host.closureHeld, host.releases, result.OK, result.Errors)
 			}
 		})
 	}
@@ -1542,6 +1636,13 @@ func TestWindowsHotConfigHookFailModeChanges(t *testing.T) {
 		{name: "a profile mode is not attributed", previous: "guardrail:\n  profiles:\n    p:\n      hook_fail_mode: closed\n", next: "guardrail:\n  profiles:\n    p:\n      hook_fail_mode: open\n", any: true, affected: 2, reopened: 2},
 		{name: "other keys only", previous: "guardrail:\n  block_at: LOW\n", next: "guardrail:\n  block_at: HIGH\n"},
 		{name: "unparseable", previous: "guardrail:\n  hook_fail_mode: open\n", next: "guardrail: [\n", any: true, affected: 2, reopened: 2},
+		// GAP-1498: an application protection connector entry added with no
+		// hook_fail_mode of its own takes codex off the application
+		// protection guardrail (open) to the global guardrail (closed).
+		{name: "application protection entry switches the chain",
+			previous: "config_version: 9\ndeployment_mode: managed_enterprise\nguardrail:\n  hook_fail_mode: closed\napplication_protection:\n  enabled: true\n  guardrail:\n    hook_fail_mode: open\n",
+			next:     "config_version: 9\ndeployment_mode: managed_enterprise\nguardrail:\n  hook_fail_mode: closed\napplication_protection:\n  enabled: true\n  guardrail:\n    hook_fail_mode: open\n  connectors:\n    codex:\n      guardrail:\n        mode: action\n",
+			any:      true, affected: 1},
 	} {
 		change := windowsHotConfigHookFailModeChanges([]byte(tc.previous), []byte(tc.next))
 		if got := change.any(); got != tc.any {
@@ -1572,6 +1673,39 @@ func TestWindowsHotConfigUnprovenTargetsAcceptExcused(t *testing.T) {
 	unproven := windowsHotConfigUnprovenTargets(targets, rows, enterpriseHookReconcileRow{SID: "s-1-5-21-1-2-3-1002", Connector: "Codex"})
 	if len(unproven) != 1 || unproven[0].SID != "S-1-5-21-1-2-3-1003" {
 		t.Fatalf("unproven = %v, want only the failed unexcused target", unproven)
+	}
+}
+
+// GAP-0933: a plain config change whose undo cannot prove the restored hook
+// fail mode goes on to the upgrade transaction with its hooks held closed;
+// it records a warning, not an error that says the previous config is back
+// over the transaction that then installs the change.
+func TestWindowsHotConfigUnprovenRestoredModeLeavesTheChangeToTheTransaction(t *testing.T) {
+	const base = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    codex: {}\n"
+	const explicitOpen = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    codex:\n      hook_fail_mode: open\n"
+	host, opts := newHotConfigHost(t, base, explicitOpen)
+	host.adopted = true
+	windowsEnterpriseHotConfigPublishedTargets = func(managed.StandaloneLayout) ([]enterprisehooks.ManifestTarget, error) {
+		return []enterprisehooks.ManifestTarget{{SID: "S-1-5-21-1-2-3-1001", Connector: "codex"}}, nil
+	}
+	// Neither the forward render nor the restored mode is proven.
+	windowsEnterpriseHotConfigTargetHooksProven = func(context.Context, managed.StandaloneLayout, []enterprisehooks.ManifestTarget, time.Duration) error {
+		return errors.New("no verified DefenseClaw hook for S-1-5-21-1-2-3-1001/codex")
+	}
+	savedDigest := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
+	windowsEnterprisePolicyDigest = host.digest
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+	if applied || opts.hotConfigRestoreFailed {
+		t.Fatalf("applied=%t restoreFailed=%t: the change must go on to the transaction", applied, opts.hotConfigRestoreFailed)
+	}
+	if windowsBundleHasCode(result.Errors, "hook_fail_mode_restore_unproven") || !windowsBundleHasCode(result.Warnings, "hook_fail_mode_restore_unproven") {
+		t.Fatalf("errors=%v warnings=%v: want the unproven restore as a warning", result.Errors, result.Warnings)
+	}
+	if !host.closureHeld || host.stops != 0 {
+		t.Fatalf("held=%t stops=%d: the hooks stay held closed and the gateway runs", host.closureHeld, host.stops)
 	}
 }
 
@@ -1663,6 +1797,30 @@ func TestWindowsHotBundleUndoHoldsHooksClosedUntilRestoredModeRenders(t *testing
 // GAP-1418: the hook proof's readiness run carries the guardian's
 // authorization directory and the gateway service name besides the service
 // pins; without them readiness refused before its report on every host.
+// GAP-1719: the hook proof runs enterprise hooks readiness from the
+// installed gateway image, the only one whose protected authorization check
+// passes; from defenseclaw.exe every proof failed closed.
+func TestWindowsHotConfigHookProofRunsTheInstalledGateway(t *testing.T) {
+	root := t.TempDir()
+	resolver, custody := windowsEnterpriseProgramFilesResolver, windowsEnterpriseInstalledCLICustody
+	t.Cleanup(func() {
+		windowsEnterpriseProgramFilesResolver, windowsEnterpriseInstalledCLICustody = resolver, custody
+	})
+	windowsEnterpriseProgramFilesResolver = func() (string, error) { return root, nil }
+	var checked []string
+	windowsEnterpriseInstalledCLICustody = func(path, _ string) error { checked = append(checked, path); return nil }
+	layout := managed.StandaloneLayout{ManifestPath: filepath.Join(root, "targets.yaml"), GuardianAuthDir: root}
+	err := windowsEnterpriseHotConfigTargetHooksProven(context.Background(), layout,
+		[]enterprisehooks.ManifestTarget{{SID: "S-1-5-21-1-2-3-1001", Connector: "codex"}}, 0)
+	gateway := filepath.Join(root, "Cisco", "DefenseClaw", "bin", "defenseclaw-gateway.exe")
+	if err == nil || !strings.Contains(err.Error(), "defenseclaw-gateway.exe") {
+		t.Fatalf("hook proof error = %v, want it to run %s", err, gateway)
+	}
+	if len(checked) != 1 || !strings.EqualFold(checked[0], gateway) {
+		t.Fatalf("custody checked %q, want only %s", checked, gateway)
+	}
+}
+
 func TestWindowsHotConfigReadinessCommandCarriesGuardianPins(t *testing.T) {
 	layout := managed.StandaloneLayout{
 		ConfigPath:      `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,

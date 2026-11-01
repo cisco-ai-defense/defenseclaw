@@ -91,6 +91,14 @@ func emitCorrelationRelationshipsV8WithEmitter(
 			}
 		}
 		relationships = changed
+		// The relationship is committed in correlation_relationships, its own
+		// audit table, before it is exported: send the change to the
+		// destinations without a second copy as an audit_events row and its
+		// correlation observation, about 4.7 KB each and 4 per Claude Code
+		// tool call (#1384). Secure Client keeps its rows (#1092).
+		if ctx != nil {
+			ctx = observability.WithSkipLocalWrite(ctx)
+		}
 	}
 	if emitter == nil || len(relationships) == 0 {
 		return nil
@@ -191,8 +199,8 @@ func emitCorrelationRelationshipsV8WithEmitter(
 		}}, nil
 	}
 	// The rows of one occurrence commit together: one write-ahead-log sync
-	// instead of one per relationship, including managed hook answers.
-	if batcher, ok := emitter.(sidecarRuntimeAtomicBatchEmitter); ok &&
+	// instead of one per relationship. Records that write no row go one by one.
+	if batcher, ok := emitter.(sidecarRuntimeAtomicBatchEmitter); ok && !observability.SkipLocalWrite(ctx) &&
 		len(relationships) > 1 && len(relationships) <= observabilityruntime.MaxLogBatchItems {
 		items := make([]observabilityruntime.LogBatchItem, 0, len(relationships))
 		for _, relationship := range relationships {

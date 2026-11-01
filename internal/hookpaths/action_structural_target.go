@@ -6,10 +6,12 @@ package hookpaths
 import (
 	"path"
 	"path/filepath"
-	"regexp"
+	"runtime"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // The mention scan follows the same effective working directory the shell
@@ -58,6 +60,9 @@ func actionPosixAdvanceDirectory(call *syntax.CallExpr, values actionValues, hom
 	if actionPosixWindowsHome(home) {
 		*cwd = actionPosixWindowsPath(destination, *cwd, home)
 		return
+	}
+	if runtime.GOOS == "windows" && actionWindowsHome(home) {
+		destination = actionMSYSDrivePath(destination) // Git Bash cd /c/... (GAP-0781 RV8-1)
 	}
 	if resolved, ok := ResolveWriteTarget(OperandPath(destination, *cwd)); ok {
 		*cwd = resolved
@@ -246,7 +251,7 @@ func (c *actionKeyComponent) selects(fold bool) bool {
 	return false
 }
 
-var actionNestedToken = regexp.MustCompile(`[A-Za-z0-9_.*?\[\]]+`)
+var actionNestedToken = lazyregexp.New(`[A-Za-z0-9_.*?\[\]]+`)
 
 func actionNestedTextNamesKey(node syntax.Node, fold bool) bool {
 	var raw strings.Builder

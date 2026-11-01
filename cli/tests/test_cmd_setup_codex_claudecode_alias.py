@@ -612,7 +612,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         )
         restart_mock.assert_not_called()
 
-    def test_cursor_observe_reports_fail_open_despite_explicit_closed_preference(self):
+    def test_cursor_observe_reports_explicit_closed_outage_choice(self):
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         self.app.cfg.guardrail.connectors = {
@@ -639,10 +639,9 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("cursor mode=observe", result.output)
-        # failClosed is true in observe mode too; while the gateway is down
-        # the hook follows the default tier's open (oss-outage-open).
+        # failClosed is true in observe mode too. The saved outage choice wins.
         self.assertIn(
-            "cursor gateway outage=open (failClosed=true)",
+            "cursor gateway outage=closed (failClosed=true)",
             result.output,
         )
 

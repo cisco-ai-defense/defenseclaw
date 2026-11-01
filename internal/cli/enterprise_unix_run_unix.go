@@ -30,6 +30,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
@@ -82,7 +83,7 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 		return withExitCode(fmt.Errorf("`enterprise %s` manages %s hosts; this host is %s", platform, goos, enterpriseunix.CurrentGOOS()), enterprisestatus.UnixExitInvalidArgs)
 	}
 	if err := checkLockWait(cmd, opts.lockWait); err != nil {
-		return err
+		return lifecycleArgumentError(cmd, action, opts.json, err)
 	}
 	env, err := newUnixLifecycleEnv(goos)
 	if err != nil {
@@ -90,6 +91,8 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	}
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait
+	} else if lockWait := applyTriggerLockWait(cmd, action, opts); lockWait > 0 {
+		env.LockTimeout = lockWait
 	}
 	ctx := cmd.Context()
 	var interrupted <-chan struct{}
@@ -126,7 +129,26 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}
+	if result.PendingApply {
+		// stdout already says which run applies a change; no "Error:" line
+		// on stderr for a status that is not a failure (GAP-0129).
+		cmd.SilenceErrors = true
+	}
 	return lifecycleFailure(result, opts.json, env.LifecycleCommand(enterpriseunix.ActionRepair))
+}
+
+// runUnixTransactionWatch runs the watcher a lifecycle run starts for its
+// transaction (enterpriseunix.WatchTransaction, GAP-0276).
+func runUnixTransactionWatch(cmd *cobra.Command, platform string, pid int, snapshot string) error {
+	goos := platformGOOS(platform)
+	if enterpriseunix.CurrentGOOS() != goos {
+		return withExitCode(fmt.Errorf("`enterprise %s` manages %s hosts; this host is %s", platform, goos, enterpriseunix.CurrentGOOS()), enterprisestatus.UnixExitInvalidArgs)
+	}
+	env, err := newUnixLifecycleEnv(goos)
+	if err != nil {
+		return withExitCode(err, enterprisestatus.UnixExitFailure)
+	}
+	return enterpriseunix.WatchTransaction(cmd.Context(), env, pid, snapshot)
 }
 
 // settleInterruptedRotation makes an interrupt (Ctrl+C, SIGTERM) end
@@ -210,6 +232,11 @@ func settleInterruptedLifecycle(w io.Writer, command, platform string) (<-chan s
 // document is on stdout and the error line on stderr carries the problems.
 func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairCommand string) error {
 	if result.OK {
+		if result.PendingApply && result.ExitCode != 0 {
+			// A status that found a change being applied is ok, and exits
+			// 75 so its caller asks again for the full state (GAP-0129).
+			return withExitCode(errors.New(result.Action+" found another lifecycle run applying a change (pending_apply); run it again when that run finishes"), result.ExitCode)
+		}
 		return nil
 	}
 	if asJSON || len(result.Errors) == 0 {
@@ -264,7 +291,15 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		}
 		warns = append(warns, warning.Code+": "+warning.Message)
 	}
-	writeLifecycleSummary(w, result.Action, result.OK, result.Noop, result.NoopReason, errs, warns)
+	if result.PendingApply {
+		// A change being applied is neither done nor a failure (GAP-0129).
+		fmt.Fprintf(w, "! %s: pending apply: another lifecycle run is applying a change, so %s checked nothing but the installed version\n", result.Action, result.Action)
+		for _, warning := range warns {
+			fmt.Fprintf(w, "  ! %s\n", warning)
+		}
+	} else {
+		writeLifecycleSummary(w, result.Action, result.OK, result.Noop, result.NoopReason, errs, warns)
+	}
 	// repair (and an ensure that re-applied) says what it changed.
 	for _, change := range result.Changes {
 		fmt.Fprintf(w, "  - %s\n", change)
@@ -274,7 +309,7 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	}
 	// A verify that found the lifecycle lock held checked nothing either:
 	// its all-false readiness line read as "not installed" (GAP-1542).
-	if (result.Action == enterpriseunix.ActionStatus || result.Action == enterpriseunix.ActionVerify) &&
+	if (result.Action == enterpriseunix.ActionStatus || result.Action == enterpriseunix.ActionVerify) && !result.PendingApply &&
 		!lifecycleResultHasError(result, "not_root") && !lifecycleResultHasError(result, "lifecycle_busy") {
 		fmt.Fprintf(w, "  installed=%v version=%s gateway_ready=%v guardian_ready=%v enumerator_ready=%v sensor_helper_ready=%v\n",
 			result.Installed, result.InstalledVersion, result.Readiness.Gateway, result.Readiness.Guardian,
@@ -286,6 +321,7 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 			fmt.Fprintf(w, "  %-46s %s\n", service.Name, service.State)
 		}
 		enterprisestatus.WriteDestinations(w, result.Destinations)
+		enterprisestatus.WriteAuditStore(w, result.AuditStore)
 	}
 	// The policy the lifecycle left in place (absent under Secure Client):
 	// an administrator reading the text must see the generation and digest.
@@ -295,9 +331,10 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	if result.Bundle != nil && result.Bundle.SessionsRestartRequired != nil {
 		enterprisestatus.WriteSessionEntries(w, *result.Bundle.SessionsRestartRequired)
 	}
-	// A busy status checked nothing else, but still reports the recorded
-	// deployment's version, as the docs say (GAP-2409).
-	if result.Action == enterpriseunix.ActionStatus && result.Installed && lifecycleResultHasError(result, "lifecycle_busy") {
+	// A status that found a change being applied checked nothing else, but
+	// still reports the recorded deployment's version, as the docs say
+	// (GAP-2409, GAP-0129).
+	if result.Action == enterpriseunix.ActionStatus && result.Installed && result.PendingApply {
 		fmt.Fprintf(w, "  installed=true version=%s\n", result.InstalledVersion)
 	}
 	return nil
@@ -352,7 +389,26 @@ func init() {
 	// With --json every Linux and macOS secret verb prints one JSON
 	// document on stdout, a flag error too (mgmt-agent-api GAP-0031).
 	enterpriseSecretArgumentRefusal = func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error {
+		if ev, ok := secretChangeEvent(action, opts.name, false, "invalid_arguments", err, false); ok {
+			recordUnixChangeRefusal(cmd, ev)
+		}
 		return reportUnixSecretFailure(cmd, action, opts, err, opts.json || secretArgsRequestJSON(secretRawArgs()))
+	}
+}
+
+// recordUnixChangeRefusal audits a refusal before the lifecycle runs. Only
+// an installed standalone host and a root caller may create the spool.
+func recordUnixChangeRefusal(cmd *cobra.Command, ev enterprisestatus.ChangeEvent) {
+	if bundleSecureClient() || !bundleManagedDevice() {
+		return
+	}
+	env, err := newUnixLifecycleEnv(enterpriseunix.CurrentGOOS())
+	if err == nil && env.Geteuid() == 0 {
+		err = env.RecordChange(ev)
+	}
+	if err != nil {
+		warning := changeUnrecordedWarning(err)
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: %s\n", warning.Code, warning.Message)
 	}
 }
 
@@ -503,11 +559,8 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	if err := secretTransactionArguments(opts); err != nil {
 		return nil, false, nil, lifecycleFlagError(cmd, err)
 	}
-	var mutate func(context.Context) error
-	existed := false
-	switch action {
-	case "set":
-		var value []byte
+	var value []byte
+	if action == "set" {
 		if opts.fromFile != "" {
 			if err := enterpriseunix.TrustedSecretSource(opts.fromFile); err != nil {
 				return nil, false, nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
@@ -523,41 +576,8 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 		} else if value, err = readUnixSecretStdin(cmd.InOrStdin(), caller); err != nil {
 			return nil, false, nil, err
 		}
-		mutate = func(ctx context.Context) error {
-			if err := secretCallerGone(caller, secretCallerPID()); err != nil {
-				return err
-			}
-			// An identical value is not rewritten, so the output can say
-			// the credential already holds it (GAP-2373).
-			stored, readErr := os.ReadFile(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
-			if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
-				return err
-			}
-			if existed = readErr == nil && subtle.ConstantTimeCompare(stored, value) == 1; existed {
-				return nil
-			}
-			// A value the signed bundle does not bind is not stored. A
-			// credential that cannot be read counts as stored.
-			replacing := readErr == nil || !errors.Is(readErr, fs.ErrNotExist)
-			if err := checkSecretBinding(ctx, opts.name, value, opts.bundle, replacing); err != nil {
-				return err
-			}
-			return env.WriteSecret(ctx, opts.name, value)
-		}
-	case "remove":
-		mutate = func(context.Context) error {
-			path := filepath.Join(env.P(env.Layout.SecretsDir), opts.name)
-			if opts.undoRotation != "" || opts.ifStored != "" {
-				stored, readErr := os.ReadFile(path)
-				if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
-					return err
-				}
-			}
-			_, statErr := os.Lstat(path)
-			existed = statErr == nil
-			return env.RemoveSecret(opts.name)
-		}
 	}
+	change := &unixSecretChange{env: env, action: action, opts: opts, value: value, caller: caller}
 	// A change this device could not audit is not made: the spool must hold
 	// room for its change event before the credential is written or
 	// removed, until the event is written. A concurrent command cannot take
@@ -569,8 +589,115 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	}
 	// Write and apply under one lifecycle lock. The apply watcher the write
 	// wakes then finds the change already applied instead of racing it.
-	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret", Mutate: mutate})
-	return result, existed, reservation, nil
+	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret",
+		Mutate: change.mutate, MutateUndo: change.putBack})
+	return result, change.existed, reservation, nil
+}
+
+// unixSecretChange is the credential write or removal of secret set or
+// secret remove, made under the lifecycle lock (mutate), and its put-back
+// when the ensure then refuses the config (putBack): a refused change leaves
+// the credential store as it was, for set and remove alike (GAP-1734,
+// GAP-1888).
+type unixSecretChange struct {
+	env    *enterpriseunix.Env
+	action string
+	opts   *enterpriseSecretOptions
+	value  []byte
+	caller int
+	// existed: set found the same value stored, remove found a credential.
+	existed bool
+	undo    func(context.Context) error
+}
+
+func (c *unixSecretChange) mutate(ctx context.Context) error {
+	env, opts, path := c.env, c.opts, filepath.Join(c.env.P(c.env.Layout.SecretsDir), c.opts.name)
+	stored, readErr := os.ReadFile(path)
+	switch c.action {
+	case "set":
+		if err := secretCallerGone(c.caller, secretCallerPID()); err != nil {
+			return err
+		}
+		// An identical value is not rewritten, so the output can say
+		// the credential already holds it (GAP-2373).
+		if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
+			return err
+		}
+		if c.existed = readErr == nil && subtle.ConstantTimeCompare(stored, c.value) == 1; c.existed {
+			return nil
+		}
+		// A value the signed bundle does not bind is not stored. A
+		// credential that cannot be read counts as stored.
+		replacing := readErr == nil || !errors.Is(readErr, fs.ErrNotExist)
+		if err := checkSecretBinding(ctx, opts.name, c.value, opts.bundle, replacing); err != nil {
+			return err
+		}
+		if err := env.WriteSecret(ctx, opts.name, c.value); err != nil {
+			return err
+		}
+		c.undo = func(ctx context.Context) error {
+			switch {
+			case readErr == nil:
+				return env.WriteSecret(ctx, opts.name, stored)
+			case errors.Is(readErr, fs.ErrNotExist):
+				return env.RemoveRotatedSecret(opts.name)
+			}
+			return fmt.Errorf("credential %s was stored, and the one it replaced could not be read before (%v), so it is not put back", opts.name, readErr)
+		}
+	case "remove":
+		_, statErr := os.Lstat(path)
+		c.existed = statErr == nil
+		if err := removeUnixSecret(env, opts); err != nil {
+			return err
+		}
+		if c.existed {
+			c.undo = func(ctx context.Context) error {
+				if readErr != nil {
+					return fmt.Errorf("credential %s was removed, and it could not be read before (%v), so it is not put back", opts.name, readErr)
+				}
+				return env.WriteSecret(ctx, opts.name, stored)
+			}
+		}
+	}
+	return nil
+}
+
+// putBack is the change's MutateUndo: it runs only when the run refused
+// the config after the change.
+func (c *unixSecretChange) putBack(ctx context.Context) error {
+	if c.undo == nil {
+		return nil
+	}
+	return c.undo(ctx)
+}
+
+// removeUnixSecret is the change of secret remove, under the lifecycle lock.
+// A put-back (--undo-rotation) runs only as checkSecretTransaction allows;
+// it removes a credential the failed rotation added to the config installed
+// before it, which may reference the credential with no value stored, only
+// while that very config is installed (--undo-config, GAP-1173). A config
+// installed since may use the value stored now: credential_in_use, and
+// nothing is removed. Every other remove refuses a referenced credential.
+func removeUnixSecret(env *enterpriseunix.Env, opts *enterpriseSecretOptions) error {
+	path := filepath.Join(env.P(env.Layout.SecretsDir), opts.name)
+	if opts.undoRotation != "" || opts.ifStored != "" {
+		stored, readErr := os.ReadFile(path)
+		if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
+			return err
+		}
+	}
+	if opts.undoRotation != "" {
+		if installed, err := os.ReadFile(env.P(env.Layout.ConfigPath)); err == nil {
+			if at := config.InstalledCredentialReference(env.Layout.ConfigPath, installed, env.Layout.DataDir, opts.name); at != "" {
+				if !undoRotationOnConfig(opts, installed) {
+					return &enterprisebundle.Error{Code: "credential_in_use", Detail: fmt.Sprintf(
+						"the installed config references credential %s at %s and is not the config installed before the rotation (--undo-config), so it may use the value stored now; credential %s was not removed", opts.name, at, opts.name)}
+				}
+				return env.RemoveRotatedSecret(opts.name)
+			}
+		}
+	}
+	return env.RemoveSecret(opts.name)
 }
 
 // secretCallerPID is the parent of this process. A seam for tests.
@@ -718,4 +845,19 @@ func describeSecretChange(result *enterprisestatus.Result, action, name string, 
 	}
 	shown.Changes = append([]string{change}, result.Changes...)
 	return &shown
+}
+
+// applyTriggerLockWait is the lifecycle-lock wait of ensure --reason path
+// without a typed --lock-wait: the wait the config-apply trigger passes
+// (enterpriseunix.ApplyTriggerLockWait), so a second push queues behind the
+// run that applies the first instead of exiting busy (rel-1-0-3 GAP-0142).
+// Zero for every other run, which keeps the MDM default.
+func applyTriggerLockWait(cmd *cobra.Command, action string, opts *unixLifecycleOptions) time.Duration {
+	if action != enterpriseunix.ActionEnsure || opts == nil || opts.reason != enterpriseunix.ApplyTriggerReason {
+		return 0
+	}
+	if f := cmd.Flags().Lookup("lock-wait"); f != nil && f.Changed {
+		return 0
+	}
+	return enterpriseunix.ApplyTriggerLockWait
 }

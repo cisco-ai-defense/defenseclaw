@@ -69,25 +69,38 @@ func TestMatchOccurrenceSharedIdentifierOfALongSessionStaysFlat(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Windows advances the monotonic clock once per timer tick (about 0.5 to
+	// 2 ms), so one call timed alone reads 0 or a whole tick: a flat match
+	// once read 0s with 50 events and 2.02ms with 3,000. Time batches of at
+	// least 15 calls and 25ms instead, and compare the best mean call.
 	match := func() time.Duration {
 		t.Helper()
-		const calls = 15
+		const (
+			batches   = 3
+			minCalls  = 15
+			minLength = 25 * time.Millisecond
+		)
 		var best time.Duration
-		for range calls {
+		for range batches {
+			calls := 0
+			var elapsed time.Duration
 			start := time.Now()
-			result, err := repo.MatchOccurrence(t.Context(), CorrelationMatchInput{
-				ConnectorInstanceID: instance.ConnectorInstanceID,
-				Identifiers:         []CorrelationMatchIdentifier{{Namespace: "cursor", Kind: CorrelationIdentifierTurn, ValueDigest: digest}},
-			})
-			elapsed := time.Since(start)
-			if err != nil {
-				t.Fatal(err)
+			for calls < minCalls || elapsed < minLength {
+				result, err := repo.MatchOccurrence(t.Context(), CorrelationMatchInput{
+					ConnectorInstanceID: instance.ConnectorInstanceID,
+					Identifiers:         []CorrelationMatchIdentifier{{Namespace: "cursor", Kind: CorrelationIdentifierTurn, ValueDigest: digest}},
+				})
+				calls++
+				elapsed = time.Since(start)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !result.Ambiguous {
+					t.Fatalf("result=%+v, want ambiguous", result)
+				}
 			}
-			if !result.Ambiguous {
-				t.Fatalf("result=%+v, want ambiguous", result)
-			}
-			if best == 0 || elapsed < best {
-				best = elapsed
+			if perCall := elapsed / time.Duration(calls); best == 0 || perCall < best {
+				best = perCall
 			}
 		}
 		return best
@@ -111,7 +124,7 @@ func TestMatchOccurrenceSharedIdentifierOfALongSessionStaysFlat(t *testing.T) {
 	long := match()
 	// The old earliest-first read sorted every match: 60 times the matches
 	// took about 40 times as long. Allow wide noise around flat.
-	if long > 8*short+2*time.Millisecond {
-		t.Fatalf("match with 3,000 matching events took %v, with 50 took %v; want flat", long, short)
+	if long > 8*short+200*time.Microsecond {
+		t.Fatalf("a match with 3,000 matching events took %v a call, with 50 took %v; want flat", long, short)
 	}
 }

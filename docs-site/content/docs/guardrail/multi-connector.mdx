@@ -47,7 +47,7 @@ guardrail:
 
 ## Adding a connector (Add vs Replace)
 
-Run the hook setup for the agent you want to add. If another agent is already guarded, setup asks. The questions it asks, in order, are listed in [Changing connectors](/docs/guardrail/switching-connectors#the-questions-setup-asks).
+Run the hook setup for the agent you want to add. Setup first asks the new agent's enforcement mode, prints what it will change, and then, if another agent is already guarded, asks how to combine them. The questions, in order, are listed in [Changing connectors](/docs/guardrail/switching-connectors#the-questions-setup-asks).
 
 1. Run the agent's setup command.
 
@@ -56,6 +56,11 @@ Run the hook setup for the agent you want to add. If another agent is already gu
    ```
 
    ```text
+     Enforcement mode for Codex
+       [1] observe — scan and report findings, never block (recommended to start)
+       [2] action  — scan and block/confirm when policy requires (PreToolUse deny)
+     Select mode (1, 2) [1]:
+     …
      DefenseClaw is already configured for: claudecode
      You are setting up: codex
        [a] Add     — run it alongside the existing connector(s) (multi-connector)
@@ -67,7 +72,7 @@ Run the hook setup for the agent you want to add. If another agent is already gu
      OK codex mode=observe
    ```
 
-   Add is the default, also with `--yes`. The new agent starts in observe mode. Add `--mode action` to block from the start.
+   Add is the default, also with `--yes`. The new agent starts in observe mode. Add `--mode action` to block from the start. The picker's "never block" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`; the permissive pack only reports it).
 
 2. Check both agents.
 
@@ -79,9 +84,11 @@ Run the hook setup for the agent you want to add. If another agent is already gu
      * enabled:    yes
          Connector    Key         State    Mode     Fail    Rule pack  Block/alert       HILT  Scan        Judge
          -----------  ----------  -------  -------  ------  ---------  ----------------  ----  ----------  -----
-         Claude Code  claudecode  enabled  observe  closed  default    CRITICAL/MEDIUM+  off   regex_only  off
-         Codex        codex       enabled  observe  closed  default    CRITICAL/MEDIUM+  off   regex_only  off
+         Claude Code  claudecode  enabled  observe  open    default    CRITICAL/MEDIUM+  off   regex_only  off
+         Codex        codex       enabled  observe  open    default    CRITICAL/MEDIUM+  off   regex_only  off
    ```
+
+   `Fail` is `open` under the default policy: while the gateway is not running a call runs with one warning. The strict policy, or a saved `closed`, shows `closed`.
 
 3. Give one agent its own settings. Add `--connector` to any guardrail command.
 
@@ -120,6 +127,8 @@ defenseclaw guardrail rule disable CMD-REVSHELL-NC --connector codex
 defenseclaw guardrail disable --connector codex
 defenseclaw guardrail enable  --connector codex
 ```
+
+`guardrail hilt`, `fail-mode`, `block-message`, `enable` and `disable` print what they will change and ask `Proceed? [Y/n]`; Enter applies it, and `--yes` skips the question in scripts. `mode`, `block-at` and `use-pack` apply at once.
 
 `--connector X` writes only that connector's override. Unscoped writes are the broad path: `fail-mode`, `hilt` and `block-message` also reconcile active connector posture so an old override does not keep the old value. On a single-connector install `--connector` is rejected.
 

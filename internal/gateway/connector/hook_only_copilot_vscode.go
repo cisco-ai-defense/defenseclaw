@@ -40,7 +40,7 @@ import (
 //     Copilot CLI also accepts PascalCase events and then sends this
 //     snake_case body)
 //
-// The tool and argument projection is copilotargs.LocalToolArgs, shared with
+// The tool and argument projection is copilotargs.LocalCall, shared with
 // the hook-side write-target resolver.
 
 // CopilotHookSurfaceVSCodeLocal is the --hook-surface value of a hook command
@@ -114,7 +114,7 @@ func copilotVSCodeLocalDecode(payload map[string]interface{}) HookProfileRequest
 	case "PreToolUse", "PostToolUse":
 		if input, ok := payload["tool_input"]; ok {
 			req.ToolArgsAuthoritative = true
-			req.ToolArgs = copilotargs.LocalToolArgs(req.ToolName, input)
+			req.ToolName, req.ToolArgs = copilotargs.LocalCall(req.ToolName, input)
 		}
 		if req.HookEventName == "PostToolUse" {
 			req.Content = cursorHookContent(payload["tool_response"])

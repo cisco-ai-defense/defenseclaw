@@ -950,6 +950,14 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 	rootAgentID := agentNodeID(agentIdentityID, source, sessionID, "root")
 	lineageProvenance := "inferred"
 	agentID = strings.TrimSpace(agentID)
+	// Copilot CLI hook inputs (camelCase sessionId; the VS Code Local surface
+	// sends session_id) name agents by session (GAP-0721). Secure Client keeps
+	// the lineage of main (issue #1092).
+	copilotLineage := strings.EqualFold(strings.TrimSpace(source), "copilot") && !ManagedEnterpriseActive() &&
+		firstString(payload, "sessionId") != ""
+	if copilotLineage {
+		agentID = copilotAgentNodeID(agentIdentityID, agentID)
+	}
 	if agentID == "" && (lifecycleEvent == "subagent_start" || lifecycleEvent == "subagent_stop") {
 		childIdentity := firstNonEmpty(
 			firstString(payload, "subagent_id", "subagentId", "agent_transcript_path", "agentTranscriptPath", "tool_call_id", "toolCallId"),
@@ -971,6 +979,9 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 		firstString(payload, "parent_agent_id", "parentAgentId", "parent_id", "parentId"),
 		firstString(objectAt(payload, "extra"), "parent_subagent_id", "parentSubagentId", "parent_agent_id", "parentAgentId"),
 	)
+	if copilotLineage {
+		reportedParentAgentID, parentSessionID = copilotReportedParent(agentIdentityID, sessionID, agentID, reportedParentAgentID, parentSessionID)
+	}
 	parentAgentID := reportedParentAgentID
 	reportedRootAgentID := firstNonEmpty(
 		firstString(payload, "root_agent_id", "rootAgentId", "rootAgentID"),
@@ -1541,6 +1552,19 @@ func removeHookStateOrderKey(order *[]string, key string) {
 		copy((*order)[i:], (*order)[i+1:])
 		*order = (*order)[:len(*order)-1]
 		return
+	}
+}
+
+// evictOldestHookToolInvocationLocked drops the oldest pending tool
+// invocation. The caller holds llmPromptMu and checked the order is not empty.
+func (a *APIServer) evictOldestHookToolInvocationLocked() {
+	oldest := a.hookToolInvocationOrder[0]
+	a.hookToolInvocationOrder = a.hookToolInvocationOrder[1:]
+	queue := a.hookToolInvocations[oldest]
+	if len(queue) <= 1 {
+		delete(a.hookToolInvocations, oldest)
+	} else {
+		a.hookToolInvocations[oldest] = queue[1:]
 	}
 }
 
@@ -2313,14 +2337,7 @@ func (a *APIServer) rememberHookToolInvocation(meta llmEventMeta, tool, argument
 		return pending.id
 	}
 	for len(a.hookToolInvocationOrder) >= hookPromptCacheMaxEntries {
-		oldest := a.hookToolInvocationOrder[0]
-		a.hookToolInvocationOrder = a.hookToolInvocationOrder[1:]
-		queue := a.hookToolInvocations[oldest]
-		if len(queue) <= 1 {
-			delete(a.hookToolInvocations, oldest)
-		} else {
-			a.hookToolInvocations[oldest] = queue[1:]
-		}
+		a.evictOldestHookToolInvocationLocked()
 	}
 	startedAt := time.Now()
 	id := stableLLMEventID(

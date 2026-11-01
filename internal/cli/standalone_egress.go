@@ -59,7 +59,10 @@ func applyStandaloneEgressEnvironment(cfg *config.Config, setenv func(key, value
 	proxy := cfg.Enterprise.EgressProxy()
 	if proxy.HTTPSProxy != "" {
 		if _, err := netguard.ParseEgressProxyURL(proxy.HTTPSProxy); err != nil {
-			return fmt.Errorf("enterprise.network.https_proxy: %w; %s", err, netguard.ProxyURLAdvice)
+			if advice := netguard.ProxyURLAdviceFor(err); advice != "" {
+				return fmt.Errorf("enterprise.network.https_proxy: %w; %s", err, advice)
+			}
+			return fmt.Errorf("enterprise.network.https_proxy: %w", err)
 		}
 	}
 	env := proxy.Environment()

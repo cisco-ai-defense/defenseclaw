@@ -60,7 +60,12 @@ func awaitingSpool(facts useridentity.DirectoryFacts) bool {
 // An account the guardian never names keeps refreshing at that pace, which
 // costs a directory cache read. Facts its current record was merged into
 // await nothing: a local Mac account, or an SSSD account whose directory
-// gives no UPN, has none (GAP-0522).
+// gives no UPN, has none (GAP-0522). Nor does an account the gateway's own
+// Open Directory answer proves local (macOSOwnDirectory: of the local node,
+// not a mobile copy of a directory account and not linked to Platform SSO):
+// it has no UPN to wait for, as agentIdentityAccountUPN already holds. Waiting for one left every UPN or
+// DOMAIN\name assignment a maybe for such an account, so a local account
+// was refused once any such assignment existed (GAP-0532).
 func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
 	if currentIdentitySpoolDir() == "" || facts.GuardianRecord {
 		return false
@@ -69,7 +74,7 @@ func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
 	case useridentity.SourceSSSD:
 		return facts.UPN == ""
 	case useridentity.SourceMacOSOpenDirectory:
-		return facts.UPN == "" || facts.Directory == ""
+		return facts.Directory == "" || facts.UPNPending || facts.UPN == "" && facts.Directory != useridentity.DirectoryLocal
 	}
 	return false
 }
@@ -77,20 +82,35 @@ func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
 // spoolRecordNote is the explain note for an account the enumerator has no
 // current identity record for. On Windows a group assignment can match only
 // through that record, so the answer, usually match=default, is not final.
-func spoolRecordNote(id string, now time.Time) string {
+//
+// selected reports that an assignment already chose the profile (a users, SID
+// or agent assignment does not need the token groups): the strict default then
+// protects nothing here, so the note must not claim it does (GAP-0507).
+func spoolRecordNote(id string, now time.Time, selected bool) string {
 	if id == "" || currentIdentitySpoolDir() == "" {
 		return ""
 	}
 	if record, ok := readIdentitySpoolFacts(id, now); ok {
 		if record.Facts.GroupsPartial {
-			return "the guardian has no current token groups for this account (it has no active desktop session): " +
-				"group assignments cannot match until it signs in again; a strict default profile protects this gap"
+			return spoolSignedOutNote(selected)
 		}
 		return ""
 	}
 	return "the guardian has no identity record for this account yet: its group membership is unknown until the enumerator " +
 		"writes one (at the account's first sign-in or its next cycle), so a group assignment cannot match it now and the " +
 		"profile above is not final" + spoolRecordSignInHint
+}
+
+// spoolSignedOutNote is the note for an account whose desktop session ended:
+// group assignments cannot match until it signs in again. The strict default
+// is named as the safety net only while no assignment has chosen the profile.
+func spoolSignedOutNote(selected bool) string {
+	note := "the guardian has no current token groups for this account (it has no active desktop session): " +
+		"group assignments cannot match until it signs in again"
+	if selected {
+		return note + "; the profile above was chosen by an assignment that needs no token groups"
+	}
+	return note + "; a strict default profile protects this gap"
 }
 
 // spoolRecordSignInHint names the sign-in that writes the record on Windows:
@@ -264,6 +284,12 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 		!strings.EqualFold(own.Domain, spool.Domain) {
 		merged.Domain, merged.Realm, merged.Principal, merged.Directory, merged.AccountDomain = "", "", "", "", ""
 	}
+	if identityStoreUPNOfADAccount(own, record) {
+		// Not the account's UPN: an earlier guardian build took it from
+		// the identity store, which an AD UPN rename leaves stale
+		// (identity-round GAP-1238).
+		spool.UPN, spool.Principal, spool.Source = "", "", ""
+	}
 	if spool.UPN != "" {
 		merged.UPN = spool.UPN
 		// Agent identity rows only; profile matching ignores the mark.
@@ -305,6 +331,19 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 	merged.Assurance = useridentity.AssuranceVerified
 	merged.GuardianRecord = true
 	return merged
+}
+
+// identityStoreUPNOfADAccount reports a guardian record whose UPN an
+// earlier guardian build took from the identity store for an AD account.
+// Only the domain controller's answer (TranslateNameW, which the SYSTEM
+// enumerator gets and the gateway's write-restricted token does not) is an
+// AD account's UPN; the identity store keeps the cloud UPN of the user's last
+// Entra sign-in, which a rename of the AD UPN leaves stale. The record's
+// UPN is then dropped and the account keeps its own principal until the
+// enumerator records the domain controller's answer.
+func identityStoreUPNOfADAccount(own useridentity.DirectoryFacts, record enterprisehooks.IdentitySpoolRecord) bool {
+	return record.UPNSource == enterprisehooks.UPNSourceIdentityStore &&
+		(own.Directory == useridentity.DirectoryActiveDirectory || record.Facts.Directory == useridentity.DirectoryActiveDirectory)
 }
 
 // forgetOnSpoolGroupChange drops key's cached facts when the guardian's

@@ -87,6 +87,64 @@ func TestAntigravityHookDeniesWhenItsHelpersAreMissing(t *testing.T) {
 	}
 }
 
+func TestHermesHookDeniesWhenItsHelpersAreMissing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data templateData
+		deny bool
+	}{
+		{"per-user closed", templateData{FailMode: "closed"}, true},
+		{"managed standalone", templateData{FailMode: "closed", Managed: true}, true},
+		{"secure client", templateData{FailMode: "open", Managed: true, SecureClient: true, SecureClientDelivery: true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.data.APIAddr, tc.data.TokenFile, tc.data.ScopedToken = "127.0.0.1:1", ".hook-hermes.token", true
+			out, code := runLoneHook(t, "hermes-hook.sh", tc.data)
+			if tc.deny && (code != 0 || !strings.Contains(out, `"action":"block"`)) {
+				t.Fatalf("exit %d stdout %q, want Hermes' native block", code, out)
+			}
+			if !tc.deny && strings.Contains(out, `"action":"block"`) {
+				t.Fatalf("exit %d stdout %q, want Secure Client's existing behavior", code, out)
+			}
+		})
+	}
+}
+
+func TestRetiredInspectHookMissingTokenNamesAvailableRepair(t *testing.T) {
+	helper, err := filepath.Abs(filepath.Join("hooks", "_hardening.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("bash", "-c",
+		`. "$1"; defenseclaw_missing_token_next_step inspect`, "inspect-probe", helper).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "defenseclaw doctor") ||
+		strings.Contains(string(out), "setup inspect") {
+		t.Fatalf("inspect missing-token repair = %q, error %v", out, err)
+	}
+}
+
+func TestStrictAvailabilityClosesPerUserUnusableAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		conn   Connector
+		script string
+		args   []string
+		stdin  string
+		deny   string
+	}{
+		{"antigravity", NewAntigravityConnector(), "antigravity-hook.sh", []string{"PreToolUse"}, `{"toolCall":{"name":"run_command"}}`, `"decision":"deny"`},
+		{"hermes", NewHermesConnector(), "hermes-hook.sh", nil, `{"hook_event_name":"pre_tool_call","tool_name":"terminal"}`, `"action":"block"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := runPerUserHookForStop(t, tc.conn, tc.script, tc.args, tc.stdin,
+				`200|{"action":"invalid"}`, "DEFENSECLAW_FAIL_MODE=open", "DEFENSECLAW_STRICT_AVAILABILITY=1")
+			if !strings.Contains(run.stdout, tc.deny) {
+				t.Fatalf("exit %d stdout=%q stderr=%q, want native denial", run.code, run.stdout, run.stderr)
+			}
+		})
+	}
+}
+
 // A Copilot hook bound to no reviewed event cannot tell preToolUse from
 // permissionRequest: a per-user hook in fail mode closed and a standalone
 // managed hook print both of Copilot's denies, as the Windows hook does.

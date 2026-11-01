@@ -28,6 +28,8 @@ _ALLOWED_BINARIES = {
     "defenseclaw-gateway.exe",
     "defenseclaw-acp.exe",
     "defenseclaw-hook.exe",
+    # The one-line install's Claude Code PreToolUse guard (GAP-2467).
+    "defenseclaw-hook-guard.exe",
     "skill-scanner.cmd",
     "mcp-scanner.cmd",
     "defenseclaw-hook-state.json",
@@ -37,9 +39,12 @@ _ALLOWED_BINARIES = {
     "uvx.exe",
     "uvw.exe",
 }
-# A copy of an owned binary that a source install renamed aside while it ran
-# (install_publish; GAP-1929).
-_RETIRED_COPY_RE = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
+# A copy of an owned binary that a source install (install_publish; GAP-1929)
+# or install.ps1 (<name>.old-<yyyyMMddTHHmmssfff>; GAP-1760) renamed aside
+# while it ran.
+_RETIRED_COPY_RE = re.compile(
+    r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+|(?P<aside>.+)\.old-[0-9]{8}T[0-9]{9}", re.IGNORECASE
+)
 _OWNERSHIP_MARKERS = {"config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv"}
 _LAUNCHER_UNWIND_GRACE_SECONDS = 1.0
 # scripts/install.ps1 holds this folder in the data dir while it installs; it
@@ -193,7 +198,9 @@ def _validate_plan(plan: dict[str, object]) -> tuple[str, str, list[str]]:
         target = _norm(str(raw))
         name = os.path.basename(target).lower()
         retired = _RETIRED_COPY_RE.fullmatch(name)
-        owned = name in _ALLOWED_BINARIES or (retired is not None and retired.group("name") in _ALLOWED_BINARIES)
+        owned = name in _ALLOWED_BINARIES or (
+            retired is not None and (retired.group("name") or retired.group("aside")) in _ALLOWED_BINARIES
+        )
         if not owned or os.path.dirname(target) != install_root:
             raise ValueError(f"binary target is not product-owned: {raw}")
         if os.path.lexists(target) and _is_reparse(target):
@@ -318,6 +325,10 @@ def _interpreter_dirs(plan: dict[str, object], data_dir: str) -> list[str]:
 
 
 _EMPTY_DIR_RD_TRIES = 30
+# rd /s of a renamed folder: a file Defender or another reader still holds
+# open stays delete-pending, so its parent folders stay and the first rd
+# leaves a chain of empty folders behind (GAP-2233). About 2 s per try.
+_TREE_RD_TRIES = 15
 _LOCK_CLOCK_SLACK_SECONDS = 0.5
 
 
@@ -395,17 +406,24 @@ def _remove_after_exit(
     for path in dirs:
         # Rename first, then delete the renamed folder: the rename is instant,
         # so a reinstall that recreates the folder while rd still runs keeps
-        # its new files (GAP-1647). Retry the rename once; if it still fails,
-        # fall back to removing the folder in place as before.
+        # its new files (GAP-1647). A program that holds a folder inside it
+        # open without delete sharing (a scanner, or a process whose current
+        # folder it is) makes both the rename and rd fail until it lets go,
+        # and one rd left a chain of empty folders and "remove it by hand"
+        # (GAP-2233): so the rename and the rd of the renamed copy are retried
+        # (no new install can own the copy). Only when the rename never
+        # succeeds is the folder removed in place, once, as before.
         tombstone_name = f"{os.path.basename(path)}.dc-removed-{os.urandom(4).hex()}"
         tombstone = os.path.join(os.path.dirname(path), tombstone_name)
         must_go.extend((path, tombstone))
-        rename = f'ren "{path}" "{tombstone_name}" 2>nul'
         steps.append(
-            f"({rename} || (ping -n 5 127.0.0.1 >nul & {rename}))"
+            f'(for /l %i in (1,1,{_TREE_RD_TRIES}) do if not exist "{tombstone}" if exist "{path}" '
+            f'(ren "{path}" "{tombstone_name}" 2>nul || ping -n 3 127.0.0.1 >nul))'
             # Parenthesize the if: cmd would run a trailing "& next step" only
             # in the else branch.
-            f' & (if exist "{tombstone}" (rd /s /q "{tombstone}") else (rd /s /q "{path}"))'
+            f' & (if exist "{tombstone}" (for /l %i in (1,1,{_TREE_RD_TRIES}) do if exist "{tombstone}" '
+            f'(rd /s /q "{tombstone}" 2>nul & if exist "{tombstone}" ping -n 3 127.0.0.1 >nul)) '
+            f'else (rd /s /q "{path}"))'
         )
     # Retry the empty-folder rd: Defender or another reader can hold a deleted
     # file open, so the tombstone stays delete-pending for a few seconds and the

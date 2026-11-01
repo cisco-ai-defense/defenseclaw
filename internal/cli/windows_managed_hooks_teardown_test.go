@@ -57,7 +57,7 @@ func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
 		}
 		actions = append(actions, child.Name())
 	}
-	if !slices.Equal(actions, []string{"capabilities", "finalize", "prepare", "rollback", "verify"}) {
+	if !slices.Equal(actions, []string{"capabilities", "check", "finalize", "prepare", "purge-user-state", "rollback", "verify"}) {
 		t.Fatalf("actions = %v", actions)
 	}
 }
@@ -1431,6 +1431,13 @@ func TestWindowsManagedHooksTeardownReportsCommittedStandalonePrepare(t *testing
 	if report["schema_version"] != float64(windowsManagedHooksTeardownSchema) || report["action"] != "capabilities" ||
 		report["ok"] != true || report["committed_standalone_prepare"] != true {
 		t.Fatalf("capabilities report = %v", report)
+	}
+	// GAP-0571: the read-only check an uninstall asks before its commit.
+	if report["precommit_check"] != true {
+		t.Fatalf("capabilities report does not offer the precommit check: %v", report)
+	}
+	if child, _, err := command.Find([]string{"check"}); err != nil || child == nil || child.Name() != "check" {
+		t.Fatalf("teardown-managed-hooks has no check action: %v", err)
 	}
 	// The committed preparation it reports is the one the validation admits.
 	installed := false

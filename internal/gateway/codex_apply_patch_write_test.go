@@ -56,6 +56,16 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 	for i := range 100 {
 		fmt.Fprintf(&hundred, "*** Add File: f%03d.txt\n+x\n", i)
 	}
+	// Staged patch files: the hook reads their directives (classifier refix 1).
+	for name, body := range map[string]string{
+		"draft.patch":  envelope(update(keys)),
+		"staged.patch": envelope(update("hard.cfg")),
+		"benign.patch": envelope(update("notes.txt")),
+	} {
+		if err := os.WriteFile(filepath.Join(project, name), []byte(body+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	command := func(text string) map[string]any { return map[string]any{"command": text} }
 	nativeCommand := func(text string) map[string]any { return map[string]any{"cmd": text} }
 	for _, row := range []struct {
@@ -71,14 +81,22 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 		{"protected last", "apply_patch", command(envelope("*** Add File: a.txt\n+x\n" + update("notes.txt") + update(keys))), "", true},
 		{"hard link absolute", "apply_patch", command(envelope(update(hardLink))), hardLink, true},
 		{"hundred benign first", "apply_patch", command(envelope(hundred.String() + update(hardLink))), hardLink, true},
-		{"truncated", "apply_patch", command("*** Begin Patch\n" + update("notes.txt")), "", true},
+		// No readable envelope and no protected-named word: not the SSH rule
+		// (TGT-0194, GAP-0781/GAP-1106 round 2).
+		{"truncated", "apply_patch", command("*** Begin Patch\n" + update("notes.txt")), "", false},
 		{"edit tool path", "apply_patch", map[string]any{"path": symlink, "content": "x"}, symlink, true},
 		{"bash -c heredoc", "Bash", command("bash -lc \"apply_patch <<'PATCH'\n" + envelope(update("~/.ssh/authorized_keys")) + "\nPATCH\""), "", true},
+		// A staged patch file is judged by its directives (classifier refix 1):
+		// draft.patch updates authorized_keys, staged.patch its hard link.
 		{"env wrapper", "Bash", command("env apply_patch < draft.patch"), "", true},
 		{"inert envelope then staged redirect", "Bash", command("echo '" + envelope(update("notes.txt")) + "'\napply_patch < staged.patch"), "", true},
 		{"inert envelope then staged pipe", "Bash", command("printf '" + envelope(update("notes.txt")) + "'\ncat staged.patch | apply_patch"), "", true},
 		{"printed envelope with stdin override", "Bash", command("printf '" + envelope(update("notes.txt")) + "' | apply_patch < staged.patch"), "", true},
 		{"inert envelope then same-line staged pipe", "Bash", command("printf '" + envelope(update("notes.txt")) + "'; cat staged.patch | apply_patch"), "", true},
+		{"benign staged redirect", "Bash", command("apply_patch < benign.patch"), "", false},
+		{"benign staged pipe after an inert envelope", "Bash", command("printf '" + envelope(update("notes.txt")) + "'; cat benign.patch | apply_patch"), "", false},
+		// A staged file the hook cannot read stays TGT-0194.
+		{"missing staged file", "Bash", command("apply_patch < missing.patch"), "", false},
 		{"here-string", "Bash", command("apply_patch <<< '" + envelope(update("hard.cfg")) + "'"), hardLink, true},
 		{"powershell wrapper", "shell", command("powershell -NoProfile -Command \"apply_patch @'\n" + envelope(update("$HOME/.ssh/authorized_keys")) + "\n'@\""), "", true},
 		// The protected path compares case-insensitively (Windows case forms).
@@ -94,11 +112,13 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 			if row.alias == symlink && !symlinks {
 				t.Skip("no symlink privilege")
 			}
-			if runtime.GOOS == "windows" && !row.block && row.tool != "apply_patch" {
-				// The Windows grammar reads this shell text; its * is a glob
-				// that reaches hard.cfg, the hard link to authorized_keys in
-				// this project (GAP-1717).
-				t.Skip("shell text beside a protected hard link on Windows: GAP-1717")
+			if runtime.GOOS == "windows" && row.name == "benign staged pipe after an inert envelope" {
+				// Codex runs PowerShell on Windows. The plain (cmd) reading,
+				// which a PowerShell hint keeps (GAP-1504), splits the
+				// single-quoted envelope and its *** is a glob that reaches
+				// hard.cfg, the hard link to authorized_keys here: a lead
+				// ruling on that reading is pending (GAP-1717 IN file).
+				t.Skip("plain reading of a quoted PowerShell envelope: lead ruling pending (GAP-1717)")
 			}
 			body := string(mustJSON(t, map[string]any{"session_id": "patch-session", "hook_event_name": "PreToolUse",
 				"tool_name": row.tool, "cwd": project, "tool_input": row.input}))

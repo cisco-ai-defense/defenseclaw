@@ -8,7 +8,7 @@ keywords:
   - dashboard catalog
 ---
 
-DefenseClaw provisions 19 Grafana dashboards into a **DefenseClaw** folder. Start the stack with [Run Grafana locally](/docs/observability/local-observability); the links on this page assume `localhost:3000`.
+DefenseClaw provisions 18 Grafana dashboards into a **DefenseClaw** folder, or 19 from a source checkout (editable install), which also seeds the optional Fleet dashboard. The IoT Fleet board is the 19th: it is not in the installed package and is added with the separate Fleet assets ([Fleet dashboard](/docs/edge-connector/api-reference#prometheus-metrics)). Start the stack with [Run Grafana locally](/docs/observability/local-observability); the links on this page assume `localhost:3000`.
 
 ## Complete inventory
 
@@ -19,7 +19,7 @@ DefenseClaw provisions 19 Grafana dashboards into a **DefenseClaw** folder. Star
 | **DefenseClaw — Agent identity** (`defenseclaw-agent-identity`) | Which agents and instances were seen? Holds the Runtime Agent Directory that opens Agent360. | Prometheus, Loki |
 | **DefenseClaw — Identity & Users** (`defenseclaw-identity`) | Who runs which agents, how verified is the identity, and which guardrail profile decided? | Loki |
 | **DefenseClaw — Agent360** (`defenseclaw-agent-360`) | What happened inside one agent, one execution, or a whole descendant tree? See [Agent360](#agent360). | Prometheus, Loki, Tempo |
-| **DefenseClaw — Blocked Events & Analysis** (`defenseclaw-blocked-events`) | What was blocked, by which rules, and what recurs? Includes kernel denials on Linux with Tetragon. | Prometheus, Loki |
+| **DefenseClaw — Blocked Events & Analysis** (`defenseclaw-blocked-events`) | What was blocked, by which rules, and what recurs? Who was blocked on which machine, under which guardrail profile and directory group. Includes kernel denials on Linux with Tetragon. | Prometheus, Loki |
 | **DefenseClaw — AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Which AI products, skills, MCP servers, IDE plugins and dependencies exist? | Prometheus, Loki, Tempo |
 | **DefenseClaw — AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What did those AI runtimes run on this host? Coverage first, so a blind host is not read as clean. | Prometheus, Loki |
 | **DefenseClaw — Hook Connectors** (`defenseclaw-connectors`) | Which connectors are active, quiet, slow or drifting? | Prometheus, Loki |
@@ -32,7 +32,6 @@ DefenseClaw provisions 19 Grafana dashboards into a **DefenseClaw** folder. Star
 | **DefenseClaw — Proxy & LLM Guard** (`defenseclaw-traffic`) | What happens on proxy and router deployments? Empty unless proxy mode is active. | Prometheus, Loki, Tempo |
 | **DefenseClaw — Sandboxes** (`defenseclaw-sandboxes`) | What are OpenShell sandboxes doing, reaching and being refused? See [Sandboxes board](#sandboxes-board). | Prometheus, Loki |
 | **DefenseClaw — Runtime & Reliability** (`defenseclaw-runtime`) | Is the process, database, exporter or destination delivery unhealthy? | Prometheus, Loki |
-| **DefenseClaw IoT Fleet** (`defenseclaw-fleet`) | Which edge devices are online and receiving verdicts? Empty until the [authenticated Fleet scrape](/docs/edge-connector/install) is set up. | Prometheus |
 
 ## Kernel controls and your Tetragon policies
 
@@ -64,6 +63,10 @@ The **Hosts with enforcing controls** tile counts each computer once, using its 
 ## Filter by user
 
 **User regex** (`$user`) appears on Overview, Activity, Blocked Events, Policy decisions, Agent identity, Agent360, AI discovery and Identity & Users. It narrows Loki panels to records whose `user.id`, account name (`defenseclaw.user.name`) or directory principal matches the whole value, for example `1001`, `S-1-5-21-.*-1104`, `alice` or `alice.*`. The principal is on records only when `ai_discovery.include_user_principal` is on. Metric panels have no per-user label and do not change. Records without a `user.id` drop out when you narrow it.
+
+## Who was blocked, where and under which policy
+
+The **Who was blocked, where, and under which policy** row on Blocked Events lists one row per enforced guardrail decision: time, user, machine, connector, guardrail profile, the directory group whose assignment selected that profile, rule IDs and action. Profile and group are empty or `none` when no identity-based profile applied. Three bars count the same decisions per machine, profile and primary rule. The **Machine** box (`host.name`), **Profile regex** box and **Rule** box narrow the table, the bars and the other Loki panels on the board. Use Inspect, Data, Download CSV on the table for an audit export. The board is for administrators; it shows every user on the stack you point it at.
 
 ## ID and hook surface boxes
 
@@ -179,4 +182,6 @@ If rare events (a single block or finding) read `0` in Prometheus panels, counte
 
 ## Source of truth and upgrades
 
-The local stack ships these JSON files in `bundles/local_observability_stack/grafana/dashboards/`. `up` refreshes them on every start; pass `--no-refresh-config` to keep your edits. Edits made in the Grafana UI are not written back to disk, so copy a changed board out with **Dashboard → JSON Model**.
+The optional **DefenseClaw IoT Fleet** (`defenseclaw-fleet`) dashboard ships in the separate `defenseclaw-fleet-assets.tar.gz` release asset, alongside the authenticated Fleet scrape templates. See [Install the Edge Connector](/docs/edge-connector/install) for Fleet setup. The core wheel excludes these optional Fleet assets. A source checkout (editable install) seeds the Fleet dashboard from `bundles/` along with the other 18.
+
+The dashboard sources live in `bundles/local_observability_stack/grafana/dashboards/`. `up` refreshes the installed dashboards on every start; pass `--no-refresh-config` to keep your edits. Edits made in the Grafana UI are not written back to disk, so copy a changed board out with **Dashboard → JSON Model**.

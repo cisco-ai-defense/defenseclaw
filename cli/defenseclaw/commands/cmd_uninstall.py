@@ -42,6 +42,7 @@ OpenClaw, never against the other adapters — calling
 from __future__ import annotations
 
 import base64
+import codecs
 import contextlib
 import errno
 import glob
@@ -56,6 +57,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -63,13 +65,15 @@ from pathlib import Path
 
 import click
 
+from defenseclaw import codex_toml, legacy_connector, ux
 from defenseclaw import config as config_module
-from defenseclaw import legacy_connector, ux
 
 # Imported here, not where it is used: by then the data removal has deleted
 # the virtual environment this CLI runs from (GAP-1397).
 from defenseclaw.bootstrap import remove_own_api_port_claims
 from defenseclaw.commands import windows_native_uninstall, windows_uninstall_helper
+from defenseclaw.commands.cmd_doctor import _codex_otel_marked_kept
+from defenseclaw.connector_paths import claude_settings_paths, codex_home
 from defenseclaw.file_lock import tui_lock_held
 
 # Connectors whose teardown the Python CLI knows how to perform locally
@@ -111,12 +115,10 @@ _CREATED_DIRS_RECORD = "watcher-created-dirs.json"
 _CREATED_DIRS_RECORD_MAX_BYTES = 1 << 20
 _WIN_SYNCHRONIZE = 0x00100000
 _WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-# until 1.1: removed connectors whose older-release state uninstall still
-# tears down (connector_backups markers, the hook script their stub replaces,
-# and active_connector.json names). In an uninstall the teardown also removes
-# their entries from the agent configs, the stub and OmniGent's import path
-# (_REMOVED_CONNECTOR_UNINSTALL_ENV); uninstall lists what is left.
-_REMOVED_CONNECTOR_UNINSTALL_ENV = "DEFENSECLAW_REMOVED_CONNECTOR_UNINSTALL"
+# until 1.1: OpenHands and OmniGent, whose older-release state uninstall still
+# tears down (connector_backups markers, their hook script or policy module,
+# and active_connector.json names). The teardown removes what DefenseClaw wrote
+# for them, by identity; uninstall lists what is left.
 _REMOVED_CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     "omnigent": (
         os.path.join("connector_backups", "omnigent", "config.json"),
@@ -230,6 +232,10 @@ class UninstallPlan:
     # sandboxes run ("" when it did). The teardown would delete whatever
     # runs, so an unknown answer stops the run too, unless stop_sandboxes.
     sandbox_list_error: str = ""
+    # sandboxes_off is set when that unknown answer came with sandboxes off:
+    # `sandbox list` cannot list them then, and the off-state teardown's dry
+    # run is what names them, once the OpenShell gateway answers (GAP-0037).
+    sandboxes_off: bool = False
     # setup_leftovers are the %LOCALAPPDATA%\DefenseClaw folders that
     # DefenseClaw Setup left after the installer replaced it (Windows,
     # --binaries only).
@@ -265,6 +271,16 @@ class UninstallPlan:
     # the agents' folders (data_dir/quarantine/<kind>/<connector>/<name>):
     # often the only copy, which `--all` deletes with data_dir (GAP-0422).
     quarantined: tuple[str, ...] = ()
+    # acp_entries are the guarded ACP editor entries `defenseclaw acp setup`
+    # wrote for this account, as (client, agent, editor settings file). They
+    # go with their contract locks, as `defenseclaw acp remove` takes them
+    # out; until 1.0.6 they stayed and kept starting defenseclaw-acp
+    # (GAP-2632). A managed computer's enrollment owns its entries.
+    acp_entries: tuple[tuple[str, str, str], ...] = ()
+    # config_error is why config.yaml did not load ("" when it did). The
+    # uninstall goes on from the connector records and says so; it used to
+    # drop the error without a word (rel-1-0-6 GAP-0153).
+    config_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -376,11 +392,334 @@ def uninstall_cmd(
         ux.subhead("Cancelled.")
         raise SystemExit(1)
 
+    from defenseclaw import opencode_service
+
+    # Found before the teardown: --binaries removes the CLI's own files.
+    opencode_binary = opencode_service.account_binary() if "opencode" in plan.connectors else ""
+    gateway_ports = _configured_gateway_ports()
     _execute_plan(plan)
+    _remove_marked_native_otel_left(gateway_ports)
+    if opencode_binary:
+        # OpenCode V2's background server kept the plugin it loaded (rel-1-0-6 GAP-0026).
+        outcome = opencode_service.restart_if_running(opencode_binary)
+        opencode_service.report(outcome, what="drops the DefenseClaw plugin")
     if plan.connectors:
         # The plan said so; the end says it again, once it is true (GAP-0255).
         ux.warn("Close any agent session still open: it runs without DefenseClaw's hooks now.")
     _render_kept_and_next_steps(plan)
+
+
+_NATIVE_OTEL_READ_LIMIT = 1024 * 1024
+
+
+def _read_agent_config(path: str) -> bytes:
+    """Read one agent config for the post-uninstall OTel check, or b"" (bounded)."""
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read(_NATIVE_OTEL_READ_LIMIT + 1)
+    except OSError:
+        return b""
+    return b"" if len(raw) > _NATIVE_OTEL_READ_LIMIT else raw
+
+
+def _marked_claude_otel_headers(env) -> list[str]:
+    """Claude Code OTLP header keys that carry both DefenseClaw markers and a bearer.
+
+    Mirror of cmd_doctor._codex_otel_marked_kept for the Claude Code env
+    block: x-defenseclaw-source = claudecode, x-defenseclaw-client =
+    claudecode-otel/..., and an authorization bearer.
+    """
+    if not isinstance(env, dict):
+        return []
+    fields = []
+    for key in sorted(env, key=str):
+        value = env.get(key)
+        if not (
+            isinstance(key, str)
+            and key.startswith("OTEL_EXPORTER_OTLP_")
+            and key.endswith("_HEADERS")
+            and isinstance(value, str)
+        ):
+            continue
+        headers = {}
+        for item in value.split(","):
+            name, sep, header_value = item.partition("=")
+            if sep:
+                headers[name.strip().lower()] = header_value.strip()
+        scheme, _, credential = headers.get("authorization", "").partition(" ")
+        if (
+            headers.get("x-defenseclaw-source") == "claudecode"
+            and headers.get("x-defenseclaw-client", "").startswith("claudecode-otel/")
+            and scheme.lower() == "bearer"
+            and len(credential.strip()) >= 8
+        ):
+            fields.append(key)
+    return fields
+
+
+def _paired_claude_otel_endpoints(env, headers: list[str]) -> list[tuple[str, str]]:
+    """The OTEL_EXPORTER_OTLP_*_ENDPOINT keys that pair with the marked header keys.
+
+    OTEL_EXPORTER_OTLP_<SIGNAL>_HEADERS pairs with OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT
+    (and the signal-less HEADERS with ENDPOINT). Returns (key, host:port) for each
+    paired endpoint that is set and points at this machine (where the DefenseClaw
+    gateway served it); a remote collector endpoint is the user's and is kept.
+    """
+    from urllib.parse import urlsplit
+
+    pairs = []
+    for header_key in headers:
+        key = header_key[: -len("HEADERS")] + "ENDPOINT"
+        value = env.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        try:
+            parsed = urlsplit(value.strip())
+            host, port = parsed.hostname or "", parsed.port
+        except ValueError:
+            continue
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            continue
+        # hostname:port, never the netloc: it may carry userinfo.
+        pairs.append((key, f"{host}:{port}" if port else host))
+    return pairs
+
+
+_TOML_TABLE_HEADER = re.compile(r"^\s*\[(?!\[)\s*([^\[\]]+?)\s*\]\s*(?:#.*)?$")
+_TOML_KEY_PART = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'[^']*'|[^.]+")
+
+
+def _toml_header_path(inner: str) -> list[str]:
+    """The dotted key of a [table] header, each part stripped of spaces and quotes."""
+    return [part.strip().strip("\"'") for part in _TOML_KEY_PART.findall(inner) if part.strip()]
+
+
+def _codex_config_without_otel_keys(raw: bytes, keys: set[str], *, drop_inert_table: bool = False) -> bytes | None:
+    """config.toml without the [otel.<key>] tables of the given otel keys, or None.
+
+    Text-level, so every other line (comments, order, quoting) stays byte for
+    byte. None when the result does not parse to the same document minus
+    exactly those otel keys (an inline table or another layout): then nothing
+    is written and the caller names the manual step instead.
+
+    ``drop_inert_table`` also drops the [otel] table itself when the keys that
+    remain in it are only ``environment`` and ``log_user_prompt``: without an
+    exporter they change nothing, and Setup wrote them beside the exporters.
+    """
+    try:
+        before = codex_toml.loads(raw)
+        text = raw.decode("utf-8-sig")
+    except (UnicodeError, TypeError, ValueError):
+        return None
+    remaining = {key for key in (before.get("otel") or {}) if key not in keys}
+    drop_table = drop_inert_table and remaining <= _CODEX_OTEL_INERT_KEYS
+    kept: list[str] = []
+    dropping = False
+    for line in text.splitlines(keepends=True):
+        match = _TOML_TABLE_HEADER.match(line)
+        if match:
+            path = _toml_header_path(match.group(1))
+            dropping = (len(path) >= 2 and path[0] == "otel" and path[1] in keys) or (
+                drop_table and path == ["otel"]
+            )
+        elif line.lstrip().startswith("[["):
+            dropping = False
+        if not dropping:
+            kept.append(line)
+    data = "".join(kept).encode("utf-8")
+    try:
+        after = codex_toml.loads(data)
+    except (UnicodeError, TypeError, ValueError):
+        return None
+    expected = dict(before)
+    otel = {key: value for key, value in (expected.get("otel") or {}).items() if key not in keys}
+    if drop_table:
+        expected.pop("otel", None)
+    elif otel or "otel" in after:
+        expected["otel"] = otel
+    else:
+        expected.pop("otel", None)
+    if after != expected:
+        return None
+    return (codecs.BOM_UTF8 if raw.startswith(codecs.BOM_UTF8) else b"") + data
+
+
+_CODEX_OTEL_INERT_KEYS = frozenset({"environment", "log_user_prompt"})
+_CODEX_OTEL_EXPORTER_KEYS = ("exporter", "trace_exporter", "metrics_exporter")
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+_DEFAULT_GATEWAY_API_PORT = 18970
+
+
+def _configured_gateway_ports() -> frozenset[int]:
+    """The API port this account's config.yaml names (the default when it cannot be read).
+
+    Read before uninstall removes the data folder: the credential-less Codex
+    exporters Setup wrote point at this port (rel-1-0-2 GAP-0376).
+    """
+    try:
+        data_dir = str(config_module.default_data_path())
+        if config_module.config_path_for_data_dir(data_dir).is_file():
+            port = int(config_module.load().gateway.api_port)
+            if 0 < port < 65536:
+                return frozenset({port})
+    except Exception:  # noqa: BLE001 - an unreadable config falls back to the default port.
+        pass
+    return frozenset({_DEFAULT_GATEWAY_API_PORT})
+
+
+def _codex_gateway_exporters(otel, ports: frozenset[int]) -> list[tuple[str, str]]:
+    """Codex [otel] exporters that only point at the DefenseClaw gateway port, as (field, target).
+
+    Setup wrote an exporter table for the gateway it configured; once its
+    credential is gone the table still sends to that port, which nothing
+    serves after uninstall (rel-1-0-2 GAP-0376, LEAD 10-31). Only a table that
+    holds nothing but ``endpoint`` and ``protocol``, with a loopback endpoint on
+    the port, counts: one with headers, TLS settings, another host or another
+    port is the user's own and stays.
+    """
+    if not isinstance(otel, dict) or not ports:
+        return []
+    found = []
+    for key in _CODEX_OTEL_EXPORTER_KEYS:
+        table = otel.get(key)
+        if not isinstance(table, dict) or not table:
+            continue
+        targets = []
+        for kind, exporter in table.items():
+            if kind not in ("otlp-http", "otlp-grpc") or not isinstance(exporter, dict):
+                targets = []
+                break
+            if not set(exporter) <= {"endpoint", "protocol"}:
+                targets = []
+                break
+            endpoint = exporter.get("endpoint")
+            try:
+                parsed = urllib.parse.urlsplit(endpoint) if isinstance(endpoint, str) else None
+                port = parsed.port if parsed is not None else None
+            except ValueError:
+                parsed, port = None, None
+            if parsed is None or (parsed.hostname or "") not in _LOOPBACK_HOSTS or port not in ports:
+                targets = []
+                break
+            targets.append(f"{parsed.hostname}:{port}")
+        if targets:
+            found.append((f"otel.{key}", targets[0]))
+    return found
+
+
+def _replace_agent_config(path: str, original: bytes, data: bytes) -> bool:
+    """Write data over path atomically if it still holds original; False if not done.
+
+    A link is never replaced (the write would swap the link for a file), and a
+    file the agent changed since it was read is left alone.
+    """
+    try:
+        if os.path.islink(path) or _read_agent_config(path) != original:
+            return False
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        fd, temp = tempfile.mkstemp(prefix=".defenseclaw-otel-", dir=os.path.dirname(path) or ".")
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+            if os.name != "nt":
+                os.chmod(temp, mode)
+            os.replace(temp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temp)
+            raise
+    except OSError:
+        return False
+    return True
+
+
+def _remove_marked_native_otel_left(gateway_ports: frozenset[int] = frozenset()) -> None:
+    """Remove the agent OTel entries DefenseClaw wrote that the teardown left (GAP-2517).
+
+    Teardown removes every exporter whose credential DefenseClaw can name. One
+    an earlier DefenseClaw setup wrote with a bearer no install recorded (a
+    pre-setup copy put back, say) stayed, and kept sending telemetry and that
+    bearer to a gateway port nothing serves after uninstall. Uninstall stops
+    the gateway, so it removes what DefenseClaw identifies by its own markers
+    (LEAD 03:45 ruling, option 1): a Codex [otel] exporter or a Claude Code
+    OTLP *_HEADERS key with x-defenseclaw-source, x-defenseclaw-client and a
+    bearer, plus the paired *_ENDPOINT key at this machine. A Codex exporter
+    with no credential at all that sends only to this machine's DefenseClaw
+    gateway port is Setup's too (rel-1-0-2 GAP-0376). Anything else is kept.
+    When the file cannot be changed safely (a link, an unusual layout, a file
+    the agent holds or changed) it is left as is and uninstall names the
+    manual step.
+    """
+    removed: list[str] = []
+    left: list[tuple[str, str]] = []
+    codex_config = os.path.join(codex_home(), "config.toml")
+    raw = _read_agent_config(codex_config)
+    try:
+        document = codex_toml.loads(raw) if raw else {}
+    except (UnicodeError, TypeError, ValueError):
+        document = {}
+    otel = document.get("otel") if isinstance(document, dict) else None
+    marked = _codex_otel_marked_kept(otel, 0)
+    configured = _codex_gateway_exporters(otel, gateway_ports)
+    marked += [pair for pair in configured if pair[0] not in {field for field, _ in marked}]
+    if marked:
+        fields = ", ".join(field for field, _ in marked)
+        targets = ", ".join(sorted({target for _, target in marked}))
+        data = _codex_config_without_otel_keys(
+            raw, {field.split(".", 1)[1] for field, _ in marked}, drop_inert_table=bool(configured)
+        )
+        if data is not None and _replace_agent_config(codex_config, raw, data):
+            removed.append(
+                f"{codex_config}: removed {fields}, the exporters DefenseClaw set up to {targets} "
+                "(nothing serves that port now)"
+            )
+        else:
+            left.append(
+                (
+                    f"{codex_config}: {fields} carry DefenseClaw's x-defenseclaw-source and "
+                    f"x-defenseclaw-client headers and a bearer, and could not be removed safely; "
+                    f"Codex still sends its telemetry and that bearer to {targets}, which DefenseClaw no longer serves",
+                    f"delete the {fields} tables from {codex_config}",
+                )
+            )
+    claude_settings = claude_settings_paths()[0]
+    raw = _read_agent_config(claude_settings)
+    try:
+        settings = json.loads(raw.decode("utf-8-sig")) if raw else {}
+    except (UnicodeError, ValueError):
+        settings = {}
+    env = settings.get("env") if isinstance(settings, dict) else None
+    headers = _marked_claude_otel_headers(env)
+    if headers:
+        # Each marked *_HEADERS key pairs with its *_ENDPOINT key: removing the
+        # headers alone leaves Claude Code exporting to the dead port.
+        endpoints = _paired_claude_otel_endpoints(env, headers)
+        targets = ", ".join(sorted({target for _, target in endpoints}))
+        keys = headers + [key for key, _ in endpoints]
+        sends = f" to {targets}" if targets else ""
+        new_settings = dict(settings)
+        new_settings["env"] = {key: value for key, value in env.items() if key not in keys}
+        bom = codecs.BOM_UTF8 if raw.startswith(codecs.BOM_UTF8) else b""
+        data = bom + (json.dumps(new_settings, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        if _replace_agent_config(claude_settings, raw, data):
+            removed.append(
+                f"{claude_settings}: removed env {', '.join(keys)}, the DefenseClaw-marked OTLP entries{sends} "
+                "(nothing serves that port now)"
+            )
+        else:
+            left.append(
+                (
+                    f"{claude_settings}: env {', '.join(headers)} carry DefenseClaw's x-defenseclaw-source and "
+                    f"x-defenseclaw-client headers and a bearer, and could not be removed safely; "
+                    f"Claude Code still sends its telemetry and that bearer{sends}",
+                    f"delete {', '.join(keys)} from the env block of {claude_settings}",
+                )
+            )
+    for line in removed:
+        ux.ok(line)
+    for detail, step in left:
+        ux.warn(detail)
+        ux.echo(f"    {step}")
 
 
 def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
@@ -538,6 +877,7 @@ def _dispatch_native_windows_uninstall(
     # may delete the data folder, and with it the records that name the
     # agent configs outside it.
     left_before = _removed_connector_leftover_lines(data_dir, data_removed=True) if wipe_data else []
+    gateway_ports = _configured_gateway_ports()
     try:
         outcome = windows_native_uninstall.execute_native_windows_uninstall(request)
     except windows_native_uninstall.NativeWindowsUninstallRefusal as exc:
@@ -545,6 +885,7 @@ def _dispatch_native_windows_uninstall(
     if outcome.returncode == 0:
         ux.ok("Native Windows uninstall completed.")
         _relay_native_setup_removed_connector_leftovers(outcome.stdout, left_before, data_dir, wipe_data=wipe_data)
+        _remove_marked_native_otel_left(gateway_ports)
         if binaries:
             _remove_script_install_after_native_setup(request.platform_name)
         return True
@@ -726,12 +1067,13 @@ def _build_plan(
     # Config identifies active connectors. If it is missing or unreadable,
     # only durable rollback markers may authorize connector teardown.
     cfg = None
+    config_error = ""
     config_file = config_module.config_path_for_data_dir(data_dir)
     if config_file.is_file():
         try:
             cfg = config_module.load()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - any load failure is reported in the plan.
+            config_error = _one_line(str(exc) or type(exc).__name__)
 
     active_connectors = _resolve_active_connectors(cfg)
     resolved_connector = _resolve_active_connector(cfg)
@@ -812,7 +1154,69 @@ def _build_plan(
         sigstore_cache=_legacy_sigstore_cache(data_dir) if wipe_data and binaries else "",
         hook_temp_dirs=_hook_temp_dirs(platform_name) if wipe_data and not preserve_data_entries else (),
         quarantined=_quarantined_copies(data_dir) if wipe_data and not preserve_data_entries else (),
+        acp_entries=_acp_editor_entries(cfg, data_dir),
+        config_error=config_error,
     )
+
+
+def _one_line(text: str, limit: int = 400) -> str:
+    """*text* on one line, at most *limit* characters."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 3] + "..."
+
+
+def _acp_editor_entries(cfg, data_dir: str) -> tuple[tuple[str, str, str], ...]:
+    """The guarded editor entries this runtime can prove `acp setup` wrote (GAP-2632).
+
+    The proof is the one `defenseclaw acp remove` uses, so a foreign or
+    adopted entry is never named. An editor file that cannot be read is left
+    as it is.
+    """
+    if getattr(cfg, "deployment_mode", "") == "managed_enterprise":
+        return ()
+    from defenseclaw.commands import cmd_acp
+
+    records = cmd_acp._owned_entry_records(data_dir)
+    entries: list[tuple[str, str, str]] = []
+    for client in sorted(cmd_acp._CLIENTS):
+        try:
+            path = cmd_acp._client_path(client)
+            servers = cmd_acp._read_json_object(path).get("agent_servers")
+        except (OSError, ValueError, RuntimeError, click.ClickException):
+            continue
+        if not isinstance(servers, dict):
+            continue
+        entries.extend(
+            (client, agent, str(path))
+            for agent in sorted(cmd_acp._AGENTS)
+            if cmd_acp._pair_entry_names(servers, client, agent, records)
+        )
+    return tuple(entries)
+
+
+def _remove_acp_editor_entries(plan: UninstallPlan) -> None:
+    """Take out the plan's ACP editor entries, their contract locks and their records."""
+    from defenseclaw.commands import cmd_acp
+
+    records = cmd_acp._owned_entry_records(plan.data_dir)
+    paths = {client: cmd_acp._remove_client_entry(client, agent, records) for client, agent, _ in plan.acp_entries}
+    # A linked acp directory holds another runtime's locks and records.
+    if cmd_acp._acp_dir_is_redirected(plan.data_dir):
+        return
+    pairs = {(client, agent) for client, agent, _path in plan.acp_entries}
+    for client, agent in pairs:
+        lock = cmd_acp._contract_lock_path(plan.data_dir, client, agent)
+        if lock.is_file() and not lock.is_symlink():
+            lock.unlink()
+    for client, path in paths.items():
+        try:
+            # Another entry this runtime wrote in the same file keeps a current pin.
+            cmd_acp._refresh_client_contract_digests(plan.data_dir, client, path)
+        except click.ClickException as exc:
+            ux.warn(f"{exc.message}; `defenseclaw acp verify` names what to repair")
+    remaining = {key: digest for key, digest in records.items() if key[:2] not in pairs}
+    if remaining != records:
+        cmd_acp._write_entry_records(plan.data_dir, remaining)
 
 
 def _quarantined_copies(data_dir: str) -> tuple[str, ...]:
@@ -1666,6 +2070,8 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
             "defenseclaw-gateway.exe",
             "defenseclaw-acp.exe",
             "defenseclaw-hook.exe",
+            # The Claude Code PreToolUse guard of the one-line install (GAP-2467).
+            "defenseclaw-hook-guard.exe",
             "skill-scanner.cmd",
             "mcp-scanner.cmd",
             # Written by install.ps1: binds defenseclaw-hook.exe to the data dir.
@@ -1692,12 +2098,16 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
 
 # install_publish renames a running binary aside to this name when `make all`
 # replaces it; a copy still mapped then stays until a later rebuild prunes it.
-_RETIRED_COPY_RE = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
+# install.ps1 renames a running one aside to <name>.old-<yyyyMMddTHHmmssfff>
+# when an upgrade or its restore replaces it under hook traffic (GAP-1760).
+_RETIRED_COPY_RE = re.compile(
+    r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+|(?P<aside>.+)\.old-[0-9]{8}T[0-9]{9}", re.IGNORECASE
+)
 
 
 def _is_retired_source_install_copy(name: str, owned: tuple[str, ...] | set[str]) -> bool:
     match = _RETIRED_COPY_RE.fullmatch(name)
-    return bool(match) and match.group("name").lower() in {item.lower() for item in owned}
+    return bool(match) and (match.group("name") or match.group("aside")).lower() in {item.lower() for item in owned}
 
 
 def _retired_source_install_copies(install_root: str, names: tuple[str, ...]) -> tuple[str, ...]:
@@ -1831,6 +2241,15 @@ def _teardown_connectors(
     for name in _removed_connectors_in_active_state(data_dir):
         add(name)
 
+    # The agent's own config is evidence too: a Codex config.toml or Claude
+    # Code settings.json that still names DefenseClaw (a notify entry or
+    # hooks from an install whose data folder and backups are gone) is torn
+    # down even when that connector is not active, and its teardown removes
+    # only the entries DefenseClaw owns (GAP-0376).
+    for name, path in _agent_config_wiring_files():
+        if _names_defenseclaw(path):
+            add(name)
+
     if include_openclaw and openclaw_config_file:
         pristine = _expand(openclaw_config_file) + ".pristine"
         if os.path.isfile(pristine):
@@ -1839,11 +2258,44 @@ def _teardown_connectors(
     return tuple(out)
 
 
+def _agent_config_wiring_files() -> list[tuple[str, str]]:
+    """(connector, user config file) whose DefenseClaw wiring outlives its backup markers."""
+    return [
+        ("codex", os.path.join(codex_home(), "config.toml")),
+        ("claudecode", claude_settings_paths()[0]),
+    ]
+
+
+def _names_defenseclaw(path: str) -> bool:
+    """Whether a regular, not linked, agent config file carries DefenseClaw wiring (first 1 MiB)."""
+    try:
+        if not os.path.isfile(path) or os.path.islink(path) or _is_reparse_path(path):
+            return False
+        with open(path, "rb") as stream:
+            text = stream.read(1 << 20).lower()
+    except OSError:
+        return False
+    return any(marker in text for marker in _DEFENSECLAW_WIRING_MARKERS)
+
+
+#: What DefenseClaw writes into an agent config, never a bare project path
+#: that merely contains the word: its hook launcher and gateway executables
+#: (a Codex notify entry names either), its data folder (hook scripts, notify
+#: bridge) and its telemetry header names.
+_DEFENSECLAW_WIRING_MARKERS = (
+    b"defenseclaw-hook",
+    b"defenseclaw-gateway",
+    b".defenseclaw/",
+    b".defenseclaw\\",
+    b"x-defenseclaw-",
+)
+
+
 _DATA_REMOVED_LEFTOVER_NOTE = (
     "  DefenseClaw's data folder is removed by this uninstall, so a hook or policy listed above "
     "names a file that no longer exists, and the agent fails on it: remove it from the agent's config."
 )
-_LEFTOVER_HEADER = re.compile(r"^\S.* support was removed in DefenseClaw 1\.0\.4\. Left for you to remove by hand:$")
+_LEFTOVER_HEADER = re.compile(r"^OpenHands/OmniGent support was removed in 1\.0\.5; DefenseClaw no longer guards it\.$")
 
 
 def _removed_connector_leftover_lines(
@@ -1875,11 +2327,10 @@ def _print_removed_connector_leftovers(
     found: list | None = None,
     moved: dict[str, str] | None = None,
 ) -> None:
-    """until 1.1: list what the removed OpenHands/OmniGent teardown left, with the steps.
+    """until 1.1: list what the OpenHands/OmniGent teardown could not remove, with the steps.
 
-    The teardown only replaces DefenseClaw's hook script with a stub that
-    blocks every call and revokes the tokens; the agent's own config still
-    names it. Every uninstall form prints this. What a data folder removal
+    The teardown removes what DefenseClaw wrote for them and blocks nothing;
+    this is information. Every uninstall form prints it. What a data folder removal
     takes away (*data_removed*) is not listed; the backups it keeps are, at
     the place they moved to (*moved*).
     """
@@ -2054,10 +2505,20 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     display_connectors = plan.connectors
     teardown = ", ".join(display_connectors) if display_connectors else "no"
     ux.echo(f"  • {ux.bold('connector teardown:')}  {teardown}")
+    if plan.config_error:
+        ux.warn(
+            f"config.yaml did not load ({plan.config_error}); the teardown goes on from the connector "
+            f"records in {plan.data_dir}",
+            indent="    ",
+        )
     if display_connectors:
         # An open Codex session ran on after the uninstall with every hook
         # failing, and its next marker command ran (GAP-0255).
         ux.echo(f"      {ux.dim('·')} {_OPEN_SESSION_NOTE}")
+    if plan.acp_entries:
+        ux.echo(f"  • {ux.bold('ACP editor entries:')}  removed with their contract locks")
+        for client, agent, path in plan.acp_entries:
+            ux.echo(f"      {ux.dim('·')} {client}/{agent} in {path}")
     if plan.platform_name == "win32" and not plan.sandbox_teardown:
         ux.echo(f"  • {ux.bold('sandbox teardown:')}    no (OpenShell sandboxes do not run on Windows)")
     elif plan.sandbox_teardown:
@@ -2087,6 +2548,11 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             unread = f"the sandbox list could not be read ({plan.sandbox_list_error})"
             if plan.stop_sandboxes:
                 ux.echo(f"      {ux.dim('·')} {unread}: any running sandbox is stopped and deleted (--stop-sandboxes)")
+            elif plan.sandboxes_off:
+                ux.echo(
+                    f"      {ux.dim('·')} {unread}: this run stops before any change; while sandboxes are off, "
+                    f"{_OFF_SANDBOXES_CHECK}; or add --stop-sandboxes or --skip-sandbox-teardown"
+                )
             else:
                 ux.echo(
                     f"      {ux.dim('·')} {unread}: this run stops before any change; check with "
@@ -2238,6 +2704,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
         if not plan.remove_data_dir:
             _turn_guardrail_off(plan.data_dir)
+    if plan.acp_entries:
+        # Before data removal: the records that prove the entries are there.
+        run_phase("ACP editor entries", lambda: _remove_acp_editor_entries(plan))
     # until 1.1: read what a removed connector left before its backups move:
     # their records name the agent configs outside the data folder.
     from defenseclaw.removed_connectors import backup_dirs, leftovers
@@ -2261,6 +2730,7 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     if plan.remove_data_dir and plan.data_dir:
         # Before the data dir (and the registry naming them) goes.
         _remove_mcp_writer_backups(plan.data_dir)
+        _remove_unregistered_mcp_writer_backups()
         _remove_legacy_codex_candidate()
     if plan.remove_plugin and "openclaw" in plan.connectors:
         # Plugin removal is OpenClaw-specific. For other connectors the
@@ -2294,7 +2764,8 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
             "scheduled",
             # The result file stays for the operator to read; the next
             # uninstall's helper removes it.
-            f"result: {status[0]}, kept for you to read",
+            f"result: {status[0]}, kept for you to read. If another DefenseClaw window still holds a "
+            "file, the removal fails and DefenseClaw stays; the next defenseclaw command then says why",
         )
     elif plan.remove_data_dir:
         run_phase(
@@ -2515,6 +2986,44 @@ def _remove_mcp_writer_backups(data_dir: str) -> None:
             ux.warn(f"could not remove the MCP config backup {expected}: {exc}")
             continue
         ux.ok(f"removed {expected}")
+
+
+def _remove_unregistered_mcp_writer_backups() -> None:
+    """Remove the MCP writer's backups the registry no longer names (GAP-1636).
+
+    An install upgraded from an earlier release can keep a
+    ``.defenseclaw-<name>.bak`` copy beside an agent config whose registry
+    entry it never had or already dropped, so ``uninstall --all`` left
+    ``~/.codex/.defenseclaw-config.toml.bak`` with DefenseClaw's hook entries.
+    The name is the writer's own marker: only a regular file at exactly the
+    name the writer gives one of the user-scope configs DefenseClaw edits is
+    removed.
+    """
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS, _managed_mcp_backup_path, mcp_source_locations
+
+    seen: set[str] = set()
+    for connector in KNOWN_CONNECTORS:
+        try:
+            locations = mcp_source_locations(connector)
+        except Exception:  # noqa: BLE001 - a connector whose paths do not resolve has no backup to find
+            continue
+        for location in locations:
+            if not os.path.isabs(location):
+                continue
+            backup = os.path.abspath(_managed_mcp_backup_path(location))
+            if backup in seen:
+                continue
+            seen.add(backup)
+            try:
+                if not stat.S_ISREG(os.lstat(backup).st_mode):
+                    continue
+                os.unlink(backup)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                ux.warn(f"could not remove the MCP config backup {backup}: {exc}")
+                continue
+            ux.ok(f"removed {backup}")
 
 
 def _remove_legacy_codex_candidate() -> None:
@@ -2838,6 +3347,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",
+                "defenseclaw-hook-guard.exe",
                 "skill-scanner.cmd",
                 "mcp-scanner.cmd",
                 "defenseclaw-hook-state.json",
@@ -3247,15 +3757,15 @@ def _sandbox_kernel_feed_hint(plan: UninstallPlan, unit: str = _SANDBOX_FEED_UNI
 _SANDBOX_LIST_TIMEOUT_SECONDS = 10
 
 
-def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
-    """The sandbox rows ``sandbox list`` prints, and why it could not say ('' when it did).
+def _listed_sandboxes(gateway_path: str) -> tuple[list, str, bool]:
+    """The sandbox rows ``sandbox list`` prints, why it could not say ('' when it did), and whether sandboxes are off.
 
     No gateway binary, or a gateway that reports sandboxes unsupported here,
     answers with no rows: no sandbox can run, and the teardown deletes none.
     A failed, timed-out or unreadable list is an unknown answer (GAP-0448).
     """
     if not gateway_path or not os.path.isfile(gateway_path):
-        return [], ""
+        return [], "", False
     try:
         proc = subprocess.run(
             [gateway_path, "sandbox", "list", "--output", "json"],
@@ -3265,11 +3775,19 @@ def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
             timeout=_SANDBOX_LIST_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        return [], f"`sandbox list` did not answer within {_SANDBOX_LIST_TIMEOUT_SECONDS} seconds"
+        return [], f"`sandbox list` did not answer within {_SANDBOX_LIST_TIMEOUT_SECONDS} seconds", False
     except OSError as exc:
-        return [], f"`sandbox list` could not run: {exc.strerror or exc}"
+        return [], f"`sandbox list` could not run: {exc.strerror or exc}", False
     if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
-        return [], ""
+        return [], "", False
+    off = proc.returncode != 0 and _sandboxes_off(proc.stdout)
+    if off and _off_teardown_finds_no_running_sandbox(gateway_path):
+        # Sandboxes are off and the teardown, which asks OpenShell itself
+        # while they are off, finds no sandbox that runs: none, or only
+        # stopped ones, as with sandboxes on (GAP-0765, GAP-1810). One that
+        # may run, or sandboxes it could not list (GAP-1782), keep the
+        # unknown answer below.
+        return [], "", False
     if proc.returncode != 0:
         lines = [
             line.strip().removeprefix("✗").strip().removeprefix("Error:").strip()
@@ -3277,14 +3795,69 @@ def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
             if line.strip()
         ]
         reason = lines[-1][:300] if lines else f"it exited with status {proc.returncode}"
-        return [], f"`sandbox list` failed: {reason}"
+        return [], f"`sandbox list` failed: {reason}", off
     try:
         rows = json.loads(proc.stdout or "").get("sandboxes")
     except (ValueError, AttributeError):
         rows = None
     if not isinstance(rows, list):
-        return [], "`sandbox list` printed no sandbox list"
-    return [row for row in rows if isinstance(row, dict) and row.get("name")], ""
+        return [], "`sandbox list` printed no sandbox list", False
+    return [row for row in rows if isinstance(row, dict) and row.get("name")], "", False
+
+
+def _sandboxes_off(stdout: str) -> bool:
+    """Whether ``sandbox list --output json`` said sandboxes are off.
+
+    While they are off the gateway answers ``{"enabled": false,
+    "available": false, "reason": ...}`` and exits 1 (GAP-1817).
+    """
+    try:
+        answer = json.loads(stdout or "")
+    except ValueError:
+        return False
+    return isinstance(answer, dict) and answer.get("enabled") is False and answer.get("available") is False
+
+
+# The dry run's "sandboxes" row ("sandboxes         none", "unknown (...)",
+# or the names, a stopped one as "NAME (stopped)"), and its line when it has
+# nothing to tear down at all.
+_TEARDOWN_SANDBOXES = re.compile(r"^\s*sandboxes\s+(\S.*?)\s*$", re.MULTILINE)
+_TEARDOWN_STOPPED_SANDBOX = re.compile(r"^[a-z0-9][a-z0-9-]* \((?:stopped|completed|deleted|missing)\)$")
+_TEARDOWN_NOTHING = "nothing to tear down"
+
+
+def _off_teardown_finds_no_running_sandbox(gateway_path: str) -> bool:
+    """Whether ``sandbox teardown --dry-run`` names no sandbox that may run.
+
+    With sandboxes off no daemon lists the sandboxes, and the teardown asks
+    OpenShell's gateway directly for those of this data directory: a dry run
+    that names none, or only stopped ones, is the answer the list could not
+    give. A dry run that fails, could not list them ("unknown") or names one
+    that may run keeps the list unknown.
+    """
+    if not _gateway_supports_sandbox_teardown(gateway_path):
+        return False
+    try:
+        proc = subprocess.run(
+            [gateway_path, "sandbox", "teardown", "--dry-run"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_SANDBOX_LIST_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    out = proc.stdout or ""
+    if proc.returncode != 0:
+        return False
+    if _TEARDOWN_NOTHING in out:
+        return True
+    row = _TEARDOWN_SANDBOXES.search(out)
+    if not row:
+        return False
+    if row.group(1) == "none":
+        return True
+    return all(_TEARDOWN_STOPPED_SANDBOX.match(entry) for entry in row.group(1).split(", "))
 
 
 def _live_mounted_sandboxes(rows: list) -> tuple[str, ...]:
@@ -3317,7 +3890,7 @@ def _with_listed_sandboxes(plan: UninstallPlan, stop_sandboxes: bool) -> Uninsta
     """*plan* with the sandboxes its teardown would stop, from one ``sandbox list``."""
     if not plan.sandbox_teardown:
         return plan
-    rows, error = _listed_sandboxes(plan.gateway_path)
+    rows, error, off = _listed_sandboxes(plan.gateway_path)
     if error and not _gateway_supports_sandbox_teardown(plan.gateway_path):
         # A gateway without ``sandbox teardown`` deletes no sandbox
         # (_sandbox_teardown), so there is nothing to protect.
@@ -3328,7 +3901,18 @@ def _with_listed_sandboxes(plan: UninstallPlan, stop_sandboxes: bool) -> Uninsta
         running_sandboxes=_running_sandboxes(rows),
         stop_sandboxes=stop_sandboxes,
         sandbox_list_error=error,
+        sandboxes_off=bool(error) and off,
     )
+
+
+# How to see the sandboxes while they are off: `sandbox list` asks the
+# sandbox daemon, which has them off; the teardown asks OpenShell itself.
+_OFF_SANDBOXES_CHECK = (
+    "`defenseclaw sandbox list` cannot list them: `defenseclaw-gateway sandbox teardown --dry-run` names them "
+    "once the OpenShell gateway answers (when it does not, start it"
+    + (" with `systemctl --user start openshell-gateway`" if sys.platform.startswith("linux") else "")
+    + ")"
+)
 
 
 def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
@@ -3341,6 +3925,18 @@ def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
     """
     if not plan.sandbox_teardown or plan.stop_sandboxes:
         return ""
+    if plan.sandbox_list_error and plan.sandboxes_off:
+        # With sandboxes off `sandbox list` fails whatever runs, so it is no
+        # way to check (GAP-0037): the off-state teardown's dry run names the
+        # sandboxes once the OpenShell gateway answers.
+        return (
+            f"the sandbox list could not be read ({plan.sandbox_list_error}), so this run cannot tell whether "
+            "OpenShell sandboxes still run for this account; a running sandbox may hold work never pulled back, "
+            "and the sandbox teardown would stop and delete it; nothing was changed. While sandboxes are off, "
+            f"{_OFF_SANDBOXES_CHECK}. Then run this command again, add --stop-sandboxes to stop and delete any "
+            "running sandbox with the teardown, or add --skip-sandbox-teardown to uninstall without the sandbox "
+            "teardown."
+        )
     if plan.sandbox_list_error:
         # A destructive step does not go ahead on an unknown answer (GAP-0448).
         return (
@@ -3645,8 +4241,6 @@ def _run_gateway_connector_teardown(
             encoding="utf-8",
             errors="replace",
             timeout=_CONNECTOR_COMMAND_TIMEOUT_S,
-            # until 1.1: so a removed connector's policy does not outlive DefenseClaw.
-            env={**os.environ, _REMOVED_CONNECTOR_UNINSTALL_ENV: "1"},
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         ux.warn(f"gateway connector teardown failed to launch: {exc}")
@@ -3766,18 +4360,41 @@ def _is_reparse_path(path: str | os.PathLike[str]) -> bool:
     return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
+def _rmtree_gone_ok(path: str) -> None:
+    """rmtree that counts a file or folder another remover took first as removed.
+
+    Two uninstalls of one account at once (two terminals) walk the same
+    trees: each failed with ENOENT on what the other had just deleted and
+    left data behind for a second run (GAP-2355).
+    """
+
+    def gone_ok(function, failed_path, exc) -> None:
+        error = exc if isinstance(exc, BaseException) else exc[1]
+        if isinstance(error, FileNotFoundError):
+            return
+        raise error
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=gone_ok)
+    else:
+        shutil.rmtree(path, onerror=gone_ok)
+
+
 def _remove_tree_entry(entry: os.DirEntry[str]) -> None:
     """Remove one direct child without following symlinks/reparse points."""
-    if _is_reparse_path(entry.path):
-        if os.path.isdir(entry.path):
-            os.rmdir(entry.path)
-        else:
-            os.unlink(entry.path)
-        return
-    if entry.is_dir(follow_symlinks=False):
-        shutil.rmtree(entry.path)
-        return
-    os.unlink(entry.path)
+    try:
+        if _is_reparse_path(entry.path):
+            if os.path.isdir(entry.path):
+                os.rmdir(entry.path)
+            else:
+                os.unlink(entry.path)
+            return
+        if entry.is_dir(follow_symlinks=False):
+            _rmtree_gone_ok(entry.path)
+            return
+        os.unlink(entry.path)
+    except FileNotFoundError:
+        return  # another remover took it first: it is gone (GAP-2355)
 
 
 def _remove_data_dir(
@@ -3866,6 +4483,8 @@ def _remove_data_dir(
 
     try:
         os.rmdir(data_dir)
+    except FileNotFoundError:
+        pass  # a concurrent uninstall of this account removed it (GAP-2355)
     except OSError as exc:
         # A data dir on its own filesystem (GAP-1447) is a mount point: the
         # contents are gone, and only an administrator can unmount the folder.

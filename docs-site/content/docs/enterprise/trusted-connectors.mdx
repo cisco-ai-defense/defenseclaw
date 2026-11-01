@@ -1,0 +1,69 @@
+---
+title: Trusted connectors
+description: Let a gateway that runs agents for many people say which person it acts for, so each person gets their own guardrail profile. Managed devices only, off by default.
+keywords:
+  - DefenseClaw trusted connectors
+  - acting_for
+  - verified_by_connector
+---
+
+A gateway that runs agents for many people calls DefenseClaw as one service account, so every person gets that account's profile. A trusted connector entry names that service account and the people it may act for. On the [agent-gateway route](/docs/connectors/agent-gateway) the account then names the person in `acting_for`, and DefenseClaw selects that person's guardrail profile from the person's own directory facts.
+
+The list is empty by default. It is a standalone managed setting, set by your administrator's managed policy, and is honoured only on a device with trust anchors installed. On a `CONFIG=` install it is ignored and the gateway logs why.
+
+## Configure
+
+```yaml
+enterprise:
+  identity:
+    trusted_connectors:
+      - name: gas                        # label in audit and status
+        account: svc-gas                 # the service account the gateway runs as
+        may_act_for:
+          groups: ["agents-users@corp.example.com"]
+          users: ["eng2"]
+```
+
+- Builds before 1.0.6 refuse the key as unknown, so the managed policy that sets it must require release 1.0.6 or later; DefenseClaw will not package a policy with the key that allows older releases.
+- `account` must not be root, an administrator, SYSTEM, LOCAL SERVICE, NETWORK SERVICE, an `NT SERVICE` account or a member of an admin group (`wheel`, `sudo`, `admin`, `Administrators`, `Domain Admins`). This is checked at start and every five minutes; an entry that becomes an administrator is disabled. Grants in sudoers outside these groups are not visible to DefenseClaw: do not give the service account sudo.
+- On a host joined to a directory, a bare account name that the directory could also hold is ambiguous: the entry is disabled and logged as `account_ambiguous_user`. Name a local service account by its uid (`account: "990"`) and directory accounts by their qualified name (`svc-gas@corp.example.com`).
+- `may_act_for` names groups and users. They resolve to ids at start and on every refresh; an ambiguous name or one that does not resolve is dropped with a warning. A connector cannot act for its own account or another connector's account.
+- Group membership always comes from the directory, never from the request.
+
+## What happens on a call
+
+The service account calls the agent-gateway route on the hook socket with `acting_for: {user: "<name, uid>"}`.
+
+1. A listed account that sends no `acting_for` is refused (`acting_for_required`). It never falls back to its own profile.
+2. DefenseClaw resolves the person itself. An unknown person, a person outside `may_act_for` and an administrator are all refused with `acting_for_not_allowed`. The local audit keeps the cause.
+3. A directory lookup that times out or answers in part refuses the call (`acting_for_lookup_unavailable`). It is not cached, and the person's own calls are not affected.
+4. One session id or `root_session_id` stays with the first person it was used for; a later call for another person is refused (`acting_for_session_mismatch`).
+5. Otherwise the person's profile applies. Audit and telemetry name the person with `defenseclaw.user.principal.assurance=verified_by_connector`, and the local audit names the connector (`trusted_connector`, `trusted_connector_account_id`). The person gets their own `agt-` and `ais-` ids, keyed on the connector too.
+
+A refusal is a deny (HTTP 403, `action: block`). `acting_for` from anyone else is ignored and audited.
+
+`verified_by_connector` selects a profile and nothing else. Checks that need proof of the person's own process (the session-start gate, sandbox ownership, per-user secret paths, require-sandbox) keep seeing the service account. Path rules and `~` resolve against the service account's home. Tool-call chains are kept per connector account and person.
+
+## Follow one piece of work across sessions
+
+Tool-call chains are kept per session. A gateway that splits one piece of work across sub-agents, or resumes a conversation as a new session, splits its chains too: a download in a sub-agent followed by running the file in the parent completes nothing.
+
+```yaml
+guardrail:
+  chains:
+    root_scope: true    # off by default
+```
+
+With `guardrail.chains.root_scope` on, a trusted connector's call that carries `root_session_id` is also evaluated in a second chain window. That window is kept per root id, connector account and person, so one person's work never joins another's. It has the bounds of a session window (the same number of calls and the same time window), and a session end or a turn boundary does not clear it.
+
+- A chain completed in the root window gets the verdict and rule ids it gets within one session. The local audit row says so: `chain_scope=session,root`, and `root_chain_ids` names the chains only the root window completed.
+- Only a trusted connector's `root_session_id` counts. Anyone else's is ignored and recorded as `root_session_ignored=untrusted_caller`, as before.
+- The setting adds no rule and changes no profile. It has no effect on a per-user install and is refused under Secure Client. It takes effect without a restart.
+- Releases before 1.0.6 refuse the setting. After a rollback to 1.0.5 or 1.0.4 the audit store stays readable: the older release ignores the root-chain tables, and root chains in flight are lost. Session chains carry on.
+
+## Limits
+
+- A compromised gateway process can act as any person in its `may_act_for` list. Keep the list small.
+- Windows has no hook socket, so `acting_for` is not honoured on Windows in 1.0.6 and the list is reported as not honoured there.
+- Rolling back to 1.0.4 or 1.0.5: the release floor of that policy refuses the rollback on Linux and macOS. A Windows Setup rollback to 1.0.5 does not check the floor on the rendered config; ask your administrator to remove the key before a Windows rollback.
+- Dashboards that count by `agt-` see new ids for these calls.

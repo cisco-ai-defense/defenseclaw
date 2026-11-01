@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -90,8 +91,13 @@ func TestHardeningReadStdinCappedRefusesNULAndOverflowExactly(t *testing.T) {
 				if runErr == nil {
 					t.Fatalf("accepted a body it must refuse (%s): got %d bytes on stdout", tc.refusal, stdout.Len())
 				}
-				if stdout.Len() != 0 {
-					t.Fatalf("refusal printed %d bytes of body", stdout.Len())
+				if strings.Contains(stderr.String(), "LOG:stdin body exceeded") {
+					capBytes, _ := strconv.Atoi(tc.cap)
+					if got, want := stdout.String(), tc.in[:capBytes]; got != want {
+						t.Fatalf("bounded refusal prefix = %q, want %q", got, want)
+					}
+				} else if stdout.Len() != 0 {
+					t.Fatalf("NUL refusal printed %d bytes of body", stdout.Len())
 				}
 				// The unbounded tier reads past the cap, so it may meet a NUL
 				// before it counts the length: either refusal is right there.

@@ -390,6 +390,10 @@ func TestEnterpriseHookGuardianFailureIssuesExposeTargetCause(t *testing.T) {
 		"last guardian reconcile failed for claudecode@S-1-5-21-111-222-333-1001: publish managed policy: access denied",
 		"last guardian reconcile failed for codex@bob: no target error was recorded",
 	}
+	if runtime.GOOS == "windows" {
+		// GAP-2290: Windows names the account of a SID row as "user (SID)".
+		want[0] = "last guardian reconcile failed for claudecode@alice (S-1-5-21-111-222-333-1001): publish managed policy: access denied"
+	}
 	if !reflect.DeepEqual(issues, want) {
 		t.Fatalf("issues = %#v, want %#v", issues, want)
 	}
@@ -1100,7 +1104,12 @@ func TestCompareEnterpriseHookGuardianRecordsRejectsExtraStaleProtectedTarget(t 
 		ProtectedTargets: []enterpriseHookReconcileRow{alice},
 	}
 	issues := compareEnterpriseHookGuardianRecords(state, authorization, activation, "", "")
-	if got := strings.Join(issues, "\n"); !strings.Contains(got, "extra or stale target codex@"+bob.SID) {
+	staleBob := "extra or stale target codex@" + bob.SID
+	if runtime.GOOS == "windows" {
+		// GAP-2290: Windows names the account of a SID row as "user (SID)".
+		staleBob = "extra or stale target codex@bob (" + bob.SID + ")"
+	}
+	if got := strings.Join(issues, "\n"); !strings.Contains(got, staleBob) {
 		t.Fatalf("issues = %v, want stale protected-target rejection", issues)
 	}
 }

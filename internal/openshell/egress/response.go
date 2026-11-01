@@ -23,9 +23,10 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"regexp"
 	"strconv"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // BlockResponse is the JSON body of a blocked request. It is written for
@@ -70,7 +71,7 @@ const (
 	maxReasonPhraseBytes = 96
 )
 
-var safeSandboxRef = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var safeSandboxRef = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 func sandboxRef(p Principal) string {
 	for _, ref := range []string{p.SandboxName, p.SandboxID} {

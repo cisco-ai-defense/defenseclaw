@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"io"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -19,19 +18,19 @@ import (
 const customRootSUIDMaxSourceBytes = 8 << 10
 
 var (
-	customRootSUIDHeredoc   = regexp.MustCompile(`^cat[ \t]+>[ \t]*([^ \t]+)[ \t]+<<'([A-Za-z][A-Za-z0-9_]{0,31})'$`)
-	customRootSUIDCompile   = regexp.MustCompile(`^(?:cc|gcc)[ \t]+([^ \t]+)[ \t]+-o[ \t]+([^ \t]+)$`)
-	customRootSUIDChown     = regexp.MustCompile(`^chown[ \t]+(?:root:root|0:0)[ \t]+([^ \t]+)$`)
-	customRootSUIDChmod     = regexp.MustCompile(`^chmod[ \t]+(0?[0-7]{3,4})[ \t]+([^ \t]+)$`)
-	customRootSUIDList      = regexp.MustCompile(`^ls[ \t]+-l[ \t]+([^ \t]+)$`)
-	customRootSUIDRun       = regexp.MustCompile(`^su[ \t]+-[ \t]+[A-Za-z_][A-Za-z0-9_-]{0,31}[ \t]+-c[ \t]+'([^']+)'$`)
-	customRootSUIDMain      = regexp.MustCompile(`\b(?:int|signed)[ \t\n]+main[ \t\n]*\([^)]*\)[ \t\n]*\{`)
-	customRootSUIDSetUID    = regexp.MustCompile(`\bsetuid[ \t\n]*\([ \t\n]*0[ \t\n]*\)`)
-	customRootSUIDSetRUID   = regexp.MustCompile(`\bsetresuid[ \t\n]*\([ \t\n]*0[ \t\n]*,[ \t\n]*0[ \t\n]*,[ \t\n]*0[ \t\n]*\)`)
-	customRootSUIDInclude   = regexp.MustCompile(`^#include[ \t]+[<][A-Za-z0-9_./]+[>]$`)
-	customRootSUIDIncludes  = regexp.MustCompile(`(?m)^[ \t]*#include[^\n]*$`)
-	customRootSUIDReturn    = regexp.MustCompile(`\breturn\b`)
-	customRootSUIDForbidden = regexp.MustCompile(`\b(?:if|for|while|switch|goto|sizeof|_generic|exit|_exit|abort|longjmp)\b`)
+	customRootSUIDHeredoc   = lazyMustCompile(`^cat[ \t]+>[ \t]*([^ \t]+)[ \t]+<<'([A-Za-z][A-Za-z0-9_]{0,31})'$`)
+	customRootSUIDCompile   = lazyMustCompile(`^(?:cc|gcc)[ \t]+([^ \t]+)[ \t]+-o[ \t]+([^ \t]+)$`)
+	customRootSUIDChown     = lazyMustCompile(`^chown[ \t]+(?:root:root|0:0)[ \t]+([^ \t]+)$`)
+	customRootSUIDChmod     = lazyMustCompile(`^chmod[ \t]+(0?[0-7]{3,4})[ \t]+([^ \t]+)$`)
+	customRootSUIDList      = lazyMustCompile(`^ls[ \t]+-l[ \t]+([^ \t]+)$`)
+	customRootSUIDRun       = lazyMustCompile(`^su[ \t]+-[ \t]+[A-Za-z_][A-Za-z0-9_-]{0,31}[ \t]+-c[ \t]+'([^']+)'$`)
+	customRootSUIDMain      = lazyMustCompile(`\b(?:int|signed)[ \t\n]+main[ \t\n]*\([^)]*\)[ \t\n]*\{`)
+	customRootSUIDSetUID    = lazyMustCompile(`\bsetuid[ \t\n]*\([ \t\n]*0[ \t\n]*\)`)
+	customRootSUIDSetRUID   = lazyMustCompile(`\bsetresuid[ \t\n]*\([ \t\n]*0[ \t\n]*,[ \t\n]*0[ \t\n]*,[ \t\n]*0[ \t\n]*\)`)
+	customRootSUIDInclude   = lazyMustCompile(`^#include[ \t]+[<][A-Za-z0-9_./]+[>]$`)
+	customRootSUIDIncludes  = lazyMustCompile(`(?m)^[ \t]*#include[^\n]*$`)
+	customRootSUIDReturn    = lazyMustCompile(`\breturn\b`)
+	customRootSUIDForbidden = lazyMustCompile(`\b(?:if|for|while|switch|goto|sizeof|_generic|exit|_exit|abort|longjmp)\b`)
 )
 
 // ExactCustomRootSUIDImplant reports a value-free proof for one closed

@@ -627,7 +627,9 @@ func TestMacOSLaunchAgentReloadStopsTheDaemonBeforeTheDrain(t *testing.T) {
 	}
 	h.ops.order = nil
 	requireOK(t, h.ensure(cfg))
-	if want := []string{"stop alice:daemon+socket", "drain alice", "release alice"}; !reflect.DeepEqual(h.ops.order, want) {
+	// Its running gateway's MicroVMs are synced under the drain, before the
+	// reload boots the gateway agent out (GAP-0380).
+	if want := []string{"stop alice:daemon+socket", "drain alice", "sync alice", "release alice"}; !reflect.DeepEqual(h.ops.order, want) {
 		t.Fatalf("order = %v, want %v", h.ops.order, want)
 	}
 	if len(f.mutated) != 2 || !strings.Contains(f.mutated[0], "bootout gui/"+strconv.Itoa(h.alice.UID)+"/"+h.env.launchAgentLabel(labelOpenShellGateway)) {
@@ -652,7 +654,7 @@ func TestMacOSLaunchAgentReloadStopsTheDaemonBeforeTheDrain(t *testing.T) {
 	}
 	h2.ops.order = nil
 	requireOK(t, h2.ensure(cfg2))
-	if want := []string{"stop alice:kill+daemon+socket", "drain alice", "release alice"}; !reflect.DeepEqual(h2.ops.order, want) {
+	if want := []string{"stop alice:kill+daemon+socket", "drain alice", "sync alice", "release alice"}; !reflect.DeepEqual(h2.ops.order, want) {
 		t.Fatalf("legacy order = %v, want %v", h2.ops.order, want)
 	}
 }

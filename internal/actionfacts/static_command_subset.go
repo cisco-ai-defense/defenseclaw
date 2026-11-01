@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -307,7 +308,7 @@ func definesFunction(source string) bool {
 		return true
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).
-		Parse(strings.NewReader(source), "")
+		Parse(shellparse.Reader(source), "")
 	if err != nil {
 		return true
 	}

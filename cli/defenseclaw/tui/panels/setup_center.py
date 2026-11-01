@@ -282,7 +282,9 @@ def task_detail(model: Any, wizard: SetupWizard, status: TaskStatus) -> Text:
         text.append("\n")
     text.append(description, style=TOKENS.text_primary)
     # The wizard's own summary says more than the Status cell when it has one.
-    summary = " ".join(wizard_state_summary(wizard, model.config).split())
+    summary = " ".join(
+        wizard_state_summary(wizard, model.config, getattr(model, "observability_status", None)).split()
+    )
     if summary:
         _line(text, "Now:", summary)
     else:

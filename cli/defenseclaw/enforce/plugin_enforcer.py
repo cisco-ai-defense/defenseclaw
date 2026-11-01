@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import uuid
 
 from defenseclaw.inventory.plugin_identity import (
     PluginIdentityError,
@@ -36,10 +37,67 @@ from defenseclaw.inventory.plugin_identity import (
 PLUGIN_CATEGORY_QUARANTINE_DIR = "plugin-categories"
 
 
+def _remove_owned(path: str) -> None:
+    """Remove a staging path this enforcer created (best effort)."""
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        elif os.path.lexists(path):
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+def move_into_place_no_replace(stage: str, dest: str) -> None:
+    """Move ``stage`` (a staging path the caller owns, next to ``dest``) to
+    ``dest`` without ever replacing what is there. A directory claims
+    ``dest`` with an atomic ``mkdir`` (it fails on any existing path, also
+    an empty directory another process just made) and then takes the staged
+    entries; a file is hard-linked (never replaces) and then unlinked. On
+    failure the staged entries are back in ``stage`` and nothing at ``dest``
+    that this call did not create is touched."""
+    if os.path.isdir(stage) and not os.path.islink(stage):
+        os.mkdir(dest)
+        moved: list[str] = []
+        try:
+            for name in sorted(os.listdir(stage)):
+                os.rename(os.path.join(stage, name), os.path.join(dest, name))
+                moved.append(name)
+            shutil.copystat(stage, dest, follow_symlinks=False)
+            os.rmdir(stage)
+        except BaseException:
+            for name in reversed(moved):
+                try:
+                    os.rename(os.path.join(dest, name), os.path.join(stage, name))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(dest)
+            except OSError:
+                pass
+            raise
+        return
+    os.link(stage, dest)
+    os.unlink(stage)
+
+
+def _move_back(stage: str, original: str) -> None:
+    """Put a staged copy back where it was so the caller's rollback finds it."""
+    try:
+        if os.path.lexists(stage) and not os.path.lexists(original):
+            shutil.move(stage, original)
+    except OSError:
+        pass
+
+
 class PluginEnforcer:
     def __init__(self, quarantine_dir: str) -> None:
         self.quarantine_dir = os.path.join(quarantine_dir, "plugins")
-        os.makedirs(self.quarantine_dir, exist_ok=True)
+        try:
+            os.makedirs(self.quarantine_dir, exist_ok=True)
+        except OSError:
+            # The quarantine move reports an unwritable folder (GAP-1740).
+            pass
 
     @staticmethod
     def _safe_segment(value: str) -> str | None:
@@ -47,6 +105,10 @@ class PluginEnforcer:
         if not safe or safe != value or safe in (".", ".."):
             return None
         return safe
+
+    def quarantine_path(self, plugin_name: str, connector: str = "") -> str | None:
+        """Return the validated quarantine location for an identity."""
+        return self._quarantine_path(plugin_name, connector)
 
     def _quarantine_path(self, plugin_name: str, connector: str = "") -> str | None:
         # GAP-2464: a Hermes plugin in a category folder is quarantined by the
@@ -109,7 +171,25 @@ class PluginEnforcer:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         if os.path.lexists(dest):
             return None
-        shutil.move(real_path, dest)
+        # Move into a staging path only this call owns, then put it in place
+        # without replacing anything: a failed move cleans up only its own
+        # staging path, never a quarantine another process made at ``dest``.
+        stage = f"{dest}.pending-{uuid.uuid4().hex}"
+        try:
+            shutil.move(real_path, stage)
+        except BaseException:
+            if os.path.lexists(real_path):
+                _remove_owned(stage)
+            else:
+                _move_back(stage, real_path)
+            raise
+        try:
+            if os.path.lexists(dest):
+                raise FileExistsError(f"quarantine destination appeared: {dest}")
+            move_into_place_no_replace(stage, dest)
+        except BaseException:
+            _move_back(stage, real_path)
+            raise
         return dest
 
     def restore(

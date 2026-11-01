@@ -24,7 +24,7 @@ const testHookBinary = "/opt/defenseclaw/bin/defenseclaw-hook"
 
 // testOpenCodePlugin is the canonical Linux path of the managed OpenCode
 // plugin, the path OpenCode's managed config names.
-const testOpenCodePlugin = "/opt/defenseclaw/share/opencode/defenseclaw.js"
+const testOpenCodePlugin = "/opt/defenseclaw/share/opencode/index.js"
 
 // installTestOpenCodePlugin installs this release's managed OpenCode plugin
 // at its canonical path inside the rooted test tree and returns the file.

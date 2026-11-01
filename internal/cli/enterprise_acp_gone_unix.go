@@ -7,10 +7,15 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -106,6 +111,42 @@ var enterpriseACPDescribePrincipal = func(principal string) (enterpriseACPAccoun
 		return enterpriseACPAccount{}, err
 	}
 	return enterpriseACPAccount{exists: true, name: account.Name, home: account.Home, uid: account.UID, gid: account.GID}, nil
+}
+
+// enterpriseACPDescribeHomePrincipal names the owner of the home that a
+// home:<digest> principal (an enrollment made with --user-home alone)
+// records: the ancestor of the recorded user data directory with that
+// digest, as the gateway binds the caller. List showed the account, token
+// copy and setup as unknown while verify said the user had run setup.
+func enterpriseACPDescribeHomePrincipal(principal, dataDir string) (enterpriseACPAccount, error) {
+	digest, ok := strings.CutPrefix(principal, "home:")
+	if !ok || len(digest) != 64 || !filepath.IsAbs(dataDir) || filepath.Clean(dataDir) != dataDir {
+		return enterpriseACPAccount{}, fmt.Errorf("%s records no home", principal)
+	}
+	for home := dataDir; ; home = filepath.Dir(home) {
+		if sum := sha256.Sum256([]byte(home)); hex.EncodeToString(sum[:]) == digest {
+			info, err := os.Lstat(home)
+			if err != nil {
+				return enterpriseACPAccount{}, err
+			}
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !info.IsDir() || !ok {
+				return enterpriseACPAccount{}, fmt.Errorf("%s is not a directory", home)
+			}
+			account, err := enterpriseACPDescribePrincipal(fmt.Sprintf("uid:%d", stat.Uid))
+			if err != nil {
+				return enterpriseACPAccount{}, err
+			}
+			if !account.exists {
+				return enterpriseACPAccount{}, fmt.Errorf("no account owns %s", home)
+			}
+			account.home = home
+			return account, nil
+		}
+		if filepath.Dir(home) == home {
+			return enterpriseACPAccount{}, fmt.Errorf("%s records a home outside its data directory %s", principal, dataDir)
+		}
+	}
 }
 
 // revokeGoneEnterpriseACPEnrollments revokes the managed ACP enrollments of

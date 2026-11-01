@@ -1046,3 +1046,31 @@ func TestManagedExplainRowCountsProjectMCPServers(t *testing.T) {
 		t.Fatalf("MCP row = %q", got)
 	}
 }
+
+// A doctor in the request-limit window names the limit, not a failed
+// policy, and a policy read that failed for another reason says why
+// (GAP-2203).
+func TestDoctorNamesTheRequestLimitNotAFailedPolicy(t *testing.T) {
+	ta := newTestApp(t, "")
+	limited := &sandboxapi.ManagedStatus{PolicyLimited: true,
+		PolicyUnread: "DefenseClaw is limiting the hook requests of this account; retry shortly"}
+	c := ta.managedPolicyCheck(bg, limited)
+	if c.Status != openshell.StatusWarn {
+		t.Errorf("limited row status = %v, want warn: %+v", c.Status, c)
+	}
+	has(t, c.Detail, "your organization's policy", "a burst of sandbox commands reached that limit", "in a few seconds")
+	lacks(t, c.Detail, "could not be confirmed", "hook")
+	if c.Fix == nil || !strings.Contains(c.Fix.Summary, "doctor again") {
+		t.Errorf("limited row fix = %+v", c.Fix)
+	}
+	unread := ta.managedPolicyCheck(bg, &sandboxapi.ManagedStatus{PolicyUnread: "the managed DefenseClaw gateway is not reachable"})
+	if unread.Status != openshell.StatusFail {
+		t.Errorf("unread row status = %v", unread.Status)
+	}
+	has(t, unread.Detail, "could not be confirmed for your account: the managed DefenseClaw gateway is not reachable")
+	// A denial stays a failure even when another harness was limited.
+	denied := ta.managedPolicyCheck(bg, &sandboxapi.ManagedStatus{DeniedHarnesses: []string{"codex"}, PolicyLimited: true, PolicyUnread: "limited"})
+	if denied.Status != openshell.StatusFail || !strings.Contains(denied.Detail, "doesn't allow sandboxes for codex") {
+		t.Errorf("denied row = %+v", denied)
+	}
+}

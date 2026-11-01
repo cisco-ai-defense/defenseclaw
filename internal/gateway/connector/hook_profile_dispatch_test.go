@@ -638,9 +638,14 @@ func TestClaudeCodeProfileRespond_WatchPathsForEveryDynamicSource(t *testing.T) 
 				Payload:       map[string]interface{}{"new_cwd": workspace},
 			}
 			output := claudeCodeProfileRespond(HookRespondInput{Req: req, Action: "allow"}).Output
-			if event == "SessionStart" {
-				output = output["hookSpecificOutput"].(map[string]interface{})
+			specific, ok := output["hookSpecificOutput"].(map[string]interface{})
+			if !ok || specific["hookEventName"] != event {
+				t.Fatalf("%s answer = %#v, want watchPaths in hookSpecificOutput (GAP-2288)", event, output)
 			}
+			if _, top := output["watchPaths"]; top {
+				t.Fatalf("%s answer has a top-level watchPaths, which Claude Code ignores: %#v", event, output)
+			}
+			output = specific
 			watchPaths, ok := output["watchPaths"].([]string)
 			if !ok {
 				t.Fatalf("watchPaths = %#v, want []string", output["watchPaths"])

@@ -3910,6 +3910,8 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         custom = os.path.join(home, "custom-opencode")
         _seed_skill(os.path.join(root, "skills"), "oc-skill")
         _seed_plugin(os.path.join(root, "plugins"), "oc-plugin", manifest="package.json")
+        with open(os.path.join(root, "plugins", "oc-plugin", "index.js"), "w", encoding="utf-8") as f:
+            f.write("export default { id: 'fixture.plugin', setup() {} }\n")
         tool_dir = os.path.join(root, "tools")
         os.makedirs(tool_dir, exist_ok=True)
         with open(os.path.join(tool_dir, "file-tool.ts"), "w", encoding="utf-8") as f:
@@ -3939,9 +3941,9 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
 
         self.assertEqual(inv["connector"], "opencode")
         self.assertEqual([row["id"] for row in inv["skills"]], ["oc-skill"])
-        # OpenCode plugins are direct JS/TS files; a package directory is not
-        # silently treated as a native plugin.
-        self.assertEqual(inv["plugins"], [])
+        # V2 auto-discovers immediate package directories as well as JS/TS files.
+        self.assertEqual([row["id"] for row in inv["plugins"]], ["oc-plugin"])
+        self.assertTrue(inv["plugins"][0]["enabled"])
         self.assertEqual([row["id"] for row in inv["tools"]], ["file-tool"])
         self.assertEqual([row["id"] for row in inv["mcp"]], ["proven-mcp"])
 

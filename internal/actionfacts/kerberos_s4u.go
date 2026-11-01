@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -298,7 +299,7 @@ func exactKerberosS4USecretsDumpInput(
 	parser := syntax.NewParser(
 		syntax.Variant(syntax.LangPOSIX), syntax.KeepComments(true),
 	)
-	file, err := parser.Parse(strings.NewReader(commandText), "")
+	file, err := parser.Parse(shellparse.Reader(commandText), "")
 	if err != nil || len(file.Stmts) != 1 {
 		return KerberosS4USecretsDumpFact{}, false
 	}

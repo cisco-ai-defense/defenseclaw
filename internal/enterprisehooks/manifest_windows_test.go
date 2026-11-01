@@ -124,7 +124,7 @@ targets:
 // TestLoadManifestWindowsAcceptsMissingAgentVersion is the Secure Client
 // version fallback (#1163).
 func TestLoadManifestWindowsAcceptsMissingAgentVersion(t *testing.T) {
-	setStandaloneProfileForTest(t, false)
+	useWindowsSecureClientForTest(t)
 	path := filepath.Join(t.TempDir(), "targets.yaml")
 	if err := os.WriteFile(path, []byte(`
 version: 1

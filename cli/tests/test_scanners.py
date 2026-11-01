@@ -22,6 +22,12 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
+# Import LiteLLM before the patch.dict("sys.modules") blocks below. A block
+# restores sys.modules on exit and drops every module first imported inside
+# it (pydantic.root_model among them), which breaks a later LiteLLM import
+# in the same worker; the MCP scan path imports LiteLLM (GAP-0020).
+import litellm  # noqa: F401
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 

@@ -185,8 +185,8 @@ func TestR104GlobFactsDecideBehindHiddenHome(t *testing.T) {
 // The client bounds its answers, and Decode accepts only "0" and "1" for an
 // absolute pattern.
 func TestR104GlobFactsAreBounded(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX fixture")
+	if !hookWriteEvidenceHost() {
+		t.Skip("the managed hook sends write evidence on Linux and macOS only")
 	}
 	_, home, cwd := globFactsFixture(t, false)
 	var words []string

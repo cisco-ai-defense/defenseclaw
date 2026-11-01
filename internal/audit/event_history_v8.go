@@ -54,10 +54,7 @@ const (
 	projectionIntegrityDomain = "defenseclaw-observability-projection-integrity-v1"
 )
 
-const (
-	maxEventHistoryVerificationRange          = 1000
-	maxCanonicalLogCorrelationIdentifierBytes = 256
-)
+const maxCanonicalLogCorrelationIdentifierBytes = 256
 
 // EventHistoryVerificationStatus is a bounded, machine-readable local
 // integrity result. No status embeds persisted record content or database
@@ -82,13 +79,6 @@ type EventHistoryVerification struct {
 	ProjectionHashValid bool                           `json:"projection_hash_valid"`
 	IntegrityVerified   bool                           `json:"integrity_verified"`
 	IntegrityKeyID      string                         `json:"integrity_key_id,omitempty"`
-}
-
-// EventHistoryVerificationRange is explicit about bounded output. Callers must
-// not treat a truncated page as a complete range attestation.
-type EventHistoryVerificationRange struct {
-	Records   []EventHistoryVerification `json:"records"`
-	Truncated bool                       `json:"truncated"`
 }
 
 // ErrIntegrityKeyUnavailable lets a signer report expected boot-order or key
@@ -295,6 +285,7 @@ type EventHistoryWriter struct {
 	generation         uint64
 	healthSequence     atomic.Uint64
 	appendCommitMu     sync.Mutex
+	group              writeGroup
 	healthMu           sync.Mutex
 	healthQueue        []EventHistoryHealthTransition
 	healthDraining     bool
@@ -386,8 +377,10 @@ func (writer *EventHistoryWriter) Append(
 
 // AppendContext validates that projection is the immutable local projection of
 // record, hashes and optionally signs its final serialization, then commits one
-// row atomically. It never falls back to record.Body or record.Bytes for stored
-// payload data.
+// row atomically. It never falls back to record.Body or record.Bytes for
+// stored payload data. Concurrent appends share one transaction (group
+// commit, writeGroup); each returns after its own row is
+// committed.
 func (writer *EventHistoryWriter) AppendContext(
 	ctx context.Context,
 	record observability.Record,
@@ -402,65 +395,19 @@ func (writer *EventHistoryWriter) AppendContext(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	release, err := writer.store.acquireReady()
-	if err != nil {
-		writer.reportHealthFailure(EventHistoryHealthWriteFailed, err, EventHistorySQLiteUnavailable)
-		return err
+	// A hook call commits its appends together (CallWriteBatch).
+	if writer.deferAppend(ctx, []observability.Record{record}, []observabilityredaction.Projection{projection}) {
+		return nil
 	}
-	released := false
-	releaseReady := func() {
-		if !released {
-			release()
-			released = true
-		}
-	}
-	defer releaseReady()
-	err = retryBusyObserved(
-		ctx,
-		"v8_event_history_transaction",
-		writer.store.sqliteBusyObservabilityV8(),
-		func() error {
-			tx, beginErr := writer.store.db.BeginTx(ctx, nil)
-			if beginErr != nil {
-				return eventHistoryFailure(
-					EventHistoryHealthWriteFailed,
-					&eventHistoryWriteError{cause: beginErr},
-				)
-			}
-			outcome, appendErr := writer.appendContextTx(ctx, tx, record, projection)
-			if appendErr != nil {
-				_ = tx.Rollback()
-				return appendErr
-			}
-			if commitErr := writer.commitAppendTransactionContext(ctx, tx, outcome); commitErr != nil {
-				_ = tx.Rollback()
-				return eventHistoryFailure(
-					EventHistoryHealthWriteFailed,
-					&eventHistoryWriteError{cause: commitErr},
-				)
-			}
-			return nil
-		},
-	)
-	if err != nil {
-		// Health reporters may persist their own mandatory record through the
-		// same single-connection Store. Every failed attempt has ended before
-		// invoking external code so failure reporting cannot self-deadlock.
-		writer.stageAppendErrorClass(err, eventHistoryCallerGaveUpClass(ctx, err))
-		releaseReady()
-		writer.flushHealth()
-		return err
-	}
-	releaseReady()
-	writer.flushHealth()
-	return nil
+	return writer.appendGrouped(ctx, record, projection)
 }
 
 // AppendBatchContext commits records in one transaction, all or none, with
 // the validation AppendContext applies to each. A producer that writes a
 // group of related rows per occurrence (the correlation relationship rows of
 // one hook) pays one commit and one write-ahead-log sync instead of one per
-// row (GAP-0246). Every record is persisted when it returns nil.
+// row (GAP-0246). Every record is persisted when it returns nil, or, inside
+// a hook call's open CallWriteBatch, when the call flushes it.
 func (writer *EventHistoryWriter) AppendBatchContext(
 	ctx context.Context,
 	records []observability.Record,
@@ -481,6 +428,19 @@ func (writer *EventHistoryWriter) AppendBatchContext(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if writer.deferAppend(ctx, append([]observability.Record(nil), records...),
+		append([]observabilityredaction.Projection(nil), projections...)) {
+		return nil
+	}
+	return writer.appendBatchDirect(ctx, records, projections)
+}
+
+// appendBatchDirect is AppendBatchContext's own transaction.
+func (writer *EventHistoryWriter) appendBatchDirect(
+	ctx context.Context,
+	records []observability.Record,
+	projections []observabilityredaction.Projection,
+) error {
 	release, err := writer.store.acquireReady()
 	if err != nil {
 		writer.reportHealthFailure(EventHistoryHealthWriteFailed, err, EventHistorySQLiteUnavailable)
@@ -610,10 +570,19 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	if err != nil {
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(EventHistoryHealthProjectionRejected, err)
 	}
-	contentDigest := sha256.Sum256(projectedEnvelope)
+	// The row keeps the projection with its field classes named by set
+	// (field_class_sets.go); the hash and the signature cover those bytes.
+	storedEnvelope, err := writer.store.storedProjection(ctx, tx, projectedEnvelope)
+	if err != nil {
+		return eventHistoryAppendOutcome{}, eventHistoryFailure(
+			EventHistoryHealthWriteFailed,
+			&eventHistoryWriteError{cause: err},
+		)
+	}
+	contentDigest := sha256.Sum256(storedEnvelope)
 	projectionHash := ProjectionHashAlgorithm + ":" + hex.EncodeToString(contentDigest[:])
 
-	payloadHMAC, integrityAlgorithm, integrityKeyID, unsigned, err := writer.integrity(ctx, projectedEnvelope)
+	payloadHMAC, integrityAlgorithm, integrityKeyID, unsigned, err := writer.integrity(ctx, storedEnvelope)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return eventHistoryAppendOutcome{}, err
@@ -627,8 +596,21 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	correlation := record.Correlation()
 	provenance := record.Provenance()
 	metadata := projection.Metadata()
-	target := projectedCompatibilityTarget(projection)
-	details := projectedCompatibilityDetails(projection, string(record.EventName()))
+	// The projected payload is decoded once for every compatibility column
+	// below; each lookup decoded the whole payload again (nine times a row,
+	// r106 performance audit). A payload that does not decode reads as
+	// empty, as each lookup did.
+	projectedPayload, _ := projection.Payload().Object()
+	target := projectedCompatibilityTarget(projectedPayload)
+	if target == "" && strings.TrimSpace(record.Connector()) != "" &&
+		strings.TrimSpace(projectedCompatibilityString(projectedPayload, "defenseclaw.health.subsystem")) != "" {
+		// A connector's own health record (the guardrail-degraded alert for
+		// its hook calls that ran fail-open, its hook files changed) names
+		// no asset: its target is the connector. `defenseclaw alerts`
+		// showed an empty Target (rel-1-0-2 GAP-0446 item 8).
+		target = strings.TrimSpace(record.Connector())
+	}
+	details := projectedCompatibilityDetails(projectedPayload, string(record.EventName()))
 	if target == "" && details == string(record.EventName()) && correlation.EvaluationID != "" &&
 		record.EventName() == observability.EventName(observability.TelemetryEventEnforcementBlockApplied) {
 		if blockTarget, blockDetails := enforcementBlockCompatibility(ctx, tx, correlation.EvaluationID); blockDetails != "" {
@@ -659,9 +641,9 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	// gateway, judge_bodies), as watch-start and watch-stop rows otherwise
 	// said audit_logger (GAP-2204).
 	legacyActor := any(provenance.Producer)
-	if actorRef := strings.TrimSpace(projectedCompatibilityString(projection, "defenseclaw.admin.actor_ref")); actorRef != "" {
+	if actorRef := strings.TrimSpace(projectedCompatibilityString(projectedPayload, "defenseclaw.admin.actor_ref")); actorRef != "" {
 		legacyActor = actorRef
-	} else if subsystem := strings.TrimSpace(projectedCompatibilityString(projection, "defenseclaw.health.subsystem")); subsystem != "" &&
+	} else if subsystem := strings.TrimSpace(projectedCompatibilityString(projectedPayload, "defenseclaw.health.subsystem")); subsystem != "" &&
 		provenance.Producer == "audit_logger" {
 		legacyActor = subsystem
 	}
@@ -681,12 +663,12 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	legacyContentHash := any(nullStr(provenance.ConfigDigest))
 	legacyGeneration := any(provenance.ConfigGeneration)
 	legacyBinaryVersion := any(provenance.BinaryVersion)
-	legacyAgentName := any(nullStr(projectedCompatibilityString(projection, "gen_ai.agent.name")))
-	legacyDestinationApp := any(nullStr(projectedCompatibilityString(projection, "defenseclaw.destination.app")))
-	legacyToolName := any(nullStr(projectedCompatibilityString(projection, "gen_ai.tool.name")))
-	toolID := projectedCompatibilityString(projection, "defenseclaw.tool.id")
+	legacyAgentName := any(nullStr(projectedCompatibilityString(projectedPayload, "gen_ai.agent.name")))
+	legacyDestinationApp := any(nullStr(projectedCompatibilityString(projectedPayload, "defenseclaw.destination.app")))
+	legacyToolName := any(nullStr(projectedCompatibilityString(projectedPayload, "gen_ai.tool.name")))
+	toolID := projectedCompatibilityString(projectedPayload, "defenseclaw.tool.id")
 	if toolID == "" {
-		toolID = projectedCompatibilityString(projection, "gen_ai.tool.call.id")
+		toolID = projectedCompatibilityString(projectedPayload, "gen_ai.tool.call.id")
 	}
 	if toolID == "" {
 		toolID = correlation.ToolInvocationID
@@ -705,7 +687,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		// The source values fill the historical columns only where the local
 		// profile kept them unchanged; otherwise the projected value is kept,
 		// so a strict store never holds the content it removed (GAP-1945).
-		projected, _ := projection.Payload().Object()
+		projected := projectedPayload
 		if value, kept := keptCompatibilityValue(projected, "target", legacy.Target); kept {
 			legacyTarget = nullStr(value)
 		}
@@ -746,27 +728,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	if err != nil {
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(EventHistoryHealthProjectionRejected, err)
 	}
-	_, err = txExecContextObserved(ctx, tx, "v8_event_history_insert", writer.store.sqliteBusyObservabilityV8(), `
-		INSERT INTO audit_events (
-			id, timestamp, action, target, actor, details, structured_json, severity,
-			run_id, trace_id, request_id, session_id, turn_id, agent_name, agent_instance_id,
-			policy_id, destination_app, tool_name, tool_id,
-			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id,
-			connector, step_idx, enforced, rule_pack_dir,
-			bucket, event_name, source, signal, bucket_catalog_version, payload_json, projected_record_json,
-			record_schema_version, projection_hash,
-			redaction_profile, mandatory, evaluation_id, scan_id, finding_id,
-			enforcement_action_id, payload_hmac, integrity_algorithm, integrity_key_id, record_sha256
-		) VALUES (
-			?, ?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?,
-			?, ?,
-			?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?
-		)`,
+	_, err = writer.store.txExecPrepared(ctx, tx, "v8_event_history_insert", eventHistoryInsertSQL,
 		record.RecordID(), record.Timestamp().Format(time.RFC3339Nano),
 		action, legacyTarget, legacyActor, legacyDetails, legacyStructured, legacySeverity,
 		nullStr(correlation.RunID), nullStr(correlation.TraceID), nullStr(correlation.RequestID),
@@ -777,7 +739,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		nullStr(correlation.AgentID), nullStr(correlation.SidecarInstanceID),
 		nullStr(record.Connector()), legacyStepIndex, legacyEnforced, legacyRulePackDir,
 		string(record.Bucket()), string(record.EventName()), string(record.Source()), string(record.Signal()),
-		record.BucketCatalogVersion(), string(payloadJSON), string(projectedEnvelope),
+		record.BucketCatalogVersion(), string(payloadJSON), string(storedEnvelope),
 		record.SchemaVersion(), projectionHash,
 		metadata.RedactionProfile, boolInt(record.Mandatory()),
 		nullStr(correlation.EvaluationID), nullStr(correlation.ScanID),
@@ -821,6 +783,29 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	}
 	return outcome, nil
 }
+
+// eventHistoryInsertSQL inserts one v8 event-history row (txExecPrepared).
+const eventHistoryInsertSQL = `
+		INSERT INTO audit_events (
+			id, timestamp, action, target, actor, details, structured_json, severity,
+			run_id, trace_id, request_id, session_id, turn_id, agent_name, agent_instance_id,
+			policy_id, destination_app, tool_name, tool_id,
+			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id,
+			connector, step_idx, enforced, rule_pack_dir,
+			bucket, event_name, source, signal, bucket_catalog_version, payload_json, projected_record_json,
+			record_schema_version, projection_hash,
+			redaction_profile, mandatory, evaluation_id, scan_id, finding_id,
+			enforcement_action_id, payload_hmac, integrity_algorithm, integrity_key_id, record_sha256
+		) VALUES (
+			?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?,
+			?, ?,
+			?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?
+		)`
 
 // exactLogLifecycleAndExecution reads only the two registered canonical
 // lifecycle attributes. They are intentionally not generic Correlation fields,
@@ -1299,11 +1284,7 @@ func sqlitePrimaryCode(err error) uint8 {
 	return uint8(primary)
 }
 
-func projectedCompatibilityTarget(projection observabilityredaction.Projection) string {
-	payload, err := projection.Payload().Object()
-	if err != nil {
-		return ""
-	}
+func projectedCompatibilityTarget(payload map[string]any) string {
 	if target, _ := payload["target"].(string); target != "" {
 		return target
 	}
@@ -1327,11 +1308,7 @@ func projectedCompatibilityTarget(projection observabilityredaction.Projection) 
 	return ""
 }
 
-func projectedCompatibilityDetails(projection observabilityredaction.Projection, fallback string) string {
-	payload, err := projection.Payload().Object()
-	if err != nil {
-		return fallback
-	}
+func projectedCompatibilityDetails(payload map[string]any, fallback string) string {
 	for _, field := range []string{"message", "description", "reason"} {
 		if value, ok := payload[field].(string); ok && value != "" {
 			return value
@@ -1369,6 +1346,8 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 			{"defenseclaw.scan.finding_count", "findings"},
 			{"defenseclaw.scan.severity_max", "max_severity"},
 			{"defenseclaw.scan.verdict", "verdict"},
+			// The judge model the scan ran with (GAP-2435).
+			{"gen_ai.request.model", "judge"},
 		} {
 			if value, present := payload[field.key]; present && value != nil && fmt.Sprint(value) != "" {
 				label += " " + field.name + "=" + fmt.Sprint(value)
@@ -1398,6 +1377,13 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 	return fallback
 }
 
+// enforcementBlockEvaluationSQL is enforcementBlockCompatibility's lookup;
+// the sparse-key index test runs EXPLAIN on it (GAP-1793).
+const enforcementBlockEvaluationSQL = `
+		SELECT COALESCE(payload_json, '') FROM audit_events
+		WHERE evaluation_id = ? AND event_name = ?
+		ORDER BY rowid DESC LIMIT 1`
+
 // enforcementBlockCompatibility names what a generated enforcement.block.applied
 // row blocked and why. That family carries only identifiers, so a guardrail
 // proxy prompt block was listed in alerts as "block | | enforcement.block.applied"
@@ -1405,10 +1391,7 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 // projected into this table) holds the direction, rule ids and reason.
 func enforcementBlockCompatibility(ctx context.Context, tx *sql.Tx, evaluationID string) (string, string) {
 	var payload string
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(payload_json, '') FROM audit_events
-		WHERE evaluation_id = ? AND event_name = ?
-		ORDER BY rowid DESC LIMIT 1`,
+	if err := tx.QueryRowContext(ctx, enforcementBlockEvaluationSQL,
 		evaluationID, observability.TelemetryEventGuardrailEvaluationCompleted,
 	).Scan(&payload); err != nil {
 		return "", ""
@@ -1461,15 +1444,8 @@ func keptCompatibilityValue(projected map[string]any, field, source string) (str
 	}
 }
 
-func projectedCompatibilityString(
-	projection observabilityredaction.Projection,
-	field string,
-) string {
+func projectedCompatibilityString(payload map[string]any, field string) string {
 	if field == "" {
-		return ""
-	}
-	payload, err := projection.Payload().Object()
-	if err != nil {
 		return ""
 	}
 	value, _ := payload[field].(string)
@@ -1619,63 +1595,6 @@ func (writer *EventHistoryWriter) VerifyEventHistoryRecord(
 	return writer.verifyStoredProjection(ctx, recordID, []byte(projected), projectionHash, payloadHMAC, algorithm, keyID)
 }
 
-// VerifyEventHistoryRange verifies a half-open UTC timestamp range. The result
-// order is stable and contains no record content.
-func (writer *EventHistoryWriter) VerifyEventHistoryRange(
-	ctx context.Context,
-	from, until time.Time,
-	limit int,
-) (EventHistoryVerificationRange, error) {
-	if writer == nil || writer.store == nil || writer.store.db == nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: v8 event-history writer is not initialized")
-	}
-	if ctx == nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: v8 event-history context is required")
-	}
-	if from.IsZero() || until.IsZero() || !from.Before(until) {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: v8 event-history verification range is invalid")
-	}
-	if limit <= 0 || limit > maxEventHistoryVerificationRange {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: v8 event-history verification limit is invalid")
-	}
-	rows, err := writer.store.db.QueryContext(ctx, `
-		SELECT id, COALESCE(projected_record_json,''), COALESCE(projection_hash,''),
-		       COALESCE(payload_hmac,''), COALESCE(integrity_algorithm,''),
-		       COALESCE(integrity_key_id,'')
-		FROM audit_events
-		WHERE julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)
-		ORDER BY julianday(timestamp) ASC, id ASC LIMIT ?`,
-		from.UTC().Format(time.RFC3339Nano), until.UTC().Format(time.RFC3339Nano), limit+1,
-	)
-	if err != nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: read v8 event-history verification range: %w", err)
-	}
-	defer rows.Close()
-	results := make([]EventHistoryVerification, 0, limit+1)
-	for rows.Next() {
-		var recordID, projected, projectionHash, payloadHMAC, algorithm, keyID string
-		if err := rows.Scan(&recordID, &projected, &projectionHash, &payloadHMAC, &algorithm, &keyID); err != nil {
-			return EventHistoryVerificationRange{}, fmt.Errorf("audit: scan v8 event-history verification range")
-		}
-		result, err := writer.verifyStoredProjection(
-			ctx, recordID, []byte(projected), projectionHash, payloadHMAC, algorithm, keyID,
-		)
-		if err != nil {
-			return EventHistoryVerificationRange{}, err
-		}
-		results = append(results, result)
-	}
-	if err := rows.Err(); err != nil {
-		return EventHistoryVerificationRange{}, fmt.Errorf("audit: iterate v8 event-history verification range: %w", err)
-	}
-	page := EventHistoryVerificationRange{Records: results}
-	if len(page.Records) > limit {
-		page.Records = page.Records[:limit]
-		page.Truncated = true
-	}
-	return page, nil
-}
-
 func (writer *EventHistoryWriter) verifyStoredProjection(
 	ctx context.Context,
 	recordID string,
@@ -1691,6 +1610,16 @@ func (writer *EventHistoryWriter) verifyStoredProjection(
 	wantHash := ProjectionHashAlgorithm + ":" + hex.EncodeToString(digest[:])
 	result.ProjectionHashValid = subtle.ConstantTimeCompare([]byte(projectionHash), []byte(wantHash)) == 1
 	if !result.ProjectionHashValid {
+		result.Status = EventHistoryHashMismatch
+		return result, nil
+	}
+	// A projection that names its field class set is whole only with that
+	// set, unchanged (field_class_sets.go).
+	if err := writer.store.checkFieldClassSet(ctx, projected); err != nil {
+		if !errors.Is(err, errFieldClassSetMissing) {
+			return EventHistoryVerification{}, err
+		}
+		result.ProjectionHashValid = false
 		result.Status = EventHistoryHashMismatch
 		return result, nil
 	}

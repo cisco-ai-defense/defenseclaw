@@ -28,7 +28,7 @@ Before starting, pick the closest sibling and list its footprint: `git grep -l -
 - [ ] `correlationContractSources` entry (immutable revision, fixture sha256). Verify: `TestCorrelationContractSourcesAndFixturesAreImmutable`.
 - [ ] `nativeTelemetryForConnector` / `mirrorIdentityTargets` / `declaredCorrelationAliases` where they apply. Verify: `TestNativeTelemetryRegistryIsExplicit`.
 - [ ] `HookProfile` Decode, DecodeToolArgs, MapVerdict, Respond; `hookOnlyProfileRespond` case; `hookOnlyConnector.HookProfile` name case. Verify: `TestHookProfile_HasDispatchCallbacks`, Respond parity tests, decode tests with real payloads.
-- [ ] Template `hooks/<id>-hook.sh` (or plugin, or `.ps1` adapter) and `connectorHookScripts["<id>"]`. Verify: a script exit test under bash (`TestOpenHandsHookScript_BlockExitsTwo` pattern), `hook_user_identity_test.go`.
+- [ ] Template `hooks/<id>-hook.sh` (or plugin, or `.ps1` adapter) and `connectorHookScripts["<id>"]`. Verify: a script exit test under bash (`cursor_hook_failopen_test.go` pattern), `hook_user_identity_test.go`.
 - [ ] `hookexec` `specs["<id>"]` (style, outputField, failOpenOnly). Verify: `TestSupportedConnectorsSorted`, `TestNativeConnectorEndpointMatrix`, `TestDecisionGolden`.
 - [ ] `hookexec` branches: event validation, `hookRequestTimeout` (below the timeout registered in the vendor config), `failForeignHookBlocked`, `emitHookResult`, `hookDialects`. Verify: `TestForeignHookBlockNamesTheFileInEveryConnectorsResponse`.
 - [ ] `foreignHookStopEvent` has the exact-case stop and session-end events. Verify: a row in `TestManagedSessionStopEventsAllowWhileOtherEventsStayBlocked` (`hookexec/session_stop_test.go`).

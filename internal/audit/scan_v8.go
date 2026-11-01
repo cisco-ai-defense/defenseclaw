@@ -246,6 +246,7 @@ func scanFindingV8Operation(
 			DefenseClawFindingDecisionPath:        optionalScanV8DecisionPath(finding.DecisionPath),
 			DefenseClawFindingContentFingerprint:  optionalScanV8Identifier(finding.ContentFingerprint),
 			DefenseClawScanScanner:                optionalScanV8Text(scanFindingV8Scanner(finding, result)),
+			GenAIRequestModel:                     optionalScanV8Identifier(correlation.JudgeModel),
 			UserID:                                optionalScanV8Identifier(correlation.UserID),
 			DefenseClawUserIDKind:                 optionalNetworkUserIDKind(correlation.UserIDKind),
 			DefenseClawUserName:                   observability.UserName(correlation.UserName, optionalScanV8Identifier),
@@ -371,6 +372,8 @@ func scanSummaryV8Operation(
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
+		// GenAIRequestModel is the judge model the scan ran with, so an
+		// exported row shows that the judge ran (GAP-0575, GAP-2435).
 		input := observability.LogScanCompletedInput{
 			Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 			DefenseClawEvaluationID: optionalScanV8Identifier(correlation.EvaluationID),
@@ -388,6 +391,7 @@ func scanSummaryV8Operation(
 			DefenseClawScanVerdict:       scanV8VerdictEnum(verdict),
 			DefenseClawScanExitCode:      observability.Present(int64(result.ExitCode)),
 			DefenseClawScanErrorSummary:  optionalScanV8Text(result.ScanError),
+			GenAIRequestModel:            optionalScanV8Identifier(correlation.JudgeModel),
 			UserID:                       optionalScanV8Identifier(correlation.UserID),
 			DefenseClawUserIDKind:        optionalNetworkUserIDKind(correlation.UserIDKind),
 			DefenseClawUserName:          observability.UserName(correlation.UserName, optionalScanV8Identifier),

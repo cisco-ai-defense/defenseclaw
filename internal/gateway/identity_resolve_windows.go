@@ -100,11 +100,15 @@ func verifiedIdentityDirectory(identity string, block bool) (useridentity.Direct
 
 // exemptIdentityDirectory returns the directory facts exempt matches a hook
 // caller's names with. Windows reads them as a blocking hook call does;
-// cached returns no facts and not settled, so no cached answer decides an
+// cached returns no facts (exemptFactsNone), so no cached answer decides an
 // exemption early.
-func exemptIdentityDirectory(uid int, cached bool) (useridentity.DirectoryFacts, bool) {
+func exemptIdentityDirectory(uid int, cached bool) (useridentity.DirectoryFacts, exemptFactsState) {
 	if cached {
-		return useridentity.DirectoryFacts{}, false
+		return useridentity.DirectoryFacts{}, exemptFactsNone
 	}
-	return verifiedIdentityDirectory(strconv.Itoa(uid), true)
+	facts, ok := verifiedIdentityDirectory(strconv.Itoa(uid), true)
+	if !ok {
+		return useridentity.DirectoryFacts{}, exemptFactsNone
+	}
+	return facts, exemptFactsCurrent
 }

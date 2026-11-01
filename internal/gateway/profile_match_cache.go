@@ -26,14 +26,21 @@ const profileMatchCacheSize = 8192
 // subject's profile.
 type profileMatchCache struct {
 	mu      sync.Mutex
-	entries map[[sha256.Size]byte]profileDecision
+	entries map[[sha256.Size]byte]profileMatchEntry
 	ring    [][sha256.Size]byte
 	next    int
 }
 
+// profileMatchEntry is one memoised decision and the uid or SID it was made
+// for, so forgetUser can drop one account's decisions.
+type profileMatchEntry struct {
+	decision profileDecision
+	userID   string
+}
+
 func newProfileMatchCache() *profileMatchCache {
 	return &profileMatchCache{
-		entries: make(map[[sha256.Size]byte]profileDecision, 256),
+		entries: make(map[[sha256.Size]byte]profileMatchEntry, 256),
 		ring:    make([][sha256.Size]byte, 0, profileMatchCacheSize),
 	}
 }
@@ -104,12 +111,13 @@ func profileMatchKey(subject *profileSubject, source, connectorName string, scan
 
 func (c *profileMatchCache) get(key [sha256.Size]byte) (profileDecision, bool) {
 	c.mu.Lock()
-	d, ok := c.entries[key]
+	e, ok := c.entries[key]
 	c.mu.Unlock()
-	return d, ok
+	return e.decision, ok
 }
 
-func (c *profileMatchCache) put(key [sha256.Size]byte, d profileDecision) {
+// put memoises d for key; userID is the uid or SID of the subject.
+func (c *profileMatchCache) put(key [sha256.Size]byte, userID string, d profileDecision) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.entries[key]; ok {
@@ -122,5 +130,27 @@ func (c *profileMatchCache) put(key [sha256.Size]byte, d profileDecision) {
 		c.ring[c.next] = key
 		c.next = (c.next + 1) % profileMatchCacheSize
 	}
-	c.entries[key] = d
+	c.entries[key] = profileMatchEntry{decision: d, userID: userID}
+}
+
+// forgetUser drops every decision memoised for userID (a uid or SID), so the
+// account's next request is decided afresh: `enterprise identity refresh`
+// calls it for each account whose profile changed. The digest key already
+// changes with the facts; this also covers inputs it does not hold. A ring
+// slot of a dropped key stays and later evicts nothing, or a re-memoised
+// copy of the same key early, which only costs a recomputation.
+func (c *profileMatchCache) forgetUser(userID string) int {
+	if c == nil || userID == "" {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dropped := 0
+	for key, entry := range c.entries {
+		if entry.userID == userID {
+			delete(c.entries, key)
+			dropped++
+		}
+	}
+	return dropped
 }

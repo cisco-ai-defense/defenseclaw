@@ -16,6 +16,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -529,9 +530,9 @@ var errIDEPluginSkipped = errors.New("ide plugin outside the registered attribut
 var (
 	// IDE inventory accepts bounded Unicode text without control characters.
 	// Keep the telemetry contract equally broad so valid plugin ids are emitted.
-	ideV8PluginIDPattern = regexp.MustCompile(`^[^\x00-\x1f\x7f-\x9f]+$`)
+	ideV8PluginIDPattern = lazyregexp.New(`^[^\x00-\x1f\x7f-\x9f]+$`)
 	ideV8VersionPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~-]*$`)
-	ideV8ProductPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
+	ideV8ProductPattern  = lazyregexp.New(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 	ideV8UserPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 	ideV8UserNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]*$`)
 )

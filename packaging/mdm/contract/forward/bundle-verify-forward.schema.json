@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/forward/bundle-verify-forward-v1.json",
+  "title": "forwardable bundle verify result",
+  "description": "Forwardable members of bundle-verify.schema.json (enterprise bundle verify --json). Credential names stay on the device; the secret_refs entries keep their booleans only. Forward schema (private #14 option A): the members a management agent may send off the device. Project with allowlist-and-drop (forward/project.py): a member not listed here, or a value outside its pattern or enum, is removed, never rejected, so members a newer DefenseClaw adds are not forwarded until this file lists them. Only DefenseClaw-minted ids, bundle and receipt ids, digests, counts, codes, booleans, enums, versions and times pass; account names and identifiers (user, uid, SID, UPN, group), paths and messages never do.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "command": {
+      "const": "verify"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "result": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "already_applied",
+        "refused"
+      ]
+    },
+    "platform": {
+      "type": "string",
+      "enum": [
+        "linux",
+        "darwin",
+        "windows"
+      ]
+    },
+    "anchor_trust": {
+      "type": "string",
+      "enum": [
+        "checked",
+        "unchecked"
+      ]
+    },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "platforms": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "linux",
+              "darwin",
+              "windows"
+            ]
+          },
+          "maxItems": 3
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+        },
+        "parent": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "rollback_of": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        }
+      }
+    },
+    "alg": {
+      "type": "string",
+      "enum": [
+        "ed25519",
+        "ecdsa-p256-sha256"
+      ]
+    },
+    "floor": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "floor_source": {
+      "type": "string",
+      "enum": [
+        "none",
+        "trust_anchor_min_version",
+        "last_confirmed_bundle",
+        "both"
+      ]
+    },
+    "effective_policy_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "expected_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "digest_verified": {
+      "type": "boolean"
+    },
+    "secret_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "required": {
+            "type": "boolean"
+          },
+          "present": {
+            "type": "boolean"
+          },
+          "value_match": {
+            "type": "boolean"
+          }
+        }
+      },
+      "maxItems": 64
+    },
+    "restart_prediction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gateway_restart": {
+          "type": "string",
+          "enum": [
+            "required",
+            "not_required",
+            "unknown"
+          ]
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "maxItems": 16
+        },
+        "settings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z_*.]{1,96}$"
+          },
+          "maxItems": 32
+        }
+      }
+    },
+    "config_drift": {
+      "type": "boolean"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/message"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/message"
+      }
+    }
+  },
+  "$defs": {
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      }
+    }
+  }
+}

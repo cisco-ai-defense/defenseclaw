@@ -329,7 +329,8 @@ func TestSandboxEgressNoticeTool(t *testing.T) {
 		{"claudecode", "Bash", true}, {"claudecode", "WebFetch", true}, {"claudecode", "mcp__fetch__fetch", true},
 		{"claudecode", "mcp__web__fetch_url", true}, {"claudecode", "Read", false}, {"claudecode", "WebSearch", false},
 		{"codex", "Bash", true}, {"copilot", "bash", true}, {"copilot", "powershell", true}, {"copilot", "web_fetch", true},
-		{"cursor", "Shell", true}, {"devin", "exec", true}, {"devin", "read", false}, {"cursor", "bash", false},
+		{"cursor", "Shell", true}, {"devin", "exec", true}, {"devin", "read", false}, {"cursor", "Read", false},
+		{"amp", "Bash", true}, {"amp", "shell_command", true},
 	} {
 		if got := sandboxEgressNoticeTool(tc.connector, tc.tool); got != tc.want {
 			t.Errorf("sandboxEgressNoticeTool(%s, %s) = %t, want %t", tc.connector, tc.tool, got, tc.want)

@@ -39,8 +39,20 @@ func TestParseCompileObservabilityV8LocalStackRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a recorded local Splunk sink must load: %v", err)
 	}
-	if _, ok := compiled.Plan.Destination("local-splunk"); !ok {
+	destination, ok := compiled.Plan.Destination("local-splunk")
+	if !ok {
 		t.Fatal("recorded local Splunk sink missing from the plan")
+	}
+	// GAP-2115: the exporter of the recorded sink checks its listener.
+	if !ObservabilityV8LocalStackSink(destination) {
+		t.Fatal("the recorded local Splunk sink is not marked for the listener check")
+	}
+	unrecorded, err := compile(t, splunk(""))
+	if err != nil {
+		t.Fatalf("a Splunk sink without the record must load: %v", err)
+	}
+	if other, ok := unrecorded.Plan.Destination("local-splunk"); !ok || ObservabilityV8LocalStackSink(other) {
+		t.Fatal("a Splunk sink without the setup record must not be taken for the local stack")
 	}
 	if strings.Contains(string(compiled.Plan.EffectiveJSON()), fullID) {
 		t.Fatal("the setup record is CLI state and must not enter the delivery plan")

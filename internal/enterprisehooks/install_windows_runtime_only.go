@@ -218,6 +218,9 @@ func installWindowsRuntimeOnlyManagedResult(
 			if !sameWindowsEnterprisePath(verifiedHome, target.home) || !verifiedSID.Equals(target.sid) {
 				return fmt.Errorf("enterprise hooks: %s target profile identity changed before runtime mutation", name)
 			}
+			if err := moveWindowsTargetOwnedDataDirLinksAside(transaction.home, transaction.dataDir, transaction.targetSID, opts.WindowsDeferredFirstEnrollment); err != nil {
+				return err
+			}
 			if err := prepareWindowsCodexRuntime(transaction, opts.AllowMissingHookConfigRepair); err != nil {
 				return err
 			}

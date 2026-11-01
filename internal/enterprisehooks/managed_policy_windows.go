@@ -1095,9 +1095,10 @@ type windowsClaudeManagedRuntimeVersionReport struct {
 	// ManagementContract is the management agent contract the gateway
 	// implements; accepted, not checked.
 	ManagementContract int `json:"management_contract,omitempty"`
-	// Older installed gateways can omit this capability; a present value
+	// Older installed gateways can omit these capabilities; a present value
 	// must still be a boolean under the strict identity decoder.
 	SecretSetBundle bool `json:"secret_set_bundle,omitempty"`
+	IdentityRefresh bool `json:"identity_refresh,omitempty"`
 }
 
 func validateWindowsClaudeManagedRuntimeVersion(target windowsClaudeManagedPolicyTarget, expectedVersion string) error {
@@ -2357,7 +2358,10 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 	if err := setWindowsManagedPolicyProtection(tempPath, false, userReadable); err != nil {
 		return err
 	}
-	if err := safefile.ReplaceFile(tempPath, path); err != nil {
+	// One rename: a reader (Cursor loads the adapter its hooks.json names)
+	// finds the old file or the new one, never none (GAP-2572). The temp file
+	// already carries the protection, so nothing is merged from the old one.
+	if err := safefile.ReplaceFileAtomically(tempPath, path); err != nil {
 		return fmt.Errorf("enterprise hooks: publish managed policy %s: %w", path, err)
 	}
 	if err := setWindowsManagedPolicyProtection(path, false, userReadable); err != nil {

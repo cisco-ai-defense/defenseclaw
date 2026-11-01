@@ -522,6 +522,17 @@ def test_inspect_status_preserves_effective_judge_capture_default_and_override(t
         assert inspect_v8_operator_status(path).judge_bodies_enabled is False
 
 
+def test_inspect_status_names_the_configured_default_redaction_profile(tmp_path: Path) -> None:
+    # GAP-1394: the TUI Redaction summary reads it from here.
+    path = tmp_path / "config.yaml"
+    wire = SimpleNamespace(effective=_effective(), source=str(path), data_dir=str(tmp_path), plan_digest="a" * 64)
+    with patch("defenseclaw.observability.v8_status.inspect_v8_config", return_value=wire):
+        path.write_text("config_version: 8\nobservability: {}\n")
+        assert inspect_v8_operator_status(path).default_redaction_profile == "none"
+        path.write_text("config_version: 8\nobservability:\n  defaults:\n    redaction_profile: content\n")
+        assert inspect_v8_operator_status(path).default_redaction_profile == "content"
+
+
 def test_inspect_status_protects_snapshot_before_first_write(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     source = b"config_version: 8\nobservability: {}\n"
@@ -1402,3 +1413,24 @@ def test_destination_display_reason_hides_routine_healthy_codes() -> None:
     assert V8DestinationHealth(name="g", state="healthy", reason="activated").display_reason == ""
     assert V8DestinationHealth(name="g", state="degraded", reason="queue_full").display_reason == "queue_full"
     assert V8DestinationHealth(name="g", state="healthy", reason="origin_loop").display_reason == "origin_loop"
+
+
+def test_max_store_mb_is_off_by_default_and_shown_when_set() -> None:
+    """#1384: the opt-in audit.db size cap is shown next to the retention days."""
+    effective = _effective()
+    status = operator_status_from_effective(effective, source="x", data_dir="y", plan_digest="z")
+    assert status.max_store_mb == 0
+    assert status.retention_label == "90 days"
+
+    capped = copy.deepcopy(effective)
+    capped["local"]["max_store_mb"] = 2048
+    status = operator_status_from_effective(capped, source="x", data_dir="y", plan_digest="z")
+    assert status.max_store_mb == 2048
+    assert status.retention_label == "90 days, size cap 2048 MiB"
+
+    capped["local"]["retention_days"] = 0
+    status = operator_status_from_effective(capped, source="x", data_dir="y", plan_digest="z")
+    assert status.retention_label == "size cap 2048 MiB"
+    capped["local"].pop("max_store_mb")
+    status = operator_status_from_effective(capped, source="x", data_dir="y", plan_digest="z")
+    assert status.retention_label == "unbounded"

@@ -463,6 +463,39 @@ func TestValidateDeploymentMode_Invalid(t *testing.T) {
 	}
 }
 
+// GAP-1042: the runtime loader must keep a standalone gateway on the
+// launchd/systemd-owned API port even if an administrator edits the service
+// config directly instead of going through lifecycle ensure.
+func TestManagedStandaloneRuntimeRequiresHeldAPIPort(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode, profile string
+		port                int
+		wantError           bool
+	}{
+		{"standalone default", string(DeploymentModeManagedEnterprise), "standalone", 18970, false},
+		{"standalone lower custom port", string(DeploymentModeManagedEnterprise), "standalone", 18969, true},
+		{"standalone higher custom port", string(DeploymentModeManagedEnterprise), "standalone", 18971, true},
+		{"per-user custom port", "", "", 18971, false},
+		{"Secure Client custom port", string(DeploymentModeManagedEnterprise), "secure_client", 18971, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.DeploymentMode = tc.mode
+			cfg.Enterprise.Profile = tc.profile
+			cfg.Gateway.APIBind = "127.0.0.1"
+			cfg.Gateway.APIPort = tc.port
+			err := ValidateManagedEnterpriseListenerBindings(cfg)
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "gateway.api_port") {
+					t.Fatalf("port %d: error = %v, want refusal of an unheld API port", tc.port, err)
+				}
+			} else if err != nil {
+				t.Fatalf("port %d: unexpected error: %v", tc.port, err)
+			}
+		})
+	}
+}
+
 func TestManagedEnterpriseListenerBindingsModeMatrix(t *testing.T) {
 	tests := []struct {
 		name          string

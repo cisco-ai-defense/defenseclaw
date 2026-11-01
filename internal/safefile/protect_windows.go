@@ -396,6 +396,16 @@ func preserveExistingProtection(source, destination string) error {
 	)
 }
 
+// ErrReparsePoint marks a path refused because it, or a folder on the way to
+// it, is a symbolic link, junction or other reparse point.
+var ErrReparsePoint = errors.New("safefile: refusing reparse point")
+
+// RejectReparseChain refuses path when it or any existing parent folder is a
+// reparse point: the check CreatePrivateDirectory runs before it creates
+// anything. Other errors (for example a folder the caller cannot read) are
+// returned as they are.
+func RejectReparseChain(path string) error { return rejectReparseChain(path) }
+
 func rejectReparsePath(path string) error {
 	ptr, err := winpath.UTF16Ptr(path)
 	if err != nil {
@@ -409,7 +419,7 @@ func rejectReparsePath(path string) error {
 		return err
 	}
 	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return fmt.Errorf("safefile: refusing reparse point: %s", path)
+		return fmt.Errorf("%w: %s", ErrReparsePoint, path)
 	}
 	return nil
 }

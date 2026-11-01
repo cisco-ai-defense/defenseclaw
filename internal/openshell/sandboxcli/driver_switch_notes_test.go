@@ -58,6 +58,18 @@ func TestListAndDoctorNameTheDriverOfASandboxTheGatewayNoLongerRuns(t *testing.T
 	ta.ok(t, ta.fresh().List(bg, OutputText))
 	lacks(t, ta.output(), "no longer runs")
 
+	// GAP-1431: a MicroVM still being created, which has recorded no driver
+	// yet, is no obsolete docker sandbox.
+	creating := sampleSandbox("fresh-vm")
+	creating.Driver, creating.Phase = "", "creating"
+	ta = newTestApp(t, "", creating)
+	ta.daemon.status.Gateway.Driver = "vm"
+	ta.ok(t, ta.List(bg, OutputText))
+	lacks(t, ta.output(), "no longer runs", "fresh-vm (docker)")
+	if got := otherDriverNote([]sandboxapi.Sandbox{creating}, "vm"); got != "" {
+		t.Fatalf("creating MicroVM note = %q", got)
+	}
+
 	// GAP-0663: OpenShell drops the old driver's sandbox a few minutes after
 	// the switch, so the note never promises that it runs again.
 	if got := otherDriverNote([]sandboxapi.Sandbox{old}, "docker"); !strings.Contains(got, "OpenShell drops it a few minutes after the switch") ||

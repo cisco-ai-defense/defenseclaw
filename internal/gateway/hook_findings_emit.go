@@ -116,7 +116,11 @@ func (a *APIServer) emitInspectVerdictFindings(
 	if a.logger == nil {
 		return hookEvaluationContext{}
 	}
+	// Recording the scan waits on the audit store; a hook gives its caller's
+	// run slot up for that wait (GAP-1790).
+	resume := waitWithoutHookRunSlot(ctx)
 	evalID, scanID, err := a.logger.LogInspectFindingsWithCorrelation(ctx, src, ScanCorrelationFromContext(ctx))
+	resume()
 	if err != nil {
 		metricRuntime, _ := a.observabilityV8RuntimeEmitter().(hookLifecycleMetricV8Runtime)
 		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, errorReason)
@@ -293,7 +297,11 @@ func (a *APIServer) emitAssetPolicyDecisionFindings(
 	if a.logger == nil {
 		return hookEvaluationContext{}
 	}
+	// Recording the scan waits on the audit store; a hook gives its caller's
+	// run slot up for that wait (GAP-1790).
+	resume := waitWithoutHookRunSlot(ctx)
 	evalID, scanID, err := a.logger.LogInspectFindingsWithCorrelation(ctx, src, ScanCorrelationFromContext(ctx))
+	resume()
 	if err != nil {
 		metricRuntime, _ := a.observabilityV8RuntimeEmitter().(hookLifecycleMetricV8Runtime)
 		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, "emit_asset_policy")

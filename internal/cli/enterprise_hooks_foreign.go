@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -58,6 +59,15 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		HookBinary:    opts.HookBinary,
 		Policy:        policy,
 		OwnedCommands: perUserOwnedHookCommandsForBinary(name, target.UserHome, dataDir, opts.HookBinary),
+	}
+	if layout.GOOS == "windows" && name == enterprisepolicy.ConnectorCopilot &&
+		slices.Contains(enterprisepolicy.StandaloneConnectors(cfg), enterprisepolicy.ConnectorClaudeCode) {
+		// A retained personal registration is retired only after its managed
+		// replacement is proven installed. Until then the guard keeps blocking
+		// that untrusted user binary, including if a cleanup write fails.
+		verified, verifyErr := enterprisepolicy.VerifyAll(opts, []string{enterprisepolicy.ConnectorClaudeCode})
+		request.RetireLegacyClaudeUserHooks = verifyErr == nil &&
+			slices.Contains(verified.MachinePolicyConnectors, enterprisepolicy.ConnectorClaudeCode)
 	}
 	return cleanEnterpriseForeignHooksFenced(target, request, time.Now())
 }

@@ -33,10 +33,10 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly MIN_GO_VERSION="1.26.4"
 # Same pin as GOLANGCI_LINT_VERSION in the Makefile (#1228).
 readonly GOLANGCI_LINT_VERSION="v2.14.0"
-readonly MIN_PYTHON_VERSION="3.10"
+readonly MIN_PYTHON_VERSION="3.11"
 readonly MAX_PYTHON_VERSION="3.13"
 readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
-readonly PREFERRED_PYTHON_VERSIONS=("3.12" "3.11" "3.13" "3.10")
+readonly PREFERRED_PYTHON_VERSIONS=("3.12" "3.11" "3.13")
 readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 
 readonly VENV_DIR="${REPO_ROOT}/.venv"

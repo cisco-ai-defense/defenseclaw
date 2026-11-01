@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -60,7 +62,9 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	wanted := privateInstallConnectors(names, func(name string) bool { return name == "claudecode" || name == "codex" || name == "copilot" })
+	wanted := privateInstallConnectors(names, func(name string) bool {
+		return name == "claudecode" || name == "codex" || name == "copilot" || name == "opencode"
+	})
 	if len(wanted) == 0 {
 		return nil
 	}
@@ -83,9 +87,7 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 	// The walk never descends through a reparse point: the profile's
 	// compatibility junctions name folders it reads through their own
 	// paths, and LocalSystem must not follow a user's link anywhere else.
-	nested, complete := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{open: openWindowsPrivateWalkDir, openChild: openWindowsPrivateWalkChild,
-		enter:       enterWindowsPrivateWalkBackup,
-		unreachable: func(_ string, err error) bool { return errors.Is(err, fs.ErrNotExist) }})
+	nested, complete := windowsPrivateHomeWalk(ctx, home)
 	if !complete {
 		scan.skipAll(wanted, PrivateInstallSkippedHome)
 	}
@@ -108,6 +110,11 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 			return scan.result()
 		}
 		packages := windowsStandaloneNPMPackages[name]
+		if name == "opencode" {
+			// Only OpenCode V1, which cannot run the V2 plugin (opencode_v1.go);
+			// the version probe and enrollment judge V2 copies.
+			packages = []string{openCodeV1Package}
+		}
 		packageRoots := append([]string(nil), roots...)
 		for _, packageName := range packages {
 			// Volta gives each package an image below AppData\Local, outside
@@ -169,6 +176,169 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 		scan.skipAll(wanted, PrivateInstallSkippedHome)
 	}
 	return scan.result()
+}
+
+// windowsPrivateWalkRun is one bounded walk of a home for npm prefixes.
+// Tests replace it.
+var windowsPrivateWalkRun = func(ctx context.Context, home string) ([]string, bool) {
+	return walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{open: openWindowsPrivateWalkDir, openChild: openWindowsPrivateWalkChild,
+		enter:       enterWindowsPrivateWalkBackup,
+		unreachable: func(_ string, err error) bool { return errors.Is(err, fs.ErrNotExist) }})
+}
+
+// A home walk is not bound to the profile's scan deadline: under hook load
+// it can need longer than a cycle's share (20 s at most), and every cycle
+// then cut it off, so coverage_complete stayed false after an upgrade until
+// the host went idle (GAP-2002). The walk runs on to
+// windowsPrivateWalkBackgroundBound; the scan waits for it until shortly
+// before its own deadline, keeping time for the fixed install roots it reads
+// every cycle. When the walk is still running then, the scan uses the last
+// complete walk of that home if it is at most windowsPrivateWalkReuse old,
+// and the account is reported incomplete otherwise. A walk that ends
+// incomplete (its entry bound, an unlistable folder) is reported as it ends,
+// never replaced by an older result.
+var (
+	windowsPrivateWalkBackgroundBound = 2 * time.Minute
+	windowsPrivateWalkReuse           = 10 * time.Minute
+	windowsPrivateWalkNow             = time.Now
+)
+
+type windowsPrivateWalkRunState struct {
+	done     chan struct{}
+	prefixes []string
+	complete bool
+	// reported marks a walk a scan stopped waiting for with no fresh
+	// complete walk to use, so that account was reported incomplete.
+	reported bool
+}
+
+type windowsPrivateWalkHome struct {
+	running *windowsPrivateWalkRunState
+	last    []string
+	lastAt  time.Time
+}
+
+var windowsPrivateWalks = struct {
+	sync.Mutex
+	homes map[string]*windowsPrivateWalkHome
+}{homes: map[string]*windowsPrivateWalkHome{}}
+
+// windowsPrivateWalkLate is signalled when a walk finishes complete after a
+// scan reported its account incomplete for want of it. The enumerator runs
+// one extra cycle on it, so the coverage record does not stay incomplete
+// until the next interval tick (5 minutes) after a slow first cycle, such as
+// the one right after an upgrade (GAP-2002). The extra cycle uses that fresh
+// walk, so it does not signal again.
+var windowsPrivateWalkLate = make(chan struct{}, 1)
+
+// WindowsPrivateWalkCompletedLate returns the channel the enumerator's
+// interval loop waits on for that extra cycle.
+func WindowsPrivateWalkCompletedLate() <-chan struct{} { return windowsPrivateWalkLate }
+
+// WaitWindowsPrivateWalksReported waits, until ctx ends, for every profile
+// walk a scan stopped waiting for and reported incomplete, and reports
+// whether one of them finished complete. The installer's single cycle
+// (enumerate --once) exits after it publishes, so the extra cycle of
+// WindowsPrivateWalkCompletedLate never ran for it: on a slow first install
+// the account stayed agent_install_scan_incomplete in the install result
+// although its walk finished seconds later (rel-1-0-6 r106 CI). A walk that
+// ends incomplete, or still runs when ctx ends, leaves the account
+// incomplete.
+func WaitWindowsPrivateWalksReported(ctx context.Context) bool {
+	windowsPrivateWalks.Lock()
+	var runs []*windowsPrivateWalkRunState
+	for _, state := range windowsPrivateWalks.homes {
+		if state.running != nil && state.running.reported {
+			runs = append(runs, state.running)
+		}
+	}
+	windowsPrivateWalks.Unlock()
+	finished := false
+	for _, run := range runs {
+		select {
+		case <-run.done:
+			finished = finished || run.complete
+		case <-ctx.Done():
+			return finished
+		}
+	}
+	// A reported walk that finished complete before the lock above has
+	// already signalled the extra cycle.
+	select {
+	case <-windowsPrivateWalkLate:
+		finished = true
+	default:
+	}
+	return finished
+}
+
+// windowsPrivateWalkWait is the part of ctx the scan waits for its walk:
+// a quarter of what is left, at least 2 s, stays for the rest of the scan.
+func windowsPrivateWalkWait(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, bounded := ctx.Deadline()
+	if !bounded {
+		return context.WithCancel(ctx)
+	}
+	reserve := time.Until(deadline) / 4
+	if reserve < 2*time.Second {
+		reserve = 2 * time.Second
+	}
+	return context.WithDeadline(ctx, deadline.Add(-reserve))
+}
+
+func windowsPrivateHomeWalk(ctx context.Context, home string) ([]string, bool) {
+	if ctx.Err() != nil {
+		return nil, false
+	}
+	key := strings.ToLower(filepath.Clean(home))
+	windowsPrivateWalks.Lock()
+	state := windowsPrivateWalks.homes[key]
+	if state == nil {
+		state = &windowsPrivateWalkHome{}
+		windowsPrivateWalks.homes[key] = state
+	}
+	run := state.running
+	if run == nil {
+		run = &windowsPrivateWalkRunState{done: make(chan struct{})}
+		state.running = run
+		go func() {
+			walkCtx, cancel := context.WithTimeout(context.Background(), windowsPrivateWalkBackgroundBound)
+			prefixes, complete := windowsPrivateWalkRun(walkCtx, home)
+			cancel()
+			windowsPrivateWalks.Lock()
+			run.prefixes, run.complete = prefixes, complete
+			if complete {
+				state.last, state.lastAt = prefixes, windowsPrivateWalkNow()
+			}
+			state.running = nil
+			late := complete && run.reported
+			windowsPrivateWalks.Unlock()
+			close(run.done)
+			if late {
+				select {
+				case windowsPrivateWalkLate <- struct{}{}:
+				default: // an extra cycle is already due
+				}
+			}
+		}()
+	}
+	windowsPrivateWalks.Unlock()
+	wait, cancel := windowsPrivateWalkWait(ctx)
+	defer cancel()
+	select {
+	case <-run.done:
+		return append([]string(nil), run.prefixes...), run.complete
+	case <-wait.Done():
+	}
+	windowsPrivateWalks.Lock()
+	defer windowsPrivateWalks.Unlock()
+	if age := windowsPrivateWalkNow().Sub(state.lastAt); !state.lastAt.IsZero() && age >= 0 && age <= windowsPrivateWalkReuse {
+		return append([]string(nil), state.last...), true
+	}
+	if state.running == run {
+		run.reported = true
+	}
+	return nil, false
 }
 
 // errPrivateWalkReparse refuses a directory path that cannot be opened as

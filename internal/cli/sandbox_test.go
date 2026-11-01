@@ -308,6 +308,22 @@ func TestSandboxDoctorHelpNamesJSONFailureExit(t *testing.T) {
 // removes what an earlier setup left there.
 func TestSandboxHostRefusal(t *testing.T) {
 	const windows = "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported"
+	// GAP-0523: on a managed Windows computer the refusal names the
+	// administrator's view of the account's sandboxes; elsewhere it is unchanged.
+	restoreHost, restoreAccount := managedHostWindowsStandalone, managedHostCurrentAccount
+	t.Cleanup(func() { managedHostWindowsStandalone, managedHostCurrentAccount = restoreHost, restoreAccount })
+	managedHostCurrentAccount = func() string { return `HOST\dcw-std1` }
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	if err := managedWindowsSandboxRefusal(sandboxHostRefusal("windows", "amd64", false)); err.Error() != windows {
+		t.Fatalf("unmanaged Windows sandbox refusal = %q", err)
+	}
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	managedErr := managedWindowsSandboxRefusal(sandboxHostRefusal("windows", "amd64", false)).Error()
+	if !strings.HasPrefix(managedErr, windows+". ") ||
+		!strings.Contains(managedErr, `defenseclaw-gateway.exe' enterprise windows sandbox list --user dcw-std1`+"`") ||
+		!strings.HasSuffix(managedErr, "Nothing was changed.") {
+		t.Fatalf("managed Windows sandbox refusal = %q", managedErr)
+	}
 	for _, c := range []struct {
 		goos, goarch string
 		cleanup      bool

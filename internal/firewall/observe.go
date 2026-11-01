@@ -25,10 +25,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // ObservedConnection is a single active outbound TCP connection.
@@ -77,7 +78,7 @@ func observeConnections(ctx context.Context) ([]ObservedConnection, error) {
 }
 
 // connPattern matches "localIP:port->remoteIP:port" in lsof NAME field.
-var connPattern = regexp.MustCompile(`\d+\.\d+\.\d+\.\d+:\d+->(\d+\.\d+\.\d+\.\d+):(\d+)`)
+var connPattern = lazyregexp.New(`\d+\.\d+\.\d+\.\d+:\d+->(\d+\.\d+\.\d+\.\d+):(\d+)`)
 
 func parseLSOF(data []byte) []ObservedConnection {
 	seen := make(map[string]bool)
@@ -124,7 +125,7 @@ func reverseLookup(ip string) string {
 }
 
 // urlPattern extracts hostnames from http(s):// URLs in source files.
-var urlPattern = regexp.MustCompile(`https?://([a-zA-Z0-9][a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})`)
+var urlPattern = lazyregexp.New(`https?://([a-zA-Z0-9][a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})`)
 
 var textExtensions = map[string]bool{
 	".py": true, ".js": true, ".ts": true, ".go": true,

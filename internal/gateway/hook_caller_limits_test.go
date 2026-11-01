@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -364,10 +365,11 @@ func TestForeignHookSessionExchangesDoNotWaitOnOtherIdentities(t *testing.T) {
 
 // GAP-0186: a managed flood of one account at 10 hook calls a second was
 // refused with enterprise_managed_rate_limited once each call took 6-7 s:
-// the calls held the caller's in-flight slots (8 on a host of two processors
-// or fewer) far past the rate budget. With the hook path back near 40 ms a
-// call, 10 calls a second hold under one slot and none is refused; the
-// in-flight bound still refuses a caller whose calls each take a second.
+// the calls held the caller's in-flight slots far past the rate budget.
+// GAP-1790: on a host of two processors the caller held only 8, so 10 calls
+// a second answered in 1 to 3 s under CPU load, inside the 3.5 s answer
+// budget, were refused. None of those is refused now; the in-flight bound
+// still refuses a caller whose calls each take longer than the budget.
 func TestHookCallerLimiterAdmitsTenCallsASecondOfOneAccount(t *testing.T) {
 	flood := func(service time.Duration) (refused int) {
 		now := time.Unix(4_000_000, 0)
@@ -398,12 +400,175 @@ func TestHookCallerLimiterAdmitsTenCallsASecondOfOneAccount(t *testing.T) {
 		}
 		return refused
 	}
-	for _, service := range []time.Duration{40 * time.Millisecond, 500 * time.Millisecond} {
+	for _, service := range []time.Duration{40 * time.Millisecond, 500 * time.Millisecond, time.Second, 3 * time.Second} {
 		if refused := flood(service); refused != 0 {
 			t.Fatalf("10 calls a second taking %s each: %d of 600 refused, want 0", service, refused)
 		}
 	}
-	if refused := flood(time.Second); refused == 0 {
-		t.Fatal("10 calls a second taking 1 s each were all admitted; the in-flight bound did not apply")
+	if refused := flood(4 * time.Second); refused == 0 {
+		t.Fatal("10 calls a second taking 4 s each were all admitted; the in-flight bound did not apply")
+	}
+}
+
+// GAP-1693: a burst of an operator's read-only sandbox CLI reads is not
+// refused; the sandbox policy writes keep their own small budget. The reads
+// include the views a POST asks (policy explain, policy test): a few
+// back-to-back `sandbox policy explain` calls were refused (es:GAP-0023).
+func TestSandboxCLIReadBurstIsNotThrottled(t *testing.T) {
+	api := &APIServer{}
+	for i := range 40 {
+		for _, read := range []struct{ method, path string }{
+			{http.MethodGet, "/api/v1/sandbox/policy/packs"},
+			{http.MethodPost, "/api/v1/sandbox/policy/explain"},
+			{http.MethodPost, "/api/v1/sandbox/policy/test"},
+		} {
+			rec := httptest.NewRecorder()
+			_, release := api.admitHookCaller(rec, httptest.NewRequest(read.method, read.path, nil), "1001", read.path)
+			if release == nil {
+				t.Fatalf("%s %s %d of a sandbox CLI burst refused: %d %s", read.method, read.path, i, rec.Code, rec.Body.String())
+			}
+			release()
+		}
+	}
+	refused := false
+	for range 40 {
+		rec := httptest.NewRecorder()
+		_, release := api.admitHookCaller(rec,
+			httptest.NewRequest(http.MethodPost, "/api/v1/sandbox/decisions", nil), "1001", "/api/v1/sandbox/decisions")
+		if release == nil {
+			refused = true
+			break
+		}
+		release()
+	}
+	if !refused {
+		t.Fatal("sandbox policy writes lost their budget")
+	}
+}
+
+// Once a request has offered its answer, what it still does (wait for the
+// delivery receipt, write the call's audit rows) must not take a run slot
+// back from the caller's next hook. With one slot (a host of two or three
+// processors) and slow audit writes (a cold page cache on a large store),
+// every new hook of a 10 calls a second load queued behind the previous
+// calls' audit writes and was blocked as a gateway no-answer (GAP-1790).
+func TestAnsweredRequestDoesNotTakeTheRunSlotBackFromTheNextHook(t *testing.T) {
+	const route = "/api/v1/claude-code/hook"
+	api := &APIServer{}
+	api.hookCallerLimits = hookCallerLimiter{rate: 1000, burst: 1000, running: 1}
+	request := func() *http.Request { return httptest.NewRequest(http.MethodPost, route, nil) }
+	answered, releaseAnswered := api.admitHookCaller(httptest.NewRecorder(), request(), "1001", route)
+	if releaseAnswered == nil {
+		t.Fatal("first request refused")
+	}
+	next := make(chan func(), 1)
+	go func() {
+		_, release := api.admitHookCaller(httptest.NewRecorder(), request(), "1001", route)
+		next <- release
+	}()
+	select {
+	case <-next:
+		t.Fatal("the caller's second request ran beside its first before the first answered")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The first request offers its answer: the next hook starts.
+	resume := pauseHookRunSlot(answered.Context())
+	var releaseNext func()
+	select {
+	case releaseNext = <-next:
+		if releaseNext == nil {
+			t.Fatal("the caller's next request was refused")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the next hook did not start when the first request offered its answer")
+	}
+
+	// The answered request goes on to its audit writes while the next hook
+	// still runs: it neither waits for nor takes that hook's slot.
+	resumed := make(chan struct{})
+	go func() {
+		resume()
+		close(resumed)
+	}()
+	select {
+	case <-resumed:
+	case <-time.After(2 * time.Second):
+		releaseNext()
+		t.Fatal("the answered request waited for the next hook's run slot before its audit writes")
+	}
+	budget := api.hookCallerLimits.callers["1001"]
+	if got := len(budget.running); got != 1 {
+		t.Fatalf("running = %d while the next hook runs, want 1 (its own slot only)", got)
+	}
+	releaseAnswered()
+	releaseNext()
+	if budget.inFlight != 0 || len(budget.running) != 0 {
+		t.Fatalf("in-flight = %d, running = %d, want 0 and 0", budget.inFlight, len(budget.running))
+	}
+}
+
+// GAP-0050: the calls of one parallel tool turn whose sessions the gateway
+// has not seen all wait for their session starts at the same time. A call
+// that waits for its start uses no gateway CPU, so it is parked and does not
+// hold back the turn's next calls at the caller's in-flight cap; before,
+// those were refused until the first calls' arrival wait ended, then paid
+// their own, and a 60-way turn ran past the managed answer budget. Parking
+// stays bounded: the caller's parked calls never exceed its in-flight cap.
+func TestCallsWaitingForTheirSessionStartsDoNotHoldBackTheTurnsOtherCalls(t *testing.T) {
+	const route = "/api/v1/inspect/tool"
+	api := &APIServer{}
+	api.hookCallerLimits = hookCallerLimiter{rate: 1000, burst: 1000, inFlight: 2, running: 4}
+	gate := &sessionStartGate{}
+	allowed := func(context.Context) (bool, string) { return false, "" }
+	sessions := []string{"s0", "s1", "s2", "s3", "s4"}
+	waiting := make(chan struct{}, len(sessions))
+	var wg sync.WaitGroup
+	call := func(i int) bool {
+		r, release := api.admitHookCaller(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, route, nil), "1001", route)
+		if release == nil {
+			return false
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer release()
+			waiting <- struct{}{}
+			if reason, refused := gate.await(r.Context(), "claudecode\x00user:1001\x00"+sessions[i], 5*time.Second,
+				400*time.Millisecond, allowed); refused {
+				t.Errorf("call %d refused: %q", i, reason)
+			}
+		}()
+		return true
+	}
+	for i := range 2 {
+		if !call(i) {
+			t.Fatalf("call %d of the turn was refused inside the caller's in-flight cap", i)
+		}
+	}
+	<-waiting
+	<-waiting
+	admitted := 0
+	for next, deadline := 2, time.Now().Add(300*time.Millisecond); next < 4 && time.Now().Before(deadline); {
+		if call(next) {
+			next++
+			admitted++
+			continue
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if admitted != 2 {
+		wg.Wait()
+		t.Fatalf("admitted %d of the turn's next 2 calls while its first 2 waited for their session starts, want 2", admitted)
+	}
+	if call(4) {
+		t.Error("a fifth call was admitted past the caller's in-flight and parked bounds")
+	}
+	wg.Wait()
+	limits := &api.hookCallerLimits
+	limits.mu.Lock()
+	defer limits.mu.Unlock()
+	if budget := limits.callers["1001"]; budget.inFlight != 0 || len(budget.running) != 0 || limits.total != 0 {
+		t.Fatalf("after the turn in-flight = %d, running = %d, total = %d, want 0", budget.inFlight, len(budget.running), limits.total)
 	}
 }

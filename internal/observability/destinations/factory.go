@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -29,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
@@ -57,7 +57,7 @@ const (
 	maxWireValueBytes = 512
 )
 
-var secretReferencePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,255}$`)
+var secretReferencePattern = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]{0,255}$`)
 
 type ErrorCode string
 
@@ -120,15 +120,19 @@ func (function CAFileLoaderFunc) LoadObservabilityCA(ctx context.Context, path s
 // resolved until PrepareDestination, so a new generation observes legitimate
 // rotation without the factory caching prior material.
 type Options struct {
-	SecureClient  bool
-	ConsoleStream ConsoleStream
-	Stdout        io.Writer
-	Stderr        io.Writer
-	Secrets       config.ObservabilityV8SecretResolver
-	CALoader      CAFileLoader
-	Resolver      netguard.V8Resolver
-	Dialer        netguard.V8Dialer
-	Warnings      push.WarningObserver
+	SecureClient bool
+	// ManagedService is a managed enterprise gateway (a system service):
+	// OTLP destinations named like the bundled local stack are the
+	// administrator collector, not this account stack (GAP-2608).
+	ManagedService bool
+	ConsoleStream  ConsoleStream
+	Stdout         io.Writer
+	Stderr         io.Writer
+	Secrets        config.ObservabilityV8SecretResolver
+	CALoader       CAFileLoader
+	Resolver       netguard.V8Resolver
+	Dialer         netguard.V8Dialer
+	Warnings       push.WarningObserver
 	// Canonical trace projection dependencies are process-stable so every
 	// generation uses the same central redaction key and bounded health seams.
 	// The OTLP observer is required by general trace destinations; the Galileo
@@ -148,6 +152,7 @@ type Options struct {
 // distinct adapter and retryable, idempotent cleanup closure.
 type Factory struct {
 	secureClient     bool
+	managedService   bool
 	console          io.Writer
 	stderr           io.Writer
 	secrets          config.ObservabilityV8SecretResolver
@@ -182,8 +187,8 @@ func NewFactory(options Options) (*Factory, error) {
 		return nil, newError(ErrorInvalidDependencies)
 	}
 	return &Factory{
-		secureClient: options.SecureClient,
-		console:      console, stderr: options.Stderr, secrets: options.Secrets, caLoader: options.CALoader,
+		secureClient: options.SecureClient, managedService: options.ManagedService,
+		console: console, stderr: options.Stderr, secrets: options.Secrets, caLoader: options.CALoader,
 		resolver: options.Resolver, dialer: options.Dialer, warnings: options.Warnings,
 		redaction: options.RedactionEngine, deliveryObserver: options.DeliveryObserver,
 		otlpObserver: options.OTLPCanonicalObserver, galileoObserver: options.GalileoObserver,
@@ -355,6 +360,7 @@ func (factory *Factory) prepareOTLPLogs(
 			MaxExportBatchBytes: batch.MaxExportBatchBytes,
 			ScheduledDelay:      time.Duration(batch.ScheduledDelayMS) * time.Millisecond,
 		},
+		ManagedService: factory.managedService,
 	}, otlp.Dependencies{Resolver: factory.resolver, Dialer: factory.dialer})
 	if prepareErr != nil {
 		return nil, noResource, newError(ErrorAdapterPrepare)
@@ -421,7 +427,7 @@ func (factory *Factory) prepareSplunk(
 		Destination: destination.Name, Endpoint: destination.Transport.Endpoint,
 		Token: token, Index: destination.Transport.Index, Source: destination.Transport.Source,
 		SourceType: destination.Transport.SourceType, SourceTypeOverrides: overrides,
-		TLS: tlsOptions,
+		TLS: tlsOptions, LocalStack: config.ObservabilityV8LocalStackSink(destination),
 		Network: push.NetworkOptions{
 			AllowPrivateNetworks: network.AllowPrivateNetworks,
 			AllowCGNAT:           network.AllowCGNAT,

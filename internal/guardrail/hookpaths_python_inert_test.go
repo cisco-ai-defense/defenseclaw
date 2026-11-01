@@ -17,14 +17,15 @@ import (
 // beside it, or a PYTHONPATH the command sets), and a real write call with a
 // computed argument stays unproven.
 func TestUnprovenWriteIgnoresInertPythonText(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	t.Setenv("PYTHONPATH", "")
 	t.Setenv("PYTHONHOME", "")
 	clean, shadow := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(shadow, "pathlib.py"), []byte("# local module\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	const home = "/home/alice"
+	// The active home is a real directory of this host (a native Windows
+	// home on Windows), as the hook sees it.
+	home := t.TempDir()
 	inert := `python3 -c 'p = Path.home() / ".ssh" / "authorized_keys"; print(f"p.write_text(42)")'`
 	for _, tc := range []struct {
 		name, command, cwd string

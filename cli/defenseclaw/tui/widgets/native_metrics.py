@@ -16,7 +16,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from rich.text import Text
+from rich.text import Span, Text
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -59,8 +59,11 @@ def fit_metric_detail(detail: str, width: int) -> str | Text:
     The line is "item · item · item". Items that don't fit are dropped whole
     and " …" marks that more were left out, so a count is never cut into a
     different number ("UserPromptSubmit x1…" for x11, "claudecode 3…" for
-    380, GAP-2430). When even the first item doesn't fit, its label is
-    shortened and its number kept ("claudeco… 380", GAP-2443).
+    380, GAP-2430). When even the first item doesn't fit, its label stays
+    whole (GAP-0341): a count of 1000 or more is written short ("12k"), and
+    if the item still doesn't fit the count gives way ("claudecode …"); the
+    tile's big digits and the panels keep every number. A phrase keeps its
+    whole leading words ("skill+mcp …").
     """
 
     if width <= 0 or not detail:
@@ -80,20 +83,72 @@ def fit_metric_detail(detail: str, width: int) -> str | Text:
             kept.append(_MORE, style=TOKENS.text_muted)
             return kept
     first = text[: ends[0]] if ends else text
+    if ends and first.cell_len <= width:
+        # No room for the " …" marker beside the first item: keep that item
+        # whole ("claudecode 59") rather than cutting its label (GAP-0341).
+        return first
+    more = bool(ends)
+    for tenths in (True, False):
+        short = _with_short_counts(first, tenths=tenths)
+        if short is not None and short.cell_len <= width:
+            if more and short.cell_len + len(_MORE) <= width:
+                short.append(_MORE, style=TOKENS.text_muted)
+            return short
     count = _TRAILING_COUNT.search(first.plain)
     if count is not None and count.start() > 0:
-        number = first[count.start() :]
-        room = width - number.cell_len - 2
-        if room >= 2:
-            label = first[:room]
-            label.rstrip()
-            label.append("… ")
-            label.append_text(number)
+        label = first[: count.start()]
+        label.rstrip()
+        if label.cell_len + len(_MORE) <= width:
+            label.append(_MORE, style=TOKENS.text_muted)
             return label
-        if number.cell_len <= width:
-            return number
+        if label.cell_len <= width:
+            return label
+    # A phrase ("skill+mcp scans", "gateway status pending") keeps whole
+    # words; only a single word wider than the tile is cut.
+    words = [index for index, char in enumerate(first.plain) if char == " "]
+    for index in reversed(words):
+        head = first[:index]
+        head.rstrip()
+        for marker in (_MORE, "\u2026"):
+            if head.plain and head.cell_len + len(marker) <= width:
+                head.append(marker, style=TOKENS.text_muted)
+                return head
     first.truncate(width, overflow="ellipsis")
     return first
+
+
+_COUNT_WORD = re.compile(r"(?<!\S)(\D*?)(\d{4,})(?!\S)")
+
+
+def _short_count(value: int, *, tenths: bool = True) -> str:
+    """1234 -> "1.2k" ("1k" without tenths), 12345 -> "12k", 1234567 -> "1.2M" (rounded down)."""
+
+    for unit, size in (("M", 1_000_000), ("k", 1_000)):
+        if value >= size:
+            whole, rest = divmod(value, size)
+            tenth = rest * 10 // size
+            return f"{whole}.{tenth}{unit}" if tenths and whole < 10 and tenth else f"{whole}{unit}"
+    return str(value)
+
+
+def _with_short_counts(item: Text, *, tenths: bool = True) -> Text | None:
+    """``item`` with every count of 1000 or more written short; None if it has none."""
+
+    plain = item.plain
+    matches = list(_COUNT_WORD.finditer(plain))
+    if not matches:
+        return None
+    out = Text()
+    last = 0
+    for match in matches:
+        start, end = match.start(2), match.end(2)
+        out.append_text(item[last:start])
+        short = _short_count(int(match.group(2)), tenths=tenths)
+        # Keep the number's colour (the spans of its slice cover it whole).
+        out.append_text(Text(short, spans=[Span(0, len(short), span.style) for span in item[start:end].spans]))
+        last = end
+    out.append_text(item[last:])
+    return out
 
 
 @dataclass(frozen=True)

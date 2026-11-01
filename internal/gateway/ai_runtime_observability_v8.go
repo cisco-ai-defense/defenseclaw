@@ -410,6 +410,11 @@ func (adapter *aiRuntimeV8Adapter) emitActivity(
 			DefenseClawAIRuntimeAgent:         agent,
 			DefenseClawAIRuntimeProcess:       aiDiscoveryV8OptionalText(finding.Process),
 		}
+		if detail.Outcome != "" && detail.Hits > 0 {
+			// The kernel hits this activity stands for, so a chart counts two
+			// would-block files of one tactic as two (GAP-1400).
+			input.DefenseClawAIRuntimeKernelCount = observability.Present(int64(min(detail.Hits, kernelDeltaMax)))
+		}
 		if detail.Hook != nil {
 			// Managed hosts only. The join labels the activity and never
 			// blocks it: hook_seen=false is activity no decision covered.

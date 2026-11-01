@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,5 +111,104 @@ func TestManagedHookIsAnsweredInsideTheBudgetWhileItsRuntimeResolutionStalls(t *
 	}
 	if got := answer.String(); code != 2 || !strings.Contains(got, "enterprise_managed_gateway_no_answer") {
 		t.Fatalf("answer = exit %d, stderr %q; want the closed no-answer block (exit 2)", code, got)
+	}
+}
+
+// rel-1-0-3 GAP-0159: during a Setup /repair one registered managed Claude
+// call was answered after 5.2 s while the others failed closed in 2.9 s.
+// NativeHookRuntimeNoop ran the per-user stable runtime reads (the
+// LocalAppData known folder, the runtime folder's ACLs) for a managed call
+// too, before its answer watchdog was armed, although their result answers
+// nothing for it. A managed call must leave main without them.
+func TestManagedHookLeavesMainWithoutThePerUserRuntimeReads(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	stalled := func(string) (hookruntime.State, bool, error) {
+		<-release // a read the repair holds
+		return hookruntime.State{}, false, nil
+	}
+	stubNativeDelegatedHookRuntimeReader(t, stalled)
+	stubNativeHookRuntimeReader(t, stalled)
+	savedArgs := os.Args
+	t.Cleanup(func() { os.Args = savedArgs })
+	os.Args = []string{savedArgs[0], "hook", "--connector", "claudecode", "--enterprise-managed"}
+
+	done := make(chan bool, 1)
+	go func() { done <- NativeHookRuntimeNoop() }()
+	select {
+	case noop := <-done:
+		if noop {
+			t.Fatal("the managed call ended as a no-op")
+		}
+	case <-time.After(2 * time.Second):
+		unblock()
+		<-done
+		t.Fatal("the managed call waited in main on the per-user runtime reads, before its answer watchdog")
+	}
+	if _, _, _, prepared := preparedNativeHookRuntime(nativeHookExecutable()); prepared {
+		t.Fatal("a managed call prepared the per-user runtime snapshot")
+	}
+}
+
+// rel-1-0-3 GAP-0159 follow-up: a managed call leaves main with the per-user
+// snapshot unprepared, yet a recognized stable per-user launcher that a
+// long-running agent still calls with cached managed arguments must stay the
+// silent no-op after its uninstall tombstone (absent machine policy,
+// unregistered account), never a closed block.
+func TestCachedManagedArgsOfTheRetiredPerUserLauncherNoopThroughMain(t *testing.T) {
+	stubNativeDelegatedHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		return hookruntime.State{}, false, nil
+	})
+	stubNativeHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		return hookruntime.State{Status: hookruntime.StatusDisabled}, true, nil
+	})
+	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+		return enterprisehooks.WindowsManagedHookRuntime{Connector: "codex"}, nil
+	})
+	savedArgs := os.Args
+	t.Cleanup(func() { os.Args = savedArgs })
+	os.Args = []string{savedArgs[0], "hook", "--connector", "codex", "--enterprise-managed"}
+
+	if NativeHookRuntimeNoop() {
+		t.Fatal("the managed call ended in main")
+	}
+	if !prepareEnterpriseManagedHookRuntime("codex") {
+		t.Fatal("the retired per-user launcher with cached managed args did not no-op after its tombstone")
+	}
+}
+
+// The registered managed call keeps the GAP-0159 timing: with the machine
+// policy active and the account registered, neither main nor the runtime
+// preparation runs the per-user stable runtime reads.
+func TestRegisteredManagedCallNeverRunsThePerUserRuntimeReads(t *testing.T) {
+	read := func(string) (hookruntime.State, bool, error) {
+		t.Error("a registered managed call ran a per-user stable runtime read")
+		return hookruntime.State{}, false, nil
+	}
+	stubNativeDelegatedHookRuntimeReader(t, read)
+	stubNativeHookRuntimeReader(t, read)
+	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+		return enterprisehooks.WindowsManagedHookRuntime{
+			Connector:    "claudecode",
+			PolicyActive: true,
+			Registered:   true,
+			GenerationID: "0123456789abcdef0123456789abcdef",
+			ScopedToken:  "scoped",
+		}, nil
+	})
+	savedArgs := os.Args
+	t.Cleanup(func() { os.Args = savedArgs })
+	os.Args = []string{savedArgs[0], "hook", "--connector", "claudecode", "--enterprise-managed"}
+
+	if NativeHookRuntimeNoop() {
+		t.Fatal("the managed call ended in main")
+	}
+	if prepareEnterpriseManagedHookRuntime("claudecode") {
+		t.Fatal("a registered managed call ended as a no-op")
+	}
+	if _, _, _, prepared := preparedNativeHookRuntime(nativeHookExecutable()); prepared {
+		t.Fatal("a registered managed call prepared the per-user runtime snapshot")
 	}
 }

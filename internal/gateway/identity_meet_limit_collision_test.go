@@ -25,8 +25,13 @@ import (
 func meetFixtureContext(t *testing.T, set *guardrailProfileSet, scope string) context.Context {
 	t.Helper()
 	p := identityTestPlatforms[0]
-	return withGuardrailProfile(context.WithValue(t.Context(), testVerifiedSubjectKey{},
-		identityTestSubject(p, p.providers[0], stateProven, true)), set, scope)
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{},
+		identityTestSubject(p, p.providers[0], stateProven, true))
+	// Requests pin the profile generation before scanning; pin it here so
+	// another test's process-wide live set never reaches the fixture
+	// (GAP-1499), as meetOfTwoAssignments does.
+	ctx = withPinnedGeneration(ctx, &Generation{N: 1, Config: set.base, Profiles: set})
+	return withGuardrailProfile(ctx, set, scope)
 }
 
 // Two proven profiles whose packs are each valid alone but whose union is
@@ -36,6 +41,21 @@ func meetFixtureContext(t *testing.T, set *guardrailProfileSet, scope string) co
 // where none blocks) and scans each member's rules as that member does.
 func TestMeetOverOneGenerationsLimitKeepsEveryRuleAndNeverRefuses(t *testing.T) {
 	stubProfileSources(t)
+	// Another test's process-wide live profile set must not reach this
+	// one: the meet scans with the generation its request pins (GAP-1499).
+	previous := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previous) })
+	strayCfg := &config.Config{}
+	strayCfg.Guardrail.Mode = "observe"
+	strayCfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"stray": {Mode: "observe"}}
+	strayCfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "stray", Match: config.ProfileMatch{Users: []string{identityTestPlatforms[0].id}}},
+	}
+	stray, err := newGuardrailProfileSet(strayCfg, nil, true)
+	if err != nil || stray == nil {
+		t.Fatalf("stray live profile set: %v", err)
+	}
+	liveGuardrailProfiles.Store(stray)
 	aRules := meetMarkerGeneration(t, "LIM-A", 2)
 	bRules := meetMarkerGeneration(t, "LIM-B", maxGenerationSemanticRules-1)
 	if _, err := compileRulePackGeneration(unionRuleCategories([]*compiledRulePackCategories{aRules, bRules})); err == nil {

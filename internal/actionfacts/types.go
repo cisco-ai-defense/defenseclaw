@@ -63,6 +63,13 @@ type Input struct {
 	// Parsers never derive it from action input.
 	ActiveAgentFilesUncertain bool
 	DialectHint               Dialect
+	// MovedWindowsShellCWD is trusted caller context set only when the
+	// gateway judges one command of a POSIX shell action alone in the native
+	// Windows directory an earlier cd, pushd or env -C of the same action
+	// moved the shell to. Relative, drive, MSYS-mount and ~ operands of that
+	// command then resolve under it (GAP-2473); the whole action keeps its
+	// own reading.
+	MovedWindowsShellCWD bool `json:"-"`
 	// CurlCapabilities is trusted caller context for resolved curl executables.
 	// ActionFacts never discovers capabilities from GOOS, dialect, basename,
 	// PATH, or process state. Callers must authenticate and invalidate this
@@ -73,6 +80,14 @@ type Input struct {
 	// lineage references. A zero key disables that projection. Neither the key
 	// nor the input values are retained by Facts.
 	CredentialLineageHMACKey [32]byte `json:"-"`
+	// ActiveStateTreeNames is trusted caller context: the authenticated hook
+	// client's answers, read as the user, to whether the protected
+	// DefenseClaw state tree holds a name a find -name/-iname test matches
+	// (hookpaths.StateTreeNameKey -> "0"/"1"). A managed gateway runs as a
+	// service account that cannot read the home, so its own index counts
+	// every name as state (GAP-2404 pod check21). ActionFacts copies the map
+	// and never derives it from action input.
+	ActiveStateTreeNames map[string]string `json:"-"`
 }
 
 // Facts contains the statically proven subset of one action. Attacker-
@@ -329,6 +344,9 @@ type Facts struct {
 	// and principal names never cross the ActionFacts boundary.
 	POSIXUnrestrictedSudoersGrantWrites []POSIXUnrestrictedSudoersGrantWriteFact `json:"-"`
 	Artifacts                           []ArtifactFact
+	// ActiveStateTreeNames is Input.ActiveStateTreeNames, copied in process
+	// for the state-tree name checks of a find (never serialized).
+	ActiveStateTreeNames map[string]string `json:"-"`
 }
 
 // CloudMetadataCredentialReadFact retains only the provider family proven by
@@ -1001,15 +1019,20 @@ type CommandFact struct {
 	// Background distinguishes one statically present asynchronous POSIX
 	// statement from conditional or otherwise unresolved control flow. It is
 	// value-free and private to exact code-owned proofs.
-	Background   bool `json:"-"`
-	Kind         CommandKind
-	Dialect      Dialect
-	Effect       CommandEffect
-	Executable   string
-	Program      string
-	Argv         []string
-	Arguments    []ArgumentFact
-	ArgvComplete bool
+	Background bool `json:"-"`
+	// ShortCircuitListID is shared by the commands of one && / || list
+	// (zero outside one). It is value-free and lets a bounded proof tell
+	// `cd X && a && b` (b runs only after the cd succeeded) from
+	// `cd X && a; b` (b also runs after a failed cd).
+	ShortCircuitListID int64 `json:"-"`
+	Kind               CommandKind
+	Dialect            Dialect
+	Effect             CommandEffect
+	Executable         string
+	Program            string
+	Argv               []string
+	Arguments          []ArgumentFact
+	ArgvComplete       bool
 	// LiteralStdin is retained only for one bounded, single-quoted POSIX
 	// heredoc whose bytes cannot undergo shell expansion. It is private
 	// in-process evidence and is intentionally not part of the public semantic
@@ -1073,6 +1096,17 @@ type ArgumentFact struct {
 	// escaped a leading "~" (an unquoted one is an expansion), and kept on
 	// the argv a wrapper passes on. Such a word names "./~", not the home.
 	literalTilde bool
+	// homeSpelling is a word whose only expansion is a plain $HOME or
+	// ${HOME} at its start (or after the = of a leading --option=), written
+	// with "~" for it ("$HOME/.dotfiles" -> "~/.dotfiles"). It is empty when
+	// the action may rebind HOME.
+	homeSpelling string
+}
+
+// HomeSpelling is the word with its leading $HOME written as "~", or "".
+// It names the home of the calling shell, which the action did not rebind.
+func (argument ArgumentFact) HomeSpelling() string {
+	return argument.homeSpelling
 }
 
 type QuoteKind string

@@ -74,6 +74,9 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// protectedFiles is the sidecar's protected-file watch (nil when off or
+	// in a test server); the hook handler records tool calls for it.
+	protectedFiles *protectedFileWatch
 	// Both API listeners start this server's one background recovery loop
 	// of the hook delivery journal (startPendingHookRecovery); neither
 	// waits for it.
@@ -91,6 +94,9 @@ type APIServer struct {
 	// projectSkills are the project skill folders the install watcher
 	// watches; nil when no watcher shares them (GAP-1063).
 	projectSkills *projectSkillRoots
+	// hookMCP are the MCP servers the managed Linux and macOS hooks report,
+	// which the install watcher admits (GAP-2591); nil elsewhere.
+	hookMCP *hookReportedMCPServers
 
 	// exemptAuditAt is when each exempt account and connector last got an
 	// enterprise-exempt-user audit row (auditEnterpriseExemptUser).
@@ -119,6 +125,13 @@ type APIServer struct {
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe
+	// copilotPermission binds an argumentless native permission callback to
+	// the call of one recently audited pre-tool allow from the same
+	// caller/session; the callback is then decided again, now.
+	copilotPermission copilotPermissionJoin
+	// sessionStartGate holds a session's calls until its start verdict
+	// (GAP-0806).
+	sessionStartGate sessionStartGate
 	// hermesTasks gives a Hermes hook that names only its task the session
 	// of that task.
 	hermesTasks hermesTaskSessions
@@ -286,9 +299,11 @@ type APIServer struct {
 
 	claudeCodeMu                sync.Mutex
 	claudeCodeLastComponentScan time.Time
-	// activeAgentContext is process-local, authenticated connector context. It
-	// is deliberately separate from hook payloads so tool arguments and generic
-	// request fields cannot assert which agent instruction files are active.
+	// activeAgentContext is authenticated connector context, kept in memory
+	// and recorded per session under the data directory so a restart keeps it
+	// (saveInstructionLoads). It is deliberately separate from hook payloads
+	// so tool arguments and generic request fields cannot assert which agent
+	// instruction files are active.
 	activeAgentContext     activeAgentContextCache
 	codexMu                sync.Mutex
 	codexLastComponentScan time.Time
@@ -380,6 +395,10 @@ type APIServer struct {
 	// boot via SetHookJudge. Per-connector gating happens in
 	// hookJudgeInspect via guardrail.judge.hook_connectors.
 	hookJudge atomic.Pointer[LLMJudge]
+
+	// userDownloads remembers the hosts recent user prompts ask to download
+	// from and run (#1390), per session, judge or not.
+	userDownloads userDownloadRequests
 	// hookJudgeSem bounds concurrent hook-lane judge executions,
 	// mirroring EventRouter.judgeSem on the proxy lane. At capacity
 	// the judge is skipped (fail-open to the regex/AID verdict)
@@ -664,6 +683,12 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	}
 
 	dataDir := a.configDataDir()
+	// A removed connector whose token file its teardown could not delete:
+	// the hook registration is gone, so the credential is refused while the
+	// removal is retried (GAP-0858).
+	if connector.HookAPITokenRevoked(dataDir, name) {
+		return false
+	}
 	if dataDir == "" {
 		a.hookAPITokenMu.RLock()
 		cached := ""
@@ -1227,6 +1252,8 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// Secure Client serves none of the identity routes (issue #1092).
 	if !a.managedAIDOnly() {
 		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", awaitConfigReload(a.handleGuardrailProfileResolve))
+		// enterprise identity refresh (root or SYSTEM, managed only).
+		mux.HandleFunc(identityRefreshPath, awaitConfigReload(a.handleIdentityRefresh))
 	}
 	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
 	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
@@ -1257,6 +1284,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc(cliObservabilityV8Path, a.handleCLIObservabilityV8)
 	mux.HandleFunc(alertAcknowledgementV8Path, a.handleAlertAcknowledgementV8)
 	a.registerConnectorHookRoutes(mux, hookLimiter)
+	a.registerAgentGatewayRoute(mux, false, hookLimiter)
 	// OTLP-HTTP receiver for the three signal types codex
 	// (via [otel.exporter.otlp-http]) and Claude Code (via
 	// OTEL_EXPORTER_OTLP_ENDPOINT) post telemetry to. Body shape is
@@ -1348,11 +1376,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 		baseCtx = withServiceAccountGateway(ctx)
 	}
 	srv := &http.Server{
-		Addr:    a.addr,
-		Handler: handler,
-		BaseContext: func(_ net.Listener) context.Context {
-			return baseCtx
-		},
+		Addr:        a.addr,
+		Handler:     handler,
+		BaseContext: apiRequestBaseContext(baseCtx),
 		ConnContext: acpPeerConnContext,
 	}
 
@@ -1423,6 +1449,11 @@ func (a *APIServer) Run(ctx context.Context) error {
 	}
 
 	serveTCP := func(ln net.Listener) {
+		if err := a.recordRuntimeAPIAddress(ln); err != nil {
+			_ = ln.Close()
+			errCh <- fmt.Errorf("record the running gateway listener: %w; check data directory permissions and run defenseclaw-gateway start", err)
+			return
+		}
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -1481,16 +1512,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	go systemd.RunWatchdog(watchdogCtx, nil)
 
 	shutdown := func() error {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		var hookShutdownErr error
-		if hookSrv != nil {
-			hookShutdownErr = hookSrv.Shutdown(shutdownCtx)
-		}
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return err
-		}
-		return hookShutdownErr
+		return shutdownAPIServers(apiShutdownGrace, srv, hookSrv)
 	}
 
 	for {
@@ -1510,6 +1532,54 @@ func (a *APIServer) Run(ctx context.Context) error {
 			return shutdown()
 		}
 	}
+}
+
+// apiShutdownGrace bounds how long a stop waits for the requests the
+// gateway listeners already accepted.
+const apiShutdownGrace = 5 * time.Second
+
+// apiRequestBaseContext is the base context of every request on a gateway
+// listener: ctx's values without its cancellation. A stop cancels the run
+// context first; requests built on it were cancelled with it, so a hook call
+// the gateway had accepted was read as the client going away, audited as a
+// block and never answered (GAP-1459). The listeners close on Shutdown
+// instead, and accepted calls answer inside the grace, as the sandbox
+// ingress already does.
+func apiRequestBaseContext(ctx context.Context) func(net.Listener) context.Context {
+	base := context.WithoutCancel(ctx)
+	return func(net.Listener) context.Context { return base }
+}
+
+// shutdownAPIServers stops the servers together and waits, up to grace, for
+// the requests they accepted. A request still running after the grace (a
+// follow stream) ends with its connection, which is closed; that is still a
+// clean stop.
+func shutdownAPIServers(grace time.Duration, servers ...*http.Server) error {
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	errs := make([]error, len(servers))
+	var wg sync.WaitGroup
+	for i, srv := range servers {
+		if srv == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := srv.Shutdown(ctx)
+			if err == nil {
+				return
+			}
+			_ = srv.Close()
+			if errors.Is(err, context.DeadlineExceeded) {
+				fmt.Fprintf(os.Stderr, "[sidecar-api] requests still running %s after the stop were closed\n", grace)
+				return
+			}
+			errs[i] = err
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 // handleTelemetryCanary exercises the real runtime trace pipeline. The global
@@ -1981,7 +2051,7 @@ func sameRuntimeDataDir(left, right string) bool {
 //	  "mode":       "guardrail" | "observability", // legacy data-path field
 //	  "policy_mode": "observe" | "action",
 //	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks",
-//	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
+//	  "telemetry":  ["hooks"],   // channels the install registers
 //	  "proxy_intercept": true | false,
 //	}
 //
@@ -2042,7 +2112,6 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 	mode := "guardrail"
 	intercept := true
 	surface := "llm_proxy"
-	var telemetry []string
 	policyMode = strings.ToLower(strings.TrimSpace(policyMode))
 	if policyMode != "action" {
 		policyMode = "observe"
@@ -2064,24 +2133,12 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		surface = "agent_lifecycle_hooks"
 	}
 
-	switch name {
-	case "codex":
-		// codex telemetry always wires all three channels (hooks,
-		// the [otel.exporter.otlp-http] block, the notify bridge).
-		telemetry = []string{"hooks", "otel", "notify"}
-	case "claudecode":
-		// Claude Code uses hooks + the OTel env-block; no notify
-		// equivalent (Anthropic doesn't ship a turn-complete shim).
-		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "devin", "copilot",
-		"antigravity", "opencode", "amp", "kiro":
-		telemetry = []string{"hooks"}
-	default:
-		// openclaw / zeptoclaw / unknown: enforcement is the only
-		// supported mode today. Hooks are wired by the connector;
-		// no native OTel surface from those agents.
-		telemetry = []string{"hooks"}
-	}
+	// A host install registers only the connector's hooks: setup turns the
+	// native OTel exporters off (they run only in the OpenShell sandbox
+	// renderer) and writes Codex's notify bridge only for Secure Client
+	// (codexRegistersNotify). connectorModeForDecision reports the Secure
+	// Client channels.
+	telemetry := []string{"hooks"}
 
 	return map[string]interface{}{
 		"connector":           name,
@@ -2090,6 +2147,19 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		"enforcement_surface": surface,
 		"telemetry":           telemetry,
 		"proxy_intercept":     intercept,
+	}
+}
+
+// secureClientConnectorTelemetry is the telemetry list the Secure Client
+// profile reports, unchanged from main.
+func secureClientConnectorTelemetry(name string) []string {
+	switch name {
+	case "codex":
+		return []string{"hooks", "otel", "notify"}
+	case "claudecode":
+		return []string{"hooks", "otel"}
+	default:
+		return []string{"hooks"}
 	}
 }
 
@@ -2115,6 +2185,10 @@ func connectorModeForDecision(cfg, decisionCfg *config.Config, name string) map[
 		enabled = cfg.Guardrail.EffectiveEnabled(name)
 	}
 	out := connectorModeFor(name, guardrailMode)
+	if cfg != nil && cfg.SecureClientIntegration() {
+		// Secure Client answers stay as on main (out of 1.0.x scope).
+		out["telemetry"] = secureClientConnectorTelemetry(name)
+	}
 	if guardrailMode != "" {
 		out["guardrail_mode"] = guardrailMode
 	}
@@ -2992,11 +3066,84 @@ func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} 
 	}
 }
 
+// scanAdmissionPreview is what install admission would decide for the skill
+// or plugin a REST scan just scanned at target: the policy, the asset_policy
+// lists and the scanner gate the install watcher applies
+// (evaluateAdmissionPolicy), with no side effect. An administrator scan
+// outside the watcher blocks and quarantines nothing; it printed only the
+// scanner verdict, with no policy result, and its audit scan row read warn
+// for any finding, an INFO-only skill the policy admits included
+// (GAP-2635). The asset is named by its folder, as the watcher names it,
+// unless the request names it. Nil for a Secure Client host (its response
+// and audit rows stay as on main) or when the policy cannot be evaluated.
+func (a *APIServer) scanAdmissionPreview(
+	ctx context.Context,
+	cfg *config.Config,
+	targetType, target, name string,
+	result *scanner.ScanResult,
+) *policy.AdmissionOutput {
+	if cfg == nil || cfg.SecureClientIntegration() || result == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = filepath.Base(filepath.Clean(target))
+	}
+	input := policy.AdmissionInput{
+		TargetType: targetType,
+		TargetName: name,
+		Path:       target,
+		ScanResult: &policy.ScanResultInput{
+			MaxSeverity:   string(result.MaxSeverity()),
+			TotalFindings: len(result.Findings),
+			ScannerName:   result.Scanner,
+			ExitCode:      result.ExitCode,
+			ScanError:     result.ScanError,
+		},
+	}
+	for _, finding := range result.Findings {
+		input.ScanResult.Findings = append(input.ScanResult.Findings, policy.FindingInput{
+			Severity: string(finding.Severity), Scanner: finding.Scanner, Title: finding.Title, RuleID: finding.RuleID,
+		})
+	}
+	out, err := a.evaluateAdmissionPolicy(ctx, input, "")
+	if err != nil || out == nil || strings.TrimSpace(out.Verdict) == "" {
+		return nil
+	}
+	return out
+}
+
+// scanAdmissionVerdict is the audit scan verdict of a REST scan: the
+// admission verdict the watcher would log for the same asset (clean,
+// allowed, warning, rejected or blocked), or "" (findings read warn) when
+// there is no preview.
+func scanAdmissionVerdict(admission *policy.AdmissionOutput) string {
+	if admission == nil {
+		return ""
+	}
+	return admission.Verdict
+}
+
+// withScanAdmission adds the admission preview to a scan response as
+// "admission": {verdict, reason, install_action}.
+func withScanAdmission(envelope map[string]interface{}, admission *policy.AdmissionOutput) map[string]interface{} {
+	if admission == nil {
+		return envelope
+	}
+	envelope["admission"] = map[string]string{
+		"verdict":        admission.Verdict,
+		"reason":         admission.Reason,
+		"install_action": admission.InstallAction,
+	}
+	return envelope
+}
+
 // withScannerSettings adds the scanner settings a scan ran with (policy,
 // analyzers and judge model, never a key) so `defenseclaw scan skill|mcp`
-// reports them as the per-user `skill scan` does. The Secure Client
-// integration keeps its response unchanged.
-func withScannerSettings(cfg *config.Config, kind string, envelope map[string]interface{}) map[string]interface{} {
+// reports them as the per-user `skill scan` does. For MCP it names the
+// analyzers that ran and adds a warning when the LLM judge did not run
+// (GAP-2621). The Secure Client integration keeps its response unchanged.
+func withScannerSettings(cfg *config.Config, kind string, result *scanner.ScanResult, envelope map[string]interface{}) map[string]interface{} {
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return envelope
 	}
@@ -3008,11 +3155,61 @@ func withScannerSettings(cfg *config.Config, kind string, envelope map[string]in
 			settings["judge_model"] = cfg.ResolveLLM("scanners.skill").Model
 		}
 	case "mcp":
-		settings["analyzers"] = cfg.Scanners.MCPScanner.AnalyzersArg()
-		settings["judge_model"] = cfg.ResolveLLM("scanners.mcp").Model
+		model := cfg.ResolveLLM("scanners.mcp").Model
+		var warnings []string
+		if result != nil {
+			warnings = append(warnings, result.Warnings...)
+		}
+		ran, llmRan, warning := mcpAnalyzersRan(cfg.Scanners.MCPScanner.EffectiveAnalyzers(), model, len(warnings) > 0)
+		settings["analyzers"] = ran
+		if llmRan {
+			settings["judge_model"] = model
+		}
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
+		if len(warnings) > 0 {
+			envelope["warnings"] = warnings
+		}
 	}
 	envelope["scanner_settings"] = settings
 	return envelope
+}
+
+// mcpAnalyzersRan is the analyzer label an MCP scan reports: the explicit
+// list, or auto (YARA, plus the LLM judge when a model is configured), less
+// the LLM when the scanner said it skipped it. It also returns whether the
+// judge ran and a warning when auto ran without a judge model.
+func mcpAnalyzersRan(names []string, model string, llmSkipped bool) (string, bool, string) {
+	auto := len(names) == 0
+	if auto {
+		names = []string{"yara"}
+		if model != "" {
+			names = append(names, "llm")
+		}
+	}
+	ran := make([]string, 0, len(names))
+	llmRan := false
+	for _, name := range names {
+		if name == "llm" {
+			if llmSkipped {
+				continue
+			}
+			llmRan = true
+		}
+		ran = append(ran, name)
+	}
+	label := strings.Join(ran, ", ")
+	if label == "" {
+		label = "none"
+	}
+	if auto {
+		label = "auto (" + label + ")"
+	}
+	if auto && model == "" {
+		return label, false, "LLM judge did not run: no LLM model is configured for the MCP scanner"
+	}
+	return label, llmRan, ""
 }
 
 // ---------------------------------------------------------------------------
@@ -3039,7 +3236,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if a.rejectWindowsGatewayPath(w, req.Target) {
+	if a.rejectWindowsGatewayPath(w, "skill", req.Target, req.Target) {
 		return
 	}
 	if isBundledSkillScanPath(req.Target) {
@@ -3049,7 +3246,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.rejectUnreadableScanTarget(w, "target directory", req.Target, "SKILL.md") {
+	if a.rejectUnreadableScanTarget(w, "skill", "target directory", req.Target, "SKILL.md") {
 		return
 	}
 
@@ -3087,12 +3284,13 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	admission := a.scanAdmissionPreview(r.Context(), cfg, config.AdmissionTypeSkill, req.Target, req.Name, result)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationWithJudge(r.Context(), result))
 	}
 
-	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", scanAPIResponseEnvelope(result)))
+	a.writeJSON(w, http.StatusOK, withScanAdmission(withScannerSettings(cfg, "skill", result, scanAPIResponseEnvelope(result)), admission))
 }
 
 // rejectUnreadableScanTarget answers with one plain line when the folder to
@@ -3101,8 +3299,8 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 // would otherwise die on the same error and the caller would get its process
 // name, its exit code or its Python traceback (GAP-0229, GAP-0256). A path that
 // exists but is not a directory is only logged: the scanner reports it.
-func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string, mustRead ...string) bool {
-	if a.rejectWindowsGatewayPath(w, target) {
+func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, kind, what, target string, mustRead ...string) bool {
+	if a.rejectWindowsGatewayPath(w, kind, target, target) {
 		return true
 	}
 	info, err := os.Stat(target)
@@ -3132,7 +3330,7 @@ func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, targ
 	}
 	for _, name := range mustRead {
 		file := filepath.Join(target, name)
-		if a.rejectWindowsGatewayPath(w, file) {
+		if a.rejectWindowsGatewayPath(w, kind, file, target) {
 			return true
 		}
 		handle, openErr := os.Open(file)
@@ -3149,12 +3347,42 @@ func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, targ
 	return false
 }
 
-func (a *APIServer) rejectWindowsGatewayPath(w http.ResponseWriter, path string) bool {
-	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+// requireGatewayPathOutsideUserProfiles is the managed Windows profile
+// check of a scan path (a seam for tests).
+var requireGatewayPathOutsideUserProfiles = managed.RequireWindowsGatewayPathOutsideUserProfiles
+
+// rejectWindowsGatewayPath answers 403 for a path the managed Windows gateway
+// may not read. For a scan of kind ("" for none) it adds how an
+// administrator scans target instead.
+func (a *APIServer) rejectWindowsGatewayPath(w http.ResponseWriter, kind, path, target string) bool {
+	if err := requireGatewayPathOutsideUserProfiles(path); err != nil {
+		message := err.Error()
+		if kind != "" {
+			message += "; " + windowsProfileScanNextStep(kind, target)
+		}
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": message})
 		return true
 	}
 	return false
+}
+
+// windowsProfileScanNextStep is the next step of a managed Windows scan of a
+// folder inside a user profile. The refusal said to scan it as the signed-in
+// user, which managed scans refuse a standard account (GAP-0526); the
+// documented route is an administrator's copy outside the profiles.
+func windowsProfileScanNextStep(kind, target string) string {
+	trimmed := strings.TrimRight(target, `\/`)
+	name := trimmed[strings.LastIndexAny(trimmed, `\/`)+1:]
+	if name == "" || strings.HasSuffix(name, ":") {
+		name = kind
+	}
+	review := `C:\DefenseClawReview`
+	copyTo := review + `\` + name
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	return "standard accounts cannot run managed scans, so an administrator copies the folder out of the profiles and scans the copy " +
+		"from an elevated PowerShell prompt: `New-Item -ItemType Directory -Force " + quote(review) + " | Out-Null; " +
+		"Copy-Item -Recurse -Force -LiteralPath " + quote(target) + " -Destination " + quote(copyTo) + "`, then `& " +
+		quote(managed.WindowsStandaloneAdminCLI()) + " scan " + kind + " " + quote(copyTo) + "`"
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
@@ -3234,7 +3462,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if a.rejectWindowsGatewayPath(w, req.Target) {
+	if a.rejectWindowsGatewayPath(w, "plugin", req.Target, req.Target) {
 		return
 	}
 	if a.isManagedPluginScanTarget(req.Target) {
@@ -3244,7 +3472,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.rejectUnreadableScanTarget(w, "plugin target directory", req.Target) {
+	if a.rejectUnreadableScanTarget(w, "plugin", "plugin target directory", req.Target) {
 		return
 	}
 
@@ -3267,12 +3495,13 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	admission := a.scanAdmissionPreview(r.Context(), cfg, config.AdmissionTypePlugin, req.Target, req.Name, result)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIPluginScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationWithJudge(r.Context(), result))
 	}
 
-	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
+	a.writeJSON(w, http.StatusOK, withScanAdmission(scanAPIResponseEnvelope(result), admission))
 }
 
 // ---------------------------------------------------------------------------
@@ -3364,7 +3593,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "mcp", scanAPIResponseEnvelope(result)))
+	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "mcp", result, scanAPIResponseEnvelope(result)))
 }
 
 // ---------------------------------------------------------------------------
@@ -3390,7 +3619,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if a.rejectWindowsGatewayPath(w, req.Target) {
+	if a.rejectWindowsGatewayPath(w, "", req.Target, req.Target) {
 		return
 	}
 
@@ -3941,12 +4170,6 @@ func requestGatewayToken(r *http.Request) string {
 // and never reaches next.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// until 1.1: a removed connector's hook route blocks every call
-		// before any credential check (retired_connector_hook.go): with a
-		// valid token, a revoked one, none or a sandbox credential.
-		if serveRetiredConnectorHook(w, r) {
-			return
-		}
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
 			return
@@ -3972,7 +4195,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// reached with one, whatever header or path carries it.
 		if requestCarriesSandboxCredential(r) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 		// Fleet API routes carry their own token auth (fleet.API's
@@ -3989,7 +4212,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
 			if !ok {
 				a.emitHTTPAuthFailure(a.withRevokedACPCredential(a.withACPCallerAccount(ctx, r), r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			if reason := a.acpCallerAccountRefusal(authenticated); reason != "" {
@@ -4001,7 +4224,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 					writeACPSignedOtherAccountRefusal(w, r, token, nonce)
 					return
 				}
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			// The ACP credential that signed the request names who sent it:
@@ -4014,7 +4237,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "missing_acp_authenticated_transport")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 
@@ -4031,7 +4254,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			// (503) rather than silently allowing loopback — the previous
 			// "no token, trust loopback" path was a local-IDOR risk.
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "no_token_configured")
-			http.Error(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
+			writeJSONRefusal(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
 			return
 		}
 		// Codex and Claude Code support arbitrary OTLP headers. Bind their
@@ -4066,7 +4289,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 						return
 					}
 					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_header_token")
-					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
 			}
@@ -4082,7 +4305,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			if scoped != "" {
 				if token != "" {
 					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "scoped_otlp_rejects_header_token")
-					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
 				if !userScoped && constantTimeStringMatch(pathToken, scoped) {
@@ -4090,7 +4313,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 					return
 				}
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_path_token")
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			// Legacy compatibility only for deployments that have not
@@ -4151,12 +4374,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if token == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 		if !constantTimeStringMatch(token, expected) && !a.matchesRefreshedGatewayToken(token) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 
@@ -4271,7 +4494,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
 			if sfs != "same-origin" && sfs != "none" {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "sec_fetch_site_rejected")
-				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
@@ -4291,12 +4514,12 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 			//      application/x-www-form-urlencoded.
 			if origin := r.Header.Get("Origin"); origin != "" && !isLocalhostOrigin(origin) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthOriginBlocked, "origin_blocked")
-				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
 				return
 			}
 			if !isOTLPContentType(r.Header.Get("Content-Type")) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
-				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
+				writeJSONRefusal(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -4310,7 +4533,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		if r.Method == http.MethodOptions {
 			if r.Header.Get("X-DefenseClaw-Client") == "" {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch_options")
-				http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -4319,7 +4542,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch")
-			http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+			writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 			return
 		}
 
@@ -4327,19 +4550,19 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		if isOTLPEndpointPath(r.URL.Path) || isSandboxRelayOTLPPath(r.URL.Path) {
 			if !isOTLPContentType(ct) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
-				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
+				writeJSONRefusal(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
 				return
 			}
 		} else if !strings.Contains(ct, "application/json") {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
-			http.Error(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
+			writeJSONRefusal(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
 			return
 		}
 
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if !isLocalhostOrigin(origin) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthOriginBlocked, "origin_blocked")
-				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
@@ -4400,31 +4623,41 @@ func csrfProtect(next http.Handler) http.Handler {
 
 		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
 			if sfs != "same-origin" && sfs != "none" {
-				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {
-			http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+			writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 			return
 		}
 
 		ct := r.Header.Get("Content-Type")
 		if !strings.Contains(ct, "application/json") {
-			http.Error(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
+			writeJSONRefusal(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
 			return
 		}
 
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if !isLocalhostOrigin(origin) {
-				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeJSONRefusal writes a CSRF gate refusal: its body is JSON, so it is
+// served as application/json like every other API error (GAP-0569), not as
+// http.Error's text/plain. Bodies and status codes are unchanged.
+func writeJSONRefusal(w http.ResponseWriter, body string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body+"\n")
 }
 
 func isLocalhostOrigin(origin string) bool {
@@ -4476,10 +4709,7 @@ func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {
 // the request cannot pair one generation's query with another's lists
 // (GAP-0873).
 func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput, connector string) (*policy.AdmissionOutput, error) {
-	cfg := a.liveConfig()
-	if g := pinnedGeneration(ctx); g != nil && g.Config != nil && (cfg == nil || !cfg.SecureClientIntegration()) {
-		cfg = g.Config
-	}
+	cfg := a.requestConfig(ctx)
 	input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
 		TargetType: input.TargetType, Name: input.TargetName, Connector: connector, SourcePath: input.Path,
 	})
@@ -4911,4 +5141,15 @@ func connectorProxyBindsByName(name string) bool {
 		return true
 	}
 	return proxyShouldBindForConnector(conn, nil)
+}
+
+// scanCorrelationWithJudge is ScanCorrelationFromContext plus the LLM judge
+// model the skill or plugin scan ran with, so its audit rows say the judge
+// ran, as the install watcher rows do (GAP-0575, GAP-2435).
+func scanCorrelationWithJudge(ctx context.Context, result *scanner.ScanResult) audit.ScanCorrelation {
+	correlation := ScanCorrelationFromContext(ctx)
+	if result != nil {
+		correlation.JudgeModel = result.JudgeModel
+	}
+	return correlation
 }

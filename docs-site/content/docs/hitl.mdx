@@ -126,7 +126,7 @@ Alert #2
   …
 ```
 
-`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved. Outside Manual mode, the decision is `block`. Copilot CLI blocks an action-mode confirmation because its hook does not prove that an approval prompt is available; the audit records `block` with raw action `confirm`. Antigravity can deny a confirm without asking in a non-interactive run (`-p`); its audit still shows `confirm`.
+`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved. Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`. Copilot CLI blocks an action-mode confirmation because its hook does not prove that an approval prompt is available; the audit records `block` with raw action `confirm`. Antigravity can deny a confirm without asking in a non-interactive run (`-p`); its audit still shows `confirm`.
 
 ## What HITL is not
 

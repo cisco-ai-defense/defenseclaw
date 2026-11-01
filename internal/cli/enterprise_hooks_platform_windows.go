@@ -63,18 +63,41 @@ var enterpriseHookCursorPolicyRestorer = enterprisehooks.RestoreWindowsCursorMan
 var enterpriseHookCursorPolicyDeactivator = enterprisehooks.DeactivateWindowsCursorManagedPolicy
 
 // enterpriseHookRemovedAccountNote follows each failure status and verify
-// report as a warning for a deleted account whose profile folder was removed.
-const enterpriseHookRemovedAccountNote = " (the account was deleted and its profile folder removed; the enumerator drops its rows at its next pass)"
+// report as a warning for a deleted account or a removed profile.
+const enterpriseHookRemovedAccountNote = " (the account was deleted or its profile removed; the enumerator drops its rows at its next pass, and Setup /repair or /ensure prunes them now)"
 
 // enterpriseHookRemovedAccountRow reports, on a standalone deployment only,
 // a guardian row of a local account that was deleted: no one can sign in as
 // it, and the enumerator drops its rows at its next pass, also when its
-// profile folder could not be removed (GAP-0430). Tests replace it.
+// profile folder could not be removed (GAP-0430). A domain account whose
+// profile an administrator removed (System Properties > User Profiles, or
+// Win32_UserProfile) is the same until it signs in again and gets a new
+// profile: ProfileList no longer lists it, so the enumerator drops its rows
+// too. Status, verify and repair told the administrator to remove that
+// profile and run repair again, which could not help (GAP-1657). Tests
+// replace it.
 var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool {
 	if cfg == nil || !cfg.StandaloneEnterprise() || strings.TrimSpace(row.UserHome) == "" {
 		return false
 	}
-	return windowsEnterpriseAccountDeleted(row.SID)
+	return windowsEnterpriseAccountDeleted(row.SID) ||
+		windowsEnterpriseProfileRemoved(row.SID, row.UserHome)
+}
+
+// windowsEnterpriseProfileRemoved reports a row whose recorded home is gone
+// and whose SID has no ProfileList entry: the profile was removed. A
+// ProfileList entry, a home that still exists or cannot be inspected, or a
+// registry read that fails for another reason is not proof.
+func windowsEnterpriseProfileRemoved(sid, home string) bool {
+	home = strings.TrimSpace(home)
+	if strings.TrimSpace(sid) == "" || home == "" || !filepath.IsAbs(home) {
+		return false
+	}
+	if _, err := os.Lstat(home); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	_, err := enterpriseHookSIDProfilePath(sid)
+	return errors.Is(err, registry.ErrNotExist)
 }
 
 // enterpriseHookSignedOutAccount names, on a standalone deployment only, the
@@ -88,20 +111,23 @@ var enterpriseHookSignedOutAccount = func(row enterpriseHookReconcileRow) string
 	return enterpriseHookWindowsAccountLabel(row)
 }
 
+// enterpriseHookNoticeAccount names a guardian row's account in a notice
+// as the other Windows notices do, "user (SID)": a SID-only row would name
+// the account by SID alone (GAP-0929 review).
+func enterpriseHookNoticeAccount(row enterpriseHookReconcileRow) string {
+	return enterpriseHookWindowsAccountLabel(row)
+}
+
+// enterpriseHookTargetIssueAccount names a failing or drifted target's
+// account as "user (SID)" (GAP-2290).
+func enterpriseHookTargetIssueAccount(row enterpriseHookReconcileRow) string {
+	return enterpriseHookWindowsAccountLabel(row)
+}
+
 // enterpriseHookWindowsAccountLabel is "user (SID)", looking the account up
 // when the row carries only its SID.
 func enterpriseHookWindowsAccountLabel(row enterpriseHookReconcileRow) string {
-	user, sid := strings.TrimSpace(row.User), strings.TrimSpace(row.SID)
-	if user == "" && sid != "" {
-		if parsed, err := windows.StringToSid(sid); err == nil {
-			if account, domain, _, err := parsed.LookupAccount(""); err == nil {
-				user = account
-				if domain != "" {
-					user = domain + `\` + account
-				}
-			}
-		}
-	}
+	user, sid := enterpriseHookWindowsAccountName(row.User, row.SID), strings.TrimSpace(row.SID)
 	switch {
 	case user == "":
 		return sid
@@ -109,6 +135,26 @@ func enterpriseHookWindowsAccountLabel(row enterpriseHookReconcileRow) string {
 		return user
 	}
 	return user + " (" + sid + ")"
+}
+
+// enterpriseHookWindowsAccountName is the account name a row or manifest
+// target carries, else DOMAIN\account looked up from its SID, else "".
+func enterpriseHookWindowsAccountName(user, sid string) string {
+	if user = strings.TrimSpace(user); user != "" {
+		return user
+	}
+	parsed, err := windows.StringToSid(strings.TrimSpace(sid))
+	if err != nil {
+		return ""
+	}
+	account, domain, _, err := parsed.LookupAccount("")
+	if err != nil || account == "" {
+		return ""
+	}
+	if domain != "" {
+		return domain + `\` + account
+	}
+	return account
 }
 
 // enterpriseHookManifestCatchUpAllowed reports a standalone deployment,

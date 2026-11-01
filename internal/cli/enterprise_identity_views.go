@@ -196,6 +196,12 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 			if goos := enterprisePlatformGOOS(platform); runtime.GOOS != goos {
 				return invalidLifecycleArguments(fmt.Errorf("`enterprise %s %s` reads %s hosts; this host is %s", platform, view.use, goos, runtime.GOOS))
 			}
+			if view.use == "profile-explain" {
+				if refusal := refuseEnterpriseIdentityViewForStandardUser(cmd); refusal != nil {
+					// A standard user explains their own profile (GAP-0431, GAP-0422).
+					return explainOwnGuardrailProfile(cmd, values[0], values[1], values[2], refusal, refusal, asJSON)
+				}
+			}
 			query := url.Values{}
 			for i, flag := range view.flags {
 				if values[i] != "" {
@@ -350,10 +356,18 @@ func unresolvedProfileExplainAccount(answer json.RawMessage) string {
 }
 
 // refuseUnknownIdentityViewAccount refuses a --user that names no account,
-// with the reason profile-explain gives and the spellings the view takes.
+// with the reason profile-explain gives and the spellings the view takes. It
+// sends the account as root resolves it, as profile-explain does (GAP-0500):
+// the gateway service cannot look up a bare directory name on an
+// SSSD-joined host itself, and refused an existing account whose listing
+// was empty (GAP-2035).
 func refuseUnknownIdentityViewAccount(user string) error {
+	query := url.Values{"user": {user}}
+	if facts := enterpriseExplainCallerFacts(user); facts != "" {
+		query.Set("caller_facts", facts)
+	}
 	var answer json.RawMessage
-	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?user="+url.QueryEscape(user), &answer); err != nil {
+	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?"+query.Encode(), &answer); err != nil {
 		return enterpriseIdentityViewError(err)
 	}
 	lookupErr := unresolvedProfileExplainAccount(answer)

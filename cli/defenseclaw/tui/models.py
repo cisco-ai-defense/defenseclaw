@@ -215,3 +215,4 @@ class HintState:
     # alerts that the filter hides (GAP-1253).
     connector_filter: str = ""
     hidden_critical_alerts: int = 0
+    palette_open: bool = False

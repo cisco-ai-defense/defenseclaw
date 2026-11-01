@@ -45,6 +45,18 @@ struct WizardField: Identifiable {
     /// Optional third driver for provider-family auth subgroups.
     var visibleWhen3: (key: String, equals: [String])? = nil
     var help: String = ""
+    /// TUI form rule (tui/panels/setup.py _wizard_args): a field left at the
+    /// value it opened on emits no flag, a change always emits one — so an
+    /// untouched Run never rewrites a setting the CLI would otherwise keep.
+    var emitsOnlyOnChange: Bool = false
+    /// Hidden on runtimes older than this major (runtime 1.0.x additions
+    /// a 0.8.x CLI rejects as unknown options). An unknown runtime version
+    /// counts as pre-1.0, as SecretStandardInputTransport does.
+    var minimumRuntimeMajor: Int? = nil
+    /// On pre-1.0 runtimes the field takes this kind (a click `is_flag`
+    /// toggle has no --no- form; a choice list is narrower) and default.
+    var legacyKind: Kind? = nil
+    var legacyDefault: String? = nil
 
     var id: String { key }
 }
@@ -166,6 +178,12 @@ struct WizardSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var values: [String: String] = [:]
+    /// The values the form opened on (static defaults + live config), the
+    /// baseline for fields that emit only when changed.
+    @State private var seededValues: [String: String] = [:]
+    /// What `sandbox doctor` said about this machine while the Sandbox form
+    /// is open (the TUI's machine line under Install OpenShell).
+    @State private var sandboxMachineNote = "Checking this machine… (defenseclaw sandbox doctor)"
     @State private var revealedSecrets: Set<String> = []
     @State private var phase: Phase = .form
     @State private var output = ""
@@ -181,8 +199,14 @@ struct WizardSheet: View {
 
     enum Phase { case form, review, running, done }
 
+    /// The fields the installed runtime accepts (1.0.x additions hidden on
+    /// older runtimes, legacy kinds there).
+    private var effectiveFields: [WizardField] {
+        TUIWizards.fields(of: wizard, runtimeMajor: TUIWizards.runtimeMajor(appState.installedRuntimeVersion))
+    }
+
     private var visibleFields: [WizardField] {
-        wizard.fields.filter { field in
+        effectiveFields.filter { field in
             matches(field.visibleWhen)
                 && matches(field.visibleWhen2)
                 && matches(field.visibleWhen3)
@@ -196,35 +220,40 @@ struct WizardSheet: View {
         return condition.equals.contains(current)
     }
 
-    /// The exact CLI invocation, shown verbatim in review (parity requirement).
-    /// Booleans render click-style (--flag / --no-flag); the commandField value
-    /// becomes a positional subcommand (mapped, e.g. claudecode → claude-code).
-    private func buildArguments(maskSecrets: Bool) -> [String] {
-        var args = wizard.baseArgs
-        if let commandField = wizard.commandField {
-            let value = values[commandField] ?? ""
-            if !value.isEmpty { args.append(wizard.commandMap[value] ?? value) }
-        }
-        for field in visibleFields where field.key != wizard.commandField {
-            let value = values[field.key] ?? ""
-            switch field.kind {
-            case .bool:
-                args.append(value == "yes" ? "--\(field.key)" : "--no-\(field.key)")
-            case .flagOnly:
-                if value == "yes" { args.append("--\(field.key)") }
-            case .secure:
-                // Secrets are transported only via stdin, a child-only
-                // environment variable, or an explicit command builder.
-                // Never let the generic argument builder place one in argv.
-                continue
-            default:
-                guard !value.isEmpty else { continue }
-                args.append("--\(field.key)=\(value)")
+    /// tui/panels/setup.py apply_sandbox_machine_check: read `sandbox doctor
+    /// --json` (read-only) as the Sandbox form opens; Install OpenShell
+    /// follows the check unless the operator already changed it. A missing
+    /// OpenShell pre-checks the install; a working one leaves the in-place
+    /// upgrade (which restarts the gateway) off until the operator turns it on.
+    private func checkSandboxMachine() {
+        Task {
+            let result = await appState.runCommand(
+                title: "Sandbox machine check", arguments: ["sandbox", "doctor", "--json"],
+                mutation: false, category: "info", origin: "Setup"
+            )
+            guard phase == .form, let check = TUIWizards.sandboxMachineCheck(from: result.output) else {
+                sandboxMachineNote = "Could not check this machine; yes installs OpenShell with Homebrew."
+                return
+            }
+            let release = check.release.isEmpty ? "OpenShell" : "OpenShell \(check.release)"
+            if check.openshellNeeded {
+                if values["install-openshell"] == seededValues["install-openshell"] {
+                    values["install-openshell"] = "yes"
+                    seededValues["install-openshell"] = "yes"
+                }
+                sandboxMachineNote = "OpenShell is missing: yes installs \(release) with Homebrew."
+            } else if check.openshellUpgrade {
+                sandboxMachineNote = "OpenShell works; yes upgrades it in place to \(release) (Homebrew), only while no MicroVM sandbox runs, and restarts the gateway."
+            } else {
+                sandboxMachineNote = "OpenShell is installed; setup configures it. Yes would reinstall it with Homebrew."
             }
         }
-        if wizard.appendYes { args.append("--yes") }
-        if wizard.appendNonInteractive { args.append("--non-interactive") }
-        return args
+    }
+
+    /// The exact CLI invocation, shown verbatim in review (parity requirement);
+    /// the rules live in TUIWizards.genericArguments so they are unit-tested.
+    private func buildArguments(maskSecrets: Bool) -> [String] {
+        TUIWizards.genericArguments(for: wizard, values: values, seeded: seededValues, visibleFields: visibleFields)
     }
 
     private func buildCommands(maskSecrets: Bool) -> [[String]] {
@@ -290,7 +319,7 @@ struct WizardSheet: View {
         .padding(18)
         .frame(width: wizard.id == "sandbox" ? 640 : 560, height: wizard.id == "sandbox" ? 640 : 480)
         .onAppear {
-            for field in wizard.fields where values[field.key] == nil {
+            for field in effectiveFields where values[field.key] == nil {
                 values[field.key] = field.defaultValue
             }
             // Live-config prefill outranks static defaults (never downgrade
@@ -308,7 +337,9 @@ struct WizardSheet: View {
                TUIWizards.connectors.contains(configured) {
                 values["connector"] = configured
             }
+            seededValues = values
             if wizard.interactiveOnly { phase = .review } // nothing to fill in
+            if wizard.id == "sandbox" { checkSandboxMachine() }
         }
         .alert("Replace the connector roster?", isPresented: $confirmConnectorReplacement) {
             Button("Cancel", role: .cancel) {}
@@ -325,6 +356,9 @@ struct WizardSheet: View {
                     fieldRow(field)
                     if !field.help.isEmpty {
                         Text(field.help).font(.caption2).foregroundStyle(.secondary)
+                    }
+                    if wizard.id == "sandbox", field.key == "install-openshell" {
+                        Text(sandboxMachineNote).font(.caption2).foregroundStyle(Cisco.orange)
                     }
                 }
             }
@@ -373,8 +407,15 @@ struct WizardSheet: View {
                 .help("Toggle secret visibility")
             }
         case .choice(let options):
+            // A configured value outside the catalog (a custom scanner
+            // policy, a retired provider) stays selectable so an untouched
+            // Run keeps it, as the TUI prepends it to the choices.
+            // The entry comes from the value the form opened on (the TUI
+            // builds its choices once), so it survives browsing the catalog.
+            let opened = seededValues[field.key] ?? values[field.key] ?? ""
+            let choices = opened.isEmpty || options.contains(opened) ? options : [opened] + options
             Picker(field.label, selection: binding) {
-                ForEach(options, id: \.self) { Text($0).tag($0) }
+                ForEach(choices, id: \.self) { Text($0).tag($0) }
             }
         case .bool, .flagOnly:
             Toggle(field.label, isOn: Binding(
@@ -560,6 +601,9 @@ struct ConfigEditorView: View {
     @State private var selectedSection: String? = "General"
     @State private var original: [String: String] = [:]
     @State private var edited: [String: String] = [:]
+    /// Draft keys another writer changed on disk while the draft was open
+    /// (GAP-0342).
+    @State private var diskChangedKeys: Set<String> = []
     @State private var showDiff = false
     @State private var status: String?
     @State private var statusOK = true
@@ -604,7 +648,8 @@ struct ConfigEditorView: View {
                 key: field.key,
                 before: original[field.key] ?? "",
                 after: after,
-                secret: field.secret
+                secret: field.secret,
+                diskChanged: diskChangedKeys.contains(field.key)
             )
         }
     }
@@ -715,8 +760,14 @@ struct ConfigEditorView: View {
                         .font(.caption)
                         .foregroundStyle(statusOK ? Cisco.green : Cisco.red)
                 }
+                if !diskChangedKeys.isEmpty {
+                    Label("config.yaml changed on disk; Review marks the saved values this draft replaces",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(Cisco.orange)
+                }
                 Spacer()
-                Button("Revert") { edited = [:]; status = nil }
+                Button("Revert") { edited = [:]; diskChangedKeys = []; status = nil }
                     .disabled(diffEntries.isEmpty)
                 Button("Review \(diffEntries.count) Change\(diffEntries.count == 1 ? "" : "s")…") {
                     showDiff = true
@@ -736,8 +787,11 @@ struct ConfigEditorView: View {
         .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in
             loadCatalog()
         }
+        // The config changed on disk under the open editor (the pulse's
+        // reload): rebase the draft onto the new generation.
+        .onChange(of: appState.configDiskGeneration) { _, _ in loadCatalog() }
         .sheet(isPresented: $showDiff) {
-            ConfigDiffSheet(entries: diffEntries, saving: saving) { save in
+            ConfigDiffSheet(entries: diffEntries, saving: saving, queuesRestart: saveQueuesRestart) { save in
                 if save { applyChanges() } else { showDiff = false }
             }
         }
@@ -919,9 +973,24 @@ struct ConfigEditorView: View {
             dynamicSections = freshDynamicSections
             catalogSource = freshCatalogSource
             uncatalogued = freshUncatalogued
+            // An open draft survives a reload (setup.py _rebase_config_draft):
+            // edits still differing from disk are kept, with the fresh value
+            // as their "before"; keys another writer changed are marked.
+            let rebased = ConfigDraftRebase.rebase(
+                original: original, edited: edited, diskChanged: diskChangedKeys, fresh: values
+            )
             original = values
-            edited = [:]
+            edited = rebased.edited
+            diskChangedKeys = rebased.diskChanged
+            if !edited.isEmpty, status != nil { status = nil }
         }
+    }
+
+    /// config_diff.py save_label: a restart is offered only when a changed
+    /// key is one the gateway reads once at start (Secure Client always).
+    private var saveQueuesRestart: Bool {
+        OperatorAssetLists.read(raw: appState.config.raw).secureClient
+            || !ConfigRestartPolicy.restartRequired(diffEntries.map(\.key)).isEmpty
     }
 
     /// YAML node → editor display string (lists join with ", ", TUI _value()).
@@ -964,6 +1033,7 @@ struct ConfigEditorView: View {
             return
         }
         saving = true
+        let queuesRestart = saveQueuesRestart
         let payload = Dictionary(uniqueKeysWithValues: entries.map { ($0.key, $0.after) })
         guard let json = try? JSONSerialization.data(withJSONObject: payload),
               let stdin = String(data: json, encoding: .utf8) else {
@@ -981,15 +1051,16 @@ struct ConfigEditorView: View {
                 standardInput: stdin,
                 category: "setup",
                 origin: "Config editor",
-                successEffects: ["config.yaml updated; gateway restart queued"],
+                successEffects: [queuesRestart ? "config.yaml updated; gateway restart queued"
+                                               : "config.yaml updated; the gateway applies the new generation"],
                 refreshOnSuccess: true
             )
             saving = false
             showDiff = false
             if result.succeeded {
-                status = "Saved \(entries.count) change\(entries.count == 1 ? "" : "s"); restart queued."
+                status = "Saved \(entries.count) change\(entries.count == 1 ? "" : "s")" + (queuesRestart ? "; restart queued." : ".")
                 statusOK = true
-                restartQueued = true
+                restartQueued = queuesRestart
                 appState.reloadConfig()
                 loadCatalog()
             } else {
@@ -1022,6 +1093,9 @@ struct ConfigEditorView: View {
 private struct ConfigDiffSheet: View {
     let entries: [ConfigDiffEntry]
     let saving: Bool
+    /// A changed key the gateway reads once at start (or a Secure Client
+    /// host): the save queues a restart.
+    var queuesRestart = true
     let onDecision: (Bool) -> Void
 
     var body: some View {
@@ -1034,8 +1108,10 @@ private struct ConfigDiffSheet: View {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(entries) { entry in
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.secret ? "\(entry.key) (masked)" : entry.key)
+                                Text((entry.secret ? "\(entry.key) (masked)" : entry.key)
+                                     + (entry.diskChanged ? "  (changed on disk; saving replaces it)" : ""))
                                     .font(.caption.weight(.semibold).monospaced())
+                                    .foregroundStyle(entry.diskChanged ? Cisco.orange : .primary)
                                 Text("before: \(entry.secret ? "••••••" : displayTruncated(entry.before))")
                                     .font(.caption.monospaced())
                                     .foregroundStyle(.secondary)
@@ -1052,7 +1128,7 @@ private struct ConfigDiffSheet: View {
                 Spacer()
                 Button("Cancel") { onDecision(false) }
                     .keyboardShortcut(.cancelAction)
-                Button(saving ? "Saving…" : "Save and queue restart") { onDecision(true) }
+                Button(saving ? "Saving…" : (queuesRestart ? "Save and queue restart" : "Save")) { onDecision(true) }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
                     .tint(Cisco.green)

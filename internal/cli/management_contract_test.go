@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -68,6 +69,34 @@ func TestManagementContractVersionJSON(t *testing.T) {
 	doc := schemas.Validate(t, "version.schema.json", out.Bytes())
 	if doc["management_contract"] != json.Number("1") {
 		t.Fatalf("management_contract = %v, want 1", doc["management_contract"])
+	}
+}
+
+// GAP-2448: `--version --json` (in either order) prints the version document
+// of --version-json instead of a usage error with no JSON; any other unknown
+// root flag stays a usage error.
+func TestManagementContractVersionAndJSONSpelledApart(t *testing.T) {
+	schemas := contracttest.Compile(t)
+	saved := secretRawArgs
+	savedVersion := appVersion
+	t.Cleanup(func() { secretRawArgs, appVersion = saved, savedVersion; rootCmd.SetOut(nil) })
+	appVersion = "1.0.5"
+	for _, args := range [][]string{{"--version", "--json"}, {"--json", "--version"}} {
+		secretRawArgs = func() []string { return args }
+		var out bytes.Buffer
+		rootCmd.SetOut(&out)
+		if err := usageFlagError(rootCmd, errors.New("unknown flag: --json")); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		schemas.Validate(t, "version.schema.json", out.Bytes())
+	}
+	for _, args := range [][]string{{"--version", "--json", "--bogus"}, {"--json"}, {"--bogus", "--version"}} {
+		secretRawArgs = func() []string { return args }
+		var out bytes.Buffer
+		rootCmd.SetOut(&out)
+		if err := usageFlagError(rootCmd, errors.New("unknown flag: --json")); runExit(err) != 2 || out.Len() != 0 {
+			t.Fatalf("%v: exit %d, stdout %q; want a usage error", args, runExit(err), out.String())
+		}
 	}
 }
 
@@ -142,6 +171,7 @@ func TestManagementContractBundleApplyRefusals(t *testing.T) {
 func TestManagementContractBundleStatusDescribesEveryMember(t *testing.T) {
 	contracttest.RequireMembers(t, "bundle-status.schema.json#/$defs/full", reflect.TypeOf(bundleStatusResult{}))
 	contracttest.RequireMembers(t, "bundle-status.schema.json#/$defs/anchorsSummary", reflect.TypeOf(enterprisebundle.AnchorsSummary{}))
+	contracttest.RequireMembers(t, "bundle-status.schema.json#/$defs/currentRef", reflect.TypeOf(bundleStatusRef{}))
 	contracttest.RequireMembers(t, "bundle-status.schema.json#/$defs/anchorsSummary/properties/keys/items", reflect.TypeOf(enterprisebundle.AnchorKeySummary{}))
 	contracttest.RequireMembers(t, "bundle-verify.schema.json#/$defs/warning", reflect.TypeOf(enterprisebundle.Warning{}))
 	contracttest.RequireMembers(t, "bundle-refused.schema.json#/$defs/bundleError", reflect.TypeOf(bundleError{}))

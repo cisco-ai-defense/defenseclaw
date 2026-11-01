@@ -16,8 +16,8 @@ keywords:
 
 DefenseClaw never calls Microsoft Entra ID or Microsoft Graph. A user signs in to the computer with Entra ID, the computer gives that user an operating system account, and DefenseClaw reads the account the way it reads any other: the SID and sign-in token on Windows, NSS on Linux, Open Directory on macOS. A `groups` assignment can name an Entra group only where the operating system knows the membership. What is read from where is in [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources). Guardrail profiles apply to per-user installs and to the standalone enterprise profile; the Secure Client profile rejects them.
 
-<Callout type="warn" title="Not part of the 1.0.4 certification">
-Active Directory is the certified identity stack in 1.0.4. The Entra setups below were last verified live in October 2026 with Claude Code on Entra-joined Windows 11, Ubuntu 22.04 on Azure (Entra SSH sign-in), Ubuntu 24.04 with Himmelblau 5.0.0, RHEL 9.8 on Entra Domain Services, and macOS 15.8 with Platform SSO. Hybrid-joined Windows, Entra Kerberos and Himmelblau 4.x were not tested.
+<Callout type="warn" title="Not part of the release certification">
+Active Directory is the certified identity stack. The Entra setups below were last verified live in October 2026 with Claude Code on Entra-joined Windows 11, Ubuntu 22.04 on Azure (Entra SSH sign-in), Ubuntu 24.04 with Himmelblau 5.0.0, RHEL 9.8 on Entra Domain Services, and macOS 15.8 with Platform SSO. Hybrid-joined Windows, Entra Kerberos and Himmelblau 4.x were not tested.
 </Callout>
 
 ## Pick your setup
@@ -278,10 +278,6 @@ A per-user install reads `~/.defenseclaw/config.yaml` (Windows: `%USERPROFILE%\.
 | macOS Platform SSO, per-user | No: the account reports `local` without a UPN | Only a local group |
 
 Set a strict `default_profile` for accounts no assignment selects. A failed lookup refuses requests whose assignments need the missing fact, and the refusal names it ([why](/docs/guardrail/user-and-group-policies/)).
-
-<Callout type="warn" title="A per-user config belongs to the user">
-A per-user install reads the config from the user's own profile, so the user can change their profile. To enforce a policy the user cannot change, use the standalone enterprise profile, which reads the machine config.
-</Callout>
 
 ## 6. Check
 

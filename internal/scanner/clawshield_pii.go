@@ -92,7 +92,8 @@ func (s *ClawShieldPIIScanner) Scan(ctx context.Context, target string) (*ScanRe
 	start := time.Now()
 	result := &ScanResult{Scanner: s.Name(), Target: target, Timestamp: start}
 
-	files, err := csCollectTextFiles(target)
+	strict := completeScanRequired(ctx)
+	files, err := csCollectTextFiles(target, strict)
 	if err != nil {
 		return nil, fmt.Errorf("scanner: clawshield-pii: %w", err)
 	}
@@ -100,6 +101,9 @@ func (s *ClawShieldPIIScanner) Scan(ctx context.Context, target string) (*ScanRe
 	for _, f := range files {
 		content, err := os.ReadFile(f)
 		if err != nil {
+			if strict {
+				return nil, fmt.Errorf("scanner: clawshield-pii: %w", incompleteScan(f, err))
+			}
 			continue
 		}
 		result.Findings = append(result.Findings, csPIIScanContent(content, f)...)

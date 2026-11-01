@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from datetime import datetime, timedelta, timezone
 
 from defenseclaw import connector_paths
@@ -1225,6 +1227,40 @@ def test_multi_connector_overview_has_no_false_drift_and_counts_modes() -> None:
         {"user": "alice", "profile": "mlteam", "effective": {"mode": "action", "rule_pack_dir": "/p/idr-marker"}}
     )
     assert model.guardrail_detail().startswith("action, profile mlteam, idr-marker pack")
+
+
+@pytest.mark.parametrize(
+    ("spelling", "live"),
+    [("Codex", "codex"), ("claude-code", "claudecode"), ("claude_code", "claudecode"), ("Claude-Code", "claudecode")],
+)
+def test_aliased_claw_mode_is_not_connector_drift(spelling: str, live: str) -> None:
+    """GAP-2079: the gateway folds an alias of claw.mode to its registry name
+    (GAP-2007); the Overview reads the same name and reports no drift."""
+
+    model = OverviewPanelModel(OverviewConfig(claw_mode=spelling, guardrail_connector=spelling), version="test")
+    model.set_health(
+        HealthSnapshot(
+            uptime_ms=int(timedelta(seconds=30).total_seconds() * 1000),
+            gateway=SubsystemHealth(state="running"),
+            connector=ConnectorHealth(name=live, state="running", requests=1),
+            connectors=(ConnectorHealth(name=live, state="running", requests=1),),
+        )
+    )
+    messages = [notice.message for notice in model.build_notices()]
+    assert not any("drift" in m for m in messages), messages
+    assert model.active_connector_name() == live
+
+    # A real mismatch still warns.
+    other = OverviewPanelModel(OverviewConfig(claw_mode=spelling), version="test")
+    other.set_health(
+        HealthSnapshot(
+            uptime_ms=int(timedelta(seconds=30).total_seconds() * 1000),
+            gateway=SubsystemHealth(state="running"),
+            connector=ConnectorHealth(name="opencode", state="running", requests=1),
+            connectors=(ConnectorHealth(name="opencode", state="running", requests=1),),
+        )
+    )
+    assert any("Connector drift" in n.message for n in other.build_notices())
 
 
 def test_overview_uses_selected_connectors_resolved_profile_mode(monkeypatch) -> None:

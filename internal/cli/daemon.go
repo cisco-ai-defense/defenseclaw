@@ -31,7 +31,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -45,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -266,11 +266,14 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 	lockWait := gatewayStartLockWait
 	if coldStart {
-		// Many hooks see the same restart at once and each starts the
-		// gateway: only the first takes the lock. The others end at once
-		// (GAP-0143); the start or restart that holds the lock brings the
-		// gateway up, and their hooks keep sending the call to it.
-		lockWait = 0
+		// Of the hooks that meet a restart, only the one that took the
+		// hook's .cold-start.lock launches this start, and the lock is
+		// held until the start ends (GAP-0143). A start or restart that
+		// holds the start lock is bringing the gateway up: wait for it,
+		// then find that gateway running and end. Ending at once would
+		// free the hook lock, and the next hook call would launch another
+		// start, about one a second for the whole restart.
+		lockWait = hookColdStartLockWait
 	}
 	release, err := acquireGatewayStartLock(dataDir, lockWait)
 	if err != nil {
@@ -286,6 +289,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("hook cold start skipped: %w", err)
 		}
 	}
+	// GAP-2521: an older release roll-forward leaves out the helpers it does
+	// not know; put back the ones this install recorded.
+	restorePerUserInstallerHelpers(dataDir)
 	err = runStartLocked(cmd, args, coldStart)
 	if err != nil && coldStart {
 		if running, _ := daemon.New(dataDir).IsRunning(); !running {
@@ -804,6 +810,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	}
 	defer release()
 	recordGatewayLoginPath(config.DefaultDataPath())
+	restorePerUserInstallerHelpers(config.DefaultDataPath())
 	d := daemon.New(config.DefaultDataPath())
 	// Restart may stop an otherwise healthy managed gateway. Validate every
 	// process-identity artifact before that first side effect so malformed or
@@ -1194,7 +1201,7 @@ const emptyConfigProbeBytes = 64 << 10
 // load, to tell a cut-short file from an older or invalid one.
 const incompleteConfigProbeBytes = 4 << 20
 
-var configVersionLine = regexp.MustCompile(`(?m)^config_version[ \t]*:`)
+var configVersionLine = lazyregexp.New(`(?m)^config_version[ \t]*:`)
 
 // incompleteConfigFile reports a config.yaml that stops mid-document:
 // DefenseClaw always ends it with a newline, and a file cut short before

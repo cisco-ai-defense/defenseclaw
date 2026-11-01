@@ -26,7 +26,7 @@ func TestEvaluateDeterministicToolResultUsesClosedConnectorProofs(t *testing.T) 
 	}{
 		{"claude-acquisition", "claudecode", "PreToolUse", "PostToolUse", "shell", json.RawMessage(`{"command":"impacket-GetUserSPNs -request EXAMPLE.TEST/user:secret"}`)},
 		{"claude-file-read", "claudecode", "PreToolUse", "PostToolUse", "shell", json.RawMessage(`{"command":"cat /tmp/kerberoast.txt"}`)},
-		{"opencode", "opencode", "tool.execute.before", "tool.execute.after", "bash", json.RawMessage(`{"command":"impacket-GetUserSPNs -request EXAMPLE.TEST/user:secret"}`)},
+		{"opencode", "opencode", "tool.execute.before", "tool.execute.after", "shell", json.RawMessage(`{"command":"impacket-GetUserSPNs -request EXAMPLE.TEST/user:secret"}`)},
 		{"amp", "amp", "tool.call", "tool.result", "Bash", json.RawMessage(`{"command":"impacket-GetUserSPNs -request EXAMPLE.TEST/user:secret"}`)},
 		{"codex", "codex", "PreToolUse", "PostToolUse", "mcp__directory__kerberoast", json.RawMessage(`{"domain":"example.test","target_user":"svc"}`)},
 	} {
@@ -140,7 +140,9 @@ func TestExactReturnedCredentialResultBytes(t *testing.T) {
 	credential := returnedTGSFixture()
 	tests := []agentHookRequest{
 		{ConnectorName: "claudecode", HookEventName: "PostToolUse", Payload: map[string]interface{}{"tool_response": credential}},
-		{ConnectorName: "opencode", HookEventName: "tool.execute.after", Payload: map[string]interface{}{"tool_response": map[string]interface{}{"output": credential, "metadata": map[string]interface{}{"exit": 0}}}},
+		{ConnectorName: "opencode", HookEventName: "tool.execute.after", Payload: map[string]interface{}{"tool_response": map[string]interface{}{"opencode_v2_status": "completed", "output": credential}}},
+		{ConnectorName: "opencode", HookEventName: "tool.execute.after", Payload: map[string]interface{}{"tool_response": map[string]interface{}{"opencode_v2_status": "completed", "output": map[string]interface{}{"output": credential, "exit": 0}}}},
+		{ConnectorName: "opencode", HookEventName: "tool.execute.after", Payload: map[string]interface{}{"tool_response": map[string]interface{}{"opencode_v2_status": "completed", "content": []interface{}{map[string]interface{}{"type": "text", "text": credential}}}}},
 		{ConnectorName: "amp", HookEventName: "tool.result", Payload: map[string]interface{}{"tool_response": credential, "status": "done"}},
 		{ConnectorName: "codex", HookEventName: "PostToolUse", ToolName: "mcp__directory__roast", Payload: map[string]interface{}{"tool_name": "mcp__directory__roast", "tool_input": map[string]interface{}{}, "tool_response": map[string]interface{}{"content": []interface{}{map[string]interface{}{"type": "text", "text": credential}}}}},
 	}
@@ -162,6 +164,8 @@ func TestExactReturnedCredentialResultBytesAbstains(t *testing.T) {
 		{"failed", agentHookRequest{ConnectorName: "claudecode", HookEventName: "PostToolUse", Payload: map[string]interface{}{"tool_response": credential}}, connector.ToolLifecycleOutcomeFailure},
 		{"claude-batch", agentHookRequest{ConnectorName: "claudecode", HookEventName: "PostToolBatch", Payload: map[string]interface{}{"tool_response": credential}}, connector.ToolLifecycleOutcomeSuccess},
 		{"opencode-malformed", agentHookRequest{ConnectorName: "opencode", HookEventName: "tool.execute.after", Payload: map[string]interface{}{"tool_response": map[string]interface{}{"output": 7}}}, connector.ToolLifecycleOutcomeSuccess},
+		{"opencode-legacy", agentHookRequest{ConnectorName: "opencode", HookEventName: "tool.execute.after", Payload: map[string]interface{}{"tool_response": map[string]interface{}{"output": credential}}}, connector.ToolLifecycleOutcomeSuccess},
+		{"opencode-failed", agentHookRequest{ConnectorName: "opencode", HookEventName: "tool.execute.after", Payload: map[string]interface{}{"tool_response": map[string]interface{}{"opencode_v2_status": "error", "output": credential}}}, connector.ToolLifecycleOutcomeSuccess},
 		{"amp-error", agentHookRequest{ConnectorName: "amp", HookEventName: "tool.result", Payload: map[string]interface{}{"tool_response": credential, "status": "done", "error": "failed"}}, connector.ToolLifecycleOutcomeSuccess},
 		{"codex-shell", agentHookRequest{ConnectorName: "codex", HookEventName: "PostToolUse", ToolName: "shell", Payload: map[string]interface{}{"tool_name": "shell", "tool_response": credential}}, connector.ToolLifecycleOutcomeSuccess},
 	} {

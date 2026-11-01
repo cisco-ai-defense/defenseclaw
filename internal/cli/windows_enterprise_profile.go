@@ -20,12 +20,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -40,8 +40,8 @@ const (
 
 var (
 	windowsEnterpriseDeploymentInspector = inspectTrustedWindowsEnterpriseDeployment
-	windowsEnterpriseSHA256Pattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	windowsEnterprisePayloadLeafPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	windowsEnterpriseSHA256Pattern       = lazyregexp.New(`^[0-9a-f]{64}$`)
+	windowsEnterprisePayloadLeafPattern  = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 	// Seams for inspectTrustedWindowsEnterpriseDeployment.
 	windowsEnterpriseRecordRoots     = winpath.TrustedEnterpriseRoots
@@ -125,6 +125,14 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 		return windowsEnterpriseInvalidArguments("--profile must be %s or %s", managed.ProfileSecureClient, managed.ProfileStandalone)
 	}
 	if path := strings.TrimSpace(opts.configPath); path != "" {
+		// A relative --config is the caller's mistake, refused as invalid
+		// arguments before anything opens it, as on Linux; it was a 1603
+		// preflight failure for a file looked up in the current folder
+		// (GAP-1674). Secure Client keeps its arguments.
+		if !filepath.IsAbs(path) && (requested == managed.ProfileStandalone ||
+			(requested == "" && windowsEnterpriseStandaloneRecordedOnly(opts))) {
+			return windowsEnterpriseInvalidArguments("--config must be an absolute path, got %s", path)
+		}
 		configured, err := readWindowsEnterpriseConfigProfile(path)
 		var content windowsEnterpriseConfigContentError
 		var unreadable windowsEnterpriseConfigReadError
@@ -477,8 +485,8 @@ func windowsEnterpriseTrustFromDocument(path string, document windowsEnterpriseT
 }
 
 var (
-	windowsEnterpriseYAMLTypeEntry = regexp.MustCompile(`^line ([0-9]+): cannot unmarshal (!![a-z]+)`)
-	windowsEnterpriseYAMLLineEntry = regexp.MustCompile(`^(?:yaml: )?line ([0-9]+): (.+)$`)
+	windowsEnterpriseYAMLTypeEntry = lazyregexp.New(`^line ([0-9]+): cannot unmarshal (!![a-z]+)`)
+	windowsEnterpriseYAMLLineEntry = lazyregexp.New(`^(?:yaml: )?line ([0-9]+): (.+)$`)
 )
 
 // windowsEnterpriseYAMLProblem says in plain words where a config does not

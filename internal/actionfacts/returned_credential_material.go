@@ -5,7 +5,6 @@ package actionfacts
 
 import (
 	"bytes"
-	"regexp"
 )
 
 const (
@@ -47,19 +46,19 @@ const (
 )
 
 var (
-	returnedKerberosTGSLine = regexp.MustCompile(
+	returnedKerberosTGSLine = lazyMustCompile(
 		`(?i)^\$krb5tgs\$(?:17|18|23)\$\*?[^\s$:*]{1,128}\$[^\s$]{1,255}\$[^\s$]{1,1000}\*?\$[0-9a-f]{32,96}\$[0-9a-f]{64,}$`,
 	)
-	returnedKerberosASREPLine = regexp.MustCompile(
+	returnedKerberosASREPLine = lazyMustCompile(
 		`(?i)^\$krb5asrep\$(?:17|18|23)\$[^\s:$]{1,128}(?:@[^\s:$]{1,255})?:[0-9a-f]{32,96}\$[0-9a-f]{64,}$`,
 	)
-	returnedNTDSLine = regexp.MustCompile(
+	returnedNTDSLine = lazyMustCompile(
 		`(?i)^(?:[^:\s]{1,128}\\)?[^:\s]{1,128}:[0-9]{1,10}:(?:[0-9a-f]{32}|\*):(?:[0-9a-f]{32}|\*):::$`,
 	)
-	returnedLabeledNTLMLine = regexp.MustCompile(
+	returnedLabeledNTLMLine = lazyMustCompile(
 		`(?i)^(?:[^:\r\n]{1,128}\s+)?(?:ntlm|nt[ _-]?hash)\s*[:=]\s*[0-9a-f]{32}$`,
 	)
-	returnedCredentialTelemetryMarker = regexp.MustCompile(
+	returnedCredentialTelemetryMarker = lazyMustCompile(
 		`(?i)(?:ntlm|nt[ _-]?hash)\s*[:=]|:[0-9]{1,10}:(?:[0-9a-f]{32}|\*):(?:[0-9a-f]{32}|\*):::`,
 	)
 )

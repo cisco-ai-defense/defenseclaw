@@ -19,6 +19,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -213,6 +214,7 @@ func readMCPServersOpenCodeResolution(resolution openCodeConfigResolution) []MCP
 		if !ok {
 			continue
 		}
+		mcp = openCodeMCPMap(mcp)
 		names := make([]string, 0, len(mcp))
 		for name := range mcp {
 			names = append(names, name)
@@ -225,9 +227,15 @@ func readMCPServersOpenCodeResolution(resolution openCodeConfigResolution) []MCP
 			}
 			if _, exists := configs[name]; !exists {
 				order = append(order, name)
-				configs[name] = map[string]any{}
 			}
-			configs[name] = mergeOpenCodeConfig(configs[name], entry)
+			entry = maps.Clone(entry)
+			if disabled, native := entry["disabled"]; native {
+				entry["enabled"] = disabled != true
+				delete(entry, "disabled")
+			}
+			// V2 normalizes both supported config syntaxes before replacing
+			// a same-name server. Never inherit credentials from a lower layer.
+			configs[name] = entry
 			provenance[name] = layer
 		}
 	}
@@ -238,21 +246,35 @@ func readMCPServersOpenCodeResolution(resolution openCodeConfigResolution) []MCP
 	return entries
 }
 
-func mergeOpenCodeConfig(base, override map[string]any) map[string]any {
-	merged := make(map[string]any, len(base)+len(override))
-	for key, value := range base {
-		merged[key] = value
-	}
-	for key, value := range override {
-		if previous, ok := merged[key].(map[string]any); ok {
-			if next, ok := value.(map[string]any); ok {
-				merged[key] = mergeOpenCodeConfig(previous, next)
+// openCodeMCPMap mirrors V2's config normalization: direct compatible entries
+// coexist with the native container, whose entries win same-name collisions.
+func openCodeMCPMap(mcp map[string]any) map[string]any {
+	entries := make(map[string]any, len(mcp))
+	for name, value := range mcp {
+		if (name == "servers" || name == "timeout") && !openCodeDirectMCPEntry(value) {
+			continue
+		}
+		if entry, ok := value.(map[string]any); ok {
+			_, hasType := entry["type"]
+			if _, enabledOnly := entry["enabled"].(bool); !hasType && enabledOnly {
+				// The V2 normalizer omits unsupported enabled-only legacy entries.
 				continue
 			}
 		}
-		merged[key] = value
+		entries[name] = value
 	}
-	return merged
+	if servers, ok := mcp["servers"].(map[string]any); ok && !openCodeDirectMCPEntry(servers) {
+		maps.Copy(entries, servers)
+	}
+	return entries
+}
+
+func openCodeDirectMCPEntry(value any) bool {
+	entry, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	return entry["type"] == "local" || entry["type"] == "remote"
 }
 
 func openCodeMCPEntry(name string, cfg map[string]any, source openCodeConfigLayer) MCPServerEntry {

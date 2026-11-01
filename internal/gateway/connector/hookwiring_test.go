@@ -964,11 +964,14 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 	const event = "PreToolUse"
 	const contractID = "codex-hooks-v4"
 	setHookBinaryOverride(t, hookBinary)
-	current := windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBinary)
+	// GAP-1908: setup repairs every earlier form to the direct cmd.exe start.
+	current := windowsCodexHookCommandForBinaryEvent(event, contractID, hookBinary)
+	bridge := windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBinary)
 	legacyCommands := []struct {
 		name    string
 		command string
 	}{
+		{name: "1.0.4 awaited bridge", command: bridge},
 		{name: "non-waiting", command: legacyWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "unqualified-start-process", command: legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "start-process", command: legacyStartProcessWindowsNativePowerShellHookCommand("codex", hookBinary)},
@@ -1024,9 +1027,13 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 			}
 		})
 	}
-	// The repaired command awaits the launcher on the handle it started it
-	// with; $LASTEXITCODE is read only after Out-Host has awaited it.
-	decoded := decodePowerShellEncodedCommandForTest(t, current)
+	if want := windowsSystemCmdExe() + ` /d /v:off /c "` + hookBinary + `" hook --connector codex --event ` + event + ` --hook-contract ` + contractID; current != want {
+		t.Fatalf("repaired command = %q, want %q", current, want)
+	}
+	// The 1.0.4 bridge (still rendered for a path the direct form cannot
+	// carry) awaits the launcher on the handle it started it with;
+	// $LASTEXITCODE is read only after Out-Host has awaited it.
+	decoded := decodePowerShellEncodedCommandForTest(t, bridge)
 	if want := windowsAwaitedHookScriptForTest(hookBinary, "hook", "--connector", "codex", "--event", event, "--hook-contract", contractID); decoded != want {
 		t.Fatalf("repaired command = %s\nwant %s", decoded, want)
 	}
@@ -1509,7 +1516,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "probe received invalid exit code")
 		os.Exit(7)
 	}
-	fmt.Fprintln(os.Stdout, "probe stdout "+connector)
+	if answer, ok := os.LookupEnv("DC_TEST_STDOUT"); ok {
+		fmt.Fprintln(os.Stdout, answer)
+	} else {
+		fmt.Fprintln(os.Stdout, "probe stdout "+connector)
+	}
 	fmt.Fprintln(os.Stderr, "probe stderr "+connector)
 	time.Sleep(500 * time.Millisecond)
 	os.Exit(exitCode)
@@ -1539,19 +1550,38 @@ func main() {
 		t.Fatalf("write Copilot adapter: %v", err)
 	}
 
+	// GAP-0364: the Copilot adapter forwards a crashed launcher's output only
+	// when it is one whole native deny; a partial or other answer from a
+	// launcher that exited non-zero gets the adapter's own closed denial.
+	const adapterDeny = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}`
+	const wholeDeny = `{"permissionDecision":"deny","permissionDecisionReason":"blocked by policy \u003cr1\u003e"}`
+	str := func(s string) *string { return &s }
 	cases := []struct {
-		connector string
-		exitCode  int
+		name       string
+		connector  string
+		exitCode   int
+		stdout     *string
+		wantStdout string
 	}{
 		{connector: "codex", exitCode: 0},
 		{connector: "codex", exitCode: 1},
 		{connector: "codex", exitCode: 2},
 		{connector: "antigravity", exitCode: 2},
 		{connector: "copilot", exitCode: 0},
-		{connector: "copilot", exitCode: 2},
+		{connector: "copilot", exitCode: 2, wantStdout: adapterDeny},
+		{name: "copilot-exit-2-partial-deny", connector: "copilot", exitCode: 2,
+			stdout: str(`{"permissionDecision":"deny","permissionDecisionRea`), wantStdout: adapterDeny},
+		{name: "copilot-exit-1-whole-allow", connector: "copilot", exitCode: 1,
+			stdout: str(`{"permissionDecision":"allow"}`), wantStdout: adapterDeny},
+		{name: "copilot-exit-2-whole-deny", connector: "copilot", exitCode: 2,
+			stdout: str(wholeDeny), wantStdout: wholeDeny},
 	}
 	for _, testCase := range cases {
-		t.Run(fmt.Sprintf("%s-exit-%d", testCase.connector, testCase.exitCode), func(t *testing.T) {
+		name := testCase.name
+		if name == "" {
+			name = fmt.Sprintf("%s-exit-%d", testCase.connector, testCase.exitCode)
+		}
+		t.Run(name, func(t *testing.T) {
 			command := windowsNativePowerShellHookCommand(testCase.connector)
 			if testCase.connector == "copilot" {
 				command = copilotHookInvocationCommandForEvent(
@@ -1567,6 +1597,9 @@ func main() {
 					"DC_TEST_CONNECTOR="+testCase.connector,
 					fmt.Sprintf("DC_TEST_EXIT_CODE=%d", testCase.exitCode),
 				)
+				if testCase.stdout != nil {
+					cmd.Env = append(cmd.Env, "DC_TEST_STDOUT="+*testCase.stdout)
+				}
 				cmd.Stdin = strings.NewReader(`{"tool":"win-aud-069"}`)
 				var stdoutBuf, stderrBuf bytes.Buffer
 				cmd.Stdout = &stdoutBuf
@@ -1590,7 +1623,11 @@ func main() {
 				t.Fatalf("generated command exit = %d, want %d\ncommand: %s\nstdout: %s\nstderr: %s",
 					got, wantExitCode, command, stdout, stderr)
 			}
-			if got, want := strings.TrimSpace(stdout), "probe stdout "+testCase.connector; got != want {
+			want := testCase.wantStdout
+			if want == "" {
+				want = "probe stdout " + testCase.connector
+			}
+			if got := strings.TrimSpace(stdout); got != want {
 				t.Fatalf("generated command stdout = %q, want %q; stderr=%q", got, want, stderr)
 			}
 			if got, want := stderr, "probe stderr "+testCase.connector; !strings.Contains(got, want) {
@@ -2074,14 +2111,15 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 					windowsCommand,
 				)
 			}
-			decoded := decodePowerShellEncodedCommandForTest(t, windowsCommand)
-			if !windowsBridgeBindsArgumentForTest(decoded, "--event", group.eventType) ||
-				!windowsBridgeBindsArgumentForTest(decoded, "--hook-contract", contract.ContractID) {
+			// GAP-1908: the launcher starts through the system cmd.exe and
+			// the command binds the event and contract.
+			if !strings.HasPrefix(windowsCommand, windowsSystemCmdExe()+` /d /v:off /c "`) ||
+				!strings.HasSuffix(windowsCommand, " hook --connector codex --event "+group.eventType+" --hook-contract "+contract.ContractID) {
 				t.Errorf(
-					"event %s command did not bind event and contract %s: %s",
+					"event %s command did not bind event and contract %s through cmd.exe: %s",
 					group.eventType,
 					contract.ContractID,
-					decoded,
+					windowsCommand,
 				)
 			}
 		}
@@ -2559,7 +2597,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				groups := hooks["PreToolUse"].([]interface{})
 				handlers := groups[0].(map[string]interface{})["hooks"].([]interface{})
 				command := handlers[0].(map[string]interface{})["command_windows"].(string)
-				wantCommand := windowsNativePowerShellHookCommandForCodexEvent(
+				wantCommand := windowsCodexHookCommandForBinaryEvent(
 					"PreToolUse",
 					"codex-hooks-v4",
 					defenseclawHookBinary(),
@@ -2567,9 +2605,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				if command != wantCommand {
 					t.Errorf("Codex PreToolUse command_windows = %q, want %q", command, wantCommand)
 				}
-				decoded := decodePowerShellEncodedCommandForTest(t, command)
-				if !windowsBridgeBindsArgumentForTest(decoded, "--event", "PreToolUse") ||
-					!windowsBridgeBindsArgumentForTest(decoded, "--hook-contract", "codex-hooks-v4") {
+				if !strings.HasSuffix(command, " hook --connector codex --event PreToolUse --hook-contract codex-hooks-v4") {
 					t.Errorf("config missing event-bound native command_windows for %s:\n%s", connectorName, text)
 				}
 			case "copilot":

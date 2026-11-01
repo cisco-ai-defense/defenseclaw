@@ -247,7 +247,9 @@ func (f AccountFilter) matches(id, name, domains string, own, another func() boo
 	case f.raw == "":
 		return true
 	case id != "" && strings.EqualFold(f.raw, id):
-		return true
+		// A uid filter keeps out the rows another holder of the uid left,
+		// as the name of its account does (GAP-1876).
+		return another == nil || !another()
 	case f.domain != "" && id != "" && slices.ContainsFunc(f.ids, func(resolved string) bool {
 		return strings.EqualFold(resolved, id)
 	}) && own():

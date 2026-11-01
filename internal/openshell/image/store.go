@@ -26,12 +26,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -165,7 +165,7 @@ func pemDigest(pem string) string {
 }
 
 // ownerRE is the shape of a store owner.
-var ownerRE = regexp.MustCompile(`^[0-9a-f]{16}$`)
+var ownerRE = lazyregexp.New(`^[0-9a-f]{16}$`)
 
 // NewStore opens the store under dataDir.
 func NewStore(dataDir string) *Store {

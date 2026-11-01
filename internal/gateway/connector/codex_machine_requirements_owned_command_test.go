@@ -35,6 +35,7 @@ func windowsCodexTestScript(t *testing.T, command string) string {
 func windowsCodexAdministratorLookalikes(t *testing.T, opts WindowsCodexMachineRequirementsOptions) map[string]string {
 	t.Helper()
 	current := windowsCodexBoundManagedHookCommand(opts.HookBinary, "PreToolUse", opts.HookContractID)
+	bridge := bridgeWindowsCodexBoundManagedHookCommand(opts.HookBinary, "PreToolUse", opts.HookContractID)
 	legacy := legacyStartProcessWindowsCodexBoundManagedHookCommand(opts.HookBinary, "PreToolUse", opts.HookContractID)
 	extraArgument := []string{"hook", "--connector", "codex", "--enterprise-managed", "--event", "PreToolUse", "--hook-contract", opts.HookContractID, "--debug"}
 	return map[string]string{
@@ -45,11 +46,14 @@ func windowsCodexAdministratorLookalikes(t *testing.T, opts WindowsCodexMachineR
 			"& 'C:\\Tools\\audit.exe'",
 			"exit $LASTEXITCODE",
 		}, "; ")),
-		"the current command with a statement appended": windowsCodexTestEncoded(windowsCodexTestScript(t, current) + "; & 'C:\\Tools\\audit.exe'"),
+		"the 1.0.4 bridge with a statement appended":    windowsCodexTestEncoded(windowsCodexTestScript(t, bridge) + "; & 'C:\\Tools\\audit.exe'"),
 		"the 1.0.0 command with a statement prepended":  windowsCodexTestEncoded("& 'C:\\Tools\\audit.exe'; " + windowsCodexTestScript(t, legacy)),
 		"the unbound command with a statement appended": windowsCodexTestEncoded(windowsCodexTestScript(t, windowsCodexManagedHookCommand(opts.HookBinary)) + "; Write-Host done"),
 		"the launcher with an extra argument":           windowsCodexTestEncoded(strings.Join(append([]string{"$ErrorActionPreference='Stop'", "$env:NoDefaultCurrentDirectoryInExePath='1'"}, windowsAwaitedHookStatements(opts.HookBinary, extraArgument)...), "; ")),
-		"the current script outside -EncodedCommand":    windowsSystemPowerShellExe() + " -NoLogo -NoProfile -Command \"" + windowsCodexTestScript(t, current) + "\"",
+		"the 1.0.4 script outside -EncodedCommand":      windowsSystemPowerShellExe() + " -NoLogo -NoProfile -Command \"" + windowsCodexTestScript(t, bridge) + "\"",
+		"the direct command with a cmd.exe statement":   current + " & C:\\Tools\\audit.exe",
+		"the direct command with an extra argument":     strings.Replace(current, " hook --connector codex", " hook --debug --connector codex", 1),
+		"the direct command through another cmd.exe":    strings.Replace(current, windowsSystemCmdExe(), `C:\Tools\cmd.exe`, 1),
 		"the current command for another launcher":      windowsCodexBoundManagedHookCommand(`C:\Tools\defenseclaw-hook.exe`, "PreToolUse", opts.HookContractID),
 		"the current command with trailing arguments":   current + " -Version 5",
 	}
@@ -81,6 +85,10 @@ func TestWindowsCodexOwnedHookCommandIsOnlyARenderedCommand(t *testing.T) {
 		legacy.HookContractID = contract.ContractID
 		forms = append(forms, rendered{name: contract.ContractID + " 1.0.0", opts: legacy, form: func(event, contract string) string {
 			return legacyStartProcessWindowsCodexBoundManagedHookCommand(legacy.HookBinary, event, contract)
+		}})
+		// The PowerShell bridge releases 1.0.1 to 1.0.4 wrote (GAP-1908).
+		forms = append(forms, rendered{name: contract.ContractID + " 1.0.4 bridge", opts: legacy, form: func(event, contract string) string {
+			return bridgeWindowsCodexBoundManagedHookCommand(legacy.HookBinary, event, contract)
 		}})
 	}
 	for _, form := range forms {

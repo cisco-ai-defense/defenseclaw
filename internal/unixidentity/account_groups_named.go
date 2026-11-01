@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -63,4 +65,56 @@ func namedGroupIDs(ctx context.Context, names []string, lookup func(context.Cont
 		}
 	}
 	return out, nil
+}
+
+// namedGroupMemoryTTL is how long an assignment group name that resolved keeps
+// its gid after the directory stops naming it.
+const namedGroupMemoryTTL = 15 * time.Minute
+
+// namedGroupMemory remembers the gid each assignment group name last resolved
+// to. Open Directory answers "no such group" also while part of a bound
+// directory does not answer, and nothing in that answer says so: the group
+// was dropped from a successful answer and a looser profile could match
+// (GAP-0592). A name that resolved within namedGroupMemoryTTL keeps its gid,
+// so the uid membership check still decides whether the account is in the
+// group; a name that never resolved, or has not resolved for longer than the
+// TTL (deleted or renamed in the directory), is gone. A failed lookup stays a
+// failure.
+type namedGroupMemory struct {
+	now  func() time.Time
+	mu   sync.Mutex
+	gids map[string]rememberedNamedGroup
+}
+
+type rememberedNamedGroup struct {
+	gid int
+	at  time.Time
+}
+
+// lookup wraps a named group lookup with the memory.
+func (m *namedGroupMemory) lookup(next func(context.Context, string) (int, bool, error)) func(context.Context, string) (int, bool, error) {
+	return func(ctx context.Context, name string) (int, bool, error) {
+		gid, ok, err := next(ctx, name)
+		if err != nil {
+			return gid, ok, err
+		}
+		key := strings.ToLower(strings.TrimSpace(name))
+		now := m.now()
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if ok {
+			if m.gids == nil {
+				m.gids = map[string]rememberedNamedGroup{}
+			}
+			m.gids[key] = rememberedNamedGroup{gid: gid, at: now}
+			return gid, true, nil
+		}
+		if known, found := m.gids[key]; found {
+			if age := now.Sub(known.at); age >= 0 && age < namedGroupMemoryTTL {
+				return known.gid, true, nil
+			}
+			delete(m.gids, key)
+		}
+		return 0, false, nil
+	}
 }

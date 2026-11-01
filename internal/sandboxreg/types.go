@@ -92,6 +92,14 @@ const (
 	// MaxEntriesPerUID caps one uid's registrations; the oldest tombstones
 	// are evicted first, never a live entry.
 	MaxEntriesPerUID = 1024
+	// MaxLivePerUID caps how many of one uid's registrations are live at
+	// once (bound, and reported running within LiveLease): what an
+	// account's sandboxes count in the fleet's active-sandbox gauge, which
+	// the gateway cannot check against OpenShell. A bind, a restart or a
+	// running report that revives a lapsed lease past it is refused
+	// (ErrTooManyLive). An account runs a few sandboxes at once, not dozens;
+	// stopped, pending and deleted registrations do not count (GAP-0020).
+	MaxLivePerUID = 32
 )
 
 // Registration is one sandbox a user's daemon registered with the managed

@@ -115,71 +115,80 @@ func managedEnterpriseHTTPClientFor(
 					)
 				}
 
-				servicePID, err := managedEnterpriseQueryServicePID(serviceName)
-				if errors.Is(err, errManagedGatewayNotRunning) {
-					return nil, stoppedManagedGatewayError(canonicalAddr, err, secureClient)
-				}
-				if err != nil {
-					return nil, managedGatewayPeerError("query protected gateway service: %v", err)
-				}
-				// A service that has just started (or is about to stop)
-				// can run without a listener on its port. Windows answers a
-				// connect to such a port only after about 2 seconds of SYN
-				// retries, so one try could take most of a restart budget:
-				// read the listen table instead, and try again shortly.
-				// Only an IPv4 listener counts here: the hook dials tcp4, and
-				// an IPv6-only listener would turn this into a refused dial.
-				if listening, known := managedEnterpriseListeningIPv4(canonicalAddr); known && !listening {
-					// The service has a PID, so its absence is not proven. The
-					// restart loop may retry, but open must not allow this call.
-					return nil, fmt.Errorf("%w: %w: running service has no listener on %s yet",
-						errManagedGatewayPeerUnverified, errGatewayNotConnected, canonicalAddr)
-				}
-				conn, err := managedEnterpriseDialContext(ctx, "tcp4", canonicalAddr)
-				if err != nil {
-					return nil, err
-				}
-				verified := false
-				defer func() {
-					if !verified {
-						_ = conn.Close()
-					}
-				}()
-
-				connectedPID, err := managedEnterpriseConnectedPID(conn)
-				if err != nil {
-					return nil, managedGatewayPeerError("resolve connected listener owner: %v", err)
-				}
-				if connectedPID == 0 {
-					return nil, managedGatewayPeerError("connected listener PID 0 does not equal service PID %d", servicePID)
-				}
-				if connectedPID != servicePID {
-					// The service runs, but another process answers on its
-					// port: the hook names the port, not a stopped service
-					// (GAP-1029).
-					return nil, fmt.Errorf("%w: %w: connected listener PID %d does not equal service PID %d",
-						errManagedGatewayPeerUnverified, errManagedGatewayPortHeld, connectedPID, servicePID)
-				}
-				recheckedPID, err := managedEnterpriseQueryServicePID(serviceName)
-				if err != nil {
-					return nil, managedGatewayPeerError("re-query protected gateway service: %v", err)
-				}
-				if recheckedPID != servicePID {
-					return nil, managedGatewayPeerError(
-						"gateway service PID changed from %d to %d",
-						servicePID,
-						recheckedPID,
-					)
-				}
-
-				verified = true
-				return conn, nil
+				return dialManagedGatewayService(ctx, canonicalAddr, serviceName, secureClient)
 			},
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}, nil
+}
+
+// dialManagedGatewayService connects to canonicalAddr and returns the
+// connection only when the process behind its server end is the running SCM
+// service serviceName, the same process before and after the lookup. No byte
+// is written to the connection before that. secureClient selects the
+// stopped-gateway port check (stoppedManagedGatewayError).
+func dialManagedGatewayService(ctx context.Context, canonicalAddr, serviceName string, secureClient bool) (net.Conn, error) {
+	servicePID, err := managedEnterpriseQueryServicePID(serviceName)
+	if errors.Is(err, errManagedGatewayNotRunning) {
+		return nil, stoppedManagedGatewayError(canonicalAddr, err, secureClient)
+	}
+	if err != nil {
+		return nil, managedGatewayPeerError("query protected gateway service: %v", err)
+	}
+	// A service that has just started (or is about to stop)
+	// can run without a listener on its port. Windows answers a
+	// connect to such a port only after about 2 seconds of SYN
+	// retries, so one try could take most of a restart budget:
+	// read the listen table instead, and try again shortly.
+	// Only an IPv4 listener counts here: the hook dials tcp4, and
+	// an IPv6-only listener would turn this into a refused dial.
+	if listening, known := managedEnterpriseListeningIPv4(canonicalAddr); known && !listening {
+		// The service has a PID, so its absence is not proven. The
+		// restart loop may retry, but open must not allow this call.
+		return nil, fmt.Errorf("%w: %w: running service has no listener on %s yet",
+			errManagedGatewayPeerUnverified, errGatewayNotConnected, canonicalAddr)
+	}
+	conn, err := managedEnterpriseDialContext(ctx, "tcp4", canonicalAddr)
+	if err != nil {
+		return nil, err
+	}
+	verified := false
+	defer func() {
+		if !verified {
+			_ = conn.Close()
+		}
+	}()
+
+	connectedPID, err := managedEnterpriseConnectedPID(conn)
+	if err != nil {
+		return nil, managedGatewayPeerError("resolve connected listener owner: %v", err)
+	}
+	if connectedPID == 0 {
+		return nil, managedGatewayPeerError("connected listener PID 0 does not equal service PID %d", servicePID)
+	}
+	if connectedPID != servicePID {
+		// The service runs, but another process answers on its
+		// port: the hook names the port, not a stopped service
+		// (GAP-1029).
+		return nil, fmt.Errorf("%w: %w: connected listener PID %d does not equal service PID %d",
+			errManagedGatewayPeerUnverified, errManagedGatewayPortHeld, connectedPID, servicePID)
+	}
+	recheckedPID, err := managedEnterpriseQueryServicePID(serviceName)
+	if err != nil {
+		return nil, managedGatewayPeerError("re-query protected gateway service: %v", err)
+	}
+	if recheckedPID != servicePID {
+		return nil, managedGatewayPeerError(
+			"gateway service PID changed from %d to %d",
+			servicePID,
+			recheckedPID,
+		)
+	}
+
+	verified = true
+	return conn, nil
 }
 
 // stoppedManagedGatewayError is the dial error when the gateway service is

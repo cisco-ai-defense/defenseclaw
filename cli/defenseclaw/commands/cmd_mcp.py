@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -150,6 +151,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     all_connectors = resolve_list_connectors(app, "")
     connectors = explicit if explicit is not None else all_connectors
     allow_legacy_plain_scans = len(all_connectors) == 1
+    policy = _mcp_list_admission_policy(app)
 
     if as_json:
         undiscoverable: list[str] = []
@@ -176,6 +178,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     "connector": c,
                     "mcp_servers": _mcp_list_json_items(
                         servers, scan_map, actions_map, connector=c, failed_map=failed_map,
+                        policy=policy,
                     ),
                 })
             click.echo(json.dumps(groups, indent=2, default=str))
@@ -203,6 +206,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             # automation never has to remember argv to know the scope.
             items = _mcp_list_json_items(
                 servers, scan_map, actions_map, connector=connectors[0], failed_map=failed_map,
+                policy=policy,
             )
             payload = (
                 {"connector": connectors[0], "mcp_servers": items}
@@ -219,6 +223,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     undiscoverable: list[str] = []
     source_diagnostics: list[tuple[str, connector_paths.MCPSourceDiagnostic]] = []
     failed_rows: list[tuple[str, str, str, MCPServerEntry | None]] = []
+    held_after_failed_scan: list[tuple[str, str]] = []
     not_loaded: list[tuple[str, MCPServerEntry]] = []
     # GAP-1907: on a fan-out listing, a connector with no MCP servers is a
     # normal state. Collect those into one short line instead of a warning
@@ -260,12 +265,18 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             app.store, servers, connector,
             allow_legacy_plain=allow_legacy_plain_scans,
         )
-        _print_mcp_list_table(servers, scan_map, actions_map, connector, failed_map)
+        _print_mcp_list_table(servers, scan_map, actions_map, connector, failed_map, policy=policy)
         _echo_legacy_mcp_locations(servers)
         not_loaded.extend((connector, s) for s in servers if s.load_problem)
         by_name = {s.name: s for s in servers}
+        held = [
+            name for name in by_name
+            if _blocked_after_failed_scan(actions_map.get(name))
+        ]
+        held_after_failed_scan.extend((connector, name) for name in held)
         failed_rows.extend(
-            (connector, name, row.get("error", ""), by_name.get(name)) for name, row in failed_map.items()
+            (connector, name, row.get("error", ""), by_name.get(name))
+            for name, row in failed_map.items() if name not in held
         )
         shown_any = True
 
@@ -290,6 +301,22 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             ux.subhead(
                 f"... and {len(failed_rows) - _FAILED_SCAN_HINT_LIMIT} more; "
                 "each server's last_scan_error is in: defenseclaw mcp list --json"
+            )
+    if held_after_failed_scan:
+        # GAP-1855: the gateway blocked these when their admission scan
+        # failed. A new "mcp scan" reports a verdict but does not release
+        # that block, so the hint names what does.
+        ux.warn(
+            f"{len(held_after_failed_scan)} MCP server(s) are blocked because their admission scan failed: "
+            + ", ".join(f"{name} ({connector})" for connector, name in held_after_failed_scan)
+        )
+        interval = getattr(getattr(app.cfg, "watch", None), "rescan_interval_min", 60)
+        for connector, name in held_after_failed_scan[:_FAILED_SCAN_HINT_LIMIT]:
+            ux.subhead(
+                f"{name} ({connector}): a new scan does not release this block. "
+                f"Release it now: defenseclaw mcp unblock {shlex.quote(name)} --connector {connector}; "
+                f"otherwise the gateway admits it again at its next rescan "
+                f"(watch.rescan_interval_min, every {interval} min) once the scan succeeds"
             )
     if not_loaded:
         # GAP-2514: the agent skips these entries, so they are not live.
@@ -435,6 +462,80 @@ def _has_enforcement_action(action_entry) -> bool:
     return bool(action_entry and not action_entry.actions.is_empty())
 
 
+# The journal reason of a block the gateway watcher applied because an
+# admission scan failed (internal/watcher scanFailureReason).
+_SCAN_FAILURE_BLOCK_REASON = "scanner failure (fail-closed): "
+
+
+def _blocked_after_failed_scan(action_entry) -> bool:
+    """A block or runtime disable the watcher applied when a scan failed (GAP-1855)."""
+    if not _has_enforcement_action(action_entry):
+        return False
+    actions = action_entry.actions
+    return (actions.install == "block" or actions.runtime == "disable") and str(
+        getattr(action_entry, "reason", "") or ""
+    ).startswith(_SCAN_FAILURE_BLOCK_REASON)
+
+
+def _mcp_list_admission_policy(app: AppContext):
+    """The compiled MCP admission policy the list labels scans with, or None."""
+    try:
+        from defenseclaw.enforce.admission import compile_admission
+
+        return compile_admission(app.cfg, "mcp")
+    except Exception:  # noqa: BLE001 - the list falls back to severity labels
+        return None
+
+
+def _mcp_list_verdict(action_entry, scan_entry, policy) -> tuple[str, str]:
+    """The verdict mcp list shows: an enforcement action, else what the
+    admission policy does with the scan's severity (GAP-1429). Balanced MCP
+    admission warns on HIGH, so a warned server reads "warning", not
+    "rejected"; a severity the policy refuses still reads "rejected"."""
+    label, style = _compute_verdict(action_entry, scan_entry)
+    if policy is None or _has_enforcement_action(action_entry) or not scan_entry:
+        return label, style
+    severity = str(scan_entry.get("max_severity") or "").upper()
+    if severity not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+        return label, style
+    from defenseclaw.enforce.admission import action_blocks, effective_action_for
+
+    action, allow = effective_action_for(policy, severity=severity, scanner="mcp-scanner")
+    if action_blocks(action):
+        return "rejected", "red"
+    if allow:
+        return "allowed", "green"
+    return "warning", "yellow"
+
+
+def _mcp_scan_findings_verdict(app: AppContext, pe, result, *, name: str, connector: str) -> str:
+    """The scan line glyph for a server with findings (GAP-2616).
+
+    BLOCKED (and the Summary blocked=) only when the admission policy
+    refuses the server at this severity (install block, runtime disable or
+    quarantine), as mcp list reads it "rejected"; a balanced HIGH verdict
+    (warn) reads WARN, an INFO-only result INFO. An allow-listed server is
+    not refused. A policy that cannot be read keeps BLOCKED, so a failure
+    never reads milder than before.
+    """
+    from defenseclaw.commands import _scan_ui
+
+    severity = str(result.max_severity() or "").upper()
+    milder = _scan_ui.VERDICT_INFO if severity == "INFO" else _scan_ui.VERDICT_WARN
+    try:
+        if pe is not None and pe.is_allowed_for_connector("mcp", name, connector):
+            return milder
+        from defenseclaw.enforce.admission import action_blocks, compile_admission, effective_action_for
+
+        policy = compile_admission(app.cfg, "mcp")
+        action, allow = effective_action_for(policy, severity=severity, scanner="mcp-scanner")
+    except Exception:  # noqa: BLE001 - an unreadable policy keeps the strict label.
+        return _scan_ui.VERDICT_BLOCKED
+    if action_blocks(action) and not allow:
+        return _scan_ui.VERDICT_BLOCKED
+    return milder
+
+
 def _mcp_list_json_items(
     servers: list[MCPServerEntry],
     scan_map: dict[str, dict],
@@ -442,6 +543,7 @@ def _mcp_list_json_items(
     *,
     connector: str = "",
     failed_map: dict[str, dict] | None = None,
+    policy=None,
 ) -> list[dict]:
     """Build the flat JSON item list for one connector's MCP servers.
 
@@ -477,8 +579,8 @@ def _mcp_list_json_items(
             ae = actions_map[s.name]
             if not ae.actions.is_empty():
                 entry["actions"] = ae.actions.to_dict()
-        verdict_label, _ = _compute_verdict(
-            actions_map.get(s.name), scan_map.get(s.name),
+        verdict_label, _ = _mcp_list_verdict(
+            actions_map.get(s.name), scan_map.get(s.name), policy,
         )
         if failed_map and s.name in failed_map:
             entry["last_scan_error"] = failed_map[s.name]["error"]
@@ -523,6 +625,8 @@ def _print_mcp_list_table(
     actions_map: dict,
     connector: str,
     failed_map: dict[str, dict] | None = None,
+    *,
+    policy=None,
 ) -> None:
     """Render one connector-tagged MCP server table."""
     from rich.console import Console
@@ -558,8 +662,8 @@ def _print_mcp_list_table(
         if s.name in actions_map:
             actions_str = actions_map[s.name].actions.summary()
 
-        verdict_label, verdict_style = _compute_verdict(
-            actions_map.get(s.name), scan_map.get(s.name),
+        verdict_label, verdict_style = _mcp_list_verdict(
+            actions_map.get(s.name), scan_map.get(s.name), policy,
         )
         if failed_map and s.name in failed_map and not _has_enforcement_action(actions_map.get(s.name)):
             verdict_label, verdict_style = "scan failed", "yellow"
@@ -1355,7 +1459,7 @@ def _scan_all_mcp(
     )
     _scan_ui.render_preamble(ctx, target_count=len(scan_targets))
 
-    clean = blocked = errored = 0
+    clean = warned = blocked = errored = 0
     private_refused: list[MCPServerEntry] = []
     json_rows: list[dict] = list(source_error_rows)
     started = time.monotonic()
@@ -1393,11 +1497,15 @@ def _scan_all_mcp(
                     ctx, target=s.name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
                 )
             else:
-                blocked += 1
+                verdict = _mcp_scan_findings_verdict(app, pe, result, name=s.name, connector=connector)
+                if verdict == _scan_ui.VERDICT_BLOCKED:
+                    blocked += 1
+                else:
+                    warned += 1
                 _scan_ui.render_per_target_status(
                     ctx,
                     target=s.name,
-                    verdict=_scan_ui.VERDICT_BLOCKED,
+                    verdict=verdict,
                     detail=f"max severity: {result.max_severity()}",
                     findings=len(result.findings),
                 )
@@ -1408,13 +1516,14 @@ def _scan_all_mcp(
         _scan_ui.render_summary(
             ctx,
             clean=clean,
+            warning=warned,
             blocked=blocked,
             errored=errored,
-            total=clean + blocked + errored,
+            total=clean + warned + blocked + errored,
             duration_ms=duration_ms,
         )
         from defenseclaw.commands import hint
-        if blocked:
+        if blocked or warned:
             hint("View alerts:  defenseclaw alerts")
         if private_refused:
             # GAP-2498: a loopback/private URL is refused without the opt-in.
@@ -1679,15 +1788,19 @@ def _scan_one_resolved(
         _print_scan_result(result, as_json, connector=connector)
         return "clean" if result.is_clean() else "findings"
 
+    verdict = _scan_ui.VERDICT_CLEAN
     if result.is_clean():
         _scan_ui.render_per_target_status(
             ctx, target=target, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
         )
     else:
+        verdict = _mcp_scan_findings_verdict(
+            app, pe, result, name=entry.name if entry else target, connector=connector,
+        )
         _scan_ui.render_per_target_status(
             ctx,
             target=target,
-            verdict=_scan_ui.VERDICT_BLOCKED,
+            verdict=verdict,
             detail=f"max severity: {result.max_severity()}",
             findings=len(result.findings),
         )
@@ -1696,7 +1809,8 @@ def _scan_one_resolved(
     _scan_ui.render_summary(
         ctx,
         clean=1 if result.is_clean() else 0,
-        blocked=0 if result.is_clean() else 1,
+        warning=0 if verdict in (_scan_ui.VERDICT_CLEAN, _scan_ui.VERDICT_BLOCKED) else 1,
+        blocked=1 if verdict == _scan_ui.VERDICT_BLOCKED else 0,
         errored=0,
         total=1,
         duration_ms=duration_ms,
@@ -2446,6 +2560,32 @@ def _openclaw_config_unset(path: str) -> None:
         raise click.ClickException(f"openclaw config unset failed: {detail}")
 
 
+def _is_write_failure(exc: Exception) -> bool:
+    """An OS error, or the refusal to write through a symlink that a connector
+    writer re-raises as a ValueError (GAP-1390): both end in one plain line."""
+    from defenseclaw.file_permissions import UnsafePathError
+
+    return isinstance(exc, OSError) or isinstance(exc.__cause__, UnsafePathError)
+
+
+def _connector_label(connector: str) -> str:
+    """The connector as ``mcp set`` and ``mcp unset`` report it: Claude Code
+    also names the profile it wrote, the default one or the CLAUDE_CONFIG_DIR
+    folder (GAP-1390)."""
+    if connector_paths.normalize(connector) != "claudecode":
+        return connector
+    if not (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip():
+        return f"{connector}, default profile"
+    return f"{connector}, profile {connector_paths.claude_config_dir()}"
+
+
+def _connector_labels(connectors: list[str]) -> str:
+    """The labels of *connectors* as one list; a label with a profile contains a
+    comma, so the list is then separated with semicolons."""
+    labels = [_connector_label(c) for c in connectors]
+    return ("; " if any("," in label for label in labels) else ", ").join(labels)
+
+
 def _connector_write_error(exc: Exception) -> str:
     """Return one plain line for an unexpected connector config write failure.
 
@@ -2925,7 +3065,7 @@ def set_server(
             # leave a silent partial write, so it is isolated and surfaced via a
             # non-zero exit below.
             if len(connectors) == 1:
-                if isinstance(exc, OSError):
+                if _is_write_failure(exc):
                     raise click.ClickException(
                         f"MCP server {name!r} was not saved for {c}: {_connector_write_error(exc)}"
                     ) from exc
@@ -2984,12 +3124,12 @@ def set_server(
         prep = "on" if verb == "Updated" else "to"
         click.secho(
             f"[mcp] {verb} {name!r} {prep} {len(applied)} connectors: "
-            f"{', '.join(applied)}{not_applied_suffix}.",
+            f"{_connector_labels(applied)}{not_applied_suffix}.",
             fg="green",
         )
     else:
         click.secho(
-            f"[mcp] {verb} {name!r} ({applied[0]}){not_applied_suffix}.",
+            f"[mcp] {verb} {name!r} ({_connector_label(applied[0])}){not_applied_suffix}.",
             fg="green",
         )
 
@@ -3017,6 +3157,45 @@ def set_server(
         # GAP-2311: keep the --connector the user passed, as unblock does.
         scan_connector = applied[0] if connector_flag and len(applied) == 1 else ""
         hint(f"Scan it now:  {_mcp_scan_command(name, scan_connector, url)}")
+
+
+def _mcp_entries_unset_does_not_write(
+    app: AppContext, connectors: list[str], name: str,
+) -> list[tuple[str, MCPServerEntry]]:
+    """Return the *name* entries ``mcp list`` shows that ``mcp unset`` skips.
+
+    ``mcp list`` also reads the project and local scopes of the current
+    folder; ``mcp unset`` only removes from the scope DefenseClaw writes.
+    """
+    out: list[tuple[str, MCPServerEntry]] = []
+    for c in connectors:
+        try:
+            listed = [s for s in _collect_mcps_for_connector(app, c) if s.name == name]
+        except Exception:  # noqa: BLE001 - a hint must never fail the command
+            continue
+        out.extend((c, s) for s in listed)
+    return out
+
+
+def _mcp_remove_elsewhere_hint(app: AppContext, connector: str, name: str, entry: MCPServerEntry) -> str:
+    where = entry.source or "a project config"
+    if connector_paths.normalize(connector) == "claudecode":
+        # Local entries live under projects[<folder>] of the Claude state file.
+        where = entry.source or f"projects of {connector_paths.claude_mcp_state_path()}"
+        scope = "project" if os.path.basename(entry.source or "") == ".mcp.json" else "local"
+        try:
+            folder = app.cfg.connector_workspace_dir() or ""
+        except Exception:  # noqa: BLE001
+            folder = ""
+        folder = folder or os.getcwd()
+        return (
+            f"{name!r} is in the Claude Code {scope} scope of {folder} ({where}), which mcp unset "
+            f"does not write; remove it there with: claude mcp remove {name} -s {scope}"
+        )
+    return (
+        f"{name!r} is listed in {where}, which mcp unset does not write; "
+        f"remove it there or with the {connector} MCP command"
+    )
 
 
 @mcp.command("unset")
@@ -3062,7 +3241,7 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
             # verbatim for a single-connector target, otherwise isolate it so a
             # writable peer is still cleaned up (surfaced via non-zero exit).
             if len(connectors) == 1:
-                if isinstance(exc, OSError):
+                if _is_write_failure(exc):
                     raise click.ClickException(
                         f"MCP server {name!r} was not removed from {c}: {_connector_write_error(exc)}"
                     ) from exc
@@ -3089,6 +3268,22 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
                 f"MCP server {name!r} is present but not removable on: "
                 f"{', '.join(skipped)} (no writable MCP surface)."
             )
+        elsewhere = _mcp_entries_unset_does_not_write(app, connectors, name)
+        if elsewhere:
+            # GAP-2594: mcp list showed the server (a project or local scope
+            # read from the cwd, such as claude mcp add without -s), but unset
+            # writes only the scope DefenseClaw manages. Say where it is and
+            # how to remove it instead of calling it not configured.
+            for c, entry in elsewhere:
+                click.secho(f"  not removed [{c}]: {_mcp_remove_elsewhere_hint(app, c, name, entry)}", fg="red")
+            kept = sorted({c for c, _ in elsewhere})
+            if app.logger:
+                saved_change_audit(app.logger).log_action(
+                    "mcp-unset", name, f"result=not-removed connectors={','.join(kept)}"
+                )
+            raise click.ClickException(
+                f"MCP server {name!r} was not removed from: {', '.join(kept)}."
+            )
         click.secho(
             f"MCP server {name!r} not configured on: {', '.join(connectors)}; "
             "nothing to remove.",
@@ -3106,9 +3301,12 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
     skipped_note = f" ({len(skipped)} skipped: {', '.join(skipped)})" if skipped else ""
     if gone:
         if len(gone) == 1 and len(connectors) == 1:
-            click.secho(f"[mcp] Removed {name!r} ({gone[0]}).", fg="yellow")
+            click.secho(f"[mcp] Removed {name!r} ({_connector_label(gone[0])}).", fg="yellow")
         else:
-            click.secho(f"[mcp] Removed {name!r} from {', '.join(gone)}{skipped_note}.", fg="yellow")
+            click.secho(
+                f"[mcp] Removed {name!r} from {_connector_labels(gone)}{skipped_note}.",
+                fg="yellow",
+            )
     for c in restored:
         click.secho(
             f"Restored your previous {name} entry on {c} (DefenseClaw's version removed); "

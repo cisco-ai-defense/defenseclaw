@@ -671,14 +671,14 @@ _is_valid_opencode_version() {
   [[ "${version}" =~ ${semver_re} ]]
 }
 
-# _probe_opencode_json_version PATH -> echoes a validated opencode-ai package
+# _probe_opencode_json_version PATH -> echoes a validated @opencode/cli V2 package
 # version. The package-name check prevents a similarly placed, unrelated npm
 # package from becoming version authority. Malformed JSON and invalid version
 # strings feed the installer's existing discovery-error report.
 _probe_opencode_json_version() {
   local path="$1"
   local version
-  version="$(_probe_json_version "${path}" opencode "opencode-ai")"
+  version="$(_probe_json_version "${path}" opencode "@opencode/cli")"
   [[ -n "${version}" ]] || return 0
   if ! _is_valid_opencode_version "${version}"; then
     _record_discovery_error opencode "${path}" "invalid-version"
@@ -1158,10 +1158,10 @@ discover_agent_version() {
 
       local pkg
       for pkg in \
-        "${home}"/.npm-global/lib/node_modules/opencode-ai/package.json \
-        "${home}"/.local/lib/node_modules/opencode-ai/package.json \
-        /usr/local/lib/node_modules/opencode-ai/package.json \
-        /opt/homebrew/lib/node_modules/opencode-ai/package.json; do
+        "${home}"/.npm-global/lib/node_modules/@opencode/cli/package.json \
+        "${home}"/.local/lib/node_modules/@opencode/cli/package.json \
+        /usr/local/lib/node_modules/@opencode/cli/package.json \
+        /opt/homebrew/lib/node_modules/@opencode/cli/package.json; do
         [[ -f "${pkg}" ]] || continue
         version="$(_probe_opencode_json_version "${pkg}")"
         if [[ -n "${version}" ]]; then echo "${version}"; return; fi

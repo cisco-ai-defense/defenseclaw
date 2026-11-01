@@ -1159,7 +1159,7 @@ func TestRemovedConnectorTeardownLeftoversAreShown(t *testing.T) {
 	recordRemovedConnectorLeftovers("omnigent", []byte("not json\n"))
 	got := removedConnectorNotesText()
 	for _, want := range []string{
-		"OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:",
+		"OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.",
 		`C:\Users\u\.omnigent\config.yaml: OmniGent still imports DefenseClaw's policy module from here. To remove: remove defenseclaw_omnigent_policy from policy_modules.`,
 		`defenseclaw_omnigent_policy.py: the stub that blocks every OmniGent call. To remove: delete it once nothing above runs it.`,
 	} {

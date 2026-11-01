@@ -93,10 +93,12 @@ On a Mac use `shasum -a 256 -c`. If you stage releases on an internal mirror, co
 
 ## Deliver the config
 
-For signed bundles on Windows, install the base app first and make the bundle app
-depend on it. The packager checks only specific base-config blocks against the
-bundle; [check which settings must match](/docs/enterprise/mdm/intune-windows)
-and put any other required enforcement settings in the base config too.
+For signed bundles on Windows, deliver one app that carries the config and the
+first bundle: Setup installs with the services stopped and starts them on the
+signed bundle, so nothing runs on the config
+(the single app in [Intune on Windows](/docs/enterprise/mdm/intune-windows)).
+Devices installed earlier with a base app and a dependent bundle app take the
+same single app.
 
 The config decides which agents are protected and how, and it is the only policy a
 managed host enforces. Content: [Settings](/docs/enterprise/configuration) and
@@ -279,10 +281,22 @@ gpg --dearmor < defenseclaw-enterprise-release-key.asc > defenseclaw-enterprise-
   need 7.4 or later. Setup, `detect.ps1`, `uninstall.ps1` and the Intune scripts
   do not need it to start.
 - **Time.** Setup gives the lifecycle 30 minutes by default (`TIMEOUTSECONDS=60`
-  to `7200`). Allow at least that long in your MDM.
+  to `7200`), counted from when Setup starts, so its payload checks and unpacking
+  count too; a run with less than about a minute left after them does not start
+  the lifecycle and changes nothing, so a change needs `TIMEOUTSECONDS` of at least about 2 minutes (`120`); lower values suit only `/verify` and `/status`. `120` only lets a change start: an
+  unloaded upgrade or `/ensure` takes about 5 to 8 minutes, so keep the default unless you
+  have a reason not to. On Windows, a standalone Setup
+  run stopped at `TIMEOUTSECONDS` then runs its own recovery for up to 10 more
+  minutes, so allow `TIMEOUTSECONDS` plus 10 minutes (40 minutes by default). An
+  MDM that ends Setup sooner can stop that recovery and leave `verify` failing
+  until the next `/ensure` or `/repair`.
 - **One run at a time.** A second run while one holds the lifecycle lock, or
   while dpkg, rpm or the macOS installer is busy, exits `1618` (Windows) or `75`
-  (Linux, macOS). Retry later.
+  (Linux, macOS). Retry later. On Windows, a Setup that would upgrade the
+  installed release also exits `1618` (`lifecycle_busy`) before it changes
+  anything when the processors are less than 25% idle over 6 seconds: the
+  upgrade runs below normal priority so agent hooks keep answering, and could
+  not finish in time on a computer that busy.
 - **Leftovers of an unmanaged install (Linux, macOS).** If DefenseClaw machine
   files exist that no committed deployment owns, `ensure` refuses with
   `unmanaged_layout_present`. Take them over once by running
@@ -308,7 +322,7 @@ and `/norestart` are accepted and ignored.
 | `NOSTART=1` | Install with the services stopped (mutating actions only). |
 | `PURGE=1` | With `/uninstall`, also remove each enrolled account's DefenseClaw data and per-user binaries. |
 | `FORCE=1` | With `/uninstall`, last resort: remove the deployment without recovering a pending transaction. |
-| `TIMEOUTSECONDS=` | Lifecycle timeout, 60 to 7200 seconds. Default 1800. |
+| `TIMEOUTSECONDS=` | Lifecycle timeout, 60 to 7200 seconds, counted from when Setup starts. Default 1800. A change needs at least about 120; lower values suit only `/verify` and `/status`. |
 | `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the administrator's attestation that Claude Code runs DefenseClaw's managed hooks. See [Claude Code on Windows](#claude-code-on-windows). |
 
 ## Exit codes
@@ -603,6 +617,8 @@ instead. On a refusal the config is not applied, but on Linux and macOS the
 wrapper runs its earlier steps first: a deb, rpm or pkg package (`--source`) is
 installed and a credential (`--secret-name`) is stored, and both stay.
 
+When you deliver a credential with a bundle, the script first writes what it replaces to a root-only journal (`/var/lib/defenseclaw-mdm/rotation` on Linux, `/var/db/defenseclaw-mdm/rotation` on macOS). If the bundle does not apply, it puts the earlier value back, or removes a credential it added. If the run is stopped before it finishes, the next ensure does that before it changes anything. The new value stays only when the gateway reports that a bundle confirmed since uses it. If the gateway refuses the put-back for another reason, the journal entry stays, the wrapper log says why, and the script rotates no other credential until it is resolved. On Linux and macOS the wrapper journals a credential it rotates with a bundle in that root-only folder. Until the rotation settles, `<name>.value` there holds a root-only copy of the earlier credential. If an entry cannot be settled, every ensure exits `mdm_secret_failed` and the wrapper log says why; deliver the package with `--source`, or fix the logged cause, and run ensure again. Two kit runs do not rotate at once: the wrapper holds a lock on the journal, and a run that waits for it logs that it waits (after 2 seconds, then once a minute, up to 10 minutes). Two first runs that start together both create the state folders without failing.
+
 An MDM that detects the Windows deployment by version does not re-run it for a
 config-only change.
 [Intune on Windows](/docs/enterprise/mdm/intune-windows#6-change-the-config-upgrade-and-roll-back)
@@ -616,9 +632,9 @@ no-op result and exit `0`.
 
 | OS | Command | Removes |
 | --- | --- | --- |
-| Linux | `uninstall.sh [--purge] [--keep-package] [--log FILE]`, or `DC_PURGE=1` and `DC_KEEP_PACKAGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), config, credentials, most state and logs, and the `defenseclaw` service account, then the deb or rpm unless `--keep-package`. Your policies in `/etc/defenseclaw/policies` stay; `--purge` removes them. `--purge` also removes each enrolled account's `~/.defenseclaw` and per-user binaries (an account's own earlier install is moved to `~/.defenseclaw-backup-<UTC time>` first), the kept sandbox store and key, and the wrapper's staging folder `/var/lib/defenseclaw-mdm` once it is empty. |
-| macOS | `uninstall.sh [--purge] [--log FILE]`, or `DC_PURGE=1` in its settings block | The same, with the `_defenseclaw` account; the lifecycle forgets the pkg receipt. |
-| Windows | `uninstall.ps1 [-Purge]`, or `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` with optional `PURGE=1` | The services, hooks and machine-policy entries, the machine state (config, key and state), the Add/Remove Programs entry and the marker. Purge also removes each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries. |
+| Linux | `uninstall.sh [--purge] [--keep-package] [--log FILE]`, or `DC_PURGE=1` and `DC_KEEP_PACKAGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), config, credentials, most state and logs, and the `defenseclaw` service account, then the deb or rpm unless `--keep-package`. Your policies in `/etc/defenseclaw/policies` stay; `--purge` removes them. `--purge` also removes each enrolled account's `~/.defenseclaw` and per-user binaries, the kept sandbox store and key, and the wrapper's state folder (`/var/lib/defenseclaw-mdm` on Linux, `/var/db/defenseclaw-mdm` on macOS), including the rotation journal and the staging folders of wrapper runs that were killed. If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. Every completed uninstall, through `uninstall.sh` or `enterprise linux|macos uninstall`, overwrites and removes the rotation journal; `uninstall --keep-state`, or an uninstall that fails and keeps the credentials for a rerun, keeps it. |
+| macOS | `uninstall.sh [--purge] [--staging-dir DIR] [--log FILE]`, or `DC_PURGE=1` in its settings block | The same, with the `_defenseclaw` account; the lifecycle forgets the pkg receipt. `--purge` also removes the wrapper's empty state folder `/var/db/defenseclaw-mdm` and the staging folders that killed wrapper runs left in `/var/tmp` (and in the `--staging-dir` folder, if your wrapper runs used one). |
+| Windows | `uninstall.ps1 [-Purge]`, or `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` with optional `PURGE=1` | The services, hooks and machine-policy entries, the machine state (config, key and state), the Add/Remove Programs entry and the marker. Purge also removes each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries, and the kit's rotation journal `C:\ProgramData\Cisco\DefenseClaw-MDM\rotation`. A plain uninstall keeps that journal and the JSON result names it (`mdm_rotation_journal_kept`). |
 
 Without `--purge`, if an account keeps sandboxes, the gateway's sandbox store and
 `redaction-correlation.key` stay root-owned until the next `ensure` adopts them.

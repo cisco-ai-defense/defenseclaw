@@ -11,6 +11,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,8 +71,13 @@ var configValidateCmd = &cobra.Command{
 			// (pack digests included) at load and on every reload.
 			_, derivationErr = loaded.runtime.DeriveGuardrailProfiles()
 		}
+		var packErr error
+		if err == nil && derivationErr == nil {
+			// The required sandbox packs, as ensure loads them (GAP-0546).
+			packErr = configValidateRequiredSandboxPacks(loaded.runtime)
+		}
 		out := cmd.OutOrStdout()
-		if err != nil || derivationErr != nil {
+		if err != nil || derivationErr != nil || packErr != nil {
 			failure := configV8ValidationFailure(err)
 			if derivationErr != nil {
 				failure.Path = "$.guardrail.profiles"
@@ -79,9 +85,18 @@ var configValidateCmd = &cobra.Command{
 					configV8SettingRule(derivationErr.Error()), "", "")
 				failure.ConfigVersion = loaded.runtime.ConfigVersion
 			}
+			if packErr != nil {
+				failure.Path = "$.openshell.admin.required_pack"
+				failure.Reason = configV8DiagnosticReason("config_semantic_invalid",
+					configV8SettingRule(packErr.Error()), "", "")
+				failure.ConfigVersion = loaded.runtime.ConfigVersion
+			}
 			refusal := err
 			if derivationErr != nil {
 				refusal = derivationErr
+			}
+			if packErr != nil {
+				refusal = packErr
 			}
 			plain, worded := configValidatePlainRefusal(refusal, failure, configValidateShownPath(path), path)
 			var readError *configV8ReadError
@@ -104,6 +119,7 @@ var configValidateCmd = &cobra.Command{
 		warnings := append(gateway.ConfigHILTWarnings(loaded.runtime), loaded.runtime.SandboxDefaultProfileWarnings()...)
 		warnings = append(warnings, configV8InstalledAdvisories(loaded)...)
 		warnings = append(warnings, configValidateManagedStandaloneWarnings(loaded)...)
+		warnings = append(warnings, configValidateUserEntryWarnings(cmd.Context(), loaded.runtime.Guardrail.ProfileAssignments)...)
 		if configValidateJSON {
 			valid := true
 			encoder := json.NewEncoder(out)
@@ -123,6 +139,20 @@ var configValidateCmd = &cobra.Command{
 	},
 }
 
+// configValidateUserEntryWarnings names the guardrail.profile_assignments
+// users entries that select nobody on this computer, as status and verify
+// name them once the gateway runs the file (GAP-0197). A seam for tests.
+var configValidateUserEntryWarnings = func(ctx context.Context, assignments []config.ProfileAssignment) []string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var warnings []string
+	for _, warning := range gateway.ProfileUserEntryWarnings(ctx, assignments) {
+		warnings = append(warnings, warning+" (profile_assignment_unmatched)")
+	}
+	return warnings
+}
+
 // configValidateLayout is this computer's standalone layout. A seam for
 // tests.
 var configValidateLayout = func() (managed.StandaloneLayout, error) {
@@ -133,7 +163,17 @@ var configValidateLayout = func() (managed.StandaloneLayout, error) {
 // layout when its administrator-owned runtime descriptor is present.
 func configValidateManagedHostLayout() (managed.StandaloneLayout, bool) {
 	layout, err := configValidateLayout()
-	if err != nil || layout.DescriptorPath == "" {
+	if err != nil {
+		return managed.StandaloneLayout{}, false
+	}
+	// A Windows standalone computer is named by its protected registration
+	// marker, as every other managed-host check there reads it; without it
+	// validate with no file read the per-user config the administrator has
+	// none of (GAP-1625, the Windows half of GAP-0602).
+	if _, present := managedHostWindowsStandalone(); present {
+		return layout, true
+	}
+	if layout.DescriptorPath == "" {
 		return managed.StandaloneLayout{}, false
 	}
 	if _, err := os.Stat(layout.DescriptorPath); err != nil {

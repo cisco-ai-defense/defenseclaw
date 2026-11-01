@@ -393,6 +393,9 @@ $failures = & $module {
         Reset-TestHost -StagedVersion '1.0.40' -SetupVersion '1.0.40-rc.1'
         Assert-TestRefused 'a prerelease of the staged release' 'older_release'
 
+        Reset-TestHost -StagedVersion '1.0.40-rc.10' -SetupVersion '1.0.40-rc.9'
+        Assert-TestRefused 'an earlier numbered prerelease (rc.9 over rc.10)' 'older_release'
+
         Reset-TestHost -SetupVersion ''
         Assert-TestRefused 'a Setup gateway without a version resource' 'version_unknown'
 
@@ -403,7 +406,8 @@ $failures = & $module {
             @('1.0.40', '1.0.40'),
             @('1.0.40-rc.1', '1.0.40'),
             @('1.0.40', 'v1.0.41+abc'),
-            @('1.0.9', '1.0.10')
+            @('1.0.9', '1.0.10'),
+            @('1.0.40-rc.9', '1.0.40-rc.10')
         )) {
             Reset-TestHost -StagedVersion $pair[0] -SetupVersion $pair[1]
             $outcome = Invoke-TestRecovery
@@ -421,7 +425,13 @@ $failures = & $module {
             @('1.0', '1.0.0', 0),
             @('V1.0.43+build.7', '1.0.43', 0),
             @('1.0.43-rc.1', '1.0.43', -1),
-            @('1.0.43-rc.2', '1.0.43-rc.10', 1),
+            @('1.0.43-rc.2', '1.0.43-rc.10', -1),
+            @('1.0.43-rc.9', '1.0.43-rc.10', -1),
+            @('1.0.43-rc.10', '1.0.43-rc.9', 1),
+            @('1.0.43-rc.1', '1.0.43-rc.1.1', -1),
+            @('1.0.43-rc.1', '1.0.43-rc.a', -1),
+            @('1.0.43-alpha', '1.0.43-beta', -1),
+            @('1.0.43-dev.wm9', '1.0.43-dev.wm10', 1),
             @('1.0.43.1', '1.0.43', 1)
         )) {
             $left = ConvertTo-DefenseClawRecoveryGatewayRelease -Value $case[0]

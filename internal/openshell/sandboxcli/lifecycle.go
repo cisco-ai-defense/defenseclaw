@@ -89,11 +89,18 @@ func otherDriverSandboxes(list []sandboxapi.Sandbox, live string) []sandboxapi.S
 	}
 	var out []sandboxapi.Sandbox
 	for _, sb := range list {
-		if sb.Phase != "deleted" && createdDriver(sb) != live {
+		if sb.Phase != "deleted" && !beingCreated(sb) && createdDriver(sb) != live {
 			out = append(out, sb)
 		}
 	}
 	return out
+}
+
+// beingCreated reports a sandbox whose create is still under way and has
+// recorded no driver yet: it is being made on the driver the gateway runs
+// now, never an old record of the docker driver (GAP-1431).
+func beingCreated(sb sandboxapi.Sandbox) bool {
+	return sb.Driver == "" && (sb.Phase == "creating" || sb.Phase == "provisioning" || sb.Phase == "pending")
 }
 
 // otherDriverNote says which sandboxes belong to a driver the gateway no
@@ -303,6 +310,44 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 		row("Telemetry", a.style(fmt.Sprintf("%s refused since the daemon started; last: %s",
 			plural(st.TelemetryFailures, "record", "records"), truncate(sandboxapi.DisplayText(st.TelemetryError), 200)), ansiRed))
 	}
+	for _, u := range st.Unprotected {
+		// A live legacy guest (GAP-0901), a contained one (GAP-0902) or one
+		// that may be either whose gateway has not said (GAP-1085,
+		// GAP-1089), in the daemon's words for each: no new sandbox runs
+		// until it is gone, and DefenseClaw does not stop it for the user.
+		row("Unprotected", a.style(u.Name+": "+unprotectedWords(u)+"; "+unprotectedWay(u), ansiRed))
+	}
+}
+
+// unprotectedWords names the state of the unprotected guest u: a live
+// legacy one (no reason: what a daemon of the first 1.0.4 builds sends too)
+// or a contained one, and the daemon's own reason for any other.
+func unprotectedWords(u sandboxapi.UnprotectedSandbox) string {
+	switch u.Reason {
+	case "":
+		return sandboxapi.LegacyUnprotected
+	case sandboxapi.UnprotectedContained:
+		return sandboxapi.ContainedUnprotected
+	case sandboxapi.UnprotectedUnknown:
+		return sandboxapi.UnknownUnprotected
+	}
+	return "running unprotected: " + u.Reason
+}
+
+// unprotectedWay is what the user of the unprotected guest u does: the
+// daemon's detail, and the command that ends it.
+func unprotectedWay(u sandboxapi.UnprotectedSandbox) string {
+	way := "no new sandbox runs until it is gone"
+	if u.Reason == sandboxapi.UnprotectedUnknown {
+		way = "no new sandbox runs until its gateway says"
+	}
+	if u.Detail != "" {
+		way += ": " + u.Detail
+	}
+	if u.Stop != "" {
+		way += ": `" + u.Stop + "`"
+	}
+	return way
 }
 
 func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
@@ -333,9 +378,17 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		// The floor refuses every ask, whatever triage's mode (GAP-0468).
 		approvals = "refused (your profile doesn't let you approve asks)"
 	}
-	if sandboxPolicyPending(*sb) {
+	switch {
+	case sandboxPolicyPending(*sb):
 		row("Policy", "pending (resolving policy)")
-	} else {
+	case sb.StopReason != "":
+		// The organization's gateway ended the registration (the Stopped
+		// row says why): the policy shown is the one the sandbox was
+		// created with, which is not in force; it can't start under it
+		// (GAP-0606). The list keeps naming it (GAP-0079).
+		row("Policy", fmt.Sprintf("pack %s, network %s, approvals %s: the policy it was created with, not in force; it can't start under it (see Stopped)",
+			joinNonEmpty(" ", firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest)), networkLabel(sb), sb.Approvals))
+	default:
 		row("Policy", fmt.Sprintf("pack %s, network %s, approvals %s", joinNonEmpty(" ", firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest)), networkLabel(sb), approvals))
 	}
 	// On a managed computer: the organization profile the sandbox's
@@ -554,10 +607,13 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	args := o.Args
 	shown := RunOptions{Args: args, Prompt: o.Prompt}
 	if run != nil {
+		shownArgs := sessionArgs(run.Args, o.Args)
 		if !o.Shell {
-			args = sessionArgs(run.Args, o.Args)
+			args = shownArgs
 		}
-		shown = RunOptions{Args: args, Prompt: o.Prompt, Credentials: run.Credentials, GitHubWrite: run.GitHubWrite, HostPorts: run.HostPorts}
+		// A companion shell still shows the saved model, but receives no
+		// harness options itself.
+		shown = RunOptions{Args: shownArgs, Prompt: o.Prompt, Credentials: run.Credentials, GitHubWrite: run.GitHubWrite, HostPorts: run.HostPorts}
 	}
 	started, kept := false, sb.Phase == "ready"
 	if sb.Phase != "ready" {
@@ -594,6 +650,13 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	// fail stops the sandbox this command started for a session that never
 	// began: the probe, the refresh or the harness's start failed.
 	fail := func(err error) error {
+		var missing *openShellClientMissingError
+		if errors.As(err, &missing) {
+			// The sandbox runs; only this command cannot reach it. Stopping it
+			// would end what it runs for a client binary that the account's
+			// sandbox service installs again (GAP-0196).
+			return a.openShellClientMissingText(ctx, missing, started)
+		}
 		if started {
 			switch keep, serr := a.stopIfAlone(context.WithoutCancel(ctx), api, sb.Name, nil); {
 			case keep != "":
@@ -664,9 +727,10 @@ func oldSupervisorRefusal(sb *sandboxapi.Sandbox) error {
 	name := sb.Name
 	stop := "save the work you need, then run `" + CommandName + " stop " + name + "`"
 	if d, ok := openshell.LookupDriver(sb.Driver); !ok || !d.StopFlushes {
-		stop += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost)"
+		stop += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost) " +
+			"and, when that sync fails, asks before it stops the VM"
 	}
-	return fmt.Errorf("%s: legacy sandbox running, not protected by the 1.0.4 egress policy: its session runs the supervisor of an OpenShell release older than %s, "+
+	return fmt.Errorf("%s: "+sandboxapi.LegacyUnprotected+": its session runs the supervisor of an OpenShell release older than %s, "+
 		"whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494), so DefenseClaw runs nothing in it and does not stop it for you: "+
 		"%s; then `%s start %s` (or `connect`) runs it on the gateway's own supervisor",
 		name, openshell.SupportedMin, stop, CommandName, name)
@@ -830,6 +894,11 @@ type StopOptions struct {
 	// whose own disk could not be looked at, without asking. A copy-mode
 	// MicroVM whose disk is full keeps running even so (fullDiskStop).
 	Yes bool
+	// DiscardUnsynced stops a MicroVM whose disk could not be synced first,
+	// losing what it wrote since its last sync. Yes does not: without it
+	// such a stop is asked on a terminal, and refused without one
+	// (askDiscardUnsynced).
+	DiscardUnsynced bool
 }
 
 // ExitStopKept is the exit status of a `sandbox stop` that kept the
@@ -899,15 +968,27 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	// request (copyBase).
 	var stopped *sandboxapi.Sandbox
 	var stopErr error
-	err = a.endAsked(ctx, o.Name, asked, func(others int) (bool, error) {
-		copyAt = nil
-		return a.confirmEnding(attachedText(o.Name, others)+" now; stopping the sandbox ends "+them(others), "Stop anyway?", o.Yes)
-	}, func() {
-		stopped, stopErr = api.Stop(ctx, o.Name)
-		if stopErr == nil && copyAt != nil && base.unchanged(a, o.Name, stopped) {
-			a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
+	stopGated := func(discard bool) error {
+		return a.endAsked(ctx, o.Name, asked, func(others int) (bool, error) {
+			copyAt = nil
+			return a.confirmEnding(attachedText(o.Name, others)+" now; stopping the sandbox ends "+them(others), "Stop anyway?", o.Yes)
+		}, func() {
+			stopped, stopErr = api.StopWith(ctx, o.Name, sandboxapi.StopRequest{DiscardUnsynced: discard})
+			if stopErr == nil && copyAt != nil && base.unchanged(a, o.Name, stopped) {
+				a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
+			}
+		})
+	}
+	err = stopGated(o.DiscardUnsynced)
+	if err == nil && stopErr != nil && !o.DiscardUnsynced && sandboxapi.IsCode(stopErr, sandboxapi.CodeUnsynced) {
+		// The question is asked with no gate held; a yes stops under the gate
+		// again (GAP-0902).
+		discard, aerr := a.askDiscardUnsynced(o.Name, stopErr)
+		if aerr != nil || !discard {
+			return aerr
 		}
-	})
+		err = stopGated(true)
+	}
 	switch {
 	case errors.Is(err, errKept):
 		a.note(o.Name + " keeps running")
@@ -923,6 +1004,30 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	}
 	a.ok(stopped.Name + " is " + stopped.Phase)
 	return nil
+}
+
+// askDiscardUnsynced answers the daemon's refusal (err) to stop a MicroVM
+// whose disk it could not sync first (sandboxapi.CodeUnsynced, GAP-0902): on
+// a terminal the user is told what is lost and asked, and only a yes stops
+// it, accepting the loss (sandboxapi.StopRequest.DiscardUnsynced);
+// --discard-unsynced accepts it up front. --yes does not, since the TUI, the
+// macOS app and scripts pass it for the question about a detached run.
+// Without a terminal the sandbox keeps running (ExitStopKept). A no keeps
+// it running too, and returns false and no error.
+func (a *App) askDiscardUnsynced(name string, err error) (bool, error) {
+	a.warn(sandboxapi.AsError(err).Message)
+	if !a.IO.TTY {
+		a.note("to stop it anyway, losing that: `" + CommandName + " stop " + name + " --discard-unsynced`")
+		return false, &ExitError{Code: ExitStopKept, Err: &Silent{Err: errors.New(name + " keeps running: its disk could not be synced")}}
+	}
+	ok, aerr := a.ask("Stop "+name+" anyway and lose what it wrote since its last sync?", false, false)
+	if aerr != nil {
+		return false, aerr
+	}
+	if !ok {
+		a.note(name + " keeps running; save the work you need, then stop it again")
+	}
+	return ok, nil
 }
 
 // stopFailure is the error of the stop of the sandbox name that the daemon
@@ -1068,6 +1173,17 @@ func (d overlayDisk) percent() int64 {
 // filling reports a disk that is full or nearly so.
 func (d overlayDisk) filling() bool {
 	return d.known && (d.full() || d.percent() >= overlayDiskWarnPercent)
+}
+
+// fillsWithin reports whether d, at the rate its free space fell since the
+// look before (prev, elapsed ago), runs out of room within horizon.
+func (d overlayDisk) fillsWithin(prev overlayDisk, elapsed, horizon time.Duration) bool {
+	if !d.known || !prev.known || prev.size != d.size || elapsed <= 0 || d.avail >= prev.avail {
+		return false
+	}
+	perSecond := float64(prev.avail-d.avail) / elapsed.Seconds()
+	left := float64(d.avail - lowDiskBytes)
+	return left <= 0 || left/perSecond <= horizon.Seconds()
 }
 
 // overlayDiskOf looks at the own disk of the running MicroVM name with
@@ -1595,4 +1711,23 @@ func (a *App) stoppedUnderFollower(ctx context.Context, api API, sb *sandboxapi.
 	a.note(fmt.Sprintf("%s is %s (%s); DefenseClaw kept the log of its detached run (`%s logs %s` shows it)",
 		sb.Name, sb.Phase, a.clock(kept.KeptAt), CommandName, sb.Name))
 	a.keptRunState(kept)
+}
+
+// openShellClientMissingText is the refusal of a connect that could not run
+// the OpenShell command (openShellClientMissingError), with the next step: on
+// a managed computer the account's sandbox service puts its copy back, so
+// the command is run again, and the organization's contact if it lasts.
+func (a *App) openShellClientMissingText(ctx context.Context, e *openShellClientMissingError, started bool) error {
+	state := e.sandbox + " keeps running"
+	if !started {
+		state = e.sandbox + " is not changed"
+	}
+	facts := a.managedFacts(ctx)
+	if a.ManagedHost() || onManagedHost() || a.managedSeen != nil {
+		return fmt.Errorf("%s; %s. This happens for a short while after your organization changed the sandbox setup on this computer, "+
+			"until your sandbox service installs the command again: run `%s sandbox connect %s` again in a minute, and `%s sandbox doctor` shows what is missing. %s",
+			e.Error(), state, CommandName, e.sandbox, CommandName, accountOutageContact(facts.RequestAccess))
+	}
+	return fmt.Errorf("%s; %s. Install OpenShell again with `%s sandbox setup`, and `%s sandbox doctor` shows what is missing",
+		e.Error(), state, CommandName, CommandName)
 }

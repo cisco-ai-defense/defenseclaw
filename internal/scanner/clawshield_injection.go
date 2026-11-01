@@ -96,7 +96,8 @@ func (s *ClawShieldInjectionScanner) Scan(ctx context.Context, target string) (*
 	start := time.Now()
 	result := &ScanResult{Scanner: s.Name(), Target: target, Timestamp: start}
 
-	files, err := csCollectTextFiles(target)
+	strict := completeScanRequired(ctx)
+	files, err := csCollectTextFiles(target, strict)
 	if err != nil {
 		return nil, fmt.Errorf("scanner: clawshield-injection: %w", err)
 	}
@@ -104,6 +105,9 @@ func (s *ClawShieldInjectionScanner) Scan(ctx context.Context, target string) (*
 	for _, f := range files {
 		content, err := os.ReadFile(f)
 		if err != nil {
+			if strict {
+				return nil, fmt.Errorf("scanner: clawshield-injection: %w", incompleteScan(f, err))
+			}
 			continue
 		}
 		result.Findings = append(result.Findings, csInjectionScanContent(content, f)...)

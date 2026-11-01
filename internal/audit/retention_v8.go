@@ -55,6 +55,13 @@ const (
 	// writer connection keep at least two thirds of it while a prune runs.
 	retentionPauseFactor = 2
 	retentionPauseMax    = 250 * time.Millisecond
+	// RetentionMaxStoreMB is the largest observability.local.max_store_mb.
+	RetentionMaxStoreMB = 1 << 20
+	// RetentionSizeCapKeep is the newest history the size cap never deletes.
+	RetentionSizeCapKeep = time.Hour
+	// retentionSizeCapTargetDivisor: a size-capped run deletes down to nine
+	// tenths of the cap, so the next inserts do not cross it again at once.
+	retentionSizeCapTargetDivisor = 10
 )
 
 // RetentionTableClass is a fixed metric/reporting label. Values can only come
@@ -119,7 +126,10 @@ const (
 // RetentionRunResult is bounded by the fixed class registry. RowsDeleted always
 // has exactly the registry's keys and contains counts only.
 type RetentionRunResult struct {
-	Disabled    bool
+	Disabled bool
+	// SizeCapped is set when the store was over observability.local.max_store_mb
+	// and the run moved its cutoff forward to bring it under the cap.
+	SizeCapped  bool
 	Cutoff      time.Time
 	CompletedAt time.Time
 	Duration    time.Duration
@@ -192,6 +202,10 @@ type retentionHooks struct {
 	afterLegacyJudgeCommit        func() error
 	afterAuthoritativeJudgeCommit func() error
 	checkpoint                    func(context.Context, *Store, *JudgeBodyStore) error
+	// inCorrelationDelete runs inside each correlation delete attempt, with
+	// the store connection held, just before the statement: a test seam
+	// that holds the statement open until its context ends.
+	inCorrelationDelete func(context.Context)
 }
 
 func (hooks retentionHooks) withDefaults() retentionHooks {
@@ -208,6 +222,7 @@ type RetentionReaper struct {
 	store             *Store
 	judgeBodies       *JudgeBodyStore
 	retentionDays     atomic.Int64
+	maxStoreBytes     atomic.Int64
 	reporter          RetentionReporter
 	healthReporter    RetentionHealthReporter
 	passiveCheckpoint bool
@@ -322,6 +337,27 @@ func validateRetentionDays(days int64) error {
 	if days < 0 || days > math.MaxInt64/day {
 		return errors.New("retention_days is outside the supported range")
 	}
+	return nil
+}
+
+// MaxStoreMB is the opt-in audit.db size cap in MiB; zero is days only.
+func (reaper *RetentionReaper) MaxStoreMB() int64 {
+	if reaper == nil {
+		return 0
+	}
+	return reaper.maxStoreBytes.Load() >> 20
+}
+
+// UpdateMaxStoreMB changes the next run's size cap (observability.local.max_store_mb).
+// Zero keeps retention by days only.
+func (reaper *RetentionReaper) UpdateMaxStoreMB(mb int64) error {
+	if reaper == nil {
+		return errors.New("audit: retention is not initialized")
+	}
+	if mb < 0 || mb > RetentionMaxStoreMB {
+		return errors.New("audit: max_store_mb is outside the supported range")
+	}
+	reaper.maxStoreBytes.Store(mb << 20)
 	return nil
 }
 
@@ -445,13 +481,16 @@ var retentionAuditMigrationCatalog = map[string]retentionOwnership{
 	"actions": retentionOwnedProtected, "target_snapshots": retentionOwnedProtected,
 	"finding_scopes": retentionOwnedProtected, "finding_states": retentionOwnedProtected,
 	"schema_version": retentionOwnedProtected, "observability_store_readiness": retentionOwnedProtected,
-	"alert_acknowledgement_projection":   retentionOwnedProtected,
-	"alert_acknowledgement_operations":   retentionOwnedProtected,
-	"alert_acknowledgement_baselines":    retentionOwnedProtected,
-	"alert_acknowledgement_health":       retentionOwnedProtected,
-	"quarantine_records":                 retentionOwnedProtected,
-	"quarantine_record_connectors":       retentionOwnedProtected,
-	"runtime_asset_state":                retentionOwnedProtected,
+	"alert_acknowledgement_projection": retentionOwnedProtected,
+	"alert_acknowledgement_operations": retentionOwnedProtected,
+	"alert_acknowledgement_baselines":  retentionOwnedProtected,
+	"alert_acknowledgement_health":     retentionOwnedProtected,
+	"quarantine_records":               retentionOwnedProtected,
+	"quarantine_record_connectors":     retentionOwnedProtected,
+	"runtime_asset_state":              retentionOwnedProtected,
+	// Field class sets are named by the rows retention keeps; bounded by
+	// maxFieldClassSets, never pruned (field_class_sets.go).
+	"audit_field_class_sets":             retentionOwnedProtected,
 	"guardrail_chain_deny_receipts":      retentionOwnedGraph,
 	"guardrail_chain_events":             retentionOwnedGraph,
 	"guardrail_chain_partitions":         retentionOwnedGraph,
@@ -542,22 +581,38 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 
 	started := reaper.hooks.now().UTC()
 	days := reaper.retentionDays.Load()
-	if days == 0 {
+	capBytes := reaper.maxStoreBytes.Load()
+	if days == 0 && capBytes == 0 {
 		result.Disabled = true
 		result.CompletedAt = started
 		reaper.finishTiming(&result, started)
 		reaper.report(result, nil)
 		return result, nil
 	}
-	cutoff := started.Add(-time.Duration(days) * 24 * time.Hour)
-	result.Cutoff = cutoff
+	// With days 0 and a size cap only, no row is old enough by age.
+	cutoff := time.Unix(0, 0).UTC()
+	if days > 0 {
+		cutoff = started.Add(-time.Duration(days) * 24 * time.Hour)
+	}
 
 	var runErr error
+	if capBytes > 0 {
+		sizeCutoff, over, err := reaper.storeSizeCutoff(ctx, started, capBytes)
+		if err != nil {
+			runErr = retentionRunFailure(RetentionFailureAuditStore, err)
+		} else if over && sizeCutoff.After(cutoff) {
+			cutoff = sizeCutoff
+			result.SizeCapped = true
+		}
+	}
+	result.Cutoff = cutoff
 	judgeSourceKey := ""
-	if err := ctx.Err(); err != nil {
-		runErr = err
-	} else {
-		judgeSourceKey, runErr = reaper.preflightJudgeRetention(ctx, cutoff)
+	if runErr == nil {
+		if err := ctx.Err(); err != nil {
+			runErr = err
+		} else {
+			judgeSourceKey, runErr = reaper.preflightJudgeRetention(ctx, cutoff)
+		}
 	}
 	if runErr == nil {
 		for _, spec := range retentionAuditRegistry {
@@ -596,6 +651,10 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 	if runErr == nil {
 		runErr = reaper.drainJudgeBodies(ctx, cutoff, judgeSourceKey, &result)
 	}
+	if runErr == nil && result.SizeCapped && sumRetentionRows(result.RowsDeleted) > 0 {
+		// The next run, a minute later, checks the size again.
+		result.Backlog = true
+	}
 	if runErr == nil {
 		result.ProtectedRows, runErr = reaper.readProtectedCapacity(ctx)
 		if runErr != nil {
@@ -618,6 +677,60 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 	reaper.finishTiming(&result, started)
 	reaper.report(result, runErr)
 	return result, runErr
+}
+
+// storeSizeCutoff returns the cutoff that brings the used pages of audit.db
+// under nine tenths of capBytes when they are over capBytes, and whether
+// they are (false too when audit_events has no dated rows). Rows are deleted oldest first and rowids grow with time, so the
+// cutoff is the time of the audit_events row at that fraction of the rowid
+// range: the same cutoff then also prunes the other history tables and the
+// correlation graph, as day retention does. It never reaches into the last
+// RetentionSizeCapKeep.
+func (reaper *RetentionReaper) storeSizeCutoff(ctx context.Context, now time.Time, capBytes int64) (time.Time, bool, error) {
+	var pageCount, freePages, pageSize int64
+	if err := reaper.store.db.QueryRowContext(ctx, `SELECT
+		(SELECT page_count FROM pragma_page_count()),
+		(SELECT freelist_count FROM pragma_freelist_count()),
+		(SELECT page_size FROM pragma_page_size())`).Scan(&pageCount, &freePages, &pageSize); err != nil {
+		return time.Time{}, false, fmt.Errorf("audit: read store size: %w", err)
+	}
+	used := (pageCount - freePages) * pageSize
+	if used <= capBytes {
+		return time.Time{}, false, nil
+	}
+	var first, last sql.NullInt64
+	if err := reaper.store.db.QueryRowContext(ctx,
+		`SELECT MIN(rowid), MAX(rowid) FROM audit_events`).Scan(&first, &last); err != nil {
+		return time.Time{}, false, fmt.Errorf("audit: read audit row range: %w", err)
+	}
+	if !first.Valid || !last.Valid {
+		return time.Time{}, false, nil
+	}
+	target := capBytes - capBytes/retentionSizeCapTargetDivisor
+	fraction := float64(used-target) / float64(used)
+	at := first.Int64 + int64(fraction*float64(last.Int64-first.Int64))
+	var stamp sql.NullInt64
+	err := reaper.store.db.QueryRowContext(ctx, `SELECT retention_timestamp_unix_nano FROM audit_events
+		WHERE rowid >= ? AND retention_timestamp_unix_nano IS NOT NULL ORDER BY rowid LIMIT 1`, at).Scan(&stamp)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, fmt.Errorf("audit: read size cutoff: %w", err)
+	}
+	if !stamp.Valid {
+		return time.Time{}, false, nil
+	}
+	cutoff := time.Unix(0, stamp.Int64).UTC()
+	if keepFrom := now.Add(-RetentionSizeCapKeep); cutoff.After(keepFrom) {
+		cutoff = keepFrom
+	}
+	return cutoff, true, nil
+}
+
+func sumRetentionRows(rows map[RetentionTableClass]int64) int64 {
+	var total int64
+	for _, count := range rows {
+		total += count
+	}
+	return total
 }
 
 func newRetentionCounts() map[RetentionTableClass]int64 {
@@ -765,25 +878,47 @@ func (reaper *RetentionReaper) drainCorrelationState(
 	now time.Time,
 	result *RetentionRunResult,
 ) error {
-	stages := [...]struct {
+	type correlationStage struct {
 		class RetentionTableClass
 		args  []any
-	}{
-		{RetentionGuardrailChainReceipts, []any{unixNano(now)}},
+		// root runs the stage on the root-scope chain tables (issue #1391),
+		// counted under the session class.
+		root bool
+	}
+	chainStages := []correlationStage{
+		{RetentionGuardrailChainReceipts, []any{unixNano(now)}, false},
 		{RetentionGuardrailChainEvents, []any{
 			unixNano(now.Add(-guardrail.ToolChainMaxHorizon)),
 			guardrail.ToolChainMaxEvents, guardrail.ToolChainMaxEvents,
-		}},
+		}, false},
 		{RetentionGuardrailChainPartitions, []any{
 			unixNano(now.Add(-guardrail.ToolChainMaxHorizon)),
-		}},
-		{RetentionCorrelationReceipts, []any{unixNano(now)}},
-		{RetentionCorrelationCursors, []any{unixNano(cutoff)}},
-		{RetentionCorrelationPending, []any{unixNano(cutoff)}},
-		{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}},
-		{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}},
+		}, false},
 	}
+	stages := append([]correlationStage(nil), chainStages...)
+	root, err := toolChainRootTablesExist(reaper.store.db)
+	if err != nil {
+		return err
+	}
+	if root {
+		// The root set has the same bounds as the session set, kept apart.
+		for _, stage := range chainStages {
+			stage.root = true
+			stages = append(stages, stage)
+		}
+	}
+	stages = append(stages,
+		correlationStage{RetentionCorrelationReceipts, []any{unixNano(now)}, false},
+		correlationStage{RetentionCorrelationCursors, []any{unixNano(cutoff)}, false},
+		correlationStage{RetentionCorrelationPending, []any{unixNano(cutoff)}, false},
+		correlationStage{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}, false},
+		correlationStage{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}, false},
+	)
 	deadline := reaper.hooks.now().Add(reaper.correlationBudget())
+	// A batch gives the connection back to the hooks waiting for it during
+	// the first half of the budget, and runs to its end in the second half:
+	// a run under steady hook traffic still deletes rows.
+	yieldUntil := reaper.hooks.now().Add(reaper.correlationBudget() / 2)
 	// Rotate the first stage on every run. A busy early stage can consume the
 	// whole time budget after one batch, so registry order alone does not
 	// guarantee that later relationship/event cleanup will ever run.
@@ -799,7 +934,20 @@ func (reaper *RetentionReaper) drainCorrelationState(
 				result.Backlog = true
 				return nil
 			}
-			deleted, err := reaper.deleteCorrelationBatch(ctx, stage.class, stage.args...)
+			deleted, err := reaper.deleteCorrelationBatch(ctx, stage.class, stage.root, reaper.yieldsToHooks(yieldUntil), stage.args...)
+			for errors.Is(err, errRetentionYielded) {
+				// The batch was rolled back, nothing was deleted: let the
+				// waiting hooks run, then take it again with the pages it
+				// read still cached.
+				if err := reaper.hooks.yield(ctx); err != nil {
+					return err
+				}
+				if !reaper.hooks.now().Before(deadline) {
+					result.Backlog = true
+					return nil
+				}
+				deleted, err = reaper.deleteCorrelationBatch(ctx, stage.class, stage.root, reaper.yieldsToHooks(yieldUntil), stage.args...)
+			}
 			if err != nil {
 				return err
 			}
@@ -819,14 +967,39 @@ func (reaper *RetentionReaper) drainCorrelationState(
 	}
 }
 
+// errRetentionYielded reports a correlation delete that was interrupted and
+// rolled back because hook statements waited for the store connection.
+var errRetentionYielded = errors.New("audit: retention batch yielded to waiting hooks")
+
+// yieldsToHooks says whether a correlation batch started now gives the
+// store connection back to waiting hooks. Secure Client keeps its batches.
+func (reaper *RetentionReaper) yieldsToHooks(until time.Time) bool {
+	return !reaper.secureClient && reaper.hooks.now().Before(until)
+}
+
+// deleteCorrelationBatch deletes one bounded batch of a correlation class.
+// With yieldToHooks, the statement is interrupted once another statement
+// has waited plannerStatsYieldWait for the store connection, and it returns
+// errRetentionYielded with nothing deleted. On a multi-gigabyte store with a
+// cold page cache one batch read pages for about 18 s after a gateway start
+// while every hook call queued behind it, and benign calls were denied as a
+// gateway no-answer (GAP-1790, managed RHEL, 6.8 GB store).
 func (reaper *RetentionReaper) deleteCorrelationBatch(
 	ctx context.Context,
 	class RetentionTableClass,
+	root bool,
+	yieldToHooks bool,
 	args ...any,
 ) (int64, error) {
 	statement, err := correlationRetentionDeleteStatement(class)
 	if err != nil {
 		return 0, err
+	}
+	if root {
+		statement, err = toolChainRootRetentionStatement(class, statement)
+		if err != nil {
+			return 0, err
+		}
 	}
 	args = append(args, reaper.batchSize())
 	if err := reaper.store.awaitWALHeadroom(ctx); err != nil {
@@ -839,12 +1012,29 @@ func (reaper *RetentionReaper) deleteCorrelationBatch(
 	defer release()
 	var deleted int64
 	err = retryBusy(ctx, "observability_v8_retention_"+string(class), func() error {
+		waitsBefore := reaper.store.db.Stats().WaitCount
 		tx, beginErr := reaper.store.db.BeginTx(ctx, nil)
 		if beginErr != nil {
 			return beginErr
 		}
 		defer tx.Rollback() //nolint:errcheck
-		res, execErr := tx.ExecContext(ctx, statement, args...)
+		statementCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		interrupted := func() bool { return false }
+		if yieldToHooks {
+			// When BeginTx itself waited, the statements queued with it are
+			// already in the pool wait count: time the hold from the start.
+			contended := reaper.store.db.Stats().WaitCount != waitsBefore
+			interrupted = reaper.store.yieldPlannerStatsToWriters(statementCtx, cancel, contended)
+		}
+		if reaper.hooks.inCorrelationDelete != nil {
+			reaper.hooks.inCorrelationDelete(statementCtx)
+		}
+		res, execErr := tx.ExecContext(statementCtx, statement, args...)
+		cancel()
+		if execErr != nil && interrupted() && ctx.Err() == nil {
+			return errRetentionYielded
+		}
 		if execErr != nil {
 			return execErr
 		}
@@ -867,6 +1057,17 @@ func (reaper *RetentionReaper) deleteCorrelationBatch(
 		return nil
 	})
 	return deleted, err
+}
+
+// toolChainRootRetentionStatement is a chain class's statement on the
+// root-scope tables (tool_chain_root.go).
+func toolChainRootRetentionStatement(class RetentionTableClass, statement string) (string, error) {
+	switch class {
+	case RetentionGuardrailChainReceipts, RetentionGuardrailChainEvents, RetentionGuardrailChainPartitions:
+		return toolChainRootTables.rewrite.Replace(statement), nil
+	default:
+		return "", errors.New("retention registry contains an unsupported root chain class")
+	}
 }
 
 func correlationRetentionDeleteStatement(class RetentionTableClass) (string, error) {
@@ -922,6 +1123,14 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 			ORDER BY updated_time_unix_nano, connector_instance_id, operation_id, operation_type LIMIT ?
 		)`, nil
 	case RetentionCorrelationRelationships:
+		// Each protected-node test is one equality lookup on (kind, id), so
+		// SQLite answers it from an automatic index on the materialized set.
+		// An OR of the from and to pairs, or a node join keyed on kind alone,
+		// scanned the whole protected set for every candidate: on a 1.75 GB
+		// managed store (59,000 candidates, 38,000 protected nodes) one batch
+		// held the writer connection for 86 s at 100% CPU after every gateway
+		// start, and every hook waiting for that connection failed closed
+		// (GAP-1862, GAP-1908).
 		return `DELETE FROM correlation_relationships WHERE rowid IN (
 			WITH protected_nodes(kind, id) AS (
 				SELECT 'semantic_event', semantic_event_id FROM correlation_receipts
@@ -955,17 +1164,25 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 			SELECT relationship.rowid FROM correlation_relationships AS relationship
 			WHERE relationship.last_seen_time_unix_nano < ?
 			AND NOT EXISTS (SELECT 1 FROM protected_nodes AS node WHERE
-				(node.kind=relationship.from_kind AND node.id=relationship.from_id) OR
-				(node.kind=relationship.to_kind AND node.id=relationship.to_id))
+				node.kind=relationship.from_kind AND node.id=relationship.from_id)
+			AND NOT EXISTS (SELECT 1 FROM protected_nodes AS node WHERE
+				node.kind=relationship.to_kind AND node.id=relationship.to_id)
 			AND NOT EXISTS (
 				SELECT 1 FROM correlation_relationship_evidence AS evidence
-				JOIN protected_nodes AS node ON node.kind='semantic_event'
-					AND node.id=evidence.semantic_event_id
 				WHERE evidence.relationship_id=relationship.relationship_id
+				AND EXISTS (SELECT 1 FROM protected_nodes AS node
+					WHERE node.id=evidence.semantic_event_id AND node.kind='semantic_event')
 			)
 			ORDER BY relationship.last_seen_time_unix_nano, relationship.relationship_id LIMIT ?
 		)`, nil
 	case RetentionCorrelationEvents:
+		// One test per indexed column, for the same reason as the
+		// relationship batch: an OR of two columns made SQLite scan the
+		// receipts for every candidate event (GAP-1862). The pending
+		// operations and relationships get the same split: statistics that
+		// call the terminal column one value (every open operation has it
+		// NULL) made SQLite scan the operations once per candidate while
+		// retention held the writer at gateway start (GAP-1979).
 		return `DELETE FROM correlation_events WHERE rowid IN (
 			SELECT event.rowid FROM correlation_events AS event
 			WHERE NOT EXISTS (
@@ -975,12 +1192,14 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 					chain_receipt.predecessor_semantic_event_id=event.semantic_event_id))
 			AND event.received_time_unix_nano < ?
 			AND NOT EXISTS (SELECT 1 FROM correlation_receipts AS receipt WHERE
-				receipt.semantic_event_id=event.semantic_event_id OR
+				receipt.semantic_event_id=event.semantic_event_id)
+			AND NOT EXISTS (SELECT 1 FROM correlation_receipts AS receipt WHERE
 				receipt.conflicts_with_semantic_event_id=event.semantic_event_id)
 			AND NOT EXISTS (SELECT 1 FROM correlation_cursors AS cursor
 				WHERE cursor.last_semantic_event_id=event.semantic_event_id)
 			AND NOT EXISTS (SELECT 1 FROM correlation_pending_operations AS operation WHERE
-				operation.start_semantic_event_id=event.semantic_event_id OR
+				operation.start_semantic_event_id=event.semantic_event_id)
+			AND NOT EXISTS (SELECT 1 FROM correlation_pending_operations AS operation WHERE
 				operation.terminal_semantic_event_id=event.semantic_event_id)
 			AND NOT EXISTS (SELECT 1 FROM correlation_relationship_evidence AS evidence
 				WHERE evidence.semantic_event_id=event.semantic_event_id)
@@ -991,10 +1210,13 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 				WHERE observation.semantic_event_id=event.semantic_event_id
 			)
 			AND NOT EXISTS (SELECT 1 FROM correlation_relationships AS relationship WHERE
-				(relationship.from_kind='semantic_event' AND relationship.from_id=event.semantic_event_id) OR
-				(relationship.to_kind='semantic_event' AND relationship.to_id=event.semantic_event_id) OR
-				(relationship.from_kind='logical_event' AND relationship.from_id=event.logical_group_id) OR
-				(relationship.to_kind='logical_event' AND relationship.to_id=event.logical_group_id))
+				relationship.from_kind='semantic_event' AND relationship.from_id=event.semantic_event_id)
+			AND NOT EXISTS (SELECT 1 FROM correlation_relationships AS relationship WHERE
+				relationship.to_kind='semantic_event' AND relationship.to_id=event.semantic_event_id)
+			AND NOT EXISTS (SELECT 1 FROM correlation_relationships AS relationship WHERE
+				relationship.from_kind='logical_event' AND relationship.from_id=event.logical_group_id)
+			AND NOT EXISTS (SELECT 1 FROM correlation_relationships AS relationship WHERE
+				relationship.to_kind='logical_event' AND relationship.to_id=event.logical_group_id)
 			ORDER BY event.received_time_unix_nano, event.semantic_event_id LIMIT ?
 		)`, nil
 	default:
@@ -1161,6 +1383,41 @@ func materializeRetentionAuditCandidates(
 	return count, nil
 }
 
+// The legacy ACK baseline statements start from the batch's candidate set
+// (at most RetentionBatchSize ids) and look each audit row up by id; CROSS
+// JOIN keeps that order whatever the statistics say. With a plain JOIN the
+// planner drove both from audit_events: the projection statement read the
+// whole id index and the baseline statement every bucket-less row. On a
+// multi-GB store with a cold page cache that took about 3.5 s inside every
+// audit retention batch, which holds the store's writer, so the hooks queued
+// behind it after a gateway start passed their answer budget (GAP-1790).
+func retentionACKBaselineInsert(actionPlaceholders string) string {
+	return fmt.Sprintf(`
+		INSERT OR IGNORE INTO alert_acknowledgement_baselines (
+			alert_id, baseline_version, disposition, actor, disposition_at,
+			legacy_event_id, raw_legacy_severity, legacy_original_severity,
+			timestamp_provenance, created_at
+		)
+		SELECT event.id, 1, 'acknowledged', COALESCE(NULLIF(event.actor,''), 'unknown'), event.timestamp,
+			event.id, 'ACK', 'unknown', 'legacy_occurrence_timestamp_unreliable', ?
+		FROM retention_v8_audit_candidates AS candidate
+		CROSS JOIN audit_events AS event ON event.id = candidate.id
+		WHERE event.bucket IS NULL AND UPPER(COALESCE(event.severity,'')) = 'ACK'
+		AND event.action IN (%s)`, actionPlaceholders)
+}
+
+const retentionACKProjectionInsert = `
+		INSERT OR IGNORE INTO alert_acknowledgement_projection (
+			alert_id, disposition, actor, disposition_at, projection_version,
+			source, source_event_id, updated_at
+		)
+		SELECT baseline.alert_id, baseline.disposition, baseline.actor,
+			baseline.disposition_at, baseline.baseline_version,
+			'legacy_ack', baseline.legacy_event_id, ?
+		FROM retention_v8_audit_candidates AS candidate
+		CROSS JOIN audit_events AS event ON event.id = candidate.id
+		CROSS JOIN alert_acknowledgement_baselines AS baseline ON baseline.alert_id = event.id`
+
 func materializeRetentionACKBaselines(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -1175,33 +1432,11 @@ func materializeRetentionACKBaselines(
 	for _, action := range actions {
 		args = append(args, action)
 	}
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT OR IGNORE INTO alert_acknowledgement_baselines (
-			alert_id, baseline_version, disposition, actor, disposition_at,
-			legacy_event_id, raw_legacy_severity, legacy_original_severity,
-			timestamp_provenance, created_at
-		)
-		SELECT event.id, 1, 'acknowledged', COALESCE(NULLIF(event.actor,''), 'unknown'), event.timestamp,
-			event.id, 'ACK', 'unknown', 'legacy_occurrence_timestamp_unreliable', ?
-		FROM audit_events AS event
-		JOIN retention_v8_audit_candidates AS candidate ON candidate.id = event.id
-		WHERE event.bucket IS NULL AND UPPER(COALESCE(event.severity,'')) = 'ACK'
-		AND event.action IN (%s)`, placeholders), args...)
+	_, err := tx.ExecContext(ctx, retentionACKBaselineInsert(placeholders), args...)
 	if err != nil {
 		return fmt.Errorf("retention materialize legacy ACK baseline: %w", err)
 	}
-	_, err = tx.ExecContext(ctx, `
-		INSERT OR IGNORE INTO alert_acknowledgement_projection (
-			alert_id, disposition, actor, disposition_at, projection_version,
-			source, source_event_id, updated_at
-		)
-		SELECT baseline.alert_id, baseline.disposition, baseline.actor,
-			baseline.disposition_at, baseline.baseline_version,
-			'legacy_ack', baseline.legacy_event_id, ?
-		FROM alert_acknowledgement_baselines AS baseline
-		JOIN audit_events AS event ON event.id = baseline.alert_id
-		JOIN retention_v8_audit_candidates AS candidate ON candidate.id = event.id`,
-		createdAt.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, retentionACKProjectionInsert, createdAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("retention materialize legacy ACK projection: %w", err)
 	}

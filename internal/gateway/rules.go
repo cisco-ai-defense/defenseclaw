@@ -29,6 +29,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 )
 
 // PatternRule is a single detection rule with a compiled regex, severity,
@@ -1052,7 +1054,11 @@ func scanRuleCategoriesWithOptions(
 		seen[findings[i].RuleID] = true
 	}
 
-	// Scan raw text first
+	// Scan raw text first. A rule is skipped when the text lacks the
+	// literals every match holds (ruleScanText, GAP-1230) or its required
+	// literals (rxprefilter, GAP-2279); both checks never skip a match.
+	raw := &ruleScanText{text: text}
+	rawScan := rxprefilter.NewText(text)
 	for categoryIndex := range generation.categories {
 		cat := &generation.categories[categoryIndex]
 		categoryAllowed := options.allowsCategory(cat.Name)
@@ -1073,7 +1079,10 @@ func scanRuleCategoriesWithOptions(
 			if seen[rule.ID] {
 				continue
 			}
-			loc := firstAcceptedRuleMatch(*rule, text)
+			if !raw.mayMatch(rule.Pattern) {
+				continue
+			}
+			loc := firstAcceptedRuleMatchIn(*rule, rawScan)
 			if loc == nil {
 				continue
 			}
@@ -1100,6 +1109,8 @@ func scanRuleCategoriesWithOptions(
 	// Scan normalized text to catch shell obfuscation
 	normalized := normalizeShell(text)
 	if normalized != text {
+		normalizedText := &ruleScanText{text: normalized}
+		normalizedScan := rxprefilter.NewText(normalized)
 		for categoryIndex := range generation.categories {
 			cat := &generation.categories[categoryIndex]
 			categoryAllowed := options.allowsCategory(cat.Name)
@@ -1117,7 +1128,10 @@ func scanRuleCategoriesWithOptions(
 				if seen[rule.ID] {
 					continue // already found on raw pass
 				}
-				loc := firstAcceptedRuleMatch(*rule, normalized)
+				if !normalizedText.mayMatch(rule.Pattern) {
+					continue
+				}
+				loc := firstAcceptedRuleMatchIn(*rule, normalizedScan)
 				if loc == nil {
 					continue
 				}
@@ -1158,8 +1172,8 @@ var shellNormalizeReplacer = strings.NewReplacer(
 	`\`, "", // stray backslashes
 )
 
-var shellVarPattern = regexp.MustCompile(`\$\{?\w+\}?`)
-var shellGlobPattern = regexp.MustCompile(`\?`)
+var shellVarPattern = lazyregexp.New(`\$\{?\w+\}?`)
+var shellGlobPattern = lazyregexp.New(`\?`)
 
 func normalizeShell(s string) string {
 	n := shellNormalizeReplacer.Replace(s)

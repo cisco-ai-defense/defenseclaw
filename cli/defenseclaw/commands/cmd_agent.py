@@ -1570,18 +1570,22 @@ def discovery_enable(
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 @pass_ctx
 def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
-    """Disable the sidecar AI discovery service.
+    """Disable the sidecar AI discovery service and its runtime planes.
 
-    Sets ``ai_discovery.enabled = false`` in ``~/.defenseclaw/config.yaml``
-    and (when ``--restart`` is on) restarts the gateway so the sidecar
-    drops the running discovery service.
+    Sets ``ai_discovery.enabled = false`` and ``ai_discovery.runtime.enabled
+    = false`` in ``~/.defenseclaw/config.yaml`` (``enable`` turned both on;
+    the selected planes are kept for the next enable) and (when
+    ``--restart`` is on) restarts the gateway so the sidecar drops the
+    running discovery service.
     """
     from defenseclaw import ux
 
     cfg = _require_loaded_config(app)
     ad = cfg.ai_discovery
+    runtime = _discovery_runtime(ad)
+    runtime_on = bool(getattr(runtime, "enabled", False))
 
-    if not ad.enabled:
+    if not ad.enabled and not runtime_on:
         click.echo(f"  {ux.dim('AI discovery is already disabled.')}")
         return
 
@@ -1614,9 +1618,14 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
         raise SystemExit(1)
 
     ad.enabled = False
+    if runtime_on:
+        # Turn it off undoes what enable turned on, the runtime planes too
+        # (GAP-1663).
+        runtime.enabled = False
     try:
         cfg.save()
-        ux.ok("Config saved (ai_discovery.enabled = false)", indent="  ")
+        saved = "ai_discovery.enabled = false" + (", runtime planes off" if runtime_on else "")
+        ux.ok(f"Config saved ({saved})", indent="  ")
     except OSError as exc:
         ux.err(f"Failed to save config: {exc}", indent="  ")
         ux.subhead("Re-run after fixing the underlying I/O error.", indent="    ")

@@ -51,16 +51,16 @@ try {
         $engineName = [IO.Path]::GetFileName($engine)
         $readerScript = [IO.Path]::Combine($Root, 'reader.ps1')
         [IO.File]::WriteAllText($readerScript, @'
-param([string]$Path, [string]$Ready, [int]$HoldMilliseconds)
-$stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+param([string]$Path, [string]$Ready, [int]$HoldMilliseconds, [string]$Share = 'Read')
+$stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]$Share)
 [IO.File]::WriteAllText($Ready, 'ready')
 Start-Sleep -Milliseconds $HoldMilliseconds
 $stream.Dispose()
 '@)
         try {
-            function Start-TestReader([string]$Path, [int]$HoldMilliseconds) {
+            function Start-TestReader([string]$Path, [int]$HoldMilliseconds, [string]$Share = 'Read') {
                 $ready = [IO.Path]::Combine($Root, 'ready-' + [Guid]::NewGuid().ToString('N'))
-                $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Path "{1}" -Ready "{2}" -HoldMilliseconds {3}' -f $readerScript, $Path, $ready, $HoldMilliseconds
+                $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Path "{1}" -Ready "{2}" -HoldMilliseconds {3} -Share "{4}"' -f $readerScript, $Path, $ready, $HoldMilliseconds, $Share
                 $process = Microsoft.PowerShell.Management\Start-Process `
                     -FilePath $engine `
                     -ArgumentList $arguments `
@@ -225,6 +225,48 @@ $stream.Dispose()
             Test-StateIntact 'install-root holder refusal' $layout
             Stop-TestReader $reader
 
+            # GAP-0789: before an upgrade or repair swaps the hook, only a
+            # holder whose handle does not share delete defers the run. A
+            # well-behaved scanner (FileShare ReadWrite and Delete) deferred
+            # every repair with hook_in_use; the swap works under its handle
+            # and leaves nothing beside the hook.
+            $layout = New-TestState 'hook-shares-delete'
+            $layout.HookPath = [IO.Path]::Combine($layout.BinDirectory, 'defenseclaw-hook.exe')
+            $reader = Start-TestReader $layout.HookPath 120000 'ReadWrite, Delete'
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            Test-Accepted 'hook held with delete sharing' { Assert-DefenseClawHookNotHeld -Layout $layout -TimeoutSeconds 3 }
+            if ($clock.ElapsedMilliseconds -ge 3000) {
+                $failures.Add("a hook holder that shares delete was waited for ($($clock.ElapsedMilliseconds) ms)")
+            }
+            $replacement = [IO.Path]::Combine($Root, 'hook-shares-delete', 'replacement.exe')
+            [IO.File]::WriteAllText($replacement, 'replaced')
+            Test-Accepted 'swap of a hook held with delete sharing' { Install-DefenseClawFileAtomic -Source $replacement -Destination $layout.HookPath }
+            if (-not [IO.File]::Exists($layout.HookPath) -or [IO.File]::ReadAllText($layout.HookPath) -cne 'replaced') {
+                $failures.Add('the hook held with delete sharing was not replaced')
+            }
+            $left = @([IO.Directory]::GetFileSystemEntries($layout.BinDirectory) | Microsoft.PowerShell.Core\Where-Object {
+                    [IO.Path]::GetFileName($_) -cne 'defenseclaw-hook.exe' })
+            if ($left.Count -gt 0) {
+                $failures.Add("the swap of a hook held with delete sharing left $($left -join ', ')")
+            }
+            if ($reader.HasExited) {
+                $failures.Add('the hook holder that shares delete was ended')
+            }
+            Stop-TestReader $reader
+
+            # A holder without delete sharing still defers the run, named,
+            # with the hook unchanged.
+            $layout = New-TestState 'hook-held'
+            $layout.HookPath = [IO.Path]::Combine($layout.BinDirectory, 'defenseclaw-hook.exe')
+            $reader = Start-TestReader $layout.HookPath 120000 'Read'
+            Test-Refused 'hook held without delete sharing' { Assert-DefenseClawHookNotHeld -Layout $layout -TimeoutSeconds 2 } (
+                '^hook_in_use: ' + [regex]::Escape($engineName) + ' \(process id ' + $reader.Id + '[,)].* has ' +
+                [regex]::Escape([string]$layout.HookPath) + ' open, so Setup could not replace it; this run stopped and replaced nothing\.')
+            if ([IO.File]::ReadAllText($layout.HookPath) -cne 'installed') {
+                $failures.Add('the hook held without delete sharing changed')
+            }
+            Stop-TestReader $reader
+
             # Two short hook invocations on a busy host can be seen on
             # different passes. Neither PID survived the recheck.
             $savedInstallRootHolders = ${function:Get-DefenseClawInstallRootHolders}
@@ -282,6 +324,50 @@ $stream.Dispose()
             }
             finally {
                 Microsoft.PowerShell.Management\Set-Item -Path function:script:Initialize-DefenseClawNativeSecurity -Value $savedNative
+            }
+
+            # GAP-2265: a holder Restart Manager reported that has exited
+            # by the time the process list is read holds nothing. Under
+            # agent load the hook's own short-lived processes were named
+            # "a program" or "DefenseClaw Agent Hook" that way and deferred
+            # every upgrade with hook_in_use; a running holder outside the
+            # install folder is still named.
+            if (-not ('DcsfListedRestartManager' -as [type])) {
+                Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
+public class DcsfListedHolder { public int ProcessId { get; set; } public string ServiceName { get; set; } public string AppName { get; set; } public long StartFileTime { get; set; } }
+public static class DcsfListedRestartManager {
+    public static int[] Ids = new int[0];
+    public static object[] GetFileHolders(string[] paths) {
+        object[] found = new object[Ids.Length];
+        for (int i = 0; i < Ids.Length; i++) { found[i] = new DcsfListedHolder { ProcessId = Ids[i], ServiceName = "", AppName = "DefenseClaw Agent Hook", StartFileTime = i }; }
+        return found;
+    }
+}
+'@
+            }
+            $exited = Microsoft.PowerShell.Management\Start-Process -FilePath $engine -ArgumentList @('-NoProfile', '-Command', 'exit 0') -WindowStyle Hidden -PassThru
+            [void]$exited.WaitForExit(60000)
+            $running = Start-TestReader ([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) 120000
+            $savedNative = ${function:Initialize-DefenseClawNativeSecurity}
+            try {
+                function script:Initialize-DefenseClawNativeSecurity { return [DcsfListedRestartManager] }
+                $self = [Collections.Generic.HashSet[int]]::new()
+                [void]$self.Add([int]$PID)
+                [DcsfListedRestartManager]::Ids = @([int]$exited.Id)
+                $seen = Get-DefenseClawStateFileHolders -Layout $layout -Paths @([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) -Excluded $self
+                if ($seen.Count -ne 0) {
+                    $failures.Add("an exited holder (pid $($exited.Id)) still counted: $(@($seen.Values | Microsoft.PowerShell.Core\ForEach-Object { $_.Name }) -join ', ')")
+                }
+                [DcsfListedRestartManager]::Ids = @([int]$exited.Id, [int]$running.Id)
+                $seen = Get-DefenseClawStateFileHolders -Layout $layout -Paths @([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) -Excluded $self
+                $named = @($seen.Values | Microsoft.PowerShell.Core\Where-Object { $_.Id -eq [int]$running.Id })
+                if ($seen.Count -ne 1 -or $named.Count -ne 1 -or $named[0].Name -ne $engineName) {
+                    $failures.Add("a running holder beside an exited one was not named alone: $(@($seen.Values | Microsoft.PowerShell.Core\ForEach-Object { '{0}={1}' -f $_.Id, $_.Name }) -join ', ')")
+                }
+            }
+            finally {
+                Microsoft.PowerShell.Management\Set-Item -Path function:script:Initialize-DefenseClawNativeSecurity -Value $savedNative
+                Stop-TestReader $running
             }
 
             # The Secure Client profile has no data-file check.

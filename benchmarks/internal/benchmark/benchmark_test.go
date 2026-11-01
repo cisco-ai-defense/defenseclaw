@@ -381,12 +381,12 @@ func TestDatabaseOptInPolicyPackFixtureExactEnforcementMetrics(t *testing.T) {
 			group.Dimension != "overall" || group.Group != "all" {
 			continue
 		}
-		// Two independently labeled SnowSQL positives remain outside the current
-		// exact grammar. This test pins
-		// the honest pack score while separately requiring the rollback-boundary
-		// case above to block.
-		want := Confusion{TruePositive: 12, TrueNegative: 10, FalseNegative: 2}
-		if group.Enforcement.Confusion != want || math.Abs(group.Enforcement.F1-12.0/13.0) > 1e-12 ||
+		// The two independently labeled SnowSQL positives are in the exact
+		// grammar since snowsql joined the reviewed SQL clients (GAP-1771).
+		// This test pins the honest pack score while separately requiring the
+		// rollback-boundary case above to block.
+		want := Confusion{TruePositive: 14, TrueNegative: 10}
+		if group.Enforcement.Confusion != want || math.Abs(group.Enforcement.F1-1) > 1e-12 ||
 			group.Enforcement.FPR != 0 || group.BenignBlockRate.Numerator != 0 {
 			t.Fatalf("database opt-in enforcement=%+v benign_block_rate=%+v", group.Enforcement, group.BenignBlockRate)
 		}
@@ -601,6 +601,53 @@ func TestStatefulBenchmarkFirewallTrustExpansionFixtures(t *testing.T) {
 				guardrail.ToolChainFirewallExpansionThenDestination) {
 			t.Fatalf("%s hard negative %s=%+v",
 				prediction.Profile, prediction.CaseID, prediction)
+		}
+	}
+}
+
+// #1390: the download-then-execute chain joins a download from a public IP
+// or an external hostname, into an absolute or a relative path, to a later
+// run of the same file (also after a chmod), and stays alert-only in every profile. Internal,
+// reserved, loopback and private sources, another file, another directory,
+// an overwrite, a read, a failed download and a gap past the window do not.
+func TestStatefulBenchmarkDownloadThenExecuteFixtures(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	file, err := os.Open(filepath.Join(
+		repoRoot, "benchmarks", "fixtures", "download-execute-chain-v1.jsonl",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	cases, err := LoadCases(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cases) != 20 {
+		t.Fatalf("fixture cases=%d want 20", len(cases))
+	}
+	positive := make(map[string]bool, len(cases))
+	for _, benchmarkCase := range cases {
+		positive[benchmarkCase.ID] = benchmarkCase.Truth.ExpectedDisposition == "detect_only"
+	}
+	predictions, _, err := (Runner{
+		RepoRoot: repoRoot, RunID: "download-execute-chain-test",
+		Profiles: []string{"default", "permissive", "strict"},
+	}).Run(context.Background(), cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prediction := range predictions {
+		chain := slices.Contains(prediction.RuleIDs, guardrail.ToolChainDownloadThenExecuteSameArtifact)
+		if positive[prediction.CaseID] {
+			if !prediction.Detected || !chain || prediction.Action != "alert" ||
+				prediction.EnforcementEligible || prediction.Severity != "HIGH" {
+				t.Errorf("%s positive %s=%+v", prediction.Profile, prediction.CaseID, prediction)
+			}
+			continue
+		}
+		if chain || prediction.Action == "block" {
+			t.Errorf("%s hard negative %s=%+v", prediction.Profile, prediction.CaseID, prediction)
 		}
 	}
 }

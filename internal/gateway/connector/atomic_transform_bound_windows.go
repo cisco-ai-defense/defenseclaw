@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -144,7 +145,11 @@ func validateAtomicTransformWindowsPrivateHandleForOwner(handle windows.Handle, 
 // only that user, SYSTEM and Administrators hold access. A SYSTEM uninstall
 // meets such a target-local legacy (V1) compare-and-swap namespace beside the
 // user's Claude settings; its owner is the user, never the caller
-// (GAP-1437).
+// (GAP-1437). A folder the user made the ordinary way inherits the
+// .claude DACL instead of a protected one, including the read-only entry a
+// managed install grants its gateway service there. The owner can rewrite
+// that DACL at any time anyway, so only its effective entries are checked,
+// and the managed gateway service may hold read access (GAP-1539).
 func (dir *atomicTransformBoundDirectory) validatePrivateOwnedBy(owner *windows.SID) error {
 	if owner == nil {
 		return fmt.Errorf("bound compare-and-swap state directory has no expected owner")
@@ -155,11 +160,17 @@ func (dir *atomicTransformBoundDirectory) validatePrivateOwnedBy(owner *windows.
 	if err := validateAtomicTransformBoundDirectoryPlatform(dir.file, false); err != nil {
 		return err
 	}
-	return validateAtomicTransformWindowsPrivateHandleShape(windows.Handle(dir.file.Fd()), owner, false)
+	return validateAtomicTransformWindowsPrivateHandleACL(windows.Handle(dir.file.Fd()), owner, false, true)
 }
 
 func validateAtomicTransformWindowsPrivateHandleShape(
 	handle windows.Handle, expectedOwner *windows.SID, requireAdministrators bool,
+) error {
+	return validateAtomicTransformWindowsPrivateHandleACL(handle, expectedOwner, requireAdministrators, false)
+}
+
+func validateAtomicTransformWindowsPrivateHandleACL(
+	handle windows.Handle, expectedOwner *windows.SID, requireAdministrators, enrolledUserLegacy bool,
 ) error {
 	descriptor, err := windows.GetSecurityInfo(
 		handle, windows.SE_FILE_OBJECT,
@@ -172,7 +183,7 @@ func validateAtomicTransformWindowsPrivateHandleShape(
 	if err != nil {
 		return err
 	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
+	if control&windows.SE_DACL_PROTECTED == 0 && !enrolledUserLegacy {
 		return fmt.Errorf("bound private compare-and-swap object has an inheritable DACL")
 	}
 	owner, _, err := descriptor.Owner()
@@ -203,6 +214,12 @@ func validateAtomicTransformWindowsPrivateHandleShape(
 	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
 		return err
+	}
+	var gatewayReader *windows.SID
+	if enrolledUserLegacy && managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		if sid, sidErr := managed.WindowsServiceAccountSID(os.Getenv(managed.WindowsServiceAccountEnv)); sidErr == nil {
+			gatewayReader = sid
+		}
 	}
 	var ownerMask, systemMask, administratorsMask windows.ACCESS_MASK
 	for index := uint16(0); index < dacl.AceCount; index++ {
@@ -243,6 +260,8 @@ func validateAtomicTransformWindowsPrivateHandleShape(
 			if !inheritOnly {
 				administratorsMask |= ace.Mask
 			}
+		case gatewayReader != nil && sid.Equals(gatewayReader) && !hookAPIWindowsWriteLikeAccess(ace.Mask, true):
+			// The managed gateway service's read-only entry on .claude.
 		default:
 			return fmt.Errorf("bound compare-and-swap state directory grants access to another principal")
 		}

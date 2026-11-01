@@ -11,10 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -29,7 +30,7 @@ const (
 	srContainerNameLabel = "com.defenseclaw.component=semantic-router"
 )
 
-var semanticRouterVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$`)
+var semanticRouterVersionPattern = lazyregexp.New(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$`)
 
 // Lifecycle manages the semantic router container.
 // We start ONLY the router container (not Envoy/dashboard/observability)

@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // Per-caller limits on a standalone gateway.
@@ -54,6 +56,18 @@ import (
 // gives its slot up while it waits on a remote scanner (yieldHookRunSlot),
 // which uses no gateway CPU, so a caller's parallel tool calls do not queue
 // behind Cisco AI Defense or LLM judge round trips.
+//
+// A request that waits for its agent session's start (the action-mode
+// arrival wait, or another call's start verdict) uses no gateway CPU and
+// no run slot, so it is also parked (parkHookCaller): for that wait it does
+// not count toward the in-flight bounds of new requests, up to as many parked
+// requests per caller as its in-flight cap and, for all callers together, as
+// the global bound. A 60-way parallel tool turn of sessions the gateway has
+// not seen otherwise admitted 32 calls, made the rest wait out the first
+// calls' 1 s arrival wait before they were admitted and then pay their own,
+// and about a quarter of the turn ran past the 3.5 s managed answer budget
+// (GAP-0050). A parked request takes its in-flight place back when its wait
+// ends, over the bound if need be: it was admitted and is answered.
 const (
 	// hookCallerRate and hookCallerBurst are one caller's sustained and
 	// burst request budget. An agent sends a few requests per tool call, so
@@ -65,11 +79,18 @@ const (
 	hookCallerInFlight = 32
 	// hookGlobalInFlightPerProc and hookGlobalInFlightMin bound the requests
 	// the gateway holds at once for all callers together: 16 per processor,
-	// at least 32. A processor serves about 3 hooks a second, so a full
-	// gateway answers its last admitted request in about 5 s, inside the
-	// shortest hook deadline (10 s).
+	// at least four callers' in-flight caps (128). A caller's share of it is a
+	// quarter, so on a small host the minimum is what lets one account hold
+	// its full hookCallerInFlight: 10 calls a second for the 3.5 s answer
+	// budget. With a minimum of 32 a host of two processors let one account
+	// hold 8, so an ordinary 10 calls a second whose answers took over 0.8 s
+	// under CPU load (five agent TUIs starting beside two busy agents) were
+	// refused 429 and blocked as a gateway no-answer (GAP-1790). A request
+	// that waits for its caller's run slot uses no CPU and is dropped when its
+	// hook gives up, so holding it costs nothing the answer budget does not
+	// already bound.
 	hookGlobalInFlightPerProc = 16
-	hookGlobalInFlightMin     = 32
+	hookGlobalInFlightMin     = 4 * hookCallerInFlight
 	// hookCallerIdle is how long an idle caller's budget is kept.
 	hookCallerIdle = 5 * time.Minute
 	// hookCallerLogInterval paces the refusal log line per caller.
@@ -85,8 +106,11 @@ type hookCallerLimiter struct {
 	lastSweep time.Time
 	// total is the number of admitted requests that have not finished, for
 	// all callers; lastOverloadLog paces the log line of a full gateway.
-	total           int
-	telemetryTotal  int
+	total          int
+	telemetryTotal int
+	// parked is how many of total wait without gateway CPU for a session
+	// start (parkHookCaller); they do not count against new admissions.
+	parked          int
 	lastOverloadLog time.Time
 	// Test overrides; zero values select the defaults above.
 	now                                            func() time.Time
@@ -96,6 +120,8 @@ type hookCallerLimiter struct {
 type hookCallerBudget struct {
 	limiter  *rate.Limiter
 	inFlight int
+	// parked is how many of inFlight are parked (parkHookCaller).
+	parked int
 	// running holds one token per request of this caller that is running.
 	running  chan struct{}
 	lastSeen time.Time
@@ -164,7 +190,7 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 	telemetry := strings.HasSuffix(caller, hookCallerTelemetryBudget)
 	// Keep half the host capacity available to hooks even when exporters
 	// from many accounts all retry together.
-	if l.total >= l.globalLimit() || (telemetry && l.telemetryTotal >= max(1, l.globalLimit()/2)) {
+	if l.total-l.parked >= l.globalLimit() || (telemetry && l.telemetryTotal >= max(1, l.globalLimit()/2)) {
 		logNow = now.Sub(l.lastOverloadLog) >= hookCallerLogInterval
 		if logNow {
 			l.lastOverloadLog = now
@@ -172,16 +198,14 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 		return nil, nil, managedHookReasonOverloaded, logNow
 	}
 	rps, burst, inFlight, running := l.limits(caller)
-	// Keep capacity for at least three other callers even when one
-	// caller fills every request it may hold while queued.
-	inFlight = min(inFlight, max(1, l.globalLimit()/4))
+	inFlight = l.callerInFlight(inFlight)
 	budget := l.callers[caller]
 	if budget == nil {
 		budget = &hookCallerBudget{limiter: rate.NewLimiter(rate.Limit(rps), burst), running: make(chan struct{}, running)}
 		l.callers[caller] = budget
 	}
 	budget.lastSeen = now
-	if budget.inFlight >= inFlight || !budget.limiter.AllowN(now, 1) {
+	if budget.inFlight-budget.parked >= inFlight || !budget.limiter.AllowN(now, 1) {
 		logNow = now.Sub(budget.lastLog) >= hookCallerLogInterval
 		if logNow {
 			budget.lastLog = now
@@ -208,6 +232,42 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 	}, budget.running, "", false
 }
 
+// callerInFlight is the in-flight cap of one caller whose own cap is
+// inFlight: it keeps capacity for at least three other callers even when one
+// caller fills every request it may hold while queued.
+func (l *hookCallerLimiter) callerInFlight(inFlight int) int {
+	return min(inFlight, max(1, l.globalLimit()/4))
+}
+
+// park takes one admitted request of caller out of the in-flight bounds of
+// new requests while it waits without gateway CPU, unless the caller already
+// has as many parked requests as its in-flight cap or all callers together
+// as many as the global bound (then the request keeps counting, as before).
+// unpark ends the wait; it runs once.
+func (l *hookCallerLimiter) park(caller string) (unpark func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	budget := l.callers[caller]
+	if budget == nil || budget.inFlight-budget.parked <= 0 {
+		return func() {}
+	}
+	_, _, inFlight, _ := l.limits(caller)
+	if budget.parked >= l.callerInFlight(inFlight) || l.parked >= l.globalLimit() {
+		return func() {}
+	}
+	budget.parked++
+	l.parked++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			budget.parked--
+			l.parked--
+			l.mu.Unlock()
+		})
+	}
+}
+
 // hookCallerTelemetryBudget suffixes the budget key of a caller's OTLP
 // export. A burst of telemetry batches from the user's agents must not use
 // up the budget that user's hooks need: a refused hook request denies the
@@ -231,18 +291,52 @@ func hookCallerBudgetKey(identity, path string) string {
 	return identity
 }
 
+// hookCallerSandboxRead is the budget of an account's read-only sandbox
+// requests (GET under the sandbox policy class: status, sandboxes, packs,
+// current policy; and the two views a POST carries the question of, policy
+// explain and policy test). They are an operator's CLI and TUI reads, not
+// policy writes or hook traffic: in the sandbox policy class's 20-request
+// burst about nine back-to-back "defenseclaw sandbox pack list" calls were
+// refused for 20 s (GAP-1693), and a few back-to-back "defenseclaw sandbox
+// policy explain" calls were refused the same way, with or without a
+// sandbox's hooks running (es:GAP-0023). Reads take the ordinary caller
+// limits under their own key, so they neither wait on nor use up the policy
+// writes' or the host hooks' budgets.
+const hookCallerSandboxRead = "|sandbox-read"
+
+// hookCallerAdmissionKey is hookCallerBudgetKey with the method: a read of
+// the sandbox policy class gets the read budget.
+func hookCallerAdmissionKey(identity, method, path string) string {
+	key := hookCallerBudgetKey(identity, path)
+	if !strings.HasSuffix(key, "|"+sandboxBudgetPolicy) {
+		return key
+	}
+	if method == http.MethodGet || method == http.MethodPost && sandboxPolicyView(path) {
+		return identity + hookCallerSandboxRead
+	}
+	return key
+}
+
+// sandboxPolicyView reports whether path is a read-only policy view asked
+// with a POST body: policy explain and policy test change nothing.
+func sandboxPolicyView(path string) bool {
+	return path == sandboxrelay.PathPolicyExplain || path == sandboxrelay.PathPolicyTest
+}
+
 // admitHookCaller applies the per-caller limits to one request for path and
 // waits for one of the caller's run slots. It returns the request to serve,
 // which carries the slot, and the release function to defer; the release
 // function is nil after answering 429 or when the client went away while it
-// waited.
+// waited; hookCallerLeft reports the second.
 func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, identity, route string) (*http.Request, func()) {
-	release, run, refusal, logNow := a.hookCallerLimits.acquire(hookCallerBudgetKey(identity, r.URL.Path))
+	key := hookCallerAdmissionKey(identity, r.Method, r.URL.Path)
+	release, run, refusal, logNow := a.hookCallerLimits.acquire(key)
 	if refusal == "" {
 		if r.Context().Err() != nil {
-			// The client left before it had a slot: nothing to serve.
+			// The client left before it had a slot: nothing to serve. The
+			// caller audits a managed call it would have served (GAP-0286).
 			release()
-			return r, nil
+			return withHookCallerLeft(r), nil
 		}
 		// Advertise the receipt protocol as soon as a managed hook is
 		// admitted. Waiting for this caller's run slot can exceed the native
@@ -258,14 +352,14 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 		}
 		select {
 		case run <- struct{}{}:
-			slot := &hookRunSlot{run: run, held: true}
+			slot := &hookRunSlot{run: run, held: true, park: func() func() { return a.hookCallerLimits.park(key) }}
 			return r.WithContext(context.WithValue(r.Context(), hookRunSlotContextKey{}, slot)), func() {
 				slot.end()
 				release()
 			}
 		case <-r.Context().Done():
 			release()
-			return r, nil
+			return withHookCallerLeft(r), nil
 		}
 	}
 	if logNow {
@@ -297,6 +391,9 @@ type hookRunSlot struct {
 	mu   sync.Mutex
 	held bool // the request holds one token of run
 	done bool // the request has ended
+	// park takes the request out of its caller's in-flight bounds for a
+	// wait without gateway CPU (hookCallerLimiter.park); nil in tests.
+	park func() (unpark func())
 }
 
 type hookRunSlotContextKey struct{}
@@ -311,24 +408,19 @@ func yieldHookRunSlot(ctx context.Context) (resume func()) {
 	// The hook bounds its wait for a local decision; this one waits on a
 	// remote scanner, so it reports progress first (hook_progress.go).
 	reportHookProgress(ctx)
-	return pauseHookRunSlot(ctx)
+	return waitWithoutHookRunSlot(ctx)
 }
 
-// pauseHookRunSlot frees the caller's run slot while this request waits for
-// an external answer. The request still counts toward its in-flight limits.
-// The caller resumes the slot before doing more gateway work.
-func pauseHookRunSlot(ctx context.Context) (resume func()) {
-	slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot)
+// waitWithoutHookRunSlot frees the caller's run slot while the request waits
+// on something that uses no gateway CPU (a remote scanner, a session start
+// that has not arrived yet, GAP-1822). Unlike pauseHookRunSlot, resume takes
+// a slot back before the request goes on, and gives up when the request has
+// ended.
+func waitWithoutHookRunSlot(ctx context.Context) (resume func()) {
+	slot := giveUpHookRunSlot(ctx)
 	if slot == nil {
 		return func() {}
 	}
-	slot.mu.Lock()
-	defer slot.mu.Unlock()
-	if !slot.held {
-		return func() {}
-	}
-	<-slot.run
-	slot.held = false
 	return func() {
 		select {
 		case slot.run <- struct{}{}:
@@ -343,6 +435,56 @@ func pauseHookRunSlot(ctx context.Context) (resume func()) {
 			return
 		}
 		slot.held = true
+	}
+}
+
+// pauseHookRunSlot frees the caller's run slot once the request has offered
+// its answer to the hook. The request still counts toward its in-flight
+// limits, and the returned resume does not take a slot back: what is left
+// (waiting for the delivery receipt, then writing the call's audit rows) is
+// not answer work, and the audit writes queue on the store's single writer
+// anyway. Taking a run slot back for it made a caller's next hook wait behind
+// this call's audit writes: on a host of two or three processors a caller
+// has one slot, and with a cold page cache on a large audit store those
+// writes took long enough that a 10 calls a second load of one account
+// queued every new hook past the answer budget, and the hooks blocked them
+// as a gateway no-answer (GAP-1790).
+func pauseHookRunSlot(ctx context.Context) (resume func()) {
+	giveUpHookRunSlot(ctx)
+	return func() {}
+}
+
+// giveUpHookRunSlot returns the run slot the request on ctx holds and
+// reports that slot, or nil when the request holds none.
+func giveUpHookRunSlot(ctx context.Context) *hookRunSlot {
+	slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot)
+	if slot == nil {
+		return nil
+	}
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	if !slot.held {
+		return nil
+	}
+	<-slot.run
+	slot.held = false
+	return slot
+}
+
+// parkHookCaller frees the caller's run slot (waitWithoutHookRunSlot) and parks the
+// request (hookCallerLimiter.park) while it waits for its agent session's
+// start, which uses no gateway CPU, so the caller's other parallel calls are
+// admitted and wait for their own starts at the same time (GAP-0050). resume
+// unparks the request, then takes a slot back as waitWithoutHookRunSlot's does.
+func parkHookCaller(ctx context.Context) (resume func()) {
+	resumeSlot := waitWithoutHookRunSlot(ctx)
+	unpark := func() {}
+	if slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot); slot != nil && slot.park != nil {
+		unpark = slot.park()
+	}
+	return func() {
+		unpark()
+		resumeSlot()
 	}
 }
 

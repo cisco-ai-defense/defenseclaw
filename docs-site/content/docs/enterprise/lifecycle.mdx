@@ -29,8 +29,9 @@ commits a deployment does.
 
 Only one lifecycle run works at a time. On Linux and macOS a run that finds another in
 progress waits 5 seconds and exits `75` (busy); `--lock-wait <duration>` (at most
-`15m`) waits longer. The apply trigger waits up to 10 minutes and the deb, rpm and pkg
-install scripts up to 8, so a change made during another run is applied after it. The
+`15m`) waits longer. The apply trigger waits up to 10 minutes, and so does any
+`ensure --reason path` without `--lock-wait`; the deb, rpm and pkg install scripts wait
+up to 8, so a change made during another run is applied after it. The
 deb and rpm removal scripts wait the same, and a removal that still finds the lock busy
 fails without deleting anything. On Windows a busy run exits `1618`. MDM agents retry
 both.
@@ -157,6 +158,16 @@ lost until the agent is restarted.
 
 ## Roll back
 
+With bundle trust anchors, DefenseClaw refuses to install a release below the
+confirmed bundle's `min_product_version` (`product_floor_refused`): on Linux
+and macOS from 1.0.4, in Windows Setup from 1.0.6. The rollback marker, `--allow-downgrade` and
+`uninstall --keep-state` do not lift this floor. A package older than 1.0.4
+does not check the floor itself and can complete below it. A floor that cannot
+be read refuses the install too. Install a release that meets the floor; to go
+below it, contact your administrator. [Release floor
+limits](/docs/enterprise/lifecycle#release-floor-limits) says when the
+floor is checked, and what older packages and Windows Setup do.
+
 A failed action rolls itself back. You only need the steps below to go back to an older
 release on purpose. Try the rollback on one test host before the fleet. Every lifecycle
 refuses an older release unless you ask for the rollback (`downgrade_refused`). For an
@@ -174,7 +185,14 @@ the older app; otherwise Intune can reapply the newer release.
 | macOS | Create the root-owned rollback marker, then install the older package: `sudo touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`, then `sudo installer -pkg ./defenseclaw-enterprise-<older>-darwin-arm64.pkg -target /`. An older release that reads `config_version: 9` applies the installed config and is done (`last-package-result.json` reads `ok`). Only a release that reads version 8 fails on the version 9 config; then run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure --from-package --allow-downgrade --config <version 8 config> --json` |
 
 - **Windows rollback to 1.0.0–1.0.2 from an open-mode deployment:** These published Setups cannot collect a runtime generation with `hook_fail_mode: open`; they may install the older version, then exit `1603` while retiring the previous journal. Before running the older Setup, save the current admin config. Set `guardrail.hook_fail_mode` and each `guardrail.connectors.<name>.hook_fail_mode` to `closed` in a compatible config, then apply it with the installed 1.0.4 Setup `/ensure CONFIG=<closed config> JSON=1`. Run that Setup's `/verify JSON=1` and resolve any pending users before the rollback. Pass the same closed config to the older Setup `/upgrade`; that release cannot provide open-mode managed hooks. If the older Setup already committed with `1603` and reports a journal retirement error, run the 1.0.4 Setup `/ensure CONFIG=<desired admin config> JSON=1`; it recovers the committed journal and validates and collects the old generation. Do not delete the journal or runtime files by hand. Version 1.0.3 understands open-mode generations.
+- **Windows rollback to 1.0.0–1.0.3 with Hermes users:** Since 1.0.4, Setup adds `fail_closed: true` to the Hermes `pre_tool_call` hook. Releases 1.0.0 to 1.0.3 do not know that setting and read the hook as not their own. If a Hermes user is signed out when the older Setup `/upgrade` runs, `/verify` passes at first and then, within about ten minutes, exits `1603` (`canonical hook matrix is absent`, `extra or stale target hermes@<SID>`). It passes again once that user signs in, because the older guardian then rewrites the hook. To avoid the failure, roll back while Hermes users are signed in, or uninstall the newer release and install the older one: signed-out users then stay pending until they sign in, and `/verify` passes.
+- **Windows rollback to 1.0.4 with a disconnected Hermes user:** if a Hermes user's session is disconnected when the published 1.0.4 Setup `/upgrade` runs, `/verify` exits `1603` with one pending target for that account (`canonical hook matrix is absent`, a stale `hermes@<SID>` target) and coverage reads incomplete. The `/verify` result names the account, and it passes once that user reconnects. A user who is signed out is listed as pending and `/verify` passes. Roll back while Hermes users are signed in, or have them sign in again afterwards.
+- **Windows rollback to 1.0.2 with Codex users:** 1.0.5 registers the Codex hook in `%ProgramData%\OpenAI\Codex\requirements.toml` as a direct `cmd.exe` command. The published 1.0.2 Setup removes only its own form of that entry, so after the rollback the file holds both the 1.0.5 entry and the 1.0.2 entry. Both run the installed 1.0.2 hook: every Codex call is still decided and either entry can block it, but each Codex event runs the hook twice and writes two audit rows. A 1.0.2 `/repair` keeps both. Delete the 1.0.5 DefenseClaw hook group from that file by hand, or run a newer Setup's `/ensure` to go back to one entry.
 - **Packages refuse an older release** unless the root-owned marker exists, and the postinstall deletes the marker, so each rollback needs a new one. On Debian and Ubuntu use `apt`, not `dpkg -i`.
+- **Rollback from 1.0.6 to 1.0.5 with OpenCode (tested on Linux):** 1.0.6 registers the OpenCode plugin folder (`share/opencode`) in the managed OpenCode config (`/etc/opencode/opencode.json`, `/Library/Application Support/opencode/opencode.json`, `%ProgramData%\opencode\opencode.json`). 1.0.5 does not know that entry, and nothing of 1.0.6 runs during the rollback, so the entry stays next to 1.0.5's own `defenseclaw.js` entry. OpenCode V1 is still guarded by the `defenseclaw.js` entry and the file is otherwise harmless. 1.0.6 treats both entries as its own: its next `ensure` or `repair`, or an uninstall, rewrites the file to the single folder entry (or removes it) and keeps your own entries. Until then 1.0.5 can show the stale 1.0.6 OpenCode V1 warnings as `agent_unprotected` until its first scan. To clean the file by hand, delete the entry that ends in `share/opencode`.
+- **Windows rollback from 1.0.6 to 1.0.4 or 1.0.5, then uninstall:** 1.0.6 keeps the managed OpenCode plugin at `C:\Program Files\Cisco\DefenseClaw\share\opencode\index.js`. 1.0.4 and 1.0.5 use `share\opencode\defenseclaw.js` and do not know `index.js`, and nothing of 1.0.6 runs during the older Setup's `/upgrade`, so the file stays after the rollback. That older Setup's `/uninstall` then exits `1603` before it changes anything and names the file (`refusing to remove unexpected file from managed install root: ...\share\opencode\index.js`). Uninstall with the 1.0.6 or a later Setup instead: it removes the file and the `share\opencode` entry in `%ProgramData%\opencode\opencode.json`. To use the older Setup, move that one file out of `C:\Program Files\Cisco\DefenseClaw`, run its `/uninstall` again, and then delete the entry that ends in `share\opencode` from the OpenCode file (see the note above). Going forward to 1.0.6 again needs no step. Linux packages remove the file with the 1.0.6 package, and on macOS the 1.0.5 lifecycle removes it as a file the earlier release wrote, so neither has this leftover.
+- **Rollback from 1.0.6 to 1.0.5 while a user runs OpenCode V2 (macOS pkg, Linux packages):** 1.0.5 guards OpenCode V1 only and cannot be changed. During a package rollback only the older package's scripts run, so 1.0.6 cannot warn or stop it, and the root-owned marker is created by hand. After the rollback that user's OpenCode V2 runs unguarded, and on macOS 1.0.5 gives no warning for it (a Windows 1.0.5 reports `agent_unprotected` for such a user; Linux was not tested). Before you roll back, list the users who run OpenCode V2 (the `opencode` entries in `status`, `npm ls -g @opencode/cli` as each user) and have them put OpenCode V1 back (`npm uninstall -g @opencode/cli && npm install -g opencode-ai@1.18`), or accept that they run unguarded until you go forward again. Going forward again to 1.0.6 guards them without any other step.
+- **Rollback to 1.0.3 or 1.0.4 with a large audit store (Linux):** When the 1.0.3 or 1.0.4 gateway first starts on a large audit store (`/var/lib/defenseclaw/audit.db`), it is busy with that store and does not answer hooks in time. On RHEL with a 1.4 GB store this lasted 3.5 to 7.5 minutes after `dnf downgrade` finished. Rolling back to the published 1.0.4 with a 1.5 GB store, it lasted about 4 minutes. Meanwhile managed hooks deny agent tool calls and prompts (`the DefenseClaw gateway did not answer in time` or `the DefenseClaw gateway is not available`), while `enterprise linux status` and `verify` say ok. Roll back while agents are idle, or tell users to retry once the gateway answers.
 
 ### Roll back notes per channel
 
@@ -204,6 +222,57 @@ the older app; otherwise Intune can reapply the newer release.
   [Remove the policies, or downgrade](/docs/enterprise/tetragon/).
 - **MDM wrapper.** The Linux wrapper installs `.rpm` files with `rpm -U`, so it refuses
   older RHEL packages.
+
+### Release floor limits
+
+On Linux and macOS, every `install`, `upgrade`, `repair` and `ensure` checks
+the confirmed bundle's release floor before it changes anything, including a
+repair or ensure that keeps the recorded release. A version that is not a
+release (for example `dev`) never meets a floor. If that check cannot read the
+floor, the run refuses (`product_floor_refused`).
+
+The floor is read from the confirmed bundle's manifest. If another file of the
+confirmed bundle cannot be read, `repair` and `ensure` keep the config the last
+deployment committed, repair the host and warn `bundle_state_unreadable`. With
+`--config`, or with no committed config, the run stops with that code as an
+error instead. To replace the damaged bundle, contact your administrator.
+
+Package scripts shipped in 1.0.4 and later run the same check before they
+replace files, but only with a gateway that has the check: the installed
+gateway when it is 1.0.4 or later, or else the retained floor checker, a copy of
+the gateway that a non-purge uninstall keeps in the lifecycle directory. A
+checker that is there but cannot be read, is not a root-owned file only root can
+change, or does not run, refuses the install. The preinstall has nothing to
+check with when the installed gateway is older than 1.0.4 or gone and there is
+no retained floor checker: for example, an older package was installed below the
+floor, or an uninstall warned `floor_checker_not_kept`. The preinstall of a
+1.0.4 or later package then installs its files; its postinstall `ensure` refuses
+a release below the floor, after the files are in place. A package older than
+1.0.4 has no floor check in any of its scripts and completes below the floor.
+The apt hook of an installed 1.0.4 or later package runs the check for older
+packages installed through `apt` or `apt-get`.
+
+Packages older than 1.0.4 installed through `rpm`, `dnf`, `dpkg -i` or the
+macOS Installer run their own older scripts, which do not check the floor.
+`dpkg -i` does not run the apt hook.
+
+**Windows Setup.** From 1.0.6, Setup `/install`, `/upgrade`, `/repair` and
+`/ensure` check the floor before they change anything, with the Setup's own
+verified copy of DefenseClaw, and refuse a release below it
+(`product_floor_refused`, exit `1603`). A floor that cannot be read refuses
+too. The check also works after an uninstall that kept the state. A 1.0.5 or
+older Setup does not check the floor and can install below it.
+
+On every OS, a 1.0.6 or later release that finds itself below the floor
+reports `product_below_floor` in `status`, `verify` and `bundle status`. It is
+a warning only: the policy keeps enforcing and nothing is repaired or
+reinstalled.
+
+To roll back to 1.0.4, the confirmed floor must be unset or 1.0.4 or lower.
+Keep package deployment under administrator control, and check that the
+release you install meets the floor first. To go below the floor, contact
+your administrator. See [Roll back](/docs/enterprise/lifecycle#roll-back) for
+the supported procedure.
 
 ### The kept version 8 config
 
@@ -235,7 +304,13 @@ The managed config is administrator-owned. For what it contains, see
 
 **Bundle mode.** On a device whose MDM installed bundle trust anchors, the config comes only from signed bundles. `ensure --config`, Setup `CONFIG=` or a wrapper run with a config that is not the current bundle's is refused with `bundle_required`, and on Linux and macOS an edit of the installed file is reverted to the bundle's config. Deliver a new bundle instead. The rest of this section is for devices without bundle trust anchors.
 
-A change is applied by the apply trigger on Linux and macOS. While it runs, `status` and `verify` report `lifecycle_busy` and exit `75`; that is not a failure, so run them again. A hand edit of the config as root is applied, not reported as drift.
+**Leave bundle mode on Windows.** `/repair`, a new `CONFIG=` and moving the anchor file away do not turn bundle mode off: while a signed bundle is current, Setup still refuses `CONFIG=` with `bundle_required`. To go back to a local admin config:
+
+1. Stop delivering bundles to the computer in your MDM (remove the bundle app or package assignment). A later `BUNDLE=` with `TRUSTANCHORS=` puts it back in bundle mode.
+2. Run Setup as LocalSystem ([Run Setup as LocalSystem](/docs/enterprise/windows#run-setup-as-localsystem)) with `/uninstall JSON=1`, without `PURGE=1`, so each user's `%USERPROFILE%\.defenseclaw` stays. It removes the trust anchors, the bundle state and the rest of the machine state ([Remove](/docs/enterprise/windows#remove)). It removes the connector registrations of each user with an active (connected) session. A user who is signed out, or whose session is disconnected, keeps an inert registration and is named in the `user_registrations_pending` warning; that is expected here and needs no `/repair`. From an elevated prompt instead of LocalSystem every user is named, except the Claude Code registration of the account running Setup, which is removed.
+3. Run Setup as LocalSystem with `/ensure CONFIG=<file> JSON=1`. It installs again from that config and enrolls the users again: a signed-in user at once, a signed-out user at their next sign-in (until then `status` counts their connectors as pending). Later changes go through `/ensure CONFIG=` as on any device without anchors.
+
+A change is applied by the apply trigger on Linux and macOS. While it runs, `status` reports the change as pending apply (`ok: true`, `pending_apply: true`, a `lifecycle_busy` warning) and `verify` reports `lifecycle_busy`; both exit `75`. That is not a failure, so run them again. A hand edit of the config as root is applied, not reported as drift.
 
 On Linux and macOS you can also hand the new file to `ensure`. It validates the file,
 installs it as the managed config (mode `0640`, owner root, group of the service account),
@@ -257,8 +332,9 @@ If the new config is invalid, `ensure` fails and the installed config stays (`co
 ### Applying a config change
 
 `status` and `verify` wait up to 5 seconds for a running apply trigger. If it is still
-running (usually under a minute), they report `lifecycle_busy`, exit `75` and say a
-configuration change is being applied. That is not a failure and needs no repair: run them
+running (usually under a minute), they exit `75` and say a configuration change is being
+applied: `status` reports it as pending apply (`ok: true`, `pending_apply: true`, a
+`lifecycle_busy` warning), `verify` as the `lifecycle_busy` error. That is not a failure and needs no repair: run them
 again when it finishes.
 
 **A hand edit of the config is applied, not reported as drift.** When you edit the managed
@@ -386,7 +462,7 @@ Store the new value under the same credential name. On Linux and macOS the comma
 
 ## Add or remove users
 
-The enumerator enrolls users automatically, within 5 minutes. To force a user in or keep one
+The enumerator enrolls users automatically, within 5 minutes of their sign-in. On Windows, Claude Code is enrolled within 5 minutes of its first start in that account (its build is verified then), so a user who signs in and opens Claude Code later waits from that start; until then its calls are refused ([enrollment](/docs/enterprise/enrollment)). To force a user in or keep one
 out, change `enterprise.enrollment` in the config and apply it as in
 [Change the config](#change-the-config). See [Enrollment](/docs/enterprise/enrollment).
 
@@ -476,7 +552,16 @@ commands below to restart the managed gateway.
 | macOS | `sudo launchctl kickstart -k system/com.cisco.defenseclaw.gateway` | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --json` |
 | Windows | Run the installed release's Setup with `/repair JSON=1` | The same |
 
-A managed hook that meets a restarting gateway retries for about 3 seconds, so a quick restart is not visible to the agent. With the default closed fail mode, a longer restart blocks each call. Tool-call hooks wait at most about 3.5 seconds for the gateway, then block with `enterprise_managed_gateway_no_answer`. The administrator's `hook_fail_mode: open` allows only classified connection outages (service stopped or restarting before it accepts the call); no answer in time, integrity, peer-verification, credential and rate-limit refusals still block. Connectors whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`, the default) block outages too. `DEFENSECLAW_STRICT_AVAILABILITY=1` closes outages too. `ensure` applies most config changes in the running gateway without a restart; a change to a process-level key (`gateway.*`, `enterprise.network`, the other `enterprise` keys) restarts it and takes two to six minutes.
+To stop the managed gateway, for example to see what your users get while it is down, and to start it again:
+
+| OS | Stop the gateway | Start it again |
+| --- | --- | --- |
+| Linux | `sudo systemctl stop defenseclaw-gateway-hook.socket defenseclaw-gateway-api.socket defenseclaw-gateway.service` | `sudo systemctl start defenseclaw-gateway-hook.socket defenseclaw-gateway-api.socket defenseclaw-gateway.service` |
+| macOS | `sudo launchctl bootout system/com.cisco.defenseclaw.gateway` | `sudo launchctl bootstrap system /Library/LaunchDaemons/com.cisco.defenseclaw.gateway.plist` |
+
+On Linux stop the two sockets with the service: a socket that still listens starts the gateway again at the next hook. While the gateway is stopped, hooks answer `enterprise_managed_gateway_not_running` and block the call (allow it under the administrator's `hook_fail_mode: open`, see below), and `status` exits `1` with `verify_failed` errors that name the gateway as not active. The gateway stays stopped until you start it again or run `repair`.
+
+A managed hook that meets a restarting gateway retries for about 3 seconds, so a quick restart is not visible to the agent. With the default closed fail mode, a longer restart blocks each call. Tool-call hooks wait at most about 3.5 seconds for the gateway, then block with `enterprise_managed_gateway_no_answer`. The administrator's `hook_fail_mode: open` allows a call only while the hook proves the gateway service is stopped (no gateway took the call); a restart the hook cannot prove stopped, no answer in time, integrity, peer-verification, credential and rate-limit refusals still block. Connectors whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`, the default) block outages too. `DEFENSECLAW_STRICT_AVAILABILITY=1` closes outages too. `ensure` applies most config changes in the running gateway without a restart; a change to a process-level key (`gateway.*`, `enterprise.network`, the other `enterprise` keys) restarts it and takes two to six minutes.
 
 ### Gateway restarts and hook timing
 
@@ -496,9 +581,24 @@ to about 4 seconds, then is blocked the same way. Prompts and session, stop and 
 keep their whole budget. Lifecycle runs run at a lower CPU priority than the hooks on every OS,
 so a repair does not take the CPU the hooks need to answer in time.
 
-The administrator's `hook_fail_mode: open` allows only classified connection outages:
-the service is stopped or restarting before it accepts the call. A hook that
-reaches its answer deadline without a decision blocks. Integrity,
+A gateway too busy to answer blocks a tool call only when this budget runs out, never before it,
+so a burst makes calls wait longer before it blocks any. Measured on Windows Server 2025 with
+8 vCPUs in action mode: when one account starts 60 tool calls at once, each in a new session,
+every 15 seconds, about 9 in 10 calls get their decision within the budget (median about
+2.8 seconds) and the rest are blocked at the budget with `enterprise_managed_gateway_no_answer`.
+That is about 6 such calls per vCPU at once. In observe mode the same burst was answered in full.
+On Linux, measured on a per-user install on RHEL 9.8 with 4 vCPUs, up to 3 interactive agents per vCPU working at once got every tool-call decision within 2 seconds (613 calls, maximum 1.9 seconds). See [Many agents on one Linux host](/docs/support-matrix#many-agents-on-one-linux-host).
+
+While a Setup, pkg or rpm run holds the gateway, the block names the run: "DefenseClaw is being
+installed or upgraded on this computer, and its gateway is stopped until that run finishes or is
+recovered. Try again in a moment", and it points the administrator to the platform's `status`
+command. The call is still blocked. Retry when the run ends. A run that was stopped before it
+finished leaves the same block until it is recovered. A refusal with its own cause keeps its own
+text.
+
+The administrator's `hook_fail_mode: open` allows a call only while the hook proves the
+gateway service is stopped (no gateway took the call). A restart the hook cannot prove
+stopped blocks, and so does a hook that reaches its answer deadline without a decision. Integrity,
 peer-verification, credential and rate-limit refusals still block. Connectors
 whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`,
 the default) block outages too
@@ -553,7 +653,7 @@ Uninstall does the following on every OS:
 
 Restart agents after an uninstall: a session that started earlier keeps the hook it read at its start, and once the hook binary is gone it runs that hook as a missing command, so its tool calls run without DefenseClaw. To go back to an older release without that window, use [Roll back](#roll-back).
 
-A standalone uninstall also removes the config, credentials, most machine state and logs. Each user's `~/.defenseclaw` and per-user binaries stay; `--purge` removes everything, and `--keep-state` keeps machine state for a reinstall.
+A standalone uninstall also removes the config, credentials, most machine state and logs. Each user's `~/.defenseclaw` and per-user binaries stay; `--purge` removes everything DefenseClaw installed (on macOS, macOS lets only a process with Full Disk Access delete the `_defenseclaw` account, so from an ssh session or MDM agent without it the delete is refused (`eDSPermissionError`); the uninstall then completes with a `service_account` warning that gives the two `dscl` commands to run from a Terminal or MDM script that has Full Disk Access), and `--keep-state` keeps machine state for a reinstall.
 
 | Install channel | Remove the deployment and keep each user's data (Linux/macOS may keep sandbox state) | Remove everything |
 | --- | --- | --- |
@@ -597,7 +697,9 @@ keeps sandboxes, the gateway's registration store (`/var/lib/defenseclaw/sandbox
 (`redaction-correlation.key` in the same parent) stays if it is a regular file. They are
 root-owned while the service account is gone; the next `ensure` adopts them. The lifecycle
 directory also keeps the root-only record of the sandbox setup those sandboxes were made under
-(`openshell-state.kept.json`). The root-owned `lifecycle.lock` stays so waiting runs keep using
+(`openshell-state.kept.json`) and `retained-state.json`, the root-only record of the state folders the
+uninstall kept, and the kept data folder holds a root-only `.defenseclaw-retained` marker. The next
+`ensure` uses them to adopt the kept state, then removes them. The root-owned `lifecycle.lock` stays so waiting runs keep using
 the same lock. Use `--purge` for a clean image or to remove the retained sandbox store, key and
 setup record. Purge in the first removal: a purge runs the deployment's own binary, which a
 payload uninstall, `apt remove`, `dnf remove` and the MDM removal scripts delete. After one of
@@ -655,28 +757,30 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
   It then removes all of `~/.defenseclaw` (hook scripts, hook credentials and
   `~/.defenseclaw/foreign-hooks-backup` included) and, from `~/.local/bin`, `defenseclaw-gateway`,
   `defenseclaw-acp`, the launcher links, the `uv` the per-user installer added (when unchanged) and
-  its bookkeeping. A user enrolled only for machine-policy connectors has no per-user install: the
-  purge removes the session cache `~/.defenseclaw/session-facts.json`, and `~/.defenseclaw` when
-  that was all it held. It follows no symlink there and removes only a file the user owns; the
+  its bookkeeping. A user enrolled only for machine-policy connectors loses `~/.defenseclaw` the same
+  way when it holds no own install (only the session cache `~/.defenseclaw/session-facts.json` and
+  what DefenseClaw wrote there, an earlier failed install's hook files and backups included). It follows no symlink there and removes only a file the user owns; the
   user's own tools in `~/.local/bin` stay. The result names each user whose data it removed and
   each enrolled user it left alone, with the reason (a home that is not trusted or not available, a
   hook removal that failed, a gateway that could not be stopped). Fix the cause and run the same
   uninstall again. Back up `~/.defenseclaw/foreign-hooks-backup` first if a user wants their own
   moved-aside hooks back.
-- **A user's own install from before the enrollment (Linux and macOS).** When a user's
-  `~/.defenseclaw` holds a personal install from before the managed deployment enrolled them (it has
-  a `config.yaml`, `.env`, `audit.db` or `previous`), the purge first moves that install's data, as
-  the user, to a new `~/.defenseclaw-backup-<UTC time>` folder (mode `0700`) with a
-  `DEFENSECLAW-BACKUP.txt` that says how to restore it: the config, secrets, audit history,
-  policies, logs, upgrade copies and `foreign-hooks-backup`. Hook scripts, hook credentials,
-  connector backups and caches are not kept. The move is a rename on the same filesystem. If it
-  fails, the purge keeps that user's state and names the user. Delete the backup folder when the
-  user does not need it.
-- **A user whose home is gone (Linux and macOS).** When an enrolled user's home folder no longer
-  exists, the hooks and `~/.defenseclaw` went with it. The uninstall warns
-  (`per_user_hooks_remaining`) with the home and goes on. A home that does not answer, or whose
-  parent folder is missing too (an unmounted volume), is not available rather than gone: the result
-  names it so you can rerun the purge once it is mounted.
+- **A user's own install from before the enrollment (Linux and macOS).** If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. No `~/.defenseclaw-backup-*` folder is made. The enrollment shares that folder: the uninstall, with or without `--purge`, puts back the install's hook scripts and hook settings, connector backups, hook contract lock and session cache as they were before the enrollment, and each agent config those backups name when the uninstall left it as it was before the own install (an agent config changed while the computer was managed stays as it is and is named in a `per_user_state_remaining` warning). The Claude Code hook script the enrollment replaced with a blocker comes back too.
+- **A user whose home is gone (Linux and macOS).** When an enrolled user's home folder was
+  deleted and its parent folder still holds other entries, the hooks and `~/.defenseclaw` went with
+  it. The uninstall warns (`per_user_hooks_remaining`) with the home and goes on. A home that does
+  not answer, or whose parent folder is missing, empty (the mount point of an unmounted volume) or
+  cannot be read, is not available rather than gone. So is a home moved or renamed aside: its
+  parent folder still holds another folder the account owns (for example after
+  `mv /home/<user> /home/.<user>-away`, or `/Users/<user>` on macOS), and that folder keeps the
+  agent configs with DefenseClaw's hook entries. For an account that still exists, the uninstall refuses
+  before it changes anything (`uninstall_precheck_refused`): the services, the machine policy and
+  the hooks and Claude Code blockers of every other user stay. It names the home: mount it, or move it
+  back to its home path, and run the uninstall again. A home that goes away while the uninstall runs stops it later
+  (`uninstall_incomplete`), with the binaries, the deployment record and the services kept. A per-domain home layout (SSSD
+  `fallback_homedir = /home/%d/%u`) looks the same when the only account of a domain had its home
+  folder deleted: recreate that folder as a folder the account owns, then run the uninstall again.
+  Removing the account does not end the stop while a `targets.yaml` row names it (see Manifest rows).
 - **Sandboxes (Linux and macOS).** The uninstall stops the sandbox daemon and OpenShell gateway of
   each account. On Linux, `apt remove`, `dnf remove` and `rpm -e` also stop the sandbox user units
   in the user manager of every signed-in account before the package's files go. When a user manager
@@ -691,8 +795,9 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
 - **Windows per-user registrations.** Acting as a user needs that user's session token, which only
   LocalSystem can obtain. An MDM uninstall runs as LocalSystem and removes DefenseClaw's hooks and
   plugins (Amp, Antigravity, Devin, Hermes, Kiro, OpenCode, and a DefenseClaw Copilot user hook
-  file) from every signed-in user's agent config. An uninstall from an elevated administrator prompt
-  or from Add/Remove Programs removes none, and users who are signed out keep theirs. The result
+  file) from the agent config of every user with an active (connected) session. An uninstall from an
+  elevated administrator prompt or from Add/Remove Programs removes none, and users who are signed
+  out, or whose session is disconnected, keep theirs. The result
   lists them in the `user_registrations_pending` and `user_registrations_failed` warnings. What
   stays is inert; see [Windows: Remove](/docs/enterprise/windows#remove).
 - **Per-user state (Windows).** `PURGE=1` or `--purge`, run as LocalSystem, also removes all of each
@@ -700,8 +805,9 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
   included), whether or not the account is signed in, plus the DefenseClaw files of a per-user
   install from `%USERPROFILE%\.local\bin` and, once that folder is empty, the folder and its entry
   in the account's user `Path`. A signed-out account's `Path` cannot be changed, so it keeps that
-  entry. The `per_user_state_remaining` warning names each folder it could not remove, with the
-  reason.
+  entry. An account whose agent registrations stay (it had no active, connected session) keeps
+  its `.defenseclaw`, whose `connector_backups` restore them; the purge still finishes. The
+  `per_user_state_remaining` warning names each folder it could not remove, with the reason.
 
 ### After an uninstall
 

@@ -309,37 +309,64 @@
       "since": "1.0.3"
     },
     {
-      "name": "DEFENSECLAW_REMOVED_CONNECTOR_UNINSTALL",
-      "category": "upgrade_internal",
-      "purpose": "Set to 1 only by an uninstall (the Python uninstall's connector teardown child and the native Setup uninstall transaction's connector children) so that connector teardown also removes what an older setup wrote for a removed connector (OpenHands, OmniGent) and a removed DefenseClaw does not keep blocking the agent. Setup strips ambient copies from every other child.",
+      "name": "DEFENSECLAW_JUDGE_PRIORITY_DELAY",
+      "category": "test_fixture",
+      "purpose": "Sets the per-call delay of the stand-in judge model in the tool-judge priority latency test (#1395), so a manual run can measure a slower model. The tool deadline scales with it.",
+      "default": "unset (200ms)",
+      "accepted_values": [
+        "Go duration, for example 2s",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/judge_priority_latency_test.go",
+          "description": "TestJudgeToolCallStaysInsideItsDeadlineUnderPromptLoad reads it to size the stand-in judge delay and the tool deadline"
+        }
+      ],
+      "since": "1.0.6"
+    },
+    {
+      "name": "DEFENSECLAW_JUDGE_PRIORITY_TURNS",
+      "category": "test_fixture",
+      "purpose": "Sets how many prompt-and-tool turns the tool-judge priority latency test (#1395) runs, so a manual run can measure a longer queue.",
+      "default": "unset (6)",
+      "accepted_values": [
+        "positive integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/judge_priority_latency_test.go",
+          "description": "TestJudgeToolCallStaysInsideItsDeadlineUnderPromptLoad reads it to size the workload"
+        }
+      ],
+      "since": "1.0.6"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY",
+      "category": "test_fixture",
+      "purpose": "Marks the child process of the Windows gateway priority-class test (GAP-0050), so the class checks run in a child and the test binary keeps its own priority class.",
       "default": "unset",
       "accepted_values": [
         "1",
         "unset"
       ],
-      "security_impact": "low",
+      "security_impact": "none",
       "surface_in_doctor": false,
-      "managed": "allow",
+      "managed": "ignore",
       "consumers": [
         {
-          "location": "internal/gateway/connector/removed_uninstall.go",
-          "description": "Defines the variable for the removed-connector uninstall teardown"
-        },
-        {
-          "location": "internal/cli/connector_cmd.go",
-          "description": "Connector teardown also removes removed-connector state when it is 1"
-        },
-        {
-          "location": "cmd/defenseclaw-setup/transaction.go",
-          "description": "Filters ambient copies and sets it only for an uninstall transaction's connector children"
-        },
-        {
-          "location": "cli/defenseclaw/commands/cmd_uninstall.py",
-          "description": "Sets it for the uninstall's connector teardown child"
+          "location": "internal/cli/sidecar_priority_windows_test.go",
+          "description": "TestSidecarAnswersAtTheHookPriorityClass re-runs itself with the variable set to 1 and checks the class the gateway answers at"
         }
       ],
-      "since": "1.0.4",
-      "security_note": "Internal uninstall flag, removed with the OpenHands/OmniGent compatibility teardown (until 1.1). It only widens what an uninstall removes for retired connectors."
+      "since": "1.0.5"
     },
     {
       "name": "DEFENSECLAW_TEST_WINDOWS_LIFECYCLE_PRIORITY",
@@ -1546,8 +1573,8 @@
         "unset"
       ],
       "security_impact": "medium",
-      "surface_in_doctor": true,
-      "managed": "tighten_only",
+      "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/fail_mode.py",
@@ -2375,7 +2402,7 @@
     {
       "name": "DEFENSECLAW_HOOK_MAX_BODY",
       "category": "hook_internal",
-      "purpose": "Request-body cap (in bytes) for hooks. Default 1048576 (1 MiB).",
+      "purpose": "Request-body cap (in bytes) for hooks; a per-user hook sends at most 921600 bytes (900 KiB) of a call to its own gateway and treats a larger call as oversized input. Default 1048576 (1 MiB).",
       "default": "1048576",
       "accepted_values": [
         "positive integer"
@@ -3334,6 +3361,30 @@
         }
       ],
       "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_DECISION_MODEL_KEY",
+      "category": "credential",
+      "purpose": "Canonical env-var name for the decision model bearer token (decision_model.api_key_env when empty). Optional: a local System One server needs none. Value MUST live in env / .env, not in config.yaml.",
+      "default": "unset",
+      "accepted_values": [
+        "bearer token string",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/config/decision_model.go",
+          "description": "ResolvedDecisionModelKey: key store, then environment; a standalone managed host reads decision_model.credential instead"
+        },
+        {
+          "location": "cli/defenseclaw/credentials.py",
+          "description": "Credentials registry entry for decision_model.api_key_env"
+        }
+      ],
+      "since": "1.0.6"
     },
     {
       "name": "DEFENSECLAW_LLM_KEY",
@@ -8324,6 +8375,26 @@
         }
       ],
       "since": "1.0.4"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_POST_STARTUP_HELPER",
+      "category": "test_fixture",
+      "purpose": "Marks the child process TestHookPostStartupInitBudget starts from its own test binary, so the child only reports package init cost (GODEBUG=inittrace=1) and does not start another child (GAP-1225, GAP-1283).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-hook-post/main_init_test.go",
+          "description": "TestHookPostStartupInitBudget sets it on the child test process it measures"
+        }
+      ],
+      "since": "1.0.5"
     }
   ]
 }

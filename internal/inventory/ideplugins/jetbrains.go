@@ -14,8 +14,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -31,7 +32,7 @@ const (
 
 // jetbrainsProductDir matches a versioned product directory such as
 // IntelliJIdea2024.3, PyCharmCE2023.1 or AndroidStudio2024.2.
-var jetbrainsProductDir = regexp.MustCompile(`^([A-Za-z][A-Za-z-]*?)(\d{4}\.\d+(?:\.\d+)?)$`)
+var jetbrainsProductDir = lazyregexp.New(`^([A-Za-z][A-Za-z-]*?)(\d{4}\.\d+(?:\.\d+)?)$`)
 
 var jetbrainsProductTokens = map[string]string{
 	"intellijidea":  "intellij-idea",

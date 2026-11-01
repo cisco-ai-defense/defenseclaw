@@ -538,14 +538,14 @@ t_opencode_from_user_npm_metadata_without_executing_cli() {
     return 0
   fi
   local home; home="$(mktest_tmp)"
-  local pkg_dir="${home}/.npm-global/lib/node_modules/opencode-ai"
+  local pkg_dir="${home}/.npm-global/lib/node_modules/@opencode/cli"
   mkdir -p "${pkg_dir}"
   cat > "${pkg_dir}/package.json" <<'JSON'
-{ "name": "opencode-ai", "version": "1.18.19" }
+{ "name": "@opencode/cli", "version": "2.1.4" }
 JSON
   local got
   got="$(without_host_agent_bins discover_agent_version opencode "${home}")"
-  assert_eq "${got}" "1.18.19" "opencode version from package metadata without CLI execution"
+  assert_eq "${got}" "2.1.4" "opencode version from package metadata without CLI execution"
 }
 
 t_opencode_package_metadata_requires_identity_and_semver() {
@@ -553,13 +553,13 @@ t_opencode_package_metadata_requires_identity_and_semver() {
   local pkg="${dir}/package.json"
   local got
 
-  printf '{"name":"not-opencode","version":"1.18.19"}\n' > "${pkg}"
+  printf '{"name":"not-opencode","version":"2.1.4"}\n' > "${pkg}"
   got="$(_probe_opencode_json_version "${pkg}")"
   assert_eq "${got}" "" "mismatched OpenCode package identity rejected"
 
   local log="${dir}/errors.log"
   : > "${log}"
-  printf '{"name":"opencode-ai","version":"not-a-version"}\n' > "${pkg}"
+  printf '{"name":"@opencode/cli","version":"not-a-version"}\n' > "${pkg}"
   got="$(DC_DISCOVERY_ERRORS_LOG="${log}" \
          DC_INSTALLER_TARGET_USER="alice" \
          _probe_opencode_json_version "${pkg}")"

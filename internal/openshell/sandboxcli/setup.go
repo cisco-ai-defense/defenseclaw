@@ -20,10 +20,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -550,6 +553,9 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 			a.ok("gateway restarted: it runs sandboxes in OpenShell MicroVMs")
 		}
 	}
+	if microVM && !unmanaged {
+		a.giveStopSync(ctx)
+	}
 	onMicroVMs := microVM && (!switching || switched)
 	// On a Docker VM without Landlock (Docker Desktop's) no sandbox starts
 	// until the gateway runs MicroVMs.
@@ -594,6 +600,17 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	updates := map[string]any{
 		"openshell.enabled": true, "openshell.harnesses": names, "openshell.upstream_telemetry": !telemetryOff,
 	}
+	// A sandbox port another program holds (another account's gateway on
+	// this account's api_port + 1) keeps the daemon from listening there,
+	// and every run is then refused: setup offers a free port, which the
+	// daemon moves its listener to when config.yaml changes (GAP-0701).
+	moved, err := a.offerFreeSandboxPorts(rep, assume)
+	if err != nil {
+		return err
+	}
+	for key, port := range moved {
+		updates[key] = port
+	}
 	// The daemon runs the CLI from the PATH it started with, which may not
 	// have the folder this shell found it in (a Homebrew of your own).
 	bin := cliBinaryToRecord(a.Cfg.OpenShell.Binary, rep.CLIPath)
@@ -616,6 +633,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	}
 	a.Cfg.OpenShell.Enabled, a.Cfg.OpenShell.Harnesses, a.Cfg.OpenShell.UpstreamTelemetry = true, names, !telemetryOff
 	a.ok("openshell.enabled is on in " + a.tildePath(a.ConfigPath))
+	if port, ok := moved[ingressPortKey]; ok {
+		a.Cfg.OpenShell.IngressPort = port
+		a.ok(fmt.Sprintf("%s is %d in %s", ingressPortKey, port, a.tildePath(a.ConfigPath)))
+	}
+	if port, ok := moved[egressPortKey]; ok {
+		a.Cfg.OpenShell.EgressPort = port
+		a.ok(fmt.Sprintf("%s is %d in %s", egressPortKey, port, a.tildePath(a.ConfigPath)))
+	}
 	if bin != "" {
 		a.Cfg.OpenShell.Binary = bin
 		a.note("openshell.binary is " + a.tildePath(bin) + ": the daemon runs the OpenShell CLI from there, as that folder may not be on the PATH it started with")
@@ -977,6 +1002,73 @@ func cliBinaryToRecord(configured, found string) string {
 		return ""
 	}
 	return found
+}
+
+// The config keys of the sandbox listener ports.
+const (
+	ingressPortKey = "openshell.ingress_port"
+	egressPortKey  = "openshell.egress_port"
+)
+
+// sandboxPortProbe opens a listener to find a free port (net.Listen; tests
+// replace it).
+var sandboxPortProbe = net.Listen
+
+// offerFreeSandboxPorts offers, for each sandbox listener port the doctor
+// found held by another process (not this daemon), the next free port above
+// it, and returns the config keys the user took (GAP-0701). A port nobody
+// holds, or one the daemon serves, is left as it is; with no free port in
+// reach it says how to choose one.
+func (a *App) offerFreeSandboxPorts(rep *openshell.DoctorReport, assume bool) (map[string]int, error) {
+	moved := map[string]int{}
+	if a.Cfg == nil || rep == nil {
+		return moved, nil
+	}
+	ingress, egress := a.Cfg.OpenShellIngressPort(), a.Cfg.OpenShellEgressPort()
+	taken := map[int]bool{a.Cfg.Gateway.APIPort: true, ingress: true, egress: true, config.DefaultEnterpriseOpenShellGatewayPort: true}
+	for _, p := range []struct {
+		name, key string
+		port      int
+	}{{"ingress", ingressPortKey, ingress}, {"egress", egressPortKey, egress}} {
+		c := rep.Get(openshell.CheckIDPortPrefix + p.name)
+		if c == nil || c.Status != openshell.StatusFail || !strings.Contains(c.Detail, "in use by another process") {
+			continue
+		}
+		free := freeSandboxPort(p.port, taken)
+		if free == 0 {
+			a.warn(fmt.Sprintf("the sandbox %s port 127.0.0.1:%d is in use by another process and no free port was found near it; set %s to a free port, then rerun setup",
+				p.name, p.port, p.key))
+			continue
+		}
+		yes, err := a.ask(fmt.Sprintf("Move the sandbox %s port to %d? 127.0.0.1:%d is in use by another process, so the daemon cannot listen there "+
+			"and every sandbox run is refused (sets %s in %s)", p.name, free, p.port, p.key, a.tildePath(a.ConfigPath)), true, assume)
+		if err != nil {
+			return nil, err
+		}
+		if !yes {
+			continue
+		}
+		taken[free] = true
+		moved[p.key] = free
+	}
+	return moved, nil
+}
+
+// freeSandboxPort is the first port above from, within 200, that no one
+// listens on 127.0.0.1 and that taken does not hold; 0 when none is.
+func freeSandboxPort(from int, taken map[int]bool) int {
+	for port := from + 1; port <= from+200 && port <= 65535; port++ {
+		if taken[port] {
+			continue
+		}
+		ln, err := sandboxPortProbe("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			continue
+		}
+		_ = ln.Close()
+		return port
+	}
+	return 0
 }
 
 // homebrewNotWritable reports a Homebrew prefix that belongs to another
@@ -1721,5 +1813,62 @@ func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) (r
 		if a.Sleep(ctx, poll) != nil {
 			return true, false, false
 		}
+	}
+}
+
+// stopSyncBinary is DefenseClaw's gateway binary, which the stop sync
+// runs: this process, by its name on PATH when that is the same file (so
+// an upgrade in place keeps the path); a seam for tests.
+var stopSyncBinary = func() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if onPath, err := exec.LookPath(filepath.Base(self)); err == nil {
+		if abs, err := filepath.Abs(onPath); err == nil {
+			fa, aerr := os.Stat(abs)
+			fb, berr := os.Stat(self)
+			if aerr == nil && berr == nil && os.SameFile(fa, fb) {
+				return abs, nil
+			}
+		}
+	}
+	return self, nil
+}
+
+// stopSyncSpec is the ExecStop the gateway service of a MicroVM gateway
+// gets (openshell.StopSync): nil on a managed host, whose administrator's
+// lifecycle owns the units, or when this binary cannot be named.
+func (a *App) stopSyncSpec() *openshell.StopSync {
+	if onManagedHost() {
+		return nil
+	}
+	bin, err := stopSyncBinary()
+	if err != nil {
+		return nil
+	}
+	s := &openshell.StopSync{Binary: bin}
+	if a.Cfg != nil {
+		s.Gateway = a.Cfg.OpenShell.Gateway.Name
+	}
+	return s
+}
+
+// giveStopSync gives the gateway service of a MicroVM gateway the stop
+// sync now, with no restart (GAP-0380), when no restart above gave it
+// already. It is best effort: without it each DefenseClaw restart syncs
+// the running MicroVMs first, and setup goes on.
+func (a *App) giveStopSync(ctx context.Context) {
+	res, err := a.Gateway.StopSync(ctx)
+	if rerr := a.recordGatewayApply(res); rerr != nil {
+		a.warn("could not record the gateway change for teardown: " + rerr.Error())
+	}
+	if err != nil {
+		a.note("the " + openshell.GatewayService + " service gets no stop sync of its MicroVMs (" + err.Error() +
+			"); each restart DefenseClaw makes syncs them first instead")
+		return
+	}
+	if res != nil && len(res.Files) > 0 {
+		a.ok(openshell.StopSyncSummary)
 	}
 }

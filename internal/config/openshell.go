@@ -23,12 +23,14 @@ import (
 	"net/netip"
 	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -278,7 +280,7 @@ func (u OpenShellUndoIgnoredConfig) EffectiveDirs() []string {
 
 // openShellUndoIgnoredDir is one path segment that is not "." or "..":
 // a directory name matched at any depth.
-var openShellUndoIgnoredDir = regexp.MustCompile(`^\.?[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$`)
+var openShellUndoIgnoredDir = lazyregexp.New(`^\.?[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$`)
 
 func validateOpenShellUndoIgnored(u OpenShellUndoIgnoredConfig) error {
 	if u.MaxMB < 0 || u.MaxMB > 1<<20 {
@@ -604,11 +606,11 @@ func OpenShellProfileRank(profile string) int {
 }
 
 var (
-	openShellNamePattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	openShellHostLabel        = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$`)
-	openShellCPUPattern       = regexp.MustCompile(`^([0-9]{1,6})(\.[0-9]{1,3})?$|^([0-9]{1,9})m$`)
-	openShellMemoryPattern    = regexp.MustCompile(`^([0-9]{1,15})(Ki|Mi|Gi|Ti|k|K|M|G|T)?$`)
-	openShellPackDigest       = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	openShellNamePattern      = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	openShellHostLabel        = lazyregexp.New(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$`)
+	openShellCPUPattern       = lazyregexp.New(`^([0-9]{1,6})(\.[0-9]{1,3})?$|^([0-9]{1,9})m$`)
+	openShellMemoryPattern    = lazyregexp.New(`^([0-9]{1,15})(Ki|Mi|Gi|Ti|k|K|M|G|T)?$`)
+	openShellPackDigest       = lazyregexp.New(`^sha256:[0-9a-f]{64}$`)
 	openShellMemoryMultiplier = map[string]int64{
 		"": 1, "k": 1000, "K": 1000, "M": 1000 * 1000, "G": 1000 * 1000 * 1000,
 		"T": 1000 * 1000 * 1000 * 1000, "Ki": 1 << 10, "Mi": 1 << 20, "Gi": 1 << 30, "Ti": 1 << 40,
@@ -618,7 +620,7 @@ var (
 // openShellHarnessVersionKey is openShellNamePattern without ".": the config
 // loader (viper) reads a dotted image.harness_versions key as a key path, so
 // such a key never loads.
-var openShellHarnessVersionKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
+var openShellHarnessVersionKey = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
 // ParseOpenShellCPU parses a CPU quantity ("2", "1.5", "500m") into
 // millicores.
@@ -734,7 +736,7 @@ func (p OpenShellEgressPattern) Covers(inner OpenShellEgressPattern) bool {
 }
 
 // openShellPrefixBits is a CIDR prefix length without leading zeros.
-var openShellPrefixBits = regexp.MustCompile(`^(0|[1-9][0-9]{0,2})$`)
+var openShellPrefixBits = lazyregexp.New(`^(0|[1-9][0-9]{0,2})$`)
 
 // ParseOpenShellEgressPattern parses an egress host pattern (see
 // OpenShellEgressPattern). Surrounding space and case are ignored, a host
@@ -1100,6 +1102,7 @@ func (o *OpenShellConfig) Validate() error {
 // validateAs checks one floor section: openshell.admin (prefix "admin") or a
 // profile's sandbox section (prefix "sandbox", the same type).
 func (a *OpenShellAdminConfig) validateAs(prefix string) error {
+	a.foldEnumCase()
 	var errs []error
 	check := func(err error) {
 		if err != nil {
@@ -1172,6 +1175,48 @@ func validateOpenShellNonNegative(field string, value int) error {
 		return fmt.Errorf("%s must not be negative", field)
 	}
 	return nil
+}
+
+// openShellAdminEnumKeys are the floor settings (openshell.admin and a
+// guardrail profile's sandbox section) whose values are lowercase words.
+var openShellAdminEnumKeys = []string{"when_unavailable", "user_approvals", "on_silence", "foreign_sandboxes", "driver_fallback", "min_profile"}
+
+// foldOpenShellEnumCase lowercases, in a parsed config document, the string
+// values of the administrator's OpenShell settings whose values are
+// lowercase words (enterprise.openshell and the sandbox floors): a value in
+// any letter case means the same (#1226). The schema lists only the
+// lowercase words, so `install: Prerequisite`, `driver: VM` or
+// `foreign_sandboxes: Alert` were refused by config validate and ensure
+// while the loader folded the agent names next to them (GAP-0691). The
+// schema check, the typed decode and the plain projection read the folded
+// value; the loader folds the same floor settings (foldEnumCase), and the
+// file itself is not changed. The user's own openshell settings, which the
+// Python writer checks the same way (testdata/openshell
+// config_validation_cases.yaml), keep their exact words.
+func foldOpenShellEnumCase(root *yaml.Node) {
+	lower := func(mapping *yaml.Node, keys ...string) {
+		for _, key := range keys {
+			if v := v8YAMLMapValue(mapping, key); v != nil && v.Kind == yaml.ScalarNode && v.ShortTag() == "!!str" {
+				v.Value = strings.ToLower(v.Value)
+			}
+		}
+	}
+	lower(v8YAMLMapValue(v8YAMLMapValue(root, "enterprise"), "openshell"), "install", "driver", "driver_fallback")
+	lower(v8YAMLMapValue(v8YAMLMapValue(root, "openshell"), "admin"), openShellAdminEnumKeys...)
+	if profiles := v8YAMLMapValue(v8YAMLMapValue(root, "guardrail"), "profiles"); profiles != nil && profiles.Kind == yaml.MappingNode {
+		for i := 1; i < len(profiles.Content); i += 2 {
+			lower(v8YAMLMapValue(profiles.Content[i], "sandbox"), openShellAdminEnumKeys...)
+		}
+	}
+}
+
+// foldEnumCase lowercases a floor's settings that openShellAdminEnumKeys
+// name, for a configuration the loader decoded from the file itself
+// (foldOpenShellEnumCase folds the same in the document).
+func (a *OpenShellAdminConfig) foldEnumCase() {
+	for _, v := range []*string{&a.WhenUnavailable, &a.UserApprovals, &a.OnSilence, &a.ForeignSandboxes, &a.DriverFallback, &a.MinProfile} {
+		*v = strings.ToLower(*v)
+	}
 }
 
 func validateOpenShellEnum(field, value string, emptyOK bool, allowed ...string) error {

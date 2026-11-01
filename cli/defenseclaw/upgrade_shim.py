@@ -52,6 +52,15 @@ import urllib.request
 DEFAULT_REPO = "cisco-ai-defense/defenseclaw"
 # Deprecated alias of config.yaml update.source: a GitHub owner/name.
 REPO_ENV = "DEFENSECLAW_REPO"
+# DEFENSECLAW_REPO is a GitHub owner/name or an https:// mirror base URL. Any
+# other value (an http:// URL, a path) used to be appended to github.com and
+# ended in an HTTP 404 (GAP-1065). The value is never echoed: a mirror URL can
+# carry credentials.
+_VALID_REPO_ENV = re.compile(r"^(https://\S+|[^\s/:@]+/[^\s/:@]+)$")
+REPO_ENV_REFUSAL = (
+    f"{REPO_ENV} must be a GitHub owner/name or an https:// mirror URL (an http:// URL is not accepted). "
+    f"Fix or unset {REPO_ENV}, or set update.source to an https:// URL"
+)
 OFFICIAL_SOURCE = "https://github.com/" + DEFAULT_REPO
 # The release signing identity is compiled in. update.source and
 # DEFENSECLAW_REPO only change where release bytes are fetched from; a
@@ -65,7 +74,15 @@ _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 # Configuration keys added after 1.0.2, with the first release that has each.
 # The installer of an older release refuses a config.yaml that sets one
 # ("unknown field", GAP-0137), so a downgrade sets them aside first.
-NEWER_CONFIG_KEYS = (("openshell.trusted_ca_bundle", (1, 0, 3)),)
+# guardrail.chains and connectors (connectors.agent_gateway) are set aside
+# whole: an older release refuses the block itself, so taking only the inner
+# key out would leave an empty block behind.
+NEWER_CONFIG_KEYS = (
+    ("openshell.trusted_ca_bundle", (1, 0, 3)),
+    ("guardrail.internal_domains", (1, 0, 6)),
+    ("guardrail.chains", (1, 0, 6)),
+    ("connectors", (1, 0, 6)),
+)
 # Where a downgrade keeps the keys it set aside, in the data folder:
 # {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
 SET_ASIDE_FILE = "config-set-aside.json"
@@ -238,6 +255,9 @@ def _tolerant_output() -> None:
             setattr(sys, name, _AsciiGlyphs(stream))
 
 
+_VERSION_NEEDS_VALUE = "--version needs a release number, for example: defenseclaw upgrade --version 1.2.3"
+
+
 def _parse(command: str, args: list[str]) -> dict[str, object] | None:
     options: dict[str, object] = {"version": None, "yes": False}
     index = 0
@@ -247,11 +267,17 @@ def _parse(command: str, args: list[str]) -> dict[str, object] | None:
             return None
         if arg in ("-y", "--yes"):
             options["yes"] = True
-        elif command == "upgrade" and arg == "--version" and index + 1 < len(args):
+        elif command == "upgrade" and arg == "--version":
+            # A missing value is not an unknown option (GAP-2258): the flag is
+            # valid, so say what it needs. "--version --yes" is the same mistake.
+            if index + 1 >= len(args) or args[index + 1].startswith("-"):
+                raise ShimUsageError(_VERSION_NEEDS_VALUE)
             index += 1
             options["version"] = args[index]
         elif command == "upgrade" and arg.startswith("--version="):
             options["version"] = arg.split("=", 1)[1]
+            if not options["version"]:
+                raise ShimUsageError(_VERSION_NEEDS_VALUE)
         elif command == "upgrade" and arg == "--recover-corrupt-audit":
             # Hidden, kept for 0.8.x muscle memory and scripts: recovery is now automatic.
             print(RECOVER_CORRUPT_AUDIT_NOTE, file=sys.stderr)
@@ -277,6 +303,8 @@ def release_source() -> str:
         return configured.rstrip("/")
     repo = os.environ.get(REPO_ENV, "").strip()
     if repo:
+        if not _VALID_REPO_ENV.match(repo):
+            raise ShimUsageError(REPO_ENV_REFUSAL)
         return _source_url(repo)
     return OFFICIAL_SOURCE
 
@@ -320,6 +348,8 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
         return 0
     if _key(version) < (1, 0, 0):
         raise ShimError(f"DefenseClaw {installed} cannot install {version}; 1.x installs only 1.0.0 or later")
+    if _key(version) < _key(installed):
+        _refuse_unguarding_downgrade(version)
 
     print(f"  → Installing DefenseClaw {version} (installed: {installed})")
     workdir = tempfile.mkdtemp(prefix="defenseclaw-upgrade-")
@@ -352,7 +382,31 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
         except BaseException:
             shutil.rmtree(workdir, ignore_errors=True)
             raise
-    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir)
+    # Only a downgrade to a release that keeps the newer hook helper waits
+    # for its installer and drops the helper (rel-1-0-4:GAP-2503).
+    newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
+    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer)
+
+
+def _refuse_unguarding_downgrade(version: str) -> None:
+    """Stop a downgrade to a release that cannot guard an agent set up here.
+
+    ``defenseclaw rollback`` runs the same check (``migrate
+    --check-rollback-to``); a downgrade runs the older release's installer,
+    which has none, so this install checks before anything changes
+    (rel-1-0-6 GAP-0128: OpenCode V2 under 1.0.5 ran unguarded). The check
+    belongs to the rest of the CLI: when that cannot load, the downgrade goes
+    on as before, since it may be the way out of a broken install.
+    """
+
+    try:
+        from defenseclaw.migrations import MigrationError, check_opencode_rollback
+    except Exception:  # noqa: BLE001 - a broken CLI must not block the way back
+        return
+    try:
+        check_opencode_rollback(_data_home(), version, downgrade=True)
+    except MigrationError as exc:
+        raise ShimError(str(exc)) from None
 
 
 def _active_config_path() -> str:
@@ -657,7 +711,7 @@ def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str
     )
 
 
-def _run_installer(path: str, args: list[str], workdir: str) -> int:
+def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | None = None) -> int:
     # The installer downloads the release assets: hand it update.source
     # through its DEFENSECLAW_REPO input (an owner/name or an https base URL).
     configured = _configured_update_source()
@@ -711,6 +765,14 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
     bash = "/bin/bash" if os.path.exists("/bin/bash") else (shutil.which("bash") or "bash")
     sys.stdout.flush()
     sys.stderr.flush()
+    if newer:
+        # A downgrade from newer: the older installer keeps the hook helper of
+        # this release, so the shim waits for it (rel-1-0-4:GAP-2503).
+        rc = _wait_for_installer([bash, path, *args])
+        shutil.rmtree(workdir, ignore_errors=True)
+        if rc == 0:
+            _drop_newer_hook_helper(newer)
+        return rc
     try:
         # path is absolute; keep the caller's directory for relative vendor
         # paths handed to an installer from an older release.
@@ -719,6 +781,81 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
         shutil.rmtree(workdir, ignore_errors=True)
         raise ShimError(f"could not run {bash}: {exc}") from None
     return 0  # pragma: no cover - execv does not return
+
+
+def _wait_for_installer(argv: list[str]) -> int:
+    try:
+        proc = subprocess.Popen(argv)  # noqa: S603 - fixed interpreter and verified script
+    except OSError as exc:
+        raise ShimError(f"could not run {argv[0]}: {exc}") from None
+    while True:
+        try:
+            return proc.wait()
+        except KeyboardInterrupt:
+            # The installer gets the same Ctrl-C and finishes or undoes its swap.
+            continue
+
+
+HOOK_HELPER = os.path.join("hooks", "_hardening.sh")
+# A gateway of 1.0.4 or older keeps the newer hooks/_hardening.sh. 1.0.5 and
+# later ship the same helper (schema v10), and a gateway with only plugin
+# connectors (OpenCode) set up never writes one: once the shim dropped it,
+# that gateway refused to start (rel-1-0-6:GAP-0047). A release that changes
+# the helper's schema line must revisit this floor and install.sh's.
+HOOK_HELPER_KEPT_BEFORE = (1, 0, 5)
+_HOOK_HELPER_MAX_BYTES = 4 << 20
+
+
+def _drop_newer_hook_helper(newer: str) -> None:
+    """After a downgrade from ``newer``, let the older gateway write its own hook helper.
+
+    A gateway of 1.0.4 or older keeps a hooks/_hardening.sh whose schema line
+    is newer than its own, and the helper of a newer release runs native
+    commands the older binaries do not have: after ``defenseclaw upgrade
+    --version 1.0.2`` every hook call was refused as "the gateway is running
+    but did not answer" until the helper was removed and the gateway restarted
+    (rel-1-0-4:GAP-2503). The helper goes only when it is byte for byte the one
+    the replaced install (previous/, ``newer``) has. Until 1.1: remove with the
+    1.0.2, 1.0.3 and 1.0.4 downgrade paths.
+    """
+    home = _data_home()
+    live = os.path.join(home, HOOK_HELPER)
+    left = os.path.join(home, "previous", "data", HOOK_HELPER)
+    try:
+        with open(os.path.join(home, "previous", "VERSION"), encoding="utf-8") as handle:
+            if handle.read(64).strip() != newer:
+                return
+        if not all(stat.S_ISREG(os.lstat(path).st_mode) for path in (live, left)):
+            return
+        with open(live, "rb") as mine, open(left, "rb") as theirs:
+            if mine.read(_HOOK_HELPER_MAX_BYTES + 1) != theirs.read(_HOOK_HELPER_MAX_BYTES + 1):
+                return
+        os.unlink(live)
+    except OSError:
+        return
+    gateway = os.path.join(os.path.expanduser("~"), ".local", "bin", "defenseclaw-gateway")
+    print(f"  → Removed the hook helper of DefenseClaw {newer}; the gateway writes its own when it starts")
+    if not _gateway_running(home):
+        return
+    try:
+        rc = subprocess.call([gateway, "restart"])  # noqa: S603 - the installed gateway
+    except OSError:
+        rc = 1
+    if rc != 0:
+        print("  ! The gateway did not restart; hook calls are refused until it does. Run: defenseclaw-gateway restart")
+
+
+def _gateway_running(home: str) -> bool:
+    try:
+        with open(os.path.join(home, "gateway.pid"), encoding="utf-8") as handle:
+            text = handle.read(4096).strip()
+        pid = json.loads(text).get("pid") if text.startswith("{") else int(text)
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        os.kill(pid, 0)
+    except (OSError, ValueError, AttributeError):
+        return False
+    return True
 
 
 def _windows_terminal_without_desktop() -> bool:

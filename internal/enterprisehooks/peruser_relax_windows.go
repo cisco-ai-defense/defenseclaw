@@ -48,6 +48,9 @@ func relaxWindowsStandalonePerUserFootprintForSetup(target windowsGenericManaged
 	if _, perUser := windowsStandalonePerUserConnector(target.conn.Name()); !perUser {
 		return nil, nil
 	}
+	// Recorded before any folder is relaxed, so a hook or lifecycle that
+	// sees the relax also sees who holds it (GAP-1985).
+	writeWindowsSetupRelaxMarker(target.conn.Name(), target.sid)
 	dirs := append([]string{
 		filepath.Join(target.dataDir, "connector_backups", target.conn.Name()),
 	}, footprint.CreatedDirs...)

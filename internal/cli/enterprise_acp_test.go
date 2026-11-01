@@ -235,21 +235,29 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	// entry points at this data directory's token copy and lock.
 	doneLock := acpContractLockPath(userData, "zed", "kiro")
 	editorFile := filepath.Join(userHome, ".config", "zed", "settings.json")
-	guardPath := filepath.Join(userHome, "defenseclaw-acp")
+	agentBinary, agentSHA, guardPath, guardSHA := testACPExecutables(t, userHome)
 	if err := os.MkdirAll(filepath.Dir(editorFile), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	entry, _ := json.Marshal(map[string]any{"agent_servers": map[string]any{
 		acpManagedEntryName("kiro"): map[string]any{"command": guardPath,
-			"args": []string{"--token-file", tokenPath, "--contract-lock", doneLock}},
+			"args": []string{"--token-file", tokenPath, "--contract-lock", doneLock, "--", agentBinary, "acp"}},
 	}})
 	if err := os.WriteFile(editorFile, entry, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The lock pins the entry as setup does; the guard refuses a lock that
+	// pins nothing, so list cannot call it done (GAP-1154).
+	entryDigest, err := acp.ClientEntrySHA256(editorFile, "zed", "kiro", doneLock)
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeLock := func(profile, mode string) {
 		t.Helper()
-		lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile},
-			"guard": map[string]any{"path": guardPath}, "profile": profile, "mode": mode})
+		lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile,
+			"config_sha256": acp.EntryDigestPrefix + entryDigest},
+			"agent": map[string]any{"id": "kiro", "path": agentBinary, "sha256": agentSHA},
+			"guard": map[string]any{"path": guardPath, "sha256": guardSHA}, "profile": profile, "mode": mode})
 		if err := os.WriteFile(doneLock, lock, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -278,6 +286,23 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		t.Fatalf("a moved pair is not flagged: list %v, verify %v", row, verified)
 	}
 	cfg.ACP.Clients["zed"], cfg.ACP.Agents["kiro"] = config.ACPBinding{Enabled: true, Profile: "locked"}, config.ACPBinding{Enabled: true, Profile: "locked"}
+	// A profile whose allow-list no longer names the client, while the
+	// binding stays, is refused by the gateway; verify and list say so with
+	// the gateway's rule (GAP-1155).
+	allowed := cfg.ACP.Profiles["locked"]
+	narrowed := allowed
+	narrowed.AllowedClients = []string{"vscode"}
+	cfg.ACP.Profiles["locked"] = narrowed
+	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
+	verified = run(runEnterpriseACPVerify)
+	if row, _ := listed[0].(map[string]any); !strings.Contains(fmt.Sprint(row["note"]), "acp.profiles.locked.allowed_clients does not name zed") ||
+		!strings.Contains(fmt.Sprint(verified["central_note"]), "no longer allows zed/kiro in profile locked") {
+		t.Fatalf("a pair outside the profile allow-list is not flagged: list %v, verify %v", row, verified)
+	}
+	cfg.ACP.Profiles["locked"] = allowed
+	if verified = run(runEnterpriseACPVerify); verified["central_note"] != nil {
+		t.Fatalf("verify flags an allowed pair: %v", verified)
+	}
 	// After an account rename the recorded data directory names the old
 	// home; list reads the default one of the new home (GAP-0869).
 	renamedHome := t.TempDir()
@@ -448,6 +473,62 @@ func TestEnterpriseACPEnrollReplacesTheOtherProfile(t *testing.T) {
 				t.Fatalf("active profile token after revoking %s: %v", stale, err)
 			}
 		})
+	}
+}
+
+// An enrollment made with --data-dir records that dir; verify and revoke
+// without --data-dir act on the recorded copy, as list does: verify called it
+// missing and revoke left it behind and named <home>/.defenseclaw (GAP-2431).
+func TestEnterpriseACPVerifyAndRevokeUseTheRecordedDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enrolls the current Unix user")
+	}
+	previousCfg := cfg
+	previous := []string{enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile, enterpriseACPUser, enterpriseACPUserHome, enterpriseACPSID, enterpriseACPUserDataDir}
+	previousJSON, previousUID, previousGID := enterpriseACPJSON, enterpriseACPUID, enterpriseACPGID
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile = previous[0], previous[1], previous[2]
+		enterpriseACPUser, enterpriseACPUserHome, enterpriseACPSID, enterpriseACPUserDataDir = previous[3], previous[4], previous[5], previous[6]
+		enterpriseACPJSON, enterpriseACPUID, enterpriseACPGID = previousJSON, previousUID, previousGID
+	})
+	cfg = &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise", ACP: config.ACPConfig{
+		Enabled: true, DefaultProfile: "obs",
+		Clients:  map[string]config.ACPBinding{"zed": {Enabled: true, Profile: "obs"}},
+		Agents:   map[string]config.ACPBinding{"hermes": {Enabled: true, Profile: "obs"}},
+		Profiles: map[string]config.ACPProfile{"obs": {Mode: "observe", AllowedClients: []string{"zed"}, AllowedAgents: []string{"hermes"}}},
+	}}
+	cfg.Enterprise.Profile = "standalone"
+	userHome := t.TempDir()
+	recorded := filepath.Join(userHome, "custom-acp")
+	enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile = "zed", "hermes", "obs"
+	enterpriseACPUser, enterpriseACPUserHome, enterpriseACPSID, enterpriseACPUserDataDir = "", userHome, "", recorded
+	enterpriseACPJSON, enterpriseACPUID, enterpriseACPGID = true, -1, -1
+	run := func(step func(*cobra.Command, []string) error) (map[string]any, error) {
+		t.Helper()
+		var output bytes.Buffer
+		command := &cobra.Command{}
+		command.SetOut(&output)
+		err := step(command, nil)
+		var payload map[string]any
+		_ = json.Unmarshal(output.Bytes(), &payload)
+		return payload, err
+	}
+	if _, err := run(runEnterpriseACPEnroll); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	tokenPath, _ := acp.EnterpriseUserTokenPath(recorded, "zed", "hermes")
+	enterpriseACPUserDataDir = ""
+	verified, err := run(runEnterpriseACPVerify)
+	if err != nil || verified["ok"] != true || verified["token_file"] != tokenPath {
+		t.Fatalf("verify without --data-dir = %v, %v; want ok with token_file %s", verified, err, tokenPath)
+	}
+	revoked, err := run(runEnterpriseACPRevoke)
+	if err != nil || revoked["token_file"] != tokenPath || revoked["centrally_revoked"] != true {
+		t.Fatalf("revoke without --data-dir = %v, %v; want token_file %s", revoked, err, tokenPath)
+	}
+	if _, err := os.Lstat(tokenPath); !os.IsNotExist(err) {
+		t.Fatalf("recorded copy after revoke: %v; want it removed", err)
 	}
 }
 

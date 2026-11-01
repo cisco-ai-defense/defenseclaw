@@ -40,6 +40,7 @@ import (
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -586,7 +587,7 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 			return nil
 		}
 		if !isRecognizedRulePackYAML(rel) {
-			return rulePackErr(safeInventoryPath(rel), "inventory_unexpected", "unexpected YAML component")
+			return rulePackErr(safeInventoryPath(rel), "inventory_unexpected", unexpectedYAMLReason(safeInventoryPath(rel)))
 		}
 
 		fileInfo, infoErr := entry.Info()
@@ -620,6 +621,27 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 		return nil, rulePackErr(".", "inventory_unreadable", "rule-pack inventory cannot be inspected")
 	}
 	return inventory, nil
+}
+
+// unexpectedYAMLReason says what to take out of the pack folder for a YAML file
+// the loader does not recognize. rel is the safe, slash-separated path under
+// the pack root. A file below a folder that is neither rules nor judge (a copy
+// of another pack placed inside this one, such as default/judge/injection.yaml)
+// is named by that folder, since removing the one file would only surface the
+// next; any other file is named by itself. The text holds relative names only
+// (RulePackError.Reason never carries an absolute path); the installer adds the
+// absolute folder (GAP-1566).
+func unexpectedYAMLReason(rel string) string {
+	const base = "unexpected YAML component"
+	const next = ", then run the command or installer again"
+	if rel == "" || rel == "." {
+		return base
+	}
+	first, _, nested := strings.Cut(rel, "/")
+	if nested && first != "rules" && first != "judge" {
+		return base + ": the folder " + first + " does not belong in a rule pack (a copy of another pack placed inside this one?); move " + first + " out of the rule-pack folder or remove it" + next
+	}
+	return base + ": move " + rel + " out of the rule-pack folder or remove it" + next
 }
 
 // isPackManifestName reports whether rel names the pack manifest. Windows
@@ -1468,7 +1490,7 @@ func validateRequiredRegex(rel, field, pattern string) error {
 }
 
 // safeRuleIDPattern bounds the rule ids echoed in validation errors.
-var safeRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
+var safeRuleIDPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 
 // ruleFieldLabel names a rule by its id and its 1-based place in the file, so
 // an author can find it (GAP-1225). An id outside the safe set is left out.
@@ -1660,7 +1682,7 @@ func semanticCompileReason(label string, code semantic.CompileCode) string {
 	switch code {
 	case semantic.CompileStaticCost:
 		return fmt.Sprintf("%s expression's estimated worst-case evaluation cost is above the per-rule limit of %d "+
-			"(lists and strings are costed at their maximum sizes); a list macro (exists, all, map, filter) nested inside "+
+			"(lists and strings are costed at their maximum sizes); an exists() or all() nested inside "+
 			"another multiplies the cost, so test one list, prefer ==, in or startsWith over contains or matches inside "+
 			"a nested macro, or split the check into separate rules", label, semanticRuleStaticCostLimit)
 	case semantic.CompileStaticCostUnbounded:
@@ -1685,7 +1707,7 @@ var semanticCompileProblems = map[semantic.CompileCode]string{
 	semantic.CompileResultType:         "it must evaluate to true or false",
 	semantic.CompileSurface:            "it uses a field or function that rule-pack expressions don't allow",
 	semantic.CompileEnumDomain:         "it compares a field with a value that field never has",
-	semantic.CompileComprehensionDepth: "it nests list macros (exists, all, map, filter) too deeply",
+	semantic.CompileComprehensionDepth: "it nests exists() and all() too deeply; flatten the check or split it into separate rules",
 	semantic.CompileRegexForm:          "call matches() on a string with one pattern argument",
 	semantic.CompileRegexDynamic:       "the matches() pattern must be a string literal",
 	semantic.CompileRegexSize:          "the matches() pattern is too long",

@@ -25,12 +25,16 @@ const (
 	enterpriseWTSDomainName = 7
 )
 
-// WindowsTargetHasNoSession reports whether no Windows session, in any
-// state, is signed in as sid. Unlike the session-token check it does not
-// need LocalSystem: an elevated administrator can list the sessions and read
-// whose each one is, though it cannot query their tokens. A session whose
-// account cannot be read or resolved is an error, so sign-out is never
-// inferred from what the caller could not see (GAP-1433).
+// WindowsTargetHasNoSession reports whether no active Windows session is
+// signed in as sid. Unlike the session-token check it does not need
+// LocalSystem: an elevated administrator can list the sessions and read whose
+// each one is, though it cannot query their tokens. A session whose account
+// cannot be read or resolved is an error, so sign-out is never inferred from
+// what the caller could not see (GAP-1433). Only an active session counts,
+// as for the guardian, which repairs a target only in its account's active
+// session and waits while that account has only a disconnected one: verify
+// counted the disconnected session as signed in and failed 1603 on the very
+// wait the guardian and ensure accepted (GAP-1533, GAP-1564).
 func WindowsTargetHasNoSession(sid string) (bool, error) {
 	target, err := windows.StringToSid(strings.TrimSpace(sid))
 	if err != nil {
@@ -48,6 +52,9 @@ func WindowsTargetHasNoSession(sid string) (bool, error) {
 	for _, session := range unsafe.Slice(sessions, count) {
 		if session.SessionID == 0 {
 			continue // services only; nobody signs in to session 0
+		}
+		if !windowsSessionStateSignedIn(session.State) {
+			continue
 		}
 		user, err := enterpriseWTSSessionString(session.SessionID, enterpriseWTSUserName)
 		if err != nil {
@@ -73,6 +80,13 @@ func WindowsTargetHasNoSession(sid string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// windowsSessionStateSignedIn is the session state the guardian repairs a
+// target in: active. A disconnected session waits for its account to
+// reconnect or sign in again.
+func windowsSessionStateSignedIn(state uint32) bool {
+	return state == windows.WTSActive
 }
 
 func enterpriseWTSSessionString(session uint32, class uintptr) (string, error) {

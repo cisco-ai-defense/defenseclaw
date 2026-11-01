@@ -150,3 +150,140 @@ func TestConfigManagerUnchangedStartupDoesNotRepeatWriterAudit(t *testing.T) {
 		}
 	}
 }
+
+// A config set saved while the gateway was stopped, then a hand edit, then
+// the start: the startup asset reconcile (errGenerationUnchanged) records
+// the hand edit as the next generation and must also apply it, so the first
+// write after the start is attributed to its writer instead of
+// "generations N-M applied together" (GAP-0005, GAP-1338 class).
+func TestConfigManagerStoppedSetThenHandEditThenStartAttributesTheNextWrite(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := []byte("config_version: 9\ndata_dir: " + filepath.ToSlash(dir) + "\ngateway:\n  api_port: 19080\nobservability: {}\n")
+	write := func(actor string, data []byte) {
+		t.Helper()
+		if _, err := configwrite.Locked(t.Context(), path, configwrite.Options{Actor: actor, Reason: "defenseclaw config set"},
+			func() (bool, error) { return true, os.WriteFile(path, data, 0o600) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("cli:operator", raw)
+	// Stopped: config set saves a generation no gateway applies.
+	stoppedSet := bytes.ReplaceAll(raw, []byte("19080"), []byte("19081"))
+	write("cli:operator", stoppedSet)
+	// Still stopped: a hand edit.
+	handEdited := append([]byte("# edited by hand while stopped\n"), stoppedSet...)
+	if err := os.WriteFile(path, handEdited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Start.
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, logger := newNativeSkillRuntimeTestStore(t)
+	capture := &captureJudgeRuntimeV8Emitter{}
+	logger.SetRuntimeV8Emitter(capture)
+	mgr := newConfigManagerWithSnapshot(path, initial, logger, nil, "",
+		func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
+			if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets {
+				return errGenerationUnchanged
+			}
+			return nil
+		})
+	compiled, err := config.ParseCompileObservabilityV8(path, handEdited,
+		config.ObservabilityV8CompileOptions{DefaultDataDir: initial.DataDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.bindInitialObservabilityV8Plan(compiled.Plan)
+	mgr.setStartupSource(path, handEdited)
+	if err := mgr.ReloadAssets(t.Context(), "startup_reconcile"); err != nil {
+		t.Fatal(err)
+	}
+	// The first config set after the start.
+	write("cli:after", bytes.ReplaceAll(handEdited, []byte("19081"), []byte("19082")))
+	for i := 0; i < 2; i++ {
+		if err := mgr.Reload(t.Context(), "fsnotify"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records := capture.snapshot()
+	if len(records) == 0 {
+		t.Fatal("the first write after the start produced no audit record")
+	}
+	for _, record := range records {
+		wire, _ := json.Marshal(record)
+		if bytes.Contains(wire, []byte("applied together")) {
+			t.Fatalf("a write after a stopped set and hand edit is unattributed: %s", wire)
+		}
+	}
+	last, _ := json.Marshal(records[len(records)-1])
+	if !bytes.Contains(last, []byte("cli:after")) {
+		t.Fatalf("the first write after the start is not attributed to its writer: %s", last)
+	}
+}
+
+// A writer's comment-only change to a running per-user gateway's config is
+// applied by the asset reconcile (errGenerationUnchanged); a second reload
+// of the same bytes must not attribute that write again (GAP-1895).
+func TestConfigManagerUnchangedAssetReloadAttributesAWriteOnce(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := []byte("config_version: 9\ndata_dir: " + filepath.ToSlash(dir) + "\ngateway:\n  api_port: 19080\nobservability: {}\n")
+	write := func(actor string, data []byte) {
+		t.Helper()
+		if _, err := configwrite.Locked(t.Context(), path, configwrite.Options{Actor: actor, Reason: "defenseclaw config set"},
+			func() (bool, error) { return true, os.WriteFile(path, data, 0o600) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("cli:operator", raw)
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, logger := newNativeSkillRuntimeTestStore(t)
+	capture := &captureJudgeRuntimeV8Emitter{}
+	logger.SetRuntimeV8Emitter(capture)
+	mgr := newConfigManagerWithSnapshot(path, initial, logger, nil, "",
+		func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
+			if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets {
+				return errGenerationUnchanged
+			}
+			return nil
+		})
+	compiled, err := config.ParseCompileObservabilityV8(path, raw,
+		config.ObservabilityV8CompileOptions{DefaultDataDir: initial.DataDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.bindInitialObservabilityV8Plan(compiled.Plan)
+	mgr.setStartupSource(path, raw)
+	if err := mgr.ReloadAssets(t.Context(), "startup_reconcile"); err != nil {
+		t.Fatal(err)
+	}
+	write("cli:comment", append([]byte("# a comment\n"), raw...))
+	for i := 0; i < 3; i++ {
+		if err := mgr.ReloadAssets(t.Context(), "asset_watch"); err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.Reload(t.Context(), "fsnotify"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := 0
+	for _, record := range capture.snapshot() {
+		wire, _ := json.Marshal(record)
+		if bytes.Contains(wire, []byte("cli:comment")) {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("the comment write was attributed %d times, want 1", count)
+	}
+}

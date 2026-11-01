@@ -110,7 +110,7 @@ exit 127
 // WorkloadPythonShimStep is the image step that installs the python3 and
 // python shims (pythonShimScript) when the base image has the workload venv,
 // and the pip and pip3 shims (pipShimScript) when that venv has pip.
-// Like WorkloadPythonStep it is a compatibility fix, not a control: the
+// It is a compatibility fix, not a control: the
 // venv is the workload's, as pip already was. A base image without the
 // venv, or with a program of its own at a shim's path, builds on without
 // it. It runs after the harness install steps, which keep the base image's

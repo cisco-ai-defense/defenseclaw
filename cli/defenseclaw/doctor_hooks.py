@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -458,6 +459,71 @@ def _windows_system_powershell_path() -> str:
     )
 
 
+def _windows_system_cmd_path() -> str:
+    """Return the system cmd.exe path the direct Codex hook command names
+    (windowsSystemCmdExe in internal/gateway/connector/helpers.go)."""
+    powershell = _windows_system_powershell_path()
+    if not powershell:
+        return ""
+    return ntpath.join(ntpath.dirname(ntpath.dirname(ntpath.dirname(powershell))), "cmd.exe")
+
+
+# The direct Codex hook command Setup writes since GAP-1908
+# (windowsCmdDirectHookCommand in internal/gateway/connector/helpers.go):
+#
+#   <system>\cmd.exe /d /v:off /c "<launcher>" <arguments>
+#
+# Setup writes it only for a launcher path of letters, digits, spaces and
+# \ : . _ - ~ and bare arguments of letters, digits and . _ -, so neither
+# PowerShell nor cmd.exe can expand, split or redirect anything in it; any
+# other launcher path keeps the encoded PowerShell bridge.
+_CMD_DIRECT_SWITCHES = ("/d", "/v:off", "/c")
+_CMD_DIRECT_TOKEN = re.compile(r"[A-Za-z0-9._-]+")
+_CMD_DIRECT_FORBIDDEN = frozenset("\r\n\x00|<>&^%!()@$`\x27;,=")
+
+
+def _cmd_direct_path(path: str) -> bool:
+    """Report a launcher path the direct form carries (windowsCmdDirectPath, quoted)."""
+    if len(path) >= 4 and path[0].isascii() and path[0].isalpha() and path[1:3] == ":\\":
+        rest, separator, allowed = path[3:], "\\", "\\._-~ "
+    elif os.name != "nt" and path.startswith("/"):
+        # POSIX fixture paths of the non-Windows unit tests; a Windows
+        # registration always names a drive path.
+        rest, separator, allowed = path[1:], "/", "/._-~ "
+    else:
+        return False
+    if not rest or rest.endswith(separator) or separator * 2 in rest:
+        return False
+    return all(char.isalpha() or unicodedata.category(char) == "Nd" or char in allowed for char in rest)
+
+
+def _codex_cmd_direct_parts(command: str) -> tuple[str, list[str]] | None:
+    """The launcher and arguments of an exact direct Codex hook command, or None.
+
+    The command must be byte for byte what Setup renders for its launcher and
+    arguments, so a lookalike (another cmd.exe, other switches, an unquoted
+    or differently quoted launcher, shell metacharacters) stays foreign.
+    """
+    value = command.strip()
+    if any(char in _CMD_DIRECT_FORBIDDEN for char in value):
+        return None
+    try:
+        parts = _split_windows(value)
+    except _InspectionError:
+        return None
+    if len(parts) < 6 or tuple(parts[1:4]) != _CMD_DIRECT_SWITCHES:
+        return None
+    system_cmd = _windows_system_cmd_path()
+    if not system_cmd or parts[0].casefold() != system_cmd.casefold():
+        return None
+    target, args = parts[4], parts[5:]
+    if not _cmd_direct_path(target) or not all(_CMD_DIRECT_TOKEN.fullmatch(arg) for arg in args):
+        return None
+    if value != parts[0] + " /d /v:off /c \"" + target + "\" " + " ".join(args):
+        return None
+    return target, args
+
+
 def _repair_detail(connector: str, detail: str, *, configured_mode: str = "") -> str:
     repair = _REPAIR[connector]
     if connector == "copilot" and configured_mode in {"action", "observe"}:
@@ -808,7 +874,15 @@ def _read_config(path: str, connector: str) -> dict[str, Any]:
         raise _InspectionError("access-denied", f"access denied to hook registration file {path}: {exc}") from exc
     except OSError as exc:
         raise _InspectionError("malformed", f"cannot inspect hook registration file {path}: {exc}") from exc
-    if is_link_or_reparse(path) or not stat.S_ISREG(before.st_mode):
+    if is_link_or_reparse(path):
+        # Setup on Windows refuses to write through a link (GAP-0034), so the
+        # repair step alone would fail the same way: say what to fix first.
+        raise _InspectionError(
+            "foreign",
+            f"hook registration file is a symlink or reparse point: {path}; "
+            "replace the link with the regular file it points to first",
+        )
+    if not stat.S_ISREG(before.st_mode):
         raise _InspectionError("foreign", f"hook registration file is a symlink or reparse point: {path}")
     try:
         with open(path, "rb") as handle:
@@ -1664,7 +1738,10 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
         return ""
 
     first_base = ntpath.basename(parts[0]).casefold()
-    if first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+    direct = _codex_cmd_direct_parts(command) if connector == "codex" and first_base in {"cmd", "cmd.exe"} else None
+    if direct is not None:
+        target, args = direct
+    elif first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
         lowered = [part.casefold() for part in parts]
         owned_target = ""
         if "-encodedcommand" in lowered:
@@ -2614,6 +2691,14 @@ def _validate_antigravity_hook_matrix(
                 )
         if not isinstance(handler, dict) or handler.get("type") != "command":
             raise _InspectionError("malformed", f"Antigravity {event} handler type is not command")
+        # Setup writes no "enabled" below the registration key; one set on
+        # the matcher group or the handler turns the guard off as surely as
+        # the key's own (GAP-0538).
+        for part in ([entries[0], handler] if uses_matcher else [handler]):
+            if "enabled" in part and part["enabled"] is not True:
+                raise _InspectionError(
+                    "stale", f"Antigravity DefenseClaw registration {key} has a disabled {event} entry"
+                )
         if type(handler.get("timeout")) is not int or handler.get("timeout") != _ANTIGRAVITY_GUARD.timeout:
             raise _InspectionError("stale", f"Antigravity {event} timeout must be {_ANTIGRAVITY_GUARD.timeout} seconds")
         command = handler.get("command")
@@ -2640,6 +2725,68 @@ def _validate_antigravity_hook_matrix(
 
 _UNIX_EVENT_BOUND_HOOK_SCRIPTS = {"antigravity": "antigravity-hook.sh", "copilot": "copilot-hook.sh"}
 _UNIX_REGISTRATION_LIMIT = 2 * 1024 * 1024
+
+
+def unix_hermes_hook_problem(config_path: str, script_path: str, *, check_approvals: bool = True) -> tuple[str, str]:
+    """Validate the Unix Hermes event matrix: one DefenseClaw handler per event,
+    its matcher, its 30 s timeout and the command, and (check_approvals) the
+    exact agent approval of that command. Doctor leaves the approvals to
+    hook_integrity, which names each unapproved event."""
+    try:
+        document = _read_config(config_path, "hermes")
+        hooks = document.get("hooks")
+        if not isinstance(hooks, dict):
+            raise _InspectionError("missing", "Hermes hook registration has no hooks table")
+        if not os.path.isfile(script_path):
+            raise _InspectionError("missing", f"Hermes hook script is missing: {script_path}")
+        expected = os.path.realpath(script_path)
+        commands: set[str] = set()
+        for event, matcher in _HERMES_REQUIRED_HOOKS.items():
+            entries = hooks.get(event)
+            if not isinstance(entries, list):
+                raise _InspectionError("missing", f"Hermes DefenseClaw hook event {event} is missing")
+            owned = [
+                entry
+                for entry in entries
+                if isinstance(entry, dict)
+                and isinstance(entry.get("command"), str)
+                and (
+                    "hermes-hook.sh" in entry["command"]
+                    or _handler_targets_defenseclaw(entry, "hermes")
+                )
+            ]
+            if len(owned) != 1:
+                raise _InspectionError(
+                    "stale", f"Hermes event {event} has {len(owned)} DefenseClaw handlers; expected exactly one"
+                )
+            entry = owned[0]
+            if type(entry.get("timeout")) is not int or entry["timeout"] != 30:
+                raise _InspectionError("stale", f"Hermes event {event} timeout must be 30 seconds")
+            actual_matcher = entry.get("matcher") if "matcher" in entry else None
+            if actual_matcher != matcher:
+                raise _InspectionError(
+                    "stale", f"Hermes event {event} matcher is {actual_matcher!r}; expected {matcher!r}"
+                )
+            command = entry["command"].strip()
+            try:
+                argv = shlex.split(command)
+            except ValueError as exc:
+                raise _InspectionError("malformed", f"Hermes event {event} command cannot be parsed: {exc}") from exc
+            if len(argv) != 1 or os.path.realpath(argv[0]) != expected:
+                raise _InspectionError("stale", f"Hermes event {event} command does not run {script_path}")
+            commands.add(command)
+        if len(commands) != 1:
+            raise _InspectionError("stale", "Hermes events use inconsistent DefenseClaw commands")
+        for event, entries in hooks.items():
+            if event in _HERMES_REQUIRED_HOOKS or not isinstance(entries, list):
+                continue
+            if any(_handler_targets_defenseclaw(entry, "hermes") for entry in entries):
+                raise _InspectionError("stale", f"unexpected Hermes event {event} contains a DefenseClaw handler")
+        if check_approvals:
+            _validate_hermes_allowlist(config_path, next(iter(commands)))
+    except _InspectionError as exc:
+        return exc.state, exc.detail
+    return "", ""
 
 
 def unix_hook_event_binding_problem(connector: str, config_path: str, script_path: str) -> tuple[str, str]:
@@ -2951,7 +3098,18 @@ def _command_target(
         raise _InspectionError("malformed", "registered hook command has no target")
 
     first_base = ntpath.basename(parts[0]).casefold()
-    if first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+    if connector == "codex" and first_base in {"cmd", "cmd.exe"}:
+        # The direct Codex command (GAP-1908): only its exact rendered form
+        # is DefenseClaw-owned; any other cmd.exe line stays foreign.
+        direct = None if call_operator else _codex_cmd_direct_parts(command)
+        if direct is None:
+            raise _InspectionError(
+                "malformed",
+                "cmd.exe hook differs from the exact direct DefenseClaw command form",
+            )
+        target, args = direct
+        kind = "direct"
+    elif first_base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
         lowered = [part.casefold() for part in parts]
         if "-encodedcommand" in lowered:
             if connector in {"antigravity", "devin"}:

@@ -7,14 +7,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestR104LeadHermesPatchLinkTarget(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("native POSIX fixture: a Windows file name cannot hold the line break of this link target")
+	if !hookWriteEvidenceHost() {
+		t.Skip("the managed hook sends write evidence on Linux and macOS only")
 	}
 	home := t.TempDir()
 	project := filepath.Join(home, "project")

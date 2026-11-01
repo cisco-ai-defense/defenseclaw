@@ -108,7 +108,7 @@ func TestInstructionProtectionCodexNativeTools(t *testing.T) {
 		{"exec patch heredoc", "exec_command", map[string]interface{}{"cmd": "apply_patch <<'PATCH'\n*** Begin Patch\n*** Update File: AGENTS.md\n@@\n test instructions\n+changed\n*** End Patch\nPATCH"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := instructionResolvedWriteContext(t, root, tc.tool, tc.input)
+			ctx := withAuthenticatedHookConnector(instructionResolvedWriteContext(t, root, tc.tool, tc.input), "codex")
 			response := api.evaluateCodexHook(ctx, codexHookRequest{
 				HookEventName: "PreToolUse", SessionID: "codex-live", CWD: root,
 				ToolName: tc.tool, ToolInput: tc.input,
@@ -136,7 +136,7 @@ func TestInstructionProtectionUsesClientResolvedAlias(t *testing.T) {
 	if !ok || targets[alias] != agentFile {
 		t.Fatalf("client resolved writes = %v, ok=%t", targets, ok)
 	}
-	ctx := context.WithValue(t.Context(), resolvedWritesContextKey{}, targets)
+	ctx := withAuthenticatedHookConnector(context.WithValue(t.Context(), resolvedWritesContextKey{}, targets), "codex")
 	response := api.evaluateCodexHook(ctx, codexHookRequest{
 		HookEventName: "PreToolUse", SessionID: "alias-session", CWD: root,
 		ToolName: "exec_command", ToolInput: map[string]interface{}{"cmd": "printf changed > active-link"},
@@ -148,19 +148,20 @@ func TestInstructionProtectionUsesClientResolvedAlias(t *testing.T) {
 
 func TestInstructionProtectionRelativeWindowsShellsAndThreshold(t *testing.T) {
 	for _, tc := range []struct {
-		name, command, rule string
-		dialect             actionfacts.Dialect
+		name, connector, command, rule string
+		dialect                        actionfacts.Dialect
 	}{
-		{"PowerShell", `Set-Content -LiteralPath '.\CLAUDE.md' -Value changed`, "COG-CLAUDE-MD", actionfacts.DialectPowerShell},
-		{"PowerShell SOUL", `Add-Content -LiteralPath '.\SOUL.md' -Value changed`, "COG-SOUL", actionfacts.DialectPowerShell},
-		{"PowerShell OpenClaw case", `Set-Content -LiteralPath '.\openclaw.JSON' -Value changed`, "COG-OPENCLAW-JSON", actionfacts.DialectPowerShell},
-		{"cmd", `echo changed > CLAUDE.md`, "COG-CLAUDE-MD", actionfacts.DialectCMD},
+		{"PowerShell", "claudecode", `Set-Content -LiteralPath '.\CLAUDE.md' -Value changed`, "COG-CLAUDE-MD", actionfacts.DialectPowerShell},
+		{"PowerShell SOUL", "openclaw", `Add-Content -LiteralPath '.\SOUL.md' -Value changed`, "COG-SOUL", actionfacts.DialectPowerShell},
+		{"PowerShell OpenClaw case", "openclaw", `Set-Content -LiteralPath '.\openclaw.JSON' -Value changed`, "COG-OPENCLAW-JSON", actionfacts.DialectPowerShell},
+		{"cmd", "claudecode", `echo changed > CLAUDE.md`, "COG-CLAUDE-MD", actionfacts.DialectCMD},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			api := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH")
+			api := instructionProtectionTestAPI(t, tc.connector, "action", "HIGH")
 			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: `C:\Repo`, ActiveHome: `C:\Users\alice`, DialectHint: tc.dialect}
-			verdict := api.inspectTrustedToolPolicyCtx(t.Context(), &ToolInspectRequest{Tool: "Bash", Direction: "tool_call", Connector: "claudecode"}, trustedActionRequest{
-				Input: input, LegacyText: tc.command, Connector: "claudecode", EnforcementCapable: true,
+			verdict := api.inspectTrustedToolPolicyCtx(t.Context(), &ToolInspectRequest{Tool: "Bash", Direction: "tool_call", Connector: tc.connector}, trustedActionRequest{
+				Input: input, LegacyText: tc.command, Connector: tc.connector, EnforcementCapable: true,
+				ResolvedWriteTargets: syntheticExistingInstructionEvidence(t, input, tc.rule),
 			})
 			if verdict.Action != guardrailActionBlock || !findingStringHasRuleID(verdict.Findings, tc.rule) {
 				t.Fatalf("%s relative write: action=%q findings=%v; facts=%+v", tc.name, verdict.Action, verdict.Findings, actionfacts.Analyze(input))
@@ -178,21 +179,24 @@ func TestInstructionProtectionRelativeWindowsShellsAndThreshold(t *testing.T) {
 }
 
 func TestInstructionProtectionPOSIXCaseRequiresExactInstructionName(t *testing.T) {
-	api := instructionProtectionTestAPI(t, "codex", "action", "HIGH")
 	for _, tc := range []struct {
-		name, command string
-		blocked       bool
+		name, connector, command, rule string
+		blocked                        bool
 	}{
-		{"canonical", "printf changed > /repo/AGENTS.md", true},
-		{"distinct lowercase file", "printf changed > /repo/agents.md", false},
-		{"OpenClaw canonical", "printf changed > /repo/openclaw.json", true},
-		{"OpenClaw distinct case", "printf changed > /repo/openclaw.JSON", false},
+		{"canonical", "codex", "printf changed > /repo/AGENTS.md", "COG-AGENTS-MD", true},
+		{"distinct lowercase file", "codex", "printf changed > /repo/agents.md", "", false},
+		{"OpenClaw canonical", "openclaw", "printf changed > /repo/openclaw.json", "COG-OPENCLAW-JSON", true},
+		{"OpenClaw distinct case", "openclaw", "printf changed > /repo/openclaw.JSON", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			api := instructionProtectionTestAPI(t, tc.connector, "action", "HIGH")
+			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: "/repo"}
 			verdict := api.inspectTrustedToolPolicyCtx(t.Context(),
-				&ToolInspectRequest{Tool: "Bash", Direction: "tool_call", Connector: "codex"},
-				trustedActionRequest{Input: actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: "/repo"},
-					LegacyText: tc.command, Connector: "codex", EnforcementCapable: true})
+				&ToolInspectRequest{Tool: "Bash", Direction: "tool_call", Connector: tc.connector},
+				trustedActionRequest{Input: input,
+					LegacyText: tc.command, Connector: tc.connector, EnforcementCapable: true,
+					ResolvedWriteTargets: syntheticExistingInstructionEvidence(t, input, tc.rule),
+				})
 			if got := verdict.Action == guardrailActionBlock; got != tc.blocked {
 				t.Fatalf("command=%q blocked=%t, want %t; findings=%v", tc.command, got, tc.blocked, verdict.Findings)
 			}
@@ -200,10 +204,16 @@ func TestInstructionProtectionPOSIXCaseRequiresExactInstructionName(t *testing.T
 	}
 }
 
+// A case alias on a case-insensitive volume is the instruction file: the
+// project CLAUDE.md Claude Code reads at every start, and a SOUL.md the
+// session loaded.
 func TestInstructionProtectionCaseInsensitivePOSIXAlias(t *testing.T) {
-	for _, tc := range []struct{ canonical, alias, rule string }{
-		{"CLAUDE.md", "claude.md", "COG-CLAUDE-MD"},
-		{"openclaw.json", "openclaw.JSON", "COG-OPENCLAW-JSON"},
+	for _, tc := range []struct {
+		canonical, alias, rule string
+		loaded                 bool
+	}{
+		{"CLAUDE.md", "claude.md", "COG-CLAUDE-MD", false},
+		{"SOUL.md", "soul.MD", "COG-SOUL", true},
 	} {
 		t.Run(tc.canonical, func(t *testing.T) {
 			root := t.TempDir()
@@ -221,7 +231,13 @@ func TestInstructionProtectionCaseInsensitivePOSIXAlias(t *testing.T) {
 			ctx := withAuthenticatedHookConnector(
 				instructionResolvedWriteContext(t, root, "Bash", input), "claudecode",
 			)
-			response := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH").evaluateClaudeCodeHook(
+			api := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH")
+			if tc.loaded {
+				api.evaluateClaudeCodeHook(authenticatedClaudeCodeTestContext(), claudeCodeHookRequest{
+					HookEventName: "InstructionsLoaded", SessionID: "case-alias", FilePath: canonical,
+				})
+			}
+			response := api.evaluateClaudeCodeHook(
 				ctx, claudeCodeHookRequest{
 					HookEventName: "PreToolUse", SessionID: "case-alias", CWD: root,
 					ToolName: "Bash", ToolInput: input,
@@ -255,21 +271,30 @@ func TestInstructionProtectionPOSIXCaseAliasHardLink(t *testing.T) {
 	}
 }
 
+// Every built-in connector's agent reads its project instruction file at
+// every start: CLAUDE.md for Claude Code, AGENTS.md for every other agent.
+// OpenClaw reads all eight cognitive files of its workspace.
 func TestInstructionProtectionSharedConnectorAndFileMatrix(t *testing.T) {
 	for _, connectorName := range connector.NewDefaultRegistry().Names() {
 		t.Run(connectorName, func(t *testing.T) {
 			api := instructionProtectionTestAPI(t, connectorName, "action", "HIGH")
-			command := "printf changed > CLAUDE.md"
+			file, rule := "AGENTS.md", "COG-AGENTS-MD"
+			if connectorName == "claudecode" {
+				file, rule = "CLAUDE.md", "COG-CLAUDE-MD"
+			}
+			command := "printf changed > " + file
+			input := actionfacts.Input{Tool: "Bash", Command: command, CWD: "/repo"}
 			verdict := api.inspectTrustedToolPolicyCtx(t.Context(),
 				&ToolInspectRequest{Tool: "Bash", Direction: "tool_call", Connector: connectorName},
-				trustedActionRequest{Input: actionfacts.Input{Tool: "Bash", Command: command, CWD: "/repo"},
-					LegacyText: command, Connector: connectorName, EnforcementCapable: true})
-			if verdict.Action != guardrailActionBlock || !findingStringHasRuleID(verdict.Findings, "COG-CLAUDE-MD") {
+				trustedActionRequest{Input: input,
+					LegacyText: command, Connector: connectorName, EnforcementCapable: true,
+					ResolvedWriteTargets: syntheticExistingInstructionEvidence(t, input, rule)})
+			if verdict.Action != guardrailActionBlock || !findingStringHasRuleID(verdict.Findings, rule) {
 				t.Fatalf("connector=%q action=%q findings=%v", connectorName, verdict.Action, verdict.Findings)
 			}
 		})
 	}
-	api := instructionProtectionTestAPI(t, "codex", "action", "HIGH")
+	api := instructionProtectionTestAPI(t, "openclaw", "action", "HIGH")
 	for _, tc := range []struct{ file, rule string }{
 		{"AGENTS.md", "COG-AGENTS-MD"}, {"CLAUDE.md", "COG-CLAUDE-MD"},
 		{"SOUL.md", "COG-SOUL"}, {"IDENTITY.md", "COG-IDENTITY"},
@@ -278,10 +303,11 @@ func TestInstructionProtectionSharedConnectorAndFileMatrix(t *testing.T) {
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			command := "printf changed > " + tc.file
+			input := actionfacts.Input{Tool: "Bash", Command: command, CWD: "/repo"}
 			verdict := api.inspectTrustedToolPolicyCtx(t.Context(),
-				&ToolInspectRequest{Tool: "Bash", Direction: "tool_call", Connector: "codex"},
-				trustedActionRequest{Input: actionfacts.Input{Tool: "Bash", Command: command, CWD: "/repo"},
-					LegacyText: command, Connector: "codex", EnforcementCapable: true})
+				&ToolInspectRequest{Tool: "Bash", Direction: "tool_call", Connector: "openclaw"},
+				trustedActionRequest{Input: input, LegacyText: command, Connector: "openclaw", EnforcementCapable: true,
+					ResolvedWriteTargets: syntheticExistingInstructionEvidence(t, input, tc.rule)})
 			if verdict.Action != guardrailActionBlock || !findingStringHasRuleID(verdict.Findings, tc.rule) {
 				t.Fatalf("file=%q action=%q findings=%v", tc.file, verdict.Action, verdict.Findings)
 			}
@@ -295,7 +321,7 @@ func TestInstructionProtectionCannotBeSkippedByToolAllow(t *testing.T) {
 	api := instructionProtectionTestAPI(t, "codex", "action", "HIGH")
 	allowTool(api.scannerCfg, "Bash", "codex", "ordinary shell work")
 	input := map[string]interface{}{"command": "printf changed > AGENTS.md"}
-	ctx := instructionResolvedWriteContext(t, root, "Bash", input)
+	ctx := withAuthenticatedHookConnector(instructionResolvedWriteContext(t, root, "Bash", input), "codex")
 	response := api.evaluateCodexHook(ctx, codexHookRequest{
 		HookEventName: "PreToolUse", SessionID: "allowed-shell", CWD: root,
 		ToolName: "Bash", ToolInput: input,

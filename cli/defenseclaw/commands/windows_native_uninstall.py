@@ -692,6 +692,11 @@ def _setup_digest_and_source(stream: BinaryIO) -> tuple[str, str]:
     return digest.hexdigest(), next(iter(sources))
 
 
+# Get-AuthenticodeSignature takes about a second; a busy machine (catalog
+# lookups, a cold PowerShell) can stall it far past that (rel-1-0-6:GAP-0220).
+_AUTHENTICODE_TIMEOUT_SECONDS = 120
+
+
 def _verify_setup_authenticode(path: str, *, expected_version: str) -> None:
     powershell = _system_powershell_path()
     if not powershell:
@@ -719,11 +724,16 @@ def _verify_setup_authenticode(path: str, *, expected_version: str) -> None:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=30,
+            timeout=_AUTHENTICODE_TIMEOUT_SECONDS,
             check=False,
             close_fds=True,
             shell=False,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise NativeWindowsUninstallRefusal(
+            "Windows PowerShell did not finish checking the cached Setup signature within "
+            f"{_AUTHENTICODE_TIMEOUT_SECONDS} seconds. Nothing was uninstalled; run the command again."
+        ) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         raise NativeWindowsUninstallRefusal(f"Could not verify cached native Setup Authenticode: {exc}") from exc
     if completed.returncode != 0:

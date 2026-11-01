@@ -37,8 +37,9 @@ const (
 	windowsManagedRuntimeStateAbsent       = "absent"
 
 	// windowsManagedRuntimeBaselinePending is a standalone Upgrade/Repair
-	// root whose rows are all deferred and whose data directory is absent or
-	// one the account created itself before enrollment. Setup neither stages
+	// root whose rows are all deferred and whose data directory is absent,
+	// one the account created itself before enrollment, or a link the
+	// account made there (never followed). Setup neither stages
 	// nor validates it: the guardian proves it pending and creates or adopts
 	// it in the account's session, so one account's folder never fails the
 	// whole lifecycle. Only validation plans carry it.
@@ -874,6 +875,26 @@ func windowsManagedRuntimeAccountCreatedBaseline(final windows.Handle, target wi
 	return err == nil && ok
 }
 
+// windowsManagedRuntimeAccountOwnedLinkBaseline reports whether the no-follow
+// handle of a target's .defenseclaw is a link or junction the target account
+// owns (the root case of windowsTargetOwnedDataDirLink). The handle's own
+// attributes and owner bind the answer to the inode the plan opened; what
+// the link names is never opened. A plain folder, even one whose hooks entry
+// is a link, keeps its canonical checks.
+func windowsManagedRuntimeAccountOwnedLinkBaseline(final windows.Handle, target windowsManagedRuntimeTarget) bool {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(final, &info); err != nil ||
+		info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+		return false
+	}
+	descriptor, err := windows.GetSecurityInfo(final, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	owner, _, err := descriptor.Owner()
+	return err == nil && owner != nil && owner.Equals(target.sid)
+}
+
 // planWindowsManagedRuntimeRoot inspects one target root. With pendingAllowed
 // (a standalone validation plan of a profile whose rows are all deferred), an
 // absent data directory, or one the account created itself before enrollment,
@@ -902,6 +923,18 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 		}
 	} else if err != nil {
 		return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
+	} else if pendingAllowed && windowsManagedRuntimeAccountOwnedLinkBaseline(final, target) {
+		// A link or junction the deferred account made itself at its
+		// DefenseClaw folder is neither opened nor followed: the account
+		// stays pending (Setup neither stages nor validates it) and the
+		// guardian moves the link aside when the account signs in. Refusing
+		// it rolled back the Upgrade/Repair for every account (GAP-0193).
+		windows.CloseHandle(final)
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] warning: %s is a link or junction the account %s made itself; that account stays pending "+
+				"(not protected) until it signs in, when the guardian moves the link aside and enrolls it\n",
+			target.data, target.sid.String())
+		root.Baseline = windowsManagedRuntimeBaselinePending
 	} else {
 		defer windows.CloseHandle(final)
 		// A standalone install plan, explicit or after the ensure preflight,
@@ -912,6 +945,16 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 			}
 		}
 		err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+		if err != nil && !adoptPurgeKept && windowsEnterpriseStandaloneProcess() &&
+			recoverStaleWindowsSetupRelaxedDataDir(target.data, target.sid) {
+			// An Upgrade/Repair plan over a data directory a guardian left
+			// in its setup shape (stopped mid-setup, or by a rolled-back
+			// lifecycle) recovers it as the generation GC does: /repair
+			// refused it as a per-user install leftover, before the GC
+			// that recovers it ever ran (GAP-1334). A relax a running setup
+			// holds, and any other DACL, stay refused.
+			err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+		}
 		if err != nil && adoptPurgeKept {
 			adopted, adoptErr := adoptWindowsManagedRuntimePurgeKeptRoot(parent, final, target)
 			if adoptErr != nil {

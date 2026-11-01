@@ -55,6 +55,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cmidbroker"
@@ -99,6 +100,9 @@ type Sidecar struct {
 	// projectSkills are the project skill folders the hooks report, which
 	// the install watcher watches next to the connectors' (GAP-1063).
 	projectSkills projectSkillRoots
+	// hookMCP are the MCP servers the hooks of a managed Linux or macOS
+	// gateway report, which its install watcher admits (GAP-2591).
+	hookMCP hookReportedMCPServers
 
 	startedAt  time.Time
 	cfg        *config.Config
@@ -136,11 +140,13 @@ type Sidecar struct {
 	sandboxRecorderOnce sync.Once
 	sandboxRecorder     *audit.SandboxRecorder
 
-	webhooksMu        sync.RWMutex
-	aiDiscoveryMu     sync.RWMutex
-	aiRuntimeMu       sync.RWMutex
-	apiMu             sync.RWMutex
-	apiServer         *APIServer
+	webhooksMu    sync.RWMutex
+	aiDiscoveryMu sync.RWMutex
+	aiRuntimeMu   sync.RWMutex
+	apiMu         sync.RWMutex
+	apiServer     *APIServer
+	// protectedFiles is the protected-file watch, nil when it is off.
+	protectedFiles    *protectedFileWatch
 	apiProfilesReady  chan struct{}
 	hookGuardsMu      sync.RWMutex
 	hookGuards        map[*HookConfigGuard]struct{}
@@ -1009,6 +1015,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// Report the records an earlier run lost from the local history; the loss
 	// journal kept them across the restart (GAP-1129).
 	go s.recordLocalWriteGapV8()
+	// While it runs, report the hook calls that ran fail-open since
+	// (rel-1-0-2 GAP-0446 item 3); no timer on a managed gateway.
+	go s.watchHookFailOpenCalls(ctx)
 	// Bootstrap-owned workers must retire on every return path, including
 	// failures before the normal shutdown block is reached. The explicit normal
 	// close below preserves close-before-store ordering; this deferred call is
@@ -1027,6 +1036,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	defer runCancel()
 	s.setRunCancel(runCancel)
 	defer s.setRunCancel(nil)
+	// An idle gateway gives back the memory its calls left (GAP-2013,
+	// rel-1-0-3 GAP-0244).
+	go runIdleMemoryRelease(runCtx, func() { releaseIdleGatewayMemory(s.apiSnapshot(), s.store) })
+	// Package-level patterns compile on first use (internal/lazyregexp), so
+	// that a hook process does not compile them all at start. The gateway
+	// compiles them now, off the request path, so that its first hook does
+	// not pay for them either.
+	go lazyregexp.CompileAll()
 	// The endpoint inventory cannot be emitted from NewSidecar: schema v8
 	// deliberately binds its generation-owned runtime afterward. Publish the
 	// first complete connector/MCP snapshot immediately after that binding, then
@@ -1287,6 +1304,10 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			errCh <- err
 		}
 	}()
+
+	// The protected-file watch (#1172): alerts on an agent's change to an
+	// SSH authorized keys file, shell startup file or autostart entry.
+	s.startProtectedFileWatch(runCtx)
 
 	// Goroutine 2: Skill/MCP watcher (opt-in via config)
 	wg.Add(1)
@@ -1915,6 +1936,13 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *gen
 		return nil, unavailable, nil
 	}
 	judge.secureClient = cfg.SecureClientIntegration()
+	if !judge.secureClient {
+		judge.decision = newDecisionModel(cfg, dotenvPath)
+		if judge.decision != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] decision model enabled in front of the tool-call judge (model=%s, allow<=%.2f, block>=%.2f)\n",
+				judge.decision.model, judge.decision.allowAt, judge.decision.blockAt)
+		}
+	}
 
 	features := "tool-result-pii"
 	if cfg.Guardrail.Judge.ToolInjection {
@@ -2616,7 +2644,8 @@ func judgeNeedsRebuild(oldCfg, newCfg *config.Config, rulePackChanged bool, oldP
 		oldProviders.digest() != newProviders.digest() ||
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldCfg.LLMProviders, newCfg.LLMProviders) ||
-		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
+		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge) ||
+		!reflect.DeepEqual(oldCfg.DecisionModel, newCfg.DecisionModel)
 }
 
 func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
@@ -2667,8 +2696,14 @@ func aiDiscoveryNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		return false
 	}
 	// application_protection acts on discovery reports, so the rebuilt
-	// service's first report applies an edit at once.
+	// service's first report applies an edit at once. The scan record
+	// folders a full scan reads are fixed when the service is built: the
+	// sandboxes' one exists only while openshell.enabled is on, which a
+	// hot-reloaded `sandbox setup` turns on, so what a sandbox scan found
+	// never reached the inventory until the gateway restarted (GAP-1962).
 	return !reflect.DeepEqual(oldCfg.AIDiscovery, newCfg.AIDiscovery) ||
+		inventory.SandboxScanDirForConfig(oldCfg) != inventory.SandboxScanDirForConfig(newCfg) ||
+		inventory.UserScanDirForConfig(oldCfg) != inventory.UserScanDirForConfig(newCfg) ||
 		!reflect.DeepEqual(oldCfg.ApplicationProtection, newCfg.ApplicationProtection) ||
 		managed.IsManagedEnterprise(oldCfg.DeploymentMode) != managed.IsManagedEnterprise(newCfg.DeploymentMode) ||
 		!slices.Equal(discoveryExcludeUsers(oldCfg), discoveryExcludeUsers(newCfg))
@@ -2735,6 +2770,7 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 	if api != nil {
 		s.bindAPIServerObservabilityV8Locked(api)
 		api.SetHookRegistrationRepair(s.ensureActiveHookRegistration)
+		api.protectedFiles = s.protectedFiles
 	}
 	s.apiServer = api
 	if api != nil && s.apiProfilesReady != nil {
@@ -3815,7 +3851,7 @@ func WatcherWatchesDirs(cfg *config.Config) bool {
 	if !w.Enabled {
 		return false
 	}
-	return watcherUsesConnectorDirs(cfg) || watcherUsesEnrolledUserDirs(cfg) ||
+	return watcherUsesConnectorDirs(cfg) || watcherUsesEnrolledUserDirs(cfg) || watcherUsesHookReportedMCP(cfg) ||
 		(w.Skill.Enabled && len(w.Skill.Dirs) > 0) || (w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
 }
 
@@ -4067,10 +4103,10 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	}
 
 	warnUnenforcedAssetPolicy(s.currentConfig(), skillDirs, pluginDirs,
-		watcherUsesConnectorDirs(s.currentConfig()) || enrolled != nil)
+		watcherUsesConnectorDirs(s.currentConfig()) || enrolled != nil || watcherUsesHookReportedMCP(s.currentConfig()))
 	// A per-user connector can have only MCP servers (Kiro has no asset
 	// directories). Its discovery poll still needs a running watcher.
-	if len(skillDirs) == 0 && len(pluginDirs) == 0 && enrolled == nil &&
+	if len(skillDirs) == 0 && len(pluginDirs) == 0 && enrolled == nil && !watcherUsesHookReportedMCP(s.currentConfig()) &&
 		(!(watcherUsesConnectorDirs(s.currentConfig())) || s.currentConfig().SecureClientIntegration()) {
 		s.health.SetWatcher(watcherState, watcherDetail, watcherDetails(map[string]interface{}{
 			"skill_dirs":  0,
@@ -4090,6 +4126,12 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		"mcp_take_action":    wcfg.MCP.TakeAction,
 	}))
 
+	// An older watcher created vendor system folders it watched (for
+	// example /etc/codex when the gateway ran as root); remove the empty ones
+	// it recorded so the agent reads no phantom administrator policy.
+	for _, dir := range connector.RemoveVendorSystemCreatedDirs(s.currentConfig().DataDir, connector.DefaultVendorSystemRoots()) {
+		fmt.Printf("[sidecar] watcher: removed vendor system folder %s created by an earlier release\n", dir)
+	}
 	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, nil, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
@@ -4169,6 +4211,11 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 				}
 				return kept, nil
 			})
+			w.SetMCPDiscoveryPoll(true)
+		} else if watcherUsesHookReportedMCP(cfg) {
+			// The service may not read the users homes: it admits the URL
+			// servers their hooks report with each tool call (GAP-2591).
+			w.SetMCPServerSource(s.hookMCP.list)
 			w.SetMCPDiscoveryPoll(true)
 		}
 	}
@@ -4576,6 +4623,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 	}
 	s.migrateRetiredConnectorState(ctx, registry)
+	s.removeRemovedConnectorLeftovers(ctx, registry)
 	s.reportUnrebasedRulePacks(ctx)
 	conn, err := resolveActiveConnector(registry, configuredConnectorName(s.currentConfig()), "guardrail")
 	if err != nil {
@@ -4654,11 +4702,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 		return refuseAdmission(err)
 	}
+	if err := connector.RequireOpenCodeV2(conn.Name(), agentVersion); err != nil {
+		return refuseUnverified(fmt.Errorf("%w: %w", ErrHookContractAdmission, err))
+	}
 	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnknown && envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
 	}
 	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
+		return refuseUnverified(unversionedAgentAdmissionError(s.currentConfig().DataDir, conn.Name(), agentVersion, contractResolution.Reason))
 	}
 	if contractResolution.UntestedVersion {
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s agent version %q: %s\n", conn.Name(), agentVersion, contractResolution.Reason)
@@ -4757,7 +4808,22 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// inverted operator expectations, so both paths now exit the
 		// guardrail goroutine with the wrapped error via the shared
 		// failGuardrailWithRollback helper.
-		if err := connector.SetupRecordingCreatedDirs(ctx, conn, setupOpts); err != nil {
+		// The only configured connector waits out an agent that holds its
+		// settings file open, as each connector of a roster does: a
+		// Windows upgrade with only Claude Code set up rolled back on a
+		// 3 s hold (GAP-2567, the single-connector twin of GAP-2524).
+		err := singleConnectorSetup(ctx, conn, setupOpts)
+		err = retrySetupWhileSettingsBusy(ctx, conn.Name(), err, func() {
+			s.health.SetGuardrail(StateStarting, "", map[string]interface{}{
+				"setup_connector": conn.Name(),
+				"setup_step":      1,
+				"setup_total":     1,
+				"setup_busy":      true,
+			})
+		}, func() error {
+			return singleConnectorSetup(ctx, conn, setupOpts)
+		})
+		if err != nil {
 			return failSetup("setup", fmt.Errorf("connector %s setup failed: %w", conn.Name(), err))
 		}
 		// Post-Setup verification: every owned hook script the
@@ -4966,6 +5032,15 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			}
 		}
 		publishHealth := func() {
+			if !s.currentConfig().Guardrail.Enabled {
+				// guardrail.enabled=false: the teardown above removed the
+				// hooks, so nothing enforces or observes through them. A
+				// running state made doctor call the just-restarted gateway
+				// stale (GAP-2511); the multi-connector boot and the proxy
+				// path already report disabled.
+				s.health.SetGuardrail(StateDisabled, "", nil)
+				return
+			}
 			policyMode, enforcementEnabled, summary, surface := modeDetails()
 			detail := map[string]interface{}{
 				"summary":             summary,
@@ -4993,6 +5068,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 }
 
 func (s *Sidecar) waitForConnectorSetup(ctx context.Context) error {
+	// A host with no connector configured is a boot path too: a 1.0.4 host
+	// whose last connector was dropped can still hold the OpenHands/OmniGent
+	// lock entries and stubs (GAP-2018). Their teardown needs no registry.
+	s.removeRemovedConnectorLeftovers(ctx, nil)
 	if err := s.reconcileUnconfiguredConnectors(ctx, nil); err != nil {
 		if s.health != nil {
 			s.health.SetGuardrail(StateError, err.Error(), nil)
@@ -5107,6 +5186,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		}
 	}
 	s.migrateRetiredConnectorState(ctx, registry)
+	s.removeRemovedConnectorLeftovers(ctx, registry)
 	s.reportUnrebasedRulePacks(ctx)
 
 	// configured is every connector in guardrail.connectors. names is the
@@ -5224,7 +5304,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		}
 		setupSeed.activeState = activeState
 		setupSeed.hookLockState = hookLockState
-		candidates, unavailable := s.removedConnectorRollbackCandidates(
+		candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
 			registry, previous, names, apiToken, proxyAddr, apiAddr, masterKey, hookLockState,
 		)
 		removed, teardownFailed := teardownRemovedConnectorCandidates(candidates, ctx)
@@ -6082,7 +6162,7 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 		return nil
 	}
 	previousName := strings.Join(previousNames, ", ")
-	candidates, unavailable := s.removedConnectorRollbackCandidates(
+	candidates, unavailable, dropped := s.removedConnectorRollbackCandidates(
 		registry,
 		previousNames,
 		[]string{requested.Name()},
@@ -6092,7 +6172,9 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 		masterKey,
 		transaction.hookLockState,
 	)
-	if len(unavailable) > 0 || len(candidates) != len(previousNames) {
+	// A dropped name left the roster without a teardown, so it needs no
+	// rollback authority; requested Setup publishes the roster without it.
+	if len(unavailable) > 0 || len(candidates)+len(dropped) != len(previousNames) {
 		return fmt.Errorf(
 			"refuse connector switch %s to %s without complete prior-registration rollback authority",
 			previousName,
@@ -6101,7 +6183,7 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 	}
 	removed, failed := teardownRemovedConnectorCandidates(candidates, ctx)
 	candidates, failed = keepAgentSettingsRefusedTeardowns(ctx, candidates, failed, transaction)
-	if len(failed) > 0 || len(removed)+len(transaction.keptRegistrations) != len(previousNames) {
+	if len(failed) > 0 || len(removed)+len(transaction.keptRegistrations)+len(dropped) != len(previousNames) {
 		// Teardown may have partially changed the old registration. Reapply the
 		// captured candidate before returning, without touching the requested
 		// connector because its Setup has not run yet.
@@ -6280,6 +6362,23 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			}
 			err = s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
 		}
+		// An agent that has its settings file open (Claude Code writes
+		// settings.json while it runs) makes a Windows open or replace fail
+		// with a sharing violation for a moment. Setup reads the file again
+		// on every run, so it is tried again for a bounded time instead of
+		// failing the start: an upgrade rolled back on it (GAP-2524).
+		err = retrySetupWhileSettingsBusy(ctx, registration.conn.Name(), err, func() {
+			if transaction.publishSetupProgress {
+				s.health.SetGuardrail(StateStarting, "", map[string]interface{}{
+					"setup_connector": registration.conn.Name(),
+					"setup_step":      index + 1,
+					"setup_total":     len(registrations),
+					"setup_busy":      true,
+				})
+			}
+		}, func() error {
+			return s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
+		})
 		if errors.Is(err, connector.ErrAgentConfigRefusal) {
 			// The agent's own settings refuse the hooks, for example after
 			// `codex features disable hooks`. Setup changed nothing, so the
@@ -6317,7 +6416,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				if !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
 					// A Setup refusal (a known-broken agent, an unsupported
 					// profile topology) names its own next step.
-					failed = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", failed)
+					failed = fmt.Errorf("%w%s", failed, refreshRefusalNextStep(err))
 				}
 				if rollbackErr != nil {
 					failed = fmt.Errorf("%w; connector setup rollback incomplete: %v", failed, rollbackErr)
@@ -6412,6 +6511,46 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 // connectorProbeTimeoutAttempts bounds setup attempts for a connector whose
 // agent probe ran out of time (GAP-1714).
 const connectorProbeTimeoutAttempts = 3
+
+// connectorSettingsBusy reports a transient Windows sharing or lock
+// violation on a file Setup reads or replaces (connector.FileBusyError;
+// always false off Windows). Tests replace it.
+var connectorSettingsBusy = connector.FileBusyError
+
+// connectorSettingsBusyBudget and connectorSettingsBusyDelay bound the
+// retries of a connector setup whose agent holds its settings file open
+// (GAP-2524). The budget stays inside the installer readiness wait.
+var (
+	connectorSettingsBusyBudget = 5 * time.Second
+	connectorSettingsBusyDelay  = 250 * time.Millisecond
+)
+
+// singleConnectorSetup runs the Setup of the only configured connector.
+// Tests replace it.
+var singleConnectorSetup = connector.SetupRecordingCreatedDirs
+
+// retrySetupWhileSettingsBusy runs setup again while err is a settings file
+// in use (connectorSettingsBusy), every connectorSettingsBusyDelay for up to
+// connectorSettingsBusyBudget, and returns the last result. progress runs
+// before each wait. Other errors are returned at once.
+func retrySetupWhileSettingsBusy(ctx context.Context, name string, err error, progress func(), setup func() error) error {
+	for busySince := time.Now(); err != nil && connectorSettingsBusy(err) && ctx.Err() == nil &&
+		time.Since(busySince) < connectorSettingsBusyBudget; {
+		fmt.Fprintf(os.Stderr, "[guardrail] connector %s: %v; its settings are in use, retrying\n", name, err)
+		if progress != nil {
+			progress()
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(connectorSettingsBusyDelay):
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		err = setup()
+	}
+	return err
+}
 
 // connectorsNotStarted lists the configured connectors that did not come up.
 func connectorsNotStarted(conns []connector.Connector, succeeded []string) []string {
@@ -6729,6 +6868,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		APIToken:             setupTokens.connectorToken,
 		HookAPIToken:         setupTokens.hookToken,
 		HookAPITokenScoped:   setupTokens.hookTokenScoped,
+		GatewayToken:         strings.TrimSpace(apiToken),
 		WorkspaceDir:         s.currentConfig().ConnectorWorkspaceDir(),
 		// The hooks' outage mode (config.HookOutageFailMode); Secure Client
 		// renders the resolved mode as is (#1163).
@@ -6857,6 +6997,9 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		}
 		return err
 	}
+	if err := connector.RequireOpenCodeV2(conn.Name(), opts.AgentVersion); err != nil {
+		return markUnverified(fmt.Errorf("%w: %w", ErrHookContractAdmission, err))
+	}
 	if contractResolution.Status == connector.HookCompatibilityUnknown &&
 		(actionMode || strictUnknownVersion) &&
 		envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
@@ -6873,7 +7016,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	if contractResolution.Status == connector.HookCompatibilityUnversioned &&
 		actionMode &&
 		envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return markUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason))
+		return markUnverified(unversionedAgentAdmissionError(s.currentConfig().DataDir, conn.Name(), opts.AgentVersion, contractResolution.Reason))
 	}
 	if previous := previousLock; previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
@@ -7434,10 +7577,9 @@ func connectorDroppable(registry *connector.Registry, name string) bool {
 // (connector.RetiredConnector). A cleanup it cannot finish or verify is
 // returned with the lock entry kept, the way a registered connector's failed
 // teardown is: the caller keeps the name (active roster or lock) so a later
-// boot retries it. A removed connector (OpenHands, OmniGent; until 1.1) keeps
-// its lock entry even then: its teardown changes only its hook script and
-// tokens, and clearing its entry is a no-op. Any other name only loses
-// DefenseClaw's lock state (dropUnregisteredConnectorState).
+// boot retries it. OpenHands and OmniGent (until 1.1) never fail: their
+// teardown removes what DefenseClaw wrote and lists the rest. Any other name
+// only loses DefenseClaw's lock state (dropUnregisteredConnectorState).
 //
 // opts is retiredConnectorOpts: the data directory and the configured
 // connector workspace, where a workspace-pinned older setup registered its
@@ -7460,32 +7602,35 @@ func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.
 		return fmt.Errorf("retired connector %s left state: %w; %s", retired.Name(), err, removedConnectorDocHint)
 	}
 	if err := clearLock(dataDir, retired.Name()); err != nil {
-		return fmt.Errorf("clear hook contract lock for retired connector %s: %w", retired.Name(), err)
+		if !connector.IsRemovedConnector(retired.Name()) {
+			return fmt.Errorf("clear hook contract lock for retired connector %s: %w", retired.Name(), err)
+		}
+		// until 1.1: an OpenHands/OmniGent lock entry guards nothing; a
+		// leftover one never keeps the name for a retry.
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: clear hook contract lock for %s: %v\n", retired.Name(), err)
 	}
 	RemoveConnectorRulePackOverrides(retired.Name())
 	return nil
 }
 
-// logRemovedConnectorLeftovers logs one line for each thing a removed
-// connector's teardown leaves for the user to remove by hand (an agent config
-// that still names its hook or policy module, its stub, a kept token), with
-// the step, so the upgrade log names every such file. until 1.1.
+// removedConnectorNoticeLogged makes the removal notice one line per gateway
+// process, not one per removed connector or boot path. until 1.1.
+var removedConnectorNoticeLogged atomic.Bool
+
+// logRemovedConnectorLeftovers logs the one removal notice for OpenHands or
+// OmniGent (once per process), then one line for each thing its teardown could
+// not remove, with the step, so the upgrade log names every such file. until 1.1.
 func logRemovedConnectorLeftovers(name string, opts connector.SetupOpts) {
-	leftovers, _ := connector.RemovedConnectorLeftovers(name, opts)
+	leftovers, removed := connector.RemovedConnectorLeftovers(name, opts)
+	if !removed {
+		return
+	}
+	if removedConnectorNoticeLogged.CompareAndSwap(false, true) {
+		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", connector.RemovedConnectorNotice)
+	}
 	for _, left := range leftovers {
 		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s left %s: %s; to remove it: %s\n", name, left.Path, left.What, left.Step)
 	}
-}
-
-// removedConnectorAlreadyTornDown reports whether name is a removed connector
-// (until 1.1) whose teardown has nothing left to do; opts is
-// retiredConnectorOpts.
-func removedConnectorAlreadyTornDown(opts connector.SetupOpts, name string) bool {
-	if !connector.IsRemovedConnector(name) {
-		return false
-	}
-	retired, ok := connector.RetiredConnector(name)
-	return ok && retired.VerifyClean(opts) == nil
 }
 
 // retiredConnectorOpts are the options a retired connector's teardown and
@@ -7495,6 +7640,35 @@ func removedConnectorAlreadyTornDown(opts connector.SetupOpts, name string) bool
 // else: they write or read no other connector's state.
 func retiredConnectorOpts(dataDir, workspaceDir string) connector.SetupOpts {
 	return connector.SetupOpts{DataDir: dataDir, WorkspaceDir: workspaceDir}
+}
+
+// removeRemovedConnectorLeftovers runs the OpenHands/OmniGent teardown on
+// every boot path, single- and multi-connector alike and with no connector
+// configured, when a lock entry or a leftover of theirs is there: a 1.0.4
+// host that dropped them from the roster kept both, and the single-connector
+// and zero-connector boots have no orphan reconcile (GAP-1843, GAP-1926,
+// GAP-2018). registry may be nil: a removed connector's teardown never uses it. It runs before any connector transaction captures
+// state and never fails a boot. A managed install leaves it to the hook
+// guardian, which runs it as each account. until 1.1.
+func (s *Sidecar) removeRemovedConnectorLeftovers(ctx context.Context, registry *connector.Registry) {
+	cfg := s.currentConfig()
+	if cfg == nil || strings.TrimSpace(cfg.DataDir) == "" || managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return
+	}
+	opts := s.retiredConnectorOpts()
+	for _, name := range []string{"openhands", "omnigent"} {
+		locked := connector.LoadHookContractLockEntry(opts.DataDir, name).Connector != ""
+		if left, _ := connector.RemovedConnectorLeftovers(name, opts); !locked && len(left) == 0 {
+			continue
+		}
+		if err := retireOrDropUnregisteredConnector(ctx, registry, opts, name, "lock-only", nil); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %v\n", err)
+			continue
+		}
+		if locked {
+			s.auditDroppedConnectorState(name, "lock-only")
+		}
+	}
 }
 
 // retiredConnectorOpts is retiredConnectorOpts for the current config.
@@ -7600,12 +7774,10 @@ func reconcileOrphanedConnectorRegistrations(
 			if !connectorDroppable(registry, name) {
 				return fmt.Errorf("protected lock-only connector %q is not registered and a plugin may still provide it (check plugin discovery); %s", name, removedConnectorDocHint)
 			}
+			// until 1.1: an OpenHands/OmniGent lock entry runs its teardown
+			// too; it removes what DefenseClaw wrote and the entry, so the
+			// next boot finds no orphan (GAP-1843).
 			retiredOpts := retiredConnectorOpts(dataDir, ops.workspaceDir)
-			if removedConnectorAlreadyTornDown(retiredOpts, name) {
-				// until 1.1: a removed connector's lock entry stays after
-				// its teardown, so only a teardown still due runs.
-				continue
-			}
 			if err := retireOrDropUnregisteredConnector(ctx, registry, retiredOpts, name, "lock-only", ops.clearLock); err != nil {
 				return err
 			}
@@ -7728,9 +7900,9 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 	previous, current []string,
 	apiToken, proxyAddr, apiAddr, masterKey string,
 	lockState *connector.HookContractLockSnapshot,
-) ([]multiConnectorSetupRollbackPoint, []string) {
+) ([]multiConnectorSetupRollbackPoint, []string, []string) {
 	if registry == nil || len(previous) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	keep := make(map[string]struct{}, len(current))
 	for _, name := range current {
@@ -7740,6 +7912,10 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 	}
 	var candidates []multiConnectorSetupRollbackPoint
 	var failed []string
+	// dropped lists the names that left the roster here without a teardown
+	// (no build-shipped owner, or no lock and nothing installed), so a
+	// caller that must account for every previous name counts them (GAP-2617).
+	var dropped []string
 	for _, previousName := range previous {
 		name := strings.TrimSpace(previousName)
 		if name == "" {
@@ -7763,6 +7939,7 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 				continue
 			}
 			s.auditDroppedConnectorState(name, "removed")
+			dropped = append(dropped, name)
 			continue
 		}
 		opts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
@@ -7777,6 +7954,15 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 			opts:             opts,
 			previouslyActive: true,
 			previousLock:     lockState.RawEntry(name),
+		}
+		if dropRemovedConnectorWithNothingInstalled(conn, opts, point.previousLock) {
+			// No lock and no registration: retrying its teardown on every
+			// start can never succeed and only keeps a connector the config
+			// no longer names in the active roster (GAP-2617).
+			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s has no hook contract lock and nothing installed — removed its hook credential and dropped it from the active roster\n", name)
+			s.auditDroppedConnectorState(name, "removed-unregistered")
+			dropped = append(dropped, name)
+			continue
 		}
 		priorOpts, err := priorConnectorSetupOpts(point)
 		if err != nil {
@@ -7795,7 +7981,29 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 		}
 		candidates = append(candidates, point)
 	}
-	return candidates, failed
+	return candidates, failed, dropped
+}
+
+// dropRemovedConnectorWithNothingInstalled reports whether a connector that
+// left the configuration can leave the active roster without a teardown: it
+// has no hook contract lock entry and a clean VerifyClean (no hooks, plugin or
+// env DefenseClaw wrote in the agent's files). The per-user hook credential an
+// older release may have issued for it is the only thing left; it is removed
+// first (what Teardown does), so no route accepts it once the name is gone.
+// Any lock, registration or a credential that cannot be removed keeps the
+// strict retain-for-retry path.
+func dropRemovedConnectorWithNothingInstalled(conn connector.Connector, opts connector.SetupOpts, lock connector.HookContractLockEntry) bool {
+	if conn == nil || strings.TrimSpace(lock.Connector) != "" {
+		return false
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		return false
+	}
+	if err := connector.RemoveHookAPIToken(opts.DataDir, conn.Name()); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s: remove its hook credential: %v — retaining for teardown retry\n", conn.Name(), err)
+		return false
+	}
+	return true
 }
 
 // teardownRemovedConnectorCandidates removes only connectors for which the
@@ -7853,7 +8061,7 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s %s failed: %v\n", conn.Name(), surface, err)
 	previouslyActive := !opts.ManagedEnterprise && len(authority) > 0 && len(authority[0].applied) > 0 && authority[0].applied[0].previouslyActive
 	if previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
-		err = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", err)
+		err = fmt.Errorf("%w%s", err, refreshRefusalNextStep(err))
 	}
 	if !previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
 		recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
@@ -7914,6 +8122,66 @@ func (s *Sidecar) saveSingleConnectorReadyState(
 // installed hook surface for this error — the existing registration is still
 // the last verified contract.
 var ErrHookContractAdmission = errors.New("hook contract admission failed")
+
+// agentVersionUnread marks a refusal of an unversioned agent whose binary
+// discovery found but whose version it could not read; its text is the cause.
+// The next step is the cause's own, never closing an agent that is not the
+// problem (GAP-1167, GAP-2479).
+type agentVersionUnread string
+
+func (e agentVersionUnread) Error() string { return string(e) }
+
+// unversionedAgentAdmissionError is the action-mode refusal of an agent with
+// no probed version. When discovery recorded why it has no version, the
+// refusal quotes it and names the fix for that cause; the admission rule is
+// unchanged.
+func unversionedAgentAdmissionError(dataDir, name, agentVersion, reason string) error {
+	probe, cause := connector.CachedAgentVersionProbeError(dataDir, name)
+	if probe == "" && connector.CachedAgentNotFound(dataDir, name) {
+		// The connector is enrolled but discovery found no agent binary for
+		// this account, so there is no version to read and no open agent to
+		// close. The fix is the agent or the connector, never the drift env
+		// (GAP-2520).
+		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %w; put the agent back on the PATH of this account, or remove the connector (defenseclaw setup remove %s)", ErrHookContractAdmission, name, agentVersion, agentVersionUnread("discovery did not find the agent on the PATH of this account"), name)
+	}
+	if probe == "" {
+		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, name, agentVersion, reason)
+	}
+	var why agentVersionUnread
+	var next string
+	switch cause {
+	case connector.AgentVersionProbeDidNotRun:
+		why, next = "the agent did not run when discovery read its version", "make it run from this account, for example by putting its runtime on PATH"
+	case connector.AgentVersionProbeTimedOut:
+		why, next = "the agent did not answer its version probe in time", "start it once from this account so its first start finishes (a cold disk or a busy host makes it slow)"
+	case connector.AgentVersionProbeUntrustedPath:
+		why, next = "discovery did not run the agent because its install path is not trusted", "install it where only administrators or this account can write, or put that install first on PATH"
+	case connector.AgentVersionProbeNotProbed:
+		why, next = "discovery has not read the agent's version yet", "check that it starts from this account"
+	default:
+		why, next = "discovery could not read the agent's version", "check that it starts from this account and prints its version"
+	}
+	return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %w (%s); %s", ErrHookContractAdmission, name, agentVersion, why, probe, next)
+}
+
+// refreshRefusalNextStep is the next step a failed refresh of an active
+// connector names. Only a cause an open agent can explain tells the user to
+// close it. An agent discovery could not find or read names its own fix
+// (GAP-1167, GAP-2479, GAP-2520), and an agent that answered a setup probe
+// too slowly is started once first (GAP-2520). An agent installed where
+// another account can write is reinstalled, not closed (GAP-2479).
+func refreshRefusalNextStep(err error) string {
+	switch {
+	case errors.As(err, new(agentVersionUnread)):
+		return ", then run: defenseclaw upgrade"
+	case errors.Is(err, connector.ErrAgentVersionProbeTimeout):
+		return "; the agent answered too slowly (a cold first start or a busy host): start it once from this account and let it finish, then run: defenseclaw upgrade"
+	case errors.Is(err, connector.ErrAgentInstallNotTrusted):
+		return "; the agent is installed where another account can write: install it where only administrators or this account can write, or remove that write access, then run: defenseclaw upgrade"
+	default:
+		return "; close the agent holding its settings, then run: defenseclaw upgrade"
+	}
+}
 
 // GuardrailAgentSettingsRefused is the guardrail health detail that maps each
 // connector the agent's own settings refused (connector.ErrAgentConfigRefusal)
@@ -8003,6 +8271,11 @@ func hookContractDriftAdmission(name string, previous, current connector.HookCon
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s hook contract %s (written by %s) is now %s in DefenseClaw %s; agent version %q is unchanged, refreshing the lock\n",
 			name, previous.ContractID, writer, current.ContractID, current.DefenseClawVersion, current.RawAgentVersion)
+		return nil
+	}
+	if connector.HookContractAgentUpdateAdmitted(previous, current) && current.CompatibilityStatus == connector.HookCompatibilityNotGated {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s agent version changed from %q to %q; its hooks are not version-gated, refreshing the lock\n",
+			name, previous.RawAgentVersion, current.RawAgentVersion)
 		return nil
 	}
 	if connector.HookContractAgentUpdateAdmitted(previous, current) {
@@ -8198,6 +8471,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		api.initGuardrailProfiles(api.scannerCfg)
 	}
 	api.projectSkills = &s.projectSkills
+	api.hookMCP = &s.hookMCP
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
 	if set := api.guardrailProfileSet(); set != nil {

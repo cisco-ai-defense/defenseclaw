@@ -3,7 +3,7 @@
 
 # Standalone uninstall and the two directories a standalone install adds under
 # InstallRoot: <InstallRoot>\ipc\ (the sensor helper's AF_UNIX socket, a
-# reparse file on Windows) and <InstallRoot>\share\opencode\defenseclaw.js
+# reparse file on Windows) and <InstallRoot>\share\opencode\index.js
 # (the managed OpenCode plugin the guardian installs from the payload). The
 # install-tree walk must accept exactly those directories and their expected
 # leaves, removal after the services are gone must delete only them (refusing
@@ -73,7 +73,7 @@ try {
             function New-Plugin([hashtable]$Layout) {
                 $directory = [IO.Path]::Combine($Layout.InstallRoot, 'share', 'opencode')
                 [void][IO.Directory]::CreateDirectory($directory)
-                $plugin = [IO.Path]::Combine($directory, 'defenseclaw.js')
+                $plugin = [IO.Path]::Combine($directory, 'index.js')
                 [IO.File]::WriteAllText($plugin, '// defenseclaw-managed-opencode-plugin v1')
                 return $plugin
             }
@@ -190,6 +190,34 @@ try {
             # Removal with nothing installed is a no-op.
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $layout
 
+            # Uninstall after a V1 upgrade can reach the pre-finalization
+            # boundary with the old artifact alone or both generations. Both
+            # are accepted there and must be removed before retirement.
+            foreach ($withCurrentPlugin in @($false, $true)) {
+                $upgraded = New-TestLayout ('plugin-v1-upgrade-' + $withCurrentPlugin)
+                $upgradePaths = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $upgraded
+                [void][IO.Directory]::CreateDirectory([string]$upgradePaths.PluginDirectory)
+                if ($withCurrentPlugin) { [void](New-Plugin $upgraded) }
+                [IO.File]::WriteAllText([string]$upgradePaths.LegacyPluginPath, '// old managed bridge')
+                Test-Accepted 'standalone tree with the legacy managed plugin' $upgraded
+                try {
+                    Assert-DefenseClawInstallTreeRetirementState -Layout $upgraded -AllowUnretiredAcls
+                }
+                catch {
+                    $failures.Add("committed install-tree check refused the legacy OpenCode plugin before finalization: $($_.Exception.Message)")
+                }
+                $retiredAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist `
+                    -Layout $upgraded `
+                    -RetiredRoot $upgraded.InstallRoot
+                if ([string]$upgradePaths.LegacyPluginPath -in $retiredAllowlist.files) {
+                    $failures.Add('the retired tree permits the legacy managed plugin after finalization')
+                }
+                Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $upgraded
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $upgradePaths.ShareDirectory) {
+                    $failures.Add('the legacy managed OpenCode artifact survived uninstall')
+                }
+            }
+
             # GAP-0270: a 1.0.2 standalone install left lib\defenseclaw for
             # the Fleet compiler this release no longer installs. Uninstall
             # accepts the two directories only while they are empty, and a
@@ -267,10 +295,25 @@ try {
             [void][IO.Directory]::CreateDirectory($siblingDirectory)
             Test-Refused 'unknown directory under the retired lib (walk)' {
                 Assert-DefenseClawManagedInstallTree -Layout $sibling
-            } 'unexpected directory from managed install root'
+            } ('unexpected directory from managed install root: ' + [regex]::Escape($siblingDirectory) + '$')
             Remove-DefenseClawRetiredStandaloneCompiler -Layout $sibling
             if (-not [IO.Directory]::Exists($siblingDirectory)) {
                 $failures.Add('the Fleet-off retire removed an unknown directory under lib')
+            }
+
+            # rel-1-0-3 GAP-0283: a file left in the retired lib tree is the
+            # item the refusal names (not lib, which 1.0.2 installed), and it
+            # stays where it is.
+            $note = New-TestLayout 'retired-note'
+            $noteFile = [IO.Path]::Combine((Get-RetiredLib $note), 'defenseclaw', 'operator-note.txt')
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($noteFile))
+            [IO.File]::WriteAllText($noteFile, 'operator note')
+            Test-Refused 'operator file in the retired lib tree (uninstall)' {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $note
+            } ('unexpected file from managed install root: ' + [regex]::Escape($noteFile) +
+                '\. The uninstall stopped before it changed anything\. DefenseClaw did not install that item: move it out of ')
+            if (-not [IO.File]::Exists($noteFile)) {
+                $failures.Add('the uninstall refusal removed the operator file in the retired lib tree')
             }
 
             $linked = New-TestLayout 'retired-linked'
@@ -618,7 +661,7 @@ try {
 
             $nested = New-TestLayout 'nested'
             [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($nested.ManagedIPCDirectory, 'sensor-helper.sock'))
-            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($nested.InstallRoot, 'share', 'opencode', 'defenseclaw.js'))
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($nested.InstallRoot, 'share', 'opencode', 'index.js'))
             Test-Refused 'directory named like the socket' { Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $nested } 'unexpected managed IPC content'
             Test-Refused 'directory named like the plugin' { Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $nested } 'not a plain file'
 
@@ -630,12 +673,17 @@ try {
                 Test-Refused 'symbolic link named like the socket (walk)' { Assert-DefenseClawManagedInstallTree -Layout $linkedIPC } 'reparse point'
                 Test-Refused 'symbolic link named like the socket (removal)' { Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $linkedIPC } 'unexpected managed IPC content'
             }
-            $linkedPlugin = New-TestLayout 'linked-plugin'
-            $linkedDirectory = [IO.Path]::Combine($linkedPlugin.InstallRoot, 'share', 'opencode')
-            [void][IO.Directory]::CreateDirectory($linkedDirectory)
-            if (New-TestLink ([IO.Path]::Combine($linkedDirectory, 'defenseclaw.js')) $target) {
-                Test-Refused 'symbolic link named like the plugin (walk)' { Assert-DefenseClawManagedInstallTree -Layout $linkedPlugin } 'reparse point'
-                Test-Refused 'symbolic link named like the plugin (removal)' { Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $linkedPlugin } 'not a plain file'
+            foreach ($name in @('index.js', 'defenseclaw.js')) {
+                $linkedPlugin = New-TestLayout ('linked-plugin-' + $name)
+                $linkedDirectory = [IO.Path]::Combine($linkedPlugin.InstallRoot, 'share', 'opencode')
+                [void][IO.Directory]::CreateDirectory($linkedDirectory)
+                if (New-TestLink ([IO.Path]::Combine($linkedDirectory, $name)) $target) {
+                    Test-Refused 'symbolic link named like the plugin (walk)' { Assert-DefenseClawManagedInstallTree -Layout $linkedPlugin } 'reparse point'
+                    Test-Refused 'symbolic link named like the plugin (committed check)' {
+                        Assert-DefenseClawInstallTreeRetirementState -Layout $linkedPlugin -AllowUnretiredAcls
+                    } 'reparse point'
+                    Test-Refused 'symbolic link named like the plugin (removal)' { Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $linkedPlugin } 'not a plain file'
+                }
             }
             if (-not [IO.File]::Exists($target)) {
                 $failures.Add('link target outside the tree was removed')
@@ -726,6 +774,49 @@ try {
                 }
             }
 
+            # GAP-1304 (r105): a hook process that runs the executable, not
+            # only reads it. Windows refuses to delete a running image but
+            # renames it; the restore of a fresh InstallRoot renames it
+            # aside and goes on, and anywhere else the refusal stands.
+            $running = New-TrustedTestLayout 'rollback-running'
+            $runningHook = [IO.Path]::Combine($running.BinDirectory, 'defenseclaw-hook.exe')
+            [IO.File]::Copy([IO.Path]::Combine([Environment]::SystemDirectory, 'PING.EXE'), $runningHook)
+            $runner = Start-Process -FilePath $runningHook -ArgumentList '-n', '30', '127.0.0.1' -WindowStyle Hidden -PassThru
+            try {
+                Start-Sleep -Milliseconds 500
+                $controlRefused = $false
+                try {
+                    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $runningHook -Force -ErrorAction Stop
+                }
+                catch {
+                    $controlRefused = $true
+                }
+                if (-not $controlRefused) {
+                    $failures.Add('control: a running hook executable was deleted; the GAP-1304 case did not reproduce')
+                }
+                elseif (-not (Get-Command Remove-DefenseClawTransactionCreatedFile -ErrorAction SilentlyContinue)) {
+                    $failures.Add('fresh-install restore refuses a running hook executable (no rename-aside removal)')
+                }
+                else {
+                    Test-Refused 'running executable outside a fresh InstallRoot' {
+                        Remove-DefenseClawTransactionCreatedFile -Path $runningHook
+                    } ''
+                    try {
+                        Remove-DefenseClawTransactionCreatedFile -Path $runningHook -InFreshInstallRoot
+                    }
+                    catch {
+                        $failures.Add("fresh-install restore refused a running hook executable: $($_.Exception.Message)")
+                    }
+                    if ([IO.File]::Exists($runningHook)) {
+                        $failures.Add('fresh-install restore left the running hook executable at its registered path')
+                    }
+                }
+            }
+            finally {
+                if (-not $runner.HasExited) { $runner.Kill() }
+                [void]$runner.WaitForExit(10000)
+            }
+
             $otherRoot = New-TrustedTestLayout 'rollback-other-root'
             $otherSnapshot = $security::GetDirectorySecuritySnapshotNoFollowIfExists($otherRoot.InstallRoot)
             $otherOptions = @{}
@@ -743,6 +834,99 @@ try {
             } 'identity changed'
             if (-not [IO.File]::Exists($otherRoot.GatewayPath)) {
                 $failures.Add('fresh-install rollback removed a root with a different identity')
+            }
+
+            # GAP-1844 / GAP-1988: Restart Manager can lag a fresh handle.
+            # (a) It names no holder on the first query and the holder on a
+            # later one: the rollback still waits the hook out. (b) Every
+            # delete added between those queries re-checks the recorded
+            # root first, and stops when that root is no longer the one the
+            # transaction created.
+            if ($rollbackOptions.Count -gt 0) {
+                $savedHolders = ${function:Get-DefenseClawInstallRootHolders}
+                $savedRetryRoot = ${function:Test-DefenseClawManagedTreeRetryRoot}
+                $priorStrict = [Environment]::GetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', 'Process')
+                try {
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', '1', 'Process')
+                    foreach ($case in 'lag', 'swapped') {
+                        $lag = New-TrustedTestLayout ('rollback-' + $case)
+                        $lagHook = [IO.Path]::Combine($lag.BinDirectory, 'defenseclaw-hook.exe')
+                        [IO.File]::WriteAllText($lagHook, 'stand-in')
+                        $lagSnapshot = $security::GetDirectorySecuritySnapshotNoFollowIfExists($lag.InstallRoot)
+                        $lagReady = [IO.Path]::Combine($Root, 'rollback-' + $case + '-held')
+                        $script:SmokeHolderQueries = 0
+                        $script:SmokeRootChecks = 0
+                        $script:SmokeRootCase = $case
+                        function script:Get-DefenseClawInstallRootHolders {
+                            param($InstallRoot, $SelfUninstallCallerPID, $ExcludedProcessIds,
+                                [switch]$FailOnQueryError, [switch]$IncludeProcessId)
+                            $script:SmokeHolderQueries++
+                            if ($script:SmokeRootCase -eq 'lag' -and $script:SmokeHolderQueries -ge 2) {
+                                return [pscustomobject]@{ Id = 4545; Description = 'defenseclaw-hook.exe (pid 4545)' }
+                            }
+                            return @()
+                        }
+                        function script:Test-DefenseClawManagedTreeRetryRoot {
+                            param($Path, $ExpectedIdentity, $ExpectedSecurityDescriptor)
+                            $script:SmokeRootChecks++
+                            if ($script:SmokeRootCase -eq 'swapped' -and $script:SmokeRootChecks -gt 1) {
+                                return $false
+                            }
+                            return $true
+                        }
+                        $lagHolder = Start-Job -ScriptBlock {
+                            param([string]$Hook, [string]$Ready, [int]$Seconds)
+                            $stream = [IO.File]::Open($Hook, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                            try {
+                                [IO.File]::WriteAllText($Ready, 'held')
+                                Start-Sleep -Seconds $Seconds
+                            }
+                            finally { $stream.Dispose() }
+                        } -ArgumentList $lagHook, $lagReady, $(if ($case -eq 'lag') { 9 } else { 20 })
+                        try {
+                            $clock = [Diagnostics.Stopwatch]::StartNew()
+                            while (-not [IO.File]::Exists($lagReady) -and $clock.ElapsedMilliseconds -lt 10000) {
+                                Start-Sleep -Milliseconds 100
+                            }
+                            if (-not [IO.File]::Exists($lagReady)) {
+                                $failures.Add("the $case rollback hook holder did not start")
+                                continue
+                            }
+                            $lagError = $null
+                            try {
+                                Remove-DefenseClawManagedTree `
+                                    -Path $lag.InstallRoot `
+                                    -RequiredBase $trustedBase `
+                                    -Label 'InstallRoot' `
+                                    -RetryHeldFileMilliseconds 15000 `
+                                    -ExpectedRootIdentity ([string]$lagSnapshot.Identity) `
+                                    -ExpectedRootSecurityDescriptor ([byte[]]$lagSnapshot.SecurityDescriptor)
+                            }
+                            catch { $lagError = $_ }
+                            if ($case -eq 'lag') {
+                                if ($null -ne $lagError -or [IO.Directory]::Exists($lag.InstallRoot)) {
+                                    $failures.Add("fresh-install rollback gave up before Restart Manager named the holder (queries $script:SmokeHolderQueries): $lagError")
+                                }
+                            }
+                            else {
+                                if ($null -ne $lagError -or $script:SmokeRootChecks -ne 2 -or $script:SmokeHolderQueries -ne 1 -or
+                                    -not [IO.File]::Exists($lagHook)) {
+                                    $failures.Add("an added rollback delete ran without re-checking the recorded root (root checks $script:SmokeRootChecks, holder queries $script:SmokeHolderQueries, error $lagError)")
+                                }
+                            }
+                        }
+                        finally {
+                            [void](Wait-Job -Job $lagHolder -Timeout 30)
+                            if ($lagHolder.State -eq 'Running') { Stop-Job -Job $lagHolder }
+                            Remove-Job -Job $lagHolder -Force
+                            Microsoft.PowerShell.Management\Set-Item -Path function:script:Get-DefenseClawInstallRootHolders -Value $savedHolders
+                            Microsoft.PowerShell.Management\Set-Item -Path function:script:Test-DefenseClawManagedTreeRetryRoot -Value $savedRetryRoot
+                        }
+                    }
+                }
+                finally {
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', $priorStrict, 'Process')
+                }
             }
 
             # GAP-0942: an editor's ACP thread that runs defenseclaw-acp.exe

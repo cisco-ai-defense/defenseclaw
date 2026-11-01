@@ -195,11 +195,11 @@ func TestVerifyCopilotSandboxPolicyRejectsTampering(t *testing.T) {
 }
 
 func TestVerifyOpenCodeSandboxManagedConfigRejectsTampering(t *testing.T) {
-	plugin := `"plugin":["file://` + OpenCodeSandboxPluginPath + `"]`
-	good := sandboxFile(t, sandboxArtifactsFor(t, NewOpenCodeConnector(), "1.18.31"), OpenCodeSandboxManagedConfigPath).Data
+	plugin := `"plugin":["` + openCodeSandboxPluginURL() + `"]`
+	good := sandboxFile(t, sandboxArtifactsFor(t, NewOpenCodeConnector(), "2.1.4"), OpenCodeSandboxManagedConfigPath).Data
 	assertTamperRejected(t, verifyOpenCodeSandboxManagedConfig, good, map[string][]byte{
 		"no-plugin":      []byte(`{"plugin":[],"autoupdate":false,"share":"disabled"}`),
-		"extra-plugin":   []byte(`{"plugin":["file://` + OpenCodeSandboxPluginPath + `","file:///tmp/x.js"],"autoupdate":false,"share":"disabled"}`),
+		"extra-plugin":   []byte(`{"plugin":["` + openCodeSandboxPluginURL() + `","file:///tmp/x.js"],"autoupdate":false,"share":"disabled"}`),
 		"autoupdate":     []byte(`{` + plugin + `,"share":"disabled"}`),
 		"share-enabled":  []byte(`{` + plugin + `,"autoupdate":false,"share":"auto"}`),
 		"not-json":       []byte(`plugin = []`),
@@ -211,7 +211,7 @@ func TestVerifyOpenCodeSandboxManagedConfigRejectsTampering(t *testing.T) {
 // bridge (the host render path) never passes as one, and the sandbox plugins
 // carry no host-only input and always fail closed.
 func TestRenderSandboxPluginRejectsHostInputs(t *testing.T) {
-	rt, err := resolveSandboxTarget("opencode", SandboxRenderTarget{IngressPort: 18971, AgentVersion: "1.18.31"})
+	rt, err := resolveSandboxTarget("opencode", SandboxRenderTarget{IngressPort: 18971, AgentVersion: "2.1.4"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestSandboxPluginsExecutableContract(t *testing.T) {
 		path     string
 		file     string
 	}{
-		{"opencode", NewOpenCodeConnector(), "1.18.31", OpenCodeSandboxPluginPath, "opencode-sandbox.mjs"},
+		{"opencode", NewOpenCodeConnector(), "2.1.4", OpenCodeSandboxPluginPath, "opencode-sandbox.mjs"},
 		{"amp", NewAMPConnector(), "0.0.1785334225-g9abe75", AmpSandboxPluginPath, "amp-sandbox.ts"},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {

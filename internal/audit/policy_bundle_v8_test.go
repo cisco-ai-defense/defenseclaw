@@ -17,7 +17,10 @@
 package audit
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -35,7 +38,7 @@ func TestLogPolicyBundleReceiptRecordsReceiptAndMetrics(t *testing.T) {
 		PolicyBundle{ID: testPolicyBundleID, Version: 5, SignerKeyID: "fleet-2026-10", ChangeSummary: "tighten egress"},
 		PolicyBundleReceipt{ReceiptID: testPolicyBundleID, Actor: "os:uid:0:root", State: PolicyBundleFailed, ErrorCode: "not_confirmed",
 			EnforcingDigest: "sha256:" + strings.Repeat("a", 64), RolledBack: true, EnforcingVersion: 4,
-			WarningCodes: []string{"capability_disabled"}, DisabledByBundle: []string{"sandbox"}})
+			WarningCodes: []string{"capability_disabled"}, DisabledByBundle: []string{"sandbox"}}, nil, nil)
 	if err != nil {
 		t.Fatalf("LogPolicyBundleReceipt: %v", err)
 	}
@@ -75,7 +78,7 @@ func TestLogPolicyBundleReceiptRecordsReceiptAndMetrics(t *testing.T) {
 	if err := logger.LogPolicyBundleReceipt("operator:root",
 		PolicyBundle{ID: testPolicyBundleID, Version: 5},
 		PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: PolicyBundleConfirmed,
-			Restart: true, RestartRequired: true, ConfigGeneration: 3, EnforcingVersion: 5}); err != nil {
+			Restart: true, RestartRequired: true, ConfigGeneration: 3, EnforcingVersion: 5}, nil, nil); err != nil {
 		t.Fatalf("restart bundle receipt: %v", err)
 	}
 	_, records = runtime.snapshot()
@@ -95,7 +98,7 @@ func TestLogPolicyBundleReceiptRecordsReceiptAndMetrics(t *testing.T) {
 		values[observability.EventName(observability.TelemetryInstrumentDefenseClawPolicyBundleVersion)] != "5" {
 		t.Fatalf("hot bundle metrics = %v", values)
 	}
-	if err := logger.LogPolicyBundleReceipt("", PolicyBundle{}, PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: "applied"}); err == nil {
+	if err := logger.LogPolicyBundleReceipt("", PolicyBundle{}, PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: "applied"}, nil, nil); err == nil {
 		t.Fatal("a receipt that is not terminal was recorded")
 	}
 }
@@ -128,5 +131,67 @@ func TestConfigChangeAppliedCarriesPolicyBundle(t *testing.T) {
 	}
 	if principal, known := controlPlaneV8Principal("control-plane:acme/alice"); !known || !principal.IsPresent() {
 		t.Fatal("bundle principal control-plane:<tenant>/<admin> is not a known principal")
+	}
+}
+
+// GAP-0376: the reporter offers a receipt from the receipt spool until
+// every sink has it. While the audit store refuses its row (SQLITE_BUSY
+// for three polls) and after a restarted gateway finds the row stored,
+// every offer is the same record under one id, the receipt's, so a remote
+// destination that got the first offer gets no other record of it, and
+// the store keeps one row. Before, each offer was a new record with a new
+// id: the collector got the receipt twice under two record ids.
+func TestLogPolicyBundleReceiptEveryOfferIsOneRecordUnderOneID(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
+	emitter := newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary)
+	logger := NewLogger(store)
+	logger.SetRuntimeV8Emitter(emitter)
+	bundle := PolicyBundle{ID: testPolicyBundleID, Version: 2, SignerKeyID: "fleet-2026-10"}
+	receipt := PolicyBundleReceipt{ReceiptID: testPolicyBundleID, Actor: "os:uid:0:root",
+		State: PolicyBundleConfirmed, ConfigGeneration: 7, EnforcingVersion: 2,
+		FinishedAt: "2026-10-26T20:00:00.123Z"}
+	delivery, pins := observability.NewRemoteDelivery(), testConfigChangePins(t)
+	emitter.failWrite = errors.New("database is locked (SQLITE_BUSY)")
+	for offer := 0; offer < 3; offer++ {
+		receipt.FirstOffer = offer == 0
+		if err := logger.LogPolicyBundleReceipt("operator:root", bundle, receipt, delivery, pins); err == nil {
+			t.Fatalf("offer %d succeeded although the store refused its row", offer)
+		}
+	}
+	emitter.failWrite = nil
+	receipt.FirstOffer = false
+	if err := logger.LogPolicyBundleReceipt("operator:root", bundle, receipt, delivery, pins); err != nil {
+		t.Fatalf("offer after the store recovered: %v", err)
+	}
+	// A gateway killed after the row committed, before its marker: the
+	// restarted reporter has no delivery state and offers it again.
+	if err := logger.LogPolicyBundleReceipt("operator:root", bundle, receipt,
+		observability.NewRemoteDelivery(), pins); err != nil {
+		t.Fatalf("offer after a restart: %v", err)
+	}
+	built := builtRecords(emitter)
+	if len(built) != 5 {
+		t.Fatalf("built %d records, want one per offer (5)", len(built))
+	}
+	want := stableOccurrenceID(string(ActionConfigBundleReceipt), testPolicyBundleID)
+	first := recordBytes(t, built[0])
+	for i, record := range built {
+		if record.RecordID() != want {
+			t.Fatalf("offer %d record id = %q, want the receipt's stable id %q", i, record.RecordID(), want)
+		}
+		if !bytes.Equal(recordBytes(t, record), first) {
+			t.Fatalf("offer %d is another record than the first offer", i)
+		}
+	}
+	var rows int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action = ?`,
+		string(ActionConfigBundleReceipt)).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("stored receipt rows = %d (%v), want 1", rows, err)
+	}
+	emitter.mu.Lock()
+	skipped := append([]bool(nil), emitter.skippedLocalWrite...)
+	emitter.mu.Unlock()
+	if len(skipped) == 0 || !skipped[len(skipped)-1] {
+		t.Fatalf("offers that skipped the local write = %v, want the restarted offer to find the row", skipped)
 	}
 }

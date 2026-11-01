@@ -21,7 +21,6 @@ import (
 // user's authorized_keys; each allowed row writes an ordinary project file.
 // Every row is judged on the per-user route and both managed routes.
 func TestR104ShellClassProtectedWrite(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	// Local scripts the shell would run: one writes the protected link, one a
 	// project file. readIndirectSource reads these as regular files under cwd.

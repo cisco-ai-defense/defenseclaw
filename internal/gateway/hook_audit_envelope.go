@@ -84,7 +84,7 @@ type HookAuditEnvelope struct {
 	// EvaluationID + RuleIDs are the unified-pipeline correlation
 	// keys this hook emission was attributed to. The hook
 	// evaluator stamps them on agentHookResponse via
-	// emitHookRuleFindings; finalizeAgentHook copies them onto the
+	// emitHookRuleFindings; finalizeAgentHookAnswer copies them onto the
 	// envelope so audit sinks see the same join key SIEM
 	// dashboards pivot on (matches ScanPayload.evaluation_id /
 	// ScanFindingPayload.evaluation_id / VerdictPayload.

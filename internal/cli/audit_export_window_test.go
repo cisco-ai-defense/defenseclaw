@@ -263,7 +263,7 @@ func TestIncludeActivityWithoutHistoryNotesWhy(t *testing.T) {
 	if err := appendActivityLines(&stderr, db, &out, version.Provenance{}, auditExportWindow{}); err != nil {
 		t.Fatal(err)
 	}
-	if out.Len() != 0 || !strings.Contains(stderr.String(), "config-update") {
+	if out.Len() != 0 || !strings.Contains(stderr.String(), "action config.change.applied") {
 		t.Fatalf("stdout %q, stderr %q", out.String(), stderr.String())
 	}
 }

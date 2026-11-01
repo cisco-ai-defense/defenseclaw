@@ -89,7 +89,18 @@ func windowsCursorInspect(opts Options, current []byte, adapterPath string, stat
 	}
 	adapter, err := connector.RenderWindowsCursorEnterpriseAdapter(opts.HookBinary, "closed")
 	if err == nil {
-		if onDisk, exists, readErr := readPolicyFile(opts, adapterPath); readErr != nil || !exists || !bytes.Equal(onDisk, adapter) {
+		onDisk, exists, readErr := readPolicyFile(opts, adapterPath)
+		// The managed runtime writes the per-target render (each enrolled
+		// account's fail mode by SID) whenever it enrolls Cursor accounts:
+		// that exact canonical render is DefenseClaw's adapter too, so
+		// policy verify no longer called it missing while enterprise
+		// windows verify was clean (GAP-1857).
+		canonical := readErr == nil && exists && bytes.Equal(onDisk, adapter)
+		if !canonical && readErr == nil && exists {
+			_, mappedErr := connector.WindowsCursorEnterpriseAdapterTargetModes(onDisk, opts.HookBinary)
+			canonical = mappedErr == nil
+		}
+		if !canonical {
 			state.conflict("Cursor enterprise adapter %s is missing or differs from the canonical DefenseClaw adapter", adapterPath)
 		}
 	}

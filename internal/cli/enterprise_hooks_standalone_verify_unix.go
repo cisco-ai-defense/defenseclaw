@@ -43,6 +43,9 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 	if err != nil {
 		return run, err
 	}
+	// until 1.1: the guardian skips the OpenHands/OmniGent rows an older
+	// enumerator wrote, so verify does too (GAP-2504).
+	manifest.Targets = withoutRemovedConnectorTargets(manifest.Targets)
 	records := loadEnterpriseHookGuardianRecords(cfg.DataDir)
 	authorization, exists, authorizationErr := records.Authorization, records.AuthorizationExists, records.AuthorizationErr
 	activation, activationExists, activationErr := records.Activation, records.ActivationExists, records.ActivationErr
@@ -97,6 +100,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 	}
 	jobs := map[int]*enterpriseHookWorkerJob{}
 	dispatched := map[int]bool{}
+	machinePolicy := enterpriseHookStandaloneMachinePolicySet()
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -140,6 +144,27 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 			}
 			row.Pending = true
 			run.Rows = append(run.Rows, row)
+			continue
+		}
+		if _, published := machinePolicy[strings.ToLower(row.Connector)]; published {
+			// The guardian proves a target of a connector the lifecycle
+			// published through vendor machine policy by that policy, and
+			// writes no per-user hook for it. Verify and readiness looked for
+			// the per-user hook file, so a manifest that lists such a target
+			// (enrollment.mode: manifest) failed verify while status and the
+			// guardian were healthy (GAP-0101).
+			covered, err := enterpriseHookStandaloneMachinePolicyCovered(row.Connector)
+			switch {
+			case err != nil:
+				fail(fmt.Errorf("enterprise hooks: %s machine policy is unreadable: %w", row.Connector, err))
+			case !covered:
+				fail(fmt.Errorf("enterprise hooks: %s machine policy is not in place", row.Connector))
+			case exists && !enterpriseHookAuthorizationCovers(authorization, row):
+				fail(errors.New("protected authorization does not cover target"))
+			default:
+				row.OK = true
+				run.Rows = append(run.Rows, row)
+			}
 			continue
 		}
 		if transportErr != nil {
@@ -213,6 +238,12 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 		}
 		run.Rows[index] = row
 	}
+	// The guardian's records prove registration. Public Verify then refuses
+	// to attest a managed Hermes home (GAP-0766), so its records are
+	// compared with the registration result: a fully hooked Hermes set fails
+	// only with the session-only refusal, not also as "extra or stale"
+	// targets and mismatched dispositions (GAP-1703).
+	registered := append([]enterpriseHookReconcileRow(nil), run.Rows...)
 	for index, row := range run.Rows {
 		if row.Connector != "hermes" || !row.OK {
 			continue
@@ -238,6 +269,15 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 	}
 	if run.AuthorizationErr == nil && exists && activationExists {
 		proof := run
+		proof.Rows, proof.Pending, proof.Failures = registered, 0, 0
+		for _, row := range registered {
+			switch {
+			case row.Pending:
+				proof.Pending++
+			case !row.OK:
+				proof.Failures++
+			}
+		}
 		if partialRegistration {
 			proof = enterpriseHookPartialRegistrationProof(run)
 		}

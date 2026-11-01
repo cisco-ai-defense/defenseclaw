@@ -36,6 +36,28 @@ func WindowsProtectedTargetFromOtherRelease(opts InstallOptions) (string, bool, 
 	return written, true, nil
 }
 
+// WindowsProtectedTargetRunsEarlierHookMatrix reads, without writing, one
+// managed target's agent config and reports that it holds the hook matrix an
+// earlier release registered, which differs from this release's only by the
+// fail_closed setting Setup added since
+// (connector.HookRegistrationLacksOnlyFailClosed). The guardian asks only for
+// a target another release protected that fails verification while its
+// account has no active session: its earlier hooks still guard the account
+// until the guardian upgrades them in that session (rel-1-0-5 GAP-2463).
+func WindowsProtectedTargetRunsEarlierHookMatrix(opts InstallOptions) (bool, error) {
+	target, err := resolveWindowsGenericManagedTarget(opts)
+	if err != nil {
+		return false, err
+	}
+	var earlier bool
+	err = connector.WithUserHomeDir(target.home, func() error {
+		var checkErr error
+		earlier, checkErr = connector.HookRegistrationLacksOnlyFailClosed(target.conn, target.setup)
+		return checkErr
+	})
+	return earlier, err
+}
+
 // WindowsProtectedTargetHookFailModeChange reads, without writing, one
 // managed target's protected hook-contract lock entry and returns the hook
 // fail mode it records and the one opts asks for, both canonical; locked is

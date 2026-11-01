@@ -4,7 +4,17 @@ import copy
 
 import pytest
 import yaml
-from defenseclaw import config
+from defenseclaw import config, migrations
+
+
+@pytest.fixture(autouse=True)
+def _fresh_retired_settings_warning():
+    warned = getattr(config, "_retired_settings_warned", None)
+    if warned is not None:
+        warned.clear()
+    yield
+    if warned is not None:
+        warned.clear()
 
 
 @pytest.mark.parametrize("version", (8, 9))
@@ -26,7 +36,7 @@ def test_retired_connector_roster_loads_with_remaining_peer(tmp_path, caplog, ve
     assert loaded.active_connectors() == ["codex"]
     assert loaded.guardrail.connector == "codex"
     assert loaded.claw.mode == ""
-    assert "until 1.1" in caplog.text
+    assert f"{tmp_path / 'config.yaml'} still names OpenHands/OmniGent" in caplog.text
     loaded.save()
     persisted = (tmp_path / "config.yaml").read_text(encoding="utf-8").lower()
     assert "openhands" not in persisted
@@ -190,6 +200,55 @@ def test_retired_connector_only_destination_is_dropped_and_save_validates(tmp_pa
     assert "routes" not in destinations[1]
 
 
+@pytest.mark.parametrize("version", (8, 9))
+def test_upgrade_persists_retired_only_telemetry_cleanup(tmp_path, monkeypatch, version):
+    # A v8 or v9 config can have a retired-only destination even when its
+    # connector roster is current. A full rewrite keeps the original bytes.
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"config_version: {version}\n"
+        "# operator's migration note\n"
+        "guardrail:\n  connector: codex\n  connectors:\n    codex: {}\n"
+        "observability:\n  destinations:\n"
+        "    - name: retired-only\n      kind: console\n"
+        "      routes:\n"
+        "        - {name: old, signals: [logs], selector: {connectors: [omnigent, openhands]}}\n"
+        "    - name: mixed\n      kind: console\n"
+        "      routes:\n"
+        "        - {name: old, signals: [logs], selector: {connectors: [omnigent]}}\n"
+        "        - {name: current, signals: [logs], selector: {connectors: [codex]}}\n",
+        encoding="utf-8",
+    )
+    expected_backup = path.read_bytes()
+    if version == 8:
+        expected_backup = expected_backup.replace(b"config_version: 8", b"config_version: 9", 1)
+
+    def v9_step(ctx):
+        current = path.read_text(encoding="utf-8")
+        path.write_text(current.replace("config_version: 8", "config_version: 9", 1), encoding="utf-8")
+
+    monkeypatch.setitem(migrations.CONFIG_MIGRATIONS, 8, v9_step)
+    for name in (
+        "_restore_set_aside_keys", "_refresh_local_observability_bundle",
+        "_refresh_guardrail_profiles", "_refresh_rego_policies",
+    ):
+        monkeypatch.setattr(migrations, name, lambda *_args: None)
+
+    from_version = "1.0.2" if version == 8 else "1.0.3"
+    preview = migrations.migrate(str(tmp_path), from_version=from_version, check=True)
+    assert "update renamed and removed connectors" in preview.applied
+    migrations.migrate(str(tmp_path), from_version=from_version)
+
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+    destinations = saved["observability"]["destinations"]
+    assert saved["config_version"] == 9
+    assert [destination["name"] for destination in destinations] == ["mixed"]
+    assert [route["name"] for route in destinations[0]["routes"]] == ["current"]
+    backups = list(tmp_path.glob("config.yaml.retired-connector-*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == expected_backup
+
+
 _PROFILE_SANDBOXES = (
     "  profiles:\n"
     "    workers:\n"
@@ -233,3 +292,30 @@ def test_retired_connector_only_sandbox_lists_are_omitted_and_stay_restrictive(t
     assert closed["allowed"] is False
     assert "allowed_harnesses" not in closed
     assert "required_for" not in closed
+
+
+def test_retired_connector_load_warning_is_once_named_and_not_the_installer_notice(tmp_path, monkeypatch):
+    """GAP-2043: a config the upgrade could not migrate (its folder is not the
+    user's) is loaded by later installer steps. The load says once, through
+    the module logger (no raw "WARNING:root:" line), which file still names
+    them; it does not repeat the installers' removal notice or send the user
+    to the migrate that just ran."""
+    import subprocess
+    import sys
+
+    outside = tmp_path / "outside.yaml"
+    outside.write_text(
+        "config_version: 9\nguardrail:\n  connectors:\n    openhands: {}\n    codex: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(outside))
+    script = f"from defenseclaw import config\nfor _ in range(3):\n    config.load(data_dir={str(tmp_path)!r})\n"
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
+    lines = [line for line in out.stderr.splitlines() if "OpenHands/OmniGent" in line]
+    assert lines == [
+        f"{outside} still names OpenHands/OmniGent, which DefenseClaw no longer supports; "
+        "they are ignored. Delete them from that file."
+    ], out.stderr
+    assert "WARNING:root" not in out.stderr
+    assert "removed in 1.0.5" not in out.stderr
+    assert "run defenseclaw migrate" not in out.stderr

@@ -80,7 +80,7 @@ var (
 	}
 	kernelPolicyFamilies  = []string{"observe", "connect", "controls", "controls-burnin"}
 	kernelPolicyModes     = []string{"monitor", "enforce"}
-	kernelControls        = []string{"kernel.ssh_private_key_read", "kernel.persistence_write"}
+	kernelControls        = []string{"kernel.ssh_private_key_read", "kernel.persistence_write", "kernel.ssh_authorized_keys_write"}
 	runtimeEventSources   = []string{"tetragon", "cn_proc", "fanotify", "endpoint_security", "etw", "poll"}
 	runtimeKernelOutcomes = []string{
 		string(plane.OutcomeObserved), string(plane.OutcomeWouldBlock), string(plane.OutcomeBlocked),
@@ -383,6 +383,8 @@ func kernelDenialText(control string) string {
 		return "Tetragon denied an agent's process a read of an SSH private key"
 	case "kernel.persistence_write":
 		return "Tetragon denied an agent's process a write to a shell profile or user autostart entry"
+	case "kernel.ssh_authorized_keys_write":
+		return "Tetragon denied an agent's process a change to an SSH authorized keys file"
 	}
 	return "Tetragon denied an agent's process an open"
 }
@@ -746,7 +748,7 @@ var (
 	runtimeHookActions       = []string{"allow", "alert"}
 	kernelHelperModes        = []string{"off", "consume", "observe", "enforce"}
 	kernelApprovals          = []string{"not_needed", "missing", "stale", "approved"}
-	kernelMetricControls     = []string{"kernel.ssh_private_key_read", "kernel.persistence_write", "customer"}
+	kernelMetricControls     = []string{"kernel.ssh_private_key_read", "kernel.persistence_write", "kernel.ssh_authorized_keys_write", "customer"}
 )
 
 // emitCustomerKernelEvents reports the attributed events of the host's own

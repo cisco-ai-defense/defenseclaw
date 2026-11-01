@@ -30,6 +30,7 @@ func (d *Driver) ConfigGenerationOptions(raw []byte) (configwrite.Options, bool,
 		return configwrite.Options{}, false, err
 	}
 	var floor uint64
+	dir := ""
 	if matched == nil {
 		current, ref, err := d.CurrentConfig()
 		if err != nil {
@@ -49,7 +50,7 @@ func (d *Driver) ConfigGenerationOptions(raw []byte) (configwrite.Options, bool,
 		if manifest.BundleID != ref.BundleID || manifest.Version != ref.Version || ref.SignerKeyID == "" {
 			return configwrite.Options{}, false, fmt.Errorf("confirmed policy bundle identity is incomplete")
 		}
-		floor = ref.ConfigGeneration
+		floor, dir = ref.ConfigGeneration, ref.Dir
 		matched = &Receipt{BundleID: ref.BundleID, Version: ref.Version, Principal: manifest.CreatedBy,
 			SignerKeyID: ref.SignerKeyID, ChangeSummary: manifest.ChangeSummary}
 	}
@@ -58,52 +59,38 @@ func (d *Driver) ConfigGenerationOptions(raw []byte) (configwrite.Options, bool,
 		return opt, false, fmt.Errorf("policy bundle %s has no principal", matched.ReceiptID)
 	}
 	opt.GenerationFloor = floor
+	if dir != "" {
+		opt.Bundle.Dir = dir
+	}
 	return opt, true, nil
 }
 
 // stagedGenerationOwner picks, of the staged receipts whose rendered config
-// is these bytes (sum), the one whose signed identity the generation record
+// is these bytes, the one whose signed identity the generation record
 // takes. Several can match: a retry of a bundle whose committed receipt waits
 // behind a gateway outage, or another signed bundle that renders the same
-// settings. The record already naming one of them for these bytes keeps it
-// (a pending commit is never re-attributed); receipts of one signed identity
-// record the same attribution; otherwise the delivery this process installs
-// (CurrentReceiptID) owns the bytes. Any other overlap is refused.
-func (d *Driver) stagedGenerationOwner(staged []*Receipt, sum string) (*Receipt, error) {
-	if len(staged) <= 1 {
-		if len(staged) == 0 {
-			return nil, nil
-		}
-		return staged[0], nil
+// settings. The delivery this process installs (CurrentReceiptID) owns the
+// bytes; the installer child process Setup starts does not know it, and
+// there the newest staged receipt is that delivery: a run holds the bundle
+// lock from Prepare to Finish, the store numbers deliveries in order, and an
+// older staged receipt is a pending commit of an earlier run. The record
+// naming that pending commit used to keep the bytes, so a higher bundle
+// with the same settings committed nothing of its own until the pending one
+// settled (GAP-1187).
+func (d *Driver) stagedGenerationOwner(staged []*Receipt, _ string) (*Receipt, error) {
+	if len(staged) == 0 {
+		return nil, nil
 	}
-	if d.ConfigPath != "" {
-		if record, err := configwrite.ReadGenerationState(d.ConfigPath); err == nil && strings.EqualFold(record.ConfigSHA256, sum) {
-			for _, rc := range staged {
-				if record.BundleID == rc.BundleID && record.BundleVersion == rc.Version &&
-					record.SignerKeyID == rc.SignerKeyID && record.Actor == rc.Principal {
-					return rc, nil
-				}
-			}
-		}
-	}
-	same := true
+	owner := staged[0]
 	for _, rc := range staged[1:] {
-		same = same && sameGenerationIdentity(staged[0], rc)
-	}
-	if same {
-		return staged[0], nil
+		if rc.Sequence > owner.Sequence {
+			owner = rc
+		}
 	}
 	for _, rc := range staged {
 		if d.CurrentReceiptID != "" && rc.ReceiptID == d.CurrentReceiptID {
-			return rc, nil
+			owner = rc
 		}
 	}
-	return nil, fmt.Errorf("multiple staged policy bundles match installed config")
-}
-
-// sameGenerationIdentity reports receipts whose GenerationOptions record the
-// same bundle attribution.
-func sameGenerationIdentity(a, b *Receipt) bool {
-	return a.BundleID == b.BundleID && a.Version == b.Version && a.Principal == b.Principal &&
-		a.SignerKeyID == b.SignerKeyID && a.ChangeSummary == b.ChangeSummary
+	return owner, nil
 }

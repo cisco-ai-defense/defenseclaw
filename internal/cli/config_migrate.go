@@ -129,7 +129,13 @@ var configMigrateCmd = &cobra.Command{
 			if err != nil {
 				input = config.MigrateV9Input{ConfigPath: path}
 			}
-			if err := config.AcknowledgeMigrationV9(context.Background(), input); err != nil {
+			if err := config.AcknowledgeMigrationV9(context.Background(), input); errors.Is(err, fs.ErrNotExist) {
+				// No migration ran here, so there is nothing to mark as read
+				// (GAP-1677): say so and succeed, as doctor shows no row.
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "There is no config_version 9 migration record (%s); nothing to acknowledge.\n",
+					config.MigrationRecordPath(path))
+				return err
+			} else if err != nil {
 				return fmt.Errorf("acknowledge %s: %w", config.MigrationRecordPath(path), err)
 			}
 			_, err = fmt.Fprintln(cmd.OutOrStdout(), "Marked the config_version 9 migration record as read.")

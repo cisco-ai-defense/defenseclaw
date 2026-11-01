@@ -125,6 +125,41 @@ func TestConfigValidateOnManagedHostRefusesInPlainWords(t *testing.T) {
 	}
 }
 
+// GAP-0546: on a standalone managed host config validate loads the sandbox
+// packs a candidate requires, as ensure does before it applies the file: a
+// required pack that does not load is refused with what it lacks, where
+// validate said valid and ensure then refused; the repaired pack validates.
+func TestConfigValidateRefusesAnUnloadableRequiredSandboxPack(t *testing.T) {
+	layout := onStandaloneManagedHost(t)
+	env, err := newUnixLifecycleEnv(runtime.GOOS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packDir := filepath.Join(layout.PolicyDir, "sandbox")
+	file := env.P(filepath.Join(packDir, "t6-pack", "pack.yaml"))
+	if err := os.MkdirAll(filepath.Dir(file), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	body := managedValidateHead + "policy_dir: " + layout.PolicyDir + "\nopenshell:\n  pack_dir: " + packDir + "\n  admin:\n    required_pack: t6-pack\n"
+	for _, tc := range []struct{ content, field string }{
+		{"name: t6-pack\nextends: balanced\n", "version"},
+		{"version: 1\nextends: balanced\n", "name"},
+	} {
+		if err := os.WriteFile(file, []byte(tc.content), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := runConfigValidate(t, body, false); err == nil || !strings.Contains(err.Error(), tc.field) {
+			t.Fatalf("config validate with a required pack that lacks %s = %v, want its refusal", tc.field, err)
+		}
+	}
+	if err := os.WriteFile(file, []byte("version: 1\nname: t6-pack\nextends: balanced\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runConfigValidate(t, body, false); err != nil {
+		t.Fatalf("config validate refused the repaired pack: %v", err)
+	}
+}
+
 // A per-user host keeps the validator's diagnostic.
 func TestConfigValidateOffManagedHostKeepsTheDiagnostic(t *testing.T) {
 	onStandaloneManagedHost(t)

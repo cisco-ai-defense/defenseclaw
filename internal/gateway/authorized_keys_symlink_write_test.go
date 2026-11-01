@@ -410,7 +410,9 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		block              bool
 	}{
 		{"known hosts", "hostname > ~/.ssh/known_hosts", project, false},
-		{"ssh config", "hostname > ~/.ssh/config", project, false},
+		// ~/.ssh/config is protected like the keys (lead ruling 10-31,
+		// rel-1-0-4:GAP-2586): ssh runs commands it names.
+		{"ssh config", "hostname > ~/.ssh/config", project, true},
 		{"known hosts again", "date > ~/.ssh/known_hosts", project, false},
 		{"relative known hosts", "date > known_hosts", filepath.Join(home, ".ssh"), false},
 		{"project redirect", "echo hi > ~/proj/e1.txt", project, false},
@@ -433,8 +435,13 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		{"gawk inplace output", "gawk -i inplace '{print}' " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"uniq second operand output", "uniq input.txt " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"unknown output option", "fixture-tool --output=" + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
-		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
-		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		// A find that only lists reads, as ls does; its -name operand is
+		// data (rel-1-0-6:GAP-0119). A find that deletes still blocks.
+		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
+		{"find delete by name", "find " + filepath.Join(home, ".ssh") + " -name authorized_keys -delete", project, true},
+		// uniq with one operand prints it, a plain read like cat (owner
+		// decision 2, GAP-2168; GAP-2590); its second operand is the write.
+		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: row.cwd,
@@ -1220,9 +1227,12 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
 		`ln -s ~/.ssh/authorized_keys freshlink; sed -i 's/marker/k/' freshlink`,
 		`cp --archive disklink notes.txt`,
-		`cp -a -t copy tree`,
 	}
 	allowed := []string{
+		// A bare copy of a tree that carries a link is not a write: it copies a
+		// project as it is (GAP-2579); a write through the carried link still
+		// blocks in the copy rows above.
+		`cp -a -t copy tree`,
 		`cd dirlink && cat authorized_keys`,
 		`tar "$o" xenial.tar > log`,
 		`"$PY" x.py > out.txt`,
@@ -1365,6 +1375,22 @@ func TestR103B07FalsePositiveRows(t *testing.T) {
 		{"FP-0007", "cp -X report.txt r2.txt"},
 		{"FP-0008", "cp -N report.txt r2.txt"},
 		{"FP-0009", "cp -Z report.txt r2.txt"},
+		// GAP-2445 (p0 GAP-1557): ordinary tar flags and value options are
+		// not destinations; the write outside the -C directory stays allowed.
+		{"FP-0010", "tar -xzf pkg.tgz --overwrite -C build; echo hi > report.txt"},
+		{"FP-0011", "tar -xzf pkg.tgz --no-same-owner -C build; echo hi > report.txt"},
+		{"FP-0012", "tar --extract --file=pkg.tar --directory=build; echo hi > report.txt"},
+		{"FP-0013", "tar -xzvf pkg.tgz --keep-old-files -C build; echo hi > report.txt"},
+		{"FP-0014", "tar -xof pkg.tar -C build; echo hi > report.txt"},
+		{"FP-0015", "tar -xzf pkg.tgz --wildcards -C build src; echo hi > report.txt"},
+		{"FP-0016", "tar -xzf pkg.tgz -C build --exclude-from=skip.txt; echo hi > report.txt"},
+		{"FP-0017", "tar -xzf pkg.tgz -C build --warning=no-unknown-keyword; echo hi > report.txt"},
+		{"FP-0018", "tar -xJf pkg.txz -C build --no-same-permissions --numeric-owner; echo hi > report.txt"},
+		{"FP-0019", "tar -xzf pkg.tgz -C build -T list.txt; echo hi > report.txt"},
+		{"FP-0020", "tar --zstd -xf pkg.tar.zst -C build --touch --verbose; echo hi > report.txt"},
+		{"FP-0021", "tar -xzf pkg.tgz -C build --exclude docs --skip-old-files; echo hi > report.txt"},
+		{"FP-0022", "tar -xpSf pkg.tar -C build; echo hi > report.txt"},
+		{"FP-0023", "tar -xf pkg.tar -C build --gzip --unlink-first; echo hi > report.txt"},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
@@ -1376,6 +1402,28 @@ func TestR103B07FalsePositiveRows(t *testing.T) {
 				t.Fatalf("%s blocked=%t, want %t", tc.command, got, wantBlock)
 			}
 		})
+	}
+	// An option that runs a program, writes another file or keeps links
+	// stays an unknown destination (GAP-2445 keeps these blocked).
+	for _, command := range []string{
+		"tar -xf pkg.tar --to-command=sh -C build; echo hi > report.txt",
+		"tar -xf pkg.tar --keep-directory-symlink -C build; echo hi > report.txt",
+		"tar -xf pkg.tar --transform=s,^,x, -C build; echo hi > report.txt",
+		"tar -xf pkg.tar -I unzstd -C build; echo hi > report.txt",
+		"tar -xf pkg.tar -g snap -C build; echo hi > report.txt",
+		"tar -xf pkg.tar --foo -C build; echo hi > report.txt",
+		"tar -C build --overwrite -xf keys.tar && echo k >> build/n1.txt",
+		// bsdtar reads -W NAME=VALUE as --NAME=VALUE: -W directory=DIR
+		// moves the extraction destination on macOS and Windows.
+		"tar -x -W directory=../elsewhere -f keys.tar && echo k >> ../elsewhere/n1.txt",
+		"tar -xW directory=../elsewhere -f keys.tar && echo k >> ../elsewhere/n1.txt",
+		"tar xWf directory=../elsewhere keys.tar && echo k >> ../elsewhere/n1.txt",
+	} {
+		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
+			ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+		if !trustedExistingAuthorizedKeysSymlinkWrite(trustedActionRequest{Input: input}, actionfacts.Analyze(input)) {
+			t.Fatalf("unknown tar destination allowed: %s", command)
+		}
 	}
 	for _, command := range []string{`cp "$F" disklink`, `for f in *.txt; do cp "$f" disklink; done`} {
 		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,

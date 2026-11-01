@@ -11,7 +11,6 @@ import (
 )
 
 func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -35,7 +34,7 @@ func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
 		"git show HEAD --output=" + target,
 		"rg --pre='sh -c \"echo marker > " + target + "\"' marker .",
 		"cd " + filepath.Join(home, ".ssh") + " && echo " + target,
-		"grep marker " + target,
+		"grep marker report.pub >> " + target,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
@@ -46,8 +45,9 @@ func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
 	for _, command := range []string{
 		"cat " + target,
 		"cat " + target + " | head -n 1",
+		// A plain read stays allowed in action (owner decision 2, GAP-2168).
+		"grep marker " + target,
 		"echo '$HOME/.ssh/authorized_keys'",
-		"echo \\$HOME/.ssh/authorized_keys",
 		"stat " + target,
 		"cd " + filepath.Join(home, ".ssh"),
 		"pushd " + filepath.Join(home, ".ssh"),
@@ -62,6 +62,18 @@ func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
 				t.Fatalf("decision = %q, want allow", got)
 			}
 		})
+	}
+	// A POSIX shell keeps an escaped dollar literal. A Windows home selects
+	// the PowerShell grammar, where a backslash is a path separator and
+	// $HOME still expands, so there the same text names the protected file
+	// like any echo of it. The single-quoted literal above is allowed on both.
+	escaped := "echo \\$HOME/.ssh/authorized_keys"
+	wantEscaped := ""
+	if actionWindowsHome(home) {
+		wantEscaped = "protected-target"
+	}
+	if got := ActionCommandDecision(escaped, cwd, home); got != wantEscaped {
+		t.Errorf("escaped dollar %q decision = %q, want %q", escaped, got, wantEscaped)
 	}
 	if runtime.GOOS != "windows" {
 		for _, command := range []string{
@@ -99,7 +111,7 @@ func TestR104WindowsProtectedMentionNormalizationAndReadOnly(t *testing.T) {
 		`env -S 'pwsh -Command "Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker"'`,
 		`env -u OLD -S 'pwsh -Command "Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker"'`,
 		`env -u OLD --split-string 'pwsh -Command "Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker"'`,
-		`Get-Content ` + target + ` | Select-Object -First 1`,
+		`Get-Content ` + target + ` | Select-Object -First 1 | Set-Content ` + target,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
@@ -110,6 +122,9 @@ func TestR104WindowsProtectedMentionNormalizationAndReadOnly(t *testing.T) {
 	for _, command := range []string{
 		`Get-Content ` + target,
 		`cat ` + target + ` | head -n 1`,
+		// A read piped into a select filter writes nothing, as cat | head
+		// (owner decision 2, GAP-2168).
+		`Get-Content ` + target + ` | Select-Object -First 1`,
 		`Test-Path C:\Users\Alice\.ssh`,
 		`cd C:\Users\Alice\.ssh`,
 		`cd -- C:\Users\Alice\.ssh`,
@@ -349,20 +364,22 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 		`cd ~/.ssh && ls -la`,
 		`ls -la ~/.ssh`,
 		`stat ~/.ssh`,
+		// A find that only lists reads (rel-1-0-6:GAP-0119).
+		`find ~/.ssh -name '*.pub'`,
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := ActionCommandDecision(command, cwd, home); got != "" {
+			if got := posixShellDecision(command, cwd, home); got != "" {
 				t.Fatalf("directory-only decision = %q, want allow", got)
 			}
 		})
 	}
 	for _, command := range []string{
 		`ls -la ~/.ssh; pwd`,
-		`find ~/.ssh -name '*.pub'`,
+		`find ~/.ssh -name '*.pub' -delete`,
 		`cd ~/.ssh && pwd`,
 		`ls ~/.ssh && echo done`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("directory named outside read-only list %q: %q", command, got)
 		}
 	}
@@ -406,9 +423,6 @@ func TestR104LessOutputProtectedMention(t *testing.T) {
 }
 
 func TestR104DirectoryScopedWriteSurvivesDirectoryMentionExemption(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX directory write proof uses native POSIX paths")
-	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	ssh := filepath.Join(home, ".ssh")
@@ -428,15 +442,64 @@ func TestR104DirectoryScopedWriteSurvivesDirectoryMentionExemption(t *testing.T)
 		"cd dirlink && echo marker >> authorized_keys",
 		"env -C dirlink python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"marker\")\nPY",
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			writes, unknown := ShellDirectoryWriteOperands(command, cwd, home, nil, false, false)
 			t.Errorf("directory-scoped write %q decision = %q, directory writes=%v unknown=%v", command, got, writes, unknown)
 		}
 	}
-	if got := ActionCommandDecision("cd dirlink && cat authorized_keys", cwd, home); got != "" {
+	if got := posixShellDecision("cd dirlink && cat authorized_keys", cwd, home); got != "" {
 		t.Errorf("read-only directory command decision = %q", got)
 	}
-	if got := ActionCommandDecision("env -C build python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"marker\")\nPY", cwd, home); got != "" {
+	if got := posixShellDecision("env -C build python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"marker\")\nPY", cwd, home); got != "" {
 		t.Errorf("ordinary directory write decision = %q", got)
+	}
+}
+
+// du, readlink and realpath print sizes and resolved names: the read-only
+// statement list takes them, with no redirect (GAP-0091).
+func TestActionKnownReadOnlyWindowsSizeReaders(t *testing.T) {
+	for _, words := range [][]string{
+		{"du", "-sh", "/c/Users/a/.ssh/"},
+		{"readlink", "-f", "/c/Users/a/.ssh"},
+		{"realpath", "/c/Users/a/.ssh"},
+		{"du", "-sh", "/c/Users/a/.ssh/", "&&", "ls"},
+	} {
+		if !actionKnownReadOnlyWindows(words) {
+			t.Errorf("%v: want read-only", words)
+		}
+	}
+	for _, words := range [][]string{
+		{"du", "-sh", "/c/Users/a/.ssh/", ">", "/c/Users/a/.ssh/authorized_keys"},
+		{"du", "--output=x", "/c/Users/a/.ssh/"},
+		{"du", "-sh", "/c/Users/a/.ssh/", "&&", "rm", "x"},
+	} {
+		if actionKnownReadOnlyWindows(words) {
+			t.Errorf("%v: want not read-only", words)
+		}
+	}
+}
+
+// A find that only lists reads its operands on a Windows home too; one that
+// deletes, runs a program or writes a file does not (rel-1-0-6:GAP-0119).
+func TestActionKnownReadOnlyWindowsFindListing(t *testing.T) {
+	for _, words := range [][]string{
+		{"find", "/c/Users/a/.ssh", "-maxdepth", "1", "-type", "f"},
+		{"find", "/c/Users/a/.ssh", "-name", "*.pub"},
+		{"find.exe", "/c/Users/a/.ssh", "-type", "f", "-print"},
+	} {
+		if !actionKnownReadOnlyWindows(words) {
+			t.Errorf("%v: want read-only", words)
+		}
+	}
+	for _, words := range [][]string{
+		{"find", "/c/Users/a/.ssh", "-name", "authorized_keys", "-delete"},
+		{"find", "/c/Users/a/.ssh", "-exec", "rm", "{}", ";"},
+		{"find", "/c/Users/a/.ssh", "-fprint", "/c/Users/a/.ssh/authorized_keys"},
+		{"find", "/c/Users/a/.ssh", "-fls", "x"},
+		{"find", "/c/Users/a/.ssh", ">", "/c/Users/a/.ssh/authorized_keys"},
+	} {
+		if actionKnownReadOnlyWindows(words) {
+			t.Errorf("%v: want not read-only", words)
+		}
 	}
 }

@@ -1986,6 +1986,26 @@ def build_setup_sections(
             "Read-only effective plan; press E to manage destinations through setup observability.",
         ),
         ConfigSection("Webhooks", tuple(_webhook_summary_fields(cfg)), "Read-only notifier webhook summary."),
+        # The admission defaults had no row since the retired
+        # watch.allow_list_bypass_scan row went (GAP-1870).
+        ConfigSection(
+            "Admission Defaults",
+            (
+                # Unset inherits the built-in default, on: show it, so the
+                # Value column is not blank and the first toggle turns it off.
+                _field_with_original(
+                    _field(
+                        cfg,
+                        "Allow List Bypass",
+                        "admission.defaults.allow_list_bypass_scan",
+                        "bool",
+                        hint="On (default): a first-party allow-list entry installs without a scan; off: it is scanned.",
+                    ),
+                    _value(cfg, "admission.defaults.allow_list_bypass_scan") or "true",
+                ),
+            ),
+            "Admission defaults for skills, MCP servers and plugins.",
+        ),
         ConfigSection("Skill Admission", admission_action_fields("skill", cfg), "Skill admission action per severity."),
         ConfigSection("MCP Admission", admission_action_fields("mcp", cfg), "MCP admission action per severity."),
         ConfigSection("Plugin Admission", admission_action_fields("plugin", cfg), "Plugin admission action per severity."),
@@ -2002,6 +2022,24 @@ def build_setup_sections(
                 _header("Max Retries", value=_value(cfg, "inspect_llm.max_retries") or UNSET_VALUE),
             ),
             "Deprecated v4 block. Edit the Unified LLM section instead.",
+        ),
+        ConfigSection(
+            "Decision Model",
+            (
+                _field(cfg, "Enabled", "decision_model.enabled", "bool", hint="Off by default. Runs in front of the LLM judge."),
+                _field(cfg, "Model", "decision_model.model", hint="Model name the System One endpoint serves."),
+                _field(cfg, "Endpoint URL", "decision_model.base_url", hint="https, or http to loopback only."),
+                _field(cfg, "Token Env", "decision_model.api_key_env", hint="Env var NAME; default DEFENSECLAW_DECISION_MODEL_KEY."),
+                _field(cfg, "Timeout (s)", "decision_model.timeout", hint="Blank = 1. The judge runs when it is late."),
+                _field(cfg, "Allow At", "decision_model.allow_threshold", hint="Risk at or below skips the judge. Blank = 0.30."),
+                _field(cfg, "Block At", "decision_model.block_threshold", hint="Risk at or above is a confident block. Blank = 0.75."),
+                _field(
+                    cfg, "Confident Block", "decision_model.on_confident_block", "choice", ("escalate", "decide"),
+                    "escalate: the judge still checks it (default). decide: it stands.",
+                ),
+            ),
+            "Fast first pass in front of the LLM judge; skill scans record its advisory score.",
+            "Token value: defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY. Check: setup decision-model --ping.",
         ),
         ConfigSection(
             "Cisco AI Defense", tuple(_cisco_ai_defense_fields(cfg)), "Cloud-hosted prompt/response moderation."
@@ -4393,7 +4431,9 @@ def _effective_strategy_text(cfg: object | Mapping[str, Any] | None, strategy: s
     return "regex_only (judge on for no active connector)"
 
 
-def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None) -> str:
+def wizard_state_summary(
+    wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None, observability: object | None = None
+) -> str:
     """One-line "here's what's configured today" string for the goal menu.
 
     Returns an empty string for wizards without a useful summary so the
@@ -4411,7 +4451,13 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         role = "judge+agent available" if _any_active_connector_is_proxy(cfg) else "judge only"
         return f"Main: {main}  ·  Judge: {judge}  ·  Connectors: {connector_summary} ({role})"
     if wizard == SetupWizard.REDACTION:
-        profile = _cfg_str(cfg, "observability.defaults.redaction_profile", "none") or "none"
+        # The loaded Config has no observability.defaults; the canonical
+        # status read from config.yaml does (GAP-1394).
+        profile = (
+            str(getattr(observability, "default_redaction_profile", "") or "")
+            or _cfg_str(cfg, "observability.defaults.redaction_profile", "none")
+            or "none"
+        )
         posture = "unredacted" if profile == "none" else "redacted"
         return f"Default profile: {profile} ({posture})  ·  Each observability destination can set its own profile"
     if wizard == SetupWizard.GUARDRAIL:
@@ -8931,7 +8977,7 @@ def _v8_observability_fields(
             how_to,
         )
 
-    retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+    retention = status.retention_label
     fields: list[ConfigField] = [
         _header("Plan Digest", "observability.plan_digest", status.plan_digest[:12]),
         _header("Bucket Catalog", "observability.bucket_catalog_version", str(status.bucket_catalog_version)),

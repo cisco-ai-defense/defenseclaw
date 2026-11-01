@@ -14,6 +14,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // ImpersonateNamedPipeClient is not exported by golang.org/x/sys/windows.
@@ -25,11 +27,20 @@ const (
 	serverInstances   = 4
 	serverReadTimeout = time.Second
 	// clientRights is what any authenticated account may open the pipe
-	// with: FILE_WRITE_DATA, FILE_READ_ATTRIBUTES and SYNCHRONIZE, never
-	// FILE_CREATE_PIPE_INSTANCE (FILE_APPEND_DATA), so no account can serve
-	// an instance of the gateway's pipe.
-	clientRights = "0x00100082"
+	// with: FILE_READ_DATA (the receipt), FILE_WRITE_DATA,
+	// FILE_READ_ATTRIBUTES and SYNCHRONIZE, never FILE_CREATE_PIPE_INSTANCE
+	// (FILE_APPEND_DATA), so no account can serve an instance of the
+	// gateway's pipe.
+	clientRights = "0x00100083"
+	// receiptTimeout bounds the write of a receipt a client does not read.
+	receiptTimeout = time.Second
 )
+
+// Receipt is the one byte the server writes once it has read a report and
+// named its sender. A client that closed its end at once after the write
+// lost about one report in ten: the server then read or identified a client
+// that was gone (GAP-2639). The client waits for it before closing.
+var Receipt = []byte{1}
 
 // Serve accepts refusal reports on PipeName until ctx ends. handle gets the
 // SID of the account whose token connected, read from the pipe client token,
@@ -111,6 +122,9 @@ func receive(ctx context.Context, pipe windows.Handle) (string, Report, bool) {
 	if err != nil || !AccountSID(sid) {
 		return "", Report{}, false
 	}
+	_, _ = overlapped(ctx, receiptTimeout, pipe, func(done *uint32, o *windows.Overlapped) error {
+		return windows.WriteFile(pipe, Receipt, done, o)
+	})
 	return sid, report, true
 }
 
@@ -163,16 +177,20 @@ type security struct {
 	attributes windows.SecurityAttributes
 }
 
-// pipeSecurity gives SYSTEM and the gateway's own account full access and
-// every authenticated account clientRights.
+// pipeSecurity gives SYSTEM, the gateway's own account and the gateway
+// service SID full access and every authenticated account clientRights.
+//
+// The gateway service runs with a write-restricted token (service SID type
+// RESTRICTED): creating a further instance of an existing pipe is a write,
+// so it also needs an ACE for the service SID. Without one, every instance
+// after the first was refused (Access is denied): serve gave up, waited 5 s
+// and started over, and the reports sent in between were lost (GAP-2639).
 func pipeSecurity() (*security, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || user == nil || user.User.Sid == nil {
 		return nil, errors.New("resolve the gateway process account")
 	}
-	descriptor, err := windows.SecurityDescriptorFromString(
-		"O:" + user.User.Sid.String() + "D:P(A;;GA;;;SY)(A;;GA;;;" + user.User.Sid.String() + ")(A;;" + clientRights + ";;;AU)",
-	)
+	descriptor, err := windows.SecurityDescriptorFromString(pipeSDDL(user.User.Sid.String()))
 	if err != nil {
 		return nil, fmt.Errorf("build refusal pipe security descriptor: %w", err)
 	}
@@ -185,12 +203,19 @@ func pipeSecurity() (*security, error) {
 	}, nil
 }
 
+// pipeSDDL is the refusal pipe's security descriptor for the gateway
+// process account owner.
+func pipeSDDL(owner string) string {
+	service := managed.WindowsServiceSIDString(managed.StandaloneWindowsGatewaySvc)
+	return "O:" + owner + "D:P(A;;GA;;;SY)(A;;GA;;;" + owner + ")(A;;GA;;;" + service + ")(A;;" + clientRights + ";;;AU)"
+}
+
 func createPipe(name string, s *security, first bool) (windows.Handle, error) {
 	pointer, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return 0, err
 	}
-	flags := uint32(windows.PIPE_ACCESS_INBOUND | windows.FILE_FLAG_OVERLAPPED)
+	flags := uint32(windows.PIPE_ACCESS_DUPLEX | windows.FILE_FLAG_OVERLAPPED)
 	if first {
 		flags |= windows.FILE_FLAG_FIRST_PIPE_INSTANCE
 	}
@@ -199,7 +224,7 @@ func createPipe(name string, s *security, first bool) (windows.Handle, error) {
 		flags,
 		windows.PIPE_TYPE_MESSAGE|windows.PIPE_READMODE_MESSAGE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS,
 		serverInstances,
-		0,
+		uint32(len(Receipt)),
 		MaxMessageBytes,
 		0,
 		&s.attributes,

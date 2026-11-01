@@ -32,12 +32,13 @@ const userScopedListenerProofRefusedReason = "user_scoped_listener_proof_refused
 // a second account from relaying a challenge to the real gateway on another
 // port. The answer is an HMAC under
 // the credential for a nonce the caller chose; it is never accepted as a
-// credential anywhere. An unbound key ID or caller gets a 401.
+// credential anywhere. An unbound key ID or caller gets a 401 with the same
+// JSON body and Content-Type as every other authentication refusal.
 func (a *APIServer) serveUserScopedListenerProof(w http.ResponseWriter, r *http.Request) {
 	refuse := func() {
 		a.emitHTTPAuthFailure(r.Context(), r, connector.UserScopedListenerProofPath,
 			gatewaylog.ErrCodeAuthInvalidToken, userScopedListenerProofRefusedReason)
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 	}
 	if r.Method != http.MethodGet || !connector.IsLoopback(r) {
 		refuse()
@@ -72,7 +73,7 @@ func (a *APIServer) serveRotationListenerProof(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
 	scope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
@@ -80,12 +81,12 @@ func (a *APIServer) serveRotationListenerProof(w http.ResponseWriter, r *http.Re
 	nonce := strings.TrimSpace(r.Header.Get(connector.UserScopedListenerNonceHeader))
 	credential, _, ok := a.userScopedCredentialStore().hookCredentialForKeyID(scope, keyID)
 	if !ok {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
 	proof, err := connector.UserScopedListenerProof(credential, scope, nonce)
 	if err != nil {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
 	w.Header().Set(connector.UserScopedListenerProofHeader, proof)

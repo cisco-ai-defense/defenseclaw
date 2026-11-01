@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/local"
@@ -223,6 +224,17 @@ func (e *Env) loadConfigCandidate(raw []byte) (*config.Config, error) {
 	return config.LoadRuntimeV8InspectionCandidateFromBytes(e.Layout.ConfigPath, raw)
 }
 
+// InstalledConfig loads the installed config.yaml as the gateway does, for
+// the read-only commands that need what it enables (`enterprise secret
+// check`). A missing file is fs.ErrNotExist.
+func (e *Env) InstalledConfig() (*config.Config, error) {
+	raw, err := readBounded(e.P(e.Layout.ConfigPath), maxInputBytes)
+	if err != nil {
+		return nil, err
+	}
+	return e.loadConfigCandidate(raw)
+}
+
 // validateConfig checks the installed config.yaml bytes; see
 // validateConfigSource.
 func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
@@ -235,6 +247,8 @@ func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
 // installed config.yaml; source, when set, is the file the administrator
 // supplied (--config), and errors name it instead of the installed path.
 func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig, error) {
+	original := raw
+	raw = config.V8ManagedChecksView(raw)
 	if plain, ok := e.managedEnvReferenceProblem(raw, source); ok {
 		return nil, &plainConfigError{msg: plain, err: errManagedEnvReference}
 	}
@@ -251,7 +265,43 @@ func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig,
 		}
 	}
 	validated.Source = source
+	validated.Raw, validated.SHA = append([]byte(nil), original...), sha256Bytes(original)
 	return validated, nil
+}
+
+// refuseUnknownGuardrailConnectors refuses a guardrail.connector or
+// guardrail.connectors entry that names no DefenseClaw connector. The
+// enumerator skips such an entry, so ensure applied a misspelled agent with
+// ok true and the administrator believed that agent was protected
+// (GAP-2337; Windows Setup refuses it since GAP-0723). The loader has
+// already dropped the connectors 1.0.4 retired (until 1.1), so an upgraded
+// config that still names them is not refused.
+func refuseUnknownGuardrailConnectors(cfg *config.Config, source, installed string) error {
+	if cfg == nil {
+		return nil
+	}
+	var names []string
+	if strings.TrimSpace(cfg.Guardrail.Connector) != "" {
+		names = append(names, cfg.Guardrail.Connector)
+	}
+	for name := range cfg.Guardrail.Connectors {
+		if strings.TrimSpace(name) != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if gatewayconnector.IsKnownBuiltinConnector(config.NormalizeConnectorName(name)) {
+			continue
+		}
+		file := source
+		if file == "" {
+			file = installed
+		}
+		return fmt.Errorf("%s: guardrail connector %q is not a DefenseClaw connector, so no agent is protected by it; correct the name (one of %s) or remove the entry, then rerun",
+			file, strings.TrimSpace(name), strings.Join(gatewayconnector.NewDefaultRegistry().Names(), ", "))
+	}
+	return nil
 }
 
 // plainConfigError is a config problem in plain words; it keeps the
@@ -614,13 +664,25 @@ func (e *Env) checkManagedPolicyDir(cfg *config.Config) error {
 	if err := e.Trust(full, TrustRuntimeDir); err != nil {
 		return fmt.Errorf("config: managed standalone policy_dir is not administrator-controlled: %w", err)
 	}
+	packs := filepath.Join(full, "guardrail")
+	var referenced []string
+	for _, pack := range cfg.ReferencedRulePackDirs() {
+		if pack = strings.TrimSpace(pack); pack != "" {
+			referenced = append(referenced, e.P(filepath.Clean(pack)))
+		}
+	}
 	entries := 0
-	return filepath.WalkDir(full, func(path string, _ fs.DirEntry, walkErr error) error {
+	return filepath.WalkDir(full, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return fmt.Errorf("config: inspect policy_dir %s: %w", path, walkErr)
 		}
 		if path == full {
 			return nil
+		}
+		if d != nil && d.IsDir() && filepath.Dir(path) == packs && !config.PathHoldsAny(path, referenced) {
+			// A rule pack folder no setting names loads nothing; a
+			// writable one refused every admin command (GAP-1694).
+			return filepath.SkipDir
 		}
 		entries++
 		if entries > rulePackTreeMaxEntries {
@@ -660,6 +722,12 @@ func (e *Env) checkCandidateAssets(v *validatedConfig) error {
 		return fmt.Errorf("config does not build: %w", err)
 	}
 	return nil
+}
+
+// CheckRequiredSandboxPacks is checkRequiredSandboxPacks for `config
+// validate`, which must refuse what ensure refuses (GAP-0546).
+func (e *Env) CheckRequiredSandboxPacks(cfg *config.Config) error {
+	return e.checkRequiredSandboxPacks(cfg)
 }
 
 // checkRequiredSandboxPacks loads every administrator-required sandbox pack

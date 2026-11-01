@@ -430,24 +430,20 @@ func TestManagedMacExemptNonmatchUsesCachedNames(t *testing.T) {
 // answers in about a second (0.9-1.5 s on a busy Mac) must not cost a UPN or
 // DOMAIN\name exemption. The first hook after a start waits for the cold
 // answer within identityDirectoryBudget, as before 1.0.4; later hooks use the
-// cached names without another lookup, also after the facts expire, when one
-// background refresh replaces them while hooks keep the exemption. A 750 ms
-// fresh read on every hook denied each of these hooks or every other one.
+// cached names without another lookup while they are current. Past their
+// lifetime the hook that finds them expired waits for the refresh, which a
+// healthy directory gives within the budget, and the hooks after it use the
+// new answer. A 750 ms fresh read on every hook denied each of these hooks or
+// every other one.
 func TestManagedMacExemptSurvivesSlowHealthyDirectory(t *testing.T) {
 	const slowAnswer = 1100 * time.Millisecond // past the old 750 ms wait, inside the budget
 	for i, entry := range []string{"alice@corp.example.com", `CORP\alice`} {
 		t.Run(entry, func(t *testing.T) {
 			uid := 41970 + i
 			var lookups atomic.Int32
-			refresh := make(chan struct{})
-			releaseRefresh := sync.OnceFunc(func() { close(refresh) })
-			t.Cleanup(releaseRefresh)
 			_, clock := managedMacExemptFixture(t, uid, func() (useridentity.DirectoryFacts, error) {
-				if lookups.Add(1) == 1 {
-					time.Sleep(slowAnswer)
-				} else {
-					<-refresh // the background refresh is slower still
-				}
+				lookups.Add(1)
+				time.Sleep(slowAnswer)
 				return managedMacAliceFacts(), nil
 			})
 			z := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{ExemptUsers: []string{entry}}, nil,
@@ -465,20 +461,18 @@ func TestManagedMacExemptSurvivesSlowHealthyDirectory(t *testing.T) {
 			if got := lookups.Load(); got != 1 {
 				t.Fatalf("hooks 2-6 started %d more directory lookups; want none", got-1)
 			}
-			// Past the facts' lifetime the refresh runs in the background
-			// (it never answers here), and the hooks do not wait for it.
+			// Past the facts' lifetime, hook 7 waits for the one refresh, and
+			// hooks 8 and 9 use its answer.
 			clock.Add(int64(identityDirectoryTTL))
-			for hook := 7; hook <= 8; hook++ {
+			for hook := 7; hook <= 9; hook++ {
 				if decision := z.decide(peer, "codex", "cli"); !decision.Allow || !decision.Exempt {
-					t.Fatalf("hook %d: expired cached names lost the exemption during a refresh: %+v", hook, decision)
+					t.Fatalf("hook %d: a healthy directory answering in %s denied the exemption after the facts expired: %+v",
+						hook, slowAnswer, decision)
 				}
-			}
-			deadline := time.Now().Add(2 * time.Second)
-			for lookups.Load() < 2 && time.Now().Before(deadline) {
-				time.Sleep(time.Millisecond)
+				clock.Add(int64(identityDirectoryFreshCoalesce + time.Second))
 			}
 			if got := lookups.Load(); got != 2 {
-				t.Fatalf("expired facts started %d lookups in all; want one background refresh after the first", got)
+				t.Fatalf("expired facts started %d lookups in all; want one refresh after the first", got)
 			}
 		})
 	}
@@ -521,11 +515,12 @@ func TestManagedMacExemptColdLookupBoundedByBudget(t *testing.T) {
 	}
 }
 
-// An unsettled cached answer (only the primary group so far) binds no name it
-// lacks: without the UPN it does not reject a UPN exemption, and the current
-// answer decides, also when that answer takes about a second. An unsettled
-// answer that already gives the UPN exempts without waiting for the
-// directory: a name it gives is verified for the account holding the uid.
+// An unsettled cached answer (only the primary group so far) decides no
+// exemption: without the UPN it does not reject a UPN exemption, and with it
+// it does not grant one, since the answer that settles it may no longer give
+// the UPN. The current answer decides, also when it takes about a second; a
+// directory that does not answer exempts no one (review of r104 Q-identity,
+// continuation 2, loop round 2).
 func TestManagedMacExemptUnsettledCacheWaitsForNames(t *testing.T) {
 	primaryOnly := func(withUPN bool) useridentity.DirectoryFacts {
 		facts := useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory,
@@ -536,15 +531,20 @@ func TestManagedMacExemptUnsettledCacheWaitsForNames(t *testing.T) {
 		facts.Groups, facts.OnlyPrimaryGroup = []string{"staff"}, true
 		return facts
 	}
+	withoutUPN := managedMacAliceFacts()
+	withoutUPN.UPN, withoutUPN.Principal = "", ""
 	for i, tc := range []struct {
 		name        string
 		cachedUPN   bool
 		answerAfter time.Duration // < 0: the current lookup never answers
-		wantLookups int32
+		answer      useridentity.DirectoryFacts
+		wantExempt  bool
 	}{
-		{"current answer gives the UPN", false, 0, 2},
-		{"slow current answer gives the UPN", false, 1100 * time.Millisecond, 2},
-		{"cached answer gives the UPN", true, -1, 1},
+		{"current answer gives the UPN", false, 0, managedMacAliceFacts(), true},
+		{"slow current answer gives the UPN", false, 1100 * time.Millisecond, managedMacAliceFacts(), true},
+		{"cached answer gives the UPN, current one too", true, 0, managedMacAliceFacts(), true},
+		{"cached answer gives the UPN, current one no longer", true, 0, withoutUPN, false},
+		{"cached answer gives the UPN, the directory does not answer", true, -1, managedMacAliceFacts(), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			uid := 41975 + i
@@ -561,7 +561,7 @@ func TestManagedMacExemptUnsettledCacheWaitsForNames(t *testing.T) {
 				} else {
 					time.Sleep(tc.answerAfter)
 				}
-				return managedMacAliceFacts(), nil
+				return tc.answer, nil
 			})
 			if _, ok := cache.directory(uid, true); !ok {
 				t.Fatal("first lookup returned no facts")
@@ -569,13 +569,126 @@ func TestManagedMacExemptUnsettledCacheWaitsForNames(t *testing.T) {
 			clock.Add(int64(identityDirectoryFreshCoalesce + time.Nanosecond))
 			z := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"alice@corp.example.com"}}, nil,
 				func() (managedHookLedger, error) { return managedHookLedger{}, nil })
-			if decision := z.decide(managedHookPeer{UID: uid, Name: "alice"}, "codex", "cli"); !decision.Allow || !decision.Exempt {
-				t.Fatalf("unsettled cached answer: UPN exemption refused: %+v", decision)
+			started := time.Now()
+			decision := z.decide(managedHookPeer{UID: uid, Name: "alice"}, "codex", "cli")
+			if elapsed := time.Since(started); elapsed > identityDirectoryBudget+time.Second {
+				t.Fatalf("the hook waited %s for the directory; want at most about %s", elapsed, identityDirectoryBudget)
 			}
-			if got := lookups.Load(); got != tc.wantLookups {
-				t.Fatalf("%d directory lookups; want %d", got, tc.wantLookups)
+			if decision.Exempt != tc.wantExempt || decision.Allow != tc.wantExempt {
+				t.Fatalf("unsettled cached answer: %+v; want exempt=%t", decision, tc.wantExempt)
+			}
+			if got := lookups.Load(); got != 2 {
+				t.Fatalf("%d directory lookups; want the first and one current answer", got)
 			}
 		})
+	}
+}
+
+// Review of r104 Q-identity (continuation 2, loop round 2): a cached answer
+// past its lifetime that gives an exempt name does not exempt the caller
+// before the current answer confirms the name. Open Directory dropped the
+// UPN (or moved the account to another domain) after the cached answer, and
+// the expired cache match let the unenrolled caller through. A nonmatch
+// still rejects without waiting, and a directory that does not answer
+// exempts no one within identityDirectoryBudget. Linux, whose hooks read
+// only memory, waits likewise for an expired unsettled answer, as a
+// blocking hook read does.
+func TestExpiredExemptNameNeedsCurrentAnswer(t *testing.T) {
+	dropped := managedMacAliceFacts()
+	dropped.UPN, dropped.Principal = "", ""
+	moved := managedMacAliceFacts()
+	moved.AccountDomain, moved.Domain, moved.Realm = "OTHER", "other.example.com", "OTHER.EXAMPLE.COM"
+	moved.UPN, moved.Principal = "alice@other.example.com", "alice@other.example.com"
+	incomplete := func(facts useridentity.DirectoryFacts) useridentity.DirectoryFacts {
+		facts.Groups, facts.OnlyPrimaryGroup = []string{"staff"}, true
+		return facts
+	}
+	for i, tc := range []struct {
+		name       string
+		linux      bool
+		entry      string
+		first      useridentity.DirectoryFacts
+		current    useridentity.DirectoryFacts
+		never      bool // the refresh never answers
+		wantExempt bool
+	}{
+		{name: "UPN dropped", entry: "alice@corp.example.com", first: managedMacAliceFacts(), current: dropped},
+		{name: "account moved to another domain", entry: `CORP\alice`, first: managedMacAliceFacts(), current: moved},
+		{name: "directory does not answer", entry: "alice@corp.example.com", first: managedMacAliceFacts(), never: true},
+		{name: "UPN still given", entry: "alice@corp.example.com", first: managedMacAliceFacts(), current: managedMacAliceFacts(),
+			wantExempt: true},
+		{name: "Linux, unsettled answer, UPN dropped", linux: true, entry: "alice@corp.example.com",
+			first: incomplete(managedMacAliceFacts()), current: incomplete(dropped)},
+		{name: "Linux, unsettled answer, UPN still given", linux: true, entry: "alice@corp.example.com",
+			first: incomplete(managedMacAliceFacts()), current: incomplete(managedMacAliceFacts()), wantExempt: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uid := 41990 + i
+			var lookups atomic.Int32
+			never := make(chan struct{})
+			releaseNever := sync.OnceFunc(func() { close(never) })
+			t.Cleanup(releaseNever)
+			cache, clock := managedMacExemptFixture(t, uid, func() (useridentity.DirectoryFacts, error) {
+				if lookups.Add(1) == 1 {
+					return tc.first, nil
+				}
+				if tc.never {
+					<-never
+				}
+				return tc.current, nil
+			})
+			if tc.linux {
+				managedHookDirectoryNeedsFresh = false
+			}
+			z := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{ExemptUsers: []string{tc.entry}}, nil,
+				func() (managedHookLedger, error) { return managedHookLedger{}, nil })
+			peer := managedHookPeer{UID: uid, Name: "alice"}
+			if decision := z.decide(peer, "codex", "cli"); !decision.Allow || !decision.Exempt {
+				t.Fatalf("hook 1: the first answer gives the exempt name, and the caller was not exempt: %+v", decision)
+			}
+			waitDirectoryPublished(t, cache, uid)
+			clock.Add(int64(cache.directories.lifetime(tc.first) + time.Second))
+			for hook := 2; hook <= 3; hook++ {
+				started := time.Now()
+				decision := z.decide(peer, "codex", "cli")
+				if elapsed := time.Since(started); elapsed > identityDirectoryBudget+time.Second {
+					t.Fatalf("hook %d waited %s for the directory; want at most about %s", hook, elapsed, identityDirectoryBudget)
+				}
+				if decision.Exempt != tc.wantExempt || decision.Allow != tc.wantExempt {
+					t.Fatalf("hook %d after the facts expired: %+v; want exempt=%t", hook, decision, tc.wantExempt)
+				}
+				clock.Add(int64(identityDirectoryFreshCoalesce + time.Second))
+			}
+		})
+	}
+	// A caller the expired facts do not name is rejected at once; enrollment
+	// decides, and the refresh serves a later hook.
+	const uid = 41999
+	release := make(chan struct{})
+	releaseLookup := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseLookup)
+	var lookups atomic.Int32
+	cache, clock := managedMacExemptFixture(t, uid, func() (useridentity.DirectoryFacts, error) {
+		if lookups.Add(1) > 1 {
+			<-release
+		}
+		return managedMacAliceFacts(), nil
+	})
+	if _, ok := cache.directory(uid, true); !ok {
+		t.Fatal("first lookup returned no facts")
+	}
+	clock.Add(int64(identityDirectoryTTL + time.Second))
+	peerUID := uid
+	ledger := managedHookLedger{Targets: []managedHookLedgerTarget{{UID: &peerUID, Connector: "codex", OK: true}}}
+	z := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"carol@corp.example.com"}}, nil,
+		func() (managedHookLedger, error) { return ledger, nil })
+	started := time.Now()
+	decision := z.decide(managedHookPeer{UID: uid, Name: "alice"}, "codex", "cli")
+	if elapsed := time.Since(started); elapsed > 300*time.Millisecond {
+		t.Fatalf("an enrolled caller the expired facts do not name waited %s", elapsed)
+	}
+	if !decision.Allow || decision.Exempt {
+		t.Fatalf("enrolled caller: %+v; want an enrolled, not exempt, allow", decision)
 	}
 }
 

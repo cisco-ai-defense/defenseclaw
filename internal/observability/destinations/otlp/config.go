@@ -125,6 +125,11 @@ type Config struct {
 	TLS            TLSConfig
 	NetworkSafety  NetworkSafety
 	Batch          BatchConfig
+	// ManagedService is a managed enterprise gateway: a system service
+	// whose account never runs the bundled local stack, so a destination
+	// with the bundled stack name is the administrator collector and dials
+	// like any operator destination (GAP-2608).
+	ManagedService bool
 }
 
 type Dependencies struct {
@@ -156,6 +161,10 @@ type signalConfig struct {
 	canary      CanaryAcknowledgementObserver
 	health      delivery.Observer
 	tracker     *dialOutcomeTracker
+	// bundledStack marks the bundled local observability stack's
+	// destination: its loopback collector gets no byte until
+	// verifyBundledCollector proves the listener's account (GAP-1087).
+	bundledStack bool
 }
 
 // Factory is immutable after Prepare. Exporter/adapter constructors are
@@ -235,6 +244,7 @@ func Prepare(ctx context.Context, config Config, dependencies Dependencies) (*Fa
 		resolved.canary = dependencies.CanaryObserver
 		resolved.health = dependencies.HealthObserver
 		resolved.tracker = &dialOutcomeTracker{}
+		resolved.bundledStack = !config.ManagedService && bundledLocalStackDestination(config.Destination)
 		signals[signal] = resolved
 	}
 	for signal := range config.SignalOverride {
@@ -367,7 +377,7 @@ func newHTTPClient(config signalConfig) (*http.Client, *http.Transport) {
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			connection, err := safeDial(ctx, network, address)
+			connection, err := checkBundledCollector(config, safeDial)(ctx, network, address)
 			config.tracker.record(err)
 			return connection, err
 		},

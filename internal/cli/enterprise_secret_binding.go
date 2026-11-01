@@ -12,10 +12,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
 	"runtime"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // checkSecretBinding refuses (secret_ref_mismatch, secret_ref_unbound)
@@ -73,7 +73,7 @@ const (
 	codeRotationConfirmed enterprisebundle.Code = "rotation_confirmed"
 )
 
-var lowerSHA256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var lowerSHA256Hex = lazyregexp.New(`^[0-9a-f]{64}$`)
 
 // secretTransactionArguments refuses a malformed --if-confirmed,
 // --undo-rotation or --undo-config and a combination with no meaning:

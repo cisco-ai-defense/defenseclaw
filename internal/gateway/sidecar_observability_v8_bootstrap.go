@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations"
@@ -308,9 +309,18 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
-	retention, err := observabilityruntime.NewRetentionController(
-		reaper, observabilityruntime.RetentionControllerOptions{Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration()},
-	)
+	// The size cap is known from the start, as the age is, so a cap with
+	// retention_days 0 also waits the startup delay.
+	if err := reaper.UpdateMaxStoreMB(int64(snapshot.Local.MaxStoreMB)); err != nil {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
+	}
+	retentionOptions := observabilityruntime.RetentionControllerOptions{
+		Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration(),
+	}
+	if !retentionOptions.SecureClient {
+		retentionOptions.StartupDelay = observabilityruntime.RetentionStartupDelay
+	}
+	retention, err := observabilityruntime.NewRetentionController(reaper, retentionOptions)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
@@ -318,9 +328,10 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		s.observeObservabilityV8Delivery(transition)
 	})
 	destinationFactory, err := destinations.NewFactory(destinations.Options{
-		SecureClient:  s.currentConfig().SecureClientIntegration(),
-		ConsoleStream: destinations.ConsoleStderr,
-		Stdout:        os.Stdout, Stderr: os.Stderr,
+		SecureClient:   s.currentConfig().SecureClientIntegration(),
+		ManagedService: managed.IsManagedEnterprise(s.currentConfig().DeploymentMode),
+		ConsoleStream:  destinations.ConsoleStderr,
+		Stdout:         os.Stdout, Stderr: os.Stderr,
 		Secrets:  sidecarObservabilityV8SecretResolver{credentialsDir: s.currentConfig().ObservabilityCredentialsDir()},
 		CALoader: destinations.CAFileLoaderFunc(sidecarLoadObservabilityV8CA),
 		// Exporters check each destination, then connect through the
@@ -1192,6 +1203,7 @@ func (observer sidecarV8RetentionObserver) ReportRetentionController(
 	if observer.s == nil || observer.s.health == nil {
 		return
 	}
+	observer.s.health.setObservabilityV8RetentionCap(status.MaxStoreMB)
 	observer.s.health.setObservabilityV8Retention(
 		string(status.State), status.RetentionDays, string(status.Failure),
 	)

@@ -159,8 +159,7 @@ class TestEffectiveResolvers(unittest.TestCase):
     def test_per_connector_override_wins(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("codex"), "action")
-        # Its permissive pack is the outage-open tier (oss-outage-open).
-        self.assertEqual(g.effective_hook_fail_mode("codex"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
         self.assertEqual(g.effective_block_message("codex"), "codex-msg")
         self.assertEqual(g.effective_rule_pack("codex"), "permissive")
         self.assertTrue(g.effective_hilt("codex").enabled)
@@ -169,8 +168,8 @@ class TestEffectiveResolvers(unittest.TestCase):
     def test_cursor_outage_mode_follows_the_tier_in_every_guardrail_mode(self):
         g = GuardrailConfig(
             mode="observe",
-            hook_fail_mode="closed",
-            connectors={"cursor": PerConnectorGuardrailConfig(hook_fail_mode="closed")},
+            hook_fail_mode="",
+            connectors={"cursor": PerConnectorGuardrailConfig()},
         )
         self.assertEqual(g.effective_hook_fail_mode("cursor"), "open")
         g.connectors["cursor"].mode = "action"
@@ -181,7 +180,7 @@ class TestEffectiveResolvers(unittest.TestCase):
     def test_empty_block_inherits_global(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("empty"), "observe")
-        self.assertEqual(g.effective_hook_fail_mode("empty"), "closed")
+        self.assertEqual(g.effective_hook_fail_mode("empty"), "open")
         self.assertEqual(g.effective_block_message("empty"), "global-msg")
         self.assertEqual(g.effective_rule_pack("empty"), "strict")
         self.assertFalse(g.effective_hilt("empty").enabled)
@@ -190,7 +189,7 @@ class TestEffectiveResolvers(unittest.TestCase):
     def test_unknown_and_empty_connector_use_global(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("nope"), "observe")
-        self.assertEqual(g.effective_hook_fail_mode(""), "closed")
+        self.assertEqual(g.effective_hook_fail_mode(""), "open")
 
     def test_config_version_9_rule_pack_resolves_and_a_global_selection_clears_it(self):
         from defenseclaw.commands.cmd_setup import _apply_rule_pack_selection
@@ -239,12 +238,12 @@ class TestEffectiveResolvers(unittest.TestCase):
                 "claudecode": PerConnectorGuardrailConfig(),
             },
         )
-        # A per-user outage mode follows the default tier, whatever is saved.
-        self.assertEqual(g.effective_hook_fail_mode("codex"), "open")
-        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
+        # An explicitly saved mode wins over the tier.
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
         g.hook_fail_mode = "open"
         self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
-        self.assertEqual(g.effective_hook_fail_mode("codex"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
         # Under Secure Client an explicit value wins too: the global closed
         # closes a connector without its own value, and an unset global is
         # open (#1163).
@@ -276,6 +275,18 @@ class TestEffectiveResolvers(unittest.TestCase):
                         os.environ.pop(pin, None)
                 cfg = config_module.load(data_dir=tmp)
                 return cfg.guardrail.effective_hook_fail_mode(connector)
+
+    def test_oss_saved_mode_wins_over_tier_after_load(self):
+        base = "config_version: 9\nobservability: {}\n"
+        for pack, saved, expected in (
+            ("default", "", "open"),
+            ("default", "hook_fail_mode: closed, ", "closed"),
+            ("strict", "", "closed"),
+            ("strict", "hook_fail_mode: open, ", "open"),
+        ):
+            with self.subTest(pack=pack, saved=saved):
+                document = base + f"guardrail: {{{saved}rule_pack: {pack}}}\n"
+                self.assertEqual(self._load_hook_fail_mode(document, "codex"), expected)
 
     def test_secure_client_unset_hook_fail_mode_is_open(self):
         # #1163 (owner rule: hooks fail open under Secure Client): an unset

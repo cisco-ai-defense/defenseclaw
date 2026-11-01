@@ -9,6 +9,8 @@ import { buildCommand, DEFAULT_STATE } from '../components/command-generator';
 import { projectPolicyToData, withPolicyInput } from '../components/policy-creator/lib/data-projection';
 import { pickVerdictEntrypoint } from '../components/policy-creator/lib/opa-eval';
 import { policyFromPreset } from '../components/policy-creator/lib/presets';
+import { expectedVerdictFor } from '../components/policy-creator/lib/scenario-expectation';
+import type { Scenario } from '../components/policy-creator/types';
 import { applyAnswers } from '../components/policy-creator/quick-start/apply';
 import { defaultAnswers } from '../components/policy-creator/quick-start/questions';
 import recipes from '../data/policy-recipes.json';
@@ -35,6 +37,23 @@ test('Balanced Quick Start admission replay agrees with its default expectations
   }
 });
 
+test('every admission scenario matches its expectation under each preset (GAP-0209)', async () => {
+  const engine = await loadPolicy(readFileSync(new URL('../public/opa/admission.wasm', import.meta.url)));
+  for (const preset of ['default', 'strict', 'permissive'] as const) {
+    const data = projectPolicyToData(policyFromPreset(preset));
+    engine.setData(data);
+    for (const scenario of scenarios.scenarios.filter((s) => s.domain === 'admission')) {
+      const result = engine.evaluate(withPolicyInput('admission', scenario.input, data), pickVerdictEntrypoint('admission'));
+      assert.equal(result[0]?.result, expectedVerdictFor(scenario as Scenario, preset), `${scenario.id} under ${preset}`);
+    }
+  }
+  const mcp = scenarios.scenarios.find((s) => s.id === 'admission-medium-mcp') as Scenario | undefined;
+  assert.equal(mcp && expectedVerdictFor(mcp, 'default'), 'warning');
+  assert.equal(mcp && expectedVerdictFor(mcp, 'strict'), 'rejected');
+  const pane = readFileSync(new URL('../components/policy-creator/sections/live-test.tsx', import.meta.url), 'utf8');
+  assert.ok(!pane.includes('res.verdict === s.expectedVerdict') && !pane.includes('expected: s.expectedVerdict,'), 'Live Test scores against one preset only');
+});
+
 test('guardrail scenarios keep their authored action-mode expectations', async () => {
   const policy = policyFromPreset('default');
   policy.guardrail.mode = 'action';
@@ -45,6 +64,24 @@ test('guardrail scenarios keep their authored action-mode expectations', async (
     const result = engine.evaluate(withPolicyInput('guardrail', scenario.input, data), pickVerdictEntrypoint('guardrail'));
     assert.equal(result[0]?.result, scenario.expectedVerdict, scenario.id);
   }
+});
+
+test('every guardrail scenario matches its expectation under each preset in action mode (GAP-1920)', async () => {
+  const engine = await loadPolicy(readFileSync(new URL('../public/opa/guardrail.wasm', import.meta.url)));
+  for (const preset of ['default', 'strict', 'permissive'] as const) {
+    const policy = policyFromPreset(preset);
+    policy.guardrail.mode = 'action';
+    const data = projectPolicyToData(policy);
+    engine.setData(data);
+    for (const scenario of scenarios.scenarios.filter((s) => s.domain === 'guardrail')) {
+      const result = engine.evaluate(withPolicyInput('guardrail', scenario.input, data), pickVerdictEntrypoint('guardrail'));
+      assert.equal(result[0]?.result, expectedVerdictFor(scenario as Scenario, preset), `${scenario.id} under ${preset}`);
+    }
+  }
+  const medium = scenarios.scenarios.find((s) => s.id === 'guardrail-medium-completion') as Scenario | undefined;
+  assert.equal(medium && expectedVerdictFor(medium, 'default'), 'alert');
+  assert.equal(medium && expectedVerdictFor(medium, 'strict'), 'block');
+  assert.equal(medium && expectedVerdictFor(medium, 'permissive'), 'allow');
 });
 
 test('Quick Start observe mode alerts at HIGH+ and allows MEDIUM', async () => {

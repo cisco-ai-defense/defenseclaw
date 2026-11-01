@@ -12,7 +12,6 @@ import (
 
 // These parser cases preserve audit classifications; enforcement requires a resolved protected target.
 func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -22,8 +21,14 @@ func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 		"sudo -l", "sudo -ll", "sudo --list", "sudo -n -l",
 		"sudo -u root -l", "sudo -l /bin/sh", "sudo -l /bin/r*",
 	} {
-		if got := ActionCommandAuditReason(command, cwd, home); got != "" {
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
 			t.Errorf("%q: decision = %q, want allow", command, got)
+		}
+		// The POSIX grammar knows sudo -l lists and runs nothing. A Windows
+		// home reads the command as PowerShell, where sudo is an unknown
+		// program: an audit reason there, never a deny (GAP-0975).
+		if got := ActionCommandAuditReason(command, cwd, home); got != "" && !actionWindowsHome(home) {
+			t.Errorf("%q: audit reason = %q, want none", command, got)
 		}
 	}
 	for _, command := range []string{
@@ -38,7 +43,6 @@ func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 }
 
 func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -99,15 +103,20 @@ func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
 		{"ordinary redirect", `echo marker >> report.txt`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ActionCommandAuditReason(tc.command, cwd, home) != ""; got != tc.block {
-				t.Fatalf("unknown write = %t, want %t", got, tc.block)
+			want := tc.block
+			if got := posixShellAuditReason(tc.command, cwd, home) != ""; got != want {
+				t.Fatalf("unknown write = %t, want %t", got, want)
+			}
+			if tc.name == "unknown read path in write statement" {
+				if got := posixShellDecision(tc.command, cwd, home); got != "" {
+					t.Fatalf("ordinary redirect target decision = %q, want allow", got)
+				}
 			}
 		})
 	}
 }
 
 func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -142,7 +151,7 @@ func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
 		{`if test "$COND"; then v=report.txt; fi; echo ok > "$v"`, true},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
-			if reason := ActionCommandAuditReason(tc.command, cwd, home); (reason != "") != tc.block {
+			if reason := posixShellAuditReason(tc.command, cwd, home); (reason != "") != tc.block {
 				t.Fatalf("reason=%q, want block=%t", reason, tc.block)
 			}
 		})
@@ -151,14 +160,13 @@ func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
 		`read f < target-name.txt; echo ok > "$f"`,
 		`v=alias; if false; then v=report.txt; fi; echo ok > "$v"`,
 	} {
-		if ActionCommandDecision(command, cwd, home) == "" {
+		if posixShellDecision(command, cwd, home) == "" {
 			t.Errorf("resolved protected alias allowed: %q", command)
 		}
 	}
 }
 
 func TestR104ActionClassWrapperRecursion(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -197,7 +205,7 @@ func TestR104ActionClassWrapperRecursion(t *testing.T) {
 		{"exec named child", `exec -a chosen sh -c 'echo marker >> alias'`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if reason := ActionCommandAuditReason(tc.command, cwd, home); reason == "" {
+			if reason := posixShellAuditReason(tc.command, cwd, home); reason == "" {
 				t.Fatal("write-capable wrapper hid an unresolved child target")
 			}
 		})
@@ -207,7 +215,6 @@ func TestR104ActionClassWrapperRecursion(t *testing.T) {
 // Each lead gap is kept as a named row so a later parser change cannot
 // silently reopen one variant while the broader class tests stay green.
 func TestR104LeadGapCorpusPOSIX(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -226,13 +233,19 @@ func TestR104LeadGapCorpusPOSIX(t *testing.T) {
 		{"GAP-0659 computed program", `$(printf ln) -s report.txt alias`},
 	} {
 		t.Run(row.gap, func(t *testing.T) {
-			if reason := ActionCommandAuditReason(row.command, cwd, home); reason == "" {
+			if reason := posixShellAuditReason(row.command, cwd, home); reason == "" {
 				t.Fatalf("missing audit reason for %q", row.command)
 			}
-			if row.gap != "GAP-0659 computed program" && ActionCommandDecision(row.command, cwd, home) == "" {
+			if row.gap != "GAP-0659 computed program" &&
+				posixShellDecision(row.command, cwd, home) == "" {
 				t.Fatalf("resolved protected target allowed: %q", row.command)
 			}
 		})
+	}
+	// A child that names the key file is a protected target on every grammar.
+	child := `printf payload | xargs -I {} sh -c 'echo marker >> ~/.ssh/authorized_keys'`
+	if got := posixShellDecision(child, cwd, home); got != "protected-target" {
+		t.Errorf("xargs child naming the key file %q decision = %q", child, got)
 	}
 }
 
@@ -662,7 +675,6 @@ func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
 }
 
 func TestR104ActionBoundedFunctionAndProcessInputs(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -684,11 +696,11 @@ func TestR104ActionBoundedFunctionAndProcessInputs(t *testing.T) {
 		{`cat <(sh -c 'echo marker >> "$destination"') > merged.txt`, true},
 		{`cat <(sort -o alias docs/a.txt) > merged.txt`, true},
 	} {
-		if reason := ActionCommandAuditReason(tc.command, cwd, home); (reason != "") != tc.blocked {
+		if reason := posixShellAuditReason(tc.command, cwd, home); (reason != "") != tc.blocked {
 			t.Errorf("%q reason=%q, want blocked=%t", tc.command, reason, tc.blocked)
 		}
 	}
-	if ActionCommandDecision(`cat <(sort -o alias docs/a.txt) > merged.txt`, cwd, home) == "" {
+	if posixShellDecision(`cat <(sort -o alias docs/a.txt) > merged.txt`, cwd, home) == "" {
 		t.Fatal("resolved protected process-substitution output allowed")
 	}
 }

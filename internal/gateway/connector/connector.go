@@ -89,7 +89,12 @@ type SetupOpts struct {
 	// loopback /otlp/<connector>/<token>/v1/<signal> namespace. It must never
 	// be reused as a general API or hook bearer.
 	OTLPPathToken string
-	Interactive   bool
+	// GatewayToken is the install's gateway master credential. Setup never
+	// writes it into an agent config; it is known here only so that an OTLP
+	// route that carries it counts as DefenseClaw's and is removed, never kept
+	// as an operator collector (GAP-0035).
+	GatewayToken string
+	Interactive  bool
 	// ManagedEnterprise marks hook scripts installed by the privileged
 	// enterprise guardian. Managed scripts ignore user-controlled home and
 	// disable-sentinel overrides and derive their data directory from the
@@ -98,6 +103,20 @@ type SetupOpts struct {
 	// sandboxNativeOTLP selects the isolated OpenShell artifact renderer. It
 	// cannot be set by a host setup caller or a configuration file.
 	sandboxNativeOTLP bool
+	// knownCredentials are further product credentials the native OTLP
+	// residue check knows (UserNativeOTLPWithout recovers them from the
+	// configuration it judges by their digests). Never set by a caller.
+	knownCredentials []string
+	// ManagedMarkedOrphanExporters is set by the managed Windows native OTLP
+	// take-back and Verify only (never host setup): an exporter in the
+	// account's own agent config with the exact shape a pre-1.0.4 per-user
+	// render wrote (both x-defenseclaw markers, a loopback port
+	// ManagedServedAddrs does not name) is the product's (GAP-0836,
+	// native_otlp_marked_orphan.go).
+	ManagedMarkedOrphanExporters bool
+	// ManagedServedAddrs are the host:port addresses the managed gateway
+	// serves (API, guardrail proxy).
+	ManagedServedAddrs []string
 	// ManagedHookSocket is the standalone gateway's peer-authorized unix
 	// hook socket (from the root-owned runtime descriptor). When set on a
 	// unix host, in-agent plugins (OpenCode, Amp) and connector shell hooks
@@ -724,6 +743,14 @@ type HookProfileRequest struct {
 	Direction        string
 	Model            string
 	Payload          map[string]interface{}
+	// ManagedWatch is set on a managed (service-account) gateway: the watch
+	// paths of a Claude Code answer belong to the verified caller, never to
+	// the gateway service account (GAP-0066). WatchHome is that caller's
+	// home, empty when it could not be resolved (no home paths then), and
+	// WatchCWD the caller project the watch paths name.
+	ManagedWatch bool
+	WatchHome    string
+	WatchCWD     string
 }
 
 // HookVerdictInput is the mode-mapping context fed to a profile's

@@ -13,6 +13,12 @@
 // message; the message carries only an allowlisted connector and reason and
 // bounded event and tool labels. The gateway coalesces reports per SID and
 // connector, so a refusal loop cannot flood the audit log.
+//
+// The managed CLI reports its refusals of a standard account's command the
+// same way (GAP-2639): such an account holds no gateway credential either. A
+// command report carries only the refused command's fixed words and a reason,
+// never its arguments, and becomes the refused-command row the Unix gateway
+// writes for its hook socket's peer (managed_refusal_audit.go).
 package refusalpipe
 
 import (
@@ -35,6 +41,17 @@ const MaxMessageBytes = 1024
 const (
 	ReasonSIDUnregistered   = "enterprise_managed_sid_unregistered"
 	ReasonEnrollmentPending = "enterprise_managed_enrollment_pending"
+	// ReasonManagedDevice and ReasonElevationRequired are the reasons of a
+	// command report: a write the managed device takes only from the admin
+	// config, and a lifecycle command a standard account may not run.
+	ReasonManagedDevice     = "managed_device"
+	ReasonElevationRequired = "elevation_required"
+)
+
+// maxCommandBytes and maxCommandWords bound a command report's words.
+const (
+	maxCommandBytes = 64
+	maxCommandWords = 4
 )
 
 // connectors are the Windows managed hook connectors
@@ -44,7 +61,7 @@ var connectors = map[string]bool{
 	"devin": true, "hermes": true, "kiro": true, "opencode": true,
 }
 
-// Report is one refused hook call.
+// Report is one refused hook call or CLI command.
 type Report struct {
 	Connector string `json:"connector"`
 	Reason    string `json:"reason"`
@@ -52,11 +69,23 @@ type Report struct {
 	// so they only label the row.
 	Event string `json:"event,omitempty"`
 	Tool  string `json:"tool,omitempty"`
+	// Command is a CLI command report's words, such as "guardrail disable";
+	// such a report has no connector, event or tool.
+	Command string `json:"command,omitempty"`
 }
 
 // Normalize returns the report with bounded labels, or false when its
 // connector or reason is not one a refusal can have.
 func (r Report) Normalize() (Report, bool) {
+	if r.Command != "" {
+		command, ok := commandWords(r.Command)
+		reason := strings.TrimSpace(r.Reason)
+		if !ok || strings.TrimSpace(r.Connector) != "" || r.Event != "" || r.Tool != "" ||
+			(reason != ReasonManagedDevice && reason != ReasonElevationRequired) {
+			return Report{}, false
+		}
+		return Report{Command: command, Reason: reason}, true
+	}
 	r.Connector = strings.ToLower(strings.TrimSpace(r.Connector))
 	r.Reason = strings.TrimSpace(r.Reason)
 	if !connectors[r.Connector] || (r.Reason != ReasonSIDUnregistered && r.Reason != ReasonEnrollmentPending) {
@@ -68,6 +97,25 @@ func (r Report) Normalize() (Report, bool) {
 }
 
 // label keeps a short identifier-like value and drops anything else.
+// commandWords accepts a command's fixed words only: up to maxCommandWords
+// words of lower-case letters, digits and dashes, so no argument (a path, a
+// value, a key=value) can reach the audit row.
+func commandWords(command string) (string, bool) {
+	words := strings.Fields(command)
+	if len(words) == 0 || len(words) > maxCommandWords {
+		return "", false
+	}
+	for _, word := range words {
+		for _, c := range word {
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+				return "", false
+			}
+		}
+	}
+	joined := strings.Join(words, " ")
+	return joined, len(joined) <= maxCommandBytes
+}
+
 func label(value string, limit int) string {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > limit {
@@ -88,7 +136,7 @@ func label(value string, limit int) string {
 func Encode(r Report) ([]byte, error) {
 	normalized, ok := r.Normalize()
 	if !ok {
-		return nil, errors.New("refusal report has no supported connector and reason")
+		return nil, errors.New("refusal report has no supported connector or command and reason")
 	}
 	return json.Marshal(normalized)
 }
@@ -104,7 +152,7 @@ func Decode(message []byte) (Report, error) {
 	}
 	normalized, ok := r.Normalize()
 	if !ok {
-		return Report{}, errors.New("refusal report has no supported connector and reason")
+		return Report{}, errors.New("refusal report has no supported connector or command and reason")
 	}
 	return normalized, nil
 }

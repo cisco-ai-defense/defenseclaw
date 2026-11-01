@@ -205,6 +205,8 @@ def test_windows_launcher_registrations_are_registered(tmp_path, monkeypatch, co
         assert hook_integrity._registers_defenseclaw_hooks(cfg, connector, config, strict=False)
         assert hook_registration_problems(cfg, connector)
     else:
+        # The file scan is under test; Doctor's native verdict has its own tests.
+        monkeypatch.setattr(hook_integrity, "_windows_native_problem", lambda cfg, connector: None)
         assert hook_registration_problems(cfg, connector) == []
 
     removed = {"codex": "[otel.exporter.otlp-http.headers]\nx-defenseclaw-source = 'codex'\n"}.get(
@@ -253,6 +255,8 @@ def test_windows_claude_code_handlers_setup_writes_are_registered(tmp_path, monk
         guard.write_bytes(b"MZ")
         handler = {**handler, "command": str(guard)}
     cfg, config = _install(tmp_path, "claudecode", _claude_windows_settings(handler, str(launcher)))
+    # The file scan is under test; Doctor's native verdict has its own tests.
+    monkeypatch.setattr(hook_integrity, "_windows_native_problem", lambda cfg, connector: None)
     assert hook_registration_problems(cfg, "claudecode") == []
     assert _hook_runtime_degraded_suffix(cfg, "claudecode") == ""
 
@@ -296,6 +300,23 @@ def test_status_and_doctor_read_the_claude_launcher_guard_the_same_way(monkeypat
         assert hook_integrity.claude_launcher_guard_view(changed) is changed, args
     same = {**pretool, "command": golden["launcher"]}
     assert hook_integrity.claude_launcher_guard_view(same) is same
+    # The one-line install runs its GUI-subsystem guard beside the launcher
+    # (GAP-2467), a repository build its gateway (GAP-1011 round 2); no other
+    # DefenseClaw program is one.
+    import ntpath
+
+    bin_dir = ntpath.dirname(golden["launcher"])
+    for program in ("defenseclaw-hook-guard.exe", "defenseclaw-gateway.exe"):
+        guard = {**pretool, "command": ntpath.join(bin_dir, program)}
+        assert hook_integrity.claude_launcher_guard_view(guard) == golden["exec"], program
+        assert hook_integrity.hook_handler_command_lines(guard, "claudecode") == expected, program
+    for command in (
+        ntpath.join(bin_dir, "defenseclaw-acp.exe"),
+        "defenseclaw-gateway.exe",
+        "defenseclaw-hook-guard.exe",
+    ):
+        other = {**pretool, "command": command}
+        assert hook_integrity.claude_launcher_guard_view(other) is other, command
 
 
 def test_windows_copilot_adapter_in_a_data_dir_not_named_defenseclaw_is_registered(tmp_path, monkeypatch):

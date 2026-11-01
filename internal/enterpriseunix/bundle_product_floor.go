@@ -14,7 +14,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
@@ -28,8 +27,20 @@ const codeProductFloor = "product_floor_refused"
 const codeFloorCheckerNotKept = "floor_checker_not_kept"
 
 // floorCheckerDir holds the root-only copy of the gateway that answers the
-// package scripts' floor-check once the installed gateway is gone.
+// floor-check of the 1.0.4 and later package scripts once the installed
+// gateway is gone.
 const floorCheckerDir = "floor-check"
+
+// olderPackageFloorLimit is what an operator message about the package floor
+// check must add: the package scripts check the floor only from 1.0.4 on
+// (floor_check_marker), and a package older than 1.0.4 runs plain ensure,
+// which has no floor check, so it can complete below the floor.
+const olderPackageFloorLimit = "a package older than 1.0.4 has no floor check and can complete below the floor, so check that the release you install meets the floor first"
+
+// floorCheckerNotKeptLimit says what a codeFloorCheckerNotKept warning
+// leaves: no package preinstall can check the floor until a deployment is
+// committed again.
+const floorCheckerNotKeptLimit = "the preinstall of a 1.0.4 or later package cannot check that floor, so a 1.0.4 or later package below it is refused only by its postinstall, after its files are in place; " + olderPackageFloorLimit
 
 // confirmedBundleProductFloor reads the confirmed bundle's release floor
 // (tests replace it).
@@ -61,28 +72,18 @@ func (e *Env) BundleProductFloorRefusal(version string) error {
 // bundleProductFloorRefusal compares a candidate with a proven floor: either
 // the readable confirmed bundle or a new bundle verified by this apply run.
 func bundleProductFloorRefusal(version, floor string) error {
-	if floor == "" {
-		return nil
-	}
-	candidate := strings.TrimPrefix(strings.TrimSpace(version), "v")
-	if !enterprisebundle.IsReleaseVersion(candidate) {
-		if len(candidate) > 64 {
-			candidate = candidate[:64] + "..."
-		}
-		return &codedError{code: codeProductFloor, err: fmt.Errorf("the signed policy bundle needs DefenseClaw %s or later, and %q is not a release version, so it cannot meet that floor; install a release at or above %s, or deliver a bundle signed without --min-product-version first", floor, candidate, floor)}
-	}
-	if enterprisebundle.CheckProductVersion(floor, candidate) != nil {
-		return &codedError{code: codeProductFloor, err: fmt.Errorf("the signed policy bundle needs DefenseClaw %s or later, and this is %s; to go back, deliver a bundle signed with a lower --min-product-version first", floor, candidate)}
+	if err := enterprisebundle.ReleaseFloorRefusal(version, floor); err != nil {
+		return &codedError{code: codeProductFloor, err: err}
 	}
 	return nil
 }
 
 // floorCheckerPath is the root-only copy of the deployed gateway a non-purge
 // uninstall keeps in the lifecycle directory. The Linux and macOS package
-// scripts run its floor-check when the installed gateway is gone (after
-// uninstall --keep-state, or an uninstall that failed after it removed the
-// binaries), so a package below the confirmed bundle's floor is refused
-// before its files land. It keeps the gateway's own name: the binary picks
+// scripts of 1.0.4 and later run its floor-check when the installed gateway
+// is gone or older than 1.0.4 (after uninstall --keep-state, or an uninstall
+// that failed after it removed the binaries), so such a package below the
+// confirmed bundle's floor is refused before its files land. It keeps the gateway's own name: the binary picks
 // its command tree by that name (launcher.go).
 func (e *Env) floorCheckerPath() string {
 	return filepath.Join(e.P(e.Layout.LifecycleDir), floorCheckerDir, binGateway)

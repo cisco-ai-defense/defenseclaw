@@ -23,3 +23,6 @@ import "os"
 func ensureCodexConfigDir(path string) error {
 	return os.MkdirAll(path, 0o700)
 }
+
+// codexHomeLinkRefusal is Windows only: elsewhere the Codex home may be a link.
+func codexHomeLinkRefusal(string) error { return nil }

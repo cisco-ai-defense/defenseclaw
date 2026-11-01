@@ -213,11 +213,15 @@ func TestWatchGatewayStarts(t *testing.T) {
 func TestForeignHookSessionExchangeIsSentAgainWhileTheGatewayRestarts(t *testing.T) {
 	fastRestartRetries(t)
 	var calls int
+	var first string
 	opts := Options{ManagedEnterprise: true, ManagedStandalone: true, APIAddr: "127.0.0.1:18970"}
 	opts.HTTPClient = &http.Client{Transport: foreignSessionRoundTrip(func(req *http.Request) (*http.Response, error) {
 		calls++
 		body, _ := io.ReadAll(req.Body)
-		if string(body) != `{"key":{"connector":"claudecode"}}` {
+		if first == "" {
+			first = string(body)
+		}
+		if string(body) != first || withoutRetryUntil(t, body) != `{"key":{"connector":"claudecode"}}` {
 			t.Fatalf("try %d sent %q", calls, body)
 		}
 		if calls < 3 {

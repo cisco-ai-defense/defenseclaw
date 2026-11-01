@@ -945,7 +945,7 @@ to the scan; runtime hook rules still apply to its tool calls.
     `fail_closed` and the agent restarts; a killed hook can still fail
     open on its non-2 exit.
 23. The managed OpenCode plugin
-    (`C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js`)
+    (`C:\Program Files\Cisco\DefenseClaw\share\opencode\index.js`)
     grants `BUILTIN\Users` `FILE_WRITE_ATTRIBUTES` besides read and execute,
     because OpenCode's Bun runtime opens every module with that right and
     cannot load the plugin without it. With it a standard account can change

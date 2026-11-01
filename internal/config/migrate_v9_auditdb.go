@@ -27,7 +27,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -35,14 +34,16 @@ import (
 	// The audit store's driver; every binary that links this package links
 	// it already.
 	_ "modernc.org/sqlite"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Automatic scan reasons have fixed formats. Operator reasons are arbitrary
 // text, so match the watcher's complete stem and its known suffix separators.
 // Scanner and quarantine failure reasons carry an arbitrary error after their
 // distinctive prefixes; these are also automatic journal rows.
-var v9AutomaticReasonPattern = regexp.MustCompile(`^(?:post-scan: |post-install scan: |scan: )[0-9]+ findings, max=[A-Z]+$`)
-var v9WatchReasonPattern = regexp.MustCompile(`^auto-block: watch detected [A-Z]+ findings(?: \(scanner=[^)]+\))?(?:$|: |; )`)
+var v9AutomaticReasonPattern = lazyregexp.New(`^(?:post-scan: |post-install scan: |scan: )[0-9]+ findings, max=[A-Z]+$`)
+var v9WatchReasonPattern = lazyregexp.New(`^auto-block: watch detected [A-Z]+ findings(?: \(scanner=[^)]+\))?(?:$|: |; )`)
 
 func v9AutomaticInstallReason(reason string) bool {
 	reason = strings.TrimSpace(reason)
@@ -236,25 +237,8 @@ func resumeV9ActionCleanup(ctx context.Context, cleanup MigrationAuditCleanup) e
 	return err
 }
 
-// clearV9ActionRows removes the install field of moved rows in a transaction.
-func clearV9ActionRows(path string, moved []v9ActionRow) error {
-	db, err := openV9AuditDB(path, "_pragma=busy_timeout(5000)")
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("BEGIN IMMEDIATE"); err != nil {
-		return err
-	}
-	defer func() { _, _ = db.Exec("ROLLBACK") }()
-	if err := clearV9ActionRowsDB(db, moved); err != nil {
-		return err
-	}
-	_, err = db.Exec("COMMIT")
-	return err
-}
-
+// clearV9ActionRowsDB removes the install field of moved rows inside the
+// caller's write transaction.
 func clearV9ActionRowsDB(db *sql.DB, moved []v9ActionRow) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, row := range moved {

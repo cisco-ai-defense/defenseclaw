@@ -211,7 +211,7 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 		}
 		carried := false
 		if entry.previousErr == nil {
-			record = KeepLastKnownUPN(record, entry.previous)
+			record = KeepLastKnownUPN(record, windowsCarriedUPNRecord(entry.previous, facts))
 			carried = facts.UPN == "" && record.Facts.UPN != ""
 		}
 		record = MarkWindowsKeptUPN(record, entry.previous, facts.UPNKept || carried)
@@ -229,6 +229,19 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 			"stay, with this cycle's token groups: %s", len(unanswered), strings.Join(unanswered, ", ")))
 	}
 	return stopped
+}
+
+// windowsCarriedUPNRecord is previous as KeepLastKnownUPN may carry its UPN
+// into a record that resolved none: the UPN an earlier build took from the
+// identity store for an AD account is not the account's UPN (only the
+// domain controller's TranslateNameW answer is) and is not carried; a rename
+// of the AD UPN left it stale (identity-round GAP-1238).
+func windowsCarriedUPNRecord(previous IdentitySpoolRecord, facts useridentity.DirectoryFacts) IdentitySpoolRecord {
+	if previous.UPNSource == UPNSourceIdentityStore && (facts.Directory == useridentity.DirectoryActiveDirectory ||
+		previous.Facts.Directory == useridentity.DirectoryActiveDirectory) {
+		previous.Facts.UPN = ""
+	}
+	return previous
 }
 
 // windowsIdentityLookupBudget is budget, cut to the time left before ctx's

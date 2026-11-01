@@ -109,7 +109,7 @@ func perIPRateLimiter(rps, burst int) func(http.Handler) http.Handler {
 			if ip == "" {
 				// Unparseable RemoteAddr — refuse rather than fail open;
 				// caller can retry with a well-formed source.
-				http.Error(w, `{"error":"unparseable client address"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"unparseable client address"}`, http.StatusForbidden)
 				return
 			}
 			fresh := &perIPLimiterEntry{limiter: rate.NewLimiter(rate.Limit(rps), burst)}
@@ -118,7 +118,7 @@ func perIPRateLimiter(rps, burst int) func(http.Handler) http.Handler {
 			entry := val.(*perIPLimiterEntry)
 			entry.touch(now())
 			if !entry.limiter.Allow() {
-				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				writeJSONRefusal(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 				return
 			}
 			next.ServeHTTP(w, r)

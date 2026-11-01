@@ -114,8 +114,8 @@ func TestEnterpriseHookAwaitingSignInRowCoversSecureClient(t *testing.T) {
 // Setup's verify runs as the elevated administrator, which cannot query
 // another account's session, so on Secure Client it accepts the guardian's
 // fresh record of the wait; the guardian's own LocalSystem verify keeps the
-// live session check, and other session errors and the standalone profile
-// are unchanged.
+// live session check, other session errors are unchanged, and the standalone
+// profile reads the session list instead (GAP-2044).
 func TestEnterpriseHookVerifyAwaitingSignInTrustsTheGuardianRecordOutsideLocalSystem(t *testing.T) {
 	stubSecureClientSignInReconcile(t)
 	notLocalSystem := errors.New("enterprise hooks: guardian is not LocalSystem")
@@ -143,9 +143,24 @@ func TestEnterpriseHookVerifyAwaitingSignInTrustsTheGuardianRecordOutsideLocalSy
 	if enterpriseHookVerifyAwaitingSignIn(awaiting, target, row) {
 		t.Fatal("another session error was downgraded")
 	}
+	// Standalone checks the session list instead (GAP-2044): the wait is
+	// excused only while the account has no active session, and never when
+	// the list cannot be read.
 	sessionErr, secureClient = notLocalSystem, false
+	listSeam := enterpriseHookTargetHasNoSession
+	t.Cleanup(func() { enterpriseHookTargetHasNoSession = listSeam })
+	noSession, listErr := false, error(nil)
+	enterpriseHookTargetHasNoSession = func(enterprisehooks.ManifestTarget) (bool, error) { return noSession, listErr }
 	if enterpriseHookVerifyAwaitingSignIn(awaiting, target, row) {
-		t.Fatal("the standalone profile accepted the record without the session check")
+		t.Fatal("the standalone profile excused the wait while the account has an active session")
+	}
+	noSession = true
+	if !enterpriseHookVerifyAwaitingSignIn(awaiting, target, row) {
+		t.Fatal("the standalone profile refused the wait of an account with no active session (GAP-2044)")
+	}
+	listErr = errors.New("enterprise hooks: list Windows sessions: access is denied")
+	if enterpriseHookVerifyAwaitingSignIn(awaiting, target, row) {
+		t.Fatal("the standalone profile excused the wait from a session list it could not read")
 	}
 }
 

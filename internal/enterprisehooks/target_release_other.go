@@ -14,6 +14,11 @@ func WindowsProtectedTargetFromOtherRelease(InstallOptions) (string, bool, error
 	return "", false, nil
 }
 
+// WindowsProtectedTargetRunsEarlierHookMatrix is the native Windows check.
+func WindowsProtectedTargetRunsEarlierHookMatrix(InstallOptions) (bool, error) {
+	return false, nil
+}
+
 // WindowsProtectedTargetHookFailModeChange is the native Windows check.
 func WindowsProtectedTargetHookFailModeChange(InstallOptions) (string, string, error) {
 	return "", "", nil

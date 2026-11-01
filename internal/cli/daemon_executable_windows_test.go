@@ -40,6 +40,15 @@ import (
 const executableExitMarker = "__DEFENSECLAW_LASTEXITCODE__="
 
 func TestNativeWindowsExecutableForeignCollisionAndRecovery(t *testing.T) {
+	// The built gateway is a separate process that reads this computer's
+	// own machine marker (isolateTestHost cannot reach it): on a managed
+	// computer it refuses every per-user start by design (GAP-2572).
+	if where, managed := managedHostStandaloneMarker(); managed {
+		t.Skip("skipped on a managed computer: the per-user gateway this test builds refuses to start here (" + where + ")")
+	}
+	if where, managed := managedHostStandaloneRecord(); managed {
+		t.Skip("skipped on a managed computer: the per-user gateway this test builds refuses to start here (" + where + ")")
+	}
 	binary := buildGatewayExecutable(t)
 	home := t.TempDir()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -414,6 +423,18 @@ func buildGatewayExecutable(t *testing.T) string {
 	repoRoot := executableTestRepoRoot(t)
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("needs a Go toolchain to build the gateway: " + err.Error())
+	}
+	// LocalSystem has its own, usually empty, module cache; on a lane host
+	// with no module proxy in reach the build only downloads until the
+	// deadline (GAP-2572). Build from the cache or say why not.
+	if testRunsAsLocalSystem() {
+		probe := exec.Command("go", "list", "-deps", "./cmd/defenseclaw")
+		probe.Dir = repoRoot
+		probe.Env = append(os.Environ(), "GOPROXY=off")
+		if output, err := probe.CombinedOutput(); err != nil {
+			line, _, _ := strings.Cut(strings.TrimSpace(string(output)), "\n")
+			t.Skip("skipped as LocalSystem: this account's Go module cache cannot build the gateway without a module download (GOPROXY=off): " + line)
+		}
 	}
 	binary := filepath.Join(t.TempDir(), "defenseclaw-gateway.exe")
 	// A cold -trimpath build of the gateway takes 80-145 s on a hosted

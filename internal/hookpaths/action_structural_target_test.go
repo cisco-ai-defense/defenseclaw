@@ -6,14 +6,10 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
 func TestR104StructuralProtectedNamedPOSIX(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("native POSIX fixture")
-	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	ssh := filepath.Join(home, ".ssh")
@@ -35,13 +31,13 @@ func TestR104StructuralProtectedNamedPOSIX(t *testing.T) {
 		`for p in ~/.ssh/authorized_k*; do cp payload "$p"; done`,
 		`for p in ~/.s*/authorized_keys; do cp payload "$p"; done`,
 		`sh -c 'cat "$HOME/.ssh/authorized_keys"'`,
-		`grep marker ~/.ssh/authorized_keys`,
-		`wc -l ~/.ssh/authorized_keys`,
+		`grep marker payload >> ~/.ssh/authorized_keys`,
+		`wc -l ~/.ssh/authorized_keys > ~/.ssh/authorized_keys2`,
 		`cd ~/.ssh && echo authorized_keys`,
 		`ls ~/.ssh && echo done`,
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 				t.Fatalf("decision = %q, want protected-target", got)
 			}
 		})
@@ -50,11 +46,14 @@ func TestR104StructuralProtectedNamedPOSIX(t *testing.T) {
 		`cd ~/.ssh`, `pushd ~/.ssh`, `ls ~/.ssh`, `ls -o ~/.ssh`, `stat ~/.ssh`,
 		`cd ~/.ssh && cat authorized_keys`, `cd ~/.ssh && ls authorized_keys`,
 		`grep marker report.txt`,
+		// Plain reads stay allowed in action (owner decision 2, GAP-2168).
+		`grep marker ~/.ssh/authorized_keys`,
+		`wc -l ~/.ssh/authorized_keys`,
 		`cp payload ~/.s*/ordinary.txt`, `cp payload ~/.ssh/*.pub`,
 		`pushd build; popd; cp payload authorized_keys`,
 	} {
 		t.Run("allow/"+command, func(t *testing.T) {
-			if got := ActionCommandDecision(command, cwd, home); got != "" {
+			if got := posixShellDecision(command, cwd, home); got != "" {
 				t.Fatalf("decision = %q, want allow", got)
 			}
 		})
@@ -131,9 +130,6 @@ func TestR104StructuralProtectedNamedWindows(t *testing.T) {
 // component. Both forms allowed at the train baseline and blocked at
 // 6f741b9e80; the protected forms beside them must keep blocking.
 func TestR104StructuralLiteralTildeAndKeyComponent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("native POSIX fixture")
-	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	ssh := filepath.Join(home, ".ssh")
@@ -192,7 +188,7 @@ func TestR104StructuralLiteralTildeAndKeyComponent(t *testing.T) {
 		`command nohup git -C docs commit -m 'Document ~/.ssh/authorized_keys'`,
 	} {
 		t.Run("allow/"+command, func(t *testing.T) {
-			if got := ActionCommandDecision(command, cwd, home); got != "" {
+			if got := posixShellDecision(command, cwd, home); got != "" {
 				t.Fatalf("decision = %q, want allow", got)
 			}
 		})
@@ -248,7 +244,7 @@ func TestR104StructuralLiteralTildeAndKeyComponent(t *testing.T) {
 		`command cp payload ~/.ssh/authorized_keys`,
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 				t.Fatalf("decision = %q, want protected-target", got)
 			}
 		})

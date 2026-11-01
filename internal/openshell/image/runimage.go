@@ -28,7 +28,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -36,6 +35,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
@@ -80,9 +80,9 @@ const runImageSchema = 1
 const runRepositorySuffix = "-run"
 
 var (
-	imageIDRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	hashRE    = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	tagNameRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+	imageIDRE = lazyregexp.New(`^sha256:[0-9a-f]{64}$`)
+	hashRE    = lazyregexp.New(`^[0-9a-f]{64}$`)
+	tagNameRE = lazyregexp.New(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
 )
 
 // RunImage is a run image, or an alias, as the Store records it.

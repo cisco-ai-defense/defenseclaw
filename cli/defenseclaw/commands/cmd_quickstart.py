@@ -63,10 +63,10 @@ from defenseclaw import ux
     type=click.Choice(["open", "closed"], case_sensitive=False),
     default=None,
     help=(
-        "Saved as guardrail.hook_fail_mode. Per-user hooks do not read it: while the "
-        "gateway is not running they follow the policy tier (default and permissive let "
-        "calls run with a warning, strict blocks them: `defenseclaw guardrail use-pack strict`), "
-        "and every other hook failure blocks. "
+        "Saves your choice for a gateway outage as guardrail.hook_fail_mode; it wins "
+        "over the policy tier. Omitted, nothing is saved and outages follow the policy tier "
+        "(default and permissive let calls run with a warning, strict blocks them: "
+        "`defenseclaw guardrail use-pack strict`). Every other hook failure blocks. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and "
         "missing-token failures closed."
     ),
@@ -129,6 +129,16 @@ from defenseclaw import ux
     is_flag=True,
     help="Do not start the sidecar at the end of quickstart.",
 )
+@click.option(
+    "--decision-model-url", default="", help="Use a decision model at this System One endpoint (off by default)."
+)
+@click.option("--decision-model-name", default="", help="Model name the decision model endpoint serves.")
+@click.option(
+    "--decision-model-key-env",
+    default="DEFENSECLAW_DECISION_MODEL_KEY",
+    show_default=True,
+    help="Env var holding the decision model token (a local server needs none).",
+)
 @click.option("--json-summary", "--json", "json_summary", is_flag=True, help="Emit the first-run summary as JSON.")
 def quickstart_cmd(
     mode: str | None,
@@ -140,6 +150,9 @@ def quickstart_cmd(
     force: bool,
     agent_name: str | None,
     skip_gateway: bool,
+    decision_model_url: str,
+    decision_model_name: str,
+    decision_model_key_env: str,
     json_summary: bool,
 ) -> None:
     """Zero-prompt end-to-end setup with safe defaults.
@@ -157,6 +170,17 @@ def quickstart_cmd(
     from defenseclaw.ux import CLIRenderer
 
     refuse_first_run_when_managed()
+    from defenseclaw.commands.cmd_init import _decision_model_request
+    from defenseclaw.commands.cmd_setup import _validated_api_key_env_name
+
+    decision_model_request = _decision_model_request(
+        None,
+        decision_model_url,
+        decision_model_name,
+        _validated_api_key_env_name(
+            decision_model_key_env, "'--decision-model-key-env'", "DEFENSECLAW_DECISION_MODEL_KEY"
+        ),
+    )
     if agent_name:
         connector = agent_name
         _refuse_roster_narrowing(cfg_mod, connector, mode)
@@ -275,6 +299,12 @@ def quickstart_cmd(
             hilt_min_severity=hilt_min_severity or "",
         )
     )
+    if decision_model_request is not None:
+        from defenseclaw.bootstrap import _rollup_status
+        from defenseclaw.commands.cmd_init import _apply_first_run_decision_model
+
+        _apply_first_run_decision_model(report, decision_model_request, str(cfg_mod.default_data_path()))
+        report.status = _rollup_status(report.setup, report.readiness)
     if skip_gateway:
         # GAP-2052: bootstrap words a skipped start with init's flag; name
         # the one quickstart has.

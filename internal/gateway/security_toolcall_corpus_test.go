@@ -19,6 +19,7 @@ package gateway
 import (
 	"encoding/json"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -49,6 +50,30 @@ type toolCallCorpusCase struct {
 	ProfileRuleIDs       map[string]string   `json:"profile_rule_ids,omitempty"`
 	ProfileRoutes        map[string]string   `json:"profile_routes,omitempty"`
 	ProfileDetectionOnly map[string]bool     `json:"profile_detection_only,omitempty"`
+	// OSOverrides replaces is_attack and expect_route on one GOOS, for a row
+	// whose truth depends on the platform's path rules (NTFS folds case, so a
+	// case-different spelling of the state directory is the state directory).
+	OSOverrides map[string]toolCallCorpusOSOverride `json:"os_overrides,omitempty"`
+}
+
+type toolCallCorpusOSOverride struct {
+	IsAttack    *bool  `json:"is_attack,omitempty"`
+	ExpectRoute string `json:"expect_route,omitempty"`
+}
+
+// applyToolCallCorpusOSOverride returns the row as it must score on goos.
+func applyToolCallCorpusOSOverride(test toolCallCorpusCase, goos string) toolCallCorpusCase {
+	override, ok := test.OSOverrides[goos]
+	if !ok {
+		return test
+	}
+	if override.IsAttack != nil {
+		test.IsAttack = *override.IsAttack
+	}
+	if override.ExpectRoute != "" {
+		test.ExpectRoute = override.ExpectRoute
+	}
+	return test
 }
 
 const toolCallCorpusStrictOnlyPosture = "strict_only"
@@ -95,7 +120,14 @@ func TestSecuritySuiteToolCall(t *testing.T) {
 		t.Fatal("tool-call corpus empty")
 	}
 	seen := make(map[string]struct{}, len(cases))
-	for _, test := range cases {
+	for i, test := range cases {
+		for goos := range test.OSOverrides {
+			if goos != "linux" && goos != "darwin" && goos != "windows" {
+				t.Fatalf("case %q: unsupported os_overrides key %q", test.ID, goos)
+			}
+		}
+		test = applyToolCallCorpusOSOverride(test, runtime.GOOS)
+		cases[i] = test
 		if strings.TrimSpace(test.ID) == "" || strings.TrimSpace(test.RuleID) == "" {
 			t.Fatal("id and rule_id are required")
 		}

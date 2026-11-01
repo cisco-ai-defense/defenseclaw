@@ -151,7 +151,7 @@ func TestBundleReceiptPublicAndStoreChildrenPrivate(t *testing.T) {
 					t.Fatalf("%s mode = %v, %v; want %04o", path, info, err, want)
 				}
 			}
-			check(store.BundlesDir, 0o755)
+			check(store.BundlesDir, 0o711)
 			check(store.PublicReceiptPath(), 0o644)
 			check(store.PublicReceiptEventsDir(), 0o755)
 			check(publicEvent, 0o644)

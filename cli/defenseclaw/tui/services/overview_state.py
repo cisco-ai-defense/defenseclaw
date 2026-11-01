@@ -24,6 +24,13 @@ from defenseclaw.connector_paths import (
     hermes_config_path,
     hermes_home,
 )
+from defenseclaw.connector_paths import normalize as normalize_connector
+from defenseclaw.enforce.admission_overrides import (  # re-exported for the TUI
+    admission_action_overrides as admission_action_overrides,
+)
+from defenseclaw.enforce.admission_overrides import (
+    format_scanner_overrides_summary as format_scanner_overrides_summary,
+)
 from defenseclaw.observability.custody_status import (
     NativeDeliveryStatus,
     NativeDeliverySummary,
@@ -811,7 +818,7 @@ class OverviewPanelModel:
             notices.append(
                 OverviewNotice(
                     "info",
-                    "Loading the audit history - alert and hook counts show 0 until it finishes",
+                    "Loading the audit history - counts show 0 while loading",
                 )
             )
         if self.not_configured:
@@ -989,14 +996,17 @@ class OverviewPanelModel:
 
         # A stopped gateway leaves its last /health payload behind; notices
         # read from it ("since the gateway started 3m ago") would be stale.
+        idle_notice: OverviewNotice | None = None
         live_health = self.health is not None and not self.gateway_down()
         if live_health and self.health.connector is not None and self.cfg is not None:
-            live = self.health.connector.name.strip()
-            configured = self.cfg.claw_mode.strip()
-            roster = {c.strip().lower() for c, _m in self.cfg.connector_modes if c}
+            live = normalize_connector(self.health.connector.name)
+            # The gateway folds an alias of claw.mode (claude-code, Codex) to
+            # its registry name; compare the same names (GAP-2079).
+            configured = normalize_connector(self.cfg.claw_mode)
+            roster = {normalize_connector(c) for c, _m in self.cfg.connector_modes if c}
             # In a multi-connector install the gateway's primary connector can
             # be any rostered one; that is not drift (GAP-1220).
-            if live and configured and live != configured and live.lower() not in roster:
+            if live and configured and live != configured and live not in roster:
                 notices.append(
                     OverviewNotice(
                         "warn",
@@ -1006,12 +1016,15 @@ class OverviewPanelModel:
                     )
                 )
             uptime = timedelta(milliseconds=self.health.uptime_ms)
+            # The idle-connector notice is informational and only true until
+            # the first hook event, so it goes last: at 80x24 it pushed the
+            # Runtime notice and its N key below the fold (GAP-2104).
             if uptime > timedelta(minutes=1):
                 if self._is_multi_connector() and self.health.connectors:
                     # One idle connector out of several is normal; only say
                     # something when none of them has seen a hook event.
                     if not any(_connector_saw_traffic(conn) for conn in self.health.connectors):
-                        notices.append(
+                        idle_notice = (
                             OverviewNotice(
                                 "info",
                                 # One line at 80 columns: the wrapped rest fell
@@ -1021,7 +1034,7 @@ class OverviewPanelModel:
                             )
                         )
                 elif not _connector_saw_traffic(self.health.connector):
-                    notices.append(OverviewNotice("info", zero_connector_requests_notice(live, uptime)))
+                    idle_notice = OverviewNotice("info", zero_connector_requests_notice(live, uptime))
 
         probe_detail = gateway_availability.last_error.strip().lower()
         if not gateway_broken and "elevated sidecar" in probe_detail:
@@ -1052,6 +1065,8 @@ class OverviewPanelModel:
                     f"{runtime.connections} connections, no findings above the reporting floor"
                 )
             notices.append(OverviewNotice("info", message))
+        if idle_notice is not None:
+            notices.append(idle_notice)
 
         return tuple(notices)
 
@@ -1419,13 +1434,11 @@ class OverviewPanelModel:
         if self.cfg is None:
             return ""
         if self.cfg.guardrail_connector.strip():
-            return self.cfg.guardrail_connector.strip().lower()
+            return normalize_connector(self.cfg.guardrail_connector)
         primary = connector_filter.active_connector_name(self.cfg.connector_modes)
         if primary:
-            return primary.strip().lower()
-        if self.cfg.claw_mode.strip():
-            return self.cfg.claw_mode.strip().lower()
-        return ""
+            return normalize_connector(primary)
+        return normalize_connector(self.cfg.claw_mode)
 
     def scanner_overrides_summary(self) -> str:
         """One-line summary of the admission actions config.yaml overrides,
@@ -1703,12 +1716,34 @@ class OverviewPanelModel:
         others = [f"{counts[mode]} {mode}" for mode in sorted(counts) if mode != main]
         return ", ".join([main, *others])
 
+    def judge_fallbacks(self) -> int:
+        """Hook checks the rules decided without a judge verdict (0 when unknown)."""
+
+        details = self.health.guardrail.details if self.health else {}
+        fallbacks = details.get("judge_fallbacks", 0)
+        if isinstance(fallbacks, int) and not isinstance(fallbacks, bool) and fallbacks > 0:
+            return fallbacks
+        return 0
+
     def guardrail_detail(self) -> str:
         if self.cfg is None or not self.cfg.guardrail_enabled:
             return ""
         parts: list[str] = []
         if mode := self.guardrail_mode_label():
             parts.append(mode)
+        # The fallback count (short), then the judge's state, come right
+        # after the mode: the SERVICES column wraps the row at 24 cells and
+        # the box shows two of its lines at 120x40, so a trailing count was
+        # cut (GAP-0180). Hook checks the rules decided without a judge
+        # verdict (#1395); recent judge calls that failed (GAP-1288).
+        details = self.health.guardrail.details if self.health else {}
+        if fallbacks := self.judge_fallbacks():
+            parts.append(f"fallbacks {fallbacks}")
+        judge_state = str(details.get("judge_state") or "")
+        if judge_state in ("failing", "degraded"):
+            failed = details.get("judge_failed_calls", 0)
+            total = details.get("judge_recent_calls", 0)
+            parts.append(f"judge {judge_state}: {failed}/{total} calls failed")
         if self.cfg.guardrail_port and self.cfg.uses_guardrail_proxy_port():
             parts.append(f"port {self.cfg.guardrail_port}")
         roster = [name for name, _ in self.cfg.connector_modes if name and not self.cfg.connector_is_disabled(name)]
@@ -1719,13 +1754,6 @@ class OverviewPanelModel:
             parts.append(f"{pack} pack")
         if self.cfg.guardrail_judge_enabled and self.cfg.guardrail_judge_model:
             parts.append(f"judge:{self.cfg.guardrail_judge_model}")
-        # Recent judge calls that failed (gateway judge_* details, GAP-1288).
-        details = self.health.guardrail.details if self.health else {}
-        judge_state = str(details.get("judge_state") or "")
-        if judge_state in ("failing", "degraded"):
-            failed = details.get("judge_failed_calls", 0)
-            total = details.get("judge_recent_calls", 0)
-            parts.append(f"judge {judge_state}: {failed}/{total} calls failed")
         return ", ".join(parts)
 
     def ai_discovery_detail(self) -> str:
@@ -1853,7 +1881,7 @@ class OverviewPanelModel:
             health_state, health_failure = retention_health_from_gateway(
                 {"details": self.health.telemetry.details} if self.health is not None else None
             )
-        retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+        retention = status.retention_label
         return ObservabilityStorageStatus(
             retention=retention,
             judge_capture="enabled" if status.judge_bodies_enabled else "disabled",
@@ -2212,86 +2240,6 @@ def active_connector_name(health: HealthSnapshot | None, mode: str) -> str:
     if mode.strip():
         return mode.strip()
     return ""
-
-
-def admission_action_overrides(
-    config: object | None,
-) -> tuple[tuple[str, str, str, str], ...]:
-    """Effective explicit admission actions that differ from built-in policy.
-
-    Per-type actions win over scanner-derived skill actions, which win over
-    admission.defaults.actions. Only effective differences are shown to the
-    Overview and status views.
-    """
-
-    admission = getattr(config, "admission", None)
-    if admission is None:
-        return ()
-    try:
-        from defenseclaw.enforce.admission import (  # noqa: PLC0415
-            _builtin_admission,
-            _compile_action_map,
-            _derived_scanner_gate,
-        )
-    except Exception:  # noqa: BLE001 - the override summary is purely informational.
-        return ()
-    defaults = _compile_action_map(getattr(getattr(admission, "defaults", None), "actions", None))
-    flat: list[tuple[str, str, str, str]] = []
-    for target_type in ("skill", "mcp", "plugin"):
-        own = _compile_action_map(getattr(getattr(admission, target_type, None), "actions", None))
-        derived = {}
-        if target_type == "skill":
-            scanner = getattr(getattr(config, "scanners", None), "skill_scanner", None)
-            derived = _derived_scanner_gate(
-                getattr(scanner, "fail_on_severity", ""), getattr(scanner, "review_queue_min", "")
-            )
-        builtin = _builtin_admission(target_type).actions
-        for severity in dict.fromkeys((*own, *defaults)):
-            if severity in own:
-                compiled = own[severity]
-            elif severity in derived:
-                continue
-            else:
-                compiled = defaults[severity]
-            if compiled == builtin.get(severity):
-                continue
-            action, allowed = compiled
-            for surface in ("install", "file", "runtime"):
-                flat.append((target_type, severity, surface, str(getattr(action, surface))))
-            if allowed:
-                flat.append((target_type, severity, "verdict", "allow"))
-    return tuple(flat)
-
-
-def format_scanner_overrides_summary(
-    overrides: tuple[tuple[str, str, str, str], ...],
-) -> str:
-    """One-line summary of active-policy scanner action overrides (N3).
-
-    ``overrides`` is the flattened ``(asset_type, severity, surface, action)``
-    view of :func:`admission_action_overrides`. Returns ``""`` when empty, so the Overview / ``defenseclaw status`` render nothing for the
-    common default config. Groups by scanner then severity, e.g.::
-
-        secrets: HIGH file=block, install=warn | pii: MEDIUM runtime=allow
-
-    Malformed entries (not 4 fields, or missing scanner/surface) are skipped so
-    a bad adapter payload degrades to a partial line rather than raising.
-    """
-    grouped: dict[str, dict[str, list[str]]] = {}
-    for entry in overrides:
-        if len(entry) != 4:
-            continue
-        scanner, severity, surface, action = (str(part).strip() for part in entry)
-        if not scanner or not surface:
-            continue
-        grouped.setdefault(scanner, {}).setdefault(severity.upper(), []).append(f"{surface}={action}")
-    parts: list[str] = []
-    for scanner, sevs in grouped.items():
-        sev_parts = [
-            f"{severity + ' ' if severity else ''}{', '.join(surfaces)}" for severity, surfaces in sevs.items()
-        ]
-        parts.append(f"{scanner}: {'; '.join(sev_parts)}")
-    return " | ".join(parts)
 
 
 def sort_ai_discovery_signals_for_overview(signals: tuple[AIUsageSignal, ...]) -> tuple[AIUsageSignal, ...]:

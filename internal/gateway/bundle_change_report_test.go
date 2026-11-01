@@ -368,7 +368,8 @@ func TestBundleReceiptReporterSaysWhichOfferOfAChangeIsItsFirst(t *testing.T) {
 	if err := os.WriteFile(file, []byte("not a folder"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if ids, read := changeSpoolIDs(filepath.Join(file, enterprisestatus.ChangeEventsDirName)); read || ids != nil {
+	if ids, read := changeSpoolIDs(filepath.Join(file, enterprisestatus.ChangeEventsDirName),
+		filepath.Join(file, enterprisestatus.PublicReceiptEventsDirName)); read || ids != nil {
 		t.Fatalf("spool under a file: ids %v, read %t; want it unread", ids, read)
 	}
 }

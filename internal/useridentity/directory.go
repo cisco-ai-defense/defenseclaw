@@ -19,6 +19,15 @@ const (
 	// session (the Kerberos credential cache, SSH_CONNECTION, the logon
 	// session). They are attribution only and never select a profile.
 	AssuranceClaimed Assurance = "claimed"
+	// AssuranceVerifiedByConnector marks the directory facts of a person a
+	// trusted connector (enterprise.identity.trusted_connectors) said it
+	// acts for: the gateway verified the connector's service account and
+	// resolved the person's facts itself, but did not see the person's own
+	// process. The facts select a guardrail profile and nothing else: a
+	// check that needs proof of the person's own process (the session-start
+	// gate, sandbox ownership, per-user secret paths, require-sandbox) never
+	// takes it as verified.
+	AssuranceVerifiedByConnector Assurance = "verified_by_connector"
 )
 
 // Directory names the directory that owns an account. It is the Go side of
@@ -166,6 +175,12 @@ type DirectoryFacts struct {
 	// or the absence of one, is what the guardian reported, not a fact still
 	// to come. Never emitted or stored.
 	GuardianRecord bool `json:"-"`
+	// UPNPending says the gateway's own answer proves the account local but
+	// could not show that it has no UPN to wait for (macOS: the local node's
+	// Platform SSO link listing failed). The account stays local for name
+	// matching, and a UPN or DOMAIN\name entry waits for the guardian's
+	// record. Never emitted or stored.
+	UPNPending bool `json:"-"`
 	// HolderUnproven says these facts do not show which account holds the
 	// uid (SourceProcessCredentials: the uid may be another account's too),
 	// so no users entry that names an account matches them for sure. Never

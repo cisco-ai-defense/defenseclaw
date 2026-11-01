@@ -15,7 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-func TestAgentHookTrustedActionToolNormalizesOpenCodeBashOnWindows(t *testing.T) {
+func TestAgentHookTrustedActionToolUsesOpenCodeV2Tools(t *testing.T) {
 	tests := []struct {
 		name      string
 		connector string
@@ -26,16 +26,30 @@ func TestAgentHookTrustedActionToolNormalizesOpenCodeBashOnWindows(t *testing.T)
 		{
 			name:      "OpenCode native Windows terminal",
 			connector: "opencode",
-			tool:      "bash",
+			tool:      "shell",
 			platform:  "windows",
 			want:      "shell",
 		},
 		{
 			name:      "OpenCode POSIX terminal",
 			connector: "opencode",
-			tool:      "bash",
+			tool:      "shell",
 			platform:  "linux",
-			want:      "bash",
+			want:      "shell",
+		},
+		{
+			name:      "OpenCode V2 patch",
+			connector: "opencode",
+			tool:      "patch",
+			platform:  "linux",
+			want:      "apply_patch",
+		},
+		{
+			name:      "Hermes patch keeps its native schema",
+			connector: "hermes",
+			tool:      "patch",
+			platform:  "linux",
+			want:      "patch",
 		},
 		{
 			name:      "other Windows connector",
@@ -135,7 +149,10 @@ func TestCursorWindowsShellPermissionChecks(t *testing.T) {
 		{"set content", `Set-Content -Path $HOME\.ssh\authorized_keys -Value marker`, true},
 		{"tee", `echo marker | tee -Append $HOME\.ssh\authorized_keys`, true},
 		{"home read", `Get-Content $HOME\.ssh\authorized_keys`, false},
-		{"native read", `type C:\Users\alice\.ssh\authorized_keys`, true},
+		// cmd type only reads: a plain read stays allowed in action (owner
+		// decision 2, GAP-2168); its append twin still blocks.
+		{"native read", `type C:\Users\alice\.ssh\authorized_keys`, false},
+		{"native read appended", `type marker.pub >> C:\Users\alice\.ssh\authorized_keys`, true},
 		{"cat read", `cat C:\Users\alice\.ssh\authorized_keys`, false},
 		{"other curl output", `curl.exe -o C:\Users\alice\notes.txt https://example.com`, false},
 		{"authorized curl output", `curl.exe -o C:\Users\alice\.ssh\authorized_keys https://example.com`, true},
@@ -209,7 +226,7 @@ func TestCursorWindowsShellPermissionChecks(t *testing.T) {
 	}
 }
 
-func TestOpenCodeWindowsBashToolSelectsPowerShellActionFacts(t *testing.T) {
+func TestOpenCodeWindowsShellToolSelectsPowerShellActionFacts(t *testing.T) {
 	const command = `Remove-Item -Force C:\ -Recurse`
 	args, err := json.Marshal(map[string]any{
 		"command": command,
@@ -218,7 +235,7 @@ func TestOpenCodeWindowsBashToolSelectsPowerShellActionFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	facts := actionfacts.Analyze(actionfacts.Input{
-		Tool: agentHookTrustedActionTool("opencode", "bash", "windows"),
+		Tool: agentHookTrustedActionTool("opencode", "shell", "windows"),
 		Args: args,
 	})
 	if facts.Parse.Dialect != actionfacts.DialectPowerShell {
@@ -244,7 +261,7 @@ func TestOpenCodeWindowsBashToolSelectsPowerShellActionFacts(t *testing.T) {
 	}
 }
 
-func TestOpenCodeWindowsBashToolKeepsProtectedSAMReadAdvisory(t *testing.T) {
+func TestOpenCodeWindowsShellToolKeepsProtectedSAMReadAdvisory(t *testing.T) {
 	const command = `Get-Content -LiteralPath 'C:\Windows\System32\config\SAM'`
 	args, err := json.Marshal(map[string]any{
 		"command": command,
@@ -253,7 +270,7 @@ func TestOpenCodeWindowsBashToolKeepsProtectedSAMReadAdvisory(t *testing.T) {
 		t.Fatal(err)
 	}
 	facts := actionfacts.Analyze(actionfacts.Input{
-		Tool: agentHookTrustedActionTool("opencode", "bash", "windows"),
+		Tool: agentHookTrustedActionTool("opencode", "shell", "windows"),
 		Args: args,
 	})
 	if facts.Parse.Dialect != actionfacts.DialectPowerShell {

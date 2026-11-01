@@ -105,10 +105,9 @@ func TestWindowsCodexMachineRequirementsCoverCompactSessionStart(t *testing.T) {
 		t.Fatalf("upgraded SessionStart groups = %v", groups)
 	}
 
-	// Removal takes the current group, and an older install's group that
-	// the recorded preimage holds. With no such record, that group around
-	// the current command is also what an administrator who cut compact
-	// from the matcher wrote, so it stays (loop round 5 review).
+	// Removal takes the current group and an older install's group around
+	// the current command, recorded or not: either runs the binary the
+	// uninstall deletes, and a kept one stranded it (GAP-0907).
 	for _, tc := range []struct {
 		name           string
 		file, baseline []byte
@@ -116,7 +115,7 @@ func TestWindowsCodexMachineRequirementsCoverCompactSessionStart(t *testing.T) {
 	}{
 		{"current", rendered, nil, 0},
 		{"legacy recorded as its own preimage", old, old, 0},
-		{"legacy with no record of it", old, nil, 1},
+		{"legacy with no record of it", old, nil, 0},
 	} {
 		cleaned, _, err := removeWindowsCodexRequirementsOwnedChanges(tc.file, tc.baseline, opts)
 		if err != nil {

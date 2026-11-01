@@ -44,6 +44,20 @@ def _panel_by_title(dashboard: dict, title: str) -> dict:
     raise AssertionError(f"missing panel {title!r}")
 
 
+_ROOT_FOR_POPOVER = Path(__file__).resolve().parents[2]
+
+
+def test_agent360_node_details_fit_the_popover():
+    # GAP-1391: the node details popover is as wide as its longest value; a
+    # 300-character note overflowed a 1280x800 screen. The counting rules
+    # are in the panel description.
+    import re
+
+    raw = (_ROOT_FOR_POPOVER / "bundles/local_observability_stack/grafana/dashboards/defenseclaw-agent-360.json").read_text()
+    notes = re.findall(r"detail__(?:count_meaning|correlation_note|content_note|lineage_provenance)=`([^`]*)`", raw)
+    assert notes and max(len(note) for note in notes) <= 60, max(notes, key=len)
+
+
 def test_agent360_has_dynamic_directory_and_required_drilldown_surfaces() -> None:
     dashboard = _dashboard(AGENT360)
     assert dashboard["uid"] == "defenseclaw-agent-360"
@@ -515,13 +529,13 @@ def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
     assert 'source=`agent:{{.graph_parent_id}}`' in spawn_edge
     assert 'target=`agent:{{.graph_child_id}}`' in spawn_edge
     assert "paired inverse orientations count once" in spawn_edge
-    assert "raw subagent parent fields never create this edge" in spawn_edge
+    assert "delegated_by as its inverse" in spawn_edge
     assert "body_defenseclaw_agent_parent_id" not in spawn_edge
     agent_nodes = targets_by_ref["nodesAgent"]
     assert agent_nodes.startswith("((topk by (id) (1,")
     assert 'defenseclaw_event_name=~`session_start|subagent_start`' in agent_nodes
     assert '((event_name="subagent_start") or (event_name="session_start"' in agent_nodes
-    assert "Canonical 24-hour session_start or subagent_start identity" in agent_nodes
+    assert "Identity from the 24h session_start or subagent_start" in agent_nodes
     assert "and on (id)" in agent_nodes
     assert "unless on (id)" in agent_nodes
     assert agent_nodes.count("topk by (id) (1,") == 2
@@ -572,7 +586,7 @@ def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
         assert "observation_source" in query
         assert "label_format observation_source=" in query
         assert "Source-deduplicated model requests" in query
-        assert "largest source total" in query
+        assert "largest source total" in query.lower()
 
     # Request records remain visible without a terminal counterpart. Totals are
     # request counts and do not claim the work is still pending.

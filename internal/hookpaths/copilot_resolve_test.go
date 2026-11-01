@@ -68,6 +68,7 @@ func TestResolveConnectorReadsTheGatewayProjection(t *testing.T) {
 		listed, truncated bool
 	}{
 		{"cli apply_patch text", "copilot", "", "preToolUse", map[string]any{"toolName": "apply_patch", "toolArgs": patch}, true, false},
+		{"native toolCalls apply_patch text", "copilot", "", "preToolUse", map[string]any{"toolCalls": []any{map[string]any{"id": "custom_call_native", "name": "apply_patch", "args": patch}}}, true, false},
 		{"cli apply_patch JSON string", "copilot", "", "preToolUse", map[string]any{"toolName": "apply_patch", "toolArgs": jsonText(patch)}, true, false},
 		{"native permissionRequest edit", "copilot", "", "permissionRequest", map[string]any{"hookName": "permissionRequest", "toolName": "edit", "toolInput": map[string]any{"file_path": target, "diff": nativeDiff}}, true, false},
 		{"native permissionRequest mismatched diff", "copilot", "", "permissionRequest", map[string]any{"hookName": "permissionRequest", "toolName": "edit", "toolInput": map[string]any{"file_path": target, "diff": strings.Replace(nativeDiff, "+++ b"+target, "+++ b"+filepath.Join(project, "other.txt"), 1)}}, false, true},

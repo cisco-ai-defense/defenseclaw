@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -37,7 +36,7 @@ func TestSandboxOnlyUncertaintyDoesNotRefuseObserveHookOrInspect(t *testing.T) {
 			t.Errorf("path %d refused: %+v", path, got)
 		}
 		if path == profilePathHook {
-			if resp, refused := api.refuseProfileHook(ctx, connector.HookProfile{}, "codex",
+			if resp, refused := api.refuseProfileHook(ctx, (&APIServer{scannerCfg: config.DefaultConfig()}).hookProfileForConnector("codex"), "codex",
 				agentHookRequest{ConnectorName: "codex", HookEventName: "pre_tool_use"}, nil, nil); refused {
 				t.Errorf("observe hook refused: %+v", resp)
 			}
@@ -79,7 +78,7 @@ func TestRequiredSandboxUncertaintyRefusesStandaloneHostHook(t *testing.T) {
 					t.Errorf("path %d selected %q without required_for proof: %+v", path, got.Name, got)
 				}
 				if path == profilePathHook {
-					resp, refused := api.refuseProfileHook(ctx, connector.HookProfile{}, "codex",
+					resp, refused := api.refuseProfileHook(ctx, (&APIServer{scannerCfg: config.DefaultConfig()}).hookProfileForConnector("codex"), "codex",
 						agentHookRequest{ConnectorName: "codex", HookEventName: "pre_tool_use"}, nil, nil)
 					if !refused || resp.Action != guardrailActionBlock {
 						t.Errorf("host hook did not refuse the unproven required floor: refused=%t response=%+v", refused, resp)

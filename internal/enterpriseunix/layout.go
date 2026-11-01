@@ -25,22 +25,30 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// Payload binaries. The ACP mediator is optional.
+// Payload binaries. The ACP mediator is optional, and so is the scanner
+// runtime launcher: the packages install it with the runtime tree it runs
+// (<install root>/scanner-runtime, GAP-1527); 1.0.2 and 1.0.3 payloads and
+// the payload archive have neither.
 const (
 	binGateway      = "defenseclaw-gateway"
 	binHook         = "defenseclaw-hook"
 	binSensorHelper = "defenseclaw-sensor-helper"
 	binACP          = "defenseclaw-acp"
+	binScanners     = "defenseclaw-scanners"
 )
 
 var requiredBinaries = []string{binGateway, binHook, binSensorHelper}
-var optionalBinaries = []string{binACP}
+var optionalBinaries = []string{binACP, binScanners}
 
 // compilerInstallPath is shared by the package and payload channels so the
 // gateway finds its compiler under its own installation prefix.
 func compilerInstallPath(l managed.StandaloneLayout) string {
 	return filepath.Join(l.InstallRoot, "lib", "defenseclaw", compilerFileName)
 }
+
+// bundleStoreDirMode keeps the bundle store unlistable for other accounts
+// while they can still read the public receipt by name (GAP-0082).
+const bundleStoreDirMode = enterprisebundle.StoreDirMode
 
 // desiredDir is a directory the lifecycle owns or must be able to rely on.
 type desiredDir struct {
@@ -89,7 +97,7 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 			{Path: l.VendorPolicyDir, Mode: 0o755, Owner: root},
 			{Path: openCodePluginDir(l), Mode: 0o755, Owner: root},
 			{Path: l.ConfigDir, Mode: 0o755, Owner: root},
-			{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName), Mode: 0o755, Owner: root},
+			{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName), Mode: bundleStoreDirMode, Owner: root},
 			{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName, bundleInboxDirName), Mode: 0o700, Owner: root},
 			{Path: l.PolicyDir, Mode: 0o750, Owner: rootService},
 			{Path: l.SecretsDir, Mode: secretsMode, Owner: secretsOwner},
@@ -110,7 +118,7 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 		{Path: l.VendorPolicyDir, Mode: 0o755, Owner: root},
 		{Path: openCodePluginDir(l), Mode: 0o755, Owner: root},
 		{Path: l.ConfigDir, Mode: 0o755, Owner: root},
-		{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName), Mode: 0o755, Owner: root},
+		{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName), Mode: bundleStoreDirMode, Owner: root},
 		{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName, bundleInboxDirName), Mode: 0o700, Owner: root},
 		{Path: l.PolicyDir, Mode: 0o750, Owner: rootService},
 		{Path: l.SecretsDir, Mode: secretsMode, Owner: secretsOwner},

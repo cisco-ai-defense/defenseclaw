@@ -17,10 +17,14 @@
 package actionfacts
 
 import (
+	"maps"
 	"path"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
 // Analyze derives a bounded, deterministic semantic projection. It never
@@ -130,7 +134,11 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	}
 
 	if command != "" {
-		if issue := validateCommandText(command); issue != "" {
+		validate := validateCommandText
+		if isApplyPatchTool(input.Tool) {
+			validate = validatePatchToolCommandText
+		}
+		if issue := validate(command); issue != "" {
 			if issue == IssueInputLimit {
 				base.markLimit(issue)
 			} else {
@@ -227,7 +235,10 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			// exact; the rewrite is kept only when nothing else is dynamic.
 			home, _ := normalizeActiveHome(input.ActiveHome)
 			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(command, home); ok {
-				if resolved := parse(rewrite.source); resolved.status == StatusComplete {
+				if resolved := parse(rewrite.source); resolved.status == StatusComplete ||
+					issuesNarrowed(resolved, parsed) || findRewriteKeepsOnlyEmbeddedPartial(resolved) ||
+					rewrite.homeGlobs && rewriteKeepsOnlyStaticGlobs(resolved) ||
+					rewrite.optionHomeValues && rewriteKeepsOnlyOperandGrammar(resolved) {
 					parsed = resolved
 					// A Windows drive home (GAP-0912) keeps its rewritten
 					// spelling: the POSIX parse cannot resolve a drive path,
@@ -244,10 +255,17 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		if parsed.status == StatusPartial &&
 			(dialect == DialectPowerShell || dialect == DialectCMD) {
 			// The same for $HOME, ~ and %USERPROFILE% under a Windows
-			// ActiveHome (GAP-0912).
+			// ActiveHome (GAP-0912). A program with no operand grammar
+			// stays partial the same way after the rewrite (type nul >
+			// %USERPROFILE%\f), so its static redirect targets keep
+			// their path facts, as for the POSIX home (GAP-2225, GAP-2408).
 			home, _ := normalizeActiveHome(input.ActiveHome)
 			if rewrite, ok := rewriteTrustedWindowsShellHome(command, home, dialect); ok {
-				if resolved := parse(rewrite); resolved.status == StatusComplete {
+				// As for a POSIX home, a rewrite that only narrows the issues
+				// is kept: a redirect to a home path in a command list the
+				// classifier reads only in part (type a.txt & type nul >
+				// %USERPROFILE%\f) keeps its exact target (GAP-2408).
+				if resolved := parse(rewrite); resolved.status == StatusComplete || issuesNarrowed(resolved, parsed) {
 					parsed = resolved
 				}
 			}
@@ -270,12 +288,14 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	}
 	finalizePOSIXNoExecPreviews(&base)
 	deduplicateFacts(&base)
-	facts := base.factsWithContext(
+	facts := base.factsWithWindowsShellCWD(
 		safeToolName(input.Tool),
 		safeScalar(cwd, maxScalarBytes),
 		activeHome,
+		input.MovedWindowsShellCWD,
 	)
 	respellTrustedPOSIXHomeTilde(&facts, homeRewrittenCommands, homeTildeOperands)
+	resolveTrustedDriveHomePaths(&facts)
 	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
 	facts.ActiveAgentFilesCaseInsensitive = cloneSlice(
 		activeAgentFilesCaseInsensitive,
@@ -283,6 +303,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	facts.ActiveAgentFilesCaseInsensitiveUncertain =
 		input.ActiveAgentFilesCaseInsensitiveUncertain
 	facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
+	facts.ActiveStateTreeNames = maps.Clone(input.ActiveStateTreeNames)
 	classifyCanonicalPasswordCrackerPotfileRead(&facts)
 	facts.SensitiveEgressArtifactWrites =
 		projectSensitiveEgressArtifactWrites(input)
@@ -703,6 +724,10 @@ type posixShellInvocation struct {
 	interactive  bool
 	recognized   bool
 	valid        bool
+	// startupInput: valid is false only because the shell also runs
+	// startup input (login, interactive or rc file) before the command
+	// string; the command string is still what it runs after them.
+	startupInput bool
 }
 
 func isolatedPOSIXCommand(out *parseOutput, command *CommandFact) bool {
@@ -1037,6 +1062,7 @@ func finishBashInvocation(
 	// order-valid --norc proves it disabled; POSIX mode substitutes ENV instead.
 	if login || startupFile || interactive && (!noRC || posixMode) {
 		invocation.valid = false
+		invocation.startupInput = true
 	}
 	return invocation
 }
@@ -1214,6 +1240,7 @@ func finishConservativePOSIXShellInvocation(
 	invocation.interactive = interactive
 	if interactive || login || explicitStartup {
 		invocation.valid = false
+		invocation.startupInput = true
 	}
 	return invocation
 }
@@ -2184,6 +2211,20 @@ func validScalar(value string, max int) bool {
 }
 
 func validateCommandText(value string) IssueCode {
+	if shellparse.TooDeep(value) {
+		// Past the reading bounds; a nesting this deep never reaches the
+		// recursive shell parsers (GAP-2537).
+		return IssueInputLimit
+	}
+	return validatePatchToolCommandText(value)
+}
+
+// validatePatchToolCommandText validates the command text of an apply_patch
+// call. That text is a patch envelope (file content), so the shell nesting
+// bound does not make it over-limit: a patch adding ordinary text with many
+// unclosed (, { or [ (ANSI colour escapes) is read by its targets, and every
+// shell reader still parses it through shellparse.Reader (GAP-2561).
+func validatePatchToolCommandText(value string) IssueCode {
 	if len(value) > maxCommandBytes {
 		return IssueInputLimit
 	}
@@ -2213,4 +2254,132 @@ func safeToolName(value string) string {
 		return ""
 	}
 	return value
+}
+
+// issuesNarrowed reports a partial parse of the trusted-home rewrite that
+// knows no less than the partial parse of the command as sent: it drops an
+// issue of the original and adds none, because the rewrite only made the
+// home words exact and what else stays unknown (a program with no operand
+// grammar, as in `make > ~/f`) stays partial the same way, so its static
+// redirect targets keep their path facts (GAP-2225). A dynamic home word can
+// also stop the original parse at a wrapper before its child (`env make >
+// ~/f`, `sudo make > ~/f`): once the rewrite drops that dynamic_word issue,
+// the child may add only the program-grammar issues that the absolute
+// spelling of the same command has too (GAP-2225 RV12-1).
+func issuesNarrowed(resolved, original parseOutput) bool {
+	if resolved.status != StatusPartial {
+		return false
+	}
+	dropped := false
+	for _, issue := range original.issues {
+		if !slices.Contains(resolved.issues, issue) {
+			dropped = true
+		}
+	}
+	dynamicDropped := slices.Contains(original.issues, IssueDynamicWord) &&
+		!slices.Contains(resolved.issues, IssueDynamicWord)
+	for _, issue := range resolved.issues {
+		if slices.Contains(original.issues, issue) {
+			continue
+		}
+		if dynamicDropped && (issue == IssueUnknownOperandGrammar || issue == IssueUnsupportedConstruct) {
+			continue
+		}
+		return false
+	}
+	return dropped
+}
+
+// rewriteKeepsOnlyStaticGlobs reports a home rewrite whose parse is left
+// partial only by static pathname patterns: `rm -rf $HOME/.defenseclaw/*`
+// then has the facts of `rm -rf <home>/.defenseclaw/*`, whose pattern the
+// owners read from StaticGlob, while the HOME spelling had no static
+// spelling at all (GAP-2047).
+func rewriteKeepsOnlyStaticGlobs(resolved parseOutput) bool {
+	if resolved.status != StatusPartial || len(resolved.commands) == 0 {
+		return false
+	}
+	// A pattern operand is a dynamic word, and the command reading it
+	// an unsupported construct, exactly as for the absolute spelling.
+	for _, issue := range resolved.issues {
+		if issue != IssueDynamicWord && issue != IssueUnsupportedConstruct {
+			return false
+		}
+	}
+	globs := 0
+	for _, command := range resolved.commands {
+		for _, argument := range command.Arguments {
+			if !argument.Expands {
+				continue
+			}
+			if argument.StaticGlob == "" {
+				return false
+			}
+			globs++
+		}
+	}
+	return globs != 0
+}
+
+// rewriteKeepsOnlyOperandGrammar reports a home rewrite of a long option's
+// attached $HOME value (`git --work-tree=$HOME/.defenseclaw clean -fdx`)
+// whose parse is left partial only because the program's operand grammar
+// is not modelled, with no dynamic or expanding word. The absolute
+// spelling parses the same way and keeps its argv, so the $HOME spelling
+// gets the same words (GAP-2047 row d); before, the value had no static
+// spelling and no state check could read it.
+func rewriteKeepsOnlyOperandGrammar(resolved parseOutput) bool {
+	if resolved.status != StatusPartial || len(resolved.commands) == 0 {
+		return false
+	}
+	for _, issue := range resolved.issues {
+		if issue != IssueUnknownOperandGrammar {
+			return false
+		}
+	}
+	for _, command := range resolved.commands {
+		for _, argument := range command.Arguments {
+			if argument.Expands {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// findRewriteKeepsOnlyEmbeddedPartial reports a home rewrite whose parse is
+// find commands, alone or piped into xargs, left partial only by the
+// command find or xargs runs (GAP-2122). The shell expands the starting
+// points before find runs, so they are exact even though that command is
+// not read, and the rewrite gives the "~" and $HOME spellings the facts of
+// the absolute spelling.
+func findRewriteKeepsOnlyEmbeddedPartial(resolved parseOutput) bool {
+	if resolved.status != StatusPartial || len(resolved.commands) == 0 {
+		return false
+	}
+	for _, issue := range resolved.issues {
+		if issue != IssueUnsupportedConstruct && issue != IssueUnknownOperandGrammar {
+			return false
+		}
+	}
+	finds := 0
+	for _, command := range resolved.commands {
+		if IsEmbeddedProgramCommand(command) {
+			// The program of a find or xargs, read on its own words and
+			// complete (GAP-2304).
+			continue
+		}
+		switch command.Program {
+		case "find":
+			finds++
+		case "xargs",
+			// pass-through stages between find and xargs and the
+			// wrappers of an xargs (pod check8)
+			"tee", "cat", "grep", "sort", "head", "tail",
+			"sudo", "doas", "env", "nice", "nohup", "command", "stdbuf", "ionice":
+		default:
+			return false
+		}
+	}
+	return finds != 0
 }

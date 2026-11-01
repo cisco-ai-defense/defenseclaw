@@ -27,7 +27,9 @@
 #      and the config and the deployment record stay the previous release's
 #   b. ensure --from-package upgrades to this package: verify passes, the
 #      result reports the applied policy, the version 9 config keeps its
-#      bytes, and the secrets and guardian ledger are unchanged; the lane
+#      bytes (a version 8 config, written for a previous release older than
+#      the first that reads version 9, is migrated and keeps its backup), and
+#      the secrets and guardian ledger are unchanged; the lane
 #      stores a protected credential on the previous release (enterprise
 #      secret set) first, so the secrets check compares real bytes, not an
 #      empty store
@@ -271,7 +273,7 @@ retry_busy() { # step-name verb
     [ "$kind" = pkg ] || return 0
     local deadline=$((SECONDS + 180))
     while [ "$(cat "$results/$1.rc")" = 75 ] && [ "$SECONDS" -lt "$deadline" ]; do
-        "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if any(e.get("code") == "lifecycle_busy" for e in r.get("errors", [])) else 1)' "$results/$1.json" || break
+        "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if any(e.get("code") == "lifecycle_busy" for e in r.get("errors", []) + r.get("warnings", [])) else 1)' "$results/$1.json" || break
         sleep 2
         lifecycle "$1" "$2"
     done
@@ -577,9 +579,48 @@ upgrade_secret_kept() {
             "$secrets_dir/$upgrade_secret_name"
 }
 
+# release_number <version>: x.y.z (a leading v and a -rc or +build suffix are
+# ignored) as one comparable integer; 0 when it is not three numbers.
+release_number() {
+    local v=${1#v}
+    v=${v%%[-+]*}
+    if [[ "$v" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        echo $((10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]}))
+    else
+        echo 0
+    fi
+}
+
+# The first release taken to read the version 9 administrator config this lane
+# writes. The 1.0.0 builds an earlier round tested rejected it with
+# config_version_unsupported (GAP-1424); every 1.x reads version 8, so a
+# previous release below this one is given that and migrates it on upgrade.
+config_v9_first_release=1.0.1
+
+# admin_config_version <release>: the config_version the administrator config
+# for that release carries: 8 for a release older than config_v9_first_release
+# (every 1.x reads 8 and migrates it), 9 for any other, including an unparsable
+# version and this build's own.
+admin_config_version() {
+    local number
+    number=$(release_number "$1")
+    if [ "$number" -gt 0 ] && [ "$number" -lt "$(release_number "$config_v9_first_release")" ]; then
+        echo 8
+    else
+        echo 9
+    fi
+}
+
 write_admin_config() {
+    local config_version=9 rule_pack='  rule_pack: default'
+    if [ -n "$upgrade_from" ]; then
+        config_version=$(admin_config_version "$previous_version")
+        # A version 8 config selects its pack by folder; leaving the key out
+        # takes the layout's default pack on every release.
+        [ "$config_version" != 8 ] || rule_pack="  # the layout's default rule pack"
+    fi
     cat >"$stage/config.yaml" <<EOF
-config_version: 9
+config_version: $config_version
 deployment_mode: managed_enterprise
 data_dir: $data_dir
 policy_dir: $vendor_policy_dir
@@ -591,7 +632,7 @@ gateway:
 guardrail:
   enabled: true
   mode: observe
-  rule_pack: default
+$rule_pack
   connectors:
     claudecode: {enabled: true}
     codex: {enabled: true}
@@ -635,12 +676,22 @@ if [ "$platform" = linux ]; then
     esac
     echo "expected policy-view warnings: ${kernel_views[*]:-none}"
 fi
+# The previous release reports what its version reports: 1.0.3 the kernel's
+# open policy-view routes on its config steps only; 1.0.4 those routes from
+# its package install on, and on its config steps the hook residual
+# (hook_process_fail_open) and a first install scan still running
+# (agent_install_scan_incomplete), as the new release's ensure does. So its
+# steps allow them; the new release's steps require the kernel views
+# (kernel_views).
+previous_views=(--allow-warning hook_process_fail_open --allow-warning agent_install_scan_incomplete)
+[ "$platform" != linux ] ||
+    previous_views+=(--allow-warning unprivileged_user_namespaces --allow-warning unprivileged_ptrace)
 echo "package: $package"
 echo "version: $version"
 
 # ---- upgrade lane: previous release ------------------------------------------
 upgrade_lane() {
-    local previous_config_sha previous_secrets_sha previous_ledger previous_generation recorded
+    local previous_config_sha previous_secrets_sha previous_ledger previous_generation recorded config_version generation_floor
     step "install the previous release's $kind ($previous_version)"
     install_rc=0
     install_package "$upgrade_from" || install_rc=$?
@@ -650,20 +701,26 @@ upgrade_lane() {
     # A bare install of a 1.x package enables no connector, like the fresh
     # install below; the next step applies the administrator config.
     "$python" "$checker" "$results/01-previous-install.json" --label previous-install --platform "$platform" \
-        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled
+        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled \
+        ${previous_views[@]+"${previous_views[@]}"}
 
     step "apply the administrator config on the previous release"
     write_admin_config
-    lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
+    config_version=$(sed -n 's/^config_version: //p' "$stage/config.yaml")
+    echo "administrator config for $previous_version: config_version $config_version"
+    # On macOS the previous package's config write fires the launchd path job
+    # (ensure --reason path) right after its install, as the install lane's
+    # ensure-config step finds: wait for it instead of failing lifecycle_busy.
+    lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane --lock-wait 2m
     check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
-        --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
+        "${policy_checks[@]}" ${previous_views[@]+"${previous_views[@]}"}
     cp "$stage/config.yaml" "$results/config-before.yaml"
     step "store a protected credential on the previous release"
     seed_upgrade_secret 02-previous-secret
     lifecycle 03-previous-verify verify
     retry_busy 03-previous-verify verify
     check "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
-        --allow-warning unprivileged_user_namespaces
+        ${previous_views[@]+"${previous_views[@]}"}
     lifecycle 04-previous-status status
     retry_busy 04-previous-status status
     previous_config_sha=$(sha256_of "$config")
@@ -688,10 +745,17 @@ upgrade_lane() {
     # it after it saved this result.
     held=()
     [ "$platform" != linux ] || held=(--held-service defenseclaw-enterprise-apply.path)
+    # The new release reports the restored previous install truthfully
+    # (GAP-1412): its hook residual (hook_process_fail_open), a previous
+    # release's connectors without a trusted policy-view digest
+    # (machine_policy_incomplete), its first install scan after the restart
+    # (agent_install_scan_incomplete, T2 run 40440985412); the host's own
+    # policy-view sysctls are required where the host has them (kernel_views).
     "$python" "$checker" "$results/05-upgrade-fault.json" --label upgrade-fault --platform "$platform" \
         --action ensure --expect-error lifecycle_test_fault --ready ${held[@]+"${held[@]}"} \
         --allow-warning lifecycle_test_fault --allow-warning rolled_back ${kernel_views[@]+"${kernel_views[@]}"} \
-        --allow-warning machine_policy_incomplete --allow-warning hook_process_fail_open
+        --allow-warning machine_policy_incomplete --allow-warning hook_process_fail_open \
+        --allow-warning agent_install_scan_incomplete
     services_running
     if [ "$platform" = linux ]; then
         systemctl is-active --quiet defenseclaw-enterprise-apply.path ||
@@ -704,13 +768,22 @@ upgrade_lane() {
 
     step "upgrade to $version (ensure --from-package)"
     lifecycle 06-upgrade ensure --from-package --reason ci-upgrade-lane
-    # The version 9 config keeps its bytes, so its generation does not drop.
+    # A version 9 config keeps its bytes, so its generation does not drop; a
+    # version 8 one is migrated, which applies a new config generation.
+    generation_floor=$((previous_generation - 1))
+    [ "$config_version" != 8 ] || generation_floor=$previous_generation
     check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready \
         --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
         --allow-warning agent_install_scan_incomplete "${policy_checks[@]}" ${kernel_views[@]+"${kernel_views[@]}"} \
-        --policy-applied --config-generation-above "$((previous_generation - 1))"
+        --policy-applied --config-generation-above "$generation_floor"
     sandbox_files_present
     launcher_offers_only_sandbox
+    if [ "$config_version" = 8 ]; then
+        [ -f "$config_dir/migration-v9.json" ] || die "the upgrade wrote no $config_dir/migration-v9.json"
+        [ -f "$config.v8.bak" ] || die "the upgrade kept no $config.v8.bak"
+        [ "$(sha256_of "$config.v8.bak")" = "$previous_config_sha" ] || die "$config.v8.bak is not the previous config"
+        cp "$config_dir/migration-v9.json" "$results/migration-v9.json"
+    fi
     cp "$config" "$results/config-upgraded.yaml"
     [ "$(tree_sha "$secrets_dir")" = "$previous_secrets_sha" ] || die "the upgrade changed the secrets under $secrets_dir"
     upgrade_secret_kept || die "the upgrade did not keep the bytes of the protected credential $upgrade_secret_name"

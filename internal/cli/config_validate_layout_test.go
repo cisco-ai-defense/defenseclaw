@@ -146,6 +146,29 @@ func TestConfigValidateDefaultsToTheManagedInstalledConfig(t *testing.T) {
 	}
 }
 
+// GAP-1625: a Windows standalone computer has no runtime descriptor here;
+// its registration marker makes validate with no file read the managed config.
+func TestConfigValidateDefaultsToTheManagedConfigOnAWindowsStandaloneComputer(t *testing.T) {
+	dir := t.TempDir()
+	layout := useConfigValidateLayout(t, dir, "linux", false)
+	if err := os.WriteFile(layout.ConfigPath, []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := managedHostWindowsStandalone
+	t.Cleanup(func() { managedHostWindowsStandalone = previous })
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	t.Setenv(managed.ConfigPathEnv, "")
+	t.Setenv("DEFENSECLAW_HOME", filepath.Join(dir, "per-user"))
+	out := &strings.Builder{}
+	configValidateCmd.SetOut(out)
+	if err := configValidateCmd.RunE(configValidateCmd, nil); err != nil {
+		t.Fatalf("config validate with no file on a Windows standalone computer: %v", err)
+	}
+	if !strings.Contains(out.String(), layout.ConfigPath+": valid") {
+		t.Fatalf("config validate output = %q, want %s validated", out.String(), layout.ConfigPath)
+	}
+}
+
 // GAP-0605: a path with no file is reported as not found, with the path and
 // the next step, not as a config that "could not be compiled safely"; the
 // JSON failure carries the same code.

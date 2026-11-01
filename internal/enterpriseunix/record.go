@@ -77,6 +77,12 @@ type Deployment struct {
 	// last transaction left in place in vendor machine policy; the runtime
 	// descriptor records exactly this set.
 	MachinePolicyConnectors []string `json:"machine_policy_connectors"`
+	// ConnectorActivatedAt dates, per machine-policy connector, the run that
+	// placed its hooks after the deployment was activated (a config change
+	// that enabled it); status names its agent sessions started before then
+	// (GAP-0018, as Windows does). Absent for connectors placed at the
+	// activation, which the activation time covers.
+	ConnectorActivatedAt map[string]string `json:"connector_activated_at,omitempty"`
 	// RulePacks are the rule packs the applied config resolved to, keyed by
 	// setting (validatedConfig.RulePacks).
 	RulePacks map[string]string `json:"rule_packs,omitempty"`
@@ -107,6 +113,12 @@ type Pending struct {
 	// the transaction when a later run finds it interrupted (GAP-0238). An
 	// intent written before the field existed rolls back with a restart.
 	Hot bool `json:"hot,omitempty"`
+	// ConfigFile is the administrator config the transaction was applying
+	// (the absolute --config path), so status names the command that
+	// finishes it; status named a generic --config <file> (GAP-0098). Empty
+	// for a run without --config and for an intent written before the
+	// field existed.
+	ConfigFile string `json:"config_file,omitempty"`
 }
 
 func (e *Env) deploymentPath() string {

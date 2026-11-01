@@ -1164,6 +1164,12 @@ $guardianFailureDiagnosticPreserved = & $module {
                 sid = 'S-1-5-21-1002'
                 ok = $false
                 pending = $true
+            },
+            [pscustomobject][ordered]@{
+                connector = 'codex'
+                sid = 'S-1-5-18'
+                ok = $false
+                error = 'codex keeps a native OTLP exporter'
             }
         )
     } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress -Depth 4
@@ -1182,6 +1188,15 @@ $guardianFailureDiagnosticPreserved = & $module {
         $diagnostic -match 'kiro@S-1-5-21-1002' -or
         $diagnostic -notmatch 'claudecode@S-1-5-21-1000.*1 target\(s\) of signed-out accounts are pending') {
         throw "guardian live verifier diagnostic was not safely preserved: $diagnostic"
+    }
+    # GAP-2290: a row's SID that resolves is named "DOMAIN\user (SID)", as
+    # the other Windows notices name it; one that does not stays the SID.
+    $systemAccount = [Security.Principal.SecurityIdentifier]::new('S-1-5-18').Translate(
+        [Security.Principal.NTAccount]).Value
+    if (-not $diagnostic.Contains("codex@$systemAccount (S-1-5-18): codex keeps a native OTLP exporter") -or
+        $diagnostic.Contains('codex@S-1-5-18') -or
+        $diagnostic.Contains('claudecode@S-1-5-21-1000 (')) {
+        throw "guardian live verifier diagnostic did not name the row account: $diagnostic"
     }
     return $true
 }

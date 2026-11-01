@@ -26,6 +26,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
 // shellHookSocketConnectorTemplates are the connector shell hooks a
@@ -93,6 +95,7 @@ type recordingHookSocketGateway struct {
 	authorization []string
 	paths         []string
 	bodies        []string
+	bridges       []string
 }
 
 func (g *recordingHookSocketGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +104,7 @@ func (g *recordingHookSocketGateway) ServeHTTP(w http.ResponseWriter, r *http.Re
 	g.authorization = append(g.authorization, r.Header.Get("Authorization"))
 	g.paths = append(g.paths, r.URL.Path)
 	g.bodies = append(g.bodies, string(body))
+	g.bridges = append(g.bridges, r.Header.Get(hookexec.HookShellBridgeHeader))
 	n := len(g.paths)
 	g.mu.Unlock()
 	if g.serve != nil && g.serve(n, w) {
@@ -196,12 +200,22 @@ func (f *hookSocketFixture) untrustSocketDir(t *testing.T) {
 // port.
 func (f *hookSocketFixture) requireOnlyTheTrustedRequest(t *testing.T, path string) {
 	t.Helper()
+	f.requireTrustedRequests(t, path, 1)
+}
+
+func (f *hookSocketFixture) requireTrustedRequests(t *testing.T, path string, count int) {
+	t.Helper()
 	paths, authorization, _ := f.gateway.recorded()
-	if len(paths) != 1 || paths[0] != path || authorization[0] != "" {
-		t.Fatalf("hook socket requests = %v (authorization %q), want one bearer-free request for %s", paths, authorization, path)
+	if len(paths) != count || len(authorization) != count {
+		t.Fatalf("hook socket requests = %v (authorization %q), want %d bearer-free requests", paths, authorization, count)
+	}
+	for i, actual := range paths {
+		if actual != path || authorization[i] != "" {
+			t.Fatalf("untrusted hook request %q (authorization %q)", actual, authorization[i])
+		}
 	}
 	if n := f.tcpConnections.Load(); n != 0 {
-		t.Fatalf("the standalone bridge connected to the TCP API port %d times", n)
+		t.Fatalf("standalone bridge connected to TCP %d times", n)
 	}
 }
 
@@ -495,4 +509,70 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 		t.Fatalf("stopped gateway: exit %d stdout=%q stderr=%q, want the gateway-stopped sentence", code, stdout, stderr)
 	}
 	f.requireOnlyTheTrustedRequest(t, "/api/v1/devin/hook")
+}
+
+// A managed standalone shell hook posts over the hook socket with no answer
+// watchdog and no delivery receipt. It says so, so that the gateway audits
+// the answer it sent instead of an unconfirmed verdict (GAP-2614: every
+// managed Linux Antigravity allow was audited unconfirmed). The TCP render
+// is unchanged.
+func TestManagedStandaloneShellHookMarksItsSocketPostAsAShellBridge(t *testing.T) {
+	curlPath, err := exec.LookPath("curl")
+	if err != nil {
+		t.Skip("curl is required to run shell hooks")
+	}
+	f := newHookSocketFixture(t, "dcbr", nil)
+	dataDir := filepath.Join(f.root, "home", ".defenseclaw")
+	hookDir := filepath.Join(dataDir, "hooks")
+	opts := SetupOpts{
+		DataDir:            dataDir,
+		APIAddr:            f.held.Addr().String(),
+		APIToken:           "connector-scoped-token-shared-by-every-user",
+		HookAPIToken:       "connector-scoped-token-shared-by-every-user",
+		HookAPITokenScoped: true,
+		ManagedEnterprise:  true,
+		HookFailMode:       "closed",
+		ManagedHookSocket:  f.socket,
+		ManagedServiceUID:  os.Getuid(),
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewAntigravityConnector()); err != nil {
+		t.Fatal(err)
+	}
+	hookPath := filepath.Join(hookDir, "antigravity-hook.sh")
+	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", hookPath, "PreToolUse")
+	cmd.Env = append(os.Environ(), "HOME="+filepath.Join(f.root, "home"))
+	cmd.Stdin = strings.NewReader(`{"conversationId":"c1","stepIdx":1,"toolCall":{"name":"run_command","args":{"CommandLine":"echo benign","Cwd":"/tmp"}}}`)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil || !strings.Contains(stdout.String(), "hook-socket") {
+		t.Fatalf("hook over the verified socket: err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	f.gateway.mu.Lock()
+	bridges := append([]string(nil), f.gateway.bridges...)
+	f.gateway.mu.Unlock()
+	if len(bridges) != 1 || bridges[0] != "shell" {
+		t.Fatalf("%s on the socket post = %q, want one post marked shell", hookexec.HookShellBridgeHeader, bridges)
+	}
+	for _, name := range shellHookSocketConnectorTemplates {
+		content, err := hookFS.ReadFile("hooks/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := templateData{APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: true, TokenFile: ".token-x", ScopedToken: true, ConnectorName: "x"}
+		tcp, err := renderTemplate(string(content), base)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		base.HookSocketTransportSH = shellHookSocketTransport("/run/defenseclaw-hook/hook.sock", 988, "/opt/defenseclaw/bin/defenseclaw-hook", "")
+		socket, err := renderTemplate(string(content), base)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if strings.Contains(tcp, hookexec.HookShellBridgeHeader) || strings.Count(socket, `-H "`+hookexec.HookShellBridgeHeader+`: shell"`) != 1 {
+			t.Fatalf("%s: the shell bridge mark must be on the socket post only", name)
+		}
+	}
 }
