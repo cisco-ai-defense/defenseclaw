@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // ConfirmedAccountJoinSignedAt returns the created_at of the confirmed
@@ -41,6 +44,56 @@ func (s *Store) ConfirmedAccountJoinSignedAt(nextGeneration int, nextNotAfter ti
 		return time.Time{}, false
 	}
 	return created, true
+}
+
+// AccountJoinCredentials are the tenant secrets a bundle config.yaml that
+// turns enterprise.account_join on uses: account-join-key, and
+// account-join-key-next while next_generation is set. The config names
+// them only by the SHA-256 of their value, so they are not among
+// ConfigCredentials; secret_refs binds each one to its value as an optional
+// reference (rel-1-0-6:GAP-0276): a device that does not store it yet
+// still applies the bundle and reports secret_missing, one that stores
+// another value refuses the bundle (secret_ref_mismatch), and secret set
+// refuses a value the confirmed bundle does not sign.
+func AccountJoinCredentials(raw []byte) ([]string, error) {
+	doc, err := parseConfigNode(raw)
+	if err != nil {
+		return nil, err
+	}
+	block := mappingChild(mappingChild(doc.Content[0], "enterprise"), "account_join")
+	mode := mappingChild(block, "mode")
+	if mode == nil || mode.Kind != yaml.ScalarNode || strings.TrimSpace(mode.Value) != config.AccountJoinOn {
+		return nil, nil
+	}
+	names := []string{accountjoin.SecretName}
+	if next := mappingChild(block, "next_generation"); next != nil && next.Kind == yaml.ScalarNode {
+		if n, err := strconv.Atoi(strings.TrimSpace(next.Value)); err == nil && n != 0 {
+			names = append(names, accountjoin.NextSecretName)
+		}
+	}
+	return names, nil
+}
+
+// checkAccountJoinSecretValues refuses signing a bundle whose account join
+// secrets are not the values its config names by digest, or not tenant
+// secrets at all. No value or digest is echoed.
+func checkAccountJoinSecretValues(join config.EnterpriseAccountJoinConfig, values map[string][]byte) error {
+	for _, slot := range []struct{ name, digest, key string }{
+		{accountjoin.SecretName, join.SecretSHA256, "secret_sha256"},
+		{accountjoin.NextSecretName, join.NextSecretSHA256, "next_secret_sha256"},
+	} {
+		value, ok := values[slot.name]
+		if !ok {
+			continue
+		}
+		if _, err := accountjoin.ParseSecret(value); err != nil {
+			return refuse(CodeConfigInvalid, "secret_refs", "the --secret-file value of %s is not a tenant secret (32 bytes, base64url)", slot.name)
+		}
+		if !accountjoin.ValueMatches(value, slot.digest) {
+			return refuse(CodeConfigInvalid, ConfigName, "enterprise.account_join.%s is not the SHA-256 of the --secret-file value of %s", slot.key, slot.name)
+		}
+	}
+	return nil
 }
 
 // accountJoinNext reads enterprise.account_join.next_generation and

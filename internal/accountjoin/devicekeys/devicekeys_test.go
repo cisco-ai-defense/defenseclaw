@@ -97,6 +97,29 @@ func (d *device) report() *accountjoin.Report {
 	})
 }
 
+// rel-1-0-6:GAP-0276: crash dumps are off before the first secret is read,
+// and nothing is changed while the feature is off.
+func TestCrashDumpsOffBeforeTheSecretIsRead(t *testing.T) {
+	var order []string
+	previous := keepSecretOutOfCrashDumps
+	keepSecretOutOfCrashDumps = func() { order = append(order, "dumps off") }
+	t.Cleanup(func() { keepSecretOutOfCrashDumps = previous })
+	d := newDevice(t)
+	read := func(name string) ([]byte, error) {
+		order = append(order, "read "+name)
+		return secretText(0x1f), nil
+	}
+	Report(Sources{Config: d.cfg, ReadSecret: read, StatePath: d.state, GOOS: "linux", Now: d.now})
+	if len(order) < 2 || order[0] != "dumps off" || order[1] != "read "+accountjoin.SecretName {
+		t.Fatalf("order %v: crash dumps must be off before the secret is read", order)
+	}
+	order = nil
+	Report(Sources{Config: config.EnterpriseAccountJoinConfig{}, ReadSecret: read, StatePath: d.state, GOOS: "linux", Now: d.now})
+	if len(order) != 0 {
+		t.Fatalf("feature off: %v, want nothing", order)
+	}
+}
+
 // rel-1-0-6:GAP-0277: next_not_after is bounded by the signing time of the
 // confirmed bundle that carries it. A device whose clock is
 // behind the signer (20 hours, inside the skew) keeps an overlap the

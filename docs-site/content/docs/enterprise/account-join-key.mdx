@@ -28,7 +28,7 @@ It is off unless you turn it on. It is not available under Secure Client. It nee
 
    A value that is not 32 bytes in base64url is refused with `secret_malformed`. Like the other protected credentials, it is readable by root or SYSTEM and the gateway service account. It is never printed or logged.
 
-3. Turn it on in `config.yaml`, with the SHA-256 of the stored value, and sign the bundle with `--min-product-version 1.0.7`:
+3. Turn it on in `config.yaml`, with the SHA-256 of the stored value, and sign the bundle with `--min-product-version 1.0.7` and `--secret-file account-join-key=<file holding the secret>`:
 
    ```yaml
    enterprise:
@@ -39,7 +39,7 @@ It is off unless you turn it on. It is not available under Secure Client. It nee
        secret_sha256: <hex digest only: printf '%s' "$SECRET" | sha256sum | cut -d' ' -f1>
    ```
 
-   A device whose stored secret has another digest reports no key for that generation (`secret_mismatch`).
+   The bundle binds the secret by a keyed digest (`secret_refs`, an optional reference), never the value. `bundle sign` refuses a value that is not the one `secret_sha256` names. A device that stores another value refuses the bundle (`secret_ref_mismatch`) and keeps the bundle it has, and `enterprise secret set` refuses a value the confirmed bundle does not sign. A device that has no `account-join-key` yet applies the bundle and reports `secret_missing`. A config installed without a bundle has no binding: a device whose stored secret has another digest then reports no key for that generation (`secret_mismatch`).
 
 ## What the device reports
 
@@ -57,7 +57,7 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise account-keys
   "reason_codes": ["no_directory_id"]}}
 ```
 
-- Keys are computed when the command runs. They are not stored, logged, exported to telemetry or shown to users. Send them only on your fleet service's channel; do not print them in MDM script output.
+- Keys are computed when the command runs. They are not stored, logged, exported to telemetry, written to bundle receipts or shown to users. The process that reads the secret turns off its own crash dumps first (no core file on Linux and macOS, not dumpable on Linux, no heap in a Windows Error Reporting report); a dump an administrator configures for every process is inside the trust boundary. Send them only on your fleet service's channel; do not print them in MDM script output.
 - `enterprise status --json` and `enterprise verify --json` (as root or an administrator) carry only a summary: `state`, `key_count` per generation, `accounts_without_key` and `reason_codes`. They never carry a key, so MDM logs of status hold none.
 - The accounts are the enrolled accounts the hook guardian resolved and saw in the last 30 days, at most 64 per device (the most recently seen).
 - A standard user gets no keys and no summary.
@@ -100,7 +100,7 @@ Test vectors, with the secret bytes `00 01 02 … 1f` and tenant `contoso-prod`:
 
 ## Rotate the secret
 
-1. Store the new secret as `account-join-key-next` and sign a config with `next_generation`, its `next_secret_sha256` and `next_not_after`, at most 30 days after you sign the bundle. `bundle sign` refuses a later one. The device measures the 30 days from the signing time of the confirmed bundle, not from its own clock, which it uses only for a config installed without a bundle:
+1. Store the new secret as `account-join-key-next` and sign a config with `next_generation`, its `next_secret_sha256` and `next_not_after` (with `--secret-file` for both secrets), at most 30 days after you sign the bundle. `bundle sign` refuses a later one. The device measures the 30 days from the signing time of the confirmed bundle, not from its own clock, which it uses only for a config installed without a bundle:
 
    ```yaml
    account_join:
@@ -114,7 +114,7 @@ Test vectors, with the secret bytes `00 01 02 … 1f` and tenant `contoso-prod`:
 
    The device reports keys for both generations until `next_not_after`, then only the current one (`next_generation_expired`).
 
-2. When every device reports generation 2, promote it: store the new secret as `account-join-key`, sign `generation: 2` with its `secret_sha256`, drop the `next_` keys, and remove `account-join-key-next`. Until the stored secret and the signed digest agree, the device reports no key for generation 2 (`secret_mismatch`), never a wrong one.
+2. When every device reports generation 2, promote it: sign `generation: 2` with its `secret_sha256` and `--secret-file account-join-key=<new secret>`, drop the `next_` keys, store the new secret as `account-join-key` with `enterprise secret set --name account-join-key --from-stdin --bundle <that bundle>` (the confirmed bundle still binds the old value), apply the bundle, and remove `account-join-key-next`. Until the stored secret and the signed digest agree, the device reports no key for generation 2, never a wrong one.
 
 Removing `account-join-key-next` without promotion changes nothing for generation 1. A device refuses a generation lower than one it already reported (`generation_rollback`). To allow it, remove `account-join-generation.json` from the lifecycle folder as root.
 

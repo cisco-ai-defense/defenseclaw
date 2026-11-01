@@ -55,6 +55,7 @@ func Report(s Sources) *accountjoin.Report {
 	if !s.Config.On() || s.SecureClient {
 		return nil
 	}
+	keepSecretOutOfCrashDumps()
 	now := s.Now
 	if now.IsZero() {
 		now = time.Now()

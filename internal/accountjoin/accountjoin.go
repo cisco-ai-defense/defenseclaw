@@ -384,6 +384,10 @@ func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest
 	return slots, reasons, highest
 }
 
+// ValueMatches reports whether a secret value (as stored, one line) has the
+// SHA-256 the config signs (lowercase hex).
+func ValueMatches(value []byte, want string) bool { return valueMatches(value, want) }
+
 // valueMatches reports whether the stored value (as stored, one line) has
 // the signed SHA-256 (lowercase hex).
 func valueMatches(value []byte, want string) bool {
