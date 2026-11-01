@@ -222,7 +222,7 @@ _dc_vmem_soft_limit() {
   done < /proc/self/limits
   case "$soft" in
     unlimited) _DC_HOOK_NATIVE_VMEM_LIMIT=unlimited ;;
-    '' | *[!0-9]*) return 1 ;;
+    '' | *[!0-9]* | ???????????????????*) return 1 ;;
     *) _DC_HOOK_NATIVE_VMEM_LIMIT=$((soft / 1024)) ;;
   esac
 }
@@ -255,6 +255,13 @@ defenseclaw_harden_env() {
   # same name, which would copy the value into the environment of every child
   # process (curl, jq, the cold-started gateway), so drop inherited ones first.
   unset -v API_TOKEN PAYLOAD CONTENT TOOL_INPUT TOOL_OUTPUT INSPECT_BODY RESPONSE RESULT OUTPUT
+  # The values the in-shell readers keep (issue #1130), which lived in
+  # subshells before: an inherited exported name would hand them to every
+  # child process.
+  unset -v _DC_SESSION_FACTS _DC_SESSION_FACTS_FULL _DC_CCACHE_CHANGED _DC_CODEX_FIELDS _DC_CODEX_FIELDS_READ _DC_CODEX_ACTION
+  # echo prints the gateway's answer as it is: an inherited BASHOPTS with
+  # xpg_echo would turn the escapes in its JSON strings into bytes.
+  shopt -u xpg_echo 2>/dev/null || true
   # The stat spelling is learned per process, never taken from the caller.
   unset -v _DC_STAT_OUT _DC_STAT_DIALECT
 
@@ -930,25 +937,9 @@ defenseclaw_json_string_field() {
   # awk reads the answer from a here-string when bash keeps it in a pipe
   # (_dc_herestring_in_memory): no process writes it (issue #1130). The
   # newline the here-string adds is the one awk gives the last line anyway.
-  status=0
-  if _dc_herestring_in_memory "$json"; then
-    extracted="$(exec awk -v wanted="$field" "$_DC_JSON_STRING_FIELD_AWK" <<<"$json")" || status=$?
-  else
-    extracted="$(printf '%s' "$json" | awk -v wanted="$field" "$_DC_JSON_STRING_FIELD_AWK")" || status=$?
-  fi
-  if [ "$status" -eq 0 ]; then
-    # A caller that only validates the answer reads no value: no sed for it
-    # (defenseclaw_json_answer_valid, issue #1130 / GAP-0267).
-    [ "${3:-}" = --check ] && return 0
-    printf '%s' "$extracted" | sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'
-    return 0
-  fi
-  return "$status"
-}
-
-# The strict JSON reader of defenseclaw_json_string_field (awk): one object,
-# no repeated key, FIELD a top-level string.
-_DC_JSON_STRING_FIELD_AWK='    { text = text $0 "\n" }
+  # The program is a local: a global would carry the agent's value, or be
+  # unset by the sandbox scrub after this file is sourced.
+  local program='    { text = text $0 "\n" }
     function ws() {
       while (p <= n && substr(text,p,1) ~ /[[:space:]]/) p++
     }
@@ -1055,6 +1046,22 @@ _DC_JSON_STRING_FIELD_AWK='    { text = text $0 "\n" }
       exit 1
     }
 '
+  status=0
+  if _dc_herestring_in_memory "$json"; then
+    extracted="$(exec awk -v wanted="$field" "$program" <<<"$json")" || status=$?
+  else
+    extracted="$(printf '%s' "$json" | awk -v wanted="$field" "$program")" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    # A caller that only validates the answer reads no value: no sed for it
+    # (defenseclaw_json_answer_valid, issue #1130 / GAP-0267).
+    [ "${3:-}" = --check ] && return 0
+    printf '%s' "$extracted" | sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'
+    return 0
+  fi
+  return "$status"
+}
+
 
 # defenseclaw_json_answer_valid JSON FIELD returns 0 when JSON is one valid
 # object with exactly one top-level string FIELD: the check of
@@ -1132,8 +1139,8 @@ _dc_herestring_in_memory() {
 # here-string keeps in memory, jq reads it from the here-string and is the
 # substitution's only process (exec, issue #1130): VALUE and the newline echo
 # writes, or VALUE and a newline jq reads as the whitespace it is. Only for
-# JSON input (no -R). A line VALUE that echo would take for options, and
-# echo with xpg_echo set, keep echo.
+# JSON input (no -R). A line VALUE that echo would take for options keeps
+# echo (defenseclaw_harden_env turns xpg_echo off).
 _dc_jq_into() {
   local _dc_jqi_var="${1:-}" _dc_jqi_mode="${2:-}" _dc_jqi_value="${3-}" _dc_jqi_out="" _dc_jqi_status=0 _dc_jqi_fast=1
   case "$_dc_jqi_var" in
@@ -1142,7 +1149,6 @@ _dc_jq_into() {
   shift 3 || return 1
   if [ "$_dc_jqi_mode" = line ]; then
     case "$_dc_jqi_value" in -*) _dc_jqi_fast=0 ;; esac
-    case ":${BASHOPTS:-}:" in *:xpg_echo:*) _dc_jqi_fast=0 ;; esac
   fi
   if [ "$_dc_jqi_fast" = 1 ] && command -v jq >/dev/null 2>&1 && _dc_herestring_in_memory "$_dc_jqi_value"; then
     _dc_jqi_out="$(exec jq "$@" <<<"$_dc_jqi_value")" || _dc_jqi_status=$?
@@ -2704,20 +2710,20 @@ defenseclaw_failed_stop_event() {
 # holds anything but a string, as the native runner's resolveHookEvent does
 # (it decodes both event fields as strings): jq's `// empty` would turn a
 # false value into an absent field.
-_DC_HOOK_EVENT_FIELD_JQ='
+_dc_hook_event_field() {
+  # The jq program is a local (see defenseclaw_json_string_field).
+  local payload="${1:-}" field="${2:-}" program='
       if length != 1 or (.[0] | type) != "object" then error("not one JSON object") else .[0][$f] end
       | if . == null then empty elif type == "string" then . else error("not a string") end'
-_dc_hook_event_field() {
-  local payload="${1:-}" field="${2:-}"
   case "$field" in
     hook_event_name|event|session_id|sessionID|sessionId|thread_id|source_event_id|tool_call_id|tool_use_id|callID) ;;
     *) return 1 ;;
   esac
   if command -v jq >/dev/null 2>&1; then
     if _dc_herestring_in_memory "$payload"; then
-      jq -rs --arg f "$field" "$_DC_HOOK_EVENT_FIELD_JQ" <<<"$payload" 2>/dev/null
+      jq -rs --arg f "$field" "$program" <<<"$payload" 2>/dev/null
     else
-      printf '%s' "$payload" | jq -rs --arg f "$field" "$_DC_HOOK_EVENT_FIELD_JQ" 2>/dev/null
+      printf '%s' "$payload" | jq -rs --arg f "$field" "$program" 2>/dev/null
     fi
     return
   fi
@@ -3153,8 +3159,10 @@ defenseclaw_read_stdin_into() {
   if [ "${#_dc_rsi_body}" -gt 921600 ]; then
     # Over the per-user transport's cap (_dc_stdin_over_transport, which
     # returns at once for a smaller body).
-    printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_over_transport "$_dc_rsi_body" "$_dc_rsi_outcome" && exit 3; printf '%s' "$_dc_rsi_body")" ||
+    local _dc_rsi_out=""
+    _dc_rsi_out="$(_dc_stdin_over_transport "$_dc_rsi_body" "$_dc_rsi_outcome" && exit 3; printf '%s' "$_dc_rsi_body")" ||
       _dc_rsi_status=$?
+    printf -v "$_dc_rsi_var" '%s' "$_dc_rsi_out"
     return "$_dc_rsi_status"
   fi
   case "$_dc_rsi_body" in
@@ -3680,11 +3688,14 @@ defenseclaw_tool_gate_max_time() {
 # hook_event_name key do not change the bound. A payload whose event cannot
 # be read keeps DEFAULT.
 defenseclaw_payload_tool_gate_max_time() {
-  local event=""
+  # _dc_hook_event_field's jq program, a local for the same reason.
+  local event="" program='
+      if length != 1 or (.[0] | type) != "object" then error("not one JSON object") else .[0][$f] end
+      | if . == null then empty elif type == "string" then . else error("not a string") end'
   if command -v jq >/dev/null 2>&1; then
     # _dc_hook_event_field's jq branch, read into the variable by one
     # process (_dc_jq_into, issue #1130).
-    _dc_jq_into event text "${1:-}" -rs --arg f hook_event_name "$_DC_HOOK_EVENT_FIELD_JQ" 2>/dev/null || event=""
+    _dc_jq_into event text "${1:-}" -rs --arg f hook_event_name "$program" 2>/dev/null || event=""
   else
     event="$(_dc_hook_event_field "$1" hook_event_name 2>/dev/null)" || event=""
   fi

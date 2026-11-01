@@ -662,6 +662,19 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		return obs, err
 	}
 	script := filepath.Join(hookDir, c.hook.script)
+	if dir := os.Getenv("DC_HOOK_GOLDEN_SCRIPTS"); dir != "" {
+		// The rendered hooks of each mode, for bash -n and shellcheck.
+		target := filepath.Join(dir, c.mode.name)
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return obs, err
+		}
+		names, _ := filepath.Glob(filepath.Join(hookDir, "*.sh"))
+		for _, name := range names {
+			if body, err := os.ReadFile(name); err == nil {
+				_ = os.WriteFile(filepath.Join(target, filepath.Base(name)), body, 0o644)
+			}
+		}
+	}
 	if c.mode.managed {
 		curl, err := exec.LookPath("curl")
 		if err != nil {
