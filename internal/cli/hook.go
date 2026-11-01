@@ -66,6 +66,7 @@ func newHookCmd() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer RecoverHookPanic()
 			if enterpriseManaged {
 				// Keep managed diagnostics off the agent-visible streams when
 				// the hook runs through this binary instead of

@@ -18,18 +18,46 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/cli"
 )
 
 const preMainHelperEnv = "DEFENSECLAW_HOOK_PREMAIN_HELPER"
 
-// TestPreMainHelper is the child process of TestHookBinaryInitWritesNothingToStderr.
+// TestPreMainHelper is the child process of TestHookBinaryInitWritesNothingToStderr
+// and, in panic mode, of TestRecoverHookPanicReplacesStackDump.
 func TestPreMainHelper(t *testing.T) {
-	if os.Getenv(preMainHelperEnv) != "1" {
+	switch os.Getenv(preMainHelperEnv) {
+	case "1":
+	case "panic":
+		defer cli.RecoverHookPanic()
+		panic("hook-panic-marker")
+	default:
 		t.Skip("helper process only")
+	}
+}
+
+// A recovered hook panic exits 2 with one line instead of Go's stack dump.
+func TestRecoverHookPanicReplacesStackDump(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPreMainHelper$")
+	cmd.Env = append(os.Environ(), preMainHelperEnv+"=panic")
+	var stderr bytes.Buffer
+	cmd.Stdout = &bytes.Buffer{}
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("helper exit = %v, want 2 (stderr %q)", err, stderr.String())
+	}
+	if got := stderr.String(); strings.Contains(got, "goroutine") || strings.Count(got, "\n") != 1 ||
+		!strings.Contains(got, "hook-panic-marker") {
+		t.Fatalf("stderr = %q, want one internal-error line", got)
 	}
 }
 

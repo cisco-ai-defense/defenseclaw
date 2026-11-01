@@ -35,6 +35,9 @@ var (
 )
 
 func main() {
+	// A panic anywhere in the hook path becomes the hook's failure decision
+	// instead of a stack dump on the agent-visible stderr.
+	defer cli.RecoverHookPanic()
 	// Identity inspection must not depend on mutable per-user hook state. Setup
 	// invokes this exact mode before signing and after installation so archived
 	// hook bytes are bound to the payload manifest's source commit.

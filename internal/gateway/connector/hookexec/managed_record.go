@@ -99,7 +99,8 @@ func InstallManagedHookDiagnosticSinks() {
 
 // managedHookBoundaryReason reports the managed failures that are integrity
 // findings: tampered or missing runtime state, an identified foreign
-// listener, a refused credential and a payload over the cap.
+// listener, a refused credential, a payload over the cap and a hook that
+// panicked.
 func managedHookBoundaryReason(reason string) bool {
 	switch reason {
 	case managedRuntimeStateInvalidReason,
@@ -109,6 +110,7 @@ func managedHookBoundaryReason(reason string) bool {
 		managedHookTokenUnreadableReason,
 		managedHookTokenEmptyReason,
 		managedHookOversizedReason,
+		managedHookInternalErrorReason,
 		managedGatewayPortHeldReason,
 		managedGatewayPeerUnverifiedReason:
 		return true
