@@ -199,6 +199,12 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 		}
 		return true
 	}
+	// Review r5 mutation MW1: an over-budget call whose naming statements
+	// only read sends the incomplete marker, not a description of an empty
+	// reduced call.
+	if got := header(gap0568Assignments(200) + strings.Repeat("; cat ~/.defenseclaw/config.yaml 2>/dev/null", 130)); !incomplete(got) {
+		t.Errorf("read-only over-budget call: header %v, want only the incomplete marker and cwd", got)
+	}
 	if got := header(gap0568Assignments(129)); !incomplete(got) {
 		t.Errorf("129 assignments: header %v, want only the incomplete marker and cwd", got)
 	}
@@ -315,6 +321,29 @@ func TestClientStateStatementsAreBounded(t *testing.T) {
 		if stateStatementReadOnly(write, "/home/u") {
 			t.Errorf("%q: proven read-only", write)
 		}
+	}
+	// Review r5 mutation MP: a directory change is kept before the reads
+	// that fill the bound, so the relative write it places stays placed.
+	stateReads := make([]string, StateNamingStatementsMax-1)
+	for i := range stateReads {
+		stateReads[i] = "cat ~/.defenseclaw/config.yaml 2>/dev/null"
+	}
+	placed, overflow, _ := StateNamingStatements(gap0568Assignments(200)+"; "+strings.Join(stateReads, "; ")+"; cd ~/.defenseclaw; printf c >> ../.defenseclaw/config.yaml", "/home/u")
+	if overflow || !strings.Contains(placed, "cd ~/.defenseclaw; printf c >> ../.defenseclaw/config.yaml") {
+		t.Errorf("cd after 127 reads: overflow %t, reduced ends %q; want the cd kept with the write", overflow, placed[max(0, len(placed)-60):])
+	}
+	// rel-1-0-6:GAP-0414: a kept call of a function the call defines is not
+	// reducible.
+	for _, call := range []string{
+		gap0568Assignments(200) + "; " + strings.Join(stateReads, "; ") + `; f() { printf c >> "$1"; }; f ~/.defenseclaw/config.yaml`,
+		gap0568Assignments(200) + `; function f { printf c >> "$1"; }; f ~/.defenseclaw/config.yaml`,
+	} {
+		if _, overflow, ok := StateNamingStatements(call, "/home/u"); !ok || !overflow {
+			t.Errorf("%.60q...: ok %t overflow %t, want an overflow (the definition holds the write)", call[len(call)-60:], ok, overflow)
+		}
+	}
+	if _, overflow, _ := StateNamingStatements(gap0568Assignments(200)+`; f() { echo hi; }; f; printf c >> ~/.defenseclaw/config.yaml`, "/home/u"); overflow {
+		t.Error("a defined function the kept statements do not call made an overflow")
 	}
 	state = "printf c >> ~/.defense''claw/config.yaml"
 	if reduced, overflow, _ := StateNamingStatements(gap0568Assignments(200)+"; "+state, "/home/u"); reduced != state || overflow {

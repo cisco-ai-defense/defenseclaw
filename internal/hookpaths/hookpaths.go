@@ -5208,6 +5208,21 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 	if len(first) > StateNamingStatementsMax {
 		first, overflow = first[:StateNamingStatementsMax], true
 	}
+	// A kept statement that calls a function the call defines does its
+	// work in a definition the reduced reading may not keep (the body need
+	// not name the state: f() { printf c >> "$1"; }; f <state>), so the
+	// call is not reducible: it is reported as an overflow
+	// (rel-1-0-6:GAP-0414).
+	if !overflow {
+		if defined := shellFunctionNames(command); len(defined) > 0 {
+			for _, index := range first {
+				if fields := strings.Fields(texts[index]); len(fields) > 0 && defined[fields[0]] {
+					overflow = true
+					break
+				}
+			}
+		}
+	}
 	keep := first
 	if room := StateNamingStatementsMax - len(first); room > 0 {
 		keep = append(keep, reads[:min(room, len(reads))]...)
@@ -5218,6 +5233,29 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 		kept[i] = texts[index]
 	}
 	return strings.Join(kept, "; "), overflow, true
+}
+
+// shellFunctionNames returns the names of the functions a POSIX command
+// defines, or nil when it defines none (or does not parse).
+func shellFunctionNames(command string) map[string]bool {
+	if !strings.Contains(command, "()") && !strings.Contains(command, "function") {
+		return nil
+	}
+	file, ok := parseShell(command)
+	if !ok {
+		return nil
+	}
+	var names map[string]bool
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, isDecl := node.(*syntax.FuncDecl); isDecl && decl.Name != nil {
+			if names == nil {
+				names = map[string]bool{}
+			}
+			names[decl.Name.Value] = true
+		}
+		return true
+	})
+	return names
 }
 
 // StateNamingReading is StateNamingStatements for a call read in its own

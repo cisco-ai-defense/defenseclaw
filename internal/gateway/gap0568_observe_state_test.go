@@ -103,7 +103,11 @@ func TestGAP0568ObserveOverBudgetStateWriteBlocks(t *testing.T) {
 	// managedHolds rows: past the reduced reading's bound with statements
 	// that may write, the managed gateway holds the call; per-user reads
 	// the call itself and only alerts (review r4 mutation MN5).
-	managedHolds := map[string]bool{"130 naming writes to a project file": true}
+	managedHolds := map[string]bool{"130 naming writes to a project file": true,
+		// rel-1-0-6:GAP-0414: the write is in a function definition the
+		// reduced reading does not keep; per-user the gateway reads the
+		// call itself and, as under the budget, cannot prove it.
+		"function writer after 130 reads": true}
 	ovf := gap0568Assignments(200) + "; " + strings.Join(decoys, "; ") + "; "
 	reads := make([]string, 130)
 	writes := make([]string, 130)
@@ -153,6 +157,9 @@ func TestGAP0568ObserveOverBudgetStateWriteBlocks(t *testing.T) {
 		{"130 defenseclaw status with 2>&1", gap0568Assignments(200) + "; " + strings.Join(statuses, "; "), false},
 		{"130 greps with 2>/dev/null", gap0568Assignments(200) + "; " + strings.Join(greps, "; "), false},
 		{"130 naming writes to a project file", gap0568Assignments(200) + "; " + strings.Join(writes, "; "), false},
+		{"cd then relative write after 130 reads", gap0568Assignments(200) + "; " + strings.Join(reads, "; ") + "; cd ~/.defenseclaw; printf c >> config.yaml", true},
+		{"cd then relative rm after 130 reads", gap0568Assignments(200) + "; cd ~/.defenseclaw; " + strings.Join(reads, "; ") + "; rm -f config.yaml", true},
+		{"function writer after 130 reads", gap0568Assignments(200) + "; " + strings.Join(reads, "; ") + `; f() { printf c >> "$1"; }; f ` + state, false},
 		{"benign 200", gap0568Assignments(200), false},
 		{"keys write after 200", gap0568Assignments(200) + "; echo k >> " + keys, false},
 	}
