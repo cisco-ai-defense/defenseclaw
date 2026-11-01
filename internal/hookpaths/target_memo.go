@@ -41,8 +41,10 @@ type TargetMemo struct {
 	keys  map[string][]string
 	files map[string]protectedFiles
 	// work counts the path components the memo walked on the file system
-	// and the candidate checks it computed (Work).
-	work int
+	// and the candidate checks it computed (Work); candidates counts the
+	// Windows candidate checks among them (WorkParts).
+	work       int
+	candidates int
 }
 
 // maxTargetMemoEntries bounds a memo: past it, answers are computed and not
@@ -104,12 +106,33 @@ func (m *TargetMemo) Work() int {
 	return m.work
 }
 
+// WorkParts splits Work into the path components walked and the Windows
+// candidate checks computed. Each is linear in the statements; a Windows
+// gateway also reads every word as a Windows candidate, which a POSIX host
+// never does, so the two are bounded apart (rel-1-0-2:GAP-0568 on the
+// Windows x64 CI suite).
+func (m *TargetMemo) WorkParts() (walked, candidates int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.work - m.candidates, m.candidates
+}
+
 func (m *TargetMemo) noteWork() {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
 	m.work++
+	m.mu.Unlock()
+}
+
+func (m *TargetMemo) noteCandidateWork() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.work++
+	m.candidates++
 	m.mu.Unlock()
 }
 
