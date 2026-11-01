@@ -529,10 +529,15 @@ func validateWindowsCursorManagedArtifacts(
 	artifacts windowsCursorManagedArtifacts,
 ) (windowsCursorManagedArtifacts, error) {
 	artifacts, err := validateWindowsCursorManagedPublicArtifacts(artifacts)
-	if err != nil {
+	var hooksDrift error
+	if windowsCursorManagedHooksDrifted(err) {
+		// Validate the private receipt as for an active policy so that a
+		// repair is only offered over otherwise intact ownership metadata.
+		hooksDrift = err
+	} else if err != nil {
 		return artifacts, err
 	}
-	if !artifacts.active {
+	if !artifacts.active && hooksDrift == nil {
 		if artifacts.receipt.existed {
 			return artifacts, errors.New("enterprise hooks: unowned Cursor rollback receipt already exists")
 		}
@@ -585,6 +590,9 @@ func validateWindowsCursorManagedArtifacts(
 		return artifacts, errors.New("enterprise hooks: absent Cursor config has unexpected original bytes")
 	}
 	artifacts.parsedReceipt = receipt
+	if hooksDrift != nil {
+		return artifacts, hooksDrift
+	}
 	return artifacts, nil
 }
 
@@ -638,20 +646,121 @@ func validateWindowsCursorManagedPublicArtifacts(
 		artifacts.active = false
 		return artifacts, nil
 	}
-	if !artifacts.hooks.existed || !artifacts.adapter.existed {
+	if !artifacts.adapter.existed {
 		return artifacts, errors.New("enterprise hooks: Cursor managed ownership metadata is incomplete")
 	}
-	if err := windowsManagedPolicyFileTrustCheck(artifacts.hooks.path); err != nil {
-		return artifacts, fmt.Errorf("enterprise hooks: untrusted Cursor enterprise artifact %s: %w", artifacts.hooks.path, err)
+	if artifacts.hooks.existed {
+		if err := windowsManagedPolicyFileTrustCheck(artifacts.hooks.path); err != nil {
+			return artifacts, fmt.Errorf("enterprise hooks: untrusted Cursor enterprise artifact %s: %w", artifacts.hooks.path, err)
+		}
 	}
 	artifacts, err := validateWindowsCursorManagedStateIdentity(artifacts)
 	if err != nil {
 		return artifacts, err
 	}
+	// The ownership state, adapter, and identity are intact here, so a
+	// missing hooks.json or missing/altered DefenseClaw entries are content
+	// drift in an agent-shared file. Report it as repairable; callers that
+	// hold the transaction lock re-merge the entries.
+	if !artifacts.hooks.existed {
+		return artifacts, &windowsCursorManagedHooksDriftError{
+			cause: errors.New("Cursor enterprise hooks.json is missing"),
+		}
+	}
 	if err := connector.VerifyWindowsCursorEnterpriseHooksForMigration(artifacts.hooks.data, artifacts.adapter.path, cursorManagedPolicyFailMode(artifacts.parsed)); err != nil {
-		return artifacts, fmt.Errorf("enterprise hooks: verify Cursor enterprise hooks: %w", err)
+		return artifacts, &windowsCursorManagedHooksDriftError{cause: err}
 	}
 	artifacts.active = true
+	return artifacts, nil
+}
+
+// windowsCursorManagedHooksDriftError reports that the protected Cursor
+// ownership state, adapter, and identity validate but hooks.json is missing or
+// no longer carries exactly the DefenseClaw entries the state requires.
+type windowsCursorManagedHooksDriftError struct {
+	cause error
+}
+
+func (e *windowsCursorManagedHooksDriftError) Error() string {
+	return "enterprise hooks: verify Cursor enterprise hooks: " + e.cause.Error()
+}
+
+func (e *windowsCursorManagedHooksDriftError) Unwrap() error {
+	return e.cause
+}
+
+func windowsCursorManagedHooksDrifted(err error) bool {
+	var drift *windowsCursorManagedHooksDriftError
+	return errors.As(err, &drift)
+}
+
+// windowsCursorManagedHooksRepairWriter is replaced by tests that cannot
+// stamp the protected machine descriptor on a temporary file.
+var windowsCursorManagedHooksRepairWriter = writeWindowsCursorManagedFilePreservingMetadata
+
+// validateWindowsCursorManagedArtifactsRepairingHooks validates the managed
+// artifacts and, when the only problem is hooks.json content drift (entries
+// removed or altered by another writer, or the file deleted), re-merges the
+// canonical DefenseClaw entries while keeping every unrelated entry. The
+// caller must hold the Cursor transaction lock. Strict mode keeps the
+// refuse-on-drift posture.
+func validateWindowsCursorManagedArtifactsRepairingHooks(
+	artifacts windowsCursorManagedArtifacts,
+) (windowsCursorManagedArtifacts, error) {
+	validated, err := validateWindowsCursorManagedArtifacts(artifacts)
+	if err == nil || !windowsCursorManagedHooksDrifted(err) || managed.TrustStrictAncestors() {
+		return validated, err
+	}
+	repaired, repairErr := repairWindowsCursorManagedHooks(validated)
+	if repairErr != nil {
+		return validated, errors.Join(err, repairErr)
+	}
+	return validateWindowsCursorManagedArtifacts(repaired)
+}
+
+func repairWindowsCursorManagedHooks(
+	artifacts windowsCursorManagedArtifacts,
+) (windowsCursorManagedArtifacts, error) {
+	base := []byte("{}\n")
+	reason := "recreated Cursor hooks.json with the DefenseClaw hook entries after it was removed outside DefenseClaw"
+	if artifacts.hooks.existed {
+		cleaned, err := connector.RemoveWindowsCursorEnterpriseHooks(
+			artifacts.hooks.data,
+			artifacts.adapter.path,
+		)
+		if err != nil {
+			return artifacts, fmt.Errorf("enterprise hooks: strip drifted DefenseClaw Cursor hook entries: %w", err)
+		}
+		base = cleaned
+		reason = "re-merged DefenseClaw Cursor hook entries removed or altered outside DefenseClaw"
+	}
+	merged, err := connector.MergeWindowsCursorEnterpriseHooks(
+		base,
+		artifacts.adapter.path,
+		cursorManagedPolicyFailMode(artifacts.parsed),
+	)
+	if err != nil {
+		return artifacts, fmt.Errorf("enterprise hooks: re-merge DefenseClaw Cursor hook entries: %w", err)
+	}
+	if err := windowsCursorManagedHooksRepairWriter(
+		artifacts.hooks,
+		artifacts.hooksMetadata,
+		merged,
+	); err != nil {
+		return artifacts, fmt.Errorf("enterprise hooks: write re-merged Cursor hooks.json: %w", err)
+	}
+	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+		"path":   artifacts.hooks.path,
+		"reason": reason,
+	})
+	artifacts.hooks, err = snapshotWindowsManagedFileWithLimit(artifacts.hooks.path, windowsCursorManagedHooksLimit)
+	if err != nil {
+		return artifacts, err
+	}
+	artifacts.hooksMetadata, err = snapshotWindowsCursorManagedFileMetadata(artifacts.hooks)
+	if err != nil {
+		return artifacts, err
+	}
 	return artifacts, nil
 }
 
@@ -993,10 +1102,13 @@ func installWindowsCursorManagedPolicy(
 		if err != nil {
 			return err
 		}
-		current, err := validateWindowsCursorManagedArtifacts(before)
+		current, err := validateWindowsCursorManagedArtifactsRepairingHooks(before)
 		if err != nil {
 			return err
 		}
+		// A hooks repair (or orphan reclaim) during validation rewrote
+		// hooks.json; that image is the preimage this transaction owns.
+		before.hooks, before.hooksMetadata = current.hooks, current.hooksMetadata
 		gateway, err := connector.NormalizeWindowsManagedGatewayAddr(opts.APIAddr)
 		if err != nil {
 			return err
@@ -1228,7 +1340,7 @@ func removeWindowsCursorManagedPolicyTarget(targetSID *windows.SID) error {
 		if err != nil {
 			return err
 		}
-		artifacts, err := validateWindowsCursorManagedArtifacts(current)
+		artifacts, err := validateWindowsCursorManagedArtifactsRepairingHooks(current)
 		if err != nil || !artifacts.active {
 			return err
 		}
@@ -1250,6 +1362,19 @@ func ReadWindowsCursorManagedPolicyTargets() ([]WindowsCursorManagedRuntimeTarge
 		return nil, false, err
 	}
 	artifacts, err = validateWindowsCursorManagedArtifacts(artifacts)
+	if windowsCursorManagedHooksDrifted(err) && !managed.TrustStrictAncestors() {
+		// Re-merge drifted hook entries under the transaction lock so the
+		// guardian's enrollment sync heals instead of failing every tick.
+		err = withWindowsCursorManagedTransaction(func() error {
+			current, snapshotErr := snapshotWindowsCursorManagedArtifacts()
+			if snapshotErr != nil {
+				return snapshotErr
+			}
+			var repairErr error
+			artifacts, repairErr = validateWindowsCursorManagedArtifactsRepairingHooks(current)
+			return repairErr
+		})
+	}
 	if err != nil {
 		return nil, true, err
 	}
@@ -1275,7 +1400,7 @@ func PublishWindowsCursorManagedPolicyTargets(
 		if err != nil {
 			return err
 		}
-		artifacts, err := validateWindowsCursorManagedArtifacts(currentArtifacts)
+		artifacts, err := validateWindowsCursorManagedArtifactsRepairingHooks(currentArtifacts)
 		if err != nil {
 			return err
 		}
@@ -2044,7 +2169,7 @@ func CaptureWindowsCursorManagedPolicySnapshot(
 		if err != nil {
 			return err
 		}
-		artifacts, err := validateWindowsCursorManagedArtifacts(currentArtifacts)
+		artifacts, err := validateWindowsCursorManagedArtifactsRepairingHooks(currentArtifacts)
 		if err != nil {
 			return err
 		}
@@ -2122,7 +2247,7 @@ func PrepareWindowsCursorManagedPolicyTeardown(
 		if err != nil {
 			return err
 		}
-		artifacts, err = validateWindowsCursorManagedArtifacts(artifacts)
+		artifacts, err = validateWindowsCursorManagedArtifactsRepairingHooks(artifacts)
 		if err != nil {
 			return err
 		}
