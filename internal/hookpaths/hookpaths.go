@@ -2136,9 +2136,33 @@ func (l shellLinks) placedCopyDestination(path string) bool {
 // entry into the directory it names under the source name, so such a move
 // writes no protected file: tar -C /tmp -xzf x.tgz && mv /tmp/d /tmp/d2
 // (rel-1-0-6:GAP-0292). Any other move keeps the opaque reading.
-func (l *shellLinks) readScopedMoves(ops []renameOp) {
-	if l.globalOpaque || len(l.opaqueScopes) == 0 {
+func (l *shellLinks) readScopedMoves(ops []renameOp, command, cwd, home string, cds bool) {
+	if l.globalOpaque || len(l.opaqueScopes) == 0 || cds || len(ops) == 0 {
 		return
+	}
+	// Every other write of the command, as the write readings list it (they
+	// do not list a mv destination): a destination any of them names, or
+	// whose word the command spells twice, is not the move's own write
+	// alone (a write before the move, or after one that failed).
+	writes, _, _ := ShellWriteOperands(command, cwd, home)
+	writes = append(writes, LiteralWriteOperands(command, cwd, home)...)
+	writeCount := func(path string) int {
+		count := 0
+		for _, write := range writes {
+			if OperandPath(write, cwd) == path {
+				count++
+			}
+		}
+		return count
+	}
+	moveCount := func(path string) int {
+		count := 0
+		for _, op := range ops {
+			if op.dest != "" && absolutePath(op.dest, op.wd) == path {
+				count++
+			}
+		}
+		return count
 	}
 	strictlyInScope := func(path string) bool {
 		for _, scope := range l.opaqueScopes {
@@ -2149,10 +2173,14 @@ func (l *shellLinks) readScopedMoves(ops []renameOp) {
 		return false
 	}
 	for _, op := range ops {
-		if len(op.sources) != 1 || op.backup || op.targetDir != "" || op.dest == "" {
+		if len(op.sources) != 1 || op.backup || op.optioned || op.targetDir != "" || op.dest == "" ||
+			dotDotComponent(op.dest) || dotDotComponent(op.sources[0]) {
 			continue
 		}
 		dest := absolutePath(op.dest, op.wd)
+		if moveCount(dest) != 1 || writeCount(dest) > 0 || strings.Count(command, op.dest) != 1 {
+			continue
+		}
 		source := absolutePath(op.sources[0], op.wd)
 		name := filepath.Base(source)
 		if !scopedMoveName(name) || strictlyInScope(filepath.Dir(dest)) || strictlyInScope(filepath.Dir(source)) {
@@ -2183,10 +2211,29 @@ func (l *shellLinks) readScopedMoves(ops []renameOp) {
 // archive linked cannot turn into a protected file: no dot name, no
 // extension, and no authorized-keys or SSH control file name.
 func scopedMoveName(name string) bool {
-	if name == "" || strings.Contains(name, ".") || slices.Contains(AuthorizedKeysFiles[:], name) || slices.Contains(SSHControlFiles[:], name) {
+	if name == "" || strings.Contains(name, ".") {
 		return false
 	}
+	// Folded on every OS: on macOS and Windows a case variant is the file.
+	for _, protected := range append(AuthorizedKeysFiles[:], SSHControlFiles[:]...) {
+		if strings.EqualFold(name, protected) {
+			return false
+		}
+	}
 	return true
+}
+
+// dotDotComponent reports a path word with a .. component: the move then
+// passes through a name the archive may have made a link, so the write
+// operand keeps the raw spelling (OperandPath) that the scope reading
+// walks.
+func dotDotComponent(word string) bool {
+	for _, part := range strings.FieldsFunc(word, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // placedShellBody reports a literal shell body with no directory change of
@@ -2308,7 +2355,7 @@ func (l shellLinks) opaqueTargetWithFacts(path, ownCopy string, facts map[string
 	if l.linkNameOnly[filepath.Clean(path)] {
 		return false
 	}
-	if !l.globalOpaque && l.scopedMoves[filepath.Clean(path)] {
+	if !l.globalOpaque && l.scopedMoves[path] {
 		return false
 	}
 	if l.globalOpaque && ownCopy != "" && ownCopy == path && l.globalCopyScopesAfter(ownCopy) {
@@ -2989,7 +3036,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	if len(links.opaqueScopes) > 0 && hiddenDirectoryChange(file, home, 0) {
 		links.globalOpaque, links.globalOther = true, true
 	}
-	links.readScopedMoves(renameOps)
+	links.readScopedMoves(renameOps, command, cwd, home, cds || wrappedCds)
 	links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
 	links.renameOps, links.wrappedCds, links.findMoves = renameOps, wrappedCds, findMoves
 	return links, false
