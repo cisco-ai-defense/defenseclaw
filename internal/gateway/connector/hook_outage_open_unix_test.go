@@ -6,9 +6,11 @@
 package connector
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -291,31 +293,44 @@ func freeLoopbackAddrForOutageTest(t *testing.T) string {
 			continue
 		}
 		outagePortsUsed[port] = true
-		t.Cleanup(func() { _ = syscall.Close(fd) })
+		t.Cleanup(func() { _ = closeReservedSocket(fd) })
 		return fmt.Sprintf("127.0.0.1:%d", port)
 	}
 	t.Fatal("no loopback port below the ephemeral range could be held")
 	return ""
 }
 
-// refusingLoopbackSocket binds a TCP socket to 127.0.0.1:port and never
-// listens on it. Close-on-exec is set under syscall.ForkLock, as the net
-// package does, so the hook processes the test starts do not inherit it.
+// refusingLoopbackSocket binds a close-on-exec TCP socket
+// (reservedLoopbackSocket) to 127.0.0.1:port and never listens on it.
 func refusingLoopbackSocket(port int) (int, error) {
-	syscall.ForkLock.RLock()
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
-	if err == nil {
-		syscall.CloseOnExec(fd)
-	}
-	syscall.ForkLock.RUnlock()
+	fd, err := reservedLoopbackSocket()
 	if err != nil {
 		return -1, err
 	}
 	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}); err != nil {
-		_ = syscall.Close(fd)
+		_ = closeReservedSocket(fd)
 		return -1, err
 	}
 	return fd, nil
+}
+
+// TestOutageAddrHoldsItsPortAndRefuses pins rel-1-0-6 GAP-0454 and GAP-0455:
+// while the test runs no other listener can take the outage address, and a
+// hook that connects to it is refused at once.
+func TestOutageAddrHoldsItsPortAndRefuses(t *testing.T) {
+	addr := freeLoopbackAddrForOutageTest(t)
+	if listener, err := net.Listen("tcp", addr); err == nil {
+		_ = listener.Close()
+		t.Fatalf("another listener took %s while the test held it", addr)
+	}
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatalf("a connection to %s was accepted", addr)
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("connect to %s: %v, want a refusal", addr, err)
+	}
 }
 
 var (
