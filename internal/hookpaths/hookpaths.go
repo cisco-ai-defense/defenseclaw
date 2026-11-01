@@ -861,6 +861,23 @@ func clientStatementBudgetExceeded(connector, tool string, facts actionfacts.Fac
 	}
 }
 
+// clientPowerShellReading reports a call the hook client reads as
+// PowerShell, as clientStatementBudgetExceeded counts it: a PowerShell tool,
+// a PowerShell parse, or on Windows any shell tool not known to run POSIX.
+func clientPowerShellReading(connector, tool string, facts actionfacts.Facts) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+		return true
+	}
+	switch facts.Parse.Dialect {
+	case actionfacts.DialectPowerShell:
+		return true
+	case actionfacts.DialectPOSIX:
+		return false
+	}
+	return runtime.GOOS == "windows" && hookShellDialect(connector, tool) != actionfacts.DialectPOSIX
+}
+
 func hookShellDialect(connector, tool string) actionfacts.Dialect {
 	if strings.EqualFold(strings.TrimSpace(tool), "Bash") && !strings.EqualFold(strings.TrimSpace(connector), "codex") {
 		return actionfacts.DialectPOSIX
@@ -1131,7 +1148,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					if !MayNameState(command) {
 						return incompleteEvidence(cwd)
 					}
-					reduced, overflow, ok := StateNamingStatements(command, home)
+					reduced, overflow, ok := StateNamingReading(command, home, clientPowerShellReading(connector, tool, facts))
 					if !ok || overflow || reduced == "" {
 						// No silent drop past the bound: the map says only
 						// that it is incomplete, and the gateway judges the
@@ -5201,6 +5218,20 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 		kept[i] = texts[index]
 	}
 	return strings.Join(kept, "; "), overflow, true
+}
+
+// StateNamingReading is StateNamingStatements for a call read in its own
+// dialect. A PowerShell call is never reduced: the POSIX split and
+// read-only proof are not its reading (the quoting rules differ), so a
+// "no writer" answer could come from another language
+// (rel-1-0-6:GAP-0413). It is kept whole and reported as an overflow, so
+// the hook client sends only the incomplete header and a gateway behind
+// ProtectHome holds the call when it may name the state.
+func StateNamingReading(command, home string, powershell bool) (reduced string, overflow, ok bool) {
+	if powershell {
+		return command, true, true
+	}
+	return StateNamingStatements(command, home)
 }
 
 // stateStatementReadOnly reports a statement proven to change no file: the

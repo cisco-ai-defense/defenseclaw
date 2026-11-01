@@ -23,10 +23,17 @@ import (
 // managed is set.
 func gap0568HookAction(t *testing.T, api *APIServer, connector, home, cwd, command string, client, managed bool) string {
 	t.Helper()
+	return gap0568ToolHookAction(t, api, connector, "Bash", home, cwd, command, client, managed)
+}
+
+// gap0568ToolHookAction is gap0568HookAction for a Claude Code tool other
+// than Bash (the PowerShell tool); Codex always runs exec_command.
+func gap0568ToolHookAction(t *testing.T, api *APIServer, connector, tool, home, cwd, command string, client, managed bool) string {
+	t.Helper()
 	ctx := context.Background()
 	if client {
 		body, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": "gap0568", "cwd": cwd,
-			"tool_name": "Bash", "tool_input": map[string]any{"command": command}})
+			"tool_name": tool, "tool_input": map[string]any{"command": command}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -44,7 +51,7 @@ func gap0568HookAction(t *testing.T, api *APIServer, connector, home, cwd, comma
 	}
 	if connector == "claudecode" {
 		return api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
-			HookEventName: "PreToolUse", CWD: cwd, ToolName: "Bash",
+			HookEventName: "PreToolUse", CWD: cwd, ToolName: tool,
 			ToolInput: map[string]any{"command": command},
 		}).Action
 	}
@@ -167,6 +174,61 @@ func TestGAP0568ObserveOverBudgetStateWriteBlocks(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestGAP0413PowerShellOverBudgetStateWriteHolds is rel-1-0-6:GAP-0413
+// (review r5 finding 2): the reduced state reading's "no writer" answer
+// came from a POSIX split and read-only proof of a PowerShell-tool call, so
+// 200 assignments, 130 echo "clawN" and a Set-Content of the state were
+// allowed behind ProtectHome in observe mode. A PowerShell call is now kept
+// whole and held there. Per-user, the gateway reads the call itself; on a
+// POSIX host it does not resolve the PowerShell home spellings, so those
+// cells only alert (a Windows host blocks them, checked on dc-win2).
+func TestGAP0413PowerShellOverBudgetStateWriteHolds(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX homes and a mode 0 homes folder")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can search a mode 0 directory")
+	}
+	homes := filepath.Join(t.TempDir(), "homes")
+	home := filepath.Join(homes, "alice")
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := gap0568StateFile(t, home)
+	t.Setenv("HOME", home)
+	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
+	assignments := make([]string, 200)
+	for i := range assignments {
+		assignments[i] = fmt.Sprintf("$a%d=1", i)
+	}
+	echoes := make([]string, 130)
+	for i := range echoes {
+		echoes[i] = fmt.Sprintf(`echo "claw%d"`, i)
+	}
+	pad := strings.Join(assignments, "; ") + "; " + strings.Join(echoes, "; ") + "; "
+	api := instructionProtectionTestAPI(t, "claudecode", "observe", "HIGH")
+	for _, row := range []struct {
+		name, command string
+		managedBlock  bool
+	}{
+		{"Set-Content of the state after 130 echoes", pad + "Set-Content -Path ~/.defenseclaw/config.yaml -Value x", true},
+		{"absolute Set-Content of the state after 130 echoes", pad + "Set-Content -Path " + state + " -Value x", true},
+		{"quote-split Set-Content after 200", strings.Join(assignments, "; ") + `; echo "claw\"; Set-Content -Path ~/.defenseclaw/config.yaml -Value x; \""`, true},
+		{"benign 200", strings.Join(assignments, "; "), false},
+	} {
+		for _, managed := range []bool{false, true} {
+			want := managed && row.managedBlock
+			if got := gap0568ToolHookAction(t, api, "claudecode", "PowerShell", home, cwd, row.command, true, managed) == "block"; got != want {
+				t.Errorf("%s managed=%t: block %t, want %t", row.name, managed, got, want)
+			}
+		}
+	}
+	if reduced, overflow, ok := hookpaths.StateNamingReading(pad+"Set-Content -Path "+state+" -Value x", home, true); !ok || !overflow || !strings.HasSuffix(reduced, " -Value x") {
+		t.Errorf("PowerShell reading: ok %t overflow %t, want the whole call as an overflow", ok, overflow)
 	}
 }
 

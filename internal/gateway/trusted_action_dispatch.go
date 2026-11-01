@@ -8648,12 +8648,12 @@ func withOverBudgetStateMutation(parent context.Context, request trustedActionRe
 			findings = append(findings, found...)
 		}
 	}
-	return withReducedStateReading(parent, request, findings)
+	return withReducedStateReading(parent, request, facts, findings)
 }
 
 // withReducedStateReading adds the state-write finding of the reduced
 // reading of an over-budget call (withOverBudgetStateMutation).
-func withReducedStateReading(parent context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+func withReducedStateReading(parent context.Context, request trustedActionRequest, facts actionfacts.Facts, findings []RuleFinding) []RuleFinding {
 	if slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == "tamper.detector_state_write" }) {
 		return findings
 	}
@@ -8661,7 +8661,11 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 	if !known || !hookpaths.MayNameState(command) {
 		return findings
 	}
-	reduced, overflow, ok := hookpaths.StateNamingStatements(command, request.Input.ActiveHome)
+	// A PowerShell call is kept whole and held behind ProtectHome: the
+	// POSIX read-only proof is not its reading (rel-1-0-6:GAP-0413).
+	powershell := trustedPowerShellExecutionTool(request.Input.Tool) || request.Input.DialectHint == actionfacts.DialectPowerShell ||
+		facts.Parse.Dialect == actionfacts.DialectPowerShell
+	reduced, overflow, ok := hookpaths.StateNamingReading(command, request.Input.ActiveHome, powershell)
 	if !ok {
 		return findings
 	}
