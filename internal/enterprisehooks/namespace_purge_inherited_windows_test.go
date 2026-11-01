@@ -67,8 +67,10 @@ const (
 // the standalone install creates it) holding what a killed first install
 // leaves: bin and libexec folders and a file, all with only the inherited
 // ACEs. bin is owned by LocalSystem (a Setup run as SYSTEM); libexec and
-// bin\defenseclaw.exe are left as the elevated test process created them
-// (owner Administrators, group the token's primary group).
+// bin\defenseclaw.exe are owned by Administrators (an elevated Setup), with
+// the group the token's primary group. The owner is set, not left to the
+// token: a GitHub runner's elevated token makes its user, not
+// Administrators, the default owner of what it creates.
 func newInheritedNamespacePurgeTree(t *testing.T) (string, []string) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "DefenseClaw")
@@ -89,6 +91,9 @@ func newInheritedNamespacePurgeTree(t *testing.T) (string, []string) {
 		t.Fatal(err)
 	}
 	setNamespacePurgeTestSecurity(t, bin, "O:SYG:SY", windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION)
+	for _, path := range []string{libexec, exe} {
+		setNamespacePurgeTestSecurity(t, path, "O:BA", windows.OWNER_SECURITY_INFORMATION)
+	}
 	return root, []string{bin, libexec, exe}
 }
 
