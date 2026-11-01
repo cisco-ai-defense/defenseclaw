@@ -544,6 +544,20 @@ func retentionRunFailure(class RetentionFailureClass, cause error) error {
 	return &retentionRunError{class: class, cause: cause}
 }
 
+// RetentionFailureDetail is the failure class of a failed Run and the text of
+// its cause, for the gateway log only: Error() and every status keep only
+// the class (rel-1-0-6:GAP-0263, a run that failed with no cause logged).
+func RetentionFailureDetail(err error) (RetentionFailureClass, string) {
+	if err == nil {
+		return "", ""
+	}
+	cause := err
+	if inner := errors.Unwrap(err); inner != nil {
+		cause = inner
+	}
+	return retentionFailureClass(err), cause.Error()
+}
+
 func retentionFailureClass(err error) RetentionFailureClass {
 	if err == nil {
 		return ""

@@ -316,6 +316,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	}
 	retentionOptions := observabilityruntime.RetentionControllerOptions{
 		Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration(),
+		Log: os.Stderr,
 	}
 	if !retentionOptions.SecureClient {
 		retentionOptions.StartupDelay = observabilityruntime.RetentionStartupDelay

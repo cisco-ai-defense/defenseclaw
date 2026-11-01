@@ -321,7 +321,7 @@ func TestManagedSandboxSessionUnblockEndsWithItsSession(t *testing.T) {
 	unblock := func(scope string) {
 		t.Helper()
 		if err := gw.auth.decisions.Add(relayTestPeer.UID, sandboxreg.Decision{Registration: reg.ID, Kind: sandboxrelay.DecisionUnblock,
-			Host: "webhook.site", Scope: scope}); err != nil {
+			Host: "webhook.site", Scope: scope, SubjectKey: reg.SubjectKey}); err != nil {
 			t.Fatal(err)
 		}
 	}

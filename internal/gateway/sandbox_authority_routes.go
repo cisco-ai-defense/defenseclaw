@@ -661,6 +661,7 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		PolicyKey: a.sandboxPolicyKey(r.Context(), cfg), FloorDigest: floorDigest,
 		HostPorts: slices.Clone(eff.MCP.HostPorts),
 	}
+	a.sandboxForgetPreviousAccounts(auth, peer, reg.SubjectKey, sandboxFactsPrincipal(match.facts))
 	if err := auth.store.CreateRun(peer.UID, reg, run); err != nil {
 		fmt.Fprintf(os.Stderr, "[sandbox-authority] register uid=%d: %v\n", peer.UID, err)
 		if errors.Is(err, sandboxreg.ErrFull) {
@@ -835,6 +836,8 @@ func (a *APIServer) handleSandboxRestart(w http.ResponseWriter, r *http.Request)
 		writeSandboxReason(w, sandboxrelay.ReasonRegistrationRevoked, sandboxRevokedText(auth, reg))
 		return
 	}
+	facts, _ := sandboxPeerDirectory(r.Context(), peer.UID, sandboxResolveWait)
+	a.sandboxForgetPreviousAccounts(auth, peer, reg.SubjectKey, sandboxFactsPrincipal(facts))
 	fresh, err := auth.store.Restart(peer.UID, reg.ID)
 	switch {
 	case err == nil:
@@ -1574,6 +1577,7 @@ func (a *APIServer) handleSandboxDecide(w http.ResponseWriter, r *http.Request) 
 	}
 	shape.CreatedAt = auth.clock()
 	shape.Actor = sandboxreg.DecisionActor{UID: peer.UID, PrincipalHash: sandboxPrincipalHash(auth.key, sandboxPeerPrincipal(r.Context()))}
+	shape.SubjectKey = reg.SubjectKey
 	result := sandboxrelay.DecisionResult{V: sandboxrelay.WireVersion, Decision: sandboxDecisionView(shape)}
 	if sandboxDecisionStored(req) {
 		if err := auth.decisions.Add(peer.UID, shape); err != nil {
@@ -1583,7 +1587,7 @@ func (a *APIServer) handleSandboxDecide(w http.ResponseWriter, r *http.Request) 
 		}
 		saved, _ := auth.decisions.List(peer.UID, reg.ID)
 		for _, d := range saved {
-			if d.Kind == shape.Kind && d.Scope == shape.Scope && strings.EqualFold(d.Host, shape.Host) {
+			if d.AppliesTo(reg) && d.Kind == shape.Kind && d.Scope == shape.Scope && strings.EqualFold(d.Host, shape.Host) {
 				result.Decision = sandboxDecisionView(d)
 			}
 		}
@@ -1633,7 +1637,7 @@ func (a *APIServer) handleSandboxDecisions(w http.ResponseWriter, r *http.Reques
 	}
 	out := []sandboxrelay.Decision{}
 	for _, d := range saved {
-		if d.Registration != reg.ID && d.Scope != sandboxrelay.DecisionScopeAlways {
+		if !d.AppliesTo(reg) || (d.Registration != reg.ID && d.Scope != sandboxrelay.DecisionScopeAlways) {
 			continue
 		}
 		req := sandboxrelay.DecisionRequest{V: sandboxrelay.WireVersion, Registration: reg.ID, Kind: d.Kind, Host: d.Host, Scope: d.Scope}

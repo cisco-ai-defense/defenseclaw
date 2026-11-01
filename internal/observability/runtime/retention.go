@@ -8,6 +8,8 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -22,6 +24,13 @@ import (
 // audit.db; a prune that read its old pages at that moment pushed managed
 // answers past their budget (GAP-1790, #1384).
 const RetentionStartupDelay = time.Minute
+
+// RetentionRetryMax caps the wait before a failed run is tried again. A failed
+// run is retried after audit.RetentionFollowUpInterval, then after twice the
+// previous wait, up to this cap, instead of the six-hour cadence: a transient
+// SQLite failure (a busy store right after a flood) left the state degraded
+// for hours, and only a gateway restart cleared it (rel-1-0-6:GAP-0263).
+const RetentionRetryMax = 30 * time.Minute
 
 // RetentionControllerState is a bounded lifecycle/health label. It never
 // contains a database error, path, SQL text, or retained record content.
@@ -85,6 +94,10 @@ type RetentionControllerOptions struct {
 	Scheduler    audit.RetentionScheduler
 	Clock        func() time.Time
 	Reporter     RetentionControllerReporter
+	// Log receives one line per failed run, with its cause, and one when runs
+	// succeed again; nil logs nothing. The gateway passes its stderr (the
+	// service journal); statuses never carry the cause.
+	Log io.Writer
 }
 
 type retentionReaper interface {
@@ -109,6 +122,7 @@ type RetentionController struct {
 	scheduler    audit.RetentionScheduler
 	clock        func() time.Time
 	reporter     RetentionControllerReporter
+	log          io.Writer
 	secureClient bool
 	startupDelay time.Duration
 
@@ -125,6 +139,9 @@ type RetentionController struct {
 	// backlog is set when the last run stopped at a time budget with work
 	// left; the next run then follows RetentionFollowUpInterval later.
 	backlog atomic.Bool
+	// failedRuns counts the runs that failed in a row; while it is set the
+	// next run follows retryInterval, and a policy reload runs at once.
+	failedRuns atomic.Int64
 
 	statusMu sync.Mutex
 	status   atomic.Pointer[RetentionControllerStatus]
@@ -160,7 +177,7 @@ func newRetentionController(
 	}
 	controller := &RetentionController{
 		reaper: reaper, ready: options.Ready, scheduler: scheduler,
-		clock: clock, reporter: options.Reporter, secureClient: options.SecureClient,
+		clock: clock, reporter: options.Reporter, log: options.Log, secureClient: options.SecureClient,
 		startupDelay: options.StartupDelay, done: make(chan struct{}), policyWake: make(chan struct{}, 1),
 		stopRequested: make(chan struct{}),
 	}
@@ -397,6 +414,9 @@ func (controller *RetentionController) run(ctx context.Context) {
 		switch {
 		case !controller.enabled():
 			interval = 0
+		case controller.failedRuns.Load() > 0 && !controller.secureClient:
+			// The last run failed: try again soon (rel-1-0-6:GAP-0263).
+			interval = retryInterval(controller.failedRuns.Load())
 		case controller.backlog.Load() && !controller.secureClient:
 			// The last run stopped at a time budget with work left: rows to
 			// delete or free pages to return (GAP-0287).
@@ -425,7 +445,11 @@ func (controller *RetentionController) run(ctx context.Context) {
 			if controller.stopWasRequested() {
 				return
 			}
-			prompt := controller.consumePromptRun()
+			// After a failed run any policy change runs again at once, so
+			// the state shown is that of the policy now in force, not the
+			// failure of the previous one (rel-1-0-6:GAP-0263). Secure
+			// Client keeps its cadence.
+			prompt := controller.consumePromptRun() || (controller.failedRuns.Load() > 0 && !controller.secureClient)
 			if !controller.enabled() {
 				controller.publishStatus(controller.nextStatus(
 					RetentionStateDisabled, RetentionFailureNone, nil,
@@ -510,6 +534,7 @@ func (controller *RetentionController) runOnce(ctx context.Context) bool {
 		return false
 	}
 	controller.backlog.Store(err == nil && result.Backlog)
+	controller.logRunOutcome(err)
 	status := controller.Status()
 	status.LastAttemptAt = attemptedAt
 	status.RunCount = saturatingIncrement(status.RunCount)
@@ -532,6 +557,37 @@ func (controller *RetentionController) runOnce(ctx context.Context) bool {
 	}
 	controller.publishStatus(status)
 	return true
+}
+
+// logRunOutcome counts failed runs in a row and logs each failure with its
+// cause and the wait before the next try, and the first success after them.
+func (controller *RetentionController) logRunOutcome(err error) {
+	if err == nil {
+		if failed := controller.failedRuns.Swap(0); failed > 0 && controller.log != nil {
+			fmt.Fprintf(controller.log, "[sidecar] audit retention ran again after %d failed runs; retention is healthy\n", failed)
+		}
+		return
+	}
+	failed := controller.failedRuns.Add(1)
+	if controller.log == nil {
+		return
+	}
+	class, cause := audit.RetentionFailureDetail(err)
+	next := "at the next scheduled run"
+	if !controller.secureClient {
+		next = "in " + retryInterval(failed).String() + " or at the next policy change"
+	}
+	fmt.Fprintf(controller.log, "[sidecar] audit retention run failed (%s, %d in a row): %s; retention tries again %s\n",
+		class, failed, cause, next)
+}
+
+// retryInterval is the wait before the next run after failed runs in a row.
+func retryInterval(failed int64) time.Duration {
+	wait := audit.RetentionFollowUpInterval
+	for i := int64(1); i < failed && wait < RetentionRetryMax; i++ {
+		wait *= 2
+	}
+	return min(wait, RetentionRetryMax)
 }
 
 func (controller *RetentionController) nextStatus(

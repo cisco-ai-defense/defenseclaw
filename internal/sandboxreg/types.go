@@ -203,6 +203,23 @@ type Decision struct {
 	Scope        string        `json:"scope"`
 	Actor        DecisionActor `json:"actor"`
 	CreatedAt    time.Time     `json:"created_at"`
+	// SubjectKey is the subject key of the registration the decision was
+	// made in: the account that made it. A decision applies only to that
+	// account's registrations, never to a later account given the same uid
+	// (AppliesTo, rel-1-0-6:GAP-0262). Empty for a decision saved before
+	// 1.0.7 until the first sandbox start after the upgrade stamps or drops
+	// it (FileDecisionStore.SettleAccount).
+	SubjectKey string `json:"subject_key,omitempty"`
+}
+
+// AppliesTo reports whether d may apply to reg: d was made by reg's account,
+// or it predates the subject key on decisions and was made in reg itself,
+// whose account the routes prove before they serve it. A decision without
+// the key never applies to another registration until SettleAccount gives
+// it one, so a uid that changed accounts never serves the earlier account's
+// decisions while their settling waits (rel-1-0-6:GAP-0262 review 2).
+func (d Decision) AppliesTo(reg Registration) bool {
+	return d.SubjectKey == reg.SubjectKey || (d.SubjectKey == "" && d.Registration == reg.ID)
 }
 
 // DecisionActor is the person who made a decision.
