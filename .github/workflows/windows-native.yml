@@ -286,8 +286,11 @@ jobs:
               throw 'native Go package discovery selected no non-gateway packages'
             }
             Write-Host "Native Windows remaining-package part $matrixShard of $remainingPackageShardCount runs $($remainingPackages.Count) packages."
+            # hookexec alone (pk0) runs about 12 minutes on a runner: 14m
+            # leaves headroom below the step's 1020 s and the job's 20 minutes
+            # (rel-1-0-6:GAP-0477).
             $remainingArguments = @(
-              'test', '-vet=off', '-json', '-count=1', '-timeout=12m', '-p=1',
+              'test', '-vet=off', '-json', '-count=1', '-timeout=14m', '-p=1',
               '-skip', $windowsInapplicable
             ) + $remainingPackages
             Invoke-WindowsNativeProcess $go $remainingArguments -TimeoutSeconds 1020 `
