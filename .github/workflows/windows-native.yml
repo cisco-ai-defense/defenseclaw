@@ -64,10 +64,11 @@ jobs:
     # recorded Windows test times (scripts/test-timings/go-windows.json);
     # pkN one of six timing-balanced parts of the remaining packages (still
     # -p=1 within the part); checks the DACL, redaction, isolated connector
-    # tests, vet and builds; and stress the single-flight and executable
-    # lifecycle stress loops. Every part stays under 15 minutes. Shard names
-    # stay short: they are part of the state path, and a Windows path test
-    # allows 260 characters.
+    # tests, vet and builds; stress the single-flight and executable
+    # lifecycle stress loops; and tm0-tm2 repeat 20 times the Windows timing
+    # tests that once flaked on hosted runners. Every part stays under 15
+    # minutes. Shard names stay short: they are part of the state path, and a
+    # Windows path test allows 260 characters.
     strategy:
       fail-fast: false
       matrix:
@@ -96,6 +97,9 @@ jobs:
           - { shard: pk5, kind: packages, index: 5 }
           - { shard: checks, kind: checks, index: 0 }
           - { shard: stress, kind: stress, index: 0 }
+          - { shard: tm0, kind: timing, index: 0 }
+          - { shard: tm1, kind: timing, index: 1 }
+          - { shard: tm2, kind: timing, index: 2 }
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -179,8 +183,27 @@ jobs:
           Invoke-WindowsNativeProcess $go @(
             'test', '-vet=off', '-v', '-count=2', '-run', '^TestNativeWindowsExecutableForeignCollisionAndRecovery$', './internal/cli'
           ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-native-executable-lifecycle-stress.log') | Out-Null
+      - name: Repeat Windows timing tests that flaked on hosted runners
+        if: ${{ matrix.kind == 'timing' }}
+        run: |
+          # 20 repeats in a row must pass (rel-1-0-6:GAP-0245, GAP-0246,
+          # GAP-0248, GAP-0249, GAP-0250, GAP-0251): tm0 the audit WAL and
+          # match timing tests, tm1 the PowerShell adapter tests, tm2 the
+          # Cursor adapter deadline test, whose one run waits out the
+          # production 25 s adapter deadline (20 take about 10 minutes).
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $go = (Get-Command go.exe -ErrorAction Stop).Source
+          $repeat = @{
+            0 = @('./internal/audit', '^(TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood|TestCheckpointWALIfLargeBoundedCatchUpHoldsOffAnotherWriter|TestMatchOccurrenceSharedIdentifierOfALongSessionStaysFlat)$')
+            1 = @('./internal/gateway/connector', '^(TestCopilotAdapterRefusesInvalidEventBinding|TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin)$')
+            2 = @('./internal/gateway/connector', '^TestCursorAdapterTimeoutKillsChildThatDoesNotReadStdinAndFailsClosed$')
+          }[${{ matrix.index }}]
+          Invoke-WindowsNativeProcess $go @(
+            'test', '-vet=off', '-v', '-count=20', '-timeout=14m', '-run', $repeat[1], $repeat[0]
+          ) -TimeoutSeconds 870 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-timing-repeat.log') | Out-Null
       - name: Full native Windows Go test, vet, and build
-        if: ${{ matrix.kind != 'stress' }}
+        if: ${{ matrix.kind != 'stress' && matrix.kind != 'timing' }}
         env:
           GO_SUITE_KIND: ${{ matrix.kind }}
           GO_SUITE_INDEX: ${{ matrix.index }}
