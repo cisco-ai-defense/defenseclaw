@@ -333,6 +333,10 @@ func TestHookOutageFailModeNowStaleAccountHooksFollowTheMovedDataDir(t *testing.
 		{name: "moved folder config names yet another folder", account: outageNowDefaultConfig, moved: outageNowDefaultConfig, movedElsewhere: true, want: "closed"},
 		{name: "account not in the database", account: outageNowDefaultConfig, noAccount: true, want: "closed"},
 		{name: "only the agent HOME names the folder", account: outageNowDefaultConfig, envHomeOnly: true, want: "closed"},
+		// The account config the left hooks load is a floor (review P2).
+		{name: "account strict, moved folder keeps its own default config", account: outageNowStrictConfig, moved: outageNowDefaultConfig, want: "closed"},
+		{name: "account saved closed, moved folder keeps its own default config", account: outageNowDefaultConfig + "  hook_fail_mode: closed\n", moved: outageNowDefaultConfig, want: "closed"},
+		{name: "account default, moved folder keeps its own default config", account: outageNowDefaultConfig, moved: outageNowDefaultConfig, want: "open"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			account := t.TempDir()
@@ -445,4 +449,112 @@ func TestHookOutageFailModeNowHooksLeftInAMovedBackDataDirFollowTheAccount(t *te
 			}
 		})
 	}
+}
+
+// rel-1-0-6 GAP-0224 review: a data directory's own config.yaml no longer
+// outranks the account's config that names it. The gateway enforces the
+// account's config, so its strict tier, a saved closed or a managed mode
+// closes the outage of the fresh hooks of that folder too; a default
+// account config, or one that names another folder, leaves the folder's own
+// config the answer. An account config this release cannot load closes when
+// its plain data_dir names the folder.
+func TestHookOutageFailModeNowAccountConfigIsAFloorForTheDataDirItNames(t *testing.T) {
+	for _, tc := range []struct {
+		name, account, own string
+		namesOther         bool
+		want               string
+	}{
+		{name: "account default, own default", account: outageNowDefaultConfig, own: outageNowDefaultConfig, want: "open"},
+		{name: "account strict, own default", account: outageNowStrictConfig, own: outageNowDefaultConfig, want: "closed"},
+		{name: "account saved closed, own default", account: outageNowDefaultConfig + "  hook_fail_mode: closed\n", own: outageNowDefaultConfig, want: "closed"},
+		{name: "account connector strict, own default", account: outageNowDefaultConfig + "  connectors:\n    claudecode:\n      rule_pack: strict\n", own: outageNowDefaultConfig, want: "closed"},
+		{name: "account strict names another folder, own default", account: outageNowStrictConfig, own: outageNowDefaultConfig, namesOther: true, want: "open"},
+		{name: "account config this release cannot load names the folder", account: "config_version: 7\nguardrail:\n  mode: observe\n", own: outageNowDefaultConfig, want: "closed"},
+		{name: "account config this release cannot load names another folder", account: "config_version: 7\nguardrail:\n  mode: observe\n", own: outageNowDefaultConfig, namesOther: true, want: "open"},
+		{name: "account default, own strict", account: outageNowDefaultConfig, own: outageNowStrictConfig, want: "closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := t.TempDir()
+			dataDir := t.TempDir()
+			other := t.TempDir()
+			oldAccount, oldRoot := outageAccountHome, outageInstalledDataRoot
+			outageAccountHome = func() string { return account }
+			outageInstalledDataRoot = func() (string, bool) { return "", false }
+			t.Cleanup(func() { outageAccountHome, outageInstalledDataRoot = oldAccount, oldRoot })
+			t.Setenv("HOME", account)
+			t.Setenv("USERPROFILE", account)
+			t.Setenv("DEFENSECLAW_HOME", "")
+			t.Setenv("DEFENSECLAW_CONFIG", "")
+			named := dataDir
+			if tc.namesOther {
+				named = other
+			}
+			writeOutageNowConfig(t, filepath.Join(account, ".defenseclaw"), "data_dir: "+named+"\n"+tc.account)
+			writeOutageNowConfig(t, dataDir, "data_dir: "+dataDir+"\n"+tc.own)
+			if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if got := hookOutageFailModeNow("claudecode", filepath.Join(dataDir, "hooks")); got != tc.want {
+				t.Fatalf("hookOutageFailModeNow = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// rel-1-0-6 GAP-0224 review P4: the closing conditions of the moved branch
+// that had no row. (1) On Windows the installed runtime's protected data
+// root is tried first (hookRuntimeConfigPath): hooks left in a folder with no
+// config.yaml that load that root's config, not the account database's
+// .defenseclaw, stay closed (a custom install.ps1 DEFENSECLAW_HOME is a
+// documented residual). (2) An install window leaves out only the install
+// lock, also in the moved folder the answer recurses into.
+func TestHookOutageFailModeNowMovedBranchInstalledRootAndInstallWindow(t *testing.T) {
+	t.Run("left hooks load the installed root's config", func(t *testing.T) {
+		account := t.TempDir()
+		root := t.TempDir()
+		left := t.TempDir()
+		moved := t.TempDir()
+		oldAccount, oldRoot := outageAccountHome, outageInstalledDataRoot
+		outageAccountHome = func() string { return account }
+		outageInstalledDataRoot = func() (string, bool) { return root, true }
+		t.Cleanup(func() { outageAccountHome, outageInstalledDataRoot = oldAccount, oldRoot })
+		t.Setenv("HOME", account)
+		t.Setenv("USERPROFILE", account)
+		t.Setenv("DEFENSECLAW_HOME", "")
+		t.Setenv("DEFENSECLAW_CONFIG", "")
+		writeOutageNowConfig(t, root, "data_dir: "+moved+"\n"+outageNowDefaultConfig)
+		for _, dir := range []string{filepath.Join(left, "hooks"), filepath.Join(moved, "hooks")} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := hookOutageFailModeNow("claudecode", filepath.Join(left, "hooks")); got != "closed" {
+			t.Fatalf("left hooks under the installed root's config = %q, want closed", got)
+		}
+	})
+	t.Run("install window over a lock in the moved folder", func(t *testing.T) {
+		account := t.TempDir()
+		moved := t.TempDir()
+		oldAccount, oldRoot := outageAccountHome, outageInstalledDataRoot
+		outageAccountHome = func() string { return account }
+		outageInstalledDataRoot = func() (string, bool) { return "", false }
+		t.Cleanup(func() { outageAccountHome, outageInstalledDataRoot = oldAccount, oldRoot })
+		t.Setenv("HOME", account)
+		t.Setenv("USERPROFILE", account)
+		t.Setenv("DEFENSECLAW_HOME", "")
+		t.Setenv("DEFENSECLAW_CONFIG", "")
+		own := filepath.Join(account, ".defenseclaw")
+		writeOutageNowConfig(t, own, "data_dir: "+moved+"\n"+outageNowDefaultConfig)
+		for _, dir := range []string{filepath.Join(own, "hooks"), filepath.Join(moved, "hooks"), filepath.Join(moved, ".install.lock")} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := hookOutageFailModeFor("claudecode", filepath.Join(own, "hooks"), true); got != "open" {
+			t.Fatalf("install window, lock in the moved folder = %q, want open", got)
+		}
+		if got := hookOutageFailModeFor("claudecode", filepath.Join(own, "hooks"), false); got != "closed" {
+			t.Fatalf("no install window, lock in the moved folder = %q, want closed", got)
+		}
+	})
 }
