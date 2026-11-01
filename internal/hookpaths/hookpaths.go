@@ -62,6 +62,16 @@ const ProtectedTargetDecision = "protected-target"
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
 const SourceLinkFactPrefix = "\x00source-link:"
 
+// TarPlainFactPrefix keys the hook client's reading of a tar archive a
+// command extracts: "1" when it read every member and each is a regular
+// file or a directory with a relative name and no .. component, so the
+// extraction makes no link (tarArchiveHoldsNoLink). A gateway with client
+// evidence counts it only together with its own read of the same archive:
+// a gateway that cannot read the archive (ProtectHome) keeps the opaque
+// extraction scope, so the fact never clears a scope alone
+// (rel-1-0-6:GAP-0339 review 8).
+const TarPlainFactPrefix = "\x00tar-plain:"
+
 // CdEnterableFactPrefix keys the hook client's check that the directory a
 // leading cd names exists and that the user may enter it (search
 // permission). "1" is the only value. A gateway that cannot search the
@@ -1239,7 +1249,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		} else if aliasKnown && links.opaque && (!links.opaqueTarget(resolutionPath) || !links.opaqueTargetExceptCopy(resolutionPath, resolutionPath) && links.placedCopyDestination(resolutionPath)) {
 			resolved, ok = links.resolve(resolutionPath, protected)
 		}
-		if aliasKnown && links.opaque {
+		// A plain archive can leave no client-side opaque scope even when
+		// the managed gateway cannot read it. Preserve the copy's own-write
+		// fact independently so that gateway can exempt only this destination.
+		if aliasKnown && (links.opaque || links.copyDestinationCount(resolutionPath) == 1) {
 			if fact := links.opaqueScopeFact(resolutionPath); fact != "" {
 				opaqueFacts[OpaqueScopeFactPrefix+resolutionPath] = fact
 			}
@@ -1844,6 +1857,10 @@ func Decode(value string) (map[string]string, bool) {
 		if strings.HasPrefix(key, SourceLinkFactPrefix) && (value != "0" && value != "1" && value != "?") {
 			return nil, false
 		}
+		if strings.HasPrefix(key, TarPlainFactPrefix) &&
+			(value != "1" || !filepath.IsAbs(strings.TrimPrefix(key, TarPlainFactPrefix))) {
+			return nil, false
+		}
 		if strings.HasPrefix(key, CdEnterableFactPrefix) &&
 			(value != "1" || !filepath.IsAbs(strings.TrimPrefix(key, CdEnterableFactPrefix))) {
 			return nil, false
@@ -2344,10 +2361,15 @@ func (l shellLinks) opaqueTargetExceptCopy(path, ownCopy string) bool {
 }
 
 // opaqueScopeFact is the OpaqueScopeFactPrefix value for path, or "" when a
-// scope covers it or its walk is incomplete.
+// scope covers it or its walk is incomplete. A unique copy destination gets
+// "c" even when the client found no opaque scope: a managed gateway may have
+// retained an archive scope that it could not independently clear.
 func (l shellLinks) opaqueScopeFact(path string) string {
 	switch {
 	case !l.opaqueTarget(path):
+		if !l.opaque && l.copyDestinationCount(path) == 1 {
+			return "c"
+		}
 		return "0"
 	case !l.opaqueTargetExceptCopy(path, path):
 		return "c"
@@ -2813,7 +2835,9 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					// An option supplied at runtime may select extraction.
 					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 				}
-				if archiveMayLink(program, words[1:], static[1:]) {
+				if archiveMayLink(program, words[1:], static[1:]) &&
+					!(onlyDirectoryStatementsBefore(file, call, home) &&
+						tarArchiveHoldsNoLink(program, words[1:], static[1:], dir, command, facts, record)) {
 					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 				}
 				if archiveCopiesLinks(program, words[1:], static[1:]) {
