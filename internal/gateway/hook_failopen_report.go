@@ -374,8 +374,15 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 		action, target, details, severity := hookFailureRow(call)
 		if err := logger.LogActionCtxSeverity(ctx, action, target, details, severity); err != nil {
 			// The calls after AuditOffset still need their rows: keep the
-			// running gateway's backlog cadence going.
+			// running gateway's backlog cadence going. AuditOffset never
+			// stays below Offset: a state from before 1.0.5 has none (0), and
+			// a run that jumped to the last window starts with the old one,
+			// so the next run would read every line before Offset again
+			// (duplicate fail-open alerts and rows).
 			read.start.AuditPending = true
+			if read.start.AuditOffset < read.start.Offset {
+				read.start.AuditOffset = read.start.Offset
+			}
 			_ = writeHookFailuresReported(logDir, read.start)
 			return fmt.Errorf("record %s hook call %s: %w", call.entry.Connector, action, err)
 		}

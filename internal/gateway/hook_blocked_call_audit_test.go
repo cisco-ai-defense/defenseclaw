@@ -498,3 +498,73 @@ func TestHookFailureReportDoesNotRecordACallTwiceAfterAFailedWrite(t *testing.T)
 		t.Fatalf("rows per tool id = %v, want one each", rows)
 	}
 }
+
+// Review of fix/r107-auditwal (REVIEW-auditwal.md finding 1): a run whose
+// first row write failed kept AuditPending with the stale AuditOffset, 0 in a
+// state written by a gateway before 1.0.5, so the next run went back to the
+// file's start and alerted and recorded again every call an older gateway had
+// already reported. The state keeps AuditOffset at or above Offset.
+func TestAFailedFirstRowWriteDoesNotRereadTheLinesBeforeTheRecordedOffset(t *testing.T) {
+	fixture := newSidecarRuntimeFixture(t, true)
+	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitter := &countingFailEmitter{RuntimeV8Emitter: &sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints}}
+	logger := audit.NewLogger(fixture.store)
+	logger.SetRuntimeV8Emitter(emitter)
+	now := time.Date(2026, 11, 1, 4, 0, 0, 0, time.UTC)
+	probe := filepath.Join(t.TempDir(), "logs")
+	appendHookFailures(t, probe, blockedHookLine("2026-11-01T03:59:00Z", "PreToolUse", "s", "toolu_probe"))
+	if err := reportHookFailureCallsIn(probe, logger, now); err != nil {
+		t.Fatal(err)
+	}
+	logDir := filepath.Join(t.TempDir(), "logs")
+	appendHookFailures(t, logDir,
+		hookFailOpenLine("codex", "2026-11-01T03:50:00Z"),
+		blockedHookLine("2026-11-01T03:50:01Z", "PreToolUse", "s", "toolu_old"))
+	f, err := os.Open(filepath.Join(logDir, hookFailuresFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, _ := f.Stat()
+	head := hookFailuresHead(f)
+	f.Close()
+	// A 1.0.3 gateway state: offset and head, no audit_offset.
+	if err := writeHookFailuresReported(logDir, hookFailuresReported{Offset: info.Size(), Head: head}); err != nil {
+		t.Fatal(err)
+	}
+	appendHookFailures(t, logDir, blockedHookLine("2026-11-01T03:59:01Z", "PreToolUse", "s", "toolu_new"))
+	emitter.failAfter.Store(emitter.emits.Load())
+	if err := reportHookFailureCallsIn(logDir, logger, now); err == nil {
+		t.Fatal("first row write did not fail")
+	}
+	if state := readHookFailuresReported(logDir); !state.AuditPending || state.AuditOffset < state.Offset {
+		t.Fatalf("state after the failed run = %+v, want pending with AuditOffset at or above Offset", state)
+	}
+	emitter.failAfter.Store(0)
+	for range 2 {
+		if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := fixture.store.ListEvents(500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, newRows, alerts := 0, 0, 0
+	for _, e := range events {
+		if e.ToolID == "toolu_old" {
+			old++
+		}
+		if e.ToolID == "toolu_new" {
+			newRows++
+		}
+		if e.Action == string(audit.ActionGuardrailDegraded) && e.Target == "codex" {
+			alerts++
+		}
+	}
+	if old != 0 || alerts != 0 || newRows != 1 {
+		t.Fatalf("toolu_old rows %d, codex fail-open alerts %d, toolu_new rows %d; want 0, 0 and 1: the lines before the recorded Offset were read again", old, alerts, newRows)
+	}
+}
