@@ -142,10 +142,12 @@ func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(
 							t.Error(err)
 						}
 					}
-					_, _ = io.WriteString(stdin, `{"hook_event_name":"PreToolUse","tool_input":{"command":"echo ok","description":"`+strings.Repeat("a", 16<<10)+`"}}`)
+					// Over the default 1 MiB read cap: a cap lowered under 900 KiB
+					// refuses instead of reviewing (rel-1-0-6:GAP-0337).
+					_, _ = io.WriteString(stdin, `{"hook_event_name":"PreToolUse","tool_input":{"command":"echo ok","description":"`+strings.Repeat("a", 1100<<10)+`"}}`)
 					_ = stdin.Close()
 				}
-				stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, freeAPIAddr(t), write, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+				stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, freeAPIAddr(t), write, "DEFENSECLAW_GATEWAY_AUTOSTART=0", "DEFENSECLAW_HOOK_MAX_BODY=1048576")
 				if got := shellHookBlocked(err, stdout); got != install {
 					t.Fatalf("blocks=%v, want %v (install %v): err=%v stdout=%q stderr=%q", got, install, install, err, stdout, stderr)
 				}
