@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -351,15 +352,45 @@ func repairCannotFixProblems(result *enterprisestatus.Result) bool {
 			configProblems[warning.Message] = true
 		}
 	}
+	// A file the administrator owns (ownership: verify_only) is fixed by
+	// deploying the export the problem names; repair never writes it
+	// (GAP-0918). The connector's policy-view pin differs from its trusted
+	// digest for the same reason, and only the deployed export followed by
+	// ensure clears it, so that problem is not a repair problem either
+	// (rel-1-0-6 GAP-0918: managed RHEL printed the repair advice for the
+	// pin line next to the verify_only line; managed deb had no pin line).
+	verifyOnly := map[string]bool{}
 	for _, e := range result.Errors {
-		// A file the administrator owns (ownership: verify_only) is fixed by
-		// deploying the export the problem names; repair never writes it
-		// (GAP-0918).
-		if !configProblems[e.Message] && !strings.Contains(e.Message, "missing_defenseclaw_hooks:") {
-			return false
+		if strings.Contains(e.Message, "missing_defenseclaw_hooks:") {
+			if match := verifyOnlyConnectorPattern.FindStringSubmatch(e.Message); match != nil {
+				verifyOnly[match[1]] = true
+			}
 		}
 	}
+	for _, e := range result.Errors {
+		if configProblems[e.Message] || strings.Contains(e.Message, "missing_defenseclaw_hooks:") || policyViewPinOfConnector(e.Message, verifyOnly) {
+			continue
+		}
+		return false
+	}
 	return len(result.Errors) > 0
+}
+
+// verifyOnlyConnectorPattern names the connector in the machine-policy
+// problem of a verify_only file.
+var verifyOnlyConnectorPattern = regexp.MustCompile(`machine policy for ([a-z0-9_-]+)`)
+
+// policyViewPinOfConnector reports whether message is the policy-view pin
+// problem (differs from the trusted digest, no digest, unreadable view) of a
+// connector in connectors.
+func policyViewPinOfConnector(message string, connectors map[string]bool) bool {
+	name, rest, ok := strings.Cut(message, " ")
+	if !ok || !connectors[name] {
+		return false
+	}
+	return strings.HasPrefix(rest, "policy view differs from its trusted digest") ||
+		strings.HasPrefix(rest, "has no trusted policy-view digest") ||
+		strings.HasPrefix(rest, "policy view cannot be read")
 }
 
 // lifecycleResultHasError reports whether result carries an error with code.
