@@ -1249,7 +1249,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		} else if aliasKnown && links.opaque && (!links.opaqueTarget(resolutionPath) || !links.opaqueTargetExceptCopy(resolutionPath, resolutionPath) && links.placedCopyDestination(resolutionPath)) {
 			resolved, ok = links.resolve(resolutionPath, protected)
 		}
-		if aliasKnown && links.opaque {
+		// A plain archive can leave no client-side opaque scope even when
+		// the managed gateway cannot read it. Preserve the copy's own-write
+		// fact independently so that gateway can exempt only this destination.
+		if aliasKnown && (links.opaque || links.copyDestinationCount(resolutionPath) == 1) {
 			if fact := links.opaqueScopeFact(resolutionPath); fact != "" {
 				opaqueFacts[OpaqueScopeFactPrefix+resolutionPath] = fact
 			}
@@ -2358,10 +2361,15 @@ func (l shellLinks) opaqueTargetExceptCopy(path, ownCopy string) bool {
 }
 
 // opaqueScopeFact is the OpaqueScopeFactPrefix value for path, or "" when a
-// scope covers it or its walk is incomplete.
+// scope covers it or its walk is incomplete. A unique copy destination gets
+// "c" even when the client found no opaque scope: a managed gateway may have
+// retained an archive scope that it could not independently clear.
 func (l shellLinks) opaqueScopeFact(path string) string {
 	switch {
 	case !l.opaqueTarget(path):
+		if !l.opaque && l.copyDestinationCount(path) == 1 {
+			return "c"
+		}
 		return "0"
 	case !l.opaqueTargetExceptCopy(path, path):
 		return "c"

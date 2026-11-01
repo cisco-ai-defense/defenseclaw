@@ -93,6 +93,7 @@ func TestR107CopyOfAPlainExtractionIsPlain(t *testing.T) {
 		}
 	}
 	r106Reader2CheckWith(t, []r106Reader2Row{
+		{"plain tar, cp -a of the folder only", "project", `tar -xf plain.tar -C d1 && cp -a d1 e3`, "allow"},
 		{"plain tar, cp -a of the folder, append to the copy", "project", `tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "allow/block"},
 		{"plain tar, rsync -a of the folder, append to the copy", "project", `tar -xf plain.tar -C d1 && rsync -a d1/ e2/ && echo k >> e2/p`, "allow/block"},
 		{"plain tar, append into the folder", "project", `tar -xf plain.tar -C d1 && echo k >> d1/sub/q`, "allow/block"},
