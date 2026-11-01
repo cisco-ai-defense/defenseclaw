@@ -334,7 +334,7 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 # bearer in its environment.
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
-CONTENT="$(defenseclaw_read_stdin_capped fail_closed)" || {
+defenseclaw_read_stdin_into CONTENT fail_closed || {
   _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
   PAYLOAD="$CONTENT"
@@ -441,8 +441,7 @@ RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/request" 
 {{end}}  fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"
 }{{end}}
 
-HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-RESULT=$(echo "$RESPONSE" | sed '$d')
+defenseclaw_split_response
 
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
 {{else}}if [ -z "$HTTP_CODE" ]; then
@@ -459,15 +458,15 @@ fi{{end}}
 {{end}}
 {{if .Sandbox}}# Every DefenseClaw inspect verdict names its action: an empty or
 # action-less reply from the sandbox ingress is not a verdict.
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
   fail_response "failed to parse action from response"
 }
 [ -n "$ACTION" ] || fail_response "missing action in ingress response"
-{{else}}{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+{{else}}{{if .SecureClient}}_dc_jq_into ACTION line "$RESULT" -r '.action // "allow"' 2>/dev/null || {
   fail_response "failed to parse action from response"
 }
 {{else}}# Only a recognized string action is a usable gateway verdict.
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
   fail_response "failed to parse action from response"
 }
 case "$ACTION" in
@@ -475,7 +474,7 @@ case "$ACTION" in
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
 {{end}}{{end}}if [ "$ACTION" = "block" ]; then
-  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // "blocked by DefenseClaw"' 2>/dev/null)
+  _dc_jq_into REASON line "$RESULT" -r '.reason // "blocked by DefenseClaw"' 2>/dev/null
   echo "DefenseClaw: $REASON" >&2
   exit 2
 fi

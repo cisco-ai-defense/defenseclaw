@@ -380,7 +380,7 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 # the hook process before the gateway sees the payload.
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
 # fail mode: the administrator's open covers a gateway outage only.
-{{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{end}}defenseclaw_read_hook_stdin PAYLOAD response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" || {
   _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
   if defenseclaw_prepare_oversized_stdin "$_DC_STDIN_RC"; then
@@ -400,7 +400,7 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 }
 {{if .Sandbox}}# jq, not the awk field scanner: the image verifies only the tools the
 # sandbox hooks list as runtime binaries.
-CURSOR_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r 'if type == "object" then (.hook_event_name // empty) else empty end | strings' 2>/dev/null || true)"
+_dc_jq_into CURSOR_EVENT text "$PAYLOAD" -r 'if type == "object" then (.hook_event_name // empty) else empty end | strings' 2>/dev/null || true
 {{else}}CURSOR_EVENT="$(defenseclaw_json_string_field "$PAYLOAD" "hook_event_name" 2>/dev/null || true)"
 {{end}}
 {{if .Sandbox}}if ! ( defenseclaw_sandbox_require_token cursor cursor-hook "cursor tool" ); then
@@ -504,22 +504,12 @@ fi
 
 # W3C trace propagation: forward validated traceparent / tracestate.
 TRACE_HEADER_ARGS=()
-# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
-while IFS= read -r trace_header_arg; do
-  TRACE_HEADER_ARGS+=("$trace_header_arg")
-done < <(defenseclaw_extract_trace_context)
+defenseclaw_trace_header_args
 
 # Per-user attribution: the gateway cannot read the real user's identity from
 # its own service-account process, so the hook reports it.
-# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
-# no mapfile, and there the array would stay empty and the endpoint would send
-# no identity at all.
 IDENTITY_HEADER_ARGS=()
-if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
-  while IFS= read -r identity_header_arg; do
-    IDENTITY_HEADER_ARGS+=("$identity_header_arg")
-  done < <(defenseclaw_user_identity_args)
-fi
+defenseclaw_user_identity_header_args
 
 {{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
 # OpenShell relay occasionally drops a request, and the ingress dedupes by key.
@@ -562,8 +552,7 @@ RESPONSE=$(defenseclaw_hook_post) || {
 # outage in a standalone managed hook.
 {{end}}defenseclaw_retry_busy _dc_hook_post_response || {{if and (not .SecureClient) (not .Sandbox)}}fail_response "gateway returned HTTP 429"{{else}}fail_unreachable "gateway unreachable"{{end}}{{end}}
 
-HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-RESULT=$(echo "$RESPONSE" | sed '$d')
+defenseclaw_split_response
 
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
 {{else}}if [ -z "$HTTP_CODE" ]; then
@@ -578,13 +567,13 @@ fi{{end}}
 
 {{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_answer_valid "$RESULT" action || fail_response "invalid or ambiguous JSON response"
 {{end}}
-OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
+_dc_jq_into OUTPUT line "$RESULT" -c '.hook_output // empty' 2>/dev/null || {
   fail_response "invalid JSON response"
 }
 {{if or .Sandbox (not .SecureClient)}}{{/* Every DefenseClaw verdict names its action: an empty or unknown one is no
 verdict, never an allow (a sandbox workload may have shaped it; a hook in fail
 mode closed blocks on it, open lets the call run: rel-1-0-3 GAP-0037, GAP-0153;
-a Secure Client render keeps its own contract). */}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+a Secure Client render keeps its own contract). */}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
   fail_response "failed to parse action from response"
 }
 case "$ACTION" in

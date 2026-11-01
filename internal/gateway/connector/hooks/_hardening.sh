@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v10
+# defenseclaw-managed-hook v11
 # Shell-side hook hardening helpers.
 DEFENSECLAW_BAKED_HOOK_PATH=""
 #
@@ -67,6 +67,15 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        by newer hook scripts.)
 #   v10 — validates the entire JSON answer, including nested fields and
 #         duplicate keys, before the awk fallback can extract an action.
+#   v11 — adds the in-shell readers the hooks rendered by this build call
+#         (sandbox-visibility:GAP-0028, issue #1130): defenseclaw_read_hook_stdin
+#         and defenseclaw_read_stdin_into (stdin into a variable),
+#         defenseclaw_trace_header_args and defenseclaw_user_identity_header_args
+#         (the header arrays), _dc_jq_into (a jq answer into a variable) and
+#         _dc_herestring_in_memory. They do what the command substitutions and
+#         process substitutions they replace did, with fewer processes. Every
+#         v10 helper stays, with its behaviour, for hooks an older build
+#         rendered; an older writer keeps this newer helper.
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -193,6 +202,30 @@ defenseclaw_stat_into() {
   fi
 }
 
+# _dc_vmem_soft_limit sets _DC_HOOK_NATIVE_VMEM_LIMIT to this shell's soft
+# address-space limit as `ulimit -S -v` prints it (KiB, or unlimited), read
+# from /proc/self/limits with no child process (issue #1130). It returns 1
+# where that file does not say (macOS), and the caller asks ulimit.
+_dc_vmem_soft_limit() {
+  local line="" soft=""
+  [ -r /proc/self/limits ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "Max address space "*)
+        soft="${line#Max address space}"
+        soft="${soft#"${soft%%[! ]*}"}"
+        soft="${soft%% *}"
+        break
+        ;;
+    esac
+  done < /proc/self/limits
+  case "$soft" in
+    unlimited) _DC_HOOK_NATIVE_VMEM_LIMIT=unlimited ;;
+    '' | *[!0-9]*) return 1 ;;
+    *) _DC_HOOK_NATIVE_VMEM_LIMIT=$((soft / 1024)) ;;
+  esac
+}
+
 # Resource limits — bound the hook so a stuck regex / hostile input
 # can't wedge the agent. Plan F16 ask: CPU 5s, virt mem 512MiB, fds 32.
 # Use ulimit -S (soft) so the hook doesn't try to exceed kernel maxima
@@ -206,7 +239,7 @@ defenseclaw_harden_resources() {
   # The forkless Hermes execution probe (no process may start) makes no
   # native POST, so it skips the command substitution.
   if [ "${_DC_FORKLESS_PROBE:-}" != "1" ]; then
-    _DC_HOOK_NATIVE_VMEM_LIMIT="$(ulimit -S -v 2>/dev/null)"
+    _dc_vmem_soft_limit || _DC_HOOK_NATIVE_VMEM_LIMIT="$(ulimit -S -v 2>/dev/null)"
   fi
   ulimit -S -v 524288 2>/dev/null || true
   ulimit -S -n 32    2>/dev/null || true
@@ -240,7 +273,9 @@ defenseclaw_harden_env() {
   unset DEFENSECLAW_AGENT_HOME
   DEFENSECLAW_AGENT_HOME="${HOME:-}"
   if command -v mktemp >/dev/null 2>&1; then
-    DEFENSECLAW_HOOK_HOME="$(mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null || true)"
+    # The substitution runs mktemp itself (no shell between them); its
+    # status stays off errexit, and a failed run leaves its output, empty.
+    DEFENSECLAW_HOOK_HOME="$(mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null)" || :
     if [ -n "$DEFENSECLAW_HOOK_HOME" ]; then
       _DEFENSECLAW_HOOK_HOME_OWNED=1
     fi
@@ -890,8 +925,28 @@ defenseclaw_json_string_field() {
   if ! command -v awk >/dev/null 2>&1; then
     return 2
   fi
-  if extracted="$(printf '%s' "$json" | awk -v wanted="$field" '
-    { text = text $0 "\n" }
+  # awk reads the answer from a here-string when bash keeps it in a pipe
+  # (_dc_herestring_in_memory): no process writes it (issue #1130). The
+  # newline the here-string adds is the one awk gives the last line anyway.
+  status=0
+  if _dc_herestring_in_memory "$json"; then
+    extracted="$(awk -v wanted="$field" "$_DC_JSON_STRING_FIELD_AWK" <<<"$json")" || status=$?
+  else
+    extracted="$(printf '%s' "$json" | awk -v wanted="$field" "$_DC_JSON_STRING_FIELD_AWK")" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    # A caller that only validates the answer reads no value: no sed for it
+    # (defenseclaw_json_answer_valid, issue #1130 / GAP-0267).
+    [ "${3:-}" = --check ] && return 0
+    printf '%s' "$extracted" | sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'
+    return 0
+  fi
+  return "$status"
+}
+
+# The strict JSON reader of defenseclaw_json_string_field (awk): one object,
+# no repeated key, FIELD a top-level string.
+_DC_JSON_STRING_FIELD_AWK='    { text = text $0 "\n" }
     function ws() {
       while (p <= n && substr(text,p,1) ~ /[[:space:]]/) p++
     }
@@ -997,17 +1052,7 @@ defenseclaw_json_string_field() {
       if (found) { print result; exit 0 }
       exit 1
     }
-  ')"; then
-    # A caller that only validates the answer reads no value: no sed for it
-    # (defenseclaw_json_answer_valid, issue #1130 / GAP-0267).
-    [ "${3:-}" = --check ] && return 0
-    printf '%s' "$extracted" | sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'
-    return 0
-  else
-    status=$?
-    return "$status"
-  fi
-}
+'
 
 # defenseclaw_json_answer_valid JSON FIELD returns 0 when JSON is one valid
 # object with exactly one top-level string FIELD: the check of
@@ -1053,6 +1098,59 @@ _dc_python3_usable() {
       ;;
   esac
   return 0
+}
+
+# _dc_herestring_in_memory VALUE returns 0 when `<<<"$VALUE"` reaches the
+# command through a pipe: bash 5.1 and later write a here-string shorter
+# than the pipe buffer into a pipe (at the default compatibility level), so
+# a program reads a short value with no file written and no process started
+# to write it (issue #1130). Older bash (macOS 3.2), a compatibility level
+# under 5.1 and a longer value keep the printf pipelines.
+_dc_herestring_in_memory() {
+  [ -z "${BASH_COMPAT:-}" ] || return 1
+  case ":${BASHOPTS:-}:" in
+    *:compat3[0-9]:* | *:compat4[0-9]:*) return 1 ;;
+  esac
+  case "${BASH_VERSINFO[0]:-0}" in
+    '' | *[!0-9]* | [0-4]) return 1 ;;
+    5)
+      case "${BASH_VERSINFO[1]:-0}" in
+        '' | *[!0-9]* | 0) return 1 ;;
+      esac
+      ;;
+  esac
+  local LC_ALL=C
+  [ "${#1}" -lt 4095 ]
+}
+
+# _dc_jq_into VAR line|text VALUE ARGS... sets VAR as
+#   VAR="$(echo "$VALUE" | _dc_jq ARGS...)"          (line)
+#   VAR="$(printf '%s' "$VALUE" | _dc_jq ARGS...)"   (text)
+# do, and returns the same status. With jq installed and a value the
+# here-string keeps in memory, jq reads it from the here-string and is the
+# substitution's only process (issue #1130): VALUE and the newline echo
+# writes, or VALUE and a newline jq reads as the whitespace it is. Only for
+# JSON input (no -R). A line VALUE that echo would take for options, and
+# echo with xpg_echo set, keep echo.
+_dc_jq_into() {
+  local _dc_jqi_var="${1:-}" _dc_jqi_mode="${2:-}" _dc_jqi_value="${3-}" _dc_jqi_out="" _dc_jqi_status=0 _dc_jqi_fast=1
+  case "$_dc_jqi_var" in
+    '' | [!A-Za-z_]* | *[!A-Za-z0-9_]*) return 1 ;;
+  esac
+  shift 3 || return 1
+  if [ "$_dc_jqi_mode" = line ]; then
+    case "$_dc_jqi_value" in -*) _dc_jqi_fast=0 ;; esac
+    case ":${BASHOPTS:-}:" in *:xpg_echo:*) _dc_jqi_fast=0 ;; esac
+  fi
+  if [ "$_dc_jqi_fast" = 1 ] && command -v jq >/dev/null 2>&1 && _dc_herestring_in_memory "$_dc_jqi_value"; then
+    _dc_jqi_out="$(jq "$@" <<<"$_dc_jqi_value")" || _dc_jqi_status=$?
+  elif [ "$_dc_jqi_mode" = line ]; then
+    _dc_jqi_out="$(echo "$_dc_jqi_value" | _dc_jq "$@")" || _dc_jqi_status=$?
+  else
+    _dc_jqi_out="$(printf '%s' "$_dc_jqi_value" | _dc_jq "$@")" || _dc_jqi_status=$?
+  fi
+  printf -v "$_dc_jqi_var" '%s' "$_dc_jqi_out"
+  return "$_dc_jqi_status"
 }
 
 # _dc_jq is a drop-in shim for jq covering the small subset of filters
@@ -2604,6 +2702,9 @@ defenseclaw_failed_stop_event() {
 # holds anything but a string, as the native runner's resolveHookEvent does
 # (it decodes both event fields as strings): jq's `// empty` would turn a
 # false value into an absent field.
+_DC_HOOK_EVENT_FIELD_JQ='
+      if length != 1 or (.[0] | type) != "object" then error("not one JSON object") else .[0][$f] end
+      | if . == null then empty elif type == "string" then . else error("not a string") end'
 _dc_hook_event_field() {
   local payload="${1:-}" field="${2:-}"
   case "$field" in
@@ -2611,9 +2712,11 @@ _dc_hook_event_field() {
     *) return 1 ;;
   esac
   if command -v jq >/dev/null 2>&1; then
-    printf '%s' "$payload" | jq -rs --arg f "$field" '
-      if length != 1 or (.[0] | type) != "object" then error("not one JSON object") else .[0][$f] end
-      | if . == null then empty elif type == "string" then . else error("not a string") end' 2>/dev/null
+    if _dc_herestring_in_memory "$payload"; then
+      jq -rs --arg f "$field" "$_DC_HOOK_EVENT_FIELD_JQ" <<<"$payload" 2>/dev/null
+    else
+      printf '%s' "$payload" | jq -rs --arg f "$field" "$_DC_HOOK_EVENT_FIELD_JQ" 2>/dev/null
+    fi
     return
   fi
   if _dc_python3_usable; then
@@ -3006,6 +3109,64 @@ defenseclaw_read_stdin_capped() {
   _dc_read_stdin_exact "$cap" "$overflow_outcome"
 }
 
+# defenseclaw_read_hook_stdin VAR KIND MODE sets VAR as
+#   VAR="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome KIND MODE)")"
+# did, and returns its status, with neither command substitution (issue
+# #1130). The outcome is looked up before the read, as there; what that
+# lookup notes for this call (the install window) is dropped again, as the
+# substitution dropped it.
+defenseclaw_read_hook_stdin() {
+  local _dc_rhs_seen="${_DC_INSTALL_WINDOW_SEEN-}" _dc_rhs_had_seen="${_DC_INSTALL_WINDOW_SEEN+1}"
+  local _dc_rhs_outcome_before="${_DC_HOOK_DELIVERY_OUTCOME-}" _dc_rhs_had_outcome="${_DC_HOOK_DELIVERY_OUTCOME+1}"
+  local _dc_rhs_outcome=""
+  defenseclaw_resolve_hook_delivery_outcome "${2:-}" "${3:-}" || :
+  _dc_rhs_outcome="${_DC_HOOK_DELIVERY_OUTCOME-}"
+  if [ -n "$_dc_rhs_had_seen" ]; then _DC_INSTALL_WINDOW_SEEN="$_dc_rhs_seen"; else unset _DC_INSTALL_WINDOW_SEEN; fi
+  if [ -n "$_dc_rhs_had_outcome" ]; then _DC_HOOK_DELIVERY_OUTCOME="$_dc_rhs_outcome_before"; else unset _DC_HOOK_DELIVERY_OUTCOME; fi
+  defenseclaw_read_stdin_into "${1:-}" "$_dc_rhs_outcome"
+}
+
+# defenseclaw_read_stdin_into VAR OUTCOME sets VAR as
+# VAR="$(defenseclaw_read_stdin_capped OUTCOME)" did, and returns its status.
+# A body that is read whole is stored with its trailing newlines removed, as
+# the substitution removed them, and no process starts; a refused, cut or
+# transport-sized body takes the old path in a subshell, its log included.
+defenseclaw_read_stdin_into() {
+  local _dc_rsi_var="${1:-}" _dc_rsi_outcome="${2:-unknown}" _dc_rsi_cap="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
+  local _dc_rsi_body="" _dc_rsi_status=0 LC_ALL=C
+  case "$_dc_rsi_var" in
+    '' | [!A-Za-z_]* | *[!A-Za-z0-9_]*) return 1 ;;
+  esac
+  case "$_dc_rsi_cap" in
+    ''|*[!0-9]*) _dc_rsi_cap=1048576 ;;
+  esac
+  if IFS= read -r -d '' -n "$((_dc_rsi_cap + 1))" _dc_rsi_body && [ "${#_dc_rsi_body}" -le "$_dc_rsi_cap" ]; then
+    printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" nul "$_dc_rsi_outcome")"
+    return 4
+  fi
+  if [ "${#_dc_rsi_body}" -gt "$_dc_rsi_cap" ]; then
+    printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" overflow "$_dc_rsi_outcome"; printf '%s' "${_dc_rsi_body:0:_dc_rsi_cap}")"
+    return 3
+  fi
+  if [ "${#_dc_rsi_body}" -gt 921600 ]; then
+    # Over the per-user transport's cap (_dc_stdin_over_transport, which
+    # returns at once for a smaller body).
+    printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_over_transport "$_dc_rsi_body" "$_dc_rsi_outcome" && exit 3; printf '%s' "$_dc_rsi_body")" ||
+      _dc_rsi_status=$?
+    return "$_dc_rsi_status"
+  fi
+  case "$_dc_rsi_body" in
+    *$'\n')
+      _dc_rsi_body="${_dc_rsi_body%$'\n'}"
+      # More than one: the substitution removes them all at once.
+      case "$_dc_rsi_body" in
+        *$'\n') _dc_rsi_body="$(printf '%s' "$_dc_rsi_body")" ;;
+      esac
+      ;;
+  esac
+  printf -v "$_dc_rsi_var" '%s' "$_dc_rsi_body"
+}
+
 # _dc_read_stdin_exact prints stdin unchanged, or refuses it (returns 4 for
 # NUL, 3 for overflow, and prints nothing). LC_ALL=C makes
 # ${#body} a byte count. See defenseclaw_read_stdin_capped.
@@ -3187,6 +3348,19 @@ defenseclaw_extract_trace_context() {
   fi
 }
 
+# defenseclaw_trace_header_args appends to TRACE_HEADER_ARGS the arguments
+# defenseclaw_extract_trace_context prints. Without a trace variable it
+# prints nothing and logs nothing, so the process substitution that reads it
+# is skipped (issue #1130); with one, it runs as before.
+defenseclaw_trace_header_args() {
+  local trace_header_arg=""
+  [ -n "${DEFENSECLAW_TRACEPARENT:-${TRACEPARENT:-${OTEL_TRACEPARENT:-}}}${DEFENSECLAW_TRACESTATE:-${TRACESTATE:-${OTEL_TRACESTATE:-}}}" ] || return 0
+  # A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+  while IFS= read -r trace_header_arg; do
+    TRACE_HEADER_ARGS+=("$trace_header_arg")
+  done < <(defenseclaw_extract_trace_context)
+}
+
 # defenseclaw_user_identity_args
 #
 # Emits curl arguments carrying the OS identity of the user this hook is
@@ -3217,15 +3391,26 @@ defenseclaw_extract_trace_context() {
 # guardrail hook under errexit, where a nonzero return would convert a missing
 # telemetry field into a blocked or allowed tool call.
 defenseclaw_user_identity_args() {
+  local -a IDENTITY_HEADER_ARGS=()
+  defenseclaw_user_identity_header_args
+  [ "${#IDENTITY_HEADER_ARGS[@]}" -eq 0 ] || printf '%s\n' "${IDENTITY_HEADER_ARGS[@]}"
+  return 0
+}
+
+# defenseclaw_user_identity_header_args appends to IDENTITY_HEADER_ARGS the
+# arguments defenseclaw_user_identity_args prints, in its order, with no
+# process substitution to read them from (issue #1130). Same rules, same
+# silent failures.
+defenseclaw_user_identity_header_args() {
   local facts secure_client=0
   # A Secure Client hook keeps its earlier headers: no session facts and the
   # account name as id reports it (issue #1092).
   defenseclaw_secure_client_hook && secure_client=1
   if [ "$secure_client" = 0 ]; then
-    facts="$(defenseclaw_session_facts_value)"
+    _dc_session_facts_into
+    facts="$_DC_SESSION_FACTS"
     if [ -n "$facts" ]; then
-      printf '%s\n' "-H"
-      printf '%s\n' "X-DefenseClaw-Session-Facts: $facts"
+      IDENTITY_HEADER_ARGS+=("-H" "X-DefenseClaw-Session-Facts: $facts")
     fi
   fi
 
@@ -3238,8 +3423,7 @@ defenseclaw_user_identity_args() {
   case "$uid" in
     '' | *[!0-9]*) ;;
     *)
-      printf '%s\n' "-H"
-      printf '%s\n' "X-DefenseClaw-User-Id: $uid"
+      IDENTITY_HEADER_ARGS+=("-H" "X-DefenseClaw-User-Id: $uid")
       ;;
   esac
 
@@ -3261,8 +3445,7 @@ defenseclaw_user_identity_args() {
   case "$name" in
     '' | *[!A-Za-z0-9._-]*) return 0 ;;
   esac
-  printf '%s\n' "-H"
-  printf '%s\n' "X-DefenseClaw-User-Name: $name"
+  IDENTITY_HEADER_ARGS+=("-H" "X-DefenseClaw-User-Name: $name")
   return 0
 }
 
@@ -3285,10 +3468,21 @@ defenseclaw_secure_client_hook() {
 # attribution and is dropped unless it matches the header's allowlisted
 # charset.
 defenseclaw_session_facts_value() {
+  _dc_session_facts_into
+  printf '%s' "$_DC_SESSION_FACTS"
+  return 0
+}
+
+# _dc_session_facts_into sets _DC_SESSION_FACTS to what
+# defenseclaw_session_facts_value prints, with no command substitution
+# between them (issue #1130).
+_dc_session_facts_into() {
   local value kind tty ls ca pair v full
-  full="$(defenseclaw_session_facts_full 2>/dev/null)" || full=""
+  _DC_SESSION_FACTS=""
+  _dc_session_facts_full_into 2>/dev/null || _DC_SESSION_FACTS_FULL=""
+  full="$_DC_SESSION_FACTS_FULL"
   if [ -n "$full" ]; then
-    printf '%s' "$full"
+    _DC_SESSION_FACTS="$full"
     return 0
   fi
   value="v1"
@@ -3311,7 +3505,7 @@ defenseclaw_session_facts_value() {
     [ "${#v}" -le 256 ] || continue
     value="$value;$pair"
   done
-  [ "$value" = "v1" ] || printf '%s' "$value"
+  [ "$value" = "v1" ] || _DC_SESSION_FACTS="$value"
   return 0
 }
 
@@ -3334,7 +3528,16 @@ defenseclaw_session_facts_value() {
 # per-user gateway binary; a managed hook that names none (Secure Client)
 # sends the SSH and logind variables alone.
 defenseclaw_session_facts_full() {
+  _dc_session_facts_full_into
+  printf '%s' "$_DC_SESSION_FACTS_FULL"
+  return 0
+}
+
+# _dc_session_facts_full_into sets _DC_SESSION_FACTS_FULL to what
+# defenseclaw_session_facts_full prints (issue #1130).
+_dc_session_facts_full_into() {
   local home="${DEFENSECLAW_AGENT_HOME:-${HOME:-}}" env_key cache record="" re out="" bin="${DEFENSECLAW_SESSION_FACTS_BIN:-}" ccache=""
+  _DC_SESSION_FACTS_FULL=""
   _DC_CCACHE_CHANGED=same
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) [ -n "$bin" ] || return 0 ;;
@@ -3395,7 +3598,7 @@ defenseclaw_session_facts_full() {
       if [[ "$record" =~ $re ]]; then
         out="${BASH_REMATCH[1]}"
       fi
-      defenseclaw_session_facts_checked "$out"
+      ! _dc_session_facts_fit "$out" || _DC_SESSION_FACTS_FULL="$out"
       return 0
     fi
   fi
@@ -3409,7 +3612,7 @@ defenseclaw_session_facts_full() {
     ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true
     HOME="$home" exec "$bin" hook session-facts </dev/null 2>/dev/null
   )" || return 0
-  defenseclaw_session_facts_checked "$out"
+  ! _dc_session_facts_fit "$out" || _DC_SESSION_FACTS_FULL="$out"
   return 0
 }
 
@@ -3438,15 +3641,21 @@ _dc_ccache_changed() {
 # defenseclaw_session_facts_checked prints a v1 session facts value that
 # fits the header (its charset, at most 1024 bytes) and nothing otherwise.
 defenseclaw_session_facts_checked() {
+  ! _dc_session_facts_fit "${1:-}" || printf '%s' "$1"
+  return 0
+}
+
+# _dc_session_facts_fit VALUE returns 0 when VALUE is a v1 session facts
+# value that fits the header (defenseclaw_session_facts_checked prints it).
+_dc_session_facts_fit() {
   case "$1" in
     v1\;*) ;;
-    *) return 0 ;;
+    *) return 1 ;;
   esac
   case "$1" in
-    *[!A-Za-z0-9._@/:\;=-]*) return 0 ;;
+    *[!A-Za-z0-9._@/:\;=-]*) return 1 ;;
   esac
-  [ "${#1}" -le 1024 ] || return 0
-  printf '%s' "$1"
+  [ "${#1}" -le 1024 ]
 }
 
 # defenseclaw_tool_gate_max_time EVENT DEFAULT sets HOOK_MAX_TIME, the
@@ -3470,7 +3679,13 @@ defenseclaw_tool_gate_max_time() {
 # be read keeps DEFAULT.
 defenseclaw_payload_tool_gate_max_time() {
   local event=""
-  event="$(_dc_hook_event_field "$1" hook_event_name 2>/dev/null)" || event=""
+  if command -v jq >/dev/null 2>&1; then
+    # _dc_hook_event_field's jq branch, read into the variable by one
+    # process (_dc_jq_into, issue #1130).
+    _dc_jq_into event text "${1:-}" -rs --arg f hook_event_name "$_DC_HOOK_EVENT_FIELD_JQ" 2>/dev/null || event=""
+  else
+    event="$(_dc_hook_event_field "$1" hook_event_name 2>/dev/null)" || event=""
+  fi
   defenseclaw_tool_gate_max_time "$event" "$2"
 }
 

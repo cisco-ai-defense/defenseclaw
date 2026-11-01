@@ -163,8 +163,10 @@ func TestIdentityHeadersSurviveTheSystemShellsReader(t *testing.T) {
 
 	// Matches the reader block each hook uses, so a hook that changes how it
 	// reads the helper is exercised here rather than silently going quiet.
+	// The hooks fill the array in the shell (defenseclaw_user_identity_header_args,
+	// issue #1130); the read loop they had is what bash 3.2 broke with mapfile.
 	readerPattern := regexp.MustCompile(
-		`(?s)IDENTITY_HEADER_ARGS=\(\).*?defenseclaw_user_identity_args\).*?\nfi\n`,
+		`IDENTITY_HEADER_ARGS=\(\)\ndefenseclaw_user_identity_header_args\n`,
 	)
 
 	for _, script := range identityHookScripts(t) {
