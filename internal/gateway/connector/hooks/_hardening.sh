@@ -178,7 +178,8 @@ _DC_OUTAGE_WARNING_THIS_CALL=""
 # macOS, so one call there ran twice the programs Linux runs (GAP-1755). The
 # first try follows OSTYPE and the spelling that answered is kept for this
 # process (GNU coreutils on macOS keeps working, at one extra launch once).
-# A failed try leaves no output behind. The install check each hook carries
+# A failed try leaves no output behind. exec makes the substitution's
+# shell the stat itself (issue #1130). The install check each hook carries
 # before it sources this file keeps its own spelling (it runs only while a
 # lock exists, and it must stay the same text in every hook).
 defenseclaw_stat_into() {
@@ -192,12 +193,12 @@ defenseclaw_stat_into() {
     esac
   fi
   if [ "$_DC_STAT_DIALECT" = bsd ]; then
-    _DC_STAT_OUT="$(stat -f "$bsd" "$@" 2>/dev/null)" && return 0
-    _DC_STAT_OUT="$(stat -c "$gnu" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
+    _DC_STAT_OUT="$(exec stat -f "$bsd" "$@" 2>/dev/null)" && return 0
+    _DC_STAT_OUT="$(exec stat -c "$gnu" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
     _DC_STAT_DIALECT=gnu
   else
-    _DC_STAT_OUT="$(stat -c "$gnu" "$@" 2>/dev/null)" && return 0
-    _DC_STAT_OUT="$(stat -f "$bsd" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
+    _DC_STAT_OUT="$(exec stat -c "$gnu" "$@" 2>/dev/null)" && return 0
+    _DC_STAT_OUT="$(exec stat -f "$bsd" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
     _DC_STAT_DIALECT=bsd
   fi
 }
@@ -273,9 +274,10 @@ defenseclaw_harden_env() {
   unset DEFENSECLAW_AGENT_HOME
   DEFENSECLAW_AGENT_HOME="${HOME:-}"
   if command -v mktemp >/dev/null 2>&1; then
-    # The substitution runs mktemp itself (no shell between them); its
-    # status stays off errexit, and a failed run leaves its output, empty.
-    DEFENSECLAW_HOOK_HOME="$(mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null)" || :
+    # exec: the substitution's shell becomes mktemp (bash forks a shell
+    # first while this hook has an EXIT trap, issue #1130). Its status stays
+    # off errexit, and a failed run leaves its output, empty.
+    DEFENSECLAW_HOOK_HOME="$(exec mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null)" || :
     if [ -n "$DEFENSECLAW_HOOK_HOME" ]; then
       _DEFENSECLAW_HOOK_HOME_OWNED=1
     fi
@@ -930,7 +932,7 @@ defenseclaw_json_string_field() {
   # newline the here-string adds is the one awk gives the last line anyway.
   status=0
   if _dc_herestring_in_memory "$json"; then
-    extracted="$(awk -v wanted="$field" "$_DC_JSON_STRING_FIELD_AWK" <<<"$json")" || status=$?
+    extracted="$(exec awk -v wanted="$field" "$_DC_JSON_STRING_FIELD_AWK" <<<"$json")" || status=$?
   else
     extracted="$(printf '%s' "$json" | awk -v wanted="$field" "$_DC_JSON_STRING_FIELD_AWK")" || status=$?
   fi
@@ -1128,7 +1130,7 @@ _dc_herestring_in_memory() {
 #   VAR="$(printf '%s' "$VALUE" | _dc_jq ARGS...)"   (text)
 # do, and returns the same status. With jq installed and a value the
 # here-string keeps in memory, jq reads it from the here-string and is the
-# substitution's only process (issue #1130): VALUE and the newline echo
+# substitution's only process (exec, issue #1130): VALUE and the newline echo
 # writes, or VALUE and a newline jq reads as the whitespace it is. Only for
 # JSON input (no -R). A line VALUE that echo would take for options, and
 # echo with xpg_echo set, keep echo.
@@ -1143,7 +1145,7 @@ _dc_jq_into() {
     case ":${BASHOPTS:-}:" in *:xpg_echo:*) _dc_jqi_fast=0 ;; esac
   fi
   if [ "$_dc_jqi_fast" = 1 ] && command -v jq >/dev/null 2>&1 && _dc_herestring_in_memory "$_dc_jqi_value"; then
-    _dc_jqi_out="$(jq "$@" <<<"$_dc_jqi_value")" || _dc_jqi_status=$?
+    _dc_jqi_out="$(exec jq "$@" <<<"$_dc_jqi_value")" || _dc_jqi_status=$?
   elif [ "$_dc_jqi_mode" = line ]; then
     _dc_jqi_out="$(echo "$_dc_jqi_value" | _dc_jq "$@")" || _dc_jqi_status=$?
   else
