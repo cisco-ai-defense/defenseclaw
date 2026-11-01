@@ -196,8 +196,8 @@ func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *
 		empty := "  "
 		opts.AuthenticatedManagedToken = &empty
 	})
-	if result.code != blockExit {
-		t.Fatalf("Run code = %d, want fail-closed %d; stderr=%s", result.code, blockExit, result.stderr)
+	if result.code != failClosedExit("codex") || !codexBlocked(result.stdout) {
+		t.Fatalf("Run code = %d stdout = %q, want Codex's structured fail-closed block; stderr=%s", result.code, result.stdout, result.stderr)
 	}
 	if result.rt.requests != 0 {
 		t.Fatalf("gateway requests = %d, want 0", result.rt.requests)
@@ -658,7 +658,7 @@ func TestOversizedPayload(t *testing.T) {
 	}{
 		"amp":        {stdout: "", code: 2},
 		"claudecode": {stdout: `{"decision":"block","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
-		"codex":      {stdout: `{"decision":"block","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
+		"codex":      {stdout: `{"decision":"block","reason":"DefenseClaw hook payload too large"}` + "\n", code: 0},
 		"openhands":  {stdout: `{"decision":"deny","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
 		"cursor":     {stdout: cursorDeny("DefenseClaw hook payload too large") + "\n", code: 2},
 		"copilot":    {stdout: "", code: 2},
@@ -725,8 +725,8 @@ func TestUnreachable(t *testing.T) {
 		r := run(t, "codex", &stubRT{status: 503, body: "boom"}, func(o *Options) {
 			o.StrictAvailability = true
 		})
-		if r.code != 2 {
-			t.Fatalf("code = %d, want 2", r.code)
+		if r.code != failClosedExit("codex") || !codexBlocked(r.stdout) {
+			t.Fatalf("code = %d stdout = %q, want Codex's structured fail-closed block", r.code, r.stdout)
 		}
 	})
 }
@@ -903,8 +903,8 @@ func TestResponseFailure(t *testing.T) {
 		r := run(t, "codex", ok("this is not json"), func(o *Options) {
 			o.FailMode = "closed"
 		})
-		if r.code != 2 {
-			t.Fatalf("code = %d, want 2", r.code)
+		if r.code != failClosedExit("codex") || !codexBlocked(r.stdout) {
+			t.Fatalf("code = %d stdout = %q, want Codex's structured fail-closed block", r.code, r.stdout)
 		}
 		if !strings.Contains(r.stderr, "invalid JSON response") {
 			t.Errorf("stderr = %q, want invalid JSON", r.stderr)
@@ -1402,8 +1402,11 @@ func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
 					Stderr:             &errb,
 					HTTPClient:         &http.Client{Transport: rt},
 				})
-				if code != blockExit {
-					t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, blockExit, out.String(), errb.String())
+				if code != failClosedExit(connectorName) {
+					t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, failClosedExit(connectorName), out.String(), errb.String())
+				}
+				if connectorName == "codex" && !codexBlocked(out.String()) {
+					t.Fatalf("stdout = %q, want Codex's structured block", out.String())
 				}
 				if rt.requests != 0 {
 					t.Fatalf("gateway called %d times, want 0", rt.requests)
@@ -1450,8 +1453,15 @@ func TestManagedEnterpriseResolverFailureBeforeRuntimeOrGateway(t *testing.T) {
 				Stderr:                &errb,
 				HTTPClient:            &http.Client{Transport: rt},
 			})
-			if code != tc.wantCode {
-				t.Fatalf("code = %d, want %d; stdout=%q stderr=%q", code, tc.wantCode, out.String(), errb.String())
+			want := tc.wantCode
+			if want == blockExit {
+				want = failClosedExit("codex")
+				if !codexBlocked(out.String()) {
+					t.Fatalf("stdout = %q, want Codex's structured block", out.String())
+				}
+			}
+			if code != want {
+				t.Fatalf("code = %d, want %d; stdout=%q stderr=%q", code, want, out.String(), errb.String())
 			}
 			if rt.requests != 0 {
 				t.Fatalf("gateway called %d times, want 0", rt.requests)
@@ -1645,4 +1655,19 @@ func TestDefaultHTTPClientDoesNotFollowRedirects(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want 302 (redirect surfaced, not followed)", resp.StatusCode)
 	}
+}
+
+// failClosedExit is the exit a connector's fail-closed result uses. Codex
+// treats a non-zero exit on UserPromptSubmit as "hook failed" and continues,
+// so it blocks with the structured decision and exit 0 instead.
+func failClosedExit(connector string) int {
+	if connector == "codex" {
+		return 0
+	}
+	return blockExit
+}
+
+// codexBlocked reports whether stdout carries Codex's structured block.
+func codexBlocked(stdout string) bool {
+	return strings.Contains(stdout, `"decision":"block"`)
 }

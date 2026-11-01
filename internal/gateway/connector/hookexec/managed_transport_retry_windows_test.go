@@ -187,7 +187,7 @@ func TestManagedEnterpriseRunEndpointBuildFailureFollowsFailMode(t *testing.T) {
 		wantCode int
 	}{
 		{failMode: "open", wantCode: 0},
-		{failMode: "closed", wantCode: blockExit},
+		{failMode: "closed", wantCode: failClosedExit("codex")},
 	} {
 		t.Run(tc.failMode, func(t *testing.T) {
 			records := captureManagedHookDecisions(t)

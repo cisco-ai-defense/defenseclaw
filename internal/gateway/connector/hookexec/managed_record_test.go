@@ -196,7 +196,7 @@ func TestManagedSentinelAndMissingHomeStayClosedWithBoundaryRecord(t *testing.T)
 				Stderr:                    &bytes.Buffer{},
 				HTTPClient:                &http.Client{Transport: rt},
 			})
-			if code != blockExit || rt.requests != 0 {
+			if code != failClosedExit("codex") || rt.requests != 0 {
 				t.Fatalf("code = %d requests = %d, want closed before contact", code, rt.requests)
 			}
 			requireOneManagedRecord(t, *records, managed.MarkerBoundary, `reason="`+tc.reason+`"`, `decision="block"`)
@@ -230,8 +230,8 @@ func TestOversizedPayloadManagedForcesClosed(t *testing.T) {
 				}
 				return
 			}
-			if r.code != blockExit {
-				t.Fatalf("managed oversized code = %d, want %d; stdout=%q", r.code, blockExit, r.stdout)
+			if r.code != failClosedExit("codex") || !codexBlocked(r.stdout) {
+				t.Fatalf("managed oversized code = %d stdout = %q, want Codex's structured block", r.code, r.stdout)
 			}
 			requireOneManagedRecord(t, *records, managed.MarkerBoundary,
 				`reason="`+managedHookOversizedReason+`"`,

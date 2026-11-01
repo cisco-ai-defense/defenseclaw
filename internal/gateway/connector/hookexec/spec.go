@@ -100,9 +100,12 @@ var specs = map[string]spec{
 		subject: "codex tool", endpoint: "/api/v1/codex/hook",
 		outputField: "codex_output", style: styleCodex,
 		defaultBlockReason: "Blocked by DefenseClaw Codex policy.",
-		oversizedClosed:    failResult{body: `{"decision":"block","reason":"` + tooLarge + `"}`, exit: blockExit},
-		unreachableStrict:  failResult{exit: blockExit},
-		responseClosed:     failResult{exit: blockExit},
+		// Codex treats a non-zero exit on UserPromptSubmit as "hook failed"
+		// and continues, so every fail-closed result is the structured block
+		// with exit 0 that a policy block uses (see styleCodex in Run).
+		oversizedClosed:   failResult{body: `{"decision":"block","reason":"` + tooLarge + `"}`, exit: 0},
+		unreachableStrict: failResult{body: `{"decision":"block","reason":"` + failedClosed + `"}`, exit: 0},
+		responseClosed:    failResult{body: `{"decision":"block","reason":"` + failedClosed + `"}`, exit: 0},
 	},
 	"cursor": {
 		connector: "cursor", hookName: "cursor-hook", errLabel: "cursor",
