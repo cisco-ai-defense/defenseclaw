@@ -737,14 +737,10 @@ type protectedFile struct {
 
 type protectedFiles []protectedFile
 
-// keysOnly drops the SSHControlFiles (and the files they link to): the
+// keysOnlyWith drops the SSHControlFiles (and the files they link to): the
 // target-mention scan reads every word that names a protected file, a read
 // too, and a read of ~/.ssh/config (ssh -F, a backup copy) is ordinary
 // work. Writes to those files are judged by the write readings.
-func (p protectedFiles) keysOnly(home string) protectedFiles {
-	return p.keysOnlyWith(home, nil)
-}
-
 func (p protectedFiles) keysOnlyWith(home string, memo *TargetMemo) protectedFiles {
 	control := map[string]bool{}
 	for _, name := range SSHControlFiles {
