@@ -481,6 +481,16 @@ func windowsMountPointLink(candidate string, info os.FileInfo) bool {
 // checks. A missing component is permitted at the end (redirects create
 // files), but it cannot be crossed by "..": its link status is unknown.
 func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) (string, []string, int, bool) {
+	return walkWritePathMemo(base, path, linkDepth, collect, patchTarget, nil)
+}
+
+// walkWritePathMemo is walkWritePath that, for a top-level walk of an
+// absolute path (no base, no link hop yet, no forms, not a patch target),
+// starts from the longest prefix of path the memo has already walked and
+// records the state after each component it walks itself. The state after a
+// prefix depends only on that prefix and the file system, so a memo walk
+// answers exactly what a fresh walk answers while the files stay as they are.
+func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo) (string, []string, int, bool) {
 	if linkDepth > maxWriteTargetLinkDepth {
 		return "", nil, linkDepth, false
 	}
@@ -491,6 +501,9 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 		path = strings.TrimPrefix(path, filepath.VolumeName(path))
 	} else if !filepath.IsAbs(base) {
 		return "", nil, linkDepth, false
+	}
+	if memo != nil && (base != "" || linkDepth != 0 || collect || patchTarget || !absolute) {
+		memo = nil
 	}
 	var forms []string
 	if collect && absolute {
@@ -508,65 +521,97 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 	// target. A missing component cannot be crossed: it may become a link
 	// before the command executes.
 	var crossed []bool
-	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	start := 0
+	// key is the memo key of parts[:i+1]: the volume root and the
+	// components as written.
+	var key string
+	if memo != nil {
+		key = current
+		for i, part := range parts {
+			next := key + "\x00" + part
+			state, ok := memo.prefix(next)
+			if !ok {
+				break
+			}
+			if state.failed {
+				return "", nil, state.linkDepth, false
+			}
+			key, start = next, i+1
+			current, crossed, linkDepth = state.current, append([]bool(nil), state.crossed...), state.linkDepth
+		}
+	}
+	fail := func() (string, []string, int, bool) {
+		if memo != nil {
+			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true})
+		}
+		return "", nil, linkDepth, false
+	}
+	for _, part := range parts[start:] {
+		if memo != nil {
+			key += "\x00" + part
+		}
 		switch part {
 		case "", ".":
-			continue
 		case "..":
 			if len(crossed) > 0 {
 				if crossed[len(crossed)-1] {
-					return "", nil, linkDepth, false
+					return fail()
 				}
 				crossed = crossed[:len(crossed)-1]
 			}
 			current = filepath.Dir(current)
 			if !add(current) {
-				return "", nil, linkDepth, false
+				return fail()
 			}
 		default:
 			candidate := filepath.Join(current, part)
 			if !add(candidate) {
-				return "", nil, linkDepth, false
+				return fail()
 			}
+			memo.noteWork()
 			info, err := pathLstat(candidate)
 			if err != nil && !os.IsNotExist(err) {
-				return "", nil, linkDepth, false
+				return fail()
 			}
 			unknown := os.IsNotExist(err)
 			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info)) {
 				// The cwd proc link is interpreted by the process opening the
 				// operand. Resolving it in the hook would prove a different path.
 				if ProcCWDWriteOperand(candidate) {
-					return "", nil, linkDepth, false
+					return fail()
 				}
 				link, err := pathReadlink(candidate)
 				if err != nil {
-					return "", nil, linkDepth, false
+					return fail()
 				}
 				// A patch tool may reinterpret a link target with line breaks
 				// as multiple file directives. Ordinary file opens use the
 				// literal kernel path and retain their normal proof.
 				if patchTarget && strings.ContainsAny(link, "\r\n") {
-					return "", nil, linkDepth, false
+					return fail()
 				}
 				var extra []string
 				var nextDepth int
 				var ok bool
 				current, extra, nextDepth, ok = walkWritePath(current, link, linkDepth+1, collect, patchTarget)
 				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
-					return "", nil, linkDepth, false
+					return fail()
 				}
 				linkDepth = nextDepth
 				forms = append(forms, extra...)
 				_, err = pathLstat(current)
 				if err != nil && !os.IsNotExist(err) {
-					return "", nil, linkDepth, false
+					return fail()
 				}
 				crossed = append(crossed, os.IsNotExist(err))
 			} else {
 				current = candidate
 				crossed = append(crossed, unknown)
 			}
+		}
+		if memo != nil {
+			memo.storePrefix(key, walkState{current: current, crossed: crossed, linkDepth: linkDepth})
 		}
 	}
 	return filepath.Clean(current), forms, linkDepth, true
@@ -600,6 +645,14 @@ func AuthorizedKeysPaths(home string) []string {
 // below a linked directory (a linked /home, autofs, macOS /var) must
 // protect ~/.ssh/authorized_keys before it exists (GAP-1725).
 func ProtectedAuthorizedKeysPaths(home string) []string {
+	return protectedAuthorizedKeysPaths(home, nil)
+}
+
+func protectedAuthorizedKeysPaths(home string, memo *TargetMemo) []string {
+	if memo == nil {
+		// The key files share their directory: walk it once.
+		memo = NewTargetMemo()
+	}
 	paths := AuthorizedKeysPaths(home)
 	// sshd and ssh read these as the user's login policy: environment and
 	// rc run at every login, config can run a command for every connection
@@ -612,7 +665,7 @@ func ProtectedAuthorizedKeysPaths(home string) []string {
 		}
 	}
 	for _, path := range slices.Clone(paths) {
-		if resolved, ok := ResolveWriteTarget(path); ok && resolved != path && !slices.Contains(paths, resolved) {
+		if resolved, ok := memo.resolveWriteTarget(path); ok && resolved != path && !slices.Contains(paths, resolved) {
 			paths = append(paths, resolved)
 		}
 	}
@@ -670,11 +723,15 @@ type protectedFiles []protectedFile
 // too, and a read of ~/.ssh/config (ssh -F, a backup copy) is ordinary
 // work. Writes to those files are judged by the write readings.
 func (p protectedFiles) keysOnly(home string) protectedFiles {
+	return p.keysOnlyWith(home, nil)
+}
+
+func (p protectedFiles) keysOnlyWith(home string, memo *TargetMemo) protectedFiles {
 	control := map[string]bool{}
 	for _, name := range SSHControlFiles {
 		path := filepath.Join(home, ".ssh", name)
 		control[path] = true
-		if resolved, ok := ResolveWriteTarget(path); ok {
+		if resolved, ok := memo.resolveWriteTarget(path); ok {
 			control[resolved] = true
 		}
 	}
@@ -688,8 +745,12 @@ func (p protectedFiles) keysOnly(home string) protectedFiles {
 }
 
 func newProtectedFiles(home string) protectedFiles {
+	return newProtectedFilesWith(home, nil)
+}
+
+func newProtectedFilesWith(home string, memo *TargetMemo) protectedFiles {
 	files := make(protectedFiles, 0, len(AuthorizedKeysFiles))
-	for _, path := range ProtectedAuthorizedKeysPaths(home) {
+	for _, path := range memo.ProtectedAuthorizedKeysPaths(home) {
 		protected := protectedFile{path: path}
 		info, err := pathStat(path)
 		switch {
@@ -769,6 +830,25 @@ var clientLogin = sync.OnceValue(func() string {
 // hookShellDialect is the shell a hook body's command tool runs, where only
 // the tool tells it: a Bash tool other than Codex's runs a POSIX shell, Git
 // Bash on Windows (as the gateway's private-key read proof reads it).
+// clientStatementBudgetExceeded is the gateway's statement-budget refusal
+// (trustedCallOverStatementBudget) as the hook client can read it: a call
+// the analysis reads as POSIX, or one whose analysis stopped at its input
+// bound in a shell the gateway reads as POSIX (hookShellDialect, or any
+// shell off Windows), with more than 128 statements.
+func clientStatementBudgetExceeded(connector, tool string, facts actionfacts.Facts, command string) bool {
+	switch facts.Parse.Dialect {
+	case actionfacts.DialectPOSIX:
+	case actionfacts.DialectNone, "":
+		if facts.Parse.Status != actionfacts.StatusLimitExceeded ||
+			runtime.GOOS == "windows" && hookShellDialect(connector, tool) != actionfacts.DialectPOSIX {
+			return false
+		}
+	default:
+		return false
+	}
+	return actionfacts.ShellStatementsOverBudget(command)
+}
+
 func hookShellDialect(connector, tool string) actionfacts.Dialect {
 	if strings.EqualFold(strings.TrimSpace(tool), "Bash") && !strings.EqualFold(strings.TrimSpace(connector), "codex") {
 		return actionfacts.DialectPOSIX
@@ -1021,6 +1101,16 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					// in it is file content, not shell, and no shell
 					// reader parses it (GAP-2561).
 					break
+				}
+				// A POSIX call over the statement budget (more than 128
+				// statements) is refused by the gateway before any reader
+				// runs (trustedCallOverStatementBudget). Describing it cost
+				// the client about 3 ms per statement on Windows, past the
+				// hook answer window at 3000 statements (rel-1-0-2:GAP-0568):
+				// the map says only that it is incomplete, which is never more
+				// permissive than a full one.
+				if !isApplyPatchToolName(tool) && clientStatementBudgetExceeded(connector, tool, facts, command) {
+					return incompleteEvidence(cwd)
 				}
 				// A ~<login> tilde-prefix names this user's home from the
 				// password database. The gateway judges that spelling as the

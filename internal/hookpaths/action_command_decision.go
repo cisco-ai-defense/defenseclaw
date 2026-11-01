@@ -50,29 +50,45 @@ func ActionCommandDecisionWithGlobFacts(command, cwd, home string, facts map[str
 //
 // dialect is an explicit hint, set by the tool that runs the command.
 func ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) string {
-	return actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts)
+	return (*TargetMemo)(nil).ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts)
+}
+
+// ActionCommandDecisionWithDialectAndGlobFacts is the package function of
+// that name, with the file system answers of the evaluation m (nil: none).
+func (m *TargetMemo) ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) string {
+	return actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts, m)
 }
 
 // ActionCommandDecisionInShell is ActionCommandDecisionWithGlobFacts for a
 // call with no dialect hint that the gateway's parse reads as POSIX
 // (posixShell). That guess adds the POSIX reading and drops none.
 func ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
-	return actionTargetDecision(command, cwd, home, "", posixShell, facts)
+	return (*TargetMemo)(nil).ActionCommandDecisionInShell(command, cwd, home, facts, posixShell)
 }
 
-func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string) string {
+// ActionCommandDecisionInShell is the package function of that name, with
+// the file system answers of the evaluation m (nil: none).
+func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
+	return actionTargetDecision(command, cwd, home, "", posixShell, facts, m)
+}
+
+func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
+	if memo == nil {
+		// Every reading of this decision shares one memo.
+		memo = NewTargetMemo()
+	}
 	var globs *actionGlobs
 	if facts != nil {
 		globs = &actionGlobs{facts: facts}
 	}
 	if !actionGitBashReadsAlone(command, home, dialect) &&
-		actionProtectedTargetMentionIn(command, cwd, home, 0, false, globs, dialect) {
+		actionProtectedTargetMentionIn(command, cwd, home, 0, false, globs, dialect, memo) {
 		return "protected-target"
 	}
 	if posixShell && actionWindowsHome(home) && command != "" && len(command) <= MaxPayloadBytes {
-		if actionWindowsLiteralHereDocumentTarget(command, home) ||
-			actionPosixTargetMention(command, cwd, home, 0, false, globs.forCommand(command)) ||
-			runtime.GOOS == "windows" && actionConcreteProtectedWriteOn(command, cwd, home, true) {
+		if actionWindowsLiteralHereDocumentTarget(command, home, memo) ||
+			actionPosixTargetMention(command, cwd, home, 0, false, globs.forCommandWith(command, memo)) ||
+			runtime.GOOS == "windows" && actionConcreteProtectedWriteOnWith(command, cwd, home, true, memo) {
 			return "protected-target"
 		}
 	}
@@ -85,7 +101,7 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 	if actionMakeProtectedRecipe(command, cwd, home) {
 		return "protected-target"
 	}
-	if actionConcreteProtectedWrite(command, cwd, home) {
+	if actionConcreteProtectedWriteOnWith(command, cwd, home, false, memo) {
 		return "protected-target"
 	}
 	return ""
@@ -98,13 +114,19 @@ func actionConcreteProtectedWrite(command, cwd, home string) bool {
 // actionConcreteProtectedWriteOn reads POSIX write operands; windowsHome
 // allows a Windows home (a POSIX shell on a native Windows host).
 func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool) bool {
+	return actionConcreteProtectedWriteOnWith(command, cwd, home, windowsHome, nil)
+}
+
+// actionConcreteProtectedWriteOnWith is actionConcreteProtectedWriteOn with
+// the evaluation's file system answers (TargetMemo; nil: none).
+func actionConcreteProtectedWriteOnWith(command, cwd, home string, windowsHome bool, memo *TargetMemo) bool {
 	if command == "" || home == "" || actionWindowsHome(home) && !windowsHome || !filepath.IsAbs(cwd) {
 		return false
 	}
 	if !windowsHome && actionMoveProtectedEntry(command, cwd, home) {
 		return true
 	}
-	protected := newProtectedFiles(home)
+	protected := memo.protectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
 	writes, _, _ := ShellWriteOperands(command, cwd, home)
 	writes = append(writes, LiteralWriteOperands(command, cwd, home)...)
@@ -142,7 +164,7 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 		}
 	}
 	for _, target := range writes {
-		if protectedReachPath(OperandPath(msys(target), cwd), protected, ssh) {
+		if protectedReachPathWith(OperandPath(msys(target), cwd), protected, ssh, memo) {
 			return true
 		}
 	}
@@ -160,7 +182,7 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 					continue
 				}
 				if value, known := actionWordValue(redirect.Word, values, cwd, home); known &&
-					protectedReachPath(OperandPath(msys(value), cwd), protected, ssh) {
+					protectedReachPathWith(OperandPath(msys(value), cwd), protected, ssh, memo) {
 					return true
 				}
 			}

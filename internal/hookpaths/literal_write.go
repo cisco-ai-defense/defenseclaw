@@ -75,18 +75,29 @@ func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (opera
 	boundName, boundValue := boundedProgramAssignment(file, home)
 	// The values the command assigns before each top-level statement, so an
 	// awk word built from them is read as the shell expands it (GAP-2197,
-	// GAP-0509): out=alias; awk "BEGIN {print 1 >> \"$out\"}".
-	before := make([]actionValues, len(file.Stmts))
+	// GAP-0509): out=alias; awk "BEGIN {print 1 >> \"$out\"}". They are
+	// played forward only when such a word needs them: a copy of every value
+	// before every statement was quadratic in a long assignment list
+	// (a0=1; a1=1; ..., rel-1-0-2:GAP-0568).
 	values := actionValues{"HOME": home, "PWD": cwd}
-	for i, stmt := range file.Stmts {
-		before[i] = maps.Clone(values)
-		actionUpdateValues(stmt, values, cwd, home)
-	}
+	applied := 0 // the statements values has played
+	before := map[int]actionValues{}
 	valuesAt := func(node syntax.Node) actionValues {
 		for i, stmt := range file.Stmts {
-			if node.Pos().Offset() >= stmt.Pos().Offset() && node.End().Offset() <= stmt.End().Offset() {
-				return before[i]
+			if node.Pos().Offset() < stmt.Pos().Offset() || node.End().Offset() > stmt.End().Offset() {
+				continue
 			}
+			if known, ok := before[i]; ok {
+				return known
+			}
+			if applied > i {
+				values, applied = actionValues{"HOME": home, "PWD": cwd}, 0
+			}
+			for ; applied < i; applied++ {
+				actionUpdateValues(file.Stmts[applied], values, cwd, home)
+			}
+			before[i] = maps.Clone(values)
+			return before[i]
 		}
 		return nil
 	}

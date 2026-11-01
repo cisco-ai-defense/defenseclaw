@@ -239,6 +239,11 @@ type trustedActionRequest struct {
 	// new one. The dispatches of the members of a strictest combination of
 	// profiles for one action share one (trustedActionBudget).
 	budget *trustedActionBudget
+	// targetMemo keeps the hook path readers' file system answers for the
+	// whole evaluation: the call, its twins and its simple-command passes
+	// (hookpaths.TargetMemo, rel-1-0-2:GAP-0568). dispatchTrustedAction
+	// makes it; a copy of the request shares it.
+	targetMemo *hookpaths.TargetMemo
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
@@ -281,6 +286,9 @@ func dispatchTrustedAction(
 	if _, ok := managedHookPeerFromContext(parent); ok {
 		request.ProtectedHomeHook = true
 	}
+	if request.targetMemo == nil {
+		request.targetMemo = hookpaths.NewTargetMemo()
+	}
 	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
 	if trustedActionCommandTooDeep(request.Input) {
 		// Past the reading bounds: no reader below parses it, and the call
@@ -309,6 +317,20 @@ func dispatchTrustedAction(
 	}
 	if parent == nil {
 		parent = context.Background()
+	}
+	if !request.simpleCommandPass {
+		facts = actionfacts.Analyze(request.Input)
+		analyzed = true
+		if trustedCallOverStatementBudget(request.Input, facts) {
+			// Over the statement budget the call blocks with
+			// ACTION-COMPOUND-LIMIT whatever its statements are, so it is
+			// refused here, before the twins, the readers and the
+			// per-statement passes run. Those cost about 4 ms per
+			// statement on a Windows host and kept a 3000-statement call in
+			// the gateway for 36 s, past the hook answer window
+			// (rel-1-0-2:GAP-0568).
+			return trustedActionLimitFindings(request.EnforcementCapable)
+		}
 	}
 	// A ~<active user> tilde-prefix names the active home from the password
 	// database (GAP-2378), and under a Windows home an MSYS drive mount
@@ -370,8 +392,10 @@ func dispatchTrustedAction(
 		}()
 	}
 
-	facts = actionfacts.Analyze(request.Input)
-	analyzed = true
+	if !analyzed {
+		facts = actionfacts.Analyze(request.Input)
+		analyzed = true
+	}
 	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
@@ -513,7 +537,7 @@ func dispatchTrustedActionWith(
 					if !checkedWholeWrite {
 						checkedWholeWrite = true
 						wholeWriteSafe = wholeCommandKnown &&
-							hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(wholeCommand,
+							request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(wholeCommand,
 								request.Input.CWD, request.Input.ActiveHome, request.Input.DialectHint, clientGlobFacts(request)) == ""
 					}
 					if wholeWriteSafe {
@@ -950,7 +974,7 @@ func withActiveStateTargetMention(
 		if !known {
 			return findings
 		}
-		if !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
+		if !request.targetMemo.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
 			!factsHaveFindHandOff(facts) && !throughLink(stateOperandThroughLink) &&
 			(!driven || !globbedStateMutation(driveFacts)) {
 			// Behind ProtectHome the gateway cannot open the user's home, so the
@@ -3294,7 +3318,7 @@ func stateLinkResolver(request trustedActionRequest) func(string) (string, bool)
 			// (GAP-2569).
 			return hookpaths.WalkFactTarget(request.ResolvedWriteTargets, value)
 		}
-		physical, ok := hookpaths.ResolveWriteTarget(driveFSPath(request, value))
+		physical, ok := request.targetMemo.ResolveWriteTarget(driveFSPath(request, value))
 		return driveViewPath(request, physical), ok
 	}
 }
@@ -8537,6 +8561,25 @@ func trustedStatementBudgetExceeded(input actionfacts.Input, facts actionfacts.F
 		return false
 	}
 	return actionfacts.ShellStatementsOverBudget(command)
+}
+
+// trustedCallOverStatementBudget reports a shell call that the
+// simple-command pass of dispatchTrustedActionWith judges over the
+// statement budget, by the same test: actionfacts.SimpleCommands reports a
+// "limit" failure (more than 128 statements in the POSIX, PowerShell or CMD
+// split, or nesting past its bound), or the split is empty because the
+// analysis stopped at its node or input bound first
+// (trustedStatementBudgetExceeded). That pass adds ACTION-COMPOUND-LIMIT to
+// such a call whatever else it finds.
+func trustedCallOverStatementBudget(input actionfacts.Input, facts actionfacts.Facts) bool {
+	simples := actionfacts.SimpleCommands(input, facts)
+	if slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
+		return simple.EvaluationFailure == "limit"
+	}) {
+		return true
+	}
+	command, known := trustedBashCommandInput(input)
+	return len(simples) == 0 && known && trustedStatementBudgetExceeded(input, facts, command)
 }
 
 // withTrustedActionLimitFinding adds the over-limit verdict once.

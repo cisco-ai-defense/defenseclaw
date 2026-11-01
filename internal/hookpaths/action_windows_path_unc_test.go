@@ -48,13 +48,13 @@ func TestGAP2256RepeatedWordsKeepTheStateTarget(t *testing.T) {
 	resetActiveStateIndex(t)
 	home, cwd := activeStateIndexFixture(t, 0)
 	repeated := strings.Repeat("echo build ; ", 300)
-	if actionWindowsTargetMention(repeated+"Set-Content -Path out.txt -Value x", cwd, home, 0, false, actionfacts.DialectPowerShell) {
+	if actionWindowsTargetMention(repeated+"Set-Content -Path out.txt -Value x", cwd, home, 0, false, actionfacts.DialectPowerShell, nil) {
 		t.Fatal("ordinary repeated words were a protected target")
 	}
-	if !actionWindowsTargetMention(repeated+"Add-Content -Path ~/.ssh/authorized_keys -Value x", cwd, home, 0, false, actionfacts.DialectPowerShell) {
+	if !actionWindowsTargetMention(repeated+"Add-Content -Path ~/.ssh/authorized_keys -Value x", cwd, home, 0, false, actionfacts.DialectPowerShell, nil) {
 		t.Fatal("authorized_keys after repeated words is no longer a protected target")
 	}
-	if !actionWindowsTargetMention(repeated+"Set-Content -Path ~/.defenseclaw/config.yaml -Value x", cwd, home, 0, true, actionfacts.DialectPowerShell) {
+	if !actionWindowsTargetMention(repeated+"Set-Content -Path ~/.defenseclaw/config.yaml -Value x", cwd, home, 0, true, actionfacts.DialectPowerShell, nil) {
 		t.Fatal("the active config after repeated words is no longer a state target")
 	}
 }

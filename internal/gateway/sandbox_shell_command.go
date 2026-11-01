@@ -119,6 +119,13 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	if commandTool == action.Input.Tool && bytes.Equal(command, action.Input.Args) {
 		return verdict
 	}
+	if action.EnforcementCapable && trustedCallOverStatementBudget(action.Input, primary) {
+		// The call is already refused over the statement budget, and this
+		// reading only adds to its verdict: a second, PowerShell reading
+		// of a 3000-statement Codex call cost a Windows gateway about a
+		// second (rel-1-0-2:GAP-0568).
+		return verdict
+	}
 	input := action.Input
 	input.Tool, input.Args = commandTool, command
 	if action.windowsShellDialect {
