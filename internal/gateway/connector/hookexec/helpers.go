@@ -237,7 +237,9 @@ func managedOpenCodeBackgroundEvent(opts Options, sp spec) bool {
 // decision. blocked is the delivery outcome the caller applies; a connector
 // without a fail-closed contract records what the call got instead
 // (loggedFailMode), so the fail-open report finds the calls that ran. Managed
-// OpenCode callbacks that cannot admit a tool are diagnostics.
+// OpenCode callbacks that cannot admit a tool are diagnostics. A managed
+// hook may have no Home at all, so it also leaves a durable platform record
+// of the decision (recordManagedHookDecision).
 func logHookFailure(opts Options, sp spec, reason, category, failMode string, blocked bool) {
 	if sp.failOpenOnly {
 		blocked = loggedFailMode(opts, sp, failMode) == "closed"
@@ -250,6 +252,9 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 			return
 		}
 		defer close(done)
+	}
+	if opts.ManagedEnterprise {
+		recordManagedHookDecision(opts, sp, reason, category, loggedFailMode(opts, sp, failMode), blocked)
 	}
 	outcome := "fail_closed"
 	if managedOpenCodeBackgroundEvent(opts, sp) {

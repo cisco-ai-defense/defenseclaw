@@ -36,6 +36,14 @@ var (
 	managedEnterpriseListening       = managedGatewayPortListening
 	managedEnterpriseListeningIPv4   = managedGatewayIPv4PortListening
 	managedEnterpriseDialContext     = (&net.Dialer{Timeout: 2 * time.Second}).DialContext
+
+	// managedEnterprisePeerVerifyAttempts bounds how often the hook re-dials
+	// to confirm an unconfirmed listener owner; the hook's deadline bounds it
+	// too.
+	managedEnterprisePeerVerifyAttempts = 4
+	managedEnterprisePeerRetryDelay     = func(attempt int) time.Duration {
+		return time.Duration(25<<attempt) * time.Millisecond
+	}
 )
 
 type mibTCPRowOwnerPID struct {
@@ -114,8 +122,17 @@ func managedEnterpriseHTTPClientFor(
 						canonicalAddr,
 					)
 				}
-
-				return dialManagedGatewayService(ctx, canonicalAddr, serviceName, secureClient)
+				// An unconfirmed listener owner is usually a race with the
+				// kernel's connection table or a service restart, so retry it
+				// within the hook's own deadline. Every other result is final.
+				for attempt := 0; ; attempt++ {
+					conn, err := dialManagedGatewayService(ctx, canonicalAddr, serviceName, secureClient)
+					if err == nil || !errors.Is(err, errManagedGatewayPeerUnconfirmed) ||
+						attempt+1 >= managedEnterprisePeerVerifyAttempts ||
+						!waitManagedGatewayPeerRetry(ctx, managedEnterprisePeerRetryDelay(attempt)) {
+						return conn, err
+					}
+				}
 			},
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -128,7 +145,10 @@ func managedEnterpriseHTTPClientFor(
 // connection only when the process behind its server end is the running SCM
 // service serviceName, the same process before and after the lookup. No byte
 // is written to the connection before that. secureClient selects the
-// stopped-gateway port check (stoppedManagedGatewayError).
+// stopped-gateway port check (stoppedManagedGatewayError). A positively
+// identified foreign owner is errManagedGatewayPortHeld; an owner the hook
+// could not confirm is errManagedGatewayPeerUnconfirmed, which the caller
+// retries.
 func dialManagedGatewayService(ctx context.Context, canonicalAddr, serviceName string, secureClient bool) (net.Conn, error) {
 	servicePID, err := managedEnterpriseQueryServicePID(serviceName)
 	if errors.Is(err, errManagedGatewayNotRunning) {
@@ -174,10 +194,10 @@ func dialManagedGatewayService(ctx context.Context, canonicalAddr, serviceName s
 
 	connectedPID, err := managedEnterpriseConnectedPID(conn)
 	if err != nil {
-		return nil, managedGatewayPeerError("resolve connected listener owner: %v", err)
+		return nil, unconfirmedManagedGatewayError("resolve connected listener owner: %v", err)
 	}
 	if connectedPID == 0 {
-		return nil, managedGatewayPeerError("connected listener PID 0 does not equal service PID %d", servicePID)
+		return nil, unconfirmedManagedGatewayError("connected listener PID 0 does not equal service PID %d", servicePID)
 	}
 	if connectedPID != servicePID {
 		// The service runs, but another process answers on its
@@ -188,10 +208,10 @@ func dialManagedGatewayService(ctx context.Context, canonicalAddr, serviceName s
 	}
 	recheckedPID, err := managedEnterpriseQueryServicePID(serviceName)
 	if err != nil {
-		return nil, managedGatewayPeerError("re-query protected gateway service: %v", err)
+		return nil, unconfirmedManagedGatewayError("re-query protected gateway service: %v", err)
 	}
 	if recheckedPID != servicePID {
-		return nil, managedGatewayPeerError(
+		return nil, unconfirmedManagedGatewayError(
 			"gateway service PID changed from %d to %d",
 			servicePID,
 			recheckedPID,
@@ -202,16 +222,45 @@ func dialManagedGatewayService(ctx context.Context, canonicalAddr, serviceName s
 	return conn, nil
 }
 
+// waitManagedGatewayPeerRetry sleeps delay unless the hook's deadline would
+// pass first, and reports whether another attempt may run.
+func waitManagedGatewayPeerRetry(ctx context.Context, delay time.Duration) bool {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay {
+		return false
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// unconfirmedManagedGatewayError is a peer failure whose listener owner the
+// hook could not confirm and that identified no other owner either.
+func unconfirmedManagedGatewayError(format string, args ...interface{}) error {
+	return fmt.Errorf(
+		"%w: %w: %s",
+		errManagedGatewayPeerUnverified,
+		errManagedGatewayPeerUnconfirmed,
+		fmt.Sprintf(format, args...),
+	)
+}
+
 // stoppedManagedGatewayError is the dial error when the gateway service is
 // not running (serviceErr). That is an outage, which a standalone hook's
 // open fail mode lets through, only when nothing listens on the gateway's
 // port either. Another process on the port while the service is stopped is
 // an integrity failure (errManagedGatewayPortHeld, closed in every fail
-// mode), and so is a listen table the hook cannot read: before, the stopped
-// service was reported before the port was looked at, so fail mode open
-// allowed the call while another program held the port. Under Secure Client
-// a listener on the port over IPv6 counts as well; the standalone profile
-// keeps the IPv4 check.
+// mode): before, the stopped service was reported before the port was
+// looked at, so fail mode open allowed the call while another program held
+// the port. A listen table the hook cannot read identifies no owner, so it
+// is errManagedGatewayPeerUnconfirmed: a Secure Client hook follows its fail
+// mode there, the standalone profile stays closed (managedPeerFailMode).
+// Under Secure Client a listener on the port over IPv6 counts as well; the
+// standalone profile keeps the IPv4 check.
 func stoppedManagedGatewayError(canonicalAddr string, serviceErr error, secureClient bool) error {
 	listening, known := managedEnterpriseListeningIPv4(canonicalAddr)
 	if secureClient {
@@ -219,7 +268,7 @@ func stoppedManagedGatewayError(canonicalAddr string, serviceErr error, secureCl
 	}
 	switch {
 	case !known:
-		return managedGatewayPeerError("gateway service is not running and the listeners on %s cannot be read: %v", canonicalAddr, serviceErr)
+		return unconfirmedManagedGatewayError("gateway service is not running and the listeners on %s cannot be read: %v", canonicalAddr, serviceErr)
 	case listening:
 		return fmt.Errorf("%w: %w: the gateway service is not running but another process listens on %s",
 			errManagedGatewayPeerUnverified, errManagedGatewayPortHeld, canonicalAddr)

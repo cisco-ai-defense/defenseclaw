@@ -8,6 +8,55 @@
 Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# A module that application control did not approve loads in constrained
+# language mode even under a FullLanguage installer, and its first .NET call
+# would fail without saying why. Stop here, using only cmdlets, with a message
+# the installer's catch writes into its JSON verdict.
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+    $defenseClawModulePolicies = @()
+    try {
+        $defenseClawModuleLockdown = Microsoft.PowerShell.Management\Get-ItemProperty `
+            -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' `
+            -Name '__PSLockdownPolicy' `
+            -ErrorAction Stop
+        if ("$($defenseClawModuleLockdown.__PSLockdownPolicy)" -ne '') {
+            $defenseClawModulePolicies += 'ps_lockdown_policy'
+        }
+    }
+    catch {
+    }
+    try {
+        $defenseClawModuleAppLocker = Microsoft.PowerShell.Management\Get-ItemProperty `
+            -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\SrpV2\Script' `
+            -Name 'EnforcementMode' `
+            -ErrorAction Stop
+        if ("$($defenseClawModuleAppLocker.EnforcementMode)" -eq '1') {
+            $defenseClawModulePolicies += 'applocker'
+        }
+    }
+    catch {
+    }
+    try {
+        $defenseClawModuleDeviceGuard = CimCmdlets\Get-CimInstance `
+            -Namespace 'root\Microsoft\Windows\DeviceGuard' `
+            -ClassName 'Win32_DeviceGuard' `
+            -ErrorAction Stop
+        if ("$($defenseClawModuleDeviceGuard.UsermodeCodeIntegrityPolicyEnforcementStatus)" -eq '2') {
+            $defenseClawModulePolicies += 'wdac'
+        }
+    }
+    catch {
+    }
+    if ($defenseClawModulePolicies.Count -eq 0) {
+        $defenseClawModulePolicies += 'unknown'
+    }
+    throw ((
+        'defenseclaw_prereq check="powershell_language_mode" ' +
+        'language_mode="{0}" policy="{1}" ' +
+        'remedy="allow the signed DefenseClaw enterprise module to run in FullLanguage mode"'
+    ) -f [string]$ExecutionContext.SessionState.LanguageMode, ($defenseClawModulePolicies -join ','))
+}
+
 function ConvertTo-DefenseClawTrustedMachineRoot {
     param(
         [Parameter(Mandatory)][string]$Value,
@@ -425,6 +474,137 @@ function Resolve-DefenseClawProfileFromLifecycleDirectory {
     return ''
 }
 
+# Names the policy that stopped Add-Type from compiling. Only numeric codes and
+# error IDs are read, never localized text: 1260 is AppLocker or Software
+# Restriction Policies, 4551 is WDAC or Smart App Control, 225 is Defender or
+# an ASR rule, ScriptContainedMaliciousContent is AMSI, and 112 or another
+# IOException means the compiler's temporary directory is unusable.
+function Get-DefenseClawAddTypeFailure {
+    param(
+        [Parameter(Mandatory)]$ErrorRecord,
+        [string]$Check = 'powershell_add_type',
+        # The blocked file; empty names the compiler Add-Type runs.
+        [string]$Path = ''
+    )
+    $policy = ''
+    $win32 = ''
+    $ioFailure = $false
+    $ids = @()
+    if ($null -ne $ErrorRecord.PSObject.Properties['FullyQualifiedErrorId']) {
+        $ids += [string]$ErrorRecord.FullyQualifiedErrorId
+    }
+    $exception = $ErrorRecord
+    if ($null -ne $ErrorRecord.PSObject.Properties['Exception']) {
+        $exception = $ErrorRecord.Exception
+    }
+    for ($depth = 0; $null -ne $exception -and $depth -lt 12; $depth++) {
+        if ($null -ne $exception.PSObject.Properties['ErrorRecord'] -and
+            $null -ne $exception.ErrorRecord) {
+            $ids += [string]$exception.ErrorRecord.FullyQualifiedErrorId
+        }
+        $codes = @()
+        if ($exception -is [ComponentModel.Win32Exception]) {
+            $codes += [int64]$exception.NativeErrorCode
+        }
+        $codes += [int64]([int64]$exception.HResult -band 0xffffffffL)
+        foreach ($code in $codes) {
+            switch ($code) {
+                1260 { $win32 = '1260'; $policy = 'applocker_or_srp' }
+                2147943660 { $win32 = '1260'; $policy = 'applocker_or_srp' } # 0x800704EC
+                4551 { $win32 = '4551'; $policy = 'wdac_or_smart_app_control' }
+                2147946951 { $win32 = '4551'; $policy = 'wdac_or_smart_app_control' } # 0x800711C7
+                225 { $win32 = '225'; $policy = 'defender_or_asr' }
+                2147942625 { $win32 = '225'; $policy = 'defender_or_asr' } # 0x800700E1
+                112 { if ($policy -eq '') { $win32 = '112'; $ioFailure = $true } }
+                2147942512 { if ($policy -eq '') { $win32 = '112'; $ioFailure = $true } } # 0x80070070
+            }
+        }
+        if ($exception -is [IO.IOException]) {
+            $ioFailure = $true
+        }
+        $exception = $exception.InnerException
+    }
+    if ($policy -eq '' -and
+        @($ids | Microsoft.PowerShell.Core\Where-Object {
+                $_ -like '*ScriptContainedMaliciousContent*'
+            }).Count -gt 0) {
+        $policy = 'amsi'
+    }
+    if ($policy -eq '' -and $ioFailure) {
+        $policy = 'compiler_temp_unusable'
+    }
+    if ($policy -eq '') {
+        return $null
+    }
+    $compiler = $Path
+    if ([string]::IsNullOrWhiteSpace($compiler)) {
+        try {
+            $compiler = [IO.Path]::Combine(
+                [Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory(),
+                'csc.exe'
+            )
+        }
+        catch {
+            $compiler = 'csc.exe'
+        }
+    }
+    $fields = @{
+        check  = $Check
+        path   = $compiler
+        policy = $policy
+        win32  = $win32
+    }
+    $logEvent = Get-DefenseClawPolicyBlockEvent -Policy $policy
+    if (-not [string]::IsNullOrWhiteSpace($logEvent)) {
+        $fields['event'] = $logEvent
+    }
+    return (Format-DefenseClawResilienceEvent `
+        -Marker defenseclaw_prereq `
+        -Fields $fields)
+}
+
+# Best effort: the most recent matching block in the last two minutes, named by
+# log and event ID. Never throws and never decides the verdict.
+function Get-DefenseClawPolicyBlockEvent {
+    param([string]$Policy)
+    $candidates = switch ($Policy) {
+        'applocker_or_srp' {
+            @(
+                @('Microsoft-Windows-AppLocker/EXE and DLL', 8004),
+                @('Application', 866)
+            )
+        }
+        'wdac_or_smart_app_control' {
+            @(, @('Microsoft-Windows-CodeIntegrity/Operational', 3077))
+        }
+        'defender_or_asr' {
+            @(
+                @('Microsoft-Windows-Windows Defender/Operational', 1121),
+                @('Microsoft-Windows-Windows Defender/Operational', 1116)
+            )
+        }
+        default { @() }
+    }
+    foreach ($candidate in @($candidates)) {
+        try {
+            $found = @(Microsoft.PowerShell.Diagnostics\Get-WinEvent `
+                -FilterHashtable @{
+                    LogName   = [string]$candidate[0]
+                    Id        = [int]$candidate[1]
+                    StartTime = [DateTime]::Now.AddMinutes(-2)
+                } `
+                -MaxEvents 1 `
+                -ErrorAction Stop)
+            if ($found.Count -gt 0) {
+                return ('{0} {1}' -f $candidate[0], $candidate[1])
+            }
+        }
+        catch {
+        }
+    }
+    return ''
+}
+
 function Initialize-DefenseClawNativeSecurity {
     if ($null -ne $script:DefenseClawNativeSecurityType) {
         return $script:DefenseClawNativeSecurityType
@@ -789,6 +969,9 @@ namespace $nativeNamespace
             private readonly bool bestEffort;
             internal bool RestoreEnabled;
             internal bool TakeOwnershipEnabled;
+            // Privileges a user-rights policy removed from the token, named
+            // so a failure says which one instead of a generic access denial.
+            internal readonly List<string> Missing = new List<string>();
 
             internal UninstallFilePrivilegeScope() : this(false)
             {
@@ -881,7 +1064,10 @@ namespace $nativeNamespace
                 if (!LookupPrivilegeValueW(null, name, out luid))
                 {
                     if (bestEffort)
+                    {
+                        Missing.Add(name);
                         return false;
+                    }
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
                         "resolve " + name + " for uninstall ACL recovery failed");
@@ -901,7 +1087,10 @@ namespace $nativeNamespace
                         out previousLength))
                 {
                     if (bestEffort)
+                    {
+                        Missing.Add(name);
                         return false;
+                    }
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
                         "enable " + name + " for uninstall ACL recovery failed");
@@ -909,7 +1098,10 @@ namespace $nativeNamespace
                 if (Marshal.GetLastWin32Error() == ERROR_NOT_ALL_ASSIGNED)
                 {
                     if (bestEffort)
+                    {
+                        Missing.Add(name);
                         return false;
+                    }
                     throw new Win32Exception(
                         ERROR_NOT_ALL_ASSIGNED,
                         "installer token lacks " + name + " for uninstall ACL recovery");
@@ -1613,7 +1805,9 @@ namespace $nativeNamespace
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
                         "query regular file link count failed: " + path);
-                if ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                if ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+                    ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                        !IsBenignFileReparseHandle(handle, path)))
                     throw new InvalidOperationException(
                         "refusing link-count query through a reparse point: " + path);
                 if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
@@ -2047,6 +2241,7 @@ namespace $nativeNamespace
             const uint OPEN_EXISTING = 3;
             const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
             const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+            const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
             const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
             const int SE_FILE_OBJECT = 1;
             const uint OWNER_SECURITY_INFORMATION = 0x00000001;
@@ -2074,7 +2269,9 @@ namespace $nativeNamespace
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
                         "query file attributes for raw security failed: " + path);
-                if ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                if ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+                    ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                        !IsBenignFileReparseHandle(handle, path)))
                     throw new InvalidOperationException(
                         "refusing raw security query through a reparse point: " + path);
 
@@ -2168,14 +2365,16 @@ namespace $nativeNamespace
         }
 
         private static void ValidateFixedRegularFile(
+            IntPtr handle,
             BY_HANDLE_FILE_INFORMATION information,
             uint expectedSize,
             string path)
         {
             const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
             const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
-            if ((information.FileAttributes &
-                    (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+            if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+                    !IsBenignFileReparseHandle(handle, path)))
                 throw new InvalidOperationException(
                     "managed secret is not a no-follow regular file: " + path);
             if (information.NumberOfLinks != 1)
@@ -2327,6 +2526,34 @@ namespace $nativeNamespace
             string sddl,
             bool directory)
         {
+            using (UninstallFilePrivilegeScope scope = new UninstallFilePrivilegeScope(true))
+            {
+                // Without restore the token may assign only an owner it holds
+                // itself, so Administrators is stamped instead of SYSTEM.
+                string effective = sddl;
+                if (!scope.RestoreEnabled)
+                {
+                    effective = WithAdministratorsOwner(sddl);
+                    if (!String.Equals(effective, sddl, StringComparison.Ordinal))
+                        RecordPrivilegeFallback(
+                            path,
+                            "SeRestorePrivilege",
+                            "owner Administrators stamped instead of the canonical owner");
+                }
+                return SetPathSecurityDescriptorPrivilegedNoFollowCore(
+                    path,
+                    effective,
+                    directory,
+                    scope);
+            }
+        }
+
+        private static PathSecuritySnapshot SetPathSecurityDescriptorPrivilegedNoFollowCore(
+            string path,
+            string sddl,
+            bool directory,
+            UninstallFilePrivilegeScope scope)
+        {
             const uint FILE_READ_ATTRIBUTES = 0x00000080;
             const uint READ_CONTROL = 0x00020000;
             const uint WRITE_DAC = 0x00040000;
@@ -2369,7 +2596,6 @@ namespace $nativeNamespace
                         Marshal.GetLastWin32Error(),
                         "canonical descriptor has no DACL");
 
-                using (UninstallFilePrivilegeScope scope = new UninstallFilePrivilegeScope(true))
                 {
                     int openError;
                     IntPtr handle = CreateFileNoFollowWithRetry(
@@ -2382,7 +2608,10 @@ namespace $nativeNamespace
                         if (openError != ERROR_ACCESS_DENIED || !scope.TakeOwnershipEnabled)
                             throw new Win32Exception(
                                 openError,
-                                "open managed path for ACL repair failed: " + path);
+                                "open managed path for ACL repair failed: " + path +
+                                    (openError == ERROR_ACCESS_DENIED
+                                        ? MissingPrivilegeSuffix(scope)
+                                        : String.Empty));
                         IntPtr ownerHandle = CreateFileNoFollowWithRetry(
                             path,
                             FILE_READ_ATTRIBUTES | WRITE_OWNER,
@@ -2399,7 +2628,7 @@ namespace $nativeNamespace
                                 throw new Win32Exception(
                                     Marshal.GetLastWin32Error(),
                                     "query managed path identity failed: " + path);
-                            ValidateRepairTarget(ownerInformation, directory, path);
+                            ValidateRepairTarget(ownerHandle, ownerInformation, directory, path);
                             uint ownerResult = SetSecurityInfo(
                                 ownerHandle,
                                 SE_FILE_OBJECT,
@@ -2434,7 +2663,7 @@ namespace $nativeNamespace
                             throw new Win32Exception(
                                 Marshal.GetLastWin32Error(),
                                 "query managed path identity failed: " + path);
-                        ValidateRepairTarget(before, directory, path);
+                        ValidateRepairTarget(handle, before, directory, path);
                         uint result = 0;
                         if (directory)
                         {
@@ -2493,13 +2722,15 @@ namespace $nativeNamespace
         }
 
         private static void ValidateRepairTarget(
+            IntPtr handle,
             BY_HANDLE_FILE_INFORMATION information,
             bool directory,
             string path)
         {
             const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
             const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
-            if ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            if ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+                (directory || !IsBenignFileReparseHandle(handle, path)))
                 throw new InvalidOperationException(
                     "refusing ACL repair through a reparse point: " + path);
             bool isDirectory = (information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -2521,9 +2752,15 @@ namespace $nativeNamespace
         public static string[] DeleteTreePrivileged(string root)
         {
             List<string> failures = new List<string>();
-            using (new UninstallFilePrivilegeScope(true))
+            using (UninstallFilePrivilegeScope scope = new UninstallFilePrivilegeScope(true))
             {
                 DeleteEntryPrivileged(root, failures, 0);
+                string missing = MissingPrivilegeSuffix(scope);
+                if (missing.Length != 0)
+                {
+                    for (int index = 0; index < failures.Count; index++)
+                        failures[index] = failures[index] + missing;
+                }
             }
             return failures.ToArray();
         }
@@ -2654,7 +2891,7 @@ namespace $nativeNamespace
             const uint GENERIC_READ = 0x80000000;
             const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
             const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
-            using (new UninstallFilePrivilegeScope(true))
+            using (UninstallFilePrivilegeScope scope = new UninstallFilePrivilegeScope(true))
             {
                 int openError;
                 IntPtr handle = CreateFileNoFollowWithRetry(
@@ -2665,7 +2902,8 @@ namespace $nativeNamespace
                 if (handle == new IntPtr(-1))
                     throw new Win32Exception(
                         openError,
-                        "open managed file with backup semantics failed: " + path);
+                        "open managed file with backup semantics failed: " + path +
+                            MissingPrivilegeSuffix(scope));
                 try
                 {
                     BY_HANDLE_FILE_INFORMATION information;
@@ -2673,7 +2911,7 @@ namespace $nativeNamespace
                         throw new Win32Exception(
                             Marshal.GetLastWin32Error(),
                             "query managed file identity failed: " + path);
-                    ValidateRepairTarget(information, false, path);
+                    ValidateRepairTarget(handle, information, false, path);
                     ulong size = ((ulong)information.FileSizeHigh << 32) |
                         (ulong)information.FileSizeLow;
                     if (size > (ulong)limit)
@@ -2702,6 +2940,315 @@ namespace $nativeNamespace
                 {
                     CloseHandle(handle);
                 }
+            }
+        }
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTokenInformation(
+            IntPtr token,
+            int informationClass,
+            IntPtr information,
+            uint informationLength,
+            out uint returnLength);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool LookupPrivilegeNameW(
+            string systemName,
+            ref LUID luid,
+            StringBuilder name,
+            ref int nameLength);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceObjectSecurity(
+            IntPtr service,
+            uint securityInformation,
+            IntPtr securityDescriptor,
+            uint bufferSize,
+            out uint bytesNeeded);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            IntPtr securityDescriptor,
+            uint requestedRevision,
+            uint securityInformation,
+            out IntPtr stringSecurityDescriptor,
+            out uint stringLength);
+
+        private static readonly List<string> nativeResilienceEvents = new List<string>();
+
+        // Native checks cannot write the module's log, so the facts they
+        // accept are queued as "marker|path|reason" and drained by
+        // Sync-DefenseClawNativeResilienceEvents.
+        private static void RecordNativeResilienceEvent(
+            string marker,
+            string path,
+            string reason)
+        {
+            lock (nativeResilienceEvents)
+            {
+                if (nativeResilienceEvents.Count < 1024)
+                    nativeResilienceEvents.Add(marker + "|" + path + "|" + reason);
+            }
+        }
+
+        public static string[] DrainNativeResilienceEvents()
+        {
+            lock (nativeResilienceEvents)
+            {
+                string[] drained = nativeResilienceEvents.ToArray();
+                nativeResilienceEvents.Clear();
+                return drained;
+            }
+        }
+
+        private static void RecordPrivilegeFallback(
+            string path,
+            string privilege,
+            string action)
+        {
+            RecordNativeResilienceEvent(
+                "defenseclaw_skip",
+                path,
+                privilege + " missing; " + action);
+        }
+
+        private static string MissingPrivilegeSuffix(UninstallFilePrivilegeScope scope)
+        {
+            if (scope == null || scope.Missing.Count == 0)
+                return String.Empty;
+            return " (" + String.Join(", ", scope.Missing.ToArray()) + " missing)";
+        }
+
+        private static bool StrictAncestorsPinned()
+        {
+            string raw = Environment.GetEnvironmentVariable(
+                "DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS");
+            if (String.IsNullOrWhiteSpace(raw))
+                return false;
+            string value = raw.Trim().ToLowerInvariant();
+            return value == "1" || value == "true" || value == "yes" || value == "on";
+        }
+
+        // A regular file can carry a reparse tag that redirects nothing: WOF
+        // or CompactOS compression, deduplication, a cloud-files placeholder
+        // or a stale AF_UNIX socket. The same list as
+        // Test-DefenseClawBenignFileReparseTag; the tag is read from the open
+        // no-follow handle, so it is the tag of the object being judged.
+        private static bool IsBenignFileReparseHandle(IntPtr handle, string path)
+        {
+            const int FileAttributeTagInfo = 9;
+            const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+            const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+            if (StrictAncestorsPinned())
+                return false;
+            byte[] information = new byte[8];
+            if (!GetFileInformationByHandleEx(
+                    handle,
+                    FileAttributeTagInfo,
+                    information,
+                    (uint)information.Length))
+                return false;
+            uint attributes = BitConverter.ToUInt32(information, 0);
+            uint tag = BitConverter.ToUInt32(information, 4);
+            if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0)
+                return false;
+            bool benign = tag == 0x80000017 ||
+                tag == 0x80000013 ||
+                tag == 0x80000023 ||
+                (tag & 0xFFFF0FFF) == 0x9000001A;
+            if (benign)
+                RecordNativeResilienceEvent(
+                    "defenseclaw_accept",
+                    path,
+                    "regular file carries a storage reparse tag 0x" +
+                        tag.ToString("x8", System.Globalization.CultureInfo.InvariantCulture) +
+                        " that redirects nothing");
+            return benign;
+        }
+
+        private static byte[] AdministratorsSidBytes()
+        {
+            System.Security.Principal.SecurityIdentifier administrators =
+                new System.Security.Principal.SecurityIdentifier("S-1-5-32-544");
+            byte[] bytes = new byte[administrators.BinaryLength];
+            administrators.GetBinaryForm(bytes, 0);
+            return bytes;
+        }
+
+        // Replaces the owner of an SDDL string with Administrators. The owner
+        // token runs from "O:" to the next section tag.
+        private static string WithAdministratorsOwner(string sddl)
+        {
+            if (String.IsNullOrEmpty(sddl) ||
+                !sddl.StartsWith("O:", StringComparison.Ordinal))
+                return sddl;
+            int next = sddl.IndexOf(':', 2);
+            int ownerEnd = next < 0 ? sddl.Length : next - 1;
+            if (ownerEnd < 2)
+                return sddl;
+            string owner = sddl.Substring(2, ownerEnd - 2);
+            if (String.Equals(owner, "BA", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(owner, "S-1-5-32-544", StringComparison.OrdinalIgnoreCase))
+                return sddl;
+            return "O:BA" + sddl.Substring(ownerEnd);
+        }
+
+        // Names every privilege the installer's effective token holds, enabled
+        // or not. A privilege a user-rights policy removed is simply absent.
+        public static string[] GetTokenPrivilegeNames()
+        {
+            const uint TOKEN_QUERY = 0x0008;
+            const int TokenPrivileges = 3;
+            const int ERROR_NO_TOKEN = 1008;
+            IntPtr token;
+            if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, out token))
+            {
+                int error = Marshal.GetLastWin32Error();
+                if (error != ERROR_NO_TOKEN)
+                    throw new Win32Exception(
+                        error,
+                        "open installer thread token for privilege query failed");
+                if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out token))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "open installer token for privilege query failed");
+            }
+            try
+            {
+                uint length;
+                GetTokenInformation(token, TokenPrivileges, IntPtr.Zero, 0, out length);
+                if (length == 0 || length > 65536)
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "size installer token privileges failed");
+                IntPtr buffer = Marshal.AllocHGlobal(checked((int)length));
+                try
+                {
+                    if (!GetTokenInformation(token, TokenPrivileges, buffer, length, out length))
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "query installer token privileges failed");
+                    int count = Marshal.ReadInt32(buffer);
+                    int entrySize = Marshal.SizeOf(typeof(LUID_AND_ATTRIBUTES));
+                    if (count < 0 || 4 + (long)count * entrySize > length)
+                        throw new InvalidOperationException(
+                            "installer token privilege list is malformed");
+                    List<string> names = new List<string>();
+                    for (int index = 0; index < count; index++)
+                    {
+                        LUID_AND_ATTRIBUTES entry = (LUID_AND_ATTRIBUTES)Marshal.PtrToStructure(
+                            new IntPtr(buffer.ToInt64() + 4 + (long)index * entrySize),
+                            typeof(LUID_AND_ATTRIBUTES));
+                        LUID luid = entry.Luid;
+                        StringBuilder name = new StringBuilder(128);
+                        int nameLength = name.Capacity;
+                        if (LookupPrivilegeNameW(null, ref luid, name, ref nameLength))
+                            names.Add(name.ToString());
+                    }
+                    return names.ToArray();
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+            finally
+            {
+                CloseHandle(token);
+            }
+        }
+
+        // Reads only a service's DACL through OpenService(READ_CONTROL) and
+        // QueryServiceObjectSecurity, returned as "D:..." SDDL. Unlike sc.exe
+        // sdshow it needs no SACL access and has no localized output.
+        public static string GetServiceDaclSddl(string name)
+        {
+            const uint SC_MANAGER_CONNECT = 0x0001;
+            const uint READ_CONTROL = 0x00020000;
+            const uint DACL_SECURITY_INFORMATION = 0x00000004;
+            const int ERROR_INSUFFICIENT_BUFFER = 122;
+            if (String.IsNullOrWhiteSpace(name))
+                throw new ArgumentException("service name is required", "name");
+            IntPtr manager = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+            if (manager == IntPtr.Zero)
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "open service control manager for DACL query failed");
+            try
+            {
+                IntPtr service = OpenServiceW(manager, name, READ_CONTROL);
+                if (service == IntPtr.Zero)
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "open service for DACL query failed: " + name);
+                try
+                {
+                    uint needed;
+                    if (QueryServiceObjectSecurity(
+                            service,
+                            DACL_SECURITY_INFORMATION,
+                            IntPtr.Zero,
+                            0,
+                            out needed))
+                        throw new InvalidOperationException(
+                            "service DACL query returned no required length: " + name);
+                    int sizeError = Marshal.GetLastWin32Error();
+                    if (sizeError != ERROR_INSUFFICIENT_BUFFER ||
+                        needed == 0 ||
+                        needed > 1048576)
+                        throw new Win32Exception(
+                            sizeError,
+                            "size service DACL failed: " + name);
+                    IntPtr descriptor = Marshal.AllocHGlobal(checked((int)needed));
+                    try
+                    {
+                        if (!QueryServiceObjectSecurity(
+                                service,
+                                DACL_SECURITY_INFORMATION,
+                                descriptor,
+                                needed,
+                                out needed))
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "query service DACL failed: " + name);
+                        IntPtr text;
+                        uint textLength;
+                        if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                                descriptor,
+                                1,
+                                DACL_SECURITY_INFORMATION,
+                                out text,
+                                out textLength))
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "convert service DACL failed: " + name);
+                        try
+                        {
+                            return Marshal.PtrToStringUni(text) ?? String.Empty;
+                        }
+                        finally
+                        {
+                            LocalFree(text);
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(descriptor);
+                    }
+                }
+                finally
+                {
+                    CloseServiceHandle(service);
+                }
+            }
+            finally
+            {
+                CloseServiceHandle(manager);
             }
         }
 
@@ -2758,7 +3305,7 @@ namespace $nativeNamespace
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
                         "query managed secret identity failed: " + path);
-                ValidateFixedRegularFile(information, expectedSize, path);
+                ValidateFixedRegularFile(handle, information, expectedSize, path);
                 return handle;
             }
             catch
@@ -2832,9 +3379,9 @@ namespace $nativeNamespace
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
                         "query managed receipt identity failed: " + path);
-                if ((information.FileAttributes &
-                        (FILE_ATTRIBUTE_DIRECTORY |
-                            FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+                if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                    ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+                        !IsBenignFileReparseHandle(handle, path)))
                     throw new InvalidOperationException(
                         "managed receipt is not a no-follow regular file: " +
                         path);
@@ -3309,10 +3856,22 @@ namespace $nativeNamespace
                                     Marshal.GetLastWin32Error(),
                                     "enable SeRestorePrivilege failed");
                             int enableError = Marshal.GetLastWin32Error();
+                            // A user-rights policy removed restore: the token
+                            // may then assign only an owner it holds itself,
+                            // so Administrators is stamped instead.
+                            IntPtr stampOwner = owner;
+                            GCHandle administratorsHandle = default(GCHandle);
                             if (enableError == ERROR_NOT_ALL_ASSIGNED)
-                                throw new Win32Exception(
-                                    enableError,
-                                    "installer token lacks SeRestorePrivilege");
+                            {
+                                administratorsHandle = GCHandle.Alloc(
+                                    AdministratorsSidBytes(),
+                                    GCHandleType.Pinned);
+                                stampOwner = administratorsHandle.AddrOfPinnedObject();
+                                RecordPrivilegeFallback(
+                                    path,
+                                    "SeRestorePrivilege",
+                                    "owner Administrators stamped instead of the canonical owner");
+                            }
                             try
                             {
                                 setResult = SetSecurityInfo(
@@ -3322,13 +3881,15 @@ namespace $nativeNamespace
                                         GROUP_SECURITY_INFORMATION |
                                         DACL_SECURITY_INFORMATION |
                                         PROTECTED_DACL_SECURITY_INFORMATION,
-                                    owner,
+                                    stampOwner,
                                     group,
                                     dacl,
                                     IntPtr.Zero);
                             }
                             finally
                             {
+                                if (administratorsHandle.IsAllocated)
+                                    administratorsHandle.Free();
                                 if (!RestoreTokenPrivileges(
                                         token,
                                         false,
@@ -3358,7 +3919,7 @@ namespace $nativeNamespace
                         throw new Win32Exception(
                             Marshal.GetLastWin32Error(),
                             "recheck managed secret identity failed: " + path);
-                    ValidateFixedRegularFile(after, expectedSize, path);
+                    ValidateFixedRegularFile(handle, after, expectedSize, path);
                     string afterIdentity = FileIdentity(after);
                     if (!String.Equals(
                             beforeIdentity,
@@ -3719,6 +4280,15 @@ namespace $nativeNamespace
         }
         $script:DefenseClawNativeSecurityType = $nativeType
     }
+    catch {
+        # A compiler blocked by application control: name the policy from its
+        # numeric code so the installer's verdict says what to allow.
+        $classified = Get-DefenseClawAddTypeFailure -ErrorRecord $_
+        if (-not [string]::IsNullOrWhiteSpace($classified)) {
+            throw $classified
+        }
+        throw
+    }
     finally {
         [Environment]::SetEnvironmentVariable('SystemRoot', $previousSystemRoot, 'Process')
         [Environment]::SetEnvironmentVariable('windir', $previousWindir, 'Process')
@@ -4043,6 +4613,7 @@ function Write-DefenseClawResilienceEvent {
         [Parameter(Mandatory)][string]$Marker,
         [hashtable]$Fields = @{}
     )
+    Sync-DefenseClawNativeResilienceEvents
     $line = Format-DefenseClawResilienceEvent -Marker $Marker -Fields $Fields
     # Each distinct event is logged once per action, however many checks
     # reach the same path.
@@ -4056,7 +4627,95 @@ function Write-DefenseClawResilienceEvent {
 }
 
 function Get-DefenseClawResilienceEvents {
+    Sync-DefenseClawNativeResilienceEvents
     return @($script:ResilienceEvents.ToArray())
+}
+
+# The native helper cannot write this log, so the facts it accepts (a benign
+# reparse tag, an owner stamped without restore privilege) are queued there and
+# logged here. Draining first makes the nested Write call a no-op.
+function Sync-DefenseClawNativeResilienceEvents {
+    $nativeType = $script:DefenseClawNativeSecurityType
+    if ($null -eq $nativeType) {
+        return
+    }
+    $drained = @()
+    try {
+        $drained = @($nativeType::DrainNativeResilienceEvents())
+    }
+    catch {
+        return
+    }
+    foreach ($entry in $drained) {
+        $parts = ([string]$entry).Split([char[]]@('|'), 3)
+        if ($parts.Count -ne 3 -or $parts[0] -cnotin $script:ResilienceMarkers) {
+            continue
+        }
+        Write-DefenseClawResilienceEvent -Marker $parts[0] -Fields @{
+            path   = $parts[1]
+            reason = $parts[2]
+        }
+    }
+}
+
+$script:FilePrivilegePrerequisitesReported = $false
+$script:MissingFilePrivileges = @()
+
+# A user-rights policy can remove backup, restore or take-ownership from
+# Administrators. Nothing fails yet: each path that needs one is skipped or
+# stamped another way and names it. Each missing privilege is reported once
+# per action as an advisory prerequisite.
+function Write-DefenseClawFilePrivilegePrerequisites {
+    if ($script:FilePrivilegePrerequisitesReported) {
+        return
+    }
+    $script:FilePrivilegePrerequisitesReported = $true
+    $held = @()
+    try {
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        $held = @($nativeSecurity::GetTokenPrivilegeNames())
+    }
+    catch {
+        return
+    }
+    $missing = @(Get-DefenseClawMissingFilePrivileges -Held $held)
+    $script:MissingFilePrivileges = $missing
+    foreach ($name in $missing) {
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_prereq -Fields @{
+            check     = 'token_privilege'
+            privilege = $name
+            remedy    = "grant $name to Administrators in the user rights assignment policy"
+        }
+    }
+}
+
+function Get-DefenseClawMissingFilePrivileges {
+    param([AllowEmptyCollection()][string[]]$Held = @())
+    return @(
+        @('SeBackupPrivilege', 'SeRestorePrivilege', 'SeTakeOwnershipPrivilege') |
+            Microsoft.PowerShell.Core\Where-Object { $_ -notin $Held }
+    )
+}
+
+# The privilege a native call named in its Win32 1300 failure, or ''.
+function Get-DefenseClawMissingPrivilegeFromError {
+    param($Exception)
+    $current = $Exception
+    for ($depth = 0; $null -ne $current -and $depth -lt 8; $depth++) {
+        if ($current -is [ComponentModel.Win32Exception] -and
+            [int]$current.NativeErrorCode -eq 1300) {
+            $match = [regex]::Match(
+                [string]$current.Message,
+                'Se[A-Za-z]+Privilege'
+            )
+            if ($match.Success) {
+                return $match.Value
+            }
+            return 'SeBackupPrivilege'
+        }
+        $current = $current.InnerException
+    }
+    return ''
 }
 
 function Assert-DefenseClawTrustedAncestor {
@@ -7679,8 +8338,11 @@ function Clear-DefenseClawRestrictiveFileAttributes {
     }
     Assert-DefenseClawNoReparsePath -Path $Path
     $attributes = [IO.File]::GetAttributes($Path)
-    if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        ($attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+    if (($attributes -band [IO.FileAttributes]::Directory) -ne 0 -or
+        (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -and
+            -not (Test-DefenseClawBenignFileReparseTag -Item (
+                Microsoft.PowerShell.Management\Get-Item -LiteralPath $Path -Force
+            )))) {
         throw "refusing to change attributes of a non-regular managed file: $Path"
     }
     $restrictive = [IO.FileAttributes]::ReadOnly -bor
@@ -11674,6 +12336,12 @@ function Set-DefenseClawRetainedRuntimeAcls {
                 # A stale socket or a compressed or deduplicated file carries
                 # a tag that redirects nothing; it is left as it is.
                 if (-not $strictAdoption -and -not $item.PSIsContainer) {
+                    if (-not (Test-DefenseClawBenignFileReparseTag -Item $item)) {
+                        Write-DefenseClawResilienceEvent -Marker defenseclaw_skip -Fields @{
+                            path   = $full
+                            reason = 'retained runtime file is a reparse point; left as it is'
+                        }
+                    }
                     continue
                 }
                 throw "refusing retained runtime reparse point: $full"
@@ -13439,9 +14107,24 @@ function Repair-DefenseClawUninstallAdminFileAcl {
             [int]$nativeError.NativeErrorCode -ne 5) {
             throw
         }
-        $before = $nativeSecurity::GetUninstallAdminFileSecuritySnapshotNoFollowIfExists(
-            $path
-        )
+        try {
+            $before = $nativeSecurity::GetUninstallAdminFileSecuritySnapshotNoFollowIfExists(
+                $path
+            )
+        }
+        catch {
+            $privilege = Get-DefenseClawMissingPrivilegeFromError -Exception $_.Exception
+            if ([string]::IsNullOrEmpty($privilege)) {
+                throw
+            }
+            # The privileged read is skipped; the file stays unreadable and
+            # its authority cannot be established without that privilege.
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_skip -Fields @{
+                path   = $path
+                reason = "$privilege missing"
+            }
+            throw "uninstall ACL recovery cannot read $path`: $privilege missing"
+        }
     }
     if ($null -eq $before) {
         return $false
@@ -13609,6 +14292,13 @@ function Repair-DefenseClawUninstallAdminFileAcl {
                 # A user-rights policy that removed restore from
                 # Administrators defeats the identity-pinned writer; the
                 # privileged writer falls back to take-ownership.
+                $privilege = Get-DefenseClawMissingPrivilegeFromError -Exception $_.Exception
+                if (-not [string]::IsNullOrEmpty($privilege)) {
+                    Write-DefenseClawResilienceEvent -Marker defenseclaw_skip -Fields @{
+                        path   = $path
+                        reason = "$privilege missing"
+                    }
+                }
                 [void]$nativeSecurity::SetPathSecurityDescriptorPrivilegedNoFollow(
                     $path,
                     $sddl,
@@ -18066,6 +18756,54 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
     return $true
 }
 
+# Error 1069 means the service account may not log on as a service. A
+# user-rights policy that replaced "Log on as a service" drops the virtual
+# service accounts, which Windows grants only through NT SERVICE\ALL SERVICES;
+# the gateway then cannot start, and neither can a rollback that restores it.
+function Start-DefenseClawServiceWithLogonDiagnosis {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    try {
+        Start-DefenseClawService -Name $Name
+    }
+    catch {
+        $message = [string]$_.Exception.Message
+        $logonFailure = (
+            (Get-DefenseClawWin32ErrorCode -Exception $_.Exception) -eq 1069 -or
+            $message -match '(START_ERROR|WIN32_EXIT_CODE)=1069\b'
+        )
+        if (-not $logonFailure) {
+            throw
+        }
+        $account = ''
+        try {
+            $account = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+                -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" `
+                -Name ObjectName)
+        }
+        catch {
+            $account = ''
+        }
+        if (-not [string]::Equals(
+                $account,
+                "NT SERVICE\$GatewayServiceName",
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw
+        }
+        throw ('{0}; {1}' -f $message, (Format-DefenseClawResilienceEvent `
+            -Marker defenseclaw_prereq `
+            -Fields @{
+                check   = 'service_logon_right'
+                account = $account
+                service = $Name
+                remedy  = "add NT SERVICE\ALL SERVICES to 'Log on as a service'"
+            }))
+    }
+}
+
 function Start-DefenseClawTransactionServices {
     param(
         [Parameter(Mandatory)]$Services,
@@ -18240,7 +18978,9 @@ function Start-DefenseClawTransactionServices {
     )
     if ($brokerTemporarilyRequired) {
         Set-DefenseClawServiceStartMode -Name $brokerServiceName -StartMode 3
-        Start-DefenseClawService -Name $brokerServiceName
+        Start-DefenseClawServiceWithLogonDiagnosis `
+            -Name $brokerServiceName `
+            -GatewayServiceName $GatewayServiceName
     }
     $guardianTemporarilyRequired = (
         [bool]$guardian.running -or $gatewayNeedsProtection
@@ -18285,7 +19025,9 @@ function Start-DefenseClawTransactionServices {
         Set-DefenseClawServiceStartMode `
             -Name $GatewayServiceName `
             -StartMode 3
-        Start-DefenseClawService -Name $GatewayServiceName
+        Start-DefenseClawServiceWithLogonDiagnosis `
+            -Name $GatewayServiceName `
+            -GatewayServiceName $GatewayServiceName
     }
     # Restore only an Enumerator
     # explicitly present in the authenticated service preimage. A missing or
@@ -26989,6 +27731,19 @@ function Assert-DefenseClawServiceConfiguration {
 
 function Get-DefenseClawServiceDacl {
     param([Parameter(Mandatory)][string]$Name)
+    # Read only the DACL natively: READ_CONTROL is all it needs, where sdshow
+    # also asks for the SACL and prints localized text on failure. sdshow stays
+    # as the fallback when the native helper cannot run.
+    try {
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        $nativeDacl = ([string]$nativeSecurity::GetServiceDaclSddl($Name)).Trim()
+        if ($nativeDacl.StartsWith('D:', [StringComparison]::OrdinalIgnoreCase)) {
+            return $nativeDacl
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "native service DACL read failed for $Name, using sc.exe sdshow: $($_.Exception.Message)"
+    }
     $sddlOutput = Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sdshow', $Name) -Capture
     $sddlLine = $sddlOutput | Microsoft.PowerShell.Core\Where-Object { [string]$_ -like 'D:*' } | Microsoft.PowerShell.Utility\Select-Object -First 1
     if ($null -eq $sddlLine) {
@@ -30456,7 +31211,8 @@ function Assert-DefenseClawManagedInstallTree {
                     $expectedIPCSocket,
                     [StringComparison]::OrdinalIgnoreCase
                 )
-            )) {
+            ) -and
+            -not (Test-DefenseClawBenignFileReparseTag -Item $item)) {
             throw "refusing to remove managed install tree containing a reparse point: $($item.FullName)"
         }
         # The retired lib tree (the 1.0.2 Fleet compiler's lib\defenseclaw)
@@ -30647,6 +31403,11 @@ function Assert-DefenseClawManagedTreeNoReparse {
                     $exemptSocket,
                     [StringComparison]::OrdinalIgnoreCase
                 )) {
+                continue
+            }
+            # A regular file whose tag redirects nothing (compression,
+            # deduplication, a cloud placeholder) is accepted and logged.
+            if (Test-DefenseClawBenignFileReparseTag -Item $item) {
                 continue
             }
             throw "managed tree contains a reparse point: $($item.FullName)"
@@ -35832,32 +36593,8 @@ function Assert-DefenseClawExactScopeServiceSecurity {
         return
     }
     Assert-DefenseClawServiceRegistryAcl -Name $Name
-    $sddlOutput = @(Invoke-DefenseClawNative `
-        -File $script:ScExe `
-        -Arguments @('sdshow', $Name) `
-        -Capture)
-    $sddlLine = @($sddlOutput |
-        Microsoft.PowerShell.Core\Where-Object {
-            ([string]$_).StartsWith(
-                'D:',
-                [StringComparison]::OrdinalIgnoreCase
-            )
-        } |
-        Microsoft.PowerShell.Utility\Select-Object -First 1)
-    if ($sddlLine.Count -ne 1) {
-        throw "service $Name has no readable SCM security descriptor"
-    }
-    $actualSDDL = ([string]$sddlLine[0]).Trim()
-    $saclIndex = $actualSDDL.IndexOf(
-        'S:',
-        [StringComparison]::OrdinalIgnoreCase
-    )
-    $actualDACL = if ($saclIndex -ge 0) {
-        $actualSDDL.Substring(0, $saclIndex)
-    }
-    else {
-        $actualSDDL
-    }
+    # Native DACL-only read with the sc.exe sdshow fallback.
+    $actualDACL = Get-DefenseClawServiceDacl -Name $Name
     if (-not [string]::Equals(
             $actualDACL,
             $script:ServiceSDDL,
@@ -39225,6 +39962,11 @@ function Remove-DefenseClawNuclearPath {
             }
         }
     }
+    foreach ($privilege in @($script:MissingFilePrivileges)) {
+        if (-not $detail.Contains([string]$privilege)) {
+            $detail += " ($privilege missing)"
+        }
+    }
     return ('{0} {1} survived the purge: {2}' -f $Role, $Path, $detail)
 }
 
@@ -42173,6 +42915,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [switch]$CollectRuntimeGenerations
     )
     $script:ResilienceEvents.Clear()
+    $script:FilePrivilegePrerequisitesReported = $false
+    $script:MissingFilePrivileges = @()
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
     if ($Action -eq 'Recover' -and -not (Test-DefenseClawStandaloneProfile)) {
         throw 'Recover is available only to standalone Setup after a timed-out lifecycle'
@@ -42292,6 +43036,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -not (Test-DefenseClawTrustStrictAncestors) -and
         $nuclearInstallRoot -match $nuclearSafeRootPattern -and
         $nuclearStateRoot   -match $nuclearSafeRootPattern) {
+        Write-DefenseClawFilePrivilegePrerequisites
         return Invoke-DefenseClawNuclearUninstall `
             -Layout @{
                 InstallRoot = $nuclearInstallRoot
@@ -42374,6 +43119,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     if ($Action -ne 'Status') {
         Assert-DefenseClawAdministrator
+        Write-DefenseClawFilePrivilegePrerequisites
     }
     $script:DefenseClawQuarantinedRoots = @()
     $script:DefenseClawSquattedRootNotes = @()

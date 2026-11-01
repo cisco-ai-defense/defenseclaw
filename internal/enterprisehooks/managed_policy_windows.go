@@ -179,11 +179,12 @@ func CaptureWindowsClaudeManagedPolicySnapshot(
 			// The strict identity check is still used by Teardown/Restore
 			// callers where recovery MUST authenticate the
 			// exact prior deployment; this bulldoze path is only in Capture.
-			fmt.Fprintf(os.Stderr,
-				"[enterprise-hooks] reclaiming identity-drifted Claude managed "+
-					"policy at %s and state at %s (prior scoped install's "+
-					"identity does not match current scope): %v\n",
-				path, statePath, err)
+			managed.EmitResilienceEvent(managed.MarkerRecover, map[string]string{
+				"path":       path,
+				"state_path": statePath,
+				"reason": "reclaiming identity-drifted Claude managed policy and state " +
+					"(prior scoped install's identity does not match current scope): " + err.Error(),
+			})
 			// Remove the state sidecar first. If the policy removal then
 			// fails, the leftover is policy-without-state, which
 			// reclaimOrphanClaudeManagedPolicy recovers on the next run;

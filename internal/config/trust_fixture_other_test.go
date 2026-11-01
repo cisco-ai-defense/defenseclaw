@@ -7,6 +7,10 @@ package config
 
 import "testing"
 
+// untrustedWriterAcceptedAsBoundary: Unix keeps an untrusted writer or owner
+// on a managed policy or config file fatal.
+const untrustedWriterAcceptedAsBoundary = false
+
 // grantUntrustedWriterForTest is a no-op on Unix: the fixtures there are
 // already untrusted through their owner or a world-writable parent.
 func grantUntrustedWriterForTest(t *testing.T, _ string) {

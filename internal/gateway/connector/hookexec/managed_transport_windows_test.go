@@ -380,11 +380,14 @@ func TestRunningManagedGatewayServiceNeedsAnIPv4Listener(t *testing.T) {
 }
 
 // A stopped gateway service is an outage only when nothing listens on its
-// port: another process on the port, or a listen table that cannot be read,
-// is an integrity failure that no fail mode lets through.
+// port: another process on the port is an integrity failure that no fail
+// mode lets through. A listen table that cannot be read identifies no owner
+// (errManagedGatewayPeerUnconfirmed): a Secure Client hook follows its fail
+// mode, the standalone profile stays closed.
 func TestStoppedManagedGatewayServiceWithAPortListenerIsNotAnOutage(t *testing.T) {
 	managedTransportTestMu.Lock()
 	defer managedTransportTestMu.Unlock()
+	fastManagedPeerRetries(t)
 
 	listener := listenManagedTransportTest(t)
 	defer listener.Close()
@@ -416,22 +419,23 @@ func TestStoppedManagedGatewayServiceWithAPortListenerIsNotAnOutage(t *testing.T
 		{name: "nothing listens", known: true, standaloneOutage: true, secureClientOutage: true},
 	} {
 		for _, profile := range []struct {
-			name   string
-			client func() (*http.Client, error)
-			opts   Options
-			outage bool
+			name         string
+			client       func() (*http.Client, error)
+			opts         Options
+			outage       bool
+			secureClient bool
 		}{
 			{"standalone", func() (*http.Client, error) {
 				return managedEnterpriseHTTPClientFor(time.Second, addr, "DefenseClawGateway", false)
-			}, standalone, tc.standaloneOutage},
+			}, standalone, tc.standaloneOutage, false},
 			{"secure client", func() (*http.Client, error) {
 				return managedEnterpriseHTTPClientFor(time.Second, addr, "DefenseClawGateway", true)
-			}, secureClient, tc.secureClientOutage},
+			}, secureClient, tc.secureClientOutage, true},
 			// The Secure Client plugin hook states no profile; it gets both
 			// checks.
 			{"plugin hook", func() (*http.Client, error) {
 				return NewManagedEnterpriseGatewayHTTPClient(time.Second, addr, "DefenseClawGateway")
-			}, secureClient, tc.secureClientOutage},
+			}, secureClient, tc.secureClientOutage, true},
 		} {
 			t.Run(tc.name+"/"+profile.name, func(t *testing.T) {
 				managedEnterpriseListening = func(string) (bool, bool) { return tc.any, tc.known }
@@ -451,8 +455,11 @@ func TestStoppedManagedGatewayServiceWithAPortListenerIsNotAnOutage(t *testing.T
 				if got := errors.Is(err, errManagedGatewayPortHeld); got != wantHeld {
 					t.Fatalf("port held = %v, want %v (err %v)", got, wantHeld, err)
 				}
+				if got := errors.Is(err, errManagedGatewayPeerUnconfirmed); got != !tc.known {
+					t.Fatalf("unconfirmed = %v, want %v (err %v)", got, !tc.known, err)
+				}
 				want := "closed"
-				if profile.outage {
+				if profile.outage || (!tc.known && profile.secureClient) {
 					want = "open"
 				}
 				if got := managedPeerFailMode(profile.opts, "open", err); got != want {

@@ -523,9 +523,10 @@ func validateWindowsCursorManagedArtifactsReclaimingOrphans(
 	if _, removeErr := connector.RemoveWindowsCursorEnterpriseHooks(current.hooks.data, current.adapter.path); removeErr != nil {
 		return artifacts, err
 	}
-	fmt.Fprintf(os.Stderr,
-		"[enterprise-hooks] reclaiming orphan Cursor hook refs at %s (state ownership metadata absent)\n",
-		current.hooks.path)
+	managed.EmitResilienceEvent(managed.MarkerRecover, map[string]string{
+		"path":   current.hooks.path,
+		"reason": "reclaiming orphan Cursor hook refs (state ownership metadata absent)",
+	})
 	if _, writeErr := publishWindowsCursorManagedHooks(
 		windowsCursorSharedHooks(current.hooks, current.hooksMetadata),
 		windowsCursorHooksRemovalRender(current.adapter.path, true),
@@ -2751,11 +2752,11 @@ func CaptureWindowsCursorManagedPolicySnapshot(
 			// The strict identity check remains for PrepareWindowsCursor...
 			// Teardown / RestoreWindowsCursor... callers where recovery
 			// MUST authenticate the exact prior deployment.
-			fmt.Fprintf(os.Stderr,
-				"[enterprise-hooks] reclaiming identity-drifted Cursor managed "+
-					"artifacts at %s (prior scoped install's identity does not "+
-					"match current scope): %v\n",
-				artifacts.root, err)
+			managed.EmitResilienceEvent(managed.MarkerRecover, map[string]string{
+				"path": artifacts.root,
+				"reason": "reclaiming identity-drifted Cursor managed artifacts " +
+					"(prior scoped install's identity does not match current scope): " + err.Error(),
+			})
 			if deactivateErr := deactivateWindowsCursorManagedPolicyUnlocked(artifacts); deactivateErr != nil {
 				return fmt.Errorf(
 					"enterprise hooks: reclaim identity-drifted Cursor managed policy: %w",

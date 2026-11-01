@@ -495,7 +495,7 @@ def test_public_installer_exposes_complete_truthful_lifecycle() -> None:
     assert "exit $exitCode" in installer
     assert "ok = $false" in installer
     assert "error = $failureMessage" in installer
-    assert "errors = @($failureMessage)" in installer
+    assert "errors = @(@($failureMessage) + $bootstrapResilienceEvents)" in installer
 
 
 def test_enterprise_module_install_is_idempotent_over_active_metadata() -> None:
@@ -3695,7 +3695,9 @@ def test_timeout_recovery_replays_the_pending_journal_under_the_lifecycle_lock()
     run_child = setup.index("runChild := func(runOpts enterpriseSetupOptions) (enterpriseLifecycleChildRun, error) {")
     plan = setup.index("lifecycle, last, err := runStandaloneEnsurePlan(plan, runChild)")
     assert run_child < setup.index("return runEnterpriseLifecycleChild(parent, runOpts,", run_child) < plan
-    assert plan < setup.index("\n\tcleanupErr := cleanup()")
+    # The staged files stay pinned until then too.
+    assert plan < setup.index("\n\tstage.releaseFiles()", plan)
+    assert plan < setup.index("\n\tstage.cleanupAndAccept()", plan)
 
 
 def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:
@@ -6531,3 +6533,126 @@ def test_production_uninstall_admits_native_cleanup_after_recorded_trust() -> No
         "Add-DefenseClawNativeCleanupSource"
     )
     assert "$MetadataTrusted" in helper and "Test-DefenseClawStandaloneProfile" in helper
+
+
+def _function_text(source: str, name: str) -> str:
+    start = source.index(f"function {name} {{")
+    following = source.find("\nfunction ", start + 1)
+    return source[start:] if following < 0 else source[start:following]
+
+
+def test_constrained_language_guards_run_before_any_dotnet_use() -> None:
+    installer = read(INSTALLER).replace("\r\n", "\n")
+    module = read(MODULE).replace("\r\n", "\n")
+    guard = "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {"
+
+    installer_guard = installer.index(guard)
+    assert installer.index("$ErrorActionPreference = 'Stop'") < installer_guard
+    assert installer_guard < installer.index("function ConvertTo-DefenseClawTrustedMachineRoot")
+    installer_block = installer[installer_guard : installer.index("function ConvertTo-DefenseClawTrustedMachineRoot")]
+    # Constrained language refuses .NET types and [pscustomobject] conversion.
+    for forbidden in ("[IO.", "[Environment]", "[pscustomobject]", "::"):
+        assert forbidden not in installer_block
+    for policy_source in (
+        "__PSLockdownPolicy",
+        r"HKLM:\SOFTWARE\Policies\Microsoft\Windows\SrpV2\Script",
+        "Win32_DeviceGuard",
+    ):
+        assert policy_source in installer_block
+    assert 'defenseclaw_prereq check="powershell_language_mode" ' in installer_block
+    assert "ConvertTo-Json -Depth 6 -Compress" in installer_block
+    assert "exit 1" in installer_block
+
+    module_guard = module.index(guard)
+    assert module_guard < module.index("function ConvertTo-DefenseClawTrustedMachineRoot")
+    module_block = module[module_guard : module.index("function ConvertTo-DefenseClawTrustedMachineRoot")]
+    for forbidden in ("[IO.", "[Environment]", "[pscustomobject]", "::"):
+        assert forbidden not in module_block
+    assert 'defenseclaw_prereq check="powershell_language_mode" ' in module_block
+    assert "throw (" in module_block
+
+
+def test_add_type_failures_are_classified_by_code_not_text() -> None:
+    installer = read(INSTALLER).replace("\r\n", "\n")
+    module = read(MODULE).replace("\r\n", "\n")
+    for source, classifier, initializer in (
+        (installer, "Get-DefenseClawBootstrapAddTypeFailure", "Initialize-DefenseClawBootstrapNativePath"),
+        (module, "Get-DefenseClawAddTypeFailure", "Initialize-DefenseClawNativeSecurity"),
+    ):
+        body = _function_text(source, classifier)
+        for code in ("1260", "4551", "225", "112", "ScriptContainedMaliciousContent", "[IO.IOException]"):
+            assert code in body
+        assert ".Message" not in body
+        assert "csc.exe" in body
+        init = _function_text(source, initializer)
+        assert f"{classifier} -ErrorRecord $_" in init
+    import_block = installer[
+        installer.index("        Microsoft.PowerShell.Core\\Import-Module `\n            -Name $modulePath") :
+    ]
+    assert "-Check 'powershell_module_import'" in import_block[:1200]
+    assert "Close-DefenseClawBootstrapModuleHandle" in import_block[:1200]
+
+
+def test_bootstrap_trust_reads_sids_and_keeps_only_the_leaf_strict() -> None:
+    installer = read(INSTALLER).replace("\r\n", "\n")
+    rule = _function_text(installer, "Assert-DefenseClawBootstrapTrustedPath")
+    assert "GetAccessRules(" in rule and "[Security.Principal.SecurityIdentifier]" in rule
+    assert "GetOwner([Security.Principal.SecurityIdentifier])" in rule
+    assert "ConvertTo-DefenseClawBootstrapSID" not in rule
+    assert "Test-DefenseClawBootstrapAdminEquivalentSID" in rule
+    assert "if ($Leaf) {\n        throw $findings[0]" in rule
+    assert "ancestor drift is advisory" in rule
+    for name in ("Assert-DefenseClawBootstrapExternalParentTrust", "Assert-DefenseClawBootstrapModuleTrust"):
+        body = _function_text(installer, name)
+        assert "ConvertTo-DefenseClawBootstrapSID" not in body
+        assert "Assert-DefenseClawBootstrapTrustedPath" in body
+        assert "contains a reparse point" in body
+    module_trust = _function_text(installer, "Assert-DefenseClawBootstrapModuleTrust")
+    assert "[IO.FileShare]::Read" in module_trust
+    assert "-LeafWriteLike" in module_trust
+
+    one_shot = _function_text(installer, "Assert-DefenseClawBootstrapOneShotRoot")
+    assert "$actualSDDL -cne $expectedSDDL" not in one_shot
+    assert "Get-DefenseClawBootstrapOneShotRootDrift" in one_shot
+    assert "Set-DefenseClawBootstrapDirectorySecurity" in one_shot
+    assert "RequireEmpty" in one_shot
+
+    for rendered in ("$deferredConfigPath, $deferredManifestPath", "$renderedConfigPath, $renderedManifestPath"):
+        loop = installer[installer.index(f"foreach ($renderedPath in @({rendered}))") :][:300]
+        assert "Set-DefenseClawBootstrapRenderedFileOwner" in loop
+
+
+def test_native_privilege_reparse_and_service_dacl_contract() -> None:
+    module = read(MODULE).replace("\r\n", "\n")
+    assert "public static string[] GetTokenPrivilegeNames()" in module
+    assert "public static string GetServiceDaclSddl(string name)" in module
+    assert "QueryServiceObjectSecurity(" in module
+    assert "private static bool IsBenignFileReparseHandle(IntPtr handle, string path)" in module
+    assert "const int FileAttributeTagInfo = 9;" in module
+    assert module.count("IsBenignFileReparseHandle(") >= 6
+
+    dacl = _function_text(module, "Get-DefenseClawServiceDacl")
+    assert dacl.index("GetServiceDaclSddl($Name)") < dacl.index("'sdshow'")
+    exact_scope = _function_text(module, "Assert-DefenseClawExactScopeServiceSecurity")
+    assert "'sdshow'" not in exact_scope
+    assert "Get-DefenseClawServiceDacl -Name $Name" in exact_scope
+
+    lifecycle = _function_text(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    elevation = lifecycle.index("        Assert-DefenseClawAdministrator\n        Write-DefenseClawFilePrivilegePrerequisites")
+    nuclear = lifecycle.index("        Write-DefenseClawFilePrivilegePrerequisites\n        return Invoke-DefenseClawNuclearUninstall")
+    assert nuclear < elevation
+    prerequisites = _function_text(module, "Write-DefenseClawFilePrivilegePrerequisites")
+    assert "check     = 'token_privilege'" in prerequisites
+
+    logon = _function_text(module, "Start-DefenseClawServiceWithLogonDiagnosis")
+    assert "1069" in logon
+    assert "check   = 'service_logon_right'" in logon
+    assert "add NT SERVICE\\ALL SERVICES to 'Log on as a service'" in logon
+    start = module[
+        module.index("function Start-DefenseClawTransactionServices") :
+        module.index("function Restore-DefenseClawTransactionWithManagedHooksRollback")
+    ]
+    assert "Start-DefenseClawServiceWithLogonDiagnosis `\n            -Name $GatewayServiceName" in start
+
+    tree = _function_text(module, "Assert-DefenseClawManagedTreeNoReparse")
+    assert "Test-DefenseClawBenignFileReparseTag -Item $item" in tree

@@ -104,6 +104,15 @@ func newHookCmd() *cobra.Command {
 			if !enterpriseManaged && implicitEnterpriseManagedHook() {
 				enterpriseManaged = true
 			}
+			if enterpriseManaged && runtime.GOOS == "windows" {
+				// Keep managed diagnostics off the agent-visible streams when
+				// the hook runs through this binary instead of
+				// defenseclaw-hook.exe (which installed them already): the
+				// agent shows hook stderr, and Claude Code makes it the block
+				// message. Unix hooks keep their stderr diagnostics; they
+				// have no platform record to send them to.
+				hookexec.InstallManagedHookDiagnosticSinks()
+			}
 			startedAt := hookInvocationStart()
 			// At the answer deadline of a tool call the hook writes its
 			// fail-closed answer and ends, even while its own work is held
@@ -529,7 +538,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 			SecureClient:          secureClientHost(),
 			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
-		if failMode, strict, ok := secureClientEnrollmentGapDelivery(opts.SecureClient, opts.ManagedRuntimeFailure); ok {
+		if failMode, strict, ok := secureClientRuntimeFailureDelivery(opts.SecureClient, opts.ManagedRuntimeFailure); ok {
 			opts.FailMode, opts.StrictAvailability = failMode, strict
 		}
 		opts.FailureLogHome = managedHookFailureLogHome
@@ -675,10 +684,10 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 		// and open under Secure Client, #1163). A runtime failure, and
 		// anything but open, keeps the fail-closed, strict-availability
 		// contract, except a Secure Client account that is not enrolled yet
-		// (secureClientEnrollmentGapDelivery). The agent's environment never
-		// opens it.
+		// or whose runtime state drifted (secureClientRuntimeFailureDelivery).
+		// The agent's environment never opens it.
 		opts.FailMode = enterpriseManagedHookRuntimeFailMode()
-		if failMode, strict, ok := secureClientEnrollmentGapDelivery(opts.SecureClient, managedRuntimeFailure); ok {
+		if failMode, strict, ok := secureClientRuntimeFailureDelivery(opts.SecureClient, managedRuntimeFailure); ok {
 			opts.FailMode, opts.StrictAvailability = failMode, strict
 		} else if managedRuntimeFailure != "" || opts.FailMode != "open" {
 			opts.FailMode = "closed"
@@ -798,23 +807,33 @@ func hookIsLoopbackAddr(addr string) bool {
 	return false
 }
 
-// hookEnvTrue mirrors defenseclaw_should_fail_closed_on_unreachable's truthy
-// set: 1, true, yes (case-insensitive).
-// secureClientEnrollmentGapDelivery is the delivery of a Secure Client hook
-// whose account is not enrolled yet (hookexec.ManagedEnrollmentGap): absent
-// from the protected target set, or registered with no published runtime.
-// No authenticated generation names a mode for it, so it takes the profile's
-// open default (#1163), and DEFENSECLAW_STRICT_AVAILABILITY can only close
-// it. ok is false for the standalone hook, for every other runtime failure
-// and off a Secure Client host: they keep the fail-closed,
+// secureClientRuntimeFailureDelivery is the delivery of a Secure Client
+// hook's managed runtime failure that is not an integrity boundary. An
+// account that is not enrolled yet (hookexec.ManagedEnrollmentGap: absent
+// from the protected target set, or registered with no published runtime)
+// has no authenticated generation that names a mode, so it takes the
+// profile's open default (#1163). Drifted runtime state
+// (hookexec.ManagedRuntimeDriftReason) takes the configured mode the
+// resolver recovered from authenticated state, closed when none could be
+// established (enterpriseManagedHookRuntimeDriftFailMode). In both,
+// DEFENSECLAW_STRICT_AVAILABILITY can only close it, and hookexec records
+// every decision. ok is false for the standalone hook, for every other
+// runtime failure and off a Secure Client host: they keep the fail-closed,
 // strict-availability contract.
-func secureClientEnrollmentGapDelivery(secureClient bool, reason string) (failMode string, strict, ok bool) {
-	if !secureClient || !hookexec.ManagedEnrollmentGap(reason) || implicitEnterpriseManagedHook() {
+func secureClientRuntimeFailureDelivery(secureClient bool, reason string) (failMode string, strict, ok bool) {
+	gap := hookexec.ManagedEnrollmentGap(reason)
+	if !secureClient || (!gap && reason != hookexec.ManagedRuntimeDriftReason) || implicitEnterpriseManagedHook() {
 		return "", false, false
 	}
-	return "open", hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")), true
+	strict = hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY"))
+	if gap {
+		return "open", strict, true
+	}
+	return enterpriseManagedHookRuntimeDriftFailMode(), strict, true
 }
 
+// hookEnvTrue mirrors defenseclaw_should_fail_closed_on_unreachable's truthy
+// set: 1, true, yes (case-insensitive).
 func hookEnvTrue(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "yes":

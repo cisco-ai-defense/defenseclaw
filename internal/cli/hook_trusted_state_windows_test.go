@@ -780,3 +780,114 @@ func TestNativeConnectorHookNoopRequiresExactDisabledHermesTombstone(t *testing.
 		t.Fatal("mismatched tombstone command disabled Hermes")
 	}
 }
+
+func TestManagedRuntimeDriftReasonMatchesEnterpriseHooks(t *testing.T) {
+	if hookexec.ManagedRuntimeDriftReason != enterprisehooks.WindowsManagedRuntimeDriftReason {
+		t.Fatalf("hookexec reason %q != enterprisehooks reason %q",
+			hookexec.ManagedRuntimeDriftReason, enterprisehooks.WindowsManagedRuntimeDriftReason)
+	}
+}
+
+// On a Secure Client host, drifted runtime state follows the configured
+// mode the resolver recovered from authenticated state, closed when none was
+// recovered; a boundary stays closed and strict whatever mode the runtime
+// reports. Off a Secure Client host every resolver failure stays closed and
+// strict.
+func TestEnterpriseManagedHookRuntimeFailureClassSelectsDelivery(t *testing.T) {
+	_, _ = stageTrustedNativeHookForTest(t, "closed")
+	savedSecureClient := secureClientHost
+	t.Cleanup(func() { secureClientHost = savedSecureClient })
+	cause := errors.New("enterprise hooks: managed runtime generation directory is untrusted")
+	for _, tc := range []struct {
+		name       string
+		err        error
+		failMode   string
+		strictEnv  string
+		wantReason string
+		wantMode   string
+		wantStrict bool
+	}{
+		{
+			name:       "drift open",
+			err:        fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, cause),
+			failMode:   "open",
+			wantReason: enterprisehooks.WindowsManagedRuntimeDriftReason,
+			wantMode:   "open",
+		},
+		{
+			name:       "drift closed",
+			err:        fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, cause),
+			failMode:   "closed",
+			wantReason: enterprisehooks.WindowsManagedRuntimeDriftReason,
+			wantMode:   "closed",
+		},
+		{
+			name:       "drift with no recovered mode",
+			err:        fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, cause),
+			wantReason: enterprisehooks.WindowsManagedRuntimeDriftReason,
+			wantMode:   "closed",
+		},
+		{
+			name:       "drift open under strict availability",
+			err:        fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, cause),
+			failMode:   "open",
+			strictEnv:  "1",
+			wantReason: enterprisehooks.WindowsManagedRuntimeDriftReason,
+			wantMode:   "open",
+			wantStrict: true,
+		},
+		{
+			name:       "boundary",
+			err:        fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeBoundary, cause),
+			failMode:   "open",
+			wantReason: "enterprise_managed_runtime_state_invalid",
+			wantMode:   "closed",
+			wantStrict: true,
+		},
+		{
+			name: "boundary wrapping drift",
+			err: fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeBoundary,
+				fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, cause)),
+			failMode:   "open",
+			wantReason: "enterprise_managed_runtime_state_invalid",
+			wantMode:   "closed",
+			wantStrict: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", tc.strictEnv)
+			stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+				return enterprisehooks.WindowsManagedHookRuntime{
+					Connector:    "claudecode",
+					DataDir:      filepath.Join(t.TempDir(), ".defenseclaw"),
+					PolicyActive: true,
+					FailMode:     tc.failMode,
+				}, tc.err
+			})
+			if prepareEnterpriseManagedHookRuntime("claudecode") {
+				t.Fatal("failed managed runtime was treated as a no-op")
+			}
+			secureClientHost = func() bool { return true }
+			opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
+			if opts.ManagedRuntimeFailure != tc.wantReason ||
+				opts.FailMode != tc.wantMode ||
+				opts.StrictAvailability != tc.wantStrict ||
+				!opts.ManagedEnterprise ||
+				!opts.SecureClient ||
+				opts.AuthenticatedManagedToken != nil {
+				t.Fatalf("Secure Client delivery = %+v, want reason=%q mode=%q strict=%t",
+					opts, tc.wantReason, tc.wantMode, tc.wantStrict)
+			}
+			// Off a Secure Client host the hook keeps the fail-closed,
+			// strict contract for every resolver failure, drift included.
+			secureClientHost = func() bool { return false }
+			opts = buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
+			if opts.ManagedRuntimeFailure != tc.wantReason ||
+				opts.FailMode != "closed" ||
+				!opts.StrictAvailability ||
+				opts.SecureClient {
+				t.Fatalf("non-Secure Client delivery = %+v, want reason=%q closed and strict", opts, tc.wantReason)
+			}
+		})
+	}
+}
