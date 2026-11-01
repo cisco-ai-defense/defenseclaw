@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -152,8 +153,11 @@ cp $f out.txt`,
 			t.Errorf("%s: copy source read as one known word", command)
 		}
 	}
-	if got := QuotedDynamicCopyDestinations(`f=a.txt; cp $f out.txt`, "/p", home); !slices.Equal(got, []string{"/p/out.txt"}) {
-		t.Errorf("fixed destination of a known unquoted source = %v", got)
+	// The working directory is absolute on this OS: "/p" is not on Windows,
+	// where the destination then stayed relative (rel-1-0-6 GAP-0324).
+	cwd := t.TempDir()
+	if got, want := QuotedDynamicCopyDestinations(`f=a.txt; cp $f out.txt`, cwd, home), filepath.Join(cwd, "out.txt"); !slices.Equal(got, []string{want}) {
+		t.Errorf("fixed destination of a known unquoted source = %v, want [%s]", got, want)
 	}
 }
 
@@ -209,8 +213,9 @@ func TestCopyWordValueIsKnownOnlyWhenEveryBindingGivesTheSameValue(t *testing.T)
 			t.Errorf("%s: destination value %q, want %q", row.command, got, row.want)
 		}
 	}
-	if got := LiteralWriteOperands(`f=out.txt; cp a.txt $f`, "/p", home); !slices.Contains(got, "/p/out.txt") {
-		t.Errorf("literal operands of a known destination word = %v", got)
+	cwd := t.TempDir()
+	if got, want := LiteralWriteOperands(`f=out.txt; cp a.txt $f`, cwd, home), filepath.Join(cwd, "out.txt"); !slices.Contains(got, want) {
+		t.Errorf("literal operands of a known destination word = %v, want %s", got, want)
 	}
 }
 
@@ -220,20 +225,23 @@ func TestCopyWordValueIsKnownOnlyWhenEveryBindingGivesTheSameValue(t *testing.T)
 // names, and the known word stays a copy-only reading (a tee operand named
 // by a parameter keeps the GAP-2514 reader).
 func TestKnownCopyWordNextToABraceOperand(t *testing.T) {
-	const home = "/home/u"
-	const keys = "/home/u/.ssh/authorized_keys"
+	// Paths absolute on this OS: "/p" and "/home/u" are not on Windows,
+	// where no operand was listed at all (rel-1-0-6 GAP-0324).
+	home := filepath.Join(t.TempDir(), "home", "u")
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	cwd := t.TempDir()
 	for _, command := range []string{
 		`f=a.pub; cp $f {,"$HOME"/.ssh/authorized_keys}`,
 		`f=a.pub; cp "$f" "$HOME"/.ssh/{,authorized_key"s"}`,
-		`f=/home/u/.ssh/authorized_keys; cp {a,b}.pub $f`,
-		`f=/home/u/.ssh/authorized_keys; tee $f {,out.txt}`,
+		`f=` + filepath.ToSlash(keys) + `; cp {a,b}.pub $f`,
+		`f=` + filepath.ToSlash(keys) + `; tee $f {,out.txt}`,
 	} {
-		if got := LiteralWriteOperands(command, "/p", home); !slices.Contains(got, keys) {
+		if got := LiteralWriteOperands(command, cwd, home); !slices.Contains(got, keys) {
 			t.Errorf("%s: literal operands %v, want %s", command, got, keys)
 		}
 	}
 	// An unknown parameter word keeps the cp call dynamic, as before.
-	if got := LiteralWriteOperands(`cp $g {,"$HOME"/.ssh/authorized_keys}`, "/p", home); slices.Contains(got, keys) {
+	if got := LiteralWriteOperands(`cp $g {,"$HOME"/.ssh/authorized_keys}`, cwd, home); slices.Contains(got, keys) {
 		t.Errorf("unknown copy word: literal operands %v list the keys file", got)
 	}
 }
