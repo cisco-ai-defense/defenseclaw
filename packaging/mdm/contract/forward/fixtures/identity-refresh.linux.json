@@ -1,31 +1,57 @@
 {
   "schema_version": 1,
-  "command": "identity_refresh",
   "ok": true,
+  "scope": "all",
+  "profiles_configured": true,
   "refreshed": 3,
   "changed": 1,
   "failed": 1,
-  "failed_codes": [
-    "directory_unreachable"
-  ],
+  "skipped": 0,
   "changes": [
     {
       "user_id": "1001",
-      "user": "dcad-r102-eng2",
+      "user_name": "dcad-r102-eng2",
+      "connector": "codex",
       "previous_profile": "eng",
-      "profile": "contractor"
+      "previous_match": "group:dc-r102-eng",
+      "profile": "contractor",
+      "match": "user:dcad-r102-eng2"
     },
     {
       "user_id": "S-1-5-21-3623811015-3361044348-30300820-1104",
+      "user_name": "DCLAB\\dcad-alice",
       "previous_profile": "eng",
-      "profile": "eng"
+      "previous_match": "group:wheel",
+      "profile": "eng",
+      "match": "group:wheel"
     }
   ],
+  "failures": [
+    {
+      "user_id": "S-1-5-21-3623811015-3361044348-30300820-1105",
+      "user_name": "dcad-bob@dclab.test",
+      "code": "lookup_failed"
+    }
+  ],
+  "windows_token_groups_pending": [
+    {
+      "user_id": "S-1-5-21-3623811015-3361044348-30300820-1104",
+      "user_name": "dcad-alice@dclab.test"
+    }
+  ],
+  "os_cache_flush": {
+    "requested": true,
+    "flushed": "all",
+    "method": "sss_cache",
+    "reason": "not_in_sssd_cache"
+  },
+  "duration_ms": 412,
   "warnings": [
     {
-      "code": "windows_token_groups_pending",
-      "message": "dcad-alice@dclab.test is signed in"
+      "code": "accounts_failed",
+      "message": "dcad-bob@dclab.test: lookup failed"
     }
   ],
-  "errors": []
+  "errors": [],
+  "exit_code": 0
 }

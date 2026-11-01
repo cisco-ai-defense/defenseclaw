@@ -96,6 +96,13 @@
     "current_bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
     "current_version": 13
   },
+  "enforcement_pending": {
+    "count": 2,
+    "connectors": [
+      "claudecode",
+      "codex"
+    ]
+  },
   "connectors": {
     "claudecode": {
       "enabled": true,
