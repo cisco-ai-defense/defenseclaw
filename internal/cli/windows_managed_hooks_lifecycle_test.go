@@ -1449,3 +1449,72 @@ func TestWindowsManagedHooksGuardianRefusalNamesTheFailedRow(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-6:GAP-0319: an enrolled local account deleted after the last
+// enumerator pass is not something to repair: the refusal says the next
+// pass revokes its rows, and the lifecycle module can recognize it.
+func TestWindowsManagedHooksGuardianRefusalNamesADeletedLocalAccount(t *testing.T) {
+	original := windowsManagedHooksLifecycleDeletedLocalAccount
+	t.Cleanup(func() { windowsManagedHooksLifecycleDeletedLocalAccount = original })
+	windowsManagedHooksLifecycleDeletedLocalAccount = func(sid string) bool { return sid == "S-1-5-21-111-222-333-1001" }
+	manifestSHA256 := strings.Repeat("a", 64)
+	ctx := windowsManagedHooksLifecycleContext{
+		manifestPath: `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "claudecode", SID: "S-1-5-21-111-222-333-1001"},
+			{Connector: "codex", SID: "S-1-5-21-111-222-333-1001"},
+		},
+	}
+	protected := []enterpriseHookReconcileRow{
+		{Connector: "claudecode", SID: "S-1-5-21-111-222-333-1001", OK: true},
+	}
+	results := []enterpriseHookReconcileRow{
+		protected[0],
+		{
+			Connector: "codex",
+			SID:       "S-1-5-21-111-222-333-1001",
+			Error:     "codex runtime selector: enterprise hooks: managed runtime selector targets are not strictly sorted",
+		},
+	}
+	activation := enterpriseHookGuardianActivation{
+		Version:          enterpriseHookGuardianActivationVersion,
+		UpdatedAt:        "2026-08-24T00:00:00Z",
+		ReconcileID:      strings.Repeat("f", 32),
+		Manifest:         ctx.manifestPath,
+		ManifestSHA256:   manifestSHA256,
+		TargetCount:      2,
+		SuccessCount:     1,
+		FailureCount:     1,
+		ProtectedTargets: protected,
+	}
+	authorization := enterpriseHookGuardianAuthorization{
+		Version:          1,
+		UpdatedAt:        activation.UpdatedAt,
+		TargetCount:      2,
+		SuccessCount:     1,
+		FailureCount:     1,
+		ProtectedTargets: protected,
+	}
+	state := enterpriseHookGuardianState{
+		Version:      1,
+		UpdatedAt:    activation.UpdatedAt,
+		Manifest:     ctx.manifestPath,
+		TargetCount:  2,
+		SuccessCount: 1,
+		FailureCount: 1,
+		Results:      results,
+	}
+	_, err := validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
+	if !errors.Is(err, errWindowsManagedHooksDeletedLocalAccount) || strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("deleted account refusal = %v", err)
+	}
+	for _, want := range []string{
+		"no longer exists",
+		"next pass",
+		"codex target S-1-5-21-111-222-333-1001",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal %q does not name %q", err, want)
+		}
+	}
+}

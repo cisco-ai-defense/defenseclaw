@@ -22026,6 +22026,74 @@ function Write-DefenseClawDeploymentMetadataBytes {
     }
 }
 
+function Test-DefenseClawDeletedAccountTeardownRefusal {
+    <#
+        rel-1-0-6:GAP-0319: whether a teardown refusal names an enrolled local
+        account deleted after the hook enumerator last ran (the helper text of
+        errWindowsManagedHooksDeletedLocalAccount).
+    #>
+    param([string]$Message)
+    return ([string]$Message).Contains(
+        'still lists an enrolled local account that no longer exists'
+    )
+}
+
+function Invoke-DefenseClawUninstallPrecommitHookCheck {
+    <#
+        GAP-0571 read-only check of the hook removal before the uninstall
+        commits. rel-1-0-6:GAP-0319: when it refuses only because an enrolled
+        local account was deleted after the hook enumerator last ran, the
+        enumerator revokes that account's rows on its next pass, so the check
+        restarts the enumerator once and asks again for up to four minutes
+        before it gives the refusal back.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    try {
+        [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Action check)
+        return
+    }
+    catch {
+        if (-not (Test-DefenseClawDeletedAccountTeardownRefusal -Message $_.Exception.Message)) {
+            throw
+        }
+        $refusal = $_
+    }
+    $enumerator = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    if (-not (Test-DefenseClawServiceExists -Name $enumerator)) {
+        throw $refusal
+    }
+    Write-DefenseClawLifecyclePhase -Stage 'deleted enrolled account: running a hook enumerator pass before the uninstall'
+    Stop-DefenseClawService -Name $enumerator
+    Start-DefenseClawService -Name $enumerator
+    $deadline = [DateTime]::UtcNow.AddMinutes(4)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Microsoft.PowerShell.Utility\Start-Sleep -Seconds 15
+        try {
+            [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName `
+                -Action check)
+            return
+        }
+        catch {
+            if (-not (Test-DefenseClawDeletedAccountTeardownRefusal -Message $_.Exception.Message)) {
+                throw
+            }
+            $refusal = $_
+        }
+    }
+    throw $refusal
+}
+
 function Invoke-DefenseClawManagedUserStateOwnerRightsRestore {
     <#
         rel-1-0-6:GAP-0303: Windows takes the OWNER RIGHTS entry out of a DACL
@@ -37908,16 +37976,23 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -Capability precommit_check)) {
         try {
-            [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+            Invoke-DefenseClawUninstallPrecommitHookCheck `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName `
-                -Action check)
+                -GuardianServiceName $GuardianServiceName
         }
         catch {
+            $reason = $_.Exception.Message
+            if (Test-DefenseClawDeletedAccountTeardownRefusal -Message $reason) {
+                throw ("The uninstall stopped before it removed anything; DefenseClaw is still installed. " +
+                    "An enrolled local account was deleted after the hook enumerator last ran, and its rows are still listed: " +
+                    "$reason. Nothing needs repair: run the uninstall again after the enumerator's next pass " +
+                    "(a few minutes), or restart the $(Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName) " +
+                    "service first.")
+            }
             throw ("The uninstall stopped before it removed anything; DefenseClaw is still installed. " +
                 "The hook removal it runs after the commit would refuse this deployment: " +
-                "$($_.Exception.Message). Repair that (run Setup /repair, or undo the change to the file it names), " +
+                "$reason. Repair that (run Setup /repair, or undo the change to the file it names), " +
                 "then run the uninstall again.")
         }
     }
