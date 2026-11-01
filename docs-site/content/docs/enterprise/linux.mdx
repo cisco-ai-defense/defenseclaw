@@ -234,6 +234,19 @@ sudo install -d -o root -g root -m 0700 "$PAYLOAD"
 sudo tar -xzf "defenseclaw-enterprise-${VERSION}-linux-${ARCH}.tar.gz" \
   -C "$PAYLOAD" --no-same-owner --no-same-permissions
 sudo chmod -R go-w "$PAYLOAD"
+```
+
+On hosts with fapolicyd, trust the staged payload folder after extraction and
+before running the gateway:
+
+```bash
+sudo fapolicyd-cli --file add "$PAYLOAD/" --trust-file defenseclaw && sudo fapolicyd-cli --update
+```
+
+If you change the staged files, update their trust entry before running the
+gateway again ([Application control](/docs/enterprise/threat-model)).
+
+```bash
 sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --json
 ```
 
