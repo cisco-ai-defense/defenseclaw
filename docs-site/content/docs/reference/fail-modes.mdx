@@ -54,6 +54,10 @@ A call the hook blocks itself is in the audit log too. The hook writes a `hook-f
 
 The guardrail mode does not change the outage mode: observe and action mode fail the same way. Current per-user hooks read the saved mode or tier in their installed runtime's `config.yaml` when they classify an outage (`defenseclaw-gateway hook-outage-mode`). A saved `closed` takes effect on the next call even while the gateway is stopped; a missing or unreadable config closes the outage. So a rule pack switched while the gateway is stopped is no fail-mode drift in `defenseclaw guardrail status`. The registration lock keeps the earlier mode until the gateway starts and renders the hooks again. `defenseclaw guardrail fail-mode` shows each connector's mode and any registration drift.
 
+With a custom `data_dir` (`defenseclaw config set data_dir`), the hooks are rendered into `<data_dir>/hooks` and follow the account's own `~/.defenseclaw/config.yaml`; an agent session that started before the move keeps the hooks it loaded and follows the same config. If `~/.defenseclaw/config.yaml` is strict or has a saved `closed`, the hooks of this install close on an outage.
+
+**Limit: a custom install `DEFENSECLAW_HOME`.** When DefenseClaw was installed with `DEFENSECLAW_HOME` set to another folder and there is no `~/.defenseclaw/config.yaml`, the only thing that tells a hook where the install's config is, is the `.config-record` file the gateway writes in each hooks folder. That file belongs to your account, so any program running as you can point it at another config, just as it can edit `config.yaml` itself. In that layout nothing else anchors the outage mode. Keep a strict posture in `~/.defenseclaw/config.yaml` too, or install with the default `DEFENSECLAW_HOME`, if a program running as you must not be able to reopen an outage.
+
 ### Refusals that ignore the fail mode
 
 These are not an outage, so they block in every fail mode on a managed standalone computer:
