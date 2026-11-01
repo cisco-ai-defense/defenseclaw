@@ -8,6 +8,7 @@ package enterpriseunix
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -108,17 +109,101 @@ func TestLinuxDirectoryAgentNormalLaunchUsesNSSHome(t *testing.T) {
 	}
 }
 
-func TestDarwinLaunchEnvironmentKeepsOnlyPluginSelectors(t *testing.T) {
+func TestDarwinLaunchEnvironmentKeepsOnlyRelevantSelectors(t *testing.T) {
 	raw := make([]byte, 4)
 	binary.LittleEndian.PutUint32(raw, 2)
-	raw = append(raw, []byte("/usr/local/bin/opencode\x00\x00opencode\x00--pure\x00OPENCODE_PURE=1\x00OPENCODE_CONFIG_DIR=/tmp/extra\x00KIRO_AGENT_CONFIG_DIR=/tmp/agents\x00API_TOKEN=secret\x00")...)
+	raw = append(raw, []byte("/usr/local/bin/opencode\x00\x00opencode\x00--pure\x00OPENCODE_PURE=1\x00OPENCODE_CONFIG_DIR=/tmp/extra\x00KIRO_AGENT_CONFIG_DIR=/tmp/agents\x00BASH_ENV=/private/startup\x00SHELLOPTS=braceexpand:noexec\x00API_TOKEN=secret\x00")...)
 	env, err := parseProcArgs2Environment(raw)
-	if err != nil || env["OPENCODE_PURE"] != "1" || env["KIRO_AGENT_CONFIG_DIR"] != "/tmp/agents" || len(env) != 2 {
+	if err != nil || env["OPENCODE_PURE"] != "1" || env["KIRO_AGENT_CONFIG_DIR"] != "/tmp/agents" ||
+		env["BASH_ENV"] != "set" || env["SHELLOPTS"] != "noexec" || len(env) != 4 {
 		t.Fatalf("plugin selectors = %v, %v", env, err)
 	}
 	binary.LittleEndian.PutUint32(raw, 1000)
 	if _, err := parseProcArgs2Environment(raw); err == nil {
 		t.Fatal("accepted truncated process arguments as a known environment")
+	}
+}
+
+func TestManagedBashHookStartupLowersStatusAndVerifyOnUnix(t *testing.T) {
+	tests := []struct {
+		name      string
+		env       map[string]string
+		envKnown  bool
+		argsKnown bool
+		reason    string
+		text      string
+	}{
+		{"startup", map[string]string{"BASH_ENV": "set"}, true, true, "bash_hook_startup", "BASH_ENV was set when the agent started"},
+		{"noexec", map[string]string{"SHELLOPTS": "noexec"}, true, true, "bash_hook_noexec", "SHELLOPTS contained noexec when the agent started"},
+		{"environment unknown", nil, false, true, "launch_environment_unverified", "launch environment unverified"},
+		{"arguments unknown", map[string]string{}, true, false, "launch_arguments_unverified", "process arguments could not be verified"},
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			for _, name := range []string{"codex", "copilot", "devin"} {
+				t.Run(name, func(t *testing.T) {
+					for _, test := range tests {
+						t.Run(test.name, func(t *testing.T) {
+							for _, action := range []string{ActionStatus, ActionVerify} {
+								result := enterprisestatus.New(action, managed.ProfileStandalone, goos, "1.0.7")
+								result.CoverageComplete, result.SecurityComplete = true, true
+								l := lifecycle{env: h.env, result: result, opts: Options{Action: action}}
+								var audited []managed.LaunchCoverageReport
+								h.env.ReportLaunchCoverage = func(_ context.Context, report managed.LaunchCoverageReport) error {
+									audited = append(audited, report)
+									return nil
+								}
+								sessionEnv := test.env
+								if !test.argsKnown {
+									_, home := h.env.pluginLaunchAccount(context.Background(), os.Getuid())
+									sessionEnv = map[string]string{"HOME": home}
+								}
+								l.describePluginLaunchSession(context.Background(), agentSession{
+									PID: 7133, UID: os.Getuid(), Agent: name, Args: []string{name},
+									Env: sessionEnv, EnvKnown: test.envKnown, Started: time.Date(2026, 10, 22, 23, 30, 0, 0, time.UTC),
+									ArgsKnown: test.argsKnown,
+								}, name)
+								warning := messagesOf(result.Warnings, codeManagedLaunchUninspected)
+								if !strings.Contains(warning, test.text) || !strings.Contains(warning, name+" (pid 7133)") ||
+									result.CoverageComplete || result.SecurityComplete {
+									t.Fatalf("%s %s %s missed the launch risk: %+v", name, action, test.name, result)
+								}
+								if len(audited) != 1 || audited[0].Connector != name || audited[0].Reason != test.reason ||
+									audited[0].PID != 7133 || audited[0].StartedAt != "2026-10-22T23:30:00Z" {
+									t.Fatalf("%s %s %s audit report = %+v", name, action, test.name, audited)
+								}
+								if messagesOf(result.Warnings, codeManagedLaunchAuditUnavailable) != "" {
+									t.Fatalf("%s %s %s audit was unavailable: %+v", name, action, test.name, result.Warnings)
+								}
+								if action == ActionVerify {
+									requireError(t, result, codeManagedLaunchUninspected)
+								} else if len(result.Errors) != 0 {
+									t.Fatalf("status added errors: %+v", result.Errors)
+								}
+								encoded, err := json.Marshal(result)
+								if err != nil {
+									t.Fatal(err)
+								}
+								var decoded struct {
+									Warnings []enterprisestatus.Message `json:"warnings"`
+									Errors   []enterprisestatus.Message `json:"errors"`
+								}
+								if err := json.Unmarshal(encoded, &decoded); err != nil {
+									t.Fatal(err)
+								}
+								if got := messagesOf(decoded.Warnings, codeManagedLaunchUninspected); got != warning {
+									t.Fatalf("%s %s %s JSON warning = %q, text = %q", name, action, test.name, got, warning)
+								}
+								if action == ActionVerify && messagesOf(decoded.Errors, codeManagedLaunchUninspected) != warning {
+									t.Fatalf("%s %s %s JSON verify error = %+v", name, action, test.name, decoded.Errors)
+								}
+							}
+						})
+					}
+				})
+			}
+		})
 	}
 }
 
