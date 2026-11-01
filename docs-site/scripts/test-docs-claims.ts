@@ -2673,3 +2673,14 @@ describe('retained-state file names match the Remove pages (sidecar-aispg-retest
     assert.ok(go.includes('retainedStateFileName      = "retained-state.json"') && go.includes('retainedMarkerName         = ".defenseclaw-retained"'), 'retained-state names changed: re-check enterprise/lifecycle.mdx What uninstall keeps, linux.mdx and macos.mdx Remove');
   });
 });
+
+describe('account-keys refusal on a per-user install (rel-1-0-6:GAP-0417)', () => {
+  it('names the managed-only refusal in the guide and the CLI', () => {
+    const text = page('enterprise/account-join-key.mdx');
+    assert.ok(text.includes('On a computer with only a per-user install there are no account join keys, and the command says so (`not_installed`)'),
+      'account-join-key.mdx no longer says what account-keys does on a per-user install');
+    const go = source('internal/cli/enterprise_account_keys_unix.go');
+    assert.ok(go.includes('secretFailed("not_installed", ') && go.includes('account join keys exist only on a managed (enterprise) install of DefenseClaw'),
+      'enterprise_account_keys_unix.go no longer refuses a per-user install with not_installed');
+  });
+});
