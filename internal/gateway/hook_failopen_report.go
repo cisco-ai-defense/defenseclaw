@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -55,9 +56,6 @@ import (
 const (
 	hookFailuresFile         = "hook-failures.jsonl"
 	hookFailuresReportedFile = "hook-failures.reported"
-	// hookFailOpenReportMaxBytes bounds what one start reads. With more
-	// unread, the report reads the newest lines (readHookFailureCalls).
-	hookFailOpenReportMaxBytes = 16 << 20
 	// hookFailuresHeadBytes bounds the first line the report fingerprints.
 	hookFailuresHeadBytes = 4096
 	// hookFailOpenReportMaxAge leaves out calls older than the default
@@ -70,6 +68,11 @@ const (
 	hookFailOpenReportMaxAge = 7 * 24 * time.Hour
 )
 
+// hookFailOpenReportMaxBytes bounds what one run reads. With more unread
+// and no backlog pending, the report reads the newest lines
+// (readHookFailureCalls). A variable for tests.
+var hookFailOpenReportMaxBytes int64 = 16 << 20
+
 // hookFailureRowsPerReport bounds the per-call audit rows one report run
 // writes; the next run goes on from the first call it did not record. A
 // variable for tests.
@@ -78,8 +81,9 @@ var hookFailureRowsPerReport = 1000
 // hookFailureBacklogInterval is how soon a running gateway reports again
 // while a run left calls without their rows (hookFailuresReported
 // AuditPending): with hookFailureRowsPerReport rows a run, at most 200 rows
-// a second, so the 15291 hook-blocked calls of a par-128 flood are recorded
-// within about 80 s. A variable for tests.
+// a second. A run itself takes 5-10 s on a loaded Windows disk, so the
+// 15-17k hook-blocked calls of a par-128 flood took 3-5 minutes to record
+// (rel-1-0-6:GAP-0370). A variable for tests.
 var hookFailureBacklogInterval = 5 * time.Second
 
 // hookFailOpenReportInterval is how often a running per-user gateway looks
@@ -93,6 +97,10 @@ var hookFailOpenReportInterval = time.Minute
 // hook-failure log to (hookFailOpenLogDirs). The gateway tests' TestMain
 // sets it to "", so no test reads or writes the host account's logs.
 var hookFailuresHooksHome = config.DefaultDataPath
+
+// hookFailureWatchWakes counts the running gateway's hook-failure checks,
+// so a test can tell that the backlog timer stopped.
+var hookFailureWatchWakes atomic.Int64
 
 // hookFailOpenReportMu keeps the start-up report and a write-recovery report
 // from reading the same lines.
@@ -277,6 +285,11 @@ func (s *Sidecar) watchHookFailureCalls(ctx context.Context) {
 	backlog := time.NewTimer(hookFailureBacklogInterval)
 	backlog.Stop()
 	defer backlog.Stop()
+	// A gateway that restarts while a run left calls pending goes on at the
+	// backlog cadence, not at the first tick of the ticker.
+	if cfg := s.currentConfig(); hookFailOpenReportApplies(cfg) && hookFailureRowsPending(hookFailOpenLogDirs(cfg.DataDir)) {
+		backlog.Reset(hookFailureBacklogInterval)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -284,6 +297,7 @@ func (s *Sidecar) watchHookFailureCalls(ctx context.Context) {
 		case <-ticker.C:
 		case <-backlog.C:
 		}
+		hookFailureWatchWakes.Add(1)
 		cfg := s.currentConfig()
 		if !hookFailOpenReportApplies(cfg) {
 			continue
@@ -309,8 +323,12 @@ func (s *Sidecar) watchHookFailureCalls(ctx context.Context) {
 }
 
 // hookFailureRowsPending reports whether a report run in one of dirs left
-// calls without their audit rows (AuditPending).
+// calls without their audit rows (AuditPending). It reads the state under
+// hookFailOpenReportMu: on Windows a report's rename of the state file fails
+// while another open of it is in progress.
 func hookFailureRowsPending(dirs []string) bool {
+	hookFailOpenReportMu.Lock()
+	defer hookFailOpenReportMu.Unlock()
 	for _, dir := range dirs {
 		if readHookFailuresReported(dir).AuditPending {
 			return true
@@ -355,6 +373,9 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 		ctx := audit.ContextWithEnvelope(context.Background(), env)
 		action, target, details, severity := hookFailureRow(call)
 		if err := logger.LogActionCtxSeverity(ctx, action, target, details, severity); err != nil {
+			// The calls after AuditOffset still need their rows: keep the
+			// running gateway's backlog cadence going.
+			read.start.AuditPending = true
 			_ = writeHookFailuresReported(logDir, read.start)
 			return fmt.Errorf("record %s hook call %s: %w", call.entry.Connector, action, err)
 		}
@@ -364,11 +385,17 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 	if !pending {
 		read.start.AuditOffset = read.next
 	}
+	if read.more {
+		// A pending backlog longer than one read window: the next run reads
+		// on from here instead of jumping to the file's last window.
+		pending = true
+	}
 	for _, sum := range summaries {
 		if err := logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), sum.Connector,
 			describeHookFailOpenCalls(sum), "HIGH", sum.Connector); err != nil {
 			// Keep the offset, so the next report reads these lines again,
 			// but not the connectors recorded before this one.
+			read.start.AuditPending = true
 			_ = writeHookFailuresReported(logDir, read.start)
 			return fmt.Errorf("record %s fail-open calls: %w", sum.Connector, err)
 		}
@@ -446,6 +473,8 @@ type hookFailureRead struct {
 	calls []hookFailureCall
 	// found is false when there is no hook-failures.jsonl.
 	found bool
+	// more: a pending backlog goes on past this run's read window.
+	more bool
 }
 
 type hookFailureCall struct {
@@ -493,9 +522,14 @@ func readHookFailureCalls(logDir string, now time.Time) ([]hookFailOpenSummary, 
 		offset = state.AuditOffset
 	}
 	skipPartial := false
-	if info.Size()-offset > hookFailOpenReportMaxBytes {
+	// A run that left calls pending goes on from them: jumping to the
+	// file's last window would skip them unrecorded. The LimitReader
+	// bounds the run.
+	keepWindow := state.AuditPending && positioned
+	if !keepWindow && info.Size()-offset > hookFailOpenReportMaxBytes {
 		offset, skipPartial = info.Size()-hookFailOpenReportMaxBytes, true
 	}
+	read.more = keepWindow && info.Size()-offset > hookFailOpenReportMaxBytes
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return nil, read, err
 	}
