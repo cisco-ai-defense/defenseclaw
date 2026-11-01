@@ -1379,39 +1379,79 @@ def inherited_hook_shell_env(environ: Any, connector: str) -> list[str]:
 
 
 def _system_bash_env(path: str, environ: Any) -> bool:
-    """Whether *path* is a system shell init file: absolute, outside the home, root-owned, not group or world writable.
+    """Whether *path* is a system shell init file only root can change.
 
     Environment Modules and Lmod profiles export BASH_ENV to their own init
     script so batch bash gets the ``module`` function. Only root can change such
     a file, so it is not the hostile value this check looks for; warning on it
-    on every doctor and status run was noise (rel-1-0-6:GAP-0393). A file in the
-    home, a relative path, a missing file, a file another account owns or one
-    anyone else can write is still reported. The parent folders are checked the
-    same way, so a root-owned file in a writable folder still counts.
+    on every doctor and status run was noise (rel-1-0-6:GAP-0393).
+
+    bash opens the path as written, so the path is walked as written, one part
+    at a time with lstat (_root_only_path): every folder on it, and the file,
+    must be root-owned with no group or world write, and a symlink part must be
+    root-owned too, with its target walked the same way. A link in a folder the
+    user can write (the home, a user folder in /tmp) is therefore reported even
+    when it points at a root-owned file, while Lmod's root-owned
+    /usr/share/lmod/lmod link stays exempt. A relative or missing path, and a
+    file that resolves into the home, are reported.
     """
 
     if not os.path.isabs(path):
         return False
+    real = _root_only_path(path, 0)
+    if real is None or not os.path.isfile(real):
+        return False
     home = os.path.realpath(str(environ.get("HOME", "") or Path.home()))
+    return not (real == home or real.startswith(home.rstrip(os.sep) + os.sep))
+
+
+_ROOT_ONLY_LINK_LIMIT = 40
+
+
+def _root_only_path(path: str, hops: int) -> str | None:
+    """The symlink-free path of absolute *path* if only root can change any part of it, else None."""
+
+    def root_only(info: os.stat_result, *, link: bool) -> bool:
+        if info.st_uid != 0:
+            return False
+        # A link's own mode bits mean nothing; a folder or file must not be
+        # group or world writable (a sticky /tmp still lets anyone add a file).
+        return link or not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+
     try:
-        real = os.path.realpath(path)
+        if not root_only(os.lstat(os.sep), link=False):
+            return None
     except OSError:
-        return False
-    if real == home or real.startswith(home.rstrip(os.sep) + os.sep):
-        return False
-    current = real
-    while True:
+        return None
+    current = os.sep
+    for part in path.split(os.sep):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            # current never holds a link, so going up is lexical.
+            current = os.path.dirname(current)
+            continue
+        candidate = os.path.join(current, part)
         try:
-            info = os.stat(current)
+            info = os.lstat(candidate)
         except OSError:
-            return False
-        if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            # A sticky world-writable folder (/tmp) still lets anyone add a file.
-            return False
-        parent = os.path.dirname(current)
-        if parent == current:
-            return True
-        current = parent
+            return None
+        if stat.S_ISLNK(info.st_mode):
+            if hops >= _ROOT_ONLY_LINK_LIMIT or not root_only(info, link=True):
+                return None
+            try:
+                target = os.readlink(candidate)
+            except OSError:
+                return None
+            resolved = _root_only_path(target if os.path.isabs(target) else os.path.join(current, target), hops + 1)
+            if resolved is None:
+                return None
+            current = resolved
+            continue
+        if not root_only(info, link=False):
+            return None
+        current = candidate
+    return current
 
 
 _INHERITED_RISK = {

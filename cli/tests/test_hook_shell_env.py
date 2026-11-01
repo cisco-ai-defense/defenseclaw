@@ -230,52 +230,80 @@ def test_strict_tier_is_read_from_the_real_guardrail_config():
     assert hook_integrity._strict_policy_tier(cfg, "claudecode") is True
 
 
+def _fake_ownership(monkeypatch, user_paths):
+    """lstat as if every path were root-owned with no group/world write, except *user_paths* and what is under them."""
+
+    real_lstat = os.lstat
+    users = [os.path.abspath(str(p)) for p in user_paths]
+
+    def lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        text = os.path.abspath(str(path))
+        fields = list(info)
+        if any(text == u or text.startswith(u + os.sep) for u in users):
+            fields[4] = 1000
+        else:
+            fields[4] = 0
+            fields[0] = info.st_mode & ~0o022
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(hook_integrity.os, "lstat", lstat)
+
+
 def test_system_bash_env_from_a_module_profile_is_not_reported(tmp_path, monkeypatch):
     # rel-1-0-6:GAP-0393: Environment Modules and Lmod export BASH_ENV to a
-    # root-owned init script; that is not reported. A BASH_ENV in the home or
-    # in a folder anyone can write still is.
+    # root-owned init script; that is not reported. The path is walked as
+    # written (review 3): a link in a folder the user can write is reported
+    # even when it points at a root-owned file; Lmod's root-owned link is not.
     cfg = _cfg(tmp_path, monkeypatch)
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
+    system = tmp_path / "etc" / "profile.d"
+    system.mkdir(parents=True)
+    root_file = system / "modules.sh"
+    root_file.write_text("module() { :; }\n", encoding="utf-8")
+    lmod = tmp_path / "usr" / "share" / "lmod"
+    (lmod / "lmod-8.7" / "init").mkdir(parents=True)
+    (lmod / "lmod-8.7" / "init" / "bash").write_text("module() { :; }\n", encoding="utf-8")
+    (lmod / "lmod").symlink_to("lmod-8.7")  # relative, as Lmod installs it
     mine = home / "startup.sh"
     mine.write_text("exit 0\n", encoding="utf-8")
-    shared = tmp_path / "shared.sh"
-    shared.write_text("exit 0\n", encoding="utf-8")
+    home_link = home / "x"
+    home_link.symlink_to(root_file)
+    user_tmp = tmp_path / "tmp" / "userdir"
+    user_tmp.mkdir(parents=True)
+    tmp_link = user_tmp / "x"
+    tmp_link.symlink_to(root_file)
+    root_link_to_user = system / "points-home.sh"
+    root_link_to_user.symlink_to(mine)
+    _fake_ownership(monkeypatch, [home, user_tmp])
     base = {"HOME": str(home)}
-    real_stat = os.stat
 
-    def root_owned(path, *args, **kwargs):
-        info = real_stat(path, *args, **kwargs)
-        if str(path) == str(tmp_path / "missing"):
-            raise FileNotFoundError(path)
-        fields = list(info)
-        fields[4] = 0  # st_uid
-        fields[0] = (info.st_mode & ~0o022)  # no group/world write
-        return os.stat_result(fields)
+    def reported(value):
+        return hook_integrity.inherited_hook_shell_env({**base, "BASH_ENV": str(value)}, "codex") == ["BASH_ENV"]
 
-    monkeypatch.setattr(hook_integrity.os, "stat", root_owned)
-    assert hook_integrity.inherited_hook_shell_env({**base, "BASH_ENV": str(shared)}, "codex") == []
-    assert hook_integrity.agent_hook_env_warnings(cfg, "copilot", workspace_dir=str(tmp_path / "repo"), environ={**base, "BASH_ENV": str(shared)}) == []
-    # In the home, relative, or missing: reported.
-    for value in (str(mine), "startup.sh", str(tmp_path / "missing")):
-        assert hook_integrity.inherited_hook_shell_env({**base, "BASH_ENV": value}, "devin") == ["BASH_ENV"], value
+    # Exempt: a root-owned file, and Lmod's root-owned link into its init.
+    assert not reported(root_file)
+    assert not reported(lmod / "lmod" / "init" / "bash")
+    assert hook_integrity.agent_hook_env_warnings(
+        cfg, "copilot", workspace_dir=str(tmp_path / "repo"), environ={**base, "BASH_ENV": str(root_file)}
+    ) == []
+    # Reported: a link in the home or in a user-owned /tmp folder pointing at
+    # the root-owned file, a root-owned link to a home file, a file in the
+    # home, a relative path, a missing file.
+    for value in (home_link, tmp_link, root_link_to_user, mine, "startup.sh", tmp_path / "missing"):
+        assert reported(value), value
 
-    # Not root-owned, or writable by others: reported.
-    def user_owned(path, *args, **kwargs):
-        info = real_stat(path, *args, **kwargs)
-        fields = list(info)
-        fields[4] = 1000
-        return os.stat_result(fields)
+    # A root-owned file in a folder others can write is reported.
+    real_lstat = os.lstat
 
-    monkeypatch.setattr(hook_integrity.os, "stat", user_owned)
-    assert hook_integrity.inherited_hook_shell_env({**base, "BASH_ENV": str(shared)}, "codex") == ["BASH_ENV"]
+    def writable_parent(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if os.path.abspath(str(path)) == str(system):
+            fields = list(info)
+            fields[0] = info.st_mode | 0o002
+            return os.stat_result(fields)
+        return info
 
-    def world_writable(path, *args, **kwargs):
-        info = real_stat(path, *args, **kwargs)
-        fields = list(info)
-        fields[4] = 0
-        fields[0] = info.st_mode | 0o002
-        return os.stat_result(fields)
-
-    monkeypatch.setattr(hook_integrity.os, "stat", world_writable)
-    assert hook_integrity.inherited_hook_shell_env({**base, "BASH_ENV": str(shared)}, "codex") == ["BASH_ENV"]
+    monkeypatch.setattr(hook_integrity.os, "lstat", writable_parent)
+    assert reported(root_file)
