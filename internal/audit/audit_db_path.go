@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -373,7 +374,7 @@ func pinAndSecureAuditDBSQLiteSidecars(
 	}
 	for _, suffix := range auditDBSQLiteSidecarSuffixes {
 		path := databasePath + suffix
-		before, err := os.Lstat(path)
+		before, err := pathidentity.LstatPinned(path)
 		if os.IsNotExist(err) {
 			if retained[suffix] != nil {
 				if ok, err := retire(suffix); err != nil {

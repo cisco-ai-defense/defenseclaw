@@ -32,6 +32,7 @@ import (
 	"text/template"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -2418,7 +2419,7 @@ func readStableManagedRuntimeFileForOwner(
 	if maxBytes <= 0 {
 		return nil, false, fmt.Errorf("%s has an invalid read limit", label)
 	}
-	expected, err := os.Lstat(path)
+	expected, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) && allowMissing {
 		return nil, false, nil
 	}

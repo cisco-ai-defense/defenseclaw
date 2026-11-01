@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // A Windows UNC path (\\server\share\..., //server/share/...) names a file
@@ -163,6 +165,15 @@ func pathStat(name string) (os.FileInfo, error) {
 		return nil, networkShareError("stat", name)
 	}
 	return os.Stat(name)
+}
+
+// pathStatPinned is pathStat with the file identity read at once, for a
+// FileInfo that a later os.SameFile compares with the opened file.
+func pathStatPinned(name string) (os.FileInfo, error) {
+	if networkPathUnanswered(name) {
+		return nil, networkShareError("stat", name)
+	}
+	return pathidentity.StatPinned(name)
 }
 
 func pathLstat(name string) (os.FileInfo, error) {

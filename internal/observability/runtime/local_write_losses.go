@@ -18,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // LocalWriteLossJournalFile is the reserved file in the gateway data
@@ -227,7 +228,7 @@ func newLocalWriteLossJournal(path string, now func() time.Time) *localWriteLoss
 // openLocked opens the journal, first writing a reserved one when it is
 // missing or has another size, and takes in the losses it holds.
 func (journal *localWriteLossJournal) openLocked() error {
-	info, err := os.Lstat(journal.path)
+	info, err := pathidentity.LstatPinned(journal.path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -245,7 +246,7 @@ func (journal *localWriteLossJournal) openLocked() error {
 		); err != nil {
 			return err
 		}
-		if info, err = os.Lstat(journal.path); err != nil {
+		if info, err = pathidentity.LstatPinned(journal.path); err != nil {
 			return err
 		}
 	}

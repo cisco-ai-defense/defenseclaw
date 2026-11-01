@@ -18,6 +18,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // Per-user cleanup of DefenseClaw's own registrations and plugins after a
@@ -290,7 +291,7 @@ func sameEnterpriseHookUserCleanups(left, right []enterpriseHookUserCleanup) boo
 // is an empty ledger.
 func loadEnterpriseHookUserCleanups(dataDir string) ([]enterpriseHookUserCleanup, error) {
 	path := enterpriseHookUserCleanupPath(dataDir)
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}

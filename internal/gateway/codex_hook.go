@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -1532,7 +1533,7 @@ func codexReadVerifiedGitDiffCurrentLines(
 		return nil, false
 	}
 	target := filepath.Join(realCWD, physicalRelative)
-	listed, err := os.Lstat(target)
+	listed, err := pathidentity.LstatPinned(target)
 	if err != nil || !listed.Mode().IsRegular() || listed.Size() < 0 ||
 		listed.Size() > codexTrustedSourceTreeMaxBytes ||
 		!codexSingleLinkRegularFile(target, listed) {

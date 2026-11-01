@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // The foreign-hook guard exists because several agents run every
@@ -741,7 +742,7 @@ func truncate(value string, limit int) string {
 }
 
 func readGuardFileLimit(path string, limit int64) ([]byte, bool, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
 	}

@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winsession"
 )
 
@@ -1558,7 +1559,7 @@ func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
 
 func loadEnterpriseHookGuardianState(dataDir string) (enterpriseHookGuardianState, bool, error) {
 	path := filepath.Join(strings.TrimSpace(dataDir), hookGuardianStateFile)
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return enterpriseHookGuardianState{}, false, nil
 	}
@@ -4614,7 +4615,7 @@ func previousEnterpriseHookProtection(
 
 func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuardianAuthorization, bool, error) {
 	path := managed.HookGuardianAuthorizationPath(dataDir)
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return enterpriseHookGuardianAuthorization{}, false, nil
 	}
@@ -4675,7 +4676,7 @@ func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuar
 
 func loadEnterpriseHookGuardianActivation(dataDir string) (enterpriseHookGuardianActivation, bool, error) {
 	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), hookGuardianActivationFile)
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return enterpriseHookGuardianActivation{}, false, nil
 	}

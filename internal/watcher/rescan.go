@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -1717,7 +1718,7 @@ func (w *InstallWatcher) scannerBinaryVersion(binary string) string {
 	if err != nil {
 		return ""
 	}
-	info, err := os.Stat(resolved)
+	info, err := pathidentity.StatPinned(resolved)
 	if err != nil {
 		return ""
 	}

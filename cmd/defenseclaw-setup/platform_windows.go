@@ -408,7 +408,7 @@ func probeExecutableRelease(path string) error {
 	if err := rejectReparseAncestors(path); err != nil {
 		return err
 	}
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return os.ErrNotExist
 	}

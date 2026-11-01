@@ -45,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -967,10 +968,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		if w.secureClientActive() {
 			return
 		}
-		if info, statErr := os.Stat(dir); statErr == nil {
-			// On Windows this reads the file id now, while dir names
-			// the watched folder; it is read lazily from the path otherwise.
-			os.SameFile(info, info)
+		if info, statErr := pathidentity.StatPinned(dir); statErr == nil {
 			roots[key] = watchedRoot{dir: dir, absolute: absolute, kind: kind, info: info}
 		}
 	}

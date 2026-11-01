@@ -26,6 +26,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 const settingsReadLimit = 1024 * 1024
@@ -281,7 +283,7 @@ func readJSONFileStable(path string) (map[string]any, bool, error) {
 
 func readStableFile(path string, limit int64) ([]byte, error) {
 	path = filepath.Clean(path)
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, fmt.Errorf("cannot inspect stable file %s: %w", path, err)
 	}

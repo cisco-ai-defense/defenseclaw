@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -320,7 +321,7 @@ func readSkillFile(path string) ([]byte, error) {
 	if err == nil || !errors.Is(err, fs.ErrPermission) {
 		return payload, err
 	}
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +368,7 @@ func treeMD5(root string) (string, error) {
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("linked Hermes skill content: %s", path)
 		}
-		info, err := entry.Info()
+		info, err := pathidentity.LstatPinned(path)
 		if err != nil {
 			return err
 		}

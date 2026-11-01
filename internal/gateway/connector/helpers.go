@@ -755,7 +755,7 @@ func stableNativeWindowsPE(path string) bool {
 	if !nativeWindowsPathHasNoReparsePoints(path) {
 		return false
 	}
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
 		return false
 	}
@@ -780,7 +780,7 @@ func readStableNativeWindowsFile(path string, limit int64) ([]byte, bool) {
 	if limit <= 0 || !nativeWindowsPathHasNoReparsePoints(path) {
 		return nil, false
 	}
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || before.Size() > limit {
 		return nil, false
 	}

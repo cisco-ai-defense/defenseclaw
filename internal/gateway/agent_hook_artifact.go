@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -612,7 +613,7 @@ func readPromotedArtifact(
 	path string,
 	dialectHint actionfacts.Dialect,
 ) ([]byte, actionfacts.Dialect, bool) {
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 ||
 		before.Size() <= 0 || before.Size() > promotedArtifactMaxBytes {
 		return nil, actionfacts.DialectNone, false

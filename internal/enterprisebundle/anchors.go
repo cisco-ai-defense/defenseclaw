@@ -21,6 +21,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // AnchorsName is the trust anchor file name (in <etc>/trust/).
@@ -188,7 +190,9 @@ func LoadAnchors(path string, trust TrustCheck) (*Anchors, error) {
 // (nil on any error), so a caller that installs the file writes exactly
 // what was checked without reading the source again.
 func ReadAnchorsFile(path string, trust TrustCheck) (*Anchors, []byte, error) {
-	info, err := os.Lstat(path)
+	// The identity is read now, with the attributes, so the comparison after
+	// the open binds the file the trust check passed (GAP-1308 A-W05).
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil, refuse(CodeAnchorMissing, AnchorsName, "no trust anchor file; bundle mode is off")
 	}
@@ -200,11 +204,6 @@ func ReadAnchorsFile(path string, trust TrustCheck) (*Anchors, []byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, nil, refuse(CodeAnchorInsecure, AnchorsName, "the trust anchor path is not a regular file")
 	}
-	// Pin the identity of the file that is checked now. On Windows os.Lstat
-	// reads the file ID lazily, by path, at the first os.SameFile, so without
-	// this the comparison below would read the ID of whatever file holds the
-	// path after the trust check and accept a swapped source (GAP-1308 A-W05).
-	os.SameFile(info, info)
 	if trust != nil {
 		if err := trust(path); err != nil {
 			refusal := refuse(CodeAnchorInsecure, AnchorsName, "%s", boundedDetail(err.Error()))

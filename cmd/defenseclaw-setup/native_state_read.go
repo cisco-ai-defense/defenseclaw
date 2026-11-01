@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // A gateway, guardian or CLI writer publishes native state (for example
@@ -95,7 +97,7 @@ func readBoundedNativeStateFileOnce(path string, limit int64) ([]byte, bool, err
 	if err := rejectReparseAncestors(path); err != nil {
 		return nil, false, err
 	}
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}

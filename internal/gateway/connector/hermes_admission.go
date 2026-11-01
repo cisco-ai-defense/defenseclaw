@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -229,7 +230,7 @@ func validateHermesExecutableEvidence(
 		return errors.New("selected executable is not the protected current-token updater-managed executable")
 	}
 
-	before, err := os.Lstat(selected)
+	before, err := pathidentity.LstatPinned(selected)
 	if err != nil {
 		return fmt.Errorf("inspect selected executable: %w", err)
 	}

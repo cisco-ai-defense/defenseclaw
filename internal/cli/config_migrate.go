@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // The Windows bundle lifecycle supplies generation metadata for a staged
@@ -411,7 +412,7 @@ const managedMigrationRecordMaxBytes = 4 << 20
 // link for a missing record, and ensure reported compliance while the Cursor
 // correction the record may prove stayed unapplied (G-small).
 func readManagedMigrationRecord(path string, limit int64) ([]byte, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}

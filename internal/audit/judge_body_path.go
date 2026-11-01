@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -164,7 +165,7 @@ func secureJudgeBodySQLiteSidecars(databasePath string, hooks judgeBodyPathHooks
 	hooks = hooks.withDefaults()
 	for _, suffix := range judgeBodySQLiteSidecarSuffixes {
 		path := databasePath + suffix
-		before, err := os.Lstat(path)
+		before, err := pathidentity.LstatPinned(path)
 		if os.IsNotExist(err) {
 			continue
 		}

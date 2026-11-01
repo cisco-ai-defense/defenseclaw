@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -375,7 +376,7 @@ func verifyHookRuntimeRecords(hookDir, name, failMode string) error {
 // readUserRuntimeRecord reads a small regular file of the user's own
 // runtime state without following a link at its name.
 func readUserRuntimeRecord(path, label string) ([]byte, bool, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if os.IsNotExist(err) {
 		return nil, false, nil
 	}
