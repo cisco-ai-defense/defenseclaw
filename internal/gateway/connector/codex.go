@@ -1806,7 +1806,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				}
 				// A wrapper around our notifier keeps chaining the original
 				// ours displaced, not ours.
-				argv = stripCodexSelfNotify(argv, codexOriginalNotifyCommand(loaded, opts), opts)
+				argv, _ = codexUnwrapSelfNotify(argv, codexOriginalNotifyCommand(loaded, opts), opts)
 				raw, err := json.Marshal(argv)
 				if err != nil {
 					return fmt.Errorf("capture replaced Codex notify config: %w", err)
@@ -2682,40 +2682,115 @@ func codexOriginalNotifyValue(cfg map[string]interface{}, opts SetupOpts) (inter
 	return argv, len(argv) > 0
 }
 
+// codexPreviousNotifyFlag is the argument Codex computer-use puts before the
+// JSON argv of the notifier it wraps.
+const codexPreviousNotifyFlag = "--previous-notify"
+
+// codexNotifyNestLimit bounds how many wrappers stripCodexSelfNotify looks
+// through. A deeper chain is cut there: its innermost notifier is dropped
+// rather than run, so a hostile config cannot make a chain we never inspect.
+const codexNotifyNestLimit = 8
+
 // stripCodexSelfNotify removes DefenseClaw's own notifier from argv so the
 // chained original never calls back into us. Codex computer-use wraps the
-// current notifier as `--previous-notify <json argv>`; when that is ours, it is
-// replaced by previous (the notifier ours was chaining) or dropped. An argv
-// that is ours outright becomes previous.
+// current notifier as `--previous-notify <json argv>` (or
+// `--previous-notify=<json argv>`), and a wrapper can itself be wrapped; when
+// the innermost one is ours, it is replaced by previous (the notifier ours was
+// chaining) or dropped. An argv that is ours outright becomes previous. An
+// argument that is not DefenseClaw's is kept as it was written.
 func stripCodexSelfNotify(argv, previous []string, opts SetupOpts) []string {
+	return stripCodexSelfNotifyAt(argv, previous, opts, 0)
+}
+
+func stripCodexSelfNotifyAt(argv, previous []string, opts SetupOpts, depth int) []string {
 	if codexNotifyLooksManaged(argv, opts) {
 		return previous
 	}
 	out := make([]string, 0, len(argv))
 	for i := 0; i < len(argv); i++ {
-		if argv[i] == "--previous-notify" && i+1 < len(argv) {
-			var nested []string
-			if json.Unmarshal([]byte(argv[i+1]), &nested) == nil && codexNotifyLooksManaged(nested, opts) {
-				i++
-				if raw, err := json.Marshal(previous); err == nil && len(previous) > 0 {
-					out = append(out, "--previous-notify", string(raw))
-				}
-				continue
-			}
+		arg := argv[i]
+		value, inline := "", false
+		switch {
+		case arg == codexPreviousNotifyFlag && i+1 < len(argv):
+			value = argv[i+1]
+		case strings.HasPrefix(arg, codexPreviousNotifyFlag+"="):
+			value, inline = strings.TrimPrefix(arg, codexPreviousNotifyFlag+"="), true
+		default:
+			out = append(out, arg)
+			continue
 		}
-		out = append(out, argv[i])
+		var nested []string
+		if json.Unmarshal([]byte(value), &nested) != nil || len(nested) == 0 {
+			out = append(out, arg)
+			continue
+		}
+		if !inline {
+			i++
+		}
+		kept := previous
+		if depth < codexNotifyNestLimit {
+			kept = stripCodexSelfNotifyAt(nested, previous, opts, depth+1)
+		}
+		if slices.Equal(kept, nested) {
+			if inline {
+				out = append(out, arg)
+			} else {
+				out = append(out, arg, value)
+			}
+			continue
+		}
+		raw, err := json.Marshal(kept)
+		if err != nil || len(kept) == 0 {
+			continue
+		}
+		if inline {
+			out = append(out, codexPreviousNotifyFlag+"="+string(raw))
+		} else {
+			out = append(out, codexPreviousNotifyFlag, string(raw))
+		}
 	}
 	return out
 }
 
+// codexUnwrapSelfNotify takes DefenseClaw's notifier out of a wrapper that
+// chains it and reports whether it found one. The notifier ours chained
+// (previous) takes its place, unless previous is that same wrapper: a first
+// setup under a wrapper saves the wrapper itself as the original, and chaining
+// it from inside itself would run it twice each turn.
+func codexUnwrapSelfNotify(argv, previous []string, opts SetupOpts) ([]string, bool) {
+	bare := stripCodexSelfNotify(argv, nil, opts)
+	if slices.Equal(bare, argv) {
+		return argv, false
+	}
+	if slices.Equal(previous, bare) {
+		previous = nil
+	}
+	return stripCodexSelfNotify(argv, previous, opts), true
+}
+
 func restoreCodexNotify(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) error {
 	if !codexNotifyLooksManaged(cfg["notify"], opts) {
+		// Another program's notifier (Codex computer-use) may still chain the
+		// notifier an older Setup wrote. Take ours out of it, so Codex does not
+		// call DefenseClaw back on every turn, or a program uninstall removes.
+		if argv, ok := codexNotifyArgv(cfg["notify"]); ok && len(argv) > 0 {
+			if healed, changed := codexUnwrapSelfNotify(argv, codexOriginalNotifyCommand(backup, opts), opts); changed && len(healed) > 0 {
+				cfg["notify"] = healed
+			}
+		}
 		return nil
 	}
 	if backup.HadNotify && len(backup.OriginalNotify) > 0 {
 		var original interface{}
 		if err := json.Unmarshal(backup.OriginalNotify, &original); err != nil {
 			return fmt.Errorf("restore original Codex notify config: %w", err)
+		}
+		// A backup an earlier release saved may hold a wrapper that chains
+		// our notifier: put the wrapper back without it.
+		if argv, ok := codexNotifyArgv(original); ok && len(argv) > 0 {
+			if stripped := stripCodexSelfNotify(argv, nil, opts); len(stripped) > 0 && !slices.Equal(stripped, argv) {
+				original = stripped
+			}
 		}
 		if !codexNotifyLooksManaged(original, opts) {
 			cfg["notify"] = original
