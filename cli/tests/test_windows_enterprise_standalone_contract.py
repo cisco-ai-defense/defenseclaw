@@ -1472,6 +1472,8 @@ class FakeSwapNative {
     }
 }
 function Initialize-DefenseClawNativeSecurity { return [FakeSwapNative] }
+$script:phases = [Collections.Generic.List[string]]::new()
+function Write-DefenseClawLifecyclePhase { param($Stage) $script:phases.Add($Stage) }
 function Invoke-Case([string[]]$Answers) {
     [FakeSwapNative]::Answers.Clear()
     foreach ($answer in $Answers) { [FakeSwapNative]::Answers.Enqueue($answer) }
@@ -1481,14 +1483,24 @@ function Invoke-Case([string[]]$Answers) {
 if (-not (Invoke-Case @('rename:32', 'link:5', 'rename:33', ''))) { throw 'busy files were not retried to success' }
 if ([FakeSwapNative]::Calls -ne 4) { throw "busy retry made $([FakeSwapNative]::Calls) calls" }
 foreach ($refusal in @('link:1', 'link:17', 'link:50', 'link:1142', 'rename:1', 'rename:50', 'rename:87', 'dacl:null')) {
+    $script:phases.Clear()
     if (Invoke-Case @($refusal)) { throw "$refusal did not fall back to File.Replace" }
+    # GAP-0369: the fallback is in the lifecycle log, with the file and the refusal.
+    if (@($script:phases | Where-Object { $_ -like "*C:\b\hook.exe ($refusal)*File.Replace*" }).Count -ne 1) { throw "$refusal fallback was not logged: $($script:phases -join ' | ')" }
 }
-foreach ($fatal in @('dacl:1307', 'rename:2', 'link:183', 'rename:32;backup-kept')) {
+if (-not (Invoke-Case @('open:32', ''))) { throw 'a busy replacement open was not retried' }
+foreach ($fatal in @('dacl:1307', 'open:2', 'rename:2', 'link:183')) {
     $thrown = $null
     try { [void](Invoke-Case @($fatal)) } catch { $thrown = $_.Exception }
     if ($null -eq $thrown -or $thrown -isnot [IO.IOException]) { throw "$fatal was not thrown as an IOException" }
-    if ($thrown.Message -notlike "*$($fatal.Split(';')[0])*") { throw "$fatal message lost the stage and code: $($thrown.Message)" }
+    if ($thrown.Message -notlike "*$fatal*") { throw "$fatal message lost the stage and code: $($thrown.Message)" }
 }
+# A backup link the swap could not remove is not an IOException, so the
+# GAP-0852 catch does not call it a file another program holds open.
+$thrown = $null
+try { [void](Invoke-Case @('rename:32;backup-kept')) } catch { $thrown = $_.Exception }
+if ($null -eq $thrown -or $thrown -is [IO.IOException] -or $thrown -isnot [InvalidOperationException]) { throw 'backup-kept was not thrown as its own error' }
+if ($thrown.Message -notlike '*rename:32;backup-kept*C:\b\hook.exe.backup.1*') { throw "backup-kept message lost the result or the backup: $($thrown.Message)" }
 """)
 
 
@@ -1506,6 +1518,7 @@ def test_launchable_swap_links_the_old_file_before_one_posix_rename() -> None:
         "CreateHardLinkNative(backup, destination, IntPtr.Zero)",
         "FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS",
         "const int FileRenameInfoEx = 22;",
+        'return "open:" + Marshal.GetLastWin32Error()',
         "FILE_SHARE_READ | FILE_SHARE_DELETE,",
     ):
         assert needle in swap, needle
