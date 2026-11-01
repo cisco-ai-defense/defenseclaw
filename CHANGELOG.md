@@ -8,10 +8,14 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
-## [Unreleased] — 1.0.6
+## [Unreleased] — 1.0.7
 
 ### Changed
 - **A sandbox create refused because of a shell setting in `--env` says which one.** `--env SHELLOPTS=noexec` (or `BASHOPTS`) stops the shell of the workload check from running its script, so the create was refused (and the sandbox deleted) with only "the check's answer was cut short". The refusal now names the setting and says to run the sandbox again without it. The refusal itself and which values it covers are unchanged (GAP-0352).
+
+## [Unreleased] — 1.0.6
+
+### Changed
 - **The docs say which `hook_contract_lock.json` fields change on their own.** The gateway rewrites the lock each time it starts and on every upgrade or rollback, so a restored copy did not stay byte for byte and nothing said why. Only `updated_at` and `defenseclaw_version` change; compare a restored lock without them. A test keeps the rule and the page in step (GAP-0284).
 - **OpenCode V2 replaces OpenCode V1 (from #1373, by keitheobrien).** DefenseClaw guards OpenCode V2 (`@opencode/cli`, 2.0 to 2.2 reviewed, 2.2.3 checked live) with one dependency-free plugin that default-exports `{ id, setup }` and rejects a blocked call in the awaited `execute.before`. Setup and the gateway refuse OpenCode V1 and any other major, also with the drift override. Install V2 (`npm uninstall -g opencode-ai && npm install -g @opencode/cli@2`) and restart OpenCode's background server (`opencode service restart`). The OpenShell image pins 2.1.4 and is unverified until a fresh V2 sandbox check.
 - **The upgrade stops before it changes anything while the guarded OpenCode is V1.** The running DefenseClaw keeps guarding it; install V2 and upgrade again, or remove OpenCode from DefenseClaw first. With V2 installed, the upgrade writes the V2 plugin without a setup run. A rollback to 1.0.5 or earlier is refused while OpenCode V2 is set up, because those releases cannot guard it.
