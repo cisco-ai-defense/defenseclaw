@@ -959,6 +959,52 @@ jobs:
           path: ${{ runner.temp }}/assets
       - run: scripts/test-install-lifecycle.sh --assets "$RUNNER_TEMP/assets" --lanes "fresh fleet-opt-in upgrade-0.8.10 handoff drills"
 
+  perf-budget:
+    # scripts/perf/dcperf.py on a per-user install of this commit's assets in
+    # a throwaway HOME: installed Claude Code and Codex hook latency (100
+    # sequential and 128 32-way benign PreToolUse calls), processes per hook
+    # (strace), gateway restart to /health, status/doctor/setup claude-code,
+    # skill scan (no LLM) and gateway RSS after 300 s idle. Fails on a gated
+    # metric over scripts/perf/budgets.json (linux-per-user) by more than 20%,
+    # or one that could not be measured. No secrets are needed or read.
+    name: Performance Budget (Linux per-user)
+    needs: install-smoke-assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: install-smoke-assets
+          path: ${{ runner.temp }}/assets
+      - name: strace for the processes-per-hook count
+        run: command -v strace || { sudo apt-get update -q && sudo apt-get install -y -q strace; }
+      - name: Install into a throwaway HOME
+        run: python3 scripts/perf/dcperf.py provision --assets "$RUNNER_TEMP/assets" --home "$RUNNER_TEMP/perf-home"
+      - name: Measure and check the budgets
+        run: >-
+          python3 scripts/perf/dcperf.py run --home "$RUNNER_TEMP/perf-home"
+          --out "$RUNNER_TEMP/perf-result.json" --budgets scripts/perf/budgets.json --column linux-per-user
+      - name: Stop the gateway
+        if: ${{ always() }}
+        env:
+          HOME: ${{ runner.temp }}/perf-home
+        run: if [ -x "$HOME/.local/bin/defenseclaw-gateway" ]; then "$HOME/.local/bin/defenseclaw-gateway" stop; fi
+      - if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: perf-result
+          path: ${{ runner.temp }}/perf-result.json
+          if-no-files-found: warn
+          retention-days: 14
+
   install-smoke-windows:
     # One runner per lane: the lanes are independent (each enters its own
     # throwaway profile) and ran back to back for ~31 minutes on one runner.
