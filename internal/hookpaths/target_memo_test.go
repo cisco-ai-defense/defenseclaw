@@ -206,7 +206,10 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 		t.Errorf("128 assignments: header %v, want the full map", got)
 	}
 	state := filepath.Join(home, ".defenseclaw", "config.yaml")
-	got := header(gap0568Assignments(200) + "; printf changed >> " + state)
+	// The Bash tool's shell reads an unquoted backslash as an escape, so a
+	// Windows path (C:\Users\...) is one word only in single quotes.
+	stateWord := "'" + state + "'"
+	got := header(gap0568Assignments(200) + "; printf changed >> " + stateWord)
 	if incomplete(got) {
 		t.Fatalf("over-budget state write: header %v, want the call described", got)
 	}
@@ -220,7 +223,7 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 	for i := range 30000 {
 		writes = append(writes, fmt.Sprintf("echo x > ordinary/f%d.txt", i))
 	}
-	reducedHeader := header(strings.Join(writes, "; ") + "; printf changed >> " + state)
+	reducedHeader := header(strings.Join(writes, "; ") + "; printf changed >> " + stateWord)
 	if _, listed := reducedHeader[state]; !listed || reducedHeader[TruncatedKey] != "1" {
 		t.Errorf("over-budget state write after 30000 writes: header %v, want the state listed and the truncated marker", reducedHeader)
 	}
@@ -238,10 +241,10 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 		writers = append(writers, fmt.Sprintf("echo claw%d >> notes.txt", i))
 		reads = append(reads, fmt.Sprintf("echo claw%d", i))
 	}
-	if got := header(gap0568Assignments(200) + "; " + strings.Join(writers, "; ") + "; printf changed >> " + state); !incomplete(got) {
+	if got := header(gap0568Assignments(200) + "; " + strings.Join(writers, "; ") + "; printf changed >> " + stateWord); !incomplete(got) {
 		t.Errorf("over-budget call past the bound of writing statements: header %v, want only the incomplete marker and cwd", got)
 	}
-	if got := header(gap0568Assignments(200) + "; " + strings.Join(reads, "; ") + "; printf changed >> " + state); incomplete(got) {
+	if got := header(gap0568Assignments(200) + "; " + strings.Join(reads, "; ") + "; printf changed >> " + stateWord); incomplete(got) {
 		t.Errorf("over-budget state write after 130 read-only naming statements: header %v, want the write described", got)
 	} else if _, listed := got[state]; !listed {
 		t.Errorf("over-budget state write after 130 read-only naming statements: header %v does not list %s", got, state)
