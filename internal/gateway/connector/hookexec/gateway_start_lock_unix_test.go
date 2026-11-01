@@ -7,6 +7,7 @@ package hookexec
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"os"
 	"os/exec"
@@ -90,6 +91,12 @@ const peerHelperEnv = "R107NA_PEER_HELPER_LISTEN"
 // TestPerUserPeerHelperProcess is not a test: with peerHelperEnv set it is a
 // second process of this account that listens on that address until killed.
 func TestPerUserPeerHelperProcess(t *testing.T) {
+	if os.Getenv(peerHoldHelperEnv) != "" {
+		// Holds the descriptors it inherited (ExtraFiles) until killed.
+		_, _ = os.Stdout.WriteString("ready\n")
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
 	addr := os.Getenv(peerHelperEnv)
 	if addr == "" {
 		t.Skip("helper process only")
@@ -102,6 +109,30 @@ func TestPerUserPeerHelperProcess(t *testing.T) {
 	_, _ = os.Stdout.WriteString("ready\n")
 	time.Sleep(time.Minute)
 	os.Exit(0)
+}
+
+// peerHoldHelperEnv makes TestPerUserPeerHelperProcess a process that only
+// holds the descriptors it inherited.
+const peerHoldHelperEnv = "R107NA_PEER_HELPER_HOLD"
+
+// startHoldHelper starts another process of this account that holds a dup
+// of f (a listener or an accepted socket).
+func startHoldHelper(t *testing.T, f *os.File) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPerUserPeerHelperProcess$")
+	cmd.Env = append(os.Environ(), peerHoldHelperEnv+"=1")
+	cmd.ExtraFiles = []*os.File{f}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	if line, err := bufio.NewReader(out).ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
+		t.Fatalf("hold helper not ready: %q %v", line, err)
+	}
 }
 
 // startPeerHelper starts another process of this account listening on addr.
@@ -161,9 +192,9 @@ func TestPerUserConnectedPeerIsTheProcessBehindTheSocket(t *testing.T) {
 	if !ok || pid != os.Getpid() {
 		t.Fatalf("connected peer = %d %v, want this process %d", pid, ok, os.Getpid())
 	}
-	owner, ok := perUserListenerOwner(l.Addr().(*net.TCPAddr))
-	if !ok || owner.pid != os.Getpid() || owner.identity == "" {
-		t.Fatalf("listener owner = %+v %v, want this process", owner, ok)
+	owners, ok := perUserListenerOwners(context.Background(), l.Addr().(*net.TCPAddr))
+	if !ok || len(owners) != 1 || owners[0].pid != os.Getpid() || owners[0].identity == "" {
+		t.Fatalf("listener owners = %+v %v, want this process", owners, ok)
 	}
 	record := NewPerUserPeerRecord()
 	record.capture(c.LocalAddr(), c.RemoteAddr())
@@ -212,6 +243,90 @@ func TestPerUserGatewayRestartProvenReadsTheConnectedPeer(t *testing.T) {
 			}
 		})
 	}
+	// A kill error other than "no such process" (EPERM: the pid now
+	// belongs to another account) is no proof (review r3 finding 4).
+	t.Run("lock held, peer pid unreadable (XPEERESRCH)", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root can signal pid 1")
+		}
+		// A port nobody listens on, so only the peer read can decide.
+		free, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		freeAddr := free.Addr().(*net.TCPAddr)
+		_ = free.Close()
+		dir := t.TempDir()
+		holdStartLock(t, dir)
+		if PerUserGatewayRestartProven(dir, knownPeer(1, "not-pid-1", freeAddr)) {
+			t.Fatal("an unreadable peer pid read as a restart")
+		}
+	})
+	// The proof that runs after the deadline has one budget: a proof not
+	// done in it is no proof (review r3 finding 3).
+	t.Run("lock held, proof budget spent", func(t *testing.T) {
+		previous := perUserRestartProofBudget
+		perUserRestartProofBudget = time.Nanosecond
+		t.Cleanup(func() { perUserRestartProofBudget = previous })
+		dir := t.TempDir()
+		holdStartLock(t, dir)
+		if PerUserGatewayRestartProven(dir, knownPeer(1<<22+12345, "1 2", server)) {
+			t.Fatal("a proof past its budget read as a restart")
+		}
+	})
+	// Another process holds a dup of the live gateway's listener (review r3
+	// findings 1 and 2): the old peer is among the holders, so no change.
+	t.Run("lock held, another process also holds the gateway listener", func(t *testing.T) {
+		held, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer held.Close()
+		f, err := held.(*net.TCPListener).File()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		startHoldHelper(t, f)
+		owners, ok := perUserListenerOwners(context.Background(), held.Addr().(*net.TCPAddr))
+		if !ok || len(owners) != 2 {
+			t.Fatalf("listener owners = %+v, want this process and the helper", owners)
+		}
+		dir := t.TempDir()
+		holdStartLock(t, dir)
+		if PerUserGatewayRestartProven(dir, knownPeer(os.Getpid(), self, held.Addr().(*net.TCPAddr))) {
+			t.Fatal("a second holder of the live gateway's listener read as a restart")
+		}
+	})
+	// More than one holder of the accepted socket is no known peer.
+	t.Run("connected socket held by two processes is unknown", func(t *testing.T) {
+		pl, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pl.Close()
+		accepted := make(chan net.Conn, 1)
+		go func() { c, _ := pl.Accept(); accepted <- c }()
+		c, err := net.Dial("tcp", pl.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		sc := <-accepted
+		if sc == nil {
+			t.Fatal("no accepted connection")
+		}
+		defer sc.Close()
+		f, err := sc.(*net.TCPConn).File()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		startHoldHelper(t, f)
+		if pid, ok := perUserConnectedPeerPID(c.LocalAddr().(*net.TCPAddr), c.RemoteAddr().(*net.TCPAddr)); ok {
+			t.Fatalf("connected peer = %d, want unknown with two holders", pid)
+		}
+	})
 	// Another process of this account owns the port by the deadline: the
 	// gateway that took the call gave it up.
 	t.Run("lock held, another process listens on the port", func(t *testing.T) {
