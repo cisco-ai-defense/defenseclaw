@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,8 @@ type device struct {
 	cfg     config.EnterpriseAccountJoinConfig
 	now     time.Time
 	goos    string
+	// signedAt answers Sources.SignedAt (nil: no confirmed bundle).
+	signedAt func(int, time.Time) (time.Time, bool)
 }
 
 func newDevice(t *testing.T) *device {
@@ -90,8 +93,75 @@ func (d *device) report() *accountjoin.Report {
 			return append([]byte(nil), value...), nil
 		},
 		SpoolDir: d.spool, SpoolTrust: func(string, string) error { return nil },
-		StatePath: d.state, GOOS: d.goos, Now: d.now,
+		StatePath: d.state, GOOS: d.goos, Now: d.now, SignedAt: d.signedAt,
 	})
+}
+
+// rel-1-0-6:GAP-0276: crash dumps are off before the first secret is read,
+// and nothing is changed while the feature is off.
+func TestCrashDumpsOffBeforeTheSecretIsRead(t *testing.T) {
+	var order []string
+	previous := keepSecretOutOfCrashDumps
+	keepSecretOutOfCrashDumps = func() { order = append(order, "dumps off") }
+	t.Cleanup(func() { keepSecretOutOfCrashDumps = previous })
+	d := newDevice(t)
+	read := func(name string) ([]byte, error) {
+		order = append(order, "read "+name)
+		return secretText(0x1f), nil
+	}
+	Report(Sources{Config: d.cfg, ReadSecret: read, StatePath: d.state, GOOS: "linux", Now: d.now})
+	if len(order) < 2 || order[0] != "dumps off" || order[1] != "read "+accountjoin.SecretName {
+		t.Fatalf("order %v: crash dumps must be off before the secret is read", order)
+	}
+	order = nil
+	Report(Sources{Config: config.EnterpriseAccountJoinConfig{}, ReadSecret: read, StatePath: d.state, GOOS: "linux", Now: d.now})
+	if len(order) != 0 {
+		t.Fatalf("feature off: %v, want nothing", order)
+	}
+}
+
+// rel-1-0-6:GAP-0277: next_not_after is bounded by the signing time of the
+// confirmed bundle that carries it. A device whose clock is
+// behind the signer (20 hours, inside the skew) keeps an overlap the
+// administrator signed for 30 days less an hour,
+// and falls back to its own clock only when no confirmed bundle carries
+// this next_generation and next_not_after.
+func TestNextNotAfterIsBoundedByTheBundleSigningTime(t *testing.T) {
+	d := newDevice(t)
+	d.enroll("1001", "alice@contoso.com", enterprisehooks.UPNSourceInfoPipe, "", d.now.Add(-time.Hour))
+	signed := d.now.Add(20 * time.Hour)
+	notAfter := signed.Add(30*24*time.Hour - time.Hour)
+	d.secrets[accountjoin.NextSecretName] = secretText(0xee)
+	d.cfg.NextGeneration, d.cfg.NextNotAfter, d.cfg.NextSecretSHA256 = 2, notAfter.Format(time.RFC3339), digest(secretText(0xee))
+	if report := d.report(); len(report.Generations) != 1 || text(report.ReasonCodes) != `["generation_invalid"]` {
+		t.Fatalf("no signing time: the device clock bounds next_not_after: %s", text(report))
+	}
+	var asked []string
+	d.signedAt = func(generation int, at time.Time) (time.Time, bool) {
+		asked = append(asked, fmt.Sprintf("%d %s", generation, at.Format(time.RFC3339)))
+		return signed, true
+	}
+	report := d.report()
+	if len(report.Generations) != 2 || report.Generations[1].Generation != 2 || len(report.ReasonCodes) != 0 {
+		t.Fatalf("signed 30 days less an hour ahead: %s", text(report))
+	}
+	if text(asked) != text([]string{"2 " + notAfter.Format(time.RFC3339)}) {
+		t.Fatalf("SignedAt was asked %v", asked)
+	}
+	d.signedAt = func(int, time.Time) (time.Time, bool) { return time.Time{}, false }
+	if report := d.report(); len(report.Generations) != 1 || text(report.ReasonCodes) != `["generation_invalid"]` {
+		t.Fatalf("config not from the confirmed bundle: %s", text(report))
+	}
+	// Without a next generation nothing is asked.
+	asked = nil
+	d.signedAt = func(generation int, at time.Time) (time.Time, bool) {
+		asked = append(asked, "called")
+		return signed, true
+	}
+	d.cfg.NextGeneration, d.cfg.NextNotAfter, d.cfg.NextSecretSHA256 = 0, "", ""
+	if report := d.report(); len(report.Generations) != 1 || len(asked) != 0 {
+		t.Fatalf("no next generation: %s, asked %v", text(report), asked)
+	}
 }
 
 func keyOf(t *testing.T, gen uint32, c string, last byte) string {
@@ -210,6 +280,36 @@ func TestWindowsUsesTheSIDOfADomainAccountOnly(t *testing.T) {
 	report := d.report()
 	if len(report.Generations[0].AccountKeys) != 1 || report.Generations[0].AccountKeys[0] != keyOf(t, 1, "sid:S-1-5-21-1-2-3-1105", 0x1f) || report.AccountsWithoutKey != 1 {
 		t.Fatalf("windows: %s", text(report))
+	}
+}
+
+// rel-1-0-6:GAP-0275: a macOS Active Directory account gets the key of the
+// SID the guardian read from its domain node, the same key as on Linux and
+// Windows for that SID; a local or LDAP account gets none, also with an SID
+// on its record.
+func TestMacOSUsesTheDirectorySIDOfAnActiveDirectoryAccount(t *testing.T) {
+	d := newDevice(t)
+	d.goos = "darwin"
+	write := func(key string, directory useridentity.Directory, sid string) {
+		data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
+			Version: 1, Key: key, UpdatedAt: d.now, AccountSID: sid,
+			Facts: useridentity.DirectoryFacts{Directory: directory, Principal: "alice@CONTOSO.COM"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d.spool, key+".json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("1105", useridentity.DirectoryActiveDirectory, "S-1-5-21-1004336348-1177238915-682003330-1105")
+	write("501", useridentity.DirectoryLocal, "S-1-5-21-9-9-9-1001")
+	write("1200", useridentity.DirectoryLDAP, "S-1-5-21-7-7-7-1200")
+	write("1300", useridentity.DirectoryActiveDirectory, "")
+	report := d.report()
+	want := keyOf(t, 1, "sid:S-1-5-21-1004336348-1177238915-682003330-1105", 0x1f)
+	if len(report.Generations) != 1 || len(report.Generations[0].AccountKeys) != 1 || report.Generations[0].AccountKeys[0] != want || report.AccountsWithoutKey != 3 {
+		t.Fatalf("darwin: %s", text(report))
 	}
 }
 

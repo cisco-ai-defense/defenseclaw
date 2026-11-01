@@ -44,6 +44,14 @@ const (
 	// The default managed_hooks_only: enforce turns on the vendor lock and
 	// leaves the guard off; preserve turns the guard on.
 	managedOpenRunsBlocksWithHooksOnlyPreserve = "runs-blocks-with-hooks-only-preserve"
+	// The guard blocks a new agent process and a session start on every OS;
+	// on Linux and macOS a call of a process the gateway allowed before it
+	// stopped does what the hook does (the next column), from the gateway's
+	// clean-session entry (rel-1-0-3:GAP-0352).
+	managedOpenBlocksNewProcess = "blocks-new-process"
+	// The same on Linux and macOS, where alone the guard covers the
+	// connector; on Windows the hook decides.
+	managedOpenBlocksNewProcessLinuxMacOS = "blocks-new-process-linux-macos"
 )
 
 var outageTableOSes = []string{"linux", "darwin", "windows"}
@@ -140,15 +148,22 @@ func managedOpenWithDefaultGuard(t *testing.T, name, noGuard string) string {
 	}
 	all := func(m map[string]bool) bool { return m["linux"] && m["darwin"] && m["windows"] }
 	none := func(m map[string]bool) bool { return !m["linux"] && !m["darwin"] && !m["windows"] }
+	// Where the gateway publishes clean-session entries the guard leaves a
+	// known process's outage call to the hook.
+	clean := ForeignHookCleanMirrorOS("linux") && ForeignHookCleanMirrorOS("darwin") && !ForeignHookCleanMirrorOS("windows")
 	switch {
+	case (all(guard) || guard["linux"] && guard["darwin"]) && noGuard == managedOpenBlocks:
+		// The hook blocks the outage itself.
+		return managedOpenBlocks
+	case all(guard) && clean:
+		return managedOpenBlocksNewProcess
 	case all(guard):
 		return managedOpenBlocks
+	case guard["linux"] && guard["darwin"] && !guard["windows"] && clean:
+		return managedOpenBlocksNewProcessLinuxMacOS
 	case guard["linux"] && guard["darwin"] && !guard["windows"]:
 		// Windows does what the hook does: every no-guard value but blocks
 		// lets a Windows outage call run.
-		if noGuard == managedOpenBlocks {
-			return managedOpenBlocks
-		}
 		return managedOpenBlocksLinuxMacOS
 	case none(guard) && all(guardPreserve) && noGuard == managedOpenRuns:
 		return managedOpenRunsBlocksWithHooksOnlyPreserve

@@ -574,7 +574,7 @@ func keepIdenticalWindowsSecret(store *windowsSecretStore, name string, value []
 	if !bytes.Equal(raw, value) || ensureWindowsSecretsDir(store, gateway) != nil {
 		return false
 	}
-	return applyWindowsSDDLToHandle(entry, windowsSecretFileSDDL(gateway)) == nil
+	return applyWindowsSDDLToHandle(entry, windowsSecretFileSDDLFor(name, gateway)) == nil
 }
 
 // requireWindowsSecretDeployment refuses not_installed (1603) unless a
@@ -743,11 +743,11 @@ const windowsSecretDirectoryReaderAccess = "0x1200a0"
 // and Administrators hold full control, inherited by new files. The reader
 // (the gateway service SID) gets a non-inheritable ACE with only
 // windowsSecretDirectoryReaderAccess on the directory itself. The Windows
-// installer re-applies this descriptor and windowsSecretFileSDDL on install,
-// upgrade and reconcile (Set-DefenseClawStandaloneSecretsAcls in
+// installer re-applies this descriptor and windowsSecretFileSDDLFor on
+// install, upgrade and reconcile (Set-DefenseClawStandaloneSecretsAcls in
 // DefenseClawEnterprise.psm1), because a non-purge uninstall resets the
-// retained store to administrator-only ACLs; a contract test keeps the two
-// copies identical.
+// retained store to administrator-only ACLs;
+// enterprise-standalone-secrets-acl-smoke.ps1 compares the two copies.
 func windowsSecretDirectorySDDL(reader *windows.SID) string {
 	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;" + windowsSecretDirectoryReaderAccess + ";;;" + reader.String() + ")"
 }
@@ -756,6 +756,19 @@ func windowsSecretDirectorySDDL(reader *windows.SID) string {
 // gateway service SID) and writable only by LocalSystem and Administrators.
 func windowsSecretFileSDDL(reader *windows.SID) string {
 	return "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + reader.String() + ")"
+}
+
+// windowsSecretAdminFileSDDL is the descriptor of a credential the gateway
+// is not given (managed.GatewayReadsCredential): LocalSystem and
+// Administrators only.
+const windowsSecretAdminFileSDDL = "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)"
+
+// windowsSecretFileSDDLFor is the descriptor of credential name.
+func windowsSecretFileSDDLFor(name string, reader *windows.SID) string {
+	if !managed.GatewayReadsCredential(name) {
+		return windowsSecretAdminFileSDDL
+	}
+	return windowsSecretFileSDDL(reader)
 }
 
 // errWindowsSecretsDirNotReal refuses a junction, mount point, symlink or
@@ -1088,7 +1101,7 @@ func storeWindowsSecret(store *windowsSecretStore, name string, value []byte, re
 		return "", err
 	}
 	cleanup := func() { _ = os.Remove(tmp) }
-	if err := applyWindowsSDDL(tmp, windowsSecretFileSDDL(reader)); err != nil {
+	if err := applyWindowsSDDL(tmp, windowsSecretFileSDDLFor(name, reader)); err != nil {
 		_ = file.Close()
 		cleanup()
 		return "", err

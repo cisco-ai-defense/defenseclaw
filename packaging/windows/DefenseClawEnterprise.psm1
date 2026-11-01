@@ -28341,9 +28341,12 @@ function Get-DefenseClawExactItemPath {
 # walks every ancestor of a credential and reads its owner and DACL, so the
 # directory grants the gateway service SID READ_CONTROL, SYNCHRONIZE,
 # FILE_READ_ATTRIBUTES and FILE_TRAVERSE on itself only (no list, create or
-# write right), and each credential file grants it read access. These are the
-# exact descriptors internal/cli/enterprise_secret_windows.go writes (a
-# contract test pins the two copies together).
+# write right), and each credential file grants it read access, except the
+# account join tenant secrets, which only LocalSystem and Administrators
+# read. These are the exact descriptors internal/cli/enterprise_secret_windows.go
+# writes (enterprise-standalone-secrets-acl-smoke.ps1 compares them, and
+# internal/managed TestTheInstallerKeepsTheAccountJoinSecretsFromTheGateway
+# pins the names).
 function Get-DefenseClawStandaloneSecretsDirectorySddl {
     param([Parameter(Mandatory)][string]$GatewayServiceSID)
     return (
@@ -28353,7 +28356,16 @@ function Get-DefenseClawStandaloneSecretsDirectorySddl {
 }
 
 function Get-DefenseClawStandaloneSecretFileSddl {
-    param([Parameter(Mandatory)][string]$GatewayServiceSID)
+    param(
+        [Parameter(Mandatory)][string]$GatewayServiceSID,
+        [string]$Name = ''
+    )
+    # The tenant secrets of the account join key are read only by SYSTEM
+    # and elevated administrators, never by the gateway
+    # (managed.GatewayReadsCredential, windowsSecretFileSDDLFor).
+    if ($Name -ceq 'account-join-key' -or $Name -ceq 'account-join-key-next') {
+        return 'O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)'
+    }
     return (
         'O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;{0})' -f
             $GatewayServiceSID
@@ -28434,7 +28446,8 @@ function Set-DefenseClawStandaloneSecretsAcls {
             -Path $item.FullName `
             -IsDirectory $false `
             -Sddl (Get-DefenseClawStandaloneSecretFileSddl `
-                -GatewayServiceSID $GatewayServiceSID)
+                -GatewayServiceSID $GatewayServiceSID `
+                -Name $item.Name)
     }
 }
 

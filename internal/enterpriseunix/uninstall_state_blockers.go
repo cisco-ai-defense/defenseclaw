@@ -27,6 +27,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // stateRemovalBlockers names the machine-state folders and files the
@@ -56,7 +58,9 @@ func (l *lifecycle) stateRemovalBlockers() []string {
 	add := func(path string, err error) {
 		blocked = append(blocked, fmt.Sprintf("%s (%v)", path, err))
 	}
-	for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir, env.Layout.LifecycleDir} {
+	// The gateway's clean-session folder goes with every uninstall; with
+	// --keep-state (returned above) its removal is not checked first.
+	for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, managed.ForeignHookCleanDir(env.Layout.DataDir), env.Layout.LogDir, env.Layout.LifecycleDir} {
 		if dir == "" {
 			continue
 		}

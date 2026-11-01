@@ -22,6 +22,7 @@ import (
 // binding: unbound, explain is refused with the hook's reason; bound, both
 // match by agent.
 func TestProfileExplainOfA103AgentIdentityDecidesAsTheHook(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	stubProfileSources(t)
 	in := legacyBridgeInputs("alice@corp.example")
 	legacy, current := agentidentity.LegacyAgentID(in), agentidentity.AgentID(in)

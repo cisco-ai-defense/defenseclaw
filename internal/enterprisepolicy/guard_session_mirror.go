@@ -44,7 +44,17 @@ const (
 	// foreignHookCleanMirrorSkew is the clock skew allowed for written_at.
 	foreignHookCleanMirrorSkew    = time.Minute
 	foreignHookCleanMirrorVersion = 1
+	// ForeignHookCleanMirrorTempPrefix starts the name of an entry the
+	// gateway is still writing (it renames it into place); the lifecycle's
+	// mode walk skips such a file.
+	ForeignHookCleanMirrorTempPrefix = ".clean-"
 )
+
+// ForeignHookCleanMirrorOS reports whether the gateway on goos publishes
+// clean-session entries, so that a guarded call of an agent process it
+// allowed before it stopped follows the hook's fail mode during a proven
+// outage instead of blocking (rel-1-0-3:GAP-0352). Windows publishes none.
+func ForeignHookCleanMirrorOS(goos string) bool { return goos == "linux" || goos == "darwin" }
 
 // foreignHookCleanMirror is one entry.
 type foreignHookCleanMirror struct {

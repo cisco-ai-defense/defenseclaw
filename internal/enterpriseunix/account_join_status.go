@@ -7,13 +7,21 @@ package enterpriseunix
 
 import (
 	"path/filepath"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 	"github.com/defenseclaw/defenseclaw/internal/accountjoin/devicekeys"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// confirmedAccountJoinSignedAt reads the signing time of the confirmed
+// bundle that carries next_not_after (tests replace it).
+var confirmedAccountJoinSignedAt = func(s *enterprisebundle.Store, generation int, notAfter time.Time) (time.Time, bool) {
+	return s.ConfirmedAccountJoinSignedAt(generation, notAfter)
+}
 
 // describeAccountJoin adds the account_join summary (counts and reason
 // codes, no key) to a status or verify run as root while the installed
@@ -42,7 +50,13 @@ func (env *Env) AccountJoinReport() *accountjoin.Report {
 	if err != nil || cfg == nil || !cfg.Enterprise.AccountJoin.On() {
 		return nil
 	}
-	return devicekeys.Report(devicekeys.Sources{
+	return devicekeys.Report(env.accountJoinSources(cfg))
+}
+
+// accountJoinSources are the device inputs of the account join keys for the
+// installed config cfg.
+func (env *Env) accountJoinSources(cfg *config.Config) devicekeys.Sources {
+	return devicekeys.Sources{
 		Config:       cfg.Enterprise.AccountJoin,
 		SecureClient: managed.IsSecureClientProfile(cfg.Enterprise.Profile),
 		Tenant: func() (string, error) {
@@ -62,8 +76,13 @@ func (env *Env) AccountJoinReport() *accountjoin.Report {
 		},
 		SpoolDir:   enterprisehooks.IdentitySpoolDir(env.P(env.Layout.GuardianAuthDir)),
 		SpoolTrust: func(path, _ string) error { return env.Trust(path, TrustAdminFile) },
-		StatePath:  filepath.Join(env.P(env.Layout.LifecycleDir), devicekeys.StateFileName),
-		GOOS:       env.GOOS,
-		Now:        env.Now(),
-	})
+		// next_not_after is bounded by the time the confirmed bundle that
+		// carries it was signed (rel-1-0-6:GAP-0277).
+		SignedAt: func(generation int, notAfter time.Time) (time.Time, bool) {
+			return confirmedAccountJoinSignedAt(env.bundleStore(), generation, notAfter)
+		},
+		StatePath: filepath.Join(env.P(env.Layout.LifecycleDir), devicekeys.StateFileName),
+		GOOS:      env.GOOS,
+		Now:       env.Now(),
+	}
 }

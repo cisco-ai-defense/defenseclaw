@@ -4,10 +4,16 @@
 package enterprisebundle_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
@@ -74,9 +80,202 @@ func TestOlderBundleWithRemovedConnectorRefusedByFloor(t *testing.T) {
 	}
 }
 
+// Test tenant secrets: bytes 00..1f and 20..3f, base64url.
+const (
+	testJoinSecret     = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+	testJoinNextSecret = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8"
+)
+
+func joinDigest(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+// accountJoinBlock is an enterprise.account_join block for the test
+// secrets, with the next generation when notAfter is set.
+func accountJoinBlock(notAfter string) string {
+	block := "  account_join:\n    mode: on\n    generation: 1\n    secret_sha256: " + joinDigest(testJoinSecret) + "\n"
+	if notAfter != "" {
+		block += "    next_generation: 2\n    next_secret_sha256: " + joinDigest(testJoinNextSecret) + "\n    next_not_after: \"" + notAfter + "\"\n"
+	}
+	return block
+}
+
+// accountJoinSecretValues are the --secret-file values of the test secrets.
+func accountJoinSecretValues() map[string][]byte {
+	return map[string][]byte{accountjoin.SecretName: []byte(testJoinSecret), accountjoin.NextSecretName: []byte(testJoinNextSecret)}
+}
+
+func accountJoinCompose(t *testing.T, block string, values map[string][]byte) (*enterprisebundle.Manifest, []byte, *enterprisebundle.Bundle, error) {
+	t.Helper()
+	config := strings.Replace(bundleConfig(t), "  profile: standalone\n", "  profile: standalone\n"+block, 1)
+	root, b := writeBundle(t, config)
+	in := enterprisebundle.ComposeInput{
+		Bundle: b, Root: root, BundleID: tamperBundleID, TenantID: "acme", DeviceGroup: "eng", Version: 5,
+		Platforms: []string{enterprisebundle.PlatformLinux}, CreatedAt: signedAt, CreatedBy: "operator:alice",
+		MinProductVersion: "1.0.7", ProductVersion: "1.0.7", HostPlatform: enterprisebundle.PlatformLinux, Digester: digester,
+		SecretValues: values,
+	}
+	m, raw, err := enterprisebundle.Compose(context.Background(), in)
+	return m, raw, b, err
+}
+
+// rel-1-0-6:GAP-0276 (private #13 review, should-change 2): the tenant
+// secrets are value-bound optional secret_refs. Sign needs their values,
+// refuses values that are not the digests the config names or not tenant
+// secrets, and never writes a value into the bundle.
+func TestComposeBindsTheAccountJoinSecrets(t *testing.T) {
+	notAfter := signedAt.Add(20 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	if _, _, _, err := accountJoinCompose(t, accountJoinBlock(""), nil); enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefUnbound || !strings.Contains(errString(err), accountjoin.SecretName) {
+		t.Fatalf("no --secret-file: %v, want secret_ref_unbound naming %s", err, accountjoin.SecretName)
+	}
+	only := map[string][]byte{accountjoin.SecretName: []byte(testJoinSecret)}
+	if _, _, _, err := accountJoinCompose(t, accountJoinBlock(notAfter), only); enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefUnbound || !strings.Contains(errString(err), accountjoin.NextSecretName) {
+		t.Fatalf("no next --secret-file: %v, want secret_ref_unbound naming %s", err, accountjoin.NextSecretName)
+	}
+	m, raw, b, err := accountJoinCompose(t, accountJoinBlock(notAfter), accountJoinSecretValues())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		accountjoin.SecretName:     enterprisebundle.CredentialValueSHA256("acme", accountjoin.SecretName, []byte(testJoinSecret)),
+		accountjoin.NextSecretName: enterprisebundle.CredentialValueSHA256("acme", accountjoin.NextSecretName, []byte(testJoinNextSecret)),
+	}
+	for _, ref := range m.SecretRefs {
+		if digest, ok := want[ref.Name()]; ok {
+			if ref.Required || ref.ValueSHA256 != digest {
+				t.Errorf("%s: %+v, want an optional reference bound to its value", ref.Name(), ref)
+			}
+			delete(want, ref.Name())
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("secret_refs %+v lack %v", m.SecretRefs, want)
+	}
+	// The written bundle holds no form of either secret: the archive is
+	// read back, and the manifest and every file are searched uncompressed.
+	b.Manifest, b.Signature = raw, []byte(`{"s":1}`)
+	var archive bytes.Buffer
+	if err := enterprisebundle.WriteArchive(&archive, b); err != nil {
+		t.Fatal(err)
+	}
+	back, err := enterprisebundle.ReadArchive(bytes.NewReader(archive.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := [][]byte{back.Manifest, back.Signature}
+	for _, data := range back.Files {
+		contents = append(contents, data)
+	}
+	written := bytes.Join(contents, []byte{0})
+	if !bytes.Contains(written, []byte(joinDigest(testJoinSecret))) {
+		t.Fatal("the search reads the wrong bytes: the config's secret_sha256 is not in them")
+	}
+	for _, secret := range []string{testJoinSecret, testJoinNextSecret} {
+		decoded, err := base64.RawURLEncoding.DecodeString(secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, form := range []string{secret, hex.EncodeToString(decoded), base64.StdEncoding.EncodeToString(decoded), base64.RawStdEncoding.EncodeToString(decoded), string(decoded)} {
+			if bytes.Contains(written, []byte(form)) {
+				t.Fatalf("the signed bundle holds a form of a tenant secret (%d bytes)", len(form))
+			}
+		}
+	}
+	// A value that is not the digest the config names, or not a tenant
+	// secret, is refused without echoing it.
+	for name, values := range map[string]map[string][]byte{
+		"other current value": {accountjoin.SecretName: []byte(testJoinNextSecret), accountjoin.NextSecretName: []byte(testJoinNextSecret)},
+		"other next value":    {accountjoin.SecretName: []byte(testJoinSecret), accountjoin.NextSecretName: []byte(testJoinSecret)},
+		"not a tenant secret": {accountjoin.SecretName: []byte("short"), accountjoin.NextSecretName: []byte(testJoinNextSecret)},
+	} {
+		_, _, _, err := accountJoinCompose(t, accountJoinBlock(notAfter), values)
+		if enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid {
+			t.Errorf("%s: %v, want config_invalid", name, err)
+		}
+		for _, value := range values {
+			if strings.Contains(errString(err), string(value)) {
+				t.Errorf("%s: the refusal echoes a value", name)
+			}
+		}
+	}
+}
+
+// The device refuses a bundle whose config turns account_join on without
+// binding its tenant secrets, and secret set refuses a value the confirmed
+// bundle does not sign.
+func TestAccountJoinSecretRefsOnTheDevice(t *testing.T) {
+	m, _, b, err := accountJoinCompose(t, accountJoinBlock(""), map[string][]byte{accountjoin.SecretName: []byte(testJoinSecret)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enterprisebundle.CheckSecretRefs(m, b); err != nil {
+		t.Fatalf("bound bundle: %v", err)
+	}
+	unbound := *m
+	unbound.SecretRefs = nil
+	for _, ref := range m.SecretRefs {
+		if ref.Name() != accountjoin.SecretName {
+			unbound.SecretRefs = append(unbound.SecretRefs, ref)
+		}
+	}
+	if err := enterprisebundle.CheckSecretRefs(&unbound, b); enterprisebundle.CodeOf(err) != enterprisebundle.CodeManifestInvalid {
+		t.Fatalf("bundle without the account join reference: %v, want manifest_invalid", err)
+	}
+	if err := enterprisebundle.CheckCredentialChange(m, nil, accountjoin.SecretName, []byte(testJoinSecret)); err != nil {
+		t.Fatalf("the signed value: %v", err)
+	}
+	if err := enterprisebundle.CheckCredentialChange(m, nil, accountjoin.SecretName, []byte(testJoinNextSecret)); enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefMismatch {
+		t.Fatalf("another value: %v, want secret_ref_mismatch", err)
+	}
+}
+
+func TestAccountJoinCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		config string
+		want   string
+	}{
+		{"config_version: 9\n", ""},
+		{"config_version: 9\nenterprise:\n  account_join:\n    mode: off\n    generation: 1\n", ""},
+		{"config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 1\n", accountjoin.SecretName},
+		{"config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 1\n    next_generation: 2\n", accountjoin.SecretName + "," + accountjoin.NextSecretName},
+		{"config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 1\n    next_generation: 0\n", accountjoin.SecretName},
+		// A form the lookup cannot read as zero needs the next secret.
+		{"config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 1\n    next_generation: 0x2\n", accountjoin.SecretName + "," + accountjoin.NextSecretName},
+		{"config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 1\n    next_generation: two\n", accountjoin.SecretName + "," + accountjoin.NextSecretName},
+		{"config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 1\n    next_generation: null\n", accountjoin.SecretName},
+	} {
+		names, err := enterprisebundle.AccountJoinCredentials([]byte(tc.config))
+		if err != nil || strings.Join(names, ",") != tc.want {
+			t.Errorf("%q: %v, %v; want %q", tc.config, names, err, tc.want)
+		}
+	}
+}
+
+// rel-1-0-6:GAP-0277: bundle sign refuses a next_not_after more than 30
+// days after the signing time, which the device would refuse.
+func TestComposeBoundsAccountJoinNextNotAfterBySigningTime(t *testing.T) {
+	for _, tc := range []struct {
+		days   int
+		refuse bool
+	}{{29, false}, {30, false}, {31, true}} {
+		block := accountJoinBlock(signedAt.Add(time.Duration(tc.days) * 24 * time.Hour).UTC().Format(time.RFC3339))
+		_, _, _, err := accountJoinCompose(t, block, accountJoinSecretValues())
+		if tc.refuse {
+			if enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(errString(err), "next_not_after") {
+				t.Errorf("%d days: got %v, want config_invalid naming next_not_after", tc.days, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%d days: %v", tc.days, err)
+		}
+	}
+}
+
 // A bundle that sets enterprise.account_join needs min_product_version 1.0.7.
 func TestComposeRequiresProductFloorForAccountJoin(t *testing.T) {
-	config := strings.Replace(bundleConfig(t), "  profile: standalone\n", "  profile: standalone\n  account_join:\n    mode: on\n    generation: 1\n    secret_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", 1)
+	config := strings.Replace(bundleConfig(t), "  profile: standalone\n", "  profile: standalone\n"+accountJoinBlock(""), 1)
 	for _, tc := range []struct {
 		min    string
 		refuse bool
@@ -86,6 +285,7 @@ func TestComposeRequiresProductFloorForAccountJoin(t *testing.T) {
 			Bundle: b, Root: root, BundleID: tamperBundleID, TenantID: "acme", DeviceGroup: "eng", Version: 5,
 			Platforms: []string{enterprisebundle.PlatformLinux}, CreatedAt: signedAt, CreatedBy: "operator:alice",
 			MinProductVersion: tc.min, ProductVersion: "1.0.7", HostPlatform: enterprisebundle.PlatformLinux, Digester: digester,
+			SecretValues: map[string][]byte{accountjoin.SecretName: []byte(testJoinSecret)},
 		}
 		_, _, err := enterprisebundle.Compose(context.Background(), in)
 		if tc.refuse {

@@ -1603,6 +1603,7 @@ func TestProfileExplainReportsTheLiveMode(t *testing.T) {
 // printed null on an install with no guardrail profiles, because the handler
 // answered before any directory lookup.
 func TestProfileExplainShowsTheSubjectWithoutProfiles(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	prev := profileExplainSubjectLookup
 	profileExplainSubjectLookup = func(string) (profileSubject, error) {
 		return profileSubject{UserID: "1201", UserName: "alice", Principal: "alice@CORP.EXAMPLE.COM", Groups: []string{"dc-devs@corp.example.com"}}, nil
@@ -1630,6 +1631,7 @@ func TestProfileExplainShowsTheSubjectWithoutProfiles(t *testing.T) {
 // OS names but cannot resolve (an Entra user the aad module has not cached)
 // reported default_lookup_failed with no lookup_error and no user id.
 func TestProfileExplainSaysWhyTheLookupFailed(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	previousBlocking := identityLookupBlocking.Load()
 	setIdentityLookupBlocking(true)
 	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
@@ -1701,6 +1703,7 @@ func TestProfileExplainFlagsUnknownConnectorAndUnverifiedAgent(t *testing.T) {
 }
 
 func TestProfileExplainNamesHookIdentityCacheWindow(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	previous := profileExplainSubjectLookup
 	profileExplainSubjectLookup = func(string) (profileSubject, error) {
 		return profileSubject{UserID: "1201", UserName: "alice", Groups: []string{"team"}}, nil
@@ -1726,6 +1729,7 @@ func TestProfileExplainNamesHookIdentityCacheWindow(t *testing.T) {
 // refreshes the cache the hooks read, so the block states what the hooks use
 // from their next call, and the note says so.
 func TestProfileExplainRefreshesTheHookCache(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	old := time.Now().Add(-12 * time.Minute)
 	clock := old
 	current := useridentity.DirectoryFacts{Groups: []string{"dc-sbx-devs"}, ResolvedAt: old}
@@ -1763,6 +1767,7 @@ func TestProfileExplainRefreshesTheHookCache(t *testing.T) {
 // cleared the failure, so they were never dropped and directory_lookups_failing
 // came and went. Explain now leaves the cache as its failed lookup left it.
 func TestProfileExplainDuringAnOutageKeepsTheHourOfCachedFacts(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	start := time.Now().Add(-50 * time.Minute)
 	clock := start
 	var down bool
@@ -1856,6 +1861,7 @@ func explainTestResolve(t *testing.T, api *APIServer, user string, out any) {
 // inspects and blocks, matching the account as the hook socket does (by uid
 // or the account database's name).
 func TestProfileExplainNamesTheEnrollmentExemption(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	previous := profileExplainSubjectLookup
 	profileExplainSubjectLookup = func(string) (profileSubject, error) {
 		return profileSubject{UserID: "1916801104", UserName: "ent-alice", accountName: "ent-alice@dclab.test"}, nil

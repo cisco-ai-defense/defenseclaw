@@ -46,6 +46,9 @@ const (
 	SecretBytes = 32
 	// MaxNextOverlap bounds how far ahead next_not_after may be.
 	MaxNextOverlap = 30 * 24 * time.Hour
+	// MaxSignedAtSkew is how far ahead of the device clock a bundle
+	// signing time may be and still bound next_not_after.
+	MaxSignedAtSkew = 24 * time.Hour
 	// MaxAccounts caps the accounts one device reports.
 	MaxAccounts = 64
 	// Retention drops an account not seen for this long.
@@ -308,6 +311,11 @@ type Generations struct {
 	NextSecret    []byte
 	NextSHA256    string
 	NextNotAfter  time.Time
+	// SignedAt is when the administrator signed next_not_after: the
+	// created_at of the confirmed policy bundle whose config carries it.
+	// Zero when the config did not come from a confirmed bundle; the
+	// device clock then bounds next_not_after.
+	SignedAt time.Time
 	// Highest is the highest generation this device applied before.
 	Highest uint32
 }
@@ -322,11 +330,20 @@ type Slot struct {
 // the ones that are not. The current generation is reported when its
 // secret is valid and its number is not below Highest; the next one in
 // addition while its secret is valid, its number is above the current one
-// and now is before NextNotAfter, which is at most MaxNextOverlap ahead.
+// and now is before NextNotAfter, which is at most MaxNextOverlap after the
+// signing time (SignedAt; now when there is none or when it is more than
+// MaxSignedAtSkew ahead of now), so a device clock that is behind or ahead
+// does not move the signed bound (rel-1-0-6:GAP-0277).
 // Removing the next secret without promotion leaves the current one as it
 // is. The returned highest is what the device records after reporting.
 func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest uint32) {
 	highest = g.Highest
+	bound := now
+	if !g.SignedAt.IsZero() && !g.SignedAt.After(now.Add(MaxSignedAtSkew)) {
+		// A signing time further ahead than the skew (a signer clock
+		// far ahead) would widen the overlap: the device clock bounds it.
+		bound = g.SignedAt
+	}
 	switch {
 	case g.CurrentSecret == nil:
 		reasons = append(reasons, ReasonSecretMissing)
@@ -334,7 +351,7 @@ func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest
 		reasons = append(reasons, ReasonGenerationInvalid)
 	case g.Current < g.Highest:
 		reasons = append(reasons, ReasonGenerationRollback)
-	case !valueMatches(g.CurrentSecret, g.CurrentSHA256):
+	case !ValueMatches(g.CurrentSecret, g.CurrentSHA256):
 		reasons = append(reasons, ReasonSecretMismatch)
 	default:
 		secret, err := ParseSecret(g.CurrentSecret)
@@ -349,11 +366,11 @@ func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest
 		switch {
 		case g.NextSecret == nil:
 			// A next generation with no secret: nothing to report.
-		case g.Next == 0 || g.Next <= g.Current || g.NextNotAfter.IsZero() || g.NextNotAfter.After(now.Add(MaxNextOverlap)):
+		case g.Next == 0 || g.Next <= g.Current || g.NextNotAfter.IsZero() || g.NextNotAfter.After(bound.Add(MaxNextOverlap)):
 			reasons = append(reasons, ReasonGenerationInvalid)
 		case !now.Before(g.NextNotAfter):
 			reasons = append(reasons, ReasonNextGenerationExpired)
-		case !valueMatches(g.NextSecret, g.NextSHA256):
+		case !ValueMatches(g.NextSecret, g.NextSHA256):
 			reasons = append(reasons, ReasonSecretMismatch)
 		default:
 			secret, err := ParseSecret(g.NextSecret)
@@ -367,9 +384,13 @@ func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest
 	return slots, reasons, highest
 }
 
-// valueMatches reports whether the stored value (as stored, one line) has
-// the signed SHA-256 (lowercase hex).
-func valueMatches(value []byte, want string) bool {
+// IsTenantSecret reports whether credential name holds a tenant secret of
+// the account join key (SecretName, NextSecretName).
+func IsTenantSecret(name string) bool { return name == SecretName || name == NextSecretName }
+
+// ValueMatches reports whether a secret value (as stored, one line) has the
+// SHA-256 the config signs (lowercase hex).
+func ValueMatches(value []byte, want string) bool {
 	sum := sha256.Sum256([]byte(strings.TrimRight(string(value), "\r\n")))
 	return want != "" && hmac.Equal([]byte(hex.EncodeToString(sum[:])), []byte(strings.ToLower(strings.TrimSpace(want))))
 }

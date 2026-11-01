@@ -146,6 +146,7 @@ func explainViewString(v any) string {
 // decision (not refused) and names the pathless refusal a sandbox run makes:
 // refused_paths ["sandbox"], sandbox_refused_reason and a warning.
 func TestExplainHandlerNamesTheSandboxRefusal(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	previousBlocking := identityLookupBlocking.Load()
 	setIdentityLookupBlocking(true)
 	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })

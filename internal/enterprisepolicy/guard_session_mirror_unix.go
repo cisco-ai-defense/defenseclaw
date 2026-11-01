@@ -89,7 +89,7 @@ func pruneCleanMirrorDir(dir string, now time.Time, adding int) error {
 	kept := 0
 	for _, entry := range entries {
 		info, err := entry.Info()
-		if err == nil && now.Sub(info.ModTime()) <= ForeignHookCleanMirrorTTL && !strings.HasPrefix(entry.Name(), ".clean-") {
+		if err == nil && now.Sub(info.ModTime()) <= ForeignHookCleanMirrorTTL && !strings.HasPrefix(entry.Name(), ForeignHookCleanMirrorTempPrefix) {
 			kept++
 			continue
 		}
@@ -135,7 +135,7 @@ func cleanMirrorOwnDir(path string, create bool) error {
 }
 
 func writeCleanMirrorFile(dir, path string, data []byte) error {
-	temp, err := os.CreateTemp(dir, ".clean-*")
+	temp, err := os.CreateTemp(dir, ForeignHookCleanMirrorTempPrefix+"*")
 	if err != nil {
 		return err
 	}

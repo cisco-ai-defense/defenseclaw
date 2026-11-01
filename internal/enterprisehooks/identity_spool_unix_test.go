@@ -627,6 +627,10 @@ func TestIdentitySpoolFailedLookupDoesNotKeepAnotherDomainsUPN(t *testing.T) {
 // with the same uid, name and domain; a partial lookup of the new SID must not
 // let the old record's UPN select the new account's profile.
 func TestIdentitySpoolFailedLookupDropsSIDLessRecordWhenFreshSIDIsKnown(t *testing.T) {
+	// The Linux rule (macOS compares SIDs only when both records have one).
+	previousRule := identitySpoolMissingSIDIsAnotherIdentity
+	identitySpoolMissingSIDIsAnotherIdentity = true
+	t.Cleanup(func() { identitySpoolMissingSIDIsAnotherIdentity = previousRule })
 	const uid = 94401413
 	dir := t.TempDir()
 	old := testDirectoryRecord(uid, "dcad-bob", "dclab.test")

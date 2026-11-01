@@ -23,6 +23,8 @@ import (
 	"sort"
 	"strconv"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const snapshotIndexName = "index.json"
@@ -427,6 +429,8 @@ func (e *Env) removeCreatedDirs(snap *snapshot) error {
 	state := map[string]bool{
 		l.DataDir: true, l.GuardianAuthDir: true, l.LogDir: true, filepath.Join(l.LogDir, "gateway"): true,
 		l.HookSocketDir: true, l.VendorPolicyDir: true,
+		// The gateway writes clean-session entries during activation.
+		managed.ForeignHookCleanDir(l.DataDir): true,
 	}
 	created := []string{}
 	for _, entry := range snap.Entries {

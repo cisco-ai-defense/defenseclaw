@@ -187,7 +187,7 @@ func (e *Env) WriteSecret(ctx context.Context, name string, value []byte) error 
 	// (settleSecretModes), so a config that references it installs at once.
 	mode, owner, dirMode, dirOwner := os.FileMode(0o600), rootOwner(), os.FileMode(0o700), rootOwner()
 	if ok {
-		mode, owner, dirMode, dirOwner = e.secretModes(ctx, account)
+		mode, owner, dirMode, dirOwner = e.secretModes(ctx, account, name)
 	}
 	if err := e.ensureDir(e.P(e.Layout.SecretsDir), dirMode, dirOwner); err != nil {
 		return err
@@ -233,8 +233,8 @@ func (e *Env) settleSecretModes(ctx context.Context, account Account) error {
 	if err != nil {
 		return err
 	}
-	mode, owner, _, _ := e.secretModes(ctx, account)
 	for _, name := range names {
+		mode, owner, _, _ := e.secretModes(ctx, account, name)
 		if err := e.fixMetadata(filepath.Join(e.P(e.Layout.SecretsDir), name), mode, owner); err != nil {
 			return fmt.Errorf("set the access of credential %s: %w", name, err)
 		}
@@ -242,10 +242,17 @@ func (e *Env) settleSecretModes(ctx context.Context, account Account) error {
 	return nil
 }
 
-func (e *Env) secretModes(ctx context.Context, account Account) (os.FileMode, fileOwner, os.FileMode, fileOwner) {
+// secretModes are the mode and owner of credential name and of the secrets
+// folder. A credential the gateway is not given (managed.
+// GatewayReadsCredential) is root-only on every path, also where the
+// gateway reads the others through the folder's group.
+func (e *Env) secretModes(ctx context.Context, account Account, name string) (os.FileMode, fileOwner, os.FileMode, fileOwner) {
 	service := fileOwner{UID: 0, GID: account.GID}
 	if e.GOOS == "linux" && e.Services.Version(ctx) >= loadCredentialSystemd {
 		return 0o600, rootOwner(), 0o700, rootOwner()
+	}
+	if !managed.GatewayReadsCredential(name) {
+		return 0o600, rootOwner(), 0o750, service
 	}
 	return 0o640, service, 0o750, service
 }

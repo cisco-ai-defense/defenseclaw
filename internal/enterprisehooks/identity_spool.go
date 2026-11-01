@@ -139,6 +139,11 @@ type IdentitySpoolRecord struct {
 	// (Windows). The gateway service cannot read Claude Code's file, which
 	// lives in the profile root (GAP-1025).
 	ConnectorEmails map[string]string `json:"connector_emails,omitempty"`
+
+	// macOSSIDUnanswered marks a fresh macOS Active Directory record whose
+	// domain node gave no answer this pass (carryMacOSAccountSID). Never
+	// written.
+	macOSSIDUnanswered bool
 }
 
 // identitySpoolRecordExtension holds the facts a record carries that the
