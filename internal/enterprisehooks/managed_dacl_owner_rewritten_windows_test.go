@@ -568,17 +568,20 @@ func TestWindowsOwnerRewrittenShapeRefusesAnotherOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	for name, owner := range map[string]*windows.SID{"administrators": administrators, "another account": other} {
+	for _, fixture := range []struct {
+		name  string
+		owner *windows.SID
+	}{{"administrators", administrators}, {"another account", other}} {
+		name, owner := fixture.name, fixture.owner
 		path := filepath.Join(dir, ".managed-runtime-codex-"+strings.Repeat(string(name[0]), 32)+".json")
 		writeOwnerRewrittenTestFile(t, path, target, ownerRewrittenShapeSDDL)
 		extended, err := winpath.Extended(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT,
-			windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
-			t.Fatalf("%s: set the owner: %v", name, err)
-		}
+		// Another account as the owner needs SeRestorePrivilege, which an
+		// elevated token (a GitHub runner) holds disabled.
+		assignNativeOTLPFixtureOwnerOrSkip(t, extended, owner)
 		if windowsUserPathOwnerRewritten(path, target, false) {
 			t.Errorf("%s: owner-rewritten shape matched an object the account does not own", name)
 		}
