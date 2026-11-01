@@ -27,6 +27,13 @@ func TestPOSIXStdinCodeBehindAWrapperStaysPartial(t *testing.T) {
 		"batch",
 		"crontab -",
 		"crontab",
+		"crontab -u root",
+		"sudo --user root sh",
+		"sudo --chdir /tmp sh",
+		"sudo -s -E",
+		"env sudo sh",
+		"env FOO=1 sudo -s",
+		"command sudo sh",
 	}
 	for _, wrapper := range partial {
 		for _, form := range []string{
@@ -61,6 +68,9 @@ func TestPOSIXStdinCodeBehindAWrapperStaysPartial(t *testing.T) {
 		"sudo sh -c \x27echo ok\x27 <<X\n$USER\nX",
 		"su -c \x27echo ok\x27 <<X\n$USER\nX",
 		"crontab /repo/jobs.cron",
+		"crontab -u root /repo/jobs.cron",
+		"crontab -u root -l",
+		"env sudo tee /repo/out.txt <<X\nhello $USER\nX",
 		"git commit -F - <<X\nfix: $MSG\nX",
 		"cat > /repo/notes.md <<X\nprice [1] $[ in text\nX",
 	} {

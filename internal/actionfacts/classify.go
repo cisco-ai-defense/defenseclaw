@@ -13215,12 +13215,14 @@ func markPOSIXStdinCodeBehindWrapper(out *parseOutput) {
 // as commands through a privilege wrapper or a scheduler. A direct shell is
 // not one: its stdin mode is modeled where it is classified.
 func posixWrapperRunsStdinAsCode(argv []string) bool {
+	argv = posixStdinCodeUnwrap(argv)
 	if len(argv) == 0 {
 		return false
 	}
 	switch commandProgram(argv[0]) {
 	case "sudo", "doas", "pkexec":
 		rest := argv[1:]
+		shell := false
 		for len(rest) > 0 && strings.HasPrefix(rest[0], "-") && rest[0] != "-" {
 			option := rest[0]
 			rest = rest[1:]
@@ -13229,16 +13231,19 @@ func posixWrapperRunsStdinAsCode(argv []string) bool {
 			}
 			switch option {
 			case "-s", "--shell", "-i", "--login":
-				if len(rest) == 0 {
-					return true
-				}
-			case "-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "-R":
+				shell = true
+			case "-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "-R",
+				"--user", "--group", "--host", "--prompt", "--role", "--type",
+				"--other-user", "--close-from", "--command-timeout", "--chdir", "--chroot":
 				if len(rest) > 0 {
 					rest = rest[1:]
 				}
 			}
 		}
-		return len(rest) > 0 && posixStdinCodeTarget(rest)
+		if len(rest) == 0 {
+			return shell
+		}
+		return posixStdinCodeTarget(rest)
 	case "su":
 		for _, argument := range argv[1:] {
 			if argument == "-c" || argument == "--command" || strings.HasPrefix(argument, "--command=") {
@@ -13255,18 +13260,47 @@ func posixWrapperRunsStdinAsCode(argv []string) bool {
 		}
 		return true
 	case "crontab":
-		if len(argv) == 1 {
-			return true
-		}
-		for _, argument := range argv[1:] {
-			if argument == "-" {
+		// crontab [-u USER] with no file, or with -, installs its stdin.
+		operands := 0
+		for index := 1; index < len(argv); index++ {
+			switch argument := argv[index]; {
+			case argument == "-u":
+				index++
+			case argument == "-":
 				return true
+			case strings.HasPrefix(argument, "-"):
+				return false
+			default:
+				operands++
 			}
 		}
-		return false
+		return operands == 0
 	default:
 		return false
 	}
+}
+
+// posixStdinCodeUnwrap drops a leading env (with its assignments and -i)
+// or command (-p), which start the next word with the same stdin.
+func posixStdinCodeUnwrap(argv []string) []string {
+	for len(argv) > 0 {
+		switch commandProgram(argv[0]) {
+		case "env":
+			argv = argv[1:]
+			for len(argv) > 0 && (argv[0] == "-i" || argv[0] == "-" ||
+				strings.Contains(argv[0], "=") && !strings.HasPrefix(argv[0], "-")) {
+				argv = argv[1:]
+			}
+		case "command":
+			argv = argv[1:]
+			for len(argv) > 0 && argv[0] == "-p" {
+				argv = argv[1:]
+			}
+		default:
+			return argv
+		}
+	}
+	return argv
 }
 
 // posixStdinCodeTarget reports the program a privilege wrapper starts when
