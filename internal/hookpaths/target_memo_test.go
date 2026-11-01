@@ -263,15 +263,27 @@ func TestClientStateStatementsAreBounded(t *testing.T) {
 	for i := range padding {
 		padding[i] = fmt.Sprintf("echo claw%d", i)
 	}
-	reduced, overflow, ok := StateNamingStatements(gap0568Assignments(500)+"; cd sub; "+strings.Join(padding, "; "), "/home/u")
+	// Only prints and reads name the state: nothing can write it, so
+	// nothing is kept or described (a 130-read call took 3.0-3.5 s on
+	// dc-win2 when its reads filled the bound).
+	for _, call := range []string{
+		gap0568Assignments(500) + "; cd sub; " + strings.Join(padding, "; "),
+		gap0568Assignments(200) + strings.Repeat("; cat ~/.defenseclaw/config.yaml 2>/dev/null", 130),
+	} {
+		if reduced, overflow, ok := StateNamingStatements(call, "/home/u"); !ok || overflow || reduced != "" {
+			t.Errorf("read-only call: ok %t overflow %t reduced %.60q, want ok, no overflow and nothing kept", ok, overflow, reduced)
+		}
+	}
+	state := "printf c >> ~/.defenseclaw/config.yaml"
+	reduced, overflow, ok := StateNamingStatements(gap0568Assignments(500)+"; cd sub; "+strings.Join(padding, "; ")+"; "+state, "/home/u")
 	if !ok || overflow {
 		t.Fatalf("POSIX call: ok %t overflow %t, want ok and no overflow (the dropped statements only print)", ok, overflow)
 	}
 	if got := len(strings.Split(reduced, "; ")); got != StateNamingStatementsMax {
 		t.Errorf("%d statements described, want %d", got, StateNamingStatementsMax)
 	}
-	if !strings.HasPrefix(reduced, "cd sub; echo claw0; ") {
-		t.Errorf("reduced call %.60q: want the directory change and the naming statements, no assignments", reduced)
+	if !strings.HasPrefix(reduced, "cd sub; echo claw0; ") || !strings.HasSuffix(reduced, "; "+state) {
+		t.Errorf("reduced call %.60q: want the directory change, the state write and the naming statements, no assignments", reduced)
 	}
 	// Statements that may write are kept first, in order: a delete after
 	// 3000 printing statements is kept (review r4 finding 2).
@@ -304,11 +316,11 @@ func TestClientStateStatementsAreBounded(t *testing.T) {
 			t.Errorf("%q: proven read-only", write)
 		}
 	}
-	state := "printf c >> ~/.defense''claw/config.yaml"
+	state = "printf c >> ~/.defense''claw/config.yaml"
 	if reduced, overflow, _ := StateNamingStatements(gap0568Assignments(200)+"; "+state, "/home/u"); reduced != state || overflow {
 		t.Errorf("reduced call %q (overflow %t), want only %q", reduced, overflow, state)
 	}
-	if _, overflow, _ := StateNamingStatements(strings.Join(padding[:StateNamingStatementsMax], "; "), "/home/u"); overflow {
+	if _, overflow, _ := StateNamingStatements(strings.Join(writers[:StateNamingStatementsMax], "; "), "/home/u"); overflow {
 		t.Error("exactly the bound overflowed")
 	}
 	for _, text := range []string{"~/.DefenseClaw", `~/.defense\claw`, "~/.defense?law", "e=claw"} {

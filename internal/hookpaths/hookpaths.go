@@ -1132,10 +1132,12 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 						return incompleteEvidence(cwd)
 					}
 					reduced, overflow, ok := StateNamingStatements(command, home)
-					if !ok || overflow {
+					if !ok || overflow || reduced == "" {
 						// No silent drop past the bound: the map says only
 						// that it is incomplete, and the gateway judges the
-						// overflow itself (withReducedStateReading).
+						// overflow itself (withReducedStateReading). With no
+						// statement that may write the state there is
+						// nothing to describe.
 						return incompleteEvidence(cwd)
 					}
 					command = reduced
@@ -5154,7 +5156,11 @@ const StateNamingStatementsMax = 128
 // the gateway judges the same reduced call for the state write. overflow
 // reports that statements not proven read-only were dropped: the reduced
 // reading is then not the whole story, and its caller must not treat it as
-// one (review r3 finding 3). A call the POSIX grammar does not split (a
+// one (review r3 finding 3). A call whose naming statements are all proven
+// read-only cannot write the state, so nothing is kept (reduced is empty):
+// neither the client nor the gateway spends the hook window describing or
+// judging 128 reads (a 130-read call took 3.0-3.5 s on dc-win2 when its
+// reads filled the bound). A call the POSIX grammar does not split (a
 // PowerShell call) is kept whole, and only up to the 64 KiB analysis bound
 // (ok false past it).
 func StateNamingStatements(command, home string) (reduced string, overflow, ok bool) {
@@ -5163,6 +5169,7 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 		return command, false, len(command) <= 64<<10
 	}
 	var first, reads []int
+	writers := 0
 	for i, text := range texts {
 		fields := strings.Fields(text)
 		place := len(fields) > 0 && (fields[0] == "cd" || fields[0] == "pushd" || fields[0] == "popd")
@@ -5174,8 +5181,12 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 				reads = append(reads, i)
 			} else {
 				first = append(first, i)
+				writers++
 			}
 		}
+	}
+	if writers == 0 {
+		return "", false, true
 	}
 	if len(first) > StateNamingStatementsMax {
 		first, overflow = first[:StateNamingStatementsMax], true
