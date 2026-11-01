@@ -8,9 +8,13 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"io"
 	"time"
 )
+
+// enterpriseSetupRecordedDeployment reads no deployment off Windows.
+var enterpriseSetupRecordedDeployment = func(*enterprisestatus.Result) bool { return false }
 
 func loadTrustedEnterprisePayload() (enterprisePayload, error) {
 	return loadEmbeddedEnterprisePayload()

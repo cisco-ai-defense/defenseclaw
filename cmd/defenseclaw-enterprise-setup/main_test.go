@@ -968,3 +968,55 @@ func TestStandaloneSetupRetryRepeatsTheRequestAsGiven(t *testing.T) {
 		t.Fatalf("recovered uninstall timeout does not repeat PURGE=1: %s", message)
 	}
 }
+
+// rel-1-0-6:GAP-0321: a refusal of Setup itself (low disk space here) on an
+// installed computer reports the recorded deployment and its services, not
+// installed=false, no version and no services.
+func TestStandaloneSetupRefusalReportsTheRecordedDeployment(t *testing.T) {
+	original := enterpriseSetupRecordedDeployment
+	t.Cleanup(func() { enterpriseSetupRecordedDeployment = original })
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true}
+	refusal := errors.New("not enough free disk space to ensure: C: has 599 MB free and about 2100 MB is needed; free some space and run Setup again")
+	decode := func(output []byte) (installed bool, version string, services int, warning string) {
+		var result struct {
+			Installed        bool   `json:"installed"`
+			InstalledVersion string `json:"installed_version"`
+			Services         []struct {
+				Name string `json:"name"`
+			} `json:"services"`
+			Warnings []struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"warnings"`
+		}
+		if err := json.Unmarshal(output, &result); err != nil {
+			t.Fatalf("result %s: %v", output, err)
+		}
+		for _, w := range result.Warnings {
+			if w.Code == "health_not_checked" {
+				warning = w.Message
+			}
+		}
+		return result.Installed, result.InstalledVersion, len(result.Services), warning
+	}
+	enterpriseSetupRecordedDeployment = func(result *enterprisestatus.Result) bool {
+		result.Installed, result.InstalledVersion = true, "1.0.7"
+		for _, name := range []string{"DefenseClawGateway", "DefenseClawHookGuardian", "DefenseClawHookEnumerator", "DefenseClawSensorHelper"} {
+			result.Services = append(result.Services, enterprisestatus.Service{Name: name, State: "running", Required: true})
+		}
+		return true
+	}
+	var stdout, stderr bytes.Buffer
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts, refusal, enterpriseFailureExitCode)
+	installed, version, services, warning := decode(stdout.Bytes())
+	if !installed || version != "1.0.7" || services != 4 || !strings.Contains(warning, "the deployment this computer records") {
+		t.Fatalf("installed computer: installed=%v version=%q services=%d warning=%q", installed, version, services, warning)
+	}
+	enterpriseSetupRecordedDeployment = func(*enterprisestatus.Result) bool { return false }
+	stdout.Reset()
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts, refusal, enterpriseFailureExitCode)
+	installed, version, services, warning = decode(stdout.Bytes())
+	if installed || version != "" || services != 0 || !strings.Contains(warning, "not evaluated") {
+		t.Fatalf("computer with no deployment: installed=%v version=%q services=%d warning=%q", installed, version, services, warning)
+	}
+}

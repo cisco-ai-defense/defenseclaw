@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"regexp"
 	"strings"
 
@@ -445,12 +446,7 @@ func windowsEnterprisePendingInspectionStep(configPath string) string {
 
 // windowsEnterpriseStandaloneServiceRoster is every service a standalone
 // deployment registers, by name and status kind.
-var windowsEnterpriseStandaloneServiceRoster = []struct{ name, kind string }{
-	{"DefenseClawGateway", "gateway"},
-	{"DefenseClawHookGuardian", "guardian"},
-	{"DefenseClawHookEnumerator", "enumerator"},
-	{"DefenseClawSensorHelper", "sensor_helper"},
-}
+var windowsEnterpriseStandaloneServiceRoster = winpath.EnterpriseStandaloneServices
 
 // windowsEnterprisePendingLead says what a pending transaction means for the
 // DefenseClaw services, from their states when the result is written. It said
@@ -479,7 +475,7 @@ func windowsEnterpriseStandaloneRosterRunning(services []enterprisestatus.Servic
 	for _, required := range windowsEnterpriseStandaloneServiceRoster {
 		running := false
 		for _, service := range services {
-			if strings.EqualFold(strings.TrimSpace(service.Name), required.name) &&
+			if strings.EqualFold(strings.TrimSpace(service.Name), required.Name) &&
 				strings.EqualFold(strings.TrimSpace(service.State), "running") {
 				running = true
 				break

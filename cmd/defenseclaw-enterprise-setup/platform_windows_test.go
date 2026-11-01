@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -563,5 +564,36 @@ func TestRecoveringSetupTakesTheStoppedRunsYoungStage(t *testing.T) {
 	removeStaleEnterpriseSetupStages(programData, time.Now(), 0, &progress, &diagnostics)
 	if _, err := os.Stat(live); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a released stage stayed: %v", err)
+	}
+}
+
+// rel-1-0-6:GAP-0321: the recorded deployment and the live service states,
+// read the way Setup reads them, and nothing for a retired record.
+func TestEnterpriseSetupRecordedDeploymentReadsTheRecordAndTheServices(t *testing.T) {
+	previousDeployment, previousState := standaloneSetupDeployment, enterpriseSetupServiceState
+	t.Cleanup(func() { standaloneSetupDeployment, enterpriseSetupServiceState = previousDeployment, previousState })
+	states := map[string]string{
+		"DefenseClawGateway":        "running",
+		"DefenseClawHookGuardian":   "running",
+		"DefenseClawHookEnumerator": "stopped",
+		"DefenseClawSensorHelper":   "absent",
+	}
+	enterpriseSetupServiceState = func(name string) string { return states[name] }
+	standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
+		return winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled, ProductVersion: "1.0.7"}, nil
+	}
+	result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.7")
+	if !enterpriseSetupRecordedDeployment(result) || !result.Installed || result.InstalledVersion != "1.0.7" ||
+		len(result.Services) != 3 || result.Readiness.Enumerator || result.Readiness.SensorHelper {
+		t.Fatalf("installed record: %+v", result)
+	}
+	for _, retired := range []winpath.EnterpriseDeploymentState{winpath.EnterpriseDeploymentAbsent, winpath.EnterpriseDeploymentTombstone, winpath.EnterpriseDeploymentUnknown} {
+		standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
+			return winpath.EnterpriseDeployment{State: retired, ProductVersion: "1.0.7"}, nil
+		}
+		result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.7")
+		if enterpriseSetupRecordedDeployment(result) || result.Installed || len(result.Services) != 0 {
+			t.Fatalf("%s record: %+v", retired, result)
+		}
 	}
 }

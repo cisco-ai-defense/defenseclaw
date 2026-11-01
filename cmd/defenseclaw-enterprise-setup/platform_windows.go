@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"io"
 	"os"
 	"os/exec"
@@ -435,6 +436,40 @@ func acquireStandaloneSetupEnsure() (release func(), err error) {
 		_ = windows.CloseHandle(handle)
 		runtime.UnlockOSThread()
 	}, nil
+}
+
+// enterpriseSetupServiceState is a service state as the lifecycle names it;
+// tests replace it.
+var enterpriseSetupServiceState = winpath.EnterpriseServiceState
+
+// enterpriseSetupRecordedDeployment gives a refusal of Setup itself the
+// standalone deployment this computer records (installed, its version) and
+// the states of its services, as the CLI does for its own refusals
+// (applyWindowsEnterpriseRecordedDeployment). It reports whether a
+// deployment is installed; a missing, retired or unreadable record changes
+// nothing (rel-1-0-6:GAP-0321).
+var enterpriseSetupRecordedDeployment = func(result *enterprisestatus.Result) bool {
+	deployment, err := standaloneSetupDeployment()
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled {
+		return false
+	}
+	result.Installed, result.InstalledVersion = true, deployment.ProductVersion
+	for _, service := range winpath.EnterpriseStandaloneServices {
+		state := enterpriseSetupServiceState(service.Name)
+		if state == "absent" {
+			continue
+		}
+		result.Services = append(result.Services, enterprisestatus.Service{
+			Name: service.Name, Kind: service.Kind, State: state, Required: true,
+		})
+		switch service.Kind {
+		case "enumerator":
+			result.Readiness.Enumerator = state == "running"
+		case "sensor_helper":
+			result.Readiness.SensorHelper = state == "running"
+		}
+	}
+	return true
 }
 
 var standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
