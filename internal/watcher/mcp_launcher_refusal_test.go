@@ -193,7 +193,7 @@ func TestMCPLauncherRefusalBaselineMark(t *testing.T) {
 		{scanFailureReason + "scanner: mcp-scanner exited 1: TimeoutError: no answer", mcpScanFailedMark},
 		{scanFailureReason + "scanner: mcp-scanner exited 1: ValueError: refusing to scan MCP URL 'http://127.0.0.1': private address", mcpScanFailedMark},
 		{scanFailureReason + `mcp-scan: MCP server "notes" is not started in server: the folder is not an absolute path`, mcpScanFailedMark},
-		{scanFailureReason + `mcp-scan: MCP server "x" is not started: an npx argument contains a Windows command metacharacter that cannot be passed safely through npx.cmd`, mcpLauncherRefusedMark},
+		{scanFailureReason + `scanner: mcp-scanner exited 1: [npx stderr] mcp as-user scan: the hook enumerator did not start the server: MCP server "x" is not started: an npx argument contains a Windows command metacharacter that cannot be passed safely through npx.cmd`, mcpLauncherRefusedMark},
 		// From the host, not the definition: the npx.cmd the user's PATH
 		// resolves, a launcher not on PATH or not trusted.
 		{scanFailureReason + `mcp-scan: MCP server "x" is not started: the npx.cmd path contains a Windows command metacharacter`, mcpScanFailedMark},

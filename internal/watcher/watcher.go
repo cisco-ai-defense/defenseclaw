@@ -566,7 +566,7 @@ func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt Instal
 // due: it is final for its definition (rel-1-0-6:GAP-0258).
 func (w *InstallWatcher) mcpScanRetryDue(path string, baseline *audit.SnapshotRow) bool {
 	return baseline != nil && !w.secureClientActive() && strings.HasSuffix(baseline.ScannerFingerprint, mcpScanFailedMark) &&
-		w.state.mcpRetryDue(path, time.Now())
+		w.state.mcpRetryDue(path)
 }
 
 // queueAddedMCP queues name for the next admission pass without waking it.
@@ -1234,7 +1234,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 				}
 			}
-			w.queueDueIssues(time.Now())
+			w.queueDueIssues()
 			w.processPending(ctx)
 		}
 	}
@@ -1248,8 +1248,8 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 // HIGH alert on every retry (GAP-0574). Its install block and runtime
 // disable stay in the journal; a watcher that watches the folder again
 // retries it.
-func (w *InstallWatcher) queueDueIssues(now time.Time) {
-	for _, issue := range w.state.dueIssues(now, AdmissionUnscanned, AdmissionNotQuarantined) {
+func (w *InstallWatcher) queueDueIssues() {
+	for _, issue := range w.state.dueIssues(AdmissionUnscanned, AdmissionNotQuarantined) {
 		roots := w.sourceRootsFor(InstallType(issue.Type))
 		if !slices.ContainsFunc(roots, func(root string) bool { return watcherPathAtOrBelow(issue.Path, root) }) {
 			continue

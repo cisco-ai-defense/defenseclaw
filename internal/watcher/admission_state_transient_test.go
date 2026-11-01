@@ -39,6 +39,8 @@ func TestAdmissionRetryKeepsAnIssueWhoseFolderIsOnlyUnreachable(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := newAdmissionState(dataDir, func(p string) string { return p })
+	clock := &fakeClock{now: time.Now()}
+	s.now = clock.Now
 	for _, path := range []string{skill, gone} {
 		s.setIssue(AdmissionIssue{Type: string(InstallSkill), Name: filepath.Base(path), Path: path, Kind: AdmissionUnscanned})
 	}
@@ -47,8 +49,8 @@ func TestAdmissionRetryKeepsAnIssueWhoseFolderIsOnlyUnreachable(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
 
-	later := time.Now().Add(admissionRetryLast)
-	if due := s.dueIssues(later, AdmissionUnscanned); len(due) != 0 {
+	clock.advance(admissionRetryLast)
+	if due := s.dueIssues(AdmissionUnscanned); len(due) != 0 {
 		t.Fatalf("due = %+v, want none: one folder is gone, the other unreachable", due)
 	}
 	issues, err := ReadAdmissionIssues(dataDir)
@@ -58,7 +60,8 @@ func TestAdmissionRetryKeepsAnIssueWhoseFolderIsOnlyUnreachable(t *testing.T) {
 	if err := os.Chmod(locked, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	due := s.dueIssues(later.Add(2*admissionRetryLast), AdmissionUnscanned)
+	clock.advance(2 * admissionRetryLast)
+	due := s.dueIssues(AdmissionUnscanned)
 	if len(due) != 1 || due[0].Path != skill {
 		t.Fatalf("due once reachable = %+v, want the skill", due)
 	}

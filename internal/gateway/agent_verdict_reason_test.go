@@ -155,9 +155,9 @@ func TestObserveNoticeNamesTheRuleLikeTheBlock(t *testing.T) {
 // error inside the reason stays out of the agent's view in both modes.
 func TestObserveNoticeNamesTheRejectedMCPServerLikeTheBlock(t *testing.T) {
 	source := `mcp server "fcpend" is disabled because its install admission rejected it (scanner failure (fail-closed): scanner: mcp-scanner exited 1: ValueError: refusing to scan local MCP server 'fcpend': command 'node' is not an allowlisted stdio launcher (allowed: npx, uvx)); asset_policy.mode does not apply to admission verdicts`
-	// A launcher refusal names its cause and fix in fixed words
-	// (rel-1-0-6:GAP-0258); the scanner text stays out.
-	subject := "MCP server fcpend is disabled because its install admission rejected it (" + mcpLauncherRefusalVerdict + ")"
+	// A launcher refusal names the bare launcher, its cause and fix in fixed
+	// words (rel-1-0-6:GAP-0258); the rest of the scanner text stays out.
+	subject := "MCP server fcpend is disabled because its install admission rejected it (the launcher node " + mcpLauncherRefusalCause + ")"
 	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__fcpend__ping"}
 	for _, standalone := range []bool{true, false} {
 		useAgentVerdictProfile(t, standalone, false)
@@ -392,15 +392,42 @@ func TestAgentBlockNamesTheRefusedMCPLauncherAndItsFix(t *testing.T) {
 	for _, standalone := range []bool{true, false} {
 		useAgentVerdictProfile(t, standalone, false)
 		block := claudeCodeResponseFor(req, "block", "block", "HIGH", source, nil, "action", true)
-		for _, want := range []string{"MCP server vs7time is disabled", "only as a package through the bare npx or uvx",
+		for _, want := range []string{"MCP server vs7time is disabled", "the launcher node is refused because", "only as a package through the bare npx or uvx",
 			"start it with npx or uvx, or serve it over HTTP", agentBlockNoRetry} {
 			if !strings.Contains(block.Reason, want) {
 				t.Fatalf("standalone=%v block = %q, want it to say %q", standalone, block.Reason, want)
 			}
 		}
-		for _, leaked := range []string{"node", "allowlisted", "still scanning", "try the same call again", redactedTokenPrefix} {
+		for _, leaked := range []string{"dcw-vs7ba", "allowlisted", "still scanning", "try the same call again", redactedTokenPrefix} {
 			if strings.Contains(block.Reason, leaked) {
 				t.Fatalf("standalone=%v block = %q, must not contain %q", standalone, block.Reason, leaked)
+			}
+		}
+	}
+	// rel-1-0-6:GAP-0258 sweep 9: the per-user gateway's reason, where the
+	// refusal came from the JSON error on stdout, longer than the old 1000
+	// bound with a folder note; and a command path, which is not named.
+	for name, tc := range map[string]struct{ refusal, want string }{
+		"per-user json error": {
+			refusal: "scanner mcp-scanner exited 1 (the server was not started in its folder /Users/r107vs9m/" + strings.Repeat("deep/", 120) +
+				"; it ran in the scanner folder instead: scan failed: refusing to scan local MCP server 'vs9time': command 'node' is not an allowlisted stdio launcher (allowed: npx, uvx): " +
+				"a scan starts only npm or PyPI packages through npx or uvx, never another program; stderr=)",
+			want: "(MCP server vs9time is disabled because its install admission rejected it (the launcher node " + mcpLauncherRefusalCause + ")). " + agentBlockNoRetry,
+		},
+		"command path": {
+			refusal: "scanner mcp-scanner exited 1 (scan failed: refusing to scan local MCP server 'vs9time': command '/Users/r107vs9m/bin/node' is a path, and paths are never an allowlisted stdio launcher: the scanner starts only the bare names npx or uvx from PATH; use the bare name npx or uvx, or a URL; stderr=)",
+			want:    "(MCP server vs9time is disabled because its install admission rejected it (the launcher " + mcpLauncherRefusalCause + ")). " + agentBlockNoRetry,
+		},
+	} {
+		source := `mcp server "vs9time" is disabled because its install admission rejected it (scanner failure (fail-closed): ` + tc.refusal + `); asset_policy.mode does not apply to admission verdicts`
+		if name == "per-user json error" && len(source) <= 1000 {
+			t.Fatalf("the reason (%d bytes) does not exercise the old 1000-byte bound", len(source))
+		}
+		for _, standalone := range []bool{true, false} {
+			useAgentVerdictProfile(t, standalone, false)
+			block := claudeCodeResponseFor(req, "block", "block", "HIGH", source, nil, "action", true)
+			if !strings.Contains(block.Reason, tc.want) || strings.Contains(block.Reason, "r107vs9m") || strings.Contains(block.Reason, redactedTokenPrefix) {
+				t.Fatalf("%s standalone=%v block = %q\nwant it to say %q, with no path or redacted span", name, standalone, block.Reason, tc.want)
 			}
 		}
 	}
