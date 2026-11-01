@@ -57,6 +57,16 @@ func TestMain(m *testing.M) {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		fmt.Print(`{"continue":false,"permission":"deny"}`)
 		os.Exit(2)
+	case "codex-machine-block":
+		payload, err := io.ReadAll(os.Stdin)
+		if err != nil || !bytes.Contains(payload, []byte("codex-machine-probe")) {
+			os.Exit(3)
+		}
+		if strings.Join(os.Args[1:], "|") != "hook|--connector|codex|--enterprise-managed" {
+			os.Exit(4)
+		}
+		fmt.Print(`{"decision":"block","reason":"codex-machine-block"}`)
+		os.Exit(2)
 	case "timeout":
 		if pidFile := os.Getenv(cursorAdapterPIDFileEnv); pidFile != "" {
 			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
