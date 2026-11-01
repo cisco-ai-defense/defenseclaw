@@ -1588,6 +1588,10 @@ class DecisionModelConfig:
     allow_threshold: float = 0.0
     block_threshold: float = 0.0
     on_confident_block: str = ""
+    # Connectors whose hook-lane tool calls the model answers on its own
+    # where the LLM judge does not run ("*" = all). Empty = only in front
+    # of the judge. Omitted from YAML when empty.
+    hook_connectors: list[str] = field(default_factory=list)
 
     def active(self) -> bool:
         return bool(self.enabled and self.base_url.strip() and self.model.strip())
@@ -1690,7 +1694,17 @@ def _merge_decision_model(raw: Any) -> DecisionModelConfig:
         allow_threshold=_num("allow_threshold"),
         block_threshold=_num("block_threshold"),
         on_confident_block=str(raw.get("on_confident_block", "") or ""),
+        hook_connectors=_decision_model_connector_list(raw.get("hook_connectors")),
     )
+
+
+def _decision_model_connector_list(raw: Any) -> list[str]:
+    """``decision_model.hook_connectors`` as a list of non-blank names."""
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list | tuple):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
 
 
 @dataclass
@@ -5595,6 +5609,8 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
     {
         # Hook-lane judge gate: empty list = lane off, stripped on save.
         "guardrail.judge.hook_connectors",
+        # Decision-model-alone gate: empty list = only in front of the judge.
+        "decision_model.hook_connectors",
         # Hook-lane judge timeout: 0 = gateway default, stripped on save.
         "guardrail.judge.hook_timeout",
         # Judge call bound: 0 = no limit, stripped on save.

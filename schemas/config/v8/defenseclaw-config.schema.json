@@ -479,6 +479,7 @@
         "hook_connectors": {
           "type": "array",
           "maxItems": 256,
+          "description": "Connectors whose hook-lane tool calls the decision model answers on its own where the LLM judge does not run; * = all. Empty = only in front of the judge. Releases before 1.0.7 refuse this key.",
           "items": {
             "anyOf": [
               {

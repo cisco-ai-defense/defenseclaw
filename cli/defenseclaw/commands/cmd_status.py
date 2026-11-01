@@ -527,6 +527,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health, cfg)
+        _print_decision_model(cfg)
         _print_hook_guardian(cfg)
         _print_fleet_health(cfg, client)
         hint(
@@ -1763,6 +1764,19 @@ def _print_judge_fallbacks(details: dict, cfg=None) -> None:
     if summary:
         hint = judge_max_parallel_hint(cfg)
         _status_row("Judge fallbacks", ux._style(summary + ("; " + hint if hint else ""), fg="yellow"))
+
+
+def _print_decision_model(cfg) -> None:
+    """One row naming the tool-call cascade per active connector, while the
+    decision model is on (rules only / rules -> decision model / ... -> LLM judge)."""
+    from defenseclaw import decision_model as dmod
+
+    dm = getattr(cfg, "decision_model", None)
+    if dm is None or not dm.active():
+        return
+    lines = dmod.cascade_lines(cfg)
+    if lines:
+        _status_row("Decision model", "; ".join(lines))
 
 
 def _print_llm_judge(health: dict | None, cfg=None) -> None:

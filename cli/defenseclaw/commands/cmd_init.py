@@ -210,8 +210,8 @@ def refuse_first_run_when_managed() -> None:
     "decision_model",
     default=None,
     help=(
-        "Use a decision model (System One protocol) in front of the LLM judge and in skill scans. "
-        "Off unless asked; needs --decision-model-url and --decision-model-name."
+        "Use a decision model (System One protocol) on tool calls, in front of the LLM judge or alone, "
+        "and in skill scans. Off unless asked; needs --decision-model-url and --decision-model-name."
     ),
 )
 @click.option("--decision-model-url", default="", help="Decision model endpoint, e.g. http://127.0.0.1:8791/v1/systemone.")
@@ -221,6 +221,14 @@ def refuse_first_run_when_managed() -> None:
     default="DEFENSECLAW_DECISION_MODEL_KEY",
     show_default=True,
     help="Env var holding the decision model token (a local server needs none).",
+)
+@click.option(
+    "--decision-model-connectors",
+    default="",
+    help=(
+        "Connectors the decision model answers for on its own where the LLM judge does not run: "
+        "comma-separated names, or *. Default: the connectors init puts in action mode."
+    ),
 )
 @click.option("--start-gateway/--no-start-gateway", default=None, help="Start the gateway sidecar after setup.")
 @click.option("--verify/--no-verify", default=None, help="Run targeted readiness checks before exiting.")
@@ -256,6 +264,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     decision_model_url: str,
     decision_model_name: str,
     decision_model_key_env: str,
+    decision_model_connectors: str,
     start_gateway: bool | None,
     verify: bool | None,
     json_summary: bool,
@@ -299,7 +308,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         decision_model_key_env, "'--decision-model-key-env'", "DEFENSECLAW_DECISION_MODEL_KEY"
     )
     decision_model_request = _decision_model_request(
-        decision_model, decision_model_url, decision_model_name, decision_model_key_env
+        decision_model, decision_model_url, decision_model_name, decision_model_key_env, decision_model_connectors
     )
     connector = _single_connector_option(connector)
     _refuse_unknown_action_connectors(action_connectors, supplied=_option_supplied("action_connectors"))
@@ -866,7 +875,12 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         raise SystemExit(1)
 
     if decision_model is not None:
-        _apply_first_run_decision_model(report, decision_model, data_dir)
+        _apply_first_run_decision_model(
+            report,
+            decision_model,
+            data_dir,
+            [s["connector"] for s in connector_settings if s.get("profile") == "action"],
+        )
         report.status = _rollup_status(report.setup, report.readiness)
 
     first_run_failed = report.status == "needs_attention"
@@ -2087,10 +2101,10 @@ def _prompt_first_run(
         judge_hook_connectors = []
         ux.subhead("LLM judge: skipped because no selected connector is in action mode.")
     with_judge = bool(judge_hook_connectors)
-    # The decision model sits in front of the LLM judge, so the question is
-    # asked only when a judge is being configured (GAP-0053). A flag already
+    # The decision model runs in front of the judge or answers alone, so the
+    # question is asked whenever a connector is in action mode. A flag already
     # answered it ("asked"), and the flag path never reaches this prompt.
-    if with_judge and decision_model_answer is not None and not decision_model_answer.get("asked"):
+    if action_set and decision_model_answer is not None and not decision_model_answer.get("asked"):
         decision_model_answer["request"] = _prompt_first_run_decision_model(data_dir or "")
 
     connector_settings: list[dict] = []
@@ -2163,14 +2177,18 @@ def _configured_judge_llm(data_dir: str | os.PathLike[str] | None) -> str:
 
 
 def _decision_model_request(
-    enabled: bool | None, url: str, name: str, key_env: str
+    enabled: bool | None, url: str, name: str, key_env: str, connectors: str = ""
 ) -> dict | None:
     """The decision model init was asked for on the command line, or None
-    to ask (interactive) or leave it alone (--yes: the default is no)."""
+    to ask (interactive) or leave it alone (--yes: the default is no).
+
+    ``connectors`` is --decision-model-connectors; without it the request
+    carries ``connectors: None`` and the connectors init puts in action mode
+    are used."""
     url, name = (url or "").strip(), (name or "").strip()
     if enabled is False:
         return {"enabled": False}
-    if enabled is None and not url and not name:
+    if enabled is None and not url and not name and not (connectors or "").strip():
         return None
     if not url or not name:
         raise click.UsageError(
@@ -2181,7 +2199,17 @@ def _decision_model_request(
     problem = decision_model_url_error(url)
     if problem:
         raise click.UsageError(f"--decision-model-url: {problem}")
-    return {"enabled": True, "base_url": url, "model": name, "api_key_env": key_env, "token": ""}
+    from defenseclaw.decision_model import parse_connectors
+
+    listed = parse_connectors(connectors or "")
+    return {
+        "enabled": True,
+        "base_url": url,
+        "model": name,
+        "api_key_env": key_env,
+        "token": "",
+        "connectors": listed or None,
+    }
 
 
 def _prompt_first_run_decision_model(data_dir: str | os.PathLike[str]) -> dict | None:
@@ -2191,8 +2219,9 @@ def _prompt_first_run_decision_model(data_dir: str | os.PathLike[str]) -> dict |
 
     click.echo()
     ux.section("Decision model (optional)")
-    ux.subhead("A fast model in front of the LLM judge: it allows clear benign tool calls itself")
-    ux.subhead("and sends the rest to the judge. Off by default. Benchmarks: " + dmod.BENCHMARK_URL)
+    ux.subhead("A fast model for tool calls: it allows clear benign calls, blocks clear harm and passes")
+    ux.subhead("the rest to the LLM judge, or asks you where the judge is off. Off by default.")
+    ux.subhead("It answers for the connectors you put in action mode. Benchmarks: " + dmod.BENCHMARK_URL)
     if not click.confirm(f"  {dmod.INIT_QUESTION}", default=False):
         return None
     while True:
@@ -2212,8 +2241,13 @@ def _prompt_first_run_decision_model(data_dir: str | os.PathLike[str]) -> dict |
     return {"enabled": True, "base_url": url, "model": name, "api_key_env": key_env, "token": token}
 
 
-def _apply_first_run_decision_model(report, request: dict, data_dir: str | os.PathLike[str]) -> None:
-    """Save the decision model init was asked for and report it as a step."""
+def _apply_first_run_decision_model(
+    report, request: dict, data_dir: str | os.PathLike[str], action_connectors: list[str] | tuple[str, ...] = ()
+) -> None:
+    """Save the decision model init was asked for and report it as a step.
+
+    ``action_connectors`` are the connectors init put in action mode; they
+    become ``decision_model.hook_connectors`` unless the request names its own."""
     from defenseclaw import config as config_module
     from defenseclaw import decision_model as dmod
     from defenseclaw.bootstrap import StepResult
@@ -2230,6 +2264,7 @@ def _apply_first_run_decision_model(report, request: dict, data_dir: str | os.Pa
             base_url=request.get("base_url"),
             model=request.get("model"),
             api_key_env=request.get("api_key_env"),
+            hook_connectors=(request.get("connectors") or list(action_connectors)) if request["enabled"] else None,
         )
         cfg.save()
     except Exception as exc:  # noqa: BLE001 - init reports each step; one failure must not hide the rest.
@@ -2244,7 +2279,8 @@ def _apply_first_run_decision_model(report, request: dict, data_dir: str | os.Pa
         report.setup.append(StepResult(
             "Decision Model",
             "warn",
-            f"{detail} saved but not reachable ({result.detail}); the LLM judge decides alone until it is reachable",
+            f"{detail} saved but not reachable ({result.detail}); "
+            "tool calls are decided without it until it is reachable",
             "defenseclaw setup decision-model --show --ping",
         ))
         return

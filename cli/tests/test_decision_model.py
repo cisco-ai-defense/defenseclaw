@@ -141,6 +141,74 @@ def test_enabled_block_round_trips(home):
     assert "enabled" not in saved and saved["model"] == "jev-1.13.0"
 
 
+def test_hook_connectors_round_trip_and_absent_key_is_byte_identical(home):
+    # A config without the key: load + save writes no hook_connectors and no decision_model block.
+    shutil.copy(FIXTURES / "1.0.5.yaml", home / "config.yaml")
+    cfg = config_module.load()
+    assert cfg.decision_model.hook_connectors == []
+    cfg.save()
+    assert "decision_model" not in yaml.safe_load((home / "config.yaml").read_text())
+    # With the key it round-trips, blanks stripped; clearing removes it again.
+    dmod.apply_settings(cfg, enabled=True, model="m", base_url="http://127.0.0.1:8791/v1/systemone",
+                        hook_connectors=["codex", " ", "claude-code"])
+    cfg.save()
+    saved = yaml.safe_load((home / "config.yaml").read_text())["decision_model"]
+    assert saved["hook_connectors"] == ["codex", "claudecode"]
+    again = config_module.load()
+    assert again.decision_model.hook_connectors == ["codex", "claudecode"]
+    dmod.apply_settings(again, hook_connectors=[])
+    again.save()
+    assert "hook_connectors" not in yaml.safe_load((home / "config.yaml").read_text())["decision_model"]
+
+
+def _cascade_cfg(*, judge_on=True, judge_gate=(), dm_on=True, dm_gate=(), strategy="", tool_strategy=""):
+    cfg = config_module.default_config()
+    cfg.guardrail.connectors = {
+        "claudecode": config_module.PerConnectorGuardrailConfig(),
+        "codex": config_module.PerConnectorGuardrailConfig(),
+    }
+    cfg.guardrail.judge.enabled = judge_on
+    cfg.guardrail.judge.hook_connectors = list(judge_gate)
+    if strategy:
+        cfg.guardrail.detection_strategy = strategy
+    cfg.guardrail.detection_strategy_tool_call = tool_strategy
+    cfg.decision_model = DecisionModelConfig(
+        enabled=dm_on, model="m", base_url="http://127.0.0.1:8791/v1/systemone", hook_connectors=list(dm_gate)
+    )
+    return cfg
+
+
+def test_cascade_for_the_four_cases():
+    both = _cascade_cfg(judge_gate=["codex"], dm_gate=["claudecode"])
+    assert dmod.cascade_for(both, "codex") == "rules -> decision model -> LLM judge"
+    assert dmod.cascade_for(both, "claudecode") == "rules -> decision model"
+    assert dmod.answers_alone_for(both, "claudecode") and not dmod.judge_runs_for(both, "claudecode")
+    judge_only = _cascade_cfg(judge_gate=["codex"], dm_on=False)
+    assert dmod.cascade_for(judge_only, "codex") == "rules -> LLM judge"
+    assert dmod.cascade_for(judge_only, "claudecode") == "rules only"
+    # Listed but the model is off, or not listed: rules only.
+    assert dmod.cascade_for(_cascade_cfg(dm_on=False, dm_gate=["codex"]), "codex") == "rules only"
+    assert dmod.cascade_for(_cascade_cfg(), "codex") == "rules only"
+
+
+def test_cascade_wildcard_case_and_regex_only():
+    star = _cascade_cfg(judge_on=False, dm_gate=["*"])
+    assert [dmod.cascade_for(star, c) for c in ("claudecode", "codex")] == ["rules -> decision model"] * 2
+    assert dmod.cascade_for(_cascade_cfg(judge_gate=["CodeX"], dm_gate=["ClaudeCode"]), "codex") == (
+        "rules -> decision model -> LLM judge"
+    )
+    assert dmod.cascade_for(_cascade_cfg(judge_on=False, dm_gate=["ClaudeCode"]), "claudecode") == (
+        "rules -> decision model"
+    )
+    # regex_only (tool-call override first, then the global strategy) means the judge does not run.
+    for kwargs in ({"tool_strategy": "regex_only"}, {"strategy": "regex_only"}):
+        cfg = _cascade_cfg(judge_gate=["*"], dm_gate=["codex"], **kwargs)
+        assert not dmod.judge_runs_for(cfg, "codex")
+        assert dmod.cascade_for(cfg, "codex") == "rules -> decision model"
+    overridden = _cascade_cfg(judge_gate=["*"], strategy="regex_only", tool_strategy="regex_judge")
+    assert dmod.judge_runs_for(overridden, "codex")
+
+
 @pytest.mark.parametrize(
     ("fields", "message"),
     [
@@ -229,6 +297,28 @@ def test_setup_decision_model_refuses_bad_values(home):
     assert "decision_model" not in yaml.safe_load((home / "config.yaml").read_text())
 
 
+def test_setup_decision_model_connectors_sets_clears_and_shows(home):
+    shutil.copy(FIXTURES / "1.0.5.yaml", home / "config.yaml")
+    base = ["decision-model", "--base-url", "http://127.0.0.1:8791/v1/systemone", "--model", "m", "--non-interactive"]
+    result = _invoke(home, [*base, "--connectors", "Codex,claudecode"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert config_module.load().decision_model.hook_connectors == ["codex", "claudecode"]
+    shown = _invoke(home, ["decision-model", "--show"], catch_exceptions=False)
+    assert "decision_model.hook_connectors" in shown.output and "codex, claudecode" in shown.output
+    assert _invoke(home, ["decision-model", "--connectors", "*"], catch_exceptions=False).exit_code == 0
+    assert config_module.load().decision_model.hook_connectors == ["*"]
+    assert _invoke(home, ["decision-model", "--connectors", ""], catch_exceptions=False).exit_code == 0
+    assert config_module.load().decision_model.hook_connectors == []
+
+
+def test_judge_note_names_connectors_without_a_model():
+    cfg = _cascade_cfg(judge_gate=["codex"], dm_gate=[])
+    note = dmod.judge_note(cfg)
+    assert "claudecode" in note and "--connectors claudecode" in note and "advisory" in note
+    cfg.decision_model.hook_connectors = ["claudecode"]
+    assert dmod.judge_note(cfg) == ""
+
+
 def test_interactive_question_defaults_to_no(home):
     shutil.copy(FIXTURES / "1.0.5.yaml", home / "config.yaml")
     result = _invoke(home, ["decision-model"], input="\n", catch_exceptions=False)
@@ -255,55 +345,68 @@ def test_init_request_from_flags():
         _decision_model_request(None, "http://10.0.0.1/x", "m", "X")
 
 
-@pytest.mark.parametrize("judge_connectors", [[], ["claudecode"]])
-def test_init_wizard_asks_only_when_a_judge_is_configured(judge_connectors):
+def _wizard(action, *, judge=(), answer=None):
+    """Run the first-run wizard with the prompts stubbed; return the
+    decision-model prompt mock."""
     from unittest.mock import patch
 
     from defenseclaw.commands import cmd_init
 
-    answer: dict = {}
+    answer = {} if answer is None else answer
     with patch.object(cmd_init, "_prompt_connector_selection", return_value=["claudecode"]), \
             patch.object(cmd_init.terminal_checkbox, "restore_line_prompt_mode"), \
             patch.object(cmd_init.click, "prompt", return_value="local"), \
             patch.object(cmd_init.click, "confirm", return_value=True), \
-            patch.object(cmd_init, "_prompt_action_connectors", return_value=["claudecode"]), \
+            patch.object(cmd_init, "_prompt_action_connectors", return_value=list(action)), \
             patch.object(cmd_init, "_current_action_connectors", return_value=[]), \
-            patch.object(cmd_init, "_supported_action_connectors", return_value=["claudecode"]), \
+            patch.object(cmd_init, "_supported_action_connectors", return_value=list(action)), \
             patch.object(cmd_init, "_prompt_action_policy", return_value=(None, None, None)), \
             patch.object(cmd_init, "_current_judge_connectors", return_value=[]), \
-            patch.object(cmd_init, "_prompt_first_run_judge_connectors", return_value=judge_connectors), \
+            patch.object(cmd_init, "_prompt_first_run_judge_connectors", return_value=list(judge)), \
             patch.object(cmd_init, "_prompt_first_run_decision_model", return_value={"enabled": True}) as dm_prompt:
         cmd_init._prompt_first_run(
             connector=None, profile=None, scanner_mode="local", with_judge=False, fail_mode=None,
             human_approval=None, hilt_min_severity=None, start_gateway=True, verify=True,
             rescan_agents=False, data_dir=None, decision_model_answer=answer,
         )
-    if judge_connectors:
-        dm_prompt.assert_called_once()
-        assert answer["request"] == {"enabled": True}
-    else:
-        dm_prompt.assert_not_called()
-        assert answer.get("request") is None
+    return dm_prompt, answer
 
-    # A flag already answered the question: the wizard never asks it again.
-    flagged = {"asked": True}
-    with patch.object(cmd_init, "_prompt_connector_selection", return_value=["claudecode"]), \
-            patch.object(cmd_init.terminal_checkbox, "restore_line_prompt_mode"), \
-            patch.object(cmd_init.click, "prompt", return_value="local"), \
-            patch.object(cmd_init.click, "confirm", return_value=True), \
-            patch.object(cmd_init, "_prompt_action_connectors", return_value=["claudecode"]), \
-            patch.object(cmd_init, "_current_action_connectors", return_value=[]), \
-            patch.object(cmd_init, "_supported_action_connectors", return_value=["claudecode"]), \
-            patch.object(cmd_init, "_prompt_action_policy", return_value=(None, None, None)), \
-            patch.object(cmd_init, "_current_judge_connectors", return_value=[]), \
-            patch.object(cmd_init, "_prompt_first_run_judge_connectors", return_value=["claudecode"]), \
-            patch.object(cmd_init, "_prompt_first_run_decision_model") as dm_prompt:
-        cmd_init._prompt_first_run(
-            connector=None, profile=None, scanner_mode="local", with_judge=False, fail_mode=None,
-            human_approval=None, hilt_min_severity=None, start_gateway=True, verify=True,
-            rescan_agents=False, data_dir=None, decision_model_answer=flagged,
-        )
+
+def test_init_wizard_asks_whenever_a_connector_is_in_action_mode():
+    # Judge off, one action connector: asked, and the answer is kept.
+    dm_prompt, answer = _wizard(["claudecode"], judge=[])
+    dm_prompt.assert_called_once()
+    assert answer["request"] == {"enabled": True}
+    # No action connector: not asked.
+    dm_prompt, answer = _wizard([], judge=[])
     dm_prompt.assert_not_called()
+    assert answer.get("request") is None
+    # A flag already answered it: never asked again, judge or not.
+    dm_prompt, _ = _wizard(["claudecode"], judge=["claudecode"], answer={"asked": True})
+    dm_prompt.assert_not_called()
+
+
+def test_init_decision_model_connectors_default_and_flag(home, system_one):
+    from defenseclaw.bootstrap import FirstRunReport
+    from defenseclaw.commands.cmd_init import _apply_first_run_decision_model, _decision_model_request
+
+    shutil.copy(FIXTURES / "1.0.5.yaml", home / "config.yaml")
+    req = _decision_model_request(None, system_one, "fake-dm", "DEFENSECLAW_DECISION_MODEL_KEY")
+    assert req["connectors"] is None  # default: the connectors init puts in action mode
+    report = FirstRunReport.__new__(FirstRunReport)
+    report.setup = []
+    _apply_first_run_decision_model(report, req, str(home), ["claudecode", "codex"])
+    assert config_module.load().decision_model.hook_connectors == ["claudecode", "codex"]
+    flagged = _decision_model_request(None, system_one, "fake-dm", "X", "Codex, claudecode")
+    assert flagged["connectors"] == ["codex", "claudecode"]
+    _apply_first_run_decision_model(report, flagged, str(home), ["hermes"])
+    assert config_module.load().decision_model.hook_connectors == ["codex", "claudecode"]
+    # --yes alone and the connectors flag without an endpoint do not turn it on by themselves.
+    assert _decision_model_request(None, "", "", "X") is None
+    import click
+
+    with pytest.raises(click.UsageError, match="both"):
+        _decision_model_request(None, "", "", "X", "codex")
 
 
 def test_init_step_saves_and_reports(home, system_one):
@@ -330,7 +433,7 @@ def test_setup_decision_model_unreachable_warning_is_a_whole_sentence(home):
         ["decision-model", "--base-url", "http://127.0.0.1:1/v1/systemone", "--model", "m", "--ping", "--non-interactive"],
         catch_exceptions=False,
     )
-    assert "the LLM judge decides alone until it is reachable" in result.output
+    assert "tool calls are decided without it until it is reachable" in result.output
 
 
 def test_init_step_warns_when_unreachable(home):
@@ -344,7 +447,7 @@ def test_init_step_warns_when_unreachable(home):
         report, {"enabled": True, "base_url": "http://127.0.0.1:1/v1/systemone", "model": "m", "api_key_env": "", "token": ""}, str(home)
     )
     assert report.setup[-1].status == "warn"
-    assert report.setup[-1].detail.endswith("the LLM judge decides alone until it is reachable")
+    assert report.setup[-1].detail.endswith("tool calls are decided without it until it is reachable")
 
 
 # --- doctor ---------------------------------------------------------------------
@@ -364,6 +467,23 @@ def test_doctor_row(home, system_one):
     dmod.apply_settings(cfg, base_url="http://127.0.0.1:1/v1/systemone")
     cmd_doctor._check_decision_model(cfg, r)
     assert r.checks[-1]["status"] == "warn"
+
+
+def test_doctor_row_names_the_cascade_per_connector(system_one):
+    from defenseclaw.commands import cmd_doctor
+
+    cfg = _cascade_cfg(judge_gate=["codex"], dm_gate=["claudecode"])
+    cfg.decision_model.base_url = system_one
+    r = cmd_doctor._DoctorResult()
+    cmd_doctor._check_decision_model(cfg, r)
+    row = r.checks[-1]
+    assert row["status"] == "pass"
+    assert "claudecode: rules -> decision model; codex: rules -> decision model -> LLM judge" in row["detail"]
+    # Reachable but answering no connector's tool calls: a warning that says how to add one.
+    cfg.decision_model.hook_connectors = []
+    cfg.guardrail.judge.hook_connectors = []
+    cmd_doctor._check_decision_model(cfg, r)
+    assert r.checks[-1]["status"] == "warn" and "--connectors" in r.checks[-1]["detail"]
 
 
 # --- skill scanner pass-through ------------------------------------------------
