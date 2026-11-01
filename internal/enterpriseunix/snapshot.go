@@ -131,8 +131,8 @@ func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err er
 				return nil, fmt.Errorf("snapshot %s: %w", canonical, ownerErr)
 			}
 			entry.Present, entry.Mode, entry.UID, entry.GID = true, mode.Perm(), uid, gid
-			if !holdsState(e.P(canonical)) {
-				entry.Empty, entry.EmptyDirs = true, emptySubdirs(e.P(canonical))
+			if dirs, ok := stateFreeSubdirs(e.P(canonical)); ok {
+				entry.Empty, entry.EmptyDirs = true, dirs
 			}
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("snapshot %s: %w", canonical, err)
@@ -467,54 +467,98 @@ func (e *Env) removeCreatedDirs(snap *snapshot) error {
 	return errors.Join(errs...)
 }
 
-// emptySubdirs lists the subdirectories of dir, relative to it, deepest
-// last; dir holds nothing else (holdsState is false).
-func emptySubdirs(dir string) []string {
-	var out []string
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || path == dir || !d.IsDir() {
+// stateFreeSubdirs reports whether dir holds nothing but directories and
+// lists those, relative to it. It is the snapshot's own check, strict
+// where holdsState (the adoption guard's) is lenient: a walk error at dir
+// itself or below, or any entry that is not a directory (a file, a symbolic
+// link, a socket), means not state-free, so a directory that cannot be
+// listed is never recorded empty and a rollback never empties it
+// (rel-1-0-6:GAP-0286 review).
+func stateFreeSubdirs(dir string) ([]string, bool) {
+	var dirs []string
+	ok := true
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			ok = false
+			return filepath.SkipAll
+		}
+		if path == dir {
 			return nil
 		}
-		if rel, err := filepath.Rel(dir, path); err == nil {
-			out = append(out, filepath.ToSlash(rel))
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			ok = false
+			return filepath.SkipAll
 		}
+		dirs = append(dirs, filepath.ToSlash(rel))
 		return nil
 	})
-	return out
+	if err != nil || !ok {
+		return nil, false
+	}
+	return dirs, true
 }
 
 // emptyBackTo removes everything under dir but the subdirectories keep
 // names (relative to dir), which it leaves in place: a state directory that
-// held no state before a rolled-back transaction holds none after it. A
-// symbolic link is removed, never followed.
+// held no state before a rolled-back transaction holds none after it. It
+// works through an os.Root at dir, so no step follows a symbolic link out
+// of the tree (a link is removed as a link, a kept subdirectory swapped for
+// a link is removed, never listed), and it leaves an entry on another
+// filesystem (a mount point) alone.
 func emptyBackTo(dir string, keep []string) error {
+	root, err := os.OpenRoot(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	top, err := root.Lstat(".")
+	if err != nil {
+		return err
+	}
 	kept := make(map[string]bool, len(keep))
 	for _, rel := range keep {
 		kept[filepath.FromSlash(rel)] = true
 	}
-	var clear func(string, string) error
-	clear = func(abs, rel string) error {
-		entries, err := os.ReadDir(abs)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
+	var clear func(string) error
+	clear = func(rel string) error {
+		f, err := root.Open(rel)
+		if err != nil {
+			return err
 		}
+		entries, err := f.ReadDir(-1)
+		_ = f.Close()
 		if err != nil {
 			return err
 		}
 		var errs []error
 		for _, entry := range entries {
-			childAbs, childRel := filepath.Join(abs, entry.Name()), filepath.Join(rel, entry.Name())
-			if entry.IsDir() && entry.Type()&fs.ModeSymlink == 0 && kept[childRel] {
-				errs = append(errs, clear(childAbs, childRel))
+			child := filepath.Join(rel, entry.Name())
+			info, err := root.Lstat(child)
+			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			if err := os.RemoveAll(childAbs); err != nil {
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if !sameDevice(top, info) {
+				continue
+			}
+			if info.IsDir() && kept[child] {
+				errs = append(errs, clear(child))
+				continue
+			}
+			if err := root.RemoveAll(child); err != nil {
 				errs = append(errs, err)
 			}
 		}
 		return errors.Join(errs...)
 	}
-	return clear(dir, "")
+	return clear(".")
 }
 
 func (e *Env) discardSnapshot(snap *snapshot) {

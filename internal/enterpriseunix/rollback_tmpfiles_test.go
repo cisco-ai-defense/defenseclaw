@@ -105,3 +105,97 @@ func TestFailedPackageReinstallKeepsTheKeptStateAndEmptiesTheGuardianDirectory(t
 		t.Fatalf("the retry lost the kept sandbox state: %v", r.Changes)
 	}
 }
+
+// Review of rel-1-0-6:GAP-0286, finding 2: emptying a state directory
+// removes a symbolic link as a link and never follows it, also when a kept
+// subdirectory was swapped for a link after the snapshot.
+func TestRollbackEmptyingRemovesLinksAndNeverFollowsThem(t *testing.T) {
+	base := t.TempDir()
+	dir, outside := filepath.Join(base, "data"), filepath.Join(base, "outside")
+	for _, d := range []string{filepath.Join(dir, "acp"), filepath.Join(dir, "kept"), outside} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(outside, "precious"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keep, ok := stateFreeSubdirs(dir)
+	if !ok || len(keep) != 2 {
+		t.Fatalf("stateFreeSubdirs = %v %v, want acp and kept", keep, ok)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "acp")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "acp")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kept", "audit.db"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := emptyBackTo(dir, keep); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "precious")); err != nil {
+		t.Fatalf("the emptying followed a link out of the tree: %v", err)
+	}
+	for _, gone := range []string{"link", "acp", filepath.Join("kept", "audit.db")} {
+		if _, err := os.Lstat(filepath.Join(dir, gone)); !os.IsNotExist(err) {
+			t.Errorf("%s survived the emptying: %v", gone, err)
+		}
+	}
+	if info, err := os.Lstat(filepath.Join(dir, "kept")); err != nil || !info.IsDir() {
+		t.Fatalf("the kept subdirectory went: %v", err)
+	}
+}
+
+// Review of rel-1-0-6:GAP-0286, finding 1: a state directory that cannot be
+// listed at snapshot time (mode 0300 to its owner, at the top or below) is
+// not recorded empty, and the rollback leaves what it holds alone.
+func TestUnlistableStateDirectoryIsNeverEmptied(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root lists any directory")
+	}
+	for _, unlistable := range []string{"", "acp"} {
+		t.Run("unlistable "+map[string]string{"": "top", "acp": "subdirectory"}[unlistable], func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			data := h.env.P(h.env.Layout.DataDir)
+			target := filepath.Join(data, unlistable)
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			key := filepath.Join(target, "device.key")
+			if err := os.WriteFile(key, []byte("k"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(target, 0o300); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(target, 0o700) })
+			if _, ok := stateFreeSubdirs(data); ok {
+				t.Fatal("an unlistable directory counts as state-free")
+			}
+			snap, err := h.env.takeSnapshot("unlistable", nil, []string{h.env.Layout.DataDir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range snap.Entries {
+				if entry.Path == h.env.Layout.DataDir && entry.Empty {
+					t.Fatal("the snapshot recorded an unlistable state directory as empty")
+				}
+			}
+			if err := h.env.removeCreatedDirs(snap); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(key); err != nil {
+				t.Fatalf("the rollback removed device.key from the unlistable directory: %v", err)
+			}
+		})
+	}
+}

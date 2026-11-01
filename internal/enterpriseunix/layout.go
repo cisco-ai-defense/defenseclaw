@@ -339,7 +339,10 @@ func (e *Env) unmanagedLeftovers(services ServiceManager, channel string) []stri
 // The tmpfiles.d entry of the rpm and deb creates empty state directories
 // (such as /var/lib/defenseclaw/acp) before the postinstall ensure runs;
 // they hold no machine state, so they must not trip the adoption guard.
-// Any file, symlink or unreadable entry counts as state.
+// Any file, symlink or unreadable entry below dir counts as state; a dir
+// whose own listing fails counts as holding none here. That leniency is the
+// guard's alone: the rollback decides what it may empty with the strict
+// stateFreeSubdirs (snapshot.go).
 func holdsState(dir string) bool {
 	found := false
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
