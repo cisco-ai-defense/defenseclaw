@@ -222,6 +222,23 @@ def test_systemd_guardian_can_flush_the_sssd_caches():
         assert not any("/var/lib/sss" in path for path in _unit_values(_unit(name), "ReadWritePaths")), name
 
 
+def test_systemd_guardian_units_create_the_clean_session_folder():
+    # A guardian started before the gateway's clean-session folder existed saw
+    # it read-only and refused every foreign-hook removal until it restarted
+    # (rel-1-0-6:GAP-0279). Both guardian units create it from the tmpfiles.d
+    # entry before they start; the gateway only binds it.
+    folder = "/var/lib/defenseclaw-foreign-hook-clean"
+    create = "ExecStartPre=-+/usr/bin/systemd-tmpfiles --create --prefix=" + folder
+    assert "d " + folder + " 0711 defenseclaw defenseclaw -" in _unit("defenseclaw.conf")
+    for name in ("defenseclaw-hook-guardian.service", "defenseclaw-hook-guardian-reconcile.service"):
+        lines = _unit(name)
+        assert [line for line in lines if line.startswith("ExecStartPre=")] == [create], name
+        assert "-" + folder in _unit_values(lines, "ReadWritePaths"), name
+    gateway = _unit("defenseclaw-gateway.service")
+    assert not [line for line in gateway if line.startswith("ExecStartPre=")]
+    assert "-" + folder in _unit_values(gateway, "ReadWritePaths")
+
+
 def test_systemd_enumerator_can_publish_refused_surfaces():
     # The enumerator writes refused-surfaces.json into the guardian data dir;
     # under ProtectSystem=strict that dir must be writable or every cycle

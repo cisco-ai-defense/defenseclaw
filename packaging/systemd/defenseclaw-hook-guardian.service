@@ -22,6 +22,14 @@ Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
 Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise
 Environment=DEFENSECLAW_ENTERPRISE_PROFILE=standalone
 Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian
+# Every start creates the gateway's clean-session folder when it is missing,
+# as the tmpfiles.d entry does (0711, the service account's), so the
+# ReadWritePaths entry for it is writable from this start on. Without it a
+# guardian started before the folder existed saw it read-only and refused
+# every foreign-hook removal until it was restarted (rel-1-0-6:GAP-0279).
+# "+" runs it outside the sandbox; "-" starts the unit also when the entry
+# is turned off.
+ExecStartPre=-+/usr/bin/systemd-tmpfiles --create --prefix=/var/lib/defenseclaw-foreign-hook-clean
 ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks watch --manifest /etc/defenseclaw/hook-guardian/targets.yaml --interval 1m
 Restart=always
 RestartSec=5s
