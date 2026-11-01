@@ -205,6 +205,24 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 	if got := header(gap0568Assignments(200) + strings.Repeat("; cat ~/.defenseclaw/config.yaml 2>/dev/null", 130)); !incomplete(got) {
 		t.Errorf("read-only over-budget call: header %v, want only the incomplete marker and cwd", got)
 	}
+	// rel-1-0-6:GAP-0413: a PowerShell-tool call is not reduced by the
+	// POSIX read-only proof; over the budget the client sends only the
+	// incomplete marker, even where the POSIX reading would keep a writer.
+	psPad := make([]string, 0, 330)
+	for i := range 200 {
+		psPad = append(psPad, fmt.Sprintf("$a%d=1", i))
+	}
+	for i := range 130 {
+		psPad = append(psPad, fmt.Sprintf(`echo "claw%d"`, i))
+	}
+	psBody, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": "budget", "cwd": cwd,
+		"tool_name": "PowerShell", "tool_input": map[string]any{"command": strings.Join(psPad, "; ") + "; Set-Content -Path ~/.defenseclaw/config.yaml -Value x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := Decode(Resolve(psBody)); !ok || !incomplete(got) {
+		t.Errorf("PowerShell-tool over-budget state write: header %v, want only the incomplete marker and cwd", got)
+	}
 	if got := header(gap0568Assignments(129)); !incomplete(got) {
 		t.Errorf("129 assignments: header %v, want only the incomplete marker and cwd", got)
 	}
