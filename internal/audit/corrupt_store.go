@@ -88,13 +88,14 @@ func openDaemonStore(dbPath string, warn, progress io.Writer, opts ...StoreOptio
 	// A failed writable SQLite open can checkpoint or delete a damaged store's
 	// WAL as its last connection closes. Check an existing store read-only first,
 	// before any connection with journal_mode(WAL) is allowed to open it.
-	sidecars, err := probeExistingAuditStore(dbPath, warn)
+	probe, err := probeExistingAuditStore(dbPath, warn)
 	if err != nil && !isSQLiteCorrupt(err) {
 		return nil, err
 	}
+	sidecars := probe.sidecars
 	var store *Store
 	if err == nil {
-		store, err = openCheckedStore(dbPath, warn, progress, opts...)
+		store, err = openCheckedStore(dbPath, warn, progress, probe.checked, opts...)
 	}
 	if err == nil || !isSQLiteCorrupt(err) {
 		return store, err
@@ -104,7 +105,7 @@ func openDaemonStore(dbPath string, warn, progress io.Writer, opts ...StoreOptio
 	if preCutover {
 		if rebuildErr := rebuildAuditDB(dbPath, progress, opts...); rebuildErr != nil {
 			err = fmt.Errorf("%w; rebuilding it failed: %v", err, rebuildErr)
-		} else if rebuilt, retryErr := openCheckedStore(dbPath, warn, progress, opts...); retryErr == nil {
+		} else if rebuilt, retryErr := openCheckedStore(dbPath, warn, progress, false, opts...); retryErr == nil {
 			fmt.Fprintf(warn, "[audit] the audit store DefenseClaw 0.x wrote failed SQLite's integrity check (%v); "+
 				"it was rebuilt in place and passes the check now.\n", err)
 			return rebuilt, nil
@@ -169,43 +170,51 @@ type auditSidecarAtStart struct {
 	size   int64
 }
 
+// auditStoreProbe is what the read-only probe found: the SQLite sidecars
+// beside the store at start, and checked when its quick_check read the whole
+// store and found it intact. A skipped or inconclusive check is not checked.
+type auditStoreProbe struct {
+	sidecars []auditSidecarAtStart
+	checked  bool
+}
+
 // readOnlyAuditStoreProbe identifies corruption before a writable connection
 // can consume a damaged WAL. A hot rollback journal yields SQLITE_READONLY;
 // the probe leaves it unchanged and lets SQLite's writable open roll it back.
 // If corruption remains, the start warning says the journal was not archived.
 // Any other read failure with a populated WAL refuses the start, so a failing
 // writable open cannot consume that WAL.
-func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) ([]auditSidecarAtStart, error) {
+func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) (auditStoreProbe, error) {
 	if dbPath == ":memory:" || strings.TrimSpace(dbPath) == "" {
-		return nil, nil
+		return auditStoreProbe{}, nil
 	}
 	absolute, err := filepath.Abs(filepath.Clean(dbPath))
 	if err != nil {
-		return nil, err
+		return auditStoreProbe{}, err
 	}
 	info, err := os.Lstat(absolute)
 	if errors.Is(err, os.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
-		return nil, nil // NewStore retains its existing missing/unsafe-path handling.
+		return auditStoreProbe{}, nil // NewStore retains its existing missing/unsafe-path handling.
 	}
 	if err != nil {
-		return nil, err
+		return auditStoreProbe{}, err
 	}
 	var sidecars []auditSidecarAtStart
 	for _, suffix := range auditDBSQLiteSidecarSuffixes {
 		if sidecar, err := os.Lstat(absolute + suffix); err == nil {
 			sidecars = append(sidecars, auditSidecarAtStart{suffix: suffix, size: sidecar.Size()})
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("audit: inspect SQLite sidecar %s: %w", suffix, err)
+			return auditStoreProbe{}, fmt.Errorf("audit: inspect SQLite sidecar %s: %w", suffix, err)
 		}
 	}
 	prepared, err := prepareAuditDatabasePath(absolute, auditDBPathHooks{})
 	if err != nil {
-		return nil, err
+		return auditStoreProbe{}, err
 	}
 	defer prepared.close()
 	db, err := openAuditReadOnlyPreservingSHM(prepared.path, "")
 	if err != nil {
-		return nil, err
+		return auditStoreProbe{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), startupIntegrityCheckTimeout)
 	defer cancel()
@@ -213,12 +222,12 @@ func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) ([]auditSidecarAtSta
 	validationErr := prepared.validateAfterOpen()
 	closeErr := db.Close()
 	if validationErr != nil || closeErr != nil {
-		return nil, errors.Join(validationErr, closeErr)
+		return auditStoreProbe{}, errors.Join(validationErr, closeErr)
 	}
 	if checkErr != nil && !isSQLiteCorrupt(checkErr) {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) || isTransientSQLiteProbeError(checkErr) {
 			fmt.Fprintf(warn, "[audit] startup integrity check skipped: %v\n", checkErr)
-			return sidecars, nil
+			return auditStoreProbe{sidecars: sidecars}, nil
 		}
 		cause := ""
 		var coded sqliteCoded
@@ -229,14 +238,14 @@ func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) ([]auditSidecarAtSta
 			// The writable open would most likely fail the same way, and its
 			// last connection would checkpoint or delete the WAL as it closed
 			// (rel-1-0-2:GAP-0609). Refuse before any writable connection.
-			return nil, fmt.Errorf("audit: the audit store %s could not be read (%w); the gateway did not open it for writing, "+
+			return auditStoreProbe{}, fmt.Errorf("audit: the audit store %s could not be read (%w); the gateway did not open it for writing, "+
 				"so its -wal file keeps its records. Copy the store with its -wal and -shm files before you inspect it, "+
 				"and run defenseclaw doctor", absolute, checkErr)
 		}
 		fmt.Fprintf(warn, "[audit] read-only probe could not read the store%s: %v; the normal open and its integrity check follow.\n", cause, checkErr)
-		return sidecars, nil
+		return auditStoreProbe{sidecars: sidecars}, nil
 	}
-	return sidecars, checkErr
+	return auditStoreProbe{sidecars: sidecars, checked: checkErr == nil}, checkErr
 }
 
 // isTransientSQLiteProbeError reports contention a later open does not
@@ -386,15 +395,25 @@ func readCarryOverNote(moved string) (carryOverNote, bool) {
 	return note, true
 }
 
-func openCheckedStore(dbPath string, warn, progress io.Writer, opts ...StoreOption) (*Store, error) {
+// openCheckedStore opens the store and runs its startup quick_check, unless
+// the read-only probe has just read the whole store and found it intact
+// (probed). quick_check reads every page, so each run makes the start slower
+// by the size of the store: the probe and this second check took 1.3 s of a
+// 300 MB store's open on Linux (the probe 0.26 s of it), and a Windows
+// per-user restart took 6.6 s at 11 MB and 9.2 s at 272 MB (rel-1-0-6
+// GAP-0332). The store passed the probe a moment before, in this same
+// start, so a second check finds nothing the first did not.
+func openCheckedStore(dbPath string, warn, progress io.Writer, probed bool, opts ...StoreOption) (*Store, error) {
 	store, err := NewStore(dbPath, opts...)
 	if err != nil {
 		return nil, err
 	}
 	store.progress = progress
-	if err := store.startupQuickCheck(warn); err != nil {
-		_ = store.Close()
-		return nil, err
+	if !probed {
+		if err := store.startupQuickCheck(warn); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
 	}
 	if err := store.Init(); err != nil {
 		_ = store.Close()

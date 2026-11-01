@@ -1300,14 +1300,12 @@ func TestCheckpointWALIfLargeBoundedCatchUpHoldsOffAnotherWriter(t *testing.T) {
 
 // rel-1-0-3 GAP-0247, GAP-0136: audit.db is never memory-mapped on Windows,
 // where a sync of a mapped database grew with its size and kept the log from
-// being restarted; elsewhere every audit connection maps up to 256 MiB.
-func TestAuditConnectionsMapTheDatabaseOnlyOffWindows(t *testing.T) {
+// being restarted. rel-1-0-6 GAP-0327: nor elsewhere, where the pages read
+// through the map stayed resident and the gateway's RSS grew with the store.
+func TestAuditConnectionsNeverMapTheDatabase(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
-	want := int64(256 << 20)
-	if runtime.GOOS == "windows" {
-		want = 0
-	}
+	want := int64(0)
 	if got := auditMmapSizeBytes(); got != want {
 		t.Fatalf("auditMmapSizeBytes() = %d on %s; want %d", got, runtime.GOOS, want)
 	}
