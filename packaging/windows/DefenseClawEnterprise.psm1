@@ -34549,6 +34549,34 @@ function Invoke-DefenseClawTimeoutRecovery {
     return $status
 }
 
+function Test-DefenseClawUninstallUsesUntrustedMetadataPurge {
+    <#
+        Whether an uninstall whose deployment evidence is untrusted takes the
+        metadata-free exact-scope purge. p0-round:GAP-1365: a first install
+        killed before it wrote deployment.json leaves StateRoot with its
+        pending transaction and no record. That purge refuses to bypass the
+        transaction, so the first Setup /uninstall FORCE=1 ended 1603 and
+        only a retry finished. A forced uninstall reads nothing of the
+        transaction: with no deployment record it goes on as the forced
+        uninstall (its services checked as this deployment's, StateRoot and
+        the install receipt moved aside, then the state-absent purge), which
+        the retry did. An existing record that is not trusted still takes the
+        metadata-free purge.
+    #>
+    param(
+        [string]$Reason,
+        [bool]$MetadataExists,
+        [switch]$Force
+    )
+    if ([string]::IsNullOrWhiteSpace($Reason)) {
+        return $false
+    }
+    if ($Force -and -not $MetadataExists) {
+        return $false
+    }
+    return $true
+}
+
 function Invoke-DefenseClawUntrustedMetadataRecoveryPurge {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -39858,8 +39886,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -NativeCleanupBinary $NativeCleanupBinary `
                 -PayloadManifest $PayloadManifest `
                 -AllowUnsigned:$AllowUnsigned
-            if (-not [string]::IsNullOrWhiteSpace(
-                    $untrustedEvidenceReason)) {
+            if (Test-DefenseClawUninstallUsesUntrustedMetadataPurge `
+                    -Reason $untrustedEvidenceReason `
+                    -MetadataExists $uninstallMetadataExists `
+                    -Force:$Force) {
                 return Invoke-DefenseClawUntrustedMetadataRecoveryPurge `
                     -Layout $layout `
                     -Sources $sources `
