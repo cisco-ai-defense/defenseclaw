@@ -57,3 +57,38 @@ func TestStopAndSyncConflictsReadInDefenseClawWords(t *testing.T) {
 		t.Fatalf("another error was changed: %#v", other)
 	}
 }
+
+// rel-1-0-6:GAP-0446: a sandbox whose OpenShell gateway was killed in the
+// middle of a create or start keeps a driver claim OpenShell never settles,
+// and every start, stop and delete of it was refused with OpenShell's raw
+// "Conflict: previous driver operation is still pending" text. The refusal
+// now says the sandbox is stuck and does not run, and gives the step that
+// clears it, in DefenseClaw's words.
+func TestPendingDriverOperationReadsAsAStuckSandboxWithItsClearStep(t *testing.T) {
+	for op, raw := range map[string]string{
+		"delete sandbox vs10c-x": `openshell: delete sandbox "vs10c-x": Conflict: previous driver operation is still pending; retry and deletion are blocked`,
+		"start sandbox vs10c-x":  `openshell: start sandbox "vs10c-x": Conflict: previous driver operation may still complete; retry and deletion are blocked`,
+		"stop sandbox vs10c-x":   `openshell: stop sandbox "vs10c-x": FailedPrecondition: previous driver operation is still pending; retry and deletion are blocked`,
+	} {
+		var e *sandboxapi.Error
+		if err := upstream(op, errors.New(raw)); !errors.As(err, &e) || e.Code != sandboxapi.CodeConflict {
+			t.Fatalf("%s: refusal = %#v", op, err)
+		}
+		text := e.Error()
+		for _, want := range []string{
+			"sandbox vs10c-x is stuck", "DefenseClaw cannot run anything in it", "systemctl --user stop openshell-gateway",
+			"~/.local/state/openshell/gateway/openshell.db", "openshell.db-wal", "systemctl --user start openshell-gateway",
+			"`docker ps -a --filter name=--vs10c-x-`", "`docker rm -f`",
+			"`defenseclaw sandbox delete vs10c-x`", "forget every sandbox", "administrator",
+		} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s: %q lacks %q", op, text, want)
+			}
+		}
+		for _, leak := range []string{"Conflict", "FailedPrecondition", "openshell:", "OpenShell: delete sandbox", "retry and deletion are blocked"} {
+			if strings.Contains(text, leak) {
+				t.Fatalf("%s: raw OpenShell text %q reached the person: %q", op, leak, text)
+			}
+		}
+	}
+}

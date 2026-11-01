@@ -1324,7 +1324,29 @@ func vmExitFailure(goos string, managed bool, d openshell.Driver, err error) err
 const (
 	notReadyConflict  = "conflict: sandbox is not ready"
 	stopPhaseConflict = "sandbox must be ready, error, or in an automatic restart to stop"
+	// OpenShell keeps a durable claim on a create or start it handed its
+	// compute driver until the driver answers. A gateway killed in between
+	// never settles it (NVIDIA/OpenShell keeps the claim on purpose: neither
+	// a restart nor the container being gone clears it), so every later
+	// start, stop or delete of the sandbox is refused for good
+	// (rel-1-0-6:GAP-0446).
+	pendingOpConflict    = "previous driver operation is still pending"
+	pendingOpMayComplete = "previous driver operation may still complete"
 )
+
+// pendingOpStep is the plain step that clears a sandbox OpenShell holds on
+// an unsettled driver operation: its gateway forgets the claim only with its
+// database. The commands are the per-user Linux ones; elsewhere the gateway
+// is stopped and started the way it was started.
+const pendingOpStep = "DefenseClaw cannot run anything in it, and OpenShell will not start, stop or delete it again on its own. " +
+	"To clear it: stop the OpenShell gateway (on Linux `systemctl --user stop openshell-gateway`), " +
+	"move its database ~/.local/state/openshell/gateway/openshell.db, with the openshell.db-wal and " +
+	"openshell.db-shm files beside it, to another folder, start the gateway again " +
+	"(`systemctl --user start openshell-gateway`), remove the container the gateway leaves behind for it " +
+	"(`docker ps -a --filter name=--%s-` names it, `docker rm -f` removes it), then run " +
+	"`defenseclaw sandbox delete %s`, which releases what DefenseClaw held for it. Moving the database makes this gateway forget every sandbox it had, so " +
+	"pull or delete the others first (`defenseclaw sandbox list`). On a computer your organization manages, " +
+	"the OpenShell gateway is your administrator's: send them this message"
 
 // conflictWording is the plain DefenseClaw message for an OpenShell conflict
 // about a sandbox that is not up yet (ok false: any other error keeps its
@@ -1334,6 +1356,10 @@ func conflictWording(op string, err error) (message, detail string, ok bool) {
 	lower := strings.ToLower(err.Error())
 	name := strings.TrimSpace(op[strings.LastIndex(op, " ")+1:])
 	switch {
+	case strings.Contains(lower, pendingOpConflict) || strings.Contains(lower, pendingOpMayComplete):
+		return "sandbox " + name + " is stuck: its OpenShell gateway stopped while it was creating or starting the sandbox, " +
+				"and OpenShell holds the sandbox until that operation reports back, which it never will",
+			strings.ReplaceAll(pendingOpStep, "%s", name), true
 	case strings.Contains(lower, stopPhaseConflict):
 		phase := ""
 		if _, after, found := strings.Cut(lower, "current phase: "); found {
