@@ -3592,7 +3592,7 @@ _dc_gateway_post_once() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
   local _dc_post_auth="" _dc_post_arg
   local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path _dc_legacy_post=1
-  local _dc_header_name _dc_header_value _dc_post_output _dc_post_headers _dc_post_sep _dc_field_index
+  local _dc_header_name _dc_header_value _dc_post_output _dc_post_headers _dc_post_sep _dc_field_index _dc_post_data=""
   local -a _dc_post_args _dc_post_auth_args _dc_post_fields
   # A per-user post reads no socket table before it sends (GAP-1453): the
   # native helper proves the owner of the very connection it sends on, with
@@ -3754,6 +3754,11 @@ _dc_gateway_post_once() {
       _dc_header_value="${_dc_header_value# }"
       _dc_post_fields+=("Authorization" "$_dc_header_value")
     fi
+    # The helper's data folder is the one above the hooks folder. It is read
+    # here, not inside the command substitution below: bash 3.2 (macOS
+    # /bin/bash) ends a $( ) at the ")" of a case pattern, so a case there
+    # made the whole file a syntax error and every hook call failed.
+    case "${HOOK_DIR:-}" in /*/hooks) _dc_post_data="${HOOK_DIR%/hooks}" ;; esac
     _dc_post_output="$(
       if [ "$_dc_legacy_post" -eq 1 ]; then
         # A hook can run during an upgrade before the small helper exists.
@@ -3780,8 +3785,6 @@ _dc_gateway_post_once() {
             # 126, as for a helper that cannot run: nothing was sent.
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 126
           fi
-          _dc_post_data=""
-          case "${HOOK_DIR:-}" in /*/hooks) _dc_post_data="${HOOK_DIR%/hooks}" ;; esac
           _DC_HOOK_POST_DATA_DIR="$_dc_post_data" _DC_HOOK_POST_DEADLINE_MS="$_dc_post_remaining_ms" exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
         ) 2>/dev/null |
         defenseclaw_keep_nul_visible
