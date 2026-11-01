@@ -35931,7 +35931,9 @@ function Invoke-DefenseClawForcedUninstallPreparation {
         services or moving StateRoot fails (GAP-1438: a process holds
         StateRoot open), the services get back the startup mode and running
         state they had and the failure is rethrown, so a refused forced
-        uninstall does not leave the host unprotected.
+        uninstall does not leave the host unprotected. A move refused because
+        a file inside StateRoot is in use says so and names the next step
+        (GAP-1474).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -36000,7 +36002,27 @@ function Invoke-DefenseClawForcedUninstallPreparation {
         # which this run still holds.
         Exit-DefenseClawPurgeBundleLock
         $moved = $preparation.state_root + '.forced-uninstall-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
-        [IO.Directory]::Move($preparation.state_root, $moved)
+        try {
+            [IO.Directory]::Move($preparation.state_root, $moved)
+        }
+        catch {
+            # Another program's open file under StateRoot (no delete
+            # sharing) fails the move with the raw .NET "Access to the path
+            # ... is denied", which named no file in use and no next step
+            # (GAP-1474). Say what it is and what to do.
+            $cause = $_.Exception
+            if ($cause -is [Management.Automation.MethodInvocationException] -and $null -ne $cause.InnerException) {
+                $cause = $cause.InnerException
+            }
+            if ($cause -isnot [IO.IOException] -and $cause -isnot [UnauthorizedAccessException]) {
+                throw
+            }
+            throw ('the forced uninstall could not move StateRoot ' + $preparation.state_root +
+                ' aside because a file or folder inside it is in use by another program (' +
+                (ConvertTo-DefenseClawBoundedDiagnostic -Value $cause.Message -MaxLength 256) +
+                '); nothing was removed. Close the program that holds it open (an editor or a console whose ' +
+                'current folder is inside it, a log reader, a backup or anti-virus scan) and run Setup /uninstall FORCE=1 again.')
+        }
         $preparation.moved_state_root = $moved
         return $preparation
     }
