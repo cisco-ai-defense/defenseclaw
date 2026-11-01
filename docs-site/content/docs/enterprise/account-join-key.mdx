@@ -1,0 +1,137 @@
+---
+title: Account join key
+description: How a standalone device reports a per-tenant key for each account that ran an agent, so a fleet service can match device records to its directory accounts without the device sending names or SIDs.
+keywords:
+  - DefenseClaw account join key
+  - account_key
+  - enterprise.account_join
+  - account-join-key
+---
+
+The account join key lets your fleet service match the accounts on a device to the accounts in your directory. The device never sends a name, UPN or SID. It sends a keyed digest that only a holder of your tenant secret can compute.
+
+It is off unless you turn it on. It is not available under Secure Client. It needs DefenseClaw 1.0.7 or later on Linux, macOS and Windows standalone devices.
+
+## Turn it on
+
+1. Make a tenant secret: 32 random bytes, base64url encoded. Use it only for this.
+
+   ```bash
+   openssl rand 32 | basenc --base64url | tr -d '=\n'
+   ```
+
+2. Store it on each device as the protected credential `account-join-key`:
+
+   ```bash
+   printf '%s' "$SECRET" | sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name account-join-key --from-stdin
+   ```
+
+   A value that is not 32 bytes in base64url is refused with `secret_malformed`. Only root (Linux, macOS) or SYSTEM (Windows) can read it. It is never printed or logged.
+
+3. Turn it on in `config.yaml` and sign the bundle with `--min-product-version 1.0.7`:
+
+   ```yaml
+   enterprise:
+     profile: standalone
+     account_join:
+       mode: on
+       generation: 1
+   ```
+
+## What the device reports
+
+`enterprise status --json` and `enterprise verify --json`, run as root or an elevated administrator, add an `account_join` block:
+
+```json
+"account_join": {
+  "state": "on",
+  "generations": [{ "generation": 1, "account_keys": ["ak1:1:a2f018c3bbe491743da16cc799c63d0b"] }],
+  "accounts_without_key": 1,
+  "reason_codes": ["no_directory_id"]
+}
+```
+
+- Keys are computed when the status runs. They are not stored, logged, exported to telemetry or shown to users.
+- Only accounts that ran an agent on the device in the last 30 days get a key, at most 64 per device.
+- A standard user's status has no `account_join` block.
+
+## Which identifier is used
+
+The device uses the first one it has, and only when the directory verified it:
+
+| OS | First | Fallback |
+|---|---|---|
+| Linux (SSSD) | The account's domain SID from SSSD | The `userPrincipalName` from SSSD InfoPipe |
+| Windows | The account's SID, for a domain account only | The UPN from the directory |
+| macOS | (none) | The UPN from the identity store |
+
+Local accounts, machine-domain accounts and accounts with a derived name get no key (`no_directory_id`). `sIDHistory` is never used.
+
+A person's SID key and UPN key differ. A macOS device therefore reports a UPN key for a person whose Linux and Windows devices report a SID key. Compute both from your directory. A UPN rename changes the UPN key, and a move to a new domain changes the SID key.
+
+## How the key is computed
+
+```
+K   = HKDF-SHA256(secret, salt = none, info = "defenseclaw.account-join.v1" || 0x00 || u32be(generation), 32 bytes)
+M   = u32be(len(L)) || L || u32be(len(T)) || T || u32be(len(C)) || C
+key = "ak1:" + generation + ":" + first 32 hex characters of HMAC-SHA256(K, M)
+```
+
+- `L` is `defenseclaw.account-join.v1`.
+- `T` is the tenant ID of the signed bundle anchors, in lowercase.
+- `C` is `sid:` and the SID, or `upn:` and the UPN.
+  - SID: `S-1-5-21-a-b-c-RID` in decimal with no leading zeros, RID 1000 or more.
+  - UPN: Unicode NFC, then Unicode simple case folding of the whole string. `İ` (U+0130) has no simple folding and is kept.
+
+Test vectors, with the secret bytes `00 01 02 … 1f` and tenant `contoso-prod`:
+
+| Generation | C | Key |
+|---|---|---|
+| 1 | `sid:S-1-5-21-1004336348-1177238915-682003330-1105` | `ak1:1:fc6093568064ee498f85407a3a3afa63` |
+| 1 | `upn:alice@contoso.com` | `ak1:1:a2f018c3bbe491743da16cc799c63d0b` |
+| 2 | `upn:alice@contoso.com` | `ak1:2:ed70fcab4483d61004b5768ff3db16b3` |
+
+## Rotate the secret
+
+1. Store the new secret as `account-join-key-next` and sign a config with `next_generation` and `next_not_after` (at most 30 days ahead):
+
+   ```yaml
+   account_join:
+     mode: on
+     generation: 1
+     next_generation: 2
+     next_not_after: "2026-12-01T00:00:00Z"
+   ```
+
+   The device reports keys for both generations until `next_not_after`, then only the current one (`next_generation_expired`).
+
+2. When every device reports generation 2, promote it in one change: store the new secret as `account-join-key`, set `generation: 2`, drop the `next_` keys, and remove `account-join-key-next`.
+
+Removing `account-join-key-next` without promotion changes nothing for generation 1. A device refuses a generation lower than one it already reported (`generation_rollback`). To allow it, remove `account-join-generation.json` from the lifecycle folder as root.
+
+Rotation recovers from a leaked secret. It does not unlink history: during the overlap your service can link old keys to new ones.
+
+## Reason codes
+
+| Code | Meaning |
+|---|---|
+| `secret_missing` | No `account-join-key` is stored. |
+| `secret_malformed` | A stored secret is not 32 bytes in base64url. No other secret is used instead. |
+| `secret_unreadable` | A stored secret could not be read. |
+| `generation_invalid` | A generation number or `next_not_after` is not usable. |
+| `generation_rollback` | The generation is lower than one this device reported. |
+| `next_generation_expired` | `next_not_after` has passed. |
+| `tenant_missing` | No verified bundle anchors with a tenant ID. |
+| `no_directory_id` | An account has no verified SID or UPN. |
+| `canonicalization_failed` | An identifier is not in a form the key accepts. |
+| `account_cap` | More than 64 accounts; the 64 seen most recently get keys. |
+
+Errors and reason codes never contain a name, a SID, a UPN, the secret or part of a key.
+
+## Privacy
+
+- The key is pseudonymised personal data under the GDPR. Anyone with the tenant secret can compute the key of any identifier, so treat the secret like a directory export.
+- Purpose: matching device records to directory accounts in your fleet service. Do not use it for anything else.
+- Your organization is the controller. The secret stays with you: DefenseClaw does not hold it.
+- Retention on the device: an account not seen for 30 days drops out of the report.
+- Local administrators and root are inside the trust boundary: they can read the secret.

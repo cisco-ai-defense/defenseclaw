@@ -73,3 +73,29 @@ func TestOlderBundleWithRemovedConnectorRefusedByFloor(t *testing.T) {
 		t.Fatalf("an older bundle was not refused by the floor: %v", err)
 	}
 }
+
+// A bundle that sets enterprise.account_join needs min_product_version 1.0.7.
+func TestComposeRequiresProductFloorForAccountJoin(t *testing.T) {
+	config := strings.Replace(bundleConfig(t), "  profile: standalone\n", "  profile: standalone\n  account_join:\n    mode: on\n    generation: 1\n", 1)
+	for _, tc := range []struct {
+		min    string
+		refuse bool
+	}{{"", true}, {"1.0.6", true}, {"1.0.7", false}} {
+		root, b := writeBundle(t, config)
+		in := enterprisebundle.ComposeInput{
+			Bundle: b, Root: root, BundleID: tamperBundleID, TenantID: "acme", DeviceGroup: "eng", Version: 5,
+			Platforms: []string{enterprisebundle.PlatformLinux}, CreatedAt: signedAt, CreatedBy: "operator:alice",
+			MinProductVersion: tc.min, ProductVersion: "1.0.7", HostPlatform: enterprisebundle.PlatformLinux, Digester: digester,
+		}
+		_, _, err := enterprisebundle.Compose(context.Background(), in)
+		if tc.refuse {
+			if enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(errString(err), "account_join") {
+				t.Errorf("min %q: got %v, want config_invalid naming account_join", tc.min, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("min %q: %v", tc.min, err)
+		}
+	}
+}

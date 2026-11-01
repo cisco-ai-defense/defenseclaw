@@ -54,6 +54,7 @@ func (l *lifecycle) describeStatusV2(record *Deployment) {
 	if r.Identity == nil {
 		r.Identity = enterprisestatus.IdentityGatewayNotReady()
 	}
+	l.describeAccountJoin()
 }
 
 // describeConnectors builds the connectors block from the installed config,

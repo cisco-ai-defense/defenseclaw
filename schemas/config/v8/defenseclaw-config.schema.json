@@ -5353,6 +5353,31 @@
             }
           }
         },
+        "account_join": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Standalone only. The account join key in the root-only status: off when absent. The tenant secrets are the protected credentials account-join-key and account-join-key-next. Requires min_product_version 1.0.7 in a bundle.",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["on", "off"]
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "next_generation": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "next_not_after": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        },
         "identity": {
           "type": "object",
           "additionalProperties": false,

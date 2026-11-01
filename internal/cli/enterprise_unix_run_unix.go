@@ -576,6 +576,10 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 		} else if value, err = readUnixSecretStdin(cmd.InOrStdin(), caller); err != nil {
 			return nil, false, nil, err
 		}
+		if err := accountJoinSecretFormatError(opts.name, value); err != nil {
+			clear(value)
+			return nil, false, nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+		}
 	}
 	change := &unixSecretChange{env: env, action: action, opts: opts, value: value, caller: caller}
 	// A change this device could not audit is not made: the spool must hold

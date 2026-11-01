@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 	"slices"
 	"sort"
 	"strings"
@@ -229,8 +230,13 @@ type Result struct {
 	Connectors map[string]ConnectorState `json:"connectors,omitempty"`
 	OpenShell  *OpenShellCapability      `json:"openshell,omitempty"`
 	Identity   *IdentityHealth           `json:"identity,omitempty"`
-	LogPath    string                    `json:"log_path,omitempty"`
-	ExitCode   int                       `json:"exit_code"`
+	// AccountJoin is the account join key block of a status or verify run
+	// as root (Linux, macOS) or an administrator (Windows) on the
+	// standalone profile with enterprise.account_join on; nil (omitted)
+	// otherwise (internal/accountjoin).
+	AccountJoin *accountjoin.Report `json:"account_join,omitempty"`
+	LogPath     string              `json:"log_path,omitempty"`
+	ExitCode    int                 `json:"exit_code"`
 	// ConfigRefused marks a run that refused the submitted config before it
 	// changed anything: the policy, services and advisories it reports are
 	// the running deployment's. Text output only (GAP-0564).

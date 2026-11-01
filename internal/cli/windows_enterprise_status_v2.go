@@ -15,6 +15,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 	"os"
 	"sort"
 
@@ -47,6 +48,8 @@ type windowsEnterpriseStatusV2Inputs struct {
 	machinePolicy  func(connector string) bool
 	gatewayHealth  func() ([]byte, error)
 	knownConnector func(connector string) bool
+	// accountJoin computes the account_join block (nil: omitted).
+	accountJoin func() *accountjoin.Report
 }
 
 // windowsEnterpriseStatusV2Read reads the inputs of an installed deployment;
@@ -75,6 +78,7 @@ func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 		in.manifestErr = err
 		return in
 	}
+	in.accountJoin = func() *accountjoin.Report { return windowsAccountJoinReport(in.cfg, layout) }
 	in.manifest, in.manifestErr = readWindowsEnterpriseStatusV2Manifest(layout.ManifestPath)
 	// An unreadable record is already reported by
 	// applyWindowsEnterpriseUnprotectedAgents.
@@ -137,6 +141,9 @@ func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 		// A failed read is a gateway that did not report.
 		body, _ := in.gatewayHealth()
 		result.Identity = enterprisestatus.ParseIdentityHealth(body)
+	}
+	if in.accountJoin != nil {
+		result.AccountJoin = in.accountJoin()
 	}
 }
 

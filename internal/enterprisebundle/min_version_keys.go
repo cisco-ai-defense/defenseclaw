@@ -20,10 +20,14 @@ import (
 // policy it cannot read.
 func CheckKeyProductFloor(cfg *config.Config, minProductVersion string) error {
 	keys := cfg.UsesMinProductVersion106Keys()
+	floor := config.TrustedConnectorsMinProductVersion
+	if later := cfg.UsesMinProductVersion107Keys(); len(later) > 0 {
+		// enterprise.account_join: 1.0.7 and later.
+		keys, floor = append(keys, later...), config.AccountJoinMinProductVersion
+	}
 	if len(keys) == 0 {
 		return nil
 	}
-	floor := config.TrustedConnectorsMinProductVersion
 	min := strings.TrimSpace(minProductVersion)
 	if min == "" || !IsReleaseVersion(min) || semver.Compare("v"+min, "v"+floor) < 0 {
 		return refuse(CodeConfigInvalid, "min_product_version",
