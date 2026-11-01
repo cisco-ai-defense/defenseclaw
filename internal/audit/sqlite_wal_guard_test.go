@@ -1310,3 +1310,53 @@ func TestAuditConnectionsMapTheDatabaseOnlyOffWindows(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-6 GAP-0273: after a flood on a per-user RHEL host the WAL file
+// stayed at 52 MiB through ten idle minutes. Its log was fully copied, but
+// the file was under the 64 MiB idle threshold, and a restart cuts it back
+// only to journal_size_limit, so nothing ever shrank it. With the production
+// threshold, an idle pass trims a file between the trickle size and
+// journal_size_limit to zero, and keeps every event.
+func TestCheckpointWALIfLargeTrimsAnIdleFileUnderTheJournalSizeLimit(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	details := string(make([]byte, 64<<10))
+	written := 0
+	// Past the trickle log (about 8 MiB), well under journal_size_limit.
+	for walFileSize(t, store) <= int64(walTrickleFrames)*walFrameBytes+(1<<20) {
+		if err := store.LogEvent(Event{Action: "hook_decision", Target: "wal-guard", Severity: "INFO", SessionID: "s", Details: details}); err != nil {
+			t.Fatal(err)
+		}
+		written++
+	}
+	grown := walFileSize(t, store)
+	if grown >= auditWALJournalSizeLimitBytes {
+		t.Fatalf("WAL grew to %d bytes, want it under journal_size_limit", grown)
+	}
+	ctx := context.Background()
+	pass, err := store.CheckpointWALIfLarge(ctx, math.MaxInt64, testWALWriterBudget)
+	if err != nil || !pass.Restarted || pass.FileBytes != grown {
+		t.Fatalf("first pass after the flood: %+v, %v; want the log copied and the file kept", pass, err)
+	}
+	pass, err = store.CheckpointWALIfLarge(ctx, math.MaxInt64, testWALWriterBudget)
+	if err != nil || !pass.Truncated || pass.FileBytes != 0 {
+		t.Fatalf("idle pass with a %d-byte WAL: %+v, %v; want it trimmed to zero", grown, pass, err)
+	}
+	if got := countWALGuardEvents(t, store); got != written {
+		t.Fatalf("events after the trim = %d, want %d", got, written)
+	}
+	// A short log is left alone: its file is not trimmed on every pass.
+	logWALGuardEvents(t, store, 3)
+	small := walFileSize(t, store)
+	if _, err := store.CheckpointWALIfLarge(ctx, math.MaxInt64, testWALWriterBudget); err != nil {
+		t.Fatal(err)
+	}
+	pass, err = store.CheckpointWALIfLarge(ctx, math.MaxInt64, testWALWriterBudget)
+	if err != nil || pass.Truncated || pass.FileBytes != small {
+		t.Fatalf("idle pass with a short %d-byte WAL: %+v, %v; want it kept", small, pass, err)
+	}
+	if walIdleTrimBytes >= auditWALJournalSizeLimitBytes || walIdleTrimBytes < int64(walTrickleFrames)*walFrameBytes {
+		t.Fatalf("idle trim threshold %d, want at least the trickle log (%d) and under journal_size_limit (%d)",
+			walIdleTrimBytes, int64(walTrickleFrames)*walFrameBytes, auditWALJournalSizeLimitBytes)
+	}
+}
