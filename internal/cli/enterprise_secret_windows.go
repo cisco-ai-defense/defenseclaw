@@ -315,6 +315,10 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		if value, err = readWindowsSecretValue(source); err != nil {
 			return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
 		}
+		if err := accountJoinSecretFormatError(opts.name, value); err != nil {
+			clear(value)
+			return windowsSecretChange{}, secretFailed("secret_malformed", windowsSecretExitInvalid, err)
+		}
 	case "remove":
 	default:
 		return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("unknown action %q", action))

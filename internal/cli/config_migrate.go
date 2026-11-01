@@ -199,7 +199,7 @@ func rebaseRulePackForMigration(dir string) (*config.RulePackRebasePlan, error) 
 	return &config.RulePackRebasePlan{
 		Files: plan.Files, Digest: plan.Digest, Updated: plan.Updated,
 		Carried: plan.Carried, Expressed: plan.Expressed, AlertOnly: plan.AlertOnly, Disabled: plan.Disabled,
-		Merged: plan.Merged, Linked: plan.Linked, Renamed: plan.Renamed,
+		Merged: plan.Merged, Linked: plan.Linked, Renamed: plan.Renamed, Tagged: plan.Tagged,
 	}, nil
 }
 

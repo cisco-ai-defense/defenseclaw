@@ -523,7 +523,7 @@ profiles. A profile asset is never admission-blocked, and project skill folders
 inside profiles are skipped before verification or registration: no install
 scan, no "is not scanned yet" refusal and no `project_skill_root_unverified`
 warning. Watcher rows for roots outside profiles carry no per-user attribution.
-The scan and scan-finding rows of a `defenseclaw scan skill` or `scan plugin` run
+The scan and scan-finding rows of a `defenseclaw.exe scan skill` or `scan plugin` run
 on an asset in an enrolled user's folder name that user (`user.id`,
 `defenseclaw.user.name`), and the judge model when the judge ran
 (`gen_ai.request.model`, `judge=` in the scan row details).
@@ -541,6 +541,13 @@ on an asset in an enrolled user's folder name that user (`user.id`,
   quarantine that cannot finish leaves its asset blocked in place. The gateway
   retries after 2 minutes, then 4, up to every 30 minutes, and `status` and
   `verify` warn `asset_not_scanned` or `asset_not_quarantined`.
+- **Signed-out owners.** When the source of a quarantine is in the profile of a
+  user who is signed out and Windows gives no S4U logon for the account, the
+  copy is in quarantine and blocked, but the hook guardian removes the original
+  folder only when that user next signs in. Until then `status` and `verify`
+  warn `asset_removal_deferred`, naming the folder and why the guardian waits
+  (a Microsoft Entra ID account, an Active Directory account whose S4U logon
+  was refused, or a local account).
 - **`take_action: false`.** A rejected asset is only recorded and stays usable
   until `take_action` is on again; then `asset_rejected_not_enforced` warns.
 - **`admission.mcp.scan_on_install: false`** admits new MCP servers without a scan
@@ -595,6 +602,14 @@ its verdict. Only the server's own process runs as the user:
 - Only `npx` or `uvx` with a package argument and no code-running flag. The
   launcher must be installed for all users under Program Files; one in the
   profile, or an earlier same-named file on `PATH`, is refused.
+- A definition the scan refuses for its own launcher (not `npx` or `uvx`, a
+  command path, a code-running flag, no package argument) stays blocked and is
+  not scanned again until the definition, the scanner or the admission settings
+  change, or an allow rule admits it. Its tool calls are refused with that
+  reason. Any other failed scan, including a launcher refusal that comes from
+  the computer's `PATH`, is retried after 2 minutes, doubling to 30. An
+  administrator unblock of a refused definition stays until the definition
+  changes.
 - The working directory must be on a local fixed drive, inside the project or the
   user's own profile, in no other user's profile, with no link or junction on the
   way. Otherwise the scan fails with the reason.
@@ -903,6 +918,13 @@ without `PURGE=1`. A plain installed CLI uninstall leaves the lock file and its 
 in place (without `--purge`). They are harmless and the next install reuses them; to remove them, delete
 `C:\ProgramData\Cisco\DefenseClaw-Lifecycle` from an elevated prompt once no
 DefenseClaw run is active. The Secure Client profile keeps the lock unless `PURGE=1`.
+The Claude Code settings cleanup keeps a folder in the profile of the account that runs
+it: `C:\Windows\System32\config\systemprofile\AppData\Local\DefenseClaw\claude-settings-teardown`
+for the guardian and a Setup uninstall. Once a cleanup ends, the folder holds one empty lock
+file. The guardian removes that folder, and the empty `DefenseClaw` folder above it, after each
+pass. A standalone uninstall removes the copy of the account that runs it, with or without
+purge. A folder that still holds an unfinished cleanup stays, and the result names it in a
+`machine_state_kept` warning.
 On a computer without DefenseClaw, uninstall succeeds and changes nothing, so it does
 not remove a lock an earlier uninstall left.
 
@@ -970,6 +992,17 @@ not remove a lock an earlier uninstall left.
   Hermes, Antigravity, Kiro and Copilot hooks point at the removed
   `defenseclaw-hook.exe`, so each call fails to start and none of those agents
   blocks on it ([Hook process control](/docs/enterprise/threat-model)).
+- **Folder permissions stay.** While an account is enrolled, the guardian gives the
+  agent folders and files that hold DefenseClaw's registrations (for example
+  `%USERPROFILE%\.config`, `.config\amp\plugins`, `.config\opencode\plugins`, `.codex`
+  and `.claude\settings.json`) an explicit access list that does not inherit from the
+  profile. Uninstall and `PURGE=1` remove DefenseClaw's entries and the gateway's access,
+  but keep that list. The account keeps full access to its files, but cannot change the
+  permissions of those folders, new items in them do not inherit from the profile, and
+  Administrators are not on the list. To return one to the profile's permissions, run
+  `icacls "<folder or file>" /reset` as LocalSystem (a SYSTEM scheduled task, for
+  example). `(Get-Acl "<path>").AreAccessRulesProtected` is `True` for each one that
+  still has the list.
 
 ## Payload trust
 

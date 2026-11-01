@@ -287,9 +287,30 @@ func failNoAnswer(opts Options, sp spec, failMode string) int {
 	}
 	failMode = noAnswerFailMode(opts, failMode)
 	if opts.ManagedEnterprise {
-		return failUnreachable(opts, sp, failMode, managedGatewayNoAnswerReason)
+		return failUnreachable(opts, sp, failMode, managedNoAnswerReason(opts))
 	}
 	return failUnreachable(opts, sp, failMode, noAnswerReason(opts))
+}
+
+// managedGatewayServiceStopped reports whether the managed gateway service
+// is proven stopped now; tests replace it.
+var managedGatewayServiceStopped = platformManagedGatewayServiceStopped
+
+// managedNoAnswerReason is the reason of a managed call the gateway gave no
+// decision in time. On a stopped Windows gateway service a stall on the host
+// can end the answer budget before the transport reads the service state;
+// the call then says the service is not running, as every other call of
+// the outage does, not that the gateway did not answer (rel-1-0-3 GAP-0319).
+// The fail mode stays the no-answer one. Secure Client keeps its reason.
+func managedNoAnswerReason(opts Options) string {
+	if opts.managedNoAnswerCode != "" {
+		return opts.managedNoAnswerCode
+	}
+	name := strings.TrimSpace(opts.ManagedGatewayServiceName)
+	if !opts.SecureClient && name != "" && managedGatewayServiceStopped(name) {
+		return managedGatewayNotRunningReason
+	}
+	return managedGatewayNoAnswerReason
 }
 
 // noAnswerReason is the hook-failure reason of a call whose gateway gave no

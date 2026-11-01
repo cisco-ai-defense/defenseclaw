@@ -1191,6 +1191,15 @@ func stageWindowsManagedRuntimeRoot(rootPlan WindowsManagedRuntimeRootPlan, jour
 		if err != nil || identity != rootPlan.BaselineIdentity {
 			return claim, fmt.Errorf("enterprise hooks: canonical managed runtime baseline identity changed")
 		}
+		// The standalone install plan refused a per-user install folder
+		// (GAP-1434), but a per-user install made after the plan carries the
+		// same DACL and identity, so stage took the folder over (GAP-1202).
+		// Only an install plan is staged; Upgrade/Repair plans are not.
+		if windowsEnterpriseStandaloneProcess() {
+			if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+				return claim, err
+			}
+		}
 		claim.Identity = identity
 		claim.State = windowsManagedRuntimeStateCanonical
 		if err := journal(claim); err != nil {
@@ -1249,6 +1258,12 @@ func finalizeWindowsManagedRuntimeRoot(rootPlan WindowsManagedRuntimeRootPlan, e
 	}
 	defer windows.CloseHandle(parent)
 	if rootPlan.Baseline == windowsManagedRuntimeBaselineCanonical {
+		// A per-user install made after stage is refused too (GAP-1202).
+		if windowsEnterpriseStandaloneProcess() {
+			if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+				return claim, err
+			}
+		}
 		return validateWindowsManagedRuntimeFinal(parent, target, rootPlan.BaselineIdentity, false)
 	}
 	if expected.Identity == "" {

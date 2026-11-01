@@ -101,6 +101,11 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 	addManagedWindowsAnswer(root, "setup", func(args []string) error {
 		return managedWindowsSetupRefusal(where, args)
 	})
+	// `tui` was a bare unknown command with the generic usage (rel-1-0-3
+	// GAP-0328): the TUI is part of the per-user CLI.
+	addManagedWindowsAnswer(root, "tui", func([]string) error {
+		return withExitCode(managedWindowsTUIAnswer(where), 3)
+	})
 	for _, verb := range []string{"set", "unset"} {
 		verb := verb
 		addManagedWindowsAnswer(configCmd, verb, func([]string) error {
@@ -214,6 +219,17 @@ func managedWindowsAdminCommandAnswer(where, command string) error {
 		"deployment to check and nothing for you to do; your administrator can check the managed deployment %s, "+
 		"and your account's agents with `& '%s' enterprise policy show --user %s`.%s Nothing was changed.",
 		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName(), coverage)
+}
+
+// managedWindowsTUIAnswer tells a user on a managed Windows computer that
+// the DefenseClaw TUI, part of the per-user CLI, is not installed there, and
+// names the administrator's checks instead.
+func managedWindowsTUIAnswer(where string) error {
+	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so the DefenseClaw TUI is not installed on this computer: "+
+		"it is part of the per-user DefenseClaw, which a managed computer does not have, and there is nothing for you to set up. "+
+		"Your administrator can check the managed deployment %s, and your account's agents with `& '%s' enterprise policy show --user %s`. "+
+		"Nothing was changed.",
+		where, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName())
 }
 
 // managedWindowsVersionChangeAnswer tells a user on a managed Windows

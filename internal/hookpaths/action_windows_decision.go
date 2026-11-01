@@ -192,6 +192,12 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 	hereLen := -1
 	quoted := false // the current word has a quote, possibly an empty one
 	startQuoted := false
+	// A Git Bash here-document body is part of its statement: a line end
+	// in it, before the line that is its delimiter, ends no statement
+	// (GAP-0234). delimiterNext marks the word after <<, pendingDoc that
+	// delimiter until its line ends and hereDoc the body being read.
+	delimiterNext := false
+	pendingDoc, hereDoc := "", ""
 	emit := func(value string, isLiteral, isQuoted bool) {
 		result.words = append(result.words, value)
 		result.literal = append(result.literal, isLiteral)
@@ -199,6 +205,10 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 	}
 	flush := func() {
 		if word.Len() > 0 {
+			if delimiterNext {
+				pendingDoc = strings.TrimPrefix(word.String(), "-")
+				delimiterNext = false
+			}
 			emit(word.String(), word.Len() == hereLen, startQuoted)
 			word.Reset()
 		}
@@ -307,8 +317,30 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 			continue
 		}
 		switch c {
-		case ' ', '\t', '\r', '\n':
+		case ' ', '\t':
 			flush()
+		case '\r', '\n':
+			flush()
+			if c == '\r' && (plain || i+1 < len(command) && command[i+1] == '\n') {
+				continue
+			}
+			if hereDoc != "" {
+				end := i
+				if end > 0 && command[end-1] == '\r' {
+					end--
+				}
+				line := command[strings.LastIndexAny(command[:end], "\r\n")+1 : end]
+				if strings.TrimLeft(line, "\t") != hereDoc {
+					continue
+				}
+				hereDoc = ""
+			} else if pendingDoc != "" {
+				hereDoc, pendingDoc = pendingDoc, ""
+				continue
+			}
+			if actionWindowsLineEndsStatement(command, i, plain, result.words) {
+				emit(";", false, false)
+			}
 		case '>', '<', ';', '|', '&':
 			if c == '>' && word.Len() == 1 && (word.String() == "1" || word.String() == "2") &&
 				i+2 < len(command) && command[i+1] == '&' && command[i+2] >= '0' && command[i+2] <= '9' {
@@ -331,8 +363,11 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 			flush()
 			if i+1 < len(command) && command[i+1] == c && (c == '>' || c == '<' || c == '&' || c == '|') {
 				emit(command[i:i+2], false, false)
+				delimiterNext = c == '<'
 				i++
 			} else {
+				// <<< is a here-string, with no delimiter line.
+				delimiterNext = false
 				emit(command[i:i+1], false, false)
 			}
 		default:
@@ -342,6 +377,39 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 	flush()
 	result.ok = quote == 0
 	return result
+}
+
+// actionWindowsLineEndsStatement reports an unquoted line end at
+// command[i] that ends a statement as a ; does: PowerShell, cmd and Git
+// Bash run each line as its own statement. A line end inside quotes, a
+// here-string or a comment does not reach here, and a backtick line
+// continuation is a blank. A line end does not end a statement after an
+// operator that continues the line (; | || & && or a redirect), before a
+// line that starts with | (a PowerShell 7 pipeline), at the CR of a CRLF,
+// in a here-document body, or, in the plain reading, after a \ (Git
+// Bash) or ^ (cmd) continuation; the plain reading keeps a lone CR inside
+// the line, as Git Bash does.
+// Without it the text rule of a first echo or Write-Output statement read
+// the quoted words of every later line as text, and a writer on a later
+// line was not checked (rel-1-0-6:GAP-0234).
+func actionWindowsLineEndsStatement(command string, i int, plain bool, words []string) bool {
+	if len(words) == 0 {
+		return false
+	}
+	switch last := words[len(words)-1]; {
+	case last == ";", last == "|", last == "||", last == "&", last == "&&", actionWindowsRedirectOperator(last) != "":
+		return false
+	}
+	if plain {
+		end := i
+		if end > 0 && command[end-1] == '\r' {
+			end--
+		}
+		if end > 0 && (command[end-1] == '\\' || command[end-1] == '^') {
+			return false
+		}
+	}
+	return !strings.HasPrefix(strings.TrimLeft(command[i+1:], " \t\r\n"), "|")
 }
 
 // actionWindowsHereStringEnd reads the here-string whose opening quote is at

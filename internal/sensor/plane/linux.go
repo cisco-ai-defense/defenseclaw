@@ -430,7 +430,7 @@ func (s *linuxSource) describe(pid int) Event {
 	event.ResponsiblePID = event.PPID
 	// The account that owns the process, while it still exists: a session
 	// that exits before the next poll is otherwise unattributed (GAP-1389).
-	event.User = procprobe.OwnerOfPID(pid)
+	event.UID, event.User = procprobe.OwnerOfPID(pid)
 	return event
 }
 

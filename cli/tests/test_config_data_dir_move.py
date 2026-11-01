@@ -65,3 +65,81 @@ def test_config_set_data_dir_seeds_the_rule_packs_the_gateway_loads(tmp_path, mo
     again = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(home)], obj=AppContext())
     assert again.exit_code == 0, again.output
     assert os.path.isdir(home / "policies" / "guardrail" / "default"), again.output
+
+
+def test_config_set_data_dir_carries_the_records_the_gateway_needs_to_start(tmp_path, monkeypatch):
+    # GAP-0287: the gateway reads the agent versions for hook contract
+    # admission from <data_dir>/agent_discovery.json. Without it in the new
+    # folder every action-mode connector was refused and the gateway could
+    # not start after config set data_dir.
+    home, _ = _install_home(tmp_path, monkeypatch)
+    discovery = b'{"agents": {"claudecode": {"version": "2.1.286 (Claude Code)", "installed": true}}}\n'
+    (home / "agent_discovery.json").write_bytes(discovery)
+    (home / "claudecode_backup.json").write_bytes(b'{"original": true}\n')
+    (home / "gateway.pid").write_text("4242\n")
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    os.symlink(outside, home / "codex_backup.json")
+    moved = tmp_path / "dcdata"
+    moved.mkdir()
+    (moved / "claudecode_backup.json").write_bytes(b'{"kept": true}\n')
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    assert (moved / "agent_discovery.json").read_bytes() == discovery
+    assert os.stat(moved / "agent_discovery.json").st_mode & 0o077 == 0
+    assert (moved / "claudecode_backup.json").read_bytes() == b'{"kept": true}\n'
+    assert not os.path.lexists(moved / "codex_backup.json")
+    assert not os.path.lexists(moved / "gateway.pid")
+    assert (home / "agent_discovery.json").read_bytes() == discovery
+    assert "Copied the connector records to the new data_dir: agent_discovery.json." in result.output
+
+
+def test_config_set_data_dir_copies_no_records_as_an_administrator(tmp_path, monkeypatch):
+    # Review of 4c1ab8bf99: under sudo the account config is resolved and
+    # data_dir is not limited, so a root copy would drop user-chosen files
+    # into any root folder (data_dir /etc/cron.d).
+    home, _ = _install_home(tmp_path, monkeypatch)
+    (home / "agent_discovery.json").write_bytes(b"{}\n")
+    (home / "evil_backup.json").write_bytes(b"* * * * * root id\n")
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: True)
+    moved = tmp_path / "dcdata"
+
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
+
+    assert result.exit_code == 0, result.output
+    assert not os.path.lexists(moved / "agent_discovery.json")
+    assert not os.path.lexists(moved / "evil_backup.json")
+    assert "Did not copy the connector records to the new data_dir: this command runs as an administrator" in result.output
+
+
+def test_a_record_swapped_for_a_symlink_after_the_check_is_not_read(tmp_path, monkeypatch):
+    # Review of 4c1ab8bf99: lstat then open followed a symlink swapped in
+    # between; the copy now opens the source without following links.
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"not yours\n")
+    record = old / "agent_discovery.json"
+    record.write_bytes(b"{}\n")
+    real_lstat = os.lstat
+    swapped = []
+
+    def lstat_then_swap(path, *args, **kwargs):
+        result = real_lstat(path, *args, **kwargs)
+        if not swapped and os.fspath(path) == str(record):
+            swapped.append(True)
+            os.unlink(record)
+            os.symlink(secret, record)
+        return result
+
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
+    monkeypatch.setattr(cmd_config.os, "lstat", lstat_then_swap)
+    notes = cmd_config._carry_connector_records(str(old), str(new))
+
+    monkeypatch.setattr(cmd_config.os, "lstat", real_lstat)
+    assert swapped
+    assert not os.path.lexists(new / "agent_discovery.json")
+    assert any(note.startswith("warning: some connector records were not copied") for note in notes), notes

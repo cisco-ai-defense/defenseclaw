@@ -1019,6 +1019,9 @@ func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allo
 	for _, name := range names {
 		env = append(env, name+"="+vars[name])
 	}
+	if shellparse.MinBraceFields(word) > 1 {
+		return "", false
+	}
 	fields, err := expand.Fields(&expand.Config{Env: expand.ListEnviron(env...)}, word)
 	if err != nil || len(fields) != 1 || strings.ContainsRune(fields[0], 0) ||
 		!allowNewline && strings.ContainsAny(fields[0], "\r\n") {

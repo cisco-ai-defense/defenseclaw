@@ -1186,9 +1186,20 @@ func TestCheckpointWALIfLargePassThatRunsOutOfTimeKeepsThePressureAndEscalates(t
 // the runner's disk: on Windows a flood commit could hold SQLite's lock past
 // the catch-up's lock wait (the pass then defers, as designed), and the timer
 // sat inside the measured hold.
+//
+// rel-1-0-6:GAP-0246: the hold also contained the runner's own disk flushes
+// (the copy under the writer syncs the log and the database file). On hosted
+// Windows runners they set the hold, not this store's pages: restarted passes
+// held the writer 508-514 ms against the 500 ms bound and one pass deferred
+// at the 1 s cap (CI jobs 121366931387, 121981091285, 121986419185,
+// 122736071620). As in the flood test (GAP-0024), the store's writer and
+// checkpoint connections run without flushes (withoutDiskFlushes), so the
+// bound times the catch-up and its lock, and requireNoDiskFlushes confirms
+// the setting held through the passes.
 func TestCheckpointWALIfLargeBoundedCatchUpHoldsOffAnotherWriter(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
+	withoutDiskFlushes(t, store)
 	logWALGuardEvents(t, store, 200)
 	originalFrameBytes := walFrameBytes
 	walFrameBytes = 512 << 10 // each flooded pass crosses the hard ceiling without allocating it
@@ -1269,6 +1280,7 @@ func TestCheckpointWALIfLargeBoundedCatchUpHoldsOffAnotherWriter(t *testing.T) {
 			t.Fatalf("pass %d with another writer flooding audit.db: %+v, %v; want a restart on every pass with a short observed writer hold", i, pass, err)
 		}
 	}
+	requireNoDiskFlushes(t, store)
 	flooding.Store(false)
 	if committed.Load() != 0 || heldOff.Load() < passes {
 		t.Fatalf("the other writer committed %d times under the writer and was held off %d times; want no commits under the writer and a lock on every pass", committed.Load(), heldOff.Load())

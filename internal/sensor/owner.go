@@ -62,6 +62,9 @@ type OwnerLookups struct {
 	Accounts func() []Account
 }
 
+// accountOfUID names the account that holds a uid; a variable for tests.
+var accountOfUID = procprobe.OwnerNameOfUID
+
 // owner is the account a finding is attributed to, or why it is not.
 type owner struct {
 	User, SID, Attribution, Reason string
@@ -603,28 +606,26 @@ func (r *ownerResolver) resolve(processes []procRef, configPaths []string) owner
 			return r.named(instance.sessionUser, instance.sessionSID, AttributionSession)
 		}
 	}
-	if found, ok := r.profileOwner(configPaths); ok {
+	found, ok, ambiguous := r.profileOwner(configPaths)
+	if ok {
 		return found
 	}
-	// Last: on Linux and macOS the creation event of the session's own
-	// process names the account (read from /proc as the event arrived), so a
-	// session that exited before any poll and wrote no configuration file is
-	// still the account that ran it (p0-round GAP-1389).
-	if user, ok := eventUserPOSIX(processes); ok {
-		return owner{User: user, Attribution: AttributionProcessOwner}
+	// Say why the profiles named nobody: none holds the configuration, or
+	// it spans more than one, which is ambiguous (p0-round GAP-1447).
+	config := "no enrolled profile holds the agent's configuration"
+	if ambiguous {
+		config = "the agent's configuration spans more than one enrolled profile, so it is ambiguous"
 	}
-	reason := "the process owner could not be read (" + ownerSourcesFor(ownerGOOS) + ") " +
-		"and no enrolled profile holds the agent's configuration"
+	reason := "the process owner could not be read (" + ownerSourcesFor(ownerGOOS) + ") and " + config
 	switch {
 	case len(matched) == 0 && descendants:
 		reason = "the agent's own process is no longer in the process table, the owner of a process it " +
-			"started is not the session's, and no enrolled profile holds the agent's configuration"
+			"started is not the session's, and " + config
 	case len(matched) == 0 && reused:
 		reason = "the finding's processes have exited and their pids now belong to other processes, " +
-			"whose owners are not the finding's; no enrolled profile holds the agent's configuration"
+			"whose owners are not the finding's; " + config
 	case len(matched) == 0:
-		reason = "the finding's processes are no longer in the process table " +
-			"and no enrolled profile holds the agent's configuration"
+		reason = "the finding's processes are no longer in the process table and " + config
 	}
 	return owner{Attribution: AttributionUnattributed, Reason: reason}
 }
@@ -661,28 +662,6 @@ func eventOwner(processes []procRef) (user, sid string, mixed bool) {
 	return user, sid, false
 }
 
-// eventUserPOSIX is the one account name the creation events of the session's
-// own (non-descendant) processes named on Linux or macOS, where an event
-// carries a name and no SID. A descendant is left out as in eventOwner (a
-// setuid child names another account), and more than one name names none.
-func eventUserPOSIX(processes []procRef) (string, bool) {
-	if ownerGOOS == "windows" {
-		return "", false
-	}
-	user := ""
-	for _, process := range processes {
-		name := strings.TrimSpace(process.User)
-		switch {
-		case process.Descendant, process.SID != "", name == "":
-		case user == "":
-			user = name
-		case user != name:
-			return "", false
-		}
-	}
-	return user, user != ""
-}
-
 // named qualifies an owner with the enrolled table's DOMAIN\name for its
 // SID, which also names an owner whose SID the LSA could not translate.
 func (r *ownerResolver) named(user, sid, attribution string) owner {
@@ -696,30 +675,31 @@ func (r *ownerResolver) named(user, sid, attribution string) owner {
 }
 
 // profileOwner is the enrolled account whose profile holds the agent's
-// configuration files. Paths in more than one profile name no account, and
-// paths outside every profile (a project's AGENTS.md) say nothing.
+// configuration files. Paths in more than one profile name no account and
+// report ambiguous, and paths outside every profile (a project's AGENTS.md)
+// say nothing.
 //
 // A Windows account is identified by its SID. A Linux or macOS account has
 // none and is identified by its name: the enrolled-account table there
 // (the hook guardian's identity records) had no entry at all, so an exited
 // session could not be attributed to the one enrolled profile it wrote
 // (p0-round GAP-1389).
-func (r *ownerResolver) profileOwner(paths []string) (owner, bool) {
-	var found *Account
+func (r *ownerResolver) profileOwner(paths []string) (found owner, ok, ambiguous bool) {
+	var account *Account
 	for _, path := range paths {
-		account := r.accountForPath(path)
+		holder := r.accountForPath(path)
 		switch {
-		case account == nil:
+		case holder == nil:
 			continue
-		case found != nil && accountKey(*found) != accountKey(*account):
-			return owner{}, false
+		case account != nil && accountKey(*account) != accountKey(*holder):
+			return owner{}, false, true
 		}
-		found = account
+		account = holder
 	}
-	if found == nil || accountKey(*found) == "" {
-		return owner{}, false
+	if account == nil || accountKey(*account) == "" {
+		return owner{}, false, false
 	}
-	return owner{User: found.Name, SID: found.SID, Attribution: AttributionEnrolledProfile}, true
+	return owner{User: account.Name, SID: account.SID, Attribution: AttributionEnrolledProfile}, true, false
 }
 
 // accountKey identifies an enrolled account: its SID (Windows, any case),

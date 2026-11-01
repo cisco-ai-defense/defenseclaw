@@ -23,6 +23,9 @@ func TestCopilotAdapterRefusesInvalidEventBinding(t *testing.T) {
 			continue
 		}
 		found = true
+		// The engine's one-time first start is outside each binding's 20 s
+		// budget (rel-1-0-6:GAP-0249).
+		warmPowerShell(t, shell)
 		dir := t.TempDir()
 		body, err := renderHookTemplate("copilot-hook.ps1", templateData{
 			FailMode: "closed", HookBinaryPS: filepath.Join(dir, "missing-hook.exe"), CopilotHookTimeoutMS: 1000,

@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // hookForeignGuardPayloadLimit bounds how much of the hook payload the
@@ -334,6 +335,14 @@ func runForeignHookCheck(connectorName string, stdin io.Reader, stdout io.Writer
 	opts := hookexec.Options{Connector: name, Stdin: stdin}
 	facts := captureHookPayloadFacts(&opts)
 	decision, accountHome, unavailable := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, facts.event, startedAt, startedAt.Add(hookForeignGuardMaxScan))
+	if decision.Outage {
+		if !hookForeignGuardOutageFailsOpen(name, facts.event) {
+			decision = enterprisepolicy.GuardDecision{Deny: true, Reason: hookexec.ManagedGatewayNotRunningReason, Findings: decision.Findings}
+			unavailable = true
+		} else {
+			result.Warnings = append(result.Warnings, foreignHookCheckOutageWarning)
+		}
+	}
 	if decision.Deny {
 		_ = hookForeignGuardRecord(accountHome, name, facts.event, decision, time.Now())
 		result = foreignHookCheckResult{Deny: true, Reason: decision.Reason, Retryable: unavailable}
@@ -351,6 +360,10 @@ func runForeignHookCheck(connectorName string, stdin io.Reader, stdout io.Writer
 	}
 	return 0
 }
+
+// foreignHookCheckOutageWarning is the warning of a --foreign-hook-check
+// call let through a gateway outage by the administrator's open fail mode.
+const foreignHookCheckOutageWarning = "the DefenseClaw gateway is not running; your organization's fail mode lets this call run without DefenseClaw checks until it is back"
 
 // hookForeignGuardMaxScan caps the foreign-hook scan; real hook trees
 // take milliseconds.
@@ -444,13 +457,22 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 	}
 	decision, err := hookForeignGuardExchange(name, event, startedAt, deadline, update)
 	unavailable = err != nil && !update.Decision.Deny
-	// Bounded review P1: the gateway holds the session record, in its
-	// protected data directory. No copy the hook can read is one the user
-	// cannot write (the account-home mirror of 6c2aea5449 could be deleted or
-	// edited), so a guarded connector's call is blocked whenever the gateway
-	// cannot answer for its session, in every fail mode, a gateway outage
-	// under fail mode open included: a session the gateway blocked earlier
-	// may still run the hook it loaded, even after its file was deleted.
+	// The gateway holds the session record in its protected data directory.
+	// When it cannot answer, the call is blocked in every fail mode unless
+	// the service is proven stopped and its read-only clean-session entries
+	// vouch for this agent process and session
+	// (hookForeignGuardCleanSessionOutage); then the managed outage fail mode
+	// decides.
+	if err != nil && hookForeignGuardCleanSessionOutage(name, update, err) {
+		// The gateway service is proven stopped, and it published, read-only,
+		// that this agent process's session was clean at its last answer
+		// (enterprisepolicy.CheckForeignHookCleanMirror). The guard stops
+		// claiming an unknown session; the hook's own request then meets the
+		// same stopped gateway, and hookexec's managed outage path decides
+		// with the administrator's fail mode (open allows with its warning,
+		// closed and strict block).
+		return enterprisepolicy.GuardDecision{Findings: update.Decision.Findings, Outage: true}, accountHome, false
+	}
 	if err != nil {
 		// The gateway holds the session record. Without its answer the call
 		// is blocked in every fail mode, and the reason must not suggest an
@@ -495,6 +517,63 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 
 // hookForeignGuardGOOS is runtime.GOOS (replaceable in tests).
 var hookForeignGuardGOOS = runtime.GOOS
+
+// hookForeignGuardCleanSessionOutage reports a failed session exchange that
+// the hook may treat as a gateway outage of a known clean session. All of
+// these must hold: the exchange error proves the gateway service is not
+// running; this scan found nothing blocking and the event is not a session
+// start; the host is Linux or macOS and the connector's session record is
+// the gateway's; and the gateway's clean-session entry of this agent process
+// is present, trusted and current. Anything else keeps the refusal.
+func hookForeignGuardCleanSessionOutage(name string, update enterprisepolicy.SessionExchange, err error) bool {
+	if !hookexec.ManagedGatewayNotRunning(err) || update.Decision.Deny || update.SessionStart {
+		return false
+	}
+	// Session-local connectors never get here (they return before the
+	// exchange).
+	if hookForeignGuardGOOS != "linux" && hookForeignGuardGOOS != "darwin" {
+		return false
+	}
+	if update.Key.Process == "" {
+		return false
+	}
+	return hookForeignGuardCleanMirror(update.Key) == nil
+}
+
+// hookForeignGuardCleanMirror checks the gateway's clean-session entry of
+// key's agent process for the calling account (replaceable in tests).
+var hookForeignGuardCleanMirror = func(key enterprisepolicy.SessionKey) error {
+	layout, _, _, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return err
+	}
+	serviceUID, err := enterprisepolicy.ForeignHookCleanServiceUID(layout.DataDir)
+	if err != nil {
+		return err
+	}
+	return enterprisepolicy.CheckForeignHookCleanMirror(enterprisepolicy.ForeignHookCleanMirrorCheck{
+		Root:       managed.ForeignHookCleanDir(layout.DataDir),
+		ServiceUID: serviceUID,
+		CallerUID:  os.Getuid(),
+		Key:        key,
+		Now:        time.Now(),
+	})
+}
+
+// hookForeignGuardOutageFailsOpen reports whether the administrator's fail
+// mode lets a guarded --foreign-hook-check call through a proven gateway
+// outage. That path has no hook request after it, so it asks the managed
+// outage rule itself with the options the hook request would use
+// (replaceable in tests).
+var hookForeignGuardOutageFailsOpen = func(name, event string) bool {
+	// The session exchange prepared the managed runtime in this process;
+	// prepare it again so this rule never reads an unprepared one.
+	if prepareEnterpriseManagedHookRuntime(name) {
+		return false
+	}
+	opts := buildHookOptionsForRuntime(name, event, "", "", true)
+	return hookexec.ManagedOutageFailsOpen(opts, hookexec.ErrManagedGatewayNotRunning)
+}
 
 // foreignHookSessionLocal reports a connector whose foreign-hook check cannot
 // reach the gateway's session store on this OS

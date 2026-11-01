@@ -10,11 +10,17 @@
     "schema_version": {
       "type": "integer"
     },
-    "command": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9_]{0,63}$"
-    },
     "ok": {
+      "type": "boolean"
+    },
+    "scope": {
+      "type": "string",
+      "enum": [
+        "user",
+        "all"
+      ]
+    },
+    "profiles_configured": {
       "type": "boolean"
     },
     "refreshed": {
@@ -29,13 +35,53 @@
       "type": "integer",
       "minimum": 0
     },
-    "failed_codes": {
+    "skipped": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failures": {
       "type": "array",
       "items": {
-        "type": "string",
-        "pattern": "^[a-z][a-z0-9_]{0,63}$"
-      },
-      "maxItems": 32
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "lookup_failed",
+              "account_unresolved"
+            ]
+          }
+        }
+      }
+    },
+    "os_cache_flush": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requested": {
+          "type": "boolean"
+        },
+        "flushed": {
+          "type": "string",
+          "enum": [
+            "none",
+            "user",
+            "all"
+          ]
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "sss_cache",
+            "dscacheutil"
+          ]
+        }
+      }
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
     },
     "warnings": {
       "type": "array",
@@ -48,6 +94,9 @@
       "items": {
         "$ref": "#/$defs/message"
       }
+    },
+    "exit_code": {
+      "type": "integer"
     }
   },
   "$defs": {

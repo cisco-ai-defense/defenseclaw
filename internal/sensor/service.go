@@ -698,6 +698,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 		row := agentchain.ProcessRow{
 			PID: process.PID, PPID: process.PPID,
 			Name: process.Name, Cmdline: process.Cmdline, Start: process.StartedAt,
+			UserSID: process.UserSID,
 		}
 		rows = append(rows, row)
 	}
@@ -1177,11 +1178,21 @@ func (s *Service) hostPlaneFindings(
 			StartedAt: session.RootStart,
 		})
 		account := owners.resolve(session.Processes, session.ConfigPaths)
-		if account.Attribution == AttributionUnattributed && session.Root.User != "" && session.Root.UID != nil {
+		if account.Attribution == AttributionUnattributed && session.Root.UID != nil {
 			// The kernel event that started the root process (Tetragon's exec,
-			// or the Linux helper's) named its account with its uid. It is the
-			// root instance's own, never a later holder's of its pid.
-			account = owner{User: session.Root.User, Attribution: AttributionProcessOwner}
+			// the Linux helper's or event source's, or the macOS Endpoint
+			// Security audit token's euid) named its uid. It is the root
+			// instance's own, never a later holder's of its pid. The event
+			// source names the account only from a cache, so a uid it saw for
+			// the first time is named here, off the event loop (p0-round
+			// GAP-1389). A uid no account holds stays unattributed.
+			name := session.Root.User
+			if name == "" {
+				name = accountOfUID(*session.Root.UID)
+			}
+			if name != "" {
+				account = owner{User: name, Attribution: AttributionProcessOwner}
+			}
 		}
 		findings = append(findings, Finding{
 			FindingID:         hostFindingID(session),

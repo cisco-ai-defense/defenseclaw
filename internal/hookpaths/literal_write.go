@@ -93,6 +93,8 @@ func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (opera
 	// A definition runs nothing. A body is read once, where it is defined,
 	// when the command may call it, so an uncalled body stays inert.
 	called := calledFunctions(file, home)
+	var knownValues map[*syntax.Word]string
+	knownValuesRead := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
 			return declaration.Name != nil && called[declaration.Name.Value]
@@ -106,21 +108,41 @@ func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (opera
 			return true
 		}
 		words := make([]string, len(call.Args))
-		// The brace words of a plain cp call are the fixed words bash
-		// makes of them, so its real destination is listed (rel-1-0-6
-		// GAP-0202): the hook client resolves it like any operand.
+		// The brace words of a plain cp call, or of another writer, are
+		// the fixed words bash makes of them, so its real targets are
+		// listed (rel-1-0-6 GAP-0202, GAP-0228): the hook client resolves
+		// them like any operand. tee ~/.ssh/authorized_key{s,x} writes the
+		// keys file; a managed gateway that cannot search the home only
+		// sees the targets the client lists.
 		var braces map[int][]string
 		var argStatic []bool
-		if first, ok := StaticWord(call.Args[0], home); ok && slices.Contains(copyPrograms, programBase(first)) {
+		// A copy operand named by a parameter with one known plain value
+		// is that fixed word, so its destination is listed and resolved
+		// (rel-1-0-6:GAP-0235). Only the copy programs read known values;
+		// the other brace writers (GAP-0228) keep their own readers.
+		var copyValues map[*syntax.Word]string
+		if first, ok := StaticWord(call.Args[0], home); ok && slices.Contains(braceOperandPrograms, programBase(first)) {
+			if slices.Contains(copyPrograms, programBase(first)) {
+				if !knownValuesRead {
+					knownValues, knownValuesRead = knownWordParameterValues(command, file, home), true
+				}
+				copyValues = knownValues
+			}
 			argStatic = make([]bool, len(call.Args))
 			for i, arg := range call.Args {
 				_, argStatic[i] = StaticWord(arg, home)
+				if _, known := copyValues[arg]; known && i > 0 {
+					argStatic[i] = true
+				}
 			}
 			braces = copyBraceWordFields(call.Args, argStatic, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")))
 		}
 		for i, arg := range call.Args {
 			var static bool
 			words[i], static = StaticWord(arg, home)
+			if value, known := copyValues[arg]; known && !static && i > 0 {
+				words[i], static = value, true
+			}
 			if braces[i] != nil {
 				continue
 			}

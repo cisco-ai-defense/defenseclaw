@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -133,6 +134,10 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		if refusal := writeFencedForeignHookAllow(w, decision, answerBy); refusal != "" {
+			// The allow was not answered: its clean-session entry goes too.
+			if runtime.GOOS != "windows" {
+				_ = dropForeignHookCleanMirrors(foreignHookCleanMirrorRoot(dataDir), identity, exchange.Key)
+			}
 			release()
 			writeManagedHookRefusal(w, http.StatusServiceUnavailable, refusal)
 		}
@@ -180,6 +185,7 @@ func (a *APIServer) applyForeignHookSessionOnce(
 	// A removal in progress keeps its own reason through the join
 	// (ApplyForeignHookRemovals checks it first).
 	removalsErr := errors.Join(lockErr, ledgerErr)
+	now := time.Now()
 	decision := enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
 		StateDir:     stateDir,
 		Key:          exchange.Key,
@@ -187,15 +193,43 @@ func (a *APIServer) applyForeignHookSessionOnce(
 		Decision:     exchange.Decision,
 		Removals:     removals,
 		RemovalsErr:  removalsErr,
-		Now:          time.Now(),
+		Now:          now,
 	})
+	// The clean-session entry of an allow is written before the allow is
+	// answered, under both locks, so an allow never reaches the hook without
+	// it; a failed write leaves none and does not change the answer.
+	// Windows publishes none (enterprisepolicy.WriteForeignHookCleanMirrors).
+	// An allow already close to its hold gets none: a removal of the account
+	// may go on once the hold has passed.
+	cleanRoot := ""
+	if runtime.GOOS != "windows" {
+		cleanRoot = foreignHookCleanMirrorRoot(dataDir)
+	}
+	if cleanRoot != "" && !decision.Deny && removalsErr == nil && time.Until(answerBy) > foreignHookFencedWriteTimeout {
+		if err := writeForeignHookCleanMirrors(cleanRoot, identity, exchange.Key, enterprisepolicy.ForeignHookStateHash(exchange.Decision.Findings), now); err != nil {
+			_ = dropForeignHookCleanMirrors(cleanRoot, identity, exchange.Key)
+		}
+	}
 	if !decision.Deny && !time.Now().Before(answerBy) {
 		// Too late to answer allow: a removal of the account may already
 		// have stopped waiting for this exchange.
 		decision = enterprisepolicy.ApplyForeignHookRemovals(decision, exchange.Key, nil, errForeignHookExchangeExpired, time.Now())
 	}
+	if decision.Deny && cleanRoot != "" {
+		// A denial of either key removes both entries.
+		_ = dropForeignHookCleanMirrors(cleanRoot, identity, exchange.Key)
+	}
 	return decision, answerBy, release
 }
+
+// foreignHookCleanMirrorRoot is the clean-session folder of the data
+// directory, and writeForeignHookCleanMirrors and dropForeignHookCleanMirrors
+// publish and remove its entries (replaceable in tests).
+var (
+	foreignHookCleanMirrorRoot   = managed.ForeignHookCleanDir
+	writeForeignHookCleanMirrors = enterprisepolicy.WriteForeignHookCleanMirrors
+	dropForeignHookCleanMirrors  = enterprisepolicy.DropForeignHookCleanMirrors
+)
 
 // A clean scan the session store could not apply is applied again at most
 // foreignHookSessionRecordRetries more times, foreignHookSessionRecordRetryDelay

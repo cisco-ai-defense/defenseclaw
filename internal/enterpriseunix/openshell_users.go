@@ -210,7 +210,22 @@ const (
 	installStateRel     = openshell.TarballStateDir
 	// userSandboxDataRel is the sandbox CLI's data below ~/.defenseclaw.
 	userSandboxDataRel = ".defenseclaw/sandboxes"
+	// openshellConfigRel is the account's OpenShell configuration folder
+	// (openshell.UserConfigDir), where DefenseClaw keeps its gateway
+	// lifecycle lock (openshellLifecycleLockRel).
+	openshellConfigRel        = ".config/openshell"
+	openshellLifecycleLockRel = openshellConfigRel + "/" + openshell.LifecycleLockFile
 )
+
+// defenseclawCacheRel is DefenseClaw's folder in the account's cache folder
+// (os.UserCacheDir), which holds the hook-fire probe folder of image builds
+// (openshell.HookFireProbeDir).
+func (e *Env) defenseclawCacheRel() string {
+	if e.GOOS == "darwin" {
+		return "Library/Caches/defenseclaw"
+	}
+	return ".cache/defenseclaw"
+}
 
 // tarballRels are the only files the tarball install places, relative to the
 // home.
@@ -411,7 +426,13 @@ func (o *commandUserOps) Accounts(ctx context.Context) []SandboxAccount {
 
 // lookupUID resolves an account by uid through the host's account database.
 func (o *commandUserOps) lookupUID(ctx context.Context, uid int) (SandboxAccount, bool) {
-	e := o.env
+	return o.env.lookupAccountUID(ctx, uid)
+}
+
+// lookupAccountUID resolves an account by uid through the host's account
+// database (getent on Linux, dscl on macOS). A lookup that does not answer
+// is no account.
+func (e *Env) lookupAccountUID(ctx context.Context, uid int) (SandboxAccount, bool) {
 	if e.GOOS == "darwin" {
 		res, err := e.Runner.Run(ctx, "dscl", ".", "-search", "/Users", "UniqueID", strconv.Itoa(uid))
 		if err != nil {
@@ -864,10 +885,46 @@ func (o *commandUserOps) Groups(ctx context.Context, a SandboxAccount) ([]string
 // ---------------------------------------------------------------------------
 // Settling accounts after a transaction.
 
+// accountSlot stands for the account in the arguments of an
+// openshellChange line.
+const accountSlot = "\x00account\x00"
+
+// accountChange is a change line the lifecycle made for one or more
+// accounts: line has accountSlot where the account goes.
+type accountChange struct {
+	line     string
+	accounts []string
+}
+
 // openshellChange records what the lifecycle did for the sandbox subsystem
-// in the result, whether or not the run reports repairs.
-func (l *lifecycle) openshellChange(format string, args ...any) {
-	l.result.Changes = append(l.result.Changes, fmt.Sprintf(format, args...))
+// in account (accountSlot in args stands for it), whether or not the run
+// reports repairs. flushAccountChanges puts the lines in the result.
+func (l *lifecycle) openshellChange(account, format string, args ...any) {
+	line := fmt.Sprintf(format, args...)
+	for i := range l.accountChanges {
+		if l.accountChanges[i].line == line {
+			l.accountChanges[i].accounts = append(l.accountChanges[i].accounts, account)
+			return
+		}
+	}
+	l.accountChanges = append(l.accountChanges, accountChange{line: line, accounts: []string{account}})
+}
+
+// flushAccountChanges adds the recorded account changes to the result. A
+// change made the same way for several accounts is one line that counts
+// them and names none: apply, ensure and uninstall documents go to
+// management tooling, which shows them to people who are not the host's
+// administrator (status-v2 GAP-0005, GAP-0013). A change for one account
+// names it.
+func (l *lifecycle) flushAccountChanges() {
+	for _, c := range l.accountChanges {
+		who := c.accounts[0]
+		if len(c.accounts) > 1 {
+			who = fmt.Sprintf("%d accounts", len(c.accounts))
+		}
+		l.result.Changes = append(l.result.Changes, strings.ReplaceAll(c.line, accountSlot, who))
+	}
+	l.accountChanges = nil
 }
 
 // pendingKinds orders the changes an account can wait for: a later kind
@@ -941,6 +998,7 @@ func (l *lifecycle) settleOpenShell(ctx context.Context, op *openshellPlan) {
 	state.Applied = cur
 	l.settlePending(ctx, state, cur)
 	l.reconcileMacOSAgents(ctx, state)
+	l.flushAccountChanges()
 	if err := env.saveOpenShellState(state); err != nil {
 		l.result.AddWarning(stateWriteCode(err, codeState), "could not record the applied sandbox configuration: "+err.Error())
 	}
@@ -996,6 +1054,7 @@ func (l *lifecycle) retryOpenShell(ctx context.Context) {
 	before := len(l.result.Changes)
 	l.settlePending(ctx, state, state.Applied)
 	l.reconcileMacOSAgents(ctx, state)
+	l.flushAccountChanges()
 	if err := l.env.saveOpenShellState(state); err != nil {
 		l.result.AddWarning(stateWriteCode(err, codeState), "could not record the sandbox changes still waiting: "+err.Error())
 	}
@@ -1057,7 +1116,7 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 			// fail on the missing account, GAP-0155). Its sandbox records
 			// stay for the administrator's purge.
 			delete(state.Pending, key)
-			l.openshellChange("dropped the pending %s change of %s: the account no longer exists on this computer", entry.Kind, entry.User)
+			l.openshellChange(entry.User, "dropped the pending %s change of %s: the account no longer exists on this computer", entry.Kind, accountSlot)
 			continue
 		}
 		status, err := ops.Status(ctx, account)
@@ -1138,7 +1197,7 @@ func (l *lifecycle) replaceLegacyDaemon(ctx context.Context, ops SandboxUserOps,
 		l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("the sandbox daemon of %s still runs the earlier DefenseClaw after it was ended; the next run tries again", a.Name))
 		return next
 	}
-	l.openshellChange("replaced the sandbox daemon of %s, which an earlier DefenseClaw started, with this version's: its OpenShell gateway and its sandboxes keep running", a.Name)
+	l.openshellChange(a.Name, "replaced the sandbox daemon of %s, which an earlier DefenseClaw started, with this version's: its OpenShell gateway and its sandboxes keep running", accountSlot)
 	return next
 }
 
@@ -1224,13 +1283,13 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 				if err := l.env.migrateMacOSAgent(ctx, job, jobs); err != nil {
 					return err
 				}
-				l.openshellChange("replaced %s of %s with %s, the label of this DefenseClaw's LaunchAgent, after its sandboxes stopped", job.domain+"/"+job.label, a.Name, job.current)
+				l.openshellChange(a.Name, "replaced %s of %s with %s, the label of this DefenseClaw's LaunchAgent, after its sandboxes stopped", job.domain+"/"+job.label, accountSlot, job.current)
 				continue
 			}
 			if err := l.env.reloadMacOSAgent(ctx, job, job.state.Failure(false) != ""); err != nil {
 				return err
 			}
-			l.openshellChange("reloaded %s for %s after its sandboxes stopped", job.label, a.Name)
+			l.openshellChange(a.Name, "reloaded %s for %s after its sandboxes stopped", job.label, accountSlot)
 		}
 	case "restart":
 		if !active {
@@ -1241,7 +1300,7 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 		if err := ops.Stop(ctx, a, daemonStop(st, StopDaemon)); err != nil {
 			return err
 		}
-		l.openshellChange("restarted the sandbox daemon of %s (no sandbox of this account was running); %s", a.Name, entry.reasonBase())
+		l.openshellChange(a.Name, "restarted the sandbox daemon of %s (no sandbox of this account was running); %s", accountSlot, entry.reasonBase())
 	case "stop":
 		release, err := l.drainAccount(ctx, ops, a, st)
 		if err != nil {
@@ -1251,7 +1310,7 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 		if err := ops.Stop(ctx, a, StopDaemon|StopGateway|StopSocket); err != nil {
 			return err
 		}
-		l.openshellChange("stopped the sandbox daemon and OpenShell gateway of %s: %s", a.Name, entry.reasonBase())
+		l.openshellChange(a.Name, "stopped the sandbox daemon and OpenShell gateway of %s: %s", accountSlot, entry.reasonBase())
 	case "switch":
 		if !active && !l.env.hasHomeSandboxState(a) {
 			// Nothing of the previous setup runs or is kept in this account
@@ -1278,17 +1337,17 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 				return err
 			}
 			if len(removed) > 0 {
-				l.openshellChange("removed the OpenShell that DefenseClaw installed for %s (%d files); %s", a.Name, len(removed), entry.reasonBase())
+				l.openshellChange(a.Name, "removed the OpenShell that DefenseClaw installed for %s (%d files); %s", accountSlot, len(removed), entry.reasonBase())
 			}
 			for _, path := range kept {
 				l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("kept %s of %s: it changed after DefenseClaw installed it", path, a.Name))
 			}
 		}
 		if cur != nil && fallbackOnlySwitch(from, cur) {
-			l.openshellChange("restarted the sandbox daemon and OpenShell gateway of %s on the new fallback (%s)", a.Name, entry.reasonBase())
+			l.openshellChange(a.Name, "restarted the sandbox daemon and OpenShell gateway of %s on the new fallback (%s)", accountSlot, entry.reasonBase())
 			break
 		}
-		l.openshellChange("switched the sandbox setup of %s (%s); %s", a.Name, entry.reasonBase(), sandboxSwitchLeftovers)
+		l.openshellChange(a.Name, "switched the sandbox setup of %s (%s); %s", accountSlot, entry.reasonBase(), sandboxSwitchLeftovers)
 	}
 	return nil
 }
@@ -1783,9 +1842,14 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 		// (keepSandboxStore); the uninstall summary says so once they are
 		// kept (keptSandboxStoreLine).
 		l.sandboxesKept = kept
+		// Several accounts are counted, not named (GAP-0013).
+		who := kept[0]
+		if len(kept) > 1 {
+			who = fmt.Sprintf("%d accounts", len(kept))
+		}
 		r.Changes = append(r.Changes, fmt.Sprintf("stopped the sandbox subsystem; kept the sandboxes of %s in their homes with their records, disks and any work not pulled yet; "+
 			"`%s --purge` of an active deployment deletes them",
-			strings.Join(kept, ", "), env.lifecycleCommand(ActionUninstall)))
+			who, env.lifecycleCommand(ActionUninstall)))
 	case applied != nil && applied.Enabled:
 		r.Changes = append(r.Changes, "stopped the sandbox subsystem; no account had sandboxes to keep")
 	}
@@ -1968,6 +2032,11 @@ func (l *lifecycle) purgeAccountSandbox(a SandboxAccount) {
 	remove(openshellVMStateRel)
 	remove(env.daemonStateRel())
 	remove(installStateRel)
+	// DefenseClaw's own files in the account's OpenShell and cache folders:
+	// the gateway lifecycle lock and the hook-fire probe folder of image
+	// builds. Both stayed after the purge (rel-1-0-2 GAP-0599).
+	remove(openshellLifecycleLockRel)
+	remove(env.defenseclawCacheRel() + "/hookfire")
 	// What the managed `defenseclaw sandbox` keeps below ~/.defenseclaw (the
 	// image records, each sandbox's CLI state; the teardown above writes the
 	// image records again), unless the folder is the account's own
@@ -1986,7 +2055,7 @@ func (l *lifecycle) purgeAccountSandbox(a SandboxAccount) {
 		}
 	}
 	// The folders the install made for itself, once empty.
-	for _, rel := range []string{".local/libexec/openshell", openshellStateRel, openshellShareRel, ".defenseclaw"} {
+	for _, rel := range []string{".local/libexec/openshell", openshellStateRel, openshellShareRel, ".defenseclaw", openshellConfigRel, env.defenseclawCacheRel()} {
 		if _, err := env.removeEmptyBelowHome(a, rel); err != nil {
 			r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not remove the empty %s of %s: %v", rel, a.Name, err))
 		}

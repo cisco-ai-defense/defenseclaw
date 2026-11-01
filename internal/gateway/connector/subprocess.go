@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,6 +44,21 @@ var shimFS embed.FS
 //
 //go:embed all:hooks
 var hookFS embed.FS
+
+// HookScriptFileNames are the base names of the shell hook scripts
+// DefenseClaw writes for agents (hooks/*.sh, not the _-prefixed helpers
+// they source). A sandbox's destinations tell DefenseClaw's own hook
+// processes from the agent's by them.
+func HookScriptFileNames() []string {
+	entries, _ := fs.ReadDir(hookFS, "hooks")
+	var names []string
+	for _, e := range entries {
+		if name := e.Name(); !e.IsDir() && strings.HasSuffix(name, ".sh") && !strings.HasPrefix(name, "_") {
+			names = append(names, name)
+		}
+	}
+	return names
+}
 
 // shimBinaries lists the high-risk commands that get PATH shims.
 var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}

@@ -107,12 +107,23 @@ or an exit code bumps it.
 
 ### What to forward
 
-Some members name accounts or hold free text: warning and error messages,
-`enrollment.accounts`, `services[]`, `changes`,
-`sessions_restart_required.entries`, a receipt's `actor` and `principal`,
-and the bundle `created_by` and `change_summary`. Keep them on the device.
-`forward/` holds one closed schema per document with only the members that
-are safe to send off the device:
+Some members name accounts, hold credential names or free text, or describe
+local detail and the administrator's tenant and key choices. Keep them on
+the device: warning and error messages (with their `subject`, `detail`,
+`reason` and `path`, and a receipt's `error_message`), `enrollment.accounts`,
+`excluded_users` and `excluded_groups`, `services`, `machine_policy`,
+`destinations`, `audit_store`, `scanners`, `api_port_holders`, `log_path`,
+`last_reload_error`, `changes`, `sessions_restart_required.entries`, a
+receipt's `actor` and `principal`, the bundle `created_by` and
+`change_summary`, the credential names (`secret_refs[].name`,
+`secret_refs_missing`, `secret_refs_mismatch`), the identity refresh
+`user_id`, `user_name` and `windows_token_groups_pending`, a bundle's `dir`,
+and the tenant, device group and signing key (`anchors`, `keys`,
+`tenant_id`, `device_group`, `device_groups`, `signer_key_id`). For agent
+sessions that need a restart, forward the `count` and `state` of
+`sessions_restart_required` and the connector names in
+`enforcement_pending` (4.3). `forward/` holds one closed schema per document
+with only the members that are safe to send off the device:
 
 | Forward schema (`forward/`) | Projects |
 |---|---|
@@ -132,7 +143,9 @@ enum. Do not reject the document. A member that a newer DefenseClaw adds is
 then dropped, not an error. `forward/project.py` is a reference projection
 (Python standard library only). The contract tests project a full document
 from Linux, macOS and Windows through each forward schema and check that no
-name remains.
+name remains. They also project every document the contract tests make the
+commands print, and fail when a projection drops a member this section does
+not name, so the guide, the forward schemas and the documents agree.
 
 ## 1. Binaries and paths
 
@@ -751,11 +764,13 @@ Exit 0.
     itself in a maintenance window, then read `bundle status` (4.5) again
     until `count` is 0 with `state` `known`.
 
-  Forward only `count` and the distinct `entries[].agent` values (connector
-  names). `entries[].user` is the account name (a numeric id when the name
-  cannot be resolved), which is personal data; `pid` and `started_at` are for
-  local use. Do not forward them. `entries` lists at most 20 sessions, so the
-  connector names can be incomplete when `count` is above 20. The integer
+  Forward `count` and `state`, and the connector names from
+  `enforcement_pending.connectors` (below). Keep `entries` on the device:
+  `entries[].user` is the account name (a numeric id when the name cannot be
+  resolved), which is personal data, and `pid` and `started_at` are for local
+  use; the forward schemas drop them. `entries` lists at most 20 sessions,
+  so the connector names can be incomplete when `count` is above 20. The
+  integer
   `sessions_restart_required` of a receipt file (4.9) is the count at
   confirmation, not a live value.
 

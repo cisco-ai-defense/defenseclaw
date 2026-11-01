@@ -263,6 +263,9 @@ type lifecycle struct {
 	sandboxesKept       []string
 	sandboxStoreKept    bool
 	openshellRecordKept bool
+	// accountChanges are the sandbox changes of this run's settle, per
+	// line (openshellChange, flushAccountChanges).
+	accountChanges []accountChange
 	// configWrittenDuringRun holds a config.yaml another writer put in place
 	// while a transaction of this run planned its own (applyFiles kept it).
 	// A rollback restores the earlier file, so the newer one is put back
@@ -4047,6 +4050,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// the deployment record, the config and the state for a rerun, or for
 	// an ensure that restores the deployment.
 	removeState := l.opts.Purge || (!l.opts.KeepState && len(errs) == 0)
+	// The gateway's clean-session entries are never kept, also not with
+	// --keep-state: the next gateway writes them again after an allow.
+	if err := os.RemoveAll(env.P(managed.ForeignHookCleanDir(env.Layout.DataDir))); err != nil {
+		errs = append(errs, err)
+	}
 	if removeState {
 		// The MDM wrapper's rotation journal goes with the credentials it
 		// can put back: --keep-state and a failed uninstall keep both, so

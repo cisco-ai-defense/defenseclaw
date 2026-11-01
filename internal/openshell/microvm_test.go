@@ -97,8 +97,8 @@ func TestMicroVMFirstStartDiskFloor(t *testing.T) {
 		imageBytes       uint64
 		need, fail, warn uint64
 	}{
-		{0, 11 << 30, 12 << 30, 22 << 30},
-		{5 << 30, 11 << 30, 12 << 30, 22 << 30},
+		{0, 12 << 30, 13 << 30, 24 << 30},
+		{5 << 30, 12 << 30, 13 << 30, 24 << 30},
 		{12 << 30, 13 << 30, 14 << 30, 26 << 30},
 	} {
 		need, fail, warn := openshell.VMDiskRoom(tc.imageBytes)
@@ -106,12 +106,30 @@ func TestMicroVMFirstStartDiskFloor(t *testing.T) {
 			t.Errorf("image %d: got %d/%d/%d, want %d/%d/%d", tc.imageBytes, need, fail, warn, tc.need, tc.fail, tc.warn)
 		}
 	}
-	if openshell.VMDiskFailBytes != 12<<30 {
+	if openshell.VMDiskFailBytes != 13<<30 {
 		t.Fatal("doctor and preflight floors differ")
 	}
 	warning, err := openshell.VMDiskShortage("/vm/images", 10<<30, 5<<30, "this sandbox's first start")
-	if err == nil || warning != "" || !strings.Contains(err.Error(), "uses about 11.0 GiB") || !strings.Contains(err.Error(), "at least 12.0 GiB") {
+	if err == nil || warning != "" || !strings.Contains(err.Error(), "uses about 12.0 GiB") || !strings.Contains(err.Error(), "at least 13.0 GiB") {
 		t.Fatalf("10 GiB first start: warning %q, error %v", warning, err)
+	}
+}
+
+// GAP-0261: a first Codex MicroVM start was measured taking 12.024 GiB of
+// free space at its peak (image build, cache and disk preparation), so the
+// shared floor that refuses a first start must sit above that peak, and the
+// "uses about" figure must not understate it.
+func TestMicroVMFirstStartFloorCoversTheMeasuredPeak(t *testing.T) {
+	const measuredPeak = 12*(1<<30) + 25*(1<<20) // 12.024 GiB
+	need, fail, _ := openshell.VMDiskRoom(0)
+	if fail <= measuredPeak {
+		t.Fatalf("fail floor %d does not cover the measured first-start peak %d", fail, uint64(measuredPeak))
+	}
+	if need+(1<<29) < measuredPeak {
+		t.Fatalf("first-start use %d understates the measured peak %d by more than half a GiB", need, uint64(measuredPeak))
+	}
+	if openshell.VMDiskFailBytes != fail {
+		t.Fatalf("doctor floor %d differs from the preflight floor %d", openshell.VMDiskFailBytes, fail)
 	}
 }
 
@@ -375,9 +393,9 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 			want: checkWant{"vm-resources", fail, "below what any MicroVM gets"}, fix: &fixWant{text: "ask your administrator", manual: true}},
 
 		{name: "measured first start below floor", setup: func(f *doctorFixture) { f.diskFree = 10 << 30 },
-			want: checkWant{"disk", fail, "MicroVM sandboxes need at least 12.0 GiB"}, fix: &fixWant{text: "uses about 11 GiB", manual: true}},
+			want: checkWant{"disk", fail, "MicroVM sandboxes need at least 13.0 GiB"}, fix: &fixWant{text: "uses about 12 GiB", manual: true}},
 		{name: "disk low", setup: func(f *doctorFixture) { f.diskFree = 15 << 30 },
-			want: checkWant{"disk", warn, "15.0 GiB free under"}, fix: &fixWant{text: "uses about 11 GiB", manual: true}},
+			want: checkWant{"disk", warn, "15.0 GiB free under"}, fix: &fixWant{text: "uses about 12 GiB", manual: true}},
 		// Only the disks prepared from images count: the driver's overlay
 		// templates, the bootstrap rootfs every MicroVM boots with and a
 		// preparation under way are its own state.

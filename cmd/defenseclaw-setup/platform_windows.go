@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winfolders"
+	"github.com/defenseclaw/defenseclaw/internal/winmutex"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -124,34 +125,34 @@ const (
 	stableHookSnapshotSettle     = 10 * time.Millisecond
 )
 
-func acquireSetupLock() (func() error, error) {
+var errSetupLockBusy = errors.New("another DefenseClaw setup operation is already in progress")
+
+// setupLockName is the per-user setup mutex name. The deferred uninstall
+// cleanup script opens the same name.
+func setupLockName() (string, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return nil, fmt.Errorf("resolve setup lock identity: %w", err)
+		return "", fmt.Errorf("resolve setup lock identity: %w", err)
 	}
-	name, err := windows.UTF16PtrFromString(`Global\Cisco.DefenseClaw.Setup.` + user.User.Sid.String())
+	return `Global\Cisco.DefenseClaw.Setup.` + user.User.Sid.String(), nil
+}
+
+// acquireSetupLock takes the per-user setup mutex without waiting. The hold
+// lives on one goroutine locked to its OS thread (winmutex), because only the
+// owning thread can release a Windows mutex.
+func acquireSetupLock() (func() error, error) {
+	lockName, err := setupLockName()
 	if err != nil {
-		return nil, fmt.Errorf("encode setup lock name: %w", err)
+		return nil, err
 	}
-	handle, err := windows.CreateMutex(nil, true, name)
-	if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-		_ = windows.CloseHandle(handle)
-		return nil, errors.New("another DefenseClaw setup operation is already in progress")
+	release, err := winmutex.TryAcquire(lockName, nil)
+	if errors.Is(err, winmutex.ErrBusy) {
+		return nil, errSetupLockBusy
 	}
 	if err != nil {
-		if handle != 0 {
-			_ = windows.CloseHandle(handle)
-		}
 		return nil, fmt.Errorf("acquire setup lock: %w", err)
 	}
-	return func() error {
-		releaseErr := windows.ReleaseMutex(handle)
-		closeErr := windows.CloseHandle(handle)
-		if releaseErr != nil {
-			return releaseErr
-		}
-		return closeErr
-	}, nil
+	return release, nil
 }
 
 func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) {

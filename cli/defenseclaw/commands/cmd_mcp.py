@@ -35,7 +35,7 @@ import re
 import shlex
 import shutil
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -45,6 +45,7 @@ from defenseclaw import connector_paths, ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved_change_audit
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
+from defenseclaw.commands._scan_ui import verdict_kwargs as _verdict_kwargs
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
@@ -534,6 +535,47 @@ def _mcp_scan_findings_verdict(app: AppContext, pe, result, *, name: str, connec
     if action_blocks(action) and not allow:
         return _scan_ui.VERDICT_BLOCKED
     return milder
+
+
+def _mcp_scan_audit_verdict(app: AppContext, pe, result, *, name: str, connector: str) -> str:
+    """The audit verdict of an ``mcp scan``: what its scan line says (GAP-0302).
+
+    ``block`` when the admission policy refuses the server at this severity,
+    ``clean`` for informational findings only, ``warn`` for other findings.
+    Empty (the gateway infers it) for a clean scan.
+    """
+    from defenseclaw.commands import _scan_ui
+
+    if result.is_clean():
+        return ""
+    verdict = _mcp_scan_findings_verdict(app, pe, result, name=name, connector=connector)
+    if verdict == _scan_ui.VERDICT_BLOCKED:
+        return "block"
+    return "clean" if verdict == _scan_ui.VERDICT_INFO else "warn"
+
+
+def _mcp_admission_audit_verdict(decisions: list, result) -> str:
+    """The audit verdict of an ``mcp set`` scan from its admission decisions (GAP-0302).
+
+    The scan row says ``block`` when every connector that needed the scan
+    refuses the server, so it matches the install-rejected row that follows;
+    ``warn`` (``clean`` for informational findings) when they all write it.
+    Empty when the connectors disagree or the scan is clean: the row then
+    keeps the gateway's severity verdict and each connector's own
+    install-rejected or install-warning row says what happened there.
+    """
+    if result is None or result.is_clean():
+        return ""
+    severity = str(result.max_severity() or "").upper()
+    labels = set()
+    for decision in decisions:
+        if decision.verdict in ("blocked", "rejected"):
+            labels.add("block")
+        elif decision.verdict in ("warning", "allowed"):
+            labels.add("clean" if severity == "INFO" else "warn")
+        else:
+            return ""
+    return labels.pop() if len(labels) == 1 else ""
 
 
 def _mcp_list_json_items(
@@ -1028,12 +1070,16 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
               audit_target: str = "",
               pack_cache: RulePackOverlayCache | None = None,
               connect_hint: str = "",
-              failures: list[Exception] | None = None) -> ScanResult | None:
+              failures: list[Exception] | None = None,
+              audit_verdict: Callable[[ScanResult], str] | None = None) -> ScanResult | None:
     """Run the MCP scanner on *target*.  Returns None on fatal error.
 
     *connect_hint* replaces the default "then scan again" line printed after a
     connection error (``mcp set`` says what to run instead, GAP-2398).
     *failures*, when given, receives the exception of a failed scan.
+    *audit_verdict*, when given, names the admission verdict (clean, warn or
+    block) the scan's audit row records, so the row reads what the command
+    decides rather than "warn" for every finding (GAP-0302).
     """
     from dataclasses import replace
 
@@ -1130,6 +1176,7 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
         app.logger,
         replace(result, target=audit_target) if audit_target else result,
         connector=connector or None,
+        **_verdict_kwargs(audit_verdict(result) if audit_verdict else ""),
     )
     return result
 
@@ -1475,6 +1522,9 @@ def _scan_all_mcp(
             json_error_sink=json_errors if as_json else None,
             audit_target=_mcp_scoped_scan_target(connector, s.name),
             pack_cache=pack_cache,
+            audit_verdict=lambda r, _name=s.name: _mcp_scan_audit_verdict(
+                app, pe, r, name=_name, connector=connector,
+            ),
         )
         if result is None:
             errored += 1
@@ -1780,6 +1830,9 @@ def _scan_one_resolved(
         connector=connector,
         audit_target=_mcp_scoped_scan_target(connector, entry.name) if entry else "",
         pack_cache=pack_cache,
+        audit_verdict=lambda r: _mcp_scan_audit_verdict(
+            app, pe, r, name=entry.name if entry else target, connector=connector,
+        ),
     )
     if result is None:
         return "error"
@@ -2926,6 +2979,9 @@ def set_server(
             allow_private=allow_private,
             connect_hint="  Check that the server is running and reachable.",
             failures=scan_failures,
+            audit_verdict=lambda r: _mcp_admission_audit_verdict(
+                [_admit(c, scan_result=r) for c in connectors if pre[c].verdict == "scan"], r,
+            ),
         )
         if result is None and (
             not _scan_did_not_finish(scan_failures) or _unverified_server_blocks(app.cfg)

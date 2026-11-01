@@ -760,3 +760,119 @@ func TestMigrateManagedStandaloneConfigRefusesBundleBindingOverUnreadableGenerat
 		})
 	}
 }
+
+// GAP-0268: a rule without tags loaded on 0.8.x, and a config_version 8
+// document naming such a pack as rule_pack_dir (the fixture of the vsweep7
+// 1.0.0 -> 1.0.6 upgrade lane) failed the upgrade check with "the rebased
+// pack does not load: rule 0 tags must not be empty", nothing changed. The
+// 1.0 copy gives each such rule the tag custom and keeps the rest of it;
+// the operator's folder stays as it is.
+func TestConfigMigrateTagsTheUntaggedRulesOfACustomPack(t *testing.T) {
+	cases := []struct {
+		name, file, rule, id string
+		tags                 []string
+	}{
+		{name: "pattern-only rule without tags in a file of a shipped category", file: "rules/zz-team.yaml", tags: []string{"custom"},
+			id: "TEAM-LANE-RULE", rule: "version: 1\ncategory: c2\nrules:\n  - id: TEAM-LANE-RULE\n" +
+				"    pattern: \"team-lane-marker-literal\"\n    title: \"team lane rule\"\n    severity: MEDIUM\n    confidence: 0.8\n"},
+		{name: "rule with an expression and empty tags in a category of yours", file: "rules/acme.yaml",
+			id: "ACME-EXPR", tags: []string{"custom"}, rule: "version: 1\ncategory: acme\nrules:\n  - id: ACME-EXPR\n    pattern: acme-[0-9]+\n" +
+				"    expression: \"f.commands.exists(c, c.program == 'acme')\"\n    title: Acme\n    severity: HIGH\n" +
+				"    confidence: 0.9\n    tags: []\n"},
+		{name: "blank and repeated tags", file: "rules/acme.yaml", id: "ACME-DUP", tags: []string{"acme"},
+			rule: "version: 1\ncategory: acme\nrules:\n  - id: ACME-DUP\n    pattern: acme-dup-literal\n    title: Acme dup\n" +
+				"    severity: LOW\n    confidence: 0.5\n    tags: [\"\", acme, \" acme \"]\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			pack := filepath.Join(dir, "policies", "guardrail", "team")
+			files, err := policyassets.Files()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, file := range files {
+				if rel, ok := strings.CutPrefix(file.Path, "guardrail/default/"); ok {
+					target := filepath.Join(pack, filepath.FromSlash(rel))
+					if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(target, file.Data, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			own := filepath.Join(pack, filepath.FromSlash(tc.file))
+			if err := os.WriteFile(own, []byte(tc.rule), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "config.yaml")
+			v8 := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  mode: action\n  scanner_mode: local\n" +
+				"  rule_pack_dir: " + pack + "\nobservability: {}\nupdate_check: false\n"
+			if err := os.WriteFile(path, []byte(v8), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			input, err := configMigrateV9Input(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dry := input
+			dry.DryRun = true
+			if _, err := config.MigrateV9(context.Background(), dry); err != nil {
+				t.Fatalf("the upgrade check refuses the pack: %v", err)
+			}
+			result, err := config.MigrateV9(context.Background(), input)
+			if err != nil {
+				t.Fatalf("migrate the pack: %v", err)
+			}
+			copyDir := pack + "-1.0"
+			if got := string(result.Migrated); !strings.Contains(got, "path: "+copyDir) {
+				t.Fatalf("want the 1.0 copy of the pack pinned:\n%s", got)
+			}
+			loaded, err := guardrail.LoadRulePack(copyDir)
+			if err != nil {
+				t.Fatalf("the 1.0 copy does not load: %v", err)
+			}
+			var found *guardrail.RuleDefYAML
+			for _, file := range loaded.RuleFiles {
+				for i := range file.Rules {
+					if file.Rules[i].ID == tc.id {
+						found = &file.Rules[i]
+					}
+				}
+			}
+			if found == nil {
+				t.Fatalf("the 1.0 copy has no %s", tc.id)
+			}
+			if !slices.Equal(found.Tags, tc.tags) {
+				t.Errorf("%s tags %q, want %q", tc.id, found.Tags, tc.tags)
+			}
+			var source guardrail.RulesFileYAML
+			if err := yaml.Unmarshal([]byte(tc.rule), &source); err != nil {
+				t.Fatal(err)
+			}
+			want := source.Rules[0]
+			if found.Pattern != want.Pattern || found.Title != want.Title || found.Severity != want.Severity ||
+				found.Confidence != want.Confidence {
+				t.Errorf("%s changed beyond its tags: %+v, was %+v", tc.id, *found, want)
+			}
+			if want.Expression != "" && found.Expression != want.Expression {
+				t.Errorf("%s expression %q, was %q", tc.id, found.Expression, want.Expression)
+			}
+			if !slices.ContainsFunc(result.Record.Notes, func(note string) bool {
+				return strings.Contains(note, tc.id) && strings.Contains(note, "which 1.0 refuses")
+			}) {
+				t.Errorf("no note names %s and its tags: %q", tc.id, result.Record.Notes)
+			}
+			if len(result.Record.TaggedRules) != 1 || !strings.Contains(result.Record.TaggedRules[0], tc.id) {
+				t.Errorf("tagged rules %q, want %s named for the upgrade summary", result.Record.TaggedRules, tc.id)
+			}
+			if kept, err := os.ReadFile(own); err != nil || string(kept) != tc.rule {
+				t.Errorf("the operator's %s changed (%v)", tc.file, err)
+			}
+		})
+	}
+}

@@ -1000,9 +1000,14 @@ func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHoo
 
 // pluginJournalBlockDecision refuses a plugin whose journal entry, under
 // its name or plugin@marketplace as the watcher records a Claude Code
-// marketplace plugin, holds an install block or a runtime disable. The hook
-// sees the plugin name only, and a blocked plugin's files can stay where
-// the agent runs them, so its block is enforced here too (GAP-1189).
+// marketplace plugin, holds an install block, a runtime disable or a
+// quarantine. The hook sees the plugin name only, and a blocked plugin's
+// files can stay where the agent runs them, so its block is enforced here
+// too (GAP-1189). Quarantine moves only the cache copy: Claude Code runs a
+// local-marketplace plugin's commands, skills and MCP servers from the
+// marketplace folder, so `plugin quarantine` alone left /plugin:command
+// running (GAP-0270). `plugin restore` clears the file action, which lifts
+// this refusal.
 func (a *APIServer) pluginJournalBlockDecision(name, connector, runtimeSurface string) (config.AssetPolicyDecision, bool) {
 	if a == nil || a.store == nil || strings.TrimSpace(name) == "" {
 		return config.AssetPolicyDecision{}, false
@@ -1020,14 +1025,20 @@ func (a *APIServer) pluginJournalBlockDecision(name, connector, runtimeSurface s
 		if !config.SameAssetName(plugin, name) && !config.SameAssetName(entry.TargetName, name) {
 			continue
 		}
-		if entry.Actions.Install != "block" && entry.Actions.Runtime != "disable" {
+		reason, source := fmt.Sprintf("plugin %q is blocked by install admission", entry.TargetName), "install-block"
+		switch {
+		case entry.Actions.Install == "block" || entry.Actions.Runtime == "disable":
+		case entry.Actions.File == "quarantine":
+			// Worded as a disabled plugin for the agent (runtime-disable,
+			// agentAssetPolicySubject); the audit reason says quarantined.
+			reason, source = fmt.Sprintf("plugin %q is quarantined", entry.TargetName), "runtime-disable"
+		default:
 			continue
 		}
-		reason := fmt.Sprintf("plugin %q is blocked by install admission", entry.TargetName)
 		if detail := strings.TrimSpace(entry.Reason); detail != "" {
 			reason += ": " + detail
 		}
-		return runtimeAssetDisableBlockDecision("plugin", name, connector, runtimeSurface, reason, "install-block"), true
+		return runtimeAssetDisableBlockDecision("plugin", name, connector, runtimeSurface, reason, source), true
 	}
 	return config.AssetPolicyDecision{}, false
 }

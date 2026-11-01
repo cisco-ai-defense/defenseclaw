@@ -90,7 +90,8 @@ const ReplacedLinkFactPrefix = "\x00replaced-link:"
 // its links stay known. "1" is the only value. Only a gateway that cannot
 // open the command directory itself (ProtectHome) reads it, in place of
 // those walks of the user home; the rename and link reading itself is still
-// its own (GAP-2564, GAP-2600).
+// its own, except whether a move source it may not read is a plain file
+// (GAP-2564, GAP-2600, GAP-0091).
 const LinksStableKey = "\x00links-stable"
 
 // GlobFactPrefix keys the hook client's expansion of one pathname pattern
@@ -425,6 +426,11 @@ func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (stri
 	}
 	// Fields removes quotes and backslash escapes like the shell; a target
 	// that splits into several fields is an ambiguous redirect, not a write.
+	// A brace range of two or more elements is several fields: refuse it
+	// before building them all (GAP-0568).
+	if shellparse.MinBraceFields(word) > 1 {
+		return "", false
+	}
 	fields, err := expand.Fields(&expand.Config{Env: env}, word)
 	if err != nil || len(fields) != 1 {
 		return "", false
@@ -935,6 +941,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		// field (copilotargs.WriteArgsWithoutMetadata): describe that call.
 		if clean, ok := copilotargs.WriteArgsWithoutMetadata(tool, args); ok {
 			args = clean
+		}
+	}
+	if tool == "patch" && strings.EqualFold(strings.TrimSpace(connector), "hermes") {
+		// The gateway judges a Hermes replace patch as the edit it makes:
+		// describe that call, as write_file is described (GAP-0680).
+		if edit, ok := hermesReplaceEditArgs(args); ok {
+			tool, args = "edit", edit
 		}
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
@@ -2513,6 +2526,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
+	knownWords, knownValues := knownWordParameters(command, file, home)
 	stackPlaces := directoryStackPlaces(file, command, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds, wrappedCds := false, false, false
@@ -2617,6 +2631,13 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		// non-static word would open an unbounded copy scope that makes
 		// every write of the call opaque (rel-1-0-6 GAP-0202).
 		if slices.Contains(copyPrograms, program) {
+			// A copy operand named by a parameter with one known plain
+			// value is that fixed word (rel-1-0-6:GAP-0235).
+			for i := 1; i < len(args); i++ {
+				if value, known := knownValues[args[i]]; known && !static[i] {
+					words[i], static[i] = value, true
+				}
+			}
 			args, words, static = spliceCopyBraceWords(args, words, static, copyBraceWordFields(args, static, env))
 		}
 		// A directory-stack tilde (~1, ~-) in a copy or archive argv is one
@@ -2720,9 +2741,11 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			// (GAP-2551).
 			for _, dir := range callDirs {
 				if len(args) == 3 && !static[1] && static[2] &&
-					quotedDynamicCopySource(args[1]) && words[2] != "" && !strings.HasPrefix(words[2], "-") {
+					(quotedDynamicCopySource(args[1]) || knownWords[args[1]]) && words[2] != "" && !strings.HasPrefix(words[2], "-") {
 					// A quoted source is one argv word. If it expands to an option,
-					// cp has no source and cannot write its fixed destination.
+					// cp has no source and cannot write its fixed destination. An
+					// unquoted parameter with one known plain value is one such
+					// word too (knownWordParameterUses, rel-1-0-2:GAP-0004).
 					links.copyDestinations = append(links.copyDestinations, OperandPath(words[2], dir))
 					links.noteCopyEnd(OperandPath(words[2], dir), copyEnd)
 					continue
@@ -2959,7 +2982,8 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		// answer from the user-side hook, which ran the same walks on the
 		// user view of the disk (LinksStableKey, GAP-2564); for a nested
 		// cd or a find -exec mv too (GAP-2600). The rename reading is
-		// always the gateway own.
+		// the gateway own; only a move source it may not read is judged
+		// by that user-side reading (GAP-0091).
 		stable := true
 		moves := len(renameOps) > 0 || len(findMoves) > 0
 		walked := moves || wrappedCds
@@ -2971,7 +2995,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			// statement walk placed it and every link (GAP-2602).
 			stable = false
 		case moves:
-			stable = links.followRenames(renameOps)
+			stable = links.followRenames(renameOps, userView)
 		}
 		// LINK/.. resolves from the link target, which no lexical reading
 		// places; both gateways read it, so a LinksStableKey cannot hide it.
@@ -3899,7 +3923,8 @@ func quotedDynamicCopySource(word *syntax.Word) bool {
 }
 
 // QuotedDynamicCopyDestinations lists the fixed destinations of cp calls
-// whose only source is a quoted scalar parameter. The source is one argv
+// whose only source is a quoted scalar parameter, or an unquoted one with a
+// known plain value (knownWordParameterUses). The source is one argv
 // word; an option value cannot turn the fixed destination into a write
 // somewhere else because it leaves cp without a source operand.
 func QuotedDynamicCopyDestinations(command, cwd, home string) []string {
@@ -3908,9 +3933,10 @@ func QuotedDynamicCopyDestinations(command, cwd, home string) []string {
 		return nil
 	}
 	var destinations []string
+	knownWords := knownWordParameterUses(command, file, home)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) != 3 || !quotedDynamicCopySource(call.Args[1]) {
+		if !ok || len(call.Args) != 3 || !quotedDynamicCopySource(call.Args[1]) && !knownWords[call.Args[1]] {
 			return true
 		}
 		program, programOK := StaticWord(call.Args[0], home)

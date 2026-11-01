@@ -18,15 +18,29 @@ import (
 // the evaluation limit before any reader expands it (GAP-0187).
 const maxCopyBraceWords = shellparse.MaxBraceFields
 
+// braceOperandPrograms are the writers whose plain brace operands the
+// literal write reader expands before it lists their targets: the copy
+// programs (GAP-0202) and the writers that name a target file as an
+// operand (GAP-0228). A brace operand of any of them is several fixed
+// words bash expands before the program runs.
+var braceOperandPrograms = []string{
+	"cp", "gcp", "tee", "gtee", "dd", "gdd", "sed", "gsed", "truncate", "gtruncate",
+	"install", "ginstall", "mv", "gmv", "ln", "gln",
+}
+
 // copyBraceWordFields returns, by argv index, the words bash makes of each
 // copy operand spelled as a brace expansion of plain text (cp a.txt{,.orig},
 // cp {a.txt,b.txt} dir): bash expands such a word to several fixed words
 // before cp runs, so the call is read with them, the way the hook client
 // and ActionCommandDecision judge the real targets (rel-1-0-6 GAP-0202).
-// The shell expands a leading ~/ of a field to the home, as Fields does. A
-// word with a quote, parameter, substitution or pattern, a field that is
-// empty or keeps a tilde (~user), and a call past maxCopyBraceWords words
-// keep the dynamic reading (nil).
+// The shell expands a leading ~/ of a field to the home, as Fields does,
+// and removes the quotes of a quoted part ("key"{s,x}, key{"s",x}) and a
+// $HOME the reader knows. An empty field is dropped, as bash drops it
+// ({,keylink} is keylink; GAP-0228). A word with another parameter, a
+// substitution or an unquoted pattern stays dynamic, and a field that keeps
+// a tilde (~user) or a call past maxCopyBraceWords words keeps the dynamic
+// reading of the call (nil); a range that alone takes the call past it is
+// refused before it is expanded (GAP-0568).
 func copyBraceWordFields(args []*syntax.Word, static []bool, env expand.Environ) map[int][]string {
 	var fields map[int][]string
 	total := len(args)
@@ -34,30 +48,34 @@ func copyBraceWordFields(args []*syntax.Word, static []bool, env expand.Environ)
 		if i == 0 || static[i] || arg == nil || len(arg.Parts) == 0 {
 			continue
 		}
-		plain := true
-		for _, part := range arg.Parts {
-			lit, ok := part.(*syntax.Lit)
-			if !ok || strings.ContainsAny(lit.Value, "*?[") {
-				plain = false
-				break
-			}
-		}
 		braced := *arg
-		if !plain || !syntax.SplitBraces(&braced) {
+		if !braceWordFixed(arg.Parts, env) || !syntax.SplitBraces(&braced) {
 			continue
 		}
-		words, err := expand.Fields(&expand.Config{Env: env}, arg)
-		if err != nil || len(words) < 2 {
+		// A brace range already past the cap is refused before it is
+		// expanded (rel-1-0-2 GAP-0568). MinBraceFields never exceeds the
+		// non-empty fields the range makes (each range element is a
+		// non-empty literal), so this is the cap check below done early,
+		// with the same answer: the dynamic reading of the call (nil).
+		if uint64(total)+shellparse.MinBraceFields(arg) > maxCopyBraceWords+1 {
 			return nil
+		}
+		expanded, err := expand.Fields(&expand.Config{Env: env}, arg)
+		if err != nil {
+			return nil
+		}
+		words := make([]string, 0, len(expanded))
+		for _, word := range expanded {
+			if strings.HasPrefix(word, "~") {
+				return nil
+			}
+			if word != "" {
+				words = append(words, word)
+			}
 		}
 		total += len(words) - 1
 		if total > maxCopyBraceWords {
 			return nil
-		}
-		for _, word := range words {
-			if word == "" || strings.HasPrefix(word, "~") {
-				return nil
-			}
 		}
 		if fields == nil {
 			fields = make(map[int][]string)
@@ -65,6 +83,47 @@ func copyBraceWordFields(args []*syntax.Word, static []bool, env expand.Environ)
 		fields[i] = words
 	}
 	return fields
+}
+
+// braceWordFixed reports whether parts expand to fixed text: unquoted
+// literals without a pattern, quoted literals, and $HOME or ${HOME} when env
+// knows the home.
+func braceWordFixed(parts []syntax.WordPart, env expand.Environ) bool {
+	haveHome := env.Get("HOME").String() != ""
+	for _, part := range parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			if strings.ContainsAny(part.Value, "*?[") {
+				return false
+			}
+		case *syntax.SglQuoted:
+			if part.Dollar {
+				return false
+			}
+		case *syntax.DblQuoted:
+			if part.Dollar {
+				return false
+			}
+			for _, inner := range part.Parts {
+				switch inner := inner.(type) {
+				case *syntax.Lit:
+				case *syntax.ParamExp:
+					if !homeParam(inner, haveHome) {
+						return false
+					}
+				default:
+					return false
+				}
+			}
+		case *syntax.ParamExp:
+			if !homeParam(part, haveHome) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // spliceCopyBraceWords returns args, words and static with each word that

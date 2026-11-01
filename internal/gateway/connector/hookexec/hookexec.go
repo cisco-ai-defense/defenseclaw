@@ -283,6 +283,9 @@ type Options struct {
 	// answeredErrorStatus records an HTTP refusal seen before a retry. A
 	// failed retry cannot turn that answered error into an outage allow.
 	answeredErrorStatus int
+	// managedNoAnswerCode is managedNoAnswerReason read once for a call the
+	// watchdog answers, so its answer and its failure row agree.
+	managedNoAnswerCode string
 	// installWindowSeen is set once a look at this account's .install.lock
 	// for this call found it held. The answer rendered from it with no home
 	// (the watchdog's prepared answer) still names the install (GAP-2440).

@@ -400,3 +400,42 @@ func TestManagedCodexStopDuringAGatewayStallNamesTheEventAndTheStall(t *testing.
 		})
 	}
 }
+
+// rel-1-0-3 GAP-0319: a managed Windows tool call whose answer budget ends
+// while the gateway service is proven stopped says the service is not
+// running, with its code, like every other call of the outage; a running
+// service that gives no answer keeps the no-answer reason. Both deny.
+func TestManagedNoAnswerOnAStoppedServiceSaysItIsNotRunning(t *testing.T) {
+	shortAnswerBudget(t, 300*time.Millisecond)
+	shortAnswerFloor(t)
+	for _, stopped := range []bool{true, false} {
+		t.Run("stopped="+strconv.FormatBool(stopped), func(t *testing.T) {
+			previous := managedGatewayServiceStopped
+			managedGatewayServiceStopped = func(name string) bool { return stopped && name == "DefenseClawGateway" }
+			t.Cleanup(func() { managedGatewayServiceStopped = previous })
+			home := t.TempDir()
+			result, _ := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) {
+				managedWindowsStandalone(opts)
+				opts.ManagedGatewayServiceName = "DefenseClawGateway"
+				opts.FailureLogHome = userLogHome(home)
+				opts.Event = "PreToolUse"
+				opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell","prompt":"echo ok"}`)
+				opts.HTTPClient.Timeout = 1200 * time.Millisecond
+			})
+			want := managedGatewayNoAnswerReason
+			if stopped {
+				want = managedGatewayNotRunningReason
+			}
+			if !blocked(result) || !strings.Contains(result.stdout+result.stderr, want) {
+				t.Errorf("code=%d stdout=%q stderr=%q, want a block naming %s", result.code, result.stdout, result.stderr, want)
+			}
+			if stopped && !strings.Contains(result.stdout+result.stderr, "service is not running") {
+				t.Errorf("stdout=%q stderr=%q, want the not-running text", result.stdout, result.stderr)
+			}
+			entry := lastHookFailure(t, home)
+			if entry["reason"] != want || entry["fail_mode"] != "closed" || entry["outcome"] != "fail_closed" {
+				t.Errorf("failure = %v, want %s, closed", entry, want)
+			}
+		})
+	}
+}

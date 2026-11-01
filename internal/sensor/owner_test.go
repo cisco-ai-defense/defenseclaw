@@ -130,6 +130,26 @@ func TestOwnerResolverFallsBackFromTokenToSessionToEnrolledProfile(t *testing.T)
 	}
 }
 
+// p0-round GAP-1447: an unattributed finding whose agent wrote configuration
+// into two enrolled profiles says the configuration spans more than one
+// profile (ambiguous), not that no enrolled profile holds it.
+func TestUnattributedFindingSpanningTwoProfilesSaysItIsAmbiguous(t *testing.T) {
+	t.Parallel()
+	at := time.Unix(1_760_000_000, 0)
+	resolver := resolverFor(ownerTestLookups(), nil, at)
+	exited := []procRef{{PID: 99, At: at, Name: "claude.exe"}}
+	two := []string{`C:\Users\alice\.claude\settings.json`, `C:\Users\bob\.claude\settings.json`}
+	got := resolver.resolve(exited, two)
+	if got.Attribution != AttributionUnattributed || !strings.Contains(got.Reason, "more than one enrolled profile") ||
+		!strings.Contains(got.Reason, "ambiguous") || strings.Contains(got.Reason, "no enrolled profile holds") {
+		t.Fatalf("two profiles: %+v, want an ambiguous-profiles reason", got)
+	}
+	if got := resolver.resolve(exited, nil); !strings.Contains(got.Reason, "no enrolled profile holds") ||
+		strings.Contains(got.Reason, "ambiguous") {
+		t.Fatalf("no profile: %+v, want the no-profile reason", got)
+	}
+}
+
 // resolverFor is the owner resolver after one poll saw processes at at.
 func resolverFor(lookups OwnerLookups, processes []procprobe.Process, at time.Time) *ownerResolver {
 	book := newOwnerBook(lookups, time.Hour)

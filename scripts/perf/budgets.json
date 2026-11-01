@@ -1,0 +1,162 @@
+{
+ "schema": 1,
+ "tolerance": 0.2,
+ "notes": [
+  "Budgets for scripts/perf/dcperf.py. A gated metric fails the check when it is over budget * (1 + tolerance) or was not measured.",
+  "linux-per-user is seeded from the RHEL 9.8 per-user column of the 1.0.6 performance baseline (~/dc-eh/plans/r107/data/PERF-BASELINE.md, dc-rhel, 4 vCPU). Each entry names its source row.",
+  "gate false: reported next to its budget but not gated, with the reason in why (max is a single-sample tail; burst latency depends on the runner CPU).",
+  "TODO: no baseline measurement for this cell yet; fill it from a dcperf run on that OS and mode."
+ ],
+ "columns": {
+  "linux-per-user": {
+   "hook.claudecode.idle.p50_ms": {
+    "budget": 79.8,
+    "source": "Claude Code PreToolUse e2e, 1.0.4, n=40 (TST-0006, perf/live/hookbench2.out)"
+   },
+   "hook.claudecode.idle.p95_ms": {
+    "budget": 94.4,
+    "source": "same"
+   },
+   "hook.claudecode.idle.max_ms": {
+    "budget": 97.7,
+    "gate": false,
+    "source": "same"
+   },
+   "hook.claudecode.idle.not_allowed": {
+    "budget": 0,
+    "source": "benign calls must all be allowed"
+   },
+   "hook.claudecode.burst.p50_ms": {
+    "budget": 619,
+    "source": "32-way burst, rc23 dc-rhel, p50 605-619 ms (TST-7591)",
+    "gate": false,
+    "why": "not gated: burst latency is CPU-bound (32 hook shells on 4 vCPUs) and GitHub runners vary in CPU. CI run 41255145781 on ubuntu-latest: claudecode burst p50 774 / p95 1074 ms. Same harness on the build box pinned to 4 CPUs (taskset): rc23 710e2cc0d8 p50 477-502 / p95 680-746 ms, 1.0.7 tip 94d60a0462 p50 457-465 / p95 652-685 ms, so no regression. Gate it once dcperf has run on dc-rhel (rel-1-0-6:GAP-0239 sweep recipe); not_allowed stays gated."
+   },
+   "hook.claudecode.burst.p95_ms": {
+    "budget": 863,
+    "source": "same, p95 840-863 ms",
+    "gate": false,
+    "why": "see hook.claudecode.burst.p50_ms"
+   },
+   "hook.claudecode.burst.not_allowed": {
+    "budget": 0,
+    "source": "0 denies (TST-7591)"
+   },
+   "hook.codex.idle.p50_ms": {
+    "budget": 93.1,
+    "source": "Codex PreToolUse e2e, 1.0.4, n=40 (TST-0006, hookbench2.out)"
+   },
+   "hook.codex.idle.p95_ms": {
+    "budget": 109.1,
+    "source": "same"
+   },
+   "hook.codex.idle.max_ms": {
+    "budget": 112.8,
+    "gate": false,
+    "source": "same"
+   },
+   "hook.codex.idle.not_allowed": {
+    "budget": 0,
+    "source": "benign calls must all be allowed"
+   },
+   "hook.codex.burst.p50_ms": {
+    "budget": "TODO",
+    "source": "no Codex burst baseline"
+   },
+   "hook.codex.burst.p95_ms": {
+    "budget": "TODO",
+    "source": "no Codex burst baseline"
+   },
+   "hook.codex.burst.not_allowed": {
+    "budget": 0,
+    "source": "benign calls must all be allowed"
+   },
+   "hook_execs.claudecode.per_call_p50": {
+    "budget": 15,
+    "source": "15.0 execs per hook invocation, 1.0.1/1.0.3 sampler (rel-1-0-3 TST-1148, TST-1199)"
+   },
+   "hook_execs.claudecode.processes_per_call_p50": {
+    "budget": "TODO",
+    "source": "no fork-count baseline (first measured by dcperf, 1.0.7)"
+   },
+   "gateway_restart.to_api_ready.p50_ms": {
+    "budget": 7854,
+    "source": "defenseclaw-gateway restart to first /health 200, 1.0.4 dc-rhel (perf/live/cold.out)"
+   },
+   "cli.status.p50_ms": {
+    "budget": 1446.4,
+    "source": "defenseclaw status, 1.0.4, n=10 (TST-0010, perf/live/cli.out)"
+   },
+   "cli.doctor.p50_ms": {
+    "budget": 3502,
+    "source": "defenseclaw doctor, 1.0.4, n=3 (perf/live/cli.out)"
+   },
+   "cli.setup_claudecode.p50_ms": {
+    "budget": 2000,
+    "source": "setup claude-code --yes --no-restart, rc1 (TST-1327)"
+   },
+   "cli.skill_scan.p50_ms": {
+    "budget": 7060,
+    "source": "skill scan fixture --no-use-llm, 1.0.4 (perf/live/scan.out)",
+    "gate": false,
+    "why": "not gated: single-thread CPU-bound and CI runner CPUs differ: 4953, 7514 and 8446 ms on three ubuntu-latest runs of this branch (CI 41255145781, 41257204077, 41258641067; within 1% across the 3 scans of each run; AMD EPYC 7763 on the slowest), 5874-6074 ms on the build box. Gate it once results are normalized by host.cpu_score_ms against the dc-rhel score (rel-1-0-6:GAP-0239 sweep recipe)."
+   },
+   "gateway_rss_kb.after_idle": {
+    "budget": 209920,
+    "source": "gateway RSS before the flood, 205 MB, rc10 fix branch dc-rhel (TST-3312)",
+    "why": "total RSS of a gateway on a fresh store (CI). The file-backed part grows with audit.db up to the 256 MiB mmap_size (startup quick_check reads the store through mmap): build box 170 MiB on a 1 MiB store, 274 MiB on a 103 MiB store, heap (anon_kb) 90 MiB in both."
+   },
+   "gateway_rss_kb.anon_kb": {
+    "budget": "TODO",
+    "source": "no baseline split anon/file before dcperf (1.0.7 build box: anon 90 MiB)"
+   },
+   "gateway_rss_kb.file_kb": {
+    "budget": "TODO",
+    "source": "no baseline split anon/file before dcperf (1.0.7 build box: anon 90 MiB)"
+   }
+  },
+  "macos-per-user": {
+   "hook.claudecode.idle.p50_ms": {
+    "budget": "TODO",
+    "source": "PERF-BASELINE: 91.7 ms rc1 (TST-1258), not yet measured with dcperf"
+   },
+   "hook.claudecode.idle.p95_ms": {
+    "budget": "TODO"
+   },
+   "cli.status.p50_ms": {
+    "budget": "TODO"
+   },
+   "cli.skill_scan.p50_ms": {
+    "budget": "TODO"
+   },
+   "gateway_restart.to_api_ready.p50_ms": {
+    "budget": "TODO"
+   },
+   "gateway_rss_kb.after_idle": {
+    "budget": "TODO"
+   }
+  },
+  "windows-per-user": {
+   "hook.claudecode.idle.p50_ms": {
+    "budget": "TODO",
+    "source": "dcperf does not run on Windows yet"
+   }
+  },
+  "linux-managed": {
+   "hook.claudecode.idle.p50_ms": {
+    "budget": "TODO",
+    "source": "dcperf measures per-user installs only"
+   }
+  },
+  "macos-managed": {
+   "hook.claudecode.idle.p50_ms": {
+    "budget": "TODO"
+   }
+  },
+  "windows-managed": {
+   "hook.claudecode.idle.p50_ms": {
+    "budget": "TODO"
+   }
+  }
+ }
+}
