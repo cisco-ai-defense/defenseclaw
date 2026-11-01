@@ -179,6 +179,19 @@ jobs:
           Invoke-WindowsNativeProcess $go @(
             'test', '-vet=off', '-v', '-count=2', '-run', '^TestNativeWindowsExecutableForeignCollisionAndRecovery$', './internal/cli'
           ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-native-executable-lifecycle-stress.log') | Out-Null
+          # Windows timing tests that flaked on hosted runners: 20 repeats in a
+          # row must pass (rel-1-0-6:GAP-0245, GAP-0246, GAP-0249, GAP-0250,
+          # GAP-0251).
+          Invoke-WindowsNativeProcess $go @(
+            'test', '-vet=off', '-v', '-count=20', '-run',
+            '^(TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood|TestCheckpointWALIfLargeBoundedCatchUpHoldsOffAnotherWriter|TestMatchOccurrenceSharedIdentifierOfALongSessionStaysFlat)$',
+            './internal/audit'
+          ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-audit-timing-stress.log') | Out-Null
+          Invoke-WindowsNativeProcess $go @(
+            'test', '-vet=off', '-v', '-count=20', '-run',
+            '^(TestCopilotAdapterRefusesInvalidEventBinding|TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin)$',
+            './internal/gateway/connector'
+          ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-connector-powershell-stress.log') | Out-Null
       - name: Full native Windows Go test, vet, and build
         if: ${{ matrix.kind != 'stress' }}
         env:
