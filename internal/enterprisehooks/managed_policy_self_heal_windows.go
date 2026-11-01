@@ -172,7 +172,9 @@ func repairWindowsManagedPolicySelfHealFile(path string, file windowsManagedPoli
 		reportWindowsManagedPolicySelfHeal(managed.MarkerBoundary, path, err)
 		return
 	}
-	clearWindowsManagedPolicyFileAttributes(path, file.clear)
+	// Cleared after the descriptor repair below, which may restore the
+	// FILE_WRITE_ATTRIBUTES right the clear needs.
+	defer clearWindowsManagedPolicyFileAttributes(path, file.clear)
 	check := windowsManagedPolicyLeafTrust(managed.ObjectInstallFile)
 	if file.exact {
 		userReadable := file.userReadable
