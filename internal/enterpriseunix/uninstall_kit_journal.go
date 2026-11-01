@@ -58,7 +58,7 @@ func (l *lifecycle) removeKitRotationJournal() {
 				if info, err := entry.Info(); err == nil {
 					if file, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
 						_, _ = file.Write(make([]byte, info.Size()))
-						_ = file.Sync()
+						_ = syncFile(file)
 						_ = file.Close()
 					}
 				}
