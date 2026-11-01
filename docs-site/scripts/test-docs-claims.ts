@@ -2673,3 +2673,13 @@ describe('retained-state file names match the Remove pages (sidecar-aispg-retest
     assert.ok(go.includes('retainedStateFileName      = "retained-state.json"') && go.includes('retainedMarkerName         = ".defenseclaw-retained"'), 'retained-state names changed: re-check enterprise/lifecycle.mdx What uninstall keeps, linux.mdx and macos.mdx Remove');
   });
 });
+
+describe('A disabled connector on a managed host (rel-1-0-6:GAP-0325)', () => {
+  it('says root and exempt_users get the same unrecorded allow and keep only their own refusals', () => {
+    const text = page('enterprise/troubleshooting.mdx');
+    assert.ok(text.includes('Root and `exempt_users` accounts get the same allow without a record. Root is still refused by `enrollment.root: deny`. Each account keeps only the refusals that already apply to it (root skips the surface check, `exempt_users` skips the require-sandbox refusal).'),
+      'troubleshooting.mdx no longer says how root and exempt_users are answered on a disabled connector');
+    assert.ok(!text.includes('This applies to every account, root and `exempt_users` included'),
+      'troubleshooting.mdx again claims every refusal applies to root and exempt_users (root skips the surface check, exempt_users skips require-sandbox)');
+  });
+});

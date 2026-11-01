@@ -76,6 +76,12 @@ type ConnectorState struct {
 	// machine policy rather than a per-user registration. Absent when the
 	// connector is not enabled.
 	ManagedHook *bool `json:"managed_hook,omitempty"`
+	// configDisabled: the installed config names the connector with
+	// enabled: false (ConnectorInputs.Disabled). Text only, never printed in
+	// JSON: ConnectorsLine says "disabled" for it and "not enabled" for any
+	// other entry with enabled false (a leftover target, an unprotected
+	// install, a config that could not be read).
+	configDisabled bool
 }
 
 // ConnectorTargets counts one connector's guardian targets: Total is
@@ -112,6 +118,11 @@ type ConnectorInputs struct {
 	ConfigLoaded bool
 	Enabled      []string
 	Mode         func(connector string) string
+	// Disabled are the connectors the config names with enabled: false
+	// (config.GuardrailConfig.DisabledConnectors). Each gets an entry with
+	// enabled false, so status says the administrator turned it off rather
+	// than leaving it out (rel-1-0-6:GAP-0325).
+	Disabled []string
 	// ManifestRead says the enumerator's manifest was read; Manifest are
 	// its targets.
 	ManifestRead bool
@@ -173,6 +184,14 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 	listed := map[string]bool{}
 	for name := range enabled {
 		listed[name] = true
+	}
+	configOff := map[string]bool{}
+	if in.ConfigLoaded {
+		for _, name := range in.Disabled {
+			if name, ok := id(name); ok && !enabled[name] {
+				listed[name], configOff[name] = true, true
+			}
+		}
 	}
 	detected := map[string]bool{}
 	// rowed are the connectors with a manifest target.
@@ -242,7 +261,7 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 	}
 	block = make(map[string]ConnectorState, len(listed))
 	for name := range listed {
-		state := ConnectorState{Enabled: enabled[name], HooksInstalled: HooksInstalledUnknown}
+		state := ConnectorState{Enabled: enabled[name], HooksInstalled: HooksInstalledUnknown, configDisabled: configOff[name]}
 		if coverage, ok := in.MachinePolicyCoverage[name]; ok && !rowed[name] && counts[name] == nil {
 			// No account row exists for a machine-policy-only connector, so
 			// detected, versions and targets would be a false "not found"
@@ -294,6 +313,42 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 		block[name] = state
 	}
 	return block, hidden
+}
+
+// ConnectorsLine is the text status line of the connectors block: each
+// connector, sorted, enabled, disabled or not enabled. "disabled" is only a
+// connector the installed config turns off with enabled: false, so status
+// says DefenseClaw does not inspect it instead of leaving it out
+// (rel-1-0-6:GAP-0325); any other entry with enabled false (a leftover
+// target, an unprotected install) is "not enabled". Empty without a block.
+func ConnectorsLine(block map[string]ConnectorState) string {
+	if len(block) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(block))
+	for name := range block {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	off := false
+	for _, name := range names {
+		if block[name].Enabled {
+			parts = append(parts, name+" enabled")
+			continue
+		}
+		if !block[name].configDisabled {
+			parts = append(parts, name+" not enabled")
+			continue
+		}
+		parts = append(parts, name+" disabled")
+		off = true
+	}
+	line := "connectors: " + strings.Join(parts, ", ")
+	if off {
+		line += " (DefenseClaw does not inspect a disabled connector on this computer)"
+	}
+	return line
 }
 
 // effective is a connector's effective_mode and effective_hook_fail_mode;

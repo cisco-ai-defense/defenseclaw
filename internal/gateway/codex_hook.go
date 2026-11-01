@@ -546,7 +546,7 @@ func (a *APIServer) codexEnabled() bool {
 	// still calls in. EffectiveEnabled defaults to true, so this is a
 	// no-op for single-connector installs and any connector never
 	// explicitly disabled.
-	if cfg.ManualConnectorConfigured("codex") && !cfg.Guardrail.EffectiveEnabled("codex") {
+	if cfg.ConnectorDisabled("codex") {
 		return false
 	}
 	if cfg.ConnectorHookConfig("codex").Enabled {

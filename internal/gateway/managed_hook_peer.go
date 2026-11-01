@@ -195,6 +195,10 @@ type managedHookDecision struct {
 	// says so (enrollment: excluded), so the hook does not tell the account
 	// to wait for an enrollment that never comes (identity-round GAP-1181).
 	Excluded bool
+	// Disabled marks a call the administrator's config does not protect
+	// (guardrail.connectors.<name>.enabled: false): the hook route answers
+	// it allow and records nothing (answerDisabledConnectorHook).
+	Disabled bool
 }
 
 func allowManagedHook() managedHookDecision {
@@ -349,6 +353,16 @@ var managedHookExemptFacts = exemptIdentityDirectory
 // only installs are refused surfaces is in the refused list and is refused
 // for the connector.
 func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surface string) managedHookDecision {
+	return z.decideFor(peer, connectorName, surface, false)
+}
+
+// decideFor is decide for a hook route whose connector the administrator's
+// config may turn off: disabled says guardrail.connectors.<name>.enabled is
+// false (config.ConnectorDisabled). Such a call is let through after the
+// root, surface and exemption checks, to the route's allow without a scan,
+// instead of being refused because the guardian enrolls nobody for a
+// connector it no longer protects. Inspect routes never pass disabled.
+func (z *managedHookAuthorizer) decideFor(peer managedHookPeer, connectorName, surface string, disabled bool) managedHookDecision {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	if connectorName == "" {
 		return denyManagedHook(http.StatusForbidden, managedHookReasonConnectorUnknown)
@@ -366,7 +380,12 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 		if strings.EqualFold(strings.TrimSpace(z.enrollment.Root), config.EnterpriseRootDeny) {
 			return denyManagedHook(http.StatusForbidden, managedHookReasonRootDenied)
 		}
-		return allowManagedHook()
+		// Root allowed by enrollment.root is not inspected on a disabled
+		// connector either: the mark sends it to the same allow that records
+		// nothing (rel-1-0-6:GAP-0325 r2 review).
+		decision := allowManagedHook()
+		decision.Disabled = disabled
+		return decision
 	}
 	refuse := z.enrollment.UnverifiedVersionsFor(connectorName) == config.EnterpriseUnverifiedRefuse
 	if refuse && connector.SurfaceRefused(connectorName, surface, config.EnterpriseUnverifiedRefuse) {
@@ -383,7 +402,17 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 	}
 	if z.hostRunExempt(peer) {
 		decision := allowManagedHook()
-		decision.Exempt = true
+		decision.Exempt, decision.Disabled = true, disabled
+		return decision
+	}
+	if disabled {
+		// The lifecycle removed this connector's hooks and machine policy,
+		// and DefenseClaw does not inspect it. A hook an agent still runs (a
+		// session started before the change, or a file the administrator
+		// deploys) was refused as an unenrolled account, so every call was
+		// blocked, benign ones included (rel-1-0-6:GAP-0325).
+		decision := allowManagedHook()
+		decision.Disabled = true
 		return decision
 	}
 	machine := z.machinePolicy[connectorName]
@@ -729,7 +758,14 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			return
 		}
 		connectorName, inspect := a.managedHookRouteScope(r)
-		decision := authorizer.decide(peer, connectorName, r.Header.Get(hookexec.AgentSurfaceHeader))
+		// The hook route answers a connector the config turns off allow
+		// without a scan (agentHookEnabled, codexEnabled, claudeCodeEnabled
+		// read the same config.ConnectorDisabled). An inspect route, the
+		// Codex notifier and the foreign hook session report have no such
+		// answer and keep the enrollment check.
+		disabled := !inspect && exemptAuditedHookPath(r.URL.Path) &&
+			a.hookEnablementConfig(r.Context()).ConnectorDisabled(connectorName)
+		decision := authorizer.decideFor(peer, connectorName, r.Header.Get(hookexec.AgentSurfaceHeader), disabled)
 		if !decision.Allow {
 			fmt.Fprintf(os.Stderr,
 				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s\n",
@@ -743,6 +779,13 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 				"[sidecar-api] enterprise_exempt_user uid=%d user=%q connector=%q route=%s\n",
 				peer.UID, peer.Name, connectorName, route)
 		}
+		if decision.Disabled {
+			// The only trace of a disabled connector's call: no payload, no
+			// audit row, no export (rel-1-0-6:GAP-0325).
+			fmt.Fprintf(os.Stderr,
+				"[sidecar-api] enterprise_disabled_connector uid=%d connector=%q route=%s: allowed without inspection\n",
+				peer.UID, connectorName, route)
+		}
 		ctx := PromoteSessionIfAuthenticated(r.Context())
 		ctx = attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), strconv.Itoa(peer.UID), peer.Name, subjectSourcePeerCredentials)
 		if inspect {
@@ -750,7 +793,17 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		} else {
 			ctx = withAuthenticatedHookConnector(ctx, connectorName)
 		}
+		if decision.Disabled {
+			ctx = withDisabledConnectorCall(ctx)
+		}
 		if decision.Exempt {
+			if decision.Disabled {
+				// A disabled connector's call writes no audit row, the
+				// enterprise-exempt-user row included; the log line above is
+				// its trace.
+				next.ServeHTTP(w, r.WithContext(withEnterpriseExemptUser(ctx)))
+				return
+			}
 			a.serveEnterpriseExemptHookCall(w, r.WithContext(withEnterpriseExemptUser(ctx)), next, peer, connectorName, route, inspect)
 			return
 		}

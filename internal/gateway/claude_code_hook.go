@@ -492,7 +492,7 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if cfg.ManualConnectorConfigured("claudecode") && !cfg.Guardrail.EffectiveEnabled("claudecode") {
+	if cfg.ConnectorDisabled("claudecode") {
 		return false
 	}
 	hookCfg := cfg.ConnectorHookConfig("claudecode")

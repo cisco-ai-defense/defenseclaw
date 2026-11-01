@@ -502,6 +502,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			})
 			return
 		}
+		// A connector the administrator's config turns off is answered allow
+		// here, before anything about the call is recorded (rel-1-0-6:GAP-0325).
+		if a.answerDisabledConnectorHook(r.Context(), w, r.Header, profile, connectorName, req) {
+			return
+		}
 		a.noteProtectedFileActivity(r.Context(), connectorName, req, identityFacts.ID)
 		toolRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
 		if (connectorName == "claudecode" || connectorName == "codex") &&
@@ -4000,7 +4005,7 @@ func (a *APIServer) agentHookEnabled(ctx context.Context, name string) bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if cfg.ManualConnectorConfigured(name) && !cfg.Guardrail.EffectiveEnabled(name) {
+	if cfg.ConnectorDisabled(name) {
 		return false
 	}
 	if cfg.ConnectorHookConfig(name).Enabled {
