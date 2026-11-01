@@ -1946,13 +1946,13 @@ describe('identity-entra-id callouts appear once (GAP-2193)', () => {
 });
 
 // GAP-2347 class: only a per-user gateway turns hook-failures.jsonl lines
-// into a guardrail-degraded alert (reportHookFailOpenCalls returns on a
+// into a guardrail-degraded alert (reportHookFailureCalls returns on a
 // managed host), so every sentence that promises that alert from the file
 // says per-user.
 describe('fail-open alert promises are scoped to per-user installs (GAP-2347)', () => {
   it('scopes every hook-failures.jsonl guardrail-degraded sentence and matches the gateway', () => {
     const report = source('internal/gateway/hook_failopen_report.go');
-    assert.match(report, /func \(s \*Sidecar\) reportHookFailOpenCalls\(\) \{\s*if s == nil \|\| s\.logger == nil \|\| ManagedEnterpriseActive\(\) \{\s*return/, 'the managed early return moved: re-check the docs scope');
+    assert.match(report, /func \(s \*Sidecar\) reportHookFailureCalls\(\) \{\s*if s == nil \|\| s\.logger == nil \|\| ManagedEnterpriseActive\(\) \{\s*return/, 'the managed early return moved: re-check the docs scope');
     const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.mdx') ? [join(dir, e.name)] : []));
     const root = join(site, 'content/docs');
     const unscoped: string[] = [];
