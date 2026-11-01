@@ -177,6 +177,13 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
 				continue
 			}
+			if directoryCreationFact(facts, candidate) {
+				// mkdir makes a directory entry: it writes no file and
+				// follows no link at its operand to one, and the same call
+				// without a directory change is no write operand
+				// (rel-1-0-6:GAP-0260).
+				continue
+			}
 			target := candidate.Resolved
 			if target == "" {
 				target = candidate.Normalized
@@ -682,6 +689,16 @@ func directoryFactRequired(directory, home string) bool {
 	for _, root := range []string{home, "/home", "/tmp", "/var/tmp"} {
 		if root != "" && (directory == root || strings.HasPrefix(directory, root+string(filepath.Separator))) {
 			return true
+		}
+	}
+	return false
+}
+
+// directoryCreationFact reports a path fact of a POSIX mkdir call.
+func directoryCreationFact(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	for _, command := range facts.Commands {
+		if command.ID == candidate.CommandID {
+			return command.Program == "mkdir" && command.Dialect == actionfacts.DialectPOSIX
 		}
 	}
 	return false

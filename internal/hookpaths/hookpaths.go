@@ -104,7 +104,9 @@ const GlobFactPrefix = "\x00glob:"
 // ReadingTargetPrefix keys the hook client resolution of one write operand
 // on a static reading of a call with a runtime-expanded operand word
 // (actionfacts.DynamicOperandTwins, GAP-2477), for an operand that the call
-// as written lists with an empty (unknown) answer. Only the gateway judgment
+// as written lists with an empty (unknown) answer, or that the reading
+// resolves to a protected file the call as written does not name (a copy of
+// links on disk read as those links, rel-1-0-6:GAP-0274). Only the gateway judgment
 // of that reading behind ProtectHome reads it; the call as written keeps
 // the unknown answer. An empty or missing fact leaves the operand unknown.
 const ReadingTargetPrefix = "\x00reading-target:"
@@ -1402,6 +1404,16 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			key := OperandPath(path, cwd)
 			old, listed := targets[key]
 			if listed && old != "" {
+				// A reading that reads a copy of links on disk as those links
+				// may find a protected file the call as written, read with
+				// the opaque copy scope, did not: that answer is the
+				// reading's, so the gateway judges the reading by it
+				// (rel-1-0-6:GAP-0274).
+				if links.known && len(links.aliases) > 0 {
+					if resolved, ok := links.resolve(key, protected); ok && resolved != old && protected.has(resolved) {
+						readingTargets[ReadingTargetPrefix+key] = resolved
+					}
+				}
 				continue
 			}
 			add(path, true, false)
@@ -1825,6 +1837,11 @@ func Decode(value string) (map[string]string, bool) {
 		if strings.HasPrefix(key, SourceLinkFactPrefix) && (value != "0" && value != "1" && value != "?") {
 			return nil, false
 		}
+		if strings.HasPrefix(key, SourceLinksFactPrefix) {
+			if _, ok := decodeSourceLinks(value); !ok || !filepath.IsAbs(strings.TrimPrefix(key, SourceLinksFactPrefix)) {
+				return nil, false
+			}
+		}
 		if strings.HasPrefix(key, OpaqueScopeFactPrefix) && (value != "0" && value != "c" ||
 			!filepath.IsAbs(strings.TrimPrefix(key, OpaqueScopeFactPrefix))) {
 			return nil, false
@@ -1999,7 +2016,12 @@ type shellLinks struct {
 	// cdScopes: the scopes follow a static top-level directory change that
 	// the statement walk placed them after. Every write is opaque but the own
 	// destination of a placed copy, which that walk places too (GAP-2579).
-	cdScopes         bool
+	cdScopes bool
+	// cdFrom and cdDirs: with cdScopes, the starting directory and every
+	// directory a top-level statement may stand in. A write is read against
+	// the scopes from each of them (rel-1-0-6:GAP-0260).
+	cdFrom           string
+	cdDirs           []string
 	opaqueScopes     []opaqueScope
 	copyDestinations []string
 	// copyEnds: the end offset of the copy call that wrote a destination,
@@ -2082,6 +2104,14 @@ func bodyOnlyChangesDirectory(command string, call *syntax.CallExpr) bool {
 		return false
 	}
 	return !tactics.RunsProgram(command[:from]+" "+command[to:], cdPrograms...)
+}
+
+// placedShellBody reports a literal shell body with no directory change of
+// its own whose call the statement walk placed in one directory, ahead of
+// any wrapper that moves it (cd p && sh -c "ln -s a b && cp -a b c").
+func placedShellBody(body string, linkDirsKnown bool, linkDirs map[*syntax.CallExpr][]string, call *syntax.CallExpr, callDirs []string, movedDir string) bool {
+	_, placed := linkDirs[call]
+	return linkDirsKnown && placed && len(callDirs) == 1 && movedDir == "" && !tactics.RunsProgram(body, cdPrograms...)
 }
 
 // unknown marks the links unknown, and opaque when a link may be created.
@@ -2201,26 +2231,44 @@ func (l shellLinks) opaqueTargetWithFacts(path, ownCopy string, facts map[string
 	} else if l.globalOpaque || len(l.opaqueScopes) == 0 {
 		return true
 	}
+	names := []string{path}
 	if l.cdScopes && (ownCopy == "" || ownCopy != path) {
-		return true
-	}
-	forms, complete := writePathForms(path, 0)
-	if !complete {
-		// The user's walk of the same operand stands in for one this process
-		// cannot finish; the scope check below still sees the name itself.
-		fact := facts[OpaqueScopeFactPrefix+path]
-		if fact != "0" && (fact != "c" || ownCopy == "" || ownCopy != path) {
+		// After a directory change a relative write may land in a scope
+		// under another name, so the operand is also read as written in
+		// every directory a statement may stand in: cd p && tar -C build
+		// -xf x; echo hi > report.txt writes no scope, cd build && tar -C .
+		// -xf x; echo hi > report.txt may (rel-1-0-6:GAP-0260).
+		rel, err := filepath.Rel(l.cdFrom, path)
+		if len(l.cdDirs) == 0 || err != nil {
 			return true
 		}
-		forms = []string{filepath.Clean(path)}
-	}
-	for _, scope := range l.opaqueScopes {
-		if scope.copy && scope.path == ownCopy {
-			continue
+		for _, dir := range l.cdDirs {
+			if name := filepath.Join(dir, rel); name != path && !slices.Contains(names, name) {
+				names = append(names, name)
+			}
 		}
-		for _, form := range forms {
-			if form == scope.path || strings.HasPrefix(form, scope.path+string(filepath.Separator)) {
+	}
+	for i, name := range names {
+		forms, complete := writePathForms(name, 0)
+		if !complete {
+			// The user's walk of the same operand stands in for one this
+			// process cannot finish; the scope check below still sees the
+			// name itself. That walk read every placement of the operand,
+			// so only its "0" answers for another directory.
+			fact := facts[OpaqueScopeFactPrefix+path]
+			if fact != "0" && (i > 0 || fact != "c" || ownCopy == "" || ownCopy != path) {
 				return true
+			}
+			forms = []string{filepath.Clean(name)}
+		}
+		for _, scope := range l.opaqueScopes {
+			if scope.copy && scope.path == ownCopy {
+				continue
+			}
+			for _, form := range forms {
+				if form == scope.path || strings.HasPrefix(form, scope.path+string(filepath.Separator)) {
+					return true
+				}
 			}
 		}
 	}
@@ -2295,6 +2343,20 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 // returns its facts without the end checks: its caller runs them once
 // over its own links and the body links together.
 func commandLinks(command, cwd, home string, facts map[string]string, record, nested bool) shellLinks {
+	links, fallback := commandLinksRead(command, cwd, home, facts, record, nested, true)
+	if fallback {
+		// A copy of links on disk that the end of the command does not let
+		// us read is read as before, an opaque copy scope at the copy call
+		// (rel-1-0-6:GAP-0274).
+		links, _ = commandLinksRead(command, cwd, home, facts, record, nested, false)
+	}
+	return links
+}
+
+// commandLinksRead is commandLinks; readDisk reads the link-keeping copies
+// of links on disk as those links (copyDiskLinks). fallback reports such a
+// copy that could not be read so.
+func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk bool) (shellLinks, bool) {
 	links := shellLinks{known: true, callAt: -1}
 	file, parsed := parseShell(command)
 	if !parsed {
@@ -2302,11 +2364,11 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		if opaqueLink.MatchString(command) {
 			links.unknown(true)
 		}
-		return links
+		return links, false
 	}
 	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) && !links.addPythonLiteralLinks(file, command, cwd, home) {
 		links.unknown(true)
-		return links
+		return links, false
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
@@ -2321,6 +2383,15 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	// statement walk placed its call.
 	unplacedScopes := false
 	var copyScopes []string
+	// linkCopies: link-keeping copies that copyLinks may read as copies of
+	// the command's own links instead of opaque copy scopes.
+	var linkCopies []linkCopy
+	// diskCopies: link-keeping copies of sources with links on disk whose
+	// texts are known (copyDiskLinks).
+	var diskCopies []linkCopy
+	// treeCopies: recursive and link-keeping copies, read at the end
+	// against the opaque scopes (copyScopedTrees).
+	var treeCopies []treeCopy
 	var renameOps []renameOp
 	var findMoves []findMove
 	// placedLinkNames: the names of plain link calls the statement walk
@@ -2531,9 +2602,28 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 				}
 				option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
 				if copyPreservesLinks(words[1:], static[1:]) {
-					copyScopes = append(copyScopes, destination)
-					if cpDiskSymlink(words[1:], static[1:], dir, home, facts, record) {
-						links.unknownCopyIn(destination)
+					treeCopies = append(treeCopies, cpTreeCopy(words[1:], static[1:], dir, destination))
+					diskLink := cpDiskSymlink(words[1:], static[1:], dir, home, facts, record)
+					copied, readable := linkOnlyCopyOperands(words[1:], static[1:], dir)
+					readable = readable && !option && !dynamic && !nested && movedDir == "" && len(callDirs) == 1
+					diskRead := false
+					if diskLink {
+						// A copy of links already on disk whose texts the
+						// hook client read is read at the end as the same
+						// links at the copy's names (rel-1-0-6:GAP-0274).
+						if diskRead = readDisk && readable && copied.readDiskLinks(facts, record); diskRead {
+							diskCopies = append(diskCopies, copied)
+						} else {
+							links.unknownCopyIn(destination)
+						}
+					}
+					// A copy that keeps links and copies only links this
+					// command makes is read at the end, against every link
+					// the command makes (rel-1-0-6:GAP-0259).
+					if readable && !diskLink {
+						linkCopies = append(linkCopies, copied)
+					} else if !diskRead {
+						copyScopes = append(copyScopes, destination)
 					}
 				}
 				switch {
@@ -2563,6 +2653,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 				if archiveCopiesLinks(program, words[1:], static[1:]) {
 					destination := archiveDestination(program, words[1:], static[1:], dir)
 					copyScopes = append(copyScopes, destination)
+					treeCopies = append(treeCopies, archiveTreeCopy(words[1:], static[1:], dir, destination))
 					if archiveCopiesDiskSymlink(program, words[1:], static[1:], dir, home, facts, record, stackSources) {
 						links.unknownIn(destination)
 					}
@@ -2602,7 +2693,8 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		case slices.Contains(cdPrograms, program):
 			cds = true
 		case literalShellBody(program, words, static) != "" &&
-			(!changesDirectory || bodyOnlyChangesDirectory(command, call)):
+			(!changesDirectory || bodyOnlyChangesDirectory(command, call) ||
+				placedShellBody(literalShellBody(program, words, static), linkDirsKnown, linkDirs, call, callDirs, movedDir)):
 			// sh -c "ln -s build/out bin" makes the link the plain ln makes,
 			// in the same directory: read the body as that command, so its
 			// links are known (or opaque) exactly as they would be written
@@ -2610,14 +2702,21 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			// Renames and link-copying archives in the body also act on
 			// links made outside it (a top-level link renamed by sh -c
 			// "mv c d"), so they count as facts of this command too.
-			inner := commandLinks(literalShellBody(program, words, static), cwd, home, facts, record, true)
+			body, bodyDir, placedBody := literalShellBody(program, words, static), cwd, false
+			if changesDirectory && !bodyOnlyChangesDirectory(command, call) {
+				// After static top-level cd statements a body with no
+				// directory change of its own runs where the statement walk
+				// placed its call (rel-1-0-6:GAP-0260).
+				bodyDir, placedBody = callDirs[0], true
+			}
+			inner := commandLinks(body, bodyDir, home, facts, record, true)
 			links.merge(inner)
 			renames = renames || inner.renames
 			cds = cds || inner.cds
 			// A directory change that only this body makes is read by the
 			// body own statement walk; the disk checks of a nested directory
 			// change still guard the links made outside it (GAP-2533).
-			wrappedCds = wrappedCds || inner.wrappedCds || changesDirectory
+			wrappedCds = wrappedCds || inner.wrappedCds || changesDirectory && !placedBody
 			copyScopes = append(copyScopes, inner.copyScopes...)
 			renameOps = append(renameOps, inner.renameOps...)
 			findMoves = append(findMoves, inner.findMoves...)
@@ -2676,15 +2775,41 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		}
 		return true
 	})
+	links.copyScopedTrees(treeCopies)
 	if nested {
 		links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
 		links.renameOps, links.wrappedCds, links.findMoves = renameOps, wrappedCds, findMoves
-		return links
+		return links, false
 	}
 	links.callAt = -1
+	if len(diskCopies) > 0 {
+		// The copy of a link on disk is that link at the copy's name, read
+		// only in a command that moves no link and no directory and whose
+		// link operations were all read (rel-1-0-6:GAP-0274).
+		read := links.known && !links.opaque && !renames && !cds && !wrappedCds && len(renameOps) == 0 && len(findMoves) == 0
+		for _, copied := range diskCopies {
+			if !read || !links.copyDiskLinks(copied) {
+				return links, true
+			}
+		}
+	}
 	if len(links.aliases) > 0 {
+		// cp -a of a link the command makes copies the link itself: the copy
+		// stores the same target text, read from its own directory. It is
+		// read so only in a command that moves no link and no directory and
+		// whose link operations were all read (rel-1-0-6:GAP-0259).
+		read := links.known && !links.opaque && !renames && !cds && !wrappedCds && len(renameOps) == 0 && len(findMoves) == 0
+		for _, copied := range linkCopies {
+			if !read || !links.copyLinks(copied, facts) {
+				copyScopes = append(copyScopes, copied.destination)
+			}
+		}
 		for _, scope := range copyScopes {
 			links.unknownCopyIn(scope)
+		}
+	} else {
+		for _, copied := range linkCopies {
+			copyScopes = append(copyScopes, copied.destination)
 		}
 	}
 	if len(links.aliases) > 0 {
@@ -2756,15 +2881,97 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	// the statement walk placed every scope, the own destination of a placed
 	// copy is still read against its own scope (GAP-2579).
 	if cds && len(links.opaqueScopes) > 0 {
+		_, statementDirs, statementsKnown := topLevelStatementDirectories(file, cwd, home)
 		if linkDirsKnown && !wrappedCds && !unplacedScopes {
 			links.cdScopes = true
+			if statementsKnown {
+				links.cdFrom = cwd
+				links.cdDirs = []string{cwd}
+				for _, dir := range statementDirs {
+					if !slices.Contains(links.cdDirs, dir) {
+						links.cdDirs = append(links.cdDirs, dir)
+					}
+				}
+			}
 		} else {
 			links.globalOpaque, links.globalOther = true, true
 		}
 	}
+	// Scopes are read against the directories the shell is seen to stand
+	// in. Shell code this package does not read may change the directory
+	// with no visible cd (. ./x.sh; trap "cd unpack" DEBUG; an alias of cd),
+	// so a relative write may land in a scope under another name; with or
+	// without a cd, every write is then opaque (rel-1-0-6:GAP-0260 review).
+	if len(links.opaqueScopes) > 0 && hiddenDirectoryChange(file, home, 0) {
+		links.globalOpaque, links.globalOther = true, true
+	}
 	links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
 	links.renameOps, links.wrappedCds, links.findMoves = renameOps, wrappedCds, findMoves
-	return links
+	return links, false
+}
+
+// hiddenDirectoryPrograms run shell code this package does not read, or
+// change how a later word runs, so the shell may change its directory with
+// no cd statement to see: a sourced file, a trap, an alias (with shopt -s
+// expand_aliases), exec, and builtin or command in front of cd.
+var hiddenDirectoryPrograms = []string{".", "source", "trap", "alias", "shopt", "exec", "builtin", "command"}
+
+// maxHiddenDirectoryDepth bounds the literal eval and sh -c bodies that
+// hiddenDirectoryChange reads; a deeper body counts as a hidden change.
+const maxHiddenDirectoryDepth = 4
+
+// hiddenDirectoryChange reports a command that may change the shell's
+// directory where no static cd shows it: a hiddenDirectoryPrograms call, a
+// call of a function the command defines, an eval whose argument is not
+// literal, or such a call in a literal eval or sh -c body.
+func hiddenDirectoryChange(file *syntax.File, home string, depth int) bool {
+	if depth > maxHiddenDirectoryDepth {
+		return true
+	}
+	functions := make(map[string]bool)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil {
+			functions[decl.Name.Value] = true
+		}
+		return true
+	})
+	hidden := false
+	body := func(text string) {
+		inner, parsed := parseShell(text)
+		hidden = hidden || !parsed || hiddenDirectoryChange(inner, home, depth+1)
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if hidden || !ok || len(call.Args) == 0 {
+			return !hidden
+		}
+		words := make([]string, len(call.Args))
+		static := make([]bool, len(call.Args))
+		for i, arg := range call.Args {
+			words[i], static[i] = StaticWord(arg, home)
+		}
+		if !static[0] {
+			// A dynamic program word is read elsewhere (known is false).
+			return true
+		}
+		program := programBase(words[0])
+		switch {
+		case slices.Contains(hiddenDirectoryPrograms, program) || functions[words[0]]:
+			hidden = true
+		case program == "eval":
+			if slices.Contains(static[1:], false) {
+				hidden = true
+			} else {
+				body(strings.Join(words[1:], " "))
+			}
+		default:
+			if text := literalShellBody(program, words, static); text != "" {
+				body(text)
+			}
+		}
+		return !hidden
+	})
+	return hidden
 }
 
 // topLevelLinkDirectories places the link, copy and archive calls of a
@@ -2845,7 +3052,7 @@ func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statemen
 		}
 		return true
 	})
-	if !known {
+	if !known || hiddenDirectoryChange(file, home, 0) {
 		return nil, nil, false
 	}
 	// A place is one directory the shell may stand in, with its pushd
@@ -3795,6 +4002,11 @@ type cpOperandsResult struct {
 	symbolic    bool
 	noTargetDir bool
 	targetDir   bool
+	// dereference: -L, -H or --dereference follows a source link, so the
+	// copy is not a copy of the link. parents: --parents names the copy
+	// after the whole source path.
+	dereference bool
+	parents     bool
 	ok          bool
 }
 
@@ -3864,6 +4076,12 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 				if joined {
 					return cpOperandsResult{preserves: true}
 				}
+				switch option {
+				case "dereference":
+					result.dereference = true
+				case "parents":
+					result.parents = true
+				}
 			}
 			continue
 		}
@@ -3871,6 +4089,8 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 			switch arg[j] {
 			case 'a', 'P', 'd', 'r', 'R':
 				result.preserves = true
+			case 'H', 'L':
+				result.dereference = true
 			case 'l':
 				result.hard = true
 			case 's':
@@ -3893,7 +4113,7 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 					targetDir = value
 				}
 				j = len(arg)
-			case 'b', 'c', 'f', 'H', 'i', 'L', 'n', 'N', 'p', 'u', 'v', 'x', 'X', 'Z':
+			case 'b', 'c', 'f', 'i', 'n', 'N', 'p', 'u', 'v', 'x', 'X', 'Z':
 			default:
 				return cpOperandsResult{preserves: true}
 			}
@@ -3911,6 +4131,369 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 	}
 	result.sources, result.destination, result.ok = operands[:len(operands)-1], operands[len(operands)-1], true
 	return result
+}
+
+// treeCopy is a recursive or link-keeping copy: its sources and its
+// destination, absolute ("" when it may write anywhere). known is false
+// when its sources are not all read.
+type treeCopy struct {
+	sources     []string
+	destination string
+	known       bool
+}
+
+func cpTreeCopy(args []string, static []bool, dir, destination string) treeCopy {
+	parsed := cpOperands(args, static)
+	copied := treeCopy{destination: destination, known: parsed.ok}
+	for _, source := range parsed.sources {
+		copied.sources = append(copied.sources, absolutePath(source, dir))
+	}
+	return copied
+}
+
+// archiveTreeCopy reads the sources of a link-copying rsync, cpio -p or
+// pax -rw call as archiveCopiesDiskSymlink does: every static operand but
+// the last.
+func archiveTreeCopy(args []string, static []bool, dir, destination string) treeCopy {
+	copied := treeCopy{destination: destination, known: !slices.Contains(static, false)}
+	var operands []string
+	for i, arg := range args {
+		if static[i] && !strings.HasPrefix(arg, "-") {
+			operands = append(operands, arg)
+		}
+	}
+	if len(operands) < 2 {
+		copied.known = false
+		return copied
+	}
+	for _, source := range operands[:len(operands)-1] {
+		copied.sources = append(copied.sources, absolutePath(source, dir))
+	}
+	return copied
+}
+
+// copyScopedTrees makes the destination of a recursive or link-keeping copy
+// whose source holds, or lies in, an opaque scope (an extraction directory,
+// or the copy of one) an opaque copy scope too: the extracted links are
+// copied with it, so tar -xf x.tar -C d0 && cp -a d0 e0 && echo k >> e0/k
+// may write through one (rel-1-0-6:GAP-0283). The copy's own destination
+// keeps its own-copy reading, so the copy alone and reads of it stay
+// allowed. A copy whose sources are not read follows any scope.
+func (l *shellLinks) copyScopedTrees(copies []treeCopy) {
+	done := make([]bool, len(copies))
+	for changed := true; changed; {
+		changed = false
+		for i, copied := range copies {
+			if done[i] || len(l.opaqueScopes) == 0 && !l.globalOpaque {
+				continue
+			}
+			reaches := !copied.known || l.globalOpaque
+			for _, source := range copied.sources {
+				for _, scope := range l.opaqueScopes {
+					if scope.path != copied.destination && pathsOverlap(source, scope.path) {
+						reaches = true
+					}
+				}
+			}
+			if reaches {
+				done[i], changed = true, true
+				l.unknownCopyIn(copied.destination)
+			}
+		}
+	}
+}
+
+// linkCopy is a link-keeping cp call read in dir: its sources, its
+// destination, and the names the copy of a source may take there.
+type linkCopy struct {
+	sources []string
+	// sourceFacts: the SourceLinkFactPrefix key of each source, where the
+	// copy's disk-link check (cpDiskSymlink) records it.
+	sourceFacts []string
+	destination string
+	// named: a single source copied to the destination name itself.
+	// inside: the destination may be a directory that takes the copy
+	// under the source's last name.
+	named, inside bool
+	// diskLinks: for each source, the links on disk at or under it
+	// (readDiskLinks).
+	diskLinks [][]diskLink
+}
+
+// diskLink is a symbolic link on disk at rest under a copy source ("" for
+// the source itself) and the target text it stores.
+type diskLink struct{ rest, text string }
+
+// SourceLinksFactPrefix keys the hook client's reading of the symbolic links
+// at or under a copy source that keeps links (cp -a, -r, -P, -d): a JSON
+// list of [rest, text] pairs, rest the name under the source ("" for the
+// source itself) and text the target the link stores. The client writes it
+// only when it read every link of the source and each names an existing
+// entry that is not itself a link. A gateway that cannot see the user's home
+// reads the copy as those links at the copy's names (rel-1-0-6:GAP-0274); a
+// missing fact keeps the opaque copy scope.
+const SourceLinksFactPrefix = "\x00source-links:"
+
+// maxSourceLinks bounds the links one copy source may hold to be read.
+const maxSourceLinks = 16
+
+// readDiskLinks fills diskLinks from the source-link facts (a gateway with
+// the client's evidence) or the disk (the client, which records the fact,
+// and a gateway with no evidence). It returns false when a source's links
+// are not all known.
+func (c *linkCopy) readDiskLinks(facts map[string]string, record bool) bool {
+	c.diskLinks = nil
+	for _, key := range c.sourceFacts {
+		path := strings.TrimPrefix(key, SourceLinkFactPrefix)
+		var found []diskLink
+		if !record && facts != nil {
+			switch facts[key] {
+			case "0":
+			case "1":
+				value, present := facts[SourceLinksFactPrefix+path]
+				if !present {
+					return false
+				}
+				var ok bool
+				if found, ok = decodeSourceLinks(value); !ok {
+					return false
+				}
+			default:
+				return false
+			}
+		} else {
+			var ok bool
+			if found, ok = sourceDiskLinks(path); !ok {
+				return false
+			}
+			if record && facts != nil && len(found) > 0 {
+				facts[SourceLinksFactPrefix+path] = encodeSourceLinks(found)
+			}
+		}
+		c.diskLinks = append(c.diskLinks, found)
+	}
+	return true
+}
+
+// sourceDiskLinks reads the symbolic links at or under path on this view of
+// the disk. ok is false when path cannot be read, the walk fails or is over
+// its bounds, or a link names a missing entry or another link.
+func sourceDiskLinks(path string) ([]diskLink, bool) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		// The disk-link check read this source as one that may hold a
+		// link; a gateway behind ProtectHome sees ENOENT for it.
+		return nil, false
+	}
+	var found []diskLink
+	add := func(name, rest string) bool {
+		text, err := os.Readlink(name)
+		if err != nil || text == "" || len(found) >= maxSourceLinks {
+			return false
+		}
+		target := text
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(name), text)
+		}
+		if hop, err := os.Lstat(target); err != nil || hop.Mode()&os.ModeSymlink != 0 {
+			return false
+		}
+		found = append(found, diskLink{rest: rest, text: text})
+		return true
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return found, add(path, "")
+	}
+	if !info.IsDir() {
+		return nil, true
+	}
+	seen, ok := 0, true
+	err = filepath.WalkDir(path, func(name string, entry fs.DirEntry, err error) error {
+		seen++
+		if err != nil || seen > 4096 {
+			ok = false
+			return filepath.SkipAll
+		}
+		if entry.Type()&fs.ModeSymlink == 0 {
+			return nil
+		}
+		rest, relErr := filepath.Rel(path, name)
+		if relErr != nil || !add(name, rest) {
+			ok = false
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found, ok && err == nil
+}
+
+func encodeSourceLinks(found []diskLink) string {
+	pairs := make([][2]string, 0, len(found))
+	for _, link := range found {
+		pairs = append(pairs, [2]string{link.rest, link.text})
+	}
+	encoded, _ := json.Marshal(pairs)
+	return string(encoded)
+}
+
+// decodeSourceLinks reads a SourceLinksFactPrefix value: at most
+// maxSourceLinks pairs, each a relative rest without .. and a target text.
+func decodeSourceLinks(value string) ([]diskLink, bool) {
+	var pairs [][2]string
+	if json.Unmarshal([]byte(value), &pairs) != nil || len(pairs) == 0 || len(pairs) > maxSourceLinks {
+		return nil, false
+	}
+	found := make([]diskLink, 0, len(pairs))
+	for _, pair := range pairs {
+		rest, text := pair[0], pair[1]
+		if text == "" || len(text) > MaxWriteTargetPathBytes || len(rest) > MaxWriteTargetPathBytes ||
+			filepath.IsAbs(rest) || rest != "" && (filepath.Clean(rest) != rest || rest == ".." ||
+			strings.HasPrefix(rest, ".."+string(filepath.Separator))) {
+			return nil, false
+		}
+		found = append(found, diskLink{rest: rest, text: text})
+	}
+	return found, true
+}
+
+// copyDiskLinks records the links a link-keeping copy of sources with
+// links on disk makes: each link at the copy's names keeps its text, so a
+// relative one names the target its text names from the copy's own
+// directory. A link of this command at, under, or naming the source or a
+// directory above it keeps the opaque reading.
+func (l *shellLinks) copyDiskLinks(copied linkCopy) bool {
+	var made []linkAlias
+	for i, source := range copied.sources {
+		for _, alias := range l.aliases {
+			if _, under := cutPathPrefix(alias.name, source); under || pathAtOrUnder(source, filepath.Clean(alias.target)) {
+				return false
+			}
+		}
+		var names []string
+		if copied.named {
+			names = append(names, copied.destination)
+		}
+		if copied.inside {
+			names = append(names, filepath.Join(copied.destination, filepath.Base(source)))
+		}
+		for _, link := range copied.diskLinks[i] {
+			for _, base := range names {
+				name := base
+				if link.rest != "" {
+					name = filepath.Join(base, link.rest)
+				}
+				target, text := link.text, ""
+				if !filepath.IsAbs(target) {
+					target, text = filepath.Dir(name)+string(filepath.Separator)+link.text, link.text
+				}
+				made = append(made, linkAlias{name: name, target: target, text: text})
+				if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
+					if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
+						made = append(made, linkAlias{name: resolved, target: target, text: text})
+					}
+				}
+			}
+		}
+	}
+	l.aliases = append(l.aliases, made...)
+	return true
+}
+
+// linkOnlyCopyOperands reads a static cp call that keeps links, does not
+// follow them and does not make new ones, in dir.
+func linkOnlyCopyOperands(args []string, static []bool, dir string) (linkCopy, bool) {
+	parsed := cpOperands(args, static)
+	if !parsed.ok || !parsed.preserves || parsed.hard || parsed.symbolic || parsed.dereference || parsed.parents {
+		return linkCopy{}, false
+	}
+	copied := linkCopy{destination: absolutePath(parsed.destination, dir)}
+	for _, source := range parsed.sources {
+		if strings.HasSuffix(source, "/") || !lnEntryName(source) {
+			// A trailing slash copies the directory a link names.
+			return linkCopy{}, false
+		}
+		copied.sources = append(copied.sources, absolutePath(source, dir))
+		copied.sourceFacts = append(copied.sourceFacts, SourceLinkFactPrefix+OperandPath(source, dir))
+	}
+	copied.named = len(parsed.sources) == 1 && !parsed.targetDir
+	copied.inside = parsed.targetDir || len(parsed.sources) > 1 || !parsed.noTargetDir
+	return copied, true
+}
+
+// copyLinks records the links a link-keeping copy makes when every source
+// is a name a link of this command takes and the source-link fact (the hook
+// client's walk) says no link was at or under it before the command. A
+// caller with no facts reads its own walk of the disk, which cpDiskSymlink
+// has already made. Each copy keeps the text of every link the command
+// makes at that name, so a relative link names the target its text names
+// from the copy's own directory.
+//
+// An entry of the command under a source is copied along under the copy:
+// that is the entry ln -s T name records at name/T in case name is a
+// directory, which is a real link when the source is a directory the
+// command makes (mkdir d && ln -s ~/.ssh/authorized_keys d). A link of the
+// command that names the source or a directory above it can put entries
+// under the source that no alias lists, so it keeps the opaque reading. It
+// returns false when a source is not such a link, its fact is missing or
+// not "0", or a target text is not known.
+func (l *shellLinks) copyLinks(copied linkCopy, facts map[string]string) bool {
+	var made []linkAlias
+	for i, source := range copied.sources {
+		if facts != nil && facts[copied.sourceFacts[i]] != "0" {
+			// Evidence without the fact (an older hook client) or with a
+			// disk link: the old opaque copy scope. With no evidence at all
+			// the caller walked the disk itself (cpDiskSymlink).
+			return false
+		}
+		var froms []linkAlias
+		var rests []string
+		at := false
+		for _, alias := range l.aliases {
+			if pathAtOrUnder(source, filepath.Clean(alias.target)) {
+				return false
+			}
+			rest, under := cutPathPrefix(alias.name, source)
+			if !under {
+				continue
+			}
+			if alias.text == ".." {
+				return false
+			}
+			at = at || rest == ""
+			froms = append(froms, alias)
+			rests = append(rests, rest)
+		}
+		if !at {
+			return false
+		}
+		var names []string
+		if copied.named {
+			names = append(names, copied.destination)
+		}
+		if copied.inside {
+			names = append(names, filepath.Join(copied.destination, filepath.Base(source)))
+		}
+		for j, from := range froms {
+			for _, base := range names {
+				name := base
+				if rests[j] != "" {
+					name = filepath.Join(base, rests[j])
+				}
+				target := from.target
+				if from.text != "" {
+					target = filepath.Dir(name) + string(filepath.Separator) + from.text
+				}
+				made = append(made, linkAlias{name: name, target: target, text: from.text})
+				if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
+					if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
+						made = append(made, linkAlias{name: resolved, target: target, text: from.text})
+					}
+				}
+			}
+		}
+	}
+	l.aliases = append(l.aliases, made...)
+	return true
 }
 
 func cpDestination(args []string, static []bool, cwd string) string {
