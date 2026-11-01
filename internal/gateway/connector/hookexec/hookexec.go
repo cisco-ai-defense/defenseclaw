@@ -2465,7 +2465,7 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		return allowFailClosedStop(opts, sp, reason, "transport")
 	}
 	blocked := !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")
-	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
+	logUnreachableFailure(opts, sp, reason, failMode, blocked)
 	if !managedCopilotOpen(opts, sp, failMode) {
 		if code, handled := copilotFailClosed(opts, sp, "transport", reason); handled {
 			return code
