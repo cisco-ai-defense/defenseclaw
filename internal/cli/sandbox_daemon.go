@@ -351,7 +351,7 @@ func runSandboxDaemon(ctx context.Context, logw io.Writer) error {
 		return unavailable(fmt.Errorf("the managed gateway's hook socket: %w", err))
 	}
 	defer relay.Close()
-	settings, err := sandboxDaemonSettings(ctx, relay)
+	settings, err := sandboxDaemonSettings(ctx, relay, sandboxDaemonSettingsCallTimeout)
 	if err != nil {
 		return unavailable(err)
 	}
@@ -373,14 +373,31 @@ func runSandboxDaemon(ctx context.Context, logw io.Writer) error {
 	return err
 }
 
+// sandboxDaemonSettingsCallTimeout bounds one read of the managed settings
+// at start. The relay client allows two minutes for a relayed hook; a
+// managed gateway that took the read and never answered (stopped, hung)
+// held the daemon that long, and every command on its socket waited until
+// the watchdog replaced the gateway: 25 to 51 s (GAP-0608).
+const sandboxDaemonSettingsCallTimeout = 5 * time.Second
+
 // sandboxDaemonSettings reads the managed settings, waiting briefly for a
-// gateway that is still starting.
-func sandboxDaemonSettings(ctx context.Context, relay sandboxrelay.Client) (sandboxrelay.DaemonSettings, error) {
+// gateway that is still starting (its socket refuses or is not there yet).
+// Each read has its own deadline, callTimeout. A gateway that took a read
+// and did not answer within it is not asked again: the daemon answers that
+// sandboxes cannot run now (fail closed) and exits, and the next command
+// starts it again.
+func sandboxDaemonSettings(ctx context.Context, relay sandboxrelay.Client, callTimeout time.Duration) (sandboxrelay.DaemonSettings, error) {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		s, err := relay.Settings(ctx)
+		cctx, cancel := context.WithTimeout(ctx, callTimeout)
+		s, err := relay.Settings(cctx)
+		silent := err != nil && ctx.Err() == nil && errors.Is(cctx.Err(), context.DeadlineExceeded)
+		cancel()
 		if err == nil {
 			return s, nil
+		}
+		if silent {
+			return sandboxrelay.DaemonSettings{}, fmt.Errorf("read the managed sandbox settings: the managed gateway did not answer within %s: %w", callTimeout, err)
 		}
 		var refused *sandboxrelay.Error
 		if errors.As(err, &refused) || errors.Is(err, sandboxrelay.ErrSocketUntrusted) || time.Now().After(deadline) {
