@@ -534,12 +534,42 @@ try {
                 # read-only check after that decision and before the
                 # transaction, so a deployment the post-commit prepare
                 # would refuse is never committed.
+                # rel-1-0-6:GAP-0319: the uninstall asks through
+                # Invoke-DefenseClawUninstallPrecommitHookCheck, which may ask
+                # again after a hook enumerator pass. That helper asks the
+                # teardown helper for the read-only check only and calls no
+                # other removal command.
                 $checks = @($uninstall.FindAll({
                     param($node)
                     $node -is [Management.Automation.Language.CommandAst] -and
-                        $node.GetCommandName() -ceq 'Invoke-DefenseClawManagedHooksTeardownCommand' -and
-                        $node.Extent.Text -cmatch '-Action\s+check\s*$'
+                        $node.GetCommandName() -ceq 'Invoke-DefenseClawUninstallPrecommitHookCheck'
                 }, $true))
+                $checkHelper = $ast.Find({
+                    param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -ceq 'Invoke-DefenseClawUninstallPrecommitHookCheck'
+                }, $true)
+                $helperChecks = @()
+                $helperWrites = @()
+                if ($null -ne $checkHelper) {
+                    $helperChecks = @($checkHelper.FindAll({
+                        param($node)
+                        $node -is [Management.Automation.Language.CommandAst] -and
+                            $node.GetCommandName() -ceq 'Invoke-DefenseClawManagedHooksTeardownCommand'
+                    }, $true))
+                    $helperWrites = @($checkHelper.FindAll({
+                        param($node)
+                        $node -is [Management.Automation.Language.CommandAst] -and (
+                            ($node.GetCommandName() -ceq 'Invoke-DefenseClawManagedHooksTeardownCommand' -and
+                                $node.Extent.Text -cnotmatch '-Action\s+check(\s|$)') -or
+                            $node.GetCommandName() -ceq 'Invoke-DefenseClawCodexRequirementsCommand' -or
+                            $node.GetCommandName() -ceq 'Remove-DefenseClawStandaloneOpenCodeManagedPlugin' -or
+                            $node.GetCommandName() -ceq 'Set-DefenseClawInstallTreeRetirementAcls')
+                    }, $true))
+                }
+                if ($null -eq $checkHelper -or $helperChecks.Count -eq 0 -or $helperWrites.Count -ne 0) {
+                    $failures.Add('the precommit hook check asks the teardown helper for more than the read-only check')
+                }
                 if ($checks.Count -ne 1 -or $null -eq $transaction -or
                     $checks[0].Extent.StartOffset -lt $decision[0].Extent.StartOffset -or
                     $checks[0].Extent.StartOffset -gt $transaction.Extent.StartOffset) {
