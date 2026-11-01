@@ -295,20 +295,21 @@ func (w *answerWatchdog) closeForAnsweredError(opts Options, sp spec) {
 // watchdog already answered or the call's row is already claimed.
 //
 // The claim that writes the call's row also decides the watchdog's answer:
-// for a managed call's failUnreachable (unreachableAnswer) it is the closed
-// answer failUnreachable gives for reason (renderClaimedFailure). Before,
+// for failUnreachable (unreachableAnswer) of a call outside Secure Client it
+// is the answer failUnreachable gives for reason and failMode
+// (renderClaimedFailure). Before,
 // the watchdog kept its own no-answer text, so a call whose transport proved
 // the gateway service stopped near the deadline (the Windows SCM read after
 // the restart wait, on a loaded host) logged
 // enterprise_managed_gateway_not_running and, when the deadline passed while
 // the row was written, showed enterprise_managed_gateway_no_answer
 // (rel-1-0-6 GAP-0294).
-func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, reason string, unreachableAnswer bool) (chan struct{}, bool) {
+func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, reason, failMode string, unreachableAnswer bool) (chan struct{}, bool) {
 	var out, errb []byte
 	var code int
 	var logFailure func()
 	// Rendered outside the lock: a render can read the lifecycle marker.
-	ownOut, ownErr, ownCode, own := renderClaimedFailure(opts, sp, reason, unreachableAnswer)
+	ownOut, ownErr, ownCode, own := renderClaimedFailure(opts, sp, reason, failMode, closed, unreachableAnswer)
 	if closed {
 		closedOpts := opts
 		closedOpts.FailMode = "closed"
@@ -345,27 +346,80 @@ func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, rea
 	return w.failureLogDone, true
 }
 
-// renderClaimedFailure renders the answer of a managed call's transport
-// failure that failUnreachable is about to log with reason: the closed
-// answer failUnreachable gives for it (the not-running, restarting,
-// port-held or no-answer text, with the reason code last). The fail mode of
-// the call stays what it was; the watchdog's answer is closed in every mode,
-// as before. ok is false for every other failure (its own refusal text, a
-// per-user call, a Secure Client hook) and for a stop event, whose closed
-// answer is an allow: the watchdog keeps its answer for those.
-func renderClaimedFailure(opts Options, sp spec, reason string, unreachableAnswer bool) (stdout, stderr []byte, code int, ok bool) {
-	if !unreachableAnswer || !managedNativeDecision(opts) || strings.TrimSpace(reason) == "" || sp.failOpenOnly ||
+// renderClaimedFailure renders the answer of a transport failure that
+// failUnreachable is about to log with reason and failMode, for a managed
+// call outside Secure Client and for a per-user call: the answer
+// failUnreachable gives for it (closed when the call is blocked; a per-user
+// outage its open mode lets through keeps that allow and its warning). ok is
+// false for every other failure (its own refusal text, a Secure Client
+// hook, a connector with no fail-closed contract) and for a stop event: the
+// watchdog keeps its answer for those.
+func renderClaimedFailure(opts Options, sp spec, reason, failMode string, closed, unreachableAnswer bool) (stdout, stderr []byte, code int, ok bool) {
+	if !unreachableAnswer || opts.SecureClient || strings.TrimSpace(reason) == "" || sp.failOpenOnly ||
 		failClosedStopEvent(opts, sp) {
 		return nil, nil, 0, false
+	}
+	if closed {
+		failMode = "closed"
 	}
 	var out, errb bytes.Buffer
 	rendered := opts
 	rendered.Stdout, rendered.Stderr = &out, &errb
-	// Rendering only: the claiming call writes the row.
-	rendered.Home, rendered.FailureLogHome, rendered.answerWatch = "", nil, nil
-	rendered.FailMode = "closed"
-	code = failUnreachable(rendered, sp, "closed", reason)
+	// Rendering only: the claiming call writes the row, and the once-per-
+	// session warning marker is left for it (HookDir).
+	rendered.Home, rendered.FailureLogHome, rendered.answerWatch, rendered.HookDir = "", nil, nil, ""
+	if closed {
+		rendered.FailMode = "closed"
+	}
+	if mode := normalizeFailMode(failMode); rendered.OutageFailModeNow != nil {
+		// The mode the caller already read; the render must not read it again.
+		rendered.OutageFailModeNow = func() string { return mode }
+	}
+	code = failUnreachable(rendered, sp, failMode, reason)
 	return out.Bytes(), errb.Bytes(), code, true
+}
+
+// perUserOutageSeen makes the watchdog's answer the outage answer of a
+// per-user call whose first try err its gateway refused or dropped
+// (perUserOutageError): the
+// answer the call gives when the restart outlasts its budget
+// (perUserGatewayRestartingReason, the outage mode of the config on disk),
+// with its failure row from the same failUnreachable. Before, the deadline of
+// such a call gave the did-not-answer refusal in every fail mode, so a
+// default-tier account's benign calls were denied in its own gateway's
+// restart window while the calls refused a moment earlier ran with the outage
+// warning (rel-1-0-6 GAP-0295). A call that already logged a failure, an
+// answered error and the watchdog's own answer keep theirs. Safe on a nil
+// watchdog; managed, socket and Secure Client hooks are unchanged.
+func (w *answerWatchdog) perUserOutageSeen(opts Options, sp spec, failMode string, err error) {
+	// Only a refused or dropped call (perUserOutageError) met an outage: a
+	// gateway that took the first try and did not answer keeps the closed
+	// no-answer answer in every fail mode (GAP-2279).
+	if w == nil || !perUserOutageError(opts, err) || opts.ManagedEnterprise || opts.ManagedUnixSocket != "" ||
+		opts.SecureClient || sp.failOpenOnly {
+		return
+	}
+	outage := withPerUserOutage(opts)
+	outage.answerWatch = nil
+	mode := perUserOutageMode(&outage, closeDuringInstall(&outage, failMode))
+	outage.OutageFailModeNow = func() string { return mode }
+	var out, errb bytes.Buffer
+	rendered := outage
+	rendered.Stdout, rendered.Stderr = &out, &errb
+	rendered.Home, rendered.FailureLogHome, rendered.HookDir = "", nil, ""
+	code := failUnreachable(rendered, sp, mode, perUserGatewayRestartingReason)
+	logged := outage
+	logged.Stdout, logged.Stderr = io.Discard, io.Discard
+	logFailure := func() { _ = failUnreachable(logged, sp, mode, perUserGatewayRestartingReason) }
+	installCheck, installOut, installErr, installCode, installLogFailure := renderInstallAnswer(outage, sp, mode)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired || w.claimedAnswer || w.closedKnown || w.failureLogged {
+		return
+	}
+	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out.Bytes(), errb.Bytes(), code, logFailure
+	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
+		installCheck, installOut, installErr, installCode, installLogFailure
 }
 
 // failureLogHomeLookup resolves the invoking user's diagnostic directory of

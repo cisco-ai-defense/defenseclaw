@@ -247,7 +247,7 @@ func TestClaimedFailureAnswerIsNotReplaced(t *testing.T) {
 	stdout, stderr := newClaimedStopWriter(), newClaimedStopWriter()
 	opts := managedStoppedOptions(t, "claudecode", managedStoppedForms[0].shape, stdout, stderr, nil)
 	w := prepareAnswerWatchdog(&opts, sp, "closed", time.Time{})
-	done, claimed := w.claimFailureLog(opts, sp, true, managedGatewayNotRunningReason, true)
+	done, claimed := w.claimFailureLog(opts, sp, true, managedGatewayNotRunningReason, "closed", true)
 	if !claimed {
 		t.Fatal("first claim not taken")
 	}
@@ -259,7 +259,7 @@ func TestClaimedFailureAnswerIsNotReplaced(t *testing.T) {
 	w.adopt(&opts, sp, "closed")
 	w.closeForAnsweredError(opts, sp)
 	w.gatewayAnsweredError(opts, sp, 500)
-	if _, again := w.claimFailureLog(opts, sp, true, "gateway unreachable", false); again {
+	if _, again := w.claimFailureLog(opts, sp, true, "gateway unreachable", "closed", false); again {
 		t.Fatal("second claim taken")
 	}
 	if got := string(w.fallbackErr) + string(w.fallbackOut); got != want || !w.closedKnown {

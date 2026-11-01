@@ -963,6 +963,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 	resp, err := send()
 	if !opts.ManagedEnterprise {
+		// A first try the gateway refused or dropped met an outage: from now
+		// on the answer at the deadline is the outage's, the one this call
+		// gives below when the restart outlasts its budget (rel-1-0-6
+		// GAP-0295). perUserOutageSeen ignores every other error.
+		opts.answerWatch.perUserOutageSeen(opts, sp, failMode, err)
 		// This account's own gateway is restarting or starting: send the
 		// call again until the restart budget ends, starting the gateway
 		// beside the tries after a refused connection.
@@ -976,7 +981,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// Keep the cause: hook-failures.jsonl is the only record of
 			// why a hook could not start the gateway (GAP-0480).
 			return failUnreachable(withPerUserOutage(opts), sp, failMode, coldStartFailureReason(wait.recoveryErr))
-		case wait.outlasted && outage:
+		case wait.outlasted && outage, perUserRestartUnanswered(ctx, opts, wait):
 			return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 		}
 	}

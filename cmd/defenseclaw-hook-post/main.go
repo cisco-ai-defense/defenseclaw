@@ -31,6 +31,12 @@ var (
 )
 
 func run(args []string, input io.Reader, output io.Writer) error {
+	return runWithPeer(args, input, output, nil)
+}
+
+// runWithPeer is run; peer, when set, receives the process behind the
+// request's connection (hookexec.WithPerUserPeerRecord).
+func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexec.PerUserPeerRecord) error {
 	if len(args) == 1 && args[0] == "--version" {
 		_, err := fmt.Fprintf(output, "defenseclaw-hook-post version %s (commit=%s, built=%s)\n", version, commit, date)
 		return err
@@ -94,7 +100,7 @@ func run(args []string, input io.Reader, output io.Writer) error {
 	// Tell the gateway how long this request waits for its answer, so a
 	// tool-call judge answers inside it (#1395).
 	request.Headers[hookexec.HookAnswerWithinHeader] = strconv.FormatInt(timeout.Milliseconds(), 10)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(hookexec.WithPerUserPeerRecord(context.Background(), peer), timeout)
 	defer cancel()
 	response, err := hookexec.PostPerUserHook(ctx, *apiAddr, request.Path, request.Headers, []byte(request.Body))
 	if err != nil {
@@ -115,6 +121,11 @@ func run(args []string, input io.Reader, output io.Writer) error {
 // by a whole second; without it, --max-time alone bounds the request.
 const hookPostDeadlineEnv = "_DC_HOOK_POST_DEADLINE_MS"
 
+// hookPostDataDirEnv is the data directory of the shell hook that runs this
+// helper (the parent of its own hooks folder), where a gateway start or
+// restart holds its start lock.
+const hookPostDataDirEnv = "_DC_HOOK_POST_DATA_DIR"
+
 func requestTimeout(maxTime int) time.Duration {
 	limit := time.Duration(maxTime) * time.Second
 	ms, err := strconv.Atoi(os.Getenv(hookPostDeadlineEnv))
@@ -125,16 +136,39 @@ func requestTimeout(maxTime int) time.Duration {
 }
 
 func main() {
-	if err := run(os.Args[1:], os.Stdin, os.Stdout); err != nil {
-		fmt.Fprintf(os.Stderr, "defenseclaw-hook-post: %v\n", err)
-		if hookexec.PerUserPostOutage(err) {
-			os.Exit(hookexec.PerUserPostOutageExit)
-		}
-		if hookexec.PerUserPostPeerUnverified(err) {
-			// Nothing of the call was sent: the one failure the OpenCode and
-			// Amp plugins send again (GAP-2083).
-			os.Exit(hookexec.PerUserPostPeerUnverifiedExit)
-		}
-		os.Exit(1)
+	os.Exit(runMain(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
+
+// runMain is main with its streams: the exit status of the request.
+func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
+	// The process behind the socket the call is sent on, as the kernel names
+	// it when the call connects: a no-answer is the restart outage only when
+	// that process changed during the call (lead ruling on rel-1-0-6
+	// GAP-0295). The shell names the data directory from the hook's own
+	// folder.
+	dataDir := os.Getenv(hookPostDataDirEnv)
+	peer := hookexec.NewPerUserPeerRecord()
+	err := runWithPeer(args, input, output, peer)
+	if err == nil {
+		return 0
 	}
+	fmt.Fprintf(errOutput, "defenseclaw-hook-post: %v\n", err)
+	switch {
+	case hookexec.PerUserPostOutage(err):
+		return hookexec.PerUserPostOutageExit
+	case hookexec.PerUserPostPeerUnverified(err):
+		// Nothing of the call was sent: the one failure the OpenCode and
+		// Amp plugins send again (GAP-2083).
+		return hookexec.PerUserPostPeerUnverifiedExit
+	case hookexec.PerUserPostNoAnswer(err):
+		// No status before the deadline: the shell hook reads it as a
+		// timeout, or as the restart outage while a start or restart of
+		// this account's gateway holds its start lock and the gateway
+		// process changed during the call (rel-1-0-6 GAP-0295).
+		if hookexec.PerUserGatewayRestartProven(dataDir, peer) {
+			return hookexec.PerUserPostRestartNoAnswerExit
+		}
+		return hookexec.PerUserPostNoAnswerExit
+	}
+	return 1
 }
