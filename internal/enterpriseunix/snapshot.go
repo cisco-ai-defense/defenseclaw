@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -45,6 +46,14 @@ type snapshotEntry struct {
 	// Store is the managed root whose per-filesystem store holds Blob, when
 	// the file could not be linked into the snapshot directory itself.
 	Store string `json:"store,omitempty"`
+	// Empty marks a directory that held no state (nothing but empty
+	// directories, as the package's tmpfiles.d entry creates them before
+	// its postinstall ensure), and EmptyDirs lists those subdirectories,
+	// relative to it. A rollback empties such a state directory back to
+	// them, so a failed install from a package leaves nothing the retry
+	// would take for an unmanaged layout (rel-1-0-6:GAP-0286).
+	Empty     bool     `json:"empty,omitempty"`
+	EmptyDirs []string `json:"empty_dirs,omitempty"`
 }
 
 type snapshot struct {
@@ -124,6 +133,9 @@ func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err er
 				return nil, fmt.Errorf("snapshot %s: %w", canonical, ownerErr)
 			}
 			entry.Present, entry.Mode, entry.UID, entry.GID = true, mode.Perm(), uid, gid
+			if !holdsState(e.P(canonical)) {
+				entry.Empty, entry.EmptyDirs = true, emptySubdirs(e.P(canonical))
+			}
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("snapshot %s: %w", canonical, err)
 		}
@@ -433,13 +445,20 @@ func (e *Env) removeCreatedDirs(snap *snapshot) error {
 		managed.ForeignHookCleanDir(l.DataDir): true,
 	}
 	created := []string{}
+	var errs []error
 	for _, entry := range snap.Entries {
 		if entry.Dir && !entry.Present {
 			created = append(created, entry.Path)
 		}
+		// The two state directories the adoption guard inspects
+		// (unmanagedLeftovers): one that held no state goes back to none.
+		if entry.Dir && entry.Present && entry.Empty && (entry.Path == l.DataDir || entry.Path == l.GuardianAuthDir) {
+			if err := emptyBackTo(e.P(entry.Path), entry.EmptyDirs); err != nil {
+				errs = append(errs, fmt.Errorf("empty %s: %w", entry.Path, err))
+			}
+		}
 	}
 	sort.Slice(created, func(i, j int) bool { return len(created[i]) > len(created[j]) })
-	var errs []error
 	for _, dir := range created {
 		if state[dir] {
 			if err := os.RemoveAll(e.P(dir)); err != nil {
@@ -450,6 +469,56 @@ func (e *Env) removeCreatedDirs(snap *snapshot) error {
 		_ = removeDirIfEmpty(e.P(dir))
 	}
 	return errors.Join(errs...)
+}
+
+// emptySubdirs lists the subdirectories of dir, relative to it, deepest
+// last; dir holds nothing else (holdsState is false).
+func emptySubdirs(dir string) []string {
+	var out []string
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || path == dir || !d.IsDir() {
+			return nil
+		}
+		if rel, err := filepath.Rel(dir, path); err == nil {
+			out = append(out, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	return out
+}
+
+// emptyBackTo removes everything under dir but the subdirectories keep
+// names (relative to dir), which it leaves in place: a state directory that
+// held no state before a rolled-back transaction holds none after it. A
+// symbolic link is removed, never followed.
+func emptyBackTo(dir string, keep []string) error {
+	kept := make(map[string]bool, len(keep))
+	for _, rel := range keep {
+		kept[filepath.FromSlash(rel)] = true
+	}
+	var clear func(string, string) error
+	clear = func(abs, rel string) error {
+		entries, err := os.ReadDir(abs)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var errs []error
+		for _, entry := range entries {
+			childAbs, childRel := filepath.Join(abs, entry.Name()), filepath.Join(rel, entry.Name())
+			if entry.IsDir() && entry.Type()&fs.ModeSymlink == 0 && kept[childRel] {
+				errs = append(errs, clear(childAbs, childRel))
+				continue
+			}
+			if err := os.RemoveAll(childAbs); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}
+	return clear(dir, "")
 }
 
 func (e *Env) discardSnapshot(snap *snapshot) {
