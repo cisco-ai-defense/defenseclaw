@@ -207,6 +207,7 @@ func TestPowerShellStateReadingHoldsOnlyAPossibleStateWrite(t *testing.T) {
 		wh + "\n$p = '~/.defense' + 'claw/config.yaml'; Set-Content $p x",
 		wh + `; echo "claw\"; Set-Content -Path ` + st + ` -Value x; \""`,
 		wh + "\nSet-Content ~/.defense?law/config.yaml x",
+		wh + "\nSet-Content ~/.d*claw/config.yaml x",
 		wh + "\nsc " + st + " x",
 	} {
 		if _, overflow, ok := StateNamingReading(call, "/home/u", true); !ok || !overflow {
