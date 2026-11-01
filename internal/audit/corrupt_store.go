@@ -222,9 +222,30 @@ func (checked *auditCheckedFiles) sameAs(store *Store) bool {
 	return err == nil && wal.present == checked.wal.present && wal.size == checked.wal.size && wal.modTime.Equal(checked.wal.modTime)
 }
 
-// afterAuditStoreProbe runs between the probe and the writable open; tests
-// change the store files there.
-var afterAuditStoreProbe = func(string) {}
+// afterAuditStoreProbe runs between the probe and the writable open, and
+// duringAuditStoreProbeCheck right after the probe's quick_check; tests change
+// the store files there.
+var (
+	afterAuditStoreProbe       = func(string) {}
+	duringAuditStoreProbeCheck = func(string) {}
+)
+
+// unchangedSince reports whether db and wal, read after the probe's
+// connection closed, are the files as they were before it opened (checked
+// holds that earlier state): the same leaf with the same size and mtime, and
+// the same -wal. A -wal that was absent before and is absent or empty after
+// is unchanged: the read-only open may create an empty one, which holds no
+// frames. Anything else was written while the check ran, possibly after its
+// read snapshot, so the check did not read it.
+func (checked *auditCheckedFiles) unchangedSince(db os.FileInfo, wal auditFileState) bool {
+	if !os.SameFile(checked.db, db) || db.Size() != checked.db.Size() || !db.ModTime().Equal(checked.db.ModTime()) {
+		return false
+	}
+	if !checked.wal.present {
+		return !wal.present || wal.size == 0
+	}
+	return wal.present && wal.size == checked.wal.size && wal.modTime.Equal(checked.wal.modTime)
+}
 
 // readOnlyAuditStoreProbe identifies corruption before a writable connection
 // can consume a damaged WAL. A hot rollback journal yields SQLITE_READONLY;
@@ -260,6 +281,16 @@ func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) (auditStoreProbe, er
 		return auditStoreProbe{}, err
 	}
 	defer prepared.close()
+	// The files as they are before the check reads them: a writer that appends
+	// while the check runs adds frames it may not read (review round 2).
+	var before *auditCheckedFiles
+	if prepared.pinned != nil {
+		leaf, leafErr := prepared.pinned.Stat()
+		wal, walErr := auditFileStateOf(absolute + "-wal")
+		if leafErr == nil && walErr == nil {
+			before = &auditCheckedFiles{db: leaf, wal: wal}
+		}
+	}
 	db, err := openAuditReadOnlyPreservingSHM(prepared.path, "")
 	if err != nil {
 		return auditStoreProbe{}, err
@@ -267,6 +298,7 @@ func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) (auditStoreProbe, er
 	ctx, cancel := context.WithTimeout(context.Background(), startupIntegrityCheckTimeout)
 	defer cancel()
 	checkErr := quickCheckAuditDB(ctx, db)
+	duringAuditStoreProbeCheck(absolute)
 	validationErr := prepared.validateAfterOpen()
 	closeErr := db.Close()
 	var checked *auditCheckedFiles
@@ -275,7 +307,7 @@ func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) (auditStoreProbe, er
 		// close can still change it.
 		leaf, leafErr := prepared.pinned.Stat()
 		wal, walErr := auditFileStateOf(absolute + "-wal")
-		if leafErr == nil && walErr == nil {
+		if leafErr == nil && walErr == nil && before != nil && before.unchangedSince(leaf, wal) {
 			checked = &auditCheckedFiles{db: leaf, wal: wal}
 		}
 	}

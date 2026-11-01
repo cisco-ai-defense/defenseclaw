@@ -50,7 +50,7 @@ func (prepared *preparedJudgeBodyPath) close() {
 }
 
 func prepareJudgeBodyDatabasePath(path string, hooks judgeBodyPathHooks) (*preparedJudgeBodyPath, error) {
-	// openSQLite appends its pragma query to the filename. Reject a filename
+	// openSQLiteWithPragmas appends its pragma query to the filename. Reject a filename
 	// that already contains the DSN delimiter so the validated filesystem path
 	// cannot differ from the file SQLite actually opens.
 	if strings.ContainsRune(path, '?') {

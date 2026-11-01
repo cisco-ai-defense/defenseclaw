@@ -215,3 +215,26 @@ func TestAStoreWithAnIdleWALIsCheckedOnce(t *testing.T) {
 		t.Fatalf("writable quick_check ran %d times on an unchanged store with a -wal; want 0", *runs)
 	}
 }
+
+// Review round 2: frames a writer appends to the -wal while the probe's
+// quick_check runs (after its read snapshot) are not in the checked set.
+func TestAStoreWrittenDuringTheProbeCheckIsCheckedAgain(t *testing.T) {
+	path := intactAuditStore(t, t.TempDir(), 40)
+	runs := countWritableQuickChecks(t, func(string) {})
+	original := duringAuditStoreProbeCheck
+	t.Cleanup(func() { duringAuditStoreProbeCheck = original })
+	duringAuditStoreProbeCheck = func(path string) {
+		writer, err := openSQLite(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer writer.Close()
+		if _, err := writer.Exec(`INSERT INTO audit_events (id, timestamp, action, target) VALUES ('during', CURRENT_TIMESTAMP, 'fixture', 't')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	openDaemonStoreForTest(t, path)
+	if *runs != 1 {
+		t.Fatalf("writable quick_check ran %d times on a store written during the probe check; want 1", *runs)
+	}
+}

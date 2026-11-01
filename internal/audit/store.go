@@ -486,7 +486,7 @@ func secureClientMmapSizeBytes() int64 {
 	return 256 << 20
 }
 
-// openSQLite opens a SQLite connection with the audit-tier hardening
+// openSQLiteWithPragmas opens a SQLite connection with the audit-tier hardening
 // applied (DSN pragmas + a single-connection pool). Sharing this
 // helper between NewStore and the upcoming judge_body_store keeps
 // the contention guarantees in lockstep.
@@ -500,10 +500,6 @@ func secureClientMmapSizeBytes() int64 {
 // audit write completes in microseconds; if read latency ever
 // becomes a problem, we can introduce a separate read-only pool
 // without touching this hot path.
-func openSQLite(dbPath string) (*sql.DB, error) {
-	return openSQLiteWithPragmas(dbPath, auditPragmas)
-}
-
 func openSQLiteWithPragmas(dbPath, pragmas string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", dbPath+pragmas)
 	if err != nil {

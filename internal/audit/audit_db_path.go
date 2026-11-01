@@ -108,7 +108,7 @@ func (opened *hardenedAuditSQLite) Close() error {
 }
 
 // openHardenedAuditSQLite is the intended NewStore integration seam. It
-// preserves the existing pool/pragma behavior in openSQLite while adding a
+// preserves the existing pool/pragma behavior in openSQLiteWithPragmas while adding a
 // fail-closed filesystem trust boundary around the lazy database/sql open.
 func openHardenedAuditSQLite(dbPath string, hooks auditDBPathHooks) (*hardenedAuditSQLite, error) {
 	db, _, prepared, err := openHardenedAuditSQLiteWithIdentity(dbPath, hooks)
@@ -189,7 +189,7 @@ func prepareAuditDatabasePath(path string, hooks auditDBPathHooks) (*preparedAud
 	if path == ":memory:" {
 		return &preparedAuditDatabasePath{path: path, hooks: hooks, inMemory: true}, nil
 	}
-	// openSQLite appends its pragma query to the filename. Reject a filename
+	// openSQLiteWithPragmas appends its pragma query to the filename. Reject a filename
 	// that already contains the delimiter so the validated path cannot differ
 	// from the resource SQLite opens.
 	if strings.ContainsRune(path, '?') {

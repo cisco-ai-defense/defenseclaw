@@ -145,9 +145,9 @@ func newJudgeBodyStoreWithPathHooks(
 	db, err := openSQLiteWithPragmas(dbPath, auditPragmasFor(hooks.secureClient))
 	if err != nil {
 		prepared.close()
-		// Strip the leading "audit:" tier that openSQLite stamps so
+		// Strip the leading "audit:" tier that openSQLiteWithPragmas stamps so
 		// the operator sees the correct subsystem in the wrapped
-		// error chain. openSQLite is shared across both DBs, so the
+		// error chain. openSQLiteWithPragmas is shared across both DBs, so the
 		// tier disambiguation happens at the caller boundary.
 		return nil, fmt.Errorf("judge_body: open db %s: %w", dbPath, unwrapOpenSQLiteErr(err))
 	}
@@ -165,7 +165,7 @@ func newJudgeBodyStoreWithPathHooks(
 }
 
 // unwrapOpenSQLiteErr strips the shared "audit:" prefix from the
-// openSQLite helper so the caller-side wrap shows the right tier.
+// openSQLiteWithPragmas helper so the caller-side wrap shows the right tier.
 // Falls back to the original error when the prefix isn't present.
 func unwrapOpenSQLiteErr(err error) error {
 	if err == nil {
