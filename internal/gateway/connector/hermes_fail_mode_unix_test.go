@@ -119,7 +119,7 @@ func TestPerUserHermesHookBlocksAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	hookDir := filepath.Join(dir, "hooks")
 	opts := SetupOpts{
 		DataDir:       filepath.Join(dir, "dc"),
-		APIAddr:       freeAPIAddr(t),
+		APIAddr:       refusingAPIAddr(t),
 		APIToken:      "tok-test",
 		GuardrailMode: "action",
 		WorkspaceDir:  dir,
@@ -150,7 +150,7 @@ func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 		hookDir := filepath.Join(dir, "hooks")
 		opts := SetupOpts{
 			DataDir:       filepath.Join(dir, "dc"),
-			APIAddr:       freeAPIAddr(t),
+			APIAddr:       refusingAPIAddr(t),
 			APIToken:      "tok-test",
 			HookFailMode:  mode,
 			GuardrailMode: "action",
@@ -216,7 +216,7 @@ func TestPerUserAntigravityHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 	hookDir := filepath.Join(dir, "hooks")
 	opts := SetupOpts{
 		DataDir:       filepath.Join(dir, "dc"),
-		APIAddr:       freeAPIAddr(t),
+		APIAddr:       refusingAPIAddr(t),
 		APIToken:      "tok-test",
 		GuardrailMode: "action",
 		WorkspaceDir:  dir,

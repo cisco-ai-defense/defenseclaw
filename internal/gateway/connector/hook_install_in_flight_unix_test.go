@@ -145,7 +145,7 @@ func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(
 					_, _ = io.WriteString(stdin, `{"hook_event_name":"PreToolUse","tool_input":{"command":"echo ok","description":"`+strings.Repeat("a", 16<<10)+`"}}`)
 					_ = stdin.Close()
 				}
-				stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, freeAPIAddr(t), write, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+				stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, refusingAPIAddr(t), write, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 				if got := shellHookBlocked(err, stdout); got != install {
 					t.Fatalf("blocks=%v, want %v (install %v): err=%v stdout=%q stderr=%q", got, install, install, err, stdout, stderr)
 				}

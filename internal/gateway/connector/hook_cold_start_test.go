@@ -118,14 +118,15 @@ func runHookForColdStartWithManaged(t *testing.T, c Connector, script string, ar
 	if err := os.MkdirAll(hooksDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	apiAddr := freeAPIAddr(t)
-	// Bind the endpoint as this account to let these retry tests reach the
-	// native transport stub; free and foreign listeners have separate tests.
-	listener, err := net.Listen("tcp", apiAddr)
+	// Hold the endpoint as this account for the whole test to let these
+	// retry tests reach the native transport stub; free and foreign
+	// listeners have separate tests.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
+	apiAddr := listener.Addr().String()
 	if managed {
 		// An explicit managed binary selects standalone, not Secure Client.
 		opts := SetupOpts{
