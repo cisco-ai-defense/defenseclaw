@@ -1017,7 +1017,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	go s.recordLocalWriteGapV8()
 	// While it runs, report the hook calls that ran fail-open since
 	// (rel-1-0-2 GAP-0446 item 3); no timer on a managed gateway.
-	go s.watchHookFailOpenCalls(ctx)
+	go s.watchHookFailureCalls(ctx)
 	// Bootstrap-owned workers must retire on every return path, including
 	// failures before the normal shutdown block is reached. The explicit normal
 	// close below preserves close-before-store ordering; this deferred call is

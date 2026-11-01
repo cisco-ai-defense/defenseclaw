@@ -34,7 +34,7 @@ func TestHookFailOpenAlertCountsCallsAndNamesTheConnector(t *testing.T) {
 		hookFailOpenCallLine("hermes", "2026-10-30T11:59:03Z", "s1", "llm-1", "pre_llm_call"),
 		hookFailOpenCallLine("hermes", "2026-10-30T11:59:04Z", "s2", "tool-1", "pre_tool_call"),
 	)
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatal(err)
 	}
 	alerts := degradedAlerts(t, store)
@@ -67,7 +67,7 @@ func TestReportHookFailOpenCallsCountsTheLoggedOutcome(t *testing.T) {
 		`{"ts":"2026-10-30T11:59:01Z","connector":"copilot","hook":"h","reason":"gateway unreachable","category":"transport","fail_mode":"closed","outcome":"fail_open","call_id":"c1"}`+"\n",
 		`{"ts":"2026-10-30T11:59:02Z","connector":"copilot","hook":"h","reason":"gateway unreachable","category":"transport","fail_mode":"closed","outcome":"fail_closed","call_id":"c2"}`+"\n",
 	)
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatal(err)
 	}
 	alerts := degradedAlerts(t, store)
@@ -84,11 +84,11 @@ func TestReportHookFailOpenCallsKeepsOldLinesAfterAKnownPosition(t *testing.T) {
 	logDir := filepath.Join(t.TempDir(), "logs")
 	start := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
 	appendHookFailures(t, logDir, hookFailOpenLine("hermes", "2026-10-01T09:00:00Z"))
-	if err := reportHookFailOpenCallsIn(logDir, logger, start); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, start); err != nil {
 		t.Fatal(err)
 	}
 	appendHookFailures(t, logDir, hookFailOpenLine("copilot", "2026-10-01T10:00:00Z"))
-	if err := reportHookFailOpenCallsIn(logDir, logger, start.Add(10*24*time.Hour)); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, start.Add(10*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if alerts := degradedAlerts(t, store); len(alerts) != 2 {
@@ -97,7 +97,7 @@ func TestReportHookFailOpenCallsKeepsOldLinesAfterAKnownPosition(t *testing.T) {
 
 	fresh := filepath.Join(t.TempDir(), "logs")
 	appendHookFailures(t, fresh, hookFailOpenLine("codex", "2026-10-01T10:00:00Z"))
-	if err := reportHookFailOpenCallsIn(fresh, logger, start.Add(10*24*time.Hour)); err != nil {
+	if err := reportHookFailureCallsIn(fresh, logger, start.Add(10*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if alerts := degradedAlerts(t, store); len(alerts) != 2 {
@@ -118,7 +118,7 @@ func TestRunningGatewayReportsFailOpenCallsWithoutARestart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		s.watchHookFailOpenCalls(ctx)
+		s.watchHookFailureCalls(ctx)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -148,7 +148,7 @@ func TestManagedGatewayStartsNoFailOpenReportTimer(t *testing.T) {
 	s := &Sidecar{logger: logger, cfg: &config.Config{DataDir: t.TempDir()}}
 	done := make(chan struct{})
 	go func() {
-		s.watchHookFailOpenCalls(context.Background())
+		s.watchHookFailureCalls(context.Background())
 		close(done)
 	}()
 	select {
@@ -169,7 +169,7 @@ func TestReportHookFailOpenCallsReadsTheHooksHomeWithACustomDataDir(t *testing.T
 	t.Cleanup(func() { hookFailuresHooksHome = home })
 	appendHookFailures(t, filepath.Join(hooksHome, "logs"), hookFailOpenLine("codex", time.Now().UTC().Format(time.RFC3339)))
 	s := &Sidecar{logger: logger, cfg: &config.Config{DataDir: dataDir}}
-	s.reportHookFailOpenCalls()
+	s.reportHookFailureCalls()
 	if alerts := degradedAlerts(t, store); len(alerts) != 1 || alerts[0].Connector != "codex" {
 		t.Fatalf("alerts = %+v, want the codex call from the hooks' folder", alerts)
 	}

@@ -170,6 +170,15 @@ func progressCeiling(opts Options, startedAt time.Time) time.Time {
 	return startedAt.Add(max(hookProgressCeiling, hookAnswerBudget))
 }
 
+// ToolGateEvent reports a hook event that runs before a tool call (or asks
+// for its permission) and blocks it until the hook answers: a block of it is
+// the call's verdict. The gateway's hook-failure report uses it to tell the
+// hook's own block of a call from a block of a later event of a call that
+// already ran (GAP-0271 review).
+func ToolGateEvent(connector, event string) bool {
+	return toolGateEvent(connector, event)
+}
+
 // toolGateEvent reports a hook event that runs before a tool call (or asks
 // for its permission) and blocks it until the hook answers.
 func toolGateEvent(connector, event string) bool {

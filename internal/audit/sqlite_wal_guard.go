@@ -43,7 +43,15 @@ const auditBusyTimeoutMillis = 750
 // to zero bytes even though it is below the caller's limit: a log that stops
 // growing is never restarted by a writer, so its file kept its peak size
 // while the gateway was idle. A variable so tests can use a small file.
-var walIdleTrimBytes int64 = auditWALJournalSizeLimitBytes
+//
+// It is the trickle log's size (walTrickleFrames, about 8 MiB), not
+// journal_size_limit: a restart cuts the file back only to
+// journal_size_limit, so a flood that ended with a shorter log (52 MiB on a
+// 2-vCPU RHEL host) left its file at that size through any idle time, while
+// faster hosts, whose flood ended over 64 MiB, were trimmed to zero
+// (rel-1-0-6 GAP-0273). A trickle of writes keeps its log under this size,
+// so a trimmed file is not trimmed again on every pass.
+var walIdleTrimBytes = int64(walTrickleFrames) * walFrameBytes
 
 // walCopyPasses bounds the copy passes on the dedicated connection. Each pass
 // copies what was written during the one before, so the backlog shrinks pass
