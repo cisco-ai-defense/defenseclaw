@@ -36,7 +36,7 @@ It is off unless you turn it on. It is not available under Secure Client. It nee
      account_join:
        mode: on
        generation: 1
-       secret_sha256: <printf '%s' "$SECRET" | sha256sum>
+       secret_sha256: <hex digest only: printf '%s' "$SECRET" | sha256sum | cut -d' ' -f1>
    ```
 
    A device whose stored secret has another digest reports no key for that generation (`secret_mismatch`).
@@ -69,7 +69,7 @@ The device uses the first one it has, and only when the directory verified it:
 | OS | First | Fallback |
 |---|---|---|
 | Linux (SSSD) | The account's domain SID from SSSD | The `userPrincipalName` from SSSD InfoPipe |
-| Windows | The account's SID, for a domain account only | The UPN from the directory |
+| Windows | The account's SID, for a domain account only | The UPN from the directory (Entra ID accounts: from the Windows identity store) |
 | macOS | (none yet) | (none yet) |
 
 Local accounts, machine-domain accounts and accounts with a derived or kept (not currently verified) UPN get no key (`no_directory_id`). `sIDHistory` is never used. On Windows a SID counts as a domain account's when the directory translated it to a UPN; an account of a trusted forest counts too.
@@ -124,6 +124,7 @@ Rotation recovers from a leaked secret. It does not unlink history: during the o
 
 | Code | Meaning |
 |---|---|
+| `feature_off` | `enterprise.account_join` is off or absent (account-keys output only). |
 | `secret_missing` | No `account-join-key` is stored. |
 | `secret_malformed` | A stored secret is not 32 bytes in base64url. No other secret is used instead. |
 | `secret_unreadable` | A stored secret could not be read. |

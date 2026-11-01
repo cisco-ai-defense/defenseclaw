@@ -11,7 +11,7 @@ import (
 
 // errAccountJoinSecretMalformed refuses an account join tenant secret that
 // is not 32 bytes in base64url. It never repeats the value.
-var errAccountJoinSecretMalformed = errors.New("secret_malformed: account-join-key and account-join-key-next must be 32 random bytes in base64url")
+var errAccountJoinSecretMalformed = errors.New("account-join-key and account-join-key-next must be 32 random bytes in base64url")
 
 // accountJoinSecretFormatError checks a value `enterprise secret set`
 // stores under the account join names; every other name passes.

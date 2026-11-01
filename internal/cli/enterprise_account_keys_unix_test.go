@@ -23,6 +23,24 @@ func TestEnterpriseAccountKeysNeedsRoot(t *testing.T) {
 	}
 }
 
+// Through the command tree: the per-user root pre-run (config load, sidecar
+// bootstrap) does not run, and a standard user is refused.
+func TestEnterpriseAccountKeysCommandSkipsThePerUserStartup(t *testing.T) {
+	previous := enterpriseAccountKeysEUID
+	enterpriseAccountKeysEUID = func() int { return 1000 }
+	t.Cleanup(func() { enterpriseAccountKeysEUID = previous })
+	t.Setenv("HOME", t.TempDir())
+	var out, errOut bytes.Buffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&errOut)
+	rootCmd.SetArgs([]string{"enterprise", "account-keys"})
+	t.Cleanup(func() { rootCmd.SetArgs(nil); rootCmd.SetOut(nil); rootCmd.SetErr(nil) })
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "administrator rights") || strings.Contains(err.Error()+errOut.String(), "failed to load config") || out.Len() != 0 {
+		t.Fatalf("got %v; stderr %q; stdout %q", err, errOut.String(), out.String())
+	}
+}
+
 func TestEnterpriseAccountKeysOffDocument(t *testing.T) {
 	var out bytes.Buffer
 	if err := printEnterpriseAccountKeys(&out, nil); err != nil {

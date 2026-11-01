@@ -18,7 +18,7 @@ func TestAccountJoinSecretFormatAtSet(t *testing.T) {
 		}
 		for _, bad := range []string{short, "hunter2-canary", strings.Repeat("A", 44) + "!"} {
 			err := accountJoinSecretFormatError(name, []byte(bad))
-			if err == nil || !strings.HasPrefix(err.Error(), "secret_malformed") || strings.Contains(err.Error(), bad) {
+			if err == nil || !strings.Contains(err.Error(), "32 random bytes") || strings.Contains(err.Error(), bad) {
 				t.Fatalf("%s %q: %v", name, bad, err)
 			}
 		}

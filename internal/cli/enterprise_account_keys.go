@@ -22,7 +22,11 @@ the protected credential account-join-key and root (Linux, macOS) or an
 elevated administrator (Windows). The keys are computed now and stored
 nowhere; status and verify report only their counts.`,
 	Args: cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, _ []string) error { return runEnterpriseAccountKeys(cmd) },
+	// The managed deployment, not the caller's per-user setup: no config
+	// load, sidecar bootstrap or audit store before the privilege check.
+	PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
+	Annotations:       map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
+	RunE:              func(cmd *cobra.Command, _ []string) error { return runEnterpriseAccountKeys(cmd) },
 }
 
 func init() {

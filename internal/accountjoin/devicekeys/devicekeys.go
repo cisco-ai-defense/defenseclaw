@@ -122,8 +122,8 @@ func appendReason(reasons []string, reason string) []string {
 // verified: on Linux the SID SSSD holds for the uid (the account's domain
 // objectSid), on Windows the record's SID when the directory translated it
 // to a UPN (a domain account; local accounts have none), and the UPN only
-// from InfoPipe, the macOS identity store or the Windows name translation
-// (never a derived or kept one). LastSeen is when the guardian last wrote
+// from SSSD InfoPipe, the Windows name translation or the Windows identity
+// store (Entra ID accounts), never a derived or kept one. LastSeen is when the guardian last wrote
 // the record. The macOS guardian records no verified identifier yet, so a
 // macOS account gets no key.
 func SpoolAccounts(dir string, trust func(path, label string) error, goos string) []accountjoin.Account {
