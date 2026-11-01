@@ -250,7 +250,10 @@ func TestHookOutageFailModeNowFollowsTheAccountConfigOfACustomDataDir(t *testing
 		{name: "permissive tier", account: outageNowDefaultConfig + "  rule_pack: permissive\n", want: "open"},
 		{name: "strict tier", account: outageNowStrictConfig, want: "closed"},
 		{name: "saved closed", account: outageNowDefaultConfig + "  hook_fail_mode: closed\n", want: "closed"},
-		{name: "account config names another data dir", account: outageNowDefaultConfig, otherDataDir: true, want: "closed"},
+		// Hooks left in a data dir the account config moved away from
+		// follow the folder it names now (movedDataDirOutageMode).
+		{name: "account config names another data dir", account: outageNowDefaultConfig, otherDataDir: true, want: "open"},
+		{name: "account config names another data dir, strict", account: outageNowStrictConfig, otherDataDir: true, want: "closed"},
 		{name: "data dir keeps its own strict config", account: outageNowDefaultConfig, own: outageNowStrictConfig, want: "closed"},
 		{name: "account not in the database", account: outageNowDefaultConfig, noAccount: true, want: "closed"},
 	} {
@@ -379,6 +382,65 @@ func TestHookOutageFailModeNowStaleAccountHooksFollowTheMovedDataDir(t *testing.
 			for _, connector := range []string{"claudecode", "codex", "opencode"} {
 				if got := hookOutageFailModeNow(connector, filepath.Join(own, "hooks")); got != tc.want {
 					t.Fatalf("stale hooks hookOutageFailModeNow(%s) = %q, want %q", connector, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// The way back (rel-1-0-6 GAP-0224, sweep 8): a session started on a custom
+// data_dir keeps its hooks there after `config set data_dir` moves the data
+// back to ~/.defenseclaw. That folder has no config.yaml of its own and its
+// hooks load the account's config, which now names ~/.defenseclaw: they get
+// the account folder's answer. A strict account config, an install lock in
+// the left folder or the account folder, and a left folder with a
+// config.yaml of its own still close.
+func TestHookOutageFailModeNowHooksLeftInAMovedBackDataDirFollowTheAccount(t *testing.T) {
+	for _, tc := range []struct {
+		name, account, leftOwn string
+		lockLeft, lockAccount  bool
+		want                   string
+	}{
+		{name: "default tier", account: outageNowDefaultConfig, want: "open"},
+		{name: "strict tier", account: outageNowStrictConfig, want: "closed"},
+		{name: "install holds the left folder", account: outageNowDefaultConfig, lockLeft: true, want: "closed"},
+		{name: "install holds the account folder", account: outageNowDefaultConfig, lockAccount: true, want: "closed"},
+		{name: "left folder keeps a config of its own", account: outageNowDefaultConfig, leftOwn: outageNowDefaultConfig, want: "closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := t.TempDir()
+			left := t.TempDir()
+			oldAccount, oldRoot := outageAccountHome, outageInstalledDataRoot
+			outageAccountHome = func() string { return account }
+			outageInstalledDataRoot = func() (string, bool) { return "", false }
+			t.Cleanup(func() { outageAccountHome, outageInstalledDataRoot = oldAccount, oldRoot })
+			t.Setenv("HOME", account)
+			t.Setenv("USERPROFILE", account)
+			t.Setenv("DEFENSECLAW_HOME", "")
+			t.Setenv("DEFENSECLAW_CONFIG", "")
+			own := filepath.Join(account, ".defenseclaw")
+			writeOutageNowConfig(t, own, tc.account)
+			if tc.leftOwn != "" {
+				writeOutageNowConfig(t, left, "data_dir: "+own+"\n"+tc.leftOwn)
+			}
+			for _, dir := range []string{filepath.Join(own, "hooks"), filepath.Join(left, "hooks")} {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, root := range []struct {
+				on   bool
+				path string
+			}{{tc.lockLeft, left}, {tc.lockAccount, own}} {
+				if root.on {
+					if err := os.MkdirAll(filepath.Join(root.path, ".install.lock"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			for _, connector := range []string{"claudecode", "codex", "opencode"} {
+				if got := hookOutageFailModeNow(connector, filepath.Join(left, "hooks")); got != tc.want {
+					t.Fatalf("left hooks hookOutageFailModeNow(%s) = %q, want %q", connector, got, tc.want)
 				}
 			}
 		})
