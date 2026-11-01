@@ -2,19 +2,23 @@
 
 `dcperf.py` measures one per-user DefenseClaw install on the host it runs on.
 It needs Python 3.11+ and nothing else (strace, when present on Linux, adds
-the processes-per-hook count). It never reads or prints a credential.
+the processes-per-hook count; on macOS an `eslogger` log adds it, below).
+Started by an older `python3` (macOS ships 3.9, RHEL 9 ships 3.9), it runs
+itself again under the DefenseClaw venv Python (3.12) of the install it
+measures. It never reads or prints a credential.
 
 | Metric (JSON key) | What it measures |
 |---|---|
 | `hook.<claudecode,codex>.idle` | p50/p95/max of 100 sequential benign PreToolUse calls through the hook command the connector registered (`~/.claude/settings.json`, `~/.codex/config.toml`), run with `/bin/sh -c` as the agent runs it |
 | `hook.<connector>.burst` | the same, 128 calls 32 at a time |
 | `hook.<connector>.*.not_allowed` | benign calls that were denied or failed (must be 0) |
-| `hook_execs.claudecode` | execs and processes per hook call (`strace -f`), by program and by parent |
+| `hook_execs.claudecode` | execs and processes per hook call, by program (Linux `strace -f`, also by parent; macOS an `eslogger exec fork` log) |
+| `hook_execs.claudecode.gateway_execs_per_call` | macOS: execs the gateway and its children ran while the traced calls ran, per call (10 calls a second apart) |
 | `gateway_restart.to_api_ready` | `defenseclaw-gateway restart` until `/health` answers from the new process |
 | `cli.status`, `cli.doctor`, `cli.setup_claudecode` | wall time of `defenseclaw status`, `doctor`, `setup claude-code --yes --no-restart` |
 | `cli.skill_scan` | `defenseclaw skill scan --path fixtures/benign-skill --no-use-llm --json` |
 | `gateway_rss_kb.after_idle` | gateway RSS after `idle_s` seconds without traffic (`--rss-idle`, 300 by default) |
-| `gateway_rss_kb.anon_kb`, `file_kb`, `audit_db_kb` | the heap and file-backed parts of that RSS (Linux), and the audit.db size: the startup quick_check reads audit.db through SQLite's mmap (up to 256 MiB), so the file-backed part, and the total, grow with the store while the heap stays flat |
+| `gateway_rss_kb.anon_kb`, `file_kb`, `audit_db_kb` | the heap and file-backed parts of that RSS (Linux RssAnon/RssFile; macOS `vmmap -summary`: physical footprint and resident mapped files), and the audit.db size. Until rel-1-0-6 GAP-0327 the gateway mapped audit.db (SQLite mmap, 256 MiB) and the pages it read stayed resident, so the file-backed part, and the total, grew with the store |
 
 Run it against your own install, or against a throwaway one:
 
@@ -26,7 +30,22 @@ python3 scripts/perf/dcperf.py run --out perf.json --budgets scripts/perf/budget
 python3 scripts/perf/dcperf.py provision --assets ASSETS_DIR --home /tmp/perf-home
 python3 scripts/perf/dcperf.py run --home /tmp/perf-home --out perf.json
 
-# check a saved result against the budgets
+# macOS: count execs per hook with Endpoint Security. Only root may run
+# eslogger; start it in a root shell of its own (not as a parent of the
+# harness), point the harness at its log, and stop it after the run with
+# SIGTERM: a background job of sh ignores SIGINT, and an eslogger left
+# running keeps a client on every exec and fork of the Mac. The log grows
+# about 20 MB a minute on a busy Mac.
+# Endpoint Security makes every exec on the Mac slower while eslogger runs (a
+# hook call runs 13), so trace the execs in a pass of their own and measure
+# the rest without it, then check the two passes together.
+sudo sh -c 'eslogger exec fork > /var/tmp/dcperf-es.jsonl 2>/dev/null & echo $! > /var/tmp/dcperf-es.pid'
+python3 scripts/perf/dcperf.py run --only execs --eslogger-log /var/tmp/dcperf-es.jsonl --out perf-execs.json
+sudo kill -TERM "$(cat /var/tmp/dcperf-es.pid)"; sudo rm -f /var/tmp/dcperf-es.jsonl /var/tmp/dcperf-es.pid
+python3 scripts/perf/dcperf.py run --only hook,cli,restart,rss --out perf-rest.json
+python3 scripts/perf/dcperf.py compare perf-execs.json perf-rest.json --budgets scripts/perf/budgets.json --column macos-per-user
+
+# check a saved result (or several passes, merged) against the budgets
 python3 scripts/perf/dcperf.py compare perf.json --budgets scripts/perf/budgets.json --column linux-per-user
 ```
 

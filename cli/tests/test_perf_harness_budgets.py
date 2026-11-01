@@ -89,6 +89,102 @@ def test_strace_parser_joins_interrupted_calls_and_skips_threads_and_failed_exec
     assert parsed["forks"] == ["sh", "sh"]
 
 
+def _es(kind: str, seq: int, at: str, pid: int, ppid: int, path: str = "") -> str:
+    if kind == "exec":
+        body = {
+            "exec": {"target": {"audit_token": {"pid": pid}, "ppid": ppid, "executable": {"path": path}}, "args": []}
+        }
+        event_type = 9
+    else:
+        body = {"fork": {"child": {"audit_token": {"pid": pid}, "ppid": ppid}}}
+        event_type = 11
+    return json.dumps({"event_type": event_type, "seq_num": seq, "time": f"2026-11-01T08:00:{at}Z", "event": body})
+
+
+def test_eslogger_parser_counts_each_calls_tree_drops_gapped_calls_and_counts_gateway_execs() -> None:
+    t = dcperf.eslogger_time
+    assert t("2026-11-01T08:00:01.500000000Z") - t("2026-11-01T08:00:00.000000000Z") == 1.5
+    runner, gateway = 50, 900
+    log = [
+        # call 1, 01.0-01.2: sh (bash), a hook script fork that runs jq; an unrelated exec
+        _es("fork", 1, "01.000000001", 101, runner),
+        _es("exec", 1, "01.000000002", 101, runner, "/bin/sh"),
+        _es("exec", 2, "01.000000003", 101, runner, "/bin/bash"),
+        _es("fork", 2, "01.050000000", 102, 101),
+        _es("exec", 3, "01.050000001", 102, 101, "/usr/bin/jq"),
+        _es("exec", 4, "01.060000000", 777, 1, "/usr/bin/true"),
+        # the gateway's listing: dscl and its watchdog shell
+        _es("fork", 3, "01.100000000", 901, gateway),
+        _es("exec", 5, "01.100000001", 901, gateway, "/usr/bin/dscl"),
+        _es("fork", 4, "01.100000002", 902, gateway),
+        _es("exec", 6, "01.100000003", 902, gateway, "/bin/sh"),
+        # call 2, 02.0-02.2: a dropped exec event (seq 7 missing)
+        _es("fork", 5, "02.000000001", 103, runner),
+        _es("exec", 8, "02.000000002", 103, runner, "/bin/sh"),
+        _es("exec", 10, "02.000000003", 103, runner, "/bin/bash"),
+        "{not json",
+    ]
+    windows = [
+        (t("2026-11-01T08:00:01.000000000Z"), t("2026-11-01T08:00:01.200000000Z")),
+        (t("2026-11-01T08:00:02.000000000Z"), t("2026-11-01T08:00:02.200000000Z")),
+    ]
+    parsed = dcperf.parse_eslogger(log, windows, runner, gateway)
+    assert (parsed["calls"], parsed["calls_dropped"]) == (1, 1)
+    assert (parsed["per_call_p50"], parsed["processes_per_call_p50"]) == (3, 2)
+    assert parsed["by_program"] == {"bash": 1.0, "jq": 1.0, "sh": 1.0}
+    assert parsed["gateway_by_program"] == {"dscl": 1, "sh": 1}
+    assert parsed["gateway_execs_per_call"] == 1.0
+
+
+def test_passes_merge_into_one_result_for_the_gate() -> None:
+    execs = {"groups": ["execs"], "metrics": {"hook_execs": {"claudecode": {"per_call_p50": 13}}}, "errors": {}}
+    rest = {"groups": ["hook"], "metrics": {"hook": {"claudecode": {"idle": {"p95_ms": 90.0}}}}, "errors": {"x": "y"}}
+    merged = dcperf.merge_results([execs, rest])
+    flat = dcperf.flatten(merged)
+    assert flat["hook_execs.claudecode.per_call_p50"] == 13 and flat["hook.claudecode.idle.p95_ms"] == 90.0
+    assert merged["groups"] == ["execs", "hook"] and merged["errors"] == {"x": "y"}
+    assert "hook" not in execs["metrics"]
+
+
+def test_vmmap_summary_gives_the_footprint_and_the_resident_mapped_files() -> None:
+    text = "\n".join(
+        [
+            "Physical footprint:         118.3M",
+            "Physical footprint (peak):  141.4M",
+            "REGION TYPE                        SIZE     SIZE     SIZE",
+            "VM_ALLOCATE                        1.3G   128.9M   102.2M       0K",
+            "mapped file                       3764K    1076K       4K       0K",
+        ]
+    )
+    assert dcperf.parse_vmmap_summary(text) == {"anon_kb": int(118.3 * 1024), "file_kb": 1076}
+    assert dcperf.parse_vmmap_summary("vmmap: no process") == {}
+
+
+def test_an_old_python_runs_the_harness_again_under_the_install_venv(tmp_path: Path, monkeypatch) -> None:
+    python = tmp_path / ".defenseclaw" / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    calls = []
+    monkeypatch.delenv("DCPERF_REEXEC", raising=False)
+    monkeypatch.setattr(dcperf.sys, "version_info", (3, 9, 6))
+    monkeypatch.setattr(dcperf.os, "execv", lambda path, argv: calls.append((path, argv)))
+    try:  # the real execv does not return; the stand-in does, and the harness then stops
+        dcperf.reexec_under_install_python(["run", "--home", str(tmp_path)])
+    except SystemExit:
+        pass
+    assert calls == [
+        (str(python), [str(python), "-I", str(ROOT / "scripts" / "perf" / "dcperf.py"), "run", "--home", str(tmp_path)])
+    ]
+    monkeypatch.setenv("DCPERF_REEXEC", "1")
+    try:
+        dcperf.reexec_under_install_python(["run", f"--home={tmp_path}"])
+    except SystemExit as exc:
+        assert "3.11" in str(exc)
+    else:
+        raise AssertionError("a second re-exec was not refused")
+
+
 def test_the_registered_claude_code_and_codex_hook_commands_are_the_ones_measured(tmp_path: Path) -> None:
     inst = dcperf.Install(tmp_path)
     (tmp_path / ".claude").mkdir()
@@ -143,6 +239,30 @@ def test_every_gated_linux_budget_has_a_source_and_names_a_metric_the_harness_wr
     )
     column = BUDGETS["columns"]["linux-per-user"]
     assert BUDGETS["tolerance"] == 0.20
+    for metric, entry in column.items():
+        assert metric in produced, metric
+        assert entry.get("source"), metric
+
+
+def test_every_macos_budget_has_a_source_and_names_a_metric_the_harness_writes_there() -> None:
+    hook = {
+        "idle": {"p50_ms": 1, "p95_ms": 1, "max_ms": 1, "min_ms": 1, "n": 1, "not_allowed": 0},
+        "burst": {"p50_ms": 1, "p95_ms": 1, "max_ms": 1, "min_ms": 1, "n": 1, "not_allowed": 0, "width": 32},
+    }
+    cli = {"p50_ms": 1, "p95_ms": 1, "max_ms": 1, "min_ms": 1, "n": 1}
+    execs = {"per_call_p50": 13, "per_call_max": 13, "processes_per_call_p50": 36, "calls": 10, "calls_dropped": 0}
+    produced = dcperf.flatten(
+        _result(
+            hook={"claudecode": hook, "codex": hook},
+            hook_execs={"claudecode": dict(execs, gateway_execs_per_call=1.5)},
+            cli={name: cli for name in ("status", "doctor", "setup_claudecode", "skill_scan")},
+            gateway_restart={"to_api_ready": cli, "command": cli},
+            gateway_rss_kb={"after_idle": 1, "idle_s": 300, "audit_db_kb": 1, "anon_kb": 1, "file_kb": 1},
+        )
+    )
+    column = BUDGETS["columns"]["macos-per-user"]
+    gated = [m for m, e in column.items() if isinstance(e.get("budget"), (int, float)) and e.get("gate") is not False]
+    assert "hook.claudecode.idle.p95_ms" in gated and "gateway_rss_kb.after_idle" in gated
     for metric, entry in column.items():
         assert metric in produced, metric
         assert entry.get("source"), metric

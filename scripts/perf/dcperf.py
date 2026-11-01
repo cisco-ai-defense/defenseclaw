@@ -11,17 +11,25 @@ result plus a one-line summary:
 * hook latency of the installed Claude Code and Codex hooks (the command
   the connector registered in ~/.claude/settings.json and ~/.codex/hooks.json),
   benign PreToolUse calls: idle (sequential) and burst (32-way);
-* processes spawned per hook call (Linux, when strace is on PATH);
+* processes spawned per hook call: Linux with strace on PATH; macOS from an
+  `eslogger exec fork` log that root writes during the run (--eslogger-log),
+  which also counts what the gateway itself starts while the hooks run;
 * gateway restart time until /health answers from the new process;
 * wall time of `defenseclaw status`, `doctor` and `setup claude-code`;
 * skill scan time on scripts/perf/fixtures/benign-skill (no LLM);
-* gateway RSS after an idle period.
+* gateway RSS after an idle period, split into the anonymous and the
+  file-backed part (Linux /proc, macOS vmmap).
+
+It needs Python 3.11+. Started by an older python3 (macOS ships 3.9), it
+runs itself again under the DefenseClaw venv Python of the install it
+measures (HOME/.defenseclaw/.venv/bin/python, 3.12).
 
 Subcommands:
   provision --assets DIR --home DIR   install the release assets into a
                                       throwaway HOME, set up claude-code and
                                       codex, start the gateway on free ports
   run [--home DIR] [--rss-idle S] [--out FILE] [--budgets FILE --column C]
+      [--eslogger-log FILE]
   compare RESULT --budgets FILE --column C
 
 `run` and `compare` exit 1 when a gated metric is over its budget by more
@@ -33,6 +41,7 @@ the files the installed hooks read themselves.
 from __future__ import annotations
 
 import argparse
+import calendar
 import concurrent.futures
 import json
 import os
@@ -60,6 +69,12 @@ SCHEMA = 1
 # (TST-0218), so an earlier sample lands before or after it by chance.
 PLAN = dict(idle=100, burst=128, width=32, restarts=3, status=5, doctor=3, setup=3, scan=3, exec_calls=10)
 DEFAULT_RSS_IDLE_S = 300
+
+# eslogger tracing (macOS): the traced calls are a second apart, so the
+# events of one call never fall in the window of the next, and an event
+# counts for a call up to ESLOGGER_SLACK_S after the hook returned.
+ESLOGGER_CALL_GAP_S = 1.0
+ESLOGGER_SLACK_S = 0.3
 
 
 # ---------------------------------------------------------------- statistics
@@ -141,6 +156,28 @@ def compare(result: dict, budgets: dict, column: str) -> dict:
         rows.append({"metric": metric, "value": value, "budget": budget, "limit": round(limit, 1), "status": status})
     failed = [r for r in rows if r["status"] in ("regression", "missing")]
     return {"column": column, "tolerance": tolerance, "rows": rows, "failed": len(failed), "ok": not failed}
+
+
+def merge_results(results: list[dict]) -> dict:
+    """One result from several passes of `run`, the metrics merged (a later
+    pass wins a metric both measured). On macOS the exec count needs an
+    eslogger running, and Endpoint Security makes every exec of the Mac
+    slower while it runs, so the hook latency is measured in a pass without
+    it (README)."""
+
+    def merge(into: dict, other: dict) -> None:
+        for key, value in other.items():
+            if isinstance(value, dict) and isinstance(into.get(key), dict):
+                merge(into[key], value)
+            else:
+                into[key] = value
+
+    merged = json.loads(json.dumps(results[0]))
+    for other in results[1:]:
+        merge(merged.setdefault("metrics", {}), other.get("metrics", {}))
+        merged.setdefault("errors", {}).update(other.get("errors", {}))
+        merged["groups"] = sorted(set(merged.get("groups", [])) | set(other.get("groups", [])))
+    return merged
 
 
 def compare_text(report: dict) -> str:
@@ -463,14 +500,17 @@ def parse_strace(text: str) -> dict:
     return {"execs": execs, "forks": forks}
 
 
-def count_execs(inst: Install, connector: str, calls: int) -> dict | None:
-    """Processes started per hook invocation, traced with strace -f (Linux only).
+def count_execs(inst: Install, connector: str, calls: int, eslogger_log: Path | None = None) -> dict | None:
+    """Processes started per hook invocation, traced with strace -f (Linux)
+    or read from an eslogger log (macOS, count_execs_eslogger).
 
     Counts every successful execve and every new process (fork or non-thread
     clone) in the hook's tree, including the /bin/sh the agent starts the
     hook command with; by_program says which program each exec ran and
     spawned_by which program started it.
     """
+    if platform.system() == "Darwin":
+        return count_execs_eslogger(inst, connector, calls, eslogger_log) if eslogger_log else None
     strace = shutil.which("strace")
     if not strace or platform.system() != "Linux":
         return None
@@ -520,6 +560,7 @@ def count_execs(inst: Install, connector: str, calls: int) -> dict | None:
         return {k: round(v / calls, 2) for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))}
 
     return {
+        "tracer": "strace",
         "per_call_p50": statistics.median(per_call),
         "per_call_max": max(per_call),
         "processes_per_call_p50": statistics.median(forks),
@@ -528,6 +569,153 @@ def count_execs(inst: Install, connector: str, calls: int) -> dict | None:
         "spawned_by": ranked(spawned),
         "forks_by": ranked(forked),
     }
+
+
+def eslogger_time(text: str) -> float:
+    """Seconds since the epoch of an eslogger "time" (UTC, "...T08:31:00.123456789Z")."""
+    whole, _, fraction = text.rstrip("Z").partition(".")
+    return calendar.timegm(time.strptime(whole, "%Y-%m-%dT%H:%M:%S")) + float("0." + (fraction or "0"))
+
+
+def parse_eslogger(
+    lines: list[str], windows: list[tuple[float, float]], runner_pid: int, gateway_pid: int | None
+) -> dict:
+    """Execs and processes per hook call in an `eslogger exec fork` JSON log (macOS).
+
+    windows holds the wall-clock start and end of each traced call, which
+    runner_pid ran with /bin/sh. A call's tree is the /bin/sh that runner_pid
+    started in its window and every process forked below it there; on macOS
+    /bin/sh runs bash, so a call's own shell is two execs. Endpoint Security
+    drops events under load, so a call whose window has a gap in the seq_num
+    of an event type is dropped rather than counted short. gateway_execs
+    counts the execs of the gateway's descendants from the first call to the
+    last: a per-user macOS gateway ran four dscl, each with a process-group
+    watchdog shell, every 2 s while hooks came in (rel-1-0-6 GAP-0326).
+    """
+    events = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+            at, seq = eslogger_time(event["time"]), (event["event_type"], event["seq_num"])
+            body = event["event"]
+            if "exec" in body:
+                target = body["exec"]["target"]
+                pid, ppid = target["audit_token"]["pid"], target["ppid"]
+                events.append((at, "exec", seq, pid, ppid, os.path.basename(target["executable"]["path"])))
+            elif "fork" in body:
+                child = body["fork"]["child"]
+                events.append((at, "fork", seq, child["audit_token"]["pid"], child["ppid"], ""))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue  # a line eslogger was still writing, or another event
+    events.sort(key=lambda event: event[0])
+    parent: dict[int, int] = {}
+    for _, _, _, pid, ppid, _ in events:
+        parent.setdefault(pid, ppid)
+    per_call, procs, names, dropped = [], [], {}, 0
+    for start, end in windows:
+        window = [e for e in events if start - 0.05 <= e[0] <= end + ESLOGGER_SLACK_S]
+        gap = False
+        for kind in ("exec", "fork"):
+            seqs = sorted(e[2][1] for e in window if e[1] == kind)
+            gap = gap or bool(seqs and seqs[-1] - seqs[0] + 1 != len(seqs))
+        roots = [e for e in window if e[1] == "exec" and e[4] == runner_pid and e[5] == "sh"]
+        if gap or not roots:
+            dropped += 1
+            continue
+        tree, links, grown = {roots[0][3]}, {e[3]: e[4] for e in window}, True
+        while grown:
+            grown = False
+            for pid, ppid in links.items():
+                if ppid in tree and pid not in tree:
+                    tree.add(pid)
+                    grown = True
+        execs = [e for e in window if e[1] == "exec" and e[3] in tree]
+        per_call.append(len(execs))
+        procs.append(len(tree))
+        for e in execs:
+            names[e[5]] = names.get(e[5], 0) + 1
+    out: dict = {"calls": len(per_call), "calls_dropped": dropped}
+    if per_call:
+        out.update(
+            per_call_p50=statistics.median(per_call),
+            per_call_max=max(per_call),
+            processes_per_call_p50=statistics.median(procs),
+            by_program={
+                k: round(v / len(per_call), 2) for k, v in sorted(names.items(), key=lambda kv: (-kv[1], kv[0]))
+            },
+        )
+    if gateway_pid and windows:
+
+        def below_gateway(pid: int) -> bool:
+            for _ in range(64):
+                if pid == gateway_pid:
+                    return True
+                pid = parent.get(pid, 0)
+                if pid <= 1:
+                    return False
+            return False
+
+        first, last = windows[0][0], windows[-1][1] + ESLOGGER_SLACK_S
+        gateway = [e for e in events if e[1] == "exec" and first <= e[0] <= last and below_gateway(e[3])]
+        programs: dict[str, int] = {}
+        for e in gateway:
+            programs[e[5]] = programs.get(e[5], 0) + 1
+        out["gateway_execs_per_call"] = round(len(gateway) / len(windows), 2)
+        out["gateway_by_program"] = dict(sorted(programs.items(), key=lambda kv: (-kv[1], kv[0])))
+    return out
+
+
+def _read_log_from(path: Path, offset: int) -> list[str]:
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        return handle.read().decode(errors="replace").splitlines()
+
+
+def count_execs_eslogger(inst: Install, connector: str, calls: int, log: Path) -> dict:
+    """Processes started per hook invocation on macOS, from an eslogger log.
+
+    macOS has no strace, and only root may run `eslogger exec fork`, so the
+    operator starts it for the run (README) and passes its log; the harness
+    marks the time of each call, a second apart, and reads the events that
+    eslogger wrote after the first call. eslogger writes through a buffer:
+    the log is read once it holds an event from after the last call.
+    """
+    env = inst.env()
+    command = registered_hook(inst, connector)
+    session = f"dcperf-exec-{uuid.uuid4().hex[:8]}"
+    offset = log.stat().st_size
+    windows = []
+    for _ in range(calls):
+        start = time.time()
+        subprocess.run(
+            ["/bin/sh", "-c", command],
+            input=hook_payload(connector, inst.work, session),
+            env=env,
+            cwd=str(inst.work),
+            capture_output=True,
+            timeout=60,
+        )
+        windows.append((start, time.time()))
+        time.sleep(ESLOGGER_CALL_GAP_S)
+    after = windows[-1][1] + ESLOGGER_SLACK_S + 0.5
+    deadline = time.time() + 60
+    while True:
+        lines = _read_log_from(log, offset)
+        newest = 0.0
+        for line in reversed(lines[-50:]):
+            try:
+                newest = max(newest, eslogger_time(json.loads(line)["time"]))
+            except (ValueError, KeyError, TypeError):
+                continue
+        if newest > after or time.time() > deadline:
+            break
+        time.sleep(1.0)
+    parsed = parse_eslogger(lines, windows, os.getpid(), inst.gateway_pid())
+    if not parsed["calls"]:
+        raise RuntimeError(
+            f"no traced call in {log} ({parsed['calls_dropped']} dropped): is `eslogger exec fork` writing it?"
+        )
+    return dict(parsed, tracer="eslogger")
 
 
 # ---------------------------------------------------------------- gateway, CLI
@@ -545,11 +733,14 @@ def rss_kb(pid: int) -> int | None:
 
 
 def rss_split_kb(pid: int) -> dict:
-    """RssAnon and RssFile of a Linux process ({} elsewhere).
+    """The anonymous and the file-backed part of a process's memory.
 
-    The file-backed part holds the gateway binary and the audit.db pages the
-    startup quick_check read through SQLite's mmap (capped at mmap_size, 256
-    MiB), so it grows with the audit store; the anonymous part is the heap.
+    Linux: RssAnon and RssFile. macOS: the physical footprint (the dirty
+    memory vmmap charges to the process, anon_kb) and the resident pages of
+    its mapped files (file_kb, vmmap -summary). {} elsewhere or when vmmap
+    cannot read the process. Until rel-1-0-6 GAP-0327 the file-backed part
+    also held the audit.db pages the gateway read through SQLite's mmap, so it
+    grew with the store; audit.db is no longer mapped.
     """
     status = Path(f"/proc/{pid}/status")
     out = {}
@@ -558,6 +749,34 @@ def rss_split_kb(pid: int) -> dict:
             key = line.split(":", 1)[0]
             if key in ("RssAnon", "RssFile"):
                 out[key[3:].lower() + "_kb"] = int(line.split()[1])
+        return out
+    if platform.system() == "Darwin":
+        try:
+            proc = subprocess.run(["vmmap", "-summary", str(pid)], capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.SubprocessError):
+            return out
+        out = parse_vmmap_summary(proc.stdout)
+    return out
+
+
+_VMMAP_UNITS = {"": 1 / 1024, "B": 1 / 1024, "K": 1, "M": 1024, "G": 1024**2, "T": 1024**3}
+
+
+def _vmmap_kb(text: str) -> int | None:
+    match = re.fullmatch(r"([\d.]+)([BKMGT]?)", text.strip())
+    return int(float(match.group(1)) * _VMMAP_UNITS[match.group(2)]) if match else None
+
+
+def parse_vmmap_summary(text: str) -> dict:
+    """anon_kb (Physical footprint) and file_kb (resident size of the
+    "mapped file" region type) from `vmmap -summary` output."""
+    out = {}
+    footprint = re.search(r"^Physical footprint:\s+(\S+)", text, re.M)
+    mapped = re.search(r"^mapped file\s+(\S+)\s+(\S+)", text, re.M)
+    if footprint and _vmmap_kb(footprint.group(1)) is not None:
+        out["anon_kb"] = _vmmap_kb(footprint.group(1))
+    if mapped and _vmmap_kb(mapped.group(2)) is not None:
+        out["file_kb"] = _vmmap_kb(mapped.group(2))
     return out
 
 
@@ -604,7 +823,12 @@ def time_cli(inst: Install, argv: list[str], count: int, ok_codes=(0,)) -> dict:
 GROUPS = ("hook", "execs", "cli", "restart", "rss")
 
 
-def measure(inst: Install, rss_idle: int = DEFAULT_RSS_IDLE_S, only: tuple[str, ...] = GROUPS) -> dict:
+def measure(
+    inst: Install,
+    rss_idle: int = DEFAULT_RSS_IDLE_S,
+    only: tuple[str, ...] = GROUPS,
+    eslogger_log: Path | None = None,
+) -> dict:
     prof = dict(PLAN, rss_idle=rss_idle)
     metrics: dict = {}
     errors: dict = {}
@@ -628,7 +852,7 @@ def measure(inst: Install, rss_idle: int = DEFAULT_RSS_IDLE_S, only: tuple[str, 
         metrics["hook"] = hooks
     execs = None
     if "execs" in only:
-        execs = attempt("hook_execs", lambda: count_execs(inst, "claudecode", prof["exec_calls"]))
+        execs = attempt("hook_execs", lambda: count_execs(inst, "claudecode", prof["exec_calls"], eslogger_log))
     if execs:
         metrics["hook_execs"] = {"claudecode": execs}
     cli = {}
@@ -745,8 +969,10 @@ def one_line(result: dict) -> str:
             f" burst{b['width']} p95 {b['p95_ms']:.0f} ms"
         )
     ex = m.get("hook_execs", {}).get("claudecode")
-    if ex:
+    if ex and "per_call_p50" in ex:
         parts.append(f"execs/hook {ex['per_call_p50']:g}")
+    if ex and "gateway_execs_per_call" in ex:
+        parts.append(f"gateway execs/hook {ex['gateway_execs_per_call']:g}")
     r = m.get("gateway_restart")
     if r:
         parts.append(f"restart {r['to_api_ready']['p50_ms']:.0f} ms")
@@ -754,7 +980,10 @@ def one_line(result: dict) -> str:
         parts.append(f"{name} {value['p50_ms']:.0f} ms")
     rss = m.get("gateway_rss_kb")
     if rss:
-        parts.append(f"rss after {rss['idle_s']} s idle {rss['after_idle'] / 1024:.0f} MiB")
+        split = ""
+        if "anon_kb" in rss and "file_kb" in rss:
+            split = f" (anon {rss['anon_kb'] / 1024:.0f}, file {rss['file_kb'] / 1024:.0f})"
+        parts.append(f"rss after {rss['idle_s']} s idle {rss['after_idle'] / 1024:.0f} MiB{split}")
     if result.get("errors"):
         parts.append(f"errors {sorted(result['errors'])}")
     return "dcperf: " + "; ".join(parts)
@@ -768,7 +997,30 @@ def _groups(text: str) -> tuple[str, ...]:
     return groups
 
 
+def reexec_under_install_python(argv: list[str]) -> None:
+    """Run again under the DefenseClaw venv Python when this one is older
+    than 3.11 (tomllib, and the syntax above): macOS ships python3 3.9.
+
+    The venv is the one of the install --home names (HOME by default). It
+    runs isolated (-I), as the harness needs only the standard library.
+    """
+    if sys.version_info >= (3, 11):
+        return
+    home = Path.home()
+    for i, arg in enumerate(argv):
+        if arg == "--home" and i + 1 < len(argv):
+            home = Path(argv[i + 1])
+        elif arg.startswith("--home="):
+            home = Path(arg.split("=", 1)[1])
+    python = home / ".defenseclaw" / ".venv" / "bin" / "python"
+    if os.environ.get("DCPERF_REEXEC") != "1" and os.access(python, os.X_OK):
+        os.environ["DCPERF_REEXEC"] = "1"
+        os.execv(str(python), [str(python), "-I", str(Path(__file__).resolve())] + argv)
+    raise SystemExit(f"dcperf needs Python 3.11+, this is {platform.python_version()}; no DefenseClaw venv at {python}")
+
+
 def main(argv: list[str] | None = None) -> int:
+    reexec_under_install_python(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("provision")
@@ -783,8 +1035,13 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--out", type=Path)
     r.add_argument("--budgets", type=Path)
     r.add_argument("--column", default="linux-per-user")
+    r.add_argument(
+        "--eslogger-log",
+        type=Path,
+        help="macOS: the JSON log a root `eslogger exec fork` writes during the run (counts execs per hook)",
+    )
     c = sub.add_parser("compare")
-    c.add_argument("result", type=Path)
+    c.add_argument("result", type=Path, nargs="+", help="one result, or several passes to merge (later wins)")
     c.add_argument("--budgets", type=Path, required=True)
     c.add_argument("--column", default="linux-per-user")
     args = parser.parse_args(argv)
@@ -793,9 +1050,9 @@ def main(argv: list[str] | None = None) -> int:
         provision(args.assets.resolve(), args.home.resolve())
         return 0
     if args.cmd == "compare":
-        result = json.loads(args.result.read_text(encoding="utf-8"))
+        result = merge_results([json.loads(path.read_text(encoding="utf-8")) for path in args.result])
     else:
-        result = measure(Install(args.home.resolve()), args.rss_idle, _groups(args.only))
+        result = measure(Install(args.home.resolve()), args.rss_idle, _groups(args.only), args.eslogger_log)
         text = json.dumps(result, indent=1, sort_keys=True)
         if args.out:
             args.out.write_text(text + "\n", encoding="utf-8")
