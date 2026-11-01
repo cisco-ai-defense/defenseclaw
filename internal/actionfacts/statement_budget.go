@@ -89,9 +89,11 @@ func powerShellStatements(command string, limit int) (int, bool) {
 	statements := 0
 	inStatement := false
 	opaque := false
-	// lastSignificant is the last non-blank character before i: a line end
-	// right after a comma continues the statement (a multi-line array).
+	// lastSignificant is the last non-blank character of code before i: a
+	// line end right after a comma continues the statement (a multi-line
+	// array). Comment text never sets it (commentEnd).
 	lastSignificant := rune(0)
+	commentEnd := -1
 	boundary := func() {
 		if inStatement {
 			statements++
@@ -131,7 +133,7 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			continue
 		}
 		// Code, paren and hashtable frames.
-		if i > 0 && !unicode.IsSpace(runes[i-1]) {
+		if i > 0 && i-1 != commentEnd && !unicode.IsSpace(runes[i-1]) {
 			lastSignificant = runes[i-1]
 		}
 		next := rune(0)
@@ -140,9 +142,21 @@ func powerShellStatements(command string, limit int) (int, bool) {
 		}
 		switch {
 		case r == '#' && tokenStart(i):
+			// A line comment: the line goes on as the code before it ends.
+			// A comma inside the comment does not continue the line
+			// (review r3 finding 1: `Write-Output 1 # note,` lines hid
+			// their statements from the count).
+			lastSignificant = 0
+			for j := i - 1; j >= 0 && runes[j] != '\n' && runes[j] != '\r'; j-- {
+				if !unicode.IsSpace(runes[j]) {
+					lastSignificant = runes[j]
+					break
+				}
+			}
 			for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
 				i++
 			}
+			commentEnd = i
 		case r == '<' && next == '#':
 			j := i + 2
 			for j+1 < len(runes) && (runes[j] != '#' || runes[j+1] != '>') {
@@ -226,11 +240,13 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			boundary()
 			i++
 		case r == '&' && (i == 0 || runes[i-1] != '>'):
-			// After a statement, the PowerShell 7 background operator ends
-			// it; at a statement start, the call operator. The Windows
-			// lexer stops at a call whose target is not quoted.
+			// After a complete command, the PowerShell 7 background
+			// operator ends it; at a statement start or after an
+			// assignment or operator ($x = & git ...), the call operator,
+			// which ends nothing (review r3 finding 2). The Windows lexer
+			// stops at a call whose target is not quoted.
 			opaque = true
-			if inStatement {
+			if inStatement && !strings.ContainsRune("=(,|{!+-*/%<>", lastSignificant) {
 				boundary()
 			} else {
 				inStatement = true

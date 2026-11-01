@@ -60,6 +60,22 @@ func TestPowerShellStatementsOverBudget(t *testing.T) {
 		{"PowerShell 7 background chain", strings.ReplaceAll(statements(200, "Write-Output %d"), "; ", " & "), true},
 		{"call operator at each statement start", statements(129, "& git status %d"), true},
 		{"redirect 2>&1 is no separator", strings.Repeat("Write-Output 1 2>&1 ", 200), false},
+		// Review r3: a comma inside a line comment does not continue the
+		// line (finding 1); a comma before the comment does.
+		{"line comments that end in a comma", strings.ReplaceAll(statements(200, "Write-Output %d # note,"), "; ", "\n"), true},
+		{"array items with a comment after the comma", "$list = @(\n" + strings.ReplaceAll(statements(300, "  'item%d', # note"), "; ", "\n") + "\n  'last'\n)", false},
+		// The call operator after an assignment ends no statement
+		// (finding 2).
+		{"assigned call operator, 70 lines", strings.ReplaceAll(statements(70, "$o%d = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"assigned call operator, 128 lines", strings.ReplaceAll(statements(128, "$o%d = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"assigned call operator, 129 lines", strings.ReplaceAll(statements(129, "$o%d = & git rev-parse HEAD"), "; ", "\n"), true},
+		{"quoted call target after an assignment", strings.ReplaceAll(statements(100, "$o%d = & 'git' status"), "; ", "\n"), false},
+		// Line ends inside a bare ( ) with no commas: a multi-line
+		// condition is one statement (review r3 finding 4, mutation MH).
+		{"multi-line condition in a bare ( )", "if (\n" + strings.ReplaceAll(statements(140, "$a%d -eq 1 -or"), "; ", "\n") + "\n$true) { Get-Date }", false},
+		// Block comments are not statements (item 5c).
+		{"block comments ending each line", strings.ReplaceAll(statements(200, "Write-Output %d <# , #>"), "; ", "\n"), true},
+		{"block comments on 100 lines", strings.ReplaceAll(statements(100, "Write-Output %d <# , ; | #>"), "; ", "\n"), false},
 	} {
 		if got := PowerShellStatementsOverBudget(tc.command); got != tc.over {
 			t.Errorf("%s (%d bytes): over budget %t, want %t", tc.name, len(tc.command), got, tc.over)

@@ -638,6 +638,31 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			break
 		}
 
+		if dialect == windowsPowerShell && r == '<' && i+1 < len(runes) && runes[i+1] == '#' && !wordActive {
+			// A PowerShell block comment, <# ... #>, separates tokens like
+			// a blank. It was read as the input redirection PowerShell
+			// rejects, so a script with one read as invalid and its
+			// statements, a destructive one included, were not judged
+			// (rel-1-0-6:GAP-0331 review r3 item 5c). An unterminated one is
+			// a PowerShell parse error.
+			if !flush() {
+				return lexemes, false
+			}
+			end := -1
+			for j := i + 2; j+1 < len(runes); j++ {
+				if runes[j] == '#' && runes[j+1] == '>' {
+					end = j + 1
+					break
+				}
+			}
+			if end < 0 {
+				out.markInvalid(IssueInvalidSyntax)
+				return lexemes, false
+			}
+			i = end
+			continue
+		}
+
 		if dialect == windowsPowerShell && r == '#' && !wordActive {
 			if !flush() {
 				return lexemes, false

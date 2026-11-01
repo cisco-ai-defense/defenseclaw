@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -292,6 +293,10 @@ func TestGAP0331PowerShellPrefixDoesNotHideTheBudget(t *testing.T) {
 			}{
 				{prefix + statements(100), false},
 				{prefix + statements(200) + "; Remove-Item -Recurse -Force " + home, true},
+				// Review r3 finding 1: lines that end in a comment ending
+				// in a comma, at 200 and 3000 statements (past 64 KiB).
+				{prefix + strings.ReplaceAll(statements(200), "; ", " # note,\n") + "\nRemove-Item -Recurse -Force " + home, true},
+				{prefix + strings.ReplaceAll(statements(3000), "; ", " # note,\n") + "\nRemove-Item -Recurse -Force " + home, true},
 				{prefix + statements(3000), true},
 				// Under the 64 KiB input bound: the reading is partial, not
 				// limit-exceeded, and still counted past the lexer's stop.
@@ -310,6 +315,74 @@ func TestGAP0331PowerShellPrefixDoesNotHideTheBudget(t *testing.T) {
 				if limited != tc.refused || tc.refused && buildVerdict(findings, "tool_call").Action != guardrailActionBlock {
 					t.Errorf("%s/%s prefix %q, %d bytes: findings %v, want refused by the budget %t",
 						route.tool, route.hint, prefix, len(tc.command), findingIDs(findings), tc.refused)
+				}
+			}
+		}
+	}
+}
+
+// TestGAP0331PowerShellReadingRoutes covers the review round 3 rows on the
+// three PowerShell routes (the Claude Code PowerShell tool, the powershell
+// tool of the Codex re-reading, and Bash with a PowerShell hint), per-user
+// and as a managed peer, for both connectors:
+//   - 70 lines of $oN = & git rev-parse HEAD are 70 statements and allow, as
+//     on base (finding 2: the call operator after = ended a statement);
+//   - a script of PowerShell block comments is read, not refused as
+//     invalid, so a destructive last statement blocks under the budget
+//     too (item 5c), and a benign one allows.
+func TestGAP0331PowerShellReadingRoutes(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("POSIX homes and a mode 0 homes folder")
+	}
+	homes := filepath.Join(t.TempDir(), "homes")
+	home := filepath.Join(homes, "alice")
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
+	lines := func(n int, form string) string {
+		parts := make([]string, n)
+		for i := range parts {
+			parts[i] = fmt.Sprintf(form, i)
+		}
+		return strings.Join(parts, "\n")
+	}
+	for _, tc := range []struct {
+		name, command string
+		block         bool
+	}{
+		{"assigned call operator, 70 lines", lines(70, "$o%d = & git rev-parse HEAD"), false},
+		{"block comments, 5 lines", lines(5, "Write-Output %d <# , #>"), false},
+		{"block comments, 5 lines, destructive tail", lines(5, "Write-Output %d <# , #>") + "\nRemove-Item -Recurse -Force " + home, true},
+		{"block comments, 200 lines, destructive tail", lines(200, "Write-Output %d <# , #>") + "\nRemove-Item -Recurse -Force " + home, true},
+	} {
+		for _, route := range []struct {
+			tool string
+			hint actionfacts.Dialect
+		}{{"PowerShell", actionfacts.DialectPowerShell}, {"powershell", ""}, {"Bash", actionfacts.DialectPowerShell}} {
+			for _, connector := range []string{"claudecode", "codex"} {
+				for _, managed := range []bool{false, true} {
+					args, err := json.Marshal(map[string]string{"command": tc.command})
+					if err != nil {
+						t.Fatal(err)
+					}
+					input := actionfacts.Input{Tool: route.tool, Args: args, CWD: cwd, ActiveHome: home, DialectHint: route.hint}
+					request := trustedActionRequest{Input: input, LegacyText: string(args), Connector: connector, EnforcementCapable: true}
+					ctx := t.Context()
+					if managed {
+						ctx = withManagedHookPeer(ctx, managedHookPeer{Home: home})
+						if err := os.Chmod(homes, 0); err != nil {
+							t.Fatal(err)
+						}
+					}
+					findings := dispatchTrustedAction(ctx, request)
+					if err := os.Chmod(homes, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != tc.block {
+						t.Errorf("%s: %s/%s %s managed=%t: findings %v, want block=%t", tc.name, route.tool, route.hint, connector, managed, findingIDs(findings), tc.block)
+					}
 				}
 			}
 		}
