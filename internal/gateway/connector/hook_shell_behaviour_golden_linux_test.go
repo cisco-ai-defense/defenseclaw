@@ -45,7 +45,11 @@ import (
 // and a sample of the rest). DC_HOOK_GOLDEN_UPDATE=1 rewrites the golden
 // (with FULL=1, from the hooks whose behaviour it must keep), and
 // DC_HOOK_GOLDEN_DUMP=DIR writes each case's normalized observation to DIR,
-// so two trees can be compared whole.
+// so two trees can be compared whole. A mismatch is also written whole to
+// DC_HOOK_GOLDEN_MISMATCH_DIR (default $RUNNER_TEMP, else a kept temporary
+// folder the log names): the normalized observation, the raw stdout, stderr
+// and hook-failures.jsonl, the case's timing and load, and one re-run of the
+// case, so a single failure in CI is enough to see what differed.
 func TestShellHookBehaviourMatchesGolden(t *testing.T) {
 	for _, tool := range []string{"jq", "curl", "awk"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -113,6 +117,7 @@ func TestShellHookBehaviourMatchesGolden(t *testing.T) {
 		mu       sync.Mutex
 		got      = map[string]string{}
 		failures []string
+		mismatch []hookGoldenMismatch
 		next     atomic.Int64
 		wg       sync.WaitGroup
 	)
@@ -154,6 +159,8 @@ func TestShellHookBehaviourMatchesGolden(t *testing.T) {
 					} else if w != digest {
 						body, _ := json.MarshalIndent(obs, "", "  ")
 						failures = append(failures, fmt.Sprintf("%s: digest %s, golden %s; observation:\n%s", c.id, digest, w, body))
+						mismatch = append(mismatch, hookGoldenMismatch{Case: c.id, Index: i, Golden: w, Digest: digest,
+							Observation: obs, Raw: obs.raw, c: c})
 					}
 				}
 				mu.Unlock()
@@ -161,6 +168,9 @@ func TestShellHookBehaviourMatchesGolden(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	if len(mismatch) > 0 {
+		writeHookGoldenMismatches(t, base, len(cases), mismatch, workers)
+	}
 	sort.Strings(failures)
 	for i, f := range failures {
 		if i >= 20 {
@@ -539,6 +549,104 @@ type hookGoldenObservation struct {
 	Stderr   string              `json:"stderr"`
 	Failures []string            `json:"hook_failures"`
 	Requests []hookGoldenRequest `json:"requests"`
+	// raw is not in the digest (unexported): what a mismatch report keeps.
+	raw hookGoldenRaw
+}
+
+// hookGoldenRaw is a case's unnormalized output, its timing and the host's
+// load around it, for the mismatch report only.
+type hookGoldenRaw struct {
+	Stdout       string `json:"stdout"`
+	Stderr       string `json:"stderr"`
+	HookFailures string `json:"hook_failures"`
+	Root         string `json:"root"`
+	Addr         string `json:"addr"`
+	Started      string `json:"started"`
+	CaseMs       int64  `json:"case_ms"`
+	HookMs       int64  `json:"hook_ms"`
+	LoadBefore   string `json:"load_before"`
+	LoadAfter    string `json:"load_after"`
+}
+
+// hookGoldenMismatch is one case whose digest is not the golden's.
+type hookGoldenMismatch struct {
+	Case        string                 `json:"case"`
+	Index       int                    `json:"index"`
+	Golden      string                 `json:"golden_digest"`
+	Digest      string                 `json:"digest"`
+	Observation hookGoldenObservation  `json:"observation"`
+	Raw         hookGoldenRaw          `json:"raw"`
+	Rerun       *hookGoldenMismatchRun `json:"rerun,omitempty"`
+	c           hookGoldenCase
+}
+
+// hookGoldenMismatchRun is the same case run once more, alone, after the
+// pool: it never changes the verdict, it shows what the case gives when
+// nothing else runs.
+type hookGoldenMismatchRun struct {
+	Digest        string                `json:"digest,omitempty"`
+	MatchesGolden bool                  `json:"matches_golden"`
+	Observation   hookGoldenObservation `json:"observation"`
+	Raw           hookGoldenRaw         `json:"raw"`
+	Error         string                `json:"error,omitempty"`
+}
+
+const hookGoldenReruns = 20
+
+func hookGoldenLoad() string {
+	b, _ := os.ReadFile("/proc/loadavg")
+	return strings.TrimSpace(string(b))
+}
+
+// writeHookGoldenMismatches re-runs the first hookGoldenReruns mismatching
+// cases once (a stale golden fails every case; re-running them all would
+// take longer than the run) and writes every mismatch to one JSON file (see
+// TestShellHookBehaviourMatchesGolden).
+func writeHookGoldenMismatches(t *testing.T, base string, next int, mismatch []hookGoldenMismatch, workers int) {
+	t.Helper()
+	sort.Slice(mismatch, func(a, b int) bool { return mismatch[a].Case < mismatch[b].Case })
+	for k := range mismatch {
+		if k >= hookGoldenReruns {
+			break
+		}
+		obs, err := runHookGoldenCase(base, next+k, mismatch[k].c)
+		run := &hookGoldenMismatchRun{Observation: obs, Raw: obs.raw}
+		if err != nil {
+			run.Error = err.Error()
+		} else {
+			run.Digest = obs.digest()
+			run.MatchesGolden = run.Digest == mismatch[k].Golden
+		}
+		mismatch[k].Rerun = run
+	}
+	dir := os.Getenv("DC_HOOK_GOLDEN_MISMATCH_DIR")
+	if dir == "" {
+		dir = os.Getenv("RUNNER_TEMP")
+	}
+	var err error
+	if dir == "" {
+		dir, err = os.MkdirTemp("", "hook-golden-mismatch-")
+	} else {
+		err = os.MkdirAll(dir, 0o755)
+	}
+	if err != nil {
+		t.Logf("mismatch report not written: %v", err)
+		return
+	}
+	body, err := json.MarshalIndent(map[string]interface{}{
+		"test": t.Name(), "workers": workers, "load": hookGoldenLoad(),
+		"written": time.Now().UTC().Format(time.RFC3339Nano), "mismatches": mismatch,
+	}, "", "  ")
+	if err != nil {
+		t.Logf("mismatch report not written: %v", err)
+		return
+	}
+	path := filepath.Join(dir, fmt.Sprintf("hook-golden-mismatch-%s-%d.json", time.Now().UTC().Format("20060102T150405.000000000"), os.Getpid()))
+	if err := os.WriteFile(path, append(body, '\n'), 0o644); err != nil {
+		t.Logf("mismatch report not written: %v", err)
+		return
+	}
+	t.Logf("%d mismatching cases written to %s", len(mismatch), path)
 }
 
 func (o hookGoldenObservation) digest() string {
@@ -550,13 +658,29 @@ func (o hookGoldenObservation) digest() string {
 	return hex.EncodeToString(sum[:])[:20]
 }
 
+// hookGoldenHookToken is the bearer of every golden case's hook.
+const hookGoldenHookToken = "golden-scoped-token"
+
 type hookGoldenGateway struct {
 	mu       sync.Mutex
 	answer   func(n int, event string) (int, string)
 	requests []hookGoldenRequest
+	// bearer, when set, is the only Authorization this gateway answers.
+	bearer string
 }
 
 func (g *hookGoldenGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// A loopback TCP port is open to every program on the computer. Another
+	// test's hook aimed at a port it had probed free and closed (port 0),
+	// which the kernel then gave this listener, or another program's health
+	// probe, is not this case's hook: only that hook holds the case's
+	// bearer. Such a request is neither answered with the case's answer nor
+	// recorded or counted, so it cannot change the case's digest
+	// (rel-1-0-6:GAP-0453).
+	if g.bearer != "" && r.Header.Get("Authorization") != g.bearer {
+		http.Error(w, "not this golden case's hook", http.StatusMisdirectedRequest)
+		return
+	}
 	body, _ := io.ReadAll(r.Body)
 	event := r.Header.Get("X-DefenseClaw-Hook-Event")
 	if event == "" {
@@ -589,6 +713,9 @@ var hookGoldenRenderMu sync.Mutex
 
 func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservation, error) {
 	var obs hookGoldenObservation
+	caseStart := time.Now()
+	obs.raw.Started = caseStart.UTC().Format(time.RFC3339Nano)
+	obs.raw.LoadBefore = hookGoldenLoad()
 	root := filepath.Join(base, strconv.Itoa(i))
 	home := filepath.Join(root, "home")
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -604,6 +731,11 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		return obs, err
 	}
 	gateway := &hookGoldenGateway{answer: c.answer.answer}
+	if !c.mode.managed || c.mode.secureClient {
+		// Loopback TCP: every hook sends its bearer there. The managed hook
+		// socket is this case's own path.
+		gateway.bearer = "Bearer " + hookGoldenHookToken
+	}
 	server := &http.Server{Handler: gateway, ReadHeaderTimeout: 10 * time.Second}
 	var listener net.Listener
 	var err error
@@ -664,7 +796,7 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		}
 	}
 	opts := SetupOpts{DataDir: dataDir, APIAddr: addr, APIToken: "golden-gateway-token",
-		HookAPIToken: "golden-scoped-token", HookAPITokenScoped: true, HookFailMode: c.mode.failMode}
+		HookAPIToken: hookGoldenHookToken, HookAPITokenScoped: true, HookFailMode: c.mode.failMode}
 	if c.mode.managed {
 		opts.ManagedEnterprise = true
 		opts.ManagedHookSocket = socket
@@ -756,7 +888,11 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	hookStart := time.Now()
 	runErr := cmd.Run()
+	obs.raw.HookMs = time.Since(hookStart).Milliseconds()
+	obs.raw.LoadAfter = hookGoldenLoad()
+	obs.raw.Stdout, obs.raw.Stderr, obs.raw.Root, obs.raw.Addr = stdout.String(), stderr.String(), root, addr
 	obs.Exit = 0
 	if exitErr, ok := runErr.(*exec.ExitError); ok {
 		obs.Exit = exitErr.ExitCode()
@@ -767,18 +903,13 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 	obs.Stdout = norm(stdout.String())
 	obs.Stderr = norm(stderr.String())
 	if raw, err := os.ReadFile(filepath.Join(dataDir, "logs", "hook-failures.jsonl")); err == nil {
+		obs.raw.HookFailures = string(raw)
 		for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
 			obs.Failures = append(obs.Failures, norm(hookGoldenStripClock(line)))
 		}
 	}
 	gateway.mu.Lock()
 	for _, r := range gateway.requests {
-		// No hook sends a GET: one here is another program's health probe
-		// that reached this case's loopback port after its own gateway
-		// left it.
-		if r.Method == http.MethodGet && r.Path == "/health" {
-			continue
-		}
 		header := map[string][]string{}
 		for k, v := range r.Header {
 			for _, value := range v {
@@ -802,6 +933,7 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		obs.Requests = append(obs.Requests, hookGoldenRequest{Method: r.Method, Path: r.Path, Header: header, Body: norm(r.Body)})
 	}
 	gateway.mu.Unlock()
+	obs.raw.CaseMs = time.Since(caseStart).Milliseconds()
 	return obs, nil
 }
 
