@@ -133,7 +133,9 @@ func TestGuideNamesEveryMemberKeptOnTheDevice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, section, found := strings.Cut(string(data), "### What to forward\n")
+	// A Windows checkout converts the guide to CRLF line endings.
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	_, section, found := strings.Cut(text, "### What to forward\n")
 	if !found {
 		t.Fatal("management-agent.md has no What to forward section")
 	}
