@@ -45,21 +45,27 @@ func newNotifyCmd() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Both runtimes that reach this command, the per-user notifier and
+			// the Secure Client Windows notifier, build their options here with
+			// enterpriseManaged false, so both read the chain marker and both
+			// chain the displaced notifier.
 			opts := buildHookOptions("codex", "notify", "", "open")
-			if codexNotifyChainEnded(opts, args[0]) {
+			if codexNotifyChainEnded(args[0]) {
 				// A notifier this command started called it back with the
 				// same turn: it is already forwarded, and chaining again
 				// would loop.
 				return nil
 			}
-			hookexec.RunCodexNotify(cmd.Context(), opts, []byte(args[0]))
-			if !opts.ManagedEnterprise && !opts.SecureClient {
-				runOriginalCodexNotify(opts.Home, args[0])
-			}
+			forwardCodexNotify(cmd.Context(), opts, []byte(args[0]))
+			runOriginalCodexNotify(opts.Home, args[0])
 			return nil
 		},
 	}
 }
+
+// forwardCodexNotify is the gateway forward; a variable so tests can stand in
+// for the gateway.
+var forwardCodexNotify = hookexec.RunCodexNotify
 
 // codexNotifyChainedEnv marks the notifier runOriginalCodexNotify starts. Its
 // value is the hex SHA-256 of that turn's payload, so only a call that carries
@@ -67,7 +73,9 @@ func newNotifyCmd() *cobra.Command {
 // again, in a spelling the backup check does not know, stops after one pass
 // instead of looping (a notify loop of Codex computer-use). A constant or
 // inherited value, such as one a nested Codex got for another turn, matches no
-// payload and suppresses nothing.
+// payload and suppresses nothing. Every defenseclaw-hook notify reads it,
+// wherever it chains; the machine-policy "ignore" of the registry is not
+// applied in this process (notify skips the command pre-run that records it).
 const codexNotifyChainedEnv = "DEFENSECLAW_CODEX_NOTIFY_CHAINED"
 
 func codexNotifyPayloadDigest(payload string) string {
@@ -75,13 +83,10 @@ func codexNotifyPayloadDigest(payload string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// codexNotifyChainEnded reports whether this per-user notify call is the
-// second pass of a turn the chained notifier handed back. Managed and Secure
-// Client installs never chain and never read the marker.
-func codexNotifyChainEnded(opts hookexec.Options, payload string) bool {
-	if opts.ManagedEnterprise || opts.SecureClient {
-		return false
-	}
+// codexNotifyChainEnded reports whether this notify call is the second pass
+// of a turn the chained notifier handed back: the marker equals the digest of
+// this call's own payload.
+func codexNotifyChainEnded(payload string) bool {
 	value := envvars.Getenv(codexNotifyChainedEnv)
 	return value != "" && value == codexNotifyPayloadDigest(payload)
 }

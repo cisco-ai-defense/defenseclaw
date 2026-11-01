@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,7 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
@@ -78,7 +78,6 @@ func TestOriginalCodexNotifyCommandOverridesAnInheritedMarker(t *testing.T) {
 func TestCodexNotifyChainEndsOnlyOnTheMatchingPayloadDigest(t *testing.T) {
 	payload := `{"type":"agent-turn-complete","turn-id":"t1"}`
 	other := `{"type":"agent-turn-complete","turn-id":"t2"}`
-	perUser := hookexec.Options{}
 	for _, tc := range []struct {
 		name  string
 		set   bool
@@ -99,36 +98,85 @@ func TestCodexNotifyChainEndsOnlyOnTheMatchingPayloadDigest(t *testing.T) {
 			} else {
 				_ = os.Unsetenv(codexNotifyChainedEnv)
 			}
-			if got := codexNotifyChainEnded(perUser, payload); got != tc.want {
+			if got := codexNotifyChainEnded(payload); got != tc.want {
 				t.Fatalf("chain ended = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-// Managed and Secure Client installs never read the marker, even when the
-// digest matches, and a managed standalone host sees the variable as unset.
-func TestCodexNotifyChainMarkerIsIgnoredWhenManagedOrSecureClient(t *testing.T) {
-	payload := `{"type":"agent-turn-complete"}`
-	t.Setenv(codexNotifyChainedEnv, codexNotifyPayloadDigest(payload))
-	if !codexNotifyChainEnded(hookexec.Options{}, payload) {
-		t.Fatal("a per-user notify with the matching digest must end the chain")
+// The notify command builds its options with buildHookOptions, which never
+// marks them managed or Secure Client, so every host that reaches the command
+// reads the marker and chains. Run the real command end to end: a notifier it
+// chains runs unless the marker is the digest of this payload.
+func TestNotifyCommandChainsUnlessTheMarkerIsThePayloadDigest(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dataDir)
+	opts := buildHookOptions("codex", "notify", "", "open")
+	if opts.ManagedEnterprise || opts.SecureClient {
+		t.Fatalf("buildHookOptions marked the notify options managed=%v secureClient=%v", opts.ManagedEnterprise, opts.SecureClient)
 	}
-	for name, opts := range map[string]hookexec.Options{
-		"managed":       {ManagedEnterprise: true},
-		"secure client": {SecureClient: true},
-		"both":          {ManagedEnterprise: true, SecureClient: true},
+	if filepath.Clean(opts.Home) != filepath.Clean(dataDir) {
+		t.Skipf("the hook home %q is not the test data dir", opts.Home)
+	}
+	out := filepath.Join(dataDir, "chained.log")
+	t.Setenv("DC_NOTIFY_HELPER_OUT", out)
+	original, _ := json.Marshal([]string{os.Args[0], "-test.run=^TestNotifyChainHelperProcess$", "--"})
+	backup, _ := json.Marshal(map[string]interface{}{"had_notify": true, "original_notify": json.RawMessage(original)})
+	if err := os.WriteFile(filepath.Join(dataDir, "codex_config_backup.json"), backup, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	forwarded := 0
+	prev := forwardCodexNotify
+	forwardCodexNotify = func(_ context.Context, _ hookexec.Options, _ []byte) int { forwarded++; return 0 }
+	t.Cleanup(func() { forwardCodexNotify = prev })
+
+	payload := `{"type":"agent-turn-complete","turn-id":"t1"}`
+	other := `{"type":"agent-turn-complete","turn-id":"t2"}`
+	for _, tc := range []struct {
+		name       string
+		marker     string
+		wantChain  bool
+		wantForwar int
+	}{
+		{"unset", "", true, 1},
+		{"constant", "1", true, 1},
+		{"digest of another turn", codexNotifyPayloadDigest(other), true, 1},
+		{"digest of this payload", codexNotifyPayloadDigest(payload), false, 0},
 	} {
-		if codexNotifyChainEnded(opts, payload) {
-			t.Fatalf("%s: the marker suppressed a notify", name)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			_ = os.Remove(out)
+			forwarded = 0
+			if tc.marker == "" {
+				_ = os.Unsetenv(codexNotifyChainedEnv)
+			} else {
+				t.Setenv(codexNotifyChainedEnv, tc.marker)
+			}
+			cmd := newNotifyCmd()
+			if err := cmd.RunE(cmd, []string{payload}); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(out)
+			chained := err == nil
+			if chained != tc.wantChain {
+				t.Fatalf("chained notifier ran = %v, want %v", chained, tc.wantChain)
+			}
+			if chained && string(data) != payload {
+				t.Fatalf("chained notifier got %q, want the payload unchanged", data)
+			}
+			if forwarded != tc.wantForwar {
+				t.Fatalf("gateway forwards = %d, want %d", forwarded, tc.wantForwar)
+			}
+		})
 	}
-	if got := envvars.ManagedPolicy(codexNotifyChainedEnv); got != envvars.ManagedIgnore {
-		t.Fatalf("registry managed policy = %q, want %q", got, envvars.ManagedIgnore)
+}
+
+// TestNotifyChainHelperProcess is the notifier the test above chains: the
+// test binary itself, which writes the payload it was handed.
+func TestNotifyChainHelperProcess(t *testing.T) {
+	out := os.Getenv("DC_NOTIFY_HELPER_OUT")
+	if out == "" || len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" {
+		t.Skip("helper process of TestNotifyCommandChainsUnlessTheMarkerIsThePayloadDigest")
 	}
-	envvars.SetManagedStandalone(true)
-	t.Cleanup(func() { envvars.SetManagedStandalone(false) })
-	if got := envvars.Getenv(codexNotifyChainedEnv); got != "" {
-		t.Fatalf("managed standalone read %q, want unset", got)
-	}
+	_ = os.WriteFile(out, []byte(os.Args[len(os.Args)-1]), 0o600)
 }
