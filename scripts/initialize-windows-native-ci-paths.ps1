@@ -10,7 +10,14 @@ param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')]
     [string]$DiagnosticsLeaf,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')]
-    [string]$ArtifactLeaf = ''
+    [string]$ArtifactLeaf = '',
+    # Put the state root (and so TEMP/TMP, which
+    # Initialize-WindowsNativeTestEnvironment points below it) on the runner
+    # work disk, RUNNER_TEMP, instead of the profile on C:. Hosted runners
+    # whose C: is slow made Go test file flushes miss the package timeout
+    # (rel-1-0-6:GAP-0443). Such a root is a RUNNER_TEMP child, which
+    # Assert-SafeStateRoot accepts; no DC_WINDOWS_NATIVE_BASE_ROOT is set.
+    [switch]$StateOnRunnerTemp
 )
 
 Set-StrictMode -Version Latest
@@ -24,17 +31,26 @@ if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
     throw 'RUNNER_TEMP is required to isolate Windows-native diagnostics and artifacts.'
 }
 
-$stateBase = Resolve-SafeWindowsNativeBase (Join-Path $env:USERPROFILE '.dc-ci')
+if ($StateOnRunnerTemp) {
+    $stateBase = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'dc-ci')).TrimEnd('\')
+    if (-not (Test-PathWithin $stateBase $env:RUNNER_TEMP)) {
+        throw "DC_STATE_ROOT base must be a strict child of RUNNER_TEMP: $stateBase"
+    }
+} else {
+    $stateBase = Resolve-SafeWindowsNativeBase (Join-Path $env:USERPROFILE '.dc-ci')
+}
 $stateRoot = [IO.Path]::GetFullPath((Join-Path $stateBase $Leaf)).TrimEnd('\')
 if (-not (Test-PathWithin $stateRoot $stateBase)) {
-    throw "DC_STATE_ROOT must be a strict child of DC_WINDOWS_NATIVE_BASE_ROOT: $stateRoot"
+    throw "DC_STATE_ROOT must be a strict child of its base: $stateRoot"
 }
 if ($stateRoot.Length -gt 48) {
     throw "DC_STATE_ROOT exceeds native build path budget: $stateRoot"
 }
 
 $lines = [Collections.Generic.List[string]]::new()
-$lines.Add("DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase")
+if (-not $StateOnRunnerTemp) {
+    $lines.Add("DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase")
+}
 $lines.Add("DC_STATE_ROOT=$stateRoot")
 $lines.Add("DC_DIAGNOSTICS=$([IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP $DiagnosticsLeaf)))")
 if (-not [string]::IsNullOrWhiteSpace($ArtifactLeaf)) {

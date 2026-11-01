@@ -105,7 +105,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Initialize isolated paths
-        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}"
+        # Go test temp folders on the runner work disk (D:), not the
+        # profile on C: (rel-1-0-6:GAP-0443).
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}" -StateOnRunnerTemp
       - uses: ./.github/actions/setup-go
         id: go
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
