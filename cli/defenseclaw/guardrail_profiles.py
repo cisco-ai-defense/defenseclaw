@@ -69,6 +69,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "ea81d7cea6c23a7de47e62379572f29704df1a24e0e5efe22e9b02a6f159af95",
             "eb35cfd63246ee6343faf4114ea9a6b62155f8faf6825f05a2bb9180444bb61d",
             "ef527c66677705936f1ee319b24a76f3401286a1362265251ae2a69dc4f6dd22",
+            "f24c07c3beea7d1b590347461d9d263db597aad5bd73f1a43b4a546f60df4ad0",
         }
     ),
     "permissive": frozenset(
@@ -88,6 +89,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "9006dc19c958f8b2fa5fe7aba6d54e2fb8454f634b3fc6b6abf777c15a9e6604",
             "a1291dd16dbd6350daa6b94425bcfa19e734d99e1962e38e64915573d64f27c2",
             "a8c864dc71a7201897b4bfe5770187dedaae939ed51d8923ca6b2367b3501d79",
+            "b0ade92e8990e321af88bc657a198b2ab49c06c420d66c0908cb5e8aa2e9b3f1",
             "b890f74b17262c155256632e92d5b7545c39c5a02ddbbde88f9421ee5a15e91b",
             "ba3c328ac60c00cd249228cc36cb0cc2bec6ae5141b302b5ca9fc89c6ac0914e",
             "daa1b33a274a3c9f286ed5e9dc94a7081058c9a88832892afc7bec90e296f052",
