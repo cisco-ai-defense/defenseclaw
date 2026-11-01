@@ -294,3 +294,7 @@ func AcceptServiceRuntimeFileDrift(path, label, serviceAccount string) error {
 // osRootAncestor is Windows-only; on Unix only PlatformInstallerOwnedRoots
 // make an ancestor advisory.
 func osRootAncestor(string) bool { return false }
+
+// trustedMachineInstallBases is Windows-only; PlatformInstallerOwnedRoots
+// returns fixed roots on Unix.
+func trustedMachineInstallBases() []string { return nil }

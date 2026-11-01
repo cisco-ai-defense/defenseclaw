@@ -80,10 +80,11 @@ func PlatformInstallerOwnedRoots() []string {
 		// partially redirected environment (%ProgramFiles% set, %ProgramData%
 		// not) must still read `C:\ProgramData\Cisco` as installer-owned, or
 		// the managed state root itself would be judged foreign.
+		// The other bases come from the HKLM machine registration, never the
+		// process environment, which the invoking user controls.
 		roots := make([]string, 0, 4)
 		roots = append(roots, `C:\ProgramData\Cisco`)
-		for _, envName := range []string{"ProgramData", "ProgramFiles", "ProgramFiles(x86)"} {
-			base := os.Getenv(envName)
+		for _, base := range trustedMachineInstallBases() {
 			if base == "" {
 				continue
 			}

@@ -258,13 +258,15 @@ func ValidateTrustedRuntimeDirTolerant(path, label string) error {
 // while still rejecting DELETE_CHILD, DELETE, WRITE_DAC, WRITE_OWNER, generic
 // write, reparse points, non-NTFS mounts, and untrusted owners.
 //
-// The named directory keeps every verdict FATAL. Callers use this as a
-// pre-write and pre-delete guard on directories DefenseClaw itself creates and
-// ACLs below the state root (hook-guardian manifests, managed policy, namespace
-// purge), so an untrusted write ACE there is real breakage, not AVC's drift on
-// the shared tree. Only its parents are advisory, which is what AIFW-34262
-// needed: the untrusted grant lands on ...\Cisco Secure Client\DefenseClaw, one
-// level above every directory named here.
+// A named directory DefenseClaw itself creates and ACLs below the state root
+// (hook-guardian manifests, managed policy, namespace purge) keeps every
+// verdict FATAL: an untrusted write ACE there is real breakage, not AVC's drift
+// on the shared tree. Callers also name folders DefenseClaw does not own — the
+// first existing ancestor of a not-yet-created policy root (C:\Program Files,
+// C:\ProgramData) or the purge root's parent (...\Cisco Secure Client). Those
+// get the advisory ancestor scope (windowsNamedDirectoryScope), because
+// DefenseClaw never repairs their permissions. Structural checks stay fatal
+// everywhere, and TrustStrictAncestorsEnv keeps every verdict fatal.
 func ValidateTrustedDirectoryAncestor(path, label string) error {
 	if label == "" {
 		label = "managed directory ancestor"
@@ -282,7 +284,7 @@ func ValidateTrustedDirectoryAncestor(path, label string) error {
 	for cur := clean; ; cur = filepath.Dir(cur) {
 		scope := windowsAncestorScope(cur)
 		if cur == clean {
-			scope = windowsTrustNamedDir
+			scope = windowsNamedDirectoryScope(cur)
 		}
 		if err := validateTrustedWindowsPathElementWithWriter(cur, true, label, nil, scope); err != nil {
 			return err
@@ -475,19 +477,65 @@ func osRootAncestor(path string) bool {
 	}
 	// Every root comes from Windows or the HKLM machine registration, never
 	// the process environment, which the invoking user controls.
-	for _, resolve := range []func() (string, error){
-		winpath.TrustedProgramData, winpath.TrustedProgramFiles, winpath.TrustedProgramFilesX86,
-	} {
-		if dir, err := resolve(); err == nil && dir != "" {
-			roots = append(roots, dir)
-		}
-	}
+	roots = append(roots, trustedMachineInstallBases()...)
 	for _, root := range roots {
 		if strings.EqualFold(clean, filepath.Clean(root)) {
 			return true
 		}
 	}
 	return false
+}
+
+// windowsNamedDirectoryScope picks the scope for the directory named to
+// ValidateTrustedDirectoryAncestor. An OS root, or a platform installer root
+// and the shared folders between it and DefenseClaw's own tree (...\Cisco,
+// ...\Cisco\Cisco Secure Client), gets the advisory ancestor scope; everything
+// else, including every folder at or below a DefenseClaw folder, stays
+// windowsTrustNamedDir. Strict mode keeps the named directory fatal.
+func windowsNamedDirectoryScope(path string) windowsTrustScope {
+	if !trustStrictAncestors() && (osRootAncestor(path) || installerSharedFolder(path)) {
+		return windowsTrustAncestor
+	}
+	return windowsTrustNamedDir
+}
+
+// installerSharedFolder reports whether path is at or below a platform
+// installer root without crossing a DefenseClaw-named folder, i.e. a folder
+// whose permissions belong to AVC rather than to DefenseClaw.
+func installerSharedFolder(path string) bool {
+	clean := filepath.Clean(path)
+	for _, root := range PlatformInstallerOwnedRoots() {
+		root = filepath.Clean(root)
+		if !pathAtOrUnder(clean, root) {
+			continue
+		}
+		rel, err := filepath.Rel(root, clean)
+		if err != nil {
+			return false
+		}
+		for _, element := range strings.Split(rel, string(filepath.Separator)) {
+			if strings.HasPrefix(strings.ToLower(element), "defenseclaw") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// trustedMachineInstallBases returns ProgramData, Program Files and Program
+// Files (x86) from the HKLM machine registration. A base that cannot be
+// resolved is left out.
+func trustedMachineInstallBases() []string {
+	var bases []string
+	for _, resolve := range []func() (string, error){
+		winpath.TrustedProgramData, winpath.TrustedProgramFiles, winpath.TrustedProgramFilesX86,
+	} {
+		if dir, err := resolve(); err == nil && dir != "" {
+			bases = append(bases, dir)
+		}
+	}
+	return bases
 }
 
 func validateTrustedWindowsPathElement(path string, wantDir bool, label string) error {
@@ -816,7 +864,9 @@ func windowsDeterministicServiceSID(name string) (*windows.SID, error) {
 		return nil, fmt.Errorf("resolve Windows system directory: %w", err)
 	}
 	scExe := filepath.Join(systemDir, "sc.exe")
-	if err := ValidateTrustedFilePath(scExe, "Windows service SID calculator"); err != nil {
+	// Code integrity is advisory: TrustedInstaller owns sc.exe, and host
+	// hardening that re-ACLs System32 must not stop service SID resolution.
+	if err := ValidateExecutableFilePath(scExe, "Windows service SID calculator"); err != nil {
 		return nil, fmt.Errorf("validate Windows service SID calculator: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

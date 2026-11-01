@@ -389,6 +389,72 @@ func TestWindowsAncestorScopeDowngradesReplacementRights(t *testing.T) {
 	}
 }
 
+// ValidateTrustedDirectoryAncestor callers name OS roots (the first existing
+// ancestor of a fresh policy root) and AVC's shared folders (the purge root's
+// parent). An untrusted write ACE there is advisory; the same ACE on a
+// DefenseClaw folder below the state root, or anywhere under strict mode, stays
+// fatal.
+func TestWindowsNamedDirectoryScopeAdvisoryOnlyForForeignRoots(t *testing.T) {
+	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;BU)(A;;GA;;;BA)")
+	if err != nil {
+		t.Fatalf("SecurityDescriptorFromString: %v", err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatalf("DACL: %v", err)
+	}
+	if dacl == nil {
+		t.Fatal("test descriptor has no DACL")
+	}
+	windowsDir, err := windows.GetWindowsDirectory()
+	if err != nil {
+		t.Fatalf("GetWindowsDirectory: %v", err)
+	}
+	advisory := []string{
+		windowsDir,
+		filepath.VolumeName(windowsDir) + `\`,
+		`C:\ProgramData\Cisco`,
+		`C:\ProgramData\Cisco\Cisco Secure Client`,
+	}
+	if programData, err := winpath.TrustedProgramData(); err == nil {
+		advisory = append(advisory, programData)
+	}
+	if programFiles, err := winpath.TrustedProgramFiles(); err == nil {
+		advisory = append(advisory, programFiles, filepath.Join(programFiles, "Cisco", "Cisco Secure Client"))
+	}
+	fatal := []string{
+		`C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw`,
+		`C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\state\hook-guardian`,
+		`C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\managed-policy`,
+		os.TempDir(),
+	}
+
+	captureTrustAdvisories(t)
+	for _, path := range advisory {
+		if err := rejectUntrustedWindowsWriteACEsWithWriter(
+			path, "managed directory ancestor", dacl, nil, windowsNamedDirectoryScope(path),
+		); err != nil {
+			t.Errorf("named %q refused an untrusted ACE instead of warning: %v", path, err)
+		}
+	}
+	for _, path := range fatal {
+		if err := rejectUntrustedWindowsWriteACEsWithWriter(
+			path, "managed directory ancestor", dacl, nil, windowsNamedDirectoryScope(path),
+		); err == nil {
+			t.Errorf("DefenseClaw-owned named %q accepted an untrusted ACE", path)
+		}
+	}
+
+	t.Setenv(TrustStrictAncestorsEnv, "1")
+	for _, path := range advisory {
+		if err := rejectUntrustedWindowsWriteACEsWithWriter(
+			path, "managed directory ancestor", dacl, nil, windowsNamedDirectoryScope(path),
+		); err == nil {
+			t.Errorf("strict pin accepted an untrusted ACE on named %q", path)
+		}
+	}
+}
+
 func TestWindowsDefaultKnownFolderAncestorsAreTrusted(t *testing.T) {
 	for _, envName := range []string{"ProgramFiles", "ProgramData"} {
 		path := os.Getenv(envName)
@@ -631,6 +697,16 @@ func TestPlatformInstallerOwnedRootsAlwaysCoverCanonicalProgramData(t *testing.T
 				t.Fatalf("roots = %v, want the canonical tree covered", PlatformInstallerOwnedRoots())
 			}
 		})
+	}
+
+	// The process environment never adds a root: the invoking user controls it.
+	t.Setenv("ProgramFiles", `D:\Redirected`)
+	if PlatformInstallerOwnedPath(`D:\Redirected\Cisco\Cisco Secure Client`) {
+		t.Fatalf("roots = %v, want no root derived from %%ProgramFiles%%", PlatformInstallerOwnedRoots())
+	}
+	if programFiles, err := winpath.TrustedProgramFiles(); err == nil &&
+		!PlatformInstallerOwnedPath(filepath.Join(programFiles, "Cisco", "Cisco Secure Client")) {
+		t.Fatalf("roots = %v, want the registered Program Files tree covered", PlatformInstallerOwnedRoots())
 	}
 
 	t.Setenv("ProgramData", `C:\ProgramData`)
