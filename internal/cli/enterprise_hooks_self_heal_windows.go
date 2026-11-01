@@ -7,6 +7,7 @@ package cli
 
 import (
 	"os"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -19,6 +20,20 @@ var (
 	enterpriseWindowsManagedPolicyArtifactsRepair = enterprisehooks.RepairWindowsManagedPolicyArtifacts
 	enterpriseWindowsManagedServiceSecurityRepair = managed.RepairWindowsManagedServiceSecurity
 )
+
+// enterpriseHookOwnerTransferAllowed reports whether the guardian's self-heal
+// may take ownership of an existing object at path from a principal outside
+// the trusted set. It is only consulted for objects DefenseClaw created and
+// already holds (the state root's folders and records, data_dir, the guardian
+// ledger, the token folders), and only inside the platform installer's tree,
+// where a standard user cannot create objects: a foreign owner there is drift
+// (a backup restore, a helpdesk takeown), not a planted object. Paths where
+// an object may be created by someone else first keep refusing it, and
+// TrustStrictAncestorsEnv restores the refusal everywhere.
+func enterpriseHookOwnerTransferAllowed(path string) bool {
+	return strings.TrimSpace(path) != "" && !managed.TrustStrictAncestors() &&
+		managed.PlatformInstallerOwnedPath(path)
+}
 
 // repairEnterpriseHookManagedInstallPlatform keeps the rest of the managed
 // installation at the installer's canonical protection on every Guardian
@@ -52,7 +67,14 @@ func repairEnterpriseHookManagedInstallPlatform() {
 	if layout, ok := enterpriseHookManagedInstallLayout(
 		executable, cfg.DataDir, enterpriseHookManifest, programFiles, programData,
 	); ok {
+		// The state root's folders and records are DefenseClaw's own, so a
+		// foreign owner there is adopted; the install tree keeps the refusal.
+		stateLayout := managed.ManagedInstallLayout{StateRoot: layout.StateRoot}
+		layout.StateRoot = ""
 		_ = enterpriseWindowsManagedInstallRepair(layout, managed.CanonicalOptions{})
+		_ = enterpriseWindowsManagedInstallRepair(stateLayout, managed.CanonicalOptions{
+			AllowUntrustedOwnerTransfer: enterpriseHookOwnerTransferAllowed(stateLayout.StateRoot),
+		})
 	}
 	enterpriseWindowsManagedPolicyArtifactsRepair()
 	_ = enterpriseWindowsManagedServiceSecurityRepair(managed.ManagedServiceNames(

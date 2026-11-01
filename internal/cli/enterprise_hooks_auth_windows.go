@@ -49,9 +49,11 @@ func setEnterpriseHookGuardianStateOwnership(path string) error {
 // repairEnterpriseHookGuardianLedgerObjectPlatform re-stamps one guardian
 // ledger object to its canonical owner and DACL. Only the LocalSystem
 // guardian or an elevated installer reaches this path. Structure stays fatal:
-// a reparse point anywhere on the path, a hard-linked file, or an owner
-// outside SYSTEM, Administrators and TrustedInstaller is never adopted,
-// because any of those could hand the protected ledger to someone else.
+// a reparse point anywhere on the path or a hard-linked file is never
+// adopted, because either could hand the protected ledger to someone else. An
+// owner outside SYSTEM, Administrators and TrustedInstaller is adopted, and
+// logged as a boundary finding, only inside the platform installer's tree
+// (enterpriseHookOwnerTransferAllowed); elsewhere it is refused.
 func repairEnterpriseHookGuardianLedgerObjectPlatform(path string, directory bool) error {
 	if err := enterpriseWindowsReparseChainCheck(path); err != nil {
 		return fmt.Errorf("refusing unsafe hook guardian ledger path: %w", err)
@@ -70,11 +72,11 @@ func repairEnterpriseHookGuardianLedgerObjectPlatform(path string, directory boo
 		return fmt.Errorf("inspect hook guardian ledger owner: %w", err)
 	}
 	if !enterpriseWindowsRuntimeRepairOwnerTrusted(owner, nil) {
-		ownerSID := "<nil>"
-		if owner != nil {
-			ownerSID = owner.String()
+		// The ownership setter below always stamps Administrators, so the
+		// adopted owner itself is not needed here.
+		if _, err := enterpriseWindowsAdoptUntrustedOwner(path, owner, "hook guardian ledger"); err != nil {
+			return err
 		}
-		return fmt.Errorf("hook guardian ledger owner is not trusted: %s", ownerSID)
 	}
 	return enterprisehooks.RunWithWindowsOwnerRestorePrivilege(func() error {
 		return enterpriseHookAuthorizationOwnershipSetter(path)
