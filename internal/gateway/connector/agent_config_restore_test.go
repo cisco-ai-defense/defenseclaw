@@ -367,3 +367,35 @@ func TestHermesUnreadableCopyWithoutRecordReportsSettingsLost(t *testing.T) {
 		t.Fatalf("status = %q, want %q", status, AgentConfigSettingsLost)
 	}
 }
+
+// rel-1-0-6 GAP-0333: the notice setup reads says whether the copy that was
+// put back held DefenseClaw's hooks only, so the line it prints does not claim
+// the account's settings came back, and a copy with settings is not marked.
+func TestHermesPutBackNoticeMarksAHooksOnlyCopy(t *testing.T) {
+	for _, tc := range []struct {
+		name, settings string
+		wantHooksOnly  bool
+	}{
+		{"hooks-only copy", "", true},
+		{"copy with settings", hermesAccountSettings, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, opts, configPath := hermesRestoreFixture(t, tc.settings)
+			if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != "" {
+				t.Fatalf("status after first setup: %q", status)
+			}
+			for loss := 1; loss <= 2; loss++ {
+				if err := os.Remove(configPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := conn.Setup(context.Background(), opts); err != nil {
+					t.Fatalf("repair Setup %d: %v", loss, err)
+				}
+				notice, ok := hermesSpec.readNotice(opts.DataDir)
+				if !ok || notice.Source != AgentConfigFromLastGood || notice.HooksOnly != tc.wantHooksOnly {
+					t.Fatalf("loss %d: notice = %+v (read %v), want last_good with hooks_only=%v", loss, notice, ok, tc.wantHooksOnly)
+				}
+			}
+		})
+	}
+}
