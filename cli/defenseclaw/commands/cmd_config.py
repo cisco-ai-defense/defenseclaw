@@ -795,8 +795,14 @@ def _carry_connector_records(old_dir: str, new_dir: str) -> list[str]:
     setup rolled back because the gateway would not start (rel-1-0-6
     GAP-0287). Records already in the new folder are kept; the old folder is
     left as it is, so setting data_dir back still works.
+
+    Never as an administrator: under sudo the account's config is resolved,
+    data_dir is not limited, and a root copy would put files the user chose
+    into any folder root can write (``data_dir /etc/cron.d``). The source is
+    opened without following links, so a symlink swapped in after the check
+    is refused.
     """
-    from defenseclaw.file_permissions import make_private_directory
+    from defenseclaw.file_permissions import make_private_directory, open_regular_file_no_follow
 
     try:
         if not old_dir or not new_dir or os.path.samefile(old_dir, new_dir):
@@ -812,16 +818,24 @@ def _carry_connector_records(old_dir: str, new_dir: str) -> list[str]:
         )
     except OSError:
         return []
+    if not names:
+        return []
+    if config_module._is_admin_process():
+        return [
+            "Did not copy the connector records to the new data_dir: this command runs as an "
+            "administrator. Run defenseclaw setup <connector> as the account to refresh them."
+        ]
     copied: list[str] = []
     failed: list[str] = []
     for name in names:
         source = os.path.join(old_dir, name)
         target = os.path.join(new_dir, name)
         try:
-            if not stat.S_ISREG(os.lstat(source).st_mode) or os.path.lexists(target):
+            info = os.lstat(source)
+            if not stat.S_ISREG(info.st_mode) or os.path.lexists(target):
                 continue
             make_private_directory(new_dir)
-            with open(source, "rb") as handle:
+            with os.fdopen(open_regular_file_no_follow(source, expected_stat=info), "rb") as handle:
                 data = handle.read()
             fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
             with os.fdopen(fd, "wb") as handle:
