@@ -33,6 +33,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // ErrSymlinkRefused is returned when the target path is a symlink.
@@ -370,7 +372,7 @@ func validateRegularFilePath(path string) (os.FileInfo, error) {
 	if err := rejectReparsePath(path); err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, err
 	}

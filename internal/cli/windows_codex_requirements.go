@@ -19,6 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"github.com/spf13/cobra"
 )
@@ -425,7 +426,7 @@ func readWindowsCodexDeploymentMetadata(
 	path string,
 ) (windowsCodexDeploymentMetadata, bool, error) {
 	var metadata windowsCodexDeploymentMetadata
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return metadata, false, nil
 	}

@@ -27,6 +27,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // Keep this identical to Doctor's managed-settings read boundary so the
@@ -689,7 +691,7 @@ func decodeClaudeCodeSettings(data []byte, source string) (map[string]interface{
 }
 
 func readStableClaudeCodeSettingsFile(path string) ([]byte, bool, error) {
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}

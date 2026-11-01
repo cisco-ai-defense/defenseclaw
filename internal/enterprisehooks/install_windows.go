@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -2894,7 +2895,7 @@ func snapshotWindowsRuntimeFiles(paths []string) ([]windowsRuntimeFileSnapshot, 
 		} else if parentErr == nil {
 			snapshot.parentExisted = true
 		}
-		info, err := os.Lstat(path)
+		info, err := pathidentity.LstatPinned(path)
 		if errors.Is(err, os.ErrNotExist) {
 			snapshots = append(snapshots, snapshot)
 			continue

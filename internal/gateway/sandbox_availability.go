@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -361,7 +362,7 @@ func readSandboxPrerequisites(path string) (record sandboxPrerequisitesRecord, o
 	if path == "" {
 		return record, false
 	}
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil || !info.Mode().IsRegular() || !sandboxRecordTrusted(info) {
 		return record, false
 	}

@@ -18,6 +18,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // hookGuardianNoticesFile records, in the guardian's data directory, the
@@ -199,7 +200,7 @@ func readEnterpriseHookGuardianNotices(dataDir string) []enterpriseHookGuardianN
 		return nil
 	}
 	path := filepath.Join(dataDir, hookGuardianNoticesFile)
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil
 	}

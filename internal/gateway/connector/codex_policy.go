@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // validateCodexManagedAgentExecutable enforces the managed-executable trust
@@ -350,7 +351,7 @@ func readLegacyCodexSystemRequirements(path string) ([]byte, bool, error) {
 }
 
 func readBoundedCodexSystemRequirements(path string) ([]byte, bool, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}

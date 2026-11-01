@@ -18,6 +18,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // policyFileLimit bounds every vendor policy read. Real files are a few KiB.
@@ -127,7 +129,7 @@ func readPolicyFile(opts Options, path string) ([]byte, bool, error) {
 // itself supplied by the caller (the managed OpenCode plugin has its own).
 func readPolicyFileWith(opts Options, path string, validate func(Options, string) error) ([]byte, bool, error) {
 	path = platformPath(opts, path)
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		forgetPolicyFileRead(path)
 		if !opts.SkipTrustChecks {

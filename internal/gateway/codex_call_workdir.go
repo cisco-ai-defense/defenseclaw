@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // A Codex shell call runs in the workdir the model gave it, but the Codex
@@ -77,7 +79,7 @@ func codexTranscriptCallWorkdir(ctx context.Context, req codexHookRequest) strin
 // first, for the function_call of id. found reports the call was there;
 // readable is false when the file cannot be read as a regular file.
 func codexTranscriptCallWorkdirOnce(transcript string, marker []byte, id string) (workdir string, found, readable bool) {
-	info, err := os.Lstat(transcript)
+	info, err := pathidentity.LstatPinned(transcript)
 	if err != nil || !info.Mode().IsRegular() {
 		return "", false, false
 	}

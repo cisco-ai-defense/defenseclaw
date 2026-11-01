@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -1573,7 +1574,7 @@ func readWindowsCodexMachineFile(
 	label string,
 ) (windowsCodexStableFile, error) {
 	result := windowsCodexStableFile{}
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) && allowMissing {
 		if err := windowsCodexMachineTrustedDirCheck(filepath.Dir(path), label+" parent"); err != nil {
 			return result, err
@@ -1607,6 +1608,12 @@ func readWindowsCodexMachineFile(
 	if file == nil {
 		_ = windows.CloseHandle(handle)
 		return result, fmt.Errorf("wrap %s handle", label)
+	}
+	// The handle must hold the file the trust check passed: the check after
+	// the read proves only that the path names that file again.
+	if opened, err := file.Stat(); err != nil || !os.SameFile(info, opened) {
+		_ = file.Close()
+		return result, fmt.Errorf("%s changed identity before it was opened", label)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
 	if closeErr := file.Close(); err == nil {

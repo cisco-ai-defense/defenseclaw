@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"github.com/spf13/cobra"
@@ -769,7 +770,7 @@ func readWindowsManagedHooksLifecycleJSON(
 	disallowUnknown bool,
 	destination any,
 ) (bool, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -1838,7 +1839,7 @@ func hashWindowsManagedHooksLifecycleTrustedFile(
 	limit int64,
 	label string,
 ) (string, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return "", err
 	}
