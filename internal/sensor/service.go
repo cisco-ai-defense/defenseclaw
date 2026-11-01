@@ -698,6 +698,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 		row := agentchain.ProcessRow{
 			PID: process.PID, PPID: process.PPID,
 			Name: process.Name, Cmdline: process.Cmdline, Start: process.StartedAt,
+			UserSID: process.UserSID,
 		}
 		rows = append(rows, row)
 	}
