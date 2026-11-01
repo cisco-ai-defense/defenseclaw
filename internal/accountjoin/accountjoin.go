@@ -118,11 +118,19 @@ func CanonicalTenant(tenant string) (string, error) {
 		return "", fail(ReasonTenantMissing)
 	}
 	for _, r := range tenant {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+		if !tenantRune(r) {
 			return "", fail(ReasonTenantMissing)
 		}
 	}
 	return strings.ToLower(tenant), nil
+}
+
+func tenantRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		return true
+	}
+	return false
 }
 
 // CanonicalSID parses a domain account SID (S-1-5-21-a-b-c-RID: the

@@ -218,7 +218,7 @@ func TestRotationStateMachine(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			slots, reasons, highest := Plan(tc.g, now)
-			if got := gens(slots); strings.Join(strings.Fields(strings.Trim(strings.Replace(jsonText(got), ",", " ", -1), "[]")), ",") != strings.Join(strings.Fields(strings.Trim(strings.Replace(jsonText(tc.want), ",", " ", -1), "[]")), ",") {
+			if got := gens(slots); jsonText(got) != jsonText(tc.want) {
 				t.Fatalf("generations %v, want %v", got, tc.want)
 			}
 			if strings.Join(reasons, ",") != tc.reasons {
