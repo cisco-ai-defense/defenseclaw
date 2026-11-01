@@ -28125,14 +28125,16 @@ function Remove-DefenseClawNuclearPath {
         if ($scheduled) {
             $RebootRequired.Value = $true
         }
-        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Container) {
+        # $scheduleRoot is where the folder is now: $Path itself, or the
+        # .retired sibling it was renamed to.
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $scheduleRoot -PathType Container) {
             try {
                 $canonical = New-DefenseClawCanonicalPathAcl `
                     -IsDirectory $true `
                     -Kind AdminDirectory `
                     -GatewayServiceSID $script:AdministratorsSID
                 [void]$nativeSecurity::SetPathSecurityDescriptorPrivilegedNoFollow(
-                    $Path,
+                    $scheduleRoot,
                     $canonical.GetSecurityDescriptorSddlForm(
                         [Security.AccessControl.AccessControlSections]::All
                     ),
@@ -28140,7 +28142,7 @@ function Remove-DefenseClawNuclearPath {
                 )
             }
             catch {
-                Microsoft.PowerShell.Utility\Write-Verbose "could not re-stamp surviving $Path : $($_.Exception.Message)"
+                Microsoft.PowerShell.Utility\Write-Verbose "could not re-stamp surviving $scheduleRoot : $($_.Exception.Message)"
             }
         }
     }
