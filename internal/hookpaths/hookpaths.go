@@ -2307,6 +2307,9 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	// statement walk placed its call.
 	unplacedScopes := false
 	var copyScopes []string
+	// linkCopies: link-keeping copies that copyLinks may read as copies of
+	// the command's own links instead of opaque copy scopes.
+	var linkCopies []linkCopy
 	var renameOps []renameOp
 	var findMoves []findMove
 	// placedLinkNames: the names of plain link calls the statement walk
@@ -2508,9 +2511,18 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 				}
 				option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
 				if copyPreservesLinks(words[1:], static[1:]) {
-					copyScopes = append(copyScopes, destination)
-					if cpDiskSymlink(words[1:], static[1:], dir, home, facts, record) {
+					diskLink := cpDiskSymlink(words[1:], static[1:], dir, home, facts, record)
+					if diskLink {
 						links.unknownCopyIn(destination)
+					}
+					// A copy that keeps links and copies only links this
+					// command makes is read at the end, against every link
+					// the command makes (rel-1-0-6:GAP-0259).
+					if copied, ok := linkOnlyCopyOperands(words[1:], static[1:], dir); ok && !diskLink && !option && !dynamic &&
+						!nested && movedDir == "" && len(callDirs) == 1 {
+						linkCopies = append(linkCopies, copied)
+					} else {
+						copyScopes = append(copyScopes, destination)
 					}
 				}
 				switch {
@@ -2660,8 +2672,22 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	}
 	links.callAt = -1
 	if len(links.aliases) > 0 {
+		// cp -a of a link the command makes copies the link itself: the copy
+		// stores the same target text, read from its own directory. It is
+		// read so only in a command that moves no link and no directory and
+		// whose link operations were all read (rel-1-0-6:GAP-0259).
+		read := links.known && !links.opaque && !renames && !cds && !wrappedCds && len(renameOps) == 0 && len(findMoves) == 0
+		for _, copied := range linkCopies {
+			if !read || !links.copyLinks(copied, facts) {
+				copyScopes = append(copyScopes, copied.destination)
+			}
+		}
 		for _, scope := range copyScopes {
 			links.unknownCopyIn(scope)
+		}
+	} else {
+		for _, copied := range linkCopies {
+			copyScopes = append(copyScopes, copied.destination)
 		}
 	}
 	if len(links.aliases) > 0 {
@@ -3769,6 +3795,11 @@ type cpOperandsResult struct {
 	symbolic    bool
 	noTargetDir bool
 	targetDir   bool
+	// dereference: -L, -H or --dereference follows a source link, so the
+	// copy is not a copy of the link. parents: --parents names the copy
+	// after the whole source path.
+	dereference bool
+	parents     bool
 	ok          bool
 }
 
@@ -3838,6 +3869,12 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 				if joined {
 					return cpOperandsResult{preserves: true}
 				}
+				switch option {
+				case "dereference":
+					result.dereference = true
+				case "parents":
+					result.parents = true
+				}
 			}
 			continue
 		}
@@ -3845,6 +3882,8 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 			switch arg[j] {
 			case 'a', 'P', 'd', 'r', 'R':
 				result.preserves = true
+			case 'H', 'L':
+				result.dereference = true
 			case 'l':
 				result.hard = true
 			case 's':
@@ -3867,7 +3906,7 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 					targetDir = value
 				}
 				j = len(arg)
-			case 'b', 'c', 'f', 'H', 'i', 'L', 'n', 'N', 'p', 'u', 'v', 'x', 'X', 'Z':
+			case 'b', 'c', 'f', 'i', 'n', 'N', 'p', 'u', 'v', 'x', 'X', 'Z':
 			default:
 				return cpOperandsResult{preserves: true}
 			}
@@ -3885,6 +3924,117 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 	}
 	result.sources, result.destination, result.ok = operands[:len(operands)-1], operands[len(operands)-1], true
 	return result
+}
+
+// linkCopy is a link-keeping cp call read in dir: its sources, its
+// destination, and the names the copy of a source may take there.
+type linkCopy struct {
+	sources []string
+	// sourceFacts: the SourceLinkFactPrefix key of each source, where the
+	// copy's disk-link check (cpDiskSymlink) records it.
+	sourceFacts []string
+	destination string
+	// named: a single source copied to the destination name itself.
+	// inside: the destination may be a directory that takes the copy
+	// under the source's last name.
+	named, inside bool
+}
+
+// linkOnlyCopyOperands reads a static cp call that keeps links, does not
+// follow them and does not make new ones, in dir.
+func linkOnlyCopyOperands(args []string, static []bool, dir string) (linkCopy, bool) {
+	parsed := cpOperands(args, static)
+	if !parsed.ok || !parsed.preserves || parsed.hard || parsed.symbolic || parsed.dereference || parsed.parents {
+		return linkCopy{}, false
+	}
+	copied := linkCopy{destination: absolutePath(parsed.destination, dir)}
+	for _, source := range parsed.sources {
+		if strings.HasSuffix(source, "/") || !lnEntryName(source) {
+			// A trailing slash copies the directory a link names.
+			return linkCopy{}, false
+		}
+		copied.sources = append(copied.sources, absolutePath(source, dir))
+		copied.sourceFacts = append(copied.sourceFacts, SourceLinkFactPrefix+OperandPath(source, dir))
+	}
+	copied.named = len(parsed.sources) == 1 && !parsed.targetDir
+	copied.inside = parsed.targetDir || len(parsed.sources) > 1 || !parsed.noTargetDir
+	return copied, true
+}
+
+// copyLinks records the links a link-keeping copy makes when every source
+// is a name a link of this command takes and the source-link fact (the hook
+// client's walk) says no link was at or under it before the command. A
+// caller with no facts reads its own walk of the disk, which cpDiskSymlink
+// has already made. Each copy keeps the text of every link the command
+// makes at that name, so a relative link names the target its text names
+// from the copy's own directory.
+//
+// An entry of the command under a source is copied along under the copy:
+// that is the entry ln -s T name records at name/T in case name is a
+// directory, which is a real link when the source is a directory the
+// command makes (mkdir d && ln -s ~/.ssh/authorized_keys d). A link of the
+// command that names the source or a directory above it can put entries
+// under the source that no alias lists, so it keeps the opaque reading. It
+// returns false when a source is not such a link, its fact is missing or
+// not "0", or a target text is not known.
+func (l *shellLinks) copyLinks(copied linkCopy, facts map[string]string) bool {
+	var made []linkAlias
+	for i, source := range copied.sources {
+		if facts != nil && facts[copied.sourceFacts[i]] != "0" {
+			// Evidence without the fact (an older hook client) or with a
+			// disk link: the old opaque copy scope. With no evidence at all
+			// the caller walked the disk itself (cpDiskSymlink).
+			return false
+		}
+		var froms []linkAlias
+		var rests []string
+		at := false
+		for _, alias := range l.aliases {
+			if pathAtOrUnder(source, filepath.Clean(alias.target)) {
+				return false
+			}
+			rest, under := cutPathPrefix(alias.name, source)
+			if !under {
+				continue
+			}
+			if alias.text == ".." {
+				return false
+			}
+			at = at || rest == ""
+			froms = append(froms, alias)
+			rests = append(rests, rest)
+		}
+		if !at {
+			return false
+		}
+		var names []string
+		if copied.named {
+			names = append(names, copied.destination)
+		}
+		if copied.inside {
+			names = append(names, filepath.Join(copied.destination, filepath.Base(source)))
+		}
+		for j, from := range froms {
+			for _, base := range names {
+				name := base
+				if rests[j] != "" {
+					name = filepath.Join(base, rests[j])
+				}
+				target := from.target
+				if from.text != "" {
+					target = filepath.Dir(name) + string(filepath.Separator) + from.text
+				}
+				made = append(made, linkAlias{name: name, target: target, text: from.text})
+				if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
+					if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
+						made = append(made, linkAlias{name: resolved, target: target, text: from.text})
+					}
+				}
+			}
+		}
+	}
+	l.aliases = append(l.aliases, made...)
+	return true
 }
 
 func cpDestination(args []string, static []bool, cwd string) string {

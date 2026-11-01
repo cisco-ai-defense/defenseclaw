@@ -197,6 +197,9 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 		{"ln -sf ../.ssh/authorized_keys sub/notes.txt; echo k >> sub/notes.txt", "sub/notes.txt", keys},
 		{"ln -s ~/.ssh dir; echo k >> dir/authorized_keys", "dir/authorized_keys", keys},
 		{"cp --link ~/.ssh/authorized_keys notes.txt; echo k >> notes.txt", "notes.txt", keys},
+		// cp -a of a link the command makes copies the link, and its target
+		// with it (rel-1-0-6:GAP-0259).
+		{"ln -s ~/.ssh/authorized_keys notes.txt; cp -a notes.txt n3.txt; echo k >> n3.txt", "n3.txt", keys},
 		{"ln ~/.ssh/authorized_keys notes.txt; mv notes.txt n2; echo k >> n2", "n2", ""},
 		{"ln \"$SRC\" notes.txt; echo k >> notes.txt", "notes.txt", ""},
 		// An interpreter link call with a computed argument stays unknown; one
