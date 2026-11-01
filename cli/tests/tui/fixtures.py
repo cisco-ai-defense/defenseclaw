@@ -265,6 +265,30 @@ async def settle_layout(pilot: Pilot, done: Callable[[], bool], *, timeout: floa
         await pilot.pause()
 
 
+async def settle_overview_layout(
+    app: DefenseClawTUI, pilot: Pilot, size: tuple[int, int], *, timeout: float = 5.0
+) -> None:
+    """Wait until the Overview body is laid out for ``size``, then repaint.
+
+    ``on_resize`` re-renders the Overview body after the next refresh
+    (``_update_body_only``), and records the layout it rendered for in
+    ``_last_body_signature``; one ``pilot.pause()`` can read the frame laid
+    out for the old size on a slow runner.
+    """
+
+    def rendered_for_size() -> bool:
+        signature = app._last_body_signature  # noqa: SLF001
+        return (
+            tuple(app.size) == tuple(size)
+            and isinstance(signature, tuple)
+            and signature[:1] == ("overview",)
+            and signature[2:4] == app._overview_layout_key()  # noqa: SLF001
+        )
+
+    await settle_layout(pilot, rendered_for_size, timeout=timeout)
+    await settle_panel(app, pilot, timeout=timeout)
+
+
 def screen_text(app: DefenseClawTUI) -> str:
     """Return the current screen, including modals over it, as plain text."""
 
