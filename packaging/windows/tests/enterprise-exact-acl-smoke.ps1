@@ -409,9 +409,28 @@ $ipcCleanupCases = & $module {
         )
         callback = $callbackDescriptor
     }
+    # Outside the strict pin every ACE of the retired SID is removed,
+    # whatever its shape, and logged; the strict pin rejects the shapes.
+    $strictEnv = 'DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS'
     $invalidTargetRejected = @{}
+    $invalidTargetRemoved = @{}
     foreach ($invalidCase in $invalidTargetCases.GetEnumerator()) {
+        $removed = $false
+        try {
+            $filteredCase = Remove-DefenseClawSIDFromRawDACL `
+                -Descriptor $invalidCase.Value `
+                -SID $ScopeASID
+            $removed = [int]$filteredCase.removed -ge 1 -and
+                -not ($filteredCase.descriptor.GetSddlForm(
+                    [Security.AccessControl.AccessControlSections]::Access
+                ) -match [regex]::Escape(";;;$ScopeASID)"))
+        }
+        catch {
+            $removed = $false
+        }
+        $invalidTargetRemoved[[string]$invalidCase.Key] = $removed
         $rejected = $false
+        [Environment]::SetEnvironmentVariable($strictEnv, '1', 'Process')
         try {
             [void](Remove-DefenseClawSIDFromRawDACL `
                 -Descriptor $invalidCase.Value `
@@ -426,21 +445,39 @@ $ipcCleanupCases = & $module {
             }
             $rejected = $_.Exception.Message -match $expectedFailure
         }
+        finally {
+            [Environment]::SetEnvironmentVariable($strictEnv, $null, 'Process')
+        }
         $invalidTargetRejected[[string]$invalidCase.Key] = $rejected
     }
 
-    $retiredOwnerRejected = $false
-    $retiredGroupRejected = $false
+    $ownerFixture = [Security.AccessControl.RawSecurityDescriptor]::new(
+        ("O:{0}G:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)" -f $ScopeASID)
+    )
+    $retiredOwnerAccepted = $true
     try {
         Assert-DefenseClawManagedIPCRetirementDescriptor `
-            -Descriptor ([Security.AccessControl.RawSecurityDescriptor]::new(
-                ("O:{0}G:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)" -f $ScopeASID)
-            )) `
+            -Descriptor $ownerFixture `
+            -Path 'ipc-owner-fixture'
+    }
+    catch {
+        $retiredOwnerAccepted = $false
+    }
+    $retiredOwnerRejected = $false
+    [Environment]::SetEnvironmentVariable($strictEnv, '1', 'Process')
+    try {
+        Assert-DefenseClawManagedIPCRetirementDescriptor `
+            -Descriptor $ownerFixture `
             -Path 'ipc-owner-fixture'
     }
     catch {
         $retiredOwnerRejected = $_.Exception.Message -match 'untrusted owner'
     }
+    finally {
+        [Environment]::SetEnvironmentVariable($strictEnv, $null, 'Process')
+    }
+    # The primary group grants no access and is never judged.
+    $retiredGroupIgnored = $true
     try {
         Assert-DefenseClawManagedIPCRetirementDescriptor `
             -Descriptor ([Security.AccessControl.RawSecurityDescriptor]::new(
@@ -449,7 +486,7 @@ $ipcCleanupCases = & $module {
             -Path 'ipc-group-fixture'
     }
     catch {
-        $retiredGroupRejected = $_.Exception.Message -match 'untrusted group'
+        $retiredGroupIgnored = $false
     }
 
     [pscustomobject]@{
@@ -472,13 +509,19 @@ $ipcCleanupCases = & $module {
             ) -match ';;;BA\)'
         )
         repeated_cleanup_is_idempotent = ([int]$second.removed -eq 0)
-        inherited_target_ace_rejected = [bool]$invalidTargetRejected.inherited
-        deny_target_ace_rejected = [bool]$invalidTargetRejected.deny
-        narrow_target_ace_rejected = [bool]$invalidTargetRejected.narrow
-        duplicate_target_aces_rejected = [bool]$invalidTargetRejected.duplicate
-        callback_target_ace_rejected = [bool]$invalidTargetRejected.callback
-        retired_sid_owner_rejected = $retiredOwnerRejected
-        retired_sid_group_rejected = $retiredGroupRejected
+        inherited_target_ace_removed = [bool]$invalidTargetRemoved.inherited
+        deny_target_ace_removed = [bool]$invalidTargetRemoved.deny
+        narrow_target_ace_removed = [bool]$invalidTargetRemoved.narrow
+        duplicate_target_aces_removed = [bool]$invalidTargetRemoved.duplicate
+        callback_target_ace_removed = [bool]$invalidTargetRemoved.callback
+        strict_inherited_target_ace_rejected = [bool]$invalidTargetRejected.inherited
+        strict_deny_target_ace_rejected = [bool]$invalidTargetRejected.deny
+        strict_narrow_target_ace_rejected = [bool]$invalidTargetRejected.narrow
+        strict_duplicate_target_aces_rejected = [bool]$invalidTargetRejected.duplicate
+        strict_callback_target_ace_rejected = [bool]$invalidTargetRejected.callback
+        retired_sid_owner_accepted = $retiredOwnerAccepted
+        strict_retired_sid_owner_rejected = $retiredOwnerRejected
+        retired_sid_group_ignored = $retiredGroupIgnored
         next_scope_can_be_canonical = (
             $scopeBCanonicalSDDL -match [regex]::Escape(";;;$ScopeBSID)") -and
             -not ($scopeBCanonicalSDDL -match [regex]::Escape(";;;$ScopeASID)"))

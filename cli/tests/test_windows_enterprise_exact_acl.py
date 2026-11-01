@@ -267,6 +267,12 @@ def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> No
     assert "$matchingIndexes.Count -ne 1" in matcher
     assert "duplicate ACEs" in matcher
     assert "non-canonical ACE" in matcher
+    # Outside the strict pin every retired-SID ACE is removed and logged; the
+    # shared directory's group and inheritance never block the cleanup.
+    assert "Test-DefenseClawTrustStrictAncestors" in matcher
+    assert "defenseclaw_accept" in matcher
+    assert "Test-DefenseClawTrustStrictAncestors" in descriptor_guard
+    assert "untrusted group" not in descriptor_guard
     assert "Get-DefenseClawServiceSIDForRecovery" in resolver
     assert "Resolve-DefenseClawRetiredGatewayServiceSID" in cleanup
     assert "Remove-DefenseClawSIDFromRawDACL" in cleanup

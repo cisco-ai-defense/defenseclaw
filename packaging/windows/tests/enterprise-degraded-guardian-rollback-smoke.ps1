@@ -5,10 +5,12 @@
 
 # A rollback restores the deployment that was there before the transaction.
 # When its guardian already had failed targets, the restored guardian's fresh
-# reconcile reports ok=false, and the rollback must still accept it. Only the
-# rollback lane (no manifest digest, -AllowFailedTargets) relaxes this; an
-# activation with a digest, an incomplete reconcile, or a report with no state
-# stays rejected. The helpers are loaded from the module by AST.
+# reconcile reports ok=false, and the rollback must still accept it. Install
+# and Upgrade activation (with a manifest digest) accept the same complete
+# degraded reconcile as long as its activation identity matches, and log each
+# failed target. An incomplete reconcile, a report with no state, or a live
+# verify failure on a target the Guardian reported healthy stays rejected.
+# The helpers are loaded from the module by AST.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -35,7 +37,10 @@ foreach ($name in @(
         'Test-DefenseClawGuardianCoverageReport',
         'Test-DefenseClawGuardianReportCompletedWithFailedTargets',
         'Get-DefenseClawGuardianGeneration',
-        'Get-DefenseClawGuardianReadinessProbe'
+        'Get-DefenseClawGuardianReadinessProbe',
+        'Get-DefenseClawGuardianFailedTargets',
+        'Write-DefenseClawGuardianDegradedTargets',
+        'Get-DefenseClawVerifyFailedTargetKeys'
     )) {
     $definition = $ast.Find({
             param($node)
@@ -51,23 +56,44 @@ foreach ($name in @(
     . ([scriptblock]::Create($text))
 }
 
+$script:Events = [Collections.Generic.List[string]]::new()
+function Write-DefenseClawResilienceEvent {
+    param([string]$Marker, [hashtable]$Fields)
+    $script:Events.Add("$Marker connector=$($Fields['connector']) sid=$($Fields['sid'])")
+}
+function ConvertTo-DefenseClawBoundedDiagnostic { param($Value) [string]$Value }
+
 $startedAfter = [DateTime]::Parse('2026-10-29T00:00:00Z').ToUniversalTime()
-function New-Report([int]$Failures, [int]$Rows = 3, [bool]$WithState = $true) {
+$digest = 'a' * 64
+function New-Report([int]$Failures, [int]$Rows = 3, [bool]$WithState = $true, [string]$ActivationDigest = '') {
     $report = [ordered]@{
         ok = ($Failures -eq 0)
         errors = @($(if ($Failures -gt 0) { 'claudecode target S-1-5-21-1-2-3-1003 failed' }))
     }
     if ($WithState) {
+        $targetRows = @(
+            [ordered]@{ connector = 'claudecode'; sid = 'S-1-5-21-1-2-3-1003'; ok = ($Failures -eq 0); error = 'hook write denied' },
+            [ordered]@{ connector = 'codex'; sid = 'S-1-5-21-1-2-3-1001'; ok = $true },
+            [ordered]@{ connector = 'cursor'; sid = 'S-1-5-21-1-2-3-1002'; ok = $false; pending = $true }
+        )
         $report.state = [pscustomobject][ordered]@{
             updated_at = '2026-10-29T00:00:05Z'
             target_count = 3
             success_count = 3 - $Failures - 1
             failure_count = $Failures
             pending_count = 1
-            results = @(1..$Rows)
+            results = @($targetRows | Select-Object -First $Rows)
         }
     }
-    return ($report | ConvertTo-Json -Depth 5 | ConvertFrom-Json)
+    if (-not [string]::IsNullOrEmpty($ActivationDigest)) {
+        $report.activation = [ordered]@{
+            version = 1
+            updated_at = '2026-10-29T00:00:05Z'
+            reconcile_id = 'b' * 32
+            manifest_sha256 = $ActivationDigest
+        }
+    }
+    return ($report | ConvertTo-Json -Depth 6 | ConvertFrom-Json)
 }
 function Test-Coverage($Report, [string]$Digest = '', [switch]$Allow) {
     return Test-DefenseClawGuardianCoverageReport `
@@ -89,7 +115,10 @@ function Assert-Result($Result, [bool]$Ok, [string]$Label) {
 Assert-Result (Test-Coverage (New-Report -Failures 0)) $true 'healthy reconcile'
 Assert-Result (Test-Coverage (New-Report -Failures 1) -Allow) $true 'degraded reconcile on the rollback lane'
 Assert-Result (Test-Coverage (New-Report -Failures 1)) $false 'degraded reconcile without -AllowFailedTargets'
-Assert-Result (Test-Coverage (New-Report -Failures 1) -Digest ('a' * 64) -Allow) $false 'degraded reconcile on the activation lane'
+Assert-Result (Test-Coverage (New-Report -Failures 1) -Digest $digest -Allow) $false 'degraded reconcile without activation identity'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest -Allow) $true 'degraded reconcile on the activation lane'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest ('c' * 64)) -Digest $digest -Allow) $false 'degraded reconcile for another manifest'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest) $false 'degraded activation without -AllowFailedTargets'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -Rows 2) -Allow) $false 'incomplete degraded reconcile'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -WithState $false) -Allow) $false 'not-ok report without state'
 
@@ -97,7 +126,8 @@ Assert-Result (Test-Coverage (New-Report -Failures 1 -WithState $false) -Allow) 
 # non-zero for a degraded Guardian. The same rollback-only allowance applies.
 $script:StatusReport = New-Report -Failures 1
 function Get-DefenseClawSmokeService { param($Name, $ErrorAction) [pscustomobject]@{ Status = 'Running' } }
-function Invoke-DefenseClawGatewayCommand { param($Layout, $GatewayServiceName, $Arguments, [switch]$Capture, [switch]$AllowFailure) [pscustomobject]@{ exit_code = 1; output = @() } }
+$script:VerifyOutput = @()
+function Invoke-DefenseClawGatewayCommand { param($Layout, $GatewayServiceName, $Arguments, [switch]$Capture, [switch]$AllowFailure) [pscustomobject]@{ exit_code = 1; output = @($script:VerifyOutput) } }
 function Get-DefenseClawGuardianStatusReport { param($Layout, $GatewayServiceName) $script:StatusReport }
 function Get-DefenseClawGuardianVerificationFailureDiagnostic { param($Probe) 'guardian not ready' }
 $probeArgs = @{ Layout = @{ ManifestPath = 'C:\targets.yaml' }; GatewayServiceName = 'gw'; GuardianServiceName = 'guardian' }
@@ -108,8 +138,26 @@ if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs).ready) {
     throw 'readiness accepted a degraded Guardian without -AllowFailedTargets'
 }
 if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
-    throw 'live verification accepted a degraded Guardian'
+    throw 'live verification accepted a degraded Guardian without a per-target verify report'
 }
+$script:VerifyOutput = @('{"ok":false,"results":[{"connector":"claudecode","sid":"S-1-5-21-1-2-3-1003","ok":false,"error":"hook missing"},{"connector":"codex","sid":"S-1-5-21-1-2-3-1001","ok":true}]}')
+$script:Events.Clear()
+if (-not [bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
+    throw 'live verification rejected a failure confined to the Guardian-failed target'
+}
+if (@($script:Events | Where-Object { $_ -eq 'defenseclaw_degraded connector=claudecode sid=S-1-5-21-1-2-3-1003' }).Count -ne 1 -or
+    @($script:Events).Count -ne 1) {
+    throw "degraded activation did not log exactly the failed target: $($script:Events -join '; ')"
+}
+$script:VerifyOutput = @('{"ok":false,"results":[{"connector":"codex","sid":"S-1-5-21-1-2-3-1001","ok":false,"error":"hook drift"}]}')
+if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
+    throw 'live verification accepted a failure on a target the Guardian reported healthy'
+}
+$script:VerifyOutput = @('{"ok":false,"authorization_error":"denied","results":[{"connector":"claudecode","sid":"S-1-5-21-1-2-3-1003","ok":false}]}')
+if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
+    throw 'live verification accepted a protected-authorization failure'
+}
+$script:VerifyOutput = @()
 $script:StatusReport = New-Report -Failures 1 -Rows 2
 if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets).ready) {
     throw 'rollback readiness accepted an incomplete reconcile'

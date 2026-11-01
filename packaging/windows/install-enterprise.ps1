@@ -44,9 +44,11 @@ param(
     # eligible profile. Rows with WTSActive sessions are immediate; enabled
     # rows for disconnected profiles carry `deferred: true` so Guardian can
     # leave their first reconcile pending until the exact user token exists.
-    # A row whose connector version cannot be accepted stays disabled and is
-    # never deferred. -NoStart keeps the full planned manifest non-deferred
-    # because it makes no activation/readiness claim in this transaction.
+    # A managed connector whose installed version cannot be verified is still
+    # enabled, without agent_version (best-effort hook contract); only a
+    # connector Windows managed mode cannot hook stays disabled. -NoStart
+    # keeps the full planned manifest non-deferred because it makes no
+    # activation/readiness claim in this transaction.
     # Both are mutually exclusive with -Config / -Manifest and -DeferredConfig.
     [ValidateSet('', 'observe', 'action')]
     [string]$Mode = '',
@@ -247,44 +249,70 @@ function Get-DefenseClawTrustedMachineRoots {
     }
 }
 
-$trustedMachineRoots = Get-DefenseClawTrustedMachineRoots
-$trustedWindows = [string]$trustedMachineRoots.Windows
-$trustedProgramFiles = [string]$trustedMachineRoots.ProgramFiles
-$trustedProgramData = [string]$trustedMachineRoots.ProgramData
-$InstallRoot = if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
-    [IO.Path]::Combine(
-        $trustedProgramFiles,
-        'Cisco\Cisco Secure Client\DefenseClaw'
+# A host whose machine-root registration is broken must still get the
+# standard failure verdict, not a bare PowerShell error with no JSON.
+try {
+    $trustedMachineRoots = Get-DefenseClawTrustedMachineRoots
+    $trustedWindows = [string]$trustedMachineRoots.Windows
+    $trustedProgramFiles = [string]$trustedMachineRoots.ProgramFiles
+    $trustedProgramData = [string]$trustedMachineRoots.ProgramData
+    $InstallRoot = if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+        [IO.Path]::Combine(
+            $trustedProgramFiles,
+            'Cisco\Cisco Secure Client\DefenseClaw'
+        )
+    } else { $InstallRoot }
+    $StateRoot = if ([string]::IsNullOrWhiteSpace($StateRoot)) {
+        [IO.Path]::Combine(
+            $trustedProgramData,
+            'Cisco\Cisco Secure Client\DefenseClaw'
+        )
+    } else { $StateRoot }
+    $trustedSystem32 = [IO.Path]::Combine($trustedWindows, 'System32')
+    [Environment]::SetEnvironmentVariable('SystemRoot', $trustedWindows, 'Process')
+    [Environment]::SetEnvironmentVariable('windir', $trustedWindows, 'Process')
+    [Environment]::SetEnvironmentVariable('ProgramFiles', $trustedProgramFiles, 'Process')
+    [Environment]::SetEnvironmentVariable('ProgramData', $trustedProgramData, 'Process')
+    # Pin module resolution to the running engine's own module directory so an
+    # ambient PSModulePath cannot inject a substitute module.
+    $trustedEngineModules = [IO.Path]::Combine($PSHOME, 'Modules')
+    if (-not [IO.Directory]::Exists($trustedEngineModules)) {
+        throw "trusted engine module directory is missing: $trustedEngineModules"
+    }
+    [Environment]::SetEnvironmentVariable('PSModulePath', $trustedEngineModules, 'Process')
+    [Environment]::SetEnvironmentVariable(
+        'PATH',
+        (@(
+            $trustedSystem32,
+            $trustedWindows,
+            ([IO.Path]::Combine($trustedSystem32, 'Wbem')),
+            ([IO.Path]::Combine($trustedSystem32, 'WindowsPowerShell\v1.0'))
+        ) -join [IO.Path]::PathSeparator),
+        'Process'
     )
-} else { $InstallRoot }
-$StateRoot = if ([string]::IsNullOrWhiteSpace($StateRoot)) {
-    [IO.Path]::Combine(
-        $trustedProgramData,
-        'Cisco\Cisco Secure Client\DefenseClaw'
-    )
-} else { $StateRoot }
-$trustedSystem32 = [IO.Path]::Combine($trustedWindows, 'System32')
-[Environment]::SetEnvironmentVariable('SystemRoot', $trustedWindows, 'Process')
-[Environment]::SetEnvironmentVariable('windir', $trustedWindows, 'Process')
-[Environment]::SetEnvironmentVariable('ProgramFiles', $trustedProgramFiles, 'Process')
-[Environment]::SetEnvironmentVariable('ProgramData', $trustedProgramData, 'Process')
-# Pin module resolution to the running engine's own module directory so an
-# ambient PSModulePath cannot inject a substitute module.
-$trustedEngineModules = [IO.Path]::Combine($PSHOME, 'Modules')
-if (-not [IO.Directory]::Exists($trustedEngineModules)) {
-    throw "trusted engine module directory is missing: $trustedEngineModules"
 }
-[Environment]::SetEnvironmentVariable('PSModulePath', $trustedEngineModules, 'Process')
-[Environment]::SetEnvironmentVariable(
-    'PATH',
-    (@(
-        $trustedSystem32,
-        $trustedWindows,
-        ([IO.Path]::Combine($trustedSystem32, 'Wbem')),
-        ([IO.Path]::Combine($trustedSystem32, 'WindowsPowerShell\v1.0'))
-    ) -join [IO.Path]::PathSeparator),
-    'Process'
-)
+catch {
+    $defenseClawRootFailure = [string]$_.Exception.Message
+    if ($Json) {
+        [pscustomobject]@{
+            schema_version = 1
+            ok = $false
+            action = ([string]$Action).ToLowerInvariant()
+            error = $defenseClawRootFailure
+            errors = @($defenseClawRootFailure)
+        } | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 6 -Compress
+    }
+    else {
+        Microsoft.PowerShell.Utility\Write-Error `
+            -ErrorAction Continue `
+            -Message (
+                'DefenseClaw Windows enterprise {0} failed: {1}' -f
+                ([string]$Action).ToLowerInvariant(),
+                $defenseClawRootFailure
+            )
+    }
+    exit 1
+}
 
 $script:DefenseClawBootstrapPathProbe = $null
 # Drift the bootstrap accepts before the module is imported. Write-Warning
@@ -294,6 +322,7 @@ $script:DefenseClawBootstrapPathProbe = $null
 $script:DefenseClawBootstrapResilienceEvents =
     [Collections.Generic.List[string]]::new()
 $script:DefenseClawBootstrapAdminEquivalentMembers = $null
+$script:DefenseClawBootstrapAdminMembershipUnknown = $false
 
 # Same line format as the module and the Go components: marker, then
 # key="value" fields in key order, values quoted like Go's strconv.Quote.
@@ -346,6 +375,19 @@ function Format-DefenseClawBootstrapResilienceEvent {
         [void]$line.Append(' ').Append($key).Append('=').Append($quoted.ToString())
     }
     return $line.ToString()
+}
+
+# Mirrors the module's strict pin (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS):
+# set, the bootstrap's advisory trust verdicts are fatal again.
+function Test-DefenseClawBootstrapStrictAncestors {
+    $raw = [Environment]::GetEnvironmentVariable(
+        'DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS',
+        'Process'
+    )
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $false
+    }
+    return ([string]$raw).Trim().ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
 }
 
 function Add-DefenseClawBootstrapResilienceEvent {
@@ -2339,7 +2381,23 @@ function Assert-DefenseClawBootstrapModuleTrust {
             -LiteralPath $full `
             -ErrorAction Stop
         if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
-            throw "DefenseClaw enterprise installer module Authenticode signature is not valid ($($signature.Status)): $full; use -AllowUnsigned only for protected controlled test staging"
+            # Code integrity is advisory outside the strict pin, as it is for
+            # every artifact the module checks: an offline host that lacks the
+            # signing root (NotTrusted, UnknownError) must still be able to
+            # install and purge. A HashMismatch is advisory too, because the
+            # leaf ACL/owner check above already proved the file is not
+            # writable by an untrusted principal, and the open handle keeps
+            # it unchanged until Import-Module returns.
+            if (Test-DefenseClawBootstrapStrictAncestors) {
+                throw "DefenseClaw enterprise installer module Authenticode signature is not valid ($($signature.Status)): $full; use -AllowUnsigned only for protected controlled test staging"
+            }
+            Add-DefenseClawBootstrapResilienceEvent `
+                -Marker defenseclaw_boundary `
+                -Fields @{
+                    path   = $full
+                    label  = 'DefenseClaw enterprise installer module'
+                    reason = "Authenticode signature is not valid ($($signature.Status))"
+                }
         }
     }
     # Keep the mount-manager authorization adjacent to the import boundary.
@@ -2379,7 +2437,7 @@ function ConvertTo-DefenseClawConnectorList {
             throw "-Connector entry '$trimmed' is not supported on Windows managed_enterprise; supported: $($script:DefenseClawWindowsManagedEnterpriseSupportedConnectors -join ', ')."
         }
         if ($normalized -notcontains $trimmed) {
-            $normalized.Add($trimmed) | Out-Null
+            $normalized.Add($trimmed) | Microsoft.PowerShell.Core\Out-Null
         }
     }
     if ($normalized.Count -eq 0) {
@@ -2530,14 +2588,15 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
 
     # Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList
     # and return one PSCustomObject per eligible local/domain or Microsoft Entra
-    # ID interactive user with a resolvable on-disk ProfileImagePath whose SID
-    # translates to a live NTAccount.
+    # ID interactive user with a resolvable on-disk ProfileImagePath. The
+    # account name comes from the SID when it translates, else from the
+    # profile folder name.
     $rootKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
     $out = [Collections.Generic.List[psobject]]::new()
-    if (-not (Test-Path -LiteralPath $rootKey)) {
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $rootKey)) {
         return $out.ToArray()
     }
-    foreach ($sub in Get-ChildItem -LiteralPath $rootKey -ErrorAction SilentlyContinue) {
+    foreach ($sub in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $rootKey -ErrorAction SilentlyContinue) {
         $sid = $sub.PSChildName
         try {
             $profileSID = [Security.Principal.SecurityIdentifier]::new($sid)
@@ -2546,20 +2605,38 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
         if (-not (Test-DefenseClawInteractiveUserSID -SID $profileSID)) { continue }
         $image = $null
         try {
-            $image = (Get-ItemProperty -LiteralPath $sub.PSPath `
+            $image = (Microsoft.PowerShell.Management\Get-ItemProperty -LiteralPath $sub.PSPath `
                 -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
         }
         catch { continue }
         if ([string]::IsNullOrWhiteSpace($image)) { continue }
         $image = [Environment]::ExpandEnvironmentVariables($image)
         if (-not [IO.Directory]::Exists($image)) { continue }
+        # The account name is cosmetic (the row is keyed by SID). A domain
+        # laptop off VPN cannot translate a domain SID, and that profile
+        # must still be hooked, so fall back to the profile folder name.
         $account = $null
         try {
-            $account = $profileSID.Translate(
+            $account = [string]$profileSID.Translate(
                 [Security.Principal.NTAccount]
             ).Value
         }
-        catch { continue }
+        catch {
+            $account = $null
+        }
+        if ([string]::IsNullOrWhiteSpace($account)) {
+            $account = [IO.Path]::GetFileName(
+                ([IO.Path]::GetFullPath($image)).TrimEnd('\')
+            )
+            Add-DefenseClawBootstrapResilienceEvent `
+                -Marker defenseclaw_accept `
+                -Fields @{
+                    sid    = $sid
+                    path   = $image
+                    reason = 'profile SID did not translate to an account; using the profile folder name'
+                }
+        }
+        if ([string]::IsNullOrWhiteSpace($account)) { continue }
         $userName = $account
         $backslash = $account.IndexOf('\')
         if ($backslash -ge 0) { $userName = $account.Substring($backslash + 1) }
@@ -2568,7 +2645,7 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
             NTAccount = $account
             UserName = $userName
             UserHome = ([IO.Path]::GetFullPath($image)).TrimEnd('\')
-        }) | Out-Null
+        }) | Microsoft.PowerShell.Core\Out-Null
     }
     if ($RequireActiveSession) {
         # Keep this low-level active-only query available to callers that need
@@ -2911,7 +2988,7 @@ function Get-DefenseClawClaudeWinGetMetadataVersion {
         return ''
     }
     if ($versions.Count -eq 0) { return '' }
-    return [string]($versions | Sort-Object -Descending | Select-Object -First 1)
+    return [string]($versions | Microsoft.PowerShell.Utility\Sort-Object -Descending | Microsoft.PowerShell.Utility\Select-Object -First 1)
 }
 
 function ConvertTo-DefenseClawCodexWinGetVersion {
@@ -2965,7 +3042,7 @@ function Read-DefenseClawCodexPEBytes {
         $total += $read
     }
     # Prevent PowerShell's pipeline from unrolling byte arrays.
-    Write-Output -NoEnumerate $buffer
+    Microsoft.PowerShell.Utility\Write-Output -NoEnumerate $buffer
 }
 
 function Get-DefenseClawCodexWinGetEmbeddedVersion {
@@ -3050,7 +3127,7 @@ function Get-DefenseClawCodexWinGetEmbeddedVersion {
             })
         }
         if ($sections.Count -eq 0) { return '' }
-        $ordered = @($sections | Sort-Object -Property Offset)
+        $ordered = @($sections | Microsoft.PowerShell.Utility\Sort-Object -Property Offset)
         $previousEnd = [uint64]0
         foreach ($signedSection in $ordered) {
             if ([uint64]$signedSection.Offset -lt $previousEnd) { return '' }
@@ -3106,7 +3183,7 @@ function Get-DefenseClawCodexWinGetEmbeddedVersion {
             }
         }
         if (-not $sawCodexCLI -or $versions.Count -ne 1) { return '' }
-        return [string]($versions | Select-Object -First 1)
+        return [string]($versions | Microsoft.PowerShell.Utility\Select-Object -First 1)
     }
     catch {
         return ''
@@ -3172,14 +3249,24 @@ function Test-DefenseClawConnectorMetadataTargetIsLocalAdmin {
         # a transitively-nested group containing Administrators must not
         # silently widen owner-acceptance. Any CIM query failure returns
         # $false so we never widen acceptance based on incomplete data.
+        #
+        # A domain-joined host off its network can stall the group walk; it
+        # is bounded, and a timeout or failure is "unknown": the
+        # Administrators-owner relaxation is skipped (logged once) and every
+        # later call skips the query instead of waiting again.
+        if ($script:DefenseClawBootstrapAdminMembershipUnknown) {
+            return $false
+        }
         $adminGroup = CimCmdlets\Get-CimInstance `
             -ClassName Win32_Group `
             -Filter "SID='S-1-5-32-544' AND LocalAccount=True" `
+            -OperationTimeoutSec 15 `
             -ErrorAction Stop
         if ($null -eq $adminGroup) { return $false }
         $members = CimCmdlets\Get-CimAssociatedInstance `
             -InputObject $adminGroup `
             -Association Win32_GroupUser `
+            -OperationTimeoutSec 15 `
             -ErrorAction Stop
         foreach ($member in $members) {
             if ([string]::Equals(
@@ -3191,7 +3278,16 @@ function Test-DefenseClawConnectorMetadataTargetIsLocalAdmin {
             }
         }
     }
-    catch { return $false }
+    catch {
+        $script:DefenseClawBootstrapAdminMembershipUnknown = $true
+        Add-DefenseClawBootstrapResilienceEvent `
+            -Marker defenseclaw_skip `
+            -Fields @{
+                check  = 'local_administrators_membership'
+                reason = "membership query failed or timed out; Administrators-owned agent files are not attributed to the user: $($_.Exception.Message)"
+            }
+        return $false
+    }
     return $false
 }
 
@@ -3466,7 +3562,7 @@ function Get-DefenseClawCodexWinGetMetadataVersion {
         return ''
     }
     if ($invalidCandidate -or $versions.Count -eq 0) { return '' }
-    return [string]($versions | Sort-Object -Descending | Select-Object -First 1)
+    return [string]($versions | Microsoft.PowerShell.Utility\Sort-Object -Descending | Microsoft.PowerShell.Utility\Select-Object -First 1)
 }
 
 function Get-DefenseClawConnectorMetadataVersion {
@@ -3677,17 +3773,13 @@ function Get-DefenseClawRenderedEnterpriseTargets {
     foreach ($activeProfile in $activeProfiles) {
         [void]$activeProfileSIDs.Add(([string]$activeProfile.SID).Trim())
     }
-    # Windows managed_enterprise's manifest validator refuses any
-    # `enabled: true` target without an `agent_version` that also meets
-    # the connector's Windows minimum — see
-    # requireWindowsEnterpriseManagedAgentVersion in
-    # internal/enterprisehooks/install_windows.go (codex >= 0.131.0,
-    # claudecode >= 2.1.152). When no agent metadata exists yet (the common
-    # state on managed rollouts where AVC pushes DefenseClaw first), use the
-    # exact minimum as a bootstrap placeholder. A detected native package
-    # whose identity/version cannot be authenticated never receives that
-    # fallback. A valid below-minimum version remains exact so downstream
-    # manifest validation fails closed instead of certifying a placeholder.
+    # When no agent metadata exists yet (the common state on managed
+    # rollouts where AVC pushes DefenseClaw first), use the exact minimum as
+    # a bootstrap placeholder. A detected native package whose
+    # identity/version cannot be authenticated never receives that
+    # fallback; its row is enabled without agent_version, which the
+    # manifest accepts and which selects the best-effort hook contract. A
+    # valid below-minimum version remains exact.
     $script:DefenseClawWindowsAgentVersionMinimum = @{
         'codex'      = '0.131.0'
         'claudecode' = '2.1.152'
@@ -3732,11 +3824,32 @@ function Get-DefenseClawRenderedEnterpriseTargets {
             [void]$sb.AppendLine("    user_home: `"$($u.UserHome -replace '"','\"' -replace '\\','\\')`"")
             [void]$sb.AppendLine("    sid: `"$($u.SID)`"")
             [void]$sb.AppendLine("    connector: `"$c`"")
-            if ([string]::IsNullOrWhiteSpace($version)) {
+            $managedConnector = $c -cin
+                $script:DefenseClawWindowsManagedEnterpriseSupportedConnectors
+            if ([string]::IsNullOrWhiteSpace($version) -and
+                -not $managedConnector) {
+                # Not a Windows managed connector: nothing can hook it.
                 [void]$sb.AppendLine('    enabled: false')
             }
             else {
-                [void]$sb.AppendLine("    agent_version: `"$version`"")
+                if (-not [string]::IsNullOrWhiteSpace($version)) {
+                    [void]$sb.AppendLine("    agent_version: `"$version`"")
+                }
+                else {
+                    # An installed agent whose version or signature could
+                    # not be verified is still hooked: an empty version
+                    # selects the best-effort hook contract. A row written
+                    # disabled here would stay disabled forever, because
+                    # the Guardian enumerator keeps the previous row's
+                    # enabled state.
+                    Add-DefenseClawBootstrapResilienceEvent `
+                        -Marker defenseclaw_accept `
+                        -Fields @{
+                            connector = $c
+                            sid       = [string]$u.SID
+                            reason    = 'agent version could not be verified; enabling the target with the best-effort hook contract'
+                        }
+                }
                 [void]$sb.AppendLine('    enabled: true')
                 if ($deferTarget) {
                     [void]$sb.AppendLine('    deferred: true')
@@ -4054,7 +4167,8 @@ elseif ($Json) {
     $result | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 12 -Compress
 }
 else {
-    $resultState = if ($null -ne $result.PSObject.Properties['ok'] -and
+    $resultState = if ($null -ne $result -and
+        $null -ne $result.PSObject.Properties['ok'] -and
         -not [bool]$result.ok) {
         'INCOMPLETE'
     }
@@ -4068,49 +4182,58 @@ else {
     foreach ($line in $bootstrapResilienceEvents) {
         Microsoft.PowerShell.Utility\Write-Warning -Message ([string]$line)
     }
+    # Not every action's result carries every field; StrictMode throws on a
+    # missing property, so each one is read through PSObject.Properties.
+    $summaryValue = {
+        param([string]$Name)
+        if ($null -eq $result) {
+            return $null
+        }
+        $property = $result.PSObject.Properties[$Name]
+        if ($null -eq $property) {
+            return $null
+        }
+        return $property.Value
+    }
     if ($resultState -eq 'INCOMPLETE') {
-        foreach ($message in @($result.errors)) {
+        foreach ($message in @(& $summaryValue 'errors')) {
             if (-not [string]::IsNullOrWhiteSpace([string]$message)) {
                 Microsoft.PowerShell.Utility\Write-Warning -Message ([string]$message)
             }
         }
     }
-    if ($null -ne $result.gateway_service_state) {
+    $gatewayServiceState = & $summaryValue 'gateway_service_state'
+    if ($null -ne $gatewayServiceState) {
         Microsoft.PowerShell.Utility\Write-Host (
-            "  Gateway service: {0}" -f $result.gateway_service_state
+            "  Gateway service: {0}" -f $gatewayServiceState
         )
     }
-    if ($null -ne $result.guardian_service_state) {
+    $guardianServiceState = & $summaryValue 'guardian_service_state'
+    if ($null -ne $guardianServiceState) {
         Microsoft.PowerShell.Utility\Write-Host (
-            "  Guardian service: {0}" -f $result.guardian_service_state
+            "  Guardian service: {0}" -f $guardianServiceState
         )
     }
-    if ($null -ne $result.gateway_ready) {
+    $gatewayReady = & $summaryValue 'gateway_ready'
+    if ($null -ne $gatewayReady) {
         Microsoft.PowerShell.Utility\Write-Host (
-            "  Gateway health probe: {0}" -f $result.gateway_ready
+            "  Gateway health probe: {0}" -f $gatewayReady
         )
     }
-    $selfCleanupProperty = $result.PSObject.Properties[
-        'self_uninstall_cleanup_pending'
-    ]
-    if ($null -ne $selfCleanupProperty -and
-        [bool]$selfCleanupProperty.Value) {
+    if ([bool](& $summaryValue 'self_uninstall_cleanup_pending')) {
         Microsoft.PowerShell.Utility\Write-Host (
             '  Installed CLI cleanup: pending until this CLI process exits'
         )
     }
-    $clientReloadProperty = $result.PSObject.Properties[
-        'cached_enterprise_clients_require_reload'
-    ]
-    if ($null -ne $clientReloadProperty -and
-        [bool]$clientReloadProperty.Value) {
+    if ([bool](& $summaryValue 'cached_enterprise_clients_require_reload')) {
         Microsoft.PowerShell.Utility\Write-Host (
             '  Enterprise clients already running during uninstall must reload'
         )
     }
-    if ($null -ne $result.guardian_ready) {
+    $guardianReady = & $summaryValue 'guardian_ready'
+    if ($null -ne $guardianReady) {
         Microsoft.PowerShell.Utility\Write-Host (
-            "  Guardian coverage: {0}" -f $result.guardian_ready
+            "  Guardian coverage: {0}" -f $guardianReady
         )
     }
 }
