@@ -71,7 +71,7 @@ environment, profile, or working directory.
 The public `DefenseClawSetup-x64.exe` is the non-elevating per-user product. It
 must never be relabeled as the enterprise installer. The separate
 `DefenseClawSetup-Enterprise-x64.exe` requests administrator elevation, embeds
-the three machine-lifecycle executables plus the enterprise PowerShell pair,
+the gateway, hook, CMID broker, and lifecycle CLI executables plus the enterprise PowerShell pair,
 and delegates every mutation to the transaction documented above. Its gateway
 links the private CMID provider so it can authenticate to AI Defense; that
 requires a `-tags cmid` build with the private cloudreg overlay and a pinned
@@ -98,14 +98,14 @@ the OSS working tree stays clean.
 ```
 packaging/scripts/build-managed-windows-bundle.sh \
     --ref develop \
-    --version 0.9.0-rc1 \
+    --version X.Y.Z \
     --dist-dir ./dist
 ```
 
 Or via Make:
 
 ```
-make packaging-managed-windows-bundle VERSION=0.9.0-rc1
+make packaging-managed-windows-bundle VERSION=X.Y.Z
 ```
 
 Requires: `git`, `go`, and either SSH access to
@@ -126,7 +126,7 @@ git checkout $expected
     -DistRoot .\dist `
     -OutRoot .\dist\windows-enterprise-installer `
     -StateRoot .\dist\windows-enterprise-installer-state `
-    -Version 0.9.0-rc1
+    -Version X.Y.Z
 ```
 
 The enterprise builder always cross-checks local `git HEAD` against the
@@ -136,7 +136,7 @@ external provenance record.
 Or via Make on the Windows box:
 
 ```
-make packaging-windows-managed-bundle VERSION=0.9.0-rc1
+make packaging-windows-managed-bundle VERSION=X.Y.Z
 ```
 
 The Windows box does not need access to `cisco-aispg/ai-common`. Everything
