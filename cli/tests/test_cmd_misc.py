@@ -2210,7 +2210,9 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Splunk O11y configured", result.output)
         self.assertIn("Local Splunk enablement cancelled.", result.output)
-        self.assertIn("Config saved to ~/.defenseclaw/config.yaml", result.output)
+        from defenseclaw.config import config_path_for_data_dir
+
+        self.assertIn(f"Config saved to {config_path_for_data_dir(self.app.cfg.data_dir)}", result.output)
         destinations = self._v8_destinations()
         self.assertTrue(any(value["kind"] == "otlp" for value in destinations))
         self.assertFalse(any(value["kind"] == "splunk_hec" for value in destinations))

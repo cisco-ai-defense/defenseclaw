@@ -1679,7 +1679,7 @@ def setup_skill_scanner(
         _clear_legacy_llm_fields(app.cfg)
 
     app.cfg.save()
-    _print_summary(sc, llm, aid)
+    _print_summary(sc, llm, aid, app.cfg.data_dir)
     issue = scanner_settings.recommended_settings_issue(app.cfg)
     if issue:
         click.echo(f"  {ux.dim('Recommended:')} {issue}")
@@ -3083,7 +3083,7 @@ def _emit_untrusted_prefix_setup_hints(resolved_binary: str, parent: str) -> Non
     """Actionable remediation when action-mode setup cannot probe a connector binary."""
     ux.subhead(f"  Binary resolves to: {resolved_binary}")
     ux.subhead(f"  Trust it with: defenseclaw setup trusted-paths add {parent}")
-    ux.subhead("  `trusted-paths add` writes ~/.defenseclaw/config.yaml (ai_discovery.trusted_binary_prefixes).")
+    ux.subhead(f"  `trusted-paths add` writes {config_path_for_data_dir()} (ai_discovery.trusted_binary_prefixes).")
 
 
 def _echo_summary_rows(rows: list[tuple[str, str, str]]) -> None:
@@ -3099,9 +3099,9 @@ def _echo_summary_rows(rows: list[tuple[str, str, str]]) -> None:
     click.echo()
 
 
-def _print_summary(sc, llm, aid) -> None:
+def _print_summary(sc, llm, aid, data_dir: str | None = None) -> None:
     click.echo()
-    click.echo("  Saved to ~/.defenseclaw/config.yaml")
+    click.echo(f"  Saved to {config_path_for_data_dir(data_dir)}")
     click.echo()
 
     rows: list[tuple[str, str, str]] = [
@@ -3266,7 +3266,7 @@ def setup_mcp_scanner(
         _clear_legacy_llm_fields(app.cfg)
 
     app.cfg.save()
-    _print_mcp_summary(mc, llm, aid)
+    _print_mcp_summary(mc, llm, aid, app.cfg.data_dir)
 
     if verify:
         from defenseclaw.commands.cmd_doctor import _check_scanners, _DoctorResult
@@ -3384,9 +3384,9 @@ def _interactive_mcp_setup(mc, cfg) -> None:
     mc.scan_instructions = click.confirm("  Scan server instructions?", default=mc.scan_instructions)
 
 
-def _print_mcp_summary(mc, llm, aid) -> None:
+def _print_mcp_summary(mc, llm, aid, data_dir: str | None = None) -> None:
     click.echo()
-    click.echo("  Saved to ~/.defenseclaw/config.yaml")
+    click.echo(f"  Saved to {config_path_for_data_dir(data_dir)}")
     click.echo()
 
     rows: list[tuple[str, str, str]] = [
@@ -5315,7 +5315,7 @@ def setup_gateway(
     # restart that follows this command, so checking it now reports a
     # "reconnecting" FAIL row that the restart fixes (GAP-2478).
     target_changed = (gw.host, gw.port) != previous_target
-    _print_gateway_summary(gw, openclaw=uses_openclaw)
+    _print_gateway_summary(gw, openclaw=uses_openclaw, data_dir=app.cfg.data_dir)
 
     # The sidecar can only be checked while it runs on its current API port.
     check_sidecar = verify and not api_port_changed and not gateway_stopped
@@ -6493,7 +6493,7 @@ def _check_connector_version_supported_for_setup(
                 _add_trusted_bin_prefix(parent, data_dir or os.path.expanduser("~/.defenseclaw"))
                 if _trusted_prompt_cache is not None:
                     _trusted_prompt_cache[parent] = True
-                ux.subhead(f"  Trusted '{parent}' (saved in ~/.defenseclaw/config.yaml); re-checking…")
+                ux.subhead(f"  Trusted '{parent}' (saved in {config_path_for_data_dir(data_dir)}); re-checking…")
                 ux.subhead(
                     "  Note: if this path is version-specific it may need re-trusting "
                     "after an upgrade — `defenseclaw setup trusted-paths add <dir>`."
@@ -11604,7 +11604,7 @@ def _apply_hook_connector_setup(
     try:
         cfg.save()
         if _batch_summary is None:
-            ux.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+            ux.echo(f"  ✓ Config saved to {config_path_for_data_dir(cfg.data_dir)}")
     except OSError as exc:
         try:
             _restore_setup_config_snapshot(app, setup_snapshot)
@@ -11707,11 +11707,13 @@ def _apply_hook_connector_setup(
     return True
 
 
-def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, restart: bool) -> None:
+def _echo_batch_setup_summary(
+    applied: list[str], summary: dict[str, Any], *, restart: bool, data_dir: str | None = None,
+) -> None:
     """One summary for a multi-connector setup run (GAP-1781)."""
     modes: dict[str, str] = summary.get("modes", {})
     click.echo()
-    ux.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+    ux.echo(f"  ✓ Config saved to {config_path_for_data_dir(data_dir)}")
     ux.echo(f"  ✓ {len(applied)} connector(s) set up:")
     for name in applied:
         click.echo(f"      - {name}: {modes.get(name, 'observe')}")
@@ -12406,7 +12408,7 @@ def _setup_observability_alias(
             _prompt_judge_model_config(app, app.cfg.guardrail)
             try:
                 app.cfg.save()
-                ux.echo("  ✓ Judge LLM config saved to ~/.defenseclaw/config.yaml")
+                ux.echo(f"  ✓ Judge LLM config saved to {config_path_for_data_dir(app.cfg.data_dir)}")
             except OSError as exc:
                 raise click.ClickException(f"failed to save judge LLM config: {exc}") from exc
 
@@ -12853,7 +12855,8 @@ def _prompt_batch_trusted_prefixes(
         if click.confirm(f"  Add '{parent}' to trusted binary prefixes?", default=False):
             _add_trusted_bin_prefix(parent, getattr(app.cfg, "data_dir", None) or os.path.expanduser("~/.defenseclaw"))
             cache[parent] = True
-            ux.subhead(f"  Trusted '{parent}' (saved in ~/.defenseclaw/config.yaml).")
+            saved_in = config_path_for_data_dir(getattr(app.cfg, "data_dir", None))
+            ux.subhead(f"  Trusted '{parent}' (saved in {saved_in}).")
         else:
             cache[parent] = False
     return cache
@@ -13107,7 +13110,7 @@ def _apply_setup_batch(
     if not applied:
         raise click.ClickException("no connectors were configured — see errors above")
 
-    _echo_batch_setup_summary(applied, batch_summary, restart=restart)
+    _echo_batch_setup_summary(applied, batch_summary, restart=restart, data_dir=app.cfg.data_dir)
 
     # Restart handling: the bare batch owns one narrow result-callback marker.
     # Its default restart must start or restart the gateway and verify every
@@ -15490,7 +15493,7 @@ def execute_guardrail_setup(
     if save_config:
         try:
             app.cfg.save()
-            ux.ok("Config saved to ~/.defenseclaw/config.yaml")
+            ux.ok(f"Config saved to {config_path_for_data_dir(app.cfg.data_dir)}")
         except OSError as exc:
             ux.err(f"Failed to save config: {exc}")
             warnings.append("Config not saved — settings will be lost on next run")
@@ -18553,9 +18556,9 @@ def _looks_like_secret(value: str) -> bool:
     return False
 
 
-def _print_gateway_summary(gw, *, openclaw: bool = True) -> None:
+def _print_gateway_summary(gw, *, openclaw: bool = True, data_dir: str | None = None) -> None:
     click.echo()
-    ux.ok("Saved to ~/.defenseclaw/config.yaml")
+    ux.ok(f"Saved to {config_path_for_data_dir(data_dir)}")
     click.echo()
 
     resolved = gw.resolved_token()
@@ -19022,7 +19025,7 @@ def setup_splunk(
     # round-trip now (Config.save deep-merges over the existing file
     # and preserves unmodelled keys), but it's still
     # wasteful so we skip it to keep this path single-writer.
-    click.echo("  Config saved to ~/.defenseclaw/config.yaml")
+    click.echo(f"  Config saved to {config_path_for_data_dir(app.cfg.data_dir)}")
     click.echo()
     _print_splunk_status(app)
     print_redaction_status_hint(app.cfg)
@@ -19178,7 +19181,7 @@ def _interactive_splunk_setup(
     # The canonical v8 destination writer already persisted config.yaml;
     # avoid a second whole-document Config.save() after the surgical write.
     click.echo()
-    click.echo("  Config saved to ~/.defenseclaw/config.yaml")
+    click.echo(f"  Config saved to {config_path_for_data_dir(app.cfg.data_dir)}")
     click.echo()
     _print_splunk_status(app)
     print_redaction_status_hint(app.cfg)
