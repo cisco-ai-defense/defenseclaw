@@ -222,9 +222,9 @@ const outageText: Record<string, string> = {
   'runs-blocks-with-hooks-only-preserve':
     'Runs; blocks with managed_hooks_only: preserve, which turns the foreign-hook guard on',
   'blocks-new-process':
-    'Blocks a new agent process, a session start and every call on Windows; on Linux and macOS a later call of a process the gateway allowed before it stopped does what the next column says',
+    'Blocks a new agent process, a session start and every call on Windows; on Linux and macOS, while the gateway service is stopped, a later call of a process the gateway allowed in the last 12 hours does what the next column says',
   'blocks-new-process-linux-macos':
-    'Blocks a new agent process or a session start on Linux and macOS; a later call of a process the gateway allowed before it stopped, and every call on Windows, does what the next column says',
+    'Blocks a new agent process or a session start on Linux and macOS; while the gateway service is stopped, a later call of a process the gateway allowed in the last 12 hours, and every call on Windows, does what the next column says',
 };
 
 const strictText: Record<OutageRow['strictAvailability'], string> = {

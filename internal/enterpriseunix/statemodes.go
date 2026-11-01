@@ -232,9 +232,14 @@ func (e *Env) stateTrees(account Account) []stateTree {
 		// 0644 entries, all the service account's. An account opens its own
 		// entry by name; a looser folder lets it list or change them, and an
 		// entry it cannot read keeps its calls blocked in an outage.
-		{dir: managed.ForeignHookCleanDir(e.Layout.DataDir), rule: func(_ string, dir bool) stateMode {
-			if dir {
+		{dir: managed.ForeignHookCleanDir(e.Layout.DataDir), rule: func(rel string, dir bool) stateMode {
+			switch {
+			case dir:
 				return stateMode{mode: 0o711, owner: service}
+			case strings.HasPrefix(filepath.Base(rel), enterprisepolicy.ForeignHookCleanMirrorTempPrefix):
+				// An entry the gateway is still writing: created 0600, then
+				// given 0644 before the rename. No bit is added to it.
+				return stateMode{mode: 0o644, owner: service, mask: true}
 			}
 			return stateMode{mode: 0o644, owner: service}
 		}},
@@ -261,10 +266,8 @@ func (e *Env) configStateFiles(account Account) []stateFile {
 }
 
 // writerTemporary reports a file a writer stages before it renames it into
-// place (internal/safefile, and the gateway's clean-session entries).
-func writerTemporary(name string) bool {
-	return strings.HasPrefix(name, ".safefile-") || strings.HasPrefix(name, enterprisepolicy.ForeignHookCleanMirrorTempPrefix)
-}
+// place (internal/safefile).
+func writerTemporary(name string) bool { return strings.HasPrefix(name, ".safefile-") }
 
 // settleStateModes gives every entry of the state folders and every state
 // file next to config.yaml the owner and mode it is written with. The service

@@ -58,7 +58,8 @@ func (l *lifecycle) stateRemovalBlockers() []string {
 	add := func(path string, err error) {
 		blocked = append(blocked, fmt.Sprintf("%s (%v)", path, err))
 	}
-	// The gateway's clean-session folder goes with every uninstall.
+	// The gateway's clean-session folder goes with every uninstall; with
+	// --keep-state (returned above) its removal is not checked first.
 	for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, managed.ForeignHookCleanDir(env.Layout.DataDir), env.Layout.LogDir, env.Layout.LifecycleDir} {
 		if dir == "" {
 			continue
