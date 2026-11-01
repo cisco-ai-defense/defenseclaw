@@ -152,3 +152,49 @@ func TestR107Review6ForgedCdEnterableFact(t *testing.T) {
 		t.Logf("INFO %s managed forged missing dir, plain copy: %.40s", connector, got)
 	}
 }
+
+// TestR107KnownCopyDestinationFolderWord: a copy into a folder named by a
+// variable with one fixed plain value set at top level ($D/) writes that
+// folder, so it gets the verdict of the literal folder in every cell
+// (rel-1-0-6:GAP-0329). A variable naming ~/.ssh or a link to it, a
+// reassigned or rebound variable and an unbound one keep blocking.
+func TestR107KnownCopyDestinationFolderWord(t *testing.T) {
+	home, project := dynamicWordParityProject(t)
+	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "sshdir")); err != nil {
+		t.Fatal(err)
+	}
+	allowed := []string{
+		`cp a.txt build/ && echo hi > report.txt`,
+		`D=build; cp a.txt $D/`,
+		`D=build; cp a.txt $D/ && echo hi > report.txt`,
+		`D=build; cp a.txt ${D}/ && echo done`,
+		`D=build; cp a.txt $D/a2.txt`,
+		`cd ~/proj && D=build; cp a.txt $D/`,
+	}
+	blocked := []string{
+		`cp a.txt sshdir/authorized_keys`,
+		`D=~/.ssh; cp a.txt $D/authorized_keys`,
+		`D=$HOME/.ssh; cp a.txt $D/authorized_keys`,
+		`D=sshdir; cp a.txt $D/authorized_keys`,
+		`D=sshdir; cp -a disklink $D/ && echo k >> $D/disklink`,
+		`D=build; D=sshdir; cp a.txt $D/authorized_keys`,
+		`D=build; read D; cp a.txt $D/authorized_keys`,
+		`cp a.txt $D/authorized_keys`,
+		`D=build; cp a.txt $D/../../.ssh/authorized_keys`,
+		`D=build; cp a.txt $D$E/authorized_keys`,
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, managed := range []bool{false, true} {
+			for _, command := range allowed {
+				if got := postDynamicWordParity(t, home, project, connector, managed, command, nil); !strings.HasPrefix(got, `{"action":"allow"`) {
+					t.Errorf("%s managed=%v %s = %.200s, want allow", connector, managed, command, got)
+				}
+			}
+			for _, command := range blocked {
+				if got := postDynamicWordParity(t, home, project, connector, managed, command, nil); !strings.HasPrefix(got, `{"action":"block"`) {
+					t.Errorf("%s managed=%v %s = %.200s, want block", connector, managed, command, got)
+				}
+			}
+		}
+	}
+}

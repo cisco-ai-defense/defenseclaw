@@ -275,7 +275,17 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			return true
 		}
 		for _, word := range call.Args[1:] {
-			if len(word.Parts) != 1 {
+			// $D/ or $D/rest: a known folder value and a plain literal tail
+			// that starts with a slash is that fixed path; it gets a value
+			// only, not the one-word source reading (rel-1-0-6:GAP-0329).
+			suffix := ""
+			if len(word.Parts) == 2 {
+				lit, isLit := word.Parts[1].(*syntax.Lit)
+				if !isLit || !strings.HasPrefix(lit.Value, "/") || !safe(strings.ReplaceAll(lit.Value, "/", "x")) {
+					continue
+				}
+				suffix = lit.Value
+			} else if len(word.Parts) != 1 {
 				continue
 			}
 			param, ok := word.Parts[0].(*syntax.ParamExp)
@@ -298,12 +308,12 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				known = known || at > body.from && at < body.to
 			}
 			if known {
-				if !quoted {
+				if !quoted && suffix == "" {
 					uses[word] = true
 				}
 				if len(bound[name]) == 1 {
 					for value := range bound[name] {
-						values[word] = value
+						values[word] = value + suffix
 					}
 				}
 			}
