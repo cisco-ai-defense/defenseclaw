@@ -16,7 +16,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
-
 // nodeRefusal is the error the gateway reports when the Python scanner
 // refuses a bare node launcher (rel-1-0-6:GAP-0258, dc-ent-win rc23).
 const nodeRefusal = "scanner: mcp-scanner exited 1: ValueError: refusing to scan local MCP server 'gb05-benign': " +
