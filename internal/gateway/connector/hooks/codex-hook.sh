@@ -12,13 +12,13 @@
 # (the hook still posts to the gateway, it just starts a new root
 # span).
 set -euo pipefail
-# The agent's environment cannot change how this script runs: a function
+{{if not .SecureClient}}# The agent's environment cannot change how this script runs: a function
 # nesting limit, a read timeout, ignored commands and POSIX mode would end a
 # check early and let a blocked call run (review 2 of
 # sandbox-visibility:GAP-0028). Before the first function call.
 unset -v FUNCNEST TMOUT EXECIGNORE POSIXLY_CORRECT 2>/dev/null || true
 set +o posix
-{{if not .SecureClient}}# codex_event_can_control CONTRACT EVENT returns 0 for an event whose answer
+{{end}}{{if not .SecureClient}}# codex_event_can_control CONTRACT EVENT returns 0 for an event whose answer
 # Codex acts on (the native hook's codexEventCanControl).
 codex_event_can_control() {
   case "${2:-}" in

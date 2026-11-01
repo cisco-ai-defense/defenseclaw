@@ -3,13 +3,13 @@
 # DefenseClaw Hermes hook — forwards Hermes shell-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
-# The agent's environment cannot change how this script runs: a function
+{{if not .SecureClient}}# The agent's environment cannot change how this script runs: a function
 # nesting limit, a read timeout, ignored commands and POSIX mode would end a
 # check early and let a blocked call run (review 2 of
 # sandbox-visibility:GAP-0028). Before the first function call.
 unset -v FUNCNEST TMOUT EXECIGNORE POSIXLY_CORRECT 2>/dev/null || true
 set +o posix
-{{if not .Sandbox}}# The macOS execution probe has a hard zero-process limit. Reach the proof
+{{end}}{{if not .Sandbox}}# The macOS execution probe has a hard zero-process limit. Reach the proof
 # using shell builtins, while still sourcing the installed hardening helper
 # and applying its resource limits. The registered hook path is absolute.
 if [ "${1:-}" = "--defenseclaw-execution-probe" ] && [ "${2:-}" = "--forkless" ]; then

@@ -5,13 +5,13 @@
 # PreToolUse blocks only through synchronous stdout {"decision":"deny"}; this
 # bridge does not rely on undocumented non-zero-exit enforcement.
 set -euo pipefail
-# The agent's environment cannot change how this script runs: a function
+{{if not .SecureClient}}# The agent's environment cannot change how this script runs: a function
 # nesting limit, a read timeout, ignored commands and POSIX mode would end a
 # check early and let a blocked call run (review 2 of
 # sandbox-visibility:GAP-0028). Before the first function call.
 unset -v FUNCNEST TMOUT EXECIGNORE POSIXLY_CORRECT 2>/dev/null || true
 set +o posix
-
+{{end}}
 HOOK_EVENT="${1:-}"
 {{if and (not .Managed) (not .Sandbox)}}# _DC_UNBOUND_TOOL_INPUT is this hook's own marker for a registration that
 # lost its event, set only below: a value inherited from the agent's

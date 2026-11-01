@@ -3,13 +3,13 @@
 # DefenseClaw Cursor hook — forwards Cursor command-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
-# The agent's environment cannot change how this script runs: a function
+{{if not .SecureClient}}# The agent's environment cannot change how this script runs: a function
 # nesting limit, a read timeout, ignored commands and POSIX mode would end a
 # check early and let a blocked call run (review 2 of
 # sandbox-visibility:GAP-0028). Before the first function call.
 unset -v FUNCNEST TMOUT EXECIGNORE POSIXLY_CORRECT 2>/dev/null || true
 set +o posix
-{{if and (not .Managed) (not .Sandbox)}}# _DC_HOOK_DATA_DIR is the data directory this hook was installed in, the
+{{end}}{{if and (not .Managed) (not .Sandbox)}}# _DC_HOOK_DATA_DIR is the data directory this hook was installed in, the
 # folder above its hooks folder (defenseclaw_install_held). Until the hook
 # path is resolved below it is the folder above the path the agent ran.
 _DC_HOOK_DATA_DIR="${BASH_SOURCE[0]:-$0}"

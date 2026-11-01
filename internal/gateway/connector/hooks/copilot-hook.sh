@@ -3,13 +3,13 @@
 # DefenseClaw Copilot CLI hook — forwards Copilot CLI hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
-# The agent's environment cannot change how this script runs: a function
+{{if not .SecureClient}}# The agent's environment cannot change how this script runs: a function
 # nesting limit, a read timeout, ignored commands and POSIX mode would end a
 # check early and let a blocked call run (review 2 of
 # sandbox-visibility:GAP-0028). Before the first function call.
 unset -v FUNCNEST TMOUT EXECIGNORE POSIXLY_CORRECT 2>/dev/null || true
 set +o posix
-{{if and (not .Sandbox) (or (not .Managed) (not .SecureClient))}}# Copilot honours a native deny only on preToolUse and permissionRequest,
+{{end}}{{if and (not .Sandbox) (or (not .Managed) (not .SecureClient))}}# Copilot honours a native deny only on preToolUse and permissionRequest,
 # and its stdin does not name the event: setup binds a reviewed one with
 # --event. copilot_deny prints the deny with the text ($1) before helpers,
 # credentials and the gateway are consulted. A hook bound to no reviewed

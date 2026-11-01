@@ -144,8 +144,12 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 # nesting limit, a read timeout and ignored commands would end a check early
 # (review 2 of sandbox-visibility:GAP-0028). The hooks of this build drop them
 # before their first function call; this covers hooks an older build
-# rendered.
-unset -v FUNCNEST TMOUT EXECIGNORE 2>/dev/null || true
+# rendered. Secure Client hooks keep their contract (owner rule): none of
+# the review-2 changes apply to them.
+case "${DEFENSECLAW_MANAGED_HOOK:-0}:${_DC_SECURE_CLIENT_HOOK:-0}" in
+  1:1 | true:1 | TRUE:1 | yes:1 | YES:1) ;;
+  *) unset -v FUNCNEST TMOUT EXECIGNORE 2>/dev/null || true ;;
+esac
 
 # Windows compatibility: some agent runtimes (e.g. Codex on Windows) do
 # not set HOME when spawning hook subprocesses. Without this, `set -u`
@@ -262,7 +266,7 @@ defenseclaw_harden_env() {
   # same name, which would copy the value into the environment of every child
   # process (curl, jq, the cold-started gateway), so drop inherited ones first.
   unset -v API_TOKEN PAYLOAD CONTENT TOOL_INPUT TOOL_OUTPUT INSPECT_BODY RESPONSE RESULT OUTPUT
-  unset -v FUNCNEST TMOUT EXECIGNORE 2>/dev/null || true
+  defenseclaw_secure_client_hook || unset -v FUNCNEST TMOUT EXECIGNORE 2>/dev/null || true
   # The values the in-shell readers keep (issue #1130), which lived in
   # subshells before: an inherited exported name would hand them to every
   # child process.
@@ -3117,6 +3121,11 @@ defenseclaw_missing_token_next_step() {
 # the hook sent an empty body (review 2 of sandbox-visibility:GAP-0028).
 _dc_stdin_cap() {
   _DC_STDIN_CAP="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
+  # A Secure Client hook keeps its earlier cap rule (owner rule).
+  if defenseclaw_secure_client_hook; then
+    case "$_DC_STDIN_CAP" in '' | *[!0-9]*) _DC_STDIN_CAP=1048576 ;; esac
+    return 0
+  fi
   case "$_DC_STDIN_CAP" in
     '' | *[!0-9]* | ????????*) _DC_STDIN_CAP=1048576 ;;
   esac
@@ -3171,7 +3180,7 @@ defenseclaw_read_stdin_into() {
     printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" nul "$_dc_rsi_outcome")"
     return 4
   fi
-  if [ "$_dc_rsi_read" -gt 1 ]; then
+  if [ "$_dc_rsi_read" -gt 1 ] && ! defenseclaw_secure_client_hook; then
     # read could not read (_dc_read_stdin_exact): refused, never sent empty.
     printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" unreadable "$_dc_rsi_outcome")"
     return 5
@@ -3215,7 +3224,7 @@ _dc_read_stdin_exact() {
     _dc_stdin_refused "$cap" nul "$outcome"
     return 4
   fi
-  if [ "$status" -gt 1 ]; then
+  if [ "$status" -gt 1 ] && ! defenseclaw_secure_client_hook; then
     _dc_stdin_refused "$cap" unreadable "$outcome"
     return 5
   fi
