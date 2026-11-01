@@ -32,7 +32,7 @@ import (
 // it committed (or found unchanged) still hold that names a DefenseClaw
 // launcher, described without its arguments (#1286). A file it cannot
 // inspect fails the cleanup instead of reporting none.
-func removeWindowsManagedClaudeUserSettings(home, sid, _ string) (int, []string, error) {
+func removeWindowsManagedClaudeUserSettings(home, sid string) (int, []string, error) {
 	if _, err := enterprisehooks.ValidateWindowsEnterpriseHome(home, sid); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return 0, nil, nil
@@ -79,6 +79,78 @@ func windowsManagedClaudeTransactionDir() (string, error) {
 		return "", fmt.Errorf("resolve current-token Claude cleanup transaction directory: %w", err)
 	}
 	return filepath.Join(cache, "DefenseClaw", "claude-settings-teardown"), nil
+}
+
+// windowsManagedClaudeTransactionLock is the connector's protocol lock, the
+// one file a settings transaction that finished leaves in its folder.
+const windowsManagedClaudeTransactionLock = ".defenseclaw-v2-protocol.lock"
+
+// windowsManagedClaudeTransactionLeftoverRemover is replaceable in tests.
+var windowsManagedClaudeTransactionLeftoverRemover = func() error {
+	dir, err := windowsManagedClaudeTransactionDir()
+	if err != nil {
+		return err
+	}
+	return removeWindowsManagedClaudeTransactionFolder(dir)
+}
+
+// removeWindowsManagedClaudeTransactionFolder removes the Claude cleanup
+// transaction folder once an uninstall has committed, when all it holds is
+// the empty protocol lock, and then the DefenseClaw folder above it once that
+// is empty. The guardian and a Setup or bundle uninstall run the cleanup as
+// LocalSystem, so the uninstall left this behind (sidecar-r107:GAP-0007), as
+// it left the lifecycle lock before (sidecar-aispg-retest:GAP-0022):
+//
+//	C:\Windows\System32\config\systemprofile\AppData\Local\DefenseClaw\claude-settings-teardown
+//
+// The folder stays in the token's own cache, not under ProgramData: the
+// transaction needs a folder the current token owns, and its receipts must
+// outlive the StateRoot an uninstall retires. A folder that holds anything
+// else (the receipts of an unfinished transaction), a lock with content or
+// one another process holds open, and any link stay.
+func removeWindowsManagedClaudeTransactionFolder(dir string) error {
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeType != os.ModeDir {
+		return fmt.Errorf("%s is not a plain folder", dir)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	if len(entries) > 1 || (len(entries) == 1 && !strings.EqualFold(entries[0].Name(), windowsManagedClaudeTransactionLock)) {
+		return fmt.Errorf("%s holds an unfinished Claude settings transaction", dir)
+	}
+	if len(entries) == 1 {
+		lock := filepath.Join(dir, entries[0].Name())
+		lockInfo, err := os.Lstat(lock)
+		if err != nil {
+			return err
+		}
+		if !lockInfo.Mode().IsRegular() || lockInfo.Size() != 0 {
+			return fmt.Errorf("%s is not an empty lock file", lock)
+		}
+		// The connector opens the lock without delete sharing, so a
+		// transaction still running makes this fail and keeps it.
+		if err := os.Remove(lock); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(dir); err != nil {
+		return err
+	}
+	parent := filepath.Dir(dir)
+	if parentInfo, err := os.Lstat(parent); err == nil && parentInfo.Mode()&os.ModeType == os.ModeDir {
+		if left, err := os.ReadDir(parent); err == nil && len(left) == 0 {
+			_ = os.Remove(parent)
+		}
+	}
+	return nil
 }
 
 var windowsManagedClaudeSettingsRemover = removeWindowsManagedClaudeUserSettings
@@ -472,7 +544,7 @@ func removeWindowsManagedHooksStandalonePerUserRegistrations(
 			}
 		}
 		settings := filepath.Join(target.UserHome, ".claude", "settings.json")
-		n, left, err := windowsManagedClaudeSettingsRemover(target.UserHome, target.SID, runtimeDir)
+		n, left, err := windowsManagedClaudeSettingsRemover(target.UserHome, target.SID)
 		if err != nil {
 			result.Failed = append(result.Failed, "claudecode/"+target.SID+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
 			continue

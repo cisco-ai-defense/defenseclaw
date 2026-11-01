@@ -104,10 +104,10 @@ func TestWindowsStandaloneUninstallCleansClaudeSettingsWithoutUserSession(t *tes
 	})
 	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
 	calls := 0
-	windowsManagedClaudeSettingsRemover = func(home, sid, state string) (int, []string, error) {
+	windowsManagedClaudeSettingsRemover = func(home, sid string) (int, []string, error) {
 		calls++
-		if home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID || state != runtimeDir {
-			t.Fatalf("Claude cleanup target %s %s %s", home, sid, state)
+		if home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID {
+			t.Fatalf("Claude cleanup target %s %s", home, sid)
 		}
 		return 29, nil, nil
 	}
@@ -140,7 +140,7 @@ func TestWindowsStandaloneUninstallCleansClaudeSettingsOfAccountsEnrolledForOthe
 	})
 	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
 	calls := 0
-	windowsManagedClaudeSettingsRemover = func(home, sid, _ string) (int, []string, error) {
+	windowsManagedClaudeSettingsRemover = func(home, sid string) (int, []string, error) {
 		calls++
 		if home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID {
 			t.Fatalf("settings cleaned for %s %s", home, sid)
@@ -171,7 +171,7 @@ func TestWindowsStandaloneUninstallReportsClaudeSettingsEditsAndLeftovers(t *tes
 	removed := 2
 	left := []string{"PreToolUse: a hook command naming defenseclaw-hook (arguments not shown)"}
 	var removeErr error
-	windowsManagedClaudeSettingsRemover = func(home, sid, _ string) (int, []string, error) {
+	windowsManagedClaudeSettingsRemover = func(home, sid string) (int, []string, error) {
 		if home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID {
 			t.Fatalf("settings cleaned for %s %s", home, sid)
 		}
@@ -222,7 +222,7 @@ func TestWindowsStandaloneAdministratorReportsOnlyRemainingClaudeHook(t *testing
 		}
 		return present, nil, nil
 	}
-	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, []string, error) {
+	windowsManagedClaudeSettingsRemover = func(string, string) (int, []string, error) {
 		t.Fatal("another user's settings were edited")
 		return 0, nil, nil
 	}
@@ -236,7 +236,7 @@ func TestWindowsStandaloneAdministratorReportsOnlyRemainingClaudeHook(t *testing
 		t.Fatalf("another user's legacy hook = %+v", result)
 	}
 	windowsManagedClaudeCurrentUserSID = func() (string, error) { return manifest.Targets[0].SID, nil }
-	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, []string, error) { return 1, nil, nil }
+	windowsManagedClaudeSettingsRemover = func(string, string) (int, []string, error) { return 1, nil, nil }
 	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
 	if len(result.Removed) != 1 || len(result.Pending) != 0 || len(result.Failed) != 0 {
 		t.Fatalf("administrator's own legacy hook = %+v", result)
@@ -266,7 +266,7 @@ func TestWindowsStandaloneUninstallReportsAnotherUsersUnremovableClaudeHooks(t *
 		t.Fatal(err)
 	}
 	windowsManagedClaudeUserSettingsReader = func(string, string) ([]byte, error) { return raw, nil }
-	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, []string, error) {
+	windowsManagedClaudeSettingsRemover = func(string, string) (int, []string, error) {
 		t.Fatal("another user's settings were edited")
 		return 0, nil, nil
 	}
@@ -654,7 +654,7 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 		windowsManagedClaudeSettingsRemover, windowsManagedClaudeRegistrationProbe = originalRemover, originalProbe
 	})
 	var claudeCleaned, claudeProbed []string
-	windowsManagedClaudeSettingsRemover = func(_, sid, _ string) (int, []string, error) {
+	windowsManagedClaudeSettingsRemover = func(_, sid string) (int, []string, error) {
 		claudeCleaned = append(claudeCleaned, sid)
 		return 0, nil, nil
 	}
@@ -768,4 +768,177 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 			t.Fatal("unauthorized SID kept")
 		}
 	})
+}
+
+// sidecar-r107:GAP-0007: a finished settings transaction leaves its folder
+// holding only the empty protocol lock (the lane found exactly that in the
+// LocalSystem profile). The committed uninstall removes that folder, and the
+// DefenseClaw folder above it once empty, as it does the lifecycle lock
+// (sidecar-aispg-retest:GAP-0022).
+func TestWindowsUninstallRemovesClaudeCleanupTransactionLeftover(t *testing.T) {
+	cache := t.TempDir()
+	parent := filepath.Join(cache, "DefenseClaw")
+	stateDir := filepath.Join(parent, "claude-settings-teardown")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, windowsManagedClaudeTransactionLock), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeWindowsManagedClaudeTransactionFolder(stateDir); err != nil {
+		t.Fatalf("remove transaction leftover: %v", err)
+	}
+	for _, gone := range []string{stateDir, parent} {
+		if _, err := os.Lstat(gone); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s stays after the uninstall: %v", gone, err)
+		}
+	}
+	if _, err := os.Lstat(cache); err != nil {
+		t.Fatalf("the cache folder itself went: %v", err)
+	}
+	// A second uninstall, or one whose guardian never edited settings, finds
+	// nothing.
+	if err := removeWindowsManagedClaudeTransactionFolder(stateDir); err != nil {
+		t.Fatalf("absent transaction folder: %v", err)
+	}
+}
+
+// What is not a finished transaction's lone empty lock stays: receipts, a
+// lock with content, a lock a running transaction holds open, and a link.
+// A DefenseClaw folder that holds anything else stays too.
+func TestWindowsUninstallKeepsClaudeCleanupTransactionFolderInUse(t *testing.T) {
+	newFolder := func(t *testing.T, lock []byte) (string, string) {
+		t.Helper()
+		parent := filepath.Join(t.TempDir(), "DefenseClaw")
+		dir := filepath.Join(parent, "claude-settings-teardown")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, windowsManagedClaudeTransactionLock), lock, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return parent, dir
+	}
+	assertKept := func(t *testing.T, dir string) {
+		t.Helper()
+		if err := removeWindowsManagedClaudeTransactionFolder(dir); err == nil {
+			t.Fatal("the transaction folder was removed")
+		}
+		if _, err := os.Lstat(filepath.Join(dir, windowsManagedClaudeTransactionLock)); err != nil {
+			t.Fatalf("the lock went: %v", err)
+		}
+	}
+
+	t.Run("receipts", func(t *testing.T) {
+		_, dir := newFolder(t, nil)
+		if err := os.WriteFile(filepath.Join(dir, "receipt.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertKept(t, dir)
+	})
+	t.Run("lock with content", func(t *testing.T) {
+		_, dir := newFolder(t, []byte("x"))
+		assertKept(t, dir)
+	})
+	t.Run("lock held open", func(t *testing.T) {
+		_, dir := newFolder(t, nil)
+		name, err := windows.UTF16PtrFromString(filepath.Join(dir, windowsManagedClaudeTransactionLock))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The connector's own sharing: read and write, no delete.
+		handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertKept(t, dir)
+		if err := windows.CloseHandle(handle); err != nil {
+			t.Fatal(err)
+		}
+		if err := removeWindowsManagedClaudeTransactionFolder(dir); err != nil {
+			t.Fatalf("released lock: %v", err)
+		}
+	})
+	t.Run("other DefenseClaw content", func(t *testing.T) {
+		parent, dir := newFolder(t, nil)
+		other := filepath.Join(parent, "other.txt")
+		if err := os.WriteFile(other, []byte("kept"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := removeWindowsManagedClaudeTransactionFolder(dir); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("transaction folder stays: %v", err)
+		}
+		if _, err := os.Lstat(other); err != nil {
+			t.Fatalf("other DefenseClaw content went: %v", err)
+		}
+	})
+	t.Run("link", func(t *testing.T) {
+		_, target := newFolder(t, nil)
+		link := filepath.Join(t.TempDir(), "claude-settings-teardown")
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symbolic links need a privilege this account lacks: %v", err)
+		}
+		if err := removeWindowsManagedClaudeTransactionFolder(link); err == nil {
+			t.Fatal("a link was treated as the transaction folder")
+		}
+		if _, err := os.Lstat(filepath.Join(target, windowsManagedClaudeTransactionLock)); err != nil {
+			t.Fatalf("the link target's lock went: %v", err)
+		}
+	})
+}
+
+// The standalone finalize removes the leftover with and without purge and
+// never fails on it; Secure Client finalize does not run it.
+func TestCompleteWindowsManagedHooksTeardownUserCleanupRemovesClaudeTransactionLeftover(t *testing.T) {
+	originalRemover := windowsManagedHooksStandaloneUserRegistrationRemover
+	originalACPCopies := windowsManagedHooksStandaloneACPUserCopies
+	originalLeftover := windowsManagedClaudeTransactionLeftoverRemover
+	originalFloor := windowsManagedHooksStandaloneFloorPurger
+	originalCursor := windowsManagedHooksStandaloneCursorTombstonePurger
+	originalIdentity := enterpriseHookWindowsUserCleanupIdentity
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneUserRegistrationRemover = originalRemover
+		windowsManagedHooksStandaloneACPUserCopies = originalACPCopies
+		windowsManagedClaudeTransactionLeftoverRemover = originalLeftover
+		windowsManagedHooksStandaloneFloorPurger = originalFloor
+		windowsManagedHooksStandaloneCursorTombstonePurger = originalCursor
+		enterpriseHookWindowsUserCleanupIdentity = originalIdentity
+	})
+	windowsManagedHooksStandaloneUserRegistrationRemover = func(context.Context, string, enterprisehooks.Manifest) enterpriseHookUserCleanupResult {
+		return enterpriseHookUserCleanupResult{}
+	}
+	windowsManagedHooksStandaloneACPUserCopies = func() ([]enterprisehooks.WindowsACPUserCopy, error) { return nil, nil }
+	windowsManagedHooksStandaloneFloorPurger = func() error { return nil }
+	windowsManagedHooksStandaloneCursorTombstonePurger = func() error { return nil }
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return errors.New("not LocalSystem") }
+	calls := 0
+	windowsManagedClaudeTransactionLeftoverRemover = func() error {
+		calls++
+		return errors.New("holds an unfinished Claude settings transaction")
+	}
+	manifest := perUserTeardownManifest("claudecode")
+	manifest.Targets[0].UserHome = t.TempDir()
+
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	var report windowsManagedHooksTeardownReport
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if calls != 0 {
+		t.Fatalf("Secure Client finalize removed the Claude transaction folder %d time(s)", calls)
+	}
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	for index, purge := range []string{"0", "1"} {
+		t.Setenv(windowsManagedHooksPurgeUserStateEnv, purge)
+		report = windowsManagedHooksTeardownReport{}
+		completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+		if calls != index+1 {
+			t.Fatalf("purge=%s: leftover removal ran %d time(s)", purge, calls)
+		}
+		if len(report.UserRegistrationsFailed) != 0 {
+			t.Fatalf("purge=%s: a kept transaction folder failed the finalize: %v", purge, report.UserRegistrationsFailed)
+		}
+	}
 }

@@ -579,7 +579,7 @@ func migrateWindowsClaudeUserHooks(stderr, removals io.Writer, target enterprise
 	present, left, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
 	removed := 0
 	if err == nil && present {
-		removed, left, err = windowsManagedClaudeSettingsRemover(target.UserHome, target.SID, "")
+		removed, left, err = windowsManagedClaudeSettingsRemover(target.UserHome, target.SID)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: older DefenseClaw hooks in %s: %v\n", settings, err)

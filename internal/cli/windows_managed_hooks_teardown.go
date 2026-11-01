@@ -139,6 +139,10 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	// check refuses a DACL that still carries them (GAP-1765).
 	revokeErr := windowsManagedHooksStandaloneInventoryACERevoker(manifest)
 	cleanup := windowsManagedHooksStandaloneUserRegistrationRemover(context.Background(), runtimeDir, manifest)
+	// The settings cleanups are done, so their transaction folder in this
+	// token's cache goes too, also without purge. A folder that stays holds
+	// an unfinished transaction for the next install to recover.
+	_ = windowsManagedClaudeTransactionLeftoverRemover()
 	report.UserRegistrationsRemoved = len(cleanup.Removed)
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
