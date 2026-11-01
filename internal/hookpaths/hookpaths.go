@@ -2611,7 +2611,8 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			}
 			links.linkTexts = append(links.linkTexts, command[call.Pos().Offset():call.End().Offset()])
 			for _, workingDirectory := range workingDirectories {
-				if !links.add("ln", mklink, workingDirectory) {
+				placed, read := cmdMklinkDriveRelative(words, mklink, workingDirectory)
+				if !read || !links.add("ln", placed, workingDirectory) {
 					links.unknown(true)
 				}
 			}
@@ -5009,6 +5010,31 @@ func cmdMklinkArgs(words []string, static []bool) (args []string, ok bool) {
 		return []string{target, link}, true
 	}
 	return []string{"-s", target, link}, true
+}
+
+// cmdMklinkDriveRelative places a drive-relative mklink target (C:dir, as
+// Git Bash leaves C:\dir after an unquoted backslash) for a junction or a
+// hard link, which mklink resolves when it makes the link: from the working
+// directory when it is on that drive (rel-1-0-6:GAP-0284). Any other
+// drive-relative target (another drive, whose current directory is not
+// known, or a symbolic link, which keeps the text) is not read.
+func cmdMklinkDriveRelative(words, args []string, cwd string) ([]string, bool) {
+	if runtime.GOOS != "windows" || len(args) < 2 {
+		return args, true
+	}
+	target := args[len(args)-2]
+	volume := filepath.VolumeName(target)
+	if len(volume) != 2 || len(target) > 2 && os.IsPathSeparator(target[2]) {
+		return args, true
+	}
+	match := cmdMklinkPattern.FindStringSubmatch(strings.Join(words[2:], " "))
+	if match == nil || !strings.EqualFold(match[1], "/j") && !strings.EqualFold(match[1], "/h") ||
+		!strings.EqualFold(volume, filepath.VolumeName(cwd)) {
+		return nil, false
+	}
+	placed := slices.Clone(args)
+	placed[len(placed)-2] = filepath.Join(cwd, target[2:])
+	return placed, true
 }
 
 // maskCmdMklinkCalls blanks the cmd /c mklink calls that cmdMklinkArgs
