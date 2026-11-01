@@ -28,6 +28,13 @@ func TestR107LinkScopeOfAnArchiveAfterCdIsReadWhereTheWriteLands(t *testing.T) {
 		{"write into the extraction scope", "project", `tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "block"},
 		{"write into the extraction scope after cd", "project", `cd {P} && tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "block"},
 		{"mkdir, then write into the extraction scope after cd", "project", `cd {P} && mkdir -p unpack && tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "block"},
+		{"source after cd, then write into the extraction scope's name", "project", `cd {P} && tar -C unpack -xf keys.tar; . ./x.sh; echo k >> n1.txt`, "block"},
+		{"source in an && chain after cd, then write", "project", `cd {P} && tar -C unpack -xf keys.tar && source ./x.sh && echo k >> n1.txt`, "block"},
+		{"trap cd DEBUG after cd, then write", "project", `cd {P} && tar -C unpack -xf keys.tar; trap "cd unpack" DEBUG; echo k >> n1.txt`, "block"},
+		{"alias of cd after cd, then write", "project", `cd {P} && shopt -s expand_aliases; alias go=cd; tar -C unpack -xf keys.tar; go unpack; echo k >> n1.txt`, "block"},
+		{"eval of a variable after cd, then write", "project", `cd {P} && tar -C unpack -xf keys.tar; eval "$X"; echo k >> n1.txt`, "block"},
+		{"sh -c source body after cd", "project", `cd {P} && tar -C unpack -xf keys.tar; sh -c ". ./x.sh; echo k >> n1.txt"`, "block"},
+		{"source without cd, then write", "project", `tar -C unpack -xf keys.tar; . ./x.sh; echo k >> n1.txt`, "block"},
 		{"sh -c hard link of the keys file, then write", "project", `sh -c "ln ~/.ssh/authorized_keys notes.txt" && echo k >> notes.txt`, "block"},
 		{"sh -c hard link of the keys file after cd, then write", "project", `cd {P} && sh -c "ln ~/.ssh/authorized_keys notes.txt" && echo k >> notes.txt`, "block"},
 	})

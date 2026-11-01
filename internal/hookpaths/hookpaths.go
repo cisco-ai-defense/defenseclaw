@@ -2813,9 +2813,81 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			links.globalOpaque, links.globalOther = true, true
 		}
 	}
+	// Scopes are read against the directories the shell is seen to stand
+	// in. Shell code this package does not read may change the directory
+	// with no visible cd (. ./x.sh; trap "cd unpack" DEBUG; an alias of cd),
+	// so a relative write may land in a scope under another name; with or
+	// without a cd, every write is then opaque (rel-1-0-6:GAP-0260 review).
+	if len(links.opaqueScopes) > 0 && hiddenDirectoryChange(file, home, 0) {
+		links.globalOpaque, links.globalOther = true, true
+	}
 	links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
 	links.renameOps, links.wrappedCds, links.findMoves = renameOps, wrappedCds, findMoves
 	return links
+}
+
+// hiddenDirectoryPrograms run shell code this package does not read, or
+// change how a later word runs, so the shell may change its directory with
+// no cd statement to see: a sourced file, a trap, an alias (with shopt -s
+// expand_aliases), exec, and builtin or command in front of cd.
+var hiddenDirectoryPrograms = []string{".", "source", "trap", "alias", "shopt", "exec", "builtin", "command"}
+
+// maxHiddenDirectoryDepth bounds the literal eval and sh -c bodies that
+// hiddenDirectoryChange reads; a deeper body counts as a hidden change.
+const maxHiddenDirectoryDepth = 4
+
+// hiddenDirectoryChange reports a command that may change the shell's
+// directory where no static cd shows it: a hiddenDirectoryPrograms call, a
+// call of a function the command defines, an eval whose argument is not
+// literal, or such a call in a literal eval or sh -c body.
+func hiddenDirectoryChange(file *syntax.File, home string, depth int) bool {
+	if depth > maxHiddenDirectoryDepth {
+		return true
+	}
+	functions := make(map[string]bool)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil {
+			functions[decl.Name.Value] = true
+		}
+		return true
+	})
+	hidden := false
+	body := func(text string) {
+		inner, parsed := parseShell(text)
+		hidden = hidden || !parsed || hiddenDirectoryChange(inner, home, depth+1)
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if hidden || !ok || len(call.Args) == 0 {
+			return !hidden
+		}
+		words := make([]string, len(call.Args))
+		static := make([]bool, len(call.Args))
+		for i, arg := range call.Args {
+			words[i], static[i] = StaticWord(arg, home)
+		}
+		if !static[0] {
+			// A dynamic program word is read elsewhere (known is false).
+			return true
+		}
+		program := programBase(words[0])
+		switch {
+		case slices.Contains(hiddenDirectoryPrograms, program) || functions[words[0]]:
+			hidden = true
+		case program == "eval":
+			if slices.Contains(static[1:], false) {
+				hidden = true
+			} else {
+				body(strings.Join(words[1:], " "))
+			}
+		default:
+			if text := literalShellBody(program, words, static); text != "" {
+				body(text)
+			}
+		}
+		return !hidden
+	})
+	return hidden
 }
 
 // topLevelLinkDirectories places the link, copy and archive calls of a
@@ -2896,7 +2968,7 @@ func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statemen
 		}
 		return true
 	})
-	if !known {
+	if !known || hiddenDirectoryChange(file, home, 0) {
 		return nil, nil, false
 	}
 	// A place is one directory the shell may stand in, with its pushd
