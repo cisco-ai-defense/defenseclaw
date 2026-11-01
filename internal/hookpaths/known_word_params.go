@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -55,8 +56,61 @@ func literalProgramWord(word *syntax.Word, home string) (string, bool) {
 // unknown. command is the text file was parsed from; most commands leave at
 // its cheap gate.
 func knownWordParameterUses(command string, file *syntax.File, home string) map[*syntax.Word]bool {
-	uses, _ := knownWordParameters(command, file, home)
+	uses, _ := knownWordParameters(command, file, home, nil)
 	return uses
+}
+
+// knownWordParameterUsesAt is knownWordParameterUses for a command read in
+// cwd: an assignment right after a leading cd (cd DIR && f=a.txt; cp $f
+// out.txt) always runs when DIR is a directory that exists before the
+// command (cdEnterable), so it binds f for what follows as a top-level
+// assignment does (rel-1-0-6:GAP-0320).
+func knownWordParameterUsesAt(command string, file *syntax.File, home string, cdOK func(string) bool) map[*syntax.Word]bool {
+	uses, _ := knownWordParameters(command, file, home, cdOK)
+	return uses
+}
+
+// cdEnterable reports a cd operand word naming, from cwd, a directory that
+// exists and that this account may enter (directoryEnterable): from the
+// hook client's CdEnterableFactPrefix fact when the caller has evidence (a
+// managed gateway cannot search the home), else from this process's own
+// view of the disk, which the client records as that fact. A word that starts with "-" or holds a
+// dot-dot component, and a missing or unreadable directory are not. A
+// bare relative word that exists from cwd is entered whatever CDPATH
+// holds: bash falls back to it when no CDPATH entry matches.
+func cdEnterable(cwd string, facts map[string]string, record bool) func(string) bool {
+	return func(word string) bool {
+		if word == "" || strings.HasPrefix(word, "-") || !filepath.IsAbs(cwd) {
+			return false
+		}
+		for _, part := range strings.Split(filepath.ToSlash(word), "/") {
+			if part == ".." {
+				return false
+			}
+		}
+		path := OperandPath(word, cwd)
+		key := CdEnterableFactPrefix + path
+		if !record && facts != nil {
+			// The client's own check of the same directory. The
+			// DirectoryFactPrefix value is the physical name of a logical
+			// directory and is written for a missing one too, so it does
+			// not prove the cd succeeds (rel-1-0-6:GAP-0320 review 5).
+			// Where this process can walk the path itself it also checks
+			// it, as the opaque-scope fact stands in only for an
+			// incomplete walk: a forged fact cannot make a missing
+			// directory enterable (review 6). Both must hold, since a
+			// managed service may enter what the user cannot.
+			if _, complete := writePathForms(path, 0); complete && !directoryEnterable(path) {
+				return false
+			}
+			return facts[key] == "1"
+		}
+		enterable := directoryEnterable(path)
+		if record && facts != nil && enterable {
+			facts[key] = "1"
+		}
+		return enterable
+	}
 }
 
 // knownWordParameterValues returns, for the uses knownWordParameterUses
@@ -66,11 +120,11 @@ func knownWordParameterUses(command string, file *syntax.File, home string) map[
 // on the hook client and the gateway alike (rel-1-0-6:GAP-0235). A name
 // bound to more than one value has none.
 func knownWordParameterValues(command string, file *syntax.File, home string) map[*syntax.Word]string {
-	_, values := knownWordParameters(command, file, home)
+	_, values := knownWordParameters(command, file, home, nil)
 	return values
 }
 
-func knownWordParameters(command string, file *syntax.File, home string) (map[*syntax.Word]bool, map[*syntax.Word]string) {
+func knownWordParameters(command string, file *syntax.File, home string, cdOK func(string) bool) (map[*syntax.Word]bool, map[*syntax.Word]string) {
 	if file == nil || !mayHaveKnownCopyWord(command) {
 		return nil, nil
 	}
@@ -163,6 +217,11 @@ func knownWordParameters(command string, file *syntax.File, home string) (map[*s
 				break
 			}
 			program, static := literalProgramWord(node.Args[0], home)
+			if static && program == "cd" && staticCdCall(node, home) {
+				// A cd with fixed words sets only PWD and OLDPWD, which no
+				// use reads (rel-1-0-6:GAP-0320).
+				break
+			}
 			if !static || !slices.Contains(knownWordPrograms, programBase(program)) {
 				rejected = true
 			}
@@ -173,19 +232,26 @@ func knownWordParameters(command string, file *syntax.File, home string) (map[*s
 		return nil, nil
 	}
 	// A top-level assignment statement, or the first statement of a
-	// top-level AND list, always runs before what follows it.
-	var first func(*syntax.Stmt) *syntax.Stmt
-	first = func(stmt *syntax.Stmt) *syntax.Stmt {
+	// top-level AND list, always runs before what follows it. So does the
+	// statement right after the leading cd of the command's first AND list
+	// when that cd enters an existing directory (cdOK).
+	var first func(*syntax.Stmt, bool) *syntax.Stmt
+	first = func(stmt *syntax.Stmt, leading bool) *syntax.Stmt {
 		if stmt == nil || stmt.Background || stmt.Negated || stmt.Coprocess {
 			return nil
 		}
 		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && pair.Op == syntax.AndStmt {
-			return first(pair.X)
+			if leading && cdOK != nil {
+				if dir, ok := leadingCdOperand(pair.X, home); ok && cdOK(dir) {
+					return first(pair.Y, false)
+				}
+			}
+			return first(pair.X, false)
 		}
 		return stmt
 	}
-	for _, top := range file.Stmts {
-		stmt := first(top)
+	for i, top := range file.Stmts {
+		stmt := first(top, i == 0)
 		if stmt == nil || len(stmt.Redirs) != 0 {
 			continue
 		}
@@ -209,7 +275,17 @@ func knownWordParameters(command string, file *syntax.File, home string) (map[*s
 			return true
 		}
 		for _, word := range call.Args[1:] {
-			if len(word.Parts) != 1 {
+			// $D/ or $D/rest: a known folder value and a plain literal tail
+			// that starts with a slash is that fixed path; it gets a value
+			// only, not the one-word source reading (rel-1-0-6:GAP-0329).
+			suffix := ""
+			if len(word.Parts) == 2 {
+				lit, isLit := word.Parts[1].(*syntax.Lit)
+				if !isLit || !strings.HasPrefix(lit.Value, "/") || !safe(strings.ReplaceAll(lit.Value, "/", "x")) {
+					continue
+				}
+				suffix = lit.Value
+			} else if len(word.Parts) != 1 {
 				continue
 			}
 			param, ok := word.Parts[0].(*syntax.ParamExp)
@@ -232,12 +308,12 @@ func knownWordParameters(command string, file *syntax.File, home string) (map[*s
 				known = known || at > body.from && at < body.to
 			}
 			if known {
-				if !quoted {
+				if !quoted && suffix == "" {
 					uses[word] = true
 				}
 				if len(bound[name]) == 1 {
 					for value := range bound[name] {
-						values[word] = value
+						values[word] = value + suffix
 					}
 				}
 			}
@@ -278,4 +354,35 @@ func simpleScalarParameter(param *syntax.ParamExp) bool {
 		}
 	}
 	return true
+}
+
+// staticCdCall reports a cd call whose words are all fixed, with no
+// assignment in front of it.
+func staticCdCall(call *syntax.CallExpr, home string) bool {
+	if len(call.Assigns) != 0 {
+		return false
+	}
+	for _, arg := range call.Args {
+		if _, static := StaticWord(arg, home); !static {
+			return false
+		}
+	}
+	return true
+}
+
+// leadingCdOperand returns the one operand of stmt when it is a plain
+// static cd DIR call (no option, no redirect).
+func leadingCdOperand(stmt *syntax.Stmt, home string) (string, bool) {
+	if stmt == nil || len(stmt.Redirs) != 0 || stmt.Background || stmt.Negated || stmt.Coprocess {
+		return "", false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) != 2 || !staticCdCall(call, home) {
+		return "", false
+	}
+	if program, _ := StaticWord(call.Args[0], home); program != "cd" {
+		return "", false
+	}
+	dir, _ := StaticWord(call.Args[1], home)
+	return dir, true
 }

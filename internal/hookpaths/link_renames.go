@@ -28,6 +28,9 @@ type renameOp struct {
 	// unless -S or --suffix names another one, or .~N~ when numbered).
 	backup bool
 	suffix string
+	// optioned: an option other than -f, -v and -T (or their long forms),
+	// such as -n, -u or -i, which may leave the destination in place.
+	optioned bool
 }
 
 // parseRename reads the arguments of mv or gmv. ok is false for an option
@@ -53,10 +56,12 @@ func parseRename(args []string, cwd string) (op renameOp, ok bool) {
 			case "backup":
 				op.backup = op.backup || value != "none" && value != "off"
 			case "update", "context":
+				op.optioned = true
 			case "force", "interactive", "no-clobber", "strip-trailing-slashes", "verbose", "no-copy", "debug":
 				if hasValue {
 					return op, false
 				}
+				op.optioned = op.optioned || name != "force" && name != "verbose"
 			case "no-target-directory":
 				if hasValue {
 					return op, false
@@ -87,7 +92,9 @@ func parseRename(args []string, cwd string) (op renameOp, ok bool) {
 			switch flag := arg[j : j+1]; flag {
 			case "b":
 				op.backup = true
-			case "f", "i", "n", "u", "v", "Z", "h":
+			case "f", "v":
+			case "i", "n", "u", "Z", "h":
+				op.optioned = true
 			case "T":
 				op.noTargetDir = true
 			case "t", "S":

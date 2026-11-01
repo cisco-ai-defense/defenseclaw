@@ -17,6 +17,10 @@ import (
 func TestUnquotedCopySourceIsOneKnownWordOnlyWithOneFixedPlainValue(t *testing.T) {
 	const home = "/home/u"
 	known := []string{
+		// A cd with fixed words binds only PWD and OLDPWD; an alias or a
+		// chpwd hook of cd comes from the user's own shell setup, as one of
+		// cp or cat would (rel-1-0-6:GAP-0320).
+		`f=a.txt; cd build; cp $f out.txt`,
 		`for f in a.txt README.md; do cp $f build/; done`,
 		`f=a.txt; cp $f out.txt`,
 		`f=a.txt && cp ${f} out.txt`,
@@ -58,7 +62,8 @@ func TestUnquotedCopySourceIsOneKnownWordOnlyWithOneFixedPlainValue(t *testing.T
 		`f=a.txt; builtin read f; cp $f out.txt`,
 		`f=a.txt; exec 3<x; cp $f out.txt`,
 		`f=a.txt; env -S x; cp $f out.txt`,
-		`f=a.txt; cd build; cp $f out.txt`,
+		`f=a.txt; cd $D; cp $f out.txt`,
+		`f=a.txt; cd build; f=$X; cp $f out.txt`,
 		`f=a.txt; mapfile f; cp $f out.txt`,
 		`f=a.txt; getopts ab f; cp $f out.txt`,
 		`f=a.txt; \read f; cp $f out.txt`,
