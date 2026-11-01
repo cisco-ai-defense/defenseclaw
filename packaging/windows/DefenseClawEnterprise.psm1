@@ -12414,7 +12414,11 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         # Its ImagePath is the gateway binary invoked with
         # `enterprise windows enumerate --manifest X --interval 5m`;
         # its ObjectName is LocalSystem, the same account as the guardian.
-        [switch]$Enumerator
+        [switch]$Enumerator,
+        # A foreign ImagePath or account refuses instead of an advisory: the
+        # standalone forced uninstall stops and disables what it checks
+        # (p0-round:GAP-1365 review). Secure Client never passes it.
+        [switch]$Strict
     )
     if (($Guardian -and ($SensorHelper -or $Enumerator)) -or
         ($SensorHelper -and $Enumerator)) {
@@ -12455,7 +12459,7 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         # Refusing to proceed strands uninstall and install both. In
         # strict mode operators who want attacker-detection semantics
         # restore the throw via DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS.
-        if (Test-DefenseClawTrustStrictAncestors) {
+        if ($Strict -or (Test-DefenseClawTrustStrictAncestors)) {
             throw "refusing to replace foreign Windows service $Name with ImagePath $image"
         }
         Write-DefenseClawTrustAdvisory `
@@ -12473,7 +12477,7 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         Test-DefenseClawGatewayServiceAccount -Account $objectName -GatewayServiceName $Name
     }
     if (-not $ownedAccount) {
-        if (Test-DefenseClawTrustStrictAncestors) {
+        if ($Strict -or (Test-DefenseClawTrustStrictAncestors)) {
             throw "refusing to replace service $Name owned by unexpected account $objectName"
         }
         Write-DefenseClawTrustAdvisory `
@@ -34557,24 +34561,72 @@ function Test-DefenseClawUninstallUsesUntrustedMetadataPurge {
         pending transaction and no record. That purge refuses to bypass the
         transaction, so the first Setup /uninstall FORCE=1 ended 1603 and
         only a retry finished. A forced uninstall reads nothing of the
-        transaction: with no deployment record it goes on as the forced
-        uninstall (its services checked as this deployment's, StateRoot and
-        the install receipt moved aside, then the state-absent purge), which
-        the retry did. An existing record that is not trusted still takes the
-        metadata-free purge.
+        transaction: when the record is missing from an existing admin-only
+        StateRoot (-MetadataMissing, set only there) it goes on as the
+        forced uninstall, which the retry did. Every other untrusted case,
+        a present record that fails its owner, ACL, reparse, link or content
+        check included, keeps the metadata-free purge with FORCE as without
+        (p0-round:GAP-1585), and nothing changes without FORCE.
     #>
     param(
         [string]$Reason,
-        [bool]$MetadataExists,
+        [bool]$MetadataMissing,
         [switch]$Force
     )
     if ([string]::IsNullOrWhiteSpace($Reason)) {
         return $false
     }
-    if ($Force -and -not $MetadataExists) {
+    if ($Force -and $MetadataMissing) {
         return $false
     }
     return $true
+}
+
+function Test-DefenseClawForcedUninstallStateRootAdminOnly {
+    <#
+        p0-round:GAP-1585: whether StateRoot, and its install folder when it
+        exists, are plain folders (no reparse point) that only SYSTEM,
+        Administrators and TrustedInstaller own or can write, as the
+        uninstall ACL recovery requires of them. A record missing from a
+        StateRoot someone else could write may have been deleted through
+        that weakened ACL; then the forced route is not taken.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $admins = @(
+        $script:SystemSID,
+        $script:AdministratorsSID,
+        $script:TrustedInstallerSID
+    )
+    try {
+        foreach ($candidate in @(
+                [string]$Layout.StateRoot,
+                [string]$Layout.InstallStateDirectory
+            )) {
+            if ([string]::IsNullOrWhiteSpace($candidate)) {
+                continue
+            }
+            if ($candidate -ne [string]$Layout.StateRoot -and
+                -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $candidate -PathType Container)) {
+                continue
+            }
+            Assert-DefenseClawNoReparsePath -Path $candidate
+            $verdicts = @(Get-DefenseClawPathAclVerdicts `
+                -Path $candidate `
+                -AllowedWriterSIDs $admins `
+                -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+                -AllowedOwnerSIDs $admins `
+                -AllowInheritance)
+            $unsafe = @($verdicts |
+                Microsoft.PowerShell.Core\Where-Object { $_.Kind -ne 'Rights' })
+            if ($unsafe.Count -gt 0) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
 }
 
 function Invoke-DefenseClawUntrustedMetadataRecoveryPurge {
@@ -36156,19 +36208,23 @@ function Invoke-DefenseClawForcedUninstallPreparation {
     )
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     Assert-DefenseClawOwnedServiceOrAbsent `
+        -Strict `
         -Name $GatewayServiceName `
         -ExpectedGatewayPath $Layout.GatewayPath
     Assert-DefenseClawOwnedServiceOrAbsent `
+        -Strict `
         -Name $GuardianServiceName `
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Guardian
     Assert-DefenseClawOwnedServiceOrAbsent `
+        -Strict `
         -Name $enumeratorServiceName `
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Enumerator
     Assert-DefenseClawOwnedServiceOrAbsent `
+        -Strict `
         -Name $Layout.SensorHelperServiceName `
         -ExpectedGatewayPath $Layout.SensorHelperPath `
         -ExpectedSensorHelperImage (Get-DefenseClawSensorHelperImage `
@@ -39845,6 +39901,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         if ($recoverProductionUninstallAcl) {
             $untrustedEvidenceReason = ''
             $uninstallMetadataExists = $false
+            # p0-round:GAP-1365, GAP-1585: set only where deployment.json is
+            # absent from an existing admin-only StateRoot (a first install
+            # killed before it wrote the record). A record that is present
+            # but fails authentication never sets it.
+            $uninstallMetadataMissing = $false
             $uninstallMetadata = $null
             try {
                 # Authenticate ownership and repair only recoverable ACL
@@ -39876,6 +39937,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 if ($null -ne $stateRootBefore) {
                     $untrustedEvidenceReason =
                         'deployment.json is missing from an existing StateRoot'
+                    $uninstallMetadataMissing = Test-DefenseClawForcedUninstallStateRootAdminOnly `
+                        -Layout $layout
                 }
             }
             Add-DefenseClawProductionUninstallNativeCleanupSource `
@@ -39888,7 +39951,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -AllowUnsigned:$AllowUnsigned
             if (Test-DefenseClawUninstallUsesUntrustedMetadataPurge `
                     -Reason $untrustedEvidenceReason `
-                    -MetadataExists $uninstallMetadataExists `
+                    -MetadataMissing $uninstallMetadataMissing `
                     -Force:$Force) {
                 return Invoke-DefenseClawUntrustedMetadataRecoveryPurge `
                     -Layout $layout `
