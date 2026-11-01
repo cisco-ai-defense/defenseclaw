@@ -1027,7 +1027,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	// One list for the path, hard-link and missing-final-file checks, the
 	// same files the direct-write rule protects (GAP-1370).
-	protectedPaths := hookpaths.ProtectedAuthorizedKeysPaths(facts.ActiveHome)
+	protectedPaths := request.targetMemo.ProtectedAuthorizedKeysPaths(facts.ActiveHome)
 	protected := make(map[string]struct{}, len(protectedPaths))
 	for _, path := range protectedPaths {
 		protected[canonicalSemanticPath(path)] = struct{}{}
@@ -1324,9 +1324,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
-	decision := hookpaths.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
+	decision := request.targetMemo.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
 	if input.DialectHint != "" {
-		decision = hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
+		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
 	if decision != "" {
 		return true

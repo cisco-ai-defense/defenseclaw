@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,7 +22,12 @@ import (
 // alias clc, the ren alias of Rename-Item, a provider-path braced variable
 // assignment (${C:\...} = 'x' writes the file) and a piped Out-File.
 // psManySteps is an ordinary script with many distinct output statements
-// that name DefenseClaw and one state read (checker it14 B40).
+// that name DefenseClaw and one state read (checker it14 B40). It is 131
+// statements, over the 128-statement budget: lead ruling 2026-11-01
+// (rel-1-0-6:GAP-0331 review R2-3) is that an over-budget script is refused
+// on every route, as on the POSIX route, so it blocks by
+// ACTION-COMPOUND-LIMIT alone. The checker's intent stays pinned: the read
+// is never a tamper.detector_state_write.
 var psManySteps = func() string {
 	var parts []string
 	for k := range 130 {
@@ -132,7 +138,7 @@ func TestR105WindowsPowerShellStateWriteSpellings(t *testing.T) {
 		{`Copy-Item $HOME\.defenseclaw\config.yaml backup.yaml -Verbose`, false},
 		{`powershell -Command "Get-Content $HOME\.defenseclaw\config.yaml"`, false},
 		{`pwsh -NoProfile -c "Set-Content notes.txt x; Get-Content $HOME\.defenseclaw\config.yaml"`, false},
-		{psManySteps, false},
+		{psManySteps, true},
 		// An abbreviated or unknown parameter keeps the proof, and an
 		// Invoke-Expression or Start-Process powershell string body is read
 		// like a -Command body (checker it15 RV15-2).
@@ -205,6 +211,11 @@ func TestR105WindowsPowerShellStateWriteSpellings(t *testing.T) {
 			if got := verdict.Action == "block"; got != tc.block {
 				t.Errorf("%s %s (dialect %q): action %q, want block=%t (findings %v)",
 					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
+			}
+			if tc.command == psManySteps {
+				if ids := findingIDs(findings); !slices.Equal(ids, []string{"ACTION-COMPOUND-LIMIT"}) {
+					t.Errorf("%s psManySteps: findings %v, want ACTION-COMPOUND-LIMIT alone (no tamper finding)", tool, ids)
+				}
 			}
 		}
 	}

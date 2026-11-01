@@ -19,11 +19,18 @@ import (
 // A Windows hook reports native cwd and home even when the tool runs Git Bash.
 // Keep this proof independent of the operating system running the Go tests.
 func trustedWindowsLocationAuthorizedKeysWrite(input actionfacts.Input) bool {
+	return trustedWindowsLocationAuthorizedKeysWriteWith(input, nil)
+}
+
+// trustedWindowsLocationAuthorizedKeysWriteWith is
+// trustedWindowsLocationAuthorizedKeysWrite with the evaluation's file
+// system answers (trustedActionRequest.targetMemo).
+func trustedWindowsLocationAuthorizedKeysWriteWith(input actionfacts.Input, memo *hookpaths.TargetMemo) bool {
 	if input.Command == "" || len(input.Command) > 64<<10 ||
 		!windowsLocationAbsolute(input.ActiveHome) || !windowsLocationAbsolute(input.CWD) {
 		return false
 	}
-	if hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, input.ActiveHome, input.DialectHint, nil) != "" {
+	if memo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, input.ActiveHome, input.DialectHint, nil) != "" {
 		return true
 	}
 	return trustedWindowsPOSIXLocationWrite(input) ||

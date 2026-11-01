@@ -500,6 +500,16 @@ func windowsMountPointLink(candidate string, info os.FileInfo) bool {
 // checks. A missing component is permitted at the end (redirects create
 // files), but it cannot be crossed by "..": its link status is unknown.
 func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) (string, []string, int, bool) {
+	return walkWritePathMemo(base, path, linkDepth, collect, patchTarget, nil)
+}
+
+// walkWritePathMemo is walkWritePath that, for a top-level walk of an
+// absolute path (no base, no link hop yet, no forms, not a patch target),
+// starts from the longest prefix of path the memo has already walked and
+// records the state after each component it walks itself. The state after a
+// prefix depends only on that prefix and the file system, so a memo walk
+// answers exactly what a fresh walk answers while the files stay as they are.
+func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo) (string, []string, int, bool) {
 	if linkDepth > maxWriteTargetLinkDepth {
 		return "", nil, linkDepth, false
 	}
@@ -510,6 +520,9 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 		path = strings.TrimPrefix(path, filepath.VolumeName(path))
 	} else if !filepath.IsAbs(base) {
 		return "", nil, linkDepth, false
+	}
+	if memo != nil && (base != "" || linkDepth != 0 || collect || patchTarget || !absolute) {
+		memo = nil
 	}
 	var forms []string
 	if collect && absolute {
@@ -527,65 +540,97 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 	// target. A missing component cannot be crossed: it may become a link
 	// before the command executes.
 	var crossed []bool
-	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	start := 0
+	// key is the memo key of parts[:i+1]: the volume root and the
+	// components as written.
+	var key string
+	if memo != nil {
+		key = current
+		for i, part := range parts {
+			next := key + "\x00" + part
+			state, ok := memo.prefix(next)
+			if !ok {
+				break
+			}
+			if state.failed {
+				return "", nil, state.linkDepth, false
+			}
+			key, start = next, i+1
+			current, crossed, linkDepth = state.current, append([]bool(nil), state.crossed...), state.linkDepth
+		}
+	}
+	fail := func() (string, []string, int, bool) {
+		if memo != nil {
+			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true})
+		}
+		return "", nil, linkDepth, false
+	}
+	for _, part := range parts[start:] {
+		if memo != nil {
+			key += "\x00" + part
+		}
 		switch part {
 		case "", ".":
-			continue
 		case "..":
 			if len(crossed) > 0 {
 				if crossed[len(crossed)-1] {
-					return "", nil, linkDepth, false
+					return fail()
 				}
 				crossed = crossed[:len(crossed)-1]
 			}
 			current = filepath.Dir(current)
 			if !add(current) {
-				return "", nil, linkDepth, false
+				return fail()
 			}
 		default:
 			candidate := filepath.Join(current, part)
 			if !add(candidate) {
-				return "", nil, linkDepth, false
+				return fail()
 			}
+			memo.noteWork()
 			info, err := pathLstat(candidate)
 			if err != nil && !os.IsNotExist(err) {
-				return "", nil, linkDepth, false
+				return fail()
 			}
 			unknown := os.IsNotExist(err)
 			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info)) {
 				// The cwd proc link is interpreted by the process opening the
 				// operand. Resolving it in the hook would prove a different path.
 				if ProcCWDWriteOperand(candidate) {
-					return "", nil, linkDepth, false
+					return fail()
 				}
 				link, err := pathReadlink(candidate)
 				if err != nil {
-					return "", nil, linkDepth, false
+					return fail()
 				}
 				// A patch tool may reinterpret a link target with line breaks
 				// as multiple file directives. Ordinary file opens use the
 				// literal kernel path and retain their normal proof.
 				if patchTarget && strings.ContainsAny(link, "\r\n") {
-					return "", nil, linkDepth, false
+					return fail()
 				}
 				var extra []string
 				var nextDepth int
 				var ok bool
 				current, extra, nextDepth, ok = walkWritePath(current, link, linkDepth+1, collect, patchTarget)
 				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
-					return "", nil, linkDepth, false
+					return fail()
 				}
 				linkDepth = nextDepth
 				forms = append(forms, extra...)
 				_, err = pathLstat(current)
 				if err != nil && !os.IsNotExist(err) {
-					return "", nil, linkDepth, false
+					return fail()
 				}
 				crossed = append(crossed, os.IsNotExist(err))
 			} else {
 				current = candidate
 				crossed = append(crossed, unknown)
 			}
+		}
+		if memo != nil {
+			memo.storePrefix(key, walkState{current: current, crossed: crossed, linkDepth: linkDepth})
 		}
 	}
 	return filepath.Clean(current), forms, linkDepth, true
@@ -619,6 +664,14 @@ func AuthorizedKeysPaths(home string) []string {
 // below a linked directory (a linked /home, autofs, macOS /var) must
 // protect ~/.ssh/authorized_keys before it exists (GAP-1725).
 func ProtectedAuthorizedKeysPaths(home string) []string {
+	return protectedAuthorizedKeysPaths(home, nil)
+}
+
+func protectedAuthorizedKeysPaths(home string, memo *TargetMemo) []string {
+	if memo == nil {
+		// The key files share their directory: walk it once.
+		memo = NewTargetMemo()
+	}
 	paths := AuthorizedKeysPaths(home)
 	// sshd and ssh read these as the user's login policy: environment and
 	// rc run at every login, config can run a command for every connection
@@ -631,7 +684,7 @@ func ProtectedAuthorizedKeysPaths(home string) []string {
 		}
 	}
 	for _, path := range slices.Clone(paths) {
-		if resolved, ok := ResolveWriteTarget(path); ok && resolved != path && !slices.Contains(paths, resolved) {
+		if resolved, ok := memo.resolveWriteTarget(path); ok && resolved != path && !slices.Contains(paths, resolved) {
 			paths = append(paths, resolved)
 		}
 	}
@@ -689,11 +742,15 @@ type protectedFiles []protectedFile
 // too, and a read of ~/.ssh/config (ssh -F, a backup copy) is ordinary
 // work. Writes to those files are judged by the write readings.
 func (p protectedFiles) keysOnly(home string) protectedFiles {
+	return p.keysOnlyWith(home, nil)
+}
+
+func (p protectedFiles) keysOnlyWith(home string, memo *TargetMemo) protectedFiles {
 	control := map[string]bool{}
 	for _, name := range SSHControlFiles {
 		path := filepath.Join(home, ".ssh", name)
 		control[path] = true
-		if resolved, ok := ResolveWriteTarget(path); ok {
+		if resolved, ok := memo.resolveWriteTarget(path); ok {
 			control[resolved] = true
 		}
 	}
@@ -707,8 +764,12 @@ func (p protectedFiles) keysOnly(home string) protectedFiles {
 }
 
 func newProtectedFiles(home string) protectedFiles {
+	return newProtectedFilesWith(home, nil)
+}
+
+func newProtectedFilesWith(home string, memo *TargetMemo) protectedFiles {
 	files := make(protectedFiles, 0, len(AuthorizedKeysFiles))
-	for _, path := range ProtectedAuthorizedKeysPaths(home) {
+	for _, path := range memo.ProtectedAuthorizedKeysPaths(home) {
 		protected := protectedFile{path: path}
 		info, err := pathStat(path)
 		switch {
@@ -788,6 +849,37 @@ var clientLogin = sync.OnceValue(func() string {
 // hookShellDialect is the shell a hook body's command tool runs, where only
 // the tool tells it: a Bash tool other than Codex's runs a POSIX shell, Git
 // Bash on Windows (as the gateway's private-key read proof reads it).
+// clientStatementBudgetExceeded is the gateway's statement-budget refusal
+// (trustedCallOverStatementBudget) as the hook client can read it: a call
+// the analysis reads as POSIX with more than 128 statements, or one whose
+// analysis stopped at its input bound, counted as the shell that may run it
+// splits it (PowerShell for a PowerShell tool and, on Windows, for a call
+// without a POSIX shell, as the gateway counts it).
+func clientStatementBudgetExceeded(connector, tool string, facts actionfacts.Facts, command string) bool {
+	switch facts.Parse.Dialect {
+	case actionfacts.DialectPOSIX:
+		return actionfacts.ShellStatementsOverBudget(command)
+	case actionfacts.DialectPowerShell:
+		return facts.Parse.Status != actionfacts.StatusComplete &&
+			(facts.Parse.Status == actionfacts.StatusLimitExceeded || actionfacts.PowerShellReadingStopsEarly(command)) &&
+			actionfacts.PowerShellStatementsOverBudget(command)
+	case actionfacts.DialectNone, "":
+		if facts.Parse.Status != actionfacts.StatusLimitExceeded {
+			return false
+		}
+		switch strings.ToLower(strings.TrimSpace(tool)) {
+		case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+			return actionfacts.PowerShellStatementsOverBudget(command)
+		}
+		if runtime.GOOS == "windows" && hookShellDialect(connector, tool) != actionfacts.DialectPOSIX {
+			return actionfacts.PowerShellStatementsOverBudget(command)
+		}
+		return actionfacts.ShellStatementsOverBudget(command)
+	default:
+		return false
+	}
+}
+
 func hookShellDialect(connector, tool string) actionfacts.Dialect {
 	if strings.EqualFold(strings.TrimSpace(tool), "Bash") && !strings.EqualFold(strings.TrimSpace(connector), "codex") {
 		return actionfacts.DialectPOSIX
@@ -1047,6 +1139,35 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					// in it is file content, not shell, and no shell
 					// reader parses it (GAP-2561).
 					break
+				}
+				// A POSIX call over the statement budget (more than 128
+				// statements) is refused by the gateway before any reader
+				// runs (trustedCallOverStatementBudget). Describing it cost
+				// the client about 3 ms per statement on Windows, past the
+				// hook answer window at 3000 statements (rel-1-0-2:GAP-0568):
+				// the map says only that it is incomplete, which is never more
+				// permissive than a full one. A call that may name the
+				// DefenseClaw state folder is still described: in observe
+				// mode a proven state write blocks over the budget too, and
+				// a gateway behind ProtectHome proves it only from this map.
+				// Only its statements that may name the state are described,
+				// at most StateNamingStatementsMax of them, so padding the call
+				// does not push the description past the hook window.
+				if !isApplyPatchToolName(tool) && clientStatementBudgetExceeded(connector, tool, facts, command) {
+					if !MayNameState(command) {
+						return incompleteEvidence(cwd)
+					}
+					reduced, overflow, ok := StateNamingStatements(command, home)
+					if !ok || overflow || reduced == "" {
+						// No silent drop past the bound: the map says only
+						// that it is incomplete, and the gateway judges the
+						// overflow itself (withReducedStateReading). With no
+						// statement that may write the state there is
+						// nothing to describe.
+						return incompleteEvidence(cwd)
+					}
+					command = reduced
+					truncated = true
 				}
 				// A ~<login> tilde-prefix names this user's home from the
 				// password database. The gateway judges that spelling as the
@@ -5829,4 +5950,139 @@ func sequentialListCalls(file *syntax.File) map[*syntax.CallExpr]bool {
 		visit(stmt)
 	}
 	return calls
+}
+
+// MayNameState reports a command that may name the DefenseClaw state
+// folder however the shell spells it: with quotes, escapes or backticks in
+// the name (~/.defense”claw), in any case, as a pattern (~/.defense?law)
+// or split across variables (d=.defense; e=claw). Over-matching only costs
+// the description time, never a verdict (review R2-2 of rel-1-0-2:GAP-0568).
+func MayNameState(command string) bool {
+	lower := strings.ToLower(strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(command))
+	return strings.Contains(lower, "defense") || strings.Contains(lower, "claw")
+}
+
+// StateNamingStatementsMax bounds the statements kept for an over-budget
+// call that may name the state (StateNamingStatements).
+const StateNamingStatementsMax = 128
+
+// StateNamingStatements reduces an over-budget POSIX call to the statements
+// a state write can come from: those that may name the state
+// (MayNameState) and the directory changes that place them, at most
+// StateNamingStatementsMax, in their order. Statements not proven read-only
+// (stateStatementReadOnly) are kept first, so a write, redirect, link or
+// delete is never the one dropped while reads fill the bound (review r4
+// finding 2: /bin/rm, unlink, find -delete and other spellings past 130
+// statements that name the state). The hook client describes only the kept
+// statements, so its map names the state targets the gateway proves the
+// write from at a bounded cost (describing every statement of a
+// 30,000-statement call took 2.5 s, review R2-5 of rel-1-0-2:GAP-0568), and
+// the gateway judges the same reduced call for the state write. overflow
+// reports that statements not proven read-only were dropped: the reduced
+// reading is then not the whole story, and its caller must not treat it as
+// one (review r3 finding 3). A call whose naming statements are all proven
+// read-only cannot write the state, so nothing is kept (reduced is empty):
+// neither the client nor the gateway spends the hook window describing or
+// judging 128 reads (a 130-read call took 3.0-3.5 s on dc-win2 when its
+// reads filled the bound). A call the POSIX grammar does not split (a
+// PowerShell call) is kept whole, and only up to the 64 KiB analysis bound
+// (ok false past it).
+func StateNamingStatements(command, home string) (reduced string, overflow, ok bool) {
+	texts, ok := actionfacts.ShellStatementTexts(command)
+	if !ok {
+		return command, false, len(command) <= 64<<10
+	}
+	var first, reads []int
+	writers := 0
+	for i, text := range texts {
+		fields := strings.Fields(text)
+		place := len(fields) > 0 && (fields[0] == "cd" || fields[0] == "pushd" || fields[0] == "popd")
+		switch {
+		case place:
+			first = append(first, i)
+		case MayNameState(text):
+			if stateStatementReadOnly(text, home) {
+				reads = append(reads, i)
+			} else {
+				first = append(first, i)
+				writers++
+			}
+		}
+	}
+	if writers == 0 {
+		return "", false, true
+	}
+	if len(first) > StateNamingStatementsMax {
+		first, overflow = first[:StateNamingStatementsMax], true
+	}
+	keep := first
+	if room := StateNamingStatementsMax - len(first); room > 0 {
+		keep = append(keep, reads[:min(room, len(reads))]...)
+	}
+	slices.Sort(keep)
+	kept := make([]string, len(keep))
+	for i, index := range keep {
+		kept[i] = texts[index]
+	}
+	return strings.Join(kept, "; "), overflow, true
+}
+
+// stateStatementReadOnly reports a statement proven to change no file: the
+// known read-only commands (actionKnownReadOnlyShell), or prints and tests
+// (echo, printf, test, [, true, false, :) and the read-only DefenseClaw
+// commands, with no redirect but a discarded one (2>&1, >/dev/null), no
+// assignment, substitution or function. Anything else may write.
+func stateStatementReadOnly(text, home string) bool {
+	file, parsed := parseShell(text)
+	if !parsed {
+		return false
+	}
+	if actionKnownReadOnlyShell(file, home) {
+		return true
+	}
+	seen, safe := false, true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if !safe {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.Redirect:
+			if !actionDiscardRedirect(node, home) {
+				safe = false
+			}
+			return false
+		case *syntax.FuncDecl, *syntax.DeclClause, *syntax.CmdSubst, *syntax.ProcSubst, *syntax.ArithmExp:
+			safe = false
+			return false
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 || len(node.Assigns) != 0 {
+				safe = false
+				return false
+			}
+			program, known := staticProgramWord(node.Args[0], home)
+			if !known {
+				safe = false
+				return false
+			}
+			switch programBase(program) {
+			case "echo", "printf", "test", "[", "true", "false", ":":
+			case "defenseclaw":
+				sub := ""
+				if len(node.Args) > 1 {
+					sub, _ = StaticWord(node.Args[1], home)
+				}
+				switch sub {
+				case "status", "version", "--version", "help", "--help":
+				default:
+					safe = false
+				}
+			default:
+				safe = false
+			}
+			seen = true
+			return true
+		}
+		return true
+	})
+	return seen && safe
 }

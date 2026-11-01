@@ -88,7 +88,9 @@ func runGAP0146Table(t *testing.T, f b36ManagedHookFixture, commands []string, w
 // 1000 of another) and the call was allowed, a benign destructive tail
 // included, and a managed call whose write targets did not fit the bounded
 // map was named an SSH authorized keys mutation. Calls under the budget
-// stay allowed; a destructive or protected tail blocks at every size. The
+// stay allowed; a destructive or protected tail blocks at every size. Over
+// the budget a call is refused before its statements are read
+// (rel-1-0-2:GAP-0568), so a protected tail there blocks by the budget. The
 // rows run concurrently. A race build (the CI gateway shards, about 20 times
 // slower) runs the sizes at each bound: 128 and 129 statements, the fact
 // bound (300), the node bound (600, 1000 for the short form) and the input
@@ -127,9 +129,13 @@ func TestGAP0146OneStatementBudget(t *testing.T) {
 			{"; rm -rf /", ""},
 			{"; echo k >> ~/.ssh/authorized_keys", keys},
 		} {
+			rule := tail.rule
+			if rule != "" && n+1 > 128 {
+				rule = limit
+			}
 			commands = append(commands, gap0146Statements("echo_only", n)+tail.text)
 			names = append(names, fmt.Sprintf("echo_only n=%d tail %q", n, tail.text))
-			wants = append(wants, gap0146Want{verdict: "block", rule: tail.rule})
+			wants = append(wants, gap0146Want{verdict: "block", rule: rule})
 		}
 	}
 	runGAP0146Table(t, f, commands, func(row int, _ bool) gap0146Want { return wants[row] }, names)

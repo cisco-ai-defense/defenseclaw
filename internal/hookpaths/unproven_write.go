@@ -1753,7 +1753,13 @@ func boundedProtectedGlobReach(pattern, cwd string, protected protectedFiles, ss
 }
 
 func protectedReachPath(path string, protected protectedFiles, ssh string) bool {
-	resolved, ok := ResolveWriteTarget(path)
+	return protectedReachPathWith(path, protected, ssh, nil)
+}
+
+// protectedReachPathWith is protectedReachPath with the evaluation's file
+// system answers (TargetMemo; nil: none).
+func protectedReachPathWith(path string, protected protectedFiles, ssh string, memo *TargetMemo) bool {
+	resolved, ok := memo.resolveWriteTarget(path)
 	if !ok {
 		return false
 	}

@@ -680,8 +680,14 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 				command := chain(count, link)
 				header := hookpaths.Resolve(mustJSON(t, map[string]any{"tool_name": "Bash",
 					"tool_input": map[string]string{"command": command}}))
+				// Past 128 statements the call is refused by the statement
+				// budget before its writes are read (rel-1-0-2:GAP-0568).
+				rule := "persistence.ssh_authorized_keys_command"
+				if count+1 > 128 {
+					rule = "ACTION-COMPOUND-LIMIT"
+				}
 				if got := post(t, connector, "action", command, header); !strings.HasPrefix(got, block) ||
-					!strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+					!strings.Contains(got, rule) {
 					t.Fatalf("linked append after %d targets = %.400s", count, got)
 				}
 			})
