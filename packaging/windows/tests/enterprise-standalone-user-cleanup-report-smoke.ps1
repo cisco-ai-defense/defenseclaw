@@ -125,6 +125,35 @@ $failures = & $module {
         $failures.Add("leftover Claude hook commands were not carried: $(ConvertTo-HarnessJson $settingsResult)")
     }
 
+    # sidecar-r107:GAP-0007: a machine folder the finalize kept joins what the
+    # result already names in machine_state_remaining.
+    $keptFinalize = (
+        '{"schema_version":4,"action":"finalize","ok":true,' +
+        '"user_registrations_removed":0,' +
+        '"machine_state_remaining":["C:\\Windows\\System32\\config\\systemprofile\\AppData\\Local\\DefenseClaw\\claude-settings-teardown: kept: it holds an unfinished Claude Code settings cleanup"]}'
+    ) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $keptBase = New-HarnessResult
+    $keptBase | Microsoft.PowerShell.Utility\Add-Member -MemberType NoteProperty -Name machine_state_remaining -Value ([string[]]@('C:\ProgramData\DefenseClaw-PowerShell-0: in use'))
+    $keptResult = Add-DefenseClawUserRegistrationCleanupResult `
+        -Result $keptBase `
+        -Layout $standalone `
+        -Finalization $keptFinalize
+    if (@($keptResult.machine_state_remaining).Count -ne 2 -or
+        -not ([string]@($keptResult.machine_state_remaining)[0]).EndsWith(': in use') -or
+        -not ([string]@($keptResult.machine_state_remaining)[1]).EndsWith('claude-settings-teardown: kept: it holds an unfinished Claude Code settings cleanup')) {
+        $failures.Add("kept machine folder was not carried: $(ConvertTo-HarnessJson $keptResult)")
+    }
+    $keptOnly = Add-DefenseClawUserRegistrationCleanupResult `
+        -Result (New-HarnessResult) `
+        -Layout $standalone `
+        -Finalization $keptFinalize
+    if (@($keptOnly.machine_state_remaining).Count -ne 1) {
+        $failures.Add("kept machine folder without earlier entries was not carried: $(ConvertTo-HarnessJson $keptOnly)")
+    }
+    if ($null -ne (Add-DefenseClawUserRegistrationCleanupResult -Result (New-HarnessResult) -Layout $standalone -Finalization $finalize).PSObject.Properties['machine_state_remaining']) {
+        $failures.Add('a finalize without kept machine folders added machine_state_remaining')
+    }
+
     # Helper output ahead of the report, and a finalize without the fields
     # (an older helper), are tolerated.
     $json = ConvertTo-HarnessJson (Add-DefenseClawUserRegistrationCleanupResult `

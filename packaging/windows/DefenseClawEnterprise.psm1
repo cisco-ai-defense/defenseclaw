@@ -30708,6 +30708,31 @@ function Add-DefenseClawUserRegistrationCleanupResult {
                 )) `
                 -Force
     }
+    # A machine folder the finalize kept, such as the LocalSystem Claude Code
+    # settings cleanup folder while it holds an unfinished cleanup, joins
+    # machine_state_remaining (sidecar-r107:GAP-0007).
+    $machine = $null
+    if ($null -ne $report) {
+        $machine = $report.PSObject.Properties['machine_state_remaining']
+    }
+    if ($null -ne $machine -and $null -ne $machine.Value) {
+        $existing = $Result.PSObject.Properties['machine_state_remaining']
+        $Result |
+            Microsoft.PowerShell.Utility\Add-Member `
+                -MemberType NoteProperty `
+                -Name machine_state_remaining `
+                -Value ([string[]]@(
+                    @(if ($null -ne $existing -and $null -ne $existing.Value) { @($existing.Value) }) +
+                    @(@($machine.Value) |
+                        Microsoft.PowerShell.Utility\Select-Object -First 4096 |
+                        Microsoft.PowerShell.Core\ForEach-Object {
+                            ConvertTo-DefenseClawBoundedDiagnostic `
+                                -Value ([string]$_) `
+                                -MaxLength 1024
+                        })
+                )) `
+                -Force
+    }
     return $Result
 }
 
@@ -33265,10 +33290,12 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
                 -Finalization $finalization
         }
         if (Test-DefenseClawStandaloneProfile) {
-            # What a purge could not remove outside StateRoot, for the
-            # uninstall result's warnings.
+            # What a purge could not remove outside StateRoot, and what the
+            # finalize kept, for the uninstall result's warnings.
+            $finalizeKept = $result.PSObject.Properties['machine_state_remaining']
             $machineStateRemaining = [string[]]@(
                 @($machineStateRemaining) +
+                @(if ($null -ne $finalizeKept -and $null -ne $finalizeKept.Value) { @($finalizeKept.Value) }) +
                 @(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData -WindowsTemp ([IO.Path]::Combine($script:WindowsDirectory, 'Temp'))) +
                 @(Remove-DefenseClawStandaloneOrphanedHookMachineState -Layout $Layout) +
                 @(Remove-DefenseClawStandaloneHookRuntimeLeftovers)
