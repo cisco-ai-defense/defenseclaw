@@ -293,6 +293,35 @@ func sharedLimitProblems(got workloadFacts, d openshell.Driver, limits workloadL
 	return out
 }
 
+// cutShortProblem is what the workload check says when its answer ends
+// before "end".
+const cutShortProblem = "the check's answer was cut short"
+
+// shellStartEnv are the variables a shell reads on start-up and obeys
+// before it runs a script: SHELLOPTS=noexec makes the workload check's
+// shell read its script and run none of it, so the answer is empty. A
+// sandbox created with one of them in --env can be refused for that alone.
+// BASH_ENV and ENV are not here: the create refuses them by name already
+// (reservedEnv).
+var shellStartEnv = []string{"BASHOPTS", "SHELLOPTS"}
+
+// cutShortWithEnv is the refusal of a check whose answer was cut short in a
+// sandbox created with the environment env: when env sets a shell start-up
+// variable it names the setting and says what to do, in one sentence.
+// Without one it is the plain cutShortProblem.
+func cutShortWithEnv(env map[string]string) string {
+	var names []string
+	for _, n := range shellStartEnv {
+		if _, ok := env[n]; ok {
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		return cutShortProblem
+	}
+	return cutShortProblem + ", most likely by the shell setting " + strings.Join(names, ", ") + " passed with --env; run the sandbox again without it"
+}
+
 // workloadProblems lists how the sandbox differs from want, as the user
 // reads it; none means it runs as DefenseClaw prepared it. d is the
 // sandbox's compute driver, which says where a wrong identity comes from,
@@ -301,7 +330,7 @@ func sharedLimitProblems(got workloadFacts, d openshell.Driver, limits workloadL
 func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, limits workloadLimits) []string {
 	var out []string
 	if !got.End {
-		return []string{"the check's answer was cut short"}
+		return []string{cutShortProblem}
 	}
 	for _, tag := range []string{"uid", "gid", "hostname", "home", "capeff"} {
 		if !got.seen[tag] {
@@ -362,8 +391,10 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 // it found. A sandbox that does not run as want expects, or that cannot be
 // checked, is refused with CodePolicyRejected: the caller deletes or stops
 // it, so one not as prepared never keeps running, and outcome (what the
-// caller does with it, "it was deleted") ends the refusal's message.
-func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord, eff *packs.Effective, outcome string) (workloadFacts, error) {
+// caller does with it, "it was deleted") ends the refusal's message. env is
+// the extra environment the create passed (nil at a start); a check cut
+// short names the shell setting in it that most likely did that.
+func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord, eff *packs.Effective, outcome string, env map[string]string) (workloadFacts, error) {
 	res, err := m.ownExec(ctx, gw, name, verifyArgv(want), openshell.ExecOptions{
 		Timeout: verifyTimeout, Idempotent: true, MaxOutputBytes: verifyMaxOutput,
 	})
@@ -382,6 +413,9 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 		problems = []string{fmt.Sprintf("the check exited with status %d", res.ExitCode)}
 	default:
 		problems = workloadProblems(want, facts, gw.Driver, adminLimits(eff.MaxResources()))
+		if len(problems) == 1 && problems[0] == cutShortProblem {
+			problems[0] = cutShortWithEnv(env)
+		}
 	}
 	if len(problems) == 0 {
 		return facts, nil
@@ -413,7 +447,7 @@ func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec re
 	m.mu.Lock()
 	eff := b.eff
 	m.mu.Unlock()
-	facts, err := m.verifyWorkload(ctx, gw, rec.Name, *rec.Verify, eff, outcome)
+	facts, err := m.verifyWorkload(ctx, gw, rec.Name, *rec.Verify, eff, outcome, nil)
 	if err != nil {
 		if m.stopUnverified(ctx, gw, b) != nil {
 			return stillRunning(rec.Name, err, outcome)

@@ -408,6 +408,49 @@ func TestCreateRollsBackASandboxNotAsPrepared(t *testing.T) {
 	}
 }
 
+// A create refused because its check was cut short names the shell setting
+// passed with --env that did it and says what to do (SHELLOPTS=noexec makes
+// the check's shell run none of its script). The refusal and what it
+// refuses are unchanged; a cut-short answer without such a setting, and a
+// refusal for another reason, keep their plain text.
+func TestCreateRefusalNamesTheShellSettingThatCutTheCheckShort(t *testing.T) {
+	const plain = "the check's answer was cut short"
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		edit func(a *workloadAnswer)
+		want string
+	}{
+		{"SHELLOPTS", map[string]string{"SHELLOPTS": "noexec"}, func(a *workloadAnswer) { a.cut = true },
+			plain + ", most likely by the shell setting SHELLOPTS passed with --env; run the sandbox again without it"},
+		{"two settings, in order", map[string]string{"SHELLOPTS": "noexec", "BASHOPTS": "nullglob", "FOO": "1"}, func(a *workloadAnswer) { a.cut = true },
+			plain + ", most likely by the shell setting BASHOPTS, SHELLOPTS passed with --env; run the sandbox again without it"},
+		{"no shell setting", map[string]string{"FOO": "1"}, func(a *workloadAnswer) { a.cut = true }, plain},
+		{"no env", nil, func(a *workloadAnswer) { a.cut = true }, plain},
+		{"another reason keeps its text", map[string]string{"SHELLOPTS": "noexec"}, func(a *workloadAnswer) { a.capEff = "0000003fffffffff" }, "holds capabilities"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newVMEnv(t, nil)
+			e.m.host = HostUser{UID: 501, GID: 20, Name: "dev"}
+			e.images.rec.UID, e.images.rec.GID = 501, 20
+			useOpenCode(t, e)
+			e.fake.HandleExec(e.workloadChecks(func(_ string, a *workloadAnswer) { tc.edit(a) }, nil))
+			_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "envbox", Harness: "opencode", Copy: true, Env: tc.env})
+			apiErr := wantCode(t, err, sandboxapi.CodePolicyRejected)
+			if !strings.Contains(apiErr.Detail, tc.want) {
+				t.Fatalf("detail = %q, want it to contain %q", apiErr.Detail, tc.want)
+			}
+			if tc.want == plain && apiErr.Detail != plain {
+				t.Fatalf("detail = %q, want the plain text", apiErr.Detail)
+			}
+			if !strings.HasSuffix(apiErr.Message, "does not run as DefenseClaw prepared it; DefenseClaw deleted it") {
+				t.Fatalf("message = %q", apiErr.Message)
+			}
+			assertNothingLeft(t, e)
+		})
+	}
+}
+
 // A start checks the workload against what the create recorded, not a
 // fresh render: a start after the hook render changed passes. A sandbox
 // that fails the check is stopped again.
