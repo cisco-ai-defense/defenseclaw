@@ -331,6 +331,7 @@ class PySource:
         stmts: list[_PyStmt] = []
         stack: list[int] = []
         funcs: list[tuple[int, int, str]] = []  # (indent, scope id, name)
+        declared: dict[int, set[str]] = {}  # ``global`` names per function scope
         indent = 0
         row = 0
         cur: list = []
@@ -356,7 +357,10 @@ class PySource:
                     # (also after a one-line ``def f(): ...``).
                     while funcs and funcs[-1][0] >= indent:
                         funcs.pop()
-                    st = _py_statement(cur, funcs)
+                    scope = funcs[-1][1] if funcs else -1
+                    st = _py_statement(cur, funcs, declared.get(scope, set()))
+                    if cur[0].string == "global" and scope != -1:
+                        declared.setdefault(scope, set()).update(t.string for t in cur[1:] if t.type == tokenize.NAME)
                     for r in range(cur[0].start[0] - 1, min(cur[-1].end[0], nrows)):
                         line_stmt[r] = len(stmts)
                     stmts.append(st)
@@ -378,8 +382,13 @@ def _string_value(tok_string: str) -> str:
     return body[1:-1]
 
 
-def _py_statement(cur: list, funcs: list[tuple[int, int, str]]) -> _PyStmt:
-    """Names, assignment targets and write calls of one logical line."""
+def _py_statement(cur: list, funcs: list[tuple[int, int, str]], global_names: set[str]) -> _PyStmt:
+    """Names, assignment targets and write calls of one logical line.
+
+    *global_names* are the names the function declares ``global``: they are
+    module-wide, so a write through one in another function counts, as in
+    the Go artifact scan (GAP-1312).
+    """
     st = _PyStmt(funcs[-1][1] if funcs else -1)
     n = len(cur)
 
@@ -390,7 +399,7 @@ def _py_statement(cur: list, funcs: list[tuple[int, int, str]]) -> _PyStmt:
         name = cur[k].string
         if keyword.iskeyword(name):
             return
-        st.targets.add((-1 if is_op(k - 1, ".") else st.scope, name))
+        st.targets.add((-1 if is_op(k - 1, ".") or name in global_names else st.scope, name))
 
     depth = 0
     assign_at: list[int] = []
