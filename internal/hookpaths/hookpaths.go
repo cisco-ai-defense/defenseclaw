@@ -2526,7 +2526,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
-	knownWords, knownValues := knownWordParameters(command, file, home)
+	knownWords, knownValues := knownWordParameters(command, file, home, cdEnterable(cwd, facts, record))
 	stackPlaces := directoryStackPlaces(file, command, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds, wrappedCds := false, false, false
@@ -3933,7 +3933,7 @@ func QuotedDynamicCopyDestinations(command, cwd, home string) []string {
 		return nil
 	}
 	var destinations []string
-	knownWords := knownWordParameterUses(command, file, home)
+	knownWords := knownWordParameterUsesAt(command, file, home, cdEnterable(cwd, nil, false))
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) != 3 || !quotedDynamicCopySource(call.Args[1]) && !knownWords[call.Args[1]] {
