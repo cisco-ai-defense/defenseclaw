@@ -7293,7 +7293,13 @@ function Get-CodexManagedHookFingerprint(
                 $decoded,
                 '(?i)\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\((?<file>''(?:''''|[^''])+''),''hook --connector codex''\)'
             )
+            # The launcher must be started and awaited before its exit code is
+            # read: constructing ProcessStartInfo alone is not the contract.
             if (-not $startProcess.Success -or
+                $decoded -notmatch
+                    '(?i)\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\)' -or
+                $decoded -notmatch
+                    '(?i)\$hookProcess\.WaitForExit\(\)' -or
                 $decoded -notmatch
                     '(?i)(?:^|;\s*)exit\s+\$hookProcess\.ExitCode(?:;|$)' -or
                 $decoded -notmatch

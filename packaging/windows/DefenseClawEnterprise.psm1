@@ -7540,6 +7540,28 @@ function Assert-DefenseClawServiceRegistryAcl {
             if (-not $acceptResidual) {
                 throw
             }
+            # The Security value decides who can reconfigure this LocalSystem
+            # service, so a broad writer on its key is never a boundary fact.
+            $subkeyVerdicts = @()
+            try {
+                $subkeyAcl = Microsoft.PowerShell.Security\Get-Acl `
+                    -Path ([string]$securitySubkeys[0].PSPath) `
+                    -ErrorAction Stop
+                $subkeyVerdicts = @(Get-DefenseClawRegistryAclVerdicts `
+                    -Acl $subkeyAcl `
+                    -Label "service $Name SCM Security registry key" `
+                    -ExpectProtected $false)
+            }
+            catch {
+                $subkeyVerdicts = @()
+            }
+            foreach ($verdict in $subkeyVerdicts) {
+                $writerProperty = $verdict.PSObject.Properties['Writer']
+                if ($null -ne $writerProperty -and
+                    (Test-DefenseClawBroadUnprivilegedSid -SID ([string]$writerProperty.Value))) {
+                    throw [string]$verdict.Reason
+                }
+            }
             Write-DefenseClawResilienceEvent -Marker defenseclaw_boundary -Fields @{
                 path   = [string]$securitySubkeys[0].Name
                 reason = "service $Name SCM Security registry key drift remains after repair: $($_.Exception.Message)"
@@ -20135,7 +20157,10 @@ function Assert-DefenseClawServiceSecurityDescriptor {
     if (-not [string]::IsNullOrEmpty($writer)) {
         # An ordinary session that can change the service config can point
         # binPath anywhere and run it as SYSTEM: fatal even after a repair.
-        foreach ($candidate in @(Get-DefenseClawServiceDaclUntrustedWriter -Dacl $actualDACL -All)) {
+        # Assign first: the helper returns its writers as one array object,
+        # which @(...) around the call would hand to foreach as a single item.
+        $allWriters = Get-DefenseClawServiceDaclUntrustedWriter -Dacl $actualDACL -All
+        foreach ($candidate in @($allWriters)) {
             if (Test-DefenseClawBroadUnprivilegedSid -SID $candidate) {
                 throw "untrusted principal $candidate can reconfigure service $Name after the canonical descriptor was re-applied: $actualDACL"
             }
@@ -28064,6 +28089,7 @@ function Get-DefenseClawNuclearUserDataPaths {
                 -Filter '.defenseclaw.setup-*' `
                 -ErrorAction SilentlyContinue)) {
             if ([string]$staging.Name -cmatch '^\.defenseclaw\.setup-[0-9a-f]{32}$' -and
+                (Test-DefenseClawNuclearRealDirectoryPath -Path ([string]$staging.FullName)) -and
                 -not $paths.Contains([string]$staging.FullName)) {
                 $paths.Add([string]$staging.FullName)
             }

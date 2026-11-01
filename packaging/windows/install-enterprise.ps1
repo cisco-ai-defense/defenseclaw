@@ -2381,19 +2381,37 @@ function Assert-DefenseClawBootstrapModuleTrust {
             -LiteralPath $full `
             -ErrorAction Stop
         if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
-            # Outside the strict pin only a chain that cannot be built is
-            # advisory: an offline host that lacks the signing root
-            # (NotTrusted, UnknownError) must still be able to install and
-            # purge. HashMismatch, NotSigned and every other status mean the
-            # file is not the signed artifact, and the leaf ACL check proves
-            # only who can write it now, so they stay fatal for this elevated
-            # import.
-            $advisoryStatuses = @(
-                [Management.Automation.SignatureStatus]::NotTrusted,
-                [Management.Automation.SignatureStatus]::UnknownError
-            )
-            if ((Test-DefenseClawBootstrapStrictAncestors) -or
-                $signature.Status -notin $advisoryStatuses) {
+            # Outside the strict pin only NotTrusted is advisory, and only for
+            # a module signed by the same certificate as this running
+            # installer: NotTrusted means the signature's hash verified and
+            # only the chain to a trusted root failed (an offline host that
+            # lacks the signing root), and the matching signer proves the
+            # module came from the same signed artifact set. UnknownError,
+            # HashMismatch, NotSigned and every other status stay fatal for
+            # this elevated import; the leaf ACL check proves only who can
+            # write the file now, not where it came from.
+            $signerMatches = $false
+            if ($signature.Status -eq [Management.Automation.SignatureStatus]::NotTrusted -and
+                $null -ne $signature.SignerCertificate) {
+                try {
+                    $self = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
+                        -LiteralPath $PSCommandPath `
+                        -ErrorAction Stop
+                    $selfHashVerified = $self.Status -eq [Management.Automation.SignatureStatus]::Valid -or
+                        $self.Status -eq [Management.Automation.SignatureStatus]::NotTrusted
+                    $signerMatches = $selfHashVerified -and
+                        $null -ne $self.SignerCertificate -and
+                        [string]::Equals(
+                            [string]$self.SignerCertificate.Thumbprint,
+                            [string]$signature.SignerCertificate.Thumbprint,
+                            [StringComparison]::OrdinalIgnoreCase
+                        )
+                }
+                catch {
+                    $signerMatches = $false
+                }
+            }
+            if ((Test-DefenseClawBootstrapStrictAncestors) -or -not $signerMatches) {
                 throw "DefenseClaw enterprise installer module Authenticode signature is not valid ($($signature.Status)): $full; use -AllowUnsigned only for protected controlled test staging"
             }
             Add-DefenseClawBootstrapResilienceEvent `
@@ -2401,7 +2419,7 @@ function Assert-DefenseClawBootstrapModuleTrust {
                 -Fields @{
                     path   = $full
                     label  = 'DefenseClaw enterprise installer module'
-                    reason = "Authenticode signature is not valid ($($signature.Status))"
+                    reason = "Authenticode chain is not trusted on this host ($($signature.Status)); signer matches the installer"
                 }
         }
     }
