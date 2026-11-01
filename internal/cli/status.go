@@ -1205,6 +1205,10 @@ func printSubsystem(name string, h gateway.SubsystemHealth, judgeMaxParallel int
 	if retention := telemetryRetentionLabel(h.Details); retention != "" {
 		fmt.Printf("             %s %s\n", Dim("retention:"), retention)
 	}
+	capWarning := telemetryRetentionCapWarning(h.Details)
+	if capWarning != "" {
+		fmt.Printf("             %s %s\n", Style("warning:", "fg=yellow"), capWarning)
+	}
 	if len(h.Details) > 0 {
 		keys := make([]string, 0, len(h.Details))
 		for k := range h.Details {
@@ -1212,6 +1216,9 @@ func printSubsystem(name string, h gateway.SubsystemHealth, judgeMaxParallel int
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
+			if strings.HasPrefix(k, "retention_cap_") || (capWarning != "" && k == "retention_state") {
+				continue
+			}
 			if strings.Contains(k, "password") || strings.Contains(k, "secret") || strings.Contains(k, "token") {
 				continue
 			}
@@ -1232,6 +1239,31 @@ func printSubsystem(name string, h gateway.SubsystemHealth, judgeMaxParallel int
 		}
 	}
 	fmt.Println()
+}
+
+func telemetryRetentionCapWarning(details map[string]interface{}) string {
+	if state, _ := details["retention_state"].(string); state != "warning" {
+		return ""
+	}
+	fallback := "audit store cap not reached; inspect the gateway retention health"
+	used, usedOK := details["retention_cap_used_bytes"].(float64)
+	capBytes, capOK := details["retention_cap_bytes"].(float64)
+	reason, _ := details["retention_cap_reason"].(string)
+	if !usedOK || !capOK || capBytes <= 0 || used <= capBytes ||
+		capBytes > float64(audit.RetentionMaxStoreMB<<20) {
+		return fallback
+	}
+	var advice string
+	switch reason {
+	case string(audit.RetentionCapActiveCorrelation):
+		advice = "active correlation state is retained; end unused sessions or raise observability.local.max_store_mb"
+	case string(audit.RetentionCapRetainedHistory):
+		advice = "recent history or pending retention work remains; allow another pass or raise observability.local.max_store_mb"
+	default:
+		return fallback
+	}
+	return fmt.Sprintf("audit store cap not reached: %.1f MiB used, cap %.1f MiB; %s",
+		used/(1<<20), capBytes/(1<<20), advice)
 }
 
 // telemetryRetentionLabel is the audit store retention in the words of the

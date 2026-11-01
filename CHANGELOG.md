@@ -11,6 +11,7 @@ for current behavior.
 ## [Unreleased] — 1.0.7
 
 ### Changed
+- **Audit retention now warns when its size cap remains unmet after a completed pass.** A long active session can keep correlation state above `observability.local.max_store_mb` even after old audit rows are deleted. Status and doctor report the used size, cap and retention reason with advice; the warning clears after a pass meets the cap and never blocks tool calls (GAP-0408).
 - **A sandbox create refused because of a shell setting in `--env` says which one.** `--env SHELLOPTS=noexec` (or `BASHOPTS`) stops the shell of the workload check from running its script, so the create was refused (and the sandbox deleted) with only "the check's answer was cut short". The refusal now names the setting and says to run the sandbox again without it. The refusal itself and which values it covers are unchanged (GAP-0352).
 
 ## [Unreleased] — 1.0.6

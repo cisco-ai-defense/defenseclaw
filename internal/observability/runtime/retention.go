@@ -39,6 +39,7 @@ type RetentionControllerState string
 const (
 	RetentionStateWaiting  RetentionControllerState = "waiting_for_readiness"
 	RetentionStateHealthy  RetentionControllerState = "healthy"
+	RetentionStateWarning  RetentionControllerState = "warning"
 	RetentionStateDegraded RetentionControllerState = "degraded"
 	RetentionStateDisabled RetentionControllerState = "disabled"
 	RetentionStateStopped  RetentionControllerState = "stopped"
@@ -72,6 +73,11 @@ type RetentionControllerStatus struct {
 	// 0: none). Managed status surfaces show it with the retention, because
 	// the per-user status that shows it is refused there (GAP-0141).
 	MaxStoreMB int64
+	// A successful cap pass can leave used pages above the cap because
+	// retention preserves live correlation state and recent history.
+	StoreSizeBytes int64
+	StoreCapBytes  int64
+	CapReason      audit.RetentionCapReason
 }
 
 // RetentionControllerReporter receives bounded status changes. Implementations
@@ -285,6 +291,13 @@ func (controller *RetentionController) Status() RetentionControllerStatus {
 	copyStatus := *status
 	copyStatus.RetentionDays = controller.reaper.RetentionDays()
 	copyStatus.MaxStoreMB = controller.maxStoreMB()
+	if copyStatus.State == RetentionStateWarning &&
+		copyStatus.StoreCapBytes != copyStatus.MaxStoreMB<<20 {
+		copyStatus.State = RetentionStateHealthy
+		copyStatus.StoreSizeBytes = 0
+		copyStatus.StoreCapBytes = 0
+		copyStatus.CapReason = ""
+	}
 	return copyStatus
 }
 
@@ -542,6 +555,9 @@ func (controller *RetentionController) runOnce(ctx context.Context) bool {
 	status.LastBatchCount = result.BatchCount
 	status.LastRunDuration = result.Duration
 	status.LastRunCompletedAt = result.CompletedAt
+	status.StoreSizeBytes = 0
+	status.StoreCapBytes = 0
+	status.CapReason = ""
 	if err != nil {
 		status.State = RetentionStateDegraded
 		status.Failure = RetentionFailureRun
@@ -551,6 +567,14 @@ func (controller *RetentionController) runOnce(ctx context.Context) bool {
 	}
 	status.State = RetentionStateHealthy
 	status.Failure = RetentionFailureNone
+	if result.CapNotReached && result.StoreCapBytes == status.MaxStoreMB<<20 &&
+		result.StoreSizeBytes > result.StoreCapBytes && result.StoreCapBytes > 0 &&
+		(result.CapReason == audit.RetentionCapActiveCorrelation || result.CapReason == audit.RetentionCapRetainedHistory) {
+		status.State = RetentionStateWarning
+		status.StoreSizeBytes = result.StoreSizeBytes
+		status.StoreCapBytes = result.StoreCapBytes
+		status.CapReason = result.CapReason
+	}
 	status.LastSuccessAt = result.CompletedAt
 	if status.LastSuccessAt.IsZero() {
 		status.LastSuccessAt = controller.clock().UTC()
@@ -564,7 +588,7 @@ func (controller *RetentionController) runOnce(ctx context.Context) bool {
 func (controller *RetentionController) logRunOutcome(err error) {
 	if err == nil {
 		if failed := controller.failedRuns.Swap(0); failed > 0 && controller.log != nil {
-			fmt.Fprintf(controller.log, "[sidecar] audit retention ran again after %d failed runs; retention is healthy\n", failed)
+			fmt.Fprintf(controller.log, "[sidecar] audit retention ran again after %d failed runs; the run succeeded\n", failed)
 		}
 		return
 	}

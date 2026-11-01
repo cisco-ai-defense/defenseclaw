@@ -228,28 +228,31 @@ const (
 )
 
 type SidecarHealth struct {
-	mu                                    sync.RWMutex
-	gateway                               SubsystemHealth
-	watcher                               SubsystemHealth
-	config                                SubsystemHealth
-	api                                   SubsystemHealth
-	guardrail                             SubsystemHealth
-	routing                               SubsystemHealth
-	telemetry                             SubsystemHealth
-	aiDiscovery                           SubsystemHealth
-	aiRuntime                             SubsystemHealth
-	applicationProtection                 SubsystemHealth
-	sandbox                               *SubsystemHealth
-	startedAt                             time.Time
-	observabilityV8Source                 observabilityV8HealthSource
-	observabilityV8ActiveGeneration       uint64
-	observabilityV8Failures               map[string]observabilityV8FailureObservation
-	observabilityV8RetentionState         string
-	observabilityV8RetentionFailure       string
-	observabilityV8RetentionDays          int64
-	observabilityV8RetentionMaxStoreMB    int64
-	observabilityV8EventHistoryGeneration uint64
-	observabilityV8EventHistory           map[string]observabilityV8EventHistoryObservation
+	mu                                     sync.RWMutex
+	gateway                                SubsystemHealth
+	watcher                                SubsystemHealth
+	config                                 SubsystemHealth
+	api                                    SubsystemHealth
+	guardrail                              SubsystemHealth
+	routing                                SubsystemHealth
+	telemetry                              SubsystemHealth
+	aiDiscovery                            SubsystemHealth
+	aiRuntime                              SubsystemHealth
+	applicationProtection                  SubsystemHealth
+	sandbox                                *SubsystemHealth
+	startedAt                              time.Time
+	observabilityV8Source                  observabilityV8HealthSource
+	observabilityV8ActiveGeneration        uint64
+	observabilityV8Failures                map[string]observabilityV8FailureObservation
+	observabilityV8RetentionState          string
+	observabilityV8RetentionFailure        string
+	observabilityV8RetentionDays           int64
+	observabilityV8RetentionMaxStoreMB     int64
+	observabilityV8RetentionStoreSizeBytes int64
+	observabilityV8RetentionStoreCapBytes  int64
+	observabilityV8RetentionCapReason      audit.RetentionCapReason
+	observabilityV8EventHistoryGeneration  uint64
+	observabilityV8EventHistory            map[string]observabilityV8EventHistoryObservation
 	// observabilityV8LastChange is when the latest event-history or
 	// destination health change happened. telemetryShownState and
 	// telemetryShownSince remember the telemetry state the last snapshot
@@ -998,28 +1001,34 @@ func validObservabilityV8FailureCode(code string) bool {
 	}
 }
 
-// setObservabilityV8RetentionCap records the audit store size cap the next
-// setObservabilityV8Retention publishes with the retention (GAP-0141).
-func (h *SidecarHealth) setObservabilityV8RetentionCap(maxStoreMB int64) {
-	if h == nil || maxStoreMB < 0 {
-		return
-	}
-	h.mu.Lock()
-	h.observabilityV8RetentionMaxStoreMB = maxStoreMB
-	h.mu.Unlock()
-}
-
-func (h *SidecarHealth) setObservabilityV8Retention(state string, days int64, failure string) {
-	if h == nil || days < 0 || !validObservabilityV8RetentionState(state) ||
-		!validObservabilityV8RetentionFailure(failure) {
+func (h *SidecarHealth) setObservabilityV8Retention(status observabilityruntime.RetentionControllerStatus) {
+	state, failure := string(status.State), string(status.Failure)
+	if h == nil || status.RetentionDays < 0 || status.MaxStoreMB < 0 ||
+		status.MaxStoreMB > audit.RetentionMaxStoreMB ||
+		!validObservabilityV8RetentionState(state) || !validObservabilityV8RetentionFailure(failure) {
 		return
 	}
 	h.mu.Lock()
 	h.observabilityV8RetentionState = state
-	h.observabilityV8RetentionDays = days
+	h.observabilityV8RetentionDays = status.RetentionDays
 	h.observabilityV8RetentionFailure = failure
+	h.observabilityV8RetentionMaxStoreMB = status.MaxStoreMB
+	h.observabilityV8RetentionStoreSizeBytes = 0
+	h.observabilityV8RetentionStoreCapBytes = 0
+	h.observabilityV8RetentionCapReason = ""
+	if state == "warning" && status.StoreCapBytes == status.MaxStoreMB<<20 &&
+		status.StoreSizeBytes > status.StoreCapBytes && status.StoreCapBytes > 0 &&
+		validObservabilityV8RetentionCapReason(status.CapReason) {
+		h.observabilityV8RetentionStoreSizeBytes = status.StoreSizeBytes
+		h.observabilityV8RetentionStoreCapBytes = status.StoreCapBytes
+		h.observabilityV8RetentionCapReason = status.CapReason
+	}
 	h.mu.Unlock()
 	h.notifySubscribers()
+}
+
+func validObservabilityV8RetentionCapReason(reason audit.RetentionCapReason) bool {
+	return reason == audit.RetentionCapActiveCorrelation || reason == audit.RetentionCapRetainedHistory
 }
 
 func validObservabilityV8RetentionFailure(failure string) bool {
@@ -1159,7 +1168,7 @@ func validObservabilityV8EventHistoryFailure(code string) bool {
 
 func validObservabilityV8RetentionState(state string) bool {
 	switch state {
-	case "waiting_for_readiness", "healthy", "degraded", "disabled", "stopped":
+	case "waiting_for_readiness", "healthy", "warning", "degraded", "disabled", "stopped":
 		return true
 	default:
 		return false
@@ -1649,6 +1658,9 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	retentionFailure := h.observabilityV8RetentionFailure
 	retentionDays := h.observabilityV8RetentionDays
 	retentionMaxStoreMB := h.observabilityV8RetentionMaxStoreMB
+	retentionStoreSizeBytes := h.observabilityV8RetentionStoreSizeBytes
+	retentionStoreCapBytes := h.observabilityV8RetentionStoreCapBytes
+	retentionCapReason := h.observabilityV8RetentionCapReason
 	eventHistoryGeneration := h.observabilityV8EventHistoryGeneration
 	eventHistoryObservations := make(
 		map[string]observabilityV8EventHistoryObservation,
@@ -1732,6 +1744,13 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		if _, reported := snap.Telemetry.Details["retention_days"]; reported && retentionMaxStoreMB > 0 {
 			// The size cap goes with the retention it bounds (GAP-0141).
 			snap.Telemetry.Details["retention_max_store_mb"] = retentionMaxStoreMB
+		}
+		if retentionState == "warning" && retentionStoreCapBytes == retentionMaxStoreMB<<20 &&
+			retentionStoreSizeBytes > retentionStoreCapBytes && retentionStoreCapBytes > 0 &&
+			validObservabilityV8RetentionCapReason(retentionCapReason) {
+			snap.Telemetry.Details["retention_cap_used_bytes"] = retentionStoreSizeBytes
+			snap.Telemetry.Details["retention_cap_bytes"] = retentionStoreCapBytes
+			snap.Telemetry.Details["retention_cap_reason"] = string(retentionCapReason)
 		}
 		snap.Telemetry.Since = h.telemetrySince(snap.Telemetry.State, snap.Telemetry.Since)
 	}

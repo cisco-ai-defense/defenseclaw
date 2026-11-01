@@ -128,18 +128,34 @@ const (
 type RetentionRunResult struct {
 	Disabled bool
 	// SizeCapped is set when the store was over observability.local.max_store_mb
-	// and the run moved its cutoff forward to bring it under the cap.
-	SizeCapped  bool
-	Cutoff      time.Time
-	CompletedAt time.Time
-	Duration    time.Duration
-	BatchCount  int64
+	// and the run moved its cutoff forward toward the cap.
+	SizeCapped bool
+	// CapNotReached reports a completed non-Secure Client cap pass whose
+	// audit.db used pages still exceed the cap. These fields contain only
+	// bounded size and reason data, never stored record content.
+	CapNotReached  bool
+	StoreSizeBytes int64
+	StoreCapBytes  int64
+	CapReason      RetentionCapReason
+	Cutoff         time.Time
+	CompletedAt    time.Time
+	Duration       time.Duration
+	BatchCount     int64
 	// Backlog is set when a stage stopped at its time budget with work left;
 	// the scheduler then runs again after RetentionFollowUpInterval.
 	Backlog       bool
 	RowsDeleted   map[RetentionTableClass]int64
 	ProtectedRows map[RetentionProtectedClass]int64
 }
+
+// RetentionCapReason describes why a successful pass can leave used pages
+// above the configured target without claiming a database write failure.
+type RetentionCapReason string
+
+const (
+	RetentionCapActiveCorrelation RetentionCapReason = "active_correlation_state"
+	RetentionCapRetainedHistory   RetentionCapReason = "retained_history_or_pending_work"
+)
 
 type RetentionProtectedClass string
 
@@ -685,6 +701,27 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 			runErr = retentionRunFailure(RetentionFailureCheckpoint, err)
 		}
 	}
+	if runErr == nil && !reaper.secureClient && capBytes > 0 {
+		used, err := reaper.storeUsedBytes(ctx)
+		if err != nil {
+			runErr = retentionRunFailure(RetentionFailureAuditStore, err)
+		} else if used > capBytes {
+			var activeCursor bool
+			err = reaper.store.db.QueryRowContext(ctx,
+				`SELECT EXISTS(SELECT 1 FROM correlation_cursors WHERE active=1)`).Scan(&activeCursor)
+			if err != nil {
+				runErr = retentionRunFailure(RetentionFailureAuditStore, fmt.Errorf("audit: read active correlation state: %w", err))
+			} else {
+				result.CapNotReached = true
+				result.StoreSizeBytes = used
+				result.StoreCapBytes = capBytes
+				result.CapReason = RetentionCapRetainedHistory
+				if activeCursor {
+					result.CapReason = RetentionCapActiveCorrelation
+				}
+			}
+		}
+	}
 	if runErr == nil {
 		result.CompletedAt = reaper.hooks.now().UTC()
 	}
@@ -701,14 +738,10 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 // correlation graph, as day retention does. It never reaches into the last
 // RetentionSizeCapKeep.
 func (reaper *RetentionReaper) storeSizeCutoff(ctx context.Context, now time.Time, capBytes int64) (time.Time, bool, error) {
-	var pageCount, freePages, pageSize int64
-	if err := reaper.store.db.QueryRowContext(ctx, `SELECT
-		(SELECT page_count FROM pragma_page_count()),
-		(SELECT freelist_count FROM pragma_freelist_count()),
-		(SELECT page_size FROM pragma_page_size())`).Scan(&pageCount, &freePages, &pageSize); err != nil {
-		return time.Time{}, false, fmt.Errorf("audit: read store size: %w", err)
+	used, err := reaper.storeUsedBytes(ctx)
+	if err != nil {
+		return time.Time{}, false, err
 	}
-	used := (pageCount - freePages) * pageSize
 	if used <= capBytes {
 		return time.Time{}, false, nil
 	}
@@ -724,7 +757,7 @@ func (reaper *RetentionReaper) storeSizeCutoff(ctx context.Context, now time.Tim
 	fraction := float64(used-target) / float64(used)
 	at := first.Int64 + int64(fraction*float64(last.Int64-first.Int64))
 	var stamp sql.NullInt64
-	err := reaper.store.db.QueryRowContext(ctx, `SELECT retention_timestamp_unix_nano FROM audit_events
+	err = reaper.store.db.QueryRowContext(ctx, `SELECT retention_timestamp_unix_nano FROM audit_events
 		WHERE rowid >= ? AND retention_timestamp_unix_nano IS NOT NULL ORDER BY rowid LIMIT 1`, at).Scan(&stamp)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, false, fmt.Errorf("audit: read size cutoff: %w", err)
@@ -737,6 +770,17 @@ func (reaper *RetentionReaper) storeSizeCutoff(ctx context.Context, now time.Tim
 		cutoff = keepFrom
 	}
 	return cutoff, true, nil
+}
+
+func (reaper *RetentionReaper) storeUsedBytes(ctx context.Context) (int64, error) {
+	var pageCount, freePages, pageSize int64
+	if err := reaper.store.db.QueryRowContext(ctx, `SELECT
+		(SELECT page_count FROM pragma_page_count()),
+		(SELECT freelist_count FROM pragma_freelist_count()),
+		(SELECT page_size FROM pragma_page_size())`).Scan(&pageCount, &freePages, &pageSize); err != nil {
+		return 0, fmt.Errorf("audit: read store size: %w", err)
+	}
+	return (pageCount - freePages) * pageSize, nil
 }
 
 func sumRetentionRows(rows map[RetentionTableClass]int64) int64 {
