@@ -658,13 +658,29 @@ func (o hookGoldenObservation) digest() string {
 	return hex.EncodeToString(sum[:])[:20]
 }
 
+// hookGoldenHookToken is the bearer of every golden case's hook.
+const hookGoldenHookToken = "golden-scoped-token"
+
 type hookGoldenGateway struct {
 	mu       sync.Mutex
 	answer   func(n int, event string) (int, string)
 	requests []hookGoldenRequest
+	// bearer, when set, is the only Authorization this gateway answers.
+	bearer string
 }
 
 func (g *hookGoldenGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// A loopback TCP port is open to every program on the computer. Another
+	// test's hook aimed at a port it had probed free and closed (port 0),
+	// which the kernel then gave this listener, or another program's health
+	// probe, is not this case's hook: only that hook holds the case's
+	// bearer. Such a request is neither answered with the case's answer nor
+	// recorded or counted, so it cannot change the case's digest
+	// (rel-1-0-6:GAP-0453).
+	if g.bearer != "" && r.Header.Get("Authorization") != g.bearer {
+		http.Error(w, "not this golden case's hook", http.StatusMisdirectedRequest)
+		return
+	}
 	body, _ := io.ReadAll(r.Body)
 	event := r.Header.Get("X-DefenseClaw-Hook-Event")
 	if event == "" {
@@ -715,6 +731,11 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		return obs, err
 	}
 	gateway := &hookGoldenGateway{answer: c.answer.answer}
+	if !c.mode.managed || c.mode.secureClient {
+		// Loopback TCP: every hook sends its bearer there. The managed hook
+		// socket is this case's own path.
+		gateway.bearer = "Bearer " + hookGoldenHookToken
+	}
 	server := &http.Server{Handler: gateway, ReadHeaderTimeout: 10 * time.Second}
 	var listener net.Listener
 	var err error
@@ -775,7 +796,7 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		}
 	}
 	opts := SetupOpts{DataDir: dataDir, APIAddr: addr, APIToken: "golden-gateway-token",
-		HookAPIToken: "golden-scoped-token", HookAPITokenScoped: true, HookFailMode: c.mode.failMode}
+		HookAPIToken: hookGoldenHookToken, HookAPITokenScoped: true, HookFailMode: c.mode.failMode}
 	if c.mode.managed {
 		opts.ManagedEnterprise = true
 		opts.ManagedHookSocket = socket
@@ -889,12 +910,6 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 	}
 	gateway.mu.Lock()
 	for _, r := range gateway.requests {
-		// No hook sends a GET: one here is another program's health probe
-		// that reached this case's loopback port after its own gateway
-		// left it.
-		if r.Method == http.MethodGet && r.Path == "/health" {
-			continue
-		}
 		header := map[string][]string{}
 		for k, v := range r.Header {
 			for _, value := range v {
