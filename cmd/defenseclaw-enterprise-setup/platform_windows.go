@@ -230,6 +230,20 @@ func executeEnterpriseSetup(
 				progress = io.Discard
 			}
 			removeStaleEnterpriseSetupStages(programData, time.Now(), enterpriseSetupStageSweepAge(), progress, stderr)
+			// The manifest staging folder of an ensure a killed Setup
+			// left (rel-1-0-6:GAP-0342). Only an ensure creates it, and
+			// every ensure holds the host-wide ensure mutex from before
+			// staging to its result: holding that mutex proves no ensure
+			// runs, so any such folder is stale whatever its age.
+			switch opts.Action {
+			case "ensure":
+				removeStaleEnterpriseEnsureStages(programData, progress, stderr)
+			case "uninstall":
+				if release, err := acquireStandaloneSetupEnsure(); err == nil {
+					removeStaleEnterpriseEnsureStages(programData, progress, stderr)
+					release()
+				}
+			}
 			if err := requireEnterpriseSetupFreeSpace(programData, payload, opts.Action); err != nil {
 				return 0, err
 			}
@@ -917,6 +931,89 @@ func removeStaleEnterpriseSetupStages(programData string, now time.Time, minimum
 		}
 		fmt.Fprintf(progress, "%s: removed the staging folder an interrupted Setup run left, %s\n", standaloneSetupArtifactName, path)
 	}
+}
+
+// enterpriseSetupEnsureStagePrefix names the protected folder in which the
+// lifecycle of a standalone ensure stages its first guardian manifest
+// (internal/cli stageWindowsEnterpriseEnsureManifest): the prefix and 32
+// lowercase hex characters, holding at most targets.yaml.
+const enterpriseSetupEnsureStagePrefix = "DefenseClaw-Ensure-"
+
+// enterpriseSetupEnsureStageMaxBytes bounds the manifest a stale folder may
+// hold for it to be taken as DefenseClaw's.
+const enterpriseSetupEnsureStageMaxBytes = 16 << 20
+
+// validateEnterpriseEnsureStage is the trust check of a stale ensure
+// staging folder (owned by an administrator principal, no write for anyone
+// else); a seam for tests, whose temporary folders are not owned that way.
+var validateEnterpriseEnsureStage = func(path string) error {
+	return managed.ValidateTrustedRuntimeDir(path, "ensure manifest staging folder")
+}
+
+// removeStaleEnterpriseEnsureStages removes the manifest staging folders
+// that ensures a killed Setup stopped left in ProgramData
+// (rel-1-0-6:GAP-0342). The caller holds the ensure mutex. A folder is
+// taken only when its name, its owner and access list, and its content
+// prove it is one: DefenseClaw-Ensure-<32 lowercase hex>, a real folder
+// (no link), trusted, empty or holding only a regular targets.yaml of a
+// bounded size. Anything else is kept and reported to diagnostics.
+func removeStaleEnterpriseEnsureStages(programData string, progress, diagnostics io.Writer) {
+	entries, err := os.ReadDir(programData)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		capability, found := strings.CutPrefix(name, enterpriseSetupEnsureStagePrefix)
+		if !found || len(capability) != 32 || strings.Trim(capability, "0123456789abcdef") != "" {
+			continue
+		}
+		path := filepath.Join(programData, name)
+		if err := removeStaleEnterpriseEnsureStage(path); err != nil {
+			fmt.Fprintf(diagnostics, "%s: kept the ensure staging folder %s: %v\n", standaloneSetupArtifactName, path, err)
+			continue
+		}
+		fmt.Fprintf(progress, "%s: removed the ensure staging folder an interrupted Setup run left, %s\n", standaloneSetupArtifactName, path)
+	}
+}
+
+func removeStaleEnterpriseEnsureStage(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	attributes, ok := info.Sys().(*syscall.Win32FileAttributeData)
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !ok ||
+		attributes.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return errors.New("not a plain folder")
+	}
+	if err := validateEnterpriseEnsureStage(path); err != nil {
+		return err
+	}
+	children, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	if len(children) > 1 || (len(children) == 1 && children[0].Name() != "targets.yaml") {
+		return errors.New("it holds something other than targets.yaml")
+	}
+	if len(children) == 1 {
+		manifest := filepath.Join(path, "targets.yaml")
+		fileInfo, err := os.Lstat(manifest)
+		if err != nil {
+			return err
+		}
+		fileAttributes, ok := fileInfo.Sys().(*syscall.Win32FileAttributeData)
+		if !fileInfo.Mode().IsRegular() || !ok ||
+			fileAttributes.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+			fileInfo.Size() > enterpriseSetupEnsureStageMaxBytes {
+			return errors.New("its targets.yaml is not a plain bounded file")
+		}
+		if err := os.Remove(manifest); err != nil {
+			return err
+		}
+	}
+	return os.Remove(path)
 }
 
 func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions) []string {
