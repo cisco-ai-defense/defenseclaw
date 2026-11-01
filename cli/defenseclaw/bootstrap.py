@@ -87,6 +87,9 @@ class BootstrapReport:
     splunk_bridge_dest: str = ""  # "" if bundle missing, otherwise dest path
     splunk_bridge_preserved: bool = False
     openclaw_token_detected: bool = False
+    # Set when openclaw.json holds a gateway token DefenseClaw cannot read
+    # (a SecretRef, issue #1404); it never contains the token.
+    openclaw_token_notice: str = ""
     device_key_file: str = ""
     errors: list[str] = field(default_factory=list)
 
@@ -551,7 +554,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
 
     # --- gateway defaults (OpenClaw token detection) ---
     try:
-        report.openclaw_token_detected = _apply_gateway_defaults(cfg, report.is_new_config, logger)
+        report.openclaw_token_detected = _apply_gateway_defaults(cfg, report.is_new_config, logger, report)
     except Exception as exc:  # pragma: no cover — defensive
         report.errors.append(f"gateway defaults: {exc}")
 
@@ -994,6 +997,15 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             )
         else:
             setup.append(StepResult("Bootstrap", "pass", cfg.data_dir))
+        if bootstrap.openclaw_token_notice:
+            setup.append(
+                StepResult(
+                    "OpenClaw token",
+                    "warn",
+                    bootstrap.openclaw_token_notice,
+                    "defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN",
+                )
+            )
 
         _persist_first_run_secrets(cfg, options, setup)
 
@@ -2513,7 +2525,12 @@ def _seed_splunk_bridge(data_dir: str, report: BootstrapReport) -> None:
     report.splunk_bridge_dest = dest
 
 
-def _apply_gateway_defaults(cfg: Config, is_new_config: bool, logger: Logger | None = None) -> bool:
+def _apply_gateway_defaults(
+    cfg: Config,
+    is_new_config: bool,
+    logger: Logger | None = None,
+    report: BootstrapReport | None = None,
+) -> bool:
     """Sync gateway host/port/token from ``openclaw.json`` and dotenv.
 
     Returns True when a gateway token was detected (either from
@@ -2536,6 +2553,9 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool, logger: Logger | N
 
     A running gateway keeps the token it loaded until it restarts, so
     *logger* sends this run's audit events with that one (GAP-0490).
+
+    A SecretRef token DefenseClaw cannot read is skipped and its notice goes
+    on *report* (issue #1404).
     """
     from defenseclaw.commands.cmd_init import (
         _ensure_device_key,
@@ -2558,6 +2578,8 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool, logger: Logger | N
 
     token_configured = False
     token = gw.get("token", "")
+    if report is not None:
+        report.openclaw_token_notice = str(gw.get("token_notice", "") or "")
     if token:
         keep_running_gateway_token(logger, cfg.data_dir, cfg.gateway.resolved_token(), token)
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, cfg.data_dir)

@@ -2141,17 +2141,14 @@ class GatewayConfig:
         Returns the empty string when no token is reachable; callers
         gate on the truthiness, so empty == "unauthenticated".
         """
-        if self.token_env:
-            val = os.environ.get(self.token_env, "")
-            if val:
+        # SecretRef text an earlier build saved as a token is never one (#1404).
+        from defenseclaw.connector_paths import is_secret_ref_text
+
+        for name in (self.token_env, "DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
+            val = os.environ.get(name, "") if name else ""
+            if val and not is_secret_ref_text(val):
                 return val
-        val = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
-        if val:
-            return val
-        val = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
-        if val:
-            return val
-        return self.token
+        return "" if is_secret_ref_text(self.token) else self.token
 
 
 @dataclass
