@@ -54,7 +54,9 @@ func TestNSSAccountHomeAsksAFixedTrustedGetent(t *testing.T) {
 		{name: "hung lookup times out", script: "sleep 20", timeout: 300 * time.Millisecond, want: ""},
 		// Review 3 P4 rows: each reaches the check it pins.
 		{name: "home not owned by this uid", script: "echo \"u:*:" + me + ":1::/:/bin/sh\"", want: notRoot(uid, "")},
-		{name: "answer over 4 KiB", script: "printf 'u:*:" + me + ":1:" + strings.Repeat("g", 5000) + ":" + home + ":/bin/sh\\n'", want: ""},
+		// The padding is in the last (shell) field, so the line cut at 4 KiB
+		// still has 7 fields and a valid home: only the size cap refuses it.
+		{name: "answer over 4 KiB", script: "printf 'u:*:" + me + ":1::" + home + ":/bin/" + strings.Repeat("s", 5000) + "\\n'", want: ""},
 		{name: "answers only under the fixed environment", script: "[ \"$PATH\" = /usr/bin:/bin ] && [ \"$LC_ALL\" = C ] && [ -z \"$HOME\" ] && [ \"$(pwd)\" = / ] && echo \"u:*:" + me + ":1::" + home + ":/bin/sh\"", want: home},
 		{name: "home that exists but is not clean", script: "echo \"u:*:" + me + ":1::" + home + "/.:/bin/sh\"", want: ""},
 	} {
