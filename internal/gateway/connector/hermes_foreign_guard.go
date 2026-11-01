@@ -75,7 +75,7 @@ case "$DEFENSECLAW_GUARD_EVENT" in
           if defenseclaw_managed_lifecycle_held; then
             case "$DEFENSECLAW_GUARD_RESULT" in
               ""|*'"retryable":true'*)
-                defenseclaw_log_hook_failure hermes hermes-hook "managed lifecycle in progress" policy closed
+                defenseclaw_log_hook_failure hermes hermes-hook "managed lifecycle in progress" policy closed fail_closed
                 hermes_block transport "the DefenseClaw gateway is being installed or upgraded on this computer; try again in a moment."
                 exit 0
                 ;;
@@ -113,7 +113,7 @@ case "$DEFENSECLAW_GUARD_EVENT" in
               ;;
           esac
           DEFENSECLAW_GUARD_REASON="${DEFENSECLAW_GUARD_REASON:-enterprise_foreign_hook_check_failed}"
-          defenseclaw_log_hook_failure hermes hermes-hook "$DEFENSECLAW_GUARD_REASON" policy closed
+          defenseclaw_log_hook_failure hermes hermes-hook "$DEFENSECLAW_GUARD_REASON" policy closed fail_closed
           echo "defenseclaw: blocking hermes tool: $DEFENSECLAW_GUARD_REASON" >&2
           printf '%s\n' "$DEFENSECLAW_GUARD_OUTPUT"
           exit 0
