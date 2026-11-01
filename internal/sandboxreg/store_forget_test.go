@@ -83,36 +83,29 @@ func TestForgetOtherAccountsRemovesOnlyTheEarlierAccountsRegistrations(t *testin
 
 // rel-1-0-6:GAP-0262: saved decisions follow their account. A keyed
 // decision of another account goes. A decision saved before decisions
-// carried the key takes the key of its registration when that is known; one
-// whose registration is gone goes when the uid is known to have held another
-// account and is stamped with the current account's key otherwise (the first
-// start after the upgrade). A settled store is not written again.
+// carried the key takes the key keyOf gives it and goes when keyOf proves no
+// account. A settled store is not written again.
 func TestSettleAccountStampsLegacyDecisionsAndDropsTheEarlierAccounts(t *testing.T) {
 	const uid = 1012
 	oldKey, newKey := DigestPrefix+"old-account", DigestPrefix+"new-account"
+	s := NewFileDecisionStore(t.TempDir())
 	ids := make([]string, 5)
-	for i := range ids {
+	// 0 keyed old, 1 keyed new, 2 legacy keyOf new, 3 legacy keyOf old,
+	// 4 legacy keyOf none.
+	for i, key := range []string{oldKey, newKey, "", "", ""} {
 		id, err := NewID()
 		if err != nil {
 			t.Fatal(err)
 		}
 		ids[i] = id
-	}
-	seed := func(t *testing.T) *FileDecisionStore {
-		s := NewFileDecisionStore(t.TempDir())
-		// 0 keyed old, 1 keyed new, 2 legacy of a new registration, 3 legacy
-		// of an old registration, 4 legacy whose registration is gone.
-		for i, key := range []string{oldKey, newKey, "", "", ""} {
-			d := Decision{Registration: ids[i], Kind: sandboxrelay.DecisionEgressAllow, Host: "h" + string(rune('a'+i)) + ".example.com",
-				Scope: sandboxrelay.DecisionScopeAlways, SubjectKey: key}
-			if err := s.Add(uid, d); err != nil {
-				t.Fatal(err)
-			}
+		d := Decision{Registration: id, Kind: sandboxrelay.DecisionEgressAllow, Host: "h" + string(rune('a'+i)) + ".example.com",
+			Scope: sandboxrelay.DecisionScopeAlways, SubjectKey: key}
+		if err := s.Add(uid, d); err != nil {
+			t.Fatal(err)
 		}
-		return s
 	}
-	owner := func(id string) (string, bool) {
-		switch id {
+	keyOf := func(d Decision) (string, bool) {
+		switch d.Registration {
 		case ids[2]:
 			return newKey, true
 		case ids[3]:
@@ -120,45 +113,42 @@ func TestSettleAccountStampsLegacyDecisionsAndDropsTheEarlierAccounts(t *testing
 		}
 		return "", false
 	}
-	hosts := func(ds []Decision) string {
-		out := ""
-		for _, d := range ds {
-			if d.SubjectKey != newKey {
-				t.Fatalf("a kept decision is not stamped with the account's key: %+v", d)
-			}
-			out += d.Host[:2]
-		}
-		return out
+	if n, err := s.SettleAccount(uid, newKey, keyOf); err != nil || n != 3 {
+		t.Fatalf("dropped %d: %v", n, err)
 	}
-	t.Run("reused uid", func(t *testing.T) {
-		s := seed(t)
-		if n, err := s.SettleAccount(uid, newKey, owner, true); err != nil || n != 3 {
-			t.Fatalf("dropped %d: %v", n, err)
+	left, _ := s.List(uid, "")
+	hosts := ""
+	for _, d := range left {
+		if d.SubjectKey != newKey {
+			t.Fatalf("a kept decision is not the account's: %+v", d)
 		}
-		left, _ := s.List(uid, "")
-		if got := hosts(left); got != "hbhc" {
-			t.Fatalf("kept %q, want hb hc", got)
-		}
-		if n, err := s.SettleAccount(uid, newKey, owner, true); err != nil || n != 0 {
-			t.Fatalf("a settled store: dropped %d: %v", n, err)
-		}
-	})
-	t.Run("first start after the upgrade", func(t *testing.T) {
-		s := seed(t)
-		if n, err := s.SettleAccount(uid, newKey, owner, false); err != nil || n != 2 {
-			t.Fatalf("dropped %d: %v", n, err)
-		}
-		left, _ := s.List(uid, "")
-		if got := hosts(left); got != "hbhche" {
-			t.Fatalf("kept %q, want hb hc he", got)
-		}
-	})
-	if _, err := NewFileDecisionStore(t.TempDir()).SettleAccount(uid, "", nil, false); !errors.Is(err, ErrInvalid) {
+		hosts += d.Host[:2]
+	}
+	if hosts != "hbhc" {
+		t.Fatalf("kept %q, want hb hc", hosts)
+	}
+	if n, err := s.SettleAccount(uid, newKey, keyOf); err != nil || n != 0 {
+		t.Fatalf("a settled store: dropped %d: %v", n, err)
+	}
+	if _, err := s.SettleAccount(uid, "", keyOf); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("an empty subject key must be refused: %v", err)
 	}
-	mine, theirs := Registration{SubjectKey: newKey}, Registration{SubjectKey: oldKey}
-	keyed, legacy := Decision{SubjectKey: newKey}, Decision{}
-	if !keyed.AppliesTo(mine) || keyed.AppliesTo(theirs) || !legacy.AppliesTo(theirs) {
-		t.Fatal("AppliesTo must keep a keyed decision to its own account and a legacy one to any")
+}
+
+// Review 2 of rel-1-0-6:GAP-0262: a decision without the key applies only
+// inside its own registration; a keyed one to every registration of its
+// account and to no other.
+func TestDecisionAppliesToItsOwnRegistrationOrAccountOnly(t *testing.T) {
+	newKey, oldKey := DigestPrefix+"new-account", DigestPrefix+"old-account"
+	mine := Registration{ID: "reg-a", SubjectKey: newKey}
+	sibling := Registration{ID: "reg-b", SubjectKey: newKey}
+	theirs := Registration{ID: "reg-c", SubjectKey: oldKey}
+	legacy := Decision{Registration: "reg-c"}
+	keyed := Decision{Registration: "reg-a", SubjectKey: newKey}
+	if legacy.AppliesTo(mine) || legacy.AppliesTo(sibling) || !legacy.AppliesTo(theirs) {
+		t.Fatal("a legacy decision must apply only inside its own registration")
+	}
+	if !keyed.AppliesTo(mine) || !keyed.AppliesTo(sibling) || keyed.AppliesTo(theirs) {
+		t.Fatal("a keyed decision must apply to its account's registrations only")
 	}
 }

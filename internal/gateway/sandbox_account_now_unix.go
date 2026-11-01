@@ -21,6 +21,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -30,7 +31,9 @@ import (
 // peer identity spells it. The sandbox authority removes another account's
 // records only on this answer (rel-1-0-6:GAP-0262). Replaceable by tests.
 var sandboxAccountNow = func(uid int) (string, error) {
-	account, err := unixidentity.Default(context.Background()).LookupUID(uid)
+	ctx, cancel := context.WithTimeout(context.Background(), sandboxAccountNowTimeout)
+	defer cancel()
+	account, err := unixidentity.Default(ctx).LookupUID(uid)
 	if err != nil {
 		return "", err
 	}
@@ -39,3 +42,7 @@ var sandboxAccountNow = func(uid int) (string, error) {
 	}
 	return sanitizeLLMEventUser(account.Name), nil
 }
+
+// sandboxAccountNowTimeout bounds sandboxAccountNow, so a directory that
+// hangs holds a sandbox start no longer than a lookup that fails.
+const sandboxAccountNowTimeout = 5 * time.Second

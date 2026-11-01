@@ -66,7 +66,7 @@ type DecisionStore interface {
 	// SettleAccount stamps uid's decisions saved without a subject key and
 	// drops those of another account than subjectKey's; it returns how many
 	// it dropped (rel-1-0-6:GAP-0262).
-	SettleAccount(uid int, subjectKey string, owner func(registration string) (string, bool), reused bool) (int, error)
+	SettleAccount(uid int, subjectKey string, keyOf func(Decision) (string, bool)) (int, error)
 	// Purge removes the whole store.
 	Purge() error
 }

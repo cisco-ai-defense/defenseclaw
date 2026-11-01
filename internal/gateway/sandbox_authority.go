@@ -229,11 +229,16 @@ func (a *APIServer) sandboxAuth() (*sandboxAuthority, error) {
 // cache, names the same account. The decisions go first, and the
 // registrations only once that write is stored: a failed write or a crash in
 // between leaves the registrations, so the next start finds them and tries
-// again. A decision saved before 1.0.7 is stamped with its account's key on
-// the way (FileDecisionStore.SettleAccount); one whose registration is gone
-// but whose actor's directory principal is not the caller's is dropped as
-// another account's.
-func (a *APIServer) sandboxForgetPreviousAccounts(ctx context.Context, auth *sandboxAuthority, peer managedHookPeer, subjectKey string) {
+// again. While records are kept, none of them is served to the caller: a
+// decision without a subject key applies only inside its own registration
+// (Decision.AppliesTo).
+//
+// A decision saved before 1.0.7 takes the key of the registration it was made
+// in. One whose registration is gone takes the caller's key only when its
+// actor's directory principal is the caller's (principal, from the directory
+// facts the route just resolved); otherwise, a local account or a cold cache
+// included, it is dropped, which costs a new ask and never a grant.
+func (a *APIServer) sandboxForgetPreviousAccounts(auth *sandboxAuthority, peer managedHookPeer, subjectKey, principal string) {
 	uid := peer.UID
 	if subjectKey == "" || strings.TrimSpace(peer.Name) == "" {
 		return
@@ -256,24 +261,29 @@ func (a *APIServer) sandboxForgetPreviousAccounts(ctx context.Context, auth *san
 			return
 		}
 	}
-	// A legacy decision of a registration that is gone names no account,
-	// but its actor's directory principal can prove another one: both
-	// principals known and different (a principal the directory does not
-	// give now proves nothing).
-	principal := sandboxPrincipalHash(auth.key, sandboxPeerPrincipal(ctx))
-	for _, d := range saved {
-		if _, owned := owners[d.Registration]; !owned && d.SubjectKey == "" && principal != "" &&
-			d.Actor.PrincipalHash != "" && d.Actor.PrincipalHash != principal {
-			owners[d.Registration] = sandboxreg.DigestPrefix + "another-principal"
+	principalHash := sandboxPrincipalHash(auth.key, principal)
+	keyOf := func(d sandboxreg.Decision) (string, bool) {
+		if key, ok := owners[d.Registration]; ok {
+			return key, true
 		}
+		if principalHash != "" && d.Actor.PrincipalHash == principalHash {
+			return subjectKey, true
+		}
+		return "", false
 	}
 	settle := false
 	confirm := reused
 	for _, d := range saved {
-		owner, owned := owners[d.Registration]
-		owned = owned && owner == subjectKey
-		settle = settle || d.SubjectKey == "" || d.SubjectKey != subjectKey
-		confirm = confirm || (d.SubjectKey == "" && !owned) || (d.SubjectKey != "" && d.SubjectKey != subjectKey)
+		if d.SubjectKey == "" {
+			settle = true
+			if key, ok := keyOf(d); !ok || key != subjectKey || owners[d.Registration] == "" {
+				confirm = true
+			}
+			continue
+		}
+		if d.SubjectKey != subjectKey {
+			settle, confirm = true, true
+		}
 	}
 	if !reused && !settle {
 		return
@@ -290,8 +300,7 @@ func (a *APIServer) sandboxForgetPreviousAccounts(ctx context.Context, auth *san
 	}
 	dropped := 0
 	if settle {
-		owner := func(id string) (string, bool) { key, ok := owners[id]; return key, ok }
-		if dropped, err = auth.decisions.SettleAccount(uid, subjectKey, owner, reused); err != nil {
+		if dropped, err = auth.decisions.SettleAccount(uid, subjectKey, keyOf); err != nil {
 			fmt.Fprintf(os.Stderr, "[sandbox-authority] forget previous accounts uid=%d decisions: %v; the registrations stay until a later start\n", uid, err)
 			return
 		}
@@ -303,8 +312,17 @@ func (a *APIServer) sandboxForgetPreviousAccounts(ctx context.Context, auth *san
 		}
 	}
 	if len(gone) > 0 || dropped > 0 {
-		fmt.Fprintf(os.Stderr, "[sandbox-authority] uid=%d now belongs to another account than the one that registered %d sandbox registrations and %d saved decisions on it (a deleted or renamed account); removed them, the new account does not inherit them\n", uid, len(gone), dropped)
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] uid=%d: removed %d sandbox registrations and %d saved decisions another account (a deleted or renamed account) or an unproven earlier release left on it; the account that holds the uid does not inherit them\n", uid, len(gone), dropped)
 	}
+}
+
+// sandboxFactsPrincipal is the directory principal of facts as a decision's
+// actor records it (sandboxPeerPrincipal): the principal, else the UPN.
+func sandboxFactsPrincipal(facts useridentity.DirectoryFacts) string {
+	if facts.Principal != "" {
+		return facts.Principal
+	}
+	return facts.UPN
 }
 
 // sandboxSubjectKey is a registration's subject key: DigestPrefix and the

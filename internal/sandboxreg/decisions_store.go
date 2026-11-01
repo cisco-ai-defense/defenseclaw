@@ -189,16 +189,14 @@ func (s *FileDecisionStore) List(uid int, registration string) ([]Decision, erro
 
 // SettleAccount keeps uid's decisions to the account subjectKey names, the
 // account that holds the uid now (rel-1-0-6:GAP-0262). A decision saved
-// before decisions carried a subject key is stamped with the key of the
-// registration it was made in when owner knows that registration; one whose
-// registration is gone is dropped when reused is set (the uid is known to
-// have held another account) and stamped with subjectKey otherwise. Then
-// every decision of another account is dropped. It returns how many it
-// dropped; with nothing to stamp or drop, nothing is written. The caller
-// confirms subjectKey with the account database first.
-func (s *FileDecisionStore) SettleAccount(uid int, subjectKey string, owner func(registration string) (string, bool), reused bool) (int, error) {
-	if subjectKey == "" {
-		return 0, fmt.Errorf("%w: subject key is required", ErrInvalid)
+// before decisions carried a subject key gets the key keyOf gives it, or is
+// dropped when keyOf proves no account for it. Then every decision of
+// another account is dropped. It returns how many it dropped; with nothing
+// to stamp or drop, nothing is written. The caller confirms subjectKey with
+// the account database first.
+func (s *FileDecisionStore) SettleAccount(uid int, subjectKey string, keyOf func(Decision) (string, bool)) (int, error) {
+	if subjectKey == "" || keyOf == nil {
+		return 0, fmt.Errorf("%w: subject key and key source are required", ErrInvalid)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -210,16 +208,9 @@ func (s *FileDecisionStore) SettleAccount(uid int, subjectKey string, owner func
 	stamped := 0
 	for _, d := range ds {
 		if d.SubjectKey == "" {
-			key, ok := "", false
-			if owner != nil {
-				key, ok = owner(d.Registration)
-			}
-			switch {
-			case ok && key != "":
-			case reused:
+			key, ok := keyOf(d)
+			if !ok || key == "" {
 				continue
-			default:
-				key = subjectKey
 			}
 			d.SubjectKey = key
 			stamped++
