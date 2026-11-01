@@ -228,12 +228,13 @@ func (s *admissionState) forgetMCPIssuesNotListed(listed map[string]bool) {
 // dueIssues returns the skills and plugins whose unfinished admission is
 // due, and forgets those no longer in their folder. Each waits a full delay
 // before it is due again.
-func (s *admissionState) dueIssues(now time.Time, kinds ...string) []AdmissionIssue {
+func (s *admissionState) dueIssues(kinds ...string) []AdmissionIssue {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
 	var due []AdmissionIssue
 	changed := false
 	for path, issue := range s.issues {
@@ -278,7 +279,7 @@ func (s *admissionState) set(evt InstallEvent, state string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	since := time.Now().UTC()
+	since := s.now().UTC()
 	if prev, ok := s.assets[evt.Path]; ok {
 		since = prev.Since
 	}

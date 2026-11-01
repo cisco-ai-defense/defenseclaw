@@ -1693,15 +1693,18 @@ func TestFailedQuarantineIsRecordedAndRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	evt := InstallEvent{Type: InstallSkill, Name: "crit-k", Path: path, Timestamp: time.Now()}
+	clock := &fakeClock{now: time.Now()}
+	w.state.now = clock.Now
 	w.runAdmission(context.Background(), evt)
 	issues, err := ReadAdmissionIssues(cfg.DataDir)
 	if err != nil || len(issues) != 1 || issues[0].Kind != AdmissionNotQuarantined || issues[0].Account != "dcw-std1" {
 		t.Fatalf("issues %+v (err %v), want one not-quarantined issue of dcw-std1", issues, err)
 	}
-	if due := w.state.dueIssues(time.Now(), AdmissionNotQuarantined); len(due) != 0 {
+	if due := w.state.dueIssues(AdmissionNotQuarantined); len(due) != 0 {
 		t.Fatalf("due at once: %+v", due)
 	}
-	due := w.state.dueIssues(time.Now().Add(admissionRetryFirst), AdmissionNotQuarantined)
+	clock.advance(admissionRetryFirst)
+	due := w.state.dueIssues(AdmissionNotQuarantined)
 	if len(due) != 1 || due[0].Path != path {
 		t.Fatalf("due after the first delay: %+v", due)
 	}
@@ -1746,7 +1749,8 @@ func TestDueIssueOutsideTheWatchedFoldersIsNotRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
-	w.queueDueIssues(time.Now().Add(admissionRetryFirst))
+	w.state.now = func() time.Time { return time.Now().Add(admissionRetryFirst) }
+	w.queueDueIssues()
 	w.mu.Lock()
 	pending := maps.Clone(w.pending)
 	w.mu.Unlock()

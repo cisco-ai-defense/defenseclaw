@@ -1236,7 +1236,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 				}
 			}
-			w.queueDueIssues(time.Now())
+			w.queueDueIssues()
 			w.processPending(ctx)
 		}
 	}
@@ -1250,8 +1250,8 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 // HIGH alert on every retry (GAP-0574). Its install block and runtime
 // disable stay in the journal; a watcher that watches the folder again
 // retries it.
-func (w *InstallWatcher) queueDueIssues(now time.Time) {
-	for _, issue := range w.state.dueIssues(now, AdmissionUnscanned, AdmissionNotQuarantined) {
+func (w *InstallWatcher) queueDueIssues() {
+	for _, issue := range w.state.dueIssues(AdmissionUnscanned, AdmissionNotQuarantined) {
 		roots := w.sourceRootsFor(InstallType(issue.Type))
 		if !slices.ContainsFunc(roots, func(root string) bool { return watcherPathAtOrBelow(issue.Path, root) }) {
 			continue
