@@ -1589,6 +1589,95 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	)
 }
 
+// sshControlFileTitlePrefix opens the title of a block whose only SSH target
+// is a control file of ~/.ssh (config, environment, rc). The rule is the same,
+// persistence.ssh_authorized_keys_command, because a ProxyCommand or
+// LocalCommand line in those files runs code at ssh time and other code keys on
+// the rule id; only the words name the file that was hit (rel-1-0-6 GAP-0305).
+const sshControlFileTitlePrefix = "SSH control file mutation ("
+
+// sshControlFileTitle is the title for the control files in names.
+func sshControlFileTitle(names []string) string {
+	paths := make([]string, len(names))
+	for i, name := range names {
+		paths[i] = "~/.ssh/" + name
+	}
+	return sshControlFileTitlePrefix + strings.Join(paths, ", ") + ")"
+}
+
+// isSSHControlFileTitle reports a title sshControlFileTitle wrote: nothing
+// else is ship-authored text under that prefix.
+func isSSHControlFileTitle(title string) bool {
+	inner, ok := strings.CutPrefix(title, sshControlFileTitlePrefix)
+	if !ok {
+		return false
+	}
+	inner, ok = strings.CutSuffix(inner, ")")
+	if !ok || inner == "" {
+		return false
+	}
+	for _, path := range strings.Split(inner, ", ") {
+		name, found := strings.CutPrefix(path, "~/.ssh/")
+		if !found || !slices.Contains(hookpaths.SSHControlFiles[:], name) {
+			return false
+		}
+	}
+	return true
+}
+
+// sshControlFilesWritten names the ~/.ssh control files the call writes,
+// appends to or deletes, in the order of hookpaths.SSHControlFiles. It is nil
+// when the call also touches another file under .ssh (an authorized-keys file
+// keeps its own title) or touches none.
+func sshControlFilesWritten(facts actionfacts.Facts) []string {
+	hit := map[string]bool{}
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+		default:
+			continue
+		}
+		value := semanticPathValue(candidate)
+		_, after, found := strings.Cut(value, "/.ssh/")
+		if !found {
+			continue
+		}
+		if !slices.Contains(hookpaths.SSHControlFiles[:], after) {
+			return nil
+		}
+		hit[after] = true
+	}
+	var names []string
+	for _, name := range hookpaths.SSHControlFiles {
+		if hit[name] {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// withSSHControlFileTitle renames the authorized-keys finding of a call whose
+// only SSH target is a control file. The rule id, severity and the block stay.
+func withSSHControlFileTitle(facts actionfacts.Facts, findings []RuleFinding) []RuleFinding {
+	var title string
+	for i := range findings {
+		finding := &findings[i]
+		if finding.RuleID != "persistence.ssh_authorized_keys_command" ||
+			!strings.Contains(strings.ToLower(finding.Title), "authorized keys") {
+			continue
+		}
+		if title == "" {
+			names := sshControlFilesWritten(facts)
+			if len(names) == 0 {
+				return findings
+			}
+			title = sshControlFileTitle(names)
+		}
+		finding.Title = title
+	}
+	return findings
+}
+
 // trustedSudoersOnlyWrite reports a call that writes, appends or deletes at
 // least one path and only sudoers files (/etc/sudoers, /etc/sudoers.d/...).
 func trustedSudoersOnlyWrite(facts actionfacts.Facts) bool {

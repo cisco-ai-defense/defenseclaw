@@ -91,6 +91,9 @@ func trustedBuiltInFindingLabel(label string) bool {
 		return true
 	}
 	if title, ok := strings.CutPrefix(label, "persistence.ssh_authorized_keys_command:"); ok {
+		if isSSHControlFileTitle(title) {
+			return true
+		}
 		if classTitle, hasGuidance := strings.CutSuffix(title, unprovenWriteGuidance); hasGuidance &&
 			hookpaths.IsUnprovenWriteTitle(classTitle) {
 			return true

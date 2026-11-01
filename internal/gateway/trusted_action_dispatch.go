@@ -423,6 +423,16 @@ func dispatchTrustedActionWith(
 	budget *trustedActionBudget,
 	telemetry *trustedActionTelemetry,
 ) (findings []RuleFinding) {
+	// Registered first, so it runs after every other lane: a write of an SSH
+	// control file is named for the file (rel-1-0-6 GAP-0305).
+	// A compound call's own facts hold no paths (each simple command is
+	// judged on its own pass), so it keeps the keys title unless every
+	// target is proven; that is the conservative reading.
+	if !request.simpleCommandPass {
+		defer func() {
+			findings = withSSHControlFileTitle(facts, findings)
+		}()
+	}
 	// After every lane below, on what it returns (GAP-1469, GAP-1478).
 	defer func() {
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
