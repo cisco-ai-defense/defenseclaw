@@ -4488,6 +4488,51 @@ function Test-DefenseClawServicePendingDeleteFailure {
     return $Message.Contains('check="service_pending_delete"')
 }
 
+# A service whose delete is waiting for its last handle to close still
+# answers Get-Service and sc query as an ordinary stopped service; only its
+# registry key's DeleteFlag says SCM has already marked it for deletion.
+function Test-DefenseClawServiceMarkedForDelete {
+    param([Parameter(Mandatory)][string]$Name)
+    try {
+        $flag = Microsoft.PowerShell.Management\Get-ItemProperty `
+            -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" `
+            -Name DeleteFlag `
+            -ErrorAction Stop
+        return ([int]$flag.DeleteFlag -eq 1)
+    }
+    catch {
+        return $false
+    }
+}
+
+# Install and Upgrade stop here, before any service is touched, when one of
+# this scope's services is still marked for deletion: no create or configure
+# can succeed until SCM removes it.
+function Assert-DefenseClawServicesNotPendingDelete {
+    param(
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    foreach ($name in @(
+            $GatewayServiceName,
+            $GuardianServiceName,
+            (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName),
+            (Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName)
+        )) {
+        if ([string]::IsNullOrWhiteSpace([string]$name)) {
+            continue
+        }
+        if (Test-DefenseClawServiceMarkedForDelete -Name ([string]$name)) {
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_prereq -Fields @{
+                check   = 'service_pending_delete'
+                service = [string]$name
+                remedy  = 'restart Windows to finish deleting the service, then run Setup again'
+            }
+            throw (Get-DefenseClawServicePendingDeleteMessage -Name ([string]$name))
+        }
+    }
+}
+
 function Invoke-DefenseClawNative {
     param(
         [Parameter(Mandatory)][string]$File,
@@ -11188,6 +11233,12 @@ function New-DefenseClawTransaction {
     )
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
         throw 'refusing to open a lifecycle transaction while protected recovery state already exists'
+    }
+    if (-not $SkipRedactionKeySnapshot) {
+        # Install and Upgrade, not the uninstall/purge transaction.
+        Assert-DefenseClawServicesNotPendingDelete `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
     }
     if ($PriorDeploymentActive -and
         ($InstallRootCreatedForTransaction -or
@@ -28443,6 +28494,12 @@ function Invoke-DefenseClawNuclearUninstall {
         try {
             $svc = Microsoft.PowerShell.Management\Get-Service `
                 -Name $name -ErrorAction Stop
+            if (Test-DefenseClawServiceMarkedForDelete -Name $name) {
+                # sc delete succeeded but a handle (services.msc, an EDR
+                # agent, a test) still holds the row; SCM removes it when
+                # that handle closes, at the latest at the next restart.
+                return 'marked_for_delete'
+            }
             return $svc.Status.ToString().ToLowerInvariant()
         }
         catch {
