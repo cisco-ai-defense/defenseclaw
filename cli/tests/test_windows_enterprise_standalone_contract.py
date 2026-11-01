@@ -1484,9 +1484,20 @@ if ($result -cne 'passed' -or $script:rebound -ne $true) { throw "a stale activa
 # A first check that passes rebinds nothing.
 $result = Invoke-Case @('ok') @()
 if ($result -cne 'passed' -or $script:rebound -ne $false) { throw "a passing first check reported a rebinding: $result" }
-# No deleted account: the first refusal is given back at once, nothing restarted.
-$result = Invoke-Case @($outside) @()
-if ($result -notlike 'refused: *outside the deployment manifest*' -or ($script:log -join '|') -match 'stop Enum') { throw "a refusal without a deleted account was retried: $result" }
+# rel-1-0-6:GAP-0319: the scheduled enumerator pass ran before the check, so
+# the first refusal is the stale binding: rebound and asked again, no restart.
+$result = Invoke-Case @($stale, 'ok') @('rebound')
+if ($result -cne 'passed' -or $script:rebound -ne $true -or ($script:log -join '|') -match 'stop Enum') { throw "a stale first binding was not rebound without a restart: $result / $($script:log -join ' | ')" }
+# Still stale at the deadline: the first refusal comes back.
+$script:UninstallDeletedAccountWaitSeconds = 1
+$script:UninstallDeletedAccountPollSeconds = 1
+$result = Invoke-Case @($outside, $outside, $outside, $outside) @()
+if ($result -notlike 'refused: *outside the deployment manifest*' -or ($script:log -join '|') -match 'stop Enum') { throw "a catch-up refusal was not given back at the deadline: $result" }
+$script:UninstallDeletedAccountWaitSeconds = 20
+$script:UninstallDeletedAccountPollSeconds = 0
+# Any other first refusal is given back at once, nothing restarted.
+$result = Invoke-Case @('managed-hook teardown check failed: runtime selector is untrusted') @()
+if ($result -notlike 'refused: *runtime selector is untrusted*' -or ($script:log -join '|') -match 'stop Enum|sync') { throw "an unrelated first refusal was retried: $result" }
 # Another refusal during the wait is given back at once.
 $result = Invoke-Case @($deleted, 'managed-hook teardown check failed: runtime selector is untrusted') @()
 if ($result -notlike 'refused: *runtime selector is untrusted*') { throw "an unrelated refusal was swallowed: $result" }
