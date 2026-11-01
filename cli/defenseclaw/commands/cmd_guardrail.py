@@ -64,6 +64,7 @@ from defenseclaw import ux
 from defenseclaw.config import (
     _assert_config_write_allowed,
     config_path_for_data_dir,
+    gateway_pid_path,
     outage_block_hint,
     saved_hook_fail_mode_scope,
 )
@@ -3751,7 +3752,7 @@ def _gateway_running(app: AppContext) -> bool:
     from defenseclaw.process_liveness import pid_file_alive
 
     try:
-        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+        return pid_file_alive(gateway_pid_path(app.cfg.data_dir))
     except Exception:  # noqa: BLE001 — an unreadable PID file means "not running".
         return False
 

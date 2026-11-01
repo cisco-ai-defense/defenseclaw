@@ -559,12 +559,97 @@ def config_path() -> Path:
 
 
 def config_path_for_data_dir(data_dir: str | os.PathLike[str] | None = None) -> Path:
-    """Return the active config path for a caller-scoped data directory."""
+    """Return the active config path for a caller-scoped data directory.
+
+    ``defenseclaw config set data_dir`` leaves config.yaml in the install home
+    (``~/.defenseclaw``), so a data_dir without its own config.yaml is run by
+    the account config that names it (:func:`gateway_home_for_data_dir`).
+    """
     if os.environ.get(CONFIG_PATH_ENV):
         return config_path()
     if data_dir:
-        return Path(data_dir) / CONFIG_FILE_NAME
+        return Path(os.path.join(gateway_home_for_data_dir(data_dir), CONFIG_FILE_NAME))
     return config_path()
+
+
+GATEWAY_PID_FILE_NAME = "gateway.pid"
+
+# (path, st_dev, st_ino, st_size, st_mtime_ns) -> the data_dir that config names.
+_home_data_dir_cache: dict[tuple[str, int, int, int, int], str | None] = {}
+
+
+def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
+    """The folder that holds the account config.yaml and gateway.pid for ``data_dir``.
+
+    The gateway reads config.yaml and keeps its PID records in the install
+    home (``DEFENSECLAW_HOME``, else ``~/.defenseclaw``), and keeps its stores,
+    hooks and connector state under the data_dir that config names. While the
+    two are one folder this is ``data_dir``. After ``defenseclaw config set
+    data_dir`` they differ: joining config.yaml to the data folder made every
+    config write create a second config.yaml there, without the account ports
+    (rel-1-0-6 GAP-0232), and setup read the default API port and found no
+    gateway.pid, so it rolled the connector back while the gateway served
+    (GAP-0230). The Go hook runtime had the same gap (GAP-0224). A data_dir
+    holding any config.yaml entry stays its own home, so the default layout
+    and a managed install are unchanged.
+    """
+    own = os.fspath(data_dir)
+    try:
+        os.lstat(os.path.join(own, CONFIG_FILE_NAME))
+        return own
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return own
+    if os.environ.get(CONFIG_PATH_ENV):
+        return own
+    try:
+        home = os.fspath(default_data_path())
+    except (OSError, KeyError, NotImplementedError):
+        return own
+    configured = _home_config_data_dir(os.path.join(home, CONFIG_FILE_NAME))
+    if configured and _same_folder(configured, own):
+        return home
+    return own
+
+
+def gateway_pid_path(data_dir: str | os.PathLike[str]) -> str:
+    """Path of the gateway's PID record for the install that uses ``data_dir``."""
+    return os.path.join(gateway_home_for_data_dir(data_dir), GATEWAY_PID_FILE_NAME)
+
+
+def _home_config_data_dir(path: str) -> str | None:
+    """The data_dir the account config.yaml names, resolved; None when it names none."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    if key in _home_data_dir_cache:
+        return _home_data_dir_cache[key]
+    resolved: str | None = None
+    try:
+        raw = parse_config_yaml(read_config_text(path))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raw = None
+    if isinstance(raw, dict):
+        configured = raw.get("data_dir")
+        if isinstance(configured, str) and configured.strip():
+            resolved = _configured_data_dir(raw, os.path.dirname(path))
+    if len(_home_data_dir_cache) > 32:
+        _home_data_dir_cache.clear()
+    _home_data_dir_cache[key] = resolved
+    return resolved
+
+
+def _same_folder(a: str, b: str) -> bool:
+    def norm(value: str) -> str:
+        return os.path.normcase(os.path.realpath(_expand_store_home(value.strip())))
+
+    try:
+        return norm(a) == norm(b)
+    except (OSError, ValueError):
+        return False
 
 
 def _expand(p: str) -> str:

@@ -33,7 +33,7 @@ from pathlib import Path
 import click
 
 from defenseclaw import ux
-from defenseclaw.config import config_path
+from defenseclaw.config import config_path, gateway_pid_path
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed
 from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
@@ -749,7 +749,7 @@ def _live_gateway_pid(cfg) -> int:
     try:
         from defenseclaw.commands.cmd_doctor import _read_pid_from_file
 
-        return _read_pid_from_file(os.path.join(data_dir, "gateway.pid"))
+        return _read_pid_from_file(gateway_pid_path(data_dir))
     except Exception:  # noqa: BLE001 - status stays best effort
         return 0
 

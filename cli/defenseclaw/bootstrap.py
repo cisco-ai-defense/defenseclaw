@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from defenseclaw import platform_support
+from defenseclaw.config import gateway_pid_path
 from defenseclaw.connector_paths import (
     amp_policy_plugin_path,
     connector_config_files,
@@ -1175,7 +1176,7 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
         steps.append(_agent_installation_readiness(cfg, connector))
 
     if options.start_gateway:
-        pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+        pid_file = gateway_pid_path(cfg.data_dir)
         running = _pid_file_running(pid_file)
         steps.append(
             StepResult(
@@ -2006,7 +2007,7 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
     gw = shutil.which("defenseclaw-gateway")
     if not gw:
         return StepResult("Sidecar", "warn", "defenseclaw-gateway not on PATH", "make gateway-install")
-    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(cfg.data_dir)
     if _pid_file_running(pid_file):
         # Compare what the live sidecar booted with against what
         # the just-saved config says it *should* be running. Drift
