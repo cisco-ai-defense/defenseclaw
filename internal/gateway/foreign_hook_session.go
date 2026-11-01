@@ -135,7 +135,7 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		}
 		if refusal := writeFencedForeignHookAllow(w, decision, answerBy); refusal != "" {
 			// The allow was not answered: its clean-session entry goes too.
-			if runtime.GOOS != "windows" {
+			if enterprisepolicy.ForeignHookCleanMirrorOS(runtime.GOOS) {
 				_ = dropForeignHookCleanMirrors(foreignHookCleanMirrorRoot(dataDir), identity, exchange.Key)
 			}
 			release()
@@ -202,7 +202,7 @@ func (a *APIServer) applyForeignHookSessionOnce(
 	// An allow already close to its hold gets none: a removal of the account
 	// may go on once the hold has passed.
 	cleanRoot := ""
-	if runtime.GOOS != "windows" {
+	if enterprisepolicy.ForeignHookCleanMirrorOS(runtime.GOOS) {
 		cleanRoot = foreignHookCleanMirrorRoot(dataDir)
 	}
 	if cleanRoot != "" && !decision.Deny && removalsErr == nil && time.Until(answerBy) > foreignHookFencedWriteTimeout {

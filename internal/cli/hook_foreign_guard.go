@@ -531,7 +531,7 @@ func hookForeignGuardCleanSessionOutage(name string, update enterprisepolicy.Ses
 	}
 	// Session-local connectors never get here (they return before the
 	// exchange).
-	if hookForeignGuardGOOS != "linux" && hookForeignGuardGOOS != "darwin" {
+	if !enterprisepolicy.ForeignHookCleanMirrorOS(hookForeignGuardGOOS) {
 		return false
 	}
 	if update.Key.Process == "" {
