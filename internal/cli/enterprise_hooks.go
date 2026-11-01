@@ -2097,7 +2097,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			//     rewrites these during normal use. Create, Remove,
 			//     and Rename are real tamper signals; Write and Chmod
 			//     are the agent doing its own thing
-			//     and the 5-min backstop handles any in-place stripping.
+			//     and the periodic reconcile (--interval, 1 minute as
+			//     installed) handles any in-place stripping.
 			//
 			// Events on unowned paths (agent session state, sqlite
 			// WAL churn, cache writes, workspace snapshots) are

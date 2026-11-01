@@ -2133,6 +2133,19 @@ func (s *Sidecar) retryManagedInspector(ctx context.Context, api *APIServer) {
 // [Sidecar.pickInspector] and the proxy-swap block in runGuardrail).
 // Both call sites always read a fresh cfg snapshot, so this helper does
 // too.
+// cmidLibraryName is the Cloud Management identity library the platform's
+// CMID provider loads, for operator-facing diagnostics.
+func cmidLibraryName() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "cmidapi.dll"
+	case "darwin":
+		return "libcmidapi.dylib"
+	default:
+		return "the Cloud Management identity library"
+	}
+}
+
 func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Inspector {
 	cfg := s.currentConfig()
 	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
@@ -2164,8 +2177,8 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 		fmt.Fprintf(os.Stderr,
 			"[managed-cloud] CMID provider constructed but not yet ready (%s): %v — "+
 				"inspector will retry per-inspect; enforcement is fail-open until "+
-				"libcmidapi.dylib becomes loadable\n",
-			siteLabel, err)
+				"%s becomes loadable\n",
+			siteLabel, err, cmidLibraryName())
 	}
 	m := NewCiscoDefenseClawInspectClient(&cfg.CiscoAIDefense, prov)
 	if m == nil {
