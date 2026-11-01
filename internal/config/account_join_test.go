@@ -18,15 +18,18 @@ func TestValidateAccountJoin(t *testing.T) {
 	}{
 		{"absent", EnterpriseAccountJoinConfig{}, true},
 		{"off", EnterpriseAccountJoinConfig{Mode: "off"}, true},
-		{"on", EnterpriseAccountJoinConfig{Mode: "on", Generation: 1}, true},
-		{"overlap", EnterpriseAccountJoinConfig{Mode: "on", Generation: 1, NextGeneration: 2, NextNotAfter: soon}, true},
+		{"on", EnterpriseAccountJoinConfig{Mode: "on", Generation: 1, SecretSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, true},
+		{"on without a digest", EnterpriseAccountJoinConfig{Mode: "on", Generation: 1}, false},
+		{"bad digest", EnterpriseAccountJoinConfig{Mode: "on", Generation: 1, SecretSHA256: "ABC"}, false},
+		{"next without its digest", EnterpriseAccountJoinConfig{Mode: "on", Generation: 1, SecretSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NextGeneration: 2, NextNotAfter: soon}, false},
+		{"overlap", EnterpriseAccountJoinConfig{Mode: "on", Generation: 1, SecretSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NextGeneration: 2, NextSecretSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NextNotAfter: soon}, true},
 		{"unknown mode", EnterpriseAccountJoinConfig{Mode: "yes", Generation: 1}, false},
 		{"on without a generation", EnterpriseAccountJoinConfig{Mode: "on"}, false},
 		{"negative generation", EnterpriseAccountJoinConfig{Mode: "on", Generation: -1}, false},
-		{"next not above", EnterpriseAccountJoinConfig{Mode: "on", Generation: 2, NextGeneration: 2, NextNotAfter: soon}, false},
-		{"next without not_after", EnterpriseAccountJoinConfig{Mode: "on", Generation: 1, NextGeneration: 2}, false},
-		{"not_after without next", EnterpriseAccountJoinConfig{Mode: "on", Generation: 1, NextNotAfter: soon}, false},
-		{"bad not_after", EnterpriseAccountJoinConfig{Mode: "on", Generation: 1, NextGeneration: 2, NextNotAfter: "next week"}, false},
+		{"next not above", EnterpriseAccountJoinConfig{Mode: "on", SecretSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NextSecretSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Generation: 2, NextGeneration: 2, NextNotAfter: soon}, false},
+		{"next without not_after", EnterpriseAccountJoinConfig{Mode: "on", SecretSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NextSecretSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Generation: 1, NextGeneration: 2}, false},
+		{"not_after without next", EnterpriseAccountJoinConfig{Mode: "on", SecretSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NextSecretSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Generation: 1, NextNotAfter: soon}, false},
+		{"bad not_after", EnterpriseAccountJoinConfig{Mode: "on", SecretSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NextSecretSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Generation: 1, NextGeneration: 2, NextNotAfter: "next week"}, false},
 	} {
 		if err := validateAccountJoin(tc.c); (err == nil) != tc.ok {
 			t.Errorf("%s: %v", tc.name, err)

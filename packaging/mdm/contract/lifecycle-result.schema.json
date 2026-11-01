@@ -122,7 +122,7 @@
     },
     "openshell": { "$ref": "#/$defs/openshellCapability", "description": "status and verify, standalone profile, from 1.0.3: whether users on this host can run DefenseClaw sandboxes and on which driver. Windows always reports platform_unsupported. Optional." },
     "identity": { "$ref": "#/$defs/identityHealth", "description": "status and verify, standalone profile, from 1.0.3: the gateway's directory lookups, from its /health. Source tokens, counts and ages only. Optional." },
-    "account_join": { "$ref": "#/$defs/accountJoin", "description": "status and verify run as root or an administrator, standalone profile, from 1.0.7, only while enterprise.account_join is on: the account join keys of the accounts that ran an agent on this device in the last 30 days (at most 64). Keys and reason codes only; never an account name, identifier or secret. Optional." },
+    "account_join": { "$ref": "#/$defs/accountJoin", "description": "status and verify run as root or an administrator, standalone profile, from 1.0.7, only while enterprise.account_join is on: how many account join keys each generation has for the enrolled accounts the guardian saw in the last 30 days (at most 64), and reason codes. Never a key, an account name, an identifier or a secret: the keys are only in the output of enterprise account-keys. Optional." },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },
@@ -443,16 +443,16 @@
         "state": { "enum": ["on", "off", "unavailable"], "description": "on: keys were computed; unavailable: on, but no generation could be reported (reason_codes say why)." },
         "generations": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/accountJoinGeneration" } },
         "accounts_without_key": { "type": "integer", "minimum": 0 },
-        "reason_codes": { "type": "array", "items": { "enum": ["feature_off", "secret_missing", "secret_malformed", "secret_unreadable", "no_directory_id", "canonicalization_failed", "next_generation_expired", "generation_invalid", "generation_rollback", "tenant_missing", "account_cap"] } }
+        "reason_codes": { "type": "array", "items": { "enum": ["feature_off", "secret_missing", "secret_malformed", "secret_unreadable", "no_directory_id", "canonicalization_failed", "next_generation_expired", "generation_invalid", "generation_rollback", "generation_state_unreadable", "secret_mismatch", "tenant_missing", "account_cap"] } }
       }
     },
     "accountJoinGeneration": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generation", "account_keys"],
+      "required": ["generation", "key_count"],
       "properties": {
         "generation": { "type": "integer", "minimum": 1 },
-        "account_keys": { "type": "array", "maxItems": 64, "items": { "type": "string", "pattern": "^ak1:[1-9][0-9]*:[0-9a-f]{32}$" } }
+        "key_count": { "type": "integer", "minimum": 0, "maximum": 64 }
       }
     },
     "identitySource": {

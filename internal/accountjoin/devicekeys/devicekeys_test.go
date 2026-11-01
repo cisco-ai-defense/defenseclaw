@@ -4,7 +4,9 @@
 package devicekeys
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -19,6 +21,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
+
+func digest(value []byte) string {
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
+}
 
 func secretText(last byte) []byte {
 	b := make([]byte, accountjoin.SecretBytes)
@@ -44,7 +51,7 @@ func newDevice(t *testing.T) *device {
 	root := t.TempDir()
 	d := &device{t: t, spool: filepath.Join(root, "spool"), state: filepath.Join(root, StateFileName),
 		secrets: map[string][]byte{accountjoin.SecretName: secretText(0x1f)},
-		cfg:     config.EnterpriseAccountJoinConfig{Mode: config.AccountJoinOn, Generation: 1},
+		cfg:     config.EnterpriseAccountJoinConfig{Mode: config.AccountJoinOn, Generation: 1, SecretSHA256: digest(secretText(0x1f))},
 		now:     time.Date(2026, 10, 31, 22, 0, 0, 0, time.UTC), goos: "linux"}
 	if err := os.MkdirAll(d.spool, 0o700); err != nil {
 		t.Fatal(err)
@@ -144,7 +151,7 @@ func TestRefreshRetentionRotationAndRollback(t *testing.T) {
 		t.Fatalf("retention: %s", text(report))
 	}
 	d.secrets[accountjoin.NextSecretName] = secretText(0xee)
-	d.cfg.NextGeneration, d.cfg.NextNotAfter = 2, d.now.Add(7*24*time.Hour).Format(time.RFC3339)
+	d.cfg.NextGeneration, d.cfg.NextNotAfter, d.cfg.NextSecretSHA256 = 2, d.now.Add(7*24*time.Hour).Format(time.RFC3339), digest(secretText(0xee))
 	report := d.report()
 	if len(report.Generations) != 2 || report.Generations[1].Generation != 2 ||
 		report.Generations[1].AccountKeys[0] != keyOf(t, 2, "upn:alice@contoso.com", 0xee) {
@@ -153,13 +160,13 @@ func TestRefreshRetentionRotationAndRollback(t *testing.T) {
 	// Promotion: the next secret becomes the current one.
 	d.secrets[accountjoin.SecretName] = secretText(0xee)
 	delete(d.secrets, accountjoin.NextSecretName)
-	d.cfg = config.EnterpriseAccountJoinConfig{Mode: config.AccountJoinOn, Generation: 2}
+	d.cfg = config.EnterpriseAccountJoinConfig{Mode: config.AccountJoinOn, Generation: 2, SecretSHA256: digest(secretText(0xee))}
 	if report := d.report(); len(report.Generations) != 1 || report.Generations[0].Generation != 2 {
 		t.Fatalf("promotion: %s", text(report))
 	}
 	// Going back to generation 1 is refused.
 	d.secrets[accountjoin.SecretName] = secretText(0x1f)
-	d.cfg.Generation = 1
+	d.cfg.Generation, d.cfg.SecretSHA256 = 1, digest(secretText(0x1f))
 	if report := d.report(); report.State != "unavailable" || len(report.Generations) != 0 || text(report.ReasonCodes) != `["generation_rollback"]` {
 		t.Fatalf("rollback: %s", text(report))
 	}
@@ -187,6 +194,7 @@ func TestOffMissingAndUnreadableSecrets(t *testing.T) {
 		t.Fatalf("unreadable: %s", text(report))
 	}
 	d.secrets[accountjoin.SecretName] = []byte("short")
+	d.cfg.SecretSHA256 = digest([]byte("short"))
 	if report := d.report(); report.State != "unavailable" || text(report.ReasonCodes) != `["secret_malformed"]` {
 		t.Fatalf("malformed: %s", text(report))
 	}
@@ -202,5 +210,39 @@ func TestWindowsUsesTheSIDOfADomainAccountOnly(t *testing.T) {
 	report := d.report()
 	if len(report.Generations[0].AccountKeys) != 1 || report.Generations[0].AccountKeys[0] != keyOf(t, 1, "sid:S-1-5-21-1-2-3-1105", 0x1f) || report.AccountsWithoutKey != 1 {
 		t.Fatalf("windows: %s", text(report))
+	}
+}
+
+// A half-applied promotion (config at the new generation, the old secret
+// still stored) reports nothing and does not raise the recorded generation;
+// a corrupt generation record reports nothing; a kept UPN gets no key.
+func TestPromotionBindingStateAndKeptUPN(t *testing.T) {
+	d := newDevice(t)
+	d.enroll("1001", "alice@contoso.com", enterprisehooks.UPNSourceInfoPipe, "", d.now)
+	d.cfg = config.EnterpriseAccountJoinConfig{Mode: config.AccountJoinOn, Generation: 2, SecretSHA256: digest(secretText(0xee))}
+	if report := d.report(); report.State != "unavailable" || text(report.ReasonCodes) != `["secret_mismatch"]` {
+		t.Fatalf("half-applied promotion: %s", text(report))
+	}
+	if _, err := os.Stat(d.state); !os.IsNotExist(err) {
+		t.Fatalf("a mismatch must not record a generation: %v", err)
+	}
+	if err := os.WriteFile(d.state, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.cfg = config.EnterpriseAccountJoinConfig{Mode: config.AccountJoinOn, Generation: 1, SecretSHA256: digest(secretText(0x1f))}
+	if report := d.report(); report.State != "unavailable" || text(report.ReasonCodes) != `["generation_state_unreadable"]` {
+		t.Fatalf("corrupt state: %s", text(report))
+	}
+	if err := os.Remove(d.state); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{Version: 1, Key: "1002", UpdatedAt: d.now,
+		UPNSource: enterprisehooks.UPNSourceInfoPipe, UPNKeptSince: d.now.Add(-time.Hour), Facts: useridentity.DirectoryFacts{UPN: "kept@contoso.com"}})
+	if err := os.WriteFile(filepath.Join(d.spool, "1002.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report := d.report()
+	if report.AccountsWithoutKey != 1 || strings.Contains(text(report), keyOf(t, 1, "upn:kept@contoso.com", 0x1f)) {
+		t.Fatalf("kept UPN: %s", text(report))
 	}
 }

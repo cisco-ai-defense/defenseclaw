@@ -8,30 +8,41 @@ package enterpriseunix
 import (
 	"path/filepath"
 
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 	"github.com/defenseclaw/defenseclaw/internal/accountjoin/devicekeys"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// describeAccountJoin adds the account_join block to a status or verify run
-// as root while the installed config turns enterprise.account_join on. The
-// keys are computed here, from the verified bundle tenant, the protected
-// tenant secrets and the guardian's identity spool, and never stored.
+// describeAccountJoin adds the account_join summary (counts and reason
+// codes, no key) to a status or verify run as root while the installed
+// config turns enterprise.account_join on.
 func (l *lifecycle) describeAccountJoin() {
-	env := l.env
+	if report := l.env.AccountJoinReport(); report != nil {
+		summary := report.Summary()
+		l.result.AccountJoin = &summary
+	}
+}
+
+// AccountJoinReport computes the account join keys for a caller running as
+// root while the installed config turns enterprise.account_join on; nil
+// otherwise. The keys are computed from the verified bundle tenant, the
+// protected tenant secrets and the guardian's identity spool, and never
+// stored.
+func (env *Env) AccountJoinReport() *accountjoin.Report {
 	if env.Geteuid() != 0 {
-		return
+		return nil
 	}
 	raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
 	if err != nil {
-		return
+		return nil
 	}
 	cfg, err := env.loadConfigCandidate(raw)
 	if err != nil || cfg == nil || !cfg.Enterprise.AccountJoin.On() {
-		return
+		return nil
 	}
-	l.result.AccountJoin = devicekeys.Report(devicekeys.Sources{
+	return devicekeys.Report(devicekeys.Sources{
 		Config:       cfg.Enterprise.AccountJoin,
 		SecureClient: managed.IsSecureClientProfile(cfg.Enterprise.Profile),
 		Tenant: func() (string, error) {

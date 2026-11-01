@@ -61,12 +61,17 @@ func Report(s Sources) *accountjoin.Report {
 			in.Tenant = tenant
 		}
 	}
-	highest := readHighest(s.StatePath)
+	highest, ok := readHighest(s.StatePath)
+	if !ok {
+		return &accountjoin.Report{State: "unavailable", ReasonCodes: []string{accountjoin.ReasonGenerationStateUnreadable}}
+	}
 	in.Generations = accountjoin.Generations{
-		Current:      uint32(s.Config.Generation),
-		Next:         uint32(s.Config.NextGeneration),
-		NextNotAfter: s.Config.NextNotAfterTime(),
-		Highest:      highest,
+		Current:       uint32(s.Config.Generation),
+		CurrentSHA256: s.Config.SecretSHA256,
+		Next:          uint32(s.Config.NextGeneration),
+		NextSHA256:    s.Config.NextSecretSHA256,
+		NextNotAfter:  s.Config.NextNotAfterTime(),
+		Highest:       highest,
 	}
 	var secretErr bool
 	if s.ReadSecret != nil {
@@ -112,13 +117,15 @@ func appendReason(reasons []string, reason string) []string {
 	return append(reasons, reason)
 }
 
-// SpoolAccounts lists the accounts of the identity spool with only the
-// identifiers the guardian verified: on Linux the SID SSSD holds for the uid
-// (the account's domain objectSid), on Windows the record's SID when the
-// directory translated it to a UPN (a domain account; local accounts have
-// none), and the UPN only from InfoPipe, the macOS identity store or the
-// Windows name translation (never a derived or kept one). LastSeen is when
-// the guardian last wrote the record.
+// SpoolAccounts lists the accounts of the identity spool (the enrolled
+// accounts the guardian resolved) with only the identifiers the guardian
+// verified: on Linux the SID SSSD holds for the uid (the account's domain
+// objectSid), on Windows the record's SID when the directory translated it
+// to a UPN (a domain account; local accounts have none), and the UPN only
+// from InfoPipe, the macOS identity store or the Windows name translation
+// (never a derived or kept one). LastSeen is when the guardian last wrote
+// the record. The macOS guardian records no verified identifier yet, so a
+// macOS account gets no key.
 func SpoolAccounts(dir string, trust func(path, label string) error, goos string) []accountjoin.Account {
 	var out []accountjoin.Account
 	if dir == "" || trust == nil {
@@ -131,7 +138,9 @@ func SpoolAccounts(dir string, trust func(path, label string) error, goos string
 		case enterprisehooks.UPNSourceInfoPipe, enterprisehooks.UPNSourceIdentityStore, enterprisehooks.UPNSourceTranslateName:
 			verifiedUPN = true
 		}
-		if verifiedUPN {
+		// A UPN kept from an earlier pass is not one the directory verified
+		// now.
+		if verifiedUPN && record.UPNKeptSince.IsZero() {
 			account.UPN = strings.TrimSpace(record.Facts.UPN)
 		}
 		switch goos {
@@ -152,19 +161,25 @@ type highestRecord struct {
 	HighestGeneration uint32 `json:"highest_generation"`
 }
 
-func readHighest(path string) uint32 {
+// readHighest reads the highest generation reported; ok is false for a
+// record that exists but cannot be read, which reports nothing until an
+// administrator removes it.
+func readHighest(path string) (uint32, bool) {
 	if path == "" {
-		return 0
+		return 0, true
 	}
 	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, true
+	}
 	if err != nil || len(data) > 4096 {
-		return 0
+		return 0, false
 	}
 	var record highestRecord
 	if json.Unmarshal(data, &record) != nil {
-		return 0
+		return 0, false
 	}
-	return record.HighestGeneration
+	return record.HighestGeneration, true
 }
 
 func writeHighest(path string, highest uint32) error {

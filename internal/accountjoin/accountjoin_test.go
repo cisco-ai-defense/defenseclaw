@@ -4,6 +4,7 @@
 package accountjoin
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -171,7 +172,12 @@ func TestSecretFormat(t *testing.T) {
 }
 
 func generations(now time.Time) Generations {
-	return Generations{Current: 3, CurrentSecret: vectorSecretText(), Highest: 3}
+	return Generations{Current: 3, CurrentSecret: vectorSecretText(), CurrentSHA256: sha(vectorSecretText()), Highest: 3}
+}
+
+func sha(value []byte) string {
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
 }
 
 func TestRotationStateMachine(t *testing.T) {
@@ -196,16 +202,19 @@ func TestRotationStateMachine(t *testing.T) {
 		wantHighest uint32
 	}{
 		{"current only", generations(now), []uint32{3}, "", 3},
-		{"overlap", Generations{Current: 3, CurrentSecret: vectorSecretText(), Next: 4, NextSecret: nextSecret(), NextNotAfter: now.Add(24 * time.Hour), Highest: 3}, []uint32{3, 4}, "", 3},
-		{"promotion", Generations{Current: 4, CurrentSecret: nextSecret(), Highest: 3}, []uint32{4}, "", 4},
-		{"next removed without promotion", Generations{Current: 3, CurrentSecret: vectorSecretText(), Next: 4, Highest: 3}, []uint32{3}, "", 3},
-		{"next expired", Generations{Current: 3, CurrentSecret: vectorSecretText(), Next: 4, NextSecret: nextSecret(), NextNotAfter: now, Highest: 3}, []uint32{3}, ReasonNextGenerationExpired, 3},
-		{"next overlap beyond 30 days", Generations{Current: 3, CurrentSecret: vectorSecretText(), Next: 4, NextSecret: nextSecret(), NextNotAfter: now.Add(31 * 24 * time.Hour), Highest: 3}, []uint32{3}, ReasonGenerationInvalid, 3},
-		{"next not above current", Generations{Current: 3, CurrentSecret: vectorSecretText(), Next: 3, NextSecret: nextSecret(), NextNotAfter: now.Add(time.Hour), Highest: 3}, []uint32{3}, ReasonGenerationInvalid, 3},
-		{"lower generation refused", Generations{Current: 2, CurrentSecret: vectorSecretText(), Highest: 3}, []uint32{}, ReasonGenerationRollback, 3},
+		{"overlap", Generations{Current: 3, CurrentSecret: vectorSecretText(), CurrentSHA256: sha(vectorSecretText()), Next: 4, NextSecret: nextSecret(), NextSHA256: sha(nextSecret()), NextNotAfter: now.Add(24 * time.Hour), Highest: 3}, []uint32{3, 4}, "", 3},
+		{"promotion", Generations{Current: 4, CurrentSecret: nextSecret(), CurrentSHA256: sha(nextSecret()), Highest: 3}, []uint32{4}, "", 4},
+		{"next removed without promotion", Generations{Current: 3, CurrentSecret: vectorSecretText(), CurrentSHA256: sha(vectorSecretText()), Next: 4, Highest: 3}, []uint32{3}, "", 3},
+		{"next expired", Generations{Current: 3, CurrentSecret: vectorSecretText(), CurrentSHA256: sha(vectorSecretText()), Next: 4, NextSecret: nextSecret(), NextSHA256: sha(nextSecret()), NextNotAfter: now, Highest: 3}, []uint32{3}, ReasonNextGenerationExpired, 3},
+		{"next overlap beyond 30 days", Generations{Current: 3, CurrentSecret: vectorSecretText(), CurrentSHA256: sha(vectorSecretText()), Next: 4, NextSecret: nextSecret(), NextSHA256: sha(nextSecret()), NextNotAfter: now.Add(31 * 24 * time.Hour), Highest: 3}, []uint32{3}, ReasonGenerationInvalid, 3},
+		{"next not above current", Generations{Current: 3, CurrentSecret: vectorSecretText(), CurrentSHA256: sha(vectorSecretText()), Next: 3, NextSecret: nextSecret(), NextSHA256: sha(nextSecret()), NextNotAfter: now.Add(time.Hour), Highest: 3}, []uint32{3}, ReasonGenerationInvalid, 3},
+		{"lower generation refused", Generations{Current: 2, CurrentSecret: vectorSecretText(), CurrentSHA256: sha(vectorSecretText()), Highest: 3}, []uint32{}, ReasonGenerationRollback, 3},
 		{"missing secret", Generations{Current: 3, Highest: 3}, []uint32{}, ReasonSecretMissing, 3},
-		{"malformed secret, no fallback to next", Generations{Current: 3, CurrentSecret: []byte("short"), Next: 4, NextSecret: nextSecret(), NextNotAfter: now.Add(time.Hour)}, []uint32{4}, ReasonSecretMalformed, 0},
+		{"malformed secret, no fallback to next", Generations{Current: 3, CurrentSecret: []byte("short"), CurrentSHA256: sha([]byte("short")), Next: 4, NextSecret: nextSecret(), NextSHA256: sha(nextSecret()), NextNotAfter: now.Add(time.Hour)}, []uint32{4}, ReasonSecretMalformed, 0},
 		{"no generation", Generations{CurrentSecret: vectorSecretText()}, []uint32{}, ReasonGenerationInvalid, 0},
+		{"current secret is not the signed value", Generations{Current: 3, CurrentSecret: vectorSecretText(), CurrentSHA256: sha(nextSecret()), Highest: 3}, []uint32{}, ReasonSecretMismatch, 3},
+		{"half-applied promotion: config at 4, old secret stored", Generations{Current: 4, CurrentSecret: vectorSecretText(), CurrentSHA256: sha(nextSecret()), Highest: 3}, []uint32{}, ReasonSecretMismatch, 3},
+		{"next secret is not the signed value", Generations{Current: 3, CurrentSecret: vectorSecretText(), CurrentSHA256: sha(vectorSecretText()), Next: 4, NextSecret: nextSecret(), NextSHA256: sha(vectorSecretText()), NextNotAfter: now.Add(time.Hour), Highest: 3}, []uint32{3}, ReasonSecretMismatch, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			slots, reasons, highest := Plan(tc.g, now)
@@ -279,7 +288,7 @@ func TestNothingEchoesTheSecretOrTheInput(t *testing.T) {
 	canaries := []string{string(vectorSecretText()), hex.EncodeToString(vectorSecret()), base64.StdEncoding.EncodeToString(vectorSecret()),
 		canarySID, "424242", canaryUPN, "canary.person", "canary-domain", "canary-tenant"}
 	var outputs []string
-	report, _ := Compute(Input{On: true, Tenant: "canary-tenant", Generations: Generations{Current: 1, CurrentSecret: vectorSecretText()}, Now: now,
+	report, _ := Compute(Input{On: true, Tenant: "canary-tenant", Generations: Generations{Current: 1, CurrentSecret: vectorSecretText(), CurrentSHA256: sha(vectorSecretText())}, Now: now,
 		Accounts: []Account{{SID: canarySID, LastSeen: now}, {UPN: canaryUPN, LastSeen: now}, {UPN: "bad " + canaryUPN, LastSeen: now}, {SID: canarySID + "-x", LastSeen: now}}})
 	outputs = append(outputs, jsonText(report))
 	for _, value := range []string{canaryUPN + "@x", "bad " + canaryUPN} {
@@ -298,5 +307,14 @@ func TestNothingEchoesTheSecretOrTheInput(t *testing.T) {
 				t.Fatalf("output %q carries %q", out, canary)
 			}
 		}
+	}
+}
+
+func TestSummaryCarriesNoKey(t *testing.T) {
+	now := time.Date(2026, 10, 31, 22, 0, 0, 0, time.UTC)
+	report, _ := Compute(Input{On: true, Tenant: "t", Generations: generations(now), Now: now, Accounts: []Account{{UPN: "a@b", LastSeen: now}}})
+	summary := jsonText(report.Summary())
+	if strings.Contains(summary, "ak1:") || !strings.Contains(summary, `"key_count":1`) {
+		t.Fatalf("summary: %s", summary)
 	}
 }

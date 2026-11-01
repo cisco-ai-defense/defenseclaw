@@ -578,7 +578,7 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 		}
 		if err := accountJoinSecretFormatError(opts.name, value); err != nil {
 			clear(value)
-			return nil, false, nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+			return nil, false, nil, secretFailed("secret_malformed", enterprisestatus.UnixExitInvalidArgs, err)
 		}
 	}
 	change := &unixSecretChange{env: env, action: action, opts: opts, value: value, caller: caller}

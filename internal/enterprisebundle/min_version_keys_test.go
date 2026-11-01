@@ -76,7 +76,7 @@ func TestOlderBundleWithRemovedConnectorRefusedByFloor(t *testing.T) {
 
 // A bundle that sets enterprise.account_join needs min_product_version 1.0.7.
 func TestComposeRequiresProductFloorForAccountJoin(t *testing.T) {
-	config := strings.Replace(bundleConfig(t), "  profile: standalone\n", "  profile: standalone\n  account_join:\n    mode: on\n    generation: 1\n", 1)
+	config := strings.Replace(bundleConfig(t), "  profile: standalone\n", "  profile: standalone\n  account_join:\n    mode: on\n    generation: 1\n    secret_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", 1)
 	for _, tc := range []struct {
 		min    string
 		refuse bool

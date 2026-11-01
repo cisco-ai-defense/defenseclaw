@@ -17,9 +17,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// windowsAccountJoinReport is the account_join block of an elevated status
-// or verify while the installed config turns enterprise.account_join on;
-// nil otherwise. The keys are computed here and never stored.
+// windowsAccountJoinReport computes the account join keys for an elevated
+// caller while the installed config turns enterprise.account_join on; nil
+// otherwise. The keys are computed here and never stored: status and
+// verify carry only their summary.
 func windowsAccountJoinReport(cfg *config.Config, layout managed.StandaloneLayout) *accountjoin.Report {
 	if cfg == nil || !cfg.Enterprise.AccountJoin.On() || !windowsEnterpriseIsElevated() {
 		return nil
@@ -39,7 +40,8 @@ func windowsAccountJoinReport(cfg *config.Config, layout managed.StandaloneLayou
 			return anchors.TenantID, nil
 		},
 		ReadSecret: func(name string) ([]byte, error) {
-			value, _, err := managed.ResolveServiceCredential(name, layout.SecretsDir)
+			// As the gateway service account the store grants read to.
+			value, _, err := managed.ResolveServiceCredentialAs(name, layout.SecretsDir, windowsSecretGatewayAccount)
 			return value, err
 		},
 		SpoolDir:   enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir)),

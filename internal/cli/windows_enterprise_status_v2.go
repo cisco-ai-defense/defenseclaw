@@ -48,7 +48,8 @@ type windowsEnterpriseStatusV2Inputs struct {
 	machinePolicy  func(connector string) bool
 	gatewayHealth  func() ([]byte, error)
 	knownConnector func(connector string) bool
-	// accountJoin computes the account_join block (nil: omitted).
+	// accountJoin computes the account join keys (nil: omitted); the
+	// result carries only their summary.
 	accountJoin func() *accountjoin.Report
 }
 
@@ -143,7 +144,10 @@ func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 		result.Identity = enterprisestatus.ParseIdentityHealth(body)
 	}
 	if in.accountJoin != nil {
-		result.AccountJoin = in.accountJoin()
+		if report := in.accountJoin(); report != nil {
+			summary := report.Summary()
+			result.AccountJoin = &summary
+		}
 	}
 }
 

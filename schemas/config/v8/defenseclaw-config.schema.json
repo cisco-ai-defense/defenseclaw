@@ -5372,6 +5372,14 @@
               "minimum": 0,
               "maximum": 2147483647
             },
+            "secret_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "next_secret_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
             "next_not_after": {
               "type": "string",
               "format": "date-time"

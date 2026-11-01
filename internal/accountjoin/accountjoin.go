@@ -67,6 +67,12 @@ const (
 	ReasonGenerationRollback     = "generation_rollback"
 	ReasonTenantMissing          = "tenant_missing"
 	ReasonAccountCap             = "account_cap"
+	// ReasonSecretMismatch: the stored secret is not the value the signed
+	// config binds to its generation (secret_sha256, next_secret_sha256).
+	ReasonSecretMismatch = "secret_mismatch"
+	// ReasonGenerationStateUnreadable: the record of the highest generation
+	// reported cannot be read; nothing is reported until it is removed.
+	ReasonGenerationStateUnreadable = "generation_state_unreadable"
 )
 
 // Error is a failure named only by its reason code.
@@ -283,13 +289,16 @@ func lengthPrefixed(fields ...string) []byte {
 }
 
 // Generations is the tenant secret state on the device. The generation
-// numbers and next_not_after come from the administrator's signed config;
-// the secrets from the managed credential store (nil when not stored).
+// numbers, the SHA-256 of each secret value and next_not_after come from
+// the administrator's signed config; the secrets from the managed
+// credential store (nil when not stored).
 type Generations struct {
 	Current       uint32
 	CurrentSecret []byte
+	CurrentSHA256 string
 	Next          uint32
 	NextSecret    []byte
+	NextSHA256    string
 	NextNotAfter  time.Time
 	// Highest is the highest generation this device applied before.
 	Highest uint32
@@ -317,6 +326,8 @@ func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest
 		reasons = append(reasons, ReasonGenerationInvalid)
 	case g.Current < g.Highest:
 		reasons = append(reasons, ReasonGenerationRollback)
+	case !valueMatches(g.CurrentSecret, g.CurrentSHA256):
+		reasons = append(reasons, ReasonSecretMismatch)
 	default:
 		secret, err := ParseSecret(g.CurrentSecret)
 		if err != nil {
@@ -334,6 +345,8 @@ func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest
 			reasons = append(reasons, ReasonGenerationInvalid)
 		case !now.Before(g.NextNotAfter):
 			reasons = append(reasons, ReasonNextGenerationExpired)
+		case !valueMatches(g.NextSecret, g.NextSHA256):
+			reasons = append(reasons, ReasonSecretMismatch)
 		default:
 			secret, err := ParseSecret(g.NextSecret)
 			if err != nil {
@@ -344,6 +357,38 @@ func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest
 		}
 	}
 	return slots, reasons, highest
+}
+
+// valueMatches reports whether the stored value (as stored, one line) has
+// the signed SHA-256 (lowercase hex).
+func valueMatches(value []byte, want string) bool {
+	sum := sha256.Sum256([]byte(strings.TrimRight(string(value), "\r\n")))
+	return want != "" && hmac.Equal([]byte(hex.EncodeToString(sum[:])), []byte(strings.ToLower(strings.TrimSpace(want))))
+}
+
+// Summary is the account_join block of a status document: counts and
+// reason codes, never a key (the keys are only in the output of
+// `enterprise account-keys`).
+type Summary struct {
+	State              string            `json:"state"`
+	Generations        []GenerationCount `json:"generations,omitempty"`
+	AccountsWithoutKey int               `json:"accounts_without_key,omitempty"`
+	ReasonCodes        []string          `json:"reason_codes,omitempty"`
+}
+
+// GenerationCount is how many keys a generation has.
+type GenerationCount struct {
+	Generation uint32 `json:"generation"`
+	KeyCount   int    `json:"key_count"`
+}
+
+// Summary drops the keys of r.
+func (r Report) Summary() Summary {
+	s := Summary{State: r.State, AccountsWithoutKey: r.AccountsWithoutKey, ReasonCodes: r.ReasonCodes}
+	for _, g := range r.Generations {
+		s.Generations = append(s.Generations, GenerationCount{Generation: g.Generation, KeyCount: len(g.AccountKeys)})
+	}
+	return s
 }
 
 // GenerationKeys are the keys of one generation, sorted.

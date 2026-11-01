@@ -30,8 +30,8 @@ func TestStatusV2SchemaDescribesEveryMember(t *testing.T) {
 		"#/$defs/openshellCapability":   reflect.TypeOf(OpenShellCapability{}),
 		"#/$defs/identityHealth":        reflect.TypeOf(IdentityHealth{}),
 		"#/$defs/identitySource":        reflect.TypeOf(IdentitySource{}),
-		"#/$defs/accountJoin":           reflect.TypeOf(accountjoin.Report{}),
-		"#/$defs/accountJoinGeneration": reflect.TypeOf(accountjoin.GenerationKeys{}),
+		"#/$defs/accountJoin":           reflect.TypeOf(accountjoin.Summary{}),
+		"#/$defs/accountJoinGeneration": reflect.TypeOf(accountjoin.GenerationCount{}),
 	} {
 		contracttest.RequireMembers(t, lifecycleSchema+pointer, typ)
 	}
