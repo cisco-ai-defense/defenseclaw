@@ -20,6 +20,7 @@ func TestMacOSADNode(t *testing.T) {
 		{"two Active Directory nodes", "AppleMetaNodeLocation:\n /Active Directory/CORP/All Domains\n /Active Directory/OTHER/All Domains\n", "", false},
 		{"path trick", "OriginalNodeName:\n /Active Directory/CORP/../../Local/Default\n", "", false},
 		{"no domain part", "OriginalNodeName:\n /Active Directory/CORP\n", "", false},
+		{"a deeper path", "OriginalNodeName:\n /Active Directory/CORP/corp.example.com/extra\n", "", false},
 		// dscl prints a value with spaces on its own indented line; one
 		// printed on the attribute line is split and names no node.
 		{"node on the attribute line", "OriginalNodeName: /Active Directory/CORP/All Domains\n", "", false},

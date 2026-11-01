@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,32 +70,6 @@ func checkMacOSRecordUID(dscl string, uid int) error {
 		return fmt.Errorf("record belongs to another account (UniqueID %d, not uid %d)", got, uid)
 	}
 	return nil
-}
-
-// macOSAccountSID is the SID of a macOS Active Directory account, read from
-// its domain's node (read runs `dscl <node> -read /Users/<name> UniqueID
-// SMBSID`): the record there must be the uid's (checkMacOSRecordUID) and
-// name exactly one domain account SID. "" for any other account, a node
-// that does not answer (the domain is away: no SID this pass) or a record
-// that does not match. This is the directory-verified identifier the
-// account join key uses, as the SSSD SID on Linux (rel-1-0-6:GAP-0275).
-func macOSAccountSID(facts useridentity.DirectoryFacts, search string, uid int, read func(node string) string) string {
-	if facts.Directory != useridentity.DirectoryActiveDirectory {
-		return ""
-	}
-	node, ok := useridentity.MacOSADNode(search)
-	if !ok {
-		return ""
-	}
-	out := read(node)
-	if out == "" || checkMacOSRecordUID(out, uid) != nil {
-		return ""
-	}
-	sid, ok := useridentity.MacOSDirectorySID(out)
-	if !ok {
-		return ""
-	}
-	return sid
 }
 
 // identitySpoolLookupTimeout bounds the privileged lookups for one account,
@@ -226,6 +201,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil {
 				previousRecorded = true
 				previousMapless = previous.AccountIncarnation == "" && previous.LegacyOwnerToken == ""
+				record = carryMacOSAccountSID(record, previous)
 				binding := UPNBindingUnknown
 				bind := func(upn string) UPNBinding {
 					// Without a SID on the record it would be checked against,
@@ -588,6 +564,14 @@ func identitySpoolDirectoryDeparture(ctx context.Context, dir, name string) iden
 	return identitySpoolSameIdentity(record, fresh, err == nil)
 }
 
+// identitySpoolMissingSIDIsAnotherIdentity: on Linux SSSD keeps an
+// account's SID through an outage, so a record without one predates the
+// SID (1.0.3 and older) and cannot be bound to the account the lookup now
+// resolves. On macOS a record of 1.0.6 or older has none either, and one
+// written while the domain was away before any pass reached it: there the
+// SID is compared only when both have one (rel-1-0-6:GAP-0275 review).
+var identitySpoolMissingSIDIsAnotherIdentity = runtime.GOOS == "linux"
+
 // identitySpoolSameIdentity compares a record's directory identity with
 // fresh, what the directory answers for its uid now; complete says every
 // lookup of fresh succeeded. Each fact both name must agree, the account's
@@ -606,7 +590,7 @@ func identitySpoolSameIdentity(record, fresh IdentitySpoolRecord, complete bool)
 		}
 		return identitySpoolDepartureUnknown
 	}
-	if fresh.AccountSID != "" && record.AccountSID == "" {
+	if fresh.AccountSID != "" && record.AccountSID == "" && identitySpoolMissingSIDIsAnotherIdentity {
 		// Older spool records may lack the account's immutable SID. A
 		// matching uid, name and domain cannot bind their UPN to the
 		// account whose SID the current lookup resolved.

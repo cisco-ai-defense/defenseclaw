@@ -148,7 +148,7 @@ func MacOSADNode(searchOutput string) (string, bool) {
 		node = value
 	}
 	parts := strings.Split(node, "/")
-	if node == "" || len(parts) < 4 || strings.ContainsAny(node, "\x00\n\r\t") {
+	if node == "" || len(parts) != 4 || strings.ContainsAny(node, "\x00\n\r\t") {
 		return "", false
 	}
 	for _, part := range parts[2:] {
@@ -157,6 +157,11 @@ func MacOSADNode(searchOutput string) (string, bool) {
 		}
 	}
 	return node, true
+}
+
+// MacOSGeneratedUIDs are the GeneratedUID values of a dscl -read.
+func MacOSGeneratedUIDs(output string) []string {
+	return parseDSCLAttributes(output)["GeneratedUID"]
 }
 
 // macOSDomainSID is a domain account SID: S-1-5-21, three sub-authorities
