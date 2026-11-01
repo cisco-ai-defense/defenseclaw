@@ -74,6 +74,128 @@ func TestGAP0456OverBudgetWrappers(t *testing.T) {
 	}
 }
 
+func TestGAP0456ForwardedChildBoundaryCells(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("POSIX home fixture requires an unprivileged Unix user")
+	}
+	homes := filepath.Join(t.TempDir(), "homes")
+	home := filepath.Join(homes, "alice")
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gap0568StateFile(t, home)
+	t.Setenv("HOME", home)
+	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
+	rows := []struct {
+		name, command string
+		block         bool
+	}{
+		{"static child at bound", `run() { "$@"; }; ` + gap0568Assignments(125) + `; run sh -c 'echo ok'`, false},
+		{"static child over bound", `run() { "$@"; }; ` + gap0568Assignments(126) + `; run sh -c 'printf c >> ~/.defenseclaw/config.yaml'`, true},
+		{"variable child at bound", `run() { "$@"; }; f=run; ` + gap0568Assignments(124) + `; "$f" sh -c 'echo ok'`, false},
+		{"variable child over bound", `run() { "$@"; }; f=run; ` + gap0568Assignments(125) + `; "$f" sh -c 'printf c >> ~/.defenseclaw/config.yaml'`, true},
+		{"multi-step child at bound", `run() { :; "$@"; }; ` + gap0568Assignments(124) + `; run sh -c 'echo ok'`, false},
+		{"multi-step child over bound", `run() { :; "$@"; }; ` + gap0568Assignments(125) + `; run sh -c 'printf c >> ~/.defenseclaw/config.yaml'`, true},
+	}
+	for _, row := range rows {
+		if got := actionfacts.ShellStatementsOverBudget(row.command); got != row.block {
+			t.Errorf("%s: budget=%t, want %t", row.name, got, row.block)
+		}
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		api := instructionProtectionTestAPI(t, connector, "action", "HIGH")
+		for _, managed := range []bool{false, true} {
+			for _, row := range rows {
+				got := gap0568HookAction(t, api, connector, home, cwd, row.command, true, managed)
+				if (got == "block") != row.block {
+					t.Errorf("%s managed=%t %s: %s, want block=%t", connector, managed, row.name, got, row.block)
+				}
+			}
+		}
+	}
+}
+
+func TestGAP0448AndGAP0462Round9StateReadings(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("POSIX home fixture requires an unprivileged Unix user")
+	}
+	homes := filepath.Join(t.TempDir(), "homes")
+	home := filepath.Join(homes, "alice")
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gap0568StateFile(t, home)
+	t.Setenv("HOME", home)
+	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
+	steps := make([]string, 200)
+	for i := range steps {
+		steps[i] = fmt.Sprintf("Write-Host 'step %d'", i)
+	}
+	psPad := strings.Join(steps, "\n") + "\n"
+	shPad := gap0568Assignments(200) + "; "
+	state := "~/.defenseclaw/config.yaml"
+	rows := []struct {
+		name, command    string
+		powerShell, hold bool
+	}{
+		{"block comment separator", psPad + "Get-Content " + state + " <# harmless ; note #>", true, false},
+		{"block comment then writer", psPad + "Get-Content " + state + " <# harmless ; note #>; Set-Content -Path " + state + " -Value x", true, true},
+		{"line comment separator", psPad + "Get-Content notes.txt # ; Set-Content " + state + " -Value x", true, false},
+		{"line comment after list separator", psPad + "Get-Content notes.txt;# ; Set-Content " + state + " -Value x", true, false},
+		{"line comment then writer", psPad + "Get-Content notes.txt # ; ignored\nSet-Content -Path " + state + " -Value x", true, true},
+		{"unrelated date", psPad + "Get-Date; Get-Content " + state, true, false},
+		{"unrelated sleep", psPad + "Start-Sleep -Milliseconds 1; Get-Content " + state, true, false},
+		{"literal overwrite", psPad + "$p = Join-Path $HOME '.defenseclaw/config.yaml'; $p = 'notes.txt'; Set-Content -Path $p -Value x", true, false},
+		{"read overwrite", psPad + "$p = Get-Item " + state + "; $p = Join-Path $HOME 'notes.txt'; Set-Content -Path $p -Value x", true, false},
+		{"out variable writer", psPad + "Get-Item " + state + " -OutVariable p; Set-Content -Path $p[0].FullName -Value x", true, true},
+		{"out variable alias writer", psPad + "Get-Item " + state + " -ov p; Set-Content -Path $p[0].FullName -Value x", true, true},
+		{"out variable overwritten", psPad + "Get-Item " + state + " -OutVariable p; Get-Item notes.txt -OutVariable p; Set-Content -Path $p[0].FullName -Value x", true, false},
+		{"pipeline writer", psPad + "Get-Item " + state + " | ForEach-Object { Set-Content -Path $_.FullName -Value x }", true, true},
+		{"pipeline writer continued", psPad + "Get-Item " + state + " |\nForEach-Object { Set-Content -Path $_.FullName -Value x }", true, true},
+		{"pipeline PSItem writer", psPad + "Get-Item " + state + " | ForEach-Object { Set-Content -Path $PSItem.FullName -Value x }", true, true},
+		{"pipeline select writer", psPad + "Get-Item " + state + " | Select-Object -ExpandProperty FullName | ForEach-Object { Set-Content -Path $_ -Value x }", true, true},
+		{"pipeline where writer", psPad + "Get-Item " + state + " | Where-Object { Test-Path $_.FullName } | ForEach-Object { Set-Content -Path $_.FullName -Value x }", true, true},
+		{"pipeline pass-through writer", psPad + "Get-Item " + state + " | ForEach-Object { $_.FullName } | ForEach-Object { Set-Content -Path $_ -Value x }", true, true},
+		{"pipeline select read", psPad + "Get-Item " + state + " | Select-Object -ExpandProperty FullName | ForEach-Object { Test-Path $_ }", true, false},
+		{"pipeline read", psPad + "Get-Item " + state + " | ForEach-Object { Test-Path $_.FullName }", true, false},
+		{"pipeline read continued", psPad + "Get-Item " + state + " |\nForEach-Object { Test-Path $_.FullName }", true, false},
+		{"logical or is not a pipeline", psPad + "Get-Item " + state + " || Get-Content notes.txt", true, false},
+		{"pipeline discard", psPad + "Get-Item " + state + " | Out-Null", true, false},
+		{"earlier function", `echo() { printf c >> "$1"; }; ` + shPad + "echo " + state, false, true},
+		{"later function", shPad + "echo " + state + `; echo() { printf c >> "$1"; }`, false, false},
+		{"later function repeated read", shPad + "echo " + state + "; echo " + state + `; echo() { printf c >> "$1"; }`, false, false},
+		{"earlier alias", `alias echo='printf c >>'; ` + shPad + "echo " + state, false, true},
+		{"later alias", shPad + "echo " + state + `; alias echo='printf c >>'`, false, false},
+	}
+	old := codexShellRunsPowerShell
+	codexShellRunsPowerShell = true
+	t.Cleanup(func() { codexShellRunsPowerShell = old })
+	for _, row := range rows {
+		_, overflow, ok := hookpaths.StateNamingReading(row.command, home, row.powerShell)
+		if !ok || overflow != row.hold {
+			t.Errorf("%s: reading ok=%t hold=%t, want %t", row.name, ok, overflow, row.hold)
+		}
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		api := instructionProtectionTestAPI(t, connector, "observe", "HIGH")
+		for _, managed := range []bool{false, true} {
+			for _, row := range rows {
+				tool := "Bash"
+				if row.powerShell && connector == "claudecode" {
+					tool = "PowerShell"
+				}
+				got := gap0568ToolHookAction(t, api, connector, tool, home, cwd, row.command, true, managed)
+				wantBlock := managed && row.hold
+				if (got == "block") != wantBlock {
+					t.Errorf("%s managed=%t %s: %s, want block=%t", connector, managed, row.name, got, wantBlock)
+				}
+			}
+		}
+	}
+}
+
 // TestGAP0458ReadNamesNeedStableBinding holds a state path behind
 // ProtectHome when an earlier statement can change the read command's
 // binding. The ordinary unmodified read remains the benign twin.

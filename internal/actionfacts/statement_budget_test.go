@@ -9,6 +9,14 @@ import (
 	"testing"
 )
 
+func budgetAssignments(n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = fmt.Sprintf("a%d=1", i)
+	}
+	return strings.Join(parts, "; ")
+}
+
 func TestShellStatementsOverBudgetDynamicFunctions(t *testing.T) {
 	assignments := func(n int) string {
 		parts := make([]string, n)
@@ -34,6 +42,30 @@ func TestShellStatementsOverBudgetDynamicFunctions(t *testing.T) {
 		if got := ShellStatementsOverBudget(tc.command); got != tc.over {
 			t.Errorf("%s: budget=%t, want %t", tc.name, got, tc.over)
 		}
+	}
+}
+
+func TestShellStatementsOverBudgetForwardedStaticChild(t *testing.T) {
+	for _, tc := range []struct {
+		name, command string
+		over          bool
+	}{
+		{"forwarded at bound", `run() { "$@"; }; ` + budgetAssignments(125) + `; run sh -c 'echo ok'`, false},
+		{"forwarded beyond bound", `run() { "$@"; }; ` + budgetAssignments(126) + `; run sh -c 'echo ok'`, true},
+		{"forwarded state write", `run() { "$@"; }; ` + budgetAssignments(126) + `; run sh -c 'printf c >> ~/.defenseclaw/config.yaml'`, true},
+		{"variable call at bound", `run() { "$@"; }; f=run; ` + budgetAssignments(124) + `; "$f" sh -c 'echo ok'`, false},
+		{"variable call beyond bound", `run() { "$@"; }; f=run; ` + budgetAssignments(125) + `; "$f" sh -c 'printf c >> ~/.defenseclaw/config.yaml'`, true},
+		{"nested wrappers at bound", `outer() { inner "$@"; }; inner() { "$@"; }; ` + budgetAssignments(124) + `; outer sh -c 'echo ok'`, false},
+		{"nested wrappers beyond bound", `outer() { inner "$@"; }; inner() { "$@"; }; ` + budgetAssignments(125) + `; outer sh -c 'echo ok'`, true},
+		{"command wrapper beyond bound", `run() { command "$@"; }; ` + budgetAssignments(126) + `; run sh -c 'echo ok'`, true},
+		{"multi-step wrapper at bound", `run() { :; "$@"; }; ` + budgetAssignments(124) + `; run sh -c 'echo ok'`, false},
+		{"multi-step wrapper beyond bound", `run() { :; "$@"; }; ` + budgetAssignments(125) + `; run sh -c 'printf c >> ~/.defenseclaw/config.yaml'`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ShellStatementsOverBudget(tc.command); got != tc.over {
+				t.Errorf("over budget = %t, want %t", got, tc.over)
+			}
+		})
 	}
 }
 

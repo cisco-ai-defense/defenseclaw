@@ -57,6 +57,8 @@ func posixStructuralStatementsOverBudget(command string) bool {
 		return false
 	}
 	functions := make(map[string]*syntax.Stmt)
+	variables := make(map[string]string)
+	var forwardedArgs []*syntax.Word
 	count := 0
 	var statements func([]*syntax.Stmt, int)
 	var statement func(*syntax.Stmt, int)
@@ -111,6 +113,19 @@ func posixStructuralStatementsOverBudget(command string) bool {
 			return
 		case *syntax.CallExpr:
 			count++
+			if len(cmd.Args) == 0 {
+				for _, assign := range cmd.Assigns {
+					if assign.Name == nil {
+						continue
+					}
+					value, known := simpleStaticWord(assign.Value, variables)
+					if known {
+						variables[assign.Name.Value] = value
+					} else {
+						delete(variables, assign.Name.Value)
+					}
+				}
+			}
 			syntax.Walk(cmd, func(node syntax.Node) bool {
 				switch nested := node.(type) {
 				case *syntax.CmdSubst:
@@ -123,16 +138,43 @@ func posixStructuralStatementsOverBudget(command string) bool {
 				return count <= maxStatementsAlone
 			})
 			if len(cmd.Args) > 0 {
-				if name, known := simpleFunctionCallName(cmd); known && depth < 8 {
+				forwardedCall := budgetForwardedArgv(cmd.Args[0]) && len(cmd.Args) == 1
+				if len(cmd.Args) == 2 && budgetForwardedArgv(cmd.Args[1]) {
+					forwardedCall = cmd.Args[0].Lit() == "command" || cmd.Args[0].Lit() == "exec"
+				}
+				if forwardedCall && len(forwardedArgs) > 0 && depth < 8 {
+					if script, _, nested, static := simpleNestedScriptArgs(forwardedArgs, variables, 0, nil, nil); nested && static {
+						if child, parsed := budgetPOSIXParse(script); parsed {
+							prior := forwardedArgs
+							forwardedArgs = nil
+							statements(child.Stmts, depth+1)
+							forwardedArgs = prior
+						}
+					}
+				}
+				name, known := simpleFunctionCallName(cmd)
+				if !known {
+					name, known = simpleStaticWord(cmd.Args[0], variables)
+				}
+				if known && depth < 8 {
 					if body := functions[name]; body != nil {
+						prior := forwardedArgs
+						forwardedArgs = cmd.Args[1:]
+						if len(cmd.Args) == 2 && budgetForwardedArgv(cmd.Args[1]) {
+							forwardedArgs = prior
+						}
 						statement(body, depth+1)
+						forwardedArgs = prior
 					}
 				}
 			}
 			if depth < 8 {
 				if script, _, nested, static := simpleNestedScript(cmd, nil, nil, nil); nested && static {
 					if child, ok := budgetPOSIXParse(script); ok {
+						prior := forwardedArgs
+						forwardedArgs = nil
 						statements(child.Stmts, depth+1)
+						forwardedArgs = prior
 					}
 				}
 			}
@@ -142,6 +184,20 @@ func posixStructuralStatementsOverBudget(command string) bool {
 	}
 	statements(file.Stmts, 0)
 	return count > maxStatementsAlone
+}
+
+// budgetForwardedArgv recognizes the unchanged argv used by a function
+// wrapper. An unquoted $@ is not an unchanged argv because it can split.
+func budgetForwardedArgv(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) != 1 {
+		return false
+	}
+	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
+	if !ok || len(quoted.Parts) != 1 {
+		return false
+	}
+	param, ok := quoted.Parts[0].(*syntax.ParamExp)
+	return ok && param.Param != nil && param.Param.Value == "@"
 }
 
 func budgetPOSIXParse(command string) (*syntax.File, bool) {
@@ -163,15 +219,25 @@ func budgetPOSIXParse(command string) (*syntax.File, bool) {
 // statement budget counts them (ShellStatementsOverBudget), in order; ok is
 // false when the command does not parse.
 func ShellStatementTexts(command string) ([]string, bool) {
+	texts, _, ok := ShellStatementTextsWithOffsets(command)
+	return texts, ok
+}
+
+// ShellStatementTextsWithOffsets also reports each statement's start in
+// command. A function body can be read after its source position, so callers
+// use the offsets only for top-level statements executed in source order.
+func ShellStatementTextsWithOffsets(command string) ([]string, []int, bool) {
 	statements, _, ok := sequenceStatementDetails(command, true, true)
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
 	texts := make([]string, len(statements))
+	offsets := make([]int, len(statements))
 	for i, statement := range statements {
 		texts[i] = statement.text
+		offsets[i] = statement.sourceStart
 	}
-	return texts, true
+	return texts, offsets, true
 }
 
 // PowerShellStatementsOverBudget reports whether a command has more
