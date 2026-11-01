@@ -40,7 +40,6 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     is_test_path,
     js_call_view,
     make_finding,
-    python_import_dir_clean,
     python_source,
     sanitise_evidence,
     strip_comment,
@@ -576,8 +575,6 @@ def scan_source_files(
             # Python rules skip comments and docstrings; call rules also skip
             # every string literal (warning text, regex data) (GAP-1877).
             py = python_source(content)
-            if py is not None:
-                py.import_dir_clean = python_import_dir_clean(os.path.abspath(file_path))  # GAP-1312
             if py is None:
                 code_lines = [strip_hash_comment(line) for line in lines]
                 call_lines = code_lines

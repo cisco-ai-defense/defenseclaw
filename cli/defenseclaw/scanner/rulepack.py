@@ -75,7 +75,7 @@ from typing import Any, TypeAlias
 import yaml
 
 from defenseclaw.models import Finding
-from defenseclaw.scanner.plugin_scanner.helpers import PySource, python_import_dir_clean, python_source
+from defenseclaw.scanner.plugin_scanner.helpers import PySource, python_source
 from defenseclaw.scanner.plugin_scanner.self_identity import is_first_party_self_target
 
 try:  # Python 3.11+
@@ -199,7 +199,7 @@ class RulePack:
     def is_empty(self) -> bool:
         return not self.rules
 
-    def scan_text(self, text: str, *, location: str = "", python: bool = False, script: str = "") -> list[Finding]:
+    def scan_text(self, text: str, *, location: str = "", python: bool = False) -> list[Finding]:
         """Return one finding per matching rule (first hit), with line number.
 
         Python source is matched raw, comments and docstrings included, as
@@ -237,9 +237,6 @@ class RulePack:
                 if py is False:
                     py = python_source(text)
                     code = text if py is None else "\n".join(py.code)
-                    if py is not None:
-                        # *script* is the file's absolute path, "" if unknown (GAP-1312).
-                        py.import_dir_clean = python_import_dir_clean(script)
                 if py is not None:
                     source = code
                     m = next(
@@ -288,7 +285,7 @@ class RulePack:
             text = _read_text(path)
             if text is not None:
                 findings.extend(
-                    self.scan_text(text, location=os.path.basename(path), python=_is_python(path), script=path)
+                    self.scan_text(text, location=os.path.basename(path), python=_is_python(path))
                 )
             return findings
 
@@ -310,7 +307,7 @@ class RulePack:
                     continue
                 seen += 1
                 rel = os.path.relpath(full, path)
-                findings.extend(self.scan_text(text, location=rel, python=_is_python(fname), script=full))
+                findings.extend(self.scan_text(text, location=rel, python=_is_python(fname)))
         return findings
 
 

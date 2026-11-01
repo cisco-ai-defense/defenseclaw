@@ -259,36 +259,12 @@ _PY_ASSIGN_OPS = frozenset({"=", "+=", "-=", "*=", "/=", "//=", "%=", "|=", "&="
 
 
 class _PyStmt:
-    __slots__ = (
-        "scope",
-        "writes",
-        "names",
-        "targets",
-        "rebinds",
-        "indent",
-        "words",
-        "binds",
-        "fresh",
-        "fresh_path",
-        "rows",
-    )
+    __slots__ = ("scope", "writes", "names", "targets")
 
     def __init__(self, scope: int) -> None:
         self.scope = scope
         self.writes = False
         self.names: set[str] = set()
-        # GAP-1312: the name of a plain ``name = value`` whose value does not
-        # use name; the block level; every NAME token, keywords included; the
-        # names the statement may bind; the name of a ``name = <fresh
-        # literal>`` on one physical line, and whether the literal is Path();
-        # the first and last row of the statement.
-        self.rebinds = ""
-        self.indent = 0
-        self.words: set[str] = set()
-        self.binds: set[str] = set()
-        self.fresh = ""
-        self.fresh_path = False
-        self.rows = (0, 0)
         # (scope, name) pairs; scope -1 is module-wide (globals, attributes).
         self.targets: set[tuple[int, str]] = set()
 
@@ -305,13 +281,6 @@ class PySource:
         self._openers: list[tuple[int, ...]] | None = None
         self._line_stmt: list[int] = []
         self._stmts: list[_PyStmt] = []
-        self._gate: tuple[bool, bool] | None = None
-        # GAP-1312: set by the caller from python_import_dir_clean(script);
-        # the rebinding exemption needs it (a module beside the script may
-        # patch Path).
-        self.import_dir_clean = False
-        # GAP-1312: py_raw_source_allows_rebinding of the file, set by python_source.
-        self.raw_ok = False
 
     def openers(self, line_idx: int) -> tuple[int, ...]:
         """Indexes of the lines whose brackets are still open at *line_idx*."""
@@ -332,150 +301,28 @@ class PySource:
             self._analyze()
         if line_idx >= len(self._line_stmt) or self._line_stmt[line_idx] < 0:
             return False
-        first_idx = self._line_stmt[line_idx]
-        first = self._stmts[first_idx]
+        first = self._stmts[self._line_stmt[line_idx]]
         if first.writes:
             return True
         tainted: dict[str, set[int]] = {}
         for scope, name in first.targets:
             tainted.setdefault(name, set()).add(scope)
-        # A strict exception (GAP-1312): a later plain rebinding of the name
-        # to a fresh literal hides the path from the statements it dominates,
-        # until a statement that may carry the path assigns the name again.
-        gate, path_ok = self._file_allows_rebinding()
-        hidden = {first.rebinds: self._rebinding_hides(first_idx, path_ok)} if gate and first.rebinds else {}
         seen = {id(first)}
         changed = bool(tainted)
         while changed:
             changed = False
-            for idx, st in enumerate(self._stmts):
+            for st in self._stmts:
                 if id(st) in seen:
                     continue
-                if not any(
-                    (scopes := tainted.get(n)) and (-1 in scopes or st.scope in scopes) and idx not in hidden.get(n, ())
-                    for n in st.names
-                ):
+                if not any((scopes := tainted.get(n)) and (-1 in scopes or st.scope in scopes) for n in st.names):
                     continue
                 if st.writes:
                     return True
                 seen.add(id(st))
                 for scope, name in st.targets:
                     tainted.setdefault(name, set()).add(scope)
-                    hidden.pop(name, None)
                 changed = True
         return False
-
-    def _file_allows_rebinding(self) -> tuple[bool, bool]:
-        """The whole-file gate of the GAP-1312 rebinding exemption.
-
-        The exemption applies only to a file whose import path loads nothing
-        from its own directory (``import_dir_clean``) and whose code (strings
-        and comments blanked) has no non-ASCII character, none of ``_PY_GATE_NAMES``, no
-        comprehension or generator (a ``for`` inside brackets), imports only
-        ``_PY_GATE_MODULES`` (no star import, no import inside another
-        statement), and binds ``Path`` only by ``from pathlib import Path``.
-        Returns (applies, Path imported that way). The Go artifact scan
-        (pythonFileAllowsRebinding) is the same gate.
-        """
-        if not self.import_dir_clean or not self.raw_ok:
-            return False, False
-        if self._gate is None:
-            self._gate = self._compute_gate()
-        return self._gate
-
-    def _compute_gate(self) -> tuple[bool, bool]:
-        text = "\n".join(self.calls)
-        depth = 0
-        i, n = 0, len(text)
-        while i < n:
-            c = text[i]
-            if ord(c) >= 0x80:
-                return False, False
-            if c in "([{":
-                depth += 1
-                i += 1
-            elif c in ")]}":
-                depth -= 1
-                i += 1
-            elif c == "_" or c.isalnum():
-                j = i
-                while j < n and ord(text[j]) < 0x80 and (text[j] == "_" or text[j].isalnum()):
-                    j += 1
-                word = text[i:j]
-                if not c.isdigit() and (word in _PY_GATE_NAMES or (word == "for" and depth > 0)):
-                    return False, False
-                i = j
-            else:
-                i += 1
-        path_ok = False
-        for st in self._stmts:
-            stext = "\n".join(self.calls[st.rows[0] : st.rows[1] + 1])
-            if not _PY_IMPORT_STMT.match(stext):
-                if "import" in st.words:
-                    return False, False
-            elif not _py_allowed_import(stext):
-                return False, False
-            if _PY_PATHLIB_IMPORT.fullmatch(stext):
-                path_ok = True
-            elif "Path" in st.binds:
-                return False, False
-        return True, path_ok
-
-    def _rebinding_hides(self, first_idx: int, path_ok: bool) -> set[int]:
-        """Indexes of the statements whose writes through the name that
-        statement *first_idx* assigns do not act on its path (GAP-1312), in
-        a file that passed :meth:`_file_allows_rebinding`.
-
-        The path is hidden only when all of these hold: the assignment is a
-        plain ``name = value`` whose value does not use name; a later
-        statement in the same block (same level, no shallower statement
-        between) rebinds name to a fresh literal on one physical line (a
-        string, ``Path()`` of a string with Path from pathlib, or None); the
-        write follows it in the same block; and no statement after the
-        rebinding names a name bound, before it, from name or from such an
-        alias, or binds name other than to a fresh literal. Otherwise nothing
-        is hidden. The Go artifact scan (pythonRebindingHides) is the same
-        rule.
-        """
-        stmts = self._stmts
-        first = stmts[first_idx]
-        name = first.rebinds
-
-        def fresh(st: _PyStmt) -> bool:
-            return st.fresh == name and (path_ok or not st.fresh_path)
-
-        rebind = -1
-        for k in range(first_idx + 1, len(stmts)):
-            if stmts[k].indent < first.indent:
-                return set()
-            if stmts[k].indent == first.indent and fresh(stmts[k]):
-                rebind = k
-                break
-        if rebind < 0:
-            return set()
-        # A statement between them that names name (a link made from it, as
-        # in Path("x").symlink_to(name)) may keep the path past the rebinding.
-        if any(name in st.words for st in stmts[first_idx + 1 : rebind]):
-            return set()
-        carriers = {name}
-        changed = True
-        while changed:
-            changed = False
-            for k in range(rebind):
-                st = stmts[k]
-                if k != first_idx and st.words & carriers and not st.binds <= carriers:
-                    carriers |= st.binds
-                    changed = True
-        carriers.discard(name)
-        for st in stmts[rebind + 1 :]:
-            if st.words & carriers or (name in st.binds and not fresh(st)):
-                return set()
-        hidden: set[int] = set()
-        for k in range(rebind + 1, len(stmts)):
-            if stmts[k].indent < first.indent:
-                break
-            hidden.add(k)
-        return hidden
 
     def _analyze(self) -> None:
         nrows = len(self.code)
@@ -484,7 +331,6 @@ class PySource:
         stmts: list[_PyStmt] = []
         stack: list[int] = []
         funcs: list[tuple[int, int, str]] = []  # (indent, scope id, name)
-        declared: dict[int, set[str]] = {}  # ``global`` names per function scope
         indent = 0
         row = 0
         cur: list = []
@@ -510,12 +356,7 @@ class PySource:
                     # (also after a one-line ``def f(): ...``).
                     while funcs and funcs[-1][0] >= indent:
                         funcs.pop()
-                    scope = funcs[-1][1] if funcs else -1
-                    st = _py_statement(cur, funcs, declared.get(scope, set()))
-                    st.indent = indent
-                    st.rows = (cur[0].start[0] - 1, min(cur[-1].end[0], nrows) - 1)
-                    if cur[0].string == "global" and scope != -1:
-                        declared.setdefault(scope, set()).update(t.string for t in cur[1:] if t.type == tokenize.NAME)
+                    st = _py_statement(cur, funcs)
                     for r in range(cur[0].start[0] - 1, min(cur[-1].end[0], nrows)):
                         line_stmt[r] = len(stmts)
                     stmts.append(st)
@@ -537,12 +378,8 @@ def _string_value(tok_string: str) -> str:
     return body[1:-1]
 
 
-def _py_statement(cur: list, funcs: list[tuple[int, int, str]], global_names: set[str]) -> _PyStmt:
-    """Names, assignment targets and write calls of one logical line.
-
-    *global_names* are the names the function declares ``global``: they
-    are module-wide, so a write through one in another function counts.
-    """
+def _py_statement(cur: list, funcs: list[tuple[int, int, str]]) -> _PyStmt:
+    """Names, assignment targets and write calls of one logical line."""
     st = _PyStmt(funcs[-1][1] if funcs else -1)
     n = len(cur)
 
@@ -553,7 +390,7 @@ def _py_statement(cur: list, funcs: list[tuple[int, int, str]], global_names: se
         name = cur[k].string
         if keyword.iskeyword(name):
             return
-        st.targets.add((-1 if is_op(k - 1, ".") or name in global_names else st.scope, name))
+        st.targets.add((-1 if is_op(k - 1, ".") else st.scope, name))
 
     depth = 0
     assign_at: list[int] = []
@@ -608,15 +445,6 @@ def _py_statement(cur: list, funcs: list[tuple[int, int, str]], global_names: se
         if funcs and funcs[-1][2]:
             st.targets.add((-1, funcs[-1][2]))
     elif assign_at:
-        if (
-            assign_at == [1]
-            and cur[0].type == tokenize.NAME
-            and cur[0].string not in {t.string for t in cur[2:] if t.type == tokenize.NAME}
-            and cur[1].string == "="
-        ):
-            st.rebinds = cur[0].string
-            # It sets the name without reading it.
-            st.names.discard(st.rebinds)
         depth = 0
         for k in range(assign_at[-1]):
             tok = cur[k]
@@ -629,137 +457,7 @@ def _py_statement(cur: list, funcs: list[tuple[int, int, str]], global_names: se
                     break
             elif tok.type == tokenize.NAME and depth == 0 and not is_op(k + 1, "."):
                 add_target(k)
-    _py_rebinding_facts(st, cur)
     return st
-
-
-# GAP-1312 whole-file gate (PySource._file_allows_rebinding): words whose
-# presence anywhere in the code turns the rebinding exemption off (code that
-# may run later, global/nonlocal, and every way to rebind or run code without
-# naming the variable), and the only modules a file may import.
-_PY_GATE_NAMES = frozenset(
-    """def class lambda async await yield match global nonlocal globals locals vars setattr __setattr__
-    getattr __getattribute__ delattr exec eval compile breakpoint __import__ importlib sys inspect frame
-    f_locals f_globals f_back gi_frame cr_frame ag_frame tb_frame _getframe currentframe __main__ __dict__
-    __builtins__ builtins modules __class__ __globals__ __reduce__ __reduce_ex__""".split()
-)
-_PY_GATE_MODULES = frozenset("pathlib os json re datetime time math shutil glob hashlib base64 textwrap".split())
-_PY_IMPORT_STMT = re.compile(r"\s*(?:import|from)\b")
-_PY_PATHLIB_IMPORT = re.compile(r"\s*from\s+pathlib\s+import\s+Path\s*")
-_PY_FROM_IMPORT = re.compile(r"\s*from\s+([A-Za-z_][A-Za-z_0-9]*)(?:\.[A-Za-z_][A-Za-z_0-9]*)*\s+import\s+[^*;]*")
-_PY_IMPORT_LIST = re.compile(r"\s*import\s+([^;]*)")
-
-
-_PY_LOADABLE_SUFFIXES = (".py", ".pyw", ".pyc", ".pyo", ".pyd", ".so", ".zip", ".egg")
-
-
-def python_import_dir_clean(script: str, max_entries: int = 256) -> bool:
-    """GAP-1312: True when Python running *script* (an absolute path) loads
-    nothing from the script's own directory: PYTHONPATH and PYTHONHOME are
-    unset and no other entry there is a loadable file (``.py``, ``.pyc``,
-    ``.so`` and the like), a symlink, or a package with an ``__init__``. The
-    Go artifact scan (pythonImportPathOrdinary) reads the directory the same
-    way. Unknown or unreadable is not clean."""
-    if not script or not os.path.isabs(script) or os.environ.get("PYTHONPATH") or os.environ.get("PYTHONHOME"):
-        return False
-    folder, me = os.path.split(script)
-    try:
-        with os.scandir(folder) as it:
-            entries = []
-            for entry in it:
-                entries.append(entry)
-                if len(entries) > max_entries:
-                    return False
-    except OSError:
-        return False
-    for entry in entries:
-        name = entry.name
-        if name == me and entry.is_file(follow_symlinks=False):
-            continue
-        if entry.is_symlink() or name.lower().endswith(_PY_LOADABLE_SUFFIXES):
-            return False
-        if entry.is_dir(follow_symlinks=False) and (name.isidentifier() or not name.isascii()):
-            try:
-                if any(inner.lower().startswith("__init__.") for inner in os.listdir(entry.path)):
-                    return False
-            except OSError:
-                return False
-    return True
-
-
-def _py_allowed_import(text: str) -> bool:
-    """An import statement that imports only gate modules, with no star or semicolon."""
-    m = _PY_FROM_IMPORT.fullmatch(text)
-    if m:
-        return m.group(1) in _PY_GATE_MODULES
-    m = _PY_IMPORT_LIST.fullmatch(text)
-    if not m:
-        return False
-    for part in m.group(1).split(","):
-        f = part.split()
-        if not f or f[0].split(".", 1)[0] not in _PY_GATE_MODULES:
-            return False
-        if len(f) != 1 and (len(f) != 3 or f[1] != "as"):
-            return False
-    return True
-
-
-def _py_plain_string(tok) -> bool:
-    """A one-line string literal that is not an f-string and has no escape."""
-    if tok.type != tokenize.STRING:
-        return False
-    text = tok.string
-    i = 0
-    while i < len(text) and text[i] in "rRbBuU":
-        i += 1
-    body = text[i:]
-    return (
-        i <= 2
-        and len(body) >= 2
-        and body[0] in "'\""
-        and body[:3] not in ('"""', "'''")
-        and "\\" not in body
-        and "\n" not in body
-    )
-
-
-def _py_rebinding_facts(st: _PyStmt, cur: list) -> None:
-    """Fill the GAP-1312 fields of *st*: words, binds, fresh."""
-    n = len(cur)
-    st.words = {t.string for t in cur if t.type == tokenize.NAME}
-    binds = {name for _, name in st.targets}
-    for k in range(n - 1):
-        tok, nxt = cur[k], cur[k + 1]
-        if tok.type != tokenize.NAME:
-            continue
-        if nxt.type == tokenize.OP and nxt.string == ":=":
-            binds.add(tok.string)
-        elif tok.string in ("as", "def", "class") and nxt.type == tokenize.NAME:
-            binds.add(nxt.string)
-    if cur[0].string in ("import", "from"):
-        binds |= st.words
-    st.binds = binds
-    if (
-        n >= 3
-        and cur[0].type == tokenize.NAME
-        and not keyword.iskeyword(cur[0].string)
-        and cur[1].type == tokenize.OP
-        and cur[1].string == "="
-        and cur[0].start[0] == cur[-1].end[0]
-    ):
-        val = cur[2:]
-        if (
-            len(val) == 1 and ((val[0].type == tokenize.NAME and val[0].string == "None") or _py_plain_string(val[0]))
-        ) or (
-            len(val) == 4
-            and val[0].type == tokenize.NAME
-            and val[0].string == "Path"
-            and val[1].string == "("
-            and _py_plain_string(val[2])
-            and val[3].string == ")"
-        ):
-            st.fresh = cur[0].string
-            st.fresh_path = len(val) == 4
 
 
 def python_source(content: str) -> PySource | None:
@@ -794,29 +492,7 @@ def python_source(content: str) -> PySource | None:
     _blank_spans(rows, doc_spans)
     code = [r.rstrip() for r in rows]
     _blank_spans(rows, string_spans)
-    py = PySource(toks, code, [r.rstrip() for r in rows])
-    py.raw_ok = py_raw_source_allows_rebinding(content)
-    return py
-
-
-_PY_CODING_COOKIE = re.compile(r"[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
-
-
-def py_raw_source_allows_rebinding(content: str) -> bool:
-    """The raw-source part of the GAP-1312 gate (the blanked views lose
-    comments): a coding cookie other than utf-8 in the first two lines, a
-    form feed, or a carriage return not followed by a newline (Python reads
-    it as a line end) turns the rebinding exemption off. The Go artifact scan
-    (pythonRawSourceAllowsRebinding) is the same check."""
-    if "\f" in content:
-        return False
-    if any(content[i + 1 : i + 2] != "\n" for i, ch in enumerate(content) if ch == "\r"):
-        return False
-    for line in content.split("\n", 2)[:2]:
-        m = _PY_CODING_COOKIE.match(line)
-        if m and m.group(1).lower().replace("_", "-") not in ("utf-8", "utf8"):
-            return False
-    return True
+    return PySource(toks, code, [r.rstrip() for r in rows])
 
 
 def _blank_spans(rows: list[str], spans) -> None:
