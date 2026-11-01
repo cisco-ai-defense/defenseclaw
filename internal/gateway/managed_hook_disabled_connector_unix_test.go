@@ -19,7 +19,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -29,6 +31,14 @@ import (
 // enabled set as given, behind the hook socket's peer authorization with an
 // empty guardian ledger: no account is enrolled for any connector.
 func disabledConnectorSocketAPI(t *testing.T, codexEnabled bool, enrollment config.EnterpriseEnrollmentConfig) http.Handler {
+	t.Helper()
+	handler, _ := disabledConnectorSocketAPIWithStore(t, codexEnabled, enrollment)
+	return handler
+}
+
+// disabledConnectorSocketAPIWithStore is disabledConnectorSocketAPI with the
+// gateway's audit store, so a test can prove what a call recorded.
+func disabledConnectorSocketAPIWithStore(t *testing.T, codexEnabled bool, enrollment config.EnterpriseEnrollmentConfig) (http.Handler, *audit.Store) {
 	t.Helper()
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise"}
@@ -44,7 +54,23 @@ func disabledConnectorSocketAPI(t *testing.T, codexEnabled bool, enrollment conf
 	// Neither connector is in machine policy: the lifecycle removed Codex's
 	// requirements, and Claude Code is held to per-user enrollment here so
 	// the empty ledger refuses it.
-	return api.managedHookPeerAuth(newManagedHookAuthorizer(enrollment, nil, empty), api.managedHookSocketMux())
+	return api.managedHookPeerAuth(newManagedHookAuthorizer(enrollment, nil, empty), api.managedHookSocketMux()), store
+}
+
+// auditRowsFor counts the audit store rows that name connector.
+func auditRowsFor(t *testing.T, store *audit.Store, connectorName string) int {
+	t.Helper()
+	events, err := store.ListEvents(500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, ev := range events {
+		if strings.Contains(ev.Details, connectorName) || strings.Contains(ev.Target, connectorName) || ev.Action == string(audit.ActionConnectorHook) {
+			count++
+		}
+	}
+	return count
 }
 
 func postDisabledConnectorHook(t *testing.T, handler http.Handler, path, body string, headers map[string]string, peer managedHookPeer) *httptest.ResponseRecorder {
@@ -76,8 +102,21 @@ var disabledCodexHeaders = map[string]string{"X-DefenseClaw-Hook-Event": "PreToo
 // disabled connector to skip it.
 func TestManagedHookSocketAnswersADisabledConnectorAllowWithoutAScan(t *testing.T) {
 	alice := managedHookPeer{UID: 1001, Name: "alice"}
+	carol := managedHookPeer{UID: 3001, Name: "carol"}
 	for rep := 1; rep <= 3; rep++ {
-		handler := disabledConnectorSocketAPI(t, false, config.EnterpriseEnrollmentConfig{UnenrolledUsers: "deny"})
+		// carol is listed in exclude_users; alice is simply not enrolled.
+		handler, store := disabledConnectorSocketAPIWithStore(t, false, config.EnterpriseEnrollmentConfig{UnenrolledUsers: "deny", ExcludeUsers: []string{"carol"}})
+		for _, peer := range []managedHookPeer{alice, carol} {
+			w := postDisabledConnectorHook(t, handler, "/api/v1/codex/hook", disabledCodexPreToolUse, disabledCodexHeaders, peer)
+			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"action":"allow"`) {
+				t.Fatalf("rep %d %s: disabled codex hook status %d body %s", rep, peer.Name, w.Code, w.Body.String())
+			}
+		}
+		// Review finding 1: nothing about a disabled connector's call is
+		// recorded (no audit row, so nothing to correlate or export).
+		if n := auditRowsFor(t, store, "codex"); n != 0 {
+			t.Fatalf("rep %d: a disabled connector's calls wrote %d audit rows", rep, n)
+		}
 		w := postDisabledConnectorHook(t, handler, "/api/v1/codex/hook", disabledCodexPreToolUse, disabledCodexHeaders, alice)
 		if w.Code != http.StatusOK {
 			t.Fatalf("rep %d: disabled codex hook status %d body %s", rep, w.Code, w.Body.String())
@@ -108,6 +147,19 @@ func TestManagedHookSocketAnswersADisabledConnectorAllowWithoutAScan(t *testing.
 		map[string]string{"X-DefenseClaw-Connector": "codex"}, alice)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("an inspect route must keep the enrollment check for a disabled connector: %d %s", w.Code, w.Body.String())
+	}
+	// The foreign hook session report has no allow-without-scan answer and
+	// keeps the enrollment check (review finding 6).
+	w = postDisabledConnectorHook(t, handler, enterprisepolicy.ForeignHookSessionPathPrefix+"codex", `{"session_id":"s1"}`, nil, alice)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), managedHookReasonUIDUnregistered) {
+		t.Fatalf("the foreign hook session route must keep the enrollment check: %d %s", w.Code, w.Body.String())
+	}
+	// An exclude_users account stays refused on an enabled connector.
+	excluded := disabledConnectorSocketAPI(t, false, config.EnterpriseEnrollmentConfig{ExcludeUsers: []string{"carol"}})
+	w = postDisabledConnectorHook(t, excluded, "/api/v1/claude-code/hook",
+		`{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"hello","cwd":"/tmp"}`, nil, carol)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), managedHookReasonUIDUnregistered) {
+		t.Fatalf("an excluded account must stay refused on an enabled connector: %d %s", w.Code, w.Body.String())
 	}
 	// enrollment.root: deny still refuses root.
 	rootDeny := disabledConnectorSocketAPI(t, false, config.EnterpriseEnrollmentConfig{Root: config.EnterpriseRootDeny})

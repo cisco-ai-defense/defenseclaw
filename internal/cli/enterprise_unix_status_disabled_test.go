@@ -30,10 +30,9 @@ func TestUnixStatusTextNamesADisabledConnector(t *testing.T) {
 			r := enterprisestatus.New(action, "standalone", goos, "1.0.7")
 			r.Installed, r.InstalledVersion = true, "1.0.7"
 			if action != "ensure" {
-				r.Connectors = map[string]enterprisestatus.ConnectorState{
-					"claudecode": {Enabled: true, HooksInstalled: enterprisestatus.HooksInstalledAll},
-					"codex":      {HooksInstalled: enterprisestatus.HooksInstalledNone},
-				}
+				r.Connectors, _ = enterprisestatus.BuildConnectors(enterprisestatus.ConnectorInputs{
+					ConfigLoaded: true, Enabled: []string{"claudecode"}, Disabled: []string{"codex"},
+				}, func(string) string { return "closed" })
 			}
 			r.Finish(goos, 0)
 			var out bytes.Buffer

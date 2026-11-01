@@ -64,4 +64,20 @@ func TestBuildConnectorsNamesAConnectorTheConfigTurnsOff(t *testing.T) {
 	if got := ConnectorsLine(map[string]ConnectorState{"codex": {Enabled: true}}); got != "connectors: codex enabled" {
 		t.Fatalf("all-enabled line = %q", got)
 	}
+	// Review finding 3: an entry with enabled false that the config does
+	// not turn off (a leftover guardian target, an unreadable config) is
+	// "not enabled", never "disabled".
+	leftover, _ := BuildConnectors(ConnectorInputs{
+		ConfigLoaded: true, Enabled: []string{"claudecode"}, Disabled: []string{"codex"},
+		GuardianKnown: true, Guardian: []ConnectorTarget{{Connector: "cursor", OK: true}},
+	}, failMode)
+	want := "connectors: claudecode enabled, codex disabled, cursor not enabled (DefenseClaw does not inspect a disabled connector on this computer)"
+	if got := ConnectorsLine(leftover); got != want {
+		t.Fatalf("leftover line = %q\nwant %q", got, want)
+	}
+	unread, _ := BuildConnectors(ConnectorInputs{Disabled: []string{"codex"}, ManifestRead: true,
+		Manifest: []ConnectorInstall{{Connector: "codex"}}}, failMode)
+	if got := ConnectorsLine(unread); got != "connectors: codex not enabled" {
+		t.Fatalf("unread-config line = %q", got)
+	}
 }

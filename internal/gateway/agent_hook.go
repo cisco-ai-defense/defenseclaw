@@ -502,6 +502,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			})
 			return
 		}
+		// A connector the administrator's config turns off is answered allow
+		// here, before anything about the call is recorded (rel-1-0-6:GAP-0325).
+		if a.answerDisabledConnectorHook(r.Context(), w, r.Header, profile, connectorName, req) {
+			return
+		}
 		a.noteProtectedFileActivity(r.Context(), connectorName, req, identityFacts.ID)
 		toolRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
 		if (connectorName == "claudecode" || connectorName == "codex") &&

@@ -196,8 +196,8 @@ type managedHookDecision struct {
 	// to wait for an enrollment that never comes (identity-round GAP-1181).
 	Excluded bool
 	// Disabled marks a call the administrator's config does not protect
-	// (guardrail.connectors.<name>.enabled: false): it goes on to the hook
-	// route, which answers it allow without a scan.
+	// (guardrail.connectors.<name>.enabled: false): the hook route answers
+	// it allow and records nothing (answerDisabledConnectorHook).
 	Disabled bool
 }
 
@@ -774,12 +774,22 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 				"[sidecar-api] enterprise_exempt_user uid=%d user=%q connector=%q route=%s\n",
 				peer.UID, peer.Name, connectorName, route)
 		}
+		if decision.Disabled {
+			// The only trace of a disabled connector's call: no payload, no
+			// audit row, no export (rel-1-0-6:GAP-0325).
+			fmt.Fprintf(os.Stderr,
+				"[sidecar-api] enterprise_disabled_connector uid=%d connector=%q route=%s: allowed without inspection\n",
+				peer.UID, connectorName, route)
+		}
 		ctx := PromoteSessionIfAuthenticated(r.Context())
 		ctx = attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), strconv.Itoa(peer.UID), peer.Name, subjectSourcePeerCredentials)
 		if inspect {
 			ctx = withAuthenticatedInspectConnector(ctx, connectorName)
 		} else {
 			ctx = withAuthenticatedHookConnector(ctx, connectorName)
+		}
+		if decision.Disabled {
+			ctx = withDisabledConnectorCall(ctx)
 		}
 		if decision.Exempt {
 			a.serveEnterpriseExemptHookCall(w, r.WithContext(withEnterpriseExemptUser(ctx)), next, peer, connectorName, route, inspect)

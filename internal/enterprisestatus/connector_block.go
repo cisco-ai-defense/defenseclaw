@@ -76,6 +76,12 @@ type ConnectorState struct {
 	// machine policy rather than a per-user registration. Absent when the
 	// connector is not enabled.
 	ManagedHook *bool `json:"managed_hook,omitempty"`
+	// configDisabled: the installed config names the connector with
+	// enabled: false (ConnectorInputs.Disabled). Text only, never printed in
+	// JSON: ConnectorsLine says "disabled" for it and "not enabled" for any
+	// other entry with enabled false (a leftover target, an unprotected
+	// install, a config that could not be read).
+	configDisabled bool
 }
 
 // ConnectorTargets counts one connector's guardian targets: Total is
@@ -179,10 +185,11 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 	for name := range enabled {
 		listed[name] = true
 	}
+	configOff := map[string]bool{}
 	if in.ConfigLoaded {
 		for _, name := range in.Disabled {
 			if name, ok := id(name); ok && !enabled[name] {
-				listed[name] = true
+				listed[name], configOff[name] = true, true
 			}
 		}
 	}
@@ -254,7 +261,7 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 	}
 	block = make(map[string]ConnectorState, len(listed))
 	for name := range listed {
-		state := ConnectorState{Enabled: enabled[name], HooksInstalled: HooksInstalledUnknown}
+		state := ConnectorState{Enabled: enabled[name], HooksInstalled: HooksInstalledUnknown, configDisabled: configOff[name]}
 		if coverage, ok := in.MachinePolicyCoverage[name]; ok && !rowed[name] && counts[name] == nil {
 			// No account row exists for a machine-policy-only connector, so
 			// detected, versions and targets would be a false "not found"
@@ -309,10 +316,11 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 }
 
 // ConnectorsLine is the text status line of the connectors block: each
-// connector, sorted, enabled or disabled. A connector the administrator's
-// config turns off is named as disabled, so status says DefenseClaw does not
-// inspect it instead of leaving it out (rel-1-0-6:GAP-0325). Empty without a
-// block.
+// connector, sorted, enabled, disabled or not enabled. "disabled" is only a
+// connector the installed config turns off with enabled: false, so status
+// says DefenseClaw does not inspect it instead of leaving it out
+// (rel-1-0-6:GAP-0325); any other entry with enabled false (a leftover
+// target, an unprotected install) is "not enabled". Empty without a block.
 func ConnectorsLine(block map[string]ConnectorState) string {
 	if len(block) == 0 {
 		return ""
@@ -327,6 +335,10 @@ func ConnectorsLine(block map[string]ConnectorState) string {
 	for _, name := range names {
 		if block[name].Enabled {
 			parts = append(parts, name+" enabled")
+			continue
+		}
+		if !block[name].configDisabled {
+			parts = append(parts, name+" not enabled")
 			continue
 		}
 		parts = append(parts, name+" disabled")
