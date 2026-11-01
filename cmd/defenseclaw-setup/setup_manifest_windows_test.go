@@ -70,7 +70,7 @@ func TestSetupManifestIsEmbeddedAndNormalUserCanRunHelp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load setup manifest resource: %v", err)
 	}
-	want, err := windowsresources.Manifest(windowsresources.ComponentSetup, "1.2.3")
+	want, err := windowsresources.ManifestForTarget(windowsresources.TargetWindowsAMD64, windowsresources.ComponentSetup, "1.2.3")
 	if err != nil {
 		t.Fatal(err)
 	}

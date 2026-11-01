@@ -40,10 +40,10 @@ func TestApplyPreservesGoVersionMetadata(t *testing.T) {
 	}
 
 	icon := filepath.Join(repositoryRoot, filepath.FromSlash(IconSource))
-	if err := Apply(executable, ComponentStartup, "1.2.3", icon); err != nil {
+	if err := ApplyForTarget(executable, TargetWindowsAMD64, ComponentStartup, "1.2.3", icon); err != nil {
 		t.Fatalf("apply Windows resources: %v", err)
 	}
-	if err := Verify(executable, ComponentStartup, "1.2.3", icon); err != nil {
+	if err := VerifyForTarget(executable, TargetWindowsAMD64, ComponentStartup, "1.2.3", icon); err != nil {
 		t.Fatalf("verify Windows resources: %v", err)
 	}
 	after := versionMetadata()
