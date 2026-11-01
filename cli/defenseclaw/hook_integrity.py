@@ -1370,11 +1370,48 @@ def inherited_hook_shell_env(environ: Any, connector: str) -> list[str]:
     options = str(environ.get("SHELLOPTS", "") or "")
     if "noexec" in [option.strip() for option in options.split(":")]:
         found.append("SHELLOPTS")
-    if connector in _BASH_HOOK_RUNNERS and str(environ.get("BASH_ENV", "") or "").strip():
+    bash_env = str(environ.get("BASH_ENV", "") or "").strip()
+    if connector in _BASH_HOOK_RUNNERS and bash_env and not _system_bash_env(bash_env, environ):
         found.append("BASH_ENV")
     if connector == "claudecode" and str(environ.get("CLAUDE_CODE_SHELL_PREFIX", "") or "").strip():
         found.append("CLAUDE_CODE_SHELL_PREFIX")
     return found
+
+
+def _system_bash_env(path: str, environ: Any) -> bool:
+    """Whether *path* is a system shell init file: absolute, outside the home, root-owned, not group or world writable.
+
+    Environment Modules and Lmod profiles export BASH_ENV to their own init
+    script so batch bash gets the ``module`` function. Only root can change such
+    a file, so it is not the hostile value this check looks for; warning on it
+    on every doctor and status run was noise (rel-1-0-6:GAP-0393). A file in the
+    home, a relative path, a missing file, a file another account owns or one
+    anyone else can write is still reported. The parent folders are checked the
+    same way, so a root-owned file in a writable folder still counts.
+    """
+
+    if not os.path.isabs(path):
+        return False
+    home = os.path.realpath(str(environ.get("HOME", "") or Path.home()))
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return False
+    if real == home or real.startswith(home.rstrip(os.sep) + os.sep):
+        return False
+    current = real
+    while True:
+        try:
+            info = os.stat(current)
+        except OSError:
+            return False
+        if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            # A sticky world-writable folder (/tmp) still lets anyone add a file.
+            return False
+        parent = os.path.dirname(current)
+        if parent == current:
+            return True
+        current = parent
 
 
 _INHERITED_RISK = {

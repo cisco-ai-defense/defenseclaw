@@ -59,11 +59,6 @@ func TestClaudeCodeSettingsHookShellEnvFollowsEnvPrecedence(t *testing.T) {
 			want: []string{"BASH_ENV", "FUNCNEST", "SHELLOPTS"}, from: []string{"user"},
 		},
 		{
-			name:    "a number and a boolean count once stringified",
-			sources: []src{s("user", map[string]interface{}{"FUNCNEST": float64(1), "BASHOPTS": false})},
-			want:    []string{"BASHOPTS", "FUNCNEST"}, from: []string{"user"},
-		},
-		{
 			name: "cli over local",
 			sources: []src{
 				s("cli", map[string]interface{}{"CLAUDE_CODE_SHELL_PREFIX": "/usr/bin/true"}),
@@ -206,5 +201,31 @@ func TestClaudeCodeHookShellEnvWarnsByDefaultAndStrictRefuses(t *testing.T) {
 	writeClaudePolicyJSON(t, local, map[string]interface{}{})
 	if warning := HookShellEnvWarning(conn, opts); warning != "" {
 		t.Fatalf("managed warning = %q, want none", warning)
+	}
+}
+
+// Review 2 finding 1: numbers and booleans read from real files (the
+// decoder uses UseNumber, so a number is a json.Number) count, and a higher
+// file's number decides over a lower empty value.
+func TestClaudeCodeHookShellEnvNumbersFromFiles(t *testing.T) {
+	dir := t.TempDir()
+	read := func(name string, env map[string]interface{}) *claudeCodeSettingsSource {
+		t.Helper()
+		path := filepath.Join(dir, name+".json")
+		writeClaudePolicyJSON(t, path, map[string]interface{}{"env": env})
+		source, err := readOptionalClaudeCodeSettings(name, path)
+		if err != nil || source == nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		return source
+	}
+	user := read("user", map[string]interface{}{"FUNCNEST": 1, "BASHOPTS": true})
+	if names, _ := claudeCodeSettingsHookShellEnv([]*claudeCodeSettingsSource{user}); !reflect.DeepEqual(names, []string{"BASHOPTS", "FUNCNEST"}) {
+		t.Fatalf("names from a file with a number and a boolean = %v, want [BASHOPTS FUNCNEST]", names)
+	}
+	local := read("local", map[string]interface{}{"FUNCNEST": 2})
+	lower := read("user-empty", map[string]interface{}{"FUNCNEST": ""})
+	if names, from := claudeCodeSettingsHookShellEnv([]*claudeCodeSettingsSource{local, lower}); !reflect.DeepEqual(names, []string{"FUNCNEST"}) || len(from) != 1 || from[0] != local {
+		t.Fatalf("local FUNCNEST 2 over user \"\" = %v from %v, want FUNCNEST from local", names, from)
 	}
 }

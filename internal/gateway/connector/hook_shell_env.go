@@ -5,6 +5,7 @@
 package connector
 
 import (
+	"encoding/json"
 	"fmt"
 	"runtime"
 	"sort"
@@ -115,7 +116,9 @@ func claudeCodeKeepsEnvValue(value interface{}) bool {
 	switch v := value.(type) {
 	case string:
 		return !strings.ContainsRune(v, 0)
-	case bool, float64, int, int64:
+	case bool, float64, int, int64, json.Number:
+		// readOptionalClaudeCodeSettings decodes with UseNumber, so a number
+		// read from a settings file arrives as json.Number (review 2 finding 1).
 		return true
 	default:
 		return false

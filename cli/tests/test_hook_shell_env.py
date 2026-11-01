@@ -228,3 +228,54 @@ def test_strict_tier_is_read_from_the_real_guardrail_config():
     cfg.guardrail.rule_pack = "strict"
     assert cfg.guardrail.hook_policy_tier("claudecode") == "strict"
     assert hook_integrity._strict_policy_tier(cfg, "claudecode") is True
+
+
+def test_system_bash_env_from_a_module_profile_is_not_reported(tmp_path, monkeypatch):
+    # rel-1-0-6:GAP-0393: Environment Modules and Lmod export BASH_ENV to a
+    # root-owned init script; that is not reported. A BASH_ENV in the home or
+    # in a folder anyone can write still is.
+    cfg = _cfg(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    mine = home / "startup.sh"
+    mine.write_text("exit 0\n", encoding="utf-8")
+    shared = tmp_path / "shared.sh"
+    shared.write_text("exit 0\n", encoding="utf-8")
+    base = {"HOME": str(home)}
+    real_stat = os.stat
+
+    def root_owned(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        if str(path) == str(tmp_path / "missing"):
+            raise FileNotFoundError(path)
+        fields = list(info)
+        fields[4] = 0  # st_uid
+        fields[0] = (info.st_mode & ~0o022)  # no group/world write
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(hook_integrity.os, "stat", root_owned)
+    assert hook_integrity.inherited_hook_shell_env({**base, "BASH_ENV": str(shared)}, "codex") == []
+    assert hook_integrity.agent_hook_env_warnings(cfg, "copilot", workspace_dir=str(tmp_path / "repo"), environ={**base, "BASH_ENV": str(shared)}) == []
+    # In the home, relative, or missing: reported.
+    for value in (str(mine), "startup.sh", str(tmp_path / "missing")):
+        assert hook_integrity.inherited_hook_shell_env({**base, "BASH_ENV": value}, "devin") == ["BASH_ENV"], value
+
+    # Not root-owned, or writable by others: reported.
+    def user_owned(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        fields = list(info)
+        fields[4] = 1000
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(hook_integrity.os, "stat", user_owned)
+    assert hook_integrity.inherited_hook_shell_env({**base, "BASH_ENV": str(shared)}, "codex") == ["BASH_ENV"]
+
+    def world_writable(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        fields = list(info)
+        fields[4] = 0
+        fields[0] = info.st_mode | 0o002
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(hook_integrity.os, "stat", world_writable)
+    assert hook_integrity.inherited_hook_shell_env({**base, "BASH_ENV": str(shared)}, "codex") == ["BASH_ENV"]
