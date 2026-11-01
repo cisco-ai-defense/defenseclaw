@@ -144,3 +144,55 @@ var outageInstalledDataRoot = func() (string, bool) { return "", false }
 // outageHomeEnvNames are the home variables whose ~/.defenseclaw
 // hookOutageInstallHeld also looks in.
 var outageHomeEnvNames = []string{"HOME"}
+
+// hookConfigRecordName is the record the gateway writes beside per-user hooks
+// it renders: the absolute path of the config file it runs under
+// (connector.writePerUserGatewayHelperRecord).
+const hookConfigRecordName = ".config-record"
+
+// outageRecordedConfig is the config file the gateway recorded in
+// dataDir/hooks when it rendered those hooks (rel-1-0-6 GAP-0307): with a
+// custom install DEFENSECLAW_HOME the account's config is not in
+// ~/.defenseclaw, and nothing else names it without the agent's
+// environment. The record counts only when dataDir, its hooks folder, the
+// record and the recorded config's folder are this account's and not
+// writable by group or others, the record is a regular file (no link) of one
+// absolute, clean line, and the recorded file exists. Otherwise "". A
+// variable for tests.
+var outageRecordedConfig = func(dataDir string) string {
+	if !filepath.IsAbs(dataDir) {
+		return ""
+	}
+	uid := os.Getuid()
+	hookDir := filepath.Join(filepath.Clean(dataDir), "hooks")
+	for _, dir := range []string{dataDir, hookDir} {
+		if !privateOwnedDir(dir, uid) {
+			return ""
+		}
+	}
+	record := filepath.Join(hookDir, hookConfigRecordName)
+	info, err := os.Lstat(record)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || !ownedByUID(info, uid) || info.Size() > 4096 {
+		return ""
+	}
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		return ""
+	}
+	path := strings.TrimSuffix(string(raw), "\n")
+	if path == "" || strings.ContainsAny(path, "\n\r\x00") || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return ""
+	}
+	if !privateOwnedDir(filepath.Dir(path), uid) {
+		return ""
+	}
+	if target, err := os.Stat(path); err != nil || !target.Mode().IsRegular() {
+		return ""
+	}
+	return path
+}
+
+func privateOwnedDir(dir string, uid int) bool {
+	info, err := os.Stat(dir)
+	return err == nil && info.IsDir() && info.Mode().Perm()&0o022 == 0 && ownedByUID(info, uid)
+}

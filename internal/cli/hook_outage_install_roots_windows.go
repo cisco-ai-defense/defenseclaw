@@ -35,3 +35,8 @@ var outageInstalledDataRoot = trustedNativeHookHome
 // outageHomeEnvNames are the home variables whose .defenseclaw
 // hookOutageInstallHeld also looks in.
 var outageHomeEnvNames = []string{"USERPROFILE", "HOME"}
+
+// outageRecordedConfig is not used on Windows: the native hook runs from the
+// installed runtime's protected data root (outageInstalledDataRoot), which
+// names a custom install.ps1 DEFENSECLAW_HOME. A variable for tests.
+var outageRecordedConfig = func(string) string { return "" }

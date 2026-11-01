@@ -576,6 +576,44 @@ func writePerUserGatewayHelperRecord(hookDir string) error {
 	if err := hookRuntimeFileWriter(false)(filepath.Join(hookDir, ".gateway-helper"), []byte(binary+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write hook helper record: %w", err)
 	}
+	return writePerUserConfigRecord(hookDir)
+}
+
+// perUserConfigRecordName is the record of the config file this gateway runs
+// under, beside the per-user hooks it renders (cli hookConfigRecordName).
+const perUserConfigRecordName = ".config-record"
+
+// writePerUserConfigRecord records, beside the hooks, the absolute config
+// file this gateway runs under, as config.ConfigPath names it
+// (DEFENSECLAW_CONFIG, else DEFENSECLAW_HOME/config.yaml, else
+// ~/.defenseclaw/config.yaml). hook-outage-mode reads it so a custom install
+// DEFENSECLAW_HOME is the account's own folder for a gateway outage
+// (rel-1-0-6 GAP-0307); the hook process's environment never names it. A
+// relative value, or a config file that does not exist (a cold start whose
+// home is not the install's), leaves the record as it is. Windows hooks use
+// the protected install state instead.
+func writePerUserConfigRecord(hookDir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	path := ""
+	if value := os.Getenv("DEFENSECLAW_CONFIG"); value != "" {
+		path = value
+	} else if value := os.Getenv("DEFENSECLAW_HOME"); value != "" {
+		path = filepath.Join(value, "config.yaml")
+	} else if home := userHomeDir(); home != "" {
+		path = filepath.Join(home, ".defenseclaw", "config.yaml")
+	}
+	if !filepath.IsAbs(path) {
+		return nil
+	}
+	path = filepath.Clean(path)
+	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	if err := hookRuntimeFileWriter(false)(filepath.Join(hookDir, perUserConfigRecordName), []byte(path+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write hook config record: %w", err)
+	}
 	return nil
 }
 

@@ -120,8 +120,26 @@ func hookOutageFailModeFor(connectorName, hookDir string, installWindow bool) st
 // home, never the agent's environment. An account config this release cannot
 // load decides by its plain data_dir: one that may name dataDir, or that
 // cannot be read as YAML, closes.
+//
+// The installed data root (on a Windows PowerShell install, the user's own
+// defenseclaw-hook-state.json) and the recorded config (.config-record) are
+// pointers this account can rewrite (rel-1-0-6 GAP-0309). When the hooks'
+// config, or their data directory, came through one of them, the account
+// database's own config is a floor whatever folder it names: a redirected
+// pointer can never open what that config closes.
 func accountConfigClosesOutage(name, dataDir, configFile string) bool {
-	for _, candidate := range accountConfigCandidates() {
+	accountDB := ""
+	if home := outageAccountHome(); home != "" {
+		accountDB = filepath.Join(home, config.DefaultDataDirName, config.DefaultConfigName)
+	}
+	viaPointer := false
+	for _, pointer := range outagePointerConfigs(dataDir) {
+		if pathidentity.Same(configFile, pointer) || pathidentity.Same(dataDir, filepath.Dir(pointer)) {
+			viaPointer = true
+			break
+		}
+	}
+	for _, candidate := range accountConfigCandidates(dataDir) {
 		info, err := os.Lstat(candidate)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
@@ -140,7 +158,8 @@ func accountConfigClosesOutage(name, dataDir, configFile string) bool {
 			}
 			continue
 		}
-		if named == "" || !pathidentity.Same(named, dataDir) {
+		floor := viaPointer && accountDB != "" && pathidentity.Same(candidate, accountDB)
+		if !floor && (named == "" || !pathidentity.Same(named, dataDir)) {
 			continue
 		}
 		if managed.IsManagedEnterprise(account.DeploymentMode) || account.SecureClientIntegration() ||
@@ -151,12 +170,33 @@ func accountConfigClosesOutage(name, dataDir, configFile string) bool {
 	return false
 }
 
+// outagePointerConfigs are the account config candidates found through a
+// pointer the account can rewrite: the installed runtime's data root and the
+// config recorded beside the hooks (accountConfigClosesOutage).
+func outagePointerConfigs(dataDir string) []string {
+	var pointers []string
+	if root, recognized := outageInstalledDataRoot(); recognized && filepath.IsAbs(root) {
+		pointers = append(pointers, filepath.Join(filepath.Clean(root), config.DefaultConfigName))
+	}
+	if recorded := outageRecordedConfig(dataDir); recorded != "" {
+		pointers = append(pointers, recorded)
+	}
+	return pointers
+}
+
 // accountConfigCandidates are the config files that can be this account's
-// own config, in the order hookRuntimeConfigPath tries them.
-func accountConfigCandidates() []string {
+// own config for the hooks of dataDir, in the order hookRuntimeConfigPath
+// tries them: the installed runtime's protected data root (Windows), the
+// config the gateway recorded beside these hooks when it rendered them
+// (outageRecordedConfig: a custom install DEFENSECLAW_HOME, rel-1-0-6
+// GAP-0307), then the account database's .defenseclaw.
+func accountConfigCandidates(dataDir string) []string {
 	var candidates []string
 	if root, recognized := outageInstalledDataRoot(); recognized && filepath.IsAbs(root) {
 		candidates = append(candidates, filepath.Join(filepath.Clean(root), config.DefaultConfigName))
+	}
+	if recorded := outageRecordedConfig(dataDir); recorded != "" {
+		candidates = append(candidates, recorded)
 	}
 	if home := outageAccountHome(); home != "" {
 		candidates = append(candidates, filepath.Join(home, config.DefaultDataDirName, config.DefaultConfigName))
@@ -216,19 +256,25 @@ func movedDataDirOutageMode(name, dataDir, configFile, ownDataDir string, instal
 	if left, _, err := loadHookRuntimeConfig(configFile); err != nil || left.EffectiveHookOutageFailModeForConnector(name) != "open" {
 		return "closed"
 	}
-	home := outageAccountHome()
 	// The empty and relative checks cannot change the answer today (a later
 	// check closes too); they are kept as cheap fail-closed belts.
-	if home == "" || ownDataDir == "" || !filepath.IsAbs(ownDataDir) {
+	if ownDataDir == "" || !filepath.IsAbs(ownDataDir) {
 		return "closed"
 	}
-	accountData := filepath.Join(home, config.DefaultDataDirName)
-	accountConfig := filepath.Join(accountData, config.DefaultConfigName)
-	switch {
-	case pathidentity.Same(dataDir, accountData):
-	case !pathidentity.Same(configFile, filepath.Join(dataDir, config.DefaultConfigName)) &&
-		pathidentity.Same(configFile, accountConfig):
-	default:
+	// The account's own folders are the folders of its config candidates:
+	// the account database's .defenseclaw, the installed runtime's protected
+	// data root (Windows) and the install home the gateway recorded beside
+	// these hooks (a custom DEFENSECLAW_HOME, GAP-0307).
+	own := filepath.Join(dataDir, config.DefaultConfigName)
+	qualifies := false
+	for _, candidate := range accountConfigCandidates(dataDir) {
+		if pathidentity.Same(dataDir, filepath.Dir(candidate)) ||
+			(!pathidentity.Same(configFile, own) && pathidentity.Same(configFile, candidate)) {
+			qualifies = true
+			break
+		}
+	}
+	if !qualifies {
 		return "closed"
 	}
 	if !installWindow && hookOutageInstallHeld(dataDir) {
@@ -247,10 +293,10 @@ func movedDataDirOutageMode(name, dataDir, configFile, ownDataDir string, instal
 
 // hookRuntimeConfigPath is the config file of the per-user hook runtime
 // whose data directory is dataDir: config.yaml in dataDir, or, when dataDir
-// has none, the account's own config, found from the account database
-// (outageAccountHome, and on Windows the installed runtime's protected data
-// root first), never from HOME, USERPROFILE, DEFENSECLAW_HOME or
-// DEFENSECLAW_CONFIG. A custom data_dir (`defenseclaw config set data_dir`)
+// has none, the account's own config (accountConfigCandidates: on Windows the
+// installed runtime's protected data root, the config the gateway recorded
+// beside the hooks, then the account database's .defenseclaw), never from
+// HOME, USERPROFILE, DEFENSECLAW_HOME or DEFENSECLAW_CONFIG. A custom data_dir (`defenseclaw config set data_dir`)
 // keeps config.yaml in ~/.defenseclaw while the gateway renders the hooks
 // into <data_dir>/hooks, so that config is the one those hooks run under.
 // Before this a custom data_dir closed every outage (rel-1-0-6 GAP-0224).
@@ -264,15 +310,7 @@ func hookRuntimeConfigPath(dataDir string) string {
 	if _, err := os.Lstat(own); !errors.Is(err, fs.ErrNotExist) {
 		return own
 	}
-	var roots []string
-	if root, recognized := outageInstalledDataRoot(); recognized && filepath.IsAbs(root) {
-		roots = append(roots, root)
-	}
-	if home := outageAccountHome(); home != "" {
-		roots = append(roots, filepath.Join(home, config.DefaultDataDirName))
-	}
-	for _, root := range roots {
-		candidate := filepath.Join(filepath.Clean(root), config.DefaultConfigName)
+	for _, candidate := range accountConfigCandidates(dataDir) {
 		if _, err := os.Lstat(candidate); err == nil {
 			return candidate
 		}
@@ -314,6 +352,11 @@ func hookOutageInstallHeld(dataDir string) bool {
 			return true
 		}
 		roots = append(roots, root)
+	}
+	// The install home the gateway recorded beside these hooks: the
+	// installer of a custom DEFENSECLAW_HOME holds it (GAP-0307).
+	if recorded := outageRecordedConfig(dataDir); recorded != "" {
+		roots = append(roots, filepath.Dir(recorded))
 	}
 	if home := os.Getenv("DEFENSECLAW_HOME"); filepath.IsAbs(home) {
 		roots = append(roots, home)
