@@ -48,11 +48,11 @@ func ShellStatementTexts(command string) ([]string, bool) {
 // input bound (rel-1-0-6:GAP-0318).
 //
 // It reads the command with its own scanner, not the Windows lexer: the
-// lexer stops at the first subexpression, array, hashtable, braced
-// variable or here-string and leaves the rest unread, so a single
-// $(Get-Date) in front hid every later statement from the count
-// (rel-1-0-6:GAP-0331). Text in quotes, here-strings and comments is not
-// counted, nor are the entries of a hashtable (@{ a = 1; b = 2 }); an
+// lexer used to stop at the first subexpression, array, hashtable, braced
+// variable or here-string, so a single $(Get-Date) in front hid later
+// statements from the count (rel-1-0-6:GAP-0331). Text in quotes,
+// here-strings and comments is not counted, nor are the entries of a
+// hashtable (@{ a = 1; b = 2 }); an
 // opening bracket or brace starts a new statement count inside it, and a
 // closing one continues the statement around it, so a block never counts
 // more statements than it holds.
@@ -61,19 +61,18 @@ func PowerShellStatementsOverBudget(command string) bool {
 	return statements > maxStatementsAlone
 }
 
-// PowerShellReadingStopsEarly reports a command with a construct, outside
-// quotes, at which the Windows lexer stops reading and leaves the rest of
-// the command unread: a subexpression $( ), an array @( ), a hashtable
-// @{ }, a braced variable ${ }, a here-string, the stop-parsing token --%
-// or an & call. The split of such a reading holds only the statements before it
-// (rel-1-0-6:GAP-0331).
+// PowerShellReadingStopsEarly reports a command with a construct that can
+// leave a partial Windows lexer reading: a subexpression $( ), an array @( ),
+// a hashtable @{ }, a braced variable ${ }, a here-string, the stop-parsing
+// token --% or an & call. The separate budget scanner counts past these
+// constructs (rel-1-0-6:GAP-0331).
 func PowerShellReadingStopsEarly(command string) bool {
 	_, opaque := powerShellStatements(command, len(command)+1)
 	return opaque
 }
 
 // powerShellStatements counts the statements of command, stopping at limit,
-// and reports whether it met a construct that stops the Windows lexer.
+// and reports whether it met an opaque construct.
 func powerShellStatements(command string, limit int) (int, bool) {
 	const (
 		frameCode = iota

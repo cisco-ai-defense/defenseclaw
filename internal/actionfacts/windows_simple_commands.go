@@ -76,6 +76,30 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 			atStart = false
 			continue
 		}
+		if dialect == windowsPowerShell && i+1 < len(runes) &&
+			(char == '@' && windowsPowerShellQuoteDelimiter(runes[i+1]) != 0 ||
+				(char == '$' || char == '@') && (runes[i+1] == '(' || runes[i+1] == '{')) {
+			// The lexer's opaque value still occupies one part. Skip its
+			// contents here too, so only a separator after its balanced end
+			// can make another simple command.
+			end, ok := windowsPowerShellOpaqueEnd(runes, i)
+			if !ok {
+				return "", nil, false
+			}
+			i = end
+			atStart = false
+			continue
+		}
+		if dialect == windowsPowerShell && char == '-' &&
+			i+2 < len(runes) && runes[i+1] == '-' && runes[i+2] == '%' &&
+			(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) &&
+			windowsPowerShellTokenStart(runes, i) {
+			for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
+				i++
+			}
+			atStart = false
+			continue
+		}
 		if char == '"' || dialect == windowsPowerShell && char == '\'' {
 			quote = char
 			atStart = false

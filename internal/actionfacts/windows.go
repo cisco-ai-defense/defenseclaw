@@ -606,8 +606,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			i+2 < len(runes) && runes[i+1] == '-' && runes[i+2] == '%' &&
 			(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) {
 			// PowerShell's stop-parsing token makes the rest of the native
-			// invocation opaque. Do not interpret later metacharacters as new
-			// commands or destinations.
+			// invocation opaque. The next line is a new statement.
 			out.markPartial(IssueUnsupportedConstruct)
 			wordExpands = true
 			for _, literal := range "--%" {
@@ -615,8 +614,10 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 					return lexemes, false
 				}
 			}
-			i = len(runes)
-			break
+			for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
+				i++
+			}
+			continue
 		}
 		if dialect == windowsPowerShell &&
 			(r == '@' && i+1 < len(runes) &&
@@ -624,8 +625,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				(r == '$' || r == '@') && i+1 < len(runes) &&
 					(runes[i+1] == '(' || runes[i+1] == '{')) {
 			// Here-strings, subexpressions, arrays, and hashtables require a
-			// full PowerShell AST. Preserve the surrounding positive command
-			// only, and keep the remainder opaque.
+			// full PowerShell AST. Preserve this value as opaque, then read
+			// the next statement after its balanced end.
 			out.markPartial(IssueUnsupportedConstruct)
 			wordExpands = true
 			if !writeRune(r) {
@@ -634,8 +635,13 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			if !writeRune(runes[i+1]) {
 				return lexemes, false
 			}
-			i = len(runes)
-			break
+			end, ok := windowsPowerShellOpaqueEnd(runes, i)
+			if !ok {
+				i = len(runes)
+				break
+			}
+			i = end
+			continue
 		}
 
 		if dialect == windowsPowerShell && r == '<' && i+1 < len(runes) && runes[i+1] == '#' && !wordActive {
