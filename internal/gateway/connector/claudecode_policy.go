@@ -131,6 +131,9 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 	} else if disabled {
 		return false, fmt.Errorf("Claude Code %s sets disableAllHooks=true, so the user-scoped DefenseClaw hooks are inactive", source.label()) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
+	if err := claudeCodeHookShellEnvRefusal(opts, sources); err != nil {
+		return false, err
+	}
 	user := sources.user
 	if user == nil {
 		return false, nil

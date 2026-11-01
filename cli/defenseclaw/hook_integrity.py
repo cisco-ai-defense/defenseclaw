@@ -1087,6 +1087,12 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
                     )
                 )
                 break
+        if not _is_windows() and _strict_policy_tier(cfg, connector):
+            # Only what the gateway checks: workspace_dir None is the pinned
+            # claw.workspace_dir, not the folder this command runs in.
+            refusal = _claude_strict_hook_shell_env_problem(cfg, workspace_dir)
+            if refusal is not None:
+                problems.append(refusal)
     elif connector == "codex":
         for path in _hook_config_paths(cfg, connector):
             document = _read_agent_config(path)
@@ -1146,6 +1152,369 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
                 problems.append(problem)
                 break
     return problems
+
+
+# Agent settings and shell variables that stop or subvert a shell-form hook
+# command (rel-1-0-6:GAP-0322). Mirrors internal/gateway/connector/hook_shell_env.go,
+# which has the full reasoning. Claude Code starts a hook command through
+# /bin/sh -c with process.env after it applied the env block of each settings
+# source, lowest first: ~/.claude.json, user, project, local, --settings,
+# managed. Where /bin/sh is bash (RHEL, macOS) SHELLOPTS=noexec runs none of
+# the command, and CLAUDE_CODE_SHELL_PREFIX replaces it. BASH_ENV,
+# BASH_FUNC_*%% and BASHOPTS reach the bash that runs a #!/bin/bash hook script
+# (BASH_ENV can exit before the hook, an exported function replaces a command
+# the script calls). A #!/bin/bash -p script ignores those three; they stay on
+# the list either way, because a script rendered by an earlier build keeps
+# #!/bin/bash until the gateway renders it again (and a rollback brings it
+# back), and no hook needs them from a project's settings. FUNCNEST is still
+# read by bash -p. ENV is not on the list: non-interactive shells never read it.
+# The strict tier refuses such settings (agent_hook_switch_problems) for the
+# sources the gateway checks too: user, ~/.claude.json, managed, and the
+# project of the pinned claw.workspace_dir. Otherwise, and for the folder
+# doctor or status runs in, it is a warning (agent_hook_env_warnings).
+HOOK_SHELL_ENV_NAMES = ("BASHOPTS", "BASH_ENV", "CLAUDE_CODE_SHELL_PREFIX", "FUNCNEST", "SHELLOPTS")
+_HOOK_SHELL_ENV_FUNCTION_PREFIX = "BASH_FUNC_"
+
+# Connectors whose agent runs a hook command through bash (bash -c, or the
+# account's login shell with -lc), where an inherited BASH_ENV runs before the
+# command whatever the hook script starts with: Devin (GAP-0382), Copilot CLI
+# (its hooks use the "bash" field) and Codex (the passwd login shell, bash on
+# RHEL). Claude Code and Kiro use /bin/sh, which ignores BASH_ENV; Hermes,
+# Antigravity and the Amp and OpenCode plugins start the hook with no shell.
+_BASH_HOOK_RUNNERS = frozenset({"codex", "copilot", "devin"})
+
+
+def _is_hook_shell_env_name(name: str) -> bool:
+    return name in HOOK_SHELL_ENV_NAMES or name.startswith(_HOOK_SHELL_ENV_FUNCTION_PREFIX)
+
+
+def _claude_keeps_env_value(value: Any) -> bool:
+    """Whether Claude Code applies *value* from a settings env block.
+
+    It keeps a string, number or boolean (stringified) and drops anything else
+    (null, an object, an array) and a value holding NUL, so a dropped value in a
+    higher source leaves a lower one in force.
+    """
+
+    if isinstance(value, str):
+        return "\x00" not in value
+    return isinstance(value, (bool, int, float))
+
+
+def _hook_shell_env_takes_effect(name: str, value: Any) -> bool:
+    if name.startswith(_HOOK_SHELL_ENV_FUNCTION_PREFIX):
+        return True
+    if isinstance(value, str):
+        return value.strip() != ""
+    return True
+
+
+def _hook_shell_env_risk(name: str) -> str:
+    if name == "SHELLOPTS":
+        return "SHELLOPTS (with noexec, /bin/sh runs none of the hook command)"
+    if name == "CLAUDE_CODE_SHELL_PREFIX":
+        return "CLAUDE_CODE_SHELL_PREFIX (Claude Code runs that program in place of each hook command)"
+    if name == "BASH_ENV":
+        return "BASH_ENV (a #!/bin/bash hook script runs that file first, and it can exit before the hook)"
+    if name == "BASHOPTS":
+        return "BASHOPTS (sets options of a #!/bin/bash hook script)"
+    if name == "FUNCNEST":
+        return "FUNCNEST (makes the hook script's nested helper calls fail)"
+    command = name[len(_HOOK_SHELL_ENV_FUNCTION_PREFIX):].removesuffix("%%")
+    return f"{name} (an exported function that replaces the {command} command in a #!/bin/bash hook script)"
+
+
+def _strict_policy_tier(cfg: Any, connector: str) -> bool:
+    """Whether *connector* is in the strict policy tier (GuardrailConfig.hook_policy_tier)."""
+
+    tier = getattr(getattr(cfg, "guardrail", None), "hook_policy_tier", None)
+    try:
+        return callable(tier) and str(tier(connector) or "").strip().lower() == "strict"
+    except Exception:  # noqa: BLE001 - an unresolvable tier is the default tier
+        return False
+
+
+def _managed_install(cfg: Any) -> bool:
+    return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+
+
+def pinned_workspace_dir(cfg: Any) -> str:
+    """The pinned ``claw.workspace_dir`` the gateway checks (Config.ConnectorWorkspaceDir), or ""."""
+
+    resolver = getattr(cfg, "connector_workspace_dir", None)
+    if callable(resolver):
+        try:
+            return str(resolver() or "")
+        except Exception:  # noqa: BLE001 - fall back to the raw value
+            pass
+    raw = str(getattr(getattr(cfg, "claw", None), "workspace_dir", "") or "").strip()
+    return os.path.abspath(os.path.expanduser(raw)) if raw else ""
+
+
+def _claude_managed_env_source() -> tuple[str, dict] | None:
+    """The env block of the active Claude Code managed source, when it can be read."""
+
+    try:
+        from defenseclaw.connector_paths import connector_config_files
+        from defenseclaw.doctor_hooks import _claude_managed_sources
+
+        for source in _claude_managed_sources(connector_config_files("claudecode")[0], None, None):
+            if source is not None and source.settings:
+                env = source.settings.get("env")
+                return (source.label, env) if isinstance(env, dict) else None
+    except Exception:  # noqa: BLE001 - an unreadable managed tier is left out, as in the gateway
+        return None
+    return None
+
+
+def _claude_env_blocks(cfg: Any, workspace_dir: str | None) -> list[tuple[Path | str, dict]]:
+    """Claude Code env blocks, highest source first; *workspace_dir* None skips the project."""
+
+    blocks: list[tuple[Path | str, dict]] = []
+    managed = _claude_managed_env_source()
+    if managed is not None:
+        blocks.append(managed)
+    paths: list[Path] = []
+    if workspace_dir:
+        project = Path(workspace_dir, ".claude")
+        paths += [project / "settings.local.json", project / "settings.json"]
+    paths += list(_hook_config_paths(cfg, "claudecode"))
+    try:
+        from defenseclaw.connector_paths import claude_mcp_state_path, connector_config_files
+
+        paths.append(Path(connector_config_files("claudecode")[0]))
+        paths.append(Path(claude_mcp_state_path()))
+    except Exception:  # noqa: BLE001 - the recorded paths still apply
+        pass
+    for path in dict.fromkeys(paths):
+        document = _read_agent_config(path)
+        env = document.get("env") if isinstance(document, dict) else None
+        if isinstance(env, dict):
+            blocks.append((path, env))
+    return blocks
+
+
+def claude_settings_hook_shell_env(cfg: Any, workspace_dir: str | None = None) -> tuple[list[str], list[Path | str]]:
+    """Names the effective Claude Code env sets that stop or subvert its shell-form hooks, and their sources.
+
+    Claude Code applies env blocks name by name, lowest first: the highest
+    source with a value it keeps decides a name, so "" clears a lower value and
+    a dropped value (null, object, array, NUL) does not.
+    """
+
+    decided: set[str] = set()
+    names: list[str] = []
+    sources: list[Path | str] = []
+    for source, env in _claude_env_blocks(cfg, workspace_dir):
+        set_here = False
+        for key in sorted(k for k in env if isinstance(k, str)):
+            if not _is_hook_shell_env_name(key) or key in decided or not _claude_keeps_env_value(env[key]):
+                continue
+            decided.add(key)
+            if _hook_shell_env_takes_effect(key, env[key]):
+                names.append(key)
+                set_here = True
+        if set_here:
+            sources.append(source)
+    return sorted(names), sources
+
+
+def _claude_hook_shell_env_problem(
+    names: list[str], sources: list[Path | str], *, strict: bool, unchecked_folder: str = ""
+) -> HookProblem:
+    listed = ", ".join(names)
+    where = " and ".join(str(source) for source in sources)
+    risks = "; ".join(_hook_shell_env_risk(name) for name in names)
+    text = (
+        f"{where} {'sets' if len(sources) == 1 else 'set'} {listed} in the Claude Code env block, which Claude Code "
+        f"applies to the hook commands it starts through /bin/sh: {risks}"
+    )
+    if strict:
+        text += (
+            ". The strict policy tier refuses it: the gateway does not set up Claude Code, so every Claude Code "
+            "session of this account fails closed until it is removed (a session that applies the value may still "
+            "start no hook)"
+        )
+        repair = f"remove {listed} from that env block, or use the default policy tier, which only warns; then run: defenseclaw-gateway restart"
+    else:
+        if unchecked_folder:
+            text += (
+                f". Claude Code started in {unchecked_folder} would apply it; the gateway checks only the pinned "
+                "claw.workspace_dir, so nothing refused it"
+            )
+        repair = f"remove {listed} from that env block, then restart Claude Code"
+    return HookProblem(text, repair)
+
+
+def _claude_strict_hook_shell_env_problem(cfg: Any, workspace_dir: str | None) -> HookProblem | None:
+    """The strict refusal for the sources the gateway checks, or None."""
+
+    names, sources = claude_settings_hook_shell_env(cfg, workspace_dir if workspace_dir is not None else pinned_workspace_dir(cfg))
+    return _claude_hook_shell_env_problem(names, sources, strict=True) if names else None
+
+
+def inherited_hook_shell_env(environ: Any, connector: str) -> list[str]:
+    """Shell variables in *environ* that stop or subvert *connector*'s hook command.
+
+    SHELLOPTS with ``noexec`` stops every shell that starts a hook command
+    (bash as /bin/sh, bash -c); CLAUDE_CODE_SHELL_PREFIX replaces Claude Code's;
+    BASH_ENV runs before the command where the agent starts it through bash
+    (_BASH_HOOK_RUNNERS). Exported functions are left out: environment modules
+    export ``module`` and ``ml`` in every RHEL login shell, and a function only
+    subverts a hook script that calls a command of the same name. An agent
+    inherits these from the shell that starts it; DefenseClaw cannot change
+    that environment, so this is reported, not refused.
+    """
+
+    found = []
+    options = str(environ.get("SHELLOPTS", "") or "")
+    if "noexec" in [option.strip() for option in options.split(":")]:
+        found.append("SHELLOPTS")
+    bash_env = str(environ.get("BASH_ENV", "") or "").strip()
+    if connector in _BASH_HOOK_RUNNERS and bash_env and not _system_bash_env(bash_env, environ):
+        found.append("BASH_ENV")
+    if connector == "claudecode" and str(environ.get("CLAUDE_CODE_SHELL_PREFIX", "") or "").strip():
+        found.append("CLAUDE_CODE_SHELL_PREFIX")
+    return found
+
+
+def _system_bash_env(path: str, environ: Any) -> bool:
+    """Whether *path* is a system shell init file only root can change.
+
+    Environment Modules and Lmod profiles export BASH_ENV to their own init
+    script so batch bash gets the ``module`` function. Only root can change such
+    a file, so it is not the hostile value this check looks for; warning on it
+    on every doctor and status run was noise (rel-1-0-6:GAP-0393).
+
+    bash opens the path as written, so the path is walked as written, one part
+    at a time with lstat (_root_only_path): every folder on it, and the file,
+    must be root-owned with no group or world write, and a symlink part must be
+    root-owned too, with its target walked the same way. A link in a folder the
+    user can write (the home, a user folder in /tmp) is therefore reported even
+    when it points at a root-owned file, while Lmod's root-owned
+    /usr/share/lmod/lmod link stays exempt. A relative or missing path, and a
+    file that resolves into the home, are reported.
+    """
+
+    if not os.path.isabs(path):
+        return False
+    real = _root_only_path(path, 0)
+    if real is None or not os.path.isfile(real):
+        return False
+    home = os.path.realpath(str(environ.get("HOME", "") or Path.home()))
+    return not (real == home or real.startswith(home.rstrip(os.sep) + os.sep))
+
+
+_ROOT_ONLY_LINK_LIMIT = 40
+
+
+def _root_only_path(path: str, hops: int) -> str | None:
+    """The symlink-free path of absolute *path* if only root can change any part of it, else None."""
+
+    def root_only(info: os.stat_result, *, link: bool) -> bool:
+        if info.st_uid != 0:
+            return False
+        # A link's own mode bits mean nothing; a folder or file must not be
+        # group or world writable (a sticky /tmp still lets anyone add a file).
+        return link or not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+
+    try:
+        if not root_only(os.lstat(os.sep), link=False):
+            return None
+    except OSError:
+        return None
+    current = os.sep
+    for part in path.split(os.sep):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            # current never holds a link, so going up is lexical.
+            current = os.path.dirname(current)
+            continue
+        candidate = os.path.join(current, part)
+        try:
+            info = os.lstat(candidate)
+        except OSError:
+            return None
+        if stat.S_ISLNK(info.st_mode):
+            if hops >= _ROOT_ONLY_LINK_LIMIT or not root_only(info, link=True):
+                return None
+            try:
+                target = os.readlink(candidate)
+            except OSError:
+                return None
+            resolved = _root_only_path(target if os.path.isabs(target) else os.path.join(current, target), hops + 1)
+            if resolved is None:
+                return None
+            current = resolved
+            continue
+        if not root_only(info, link=False):
+            return None
+        current = candidate
+    return current
+
+
+_INHERITED_RISK = {
+    "SHELLOPTS": "SHELLOPTS with noexec (the shell that starts the hook command runs none of it)",
+    "BASH_ENV": "BASH_ENV (the agent starts its hook commands through bash, which runs that file first)",
+    "CLAUDE_CODE_SHELL_PREFIX": "CLAUDE_CODE_SHELL_PREFIX (Claude Code runs that program in place of each hook command)",
+}
+
+
+def agent_hook_env_warnings(
+    cfg: Any,
+    connector: str,
+    *,
+    workspace_dir: str | None = None,
+    environ: Any = None,
+) -> list[HookProblem]:
+    """Warnings for settings and shell variables that can stop *connector*'s hooks (rel-1-0-6:GAP-0322).
+
+    *workspace_dir* None means the pinned ``claw.workspace_dir``, else the
+    folder this command runs in. Outside the strict tier a Claude Code env block
+    that sets a name in HOOK_SHELL_ENV_NAMES is a warning; in the strict tier
+    agent_hook_switch_problems refuses what the gateway checks, and a project in
+    an unpinned folder stays a warning (the gateway does not see it). The
+    variables this shell would hand an agent it starts are a warning in every
+    tier. A managed Claude Code install pins the launch-stopping names in its
+    machine policy. Windows runs the native launcher without a POSIX shell.
+    """
+
+    if _is_windows():
+        return []
+    if connector == "claudecode" and _managed_install(cfg):
+        return []
+    warnings: list[HookProblem] = []
+    settings_names: set[str] = set()
+    if connector == "claudecode":
+        pinned = pinned_workspace_dir(cfg)
+        folder = workspace_dir if workspace_dir is not None else (pinned or os.getcwd())
+        unchecked = "" if (workspace_dir is not None or pinned) else folder
+        for _source, env in _claude_env_blocks(cfg, folder):
+            settings_names.update(key for key, value in env.items() if isinstance(key, str) and _claude_keeps_env_value(value))
+        names, sources = claude_settings_hook_shell_env(cfg, folder)
+        if names and not _strict_policy_tier(cfg, connector):
+            warnings.append(_claude_hook_shell_env_problem(names, sources, strict=False, unchecked_folder=unchecked))
+        elif names and unchecked and _claude_strict_hook_shell_env_problem(cfg, None) is None:
+            warnings.append(_claude_hook_shell_env_problem(names, sources, strict=False, unchecked_folder=unchecked))
+    # A settings env block decides a name it sets, over the inherited value.
+    inherited = [
+        name
+        for name in inherited_hook_shell_env(os.environ if environ is None else environ, connector)
+        if name not in settings_names
+    ]
+    if inherited:
+        listed = ", ".join(inherited)
+        described = "; ".join(_INHERITED_RISK[name] for name in inherited)
+        warnings.append(
+            HookProblem(
+                f"this shell's environment sets {described}, and an agent started from it passes that environment "
+                "to its hook commands, so the DefenseClaw hook may not run; DefenseClaw cannot change the environment "
+                "an agent inherits",
+                f"unset {listed} in the shell profile that sets it, then start the agent from a new shell",
+            )
+        )
+    return warnings
 
 
 def copilot_registration_switch_problem(path: Path | str) -> str:

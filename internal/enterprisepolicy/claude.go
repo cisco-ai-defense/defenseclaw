@@ -88,6 +88,23 @@ func renderClaudeDropIn(opts Options, policy config.ResolvedConnectorPolicy) ([]
 	if policy.ManagedHooksOnly == config.ManagedHooksOnlyEnforce {
 		doc.set("allowManagedHooksOnly", true)
 	}
+	if opts.goos() != "windows" {
+		// Outside Windows each handler is a shell-form command, the native
+		// hook binary's absolute path, that Claude Code starts through
+		// /bin/sh with the merged settings env. A user or project env block
+		// with SHELLOPTS=noexec made bash as /bin/sh run none of it, and
+		// CLAUDE_CODE_SHELL_PREFIX replaces it (rel-1-0-6:GAP-0322). Managed
+		// env outranks every user, project and process value, and "" is
+		// unset to both. Only those two are pinned: managed env is
+		// process-wide, and nothing else can stop this command
+		// (connector.ManagedHookShellEnvPins). Windows starts the launcher in
+		// the exec form, with no shell.
+		env := newObject()
+		for _, name := range connector.ManagedHookShellEnvPins() {
+			env.set(name, "")
+		}
+		doc.set("env", env)
+	}
 	hooks := newObject()
 	for _, group := range groups {
 		entry := newObject()
@@ -153,6 +170,60 @@ func claudeHandlerIsOwned(opts Options, raw any) bool {
 		return true
 	}
 	return command == shellQuote(opts.HookBinary)+" hook --connector claudecode --enterprise-managed"
+}
+
+// claudeEnvValue returns doc's env value for name.
+func claudeEnvValue(doc *object, name string) (any, bool) {
+	if doc == nil {
+		return nil, false
+	}
+	raw, _ := doc.get("env")
+	switch env := raw.(type) {
+	case *object:
+		return env.get(name)
+	case map[string]any:
+		value, ok := env[name]
+		return value, ok
+	}
+	return nil, false
+}
+
+// claudeEnvUnpinned lists the ManagedHookShellEnvPins doc does not set to "".
+func claudeEnvUnpinned(doc *object) []string {
+	var out []string
+	for _, name := range connector.ManagedHookShellEnvPins() {
+		if value, ok := claudeEnvValue(doc, name); !ok || value != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// inspectClaudeHookShellEnvPins reports another file-based managed source
+// that sets a pinned name. Before DefenseClaw's drop-in in merge order its
+// value is overridden, which also turns an administrator's
+// CLAUDE_CODE_SHELL_PREFIX wrapper off for Bash tool commands; after it, its
+// value applies to the managed hook commands.
+func inspectClaudeHookShellEnvPins(opts Options, sources []claudeSource, state *State) {
+	dropIn, _ := claudeDropInPath(opts)
+	seenDropIn := false
+	for _, source := range sources {
+		if source.name == dropIn {
+			seenDropIn = true
+			continue
+		}
+		for _, name := range connector.ManagedHookShellEnvPins() {
+			value, ok := claudeEnvValue(source.doc, name)
+			if !ok || value == "" {
+				continue
+			}
+			if seenDropIn {
+				state.detail("%s sets env %s after DefenseClaw's drop-in, so its value applies to the managed hook commands too (rel-1-0-6:GAP-0322)", source.name, name)
+			} else {
+				state.detail("%s sets env %s; DefenseClaw's drop-in sets it to \"\" later in merge order, so that value no longer applies, also to Bash tool commands (rel-1-0-6:GAP-0322)", source.name, name)
+			}
+		}
+	}
 }
 
 // countClaudeHooks counts DefenseClaw and foreign handlers in a settings
@@ -347,6 +418,9 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 	if policy.ManagedHooksOnly == config.ManagedHooksOnlyPreserve && lockValue != true {
 		state.detail("managed_hooks_only: preserve — user and project Claude Code hooks still run and can rewrite tool input (updatedInput) after DefenseClaw approves it")
 	}
+	if opts.goos() != "windows" {
+		inspectClaudeHookShellEnvPins(opts, sources, state)
+	}
 	if value, from := claudeEffectiveScalar(sources, "policyHelper"); value != nil {
 		state.conflict("%s configures policyHelper, which lets an external helper decide managed policy; DefenseClaw cannot verify the effective hooks", from)
 	}
@@ -362,6 +436,11 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 		switch {
 		case len(missing) == 0:
 			state.detail("%s embeds DefenseClaw's hook matrix", source.name)
+			if opts.goos() != "windows" {
+				if unpinned := claudeEnvUnpinned(source.doc); len(unpinned) > 0 {
+					state.detail("%s carries DefenseClaw's hooks but does not set %s to \"\" in its env, and it is used instead of the drop-in that does: a user or project env block can stop the managed hook commands (rel-1-0-6:GAP-0322); deploy the current `defenseclaw-gateway enterprise policy export --connector claudecode` through it", source.name, strings.Join(unpinned, " and "))
+				}
+			}
 		case behavior == "merge":
 			state.detail("%s sets managedSourcesBehavior: merge, so Claude Code %s and later also apply DefenseClaw's drop-in", source.name, claudeMergeMinimumVersion)
 			if version := opts.agentVersion(claudeConnector); version != "" && compareVersions(version, claudeMergeMinimumVersion) < 0 {

@@ -531,6 +531,7 @@ func resolveConnectorOptsFor(dataDir, name string) connector.SetupOpts {
 		opts.ProxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
 	opts.WorkspaceDir = cfg.ConnectorWorkspaceDir()
+	opts.PolicyTier = cfg.HookPolicyTierForConnector(name)
 	// Setup writes this into Codex's [otel] table; a surgical teardown only
 	// removes it when it knows the same value (GAP-1979).
 	opts.CodexOtelEnvironment = cfg.Environment
