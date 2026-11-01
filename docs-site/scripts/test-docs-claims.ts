@@ -2698,3 +2698,14 @@ describe('hook_process_fail_open next to fail-closed managed hooks (rel-1-0-6:GA
       'the open-mode hook_process_fail_open warning no longer says it is the agent limit');
   });
 });
+
+describe('account-keys refusal on a per-user install (rel-1-0-6:GAP-0417)', () => {
+  it('names the managed-only refusal in the guide and the CLI', () => {
+    const text = page('enterprise/account-join-key.mdx');
+    assert.ok(text.includes('On a computer with only a per-user install there are no account join keys, and the command says so (`not_installed`)'),
+      'account-join-key.mdx no longer says what account-keys does on a per-user install');
+    const go = source('internal/cli/enterprise_account_keys_unix.go');
+    assert.ok(go.includes('secretFailed("not_installed", ') && go.includes('account join keys exist only on a managed (enterprise) install of DefenseClaw'),
+      'enterprise_account_keys_unix.go no longer refuses a per-user install with not_installed');
+  });
+});
