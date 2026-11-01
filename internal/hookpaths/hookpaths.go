@@ -62,6 +62,13 @@ const ProtectedTargetDecision = "protected-target"
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
 const SourceLinkFactPrefix = "\x00source-link:"
 
+// CdEnterableFactPrefix keys the hook client's check that the directory a
+// leading cd names exists and that the user may enter it (search
+// permission). "1" is the only value. A gateway that cannot search the
+// user's home reads an assignment after that cd as always run only on this
+// fact (rel-1-0-6:GAP-0320); a missing fact keeps the old reading.
+const CdEnterableFactPrefix = "\x00cd-enterable:"
+
 // OpaqueScopeFactPrefix keys the hook client's check of one write operand
 // against the scopes of a command that may create links it cannot read (an
 // extraction, a sync or a copy that keeps links). The client walks the operand
@@ -1835,6 +1842,10 @@ func Decode(value string) (map[string]string, bool) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, SourceLinkFactPrefix) && (value != "0" && value != "1" && value != "?") {
+			return nil, false
+		}
+		if strings.HasPrefix(key, CdEnterableFactPrefix) &&
+			(value != "1" || !filepath.IsAbs(strings.TrimPrefix(key, CdEnterableFactPrefix))) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, SourceLinksFactPrefix) {

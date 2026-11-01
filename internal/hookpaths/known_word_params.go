@@ -4,7 +4,6 @@
 package hookpaths
 
 import (
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -72,9 +71,10 @@ func knownWordParameterUsesAt(command string, file *syntax.File, home string, cd
 }
 
 // cdEnterable reports a cd operand word naming, from cwd, a directory that
-// exists: from the hook client's directory fact when the caller has
-// evidence (a managed gateway cannot search the home), else from this
-// process's own view of the disk. A word that starts with "-" or holds a
+// exists and that this account may enter (directoryEnterable): from the
+// hook client's CdEnterableFactPrefix fact when the caller has evidence (a
+// managed gateway cannot search the home), else from this process's own
+// view of the disk, which the client records as that fact. A word that starts with "-" or holds a
 // dot-dot component, and a missing or unreadable directory are not. A
 // bare relative word that exists from cwd is entered whatever CDPATH
 // holds: bash falls back to it when no CDPATH entry matches.
@@ -89,12 +89,19 @@ func cdEnterable(cwd string, facts map[string]string, record bool) func(string) 
 			}
 		}
 		path := OperandPath(word, cwd)
+		key := CdEnterableFactPrefix + path
 		if !record && facts != nil {
-			value, present := facts[DirectoryFactPrefix+path]
-			return present && filepath.IsAbs(value)
+			// The client's own check of the same directory. The
+			// DirectoryFactPrefix value is the physical name of a logical
+			// directory and is written for a missing one too, so it does
+			// not prove the cd succeeds (rel-1-0-6:GAP-0320 review 5).
+			return facts[key] == "1"
 		}
-		info, err := os.Stat(path)
-		return err == nil && info.IsDir()
+		enterable := directoryEnterable(path)
+		if record && facts != nil && enterable {
+			facts[key] = "1"
+		}
+		return enterable
 	}
 }
 

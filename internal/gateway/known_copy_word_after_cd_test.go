@@ -3,7 +3,12 @@
 
 package gateway
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // TestR107KnownCopyWordAfterCdGetsTheVerdictWithoutTheCd: the unquoted
 // rel-1-0-2:GAP-0004 copy forms (a source named by an assigned plain value
@@ -20,7 +25,6 @@ func TestR107KnownCopyWordAfterCdGetsTheVerdictWithoutTheCd(t *testing.T) {
 			`cd ~/proj && f=a.txt; cp $f out.txt`,
 			`cd ~/proj && for x in a.txt; do cp $x build/; done; echo hi > report.txt`,
 			`cd ~/proj && cp a.txt out.txt; echo hi > report.txt`,
-			`cd build && f=a.txt; cp ../ out.txt && echo ok`,
 		},
 		[]string{
 			`cd ~/proj && cp $f build/ && echo hi > report.txt`,
@@ -33,5 +37,62 @@ func TestR107KnownCopyWordAfterCdGetsTheVerdictWithoutTheCd(t *testing.T) {
 			`cd ~/proj && cp -a disklink kbak && echo k >> kbak`,
 			`cd ~/.ssh && f=a.txt; cp ~/proj/$f authorized_keys`,
 			`cd ~ && f=a.txt; cp proj/$f .ssh/authorized_keys`,
+			`cd /nonexistent-r107 && f=a.txt; cp $f build/ && echo hi > report.txt`,
+			`cd ~/proj/../proj && f=a.txt; cp $f build/ && echo hi > report.txt`,
+			`echo x; cd ~/proj && f=a.txt; cp $f build/ && echo hi > report.txt`,
 		})
+}
+
+// TestR107Review5CdConditionsOfTheKnownCopyWord: review 5 of a458e99554
+// (rel-1-0-6:GAP-0320). One must-deny row per condition of the leading-cd
+// reading, beside must-allow neighbours, in all 4 cells: a cd target that
+// is missing, not enterable (mode 0), a dash word with a directory named
+// "-" present, a cd that is not the first statement, a dynamic cd word that
+// binds f, and a known word copied after a mid-command cd from a folder
+// holding a keys link.
+func TestR107Review5CdConditionsOfTheKnownCopyWord(t *testing.T) {
+	home, project := dynamicWordParityProject(t)
+	for _, dir := range []string{"-", "locked"} {
+		if err := os.MkdirAll(filepath.Join(project, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(project, "build", "kl.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(project, "locked"), 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(project, "locked"), 0o700) })
+	if os.Geteuid() == 0 {
+		t.Skip("root enters a mode 0 directory")
+	}
+	allowed := []string{
+		`cd build && f=a.txt; cp $f out.txt`,
+		`f=a.txt; cd build; cp $f out.txt`,
+		`cd build && f=a.txt; cp $f build2/ && echo hi > report.txt`,
+	}
+	blocked := []string{
+		`cd nosuch && f=a.txt; cp $f build/ && echo hi > report.txt`,
+		`cd locked && f=a.txt; cp $f build/ && echo hi > report.txt`,
+		`cd - && f=a.txt; cp $f build/ && echo hi > report.txt`,
+		`cd ~; cd build && f=a.txt; cp $f build/ && echo hi > report.txt`,
+		`f=; cd ${f:=disklink} 2>/dev/null; cp -a $f kbak && echo k >> kbak`,
+		`f=kl.txt; cd build; cp -a $f kbak && echo k >> kbak`,
+		`cd build; cp -a kl.txt kbak && echo k >> kbak`,
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, managed := range []bool{false, true} {
+			for _, command := range allowed {
+				if got := postDynamicWordParity(t, home, project, connector, managed, command, nil); !strings.HasPrefix(got, `{"action":"allow"`) {
+					t.Errorf("%s managed=%v %s = %.200s, want allow", connector, managed, command, got)
+				}
+			}
+			for _, command := range blocked {
+				if got := postDynamicWordParity(t, home, project, connector, managed, command, nil); !strings.HasPrefix(got, `{"action":"block"`) {
+					t.Errorf("%s managed=%v %s = %.200s, want block", connector, managed, command, got)
+				}
+			}
+		}
+	}
 }
