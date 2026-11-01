@@ -13,7 +13,7 @@ measures. It never reads or prints a credential.
 | `hook.<connector>.burst` | the same, 128 calls 32 at a time |
 | `hook.<connector>.*.not_allowed` | benign calls that were denied or failed (must be 0) |
 | `hook_execs.claudecode` | execs and processes per hook call, by program (Linux `strace -f`, also by parent; macOS an `eslogger exec fork` log) |
-| `hook_execs.claudecode.gateway_execs_per_call` | macOS: execs the gateway and its children ran while the traced calls ran, per call (10 calls a second apart) |
+| `hook_execs.claudecode.gateway_execs_per_call` | macOS: execs the gateway and its children ran while the traced calls ran, per call (10 calls a second apart); left out, with `gateway_events_dropped` set, when Endpoint Security dropped any exec or fork event in that span |
 | `gateway_restart.to_api_ready` | `defenseclaw-gateway restart` until `/health` answers from the new process |
 | `cli.status`, `cli.doctor`, `cli.setup_claudecode` | wall time of `defenseclaw status`, `doctor`, `setup claude-code --yes --no-restart` |
 | `cli.skill_scan` | `defenseclaw skill scan --path fixtures/benign-skill --no-use-llm --json` |
@@ -41,7 +41,9 @@ python3 scripts/perf/dcperf.py run --home /tmp/perf-home --out perf.json
 # the rest without it, then check the two passes together.
 sudo sh -c 'eslogger exec fork > /var/tmp/dcperf-es.jsonl 2>/dev/null & echo $! > /var/tmp/dcperf-es.pid'
 python3 scripts/perf/dcperf.py run --only execs --eslogger-log /var/tmp/dcperf-es.jsonl --out perf-execs.json
-sudo kill -TERM "$(cat /var/tmp/dcperf-es.pid)"; sudo rm -f /var/tmp/dcperf-es.jsonl /var/tmp/dcperf-es.pid
+sudo kill -TERM "$(cat /var/tmp/dcperf-es.pid)"   # flushes the log
+python3 scripts/perf/dcperf.py eslogger-parse perf-execs.json --eslogger-pid "$(cat /var/tmp/dcperf-es.pid)"
+sudo rm -f /var/tmp/dcperf-es.jsonl /var/tmp/dcperf-es.pid
 python3 scripts/perf/dcperf.py run --only hook,cli,restart,rss --out perf-rest.json
 python3 scripts/perf/dcperf.py compare perf-execs.json perf-rest.json --budgets scripts/perf/budgets.json --column macos-per-user
 

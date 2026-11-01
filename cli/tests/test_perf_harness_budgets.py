@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import yaml
@@ -101,11 +102,8 @@ def _es(kind: str, seq: int, at: str, pid: int, ppid: int, path: str = "") -> st
     return json.dumps({"event_type": event_type, "seq_num": seq, "time": f"2026-11-01T08:00:{at}Z", "event": body})
 
 
-def test_eslogger_parser_counts_each_calls_tree_drops_gapped_calls_and_counts_gateway_execs() -> None:
-    t = dcperf.eslogger_time
-    assert t("2026-11-01T08:00:01.500000000Z") - t("2026-11-01T08:00:00.000000000Z") == 1.5
-    runner, gateway = 50, 900
-    log = [
+def _eslogger_log(runner: int, gateway: int, call2_execs: tuple[int, int], listing_exec_seq: int = 5) -> list[str]:
+    return [
         # call 1, 01.0-01.2: sh (bash), a hook script fork that runs jq; an unrelated exec
         _es("fork", 1, "01.000000001", 101, runner),
         _es("exec", 1, "01.000000002", 101, runner, "/bin/sh"),
@@ -113,27 +111,88 @@ def test_eslogger_parser_counts_each_calls_tree_drops_gapped_calls_and_counts_ga
         _es("fork", 2, "01.050000000", 102, 101),
         _es("exec", 3, "01.050000001", 102, 101, "/usr/bin/jq"),
         _es("exec", 4, "01.060000000", 777, 1, "/usr/bin/true"),
-        # the gateway's listing: dscl and its watchdog shell
-        _es("fork", 3, "01.100000000", 901, gateway),
-        _es("exec", 5, "01.100000001", 901, gateway, "/usr/bin/dscl"),
-        _es("fork", 4, "01.100000002", 902, gateway),
-        _es("exec", 6, "01.100000003", 902, gateway, "/bin/sh"),
-        # call 2, 02.0-02.2: a dropped exec event (seq 7 missing)
+        # between the calls: the gateway's listing, dscl and its watchdog shell
+        _es("fork", 3, "01.600000000", 901, gateway),
+        _es("exec", listing_exec_seq, "01.600000001", 901, gateway, "/usr/bin/dscl"),
+        _es("fork", 4, "01.600000002", 902, gateway),
+        _es("exec", listing_exec_seq + 1, "01.600000003", 902, gateway, "/bin/sh"),
+        # call 2, 02.0-02.2
         _es("fork", 5, "02.000000001", 103, runner),
-        _es("exec", 8, "02.000000002", 103, runner, "/bin/sh"),
-        _es("exec", 10, "02.000000003", 103, runner, "/bin/bash"),
+        _es("exec", call2_execs[0], "02.000000002", 103, runner, "/bin/sh"),
+        _es("exec", call2_execs[1], "02.000000003", 103, runner, "/bin/bash"),
         "{not json",
     ]
-    windows = [
+
+
+def _eslogger_windows() -> list[tuple[float, float]]:
+    t = dcperf.eslogger_time
+    return [
         (t("2026-11-01T08:00:01.000000000Z"), t("2026-11-01T08:00:01.200000000Z")),
         (t("2026-11-01T08:00:02.000000000Z"), t("2026-11-01T08:00:02.200000000Z")),
     ]
-    parsed = dcperf.parse_eslogger(log, windows, runner, gateway)
-    assert (parsed["calls"], parsed["calls_dropped"]) == (1, 1)
-    assert (parsed["per_call_p50"], parsed["processes_per_call_p50"]) == (3, 2)
-    assert parsed["by_program"] == {"bash": 1.0, "jq": 1.0, "sh": 1.0}
+
+
+def test_eslogger_parser_counts_each_calls_tree_and_the_gateways_execs() -> None:
+    t = dcperf.eslogger_time
+    assert t("2026-11-01T08:00:01.500000000Z") - t("2026-11-01T08:00:00.000000000Z") == 1.5
+    parsed = dcperf.parse_eslogger(_eslogger_log(50, 900, (7, 8)), _eslogger_windows(), 50, 900)
+    assert (parsed["calls"], parsed["calls_dropped"]) == (2, 0)
+    assert (parsed["per_call_p50"], parsed["processes_per_call_p50"]) == (2.5, 1.5)
+    assert parsed["by_program"] == {"bash": 1.0, "sh": 1.0, "jq": 0.5}
+    assert parsed["gateway_events_dropped"] == 0
     assert parsed["gateway_by_program"] == {"dscl": 1, "sh": 1}
     assert parsed["gateway_execs_per_call"] == 1.0
+
+
+def test_a_dropped_event_in_a_call_drops_the_call_and_the_gateway_count() -> None:
+    # call 2's exec events skip seq 7 and 9
+    parsed = dcperf.parse_eslogger(_eslogger_log(50, 900, (8, 10)), _eslogger_windows(), 50, 900)
+    assert (parsed["calls"], parsed["calls_dropped"]) == (1, 1)
+    assert (parsed["per_call_p50"], parsed["processes_per_call_p50"]) == (3, 2)
+    assert parsed["gateway_events_dropped"] == 2
+    assert "gateway_execs_per_call" not in parsed
+
+
+def test_a_dropped_event_between_the_calls_drops_the_gateway_count_only() -> None:
+    # review of 19f71f9be5: the listing between two calls lost an exec (seq 5);
+    # the calls themselves are whole, the gateway count is not reported
+    parsed = dcperf.parse_eslogger(_eslogger_log(50, 900, (8, 9), listing_exec_seq=6), _eslogger_windows(), 50, 900)
+    assert (parsed["calls"], parsed["calls_dropped"]) == (2, 0)
+    assert parsed["gateway_events_dropped"] == 1
+    assert "gateway_execs_per_call" not in parsed
+    budgets = {"tolerance": 0.2, "columns": {"c": {"hook_execs.claudecode.gateway_execs_per_call": {"budget": 4}}}}
+    report = dcperf.compare({"metrics": {"hook_execs": {"claudecode": parsed}}}, budgets, "c")
+    assert not report["ok"] and report["rows"][0]["status"] == "missing"
+
+
+def _pending_trace(tmp_path: Path, lines: list[str]) -> dict:
+    log = tmp_path / "es.jsonl"
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    windows = _eslogger_windows()
+    return {
+        "metrics": {},
+        "eslogger_traces": {
+            "claudecode": {"log": str(log), "offset": 0, "runner_pid": 50, "gateway_pid": 900, "windows": windows}
+        },
+    }
+
+
+def test_eslogger_parse_fills_the_exec_count_from_a_stopped_logger(tmp_path: Path) -> None:
+    tail = _es("exec", 9, "03.000000000", 778, 1, "/usr/bin/true")  # written after the last call
+    result = dcperf.eslogger_parse(_pending_trace(tmp_path, _eslogger_log(50, 900, (7, 8)) + [tail]))
+    assert "eslogger_traces" not in result
+    assert result["metrics"]["hook_execs"]["claudecode"]["gateway_execs_per_call"] == 1.0
+
+
+def test_eslogger_parse_refuses_a_log_that_may_be_partial(tmp_path: Path) -> None:
+    # no event after the last call: eslogger was not stopped (its buffer was not flushed)
+    for pid, lines in ((None, _eslogger_log(50, 900, (7, 8))), (os.getpid(), _eslogger_log(50, 900, (7, 8)))):
+        try:
+            dcperf.eslogger_parse(_pending_trace(tmp_path, lines), pid)
+        except SystemExit as exc:
+            assert "SIGTERM" in str(exc)
+        else:
+            raise AssertionError(f"a partial log was parsed (pid {pid})")
 
 
 def test_passes_merge_into_one_result_for_the_gate() -> None:
@@ -287,6 +346,14 @@ def test_only_takes_known_measurement_groups() -> None:
             assert "--only" in str(exc)
         else:
             raise AssertionError(f"{bad!r} was accepted")
+
+
+def test_the_windows_column_is_report_only_until_a_windows_producer_is_in_the_repo() -> None:
+    # dcperf.py writes no Windows metrics (review of 19f71f9be5, finding 5)
+    column = BUDGETS["columns"]["windows-per-user"]
+    assert column and all(entry.get("gate") is False for entry in column.values())
+    restart = column["gateway_restart.to_api_ready.p50_ms"]["source"]
+    assert "single fresh-store sample" in restart
 
 
 def test_every_ungated_budget_other_than_a_max_says_why() -> None:

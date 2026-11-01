@@ -6,7 +6,7 @@
   "linux-per-user is seeded from the RHEL 9.8 per-user column of the 1.0.6 performance baseline (~/dc-eh/plans/r107/data/PERF-BASELINE.md, dc-rhel, 4 vCPU). Each entry names its source row.",
   "gate false: reported next to its budget but not gated, with the reason in why (max is a single-sample tail; burst latency depends on the runner CPU).",
   "TODO: no baseline measurement for this cell yet; fill it from a dcperf run on that OS and mode.",
-  "windows-per-user and macos-per-user hold the seeds of their PERF-BASELINE.md sections: the worst of three runs plus 20%, so the gate's tolerance comes on top. windows-per-user is measured with the Windows port of this harness (plans/r107/perfwin/perf.ps1, ETW for processes, working set for RSS); dcperf.py does not run on Windows yet.",
+  "windows-per-user and macos-per-user hold the seeds of their PERF-BASELINE.md sections: the worst of three runs plus 20% (the Windows restart seed is a single fresh-store sample), so the gate's tolerance comes on top. windows-per-user is report-only (every entry gate false): it was measured with a Windows port of this harness that is not in the repo.",
   "windows-per-user host: dc-win2 (Windows Server 2025, 16 vCPU, shared), cpu_score_ms 251.8 / 259.1 against dev 102 and dc-mac 110, so single-thread CPU there is about 2.4x slower than dev; the seeds are kept as measured on it, not scaled. Compare a result's host.cpu_score_ms before reading a Windows regression."
  ],
  "columns": {
@@ -238,97 +238,129 @@
   "windows-per-user": {
    "hook.claudecode.idle.p50_ms": {
     "budget": 176,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 146.4 ms (registered guard launcher + hook.exe)"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 146.4 ms (registered guard launcher + hook.exe)",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.claudecode.idle.p95_ms": {
     "budget": 193,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 161.0 ms"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 161.0 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.claudecode.idle.max_ms": {
     "budget": 634,
     "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 528.4 ms",
-    "gate": false
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.claudecode.idle.not_allowed": {
     "budget": 0,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 0"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 0",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.claudecode.burst.p50_ms": {
     "budget": 860,
     "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 716.9 ms",
     "gate": false,
-    "why": "not gated: burst latency is CPU-bound and depends on the host (16 vCPUs shared with other lanes); reported next to its seed."
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.claudecode.burst.p95_ms": {
     "budget": 1355,
     "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 1129.3 ms",
     "gate": false,
-    "why": "not gated: burst latency is CPU-bound and depends on the host (16 vCPUs shared with other lanes); reported next to its seed."
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.claudecode.burst.not_allowed": {
     "budget": 0,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 0"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 0",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.codex.idle.p50_ms": {
     "budget": 202,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 167.9 ms (registered cmd.exe + hook.exe)"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 167.9 ms (registered cmd.exe + hook.exe)",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.codex.idle.p95_ms": {
     "budget": 280,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 232.8 ms (median of the runs 195.5)"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 232.8 ms (median of the runs 195.5)",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.codex.idle.max_ms": {
     "budget": 866,
     "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 721.4 ms",
-    "gate": false
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.codex.idle.not_allowed": {
     "budget": 0,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 0"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 0",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.codex.burst.p50_ms": {
     "budget": 907,
     "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 756.0 ms",
     "gate": false,
-    "why": "not gated: burst latency is CPU-bound and depends on the host (16 vCPUs shared with other lanes); reported next to its seed."
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.codex.burst.p95_ms": {
     "budget": 1332,
     "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 1110.3 ms",
     "gate": false,
-    "why": "not gated: burst latency is CPU-bound and depends on the host (16 vCPUs shared with other lanes); reported next to its seed."
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook.codex.burst.not_allowed": {
     "budget": 0,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 0"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 0",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook_execs.claudecode.per_call_p50": {
     "budget": 2,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 2 processes started per call (ETW, 30 calls, no variance; Windows has no exec/fork split)"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 2 processes started per call (ETW, 30 calls, no variance; Windows has no exec/fork split)",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "hook_execs.codex.per_call_p50": {
     "budget": 3,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 3 processes per call (cmd.exe, conhost.exe, hook.exe; ETW, 30 calls)"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 3 processes per call (cmd.exe, conhost.exe, hook.exe; ETW, 30 calls)",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "gateway_restart.to_api_ready.p50_ms": {
     "budget": 7900,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run fresh-store seed; 9234.8 ms at a 272 MB store before rel-1-0-6 GAP-0332 (seed 11082 there), 6.6 s at 11 MB"
+    "source": "Windows per-user, dc-win2, 1.0.7 e3c263a14b (lane r107-perf-win): a single fresh-store sample, 6.6 s at an 11 MB store (first run), seeded at 7900; not the worst of three runs like the other seeds. The three reused-store runs read 8072 / 8563 / 9235 ms at 169 / 221 / 272 MB, before rel-1-0-6:GAP-0332",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "cli.status.p50_ms": {
     "budget": 3735,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 3112.3 ms"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 3112.3 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "cli.doctor.p50_ms": {
     "budget": 10381,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 8651.0 ms"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 8651.0 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "cli.setup_claudecode.p50_ms": {
     "budget": 5349,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 4457.1 ms"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 4457.1 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    },
    "gateway_rss_kb.after_idle": {
     "budget": 216634,
-    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 180528 KiB working set after 300 s idle (peak 647-684 MiB right after a restart, trimmed by Windows)"
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 180528 KiB working set after 300 s idle (peak 647-684 MiB right after a restart, trimmed by Windows)",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
    }
   },
   "linux-managed": {

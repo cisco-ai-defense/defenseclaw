@@ -30,7 +30,11 @@ Subcommands:
                                       codex, start the gateway on free ports
   run [--home DIR] [--rss-idle S] [--out FILE] [--budgets FILE --column C]
       [--eslogger-log FILE]
-  compare RESULT --budgets FILE --column C
+  eslogger-parse RESULT [--eslogger-pid PID] [--out FILE]
+                                      after eslogger was stopped with SIGTERM:
+                                      fill the exec count of a run that traced
+                                      with --eslogger-log (macOS)
+  compare RESULT [RESULT ...] --budgets FILE --column C
 
 `run` and `compare` exit 1 when a gated metric is over its budget by more
 than the tolerance in budgets.json, or when a gated metric could not be
@@ -590,7 +594,9 @@ def parse_eslogger(
     of an event type is dropped rather than counted short. gateway_execs
     counts the execs of the gateway's descendants from the first call to the
     last: a per-user macOS gateway ran four dscl, each with a process-group
-    watchdog shell, every 2 s while hooks came in (rel-1-0-6 GAP-0326).
+    watchdog shell, every 2 s while hooks came in (rel-1-0-6 GAP-0326). It
+    is left out, with gateway_events_dropped set, when any exec or fork event
+    of that whole span is missing from the log.
     """
     events = []
     for line in lines:
@@ -656,7 +662,19 @@ def parse_eslogger(
             return False
 
         first, last = windows[0][0], windows[-1][1] + ESLOGGER_SLACK_S
-        gateway = [e for e in events if e[1] == "exec" and first <= e[0] <= last and below_gateway(e[3])]
+        span = [e for e in events if first <= e[0] <= last]
+        dropped = 0
+        for kind in ("exec", "fork"):
+            seqs = sorted({e[2][1] for e in span if e[1] == kind})
+            if seqs:
+                dropped += seqs[-1] - seqs[0] + 1 - len(seqs)
+        out["gateway_events_dropped"] = dropped
+        if dropped:
+            # A dropped event may be one of the gateway's: the count would be
+            # short and pass its budget, so it is not reported (a gated metric
+            # that was not measured fails the check).
+            return out
+        gateway = [e for e in span if e[1] == "exec" and below_gateway(e[3])]
         programs: dict[str, int] = {}
         for e in gateway:
             programs[e[5]] = programs.get(e[5], 0) + 1
@@ -672,13 +690,14 @@ def _read_log_from(path: Path, offset: int) -> list[str]:
 
 
 def count_execs_eslogger(inst: Install, connector: str, calls: int, log: Path) -> dict:
-    """Processes started per hook invocation on macOS, from an eslogger log.
+    """Run the traced hook calls of an eslogger exec count (macOS).
 
     macOS has no strace, and only root may run `eslogger exec fork`, so the
-    operator starts it for the run (README) and passes its log; the harness
-    marks the time of each call, a second apart, and reads the events that
-    eslogger wrote after the first call. eslogger writes through a buffer:
-    the log is read once it holds an event from after the last call.
+    operator starts it for the run and passes its log (README). This marks the
+    time of each call, a second apart, and returns them as a pending trace:
+    eslogger writes through a buffer, so the log is read only after the
+    operator has stopped it with SIGTERM (`eslogger-parse`), never by waiting
+    for events to show up.
     """
     env = inst.env()
     command = registered_hook(inst, connector)
@@ -696,26 +715,62 @@ def count_execs_eslogger(inst: Install, connector: str, calls: int, log: Path) -
             timeout=60,
         )
         windows.append((start, time.time()))
-        time.sleep(ESLOGGER_CALL_GAP_S)
-    after = windows[-1][1] + ESLOGGER_SLACK_S + 0.5
-    deadline = time.time() + 60
-    while True:
-        lines = _read_log_from(log, offset)
+        time.sleep(ESLOGGER_CALL_GAP_S)  # pacing: one call's events never fall in the next window
+    return {
+        "tracer": "eslogger",
+        "status": "pending: stop eslogger with SIGTERM, then run eslogger-parse",
+        "trace": {
+            "log": str(log),
+            "offset": offset,
+            "runner_pid": os.getpid(),
+            "gateway_pid": inst.gateway_pid(),
+            "windows": windows,
+        },
+    }
+
+
+def eslogger_parse(result: dict, eslogger_pid: int | None = None) -> dict:
+    """Fill a result's pending eslogger traces from their logs.
+
+    Refuses (SystemExit) while the eslogger pid given is still running, and
+    when a log ends before the last traced call: eslogger flushes its buffer
+    when SIGTERM stops it, so either means a partial log.
+    """
+    traces = result.get("eslogger_traces") or {}
+    if not traces:
+        raise SystemExit("eslogger-parse: the result holds no pending eslogger trace (run with --eslogger-log)")
+    if eslogger_pid:
+        try:
+            os.kill(eslogger_pid, 0)
+            running = True
+        except ProcessLookupError:
+            running = False
+        except PermissionError:
+            running = True  # root's process, alive
+        if running:
+            raise SystemExit(
+                f"eslogger-parse: eslogger pid {eslogger_pid} is still running; stop it with SIGTERM first"
+            )
+    for connector, trace in traces.items():
+        lines = _read_log_from(Path(trace["log"]), int(trace["offset"]))
+        windows = [tuple(w) for w in trace["windows"]]
         newest = 0.0
         for line in reversed(lines[-50:]):
             try:
                 newest = max(newest, eslogger_time(json.loads(line)["time"]))
             except (ValueError, KeyError, TypeError):
                 continue
-        if newest > after or time.time() > deadline:
-            break
-        time.sleep(1.0)
-    parsed = parse_eslogger(lines, windows, os.getpid(), inst.gateway_pid())
-    if not parsed["calls"]:
-        raise RuntimeError(
-            f"no traced call in {log} ({parsed['calls_dropped']} dropped): is `eslogger exec fork` writing it?"
-        )
-    return dict(parsed, tracer="eslogger")
+        if not windows or newest <= windows[-1][1] + ESLOGGER_SLACK_S:
+            raise SystemExit(
+                f"eslogger-parse: {trace['log']} ends before the last traced call; "
+                "stop eslogger with SIGTERM (which flushes it) before parsing"
+            )
+        parsed = parse_eslogger(lines, windows, int(trace["runner_pid"]), trace.get("gateway_pid"))
+        if not parsed["calls"]:
+            raise SystemExit(f"eslogger-parse: no traced call in {trace['log']} ({parsed['calls_dropped']} dropped)")
+        result.setdefault("metrics", {}).setdefault("hook_execs", {})[connector] = dict(parsed, tracer="eslogger")
+    del result["eslogger_traces"]
+    return result
 
 
 # ---------------------------------------------------------------- gateway, CLI
@@ -853,6 +908,9 @@ def measure(
     execs = None
     if "execs" in only:
         execs = attempt("hook_execs", lambda: count_execs(inst, "claudecode", prof["exec_calls"], eslogger_log))
+    traces = {}
+    if execs and "trace" in execs:
+        traces["claudecode"] = execs.pop("trace")
     if execs:
         metrics["hook_execs"] = {"claudecode": execs}
     cli = {}
@@ -877,7 +935,7 @@ def measure(
     if restart:
         metrics["gateway_restart"] = restart
     if "rss" not in only:
-        return _result(inst, metrics, errors, only)
+        return _result(inst, metrics, errors, only, traces)
     # RSS: the gateway started by the last restart, after rss_idle seconds of no traffic
     time.sleep(prof["rss_idle"])
     pid = inst.gateway_pid()
@@ -892,7 +950,7 @@ def measure(
         )
     else:
         errors["gateway_rss"] = "no gateway pid or RSS"
-    return _result(inst, metrics, errors, only)
+    return _result(inst, metrics, errors, only, traces)
 
 
 def cpu_score_ms(rounds: int = 5) -> float:
@@ -930,9 +988,9 @@ def _cpu_model() -> str:
     return platform.processor() or platform.machine()
 
 
-def _result(inst: Install, metrics: dict, errors: dict, only: tuple[str, ...]) -> dict:
+def _result(inst: Install, metrics: dict, errors: dict, only: tuple[str, ...], traces: dict | None = None) -> dict:
     cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
-    return {
+    result = {
         "schema": SCHEMA,
         "groups": list(only),
         "host": {
@@ -949,6 +1007,9 @@ def _result(inst: Install, metrics: dict, errors: dict, only: tuple[str, ...]) -
         "metrics": metrics,
         "errors": errors,
     }
+    if traces:
+        result["eslogger_traces"] = traces
+    return result
 
 
 def version_of(inst: Install) -> str:
@@ -1040,6 +1101,10 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="macOS: the JSON log a root `eslogger exec fork` writes during the run (counts execs per hook)",
     )
+    e = sub.add_parser("eslogger-parse")
+    e.add_argument("result", type=Path)
+    e.add_argument("--eslogger-pid", type=int, help="refuse while this eslogger process still runs")
+    e.add_argument("--out", type=Path, help="write here instead of over RESULT")
     c = sub.add_parser("compare")
     c.add_argument("result", type=Path, nargs="+", help="one result, or several passes to merge (later wins)")
     c.add_argument("--budgets", type=Path, required=True)
@@ -1048,6 +1113,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "provision":
         provision(args.assets.resolve(), args.home.resolve())
+        return 0
+    if args.cmd == "eslogger-parse":
+        result = eslogger_parse(json.loads(args.result.read_text(encoding="utf-8")), args.eslogger_pid)
+        (args.out or args.result).write_text(json.dumps(result, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        print(one_line(result))
         return 0
     if args.cmd == "compare":
         result = merge_results([json.loads(path.read_text(encoding="utf-8")) for path in args.result])
