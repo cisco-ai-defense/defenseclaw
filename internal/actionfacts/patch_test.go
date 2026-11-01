@@ -116,8 +116,9 @@ func TestAnalyzeApplyPatchRejectsUncertainEnvelopes(t *testing.T) {
 		{name: "mixed separator duplicate path aliases", fields: map[string]any{"patch": "*** Begin Patch\n*** Add File: dir\\..\\a.go\n+x\n*** Delete File: a.go\n*** End Patch"}, status: StatusAmbiguous},
 		{name: "duplicate aliases", fields: map[string]any{"command": valid, "patch": valid}, status: StatusAmbiguous},
 		{name: "explicit path conflict", fields: map[string]any{"patch": valid, "path": "other.go"}, status: StatusAmbiguous},
-		{name: "POSIX absolute path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: /etc/hosts\n*** End Patch"}, status: StatusInvalid},
-		{name: "drive absolute path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: C:\\Windows\\win.ini\n*** End Patch"}, status: StatusInvalid},
+		{name: "home path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: ~/.zshrc\n*** End Patch"}, status: StatusInvalid},
+		{name: "root-relative backslash path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: \\Windows\\win.ini\n*** End Patch"}, status: StatusInvalid},
+		{name: "drive-relative path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: C:win.ini\n*** End Patch"}, status: StatusInvalid},
 		{name: "UNC absolute path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: \\\\server\\share\\file.txt\n*** End Patch"}, status: StatusInvalid},
 		{name: "nul path", fields: map[string]any{"patch": "*** Begin Patch\n*** Add File: a\x00.go\n+x\n*** End Patch"}, status: StatusInvalid},
 		{name: "path limit", fields: map[string]any{"patch": "*** Begin Patch\n*** Add File: " + strings.Repeat("a", maxScalarBytes+1) + "\n+x\n*** End Patch"}, status: StatusLimitExceeded},
@@ -154,6 +155,55 @@ func TestAnalyzeApplyPatchResolvesRelativeWindowsPath(t *testing.T) {
 		facts.Paths[0].Resolved != "C:/workspace/src/new.go" ||
 		facts.Paths[0].Access != PathAccessWrite {
 		t.Fatalf("facts = %#v", facts)
+	}
+}
+
+// An absolute target is a write fact like a relative one: Codex and the
+// Copilot CLI apply it as given, so the path rules judge it
+// (rel-1-0-6:GAP-0361).
+func TestAnalyzeApplyPatchProjectsAbsoluteTargets(t *testing.T) {
+	for _, test := range []struct {
+		name, cwd, patch string
+		dialect          Dialect
+		want             []struct {
+			value, resolved string
+			access          PathAccess
+		}
+	}{
+		{name: "POSIX update and delete", cwd: "/workspace",
+			patch: "*** Begin Patch\n*** Update File: /etc/sudoers\n@@\n a\n+b\n*** Delete File: /etc/hosts\n*** End Patch",
+			want: []struct {
+				value, resolved string
+				access          PathAccess
+			}{{"/etc/sudoers", "/etc/sudoers", PathAccessWrite}, {"/etc/hosts", "/etc/hosts", PathAccessDelete}}},
+		{name: "POSIX dot segments", cwd: "/workspace",
+			patch: "*** Begin Patch\n*** Add File: /home/alice/./.zshrc\n+x\n*** End Patch",
+			want: []struct {
+				value, resolved string
+				access          PathAccess
+			}{{"/home/alice/./.zshrc", "/home/alice/.zshrc", PathAccessWrite}}},
+		{name: "drive path", cwd: `C:\workspace`, dialect: DialectPowerShell,
+			patch: "*** Begin Patch\n*** Delete File: C:\\Windows\\win.ini\n*** End Patch",
+			want: []struct {
+				value, resolved string
+				access          PathAccess
+			}{{`C:\Windows\win.ini`, "C:/Windows/win.ini", PathAccessDelete}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args, err := json.Marshal(map[string]string{"command": test.patch})
+			if err != nil {
+				t.Fatal(err)
+			}
+			facts := Analyze(Input{Tool: "apply_patch", Args: args, CWD: test.cwd, DialectHint: test.dialect})
+			if !facts.Authoritative() || len(facts.Paths) != len(test.want) {
+				t.Fatalf("facts = %#v", facts)
+			}
+			for _, want := range test.want {
+				if !patchFactsHavePath(facts, want.value, want.resolved, want.access) {
+					t.Fatalf("missing path %#v in %#v", want, facts.Paths)
+				}
+			}
+		})
 	}
 }
 

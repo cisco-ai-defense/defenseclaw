@@ -31,6 +31,16 @@ func TestInfraSetAtomicNoisePosture(t *testing.T) {
 			present: []string{"PATH-ETC-SUDOERS"}, strictOnly: true,
 		},
 		{
+			// The main file is the rule's own form in every profile
+			// (rel-1-0-6:GAP-0353); drop-ins above stay strict-only.
+			name: "main sudoers file mutation", command: `printf configured > /etc/sudoers`,
+			present: []string{"PATH-ETC-SUDOERS"},
+		},
+		{
+			name: "main sudoers file read", command: `cat /etc/sudoers`,
+			absent: []string{"PATH-ETC-SUDOERS"},
+		},
+		{
 			name:    "exact unrestricted sudoers grant",
 			command: `printf '%s\n' 'opsbot ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/opsbot`,
 			present: []string{"privilege.sudoers_unrestricted_nopasswd"},

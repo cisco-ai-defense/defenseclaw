@@ -67,15 +67,22 @@ func isPatchEnvelopeField(field string, value any) bool {
 	return ok && field == "input" && strings.HasPrefix(text, "*** Begin Patch")
 }
 
-func isRelativePatchPath(value string) bool {
-	if value == "" || strings.HasPrefix(value, "/") ||
-		strings.HasPrefix(value, `\`) || value == "~" ||
-		strings.HasPrefix(value, "~/") || strings.HasPrefix(value, `~\`) {
+// isAcceptedPatchPath reports a patch target with one stable meaning: a path
+// relative to the working directory, or an absolute POSIX or drive path.
+// Codex and the Copilot CLI apply an absolute target as given, so it is a
+// write fact like a relative one, and every path rule judges it
+// (rel-1-0-6:GAP-0361). Home forms (~), root-relative backslash paths, UNC
+// shares and drive-relative paths (C:x) stay unread: the tool does not
+// expand ~, and the others depend on the current drive or a remote host.
+func isAcceptedPatchPath(value string) bool {
+	if value == "" || value == "~" || strings.HasPrefix(value, "~/") ||
+		strings.HasPrefix(value, `~\`) || strings.HasPrefix(value, `\`) {
 		return false
 	}
-	// Drive-qualified paths include both absolute C:\x and drive-relative C:x
-	// forms. Neither has stable working-directory semantics across platforms.
-	return len(value) < 2 || !isASCIILetter(value[0]) || value[1] != ':'
+	if len(value) >= 2 && isASCIILetter(value[0]) && value[1] == ':' {
+		return len(value) >= 3 && (value[2] == '/' || value[2] == '\\')
+	}
+	return true
 }
 
 func appendExtractedPatch(out *extractedInput, text string) {
@@ -186,7 +193,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 			strings.TrimSpace(pathValue) != pathValue ||
 			len(pathValue) > maxScalarBytes ||
 			strings.IndexByte(pathValue, 0) >= 0 ||
-			!isRelativePatchPath(pathValue) {
+			!isAcceptedPatchPath(pathValue) {
 			status := StatusInvalid
 			issue := IssueInvalidSyntax
 			if len(pathValue) > maxScalarBytes {
@@ -202,7 +209,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		if directives > maxPatchDirectives {
 			return fail(StatusLimitExceeded, IssueFactLimit)
 		}
-		// The envelope can spell the same effective relative target through dot
+		// The envelope can spell the same effective target through dot
 		// segments or either separator style. Key duplicate detection by that
 		// conservative lexical identity so conflicting access facts cannot regain
 		// authority after path normalization.
