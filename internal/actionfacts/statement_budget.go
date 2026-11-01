@@ -118,9 +118,10 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			}
 			continue
 		case frameVariable:
-			if r == '`' {
+			switch r {
+			case '`':
 				i++
-			} else if r == '}' {
+			case '}':
 				frames = frames[:len(frames)-1]
 			}
 			continue
