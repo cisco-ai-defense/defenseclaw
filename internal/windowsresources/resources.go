@@ -61,16 +61,18 @@ const (
 	ComponentStartup   Component = "startup"
 	ComponentSetup     Component = "setup"
 	// ComponentEnterpriseSetup is deliberately distinct from ComponentSetup.
-	// The ordinary Setup is a per-user, asInvoker application; the enterprise
-	// bootstrap owns machine-wide services and ACLs and must therefore run only
-	// with an elevated administrator token.
+	// The ordinary Setup is a per-user, asInvoker application; the Secure
+	// Client enterprise bootstrap owns machine-wide services and ACLs and its
+	// manifest requires an elevated administrator token.
 	ComponentEnterpriseSetup Component = "enterprise-setup"
-	// ComponentEnterpriseStandaloneSetup is the same enterprise bootstrap
-	// built as the MDM-deployable standalone Setup
-	// (packaging/windows/standalone/build-setup.sh). It differs from
-	// ComponentEnterpriseSetup only in its file names, so MDM file-version
-	// detection and the management sidecar read the release it ships
-	// (rel-1-0-6:GAP-0296).
+	// ComponentEnterpriseStandaloneSetup is the enterprise bootstrap built as
+	// the MDM-deployable standalone Setup
+	// (packaging/windows/standalone/build-setup.sh). Its VERSIONINFO lets MDM
+	// file-version detection and the management sidecar read the release it
+	// ships (rel-1-0-6:GAP-0296). Its manifest is asInvoker: the Setup refuses
+	// a token that is not elevated itself, with exit 1603 and its JSON result,
+	// and /? and argument errors (1639) work without elevation, as the
+	// published exit-code contract says.
 	ComponentEnterpriseStandaloneSetup Component = "enterprise-setup-standalone"
 )
 
@@ -217,13 +219,12 @@ var componentMetadataByName = map[Component]componentMetadata{
 		RequireAdministrator: true,
 	},
 	ComponentEnterpriseStandaloneSetup: {
-		AssemblyName:         "Cisco.DefenseClaw.EnterpriseSetup",
-		Description:          "DefenseClaw managed-enterprise Windows setup",
-		FileDescription:      "DefenseClaw Enterprise Setup",
-		InternalName:         "DefenseClawSetupEnterpriseStandalone",
-		OriginalFilename:     "DefenseClawSetup-Enterprise-Standalone-x64.exe",
-		CommonControlsV6:     true,
-		RequireAdministrator: true,
+		AssemblyName:     "Cisco.DefenseClaw.EnterpriseSetup",
+		Description:      "DefenseClaw managed-enterprise Windows setup",
+		FileDescription:  "DefenseClaw Enterprise Setup",
+		InternalName:     "DefenseClawSetupEnterpriseStandalone",
+		OriginalFilename: "DefenseClawSetup-Enterprise-Standalone-x64.exe",
+		CommonControlsV6: true,
 	},
 }
 
@@ -265,19 +266,14 @@ func parseVersion(value string) (parsedVersion, error) {
 	return parsedVersion{Display: display, Fixed: fixed, Pre: match[4] != ""}, nil
 }
 
-// Manifest returns the canonical AMD64 UTF-8 RT_MANIFEST/1 bytes for a
-// component. Setup is AMD64-only, and existing installer callers deliberately
-// retain this compatibility entry point.
-func Manifest(component Component, versionValue string) ([]byte, error) {
-	return ManifestForTarget(TargetWindowsAMD64, component, versionValue)
-}
-
 // ManifestForTarget returns the canonical UTF-8 RT_MANIFEST/1 bytes for a
 // component and target. The manifest opts every binary into long paths, current
 // Windows compatibility, and per-monitor-v2 DPI behavior. The ordinary Setup
-// remains non-elevating. The separate enterprise Setup requires an administrator
-// because it owns machine-wide services and protected Program Files/ProgramData
-// state. Both Setup variants activate common-controls v6 and are AMD64-only.
+// and the standalone enterprise Setup are non-elevating (the standalone Setup
+// refuses a token that is not elevated itself). The Secure Client enterprise
+// Setup requires an administrator because it owns machine-wide services and
+// protected Program Files/ProgramData state. Every Setup variant activates
+// common-controls v6 and is AMD64-only.
 func ManifestForTarget(target Target, component Component, versionValue string) ([]byte, error) {
 	specification, err := target.specification()
 	if err != nil {

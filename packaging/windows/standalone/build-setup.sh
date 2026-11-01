@@ -234,7 +234,7 @@ echo "==> building ${SETUP##*/} (outer EXE, no trailer yet)"
     -ldflags "-s -w -buildid=defenseclaw-enterprise-setup-standalone-${SOURCE_COMMIT} -X main.standalonePayloadBinding=${PAYLOAD_BINDING}" \
     -o "${SETUP_UNSIGNED}" ./cmd/defenseclaw-enterprise-setup )
 # VERSIONINFO (FileVersion/ProductVersion X.Y.Z.0, ProductName, CompanyName,
-# OriginalFilename), the requireAdministrator manifest and the icon, before
+# OriginalFilename), the manifest and the icon, before
 # the trailer and any signature: MDM file-version detection and the
 # management sidecar read the release from it (rel-1-0-6:GAP-0296).
 echo "==> stamping ${SETUP##*/} VERSIONINFO / manifest / icon"

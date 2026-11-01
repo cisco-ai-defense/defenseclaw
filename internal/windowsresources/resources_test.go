@@ -49,7 +49,7 @@ func TestManifestContractForEveryComponent(t *testing.T) {
 	for _, component := range AllComponents {
 		component := component
 		t.Run(string(component), func(t *testing.T) {
-			manifest, err := Manifest(component, "12.34.56-rc.7")
+			manifest, err := ManifestForTarget(TargetWindowsAMD64, component, "12.34.56-rc.7")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -59,7 +59,7 @@ func TestManifestContractForEveryComponent(t *testing.T) {
 			text := string(manifest)
 			requiredLevel := `level="asInvoker" uiAccess="false"`
 			forbiddenLevel := "requireAdministrator"
-			if component == ComponentEnterpriseSetup || component == ComponentEnterpriseStandaloneSetup {
+			if component == ComponentEnterpriseSetup {
 				requiredLevel = `level="requireAdministrator" uiAccess="false"`
 				forbiddenLevel = `level="asInvoker"`
 			}
@@ -153,7 +153,7 @@ func TestManifestArchitectureMatchesTarget(t *testing.T) {
 
 func TestSetupResourcesRemainAMD64Only(t *testing.T) {
 	for _, component := range []Component{ComponentSetup, ComponentEnterpriseSetup, ComponentEnterpriseStandaloneSetup} {
-		manifest, err := Manifest(component, "1.2.3")
+		manifest, err := ManifestForTarget(TargetWindowsAMD64, component, "1.2.3")
 		if err != nil {
 			t.Fatal(err)
 		}

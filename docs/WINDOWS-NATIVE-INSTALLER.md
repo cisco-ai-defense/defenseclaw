@@ -177,10 +177,13 @@ activates Common Controls v6 because its Win32 wizard uses those controls.
 
 The enterprise Setup (`DefenseClawSetup-Enterprise-Standalone-x64.exe`, and the
 Secure Client `DefenseClawSetup-Enterprise-x64.exe`) carries the same
-`VERSIONINFO` record (fixed file and product version `X.Y.Z.0`, version strings `X.Y.Z`) and a
-`requireAdministrator` manifest. `packaging/windows/standalone/build-setup.sh`
-stamps it before it appends the payload trailer and reads the shipped file back
-after signing. 1.0.6 and earlier standalone Setups have no version resource. To
+`VERSIONINFO` record (fixed file and product version `X.Y.Z.0`, version strings
+`X.Y.Z`). The standalone Setup's manifest is `asInvoker`: the Setup refuses a
+token that is not elevated itself (exit `1603`), and `/?` and argument errors
+(`1639`) work without elevation. The Secure Client Setup's manifest is
+`requireAdministrator`. `packaging/windows/standalone/build-setup.sh` stamps the
+standalone Setup before it appends the payload trailer and reads the shipped
+file back after signing. 1.0.6 and earlier standalone Setups have no version resource. To
 check a Setup: `(Get-Item .\DefenseClawSetup-Enterprise-Standalone-x64.exe).VersionInfo`.
 
 The installed `skill-scanner.exe`, `mcp-scanner.exe`, and

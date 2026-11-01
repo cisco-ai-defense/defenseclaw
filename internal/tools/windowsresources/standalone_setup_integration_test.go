@@ -15,6 +15,7 @@ import (
 	"github.com/tc-hib/winres"
 	"github.com/tc-hib/winres/version"
 
+	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 	"github.com/defenseclaw/defenseclaw/internal/windowsresources"
 )
 
@@ -61,16 +62,27 @@ func TestStandaloneSetupVersionInfoSurvivesThePayloadTrailer(t *testing.T) {
 	if output, err := run(); err != nil {
 		t.Fatalf("stamp the Setup: %v\n%s", err, output)
 	}
-	// The assembler appends [archive][manifest][footer] after the PE image.
+	// The assembler appends the real [archive][manifest][footer] trailer
+	// after the stamped PE image; the Setup must still find its payload.
+	entries := []setuppayload.Entry{{Name: "defenseclaw.exe", Contents: bytes.Repeat([]byte("payload"), 4096)}}
+	trailerManifest := []byte(`{"version":"` + releaseVersion + `"}`)
 	file, err := os.OpenFile(setup, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := file.Write(bytes.Repeat([]byte("DCPAYLOAD-TRAILER"), 4096)); err != nil {
+	if err := setuppayload.WriteTrailer(file, entries, trailerManifest); err != nil {
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
+	}
+	read, err := setuppayload.ReadFile(setup)
+	if err != nil {
+		t.Fatalf("read the payload trailer of the stamped Setup: %v", err)
+	}
+	if !bytes.Equal(read.Manifest, trailerManifest) || len(read.Entries) != 1 ||
+		read.Entries[0].Name != entries[0].Name || !bytes.Equal(read.Entries[0].Contents, entries[0].Contents) {
+		t.Fatalf("payload trailer did not round-trip on the stamped Setup: manifest %q, %d entries", read.Manifest, len(read.Entries))
 	}
 	if output, err := run("-verify-only"); err != nil {
 		t.Fatalf("the stamped Setup with its trailer failed the version check: %v\n%s", err, output)
