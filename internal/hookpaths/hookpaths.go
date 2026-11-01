@@ -424,6 +424,11 @@ func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (stri
 	}
 	// Fields removes quotes and backslash escapes like the shell; a target
 	// that splits into several fields is an ambiguous redirect, not a write.
+	// A brace range of two or more elements is several fields: refuse it
+	// before building them all (GAP-0568).
+	if shellparse.MinBraceFields(word) > 1 {
+		return "", false
+	}
 	fields, err := expand.Fields(&expand.Config{Env: env}, word)
 	if err != nil || len(fields) != 1 {
 		return "", false

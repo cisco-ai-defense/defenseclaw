@@ -7419,7 +7419,7 @@ func trustedBashAppendExecutablePattern(
 }
 
 func trustedBashStaticWordValue(word *syntax.Word) (string, bool) {
-	if word == nil || trustedBashWordMayExpandHome(word) {
+	if word == nil || trustedBashWordMayExpandHome(word) || shellparse.MinBraceFields(word) > 1 {
 		return "", false
 	}
 	fields, err := expand.Fields(&expand.Config{}, word)
@@ -7670,6 +7670,11 @@ func trustedBashStaticFields(call *syntax.CallExpr) ([]string, bool) {
 				return nil, false
 			}
 			break
+		}
+		// A brace range that alone passes the field cap is refused before
+		// it expands (GAP-0568).
+		if uint64(len(fields))+shellparse.MinBraceFields(word) > 256 {
+			return nil, false
 		}
 		expanded, err := expand.Fields(&expand.Config{}, word)
 		if err != nil {

@@ -39,7 +39,8 @@ var braceOperandPrograms = []string{
 // ({,keylink} is keylink; GAP-0228). A word with another parameter, a
 // substitution or an unquoted pattern stays dynamic, and a field that keeps
 // a tilde (~user) or a call past maxCopyBraceWords words keeps the dynamic
-// reading of the call (nil).
+// reading of the call (nil); a range that alone takes the call past it is
+// refused before it is expanded (GAP-0568).
 func copyBraceWordFields(args []*syntax.Word, static []bool, env expand.Environ) map[int][]string {
 	var fields map[int][]string
 	total := len(args)
@@ -50,6 +51,14 @@ func copyBraceWordFields(args []*syntax.Word, static []bool, env expand.Environ)
 		braced := *arg
 		if !braceWordFixed(arg.Parts, env) || !syntax.SplitBraces(&braced) {
 			continue
+		}
+		// A brace range already past the cap is refused before it is
+		// expanded (rel-1-0-2 GAP-0568). MinBraceFields never exceeds the
+		// non-empty fields the range makes (each range element is a
+		// non-empty literal), so this is the cap check below done early,
+		// with the same answer: the dynamic reading of the call (nil).
+		if uint64(total)+shellparse.MinBraceFields(arg) > maxCopyBraceWords+1 {
+			return nil
 		}
 		expanded, err := expand.Fields(&expand.Config{Env: env}, arg)
 		if err != nil {
