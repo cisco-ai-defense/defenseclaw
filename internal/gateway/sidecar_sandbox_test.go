@@ -139,15 +139,49 @@ func TestNewSandboxRuntimeDisabled(t *testing.T) {
 	}
 }
 
+// freePort is a 127.0.0.1 port nothing listens on now, for a listener the
+// code under test binds itself (the sandbox ingress and egress listeners,
+// the API port). It comes from below every OS ephemeral range (Linux
+// 32768-60999, macOS and Windows 49152-65535) and from a band no fixed
+// test port uses, so no port-0 listener of this or another process on the
+// box can take it between this probe and the bind. A port-0 probe was taken
+// that way under -race on a loaded box, and the daemon then refused Ready
+// with sandbox_account_busy (rel-1-0-6:GAP-0464). Calls in this process walk
+// the band, so a port comes back only after the whole band was handed out.
 func freePort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	freePortMu.Lock()
+	defer freePortMu.Unlock()
+	if freePortNext == 0 {
+		freePortNext = freePortLow + int(time.Now().UnixNano()%int64(freePortHigh-freePortLow))
 	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
+	for range freePortHigh - freePortLow {
+		port := freePortNext
+		freePortNext++
+		if freePortNext >= freePortHigh {
+			freePortNext = freePortLow
+		}
+		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			continue
+		}
+		if err := ln.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return port
+	}
+	t.Fatal("no free loopback port in the sandbox test band")
+	return 0
 }
+
+// The freePort band: 14000-17599, clear of the fixed test ports (11434,
+// 12345, 13305, 17670, 18970) and of the connector outage band 21000-28999.
+const freePortLow, freePortHigh = 14000, 17600
+
+var (
+	freePortMu   sync.Mutex
+	freePortNext int
+)
 
 // sandboxRuntimeFixture is the sandbox subsystem on free ports with no
 // OpenShell gateway to reach; squatter, if set, is another program holding
