@@ -50,6 +50,9 @@ type EnterpriseConfig struct {
 	// Identity names trusted connectors (trusted_connectors.go). Lifecycle
 	// (restart-required); honoured only from a signed bundle.
 	Identity EnterpriseIdentityConfig `mapstructure:"identity" yaml:"identity,omitempty"`
+	// AccountJoin turns the account join key on (account_join.go).
+	// Standalone only; off when absent.
+	AccountJoin EnterpriseAccountJoinConfig `mapstructure:"account_join" yaml:"account_join,omitempty"`
 }
 
 // enterprise.openshell values.
@@ -1368,7 +1371,8 @@ func enterpriseBlockEmpty(e EnterpriseConfig) bool {
 		strings.TrimSpace(e.Network.HTTPSProxy) == "" && strings.TrimSpace(e.Network.NoProxy) == "" &&
 		tetragonEmpty(e.Tetragon) &&
 		e.OpenShell == (EnterpriseOpenShellConfig{}) &&
-		len(e.Identity.TrustedConnectors) == 0
+		len(e.Identity.TrustedConnectors) == 0 &&
+		accountJoinEmpty(e.AccountJoin)
 }
 
 // standaloneInlineSecrets lists the inline secret keys cfg sets.
@@ -1508,6 +1512,9 @@ func validateEnterpriseConfig(cfg *Config) error {
 			return fmt.Errorf("config: enterprise settings other than profile apply only to the %s profile", managed.ProfileStandalone)
 		}
 		return nil
+	}
+	if err := validateAccountJoin(e.AccountJoin); err != nil {
+		return err
 	}
 	// Judge trace logs raw prompts and model responses; a managed device
 	// never writes them.

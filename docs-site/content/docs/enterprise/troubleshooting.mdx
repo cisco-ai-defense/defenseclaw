@@ -360,7 +360,9 @@ decision does not change: the call is still blocked.
   seconds or exceed their answer budget. Those calls block under the default `closed` mode and under an
   administrator's `open` too (`enterprise_managed_gateway_no_answer`): `open` allows a call only while
   the hook proves the gateway service is stopped, never a call the gateway took and did not answer in time. Calls of guarded connectors (`foreign_hooks: remove`)
-  block during an outage too, as in 1.0.3 (GAP-0352). If the gateway logs a persistent
+  follow `open` during a proven outage only on Linux and macOS, and only for an agent process the
+  gateway allowed before it stopped ([Foreign hook guard](/docs/enterprise/foreign-hook-guard)); on
+  Windows they block. If the gateway logs a persistent
   `audit WAL` over-bound warning, check for a long-running reader and available disk space.
 - A tool call that DefenseClaw allowed while the gateway was running still runs if you approve it in
   the agent after the gateway stops. Every call checked while the gateway is down is blocked.

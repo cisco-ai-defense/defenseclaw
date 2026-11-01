@@ -108,7 +108,7 @@ def test_systemd_gateway_unit_pins_the_hardening_contract():
         "AmbientCapabilities=",
         "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
         "SystemCallFilter=@system-service",
-        "ReadWritePaths=/var/lib/defenseclaw /var/log/defenseclaw /run/defenseclaw -/run/defenseclaw-hook",
+        "ReadWritePaths=/var/lib/defenseclaw /var/log/defenseclaw /run/defenseclaw -/run/defenseclaw-hook -/var/lib/defenseclaw-foreign-hook-clean",
     }
     missing = sorted(line for line in required if line not in lines)
     assert not missing

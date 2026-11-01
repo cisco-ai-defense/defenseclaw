@@ -1,0 +1,153 @@
+---
+title: Account join key
+description: How a standalone device reports a per-tenant key for each account that ran an agent, so a fleet service can match device records to its directory accounts without the device sending names or SIDs.
+keywords:
+  - DefenseClaw account join key
+  - account_key
+  - enterprise.account_join
+  - account-join-key
+---
+
+The account join key lets your fleet service match the accounts on a device to the accounts in your directory. The device never sends a name, UPN or SID. It sends a keyed digest that only a holder of your tenant secret can compute.
+
+It is off unless you turn it on. It is not available under Secure Client. It needs DefenseClaw 1.0.7 or later on Linux and Windows standalone devices. macOS devices report no keys yet (`no_directory_id`): the macOS guardian does not record a directory-verified identifier.
+
+## Turn it on
+
+1. Make a tenant secret: 32 random bytes, base64url encoded. Use it only for this.
+
+   ```bash
+   openssl rand 32 | basenc --base64url | tr -d '=\n'
+   ```
+
+2. Store it on each device as the protected credential `account-join-key`:
+
+   ```bash
+   printf '%s' "$SECRET" | sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name account-join-key --from-stdin
+   ```
+
+   A value that is not 32 bytes in base64url is refused with `secret_malformed`. Like the other protected credentials, it is readable by root or SYSTEM and the gateway service account. It is never printed or logged.
+
+3. Turn it on in `config.yaml`, with the SHA-256 of the stored value, and sign the bundle with `--min-product-version 1.0.7`:
+
+   ```yaml
+   enterprise:
+     profile: standalone
+     account_join:
+       mode: on
+       generation: 1
+       secret_sha256: <hex digest only: printf '%s' "$SECRET" | sha256sum | cut -d' ' -f1>
+   ```
+
+   A device whose stored secret has another digest reports no key for that generation (`secret_mismatch`).
+
+## What the device reports
+
+Your management agent reads the keys with `enterprise account-keys`, as root or from an elevated administrator prompt:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise account-keys
+```
+
+```json
+{"schema_version":1,"account_join":{
+  "state": "on",
+  "generations": [{ "generation": 1, "account_keys": ["ak1:1:a2f018c3bbe491743da16cc799c63d0b"] }],
+  "accounts_without_key": 1,
+  "reason_codes": ["no_directory_id"]}}
+```
+
+- Keys are computed when the command runs. They are not stored, logged, exported to telemetry or shown to users. Send them only on your fleet service's channel; do not print them in MDM script output.
+- `enterprise status --json` and `enterprise verify --json` (as root or an administrator) carry only a summary: `state`, `key_count` per generation, `accounts_without_key` and `reason_codes`. They never carry a key, so MDM logs of status hold none.
+- The accounts are the enrolled accounts the hook guardian resolved and saw in the last 30 days, at most 64 per device (the most recently seen).
+- A standard user gets no keys and no summary.
+
+## Which identifier is used
+
+The device uses the first one it has, and only when the directory verified it:
+
+| OS | First | Fallback |
+|---|---|---|
+| Linux (SSSD) | The account's domain SID from SSSD | The `userPrincipalName` from SSSD InfoPipe |
+| Windows | The account's SID, for a domain account only | The UPN from the directory (Entra ID accounts: from the Windows identity store) |
+| macOS | (none yet) | (none yet) |
+
+Local accounts, machine-domain accounts and accounts with a derived or kept (not currently verified) UPN get no key (`no_directory_id`). `sIDHistory` is never used. On Windows a SID counts as a domain account's when the directory translated it to a UPN; an account of a trusted forest counts too.
+
+A person's SID key and UPN key differ. Compute both from your directory. A UPN rename changes the UPN key, and a move to a new domain changes the SID key.
+
+## How the key is computed
+
+```
+K   = HKDF-SHA256(secret, salt = none, info = "defenseclaw.account-join.v1" || 0x00 || u32be(generation), 32 bytes)
+M   = u32be(len(L)) || L || u32be(len(T)) || T || u32be(len(C)) || C
+key = "ak1:" + generation + ":" + first 32 hex characters of HMAC-SHA256(K, M)
+```
+
+- `L` is `defenseclaw.account-join.v1`.
+- `T` is the tenant ID of the signed bundle anchors, in lowercase.
+- `C` is `sid:` and the SID, or `upn:` and the UPN.
+  - SID: `S-1-5-21-a-b-c-RID` in decimal with no leading zeros, RID 1000 or more.
+  - UPN: Unicode NFC, then Unicode simple case folding (CaseFolding.txt status C and S, Unicode 15.0) of the whole string. `İ` (U+0130) has no simple folding and is kept.
+
+Test vectors, with the secret bytes `00 01 02 … 1f` and tenant `contoso-prod`:
+
+| Generation | C | Key |
+|---|---|---|
+| 1 | `sid:S-1-5-21-1004336348-1177238915-682003330-1105` | `ak1:1:fc6093568064ee498f85407a3a3afa63` |
+| 1 | `upn:alice@contoso.com` | `ak1:1:a2f018c3bbe491743da16cc799c63d0b` |
+| 2 | `upn:alice@contoso.com` | `ak1:2:ed70fcab4483d61004b5768ff3db16b3` |
+
+## Rotate the secret
+
+1. Store the new secret as `account-join-key-next` and sign a config with `next_generation`, its `next_secret_sha256` and `next_not_after` (at most 30 days ahead):
+
+   ```yaml
+   account_join:
+     mode: on
+     generation: 1
+     secret_sha256: <digest of the current secret>
+     next_generation: 2
+     next_secret_sha256: <digest of the new secret>
+     next_not_after: "2026-12-01T00:00:00Z"
+   ```
+
+   The device reports keys for both generations until `next_not_after`, then only the current one (`next_generation_expired`).
+
+2. When every device reports generation 2, promote it: store the new secret as `account-join-key`, sign `generation: 2` with its `secret_sha256`, drop the `next_` keys, and remove `account-join-key-next`. Until the stored secret and the signed digest agree, the device reports no key for generation 2 (`secret_mismatch`), never a wrong one.
+
+Removing `account-join-key-next` without promotion changes nothing for generation 1. A device refuses a generation lower than one it already reported (`generation_rollback`). To allow it, remove `account-join-generation.json` from the lifecycle folder as root.
+
+Rotation recovers from a leaked secret. It does not unlink history: during the overlap your service can link old keys to new ones.
+
+## Reason codes
+
+| Code | Meaning |
+|---|---|
+| `feature_off` | `enterprise.account_join` is off or absent (account-keys output only). |
+| `secret_missing` | No `account-join-key` is stored. |
+| `secret_malformed` | A stored secret is not 32 bytes in base64url. No other secret is used instead. |
+| `secret_unreadable` | A stored secret could not be read. |
+| `secret_mismatch` | A stored secret is not the value the signed config names by its digest. |
+| `generation_state_unreadable` | `account-join-generation.json` cannot be read. Nothing is reported until you remove it. |
+| `generation_invalid` | A generation number or `next_not_after` is not usable. |
+| `generation_rollback` | The generation is lower than one this device reported. |
+| `next_generation_expired` | `next_not_after` has passed. |
+| `tenant_missing` | No verified bundle anchors with a tenant ID. |
+| `no_directory_id` | An account has no verified SID or UPN. |
+| `canonicalization_failed` | An identifier is not in a form the key accepts. |
+| `account_cap` | More than 64 accounts; the 64 seen most recently get keys. |
+
+Errors and reason codes never contain a name, a SID, a UPN, the secret or part of a key.
+
+## Privacy
+
+- The key is pseudonymised personal data under the GDPR. Anyone with the tenant secret can compute the key of any identifier, so treat the secret like a directory export.
+- Purpose: matching device records to directory accounts in your fleet service. Do not use it for anything else.
+- Your organization is the controller. The secret stays with you: DefenseClaw does not hold it.
+- Retention on the device: an account not seen for 30 days drops out of the report.
+- Local administrators and root are inside the trust boundary: they can read the secret.
+
+## Before you downgrade
+
+DefenseClaw 1.0.6 and older refuse a config with `enterprise.account_join`. Apply a bundle without it before you install an older build. A management agent that validates status documents must use the 1.0.7 lifecycle result schema.

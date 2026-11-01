@@ -58,6 +58,10 @@ case "$DEFENSECLAW_GUARD_EVENT" in
     DEFENSECLAW_GUARD_RESULT="$(ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || :; HOME="${DEFENSECLAW_GUARD_AGENT_HOME:-}" "$DEFENSECLAW_FOREIGN_GUARD" hook --connector hermes --foreign-hook-check 2>/dev/null <<<"$PAYLOAD")" || { DEFENSECLAW_GUARD_STATUS=$?; DEFENSECLAW_GUARD_RESULT=""; }
     case "$DEFENSECLAW_GUARD_RESULT" in
       '{"deny":false}') ;;
+      '{"deny":false,"warnings":["the DefenseClaw gateway is not running'*)
+        # A gateway outage the administrator's open fail mode lets through.
+        echo "defenseclaw: warning: the DefenseClaw gateway is not running; your organization's fail mode lets this call run without DefenseClaw checks until it is back" >&2
+        ;;
       '{"deny":false,"warnings":'*)
         echo "defenseclaw: warning: an unapproved Hermes hook is configured for this account; your organization reports it but allows it to run" >&2
         ;;

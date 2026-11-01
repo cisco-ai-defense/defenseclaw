@@ -32,7 +32,7 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectProc=invisible
 ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
-ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian
+ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian -/var/lib/defenseclaw-foreign-hook-clean
 # CAP_SETUID and CAP_SETGID are also ambient: systemd 255 (Ubuntu 24.04)
 # drops CAP_SETUID from a User= service that filters system calls unless it
 # is in the ambient set, and the per-user workers need both. The kernel
