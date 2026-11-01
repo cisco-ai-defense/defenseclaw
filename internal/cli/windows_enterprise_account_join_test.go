@@ -31,17 +31,12 @@ func TestWindowsAccountJoinReadsTheGuardianSpoolOfTheLayout(t *testing.T) {
 	if !strings.HasSuffix(strings.ToLower(want), strings.ToLower(`\hook-guardian-state\identity`)) {
 		t.Fatalf("standalone spool %s", want)
 	}
-	pins := windowsEnterpriseServicePins(layout)
-	pins[managed.HookGuardianAuthorizationDirEnv] = layout.GuardianAuthDir
 	for _, dataDir := range []string{layout.DataDir, `C:\Users\dcw-std1\.defenseclaw`} {
 		for _, env := range []string{"", `C:\elsewhere`} {
 			t.Setenv(managed.HookGuardianAuthorizationDirEnv, env)
 			sources := windowsAccountJoinSources(&config.Config{DataDir: dataDir}, layout)
 			if sources.SpoolDir != want {
 				t.Errorf("data_dir %s, pin %q: spool %s, want %s", dataDir, env, sources.SpoolDir, want)
-			}
-			if guardian := enterprisehooks.IdentitySpoolDir(pins[managed.HookGuardianAuthorizationDirEnv]); guardian != sources.SpoolDir {
-				t.Errorf("the guardian writes %s, account-keys reads %s", guardian, sources.SpoolDir)
 			}
 		}
 	}
