@@ -8,6 +8,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+// The Linux and macOS policy files are written with the Unix file I/O
+// (fsio_unix.go), as in the other *_unix_test.go files of this package.
+
+//go:build !windows
+
 package enterprisepolicy
 
 import (
