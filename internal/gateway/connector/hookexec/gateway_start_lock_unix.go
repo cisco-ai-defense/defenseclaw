@@ -23,6 +23,14 @@ import (
 // new gateway is ready.
 const perUserGatewayStartLockName = "gateway.start.lock"
 
+// perUserStartLockOpen opens the start lock for the look: no link is
+// followed, and the open never waits (O_NONBLOCK), so a FIFO or another
+// file that blocks its open in the lock's place cannot hang the call; the
+// regular-file check below refuses it (review r4). A test seam.
+var perUserStartLockOpen = func(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+}
+
 // PerUserGatewayStartInProgress reports whether a start, restart or hook
 // cold start of the per-user gateway whose data directory is dataDir holds
 // its start lock now. Only a regular file this account owns counts; any
@@ -31,7 +39,7 @@ func PerUserGatewayStartInProgress(dataDir string) bool {
 	if dataDir == "" || !filepath.IsAbs(dataDir) {
 		return false
 	}
-	f, err := os.OpenFile(filepath.Join(dataDir, perUserGatewayStartLockName), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := perUserStartLockOpen(filepath.Join(dataDir, perUserGatewayStartLockName))
 	if err != nil {
 		return false
 	}
