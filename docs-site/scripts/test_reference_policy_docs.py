@@ -63,7 +63,13 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertNotIn("A guarded connector (foreign-hook guard) blocks during an outage too", text)
         self.assertIn("Windows Amp checks its session record locally", guard)
         effective = text.split("## Effective behavior", 1)[1].split("These outcomes apply", 1)[0]
-        self.assertIn("A gateway-backed guarded tool call", effective)
+        self.assertIn("A gateway-backed guarded tool call runs during an outage under `open` only on Linux or macOS and only when its agent process has a current clean-session note", effective)
+        self.assertIn("A restart or a gateway that gives no answer blocks it in every mode, and so does every guarded call on Windows", effective)
+        self.assertNotIn("stays blocked if the foreign-hook session check cannot get a gateway answer", text)
+        # The per-user summary above the table and the managed-mode paragraph say the same.
+        self.assertNotIn("including an outage under an administrator's `open` choice", text)
+        self.assertIn("With the foreign-hook guard, `open` covers an outage only for a Linux or macOS session that has a clean-session note; every other guarded call blocks.", text)
+        self.assertNotIn("so an outage blocks those calls too", text)
 
     def test_managed_open_never_allows_an_accepted_call_without_an_answer(self):
         # oss-outage-open review (round g, loop round 2): managed open applies
