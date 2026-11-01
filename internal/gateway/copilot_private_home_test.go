@@ -51,8 +51,9 @@ func TestNativeCopilotPatchInPrivateManagedHome(t *testing.T) {
 		{name: "protected link", patch: "*** Begin Patch\n*** Update File: keylink\n@@\n-old\n+new\n*** End Patch\n", want: "block", rule: "persistence.ssh_authorized_keys_command", managed: true},
 		{name: "untrusted client proof", patch: "*** Begin Patch\n*** Add File: notes.txt\n+ordinary project edit\n*** End Patch\n", want: "block", rule: hookToolCallUnparsedRuleID},
 		// Copilot names project files by absolute path as often as by a
-		// relative one. ActionFacts refuses absolute patch paths, so the
-		// gateway must bind those names to the evidence itself.
+		// relative one. The gateway binds those names to the client
+		// evidence as it binds relative ones (absolute patch targets are
+		// write facts since rel-1-0-6:GAP-0361).
 		{name: "absolute project file", patch: addAbs, want: "allow", managed: true},
 		{name: "absolute update and move", patch: "*** Begin Patch\n*** Update File: " + filepath.Join(project, "old.txt") + "\n*** Move to: " + filepath.Join(project, "moved.txt") + "\n@@\n-old\n+new\n*** End Patch\n", want: "allow", managed: true},
 		{name: "absolute and relative files", patch: "*** Begin Patch\n*** Add File: " + filepath.Join(project, "abs2.txt") + "\n+one\n*** Add File: rel2.txt\n+two\n*** Delete File: " + filepath.Join(project, "old.txt") + "\n*** End Patch\n", want: "allow", managed: true},
