@@ -50,6 +50,8 @@ An outage is a call that no gateway took: this account's gateway is stopped (als
 - An oversized input whose bounded prefix cannot be reviewed by the gateway or which the gateway blocks. In default and permissive per-user installs, an oversized call the gateway allows runs with a warning and a HIGH audit row; strict and managed installs block oversized input.
 - An install or upgrade of this account's DefenseClaw while the installer has the gateway stopped: every call blocks in every tier, a saved `open` included, with a message that says DefenseClaw is being installed or upgraded ([Upgrade](/docs/get-started/upgrade#upgrade)). A call the running gateway answers before the stop follows that answer. A stale lock expires when its owner is gone or after its bounded lifetime.
 
+A call the hook blocks itself is in the audit log too. The hook writes a `hook-failures.jsonl` record with the call's tool ID, and the gateway adds a `guardrail-block` audit row for it within about a minute. On a loaded host the gateway can record its own allow for a call that the hook already blocked at its answer budget. The `guardrail-block` row with the same tool ID is the answer the agent got.
+
 The guardrail mode does not change the outage mode: observe and action mode fail the same way. Current per-user hooks read the saved mode or tier in their installed runtime's `config.yaml` when they classify an outage (`defenseclaw-gateway hook-outage-mode`). A saved `closed` takes effect on the next call even while the gateway is stopped; a missing or unreadable config closes the outage. `defenseclaw guardrail fail-mode` shows each connector's mode and any registration drift.
 
 ### Refusals that ignore the fail mode

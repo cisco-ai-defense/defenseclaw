@@ -1266,18 +1266,26 @@ defenseclaw_log_hook_failure() {
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date 2>/dev/null || printf unknown)"
   local safe_ts safe_connector safe_hook_name safe_reason safe_category safe_fail_mode
-	local correlation_payload="${PAYLOAD:-${CONTENT:-}}" session_id="" call_id=""
+	local correlation_payload="${PAYLOAD:-${CONTENT:-}}" session_id="" call_id="" tool_id=""
 	if [ -n "$correlation_payload" ]; then
 	  session_id="$(_dc_hook_event_field "$correlation_payload" session_id 2>/dev/null)" || session_id=""
 	  [ -n "$session_id" ] || session_id="$(_dc_hook_event_field "$correlation_payload" sessionID 2>/dev/null)" || session_id=""
 	  [ -n "$session_id" ] || session_id="$(_dc_hook_event_field "$correlation_payload" sessionId 2>/dev/null)" || session_id=""
 	  [ -n "$session_id" ] || session_id="$(_dc_hook_event_field "$correlation_payload" thread_id 2>/dev/null)" || session_id=""
 	  call_id="$(_dc_hook_event_field "$correlation_payload" source_event_id 2>/dev/null)" || call_id=""
-	  [ -n "$call_id" ] || call_id="$(_dc_hook_event_field "$correlation_payload" tool_call_id 2>/dev/null)" || call_id=""
-	  [ -n "$call_id" ] || call_id="$(_dc_hook_event_field "$correlation_payload" callID 2>/dev/null)" || call_id=""
+	  # The agent's tool call id (Claude Code and Codex tool_use_id) is also
+	  # the line's tool_id: the gateway records a call this hook blocked
+	  # itself under it, beside its own decision row (GAP-0271).
+	  if [ -z "$call_id" ]; then
+	    tool_id="$(_dc_hook_event_field "$correlation_payload" tool_call_id 2>/dev/null)" || tool_id=""
+	    [ -n "$tool_id" ] || tool_id="$(_dc_hook_event_field "$correlation_payload" tool_use_id 2>/dev/null)" || tool_id=""
+	    [ -n "$tool_id" ] || tool_id="$(_dc_hook_event_field "$correlation_payload" callID 2>/dev/null)" || tool_id=""
+	    call_id="$tool_id"
+	  fi
 	fi
 	session_id="${session_id:0:256}"
 	call_id="${call_id:0:256}"
+	tool_id="${tool_id:0:256}"
 	[ -n "$call_id" ] || call_id="$$-${RANDOM}${RANDOM}"
   safe_ts="$(defenseclaw_json_escape "$ts")"
   safe_connector="$(defenseclaw_json_escape "$connector")"
@@ -1288,9 +1296,9 @@ defenseclaw_log_hook_failure() {
   # stderr is redirected before the append so a failed open of the log
   # (full disk, read-only home) cannot print a shell diagnostic naming this
   # script into the agent-visible block reason (GAP-1974).
-  printf '{"ts":"%s","connector":"%s","hook":"%s","reason":"%s","category":"%s","fail_mode":"%s","outcome":"%s","session_id":"%s","call_id":"%s"}\n' \
+  printf '{"ts":"%s","connector":"%s","hook":"%s","reason":"%s","category":"%s","fail_mode":"%s","outcome":"%s","session_id":"%s","call_id":"%s","tool_id":"%s"}\n' \
     "$safe_ts" "$safe_connector" "$safe_hook_name" "$safe_reason" "$safe_category" "$safe_fail_mode" "$outcome" \
-    "$(defenseclaw_json_escape "$session_id")" "$(defenseclaw_json_escape "$call_id")" \
+    "$(defenseclaw_json_escape "$session_id")" "$(defenseclaw_json_escape "$call_id")" "$(defenseclaw_json_escape "$tool_id")" \
     2>/dev/null >> "$log_file" || true
   chmod 600 "$log_file" 2>/dev/null || true
   return 0
@@ -2550,7 +2558,7 @@ defenseclaw_failed_stop_event() {
 _dc_hook_event_field() {
   local payload="${1:-}" field="${2:-}"
   case "$field" in
-    hook_event_name|event|session_id|sessionID|sessionId|thread_id|source_event_id|tool_call_id|callID) ;;
+    hook_event_name|event|session_id|sessionID|sessionId|thread_id|source_event_id|tool_call_id|tool_use_id|callID) ;;
     *) return 1 ;;
   esac
   if command -v jq >/dev/null 2>&1; then

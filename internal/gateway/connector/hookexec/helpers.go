@@ -33,7 +33,12 @@ import (
 	"github.com/google/uuid"
 )
 
-func hookFailureCorrelation(payload []byte) (sessionID, callID string) {
+// hookFailureCorrelation is the session and call a hook-failure line names.
+// toolID is the call id when it came from the payload's tool call field
+// (Claude Code and Codex tool_use_id, tool_call_id, OpenCode callID): the
+// gateway records a call the hook blocked itself under that tool id, beside
+// the gateway's own decision row for the call (GAP-0271).
+func hookFailureCorrelation(payload []byte) (sessionID, callID, toolID string) {
 	var fields struct {
 		SessionID     string `json:"session_id"`
 		SessionCamel  string `json:"sessionID"`
@@ -41,6 +46,7 @@ func hookFailureCorrelation(payload []byte) (sessionID, callID string) {
 		ThreadID      string `json:"thread_id"`
 		SourceEventID string `json:"source_event_id"`
 		ToolCallID    string `json:"tool_call_id"`
+		ToolUseID     string `json:"tool_use_id"`
 		CallCamel     string `json:"callID"`
 		CallID        string `json:"call_id"`
 	}
@@ -50,10 +56,16 @@ func hookFailureCorrelation(payload []byte) (sessionID, callID string) {
 				break
 			}
 		}
-		for _, value := range []string{fields.SourceEventID, fields.ToolCallID, fields.CallCamel, fields.CallID} {
-			if callID = strings.TrimSpace(value); callID != "" {
-				break
+		if callID = strings.TrimSpace(fields.SourceEventID); callID == "" {
+			for _, value := range []string{fields.ToolCallID, fields.ToolUseID, fields.CallCamel} {
+				if callID = strings.TrimSpace(value); callID != "" {
+					toolID = callID
+					break
+				}
 			}
+		}
+		if callID == "" {
+			callID = strings.TrimSpace(fields.CallID)
 		}
 	}
 	if len(sessionID) > 256 {
@@ -62,20 +74,23 @@ func hookFailureCorrelation(payload []byte) (sessionID, callID string) {
 	if len(callID) > 256 {
 		callID = callID[:256]
 	}
+	if toolID != "" {
+		toolID = callID
+	}
 	if callID == "" {
 		var id [16]byte
 		if _, err := rand.Read(id[:]); err == nil {
 			callID = hex.EncodeToString(id[:])
 		}
 	}
-	return sessionID, callID
+	return sessionID, callID, toolID
 }
 
 // firstOutageWarning reserves one user-visible warning per agent session.
 // The marker is advisory only: failure to create it leaves the warning on,
 // and neither its presence nor its contents can affect the hook verdict.
 func firstOutageWarning(opts Options) bool {
-	sessionID, _ := hookFailureCorrelation(opts.failurePayload)
+	sessionID, _, _ := hookFailureCorrelation(opts.failurePayload)
 	if sessionID == "" || opts.HookDir == "" {
 		return true
 	}
@@ -286,7 +301,7 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		return
 	}
 	failMode = loggedFailMode(opts, sp, failMode)
-	sessionID, callID := hookFailureCorrelation(opts.failurePayload)
+	sessionID, callID, toolID := hookFailureCorrelation(opts.failurePayload)
 	logDir := filepath.Join(home, "logs")
 	if err := os.Mkdir(logDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return
@@ -300,10 +315,12 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		Event     string `json:"event,omitempty"`
 		SessionID string `json:"session_id,omitempty"`
 		CallID    string `json:"call_id,omitempty"`
-		Reason    string `json:"reason"`
-		Category  string `json:"category"`
-		FailMode  string `json:"fail_mode"`
-		Outcome   string `json:"outcome"`
+		// ToolID is CallID when it is the agent's tool call id.
+		ToolID   string `json:"tool_id,omitempty"`
+		Reason   string `json:"reason"`
+		Category string `json:"category"`
+		FailMode string `json:"fail_mode"`
+		Outcome  string `json:"outcome"`
 		// EventID names a managed call the hook blocked itself (the
 		// gateway, which writes the audit log, did not decide it); the
 		// hook's answer names the same id (managedLocalDenyEventID).
@@ -315,6 +332,7 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		Event:     strings.TrimSpace(opts.Event),
 		SessionID: sessionID,
 		CallID:    callID,
+		ToolID:    toolID,
 		Reason:    reason,
 		Category:  category,
 		FailMode:  failMode,

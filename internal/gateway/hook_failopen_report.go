@@ -32,6 +32,14 @@ import (
 // (GAP-0414). On start, and about once a minute while it runs, the gateway
 // reads the lines it has not reported yet and records one guardrail-degraded
 // alert per connector.
+//
+// A call the hook blocked itself (outcome fail_closed) gets its own audit
+// row too. Under load a per-user hook gives up at its answer budget and
+// blocks the call, while its gateway still decides it, records allow and
+// answers a hook that has left: in an 18000-call flood, 16 calls the agent
+// saw denied were recorded as 17999 allow and 1 block (GAP-0271). The
+// guardrail-block row names the call's session, call and tool id, so the
+// audit holds the block the agent received beside the gateway's decision.
 const (
 	hookFailuresFile         = "hook-failures.jsonl"
 	hookFailuresReportedFile = "hook-failures.reported"
@@ -71,9 +79,13 @@ type hookFailureLine struct {
 	Connector string `json:"connector"`
 	SessionID string `json:"session_id"`
 	CallID    string `json:"call_id"`
-	Reason    string `json:"reason"`
-	Category  string `json:"category"`
-	FailMode  string `json:"fail_mode"`
+	// ToolID is CallID when the hook took it from the agent's tool call id
+	// (tool_use_id, tool_call_id, callID). Empty in lines of hooks before
+	// 1.0.7.
+	ToolID   string `json:"tool_id"`
+	Reason   string `json:"reason"`
+	Category string `json:"category"`
+	FailMode string `json:"fail_mode"`
 	// Outcome is what the call got: fail_open (it ran unchecked),
 	// fail_closed (it was blocked) or diagnostic (a record that is no
 	// delivery decision, such as a rejected traceparent: the call still went
@@ -98,6 +110,13 @@ func (l hookFailureLine) ranUnchecked() bool {
 		return false
 	}
 	return strings.TrimSpace(l.FailMode) == "open"
+}
+
+// blockedByHook reports whether the hook blocked the logged call itself:
+// the agent got a block that no gateway decision row records (GAP-0271).
+// Only the outcome the hook wrote counts; a line without one is no proof.
+func (l hookFailureLine) blockedByHook() bool {
+	return strings.TrimSpace(l.Outcome) == "fail_closed"
 }
 
 // hookFailOpenSummary is the fail-open calls of one connector. One call can
@@ -269,15 +288,24 @@ func reportHookFailOpenCallsIn(logDir string, logger *audit.Logger, now time.Tim
 		}
 		env := audit.CorrelationEnvelope{Connector: call.entry.Connector,
 			SessionID: call.entry.SessionID, RequestID: call.entry.CallID}
+		if call.blocked {
+			env.ToolID = strings.TrimSpace(call.entry.ToolID)
+		}
 		ctx := audit.ContextWithEnvelope(context.Background(), env)
 		reason := strings.TrimSpace(call.entry.Reason)
 		if len(reason) > 300 {
 			reason = reason[:300]
 		}
+		action, severity := string(audit.ActionGuardrailWarn), "HIGH"
 		details := fmt.Sprintf("unchecked hook call during gateway outage: %s; see logs/%s", strconv.Quote(reason), hookFailuresFile)
-		if err := logger.LogActionCtxSeverity(ctx, string(audit.ActionGuardrailWarn), call.entry.Connector, details, "HIGH"); err != nil {
+		if call.blocked {
+			action, severity = string(audit.ActionGuardrailBlock), "MEDIUM"
+			details = fmt.Sprintf("hook blocked the call itself (fail-closed): %s; the agent got this block, "+
+				"not a gateway decision recorded for the call; see logs/%s", strconv.Quote(reason), hookFailuresFile)
+		}
+		if err := logger.LogActionCtxSeverity(ctx, action, call.entry.Connector, details, severity); err != nil {
 			_ = writeHookFailuresReported(logDir, read.start)
-			return fmt.Errorf("record %s unchecked hook call: %w", call.entry.Connector, err)
+			return fmt.Errorf("record %s hook call %s: %w", call.entry.Connector, action, err)
 		}
 		read.start.AuditOffset = call.end
 	}
@@ -313,6 +341,9 @@ type hookFailOpenRead struct {
 type hookFailOpenCall struct {
 	entry hookFailureLine
 	end   int64
+	// blocked: the hook blocked the call itself (blockedByHook); it gets a
+	// guardrail-block row and no place in the fail-open alert.
+	blocked bool
 }
 
 // readHookFailOpenCalls returns the fail-open calls after the reported
@@ -373,7 +404,11 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 		}
 		next += int64(len(line))
 		var entry hookFailureLine
-		if json.Unmarshal(line, &entry) != nil || !entry.ranUnchecked() {
+		if json.Unmarshal(line, &entry) != nil {
+			continue
+		}
+		blocked := entry.blockedByHook()
+		if !blocked && !entry.ranUnchecked() {
 			continue
 		}
 		at, perr := time.Parse(time.RFC3339, strings.TrimSpace(entry.TS))
@@ -382,8 +417,8 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 			continue
 		}
 		entry.Connector = connectorName
-		read.calls = append(read.calls, hookFailOpenCall{entry: entry, end: next})
-		if next <= state.Done[connectorName] {
+		read.calls = append(read.calls, hookFailOpenCall{entry: entry, end: next, blocked: blocked})
+		if blocked || next <= state.Done[connectorName] {
 			continue
 		}
 		sum := byConnector[connectorName]
