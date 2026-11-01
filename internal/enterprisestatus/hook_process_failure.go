@@ -67,7 +67,7 @@ func hookFailModeNote(failMode string) string {
 	case "closed":
 		return "This is the agent's own behavior, not DefenseClaw's fail mode: the managed hook still fails closed (effective_hook_fail_mode closed) when the gateway does not answer. "
 	case "open":
-		return "The managed hook also fails open (effective_hook_fail_mode open) when the gateway does not answer. "
+		return "This is the agent's own behavior, not DefenseClaw's fail mode: the managed hook also fails open (effective_hook_fail_mode open) when the gateway does not answer. "
 	default:
 		return ""
 	}

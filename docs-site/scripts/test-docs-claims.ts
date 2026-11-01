@@ -2680,7 +2680,11 @@ describe('hook_process_fail_open next to fail-closed managed hooks (rel-1-0-6:GA
     assert.ok(go.includes("This is the agent's own behavior, not DefenseClaw's fail mode: the managed hook still fails closed (effective_hook_fail_mode closed) when the gateway does not answer. "),
       'the hook_process_fail_open warning no longer explains the fail mode');
     const text = page('enterprise/troubleshooting.mdx');
-    assert.ok(text.includes("It is an agent limit, not DefenseClaw's hook fail mode: a managed hook still fails closed when the gateway does not answer"),
+    assert.ok(text.includes("It is an agent limit, not DefenseClaw's hook fail mode (which covers a gateway that does not answer; with fail mode `closed`, the managed default, the hook still fails closed then). The message names the connector's fail mode when the config can be read."),
       'troubleshooting.mdx hook_process_fail_open row no longer separates the agent limit from the fail mode');
+    assert.ok(!text.includes('a managed hook still fails closed when the gateway does not answer'),
+      'troubleshooting.mdx again says every managed hook fails closed (an administrator can set fail mode open)');
+    assert.ok(go.includes("This is the agent's own behavior, not DefenseClaw's fail mode: the managed hook also fails open (effective_hook_fail_mode open) when the gateway does not answer. "),
+      'the open-mode hook_process_fail_open warning no longer says it is the agent limit');
   });
 });

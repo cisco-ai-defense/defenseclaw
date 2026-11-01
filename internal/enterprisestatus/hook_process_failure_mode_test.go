@@ -39,7 +39,7 @@ func TestHookProcessFailureWarningNamesTheHookFailMode(t *testing.T) {
 	}
 	open := New("status", "standalone", "linux", "1.0.7")
 	open.AddHookProcessFailureWarnings(map[string]ConnectorState{"copilot": {Enabled: true, EffectiveHookFailMode: "open"}})
-	if len(open.Warnings) != 1 || !strings.Contains(open.Warnings[0].Message, "The managed hook also fails open (effective_hook_fail_mode open)") ||
+	if len(open.Warnings) != 1 || !strings.Contains(open.Warnings[0].Message, "This is the agent's own behavior, not DefenseClaw's fail mode: the managed hook also fails open (effective_hook_fail_mode open)") ||
 		strings.Contains(open.Warnings[0].Message, "still fails closed") {
 		t.Fatalf("an open-mode hook must say it also fails open: %v", open.Warnings)
 	}
