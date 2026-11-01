@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -251,10 +252,12 @@ func TestPostExecutionHookBlockIsNotTheVerdictOfACallThatRan(t *testing.T) {
 
 // Review note 5: after a long strict or install-window outage the backlog
 // (up to 16 MiB of lines) was written row by row on the audit writer the
-// resuming hooks need. One run writes at most hookFailureRowsPerReport rows
-// and one summary row with the count of the rest, and never writes them
-// again.
-func TestHookFailureReportCapsItsRowsPerRun(t *testing.T) {
+// resuming hooks need, so one run writes at most hookFailureRowsPerReport
+// rows. rel-1-0-6:GAP-0370: the rest got one summary row and never their own
+// rows, so after a par-128 flood 691 calls the agent saw denied kept only
+// their allow row. A capped run now leaves the rest to the next one, which
+// records them once; the fail-open alert counts the unchecked call once.
+func TestHookFailureReportLeavesTheCallsOverItsCapToTheNextRun(t *testing.T) {
 	previous := hookFailureRowsPerReport
 	hookFailureRowsPerReport = 3
 	t.Cleanup(func() { hookFailureRowsPerReport = previous })
@@ -266,35 +269,103 @@ func TestHookFailureReportCapsItsRowsPerRun(t *testing.T) {
 	}
 	appendHookFailures(t, logDir,
 		`{"ts":"2026-11-01T03:59:01Z","connector":"claudecode","hook":"claude-code-hook","event":"PreToolUse","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_open","session_id":"s","call_id":"open-1"}`+"\n")
-	count := func() (blocks, warns int, summary string) {
+	count := func() (blocks, warns int, tools map[string]int) {
 		events, err := store.ListEvents(200)
 		if err != nil {
 			t.Fatal(err)
 		}
+		tools = map[string]int{}
 		for _, event := range events {
-			switch {
-			case event.Action == string(audit.ActionGuardrailBlock):
+			switch event.Action {
+			case string(audit.ActionGuardrailBlock):
 				blocks++
-			case event.Action == string(audit.ActionGuardrailWarn) && strings.HasPrefix(event.Details, "hook failure report:"):
-				summary = event.Details
-			case event.Action == string(audit.ActionGuardrailWarn):
+				tools[event.ToolID]++
+			case string(audit.ActionGuardrailWarn):
+				if strings.HasPrefix(event.Details, "hook failure report:") {
+					t.Fatalf("summary row instead of the calls' own rows: %+v", event)
+				}
 				warns++
 			}
 		}
 		return
+	}
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
+		t.Fatal(err)
+	}
+	if blocks, warns, _ := count(); blocks != 3 || warns != 0 || !readHookFailuresReported(logDir).AuditPending {
+		t.Fatalf("first run: blocks=%d warns=%d pending=%t, want the 3 rows of its cap and the rest pending",
+			blocks, warns, readHookFailuresReported(logDir).AuditPending)
 	}
 	for range 2 {
 		if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 			t.Fatal(err)
 		}
 	}
-	blocks, warns, summary := count()
-	if blocks != 3 || warns != 0 || !strings.Contains(summary, "3 more hook calls (2 blocked by the hook, 1 unchecked)") ||
-		!strings.Contains(summary, "this run recorded 3") {
-		t.Fatalf("blocks=%d warns=%d summary=%q, want 3 rows and one summary of the other 3", blocks, warns, summary)
+	blocks, warns, tools := count()
+	if blocks != 5 || warns != 1 || readHookFailuresReported(logDir).AuditPending {
+		t.Fatalf("after the backlog: blocks=%d warns=%d pending=%t, want every call's own row", blocks, warns,
+			readHookFailuresReported(logDir).AuditPending)
+	}
+	for i := range 5 {
+		if id := fmt.Sprintf("toolu_cap_%d", i); tools[id] != 1 {
+			t.Fatalf("tool %s has %d block rows, want 1 (rows %v)", id, tools[id], tools)
+		}
 	}
 	if alerts := degradedAlerts(t, store); len(alerts) != 1 || !strings.Contains(alerts[0].Details, "1 claudecode hook call") {
-		t.Fatalf("fail-open alert = %+v, want the one unchecked call counted", alerts)
+		t.Fatalf("fail-open alert = %+v, want the one unchecked call counted once", alerts)
+	}
+}
+
+// rel-1-0-6:GAP-0370: a running gateway reported only when hook-failures.jsonl
+// changed, so the calls a capped run left after the flood's last line were
+// never recorded. It goes on every hookFailureBacklogInterval while a run
+// left calls pending, also when no line was added.
+func TestRunningGatewayRecordsTheWholeHookFailureBacklog(t *testing.T) {
+	previous, interval, backlog := hookFailureRowsPerReport, hookFailOpenReportInterval, hookFailureBacklogInterval
+	hookFailureRowsPerReport, hookFailOpenReportInterval, hookFailureBacklogInterval = 2, 10*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() {
+		hookFailureRowsPerReport, hookFailOpenReportInterval, hookFailureBacklogInterval = previous, interval, backlog
+	})
+	store, logger := testStoreAndLogger(t)
+	dataDir := t.TempDir()
+	ts := time.Now().UTC().Format(time.RFC3339)
+	for i := range 7 {
+		appendHookFailures(t, filepath.Join(dataDir, "logs"), blockedHookLine(ts, "PreToolUse", "s", fmt.Sprintf("toolu_backlog_%d", i)))
+	}
+	s := &Sidecar{logger: logger, cfg: &config.Config{DataDir: dataDir}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.watchHookFailureCalls(ctx)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	blocks := func() int {
+		events, err := store.ListEvents(200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, event := range events {
+			if event.Action == string(audit.ActionGuardrailBlock) {
+				n++
+			}
+		}
+		return n
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for blocks() < 7 {
+		if time.Now().After(deadline) {
+			t.Fatalf("a running gateway recorded %d of the 7 hook-blocked calls", blocks())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := blocks(); n != 7 {
+		t.Fatalf("block rows = %d, want 7, each call once", n)
 	}
 }
 
