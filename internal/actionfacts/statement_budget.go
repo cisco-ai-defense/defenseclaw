@@ -165,7 +165,11 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			if j+1 >= len(runes) {
 				return statements, opaque
 			}
+			// The comment's text never sets lastSignificant: the code
+			// before the comment decides what an & or a line end after it
+			// means (review r4 finding 1: `cmd <#c#> & cmd`).
 			i = j + 1
+			commentEnd = i
 		case r == '-' && next == '-' && i+2 < len(runes) && runes[i+2] == '%' && tokenStart(i):
 			// The stop-parsing token: the rest of the line is one argument.
 			opaque, inStatement = true, true
@@ -241,12 +245,15 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			i++
 		case r == '&' && (i == 0 || runes[i-1] != '>'):
 			// After a complete command, the PowerShell 7 background
-			// operator ends it; at a statement start or after an
-			// assignment or operator ($x = & git ...), the call operator,
-			// which ends nothing (review r3 finding 2). The Windows lexer
-			// stops at a call whose target is not quoted.
+			// operator ends it; at a statement start or right after an
+			// assignment or a comma ($x = & git ..., @(1, & f)), the call
+			// operator, which ends nothing (review r3 finding 2). Only those
+			// characters decide: a bare argument ending in * / % - + ! < >
+			// (Get-ChildItem *, Write-Output 50%) completes a command
+			// (review r4 finding 1). The Windows lexer stops at a call whose
+			// target is not quoted.
 			opaque = true
-			if inStatement && !strings.ContainsRune("=(,|{!+-*/%<>", lastSignificant) {
+			if inStatement && lastSignificant != '=' && lastSignificant != ',' {
 				boundary()
 			} else {
 				inStatement = true

@@ -293,6 +293,19 @@ func TestGAP0331PowerShellPrefixDoesNotHideTheBudget(t *testing.T) {
 			}{
 				{prefix + statements(100), false},
 				{prefix + statements(200) + "; Remove-Item -Recurse -Force " + home, true},
+				// Review r4 finding 1: background chains whose commands end
+				// in an operator character or a block comment, at 200 and
+				// 3000 statements.
+				{prefix + strings.Repeat("Get-ChildItem * & ", 200) + "Remove-Item -Recurse -Force " + home, true},
+				{prefix + strings.Repeat("Get-ChildItem * & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
+				{prefix + strings.Repeat("Get-ChildItem C:/ & ", 200) + "Remove-Item -Recurse -Force " + home, true},
+				{prefix + strings.Repeat("Write-Output 50% & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
+				{prefix + strings.Repeat("Write-Output - & ", 200) + "Remove-Item -Recurse -Force " + home, true},
+				{prefix + strings.Repeat("Write-Output + & ", 200) + "Remove-Item -Recurse -Force " + home, true},
+				{prefix + strings.Repeat("Write-Output ! & ", 200) + "Remove-Item -Recurse -Force " + home, true},
+				{prefix + strings.Repeat("Write-Output a< & ", 200) + "Remove-Item -Recurse -Force " + home, true},
+				{prefix + strings.Repeat("Write-Output a> & ", 200) + "Remove-Item -Recurse -Force " + home, true},
+				{prefix + strings.Repeat("Get-Date <#c#> & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
 				// Review r3 finding 1: lines that end in a comment ending
 				// in a comma, at 200 and 3000 statements (past 64 KiB).
 				{prefix + strings.ReplaceAll(statements(200), "; ", " # note,\n") + "\nRemove-Item -Recurse -Force " + home, true},

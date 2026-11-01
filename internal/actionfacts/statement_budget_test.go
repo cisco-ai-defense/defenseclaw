@@ -73,6 +73,20 @@ func TestPowerShellStatementsOverBudget(t *testing.T) {
 		// Line ends inside a bare ( ) with no commas: a multi-line
 		// condition is one statement (review r3 finding 4, mutation MH).
 		{"multi-line condition in a bare ( )", "if (\n" + strings.ReplaceAll(statements(140, "$a%d -eq 1 -or"), "; ", "\n") + "\n$true) { Get-Date }", false},
+		// Review r4 finding 1: a bare argument that ends in an operator
+		// character completes the command, so the & after it is the
+		// background operator; a block comment before it does not hide the
+		// command either (mutation MK2).
+		{"background chain after a star", strings.Repeat("Get-ChildItem * & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after a slash", strings.Repeat("Get-ChildItem C:/ & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after a percent", strings.Repeat("Write-Output 50% & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after a dash", strings.Repeat("Write-Output - & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after a plus", strings.Repeat("Write-Output + & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after a bang", strings.Repeat("Write-Output ! & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after a less-than", strings.Repeat("Write-Output a< & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after a greater-than", strings.Repeat("Write-Output a> & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after a block comment", strings.Repeat("Get-Date <#c#> & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"call operator after a comma", "$a = @(" + strings.Repeat("& git status, ", 200) + "1)", false},
 		// Block comments are not statements (item 5c).
 		{"block comments ending each line", strings.ReplaceAll(statements(200, "Write-Output %d <# , #>"), "; ", "\n"), true},
 		{"block comments on 100 lines", strings.ReplaceAll(statements(100, "Write-Output %d <# , ; | #>"), "; ", "\n"), false},
@@ -105,6 +119,27 @@ func TestPowerShellReadingStopsEarly(t *testing.T) {
 	} {
 		if got := PowerShellReadingStopsEarly(tc.command); got != tc.stops {
 			t.Errorf("%q: stops early %t, want %t", tc.command, got, tc.stops)
+		}
+	}
+}
+
+// TestPowerShellUnterminatedBlockCommentIsInvalid pins the Windows lexer's
+// block-comment reading (rel-1-0-6:GAP-0331 review r3 item 5c, r4 mutation
+// ML2): a closed <# ... #> is a blank, an unterminated one is the parse
+// error PowerShell reports, so the call reads invalid.
+func TestPowerShellUnterminatedBlockCommentIsInvalid(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		invalid bool
+	}{
+		{"Write-Output 1 <# open", true},
+		{"Write-Output 1 <# open\nRemove-Item -Recurse -Force x", true},
+		{"Write-Output 1 <# closed #>", false},
+		{"<# help\n.SYNOPSIS\n#>\nWrite-Output 1", false},
+	} {
+		facts := Analyze(Input{Tool: "powershell", Command: tc.command, CWD: `C:\\p`})
+		if got := facts.Parse.Status == StatusInvalid; got != tc.invalid {
+			t.Errorf("%q: status %q, want invalid %t", tc.command, facts.Parse.Status, tc.invalid)
 		}
 	}
 }
