@@ -22,6 +22,13 @@ import (
 type SimpleCommand struct {
 	Text string
 	CWD  string
+	// OpaqueValueAssignment has no command word outside a balanced value.
+	// The whole action has already been analyzed, so gateway judgment need
+	// not analyze this assignment again as a child.
+	OpaqueValueAssignment bool
+	// LiteralOutputOnly is a Write-Output with inert literal arguments. The
+	// whole action has already been analyzed; a child pass adds no evidence.
+	LiteralOutputOnly bool
 	// ZshHistoryBuiltin marks a history command in an explicitly invoked zsh
 	// body. Zsh history is fc -l, so Bash's history -c clear grammar does not
 	// apply to this child.
@@ -448,6 +455,23 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		processGroupEvents(childStart)
 		childInput := input
 		childInput.CWD = state.cwd
+		if dialect == windowsPowerShell {
+			if windowsSimpleLiteralOutput(part) {
+				result = append(result, SimpleCommand{Text: part, CWD: state.cwd, LiteralOutputOnly: true})
+				processGroupEvents(end)
+				return
+			}
+			if name, only := windowsSimpleOpaqueValueAssignment(part); only {
+				delete(variables, name)
+				state.forgetKnownVariables(variables)
+				if state.referencesUncertainVariable(part) {
+					failed = true
+				}
+				result = append(result, SimpleCommand{Text: part, CWD: state.cwd, OpaqueValueAssignment: true})
+				processGroupEvents(end)
+				return
+			}
+		}
 		text := part
 		if dialect == windowsPowerShell {
 			if !windowsSimpleAssignment(part, childInput, variables) {

@@ -76,6 +76,21 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 			atStart = false
 			continue
 		}
+		if dialect == windowsPowerShell && char == '#' && windowsPowerShellCommentStarts(runes, i) {
+			for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
+				i++
+			}
+			continue
+		}
+		if dialect == windowsPowerShell && char == '<' && i+1 < len(runes) &&
+			runes[i+1] == '#' && windowsPowerShellCommentStarts(runes, i) {
+			end, ok := windowsPowerShellBlockCommentEnd(runes, i)
+			if !ok {
+				return "", nil, false
+			}
+			i = end
+			continue
+		}
 		if dialect == windowsPowerShell && i+1 < len(runes) &&
 			(char == '@' && windowsPowerShellQuoteDelimiter(runes[i+1]) != 0 ||
 				(char == '$' || char == '@') && (runes[i+1] == '(' || runes[i+1] == '{')) {
@@ -94,9 +109,7 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 			i+2 < len(runes) && runes[i+1] == '-' && runes[i+2] == '%' &&
 			(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) &&
 			windowsPowerShellTokenStart(runes, i) {
-			for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
-				i++
-			}
+			i = windowsPowerShellStopParsingEnd(runes, i+3) - 1
 			atStart = false
 			continue
 		}
@@ -418,6 +431,58 @@ func windowsSimpleContinuedLexemes(lexemes []windowsLexeme) []windowsLexeme {
 		out = append(out, lexeme)
 	}
 	return out
+}
+
+// Identify a statement whose only top-level effect is assigning one opaque
+// value. It still occupies a simple-command budget slot; the gateway can
+// avoid a second full policy pass over the value.
+func windowsSimpleOpaqueValueAssignment(part string) (string, bool) {
+	runes := []rune(strings.TrimSpace(part))
+	if len(runes) < 5 || runes[0] != '$' {
+		return "", false
+	}
+	i := 1
+	for i < len(runes) && (windowsSimpleVariableLetter(unicode.ToLower(runes[i])) ||
+		runes[i] >= '0' && runes[i] <= '9') {
+		i++
+	}
+	name := strings.ToLower(string(runes[:i]))
+	if !windowsSimpleVariableName(name) {
+		return "", false
+	}
+	for i < len(runes) && (runes[i] == ' ' || runes[i] == '\t') {
+		i++
+	}
+	if i >= len(runes) || runes[i] != '=' {
+		return "", false
+	}
+	i++
+	for i < len(runes) && (runes[i] == ' ' || runes[i] == '\t') {
+		i++
+	}
+	if len(runes)-i >= len("[ordered]") && strings.EqualFold(string(runes[i:i+len("[ordered]")]), "[ordered]") {
+		i += len("[ordered]")
+	}
+	if i+1 >= len(runes) || (runes[i] != '$' && runes[i] != '@') ||
+		(runes[i+1] != '(' && runes[i+1] != '{' && windowsPowerShellQuoteDelimiter(runes[i+1]) == 0) {
+		return "", false
+	}
+	end, ok := windowsPowerShellOpaqueEnd(runes, i)
+	return name, ok && end == len(runes)-1
+}
+
+func windowsSimpleLiteralOutput(part string) bool {
+	fields := strings.Fields(part)
+	if len(fields) < 2 || !strings.EqualFold(fields[0], "Write-Output") {
+		return false
+	}
+	for _, r := range part[len(fields[0]):] {
+		if r != ' ' && r != '\t' && r != '_' && r != '-' && r != '.' &&
+			(r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 type simpleWindowsState struct {

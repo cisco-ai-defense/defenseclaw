@@ -3,7 +3,10 @@
 
 package actionfacts
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // A balanced PowerShell value is opaque, but it cannot hide the next
 // statement from the Windows reading (rel-1-0-6:GAP-0343).
@@ -52,5 +55,27 @@ func TestGAP0343UnbalancedValueDoesNotMintCommands(t *testing.T) {
 		if hasExecutable(out.commands, "remove-item") {
 			t.Errorf("unbalanced value minted a command: %q: %#v", source, out.commands)
 		}
+	}
+}
+
+func TestGAP0343SimpleCommandFastPathKeepsBudgetAndSideEffects(t *testing.T) {
+	for _, tc := range []struct {
+		command        string
+		assign, output bool
+	}{
+		{`$h = @{ a = 1; b = 'x;y' }; Write-Output ok`, true, true},
+		{`$x = $(Get-Date); Write-Output 1`, true, true},
+		{`$h = @{ a = 1 } > C:\notes.txt; Write-Output ok`, false, true},
+		{`$x = @(1); Write-Output $(Get-Date)`, true, false},
+	} {
+		input := Input{Tool: "PowerShell", Command: tc.command, DialectHint: DialectPowerShell}
+		got := SimpleCommands(input, Analyze(input))
+		if len(got) != 2 || got[0].OpaqueValueAssignment != tc.assign || got[1].LiteralOutputOnly != tc.output {
+			t.Errorf("%q: %#v", tc.command, got)
+		}
+	}
+	long := strings.TrimSuffix(strings.Repeat(`$h = @{ a = 1 }; `, 129), "; ")
+	if !PowerShellStatementsOverBudget(long) {
+		t.Fatal("opaque assignments escaped statement budget")
 	}
 }

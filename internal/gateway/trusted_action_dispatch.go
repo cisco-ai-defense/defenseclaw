@@ -482,6 +482,9 @@ func dispatchTrustedActionWith(
 					findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
 					break
 				}
+				if simple.OpaqueValueAssignment || simple.LiteralOutputOnly {
+					continue
+				}
 				child := request
 				child.Input.Command = simple.Text
 				child.Input.CWD = simple.CWD

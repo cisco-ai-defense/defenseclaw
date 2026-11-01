@@ -3,10 +3,7 @@
 
 package actionfacts
 
-import (
-	"strings"
-	"unicode"
-)
+import "unicode"
 
 // ShellStatementsOverBudget reports whether a POSIX shell command has more
 // statements than one action evaluates (maxStatementsAlone, 128), counted
@@ -101,9 +98,6 @@ func powerShellStatements(command string, limit int) (int, bool) {
 	}
 	// lineStart reports that i begins a line (for a here-string end).
 	lineStart := func(i int) bool { return i == 0 || runes[i-1] == '\n' || runes[i-1] == '\r' }
-	tokenStart := func(i int) bool {
-		return i == 0 || unicode.IsSpace(runes[i-1]) || strings.ContainsRune(";|&(){}", runes[i-1])
-	}
 	for i := 0; i < len(runes) && statements < limit; i++ {
 		r := runes[i]
 		top := frames[len(frames)-1]
@@ -140,7 +134,7 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			next = runes[i+1]
 		}
 		switch {
-		case r == '#' && tokenStart(i):
+		case r == '#' && windowsPowerShellCommentStarts(runes, i):
 			// A line comment: the line goes on as the code before it ends.
 			// A comma inside the comment does not continue the line
 			// (review r3 finding 1: `Write-Output 1 # note,` lines hid
@@ -156,25 +150,21 @@ func powerShellStatements(command string, limit int) (int, bool) {
 				i++
 			}
 			commentEnd = i
-		case r == '<' && next == '#':
-			j := i + 2
-			for j+1 < len(runes) && (runes[j] != '#' || runes[j+1] != '>') {
-				j++
-			}
-			if j+1 >= len(runes) {
+		case r == '<' && next == '#' && windowsPowerShellCommentStarts(runes, i):
+			end, ok := windowsPowerShellBlockCommentEnd(runes, i)
+			if !ok {
 				return statements, opaque
 			}
 			// The comment's text never sets lastSignificant: the code
 			// before the comment decides what an & or a line end after it
 			// means (review r4 finding 1: `cmd <#c#> & cmd`).
-			i = j + 1
-			commentEnd = i
-		case r == '-' && next == '-' && i+2 < len(runes) && runes[i+2] == '%' && tokenStart(i):
-			// The stop-parsing token: the rest of the line is one argument.
+			i = end
+			commentEnd = end
+		case r == '-' && next == '-' && i+2 < len(runes) && runes[i+2] == '%' &&
+			(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) && windowsPowerShellTokenStart(runes, i):
+			// The stop-parsing arguments end at an unquoted pipe or line end.
 			opaque, inStatement = true, true
-			for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
-				i++
-			}
+			i = windowsPowerShellStopParsingEnd(runes, i+3) - 1
 		case r == '`':
 			// An escaped character, or a line continuation.
 			inStatement = true

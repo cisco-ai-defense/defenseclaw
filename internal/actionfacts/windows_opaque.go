@@ -65,22 +65,20 @@ func windowsPowerShellOpaqueEnd(runes []rune, start int) (int, bool) {
 			switch {
 			case r == '`':
 				i++
-			case r == '<' && next == '#':
+			case r == '<' && next == '#' && windowsPowerShellCommentStarts(runes, i):
 				end, ok := windowsPowerShellBlockCommentEnd(runes, i)
 				if !ok {
 					return 0, false
 				}
 				i = end
-			case r == '#' && windowsPowerShellTokenStart(runes, i):
+			case r == '#' && windowsPowerShellCommentStarts(runes, i):
 				for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
 					i++
 				}
 			case r == '-' && next == '-' && i+2 < len(runes) && runes[i+2] == '%' &&
 				(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) &&
 				windowsPowerShellTokenStart(runes, i):
-				for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
-					i++
-				}
+				i = windowsPowerShellStopParsingEnd(runes, i+3) - 1
 			case r == '@' && windowsPowerShellQuoteDelimiter(next) != 0:
 				if !powerShellHereStringOpens(runes, i+2) {
 					return 0, false
@@ -94,6 +92,12 @@ func windowsPowerShellOpaqueEnd(runes []rune, start int) (int, bool) {
 				frames = append(frames, 'v')
 				i++
 			case windowsPowerShellQuoteDelimiter(r) != 0:
+				// Adjacent delimiters of the same family in an active string
+				// are consumed by the quote frame above. Reaching the second
+				// one as code means the value cannot be read reliably.
+				if i > 0 && windowsPowerShellQuoteDelimiter(runes[i-1]) == windowsPowerShellQuoteDelimiter(r) {
+					return 0, false
+				}
 				frames = append(frames, windowsPowerShellQuoteDelimiter(r))
 			case r == '(':
 				frames = append(frames, ')')
@@ -128,21 +132,55 @@ func windowsPowerShellHereStringEnd(runes []rune, start int) (int, bool) {
 }
 
 func windowsPowerShellBlockCommentEnd(runes []rune, start int) (int, bool) {
-	depth := 1
 	for i := start + 2; i+1 < len(runes); i++ {
-		switch {
-		case runes[i] == '<' && runes[i+1] == '#':
-			depth++
-			i++
-		case runes[i] == '#' && runes[i+1] == '>':
-			depth--
-			i++
-			if depth == 0 {
-				return i, true
-			}
+		if runes[i] == '#' && runes[i+1] == '>' {
+			return i + 1, true
 		}
 	}
 	return 0, false
+}
+
+// A comment begins at a token boundary. In argument mode, '=' remains part
+// of a word; a closing quote or bracket ends one even without whitespace.
+func windowsPowerShellCommentStarts(runes []rune, i int) bool {
+	if i == 0 {
+		return true
+	}
+	previous := runes[i-1]
+	if previous == '=' {
+		// An assignment operator ends a token, but '=' in an argument
+		// such as --format=#%h does not. The target before an assignment
+		// is a variable expression at the start of this statement.
+		start := i - 2
+		for start >= 0 && !strings.ContainsRune(";|&(){}\r\n", runes[start]) {
+			start--
+		}
+		target := strings.TrimSpace(string(runes[start+1 : i-1]))
+		if !strings.ContainsAny(target, " \t") &&
+			(strings.HasPrefix(target, "$") || strings.HasPrefix(target, "[") && strings.Contains(target, "$")) {
+			return true
+		}
+	}
+	return unicode.IsSpace(previous) || strings.ContainsRune(";|&(){}[],'\"", previous)
+}
+
+// Return the first pipeline or physical line boundary outside double quotes.
+// The boundary itself belongs to the surrounding PowerShell reading.
+func windowsPowerShellStopParsingEnd(runes []rune, from int) int {
+	quoted := false
+	for i := from; i < len(runes); i++ {
+		switch runes[i] {
+		case '\n', '\r':
+			return i
+		case '"':
+			quoted = !quoted
+		case '|':
+			if !quoted {
+				return i
+			}
+		}
+	}
+	return len(runes)
 }
 
 func windowsPowerShellTokenStart(runes []rune, i int) bool {
