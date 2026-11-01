@@ -2632,12 +2632,28 @@ namespace $nativeNamespace
             byte[] securityDescriptor,
             string expectedIdentity)
         {
+            return SetDirectoryDaclNoFollow(
+                path,
+                securityDescriptor,
+                expectedIdentity,
+                true);
+        }
+
+        // protectDacl false keeps the directory inheriting: the system drops
+        // the supplied inherited ACEs and re-derives them from the parent.
+        public static PathSecuritySnapshot SetDirectoryDaclNoFollow(
+            string path,
+            byte[] securityDescriptor,
+            string expectedIdentity,
+            bool protectDacl)
+        {
             const uint FILE_READ_ATTRIBUTES = 0x00000080;
             const uint READ_CONTROL = 0x00020000;
             const uint WRITE_DAC = 0x00040000;
             const int SE_FILE_OBJECT = 1;
             const uint DACL_SECURITY_INFORMATION = 0x00000004;
             const uint PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000;
+            const uint UNPROTECTED_DACL_SECURITY_INFORMATION = 0x20000000;
             const ushort SE_SELF_RELATIVE = 0x8000;
 
             if (securityDescriptor == null ||
@@ -2698,7 +2714,9 @@ namespace $nativeNamespace
                         handle,
                         SE_FILE_OBJECT,
                         DACL_SECURITY_INFORMATION |
-                            PROTECTED_DACL_SECURITY_INFORMATION,
+                            (protectDacl
+                                ? PROTECTED_DACL_SECURITY_INFORMATION
+                                : UNPROTECTED_DACL_SECURITY_INFORMATION),
                         IntPtr.Zero,
                         IntPtr.Zero,
                         dacl,
@@ -6031,6 +6049,26 @@ function Get-DefenseClawAclOwnerSID {
 # Principals whose deny entries also bind SYSTEM and Administrators.
 $script:BroadPrincipalSIDs = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545')
 
+# Everyone, Authenticated Users, Users, Interactive, Guests and Anonymous.
+$script:UnprivilegedWriterSIDs = @(
+    'S-1-1-0', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-4', 'S-1-5-32-546', 'S-1-5-7'
+)
+
+# True for a writer any ordinary or anonymous session holds (including Domain
+# Users and a null DACL). Write authority there on a LocalSystem service is a
+# path to SYSTEM, so drift that leaves one behind after a repair stays fatal;
+# only a named principal (a GPO or EDR account) is accepted as a boundary.
+function Test-DefenseClawBroadUnprivilegedSid {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$SID)
+    if ([string]::Equals($SID, 'null DACL', [StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    if ($SID -in $script:UnprivilegedWriterSIDs) {
+        return $true
+    }
+    return $SID -match '^S-1-5-21-\d+-\d+-\d+-513$'
+}
+
 # Reads the DACL of $Path and returns every permission verdict against it, in
 # the order they were historically thrown, so an empty result means compliant.
 # Splitting the reading from the judging is what lets a caller repair the path
@@ -7249,7 +7287,7 @@ function Get-DefenseClawRegistryAclVerdicts {
     )
     if ([string]::IsNullOrWhiteSpace($accessSDDL) -or
         -not $accessSDDL.StartsWith('D:', [StringComparison]::OrdinalIgnoreCase)) {
-        $verdicts.Add([pscustomobject]@{ Fatal = $true; Reason = "$Label has an absent or null DACL" })
+        $verdicts.Add([pscustomobject]@{ Fatal = $true; Reason = "$Label has an absent or null DACL"; Writer = 'null DACL' })
         return $verdicts.ToArray()
     }
     $ownerSID = Get-DefenseClawAclOwnerSID -Acl $Acl
@@ -7289,7 +7327,7 @@ function Get-DefenseClawRegistryAclVerdicts {
             continue
         }
         if (($rights -band $writeMask) -ne 0 -and $sid -notin $trusted) {
-            $verdicts.Add([pscustomobject]@{ Fatal = $true; Reason = "untrusted principal $sid can change the $Label" })
+            $verdicts.Add([pscustomobject]@{ Fatal = $true; Reason = "untrusted principal $sid can change the $Label"; Writer = $sid })
         }
         $current = if ($granted.ContainsKey($sid)) {
             [Security.AccessControl.RegistryRights]$granted[$sid]
@@ -7509,18 +7547,29 @@ function Assert-DefenseClawServiceRegistryAcl {
         }
     }
 
+    $keyVerdicts = @()
     try {
         $acl = Microsoft.PowerShell.Security\Get-Acl -Path $serviceKey -ErrorAction Stop
+        $keyVerdicts = @(Get-DefenseClawRegistryAclVerdicts `
+            -Acl $acl `
+            -Label "service $Name registry key" `
+            -ExpectProtected $true)
         Confirm-DefenseClawRegistryAclVerdicts `
             -Path $serviceKey `
-            -Verdicts @(Get-DefenseClawRegistryAclVerdicts `
-                -Acl $acl `
-                -Label "service $Name registry key" `
-                -ExpectProtected $true)
+            -Verdicts $keyVerdicts
     }
     catch {
         if (-not $acceptResidual) {
             throw
+        }
+        # SetValue for an ordinary session rewrites ImagePath of a LocalSystem
+        # service, so that writer is never a boundary fact.
+        foreach ($verdict in $keyVerdicts) {
+            $writerProperty = $verdict.PSObject.Properties['Writer']
+            if ($null -ne $writerProperty -and
+                (Test-DefenseClawBroadUnprivilegedSid -SID ([string]$writerProperty.Value))) {
+                throw [string]$verdict.Reason
+            }
         }
         Write-DefenseClawResilienceEvent -Marker defenseclaw_boundary -Fields @{
             path   = $serviceKey
@@ -8599,7 +8648,7 @@ function Assert-DefenseClawManagedIPCRetirementDescriptor {
         }
         Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
             path   = $Path
-            reason = 'managed IPC directory inherits its DACL; removing only the retired gateway ACE'
+            reason = 'managed IPC directory inherits its DACL; removing only the retired gateway ACE and keeping inheritance'
         }
     }
     $allowedOwners = @(
@@ -8723,10 +8772,18 @@ function Revoke-DefenseClawManagedIPCServiceAccess {
     )
     $expectedBytes = [byte[]]::new($expectedDescriptor.BinaryLength)
     $expectedDescriptor.GetBinaryForm($expectedBytes, 0)
+    # The platform installer owns this directory's inheritance: an inheriting
+    # DACL is written back still inheriting, so the exact comparison below
+    # sees the same control flags and the inherited ACEs stay live.
+    $protectedFlag = [int](
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
+    )
+    $protectDacl = ([int]$beforeDescriptor.ControlFlags -band $protectedFlag) -ne 0
     $after = $nativeSecurity::SetDirectoryDaclNoFollow(
         $ipcDirectory,
         $expectedBytes,
-        [string]$before.Identity
+        [string]$before.Identity,
+        $protectDacl
     )
     if ([string]$after.Identity -cne [string]$before.Identity) {
         throw "managed IPC directory identity changed during cleanup: $ipcDirectory"
@@ -8743,7 +8800,7 @@ function Revoke-DefenseClawManagedIPCServiceAccess {
         }
         Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
             path   = $ipcDirectory
-            reason = 'managed IPC directory DACL differs from the filtered descriptor after the update (re-inheritance or a concurrent writer)'
+            reason = 'managed IPC directory DACL differs from the filtered descriptor after the update (the parent now grants different inherited ACEs, or a concurrent writer)'
         }
     }
 
@@ -8768,7 +8825,7 @@ function Revoke-DefenseClawManagedIPCServiceAccess {
         }
         Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
             path   = $ipcDirectory
-            reason = 'managed IPC directory DACL changed after the cleanup (re-inheritance or a concurrent writer)'
+            reason = 'managed IPC directory DACL changed after the cleanup (a parent inheritance change or a concurrent writer)'
         }
     }
     if ($TransactionCreatedServicePresent) {
@@ -19625,12 +19682,18 @@ function Get-DefenseClawGuardianReadinessProbe {
                 # A live verify may fail only on the targets the Guardian
                 # itself reported failed; a failure on a target it reported
                 # healthy is real drift and is not excused.
-                $verifyKeys = Get-DefenseClawVerifyFailedTargetKeys -Probe $probe
-                if ($null -ne $verifyKeys -and @($verifyKeys).Count -gt 0) {
+                # The degraded reconcile also wrote an incomplete
+                # authorization, which verify reports by count; it is
+                # excused only when its failures are exactly the Guardian's.
+                $guardianFailed = @(Get-DefenseClawGuardianFailedTargets -Report $report)
+                $verifyKeys = Get-DefenseClawVerifyFailedTargetKeys `
+                    -Probe $probe `
+                    -GuardianFailedTargetCount $guardianFailed.Count
+                if ($null -ne $verifyKeys) {
                     $guardianKeys = [Collections.Generic.HashSet[string]]::new(
                         [StringComparer]::Ordinal
                     )
-                    foreach ($target in @(Get-DefenseClawGuardianFailedTargets -Report $report)) {
+                    foreach ($target in $guardianFailed) {
                         [void]$guardianKeys.Add(('{0}|{1}' -f ([string]$target.connector).ToLowerInvariant(), ([string]$target.sid).ToUpperInvariant()))
                     }
                     $accepted = $true
@@ -19970,12 +20033,20 @@ function Get-DefenseClawServiceDacl {
 
 # Returns the first principal outside SYSTEM and Administrators that the
 # service DACL lets reconfigure, re-ACL, take or delete the service, or ''.
+# -All returns every such principal instead.
 function Get-DefenseClawServiceDaclUntrustedWriter {
-    param([Parameter(Mandatory)][string]$Dacl)
+    param(
+        [Parameter(Mandatory)][string]$Dacl,
+        [switch]$All
+    )
     $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($Dacl)
     if ($null -eq $descriptor.DiscretionaryAcl) {
+        if ($All) {
+            return , @('null DACL')
+        }
         return 'null DACL'
     }
+    $writers = [Collections.Generic.List[string]]::new()
     # SERVICE_CHANGE_CONFIG, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_WRITE and
     # GENERIC_ALL.
     $writeMask = 0x0002L -bor 0x10000L -bor 0x40000L -bor 0x80000L -bor 0x40000000L -bor 0x10000000L
@@ -19989,8 +20060,16 @@ function Get-DefenseClawServiceDaclUntrustedWriter {
             continue
         }
         if ((([int64]$ace.AccessMask -band 0xffffffffL) -band $writeMask) -ne 0) {
-            return $sid
+            if (-not $All) {
+                return $sid
+            }
+            if (-not $writers.Contains($sid)) {
+                $writers.Add($sid)
+            }
         }
+    }
+    if ($All) {
+        return , $writers.ToArray()
     }
     return ''
 }
@@ -20050,10 +20129,17 @@ function Assert-DefenseClawServiceSecurityDescriptor {
     }
     $writer = Get-DefenseClawServiceDaclUntrustedWriter -Dacl $actualDACL
     if (-not [string]::IsNullOrEmpty($writer)) {
+        # An ordinary session that can change the service config can point
+        # binPath anywhere and run it as SYSTEM: fatal even after a repair.
+        foreach ($candidate in @(Get-DefenseClawServiceDaclUntrustedWriter -Dacl $actualDACL -All)) {
+            if (Test-DefenseClawBroadUnprivilegedSid -SID $candidate) {
+                throw "untrusted principal $candidate can reconfigure service $Name after the canonical descriptor was re-applied: $actualDACL"
+            }
+        }
         # The repair above was attempted and did not hold (an EDR or a GPO
-        # System Services template re-stamps it). Descriptor drift is a
-        # boundary fact the installer reports, not a reason to fail the
-        # Install; the strict pin threw before the repair.
+        # System Services template re-stamps it). Drift that leaves only a
+        # named principal is a boundary fact the installer reports, not a
+        # reason to fail the Install; the strict pin threw before the repair.
         Write-DefenseClawResilienceEvent -Marker defenseclaw_boundary -Fields @{
             service = $Name
             reason  = "untrusted principal $writer can reconfigure the service after the canonical descriptor was re-applied: $actualDACL"
@@ -21828,9 +21914,16 @@ function Write-DefenseClawGuardianDegradedTargets {
 
 # The connector|SID keys of the failing rows of an `enterprise hooks verify`
 # report, or $null when the report is missing, unparsable, or fails for a
-# reason that is not a per-target row (an authorization error).
+# reason that is not a per-target row. The one authorization error tolerated
+# is the incomplete-authorization verdict a degraded reconcile leaves, and
+# only when its failure count (total - succeeded - pending) equals
+# -GuardianFailedTargetCount; any other or compound authorization error is
+# $null.
 function Get-DefenseClawVerifyFailedTargetKeys {
-    param([Parameter(Mandatory)]$Probe)
+    param(
+        [Parameter(Mandatory)]$Probe,
+        [int]$GuardianFailedTargetCount = 0
+    )
     $report = $null
     foreach ($line in @($Probe.output)) {
         $text = ([string]$line).Trim()
@@ -21852,10 +21945,24 @@ function Get-DefenseClawVerifyFailedTargetKeys {
     if ($null -eq $report) {
         return $null
     }
+    $authorizationAccepted = $false
     $authorizationProperty = $report.PSObject.Properties['authorization_error']
     if ($null -ne $authorizationProperty -and
         -not [string]::IsNullOrWhiteSpace([string]$authorizationProperty.Value)) {
-        return $null
+        $incomplete = [regex]::Match(
+            [string]$authorizationProperty.Value,
+            '\Aprotected hook guardian authorization is incomplete \((\d+) succeeded, (\d+) pending, (\d+) total\)\z'
+        )
+        if ($GuardianFailedTargetCount -le 0 -or -not $incomplete.Success) {
+            return $null
+        }
+        $authorizationFailures = [int64]$incomplete.Groups[3].Value -
+            [int64]$incomplete.Groups[1].Value -
+            [int64]$incomplete.Groups[2].Value
+        if ($authorizationFailures -ne $GuardianFailedTargetCount) {
+            return $null
+        }
+        $authorizationAccepted = $true
     }
     $resultsProperty = $report.PSObject.Properties['results']
     if ($null -eq $resultsProperty) {
@@ -21876,6 +21983,11 @@ function Get-DefenseClawVerifyFailedTargetKeys {
             return $null
         }
         $keys.Add(('{0}|{1}' -f ([string]$connectorProperty.Value).ToLowerInvariant(), ([string]$sidProperty.Value).ToUpperInvariant()))
+    }
+    # A failed report with neither a failing row nor the tolerated
+    # authorization verdict is not a per-target failure.
+    if ($keys.Count -eq 0 -and -not $authorizationAccepted) {
+        return $null
     }
     return , $keys.ToArray()
 }
@@ -22676,7 +22788,26 @@ function Assert-DefenseClawInstallTreeRetirementState {
             )) {
             if (($item.PSIsContainer -and $full -notin $allowlist.directories) -or
                 (-not $item.PSIsContainer -and $full -notin $allowlist.files)) {
-                throw "committed InstallRoot contains unexpected content: $full"
+                # Install-DefenseClawFileAtomic leaves <file>.backup.<guid N>
+                # when the replaced image was still running and its delete
+                # could not even be queued. It is a regular file that the
+                # whole-tree delete below removes, so it must not stop
+                # finalization; the strict pin keeps the exact inventory.
+                $backupMatch = [regex]::Match(
+                    $full,
+                    '\A(.+)\.backup\.[0-9a-f]{32}\z'
+                )
+                if ($item.PSIsContainer -or
+                    -not $backupMatch.Success -or
+                    $backupMatch.Groups[1].Value -notin $allowlist.files -or
+                    ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    (Test-DefenseClawTrustStrictAncestors)) {
+                    throw "committed InstallRoot contains unexpected content: $full"
+                }
+                Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+                    path   = $full
+                    reason = 'leftover atomic-replacement backup in InstallRoot; removed with the tree'
+                }
             }
         }
         if ($NativeSealed -and
@@ -27766,7 +27897,31 @@ function Remove-DefenseClawNuclearPath {
     return ('{0} {1} survived the purge: {2}' -f $Role, $Path, $detail)
 }
 
-# True when <profile>\.defenseclaw is a real folder (no reparse point) that
+# True when $Path is an existing directory and neither it nor any ancestor is
+# a reparse point, so a purge of it cannot be redirected into another folder.
+function Test-DefenseClawNuclearRealDirectoryPath {
+    param([Parameter(Mandatory)][string]$Path)
+    $reparse = [IO.FileAttributes]::ReparsePoint
+    try {
+        $current = [IO.Path]::GetFullPath($Path)
+        if (([IO.File]::GetAttributes($current) -band [IO.FileAttributes]::Directory) -eq 0) {
+            return $false
+        }
+        while (-not [string]::IsNullOrEmpty($current)) {
+            if (([IO.File]::GetAttributes($current) -band $reparse) -ne 0) {
+                return $false
+            }
+            $current = [IO.Path]::GetDirectoryName($current)
+        }
+        return $true
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "user data folder $Path is unreadable: $($_.Exception.Message)"
+    }
+    return $false
+}
+
+# True when <profile>\.defenseclaw is a real folder (no reparse point in its path) that
 # holds the managed runtime's own evidence: an immutable runtime generation
 # (hooks\.managed-runtime-<connector>-<id>.json) or a hook contract lock bound
 # to a managed gateway service. A per-user DefenseClaw install never writes
@@ -27774,12 +27929,10 @@ function Remove-DefenseClawNuclearPath {
 function Test-DefenseClawNuclearManagedUserDataFolder {
     param([Parameter(Mandatory)][string]$Path)
     $reparse = [IO.FileAttributes]::ReparsePoint
+    if (-not (Test-DefenseClawNuclearRealDirectoryPath -Path $Path)) {
+        return $false
+    }
     try {
-        $attributes = [IO.File]::GetAttributes($Path)
-        if (($attributes -band [IO.FileAttributes]::Directory) -eq 0 -or
-            ($attributes -band $reparse) -ne 0) {
-            return $false
-        }
         $hooks = [IO.Path]::Combine($Path, 'hooks')
         if ([IO.Directory]::Exists($hooks) -and
             ([IO.File]::GetAttributes($hooks) -band $reparse) -eq 0) {
@@ -27847,7 +28000,7 @@ function Get-DefenseClawNuclearRegisteredProfiles {
 # and the manifest can be missing or unreadable, also from every registered
 # interactive profile whose <profile>\.defenseclaw holds managed-runtime
 # evidence. Only a canonical <profile>\.defenseclaw under a registered local
-# profile is returned, together with that profile's setup staging folders, so
+# profile, a real folder with no reparse point in its path, is returned, together with that profile's setup staging folders, so
 # the purge never reaches anything else in a home.
 function Get-DefenseClawNuclearUserDataPaths {
     param([Parameter(Mandatory)][string]$StateRoot)
@@ -27896,6 +28049,11 @@ function Get-DefenseClawNuclearUserDataPaths {
         if ([string]::IsNullOrWhiteSpace($profileHome) -or
             -not [string]::Equals([IO.Path]::GetFileName($data), '.defenseclaw', [StringComparison]::OrdinalIgnoreCase) -or
             -not $profiles.ContainsKey($profileHome.TrimEnd('\').ToUpperInvariant())) {
+            continue
+        }
+        # A manifest row is administrator-authored but still names a path
+        # inside a user's home: a link there must not steer the purge.
+        if (-not (Test-DefenseClawNuclearRealDirectoryPath -Path $data)) {
             continue
         }
         if (-not $paths.Contains($data)) {

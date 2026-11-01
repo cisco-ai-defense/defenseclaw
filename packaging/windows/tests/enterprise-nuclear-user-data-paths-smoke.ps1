@@ -8,7 +8,8 @@
 # (in the exact form the Go enumerator's YAML marshaller writes) and, because
 # those rows are optional and the manifest can be gone, also from registered
 # interactive profiles whose .defenseclaw holds managed-runtime evidence. An
-# unmanaged per-user .defenseclaw, a reparse point, a non-interactive profile
+# unmanaged per-user .defenseclaw, a reparse point (also when a manifest row
+# names it), a non-interactive profile
 # and a folder outside every registered profile are never listed. The helpers
 # are loaded from the module by AST and the profile list is replaced, so the
 # smoke also runs under pwsh off Windows.
@@ -25,6 +26,7 @@ if (@($parseErrors).Count -ne 0) {
     throw "module does not parse: $(@($parseErrors)[0])"
 }
 foreach ($name in @(
+        'Test-DefenseClawNuclearRealDirectoryPath',
         'Test-DefenseClawNuclearManagedUserDataFolder',
         'Get-DefenseClawNuclearUserDataPaths'
     )) {
@@ -45,7 +47,34 @@ if ($null -eq $ast.Find({
     throw 'module does not define Get-DefenseClawNuclearRegisteredProfiles'
 }
 
-$root = [IO.Path]::Combine([IO.Path]::GetTempPath(), "dc-nuclear-users-smoke-$([Guid]::NewGuid().ToString('N'))")
+# The purge refuses a path with a linked ancestor, and macOS keeps the temp
+# folder under /var (a link to /private/var), so build the fixture on the
+# real path. Windows PowerShell has no link resolver and needs none here.
+function Resolve-SmokeRealDirectory([string]$Path) {
+    $current = [IO.Path]::GetFullPath($Path)
+    for ($round = 0; $round -lt 16; $round++) {
+        $linked = $null
+        $probe = $current
+        while (-not [string]::IsNullOrEmpty($probe)) {
+            if (([IO.File]::GetAttributes($probe) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $linked = $probe
+                break
+            }
+            $probe = [IO.Path]::GetDirectoryName($probe)
+        }
+        if ($null -eq $linked) {
+            return $current
+        }
+        $target = [IO.Directory]::ResolveLinkTarget($linked, $true)
+        $current = [IO.Path]::GetFullPath([IO.Path]::Combine(
+            $target.FullName,
+            [IO.Path]::GetRelativePath($linked, $current)
+        ))
+    }
+    return $current
+}
+
+$root = [IO.Path]::Combine((Resolve-SmokeRealDirectory ([IO.Path]::GetTempPath())), "dc-nuclear-users-smoke-$([Guid]::NewGuid().ToString('N'))")
 $users = [IO.Path]::Combine($root, 'Users')
 $stateRoot = [IO.Path]::Combine($root, 'DefenseClaw')
 $manifestDirectory = [IO.Path]::Combine($stateRoot, 'hook-guardian')
@@ -175,6 +204,12 @@ targets:
     # A manifest row and managed evidence for the same folder list it once.
     [IO.File]::WriteAllText($manifestPath, "version: 1`ntargets:`n  - data_dir: $bobData`n")
     Assert-Paths 'manifest and evidence agree' @($bobData, $bobStaging, $carolData)
+
+    # A manifest row naming a linked .defenseclaw is not taken either.
+    if ($erinLinked) {
+        [IO.File]::WriteAllText($manifestPath, "version: 1`ntargets:`n  - data_dir: $erinData`n    connector: codex`n")
+        Assert-Paths 'manifest row through a reparse point' @($bobData, $bobStaging, $carolData)
+    }
 
     # No manifest at all: the managed folders are still found.
     [IO.File]::Delete($manifestPath)

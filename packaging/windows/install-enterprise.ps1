@@ -2381,14 +2381,19 @@ function Assert-DefenseClawBootstrapModuleTrust {
             -LiteralPath $full `
             -ErrorAction Stop
         if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
-            # Code integrity is advisory outside the strict pin, as it is for
-            # every artifact the module checks: an offline host that lacks the
-            # signing root (NotTrusted, UnknownError) must still be able to
-            # install and purge. A HashMismatch is advisory too, because the
-            # leaf ACL/owner check above already proved the file is not
-            # writable by an untrusted principal, and the open handle keeps
-            # it unchanged until Import-Module returns.
-            if (Test-DefenseClawBootstrapStrictAncestors) {
+            # Outside the strict pin only a chain that cannot be built is
+            # advisory: an offline host that lacks the signing root
+            # (NotTrusted, UnknownError) must still be able to install and
+            # purge. HashMismatch, NotSigned and every other status mean the
+            # file is not the signed artifact, and the leaf ACL check proves
+            # only who can write it now, so they stay fatal for this elevated
+            # import.
+            $advisoryStatuses = @(
+                [Management.Automation.SignatureStatus]::NotTrusted,
+                [Management.Automation.SignatureStatus]::UnknownError
+            )
+            if ((Test-DefenseClawBootstrapStrictAncestors) -or
+                $signature.Status -notin $advisoryStatuses) {
                 throw "DefenseClaw enterprise installer module Authenticode signature is not valid ($($signature.Status)): $full; use -AllowUnsigned only for protected controlled test staging"
             }
             Add-DefenseClawBootstrapResilienceEvent `

@@ -9,7 +9,9 @@
 # and Upgrade activation (with a manifest digest) accept the same complete
 # degraded reconcile as long as its activation identity matches, and log each
 # failed target. An incomplete reconcile, a report with no state, or a live
-# verify failure on a target the Guardian reported healthy stays rejected.
+# verify failure on a target the Guardian reported healthy stays rejected, as
+# does any authorization error other than the incomplete-authorization count
+# that matches the Guardian's failed targets.
 # The helpers are loaded from the module by AST.
 
 Set-StrictMode -Version Latest
@@ -153,9 +155,65 @@ $script:VerifyOutput = @('{"ok":false,"results":[{"connector":"codex","sid":"S-1
 if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
     throw 'live verification accepted a failure on a target the Guardian reported healthy'
 }
-$script:VerifyOutput = @('{"ok":false,"authorization_error":"denied","results":[{"connector":"claudecode","sid":"S-1-5-21-1-2-3-1003","ok":false}]}')
+# `enterprise hooks verify --json` after a degraded reconcile, in the shape
+# runEnterpriseHooksVerify encodes it: the reconcile wrote an ok=false
+# authorization (1 succeeded, 1 pending, 1 failed of 3), which verify reports
+# as authorization_error, and the failed target is outside the protected set.
+function New-VerifyOutput([string]$AuthorizationError, [bool]$CodexOK = $true) {
+    $codex = [ordered]@{
+        user = 'dana'; user_home = 'C:\Users\dana'; sid = 'S-1-5-21-1-2-3-1001'
+        connector = 'codex'; ok = $CodexOK
+    }
+    if (-not $CodexOK) {
+        $codex.error = 'hook drift'
+    }
+    $payload = [ordered]@{
+        authorization_error = $AuthorizationError
+        claude_effective_policy_verified = $false
+        manifest = 'C:\ProgramData\Cisco\DefenseClaw\targets.yaml'
+        ok = $false
+        results = @(
+            [ordered]@{
+                user = 'erin'; user_home = 'C:\Users\erin'; sid = 'S-1-5-21-1-2-3-1003'
+                connector = 'claudecode'; ok = $false
+                error = 'protected authorization does not cover target'
+            },
+            $codex,
+            [ordered]@{
+                user = 'finn'; user_home = 'C:\Users\finn'; sid = 'S-1-5-21-1-2-3-1002'
+                connector = 'cursor'; ok = $true
+            }
+        )
+    }
+    return @($payload | ConvertTo-Json -Depth 6 -Compress)
+}
+$degradedAuthorization = 'protected hook guardian authorization is incomplete (1 succeeded, 1 pending, 3 total)'
+$script:VerifyOutput = New-VerifyOutput -AuthorizationError $degradedAuthorization
+$script:Events.Clear()
+if (-not [bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
+    throw 'live verification rejected the incomplete authorization a degraded reconcile writes'
+}
+if (@($script:Events).Count -ne 1) {
+    throw "degraded live verification did not log exactly the failed target: $($script:Events -join '; ')"
+}
+foreach ($case in @(
+        @{ error = 'protected hook guardian authorization is not fresh: updated_at is too old'; label = 'an unrelated authorization error' },
+        @{ error = 'protected hook guardian authorization is incomplete (0 succeeded, 1 pending, 3 total)'; label = 'an incomplete authorization with more failures than the Guardian reported' },
+        @{ error = "$degradedAuthorization; protected enrollment set is not exact: extra enrollment"; label = 'a compound authorization error' },
+        @{ error = 'denied'; label = 'a protected-authorization failure' }
+    )) {
+    $script:VerifyOutput = New-VerifyOutput -AuthorizationError $case.error
+    if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
+        throw "live verification accepted $($case.label)"
+    }
+}
+$script:VerifyOutput = New-VerifyOutput -AuthorizationError $degradedAuthorization -CodexOK $false
 if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
-    throw 'live verification accepted a protected-authorization failure'
+    throw 'live verification accepted the degraded authorization with a failure on a Guardian-healthy target'
+}
+$script:VerifyOutput = @('{"ok":false,"results":[{"connector":"codex","sid":"S-1-5-21-1-2-3-1001","ok":true}]}')
+if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
+    throw 'live verification accepted a failed report with no failing target and no authorization verdict'
 }
 $script:VerifyOutput = @()
 $script:StatusReport = New-Report -Failures 1 -Rows 2
