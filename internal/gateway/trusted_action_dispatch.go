@@ -8553,9 +8553,19 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 // hint, or no hint on a Windows gateway, as Codex sends) is counted as
 // PowerShell splits it (actionfacts.PowerShellStatementsOverBudget): Codex
 // on Windows ran a 3000-statement call past the 64 KiB input bound through
-// every reader and allowed it (rel-1-0-6:GAP-0318). A finished PowerShell or
-// CMD reading is held to the budget by its own split (SimpleCommands).
+// every reader and allowed it (rel-1-0-6:GAP-0318). A PowerShell reading
+// that is not complete is counted the same way: the Windows lexer stops at
+// the first subexpression, array, hashtable, braced variable or
+// here-string, so its own split saw only the statements before it
+// (rel-1-0-6:GAP-0331). A complete PowerShell or CMD reading is held to the
+// budget by its own split (SimpleCommands), and so is one the lexer read to
+// its end: an ordinary 130-statement script of a partial reading stays
+// allowed, as before.
 func trustedStatementBudgetExceeded(input actionfacts.Input, facts actionfacts.Facts, command string) bool {
+	if facts.Parse.Dialect == actionfacts.DialectPowerShell {
+		return facts.Parse.Status != actionfacts.StatusComplete &&
+			actionfacts.PowerShellReadingStopsEarly(command) && actionfacts.PowerShellStatementsOverBudget(command)
+	}
 	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 		return false
 	}
@@ -8609,7 +8619,9 @@ func withOverBudgetStateMutation(parent context.Context, request trustedActionRe
 // split, or nesting past its bound), or the split is empty because the
 // analysis stopped at its node or input bound first
 // (trustedStatementBudgetExceeded). That pass adds ACTION-COMPOUND-LIMIT to
-// such a call whatever else it finds.
+// such a call whatever else it finds. A PowerShell reading the Windows lexer
+// stopped early is counted past the stop (rel-1-0-6:GAP-0331), so its call
+// is over the budget even where the split it made is short.
 func trustedCallOverStatementBudget(input actionfacts.Input, facts actionfacts.Facts) bool {
 	simples := actionfacts.SimpleCommands(input, facts)
 	if slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
@@ -8618,7 +8630,13 @@ func trustedCallOverStatementBudget(input actionfacts.Input, facts actionfacts.F
 		return true
 	}
 	command, known := trustedBashCommandInput(input)
-	return len(simples) == 0 && known && trustedStatementBudgetExceeded(input, facts, command)
+	if !known {
+		return false
+	}
+	if facts.Parse.Dialect == actionfacts.DialectPowerShell {
+		return trustedStatementBudgetExceeded(input, facts, command)
+	}
+	return len(simples) == 0 && trustedStatementBudgetExceeded(input, facts, command)
 }
 
 // withTrustedActionLimitFinding adds the over-limit verdict once.

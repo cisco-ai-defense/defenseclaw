@@ -3,6 +3,11 @@
 
 package actionfacts
 
+import (
+	"strings"
+	"unicode"
+)
+
 // ShellStatementsOverBudget reports whether a POSIX shell command has more
 // statements than one action evaluates (maxStatementsAlone, 128), counted
 // as SimpleCommands splits it: list members, pipeline stages and the
@@ -21,33 +26,196 @@ func ShellStatementsOverBudget(command string) bool {
 
 // PowerShellStatementsOverBudget reports whether a command has more
 // statements than one action evaluates (maxStatementsAlone) as PowerShell
-// splits it: list members (;, &&, ||, line ends) and pipeline stages, the
-// separators windowsSimpleCommands splits on. It is the budget of a call
-// that PowerShell may run but that no analysis read to its end, such as a
-// Codex call on Windows past the 64 KiB input bound (rel-1-0-6:GAP-0318).
-// The Windows lexer stops at its token bound, so a long command is lexed
-// again from the last separator it reached; a separator is never inside a
-// quoted word or a here-string, so each piece starts between statements.
+// splits it: list members (;, &&, ||, line ends) and pipeline stages, at
+// every depth of a subexpression ($( ), @( ), ( )) and a script block
+// ({ }). It is the budget of a call that PowerShell may run but that no
+// analysis read to its end, such as a Codex call on Windows past the 64 KiB
+// input bound (rel-1-0-6:GAP-0318).
+//
+// It reads the command with its own scanner, not the Windows lexer: the
+// lexer stops at the first subexpression, array, hashtable, braced
+// variable or here-string and leaves the rest unread, so a single
+// $(Get-Date) in front hid every later statement from the count
+// (rel-1-0-6:GAP-0331). Text in quotes, here-strings and comments is not
+// counted, nor are the entries of a hashtable (@{ a = 1; b = 2 }); an
+// opening bracket or brace starts a new statement count inside it, and a
+// closing one continues the statement around it, so a block never counts
+// more statements than it holds.
 func PowerShellStatementsOverBudget(command string) bool {
-	statements := 1
-	rest := []rune(command)
-	for len(rest) > 0 {
-		out := newParseOutput(DialectPowerShell, 1)
-		lexemes, ok := windowsLex(string(rest), windowsPowerShell, &out)
-		next := 0
-		for _, lexeme := range lexemes {
-			if lexeme.kind != windowsSeparatorLexeme && lexeme.kind != windowsPipeLexeme {
-				continue
-			}
-			if statements++; statements > maxStatementsAlone {
-				return true
-			}
-			next = lexeme.end
+	statements, _ := powerShellStatements(command, maxStatementsAlone+1)
+	return statements > maxStatementsAlone
+}
+
+// PowerShellReadingStopsEarly reports a command with a construct, outside
+// quotes, at which the Windows lexer stops reading and leaves the rest of
+// the command unread: a subexpression $( ), an array @( ), a hashtable
+// @{ }, a braced variable ${ }, a here-string or the stop-parsing token
+// --%. The split of such a reading holds only the statements before it
+// (rel-1-0-6:GAP-0331).
+func PowerShellReadingStopsEarly(command string) bool {
+	_, opaque := powerShellStatements(command, len(command)+1)
+	return opaque
+}
+
+// powerShellStatements counts the statements of command, stopping at limit,
+// and reports whether it met a construct that stops the Windows lexer.
+func powerShellStatements(command string, limit int) (int, bool) {
+	const (
+		frameCode = iota
+		frameHashtable
+		frameDouble
+		frameVariable
+	)
+	runes := []rune(command)
+	frames := []int{frameCode}
+	statements := 0
+	inStatement := false
+	opaque := false
+	boundary := func() {
+		if inStatement {
+			statements++
+			inStatement = false
 		}
-		if ok || out.status != StatusLimitExceeded || next <= 0 || next > len(rest) {
+	}
+	// lineStart reports that i begins a line (for a here-string end).
+	lineStart := func(i int) bool { return i == 0 || runes[i-1] == '\n' || runes[i-1] == '\r' }
+	tokenStart := func(i int) bool {
+		return i == 0 || unicode.IsSpace(runes[i-1]) || strings.ContainsRune(";|&(){}", runes[i-1])
+	}
+	for i := 0; i < len(runes) && statements < limit; i++ {
+		r := runes[i]
+		top := frames[len(frames)-1]
+		switch top {
+		case frameDouble:
+			switch {
+			case r == '`':
+				i++
+			case windowsPowerShellQuoteDelimiter(r) == '"':
+				if i+1 < len(runes) && windowsPowerShellQuoteDelimiter(runes[i+1]) == '"' {
+					i++ // a doubled quote is one quote character
+				} else {
+					frames = frames[:len(frames)-1]
+				}
+			case r == '$' && i+1 < len(runes) && runes[i+1] == '(':
+				frames = append(frames, frameCode)
+				i++
+			}
+			continue
+		case frameVariable:
+			if r == '`' {
+				i++
+			} else if r == '}' {
+				frames = frames[:len(frames)-1]
+			}
+			continue
+		}
+		// Code and hashtable frames.
+		next := rune(0)
+		if i+1 < len(runes) {
+			next = runes[i+1]
+		}
+		switch {
+		case r == '#' && tokenStart(i):
+			for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
+				i++
+			}
+		case r == '<' && next == '#':
+			j := i + 2
+			for j+1 < len(runes) && (runes[j] != '#' || runes[j+1] != '>') {
+				j++
+			}
+			if j+1 >= len(runes) {
+				return statements, opaque
+			}
+			i = j + 1
+		case r == '-' && next == '-' && i+2 < len(runes) && runes[i+2] == '%' && tokenStart(i):
+			// The stop-parsing token: the rest of the line is one argument.
+			opaque, inStatement = true, true
+			for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
+				i++
+			}
+		case r == '`':
+			// An escaped character, or a line continuation.
+			inStatement = true
+			i++
+		case r == '@' && windowsPowerShellQuoteDelimiter(next) != 0 && powerShellHereStringOpens(runes, i+2):
+			quote := windowsPowerShellQuoteDelimiter(next)
+			inStatement = true
+			j := i + 2
+			for ; j+1 < len(runes); j++ {
+				if lineStart(j) && windowsPowerShellQuoteDelimiter(runes[j]) == quote && runes[j+1] == '@' {
+					break
+				}
+			}
+			if j+1 >= len(runes) {
+				return statements, opaque
+			}
+			opaque = true
+			i = j + 1
+		case windowsPowerShellQuoteDelimiter(r) == '\'':
+			inStatement = true
+			for i++; i < len(runes); i++ {
+				if windowsPowerShellQuoteDelimiter(runes[i]) == '\'' {
+					if i+1 < len(runes) && windowsPowerShellQuoteDelimiter(runes[i+1]) == '\'' {
+						i++
+						continue
+					}
+					break
+				}
+			}
+		case windowsPowerShellQuoteDelimiter(r) == '"':
+			inStatement = true
+			frames = append(frames, frameDouble)
+		case r == '$' && next == '{':
+			inStatement, opaque = true, true
+			frames = append(frames, frameVariable)
+			i++
+		case r == '@' && next == '{':
+			inStatement, opaque = true, true
+			frames = append(frames, frameHashtable)
+			i++
+		case (r == '$' || r == '@') && next == '(':
+			frames = append(frames, frameCode)
+			inStatement, opaque = false, true
+			i++
+		case r == '(' || r == '{':
+			frames = append(frames, frameCode)
+			inStatement = false
+		case r == ')' || r == '}':
+			// The statement around the bracket goes on; the last statement
+			// inside it is counted with it.
+			if len(frames) > 1 {
+				frames = frames[:len(frames)-1]
+			}
+			inStatement = true
+		case top == frameHashtable && (r == ';' || r == '\n' || r == '\r'):
+			// Entry separators of a hashtable, not statements.
+		case r == ';' || r == '|' || r == '\n' || r == '\r':
+			boundary()
+		case r == '&' && next == '&':
+			boundary()
+			i++
+		case !unicode.IsSpace(r):
+			inStatement = true
+		}
+	}
+	if inStatement {
+		statements++
+	}
+	return statements, opaque
+}
+
+// powerShellHereStringOpens reports that only blanks follow position i up to
+// the end of its line: @' and @" open a here-string only at a line end.
+func powerShellHereStringOpens(runes []rune, i int) bool {
+	for ; i < len(runes); i++ {
+		switch runes[i] {
+		case '\n', '\r':
+			return true
+		case ' ', '\t':
+		default:
 			return false
 		}
-		rest = rest[next:]
 	}
 	return false
 }

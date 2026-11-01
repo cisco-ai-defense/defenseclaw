@@ -840,6 +840,9 @@ func clientStatementBudgetExceeded(connector, tool string, facts actionfacts.Fac
 	switch facts.Parse.Dialect {
 	case actionfacts.DialectPOSIX:
 		return actionfacts.ShellStatementsOverBudget(command)
+	case actionfacts.DialectPowerShell:
+		return facts.Parse.Status != actionfacts.StatusComplete &&
+			actionfacts.PowerShellReadingStopsEarly(command) && actionfacts.PowerShellStatementsOverBudget(command)
 	case actionfacts.DialectNone, "":
 		if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 			return false

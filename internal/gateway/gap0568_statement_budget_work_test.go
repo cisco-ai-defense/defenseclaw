@@ -240,3 +240,63 @@ func TestGAP0318StatementBudgetOnEveryDialectRoute(t *testing.T) {
 		}
 	}
 }
+
+// TestGAP0331PowerShellPrefixDoesNotHideTheBudget is rel-1-0-6:GAP-0331: a
+// one-token prefix that stops the Windows lexer ($(...), @{...}, @(...),
+// ${...} or a here-string) no longer hides the statements after it from the
+// statement budget. At 3000 statements the call is refused with
+// ACTION-COMPOUND-LIMIT, a destructive tail included, under and past the
+// 64 KiB input bound, on the PowerShell tool and with a PowerShell hint; at
+// 100 statements a benign call is not refused by the budget.
+func TestGAP0331PowerShellPrefixDoesNotHideTheBudget(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statements := func(n int) string {
+		parts := make([]string, n)
+		for i := range parts {
+			parts[i] = fmt.Sprintf("Write-Output line%d", i)
+		}
+		return strings.Join(parts, "; ")
+	}
+	for _, prefix := range []string{
+		"$x = $(Get-Date); ",
+		"$a = @(1, 2); ",
+		"$h = @{ a = 1; b = 2 }; ",
+		"${x} = 1; ",
+		"$t = @'\nbody; | ;\n'@\n",
+	} {
+		for _, route := range []struct {
+			tool string
+			hint actionfacts.Dialect
+		}{{"powershell", ""}, {"Bash", actionfacts.DialectPowerShell}} {
+			for _, tc := range []struct {
+				command string
+				refused bool
+			}{
+				{prefix + statements(100), false},
+				{prefix + statements(3000), true},
+				// Under the 64 KiB input bound: the reading is partial, not
+				// limit-exceeded, and still counted past the lexer's stop.
+				{prefix + strings.ReplaceAll(statements(3000), "Write-Output line", "echo "), true},
+				{prefix + statements(3000) + "; Remove-Item -Recurse -Force " + home, true},
+			} {
+				args, err := json.Marshal(map[string]string{"command": tc.command})
+				if err != nil {
+					t.Fatal(err)
+				}
+				input := actionfacts.Input{Tool: route.tool, Args: args, CWD: cwd, ActiveHome: home, DialectHint: route.hint}
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: input, LegacyText: string(args), Connector: "codex", EnforcementCapable: true,
+				})
+				limited := findingWithID(findings, "ACTION-COMPOUND-LIMIT") != nil
+				if limited != tc.refused || tc.refused && buildVerdict(findings, "tool_call").Action != guardrailActionBlock {
+					t.Errorf("%s/%s prefix %q, %d bytes: findings %v, want refused by the budget %t",
+						route.tool, route.hint, prefix, len(tc.command), findingIDs(findings), tc.refused)
+				}
+			}
+		}
+	}
+}
