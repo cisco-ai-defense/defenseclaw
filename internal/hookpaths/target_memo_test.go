@@ -303,11 +303,9 @@ func TestClientStateStatementsAreBounded(t *testing.T) {
 	if !ok || overflow {
 		t.Fatalf("POSIX call: ok %t overflow %t, want ok and no overflow (the dropped statements only print)", ok, overflow)
 	}
-	if got := len(strings.Split(reduced, "; ")); got != StateNamingStatementsMax {
-		t.Errorf("%d statements described, want %d", got, StateNamingStatementsMax)
-	}
-	if !strings.HasPrefix(reduced, "cd sub; echo claw0; ") || !strings.HasSuffix(reduced, "; "+state) {
-		t.Errorf("reduced call %.60q: want the directory change, the state write and the naming statements, no assignments", reduced)
+	// Reads are never kept: only the directory change and the write.
+	if want := "cd sub; " + state; reduced != want {
+		t.Errorf("reduced call %.80q: want %q (no assignments, no prints)", reduced, want)
 	}
 	// Statements that may write are kept first, in order: a delete after
 	// 3000 printing statements is kept (review r4 finding 2).
@@ -347,7 +345,7 @@ func TestClientStateStatementsAreBounded(t *testing.T) {
 		stateReads[i] = "cat ~/.defenseclaw/config.yaml 2>/dev/null"
 	}
 	placed, overflow, _ := StateNamingStatements(gap0568Assignments(200)+"; "+strings.Join(stateReads, "; ")+"; cd ~/.defenseclaw; printf c >> ../.defenseclaw/config.yaml", "/home/u")
-	if overflow || !strings.Contains(placed, "cd ~/.defenseclaw; printf c >> ../.defenseclaw/config.yaml") {
+	if overflow || placed != "cd ~/.defenseclaw; printf c >> ../.defenseclaw/config.yaml" {
 		t.Errorf("cd after 127 reads: overflow %t, reduced ends %q; want the cd kept with the write", overflow, placed[max(0, len(placed)-60):])
 	}
 	// rel-1-0-6:GAP-0414: a kept call of a function the call defines is not

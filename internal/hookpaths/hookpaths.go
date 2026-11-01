@@ -5162,11 +5162,13 @@ const StateNamingStatementsMax = 128
 // StateNamingStatements reduces an over-budget POSIX call to the statements
 // a state write can come from: those that may name the state
 // (MayNameState) and the directory changes that place them, at most
-// StateNamingStatementsMax, in their order. Statements not proven read-only
-// (stateStatementReadOnly) are kept first, so a write, redirect, link or
-// delete is never the one dropped while reads fill the bound (review r4
-// finding 2: /bin/rm, unlink, find -delete and other spellings past 130
-// statements that name the state). The hook client describes only the kept
+// StateNamingStatementsMax, in their order. Statements proven read-only
+// (stateStatementReadOnly) are never kept: a read cannot write the state, so
+// a write, redirect, link or delete is never the one dropped for a read
+// (review r4 finding 2: /bin/rm, unlink, find -delete and other spellings
+// past 130 statements that name the state), and no time goes on judging
+// reads (127 state reads kept beside one writer took 3.0-3.2 s on dc-win2,
+// review r5 follow-up). The hook client describes only the kept
 // statements, so its map names the state targets the gateway proves the
 // write from at a bounded cost (describing every statement of a
 // 30,000-statement call took 2.5 s, review R2-5 of rel-1-0-2:GAP-0568), and
@@ -5185,7 +5187,7 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 	if !ok {
 		return command, false, len(command) <= 64<<10
 	}
-	var first, reads []int
+	var first []int
 	writers := 0
 	for i, text := range texts {
 		fields := strings.Fields(text)
@@ -5193,13 +5195,9 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 		switch {
 		case place:
 			first = append(first, i)
-		case MayNameState(text):
-			if stateStatementReadOnly(text, home) {
-				reads = append(reads, i)
-			} else {
-				first = append(first, i)
-				writers++
-			}
+		case MayNameState(text) && !stateStatementReadOnly(text, home):
+			first = append(first, i)
+			writers++
 		}
 	}
 	if writers == 0 {
@@ -5223,13 +5221,8 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 			}
 		}
 	}
-	keep := first
-	if room := StateNamingStatementsMax - len(first); room > 0 {
-		keep = append(keep, reads[:min(room, len(reads))]...)
-	}
-	slices.Sort(keep)
-	kept := make([]string, len(keep))
-	for i, index := range keep {
+	kept := make([]string, len(first))
+	for i, index := range first {
 		kept[i] = texts[index]
 	}
 	return strings.Join(kept, "; "), overflow, true
