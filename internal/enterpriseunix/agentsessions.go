@@ -74,6 +74,44 @@ func codexBackgroundServer(argv []string) bool {
 	return false
 }
 
+// codexBackgroundProcess reports the Codex background server and the
+// "app-server daemon" supervisor it runs (pid-update-loop): processes that
+// keep the requirements they read when they started, but are not sessions.
+// They are named in agent_sessions_restart_required with how to restart them
+// and are not counted in enforcement_pending, which counts sessions the way
+// bundle status does (rel-1-0-6 GAP-0183).
+func codexBackgroundProcess(argv []string) bool {
+	if codexBackgroundServer(argv) {
+		return true
+	}
+	return len(argv) > 2 && filepath.Base(argv[0]) == "codex" && argv[1] == "app-server" && argv[2] == "daemon" &&
+		strings.Contains(argv[0], "/app-server-daemon/")
+}
+
+// background reports whether the process is a Codex background process, not
+// a session.
+func (s agentSession) background() bool {
+	return s.CodexServer || codexBackgroundProcess(s.Args)
+}
+
+// noteCountedPending records the sessions of a warning in the result's
+// enforcement_pending: one per session (the launcher, not the agent it
+// starts) and none for a background server, the way bundle status counts.
+func noteCountedPending(result *enterprisestatus.Result, sessions []agentSession) {
+	processes := make([]enterprisestatus.SessionProcess, 0, len(sessions))
+	connectors := make(map[int]string, len(sessions))
+	for _, session := range sessions {
+		if !session.Unknown {
+			connectors[session.PID] = agentConnectors[session.Agent]
+		}
+		processes = append(processes, enterprisestatus.SessionProcess{PID: session.PID, PPID: session.PPID,
+			User: strconv.Itoa(session.UID), Agent: session.Agent, Background: session.background()})
+	}
+	for _, process := range enterprisestatus.CountedSessions(processes) {
+		result.NotePendingSession(connectors[process.PID], process.PID)
+	}
+}
+
 // scriptHosts run an agent CLI given as their first argument.
 var scriptHosts = map[string]bool{"node": true, "nodejs": true, "bun": true, "deno": true, "python": true, "python3": true}
 
@@ -575,12 +613,8 @@ func (l *lifecycle) warnAgentSessions(sessions []agentSession, reason func(sessi
 			server[session.UID] = true
 		}
 		byUID[session.UID] = append(byUID[session.UID], label)
-		connector := ""
-		if !session.Unknown {
-			connector = agentConnectors[session.Agent]
-		}
-		l.result.NotePendingSession(connector, session.PID)
 	}
+	noteCountedPending(l.result, sessions)
 	uids := make([]int, 0, len(byUID))
 	for uid := range byUID {
 		uids = append(uids, uid)

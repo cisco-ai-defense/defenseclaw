@@ -136,3 +136,50 @@ func TestCollapseSharedOpenCodeV1(t *testing.T) {
 		t.Fatalf("a copy only one account has must not be combined: %+v", lines)
 	}
 }
+
+// An account whose OpenCode is known by its version only (its home is not
+// inspected, or its PATH resolves the machine copy) joins the one machine-wide
+// line instead of printing a per-account line (rel-1-0-6 GAP-0071, managed
+// RHEL rc21: 1 machine-wide line plus 4 per-account lines).
+func TestCollapseSharedOpenCodeV1FoldsPathlessAccounts(t *testing.T) {
+	machine := "/opt/dc-agents/lib/node_modules/opencode-ai"
+	v1 := func(user, path, version string) UnprotectedAgent {
+		return UnprotectedAgent{User: user, Connector: "opencode", Version: version, InstallPath: path, Code: UnprotectedCodeOpenCodeV1, Reason: openCodeV1Reason}
+	}
+	agents := []UnprotectedAgent{
+		v1("alice", machine, "1.18.34"), v1("bob", machine, "1.18.34"), v1("carol", machine, "1.18.34"),
+		v1("dave", "", "1.18.34"), v1("erin", "", "1.18.34"),
+		v1("alice", "", "1.18.34"), // an account with both rows counts once
+		v1("frank", "/home/frank/.npm-global/lib/node_modules/opencode-ai", "1.18.34"),
+		v1("gina", "", "1.17.0"), // another version: no copy to join
+	}
+	lines, collapsed := CollapseSharedOpenCodeV1(agents, "")
+	if len(lines) != 1 || len(lines[0].Members) != 5 {
+		t.Fatalf("want one line for 5 accounts (3 with the path, 2 without), got %+v", lines)
+	}
+	if lines[0].Members[0].InstallPath != machine || !strings.Contains(lines[0].Message(), "not protected for 5 users") {
+		t.Fatalf("the line must name the machine-wide copy and 5 users: %q", lines[0].Message())
+	}
+	for _, agent := range agents[:6] {
+		if !collapsed(agent) {
+			t.Fatalf("%s (%q) is not covered by the combined line", agent.User, agent.InstallPath)
+		}
+	}
+	if collapsed(agents[6]) || collapsed(agents[7]) {
+		t.Fatal("a per-user copy or a pathless entry of another version was folded into the machine-wide line")
+	}
+
+	// With no shared copy, or two shared copies of one version, a pathless
+	// entry cannot be placed: it keeps its per-account line.
+	only := []UnprotectedAgent{v1("dave", "", "1.18.34"), v1("erin", "", "1.18.34")}
+	if lines, collapsed := CollapseSharedOpenCodeV1(only, ""); len(lines) != 0 || collapsed(only[0]) {
+		t.Fatalf("pathless entries alone must stay per-account: %+v", lines)
+	}
+	other := "/usr/local/lib/node_modules/opencode-ai"
+	two := []UnprotectedAgent{
+		v1("a", machine, "1.18.34"), v1("b", machine, "1.18.34"), v1("c", other, "1.18.34"), v1("d", other, "1.18.34"), v1("e", "", "1.18.34"),
+	}
+	if lines, collapsed := CollapseSharedOpenCodeV1(two, ""); len(lines) != 2 || collapsed(two[4]) || len(lines[0].Members) != 2 || len(lines[1].Members) != 2 {
+		t.Fatalf("an ambiguous pathless entry must not join either copy: %+v", lines)
+	}
+}
