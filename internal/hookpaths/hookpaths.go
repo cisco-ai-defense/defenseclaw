@@ -941,6 +941,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			args = clean
 		}
 	}
+	if tool == "patch" && strings.EqualFold(strings.TrimSpace(connector), "hermes") {
+		// The gateway judges a Hermes replace patch as the edit it makes:
+		// describe that call, as write_file is described (GAP-0680).
+		if edit, ok := hermesReplaceEditArgs(args); ok {
+			tool, args = "edit", edit
+		}
+	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
 	facts := actionfacts.Analyze(input)
 	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(input, facts); ok {

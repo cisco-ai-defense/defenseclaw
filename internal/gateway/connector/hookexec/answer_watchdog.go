@@ -168,6 +168,9 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []byte, code int, logFailure func()) {
 	// The row and the rendered decision must use the same effective mode.
 	failMode = noAnswerFailMode(opts, failMode)
+	if opts.ManagedEnterprise {
+		opts.managedNoAnswerCode = managedNoAnswerReason(opts)
+	}
 	var out, errb bytes.Buffer
 	rendered := opts
 	rendered.Stdout, rendered.Stderr = &out, &errb
@@ -187,7 +190,7 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 			return
 		}
 		if logged.ManagedEnterprise {
-			logHookFailure(logged, sp, managedGatewayNoAnswerReason, "transport", failMode,
+			logHookFailure(logged, sp, managedNoAnswerReason(logged), "transport", failMode,
 				logged.StrictAvailability || failMode == "closed")
 			return
 		}
