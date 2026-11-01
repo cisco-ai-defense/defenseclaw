@@ -25,7 +25,19 @@ func windowsAccountJoinReport(cfg *config.Config, layout managed.StandaloneLayou
 	if cfg == nil || !cfg.Enterprise.AccountJoin.On() || !windowsEnterpriseIsElevated() {
 		return nil
 	}
-	return devicekeys.Report(devicekeys.Sources{
+	return devicekeys.Report(windowsAccountJoinSources(cfg, layout))
+}
+
+// windowsConfirmedAccountJoinSignedAt reads the signing time of the
+// confirmed bundle that carries next_not_after (tests replace it).
+var windowsConfirmedAccountJoinSignedAt = func(s *enterprisebundle.Store, generation int, notAfter time.Time) (time.Time, bool) {
+	return s.ConfirmedAccountJoinSignedAt(generation, notAfter)
+}
+
+// windowsAccountJoinSources are the device inputs of the account join keys
+// for the installed config cfg.
+func windowsAccountJoinSources(cfg *config.Config, layout managed.StandaloneLayout) devicekeys.Sources {
+	return devicekeys.Sources{
 		Config:       cfg.Enterprise.AccountJoin,
 		SecureClient: managed.IsSecureClientProfile(cfg.Enterprise.Profile),
 		Tenant: func() (string, error) {
@@ -53,10 +65,10 @@ func windowsAccountJoinReport(cfg *config.Config, layout managed.StandaloneLayou
 			if err != nil {
 				return time.Time{}, false
 			}
-			return store.ConfirmedAccountJoinSignedAt(generation, notAfter)
+			return windowsConfirmedAccountJoinSignedAt(store, generation, notAfter)
 		},
 		StatePath: filepath.Join(layout.LifecycleDir, devicekeys.StateFileName),
 		GOOS:      "windows",
 		Now:       time.Now(),
-	})
+	}
 }

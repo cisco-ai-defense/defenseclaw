@@ -98,15 +98,16 @@ func (d *device) report() *accountjoin.Report {
 }
 
 // rel-1-0-6:GAP-0277: next_not_after is bounded by the signing time of the
-// confirmed bundle that carries it. A device whose clock is three days
-// behind the signer keeps an overlap the administrator signed for 29 days,
+// confirmed bundle that carries it. A device whose clock is
+// behind the signer (20 hours, inside the skew) keeps an overlap the
+// administrator signed for 30 days less an hour,
 // and falls back to its own clock only when no confirmed bundle carries
 // this next_generation and next_not_after.
 func TestNextNotAfterIsBoundedByTheBundleSigningTime(t *testing.T) {
 	d := newDevice(t)
 	d.enroll("1001", "alice@contoso.com", enterprisehooks.UPNSourceInfoPipe, "", d.now.Add(-time.Hour))
-	signed := d.now.Add(3 * 24 * time.Hour)
-	notAfter := signed.Add(29 * 24 * time.Hour)
+	signed := d.now.Add(20 * time.Hour)
+	notAfter := signed.Add(30*24*time.Hour - time.Hour)
 	d.secrets[accountjoin.NextSecretName] = secretText(0xee)
 	d.cfg.NextGeneration, d.cfg.NextNotAfter, d.cfg.NextSecretSHA256 = 2, notAfter.Format(time.RFC3339), digest(secretText(0xee))
 	if report := d.report(); len(report.Generations) != 1 || text(report.ReasonCodes) != `["generation_invalid"]` {
@@ -119,7 +120,7 @@ func TestNextNotAfterIsBoundedByTheBundleSigningTime(t *testing.T) {
 	}
 	report := d.report()
 	if len(report.Generations) != 2 || report.Generations[1].Generation != 2 || len(report.ReasonCodes) != 0 {
-		t.Fatalf("signed 29 days ahead: %s", text(report))
+		t.Fatalf("signed 30 days less an hour ahead: %s", text(report))
 	}
 	if text(asked) != text([]string{"2 " + notAfter.Format(time.RFC3339)}) {
 		t.Fatalf("SignedAt was asked %v", asked)

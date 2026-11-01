@@ -76,13 +76,21 @@ func TestConfirmedAccountJoinSignedAt(t *testing.T) {
 			t.Errorf("%s: a config the confirmed bundle does not carry got its signing time", name)
 		}
 	}
+	// A confirmed config without enterprise, or without account_join, has
+	// no signing time for it (and does not panic).
+	for i, other := range []string{"config_version: 9\n", "config_version: 9\nenterprise:\n  profile: standalone\n", "config_version: 9\nenterprise: []\n"} {
+		confirmAccountJoinBundle(t, s, uint64(2+i), other, "2026-10-25T09:30:00Z")
+		if _, ok := s.ConfirmedAccountJoinSignedAt(2, notAfter); ok {
+			t.Fatalf("config %q gave a signing time", other)
+		}
+	}
 	// A config without the next generation carries no overlap.
-	confirmAccountJoinBundle(t, s, 2, "config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 2\n", "2026-10-26T08:30:00Z")
+	confirmAccountJoinBundle(t, s, 5, "config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 2\n", "2026-10-26T08:30:00Z")
 	if _, ok := s.ConfirmedAccountJoinSignedAt(2, notAfter); ok {
 		t.Fatal("a bundle without next_generation gave a signing time")
 	}
 	// A damaged confirmed config gives none: the device clock decides.
-	confirmAccountJoinBundle(t, s, 3, config, "2026-10-27T08:30:00Z")
+	confirmAccountJoinBundle(t, s, 6, config, "2026-10-27T08:30:00Z")
 	st, err := s.LoadState()
 	if err != nil {
 		t.Fatal(err)

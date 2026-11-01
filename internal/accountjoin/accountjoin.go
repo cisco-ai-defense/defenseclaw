@@ -46,6 +46,9 @@ const (
 	SecretBytes = 32
 	// MaxNextOverlap bounds how far ahead next_not_after may be.
 	MaxNextOverlap = 30 * 24 * time.Hour
+	// MaxSignedAtSkew is how far ahead of the device clock a bundle
+	// signing time may be and still bound next_not_after.
+	MaxSignedAtSkew = 24 * time.Hour
 	// MaxAccounts caps the accounts one device reports.
 	MaxAccounts = 64
 	// Retention drops an account not seen for this long.
@@ -328,14 +331,17 @@ type Slot struct {
 // secret is valid and its number is not below Highest; the next one in
 // addition while its secret is valid, its number is above the current one
 // and now is before NextNotAfter, which is at most MaxNextOverlap after the
-// signing time (SignedAt; now when there is none), so a device clock that is
-// behind or ahead does not move the signed bound (rel-1-0-6:GAP-0277).
+// signing time (SignedAt; now when there is none or when it is more than
+// MaxSignedAtSkew ahead of now), so a device clock that is behind or ahead
+// does not move the signed bound (rel-1-0-6:GAP-0277).
 // Removing the next secret without promotion leaves the current one as it
 // is. The returned highest is what the device records after reporting.
 func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest uint32) {
 	highest = g.Highest
 	bound := now
-	if !g.SignedAt.IsZero() {
+	if !g.SignedAt.IsZero() && !g.SignedAt.After(now.Add(MaxSignedAtSkew)) {
+		// A signing time further ahead than the skew (a signer clock
+		// far ahead) would widen the overlap: the device clock bounds it.
 		bound = g.SignedAt
 	}
 	switch {

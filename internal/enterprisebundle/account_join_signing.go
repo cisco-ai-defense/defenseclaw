@@ -32,7 +32,7 @@ func (s *Store) ConfirmedAccountJoinSignedAt(nextGeneration int, nextNotAfter ti
 	if err != nil {
 		return time.Time{}, false
 	}
-	created, err := time.Parse(time.RFC3339, m.CreatedAt)
+	created, err := m.CreatedTime()
 	if err != nil {
 		return time.Time{}, false
 	}
@@ -69,12 +69,15 @@ func accountJoinNext(raw []byte) (int, time.Time, bool) {
 // mappingChild is the value of key in the mapping node (aliases resolved),
 // nil when node is not a mapping or has no such key.
 func mappingChild(node *yaml.Node, key string) *yaml.Node {
+	if node == nil {
+		return nil
+	}
 	node = resolveAlias(node)
 	if node == nil || node.Kind != yaml.MappingNode {
 		return nil
 	}
 	for i := 0; i+1 < len(node.Content); i += 2 {
-		if resolveAlias(node.Content[i]).Value == key {
+		if k := resolveAlias(node.Content[i]); k != nil && k.Value == key {
 			return resolveAlias(node.Content[i+1])
 		}
 	}

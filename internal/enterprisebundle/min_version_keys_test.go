@@ -75,7 +75,6 @@ func TestOlderBundleWithRemovedConnectorRefusedByFloor(t *testing.T) {
 	}
 }
 
-// A bundle that sets enterprise.account_join needs min_product_version 1.0.7.
 // rel-1-0-6:GAP-0277: bundle sign refuses a next_not_after more than 30
 // days after the signing time, which the device would refuse.
 func TestComposeBoundsAccountJoinNextNotAfterBySigningTime(t *testing.T) {
@@ -106,6 +105,7 @@ func TestComposeBoundsAccountJoinNextNotAfterBySigningTime(t *testing.T) {
 	}
 }
 
+// A bundle that sets enterprise.account_join needs min_product_version 1.0.7.
 func TestComposeRequiresProductFloorForAccountJoin(t *testing.T) {
 	config := strings.Replace(bundleConfig(t), "  profile: standalone\n", "  profile: standalone\n  account_join:\n    mode: on\n    generation: 1\n    secret_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", 1)
 	for _, tc := range []struct {
