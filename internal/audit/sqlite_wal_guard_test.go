@@ -79,6 +79,10 @@ func TestCheckpointWALSizeCheckDoesNotHoldAuditWriter(t *testing.T) {
 
 const testWALWriterBudget = 200 * time.Millisecond
 
+// overLimitTestHoldCap is a bounded hold long enough for any test disk to copy
+// and sync a test log under the writer; the pass ends when the copy does.
+const overLimitTestHoldCap = 30 * time.Second
+
 func logWALGuardEvents(t *testing.T, store *Store, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
@@ -1108,6 +1112,12 @@ func TestCheckpointWALIfLargeOverTheLimitHoldsTheWriterWithoutSettling(t *testin
 	defer cleanup()
 	logWALGuardEvents(t, store, 200)
 	overrideWALDuration(t, &walSettledSpan, 5*time.Millisecond)
+	// What this test pins is the order of the pass (one copy, no sync, then
+	// the writer), not how fast a disk copies and syncs the ~15 MiB log under
+	// the writer. With the 100 ms production cap that copy and sync missed the
+	// cap on a Windows CI runner (100.7 ms held, WriterDeferred, no restart:
+	// rel-1-0-6:GAP-0410), so the bounded hold here gets room to finish.
+	overrideWALDuration(t, &walCatchUpCap, overLimitTestHoldCap)
 	// A reader on an older snapshot keeps every copy off the writer more than
 	// walCopyTargetFrames short of the end of the log, and each sync is
 	// slower than walSettledSpan: under the limit that is six copies and
@@ -1143,7 +1153,7 @@ func TestCheckpointWALIfLargeOverTheLimitHoldsTheWriterWithoutSettling(t *testin
 	walWriterPhaseHook = func(context.Context) {
 		endSnapshot.Do(func() { _ = snapshot.Rollback() })
 	}
-	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, 2*overLimitTestHoldCap)
 	if err != nil || !pass.Bounded || !pass.Restarted || pass.Syncs != 0 {
 		t.Fatalf("pass over the limit: %+v, %v; want a bounded catch-up with no sync before it that restarts the log", pass, err)
 	}

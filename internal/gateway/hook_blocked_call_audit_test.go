@@ -319,30 +319,22 @@ func TestHookFailureReportLeavesTheCallsOverItsCapToTheNextRun(t *testing.T) {
 // rel-1-0-6:GAP-0370: a running gateway reported only when hook-failures.jsonl
 // changed, so the calls a capped run left after the flood's last line were
 // never recorded. It goes on every hookFailureBacklogInterval while a run
-// left calls pending, also when no line was added.
+// left calls pending, also when no line was added, from its start when it
+// restarts with a backlog, and stops once every call has its row. The
+// ticker is an hour here, so only the backlog timer can record the rest.
 func TestRunningGatewayRecordsTheWholeHookFailureBacklog(t *testing.T) {
 	previous, interval, backlog := hookFailureRowsPerReport, hookFailOpenReportInterval, hookFailureBacklogInterval
-	hookFailureRowsPerReport, hookFailOpenReportInterval, hookFailureBacklogInterval = 2, 10*time.Millisecond, 10*time.Millisecond
+	hookFailureRowsPerReport, hookFailOpenReportInterval, hookFailureBacklogInterval = 2, time.Hour, 10*time.Millisecond
 	t.Cleanup(func() {
 		hookFailureRowsPerReport, hookFailOpenReportInterval, hookFailureBacklogInterval = previous, interval, backlog
 	})
 	store, logger := testStoreAndLogger(t)
 	dataDir := t.TempDir()
+	logDir := filepath.Join(dataDir, "logs")
 	ts := time.Now().UTC().Format(time.RFC3339)
 	for i := range 7 {
-		appendHookFailures(t, filepath.Join(dataDir, "logs"), blockedHookLine(ts, "PreToolUse", "s", fmt.Sprintf("toolu_backlog_%d", i)))
+		appendHookFailures(t, logDir, blockedHookLine(ts, "PreToolUse", "s", fmt.Sprintf("toolu_backlog_%d", i)))
 	}
-	s := &Sidecar{logger: logger, cfg: &config.Config{DataDir: dataDir}}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		s.watchHookFailureCalls(ctx)
-		close(done)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
 	blocks := func() int {
 		events, err := store.ListEvents(200)
 		if err != nil {
@@ -356,16 +348,86 @@ func TestRunningGatewayRecordsTheWholeHookFailureBacklog(t *testing.T) {
 		}
 		return n
 	}
+	// The start-up report of a gateway that stopped mid-backlog.
+	if err := reportHookFailureCallsIn(logDir, logger, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if n := blocks(); n != 2 || !readHookFailuresReported(logDir).AuditPending {
+		t.Fatalf("start-up run: %d rows, pending %t; want its cap of 2 and the rest pending", n, readHookFailuresReported(logDir).AuditPending)
+	}
+	s := &Sidecar{logger: logger, cfg: &config.Config{DataDir: dataDir}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.watchHookFailureCalls(ctx)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 	deadline := time.Now().Add(20 * time.Second)
-	for blocks() < 7 {
+	for blocks() < 7 || readHookFailuresReported(logDir).AuditPending {
 		if time.Now().After(deadline) {
 			t.Fatalf("a running gateway recorded %d of the 7 hook-blocked calls", blocks())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// Once the backlog is empty the timer stops: no check comes until the
+	// hour's tick or a new line (one more may already be due).
+	time.Sleep(3 * hookFailureBacklogInterval)
+	settled := hookFailureWatchWakes.Load()
+	time.Sleep(30 * hookFailureBacklogInterval)
+	if wakes := hookFailureWatchWakes.Load() - settled; wakes > 0 {
+		t.Fatalf("the backlog timer ran %d more checks after the backlog was empty", wakes)
+	}
 	if n := blocks(); n != 7 {
 		t.Fatalf("block rows = %d, want 7, each call once", n)
+	}
+}
+
+// A pending backlog longer than one read window goes on from the first call
+// left without its row instead of jumping to the file's last window
+// (rel-1-0-6:GAP-0370 review finding 1), and a run whose row write fails
+// keeps the backlog pending (finding 2).
+func TestAPendingHookFailureBacklogIsReadOnPastOneWindow(t *testing.T) {
+	previousRows, previousMax := hookFailureRowsPerReport, hookFailOpenReportMaxBytes
+	hookFailureRowsPerReport = 2
+	t.Cleanup(func() { hookFailureRowsPerReport, hookFailOpenReportMaxBytes = previousRows, previousMax })
+	store, logger := testStoreAndLogger(t)
+	logDir := filepath.Join(t.TempDir(), "logs")
+	ts := time.Now().UTC().Format(time.RFC3339)
+	for i := range 9 {
+		appendHookFailures(t, logDir, blockedHookLine(ts, "PreToolUse", "s", fmt.Sprintf("toolu_window_%d", i)))
+	}
+	if err := reportHookFailureCallsIn(logDir, logger, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// The rest of the backlog is now several windows long.
+	line := len(blockedHookLine(ts, "PreToolUse", "s", "toolu_window_0")) + 1
+	hookFailOpenReportMaxBytes = int64(2*line + line/2)
+	for run := 0; run < 20 && readHookFailuresReported(logDir).AuditPending; run++ {
+		if err := reportHookFailureCallsIn(logDir, logger, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := store.ListEvents(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := map[string]int{}
+	for _, event := range events {
+		if event.Action == string(audit.ActionGuardrailBlock) {
+			tools[event.ToolID]++
+		}
+	}
+	for i := range 9 {
+		if id := fmt.Sprintf("toolu_window_%d", i); tools[id] != 1 {
+			t.Fatalf("tool %s has %d block rows, want 1 (rows %v)", id, tools[id], tools)
+		}
+	}
+	if readHookFailuresReported(logDir).AuditPending {
+		t.Fatal("backlog still pending after every call has its row")
 	}
 }
 
@@ -434,5 +496,75 @@ func TestHookFailureReportDoesNotRecordACallTwiceAfterAFailedWrite(t *testing.T)
 	}
 	if rows["toolu_first"] != 1 || rows["toolu_second"] != 1 {
 		t.Fatalf("rows per tool id = %v, want one each", rows)
+	}
+}
+
+// Review of fix/r107-auditwal (REVIEW-auditwal.md finding 1): a run whose
+// first row write failed kept AuditPending with the stale AuditOffset, 0 in a
+// state written by a gateway before 1.0.5, so the next run went back to the
+// file's start and alerted and recorded again every call an older gateway had
+// already reported. The state keeps AuditOffset at or above Offset.
+func TestAFailedFirstRowWriteDoesNotRereadTheLinesBeforeTheRecordedOffset(t *testing.T) {
+	fixture := newSidecarRuntimeFixture(t, true)
+	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitter := &countingFailEmitter{RuntimeV8Emitter: &sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints}}
+	logger := audit.NewLogger(fixture.store)
+	logger.SetRuntimeV8Emitter(emitter)
+	now := time.Date(2026, 11, 1, 4, 0, 0, 0, time.UTC)
+	probe := filepath.Join(t.TempDir(), "logs")
+	appendHookFailures(t, probe, blockedHookLine("2026-11-01T03:59:00Z", "PreToolUse", "s", "toolu_probe"))
+	if err := reportHookFailureCallsIn(probe, logger, now); err != nil {
+		t.Fatal(err)
+	}
+	logDir := filepath.Join(t.TempDir(), "logs")
+	appendHookFailures(t, logDir,
+		hookFailOpenLine("codex", "2026-11-01T03:50:00Z"),
+		blockedHookLine("2026-11-01T03:50:01Z", "PreToolUse", "s", "toolu_old"))
+	f, err := os.Open(filepath.Join(logDir, hookFailuresFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, _ := f.Stat()
+	head := hookFailuresHead(f)
+	f.Close()
+	// A 1.0.3 gateway state: offset and head, no audit_offset.
+	if err := writeHookFailuresReported(logDir, hookFailuresReported{Offset: info.Size(), Head: head}); err != nil {
+		t.Fatal(err)
+	}
+	appendHookFailures(t, logDir, blockedHookLine("2026-11-01T03:59:01Z", "PreToolUse", "s", "toolu_new"))
+	emitter.failAfter.Store(emitter.emits.Load())
+	if err := reportHookFailureCallsIn(logDir, logger, now); err == nil {
+		t.Fatal("first row write did not fail")
+	}
+	if state := readHookFailuresReported(logDir); !state.AuditPending || state.AuditOffset < state.Offset {
+		t.Fatalf("state after the failed run = %+v, want pending with AuditOffset at or above Offset", state)
+	}
+	emitter.failAfter.Store(0)
+	for range 2 {
+		if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := fixture.store.ListEvents(500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, newRows, alerts := 0, 0, 0
+	for _, e := range events {
+		if e.ToolID == "toolu_old" {
+			old++
+		}
+		if e.ToolID == "toolu_new" {
+			newRows++
+		}
+		if e.Action == string(audit.ActionGuardrailDegraded) && e.Target == "codex" {
+			alerts++
+		}
+	}
+	if old != 0 || alerts != 0 || newRows != 1 {
+		t.Fatalf("toolu_old rows %d, codex fail-open alerts %d, toolu_new rows %d; want 0, 0 and 1: the lines before the recorded Offset were read again", old, alerts, newRows)
 	}
 }

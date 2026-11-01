@@ -728,8 +728,9 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	if err != nil {
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(EventHistoryHealthProjectionRejected, err)
 	}
+	timestamp := record.Timestamp().Format(time.RFC3339Nano)
 	_, err = writer.store.txExecPrepared(ctx, tx, "v8_event_history_insert", eventHistoryInsertSQL,
-		record.RecordID(), record.Timestamp().Format(time.RFC3339Nano),
+		record.RecordID(), timestamp,
 		action, legacyTarget, legacyActor, legacyDetails, legacyStructured, legacySeverity,
 		nullStr(correlation.RunID), nullStr(correlation.TraceID), nullStr(correlation.RequestID),
 		nullStr(correlation.SessionID), nullStr(correlation.TurnID), legacyAgentName,
@@ -745,6 +746,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		nullStr(correlation.EvaluationID), nullStr(correlation.ScanID),
 		nullStr(correlation.FindingOccurrenceID), nullStr(correlation.EnforcementActionID),
 		nullStr(payloadHMAC), nullStr(integrityAlgorithm), nullStr(integrityKeyID), nullStr(recordDigest),
+		retentionInstantOf(timestamp),
 	)
 	if err != nil {
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(
@@ -795,7 +797,8 @@ const eventHistoryInsertSQL = `
 			bucket, event_name, source, signal, bucket_catalog_version, payload_json, projected_record_json,
 			record_schema_version, projection_hash,
 			redaction_profile, mandatory, evaluation_id, scan_id, finding_id,
-			enforcement_action_id, payload_hmac, integrity_algorithm, integrity_key_id, record_sha256
+			enforcement_action_id, payload_hmac, integrity_algorithm, integrity_key_id, record_sha256,
+			retention_timestamp_unix_nano
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -804,7 +807,8 @@ const eventHistoryInsertSQL = `
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?,
 			?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?
+			?, ?, ?, ?, ?,
+			?
 		)`
 
 // exactLogLifecycleAndExecution reads only the two registered canonical

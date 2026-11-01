@@ -86,7 +86,7 @@ func TestReadHookFailOpenCallsReadsTheNewestLinesOfALargeFile(t *testing.T) {
 	now := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
 	old := hookFailOpenLine("codex", "2026-10-13T08:00:00Z")
 	var body strings.Builder
-	for body.Len() < hookFailOpenReportMaxBytes+len(old) {
+	for int64(body.Len()) < hookFailOpenReportMaxBytes+int64(len(old)) {
 		body.WriteString(old)
 	}
 	body.WriteString(hookFailOpenLine("hermes", "2026-10-13T09:59:00Z"))
