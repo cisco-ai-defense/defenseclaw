@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
@@ -385,5 +386,23 @@ func TestDecisionModelAloneRequestIsQ2WithinTheProductionBound(t *testing.T) {
 	}
 	if total > 12288 {
 		t.Fatalf("state carries %d bytes, over the 12,288-byte production bound", total)
+	}
+}
+
+// A decision-model confirm or escalate is recorded as a judge completion
+// (an alert in the audit vocabulary), not refused by the audit log.
+func TestDecisionModelCompletionActionsAreRecorded(t *testing.T) {
+	_, logger := testStoreAndLogger(t)
+	for _, action := range []string{"allow", "block", "confirm", "escalate"} {
+		evt := audit.Event{Action: string(audit.ActionLLMJudgeResponse), Target: "fake", Actor: "defenseclaw-gateway", Severity: "INFO"}
+		err := logger.LogJudgeCompletion(context.Background(), evt, audit.JudgeCompletionInput{
+			Kind: decisionModelJudgeKind, Action: judgeCompletionAction(decisionModelJudgeKind, action), LatencyMS: 3, InputBytes: 40,
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", action, err)
+		}
+	}
+	if got := judgeCompletionAction("tool_injection", "confirm"); got != "confirm" {
+		t.Fatalf("other judge kinds keep their action, got %q", got)
 	}
 }

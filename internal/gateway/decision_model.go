@@ -628,6 +628,19 @@ func emitDecisionModel(ctx context.Context, model, toolName, args string, res de
 	}
 }
 
+// judgeCompletionAction is the action of a judge completion record, whose
+// vocabulary is allow, alert, block or error: a decision-model confirm or
+// escalate (a call this tier flagged and did not block) is an alert. The
+// judge row and the audit details keep the decision model's own action.
+// Without this, every such call failed the record and raised a
+// judge_store degraded alert.
+func judgeCompletionAction(kind, action string) string {
+	if kind == decisionModelJudgeKind && (action == guardrailActionConfirm || action == "escalate") {
+		return guardrailActionAlert
+	}
+	return action
+}
+
 // judgeInputHash is the canonical "sha256:<hex>" digest emitJudge stores.
 func judgeInputHash(content string) string {
 	sum := sha256.Sum256([]byte(content))
