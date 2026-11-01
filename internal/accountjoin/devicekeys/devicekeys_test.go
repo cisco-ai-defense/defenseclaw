@@ -283,6 +283,36 @@ func TestWindowsUsesTheSIDOfADomainAccountOnly(t *testing.T) {
 	}
 }
 
+// rel-1-0-6:GAP-0275: a macOS Active Directory account gets the key of the
+// SID the guardian read from its domain node, the same key as on Linux and
+// Windows for that SID; a local or LDAP account gets none, also with an SID
+// on its record.
+func TestMacOSUsesTheDirectorySIDOfAnActiveDirectoryAccount(t *testing.T) {
+	d := newDevice(t)
+	d.goos = "darwin"
+	write := func(key string, directory useridentity.Directory, sid string) {
+		data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
+			Version: 1, Key: key, UpdatedAt: d.now, AccountSID: sid,
+			Facts: useridentity.DirectoryFacts{Directory: directory, Principal: "alice@CONTOSO.COM"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d.spool, key+".json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("1105", useridentity.DirectoryActiveDirectory, "S-1-5-21-1004336348-1177238915-682003330-1105")
+	write("501", useridentity.DirectoryLocal, "S-1-5-21-9-9-9-1001")
+	write("1200", useridentity.DirectoryLDAP, "S-1-5-21-7-7-7-1200")
+	write("1300", useridentity.DirectoryActiveDirectory, "")
+	report := d.report()
+	want := keyOf(t, 1, "sid:S-1-5-21-1004336348-1177238915-682003330-1105", 0x1f)
+	if len(report.Generations) != 1 || len(report.Generations[0].AccountKeys) != 1 || report.Generations[0].AccountKeys[0] != want || report.AccountsWithoutKey != 3 {
+		t.Fatalf("darwin: %s", text(report))
+	}
+}
+
 // A half-applied promotion (config at the new generation, the old secret
 // still stored) reports nothing and does not raise the recorded generation;
 // a corrupt generation record reports nothing; a kept UPN gets no key.

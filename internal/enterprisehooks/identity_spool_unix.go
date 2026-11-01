@@ -71,6 +71,32 @@ func checkMacOSRecordUID(dscl string, uid int) error {
 	return nil
 }
 
+// macOSAccountSID is the SID of a macOS Active Directory account, read from
+// its domain's node (read runs `dscl <node> -read /Users/<name> UniqueID
+// SMBSID`): the record there must be the uid's (checkMacOSRecordUID) and
+// name exactly one domain account SID. "" for any other account, a node
+// that does not answer (the domain is away: no SID this pass) or a record
+// that does not match. This is the directory-verified identifier the
+// account join key uses, as the SSSD SID on Linux (rel-1-0-6:GAP-0275).
+func macOSAccountSID(facts useridentity.DirectoryFacts, search string, uid int, read func(node string) string) string {
+	if facts.Directory != useridentity.DirectoryActiveDirectory {
+		return ""
+	}
+	node, ok := useridentity.MacOSADNode(search)
+	if !ok {
+		return ""
+	}
+	out := read(node)
+	if out == "" || checkMacOSRecordUID(out, uid) != nil {
+		return ""
+	}
+	sid, ok := useridentity.MacOSDirectorySID(out)
+	if !ok {
+		return ""
+	}
+	return sid
+}
+
 // identitySpoolLookupTimeout bounds the privileged lookups for one account,
 // so one unreachable directory cannot stall the guardian's pass.
 const identitySpoolLookupTimeout = 10 * time.Second

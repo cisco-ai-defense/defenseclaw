@@ -10,7 +10,7 @@ keywords:
 
 The account join key lets your fleet service match the accounts on a device to the accounts in your directory. The device never sends a name, UPN or SID. It sends a keyed digest that only a holder of your tenant secret can compute.
 
-It is off unless you turn it on. It is not available under Secure Client. It needs DefenseClaw 1.0.7 or later on Linux and Windows standalone devices. macOS devices report no keys yet (`no_directory_id`): the macOS guardian does not record a directory-verified identifier.
+It is off unless you turn it on. It is not available under Secure Client. It needs DefenseClaw 1.0.7 or later on Linux, macOS and Windows standalone devices. On macOS only Active Directory accounts get a key.
 
 ## Turn it on
 
@@ -70,9 +70,9 @@ The device uses the first one it has, and only when the directory verified it:
 |---|---|---|
 | Linux (SSSD) | The account's domain SID from SSSD | The `userPrincipalName` from SSSD InfoPipe |
 | Windows | The account's SID, for a domain account only | The UPN from the directory (Entra ID accounts: from the Windows identity store) |
-| macOS | (none yet) | (none yet) |
+| macOS | The account's domain SID (`SMBSID`), read from its Active Directory node, for an Active Directory account only | (none) |
 
-Local accounts, machine-domain accounts and accounts with a derived or kept (not currently verified) UPN get no key (`no_directory_id`). `sIDHistory` is never used. On Windows a SID counts as a domain account's when the directory translated it to a UPN; an account of a trusted forest counts too.
+Local accounts, machine-domain accounts and accounts with a derived or kept (not currently verified) UPN get no key (`no_directory_id`). So do macOS LDAP and Platform SSO accounts, and a macOS Active Directory account while its domain does not answer (the guardian reads the SID from the domain each pass). `sIDHistory` is never used. On Windows a SID counts as a domain account's when the directory translated it to a UPN; an account of a trusted forest counts too.
 
 A person's SID key and UPN key differ. Compute both from your directory. A UPN rename changes the UPN key, and a move to a new domain changes the SID key.
 

@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // StateFileName is the root-only record of the highest generation the device
@@ -133,9 +134,10 @@ func appendReason(reasons []string, reason string) []string {
 // objectSid), on Windows the record's SID when the directory translated it
 // to a UPN (a domain account; local accounts have none), and the UPN only
 // from SSSD InfoPipe, the Windows name translation or the Windows identity
-// store (Entra ID accounts), never a derived or kept one. LastSeen is when the guardian last wrote
-// the record. The macOS guardian records no verified identifier yet, so a
-// macOS account gets no key.
+// store (Entra ID accounts), never a derived or kept one. On macOS it is
+// the SID (SMBSID) the guardian read from an Active Directory account's
+// domain node; other macOS accounts get no key. LastSeen is when the
+// guardian last wrote the record.
 func SpoolAccounts(dir string, trust func(path, label string) error, goos string) []accountjoin.Account {
 	var out []accountjoin.Account
 	if dir == "" || trust == nil {
@@ -156,6 +158,12 @@ func SpoolAccounts(dir string, trust func(path, label string) error, goos string
 		switch goos {
 		case "linux":
 			account.SID = strings.TrimSpace(record.AccountSID)
+		case "darwin":
+			// The SMBSID the guardian read from the account's Active
+			// Directory node (rel-1-0-6:GAP-0275).
+			if record.Facts.Directory == useridentity.DirectoryActiveDirectory {
+				account.SID = strings.TrimSpace(record.AccountSID)
+			}
 		case "windows":
 			if record.UPNSource == enterprisehooks.UPNSourceTranslateName {
 				account.SID = strings.TrimSpace(record.Key)

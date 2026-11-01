@@ -44,7 +44,7 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 	}
 	in := useridentity.MacOSDirectoryInputs{
 		DSCL: runMacOSIdentityTool(ctx, "/usr/bin/dscl", "/Search", "-read", "/Users/"+name, "UniqueID", "AuthenticationAuthority",
-			"OriginalNodeName", "AltSecurityIdentities", "dsAttrTypeNative:userPrincipalName"),
+			"OriginalNodeName", "AppleMetaNodeLocation", "AltSecurityIdentities", "dsAttrTypeNative:userPrincipalName"),
 		DSConfigAD: runMacOSIdentityTool(ctx, "/usr/sbin/dsconfigad", "-show"),
 		AppSSO:     runMacOSIdentityTool(ctx, "/usr/bin/app-sso", "platform", "-s"),
 	}
@@ -55,11 +55,15 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 		return IdentitySpoolRecord{}, err
 	}
 	facts := useridentity.ParseMacOSDirectoryFacts(in, now)
+	sid := macOSAccountSID(facts, in.DSCL, account.UID, func(node string) string {
+		return runMacOSIdentityTool(ctx, "/usr/bin/dscl", node, "-read", "/Users/"+name, "UniqueID", "SMBSID")
+	})
 	return IdentitySpoolRecord{
 		Key:           strconv.Itoa(account.UID),
 		User:          name,
 		UpdatedAt:     now,
 		AccountDomain: facts.AccountDomain,
+		AccountSID:    sid,
 		Facts:         facts,
 	}, nil
 }
