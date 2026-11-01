@@ -1899,7 +1899,7 @@
                 {
                   "id": "impact.linux_magic_sysrq_destruction",
                   "tool_call_only": true,
-                  "expression": "f.paths.exists(p, p.normalized == '/proc/sysrq-trigger')",
+                  "expression": "f.paths.exists(p, p.resolved == '/proc/sysrq-trigger' || p.normalized == '/proc/sysrq-trigger')",
                   "pattern": "(?i)(?:^|[;\\r\\n]\\s*)echo\\s+[\"']?[bocei][\"']?\\s*>\\s*/proc/sysrq-trigger(?:\\s|$)",
                   "title": "Trigger destructive Linux Magic SysRq action",
                   "severity": "HIGH",
@@ -1929,7 +1929,7 @@
                 {
                   "id": "tamper.posix_system_log_destruction",
                   "tool_call_only": true,
-                  "expression": "f.paths.exists(p, p.normalized in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
+                  "expression": "f.paths.exists(p, (p.resolved in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] || p.normalized in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log']) && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)(?:^|[;\"\\r\\n]\\s*)(?:cat\\s+/dev/(?:null|zero)\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|echo\\s+(?:''|\"\")\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?(?:/usr/bin/)?truncate\\s+(?:-s\\s+0|--size=0)\\s+/var/log/(?:(?:messages|security|syslog|secure|audit/audit\\.log)|auth\\.log(?:/current\\.log)?)(?:\\s+2>/dev/null)?(?:\\s+\\|\\|\\s+true)?|chattr\\s+-i\\s+/var/log/audit/audit\\.log\\.1(?:\\s+2>/dev/null)?\\s*;\\s*(?:/usr/bin/)?truncate\\s+-s\\s+0\\s+/var/log/audit/audit\\.log\\.1|(?:rm\\s+-(?:rf|fr)|unlink)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?rm\\s+-f\\s+/var/log/journal/\\*/system\\.journal|(?:sudo\\s+)?journalctl\\s+--vacuum-time=0)(?:\\s|\"|$)",
                   "title": "Destroy canonical POSIX system logs",
                   "severity": "HIGH",
@@ -2389,7 +2389,7 @@
                 {
                   "id": "integrity.posix_system_interpreter_wrapper",
                   "tool_call_only": true,
-                  "expression": "f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.normalized.startsWith('/usr/bin/python3.'))",
+                  "expression": "f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && (p.resolved.startsWith('/usr/bin/python3.') || p.normalized.startsWith('/usr/bin/python3.')))",
                   "pattern": "(?mi)^[ \\t]*mv[ \\t]+-f[ \\t]+/usr/bin/\\.python3\\.[0-9]{1,2}\\.wrap[ \\t]+/usr/bin/python3\\.[0-9]{1,2}[ \\t]*$",
                   "title": "Replace a versioned system Python interpreter with an environment wrapper",
                   "severity": "HIGH",
@@ -3043,7 +3043,7 @@
                 },
                 {
                   "id": "PATH-ETC-SUDOERS",
-                  "expression": "f.paths.exists(p, (p.resolved == '/etc/sudoers' || p.normalized == '/etc/sudoers') && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
+                  "expression": "f.paths.exists(p, (p.resolved.matches('(?i)^(?:/private)?/etc/sudoers$') || p.normalized.matches('(?i)^(?:/private)?/etc/sudoers$')) && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "a^",
                   "title": "/etc/sudoers access",
                   "severity": "HIGH",
@@ -5787,7 +5787,7 @@
                 {
                   "id": "impact.linux_magic_sysrq_destruction",
                   "tool_call_only": true,
-                  "expression": "f.paths.exists(p, p.normalized == '/proc/sysrq-trigger')",
+                  "expression": "f.paths.exists(p, p.resolved == '/proc/sysrq-trigger' || p.normalized == '/proc/sysrq-trigger')",
                   "pattern": "(?i)(?:^|[;\\r\\n]\\s*)echo\\s+[\"']?[bocei][\"']?\\s*>\\s*/proc/sysrq-trigger(?:\\s|$)",
                   "title": "Trigger destructive Linux Magic SysRq action",
                   "severity": "CRITICAL",
@@ -5817,7 +5817,7 @@
                 {
                   "id": "tamper.posix_system_log_destruction",
                   "tool_call_only": true,
-                  "expression": "f.paths.exists(p, p.normalized in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
+                  "expression": "f.paths.exists(p, (p.resolved in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] || p.normalized in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log']) && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)(?:^|[;\"\\r\\n]\\s*)(?:cat\\s+/dev/(?:null|zero)\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|echo\\s+(?:''|\"\")\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?(?:/usr/bin/)?truncate\\s+(?:-s\\s+0|--size=0)\\s+/var/log/(?:(?:messages|security|syslog|secure|audit/audit\\.log)|auth\\.log(?:/current\\.log)?)(?:\\s+2>/dev/null)?(?:\\s+\\|\\|\\s+true)?|chattr\\s+-i\\s+/var/log/audit/audit\\.log\\.1(?:\\s+2>/dev/null)?\\s*;\\s*(?:/usr/bin/)?truncate\\s+-s\\s+0\\s+/var/log/audit/audit\\.log\\.1|(?:rm\\s+-(?:rf|fr)|unlink)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?rm\\s+-f\\s+/var/log/journal/\\*/system\\.journal|(?:sudo\\s+)?journalctl\\s+--vacuum-time=0)(?:\\s|\"|$)",
                   "title": "Destroy canonical POSIX system logs",
                   "severity": "CRITICAL",
@@ -6325,7 +6325,7 @@
                 {
                   "id": "integrity.posix_system_interpreter_wrapper",
                   "tool_call_only": true,
-                  "expression": "f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.normalized.startsWith('/usr/bin/python3.'))",
+                  "expression": "f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && (p.resolved.startsWith('/usr/bin/python3.') || p.normalized.startsWith('/usr/bin/python3.')))",
                   "pattern": "(?mi)^[ \\t]*mv[ \\t]+-f[ \\t]+/usr/bin/\\.python3\\.[0-9]{1,2}\\.wrap[ \\t]+/usr/bin/python3\\.[0-9]{1,2}[ \\t]*$",
                   "title": "Replace a versioned system Python interpreter with an environment wrapper",
                   "severity": "HIGH",
@@ -6986,7 +6986,7 @@
                 {
                   "id": "PATH-ETC-PASSWD",
                   "tool_call_only": true,
-                  "expression": "f.paths.exists(p, p.normalized == '/etc/passwd' && (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] || (p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ && f.commands.exists(c, c.id == p.command_id && c.dialect == defenseclaw.guardrail.semantic.v1.Dialect.DIALECT_ARGV && c.program in ['read', 'readfile', 'read_file', 'read-file', 'fsread', 'fs_read', 'fs-read', 'fs.read', 'fs.read_file', 'fileread', 'file_read', 'file-read', 'catfile', 'cat_file', 'cat-file', 'openfile', 'open_file', 'open-file', 'viewfile', 'view_file', 'view-file', 'getfile', 'get_file', 'get-file']))))",
+                  "expression": "f.paths.exists(p, (p.resolved == '/etc/passwd' || p.normalized == '/etc/passwd') && (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] || (p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ && f.commands.exists(c, c.id == p.command_id && c.dialect == defenseclaw.guardrail.semantic.v1.Dialect.DIALECT_ARGV && c.program in ['read', 'readfile', 'read_file', 'read-file', 'fsread', 'fs_read', 'fs-read', 'fs.read', 'fs.read_file', 'fileread', 'file_read', 'file-read', 'catfile', 'cat_file', 'cat-file', 'openfile', 'open_file', 'open-file', 'viewfile', 'view_file', 'view-file', 'getfile', 'get_file', 'get-file']))))",
                   "pattern": "a^",
                   "title": "/etc/passwd typed read or mutation",
                   "severity": "HIGH",
@@ -6998,7 +6998,7 @@
                 {
                   "id": "PATH-ETC-SHADOW",
                   "tool_call_only": true,
-                  "expression": "f.paths.exists(p, p.normalized == '/etc/shadow' && (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] || (p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ && f.commands.exists(c, c.id == p.command_id && c.program in ['cat', 'base64', 'head', 'tail', 'less', 'more', 'strings', 'xxd', 'hexdump', 'cp', 'read', 'readfile', 'read_file', 'read-file', 'fsread', 'fs_read', 'fs-read', 'fs.read', 'fs.read_file', 'fileread', 'file_read', 'file-read', 'catfile', 'cat_file', 'cat-file', 'openfile', 'open_file', 'open-file', 'viewfile', 'view_file', 'view-file', 'getfile', 'get_file', 'get-file']))))",
+                  "expression": "f.paths.exists(p, (p.resolved == '/etc/shadow' || p.normalized == '/etc/shadow') && (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] || (p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ && f.commands.exists(c, c.id == p.command_id && c.program in ['cat', 'base64', 'head', 'tail', 'less', 'more', 'strings', 'xxd', 'hexdump', 'cp', 'read', 'readfile', 'read_file', 'read-file', 'fsread', 'fs_read', 'fs-read', 'fs.read', 'fs.read_file', 'fileread', 'file_read', 'file-read', 'catfile', 'cat_file', 'cat-file', 'openfile', 'open_file', 'open-file', 'viewfile', 'view_file', 'view-file', 'getfile', 'get_file', 'get-file']))))",
                   "pattern": "a^",
                   "title": "/etc/shadow credential read or mutation",
                   "severity": "CRITICAL",
@@ -9543,7 +9543,7 @@
                 {
                   "id": "impact.linux_magic_sysrq_destruction",
                   "tool_call_only": true,
-                  "expression": "f.paths.exists(p, p.normalized == '/proc/sysrq-trigger')",
+                  "expression": "f.paths.exists(p, p.resolved == '/proc/sysrq-trigger' || p.normalized == '/proc/sysrq-trigger')",
                   "pattern": "(?i)(?:^|[;\\r\\n]\\s*)echo\\s+[\"']?[bocei][\"']?\\s*>\\s*/proc/sysrq-trigger(?:\\s|$)",
                   "title": "Trigger destructive Linux Magic SysRq action",
                   "severity": "HIGH",
@@ -9573,7 +9573,7 @@
                 {
                   "id": "tamper.posix_system_log_destruction",
                   "tool_call_only": true,
-                  "expression": "f.paths.exists(p, p.normalized in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
+                  "expression": "f.paths.exists(p, (p.resolved in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] || p.normalized in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log']) && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)(?:^|[;\"\\r\\n]\\s*)(?:cat\\s+/dev/(?:null|zero)\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|echo\\s+(?:''|\"\")\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?(?:/usr/bin/)?truncate\\s+(?:-s\\s+0|--size=0)\\s+/var/log/(?:(?:messages|security|syslog|secure|audit/audit\\.log)|auth\\.log(?:/current\\.log)?)(?:\\s+2>/dev/null)?(?:\\s+\\|\\|\\s+true)?|chattr\\s+-i\\s+/var/log/audit/audit\\.log\\.1(?:\\s+2>/dev/null)?\\s*;\\s*(?:/usr/bin/)?truncate\\s+-s\\s+0\\s+/var/log/audit/audit\\.log\\.1|(?:rm\\s+-(?:rf|fr)|unlink)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?rm\\s+-f\\s+/var/log/journal/\\*/system\\.journal|(?:sudo\\s+)?journalctl\\s+--vacuum-time=0)(?:\\s|\"|$)",
                   "title": "Destroy canonical POSIX system logs",
                   "severity": "HIGH",
@@ -10033,7 +10033,7 @@
                 {
                   "id": "integrity.posix_system_interpreter_wrapper",
                   "tool_call_only": true,
-                  "expression": "f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.normalized.startsWith('/usr/bin/python3.'))",
+                  "expression": "f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && (p.resolved.startsWith('/usr/bin/python3.') || p.normalized.startsWith('/usr/bin/python3.')))",
                   "pattern": "(?mi)^[ \\t]*mv[ \\t]+-f[ \\t]+/usr/bin/\\.python3\\.[0-9]{1,2}\\.wrap[ \\t]+/usr/bin/python3\\.[0-9]{1,2}[ \\t]*$",
                   "title": "Replace a versioned system Python interpreter with an environment wrapper",
                   "severity": "HIGH",
@@ -10691,7 +10691,7 @@
                 },
                 {
                   "id": "PATH-ETC-SUDOERS",
-                  "expression": "f.paths.exists(p, (p.resolved == '/etc/sudoers' || p.normalized == '/etc/sudoers') && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
+                  "expression": "f.paths.exists(p, (p.resolved.matches('(?i)^(?:/private)?/etc/sudoers$') || p.normalized.matches('(?i)^(?:/private)?/etc/sudoers$')) && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "a^",
                   "title": "/etc/sudoers access",
                   "severity": "HIGH",

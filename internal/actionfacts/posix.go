@@ -968,6 +968,18 @@ func projectPOSIXLiteralHeredoc(
 	}
 	delimiter := projectPOSIXWord(redirection.Word)
 	body := projectPOSIXWord(redirection.Hdoc)
+	if !delimiter.Expands && delimiter.Value != "" && delimiter.Quote != QuoteSingle &&
+		posixHeredocBodyRunsNothing(redirection.Hdoc) {
+		// An expanding body whose only expansions are parameters runs no
+		// command: the command and its redirect targets are as certain as
+		// with a quoted body, only the stdin text is unknown. The parse
+		// stays complete, so a proven write target (cat > /etc/sudoers
+		// <<X) is judged by the integrity owners (rel-1-0-6:GAP-0399).
+		command.LiteralStdin = ""
+		command.LiteralStdinComplete = false
+		command.LiteralStdinAmbiguous = true
+		return
+	}
 	if delimiter.Expands || delimiter.Quote != QuoteSingle ||
 		delimiter.Value == "" || body.Expands || len(body.Value) > maxScalarBytes ||
 		strings.ContainsRune(body.Value, '\x00') {
@@ -976,6 +988,24 @@ func projectPOSIXLiteralHeredoc(
 	}
 	command.LiteralStdin = body.Value
 	command.LiteralStdinComplete = true
+}
+
+// posixHeredocBodyRunsNothing reports an unquoted heredoc body that expands
+// only parameters: no command, arithmetic or process substitution anywhere
+// in it, so reading it runs nothing.
+func posixHeredocBodyRunsNothing(body *syntax.Word) bool {
+	if body == nil {
+		return true
+	}
+	runs := false
+	syntax.Walk(body, func(node syntax.Node) bool {
+		switch node.(type) {
+		case *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ProcSubst:
+			runs = true
+		}
+		return !runs
+	})
+	return !runs
 }
 
 func posixDescriptorIsRedirected(command *CommandFact, fd int64) bool {

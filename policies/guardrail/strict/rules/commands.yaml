@@ -1116,7 +1116,7 @@ rules:
   - id: impact.linux_magic_sysrq_destruction
     tool_call_only: true
     expression: >-
-      f.paths.exists(p, p.normalized == '/proc/sysrq-trigger')
+      f.paths.exists(p, p.resolved == '/proc/sysrq-trigger' || p.normalized == '/proc/sysrq-trigger')
     pattern: '(?i)(?:^|[;\r\n]\s*)echo\s+["'']?[bocei]["'']?\s*>\s*/proc/sysrq-trigger(?:\s|$)'
     title: "Trigger destructive Linux Magic SysRq action"
     severity: CRITICAL
@@ -1135,8 +1135,10 @@ rules:
   - id: tamper.posix_system_log_destruction
     tool_call_only: true
     expression: >-
-      f.paths.exists(p, p.normalized in ['/var/log/messages', '/var/log/security',
-      '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] &&
+      f.paths.exists(p, (p.resolved in ['/var/log/messages', '/var/log/security',
+      '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] ||
+      p.normalized in ['/var/log/messages', '/var/log/security',
+      '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log']) &&
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     pattern: '(?i)(?:^|[;"\r\n]\s*)(?:cat\s+/dev/(?:null|zero)\s*>\s*/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|echo\s+(?:''''|"")\s*>\s*/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|(?:sudo\s+)?(?:/usr/bin/)?truncate\s+(?:-s\s+0|--size=0)\s+/var/log/(?:(?:messages|security|syslog|secure|audit/audit\.log)|auth\.log(?:/current\.log)?)(?:\s+2>/dev/null)?(?:\s+\|\|\s+true)?|chattr\s+-i\s+/var/log/audit/audit\.log\.1(?:\s+2>/dev/null)?\s*;\s*(?:/usr/bin/)?truncate\s+-s\s+0\s+/var/log/audit/audit\.log\.1|(?:rm\s+-(?:rf|fr)|unlink)\s+/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|(?:sudo\s+)?rm\s+-f\s+/var/log/journal/\*/system\.journal|(?:sudo\s+)?journalctl\s+--vacuum-time=0)(?:\s|"|$)'
@@ -1585,7 +1587,7 @@ rules:
     tool_call_only: true
     expression: >-
       f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
-      p.normalized.startsWith('/usr/bin/python3.'))
+      (p.resolved.startsWith('/usr/bin/python3.') || p.normalized.startsWith('/usr/bin/python3.')))
     # The semantic owner requires a matching versioned interpreter backup,
     # literal four-line PYTHONPATH wrapper, exact `.real` delegation, and one
     # unconditional atomic replacement from the same /usr/bin staging path.

@@ -1089,7 +1089,7 @@ rules:
   - id: impact.linux_magic_sysrq_destruction
     tool_call_only: true
     expression: >-
-      f.paths.exists(p, p.normalized == '/proc/sysrq-trigger')
+      f.paths.exists(p, p.resolved == '/proc/sysrq-trigger' || p.normalized == '/proc/sysrq-trigger')
     # Candidate only. The exact owner requires one literal destructive key and
     # one exact stdout overwrite redirect to the kernel SysRq trigger.
     pattern: '(?i)(?:^|[;\r\n]\s*)echo\s+["'']?[bocei]["'']?\s*>\s*/proc/sysrq-trigger(?:\s|$)'
@@ -1112,8 +1112,10 @@ rules:
   - id: tamper.posix_system_log_destruction
     tool_call_only: true
     expression: >-
-      f.paths.exists(p, p.normalized in ['/var/log/messages', '/var/log/security',
-      '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] &&
+      f.paths.exists(p, (p.resolved in ['/var/log/messages', '/var/log/security',
+      '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] ||
+      p.normalized in ['/var/log/messages', '/var/log/security',
+      '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log']) &&
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     # Candidate only. The exact owner accepts a closed destructive grammar and
@@ -1514,7 +1516,7 @@ rules:
     tool_call_only: true
     expression: >-
       f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
-      p.normalized.startsWith('/usr/bin/python3.'))
+      (p.resolved.startsWith('/usr/bin/python3.') || p.normalized.startsWith('/usr/bin/python3.')))
     # The semantic owner requires a matching versioned interpreter backup,
     # literal four-line PYTHONPATH wrapper, exact `.real` delegation, and one
     # unconditional atomic replacement from the same /usr/bin staging path.
