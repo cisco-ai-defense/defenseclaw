@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -157,5 +158,59 @@ func TestTargetMemoAssignmentChainWorkIsLinear(t *testing.T) {
 				t.Errorf("128 statements cost %d units of work, want at most %d (each distinct path and candidate once)", work[128], limit)
 			}
 		})
+	}
+}
+
+// TestClientStatementBudgetHeader pins the hook client's side of the
+// statement budget (rel-1-0-2:GAP-0568): a POSIX call over 128 statements
+// gets only the incomplete-evidence header (truncated marker and cwd), one
+// at the budget gets the full map, and an over-budget call that names the
+// DefenseClaw state folder is still described in full, so a gateway behind
+// ProtectHome can prove the state write that observe mode blocks.
+func TestClientStatementBudgetHeader(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	header := func(command string) map[string]string {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": "budget", "cwd": cwd,
+			"tool_name": "Bash", "tool_input": map[string]any{"command": command}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		targets, ok := Decode(Resolve(body))
+		if !ok {
+			t.Fatalf("%.40q: header does not decode", command)
+		}
+		return targets
+	}
+	incomplete := func(targets map[string]string) bool {
+		if targets[TruncatedKey] != "1" {
+			return false
+		}
+		for key := range targets {
+			if key != TruncatedKey && key != CWDKey {
+				return false
+			}
+		}
+		return true
+	}
+	if got := header(gap0568Assignments(129)); !incomplete(got) {
+		t.Errorf("129 assignments: header %v, want only the incomplete marker and cwd", got)
+	}
+	if got := header(gap0568Assignments(128)); incomplete(got) || got[TruncatedKey] != "" {
+		t.Errorf("128 assignments: header %v, want the full map", got)
+	}
+	state := filepath.Join(home, ".defenseclaw", "config.yaml")
+	got := header(gap0568Assignments(200) + "; printf changed >> " + state)
+	if incomplete(got) {
+		t.Fatalf("over-budget state write: header %v, want the call described", got)
+	}
+	if _, listed := got[state]; !listed {
+		t.Errorf("over-budget state write: header %v does not list %s", got, state)
 	}
 }

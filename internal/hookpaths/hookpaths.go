@@ -1116,8 +1116,12 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// the client about 3 ms per statement on Windows, past the
 				// hook answer window at 3000 statements (rel-1-0-2:GAP-0568):
 				// the map says only that it is incomplete, which is never more
-				// permissive than a full one.
-				if !isApplyPatchToolName(tool) && clientStatementBudgetExceeded(connector, tool, facts, command) {
+				// permissive than a full one. A call that names the
+				// DefenseClaw state folder is still described: in observe
+				// mode a proven state write blocks over the budget too, and
+				// a gateway behind ProtectHome proves it only from this map.
+				if !isApplyPatchToolName(tool) && !strings.Contains(strings.ToLower(command), ".defenseclaw") &&
+					clientStatementBudgetExceeded(connector, tool, facts, command) {
 					return incompleteEvidence(cwd)
 				}
 				// A ~<login> tilde-prefix names this user's home from the

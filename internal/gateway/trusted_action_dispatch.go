@@ -328,8 +328,11 @@ func dispatchTrustedAction(
 			// per-statement passes run. Those cost about 4 ms per
 			// statement on a Windows host and kept a 3000-statement call in
 			// the gateway for 36 s, past the hook answer window
-			// (rel-1-0-2:GAP-0568).
-			return trustedActionLimitFindings(request.EnforcementCapable)
+			// (rel-1-0-2:GAP-0568). The whole-call state check still runs:
+			// observe mode allows the budget finding but hard-blocks a
+			// proven write to the active state, and that proof is formed
+			// only there (withOverBudgetStateMutation).
+			return withOverBudgetStateMutation(parent, request, facts, trustedActionLimitFindings(request.EnforcementCapable))
 		}
 	}
 	// A ~<active user> tilde-prefix names the active home from the password
@@ -8570,6 +8573,33 @@ func trustedStatementBudgetExceeded(input actionfacts.Input, facts actionfacts.F
 	default:
 		return false
 	}
+}
+
+// withOverBudgetStateMutation adds, to the budget refusal of a call over the
+// statement budget, the one finding observe mode still enforces: a proven
+// mutation of the active DefenseClaw state (tamper.detector_state_write,
+// provenActiveStateMutation). Only the whole-call state check runs, once
+// per generation and once per member of a strictest combination (each
+// finding keeping its member), not the twins or the per-statement passes,
+// so the refusal stays linear: about one memo unit per statement.
+func withOverBudgetStateMutation(parent context.Context, request trustedActionRequest, facts actionfacts.Facts, findings []RuleFinding) []RuleFinding {
+	generation := request.generation
+	if generation == nil {
+		generation = snapshotRulePackGenerationFor(parent, request.Connector)
+	}
+	if generation == nil || len(generation.members) == 0 {
+		return withActiveStateTargetMention(generation, request, facts, findings)
+	}
+	for i, member := range generation.members {
+		found := withActiveStateTargetMention(member, request, facts, nil)
+		if i < len(generation.memberNames) {
+			for j := range found {
+				found[j].profile = generation.memberNames[i]
+			}
+		}
+		findings = append(findings, found...)
+	}
+	return findings
 }
 
 // trustedCallOverStatementBudget reports a shell call that the
