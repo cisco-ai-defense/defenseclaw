@@ -639,6 +639,11 @@ func runWindowsEnterpriseLifecycle(
 			return err
 		}
 	}
+	if windowsEnterpriseStandalone(opts) && (action == "install" || action == "ensure" || action == "upgrade" || action == "repair") {
+		if err := windowsEnterpriseStandaloneClaudeRegistryPolicyPreflight(opts.configPath); err != nil {
+			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
+		}
+	}
 	if windowsEnterpriseStandalone(opts) && action == "upgrade" && windowsEnterpriseKeepsInstalledConfig(opts) {
 		if err := windowsEnterpriseStandaloneKeptConfigPreflight(); err != nil {
 			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
