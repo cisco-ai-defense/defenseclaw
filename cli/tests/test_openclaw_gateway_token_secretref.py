@@ -44,6 +44,7 @@ CASES = {
     "malformed-bad-id": ({"source": "env", "id": "not a name"}, None, "", True),
     "malformed-no-source": ({"id": "OPENCLAW_GATEWAY_TOKEN"}, None, "", True),
     "list": (["a", "b"], None, "", True),
+    "string-secretref-text": ("{'source': 'store', 'id': 'X'}", None, "", True),
     "number": (42, None, "", True),
 }
 
@@ -61,8 +62,11 @@ def _write_openclaw_json(tmp_path, token) -> str:
 
 @pytest.fixture
 def token_env(monkeypatch):
+    # setenv first so monkeypatch records the original state and restores it:
+    # the real dotenv writer sets os.environ, which must not leak into later tests.
     for name in (ENV_NAME, "OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN"):
-        monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(name, "unset")
+        monkeypatch.delenv(name)
 
     def apply(value):
         if value is not None:
@@ -99,7 +103,7 @@ def test_shared_reader_without_a_token_is_silent():
 
 def test_store_notice_names_the_source_and_env_notice_names_the_variable(token_env):
     token_env(None)
-    assert "\"store\" secret source" in openclaw_gateway_token(_openclaw_json(STORE_REF)).notice
+    assert '"store" secret source' in openclaw_gateway_token(_openclaw_json(STORE_REF)).notice
     assert ENV_NAME in openclaw_gateway_token(_openclaw_json(ENV_REF)).notice
 
 
@@ -269,11 +273,15 @@ def test_init_first_run_with_a_secretref_completes(setting, tmp_path, token_env,
     monkeypatch.setenv("DEFENSECLAW_HOME", data_dir)
     token_env(None)
     with (
-        patch("defenseclaw.agent_selection.record_setup_agent_selections", side_effect=record_test_setup_agent_selections),
+        patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections", side_effect=record_test_setup_agent_selections
+        ),
         patch("defenseclaw.bootstrap._quiet_guardrail_setup", return_value=StepResult("Guardrail", "pass", "test")),
     ):
         report = run_first_run(
-            FirstRunOptions(connector="openclaw", profile="observe", skip_install=True, start_gateway=False, verify=False)
+            FirstRunOptions(
+                connector="openclaw", profile="observe", skip_install=True, start_gateway=False, verify=False
+            )
         )
         cfg = load()
 
@@ -284,3 +292,127 @@ def test_init_first_run_with_a_secretref_completes(setting, tmp_path, token_env,
     assert len(notices) == 1 and notices[0].status == "warn"
     _assert_plain_notice(notices[0].detail)
     assert "openclaw" in cfg.active_connectors()
+
+
+# The line DefenseClaw 1.0.5 and 1.0.6 left in ~/.defenseclaw/.env before init failed.
+STALE_LINE = "OPENCLAW_GATEWAY_TOKEN={'source': 'store', 'provider': 'default', 'id': 'OPENCLAW_GATEWAY_TOKEN'}"
+STALE_VALUE = STALE_LINE.partition("=")[2]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "DEFENSECLAW_LLM_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "VIRUSTOTAL_API_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "SPLUNK_ACCESS_TOKEN",
+        "DEFENSECLAW_DECISION_MODEL_KEY",
+        "openai_api_key",
+    ],
+)
+def test_env_ref_naming_a_defenseclaw_credential_is_refused(name, monkeypatch):
+    monkeypatch.setenv(name, "credential-value-gh1404")
+    token = openclaw_gateway_token(_openclaw_json({"source": "env", "provider": "default", "id": name}))
+    assert token.value == ""
+    _assert_plain_notice(token.notice)
+    assert name in token.notice and "credential-value-gh1404" not in token.notice
+
+
+@pytest.mark.parametrize("name", ["OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN", "MY_OPENCLAW_TOKEN"])
+def test_env_ref_naming_a_gateway_token_variable_resolves(name, monkeypatch):
+    monkeypatch.setenv(name, ENV_VALUE)
+    token = openclaw_gateway_token(_openclaw_json({"source": "env", "provider": "default", "id": name}))
+    assert (token.value, token.notice) == (ENV_VALUE, "")
+
+
+def test_resolved_token_ignores_secretref_text(token_env, monkeypatch):
+    from defenseclaw.config import GatewayConfig
+
+    for name in ("OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN"):
+        monkeypatch.setenv(name, STALE_VALUE)
+    assert GatewayConfig(token_env="OPENCLAW_GATEWAY_TOKEN").resolved_token() == ""
+    assert GatewayConfig(token=STALE_VALUE).resolved_token() == ""
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_TOKEN", "real-token-gh1404")
+    assert GatewayConfig(token_env="OPENCLAW_GATEWAY_TOKEN").resolved_token() == "real-token-gh1404"
+
+
+def test_doctor_does_not_count_secretref_text_as_a_token():
+    from defenseclaw.commands.cmd_doctor import _normalized_gateway_token
+
+    assert _normalized_gateway_token(STALE_VALUE) == ""
+    assert _normalized_gateway_token("real-token-gh1404") == "real-token-gh1404"
+
+
+def _seed_stale_dotenv(data_dir: str, extra: str = "") -> str:
+    os.makedirs(data_dir, mode=0o700, exist_ok=True)
+    path = os.path.join(data_dir, ".env")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("DEFENSECLAW_LLM_KEY=keep-me\n" + STALE_LINE + "\n" + extra)
+    os.chmod(path, 0o600)
+    return path
+
+
+@pytest.mark.parametrize("setting", [STORE_REF, LITERAL], ids=["store", "string"])
+def test_upgrade_retry_from_the_base_dotenv_line(setting, tmp_path, token_env, monkeypatch):
+    """Init on the fix after a failed base init: the SecretRef text never becomes the token."""
+    from defenseclaw.bootstrap import FirstRunOptions, StepResult, run_first_run
+    from defenseclaw.config import load
+
+    from tests.helpers import record_test_setup_agent_selections
+
+    home = tmp_path / "home"
+    (home / ".openclaw").mkdir(parents=True)
+    (home / ".openclaw" / "openclaw.json").write_text(json.dumps(_openclaw_json(setting)), encoding="utf-8")
+    data_dir = os.path.realpath(str(tmp_path / "dchome"))
+    dotenv = _seed_stale_dotenv(data_dir)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", data_dir)
+    token_env(None)
+    # The CLI loads ~/.defenseclaw/.env into the process environment at start.
+    monkeypatch.setenv("OPENCLAW_GATEWAY_TOKEN", STALE_VALUE)
+    with (
+        patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections", side_effect=record_test_setup_agent_selections
+        ),
+        patch("defenseclaw.bootstrap._quiet_guardrail_setup", return_value=StepResult("Guardrail", "pass", "test")),
+    ):
+        report = run_first_run(
+            FirstRunOptions(
+                connector="openclaw", profile="observe", skip_install=True, start_gateway=False, verify=False
+            )
+        )
+        cfg = load()
+
+    assert [s for s in report.setup if s.status == "fail"] == []
+    body = open(dotenv, encoding="utf-8").read()
+    assert "source" not in body and "DEFENSECLAW_LLM_KEY=keep-me" in body
+    notices = [s.detail for s in report.setup if s.name == "OpenClaw token"]
+    assert len(notices) == 1 and "Removed a gateway token line" in notices[0]
+    assert STALE_VALUE not in notices[0]
+    if setting == LITERAL:
+        assert cfg.gateway.resolved_token() == LITERAL
+        assert f"OPENCLAW_GATEWAY_TOKEN={LITERAL}" in body
+    else:
+        assert cfg.gateway.resolved_token() == ""
+        assert "OPENCLAW_GATEWAY_TOKEN" not in body
+
+
+def test_doctor_fix_removes_the_base_dotenv_line(tmp_path, token_env, monkeypatch):
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "dchome"))
+    token_env(None)
+    cfg = _openclaw_cfg(tmp_path, STORE_REF)
+    dotenv = _seed_stale_dotenv(cfg.data_dir)
+    monkeypatch.setenv("OPENCLAW_GATEWAY_TOKEN", STALE_VALUE)
+    with (
+        patch.object(cmd_doctor, "_doctor_config_present", return_value=True),
+        patch.object(cmd_doctor, "_active_connector", return_value="openclaw"),
+    ):
+        status, detail = cmd_doctor._fix_gateway_token(cfg, assume_yes=True)
+    assert "already set" not in detail, (status, detail)
+    body = open(dotenv, encoding="utf-8").read()
+    assert "source" not in body and "DEFENSECLAW_LLM_KEY=keep-me" in body
+    assert os.environ.get("OPENCLAW_GATEWAY_TOKEN", "") != STALE_VALUE

@@ -21020,6 +21020,63 @@ def _stop_bridge(data_dir: str, *, gateway_token_env: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 
+_SECRET_REF_TOKEN_DROPPED = (
+    "Removed a gateway token line from ~/.defenseclaw/.env that an earlier DefenseClaw saved from "
+    "an OpenClaw secret reference; it was not a token."
+)
+
+
+def _drop_secret_ref_gateway_tokens(data_dir: str) -> str:
+    """Remove gateway token lines whose value is SecretRef text (issue #1404).
+
+    DefenseClaw 1.0.5 and 1.0.6 wrote ``OPENCLAW_GATEWAY_TOKEN={'source': ...}``
+    before init failed. Drop those lines (and the copies the CLI loaded into
+    ``os.environ``) so the text never becomes the gateway token. Returns a
+    one-line notice when a line was removed, else "". Never shows the value.
+    """
+    from defenseclaw.connector_paths import _GATEWAY_TOKEN_ENV_NAMES, is_secret_ref_text
+
+    for name in _GATEWAY_TOKEN_ENV_NAMES:
+        if is_secret_ref_text(os.environ.get(name, "")):
+            os.environ.pop(name, None)
+    if not data_dir:
+        return ""
+    dotenv_path = os.path.join(data_dir, ".env")
+    if not os.path.isfile(dotenv_path):
+        return ""
+    try:
+        return _drop_secret_ref_gateway_tokens_at(dotenv_path)
+    except (OSError, click.ClickException):
+        # Best effort: an unreadable or unsafe .env keeps its own diagnosis.
+        return ""
+
+
+def _drop_secret_ref_gateway_tokens_at(dotenv_path: str) -> str:
+    from defenseclaw.connector_paths import _GATEWAY_TOKEN_ENV_NAMES, is_secret_ref_text
+
+    with locked_file_update(dotenv_path):
+        snapshot = _rotate_token_snapshot_locked(dotenv_path)
+        if not snapshot.existed:
+            return ""
+        kept: list[bytes] = []
+        removed = False
+        for line in snapshot.body.splitlines(keepends=True):
+            key, sep, value = line.strip().partition(b"=")
+            name = key.strip().decode("utf-8", "replace")
+            if os.name == "nt":
+                name = name.upper()
+            text = value.strip().decode("utf-8", "replace")
+            if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+                text = text[1:-1]
+            if sep and name in _GATEWAY_TOKEN_ENV_NAMES and is_secret_ref_text(text):
+                removed = True
+                continue
+            kept.append(line)
+        if removed:
+            atomic_write_private_bytes(dotenv_path, b"".join(kept))
+    return _SECRET_REF_TOKEN_DROPPED if removed else ""
+
+
 def _save_secret_to_dotenv(key: str, value: str, data_dir: str) -> None:
     """Write a secret to ~/.defenseclaw/.env (mode 0600).
 

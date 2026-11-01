@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -849,7 +850,8 @@ func readGatewayTokenDotenv(path string) map[string]string {
 		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
 			value = value[1 : len(value)-1]
 		}
-		if value != "" {
+		// SecretRef text an earlier build saved as a token is never one (#1404).
+		if value != "" && !envvars.IsSecretRefText(value) {
 			values[canonicalKey] = value
 		}
 	}

@@ -1321,3 +1321,19 @@ func TestValidateTrustedADChildDomains(t *testing.T) {
 		}
 	}
 }
+
+func TestResolvedTokenSkipsSecretRefText(t *testing.T) {
+	const stale = "{source: store, provider: default, id: OPENCLAW_GATEWAY_TOKEN}"
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", stale)
+	if got := (&GatewayConfig{TokenEnv: "OPENCLAW_GATEWAY_TOKEN"}).ResolvedToken(); got != "" {
+		t.Fatalf("ResolvedToken() = %q, want empty", got)
+	}
+	if got := (&GatewayConfig{Token: stale}).ResolvedToken(); got != "" {
+		t.Fatalf("literal SecretRef text: ResolvedToken() = %q, want empty", got)
+	}
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "real-token-1404")
+	if got := (&GatewayConfig{TokenEnv: "OPENCLAW_GATEWAY_TOKEN"}).ResolvedToken(); got != "real-token-1404" {
+		t.Fatalf("ResolvedToken() = %q, want the canonical token", got)
+	}
+}

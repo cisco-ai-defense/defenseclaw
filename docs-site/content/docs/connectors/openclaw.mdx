@@ -99,13 +99,21 @@ defenseclaw guardrail allow-private-upstream bedrock-runtime.us-east-1.amazonaws
 
 ### OpenClaw gateway token
 
-DefenseClaw also reads the gateway token from `openclaw.json` (`gateway.auth.token`). A plain string is used as it is. A secret reference with `"source": "env"` is read from the named environment variable. DefenseClaw cannot read other secret sources, such as `"source": "store"`. For those, `init` and `setup` print a warning and finish. Give DefenseClaw the token yourself:
+DefenseClaw also reads the gateway token from `openclaw.json` (`gateway.auth.token`):
+
+- A plain string is used as it is.
+- A secret reference with `"source": "env"` is read from that variable in the environment of the shell that runs `init` or `setup`. DefenseClaw does not use a variable that holds one of its own credentials, such as an LLM API key.
+- DefenseClaw cannot read other secret sources, such as `"source": "store"`. For those, `init` and `setup` print a warning and finish.
+
+DefenseClaw saves a token it reads to `~/.defenseclaw/.env` (mode 0600). If it could not read the token, give it yourself:
 
 ```bash
 defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN
 ```
 
 You can also set `OPENCLAW_GATEWAY_TOKEN` or `DEFENSECLAW_GATEWAY_TOKEN` in the environment of the gateway.
+
+DefenseClaw 1.0.5 and 1.0.6 could save the secret reference text itself in `~/.defenseclaw/.env` when `init` failed. Later builds ignore that line, and `init` or `defenseclaw doctor --fix` removes it.
 
 ## Files DefenseClaw will modify
 

@@ -41,6 +41,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -1466,7 +1467,7 @@ func daemonGatewayToken(cfg *config.Config) string {
 			return running
 		}
 		if tokenEnv != "" && !daemonEnvironmentKeyEqual(tokenEnv, canonicalTokenEnv) && !daemonEnvironmentKeyEqual(tokenEnv, legacyTokenEnv) {
-			if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" {
+			if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" && !envvars.IsSecretRefText(token) {
 				return token
 			}
 		}
@@ -1483,7 +1484,7 @@ func daemonGatewayToken(cfg *config.Config) string {
 	for _, path := range paths {
 		env := readDotEnv(path)
 		for _, key := range tokenKeys {
-			if token := strings.TrimSpace(daemonDotenvValue(env, key)); token != "" {
+			if token := strings.TrimSpace(daemonDotenvValue(env, key)); token != "" && !envvars.IsSecretRefText(token) {
 				return token
 			}
 		}

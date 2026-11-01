@@ -3584,14 +3584,19 @@ def _resolve_gateway_for_connector(cfg) -> dict[str, str | int]:
     # gateway endpoint and (worse) its token. active_connectors() returns [] for
     # an unconfigured install and the real connector set otherwise, so the
     # phantom can never sneak in.
+    from defenseclaw.commands.cmd_setup import _drop_secret_ref_gateway_tokens
+
+    dropped = _drop_secret_ref_gateway_tokens(cfg.data_dir)
     if "openclaw" in cfg.active_connectors():
-        return _resolve_openclaw_gateway(cfg.claw.config_file)
+        resolved = _resolve_openclaw_gateway(cfg.claw.config_file)
+        resolved["token_notice"] = " ".join(n for n in (dropped, str(resolved["token_notice"])) if n)
+        return resolved
 
     return {
         "host": "127.0.0.1",
         "port": 18789,
         "token": "",
-        "token_notice": "",
+        "token_notice": dropped,
     }
 
 
@@ -3663,7 +3668,7 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
         # per-connector-name token branch was unreachable and is dropped.)
         cfg.gateway.token_env = cfg.gateway.token_env or "DEFENSECLAW_GATEWAY_TOKEN"
         token_configured = bool(cfg.gateway.resolved_token())
-    if openclaw_active and gw_info.get("token_notice"):
+    if gw_info.get("token_notice"):
         ux.warn(str(gw_info["token_notice"]))
 
     if not cfg.gateway.device_key_file:

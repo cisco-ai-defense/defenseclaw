@@ -165,8 +165,13 @@ _DOCTOR_GALILEO_CANARY_LIMIT = 4
 
 
 def _normalized_gateway_token(value: object) -> str:
-    """Preserve token bytes while treating whitespace-only values as empty."""
-    return value if isinstance(value, str) and value.strip() else ""
+    """Preserve token bytes while treating whitespace-only values as empty.
+
+    SecretRef text an earlier build saved as a token is empty too (#1404).
+    """
+    from defenseclaw.connector_paths import is_secret_ref_text
+
+    return value if isinstance(value, str) and value.strip() and not is_secret_ref_text(value) else ""
 
 
 def _gateway_tokens_equal(left: str, right: str) -> bool:
@@ -18330,6 +18335,10 @@ def _fix_gateway_token(
 
     rotate_required = bool(getattr(cfg, "_doctor_gateway_token_rotation_required", False))
     active_connector = _active_connector(cfg)
+    if not plan_only:
+        from defenseclaw.commands.cmd_setup import _drop_secret_ref_gateway_tokens
+
+        _drop_secret_ref_gateway_tokens(cfg.data_dir)
 
     if active_connector == "openclaw" and not rotate_required:
         from defenseclaw.commands.cmd_setup import (

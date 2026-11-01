@@ -39,6 +39,7 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -2627,17 +2628,19 @@ const legacyGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
 // caller (judge LLM init, etc.). The sidecar boot path masked
 // the bug via EnsureGatewayToken's own fallback, so it only
 // surfaced in obscure code paths until investigation.
+//
+// SecretRef text an earlier build saved as a token is skipped (issue #1404).
 func (g *GatewayConfig) ResolvedToken() string {
-	if g.TokenEnv != "" {
-		if v := os.Getenv(g.TokenEnv); v != "" {
+	for _, name := range []string{g.TokenEnv, defaultGatewayTokenEnv, legacyGatewayTokenEnv} {
+		if name == "" {
+			continue
+		}
+		if v := os.Getenv(name); v != "" && !envvars.IsSecretRefText(v) {
 			return v
 		}
 	}
-	if v := os.Getenv(defaultGatewayTokenEnv); v != "" {
-		return v
-	}
-	if v := os.Getenv(legacyGatewayTokenEnv); v != "" {
-		return v
+	if envvars.IsSecretRefText(g.Token) {
+		return ""
 	}
 	return g.Token
 }
