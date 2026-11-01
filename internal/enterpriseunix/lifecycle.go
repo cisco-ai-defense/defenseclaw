@@ -1260,7 +1260,7 @@ func (e *Env) archivePaths(archive string, paths []string) error {
 		}
 		return nil
 	}()
-	closeErr := errors.Join(tw.Close(), gz.Close(), file.Sync(), file.Close())
+	closeErr := errors.Join(tw.Close(), gz.Close(), syncFile(file), file.Close())
 	if walkErr != nil {
 		_ = os.Remove(archive)
 		return walkErr

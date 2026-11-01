@@ -398,7 +398,7 @@ func fenceHardening(home, rel string, uid int, fence string) (replaced bool, err
 		if err := unix.Fchmod(out, uint32(st.Mode&0o7777)); err != nil {
 			return err
 		}
-		if err := written.Sync(); err != nil {
+		if err := syncFile(written); err != nil {
 			return err
 		}
 		if err := written.Close(); err != nil {
