@@ -1023,6 +1023,13 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		return w.readmitInterrupted(ctx, evt, currentSnap, fingerprint)
 	}
 
+	// The scanner refused this definition's launcher: a scan of the same
+	// definition with the same scanner and policy refuses it again, so the
+	// rescan leaves its block in place without a scan (rel-1-0-6:GAP-0258).
+	if evt.Type == InstallMCP && !w.secureClientActive() && mcpLauncherRefusalFinal(baseline, currentSnap, fingerprint) {
+		return rescanSkipped
+	}
+
 	// A rejection decided while take_action was off left the target in
 	// place. Once take_action is on, admission runs again and its actions
 	// apply as for a new install. Until then the baseline keeps the mark and
@@ -1131,6 +1138,22 @@ const admittedWithoutScanMark = "|admitted-without-scan"
 // Its empty scan ID retries through admission until a completed verdict.
 const unverifiedMCPMark = "|mcp-unverified"
 
+// mcpScanFailedMark ends the fingerprint of an MCP server baseline whose
+// admission scan failed, so admission blocked and disabled the definition.
+// The discovery poll admits it again when its retry is due, at the delays of
+// an unfinished admission (2 minutes, doubling to 30), and every rescan
+// cycle does; a completed scan replaces the baseline (rel-1-0-6:GAP-0258).
+const mcpScanFailedMark = "|mcp-scan-failed"
+
+// mcpLauncherRefusedMark ends the fingerprint of an MCP server baseline
+// whose scan refused its local launcher (scanner.MCPLauncherRefusal): a
+// command other than the bare npx or uvx, a command path, a code-running
+// flag. The refusal is final for that definition. Nothing scans it again
+// until its definition, the scanner or the admission policy changes, or an
+// allow rule admits it; its block and runtime disable stay, and its tool
+// calls are refused with the launcher reason (rel-1-0-6:GAP-0258).
+const mcpLauncherRefusedMark = "|mcp-launcher-refused"
+
 // admitsMCPWithoutScan reports an MCP server that install admission allows
 // before any scan: an asset_policy.mcp allowed rule that matches its
 // definition, a first-party entry while allow_list_bypass_scan is on, or
@@ -1205,7 +1228,28 @@ func (w *InstallWatcher) admissionFingerprint(res AdmissionResult, fingerprint s
 	if res.Event.Type == InstallMCP && res.Verdict == VerdictAllowed && res.ScanID == "" {
 		return fingerprint + admittedWithoutScanMark
 	}
+	if mcpScanFailureBlocked(res) {
+		if scanner.MCPLauncherRefusal(res.Reason) {
+			return fingerprint + mcpLauncherRefusedMark
+		}
+		return fingerprint + mcpScanFailedMark
+	}
 	return fingerprint
+}
+
+// mcpScanFailureBlocked reports an MCP admission that blocked the server
+// because its scan failed (fail closed).
+func mcpScanFailureBlocked(res AdmissionResult) bool {
+	return res.Event.Type == InstallMCP && res.Verdict == VerdictBlocked && strings.HasPrefix(res.Reason, scanFailureReason)
+}
+
+// mcpLauncherRefusalFinal reports an MCP baseline that records the refusal
+// of the same definition (content hash) under the same scanner and
+// admission fingerprint: scanning it again could only refuse it again.
+func mcpLauncherRefusalFinal(baseline *audit.SnapshotRow, snap *TargetSnapshot, fingerprint string) bool {
+	return baseline != nil && snap != nil && baseline.ContentHash != "" && baseline.ContentHash == snap.ContentHash &&
+		strings.HasSuffix(baseline.ScannerFingerprint, mcpLauncherRefusedMark) &&
+		strings.TrimSuffix(baseline.ScannerFingerprint, mcpLauncherRefusedMark) == fingerprint
 }
 
 // readmitUnenforcedRejection runs admission again for a target rejected while
@@ -1258,6 +1302,18 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 	case res.Interrupted:
 		w.markInterruptedAdmission(evt, snap, fingerprint)
 	case res.Verdict == VerdictScanError && evt.Type == InstallMCP && strings.HasPrefix(res.Reason, unverifiedMCPReason):
+		if w.targetStillPresent(evt) {
+			w.persistSnapshot(evt, snap, "", w.admissionFingerprint(res, fingerprint))
+		}
+	case mcpScanFailureBlocked(res) && !w.secureClientActive():
+		// The new definition is blocked and disabled. Its baseline records
+		// that, with the failure's mark, so the discovery poll and the
+		// pending gate see an admitted definition: the old baseline left the
+		// server pending, and every poll (30 s) scanned, blocked and
+		// reported drift for it again while its calls got the "still
+		// scanning" refusal and never the scan's reason (rel-1-0-6:GAP-0258).
+		// A launcher refusal is final for that definition; another failure
+		// is retried with backoff (mcpScanFailedMark).
 		if w.targetStillPresent(evt) {
 			w.persistSnapshot(evt, snap, "", w.admissionFingerprint(res, fingerprint))
 		}

@@ -495,6 +495,32 @@ func MCPScanRefused(err error) bool {
 	return err != nil && (errors.Is(err, ErrMCPScanRefused) || mentionsMCPScanRefusal(err.Error()))
 }
 
+// mcpLauncherRefusalWords are how the scanner (cli/defenseclaw/scanner/mcp.py
+// _stdio_scan_command_error) and the managed as-user launch (enterprisehooks
+// checkMCPAsUserDefinition) word a local server whose command or arguments
+// a scan never starts: a launcher other than the bare npx or uvx, a command
+// path, a code-running flag, no package argument, or a cmd.exe metacharacter.
+var mcpLauncherRefusalWords = []string{
+	"allowlisted stdio launcher",
+	"a scan starts only the bare names npx or uvx",
+	"uses forbidden execution flag",
+	"requires a package/server argument",
+	"Windows command metacharacter",
+}
+
+// MCPLauncherRefusal reports a failed MCP scan whose text says the scanner
+// refused the server's local launcher (rel-1-0-6:GAP-0258). That refusal is
+// a pure function of the definition: the same command and arguments are
+// refused again on every try, so a retry of an unchanged definition can only
+// repeat it. Nothing else (a URL refusal, a folder the scan may not use, a
+// scanner that could not finish) is one.
+func MCPLauncherRefusal(text string) bool {
+	if !strings.Contains(text, "refusing to scan local MCP server ") && !strings.Contains(text, " is not started: ") {
+		return false
+	}
+	return slices.ContainsFunc(mcpLauncherRefusalWords, func(words string) bool { return strings.Contains(text, words) })
+}
+
 // runMCPScannerCommand owns the runtime process and its Python descendants.
 var runMCPScannerCommand = processutil.RunTreeIsolated
 

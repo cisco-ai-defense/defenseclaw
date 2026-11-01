@@ -180,10 +180,27 @@ func (s *admissionState) clearIssue(path string) {
 	s.writeLocked()
 }
 
+// mcpRetryDue reports an MCP server whose admission scan failed
+// (AdmissionUnscanned) and whose retry delay has passed. The discovery poll
+// asks it; each failed admission doubles the delay (setIssue), and a
+// finished one clears the issue (rel-1-0-6:GAP-0258).
+func (s *admissionState) mcpRetryDue(path string, now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	issue, ok := s.issues[path]
+	if !ok || issue.Type != string(InstallMCP) || issue.Kind != AdmissionUnscanned {
+		return false
+	}
+	return !now.Before(s.retry[path].due)
+}
+
 // forgetMCPIssuesNotListed forgets the problems of MCP servers that are no
-// longer configured (GAP-0134). MCP issues are never due again (admission
-// of a server reruns at discovery), so nothing else removed the issue of a
-// server whose definition was deleted.
+// longer configured (GAP-0134). dueIssues never returns an MCP issue (the
+// discovery poll retries a failed MCP scan, mcpRetryDue), so nothing else
+// removed the issue of a server whose definition was deleted.
 func (s *admissionState) forgetMCPIssuesNotListed(listed map[string]bool) {
 	if s == nil {
 		return

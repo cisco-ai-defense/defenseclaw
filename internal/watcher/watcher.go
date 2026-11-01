@@ -553,10 +553,19 @@ func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt Instal
 		return
 	}
 	snap, err := w.snapshotForEvent(evt)
-	if err != nil || snap.ContentHash == baseline.ContentHash {
+	if err != nil || (snap.ContentHash == baseline.ContentHash && !w.mcpScanRetryDue(evt.Path, baseline)) {
 		return
 	}
 	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil), "watch")
+}
+
+// mcpScanRetryDue reports an unchanged MCP server whose last admission scan
+// failed (mcpScanFailedMark) and whose retry is due: 2 minutes after the
+// first failure, doubling to 30 (admissionState). A launcher refusal is never
+// due: it is final for its definition (rel-1-0-6:GAP-0258).
+func (w *InstallWatcher) mcpScanRetryDue(path string, baseline *audit.SnapshotRow) bool {
+	return baseline != nil && !w.secureClientActive() && strings.HasSuffix(baseline.ScannerFingerprint, mcpScanFailedMark) &&
+		w.state.mcpRetryDue(path, time.Now())
 }
 
 // queueAddedMCP queues name for the next admission pass without waking it.
@@ -691,6 +700,10 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 		}
 		if !w.secureClientActive() && !mcpBaselineMatches(baseline, server) {
 			// Admitted again at once (readmitChangedMCPServer).
+			added = append(added, server.Name)
+		} else if w.mcpScanRetryDue(path, baseline) {
+			// Its scan failed: tried again with backoff, not every poll
+			// (rel-1-0-6:GAP-0258).
 			added = append(added, server.Name)
 		}
 	}
