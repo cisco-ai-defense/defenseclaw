@@ -134,6 +134,9 @@ type RulePackRebasePlan struct {
 	Digest                                                  string
 	Updated                                                 int
 	Carried, Expressed, AlertOnly, Disabled, Merged, Linked []string
+	// Tagged names the rules without tags the 1.0 copy gave the tag
+	// custom (GAP-0268).
+	Tagged []string
 	// Renamed says which built-in rules the operator gave a pattern of their
 	// own now have an ID of theirs ("CMD-RM-RF -> CUSTOM-CMD-RM-RF").
 	Renamed []string
@@ -243,6 +246,10 @@ type MigrationRecord struct {
 	// category, which 1.0 refuses, were merged into one; the upgrade prints
 	// them (GAP-1339).
 	RuleFileMerges []string `json:"rule_file_merges,omitempty"`
+	// TaggedRules says which rules of a custom pack had no tags, which 1.0
+	// refuses, and got the tag custom in its 1.0 copy; the upgrade prints
+	// them (GAP-0268).
+	TaggedRules []string `json:"tagged_rules,omitempty"`
 	// RenamedRules says which 0.8.x built-in rules the operator gave a
 	// pattern of their own were kept as rules of theirs under a new ID
 	// ("CMD-RM-RF -> CUSTOM-CMD-RM-RF"): the built-in ID keeps the shipped
@@ -3218,6 +3225,16 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 		m.note("%s reads files through links, which 1.0 refuses in a rule pack (%s). Its 1.0 copy %s holds the "+
 			"files they point to and is pinned instead: edit the copy from now on; %s is kept for a rollback to 0.8.x",
 			dir, strings.Join(plan.Linked, ", "), target, dir)
+	}
+	if len(plan.Tagged) > 0 {
+		// 0.8.x took a rule without tags; 1.0 refuses the pack (GAP-0268).
+		tagged := fmt.Sprintf("%s: %d rule(s) had no tags, or blank or repeated ones, which 1.0 refuses; their "+
+			"1.0 copy has distinct tags, custom where they had none: %s",
+			target, len(plan.Tagged), strings.Join(plan.Tagged, ", "))
+		m.record.TaggedRules = append(m.record.TaggedRules, tagged)
+		m.note("%s has rules without tags (or with blank or repeated ones), which 1.0 refuses. Its 1.0 copy %s gives "+
+			"them distinct tags, the tag custom where they had none, and keeps the rest of each rule: %s; %s is kept "+
+			"for a rollback to 0.8.x", dir, target, strings.Join(plan.Tagged, ", "), dir)
 	}
 	m.noteDetectionOnly(target, plan.AlertOnly)
 	return target, plan.Digest, nil
