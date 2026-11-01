@@ -27968,19 +27968,39 @@ function Remove-DefenseClawNuclearPath {
     # that skipped a child (access denied, say) cannot be reported as queued.
     $listingComplete = $false
     if ($null -ne $nativeSecurity) {
-        $listingErrors = $null
+        # Walk by hand: Windows PowerShell 5.1's -Recurse can follow a
+        # junction out of the tree. A reparse point is queued as itself and
+        # never descended into.
+        $listingErrors = [Collections.Generic.List[object]]::new()
+        $collected = [Collections.Generic.List[string]]::new()
+        $pendingDirectories = [Collections.Generic.Stack[string]]::new()
+        $pendingDirectories.Push($scheduleRoot)
+        while ($pendingDirectories.Count -gt 0) {
+            $directory = $pendingDirectories.Pop()
+            $entryErrors = $null
+            foreach ($entry in @(Microsoft.PowerShell.Management\Get-ChildItem `
+                    -LiteralPath $directory `
+                    -Force `
+                    -ErrorAction SilentlyContinue `
+                    -ErrorVariable entryErrors)) {
+                $collected.Add([string]$entry.FullName)
+                $isDirectory = ([int]$entry.Attributes -band [int][IO.FileAttributes]::Directory) -ne 0
+                $isReparse = ([int]$entry.Attributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0
+                if ($isDirectory -and -not $isReparse) {
+                    $pendingDirectories.Push([string]$entry.FullName)
+                }
+            }
+            foreach ($entryError in @($entryErrors)) {
+                if ($null -ne $entryError) {
+                    $listingErrors.Add($entryError)
+                }
+            }
+        }
         $leftovers = @(
-            @(Microsoft.PowerShell.Management\Get-ChildItem `
-                -LiteralPath $scheduleRoot `
-                -Recurse `
-                -Force `
-                -ErrorAction SilentlyContinue `
-                -ErrorVariable listingErrors |
-                Microsoft.PowerShell.Core\ForEach-Object { [string]$_.FullName } |
-                Microsoft.PowerShell.Utility\Sort-Object -Property Length -Descending) +
+            @($collected | Microsoft.PowerShell.Utility\Sort-Object -Property Length -Descending) +
             @($scheduleRoot)
         )
-        $listingComplete = (@($listingErrors).Count -eq 0)
+        $listingComplete = ($listingErrors.Count -eq 0)
         if (-not $listingComplete) {
             $detail += " (could not list every entry for restart deletion: $(@($listingErrors)[0]))"
         }
