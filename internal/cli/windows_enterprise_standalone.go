@@ -431,19 +431,46 @@ func windowsEnterpriseTimeoutPhases(stderr []byte) string {
 	return strings.Join(phases, " | ")
 }
 
+// windowsEnterpriseNoticePhase starts the stage of a phase line the lifecycle
+// log keeps wherever it falls in the run: the log keeps only the last 12
+// ordinary phase lines, so a notice an administrator must see (a Setup that
+// fell back to the File.Replace swap, rel-1-0-6:GAP-0369) was dropped when
+// it came early. At most windowsEnterpriseNoticePhaseLimit notices of at
+// most windowsEnterpriseNoticePhaseMaxLen bytes are kept, before the others.
+const (
+	windowsEnterpriseNoticePhase       = "notice: "
+	windowsEnterpriseNoticePhaseLimit  = 16
+	windowsEnterpriseNoticePhaseMaxLen = 512
+)
+
 func windowsEnterprisePhaseLines(stderr []byte) []string {
 	const prefix = "DC_LIFECYCLE_PHASE: "
-	var phases []string
+	var phases, notices []string
 	for _, line := range strings.Split(string(stderr), "\n") {
 		line = strings.TrimSuffix(line, "\r")
-		if strings.HasPrefix(line, prefix) && len(line) <= 160 {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		if windowsEnterpriseNoticePhaseLine(strings.TrimPrefix(line, prefix)) {
+			if len(line) <= windowsEnterpriseNoticePhaseMaxLen && len(notices) < windowsEnterpriseNoticePhaseLimit {
+				notices = append(notices, line)
+			}
+			continue
+		}
+		if len(line) <= 160 {
 			phases = append(phases, line)
 		}
 	}
 	if len(phases) > 12 {
 		phases = phases[len(phases)-12:]
 	}
-	return phases
+	return append(notices, phases...)
+}
+
+// windowsEnterpriseNoticePhaseLine reports a phase "<timestamp> notice: ...".
+func windowsEnterpriseNoticePhaseLine(phase string) bool {
+	_, stage, found := strings.Cut(phase, " ")
+	return found && strings.HasPrefix(stage, windowsEnterpriseNoticePhase)
 }
 
 // windowsEnterpriseForcedUninstallVariable carries --force (Setup /uninstall

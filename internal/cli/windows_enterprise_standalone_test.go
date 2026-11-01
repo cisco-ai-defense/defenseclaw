@@ -4153,3 +4153,38 @@ func TestWindowsEnterprisePurgeUserStateRemainingAfterTheManifestWentNamesTheFol
 		})
 	}
 }
+
+// rel-1-0-6:GAP-0369: a notice phase line (the hook-swap fallback) stays in
+// the lifecycle log diagnostics even when many ordinary phases follow it;
+// ordinary lines keep their last-12 window and 160-byte limit.
+func TestWindowsEnterprisePhaseLinesKeepNoticesWhereverTheyFall(t *testing.T) {
+	var stderr strings.Builder
+	stderr.WriteString("plain stderr line\n")
+	stderr.WriteString("DC_LIFECYCLE_PHASE: 2026-11-01T00:00:00Z notice: one-step swap refused for C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe (link:1); replacing it with File.Replace, so an agent starting it in that moment can get an error (GAP-0369)\r\n")
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&stderr, "DC_LIFECYCLE_PHASE: 2026-11-01T00:00:%02dZ native process wait %d\n", i, i)
+	}
+	stderr.WriteString("DC_LIFECYCLE_PHASE: 2026-11-01T00:01:00Z " + strings.Repeat("x", 200) + "\n")
+	lines := windowsEnterprisePhaseLines([]byte(stderr.String()))
+	if len(lines) != 13 {
+		t.Fatalf("got %d lines, want the notice and the last 12 ordinary ones: %q", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], "notice: one-step swap refused") || !strings.HasSuffix(lines[0], "(GAP-0369)") {
+		t.Fatalf("the notice was not kept first and whole: %q", lines[0])
+	}
+	if lines[1] != "DC_LIFECYCLE_PHASE: 2026-11-01T00:00:28Z native process wait 28" ||
+		lines[12] != "DC_LIFECYCLE_PHASE: 2026-11-01T00:00:39Z native process wait 39" {
+		t.Fatalf("ordinary window changed: %q", lines[1:])
+	}
+	var many strings.Builder
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&many, "DC_LIFECYCLE_PHASE: 2026-11-01T00:00:00Z notice: n%d\n", i)
+	}
+	many.WriteString("DC_LIFECYCLE_PHASE: 2026-11-01T00:00:00Z notice: " + strings.Repeat("y", 600) + "\n")
+	if got := windowsEnterprisePhaseLines([]byte(many.String())); len(got) != windowsEnterpriseNoticePhaseLimit {
+		t.Fatalf("kept %d notices, want the limit %d", len(got), windowsEnterpriseNoticePhaseLimit)
+	}
+	if windowsEnterpriseNoticePhaseLine("notice: without a timestamp") || !windowsEnterpriseNoticePhaseLine("2026-11-01T00:00:00Z notice: x") {
+		t.Fatal("notice detection reads the stage after the timestamp")
+	}
+}

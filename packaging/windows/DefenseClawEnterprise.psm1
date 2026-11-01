@@ -6915,8 +6915,10 @@ function Invoke-DefenseClawLaunchableFileSwap {
             ($stage -ceq 'link' -and $code -in @('1', '17', '50', '1142')) -or
             ($stage -ceq 'rename' -and $code -in @('1', '50', '87'))
         if ($refused) {
+            # "notice: " keeps the line in the lifecycle log wherever it
+            # falls in the run (windowsEnterpriseNoticePhase).
             Write-DefenseClawLifecyclePhase -Stage (
-                "one-step swap refused for $Destination ($result); replacing it with File.Replace, " +
+                "notice: one-step swap refused for $Destination ($result); replacing it with File.Replace, " +
                 'so an agent starting it in that moment can get an error (GAP-0369)')
             return $false
         }
