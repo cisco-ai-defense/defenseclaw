@@ -233,6 +233,10 @@ type GuardDecision struct {
 	// source the agent loaded may not have been checked. At a session start
 	// it blocks the session (ApplyForeignHookSession).
 	Incomplete bool `json:"incomplete,omitempty"`
+	// Outage is set only by the hook, never sent or decoded: the gateway
+	// is proven stopped and its clean-session entry vouches for this agent
+	// process, so the call is left to the managed outage fail mode.
+	Outage bool `json:"-"`
 }
 
 func (r GuardRequest) getenv(key string) string {

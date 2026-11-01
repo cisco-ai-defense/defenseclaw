@@ -105,6 +105,14 @@ func beginEnterpriseForeignHookRemovalMarked(ctx context.Context, stderr io.Writ
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: an online answer for %s did not finish within %s; going on, it is cut\n",
 			foreignGuardLogField(account, 256), enterprisepolicy.ForeignHookRemovalDrainWait)
 	}
+	// The gateway publishes the account's clean sessions under the same
+	// lock (enterprisepolicy.WriteForeignHookCleanMirrors). They go before
+	// the first record: a removal makes them stale, and the next allowed
+	// exchange writes them again. If they cannot be removed nothing changes.
+	if err := enterpriseForeignHookDropCleanMirrors(managed.ForeignHookCleanDir(cfg.DataDir), identity); err != nil {
+		release()
+		return nil, fmt.Errorf("remove the account's clean-session entries before the removal: %w", err)
+	}
 	tx := &enterpriseForeignHookRemovalTx{stderr: stderr, identity: identity, home: home, connector: connectorName, paths: limitEnterpriseForeignHookPaths(paths), release: release}
 	mark := firstMark
 	if mark == "" {
@@ -172,6 +180,12 @@ func (tx *enterpriseForeignHookRemovalTx) commit(removed []string) error {
 // before it.
 func (tx *enterpriseForeignHookRemovalTx) commitAt(mark string, removed []string) error {
 	defer tx.release()
+	// Again before the lock goes: an exchange cut by the drain may have
+	// written an entry after the first removal.
+	if dropErr := enterpriseForeignHookDropCleanMirrors(managed.ForeignHookCleanDir(cfg.DataDir), tx.identity); dropErr != nil {
+		fmt.Fprintf(tx.stderr, "defenseclaw: enterprise foreign-hook guard: remove the clean-session entries of %s after the %s hook removal: %v\n",
+			foreignGuardLogField(tx.identity, 256), tx.connector, dropErr)
+	}
 	_, err := tx.record(mark, "", tx.first)
 	if err != nil {
 		fmt.Fprintf(tx.stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s after it was made (the record made before it still denies): %v\n",
@@ -258,8 +272,9 @@ func writeEnterpriseForeignHookRemovalLedger(added, dropped []enterprisepolicy.F
 const enterpriseForeignHookLedgerLockWait = 30 * time.Second
 
 var (
-	enterpriseForeignHookLockAccount = enterprisepolicy.LockForeignHookAccountRemoval
-	enterpriseForeignHookLockLedger  = enterprisepolicy.LockForeignHookRemovalLedger
+	enterpriseForeignHookLockAccount      = enterprisepolicy.LockForeignHookAccountRemoval
+	enterpriseForeignHookLockLedger       = enterprisepolicy.LockForeignHookRemovalLedger
+	enterpriseForeignHookDropCleanMirrors = enterprisepolicy.DropForeignHookCleanMirrorsForAccount
 )
 
 func loadEnterpriseForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {
