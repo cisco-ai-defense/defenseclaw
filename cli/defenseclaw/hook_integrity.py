@@ -1335,7 +1335,10 @@ def _claude_hook_shell_env_problem(
             "session of this account fails closed until it is removed (a session that applies the value may still "
             "start no hook)"
         )
-        repair = f"remove {listed} from that env block, or use the default policy tier, which only warns; then run: defenseclaw-gateway restart"
+        repair = (
+            f"remove {listed} from that env block, or use the default policy tier, which only warns; "
+            "then run: defenseclaw-gateway restart"
+        )
     else:
         if unchecked_folder:
             text += (
@@ -1349,7 +1352,8 @@ def _claude_hook_shell_env_problem(
 def _claude_strict_hook_shell_env_problem(cfg: Any, workspace_dir: str | None) -> HookProblem | None:
     """The strict refusal for the sources the gateway checks, or None."""
 
-    names, sources = claude_settings_hook_shell_env(cfg, workspace_dir if workspace_dir is not None else pinned_workspace_dir(cfg))
+    folder = workspace_dir if workspace_dir is not None else pinned_workspace_dir(cfg)
+    names, sources = claude_settings_hook_shell_env(cfg, folder)
     return _claude_hook_shell_env_problem(names, sources, strict=True) if names else None
 
 
@@ -1457,7 +1461,9 @@ def _root_only_path(path: str, hops: int) -> str | None:
 _INHERITED_RISK = {
     "SHELLOPTS": "SHELLOPTS with noexec (the shell that starts the hook command runs none of it)",
     "BASH_ENV": "BASH_ENV (the agent starts its hook commands through bash, which runs that file first)",
-    "CLAUDE_CODE_SHELL_PREFIX": "CLAUDE_CODE_SHELL_PREFIX (Claude Code runs that program in place of each hook command)",
+    "CLAUDE_CODE_SHELL_PREFIX": (
+        "CLAUDE_CODE_SHELL_PREFIX (Claude Code runs that program in place of each hook command)"
+    ),
 }
 
 
@@ -1491,7 +1497,9 @@ def agent_hook_env_warnings(
         folder = workspace_dir if workspace_dir is not None else (pinned or os.getcwd())
         unchecked = "" if (workspace_dir is not None or pinned) else folder
         for _source, env in _claude_env_blocks(cfg, folder):
-            settings_names.update(key for key, value in env.items() if isinstance(key, str) and _claude_keeps_env_value(value))
+            settings_names.update(
+                key for key, value in env.items() if isinstance(key, str) and _claude_keeps_env_value(value)
+            )
         names, sources = claude_settings_hook_shell_env(cfg, folder)
         if names and not _strict_policy_tier(cfg, connector):
             warnings.append(_claude_hook_shell_env_problem(names, sources, strict=False, unchecked_folder=unchecked))
