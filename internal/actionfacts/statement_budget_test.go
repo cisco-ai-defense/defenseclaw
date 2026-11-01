@@ -86,7 +86,33 @@ func TestPowerShellStatementsOverBudget(t *testing.T) {
 		{"background chain after a less-than", strings.Repeat("Write-Output a< & ", 200) + "Remove-Item -Recurse -Force x", true},
 		{"background chain after a greater-than", strings.Repeat("Write-Output a> & ", 200) + "Remove-Item -Recurse -Force x", true},
 		{"background chain after a block comment", strings.Repeat("Get-Date <#c#> & ", 200) + "Remove-Item -Recurse -Force x", true},
-		{"call operator after a comma", "$a = @(" + strings.Repeat("& git status, ", 200) + "1)", false},
+		// A comma before & is a PowerShell parse error in every mode
+		// (MissingExpression), so the & never makes a call there and the
+		// count goes on (rel-1-0-6:GAP-0412).
+		{"comma before an & in an array", "$a = @(" + strings.Repeat("& git status, ", 200) + "1)", true},
+		{"comma at the end of a bare word", strings.Repeat("Write-Output a, & ", 200) + "Remove-Item -Recurse -Force x", true},
+		// rel-1-0-6:GAP-0412: an = in or at the end of a bare word is part of
+		// the argument in command mode, so the & after it is the background
+		// operator (PowerShell 7.6 parses each of these as one statement per
+		// command).
+		{"background chain after key=", strings.Repeat("Write-Output key= & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after key=, 3000", strings.Repeat("Write-Output key= & ", 3000) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after a base64 ==", strings.Repeat("Write-Output YWJjZA== & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after a base64 ==, 3000", strings.Repeat("Write-Output YWJjZA== & ", 3000) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after key= and a block comment", strings.Repeat("Write-Output key= <#c#> & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after == and a block comment, 3000", strings.Repeat("Write-Output YWJjZA== <#c#> & ", 3000) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after a lone = argument", strings.Repeat("Write-Output = & ", 200) + "Remove-Item -Recurse -Force x", true},
+		{"background chain after key= in an assigned command", strings.Repeat("$x = Write-Output key= & ", 200) + "Remove-Item -Recurse -Force x", true},
+		// Assignment operators: the & after them is the call operator.
+		{"call operator after =, no blank", strings.ReplaceAll(statements(70, "$o%d=& git rev-parse HEAD"), "; ", "\n"), false},
+		{"call operator after +=", strings.ReplaceAll(statements(70, "$o%d += & git rev-parse HEAD"), "; ", "\n"), false},
+		{"call operator after an index", strings.ReplaceAll(statements(70, "$a[%d]= & git rev-parse HEAD"), "; ", "\n"), false},
+		{"call operator after a braced variable", strings.ReplaceAll(statements(70, "${o%d}= & git rev-parse HEAD"), "; ", "\n"), false},
+		{"call operator after a typed variable", strings.ReplaceAll(statements(70, "[string]$o%d = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"call operator after a scoped variable", strings.ReplaceAll(statements(70, "$env:O%d = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"call operator after a property", strings.ReplaceAll(statements(70, "$o.p%d = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"call operator after ??=", strings.ReplaceAll(statements(70, "$o%d ??= & git rev-parse HEAD"), "; ", "\n"), false},
+		{"call operator in a hashtable value", strings.ReplaceAll(statements(70, "$h%d = @{ a = & git rev-parse HEAD }"), "; ", "\n"), false},
 		{"call operator after an assignment and a block comment", strings.ReplaceAll(statements(70, "$o%d = <#c#> & git rev-parse HEAD"), "; ", "\n"), false},
 		// Block comments are not statements (item 5c).
 		{"block comments ending each line", strings.ReplaceAll(statements(200, "Write-Output %d <# , #>"), "; ", "\n"), true},

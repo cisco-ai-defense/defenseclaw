@@ -306,6 +306,12 @@ func TestGAP0331PowerShellPrefixDoesNotHideTheBudget(t *testing.T) {
 				{prefix + strings.Repeat("Write-Output a< & ", 200) + "Remove-Item -Recurse -Force " + home, true},
 				{prefix + strings.Repeat("Write-Output a> & ", 200) + "Remove-Item -Recurse -Force " + home, true},
 				{prefix + strings.Repeat("Get-Date <#c#> & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
+				// rel-1-0-6:GAP-0412: an = or a base64 == at the end of a
+				// bare word, with and without a block comment.
+				{prefix + strings.Repeat("Write-Output key= & ", 200) + "Remove-Item -Recurse -Force " + home, true},
+				{prefix + strings.Repeat("Write-Output YWJjZA== & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
+				{prefix + strings.Repeat("Write-Output key= <#c#> & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
+				{prefix + strings.Repeat("Write-Output YWJjZA== <#c#> & ", 200) + "Remove-Item -Recurse -Force " + home, true},
 				// Review r3 finding 1: lines that end in a comment ending
 				// in a comma, at 200 and 3000 statements (past 64 KiB).
 				{prefix + strings.ReplaceAll(statements(200), "; ", " # note,\n") + "\nRemove-Item -Recurse -Force " + home, true},
@@ -366,6 +372,19 @@ func TestGAP0331PowerShellReadingRoutes(t *testing.T) {
 		block         bool
 	}{
 		{"assigned call operator, 70 lines", lines(70, "$o%d = & git rev-parse HEAD"), false},
+		{"assigned call operator, no blank, 70 lines", lines(70, "$o%d=& git rev-parse HEAD"), false},
+		{"assigned call operator after a block comment, 70 lines", lines(70, "$o%d = <#c#> & git rev-parse HEAD"), false},
+		// rel-1-0-6:GAP-0412: = and == ending a bare word, with and
+		// without a block comment, at 200 and 3000 statements with a
+		// destructive tail: refused in all 12 cells.
+		{"key= background chain, 200", strings.Repeat("Write-Output key= & ", 200) + "Remove-Item -Recurse -Force " + home, true},
+		{"key= background chain, 3000", strings.Repeat("Write-Output key= & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
+		{"== background chain, 200", strings.Repeat("Write-Output YWJjZA== & ", 200) + "Remove-Item -Recurse -Force " + home, true},
+		{"== background chain, 3000", strings.Repeat("Write-Output YWJjZA== & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
+		{"key= block comment background chain, 200", strings.Repeat("Write-Output key= <#c#> & ", 200) + "Remove-Item -Recurse -Force " + home, true},
+		{"key= block comment background chain, 3000", strings.Repeat("Write-Output key= <#c#> & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
+		{"== block comment background chain, 200", strings.Repeat("Write-Output YWJjZA== <#c#> & ", 200) + "Remove-Item -Recurse -Force " + home, true},
+		{"== block comment background chain, 3000", strings.Repeat("Write-Output YWJjZA== <#c#> & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
 		{"block comments, 5 lines", lines(5, "Write-Output %d <# , #>"), false},
 		{"block comments, 5 lines, destructive tail", lines(5, "Write-Output %d <# , #>") + "\nRemove-Item -Recurse -Force " + home, true},
 		{"block comments, 200 lines, destructive tail", lines(200, "Write-Output %d <# , #>") + "\nRemove-Item -Recurse -Force " + home, true},
