@@ -152,11 +152,24 @@ func TestComposeBindsTheAccountJoinSecrets(t *testing.T) {
 	if len(want) != 0 {
 		t.Fatalf("secret_refs %+v lack %v", m.SecretRefs, want)
 	}
-	// The written bundle holds no form of either secret.
-	b.Manifest = raw
+	// The written bundle holds no form of either secret: the archive is
+	// read back, and the manifest and every file are searched uncompressed.
+	b.Manifest, b.Signature = raw, []byte(`{"s":1}`)
 	var archive bytes.Buffer
 	if err := enterprisebundle.WriteArchive(&archive, b); err != nil {
 		t.Fatal(err)
+	}
+	back, err := enterprisebundle.ReadArchive(bytes.NewReader(archive.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := [][]byte{back.Manifest, back.Signature}
+	for _, data := range back.Files {
+		contents = append(contents, data)
+	}
+	written := bytes.Join(contents, []byte{0})
+	if !bytes.Contains(written, []byte(joinDigest(testJoinSecret))) {
+		t.Fatal("the search reads the wrong bytes: the config's secret_sha256 is not in them")
 	}
 	for _, secret := range []string{testJoinSecret, testJoinNextSecret} {
 		decoded, err := base64.RawURLEncoding.DecodeString(secret)
@@ -164,7 +177,7 @@ func TestComposeBindsTheAccountJoinSecrets(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, form := range []string{secret, hex.EncodeToString(decoded), base64.StdEncoding.EncodeToString(decoded), base64.RawStdEncoding.EncodeToString(decoded), string(decoded)} {
-			if bytes.Contains(archive.Bytes(), []byte(form)) {
+			if bytes.Contains(written, []byte(form)) {
 				t.Fatalf("the signed bundle holds a form of a tenant secret (%d bytes)", len(form))
 			}
 		}
@@ -227,6 +240,10 @@ func TestAccountJoinCredentials(t *testing.T) {
 		{"config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 1\n", accountjoin.SecretName},
 		{"config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 1\n    next_generation: 2\n", accountjoin.SecretName + "," + accountjoin.NextSecretName},
 		{"config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 1\n    next_generation: 0\n", accountjoin.SecretName},
+		// A form the lookup cannot read as zero needs the next secret.
+		{"config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 1\n    next_generation: 0x2\n", accountjoin.SecretName + "," + accountjoin.NextSecretName},
+		{"config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 1\n    next_generation: two\n", accountjoin.SecretName + "," + accountjoin.NextSecretName},
+		{"config_version: 9\nenterprise:\n  account_join:\n    mode: on\n    generation: 1\n    next_generation: null\n", accountjoin.SecretName},
 	} {
 		names, err := enterprisebundle.AccountJoinCredentials([]byte(tc.config))
 		if err != nil || strings.Join(names, ",") != tc.want {

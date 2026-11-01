@@ -351,7 +351,7 @@ func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest
 		reasons = append(reasons, ReasonGenerationInvalid)
 	case g.Current < g.Highest:
 		reasons = append(reasons, ReasonGenerationRollback)
-	case !valueMatches(g.CurrentSecret, g.CurrentSHA256):
+	case !ValueMatches(g.CurrentSecret, g.CurrentSHA256):
 		reasons = append(reasons, ReasonSecretMismatch)
 	default:
 		secret, err := ParseSecret(g.CurrentSecret)
@@ -370,7 +370,7 @@ func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest
 			reasons = append(reasons, ReasonGenerationInvalid)
 		case !now.Before(g.NextNotAfter):
 			reasons = append(reasons, ReasonNextGenerationExpired)
-		case !valueMatches(g.NextSecret, g.NextSHA256):
+		case !ValueMatches(g.NextSecret, g.NextSHA256):
 			reasons = append(reasons, ReasonSecretMismatch)
 		default:
 			secret, err := ParseSecret(g.NextSecret)
@@ -386,11 +386,7 @@ func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest
 
 // ValueMatches reports whether a secret value (as stored, one line) has the
 // SHA-256 the config signs (lowercase hex).
-func ValueMatches(value []byte, want string) bool { return valueMatches(value, want) }
-
-// valueMatches reports whether the stored value (as stored, one line) has
-// the signed SHA-256 (lowercase hex).
-func valueMatches(value []byte, want string) bool {
+func ValueMatches(value []byte, want string) bool {
 	sum := sha256.Sum256([]byte(strings.TrimRight(string(value), "\r\n")))
 	return want != "" && hmac.Equal([]byte(hex.EncodeToString(sum[:])), []byte(strings.ToLower(strings.TrimSpace(want))))
 }

@@ -102,13 +102,18 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 		}
 		refs = append(refs, SecretRef{Ref: SecretRefScheme + name, ValueSHA256: CredentialValueSHA256(in.TenantID, name, value)})
 	}
-	if err := checkAccountJoinSecretValues(cfg.Enterprise.AccountJoin, in.SecretValues); err != nil {
-		return nil, nil, err
-	}
 	for name := range in.SecretValues {
 		if !slices.Contains(names, name) && !slices.Contains(joinNames, name) {
 			return nil, nil, refuse(CodeManifestInvalid, "secret_refs", "a value is given for the credential %s, which config.yaml does not reference", safePath(name))
 		}
+	}
+	if join := cfg.Enterprise.AccountJoin; join.On() && join.NextGeneration != 0 && !slices.Contains(joinNames, accountjoin.NextSecretName) {
+		// The loaded config and AccountJoinCredentials must agree on the
+		// rotation, or the next secret would go unbound.
+		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "enterprise.account_join.next_generation is not a plain decimal number")
+	}
+	if err := checkAccountJoinSecretValues(cfg.Enterprise.AccountJoin, in.SecretValues); err != nil {
+		return nil, nil, err
 	}
 	ruleWarnings, _, err := RuleNotBlockingWarnings(cfg)
 	if err != nil {

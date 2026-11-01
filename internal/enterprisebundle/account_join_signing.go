@@ -66,8 +66,11 @@ func AccountJoinCredentials(raw []byte) ([]string, error) {
 		return nil, nil
 	}
 	names := []string{accountjoin.SecretName}
-	if next := mappingChild(block, "next_generation"); next != nil && next.Kind == yaml.ScalarNode {
-		if n, err := strconv.Atoi(strings.TrimSpace(next.Value)); err == nil && n != 0 {
+	// Any next_generation but a zero or null one needs the next secret: a
+	// value this lookup cannot read (0x2, 1_0, a sequence) fails closed.
+	if next := mappingChild(block, "next_generation"); next != nil && next.Tag != "!!null" {
+		value := strings.TrimSpace(next.Value)
+		if n, err := strconv.ParseInt(strings.ReplaceAll(value, "_", ""), 0, 64); next.Kind != yaml.ScalarNode || err != nil || n != 0 {
 			names = append(names, accountjoin.NextSecretName)
 		}
 	}

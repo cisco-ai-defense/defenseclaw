@@ -57,7 +57,7 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise account-keys
   "reason_codes": ["no_directory_id"]}}
 ```
 
-- Keys are computed when the command runs. They are not stored, logged, exported to telemetry, written to bundle receipts or shown to users. The process that reads the secret turns off its own crash dumps first (no core file on Linux and macOS, not dumpable on Linux, no heap in a Windows Error Reporting report); a dump an administrator configures for every process is inside the trust boundary. Send them only on your fleet service's channel; do not print them in MDM script output.
+- Keys are computed when the command runs. They are not stored, logged, exported to telemetry, written to bundle receipts or shown to users. The process that computes the keys turns off its own crash dumps before it reads the secret (no core file on Linux and macOS, not dumpable on Linux, no heap in a Windows Error Reporting report). A dump an administrator configures for every process (Windows `LocalDumps`, Linux `suid_dumpable` 2) is inside the trust boundary. Send them only on your fleet service's channel; do not print them in MDM script output.
 - `enterprise status --json` and `enterprise verify --json` (as root or an administrator) carry only a summary: `state`, `key_count` per generation, `accounts_without_key` and `reason_codes`. They never carry a key, so MDM logs of status hold none.
 - The accounts are the enrolled accounts the hook guardian resolved and saw in the last 30 days, at most 64 per device (the most recently seen).
 - A standard user gets no keys and no summary.
