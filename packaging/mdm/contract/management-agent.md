@@ -897,8 +897,10 @@ exit code; a block whose input could not be read leaves out the members that
 input feeds and adds the warning `status_detail_unavailable`.
 
 - `connectors`: one entry per connector id (`codex`, `claudecode`, ...) the
-  installed config enables, or that still has guardian targets or
-  unprotected installs. `enabled`; `detected` (the enumerator found the
+  installed config enables or turns off with `enabled: false`, or that still
+  has guardian targets or unprotected installs. `enabled` (`false` for a
+  connector the config turns off: DefenseClaw removed its hooks and does not
+  inspect it); `detected` (the enumerator found the
   agent for at least one eligible account; absent when not enabled or the
   enumerator has not run); `versions` (distinct agent versions, at most 8;
   a string that is not a plain version is not shown);

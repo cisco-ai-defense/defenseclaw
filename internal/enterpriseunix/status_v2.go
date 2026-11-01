@@ -85,6 +85,7 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 	if cfg != nil {
 		in.ConfigLoaded = true
 		in.Enabled = enterprisehooks.EffectiveUnixHookConnectors(cfg, registry)
+		in.Disabled = cfg.Guardrail.DisabledConnectors()
 		in.Mode = cfg.EffectiveGuardrailModeForConnector
 	}
 	switch manifest, err := enterprisehooks.LoadStandaloneManifest(env.P(env.Layout.ManifestPath)); {

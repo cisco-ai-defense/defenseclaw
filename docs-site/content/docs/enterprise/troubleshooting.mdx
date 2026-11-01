@@ -515,6 +515,8 @@ Hook refusals show a stable code in the agent's output. Look it up in the [hook 
 
 Its connector is not a key under `guardrail.connectors`, or its entry has `enabled: false`. With no agent enabled, `status` warns `no_connectors_enabled` and `verify` fails.
 
+An entry with `enabled: false` turns the agent off for DefenseClaw. `ensure` removes DefenseClaw's hooks and machine policy for it (an administrator's own lines in the vendor file stay), and the agent's calls are not inspected or blocked. A session that started before the change and still runs the hook gets an allow, not a refusal. `status` lists the agent as disabled on its `connectors:` line, and in `--json` as `"enabled": false` under `connectors`.
+
 **Fix.** Enable the connector under `guardrail.connectors` and apply the config ([Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)).
 
 **Check.** `verify` passes.

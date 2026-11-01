@@ -4000,7 +4000,7 @@ func (a *APIServer) agentHookEnabled(ctx context.Context, name string) bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if cfg.ManualConnectorConfigured(name) && !cfg.Guardrail.EffectiveEnabled(name) {
+	if cfg.ConnectorDisabled(name) {
 		return false
 	}
 	if cfg.ConnectorHookConfig(name).Enabled {

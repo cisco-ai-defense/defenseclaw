@@ -163,6 +163,7 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 	case in.configErr == nil && cfg != nil:
 		inputs.ConfigLoaded = true
 		inputs.Enabled = enterprisehooks.EffectiveWindowsStandaloneHookConnectors(cfg)
+		inputs.Disabled = cfg.Guardrail.DisabledConnectors()
 		inputs.Mode = cfg.EffectiveGuardrailModeForConnector
 	case publish && !errors.Is(in.configErr, os.ErrNotExist):
 		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, "connectors: the installed config could not be loaded, "+

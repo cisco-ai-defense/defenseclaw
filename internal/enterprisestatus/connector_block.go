@@ -112,6 +112,11 @@ type ConnectorInputs struct {
 	ConfigLoaded bool
 	Enabled      []string
 	Mode         func(connector string) string
+	// Disabled are the connectors the config names with enabled: false
+	// (config.GuardrailConfig.DisabledConnectors). Each gets an entry with
+	// enabled false, so status says the administrator turned it off rather
+	// than leaving it out (rel-1-0-6:GAP-0325).
+	Disabled []string
 	// ManifestRead says the enumerator's manifest was read; Manifest are
 	// its targets.
 	ManifestRead bool
@@ -173,6 +178,13 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 	listed := map[string]bool{}
 	for name := range enabled {
 		listed[name] = true
+	}
+	if in.ConfigLoaded {
+		for _, name := range in.Disabled {
+			if name, ok := id(name); ok && !enabled[name] {
+				listed[name] = true
+			}
+		}
 	}
 	detected := map[string]bool{}
 	// rowed are the connectors with a manifest target.
@@ -294,6 +306,37 @@ func BuildConnectors(in ConnectorInputs, failMode func(connector string) string)
 		block[name] = state
 	}
 	return block, hidden
+}
+
+// ConnectorsLine is the text status line of the connectors block: each
+// connector, sorted, enabled or disabled. A connector the administrator's
+// config turns off is named as disabled, so status says DefenseClaw does not
+// inspect it instead of leaving it out (rel-1-0-6:GAP-0325). Empty without a
+// block.
+func ConnectorsLine(block map[string]ConnectorState) string {
+	if len(block) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(block))
+	for name := range block {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	off := false
+	for _, name := range names {
+		if block[name].Enabled {
+			parts = append(parts, name+" enabled")
+			continue
+		}
+		parts = append(parts, name+" disabled")
+		off = true
+	}
+	line := "connectors: " + strings.Join(parts, ", ")
+	if off {
+		line += " (DefenseClaw does not inspect a disabled connector on this computer)"
+	}
+	return line
 }
 
 // effective is a connector's effective_mode and effective_hook_fail_mode;

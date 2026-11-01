@@ -300,6 +300,36 @@ func (c *Config) ManualConnectorConfigured(connector string) bool {
 	return c.manualConnectorConfigured(connector)
 }
 
+// ConnectorDisabled reports whether the manual setup control plane names
+// connector and guardrail.connectors.<name>.enabled: false turns it off. The
+// hook gates answer such a connector allow without a scan, the standalone
+// lifecycle removes its hooks and machine policy, and the managed hook
+// socket lets a call of it through to that answer instead of refusing it as
+// an unenrolled account (rel-1-0-6:GAP-0325).
+func (c *Config) ConnectorDisabled(connector string) bool {
+	return c != nil && c.manualConnectorConfigured(connector) && !c.Guardrail.EffectiveEnabled(connector)
+}
+
+// DisabledConnectors lists the guardrail.connectors entries that enabled:
+// false turns off, by their canonical names, sorted.
+func (g *GuardrailConfig) DisabledConnectors() []string {
+	if g == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for name, pc := range g.Connectors {
+		key := normalizeConnectorKey(name)
+		if key == "" || seen[key] || pc.Enabled == nil || *pc.Enabled {
+			continue
+		}
+		seen[key] = true
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (c *Config) appProtectionGuardrailOverride(connector string) (PerConnectorGuardrailConfig, bool) {
 	if c == nil || !c.ApplicationProtection.Enabled || c.manualConnectorConfigured(connector) {
 		return PerConnectorGuardrailConfig{}, false

@@ -3021,6 +3021,9 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	if result.Action == "status" || result.Action == "verify" {
 		writeWindowsEnterpriseEnrollmentAccounts(output, result.Enrollment.Accounts)
 		writeWindowsEnterpriseEnrollmentExclusions(output, result.Enrollment)
+		if line := enterprisestatus.ConnectorsLine(result.Connectors); line != "" {
+			fmt.Fprintf(output, "  %s\n", line)
+		}
 	}
 	writeWindowsEnterpriseScanners(output, result.Scanners)
 	if result.Policy != nil {
