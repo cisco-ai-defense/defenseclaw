@@ -832,19 +832,16 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("gateway restart listener: %w", err)
 	}
 
-	running, pid, err := inspectRestartTarget(d, cfg, client)
-	if err != nil {
-		return err
-	}
-	if running {
+	running, pid, err := stopRestartTarget(d, cfg, client, defaultStopTimeout, func(pid int) {
 		// Stop the watchdog only after proving the configured listener belongs to
 		// this managed instance; a foreign collision must have no side effects.
 		_ = stopWatchdogForGateway()
 		fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
-		if err := stopGatewayGracefully(d, cfg, defaultStopTimeout); err != nil {
-			fmt.Println(Style("FAILED", "fg=red", "bold"))
-			return fmt.Errorf("stop for restart: %w", err)
-		}
+	})
+	if err != nil {
+		return err
+	}
+	if running {
 		fmt.Println(Style("OK", "fg=green", "bold"))
 	}
 	if err := waitForConfiguredPortFree(cfg, pid, restartPortReleaseTimeout, restartPortReleaseInterval); err != nil {
@@ -917,17 +914,62 @@ type gracefulGatewayStopper interface {
 	StopGracefully(time.Duration, daemon.GracefulStopRequest) error
 }
 
+// restartTargetDaemon is the daemon restart inspects and stops.
+type restartTargetDaemon interface {
+	daemonState
+	gracefulGatewayStopper
+}
+
+// stopRestartTarget is restart's first half: it inspects the gateway restart
+// would replace (inspectRestartTarget) and, when one runs, calls beforeStop and
+// stops it as the runtime of the data directory it runs on, which after
+// `defenseclaw config set data_dir` is the folder it started with, not the
+// configured one (rel-1-0-6 GAP-0323). A stop failure is printed FAILED.
+func stopRestartTarget(d restartTargetDaemon, cfg *config.Config, client *http.Client, timeout time.Duration, beforeStop func(pid int)) (bool, int, error) {
+	running, pid, runningDataDir, err := inspectRestartTarget(d, cfg, client)
+	if err != nil || !running {
+		return running, pid, err
+	}
+	if beforeStop != nil {
+		beforeStop(pid)
+	}
+	if err := stopGatewayGracefullyOnDataDir(d, cfg, runningDataDir, timeout); err != nil {
+		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		return running, pid, fmt.Errorf("stop for restart: %w", err)
+	}
+	return running, pid, nil
+}
+
 func stopGatewayGracefully(d gracefulGatewayStopper, cfg *config.Config, timeout time.Duration) error {
+	dataDir := ""
+	if cfg != nil {
+		dataDir = cfg.DataDir
+	}
+	return stopGatewayGracefullyOnDataDir(d, cfg, dataDir, timeout)
+}
+
+// stopGatewayGracefullyOnDataDir asks the gateway to shut down as the runtime
+// of dataDir: the data directory it runs on, which differs from cfg's after a
+// data_dir change (inspectRestartTarget, GAP-0323).
+func stopGatewayGracefullyOnDataDir(d gracefulGatewayStopper, cfg *config.Config, dataDir string, timeout time.Duration) error {
 	client, err := gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), gracefulShutdownHTTPTimeout)
 	if err != nil {
 		return fmt.Errorf("gateway shutdown listener: %w", err)
 	}
 	return d.StopGracefully(timeout, func(pid int) error {
-		return requestGatewayShutdown(client, cfg, daemonGatewayToken(cfg), pid)
+		return requestGatewayShutdownOnDataDir(client, cfg, daemonGatewayToken(cfg), pid, dataDir)
 	})
 }
 
 func requestGatewayShutdown(client *http.Client, cfg *config.Config, token string, pid int) error {
+	dataDir := ""
+	if cfg != nil {
+		dataDir = cfg.DataDir
+	}
+	return requestGatewayShutdownOnDataDir(client, cfg, token, pid, dataDir)
+}
+
+func requestGatewayShutdownOnDataDir(client *http.Client, cfg *config.Config, token string, pid int, dataDir string) error {
 	if cfg == nil {
 		return errors.New("gateway shutdown configuration is unavailable")
 	}
@@ -957,7 +999,7 @@ func requestGatewayShutdown(client *http.Client, cfg *config.Config, token strin
 	}
 	body, err := json.Marshal(map[string]interface{}{
 		"pid":      pid,
-		"data_dir": cfg.DataDir,
+		"data_dir": dataDir,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal gateway shutdown request: %w", err)
@@ -1520,12 +1562,25 @@ func daemonDotenvValue(env map[string]string, key string) string {
 // port changed while this account's gateway ran on the old one, restart stops
 // that gateway (stop verifies its own PID record) and starts it on the new
 // port, instead of failing and leaving it on the old port (GAP-1573).
-func inspectRestartTarget(d daemonState, cfg *config.Config, client *http.Client) (bool, int, error) {
+//
+// The last result is the data directory the running gateway runs on. After
+// `defenseclaw config set data_dir` it is still the one the gateway started
+// with; Windows checks the listener's identity and refused the restart
+// ("gateway identity mismatch"), leaving the old gateway running
+// (rel-1-0-6 GAP-0323). Restart now stops it when its authenticated status
+// names the managed PID and the runtime record in the data directory it
+// reports (gateway-api.json) is private and names that PID too, then starts
+// the gateway on the new data_dir.
+func inspectRestartTarget(d daemonState, cfg *config.Config, client *http.Client) (bool, int, string, error) {
 	running, pid, err := inspectConfiguredListener(d, cfg, client)
 	if errors.Is(err, errManagedGatewayOffConfiguredPort) {
-		return true, pid, nil
+		return true, pid, cfg.DataDir, nil
 	}
-	return running, pid, err
+	var moved *gatewayDataDirMismatchError
+	if errors.As(err, &moved) && gatewayRuntimeRecordNamesPID(moved.runtimeDataDir, moved.pid) {
+		return true, moved.pid, filepath.Clean(moved.runtimeDataDir), nil
+	}
+	return running, pid, cfg.DataDir, err
 }
 
 func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.Client) (bool, int, error) {
@@ -1761,9 +1816,49 @@ func verifyGatewayRuntimeIdentity(status gatewayStatusEnvelope, expectedPID int,
 		return fmt.Errorf("%w: authenticated runtime PID %d does not match managed PID %d", errGatewayIdentityMismatch, status.Runtime.PID, expectedPID)
 	}
 	if !sameGatewayDataDir(status.Runtime.DataDir, expectedDataDir) {
-		return fmt.Errorf("%w: authenticated runtime data directory does not match this configuration", errGatewayIdentityMismatch)
+		return &gatewayDataDirMismatchError{pid: expectedPID, runtimeDataDir: status.Runtime.DataDir}
 	}
 	return nil
+}
+
+// gatewayDataDirMismatchError is the identity mismatch of this account's
+// authenticated gateway (its PID is the managed one) that runs on another
+// data directory than the configuration names: runtimeDataDir, as its
+// authenticated status reports it.
+type gatewayDataDirMismatchError struct {
+	pid            int
+	runtimeDataDir string
+}
+
+func (e *gatewayDataDirMismatchError) Error() string {
+	return errGatewayIdentityMismatch.Error() + ": authenticated runtime data directory does not match this configuration"
+}
+
+func (e *gatewayDataDirMismatchError) Unwrap() error { return errGatewayIdentityMismatch }
+
+// gatewayRuntimeRecordNamesPID reports whether dataDir holds the runtime
+// record a gateway publishes in its own data directory (gateway-api.json,
+// recordRuntimeAPIAddress) for pid: a private regular file (0600 on POSIX,
+// an owner-only protected DACL on Windows, no link) whose pid is pid.
+// Restart reads it to stop this account's gateway that still runs on the
+// data_dir it started with after `defenseclaw config set data_dir`
+// (rel-1-0-6 GAP-0323).
+func gatewayRuntimeRecordNamesPID(dataDir string, pid int) bool {
+	if pid <= 0 || !filepath.IsAbs(dataDir) {
+		return false
+	}
+	record := filepath.Join(filepath.Clean(dataDir), "gateway-api.json")
+	if err := safefile.ValidatePrivateFile(record); err != nil {
+		return false
+	}
+	raw, err := safefile.ReadRegularFileBounded(record, 4<<10)
+	if err != nil {
+		return false
+	}
+	var published struct {
+		PID int `json:"pid"`
+	}
+	return json.Unmarshal(raw, &published) == nil && published.PID == pid
 }
 
 func sameGatewayDataDir(left, right string) bool {
