@@ -10,8 +10,8 @@
 # degraded reconcile as long as its activation identity matches, and log each
 # failed target. An incomplete reconcile, a report with no state, or a live
 # verify failure on a target the Guardian reported healthy stays rejected, as
-# does any authorization error other than the incomplete-authorization count
-# that matches the Guardian's failed targets.
+# does any authorization error other than an incomplete-authorization count
+# within the Guardian's failed plus pending targets (with at least one failed).
 # The helpers are loaded from the module by AST.
 
 Set-StrictMode -Version Latest
@@ -41,6 +41,7 @@ foreach ($name in @(
         'Get-DefenseClawGuardianGeneration',
         'Get-DefenseClawGuardianReadinessProbe',
         'Get-DefenseClawGuardianFailedTargets',
+        'Get-DefenseClawGuardianPendingTargets',
         'Write-DefenseClawGuardianDegradedTargets',
         'Get-DefenseClawVerifyFailedTargetKeys'
     )) {
@@ -159,7 +160,7 @@ if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets 
 # runEnterpriseHooksVerify encodes it: the reconcile wrote an ok=false
 # authorization (1 succeeded, 1 pending, 1 failed of 3), which verify reports
 # as authorization_error, and the failed target is outside the protected set.
-function New-VerifyOutput([string]$AuthorizationError, [bool]$CodexOK = $true) {
+function New-VerifyOutput([string]$AuthorizationError, [bool]$CodexOK = $true, [bool]$CursorOK = $true) {
     $codex = [ordered]@{
         user = 'dana'; user_home = 'C:\Users\dana'; sid = 'S-1-5-21-1-2-3-1001'
         connector = 'codex'; ok = $CodexOK
@@ -179,10 +180,18 @@ function New-VerifyOutput([string]$AuthorizationError, [bool]$CodexOK = $true) {
                 error = 'protected authorization does not cover target'
             },
             $codex,
-            [ordered]@{
-                user = 'finn'; user_home = 'C:\Users\finn'; sid = 'S-1-5-21-1-2-3-1002'
-                connector = 'cursor'; ok = $true
-            }
+            $(if ($CursorOK) {
+                [ordered]@{
+                    user = 'finn'; user_home = 'C:\Users\finn'; sid = 'S-1-5-21-1-2-3-1002'
+                    connector = 'cursor'; ok = $true
+                }
+            } else {
+                [ordered]@{
+                    user = 'finn'; user_home = 'C:\Users\finn'; sid = 'S-1-5-21-1-2-3-1002'
+                    connector = 'cursor'; ok = $false
+                    error = 'protected authorization does not cover target'
+                }
+            })
         )
     }
     return @($payload | ConvertTo-Json -Depth 6 -Compress)
@@ -198,7 +207,7 @@ if (@($script:Events).Count -ne 1) {
 }
 foreach ($case in @(
         @{ error = 'protected hook guardian authorization is not fresh: updated_at is too old'; label = 'an unrelated authorization error' },
-        @{ error = 'protected hook guardian authorization is incomplete (0 succeeded, 1 pending, 3 total)'; label = 'an incomplete authorization with more failures than the Guardian reported' },
+        @{ error = 'protected hook guardian authorization is incomplete (0 succeeded, 0 pending, 3 total)'; label = 'an incomplete authorization with more failures than the Guardian failed and pending targets' },
         @{ error = "$degradedAuthorization; protected enrollment set is not exact: extra enrollment"; label = 'a compound authorization error' },
         @{ error = 'denied'; label = 'a protected-authorization failure' }
     )) {
@@ -207,6 +216,33 @@ foreach ($case in @(
         throw "live verification accepted $($case.label)"
     }
 }
+# Under the degraded authorization verify no longer credits the signed-out
+# cursor target as pending: it counts it as a failure and fails its row. Both
+# stay within the Guardian's failed plus pending targets.
+$script:VerifyOutput = New-VerifyOutput `
+    -AuthorizationError 'protected hook guardian authorization is incomplete (1 succeeded, 0 pending, 3 total)' `
+    -CursorOK $false
+$script:Events.Clear()
+if (-not [bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
+    throw 'live verification rejected a degraded install that also has a pending target'
+}
+if (@($script:Events).Count -ne 1) {
+    throw "degraded+pending live verification did not log exactly the failed target: $($script:Events -join '; ')"
+}
+# Without a Guardian-failed target an incomplete authorization is never
+# excused, even when its count fits the pending targets.
+$pendingOnly = [pscustomobject]@{
+    output = @(New-VerifyOutput -AuthorizationError 'protected hook guardian authorization is incomplete (2 succeeded, 0 pending, 3 total)')
+}
+if ($null -ne (Get-DefenseClawVerifyFailedTargetKeys -Probe $pendingOnly -GuardianFailedTargetCount 0 -GuardianPendingTargetCount 1)) {
+    throw 'verify keys accepted an incomplete authorization without a Guardian-failed target'
+}
+$script:StatusReport = New-Report -Failures 0
+$script:VerifyOutput = $pendingOnly.output
+if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
+    throw 'live verification accepted an incomplete authorization when the Guardian reported no failed target'
+}
+$script:StatusReport = New-Report -Failures 1
 $script:VerifyOutput = New-VerifyOutput -AuthorizationError $degradedAuthorization -CodexOK $false
 if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
     throw 'live verification accepted the degraded authorization with a failure on a Guardian-healthy target'

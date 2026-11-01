@@ -19683,17 +19683,21 @@ function Get-DefenseClawGuardianReadinessProbe {
                 # itself reported failed; a failure on a target it reported
                 # healthy is real drift and is not excused.
                 # The degraded reconcile also wrote an incomplete
-                # authorization, which verify reports by count; it is
-                # excused only when its failures are exactly the Guardian's.
+                # authorization, which verify reports by count, and under it
+                # verify reports a signed-out (pending) target as failed too.
+                # Both are excused only within the Guardian's own failed and
+                # pending targets from the same fresh status report.
                 $guardianFailed = @(Get-DefenseClawGuardianFailedTargets -Report $report)
+                $guardianPending = @(Get-DefenseClawGuardianPendingTargets -Report $report)
                 $verifyKeys = Get-DefenseClawVerifyFailedTargetKeys `
                     -Probe $probe `
-                    -GuardianFailedTargetCount $guardianFailed.Count
+                    -GuardianFailedTargetCount $guardianFailed.Count `
+                    -GuardianPendingTargetCount $guardianPending.Count
                 if ($null -ne $verifyKeys) {
                     $guardianKeys = [Collections.Generic.HashSet[string]]::new(
                         [StringComparer]::Ordinal
                     )
-                    foreach ($target in $guardianFailed) {
+                    foreach ($target in @($guardianFailed) + @($guardianPending)) {
                         [void]$guardianKeys.Add(('{0}|{1}' -f ([string]$target.connector).ToLowerInvariant(), ([string]$target.sid).ToUpperInvariant()))
                     }
                     $accepted = $true
@@ -21856,6 +21860,39 @@ function Test-DefenseClawGuardianReportCompletedWithFailedTargets {
         @($state.results).Count -eq $targets)
 }
 
+# The pending (signed-out) target rows of a Guardian status report, each as
+# connector and sid. Empty when the report has no reconcile state.
+function Get-DefenseClawGuardianPendingTargets {
+    param($Report)
+    $pending = [Collections.Generic.List[object]]::new()
+    if ($null -eq $Report -or $null -eq $Report.PSObject.Properties['state'] -or
+        $null -eq $Report.state -or
+        $null -eq $Report.state.PSObject.Properties['results']) {
+        return @()
+    }
+    foreach ($row in @($Report.state.results)) {
+        if ($null -eq $row) {
+            continue
+        }
+        $pendingProperty = $row.PSObject.Properties['pending']
+        if ($null -eq $pendingProperty -or $pendingProperty.Value -isnot [bool] -or -not [bool]$pendingProperty.Value) {
+            continue
+        }
+        $values = @{}
+        foreach ($name in @('connector', 'sid')) {
+            $property = $row.PSObject.Properties[$name]
+            if ($null -eq $property) {
+                $values[$name] = ''
+            }
+            else {
+                $values[$name] = [string]$property.Value
+            }
+        }
+        $pending.Add([pscustomobject]$values)
+    }
+    return @($pending.ToArray())
+}
+
 # The failed (not pending) target rows of a Guardian status report, each as
 # connector, sid and error. Empty when the report has no reconcile state.
 function Get-DefenseClawGuardianFailedTargets {
@@ -21916,13 +21953,17 @@ function Write-DefenseClawGuardianDegradedTargets {
 # report, or $null when the report is missing, unparsable, or fails for a
 # reason that is not a per-target row. The one authorization error tolerated
 # is the incomplete-authorization verdict a degraded reconcile leaves, and
-# only when its failure count (total - succeeded - pending) equals
-# -GuardianFailedTargetCount; any other or compound authorization error is
-# $null.
+# only when the Guardian reported at least one failed target and the
+# verdict's failure count (total - succeeded - pending) is at most the
+# Guardian's failed plus pending targets: verify counts a signed-out target
+# as pending only while the authorization is complete, so a degraded
+# authorization reports it as a failure. Any other or compound authorization
+# error is $null.
 function Get-DefenseClawVerifyFailedTargetKeys {
     param(
         [Parameter(Mandatory)]$Probe,
-        [int]$GuardianFailedTargetCount = 0
+        [int]$GuardianFailedTargetCount = 0,
+        [int]$GuardianPendingTargetCount = 0
     )
     $report = $null
     foreach ($line in @($Probe.output)) {
@@ -21959,7 +22000,8 @@ function Get-DefenseClawVerifyFailedTargetKeys {
         $authorizationFailures = [int64]$incomplete.Groups[3].Value -
             [int64]$incomplete.Groups[1].Value -
             [int64]$incomplete.Groups[2].Value
-        if ($authorizationFailures -ne $GuardianFailedTargetCount) {
+        if ($authorizationFailures -lt 0 -or $GuardianPendingTargetCount -lt 0 -or
+            $authorizationFailures -gt ($GuardianFailedTargetCount + $GuardianPendingTargetCount)) {
             return $null
         }
         $authorizationAccepted = $true
