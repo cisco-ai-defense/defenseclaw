@@ -832,19 +832,16 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("gateway restart listener: %w", err)
 	}
 
-	running, pid, runningDataDir, err := inspectRestartTarget(d, cfg, client)
-	if err != nil {
-		return err
-	}
-	if running {
+	running, pid, err := stopRestartTarget(d, cfg, client, defaultStopTimeout, func(pid int) {
 		// Stop the watchdog only after proving the configured listener belongs to
 		// this managed instance; a foreign collision must have no side effects.
 		_ = stopWatchdogForGateway()
 		fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
-		if err := stopGatewayGracefullyOnDataDir(d, cfg, runningDataDir, defaultStopTimeout); err != nil {
-			fmt.Println(Style("FAILED", "fg=red", "bold"))
-			return fmt.Errorf("stop for restart: %w", err)
-		}
+	})
+	if err != nil {
+		return err
+	}
+	if running {
 		fmt.Println(Style("OK", "fg=green", "bold"))
 	}
 	if err := waitForConfiguredPortFree(cfg, pid, restartPortReleaseTimeout, restartPortReleaseInterval); err != nil {
@@ -915,6 +912,32 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 
 type gracefulGatewayStopper interface {
 	StopGracefully(time.Duration, daemon.GracefulStopRequest) error
+}
+
+// restartTargetDaemon is the daemon restart inspects and stops.
+type restartTargetDaemon interface {
+	daemonState
+	gracefulGatewayStopper
+}
+
+// stopRestartTarget is restart's first half: it inspects the gateway restart
+// would replace (inspectRestartTarget) and, when one runs, calls beforeStop and
+// stops it as the runtime of the data directory it runs on, which after
+// `defenseclaw config set data_dir` is the folder it started with, not the
+// configured one (rel-1-0-6 GAP-0323). A stop failure is printed FAILED.
+func stopRestartTarget(d restartTargetDaemon, cfg *config.Config, client *http.Client, timeout time.Duration, beforeStop func(pid int)) (bool, int, error) {
+	running, pid, runningDataDir, err := inspectRestartTarget(d, cfg, client)
+	if err != nil || !running {
+		return running, pid, err
+	}
+	if beforeStop != nil {
+		beforeStop(pid)
+	}
+	if err := stopGatewayGracefullyOnDataDir(d, cfg, runningDataDir, timeout); err != nil {
+		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		return running, pid, fmt.Errorf("stop for restart: %w", err)
+	}
+	return running, pid, nil
 }
 
 func stopGatewayGracefully(d gracefulGatewayStopper, cfg *config.Config, timeout time.Duration) error {

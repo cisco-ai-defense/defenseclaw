@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -718,21 +719,98 @@ func TestRestartShutdownRequestNamesTheRunningDataDir(t *testing.T) {
 }
 
 // writeGatewayRuntimeRecordForTest writes the gateway-api.json a gateway
-// publishes in its data directory, private, or with mode on POSIX when mode
-// is not 0600 (Windows skips the test row then).
+// publishes in its data directory, private, or, when mode is not 0600,
+// readable by others: that mode on POSIX, an Everyone read ACE on Windows.
 func writeGatewayRuntimeRecordForTest(t *testing.T, dataDir string, pid int, mode os.FileMode) {
 	t.Helper()
-	if mode != 0o600 && runtime.GOOS == "windows" {
-		t.Skip("POSIX mode row")
-	}
 	body := []byte(fmt.Sprintf(`{"pid":%d,"host":"127.0.0.1","port":1}`, pid))
 	path := filepath.Join(dataDir, "gateway-api.json")
 	if err := safefile.WritePrivate(path, body); err != nil {
 		t.Fatal(err)
 	}
-	if mode != 0o600 {
-		if err := os.Chmod(path, mode); err != nil {
-			t.Fatal(err)
+	if mode == 0o600 {
+		return
+	}
+	if runtime.GOOS == "windows" {
+		// A real ACL: Everyone (S-1-1-0) may read the record.
+		if output, err := exec.Command("icacls", path, "/grant", "*S-1-1-0:(R)").CombinedOutput(); err != nil {
+			t.Fatalf("icacls grant Everyone read: %v: %s", err, output)
 		}
+		return
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fakeRestartDaemon is a running managed gateway whose graceful stop sends
+// the authenticated shutdown request, as daemon.StopGracefully does.
+type fakeRestartDaemon struct {
+	fakeDaemonState
+	stopped bool
+}
+
+func (f *fakeRestartDaemon) StopGracefully(_ time.Duration, request daemon.GracefulStopRequest) error {
+	if err := request(f.pid); err != nil {
+		return err
+	}
+	f.stopped = true
+	return nil
+}
+
+// rel-1-0-6 GAP-0323 wiring: restart's stop half (stopRestartTarget, used by
+// runRestart) sends the shutdown request of a gateway still on the data_dir
+// it started with naming that folder, which the gateway compares with its
+// own, and not the configured one; without the change of data_dir it names
+// the configured folder.
+func TestRestartStopsAGatewayOnTheOldDataDirWithItsOwnDataDirInTheShutdownBody(t *testing.T) {
+	for _, moved := range []bool{true, false} {
+		name := "same data_dir"
+		if moved {
+			name = "after config set data_dir"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := startupTestConfig(t)
+			pinStartupTestToken(t, cfg)
+			running := cfg.DataDir
+			if moved {
+				running = t.TempDir()
+				writeGatewayRuntimeRecordForTest(t, running, 42, 0o600)
+			}
+			var shutdown map[string]interface{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer "+cfg.Gateway.Token {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+				if r.Method == http.MethodPost {
+					_ = json.NewDecoder(r.Body).Decode(&shutdown)
+					if dir, _ := shutdown["data_dir"].(string); !sameGatewayDataDir(dir, running) {
+						w.WriteHeader(http.StatusConflict)
+						_ = json.NewEncoder(w).Encode(map[string]string{"error": "gateway runtime identity mismatch"})
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+					return
+				}
+				status := gatewayStatusEnvelope{}
+				status.Runtime.PID = 42
+				status.Runtime.DataDir = running
+				_ = json.NewEncoder(w).Encode(status)
+			}))
+			defer srv.Close()
+			host, port := splitHostPortForTest(t, strings.TrimPrefix(srv.URL, "http://"))
+			cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+			withStartupListenerInspector(t, func(string, int) (int, error) { return 42, nil })
+			d := &fakeRestartDaemon{fakeDaemonState: fakeDaemonState{running: true, pid: 42}}
+			before := 0
+			ok, pid, err := stopRestartTarget(d, cfg, srv.Client(), time.Second, func(int) { before++ })
+			if err != nil || !ok || pid != 42 || !d.stopped || before != 1 {
+				t.Fatalf("stopRestartTarget = (%v, %d, %v), stopped %v, beforeStop %d", ok, pid, err, d.stopped, before)
+			}
+			if dir, _ := shutdown["data_dir"].(string); !sameGatewayDataDir(dir, running) {
+				t.Fatalf("shutdown body data_dir = %q, want the running folder %s", dir, running)
+			}
+		})
 	}
 }
