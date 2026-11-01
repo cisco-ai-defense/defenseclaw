@@ -1126,22 +1126,98 @@ func TestWindowsCorrelationKeyAcceptsReadACLButRejectsWriteACL(t *testing.T) {
 	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
 		t.Fatalf("error = %v, want the read-only drift accepted", err)
 	}
-	// Write authority for Everyone stays fatal.
-	dacl, err = windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+	// Write authority for Everyone is a boundary finding: the key is still
+	// used, and re-stamped when this process can. Strict mode keeps it fatal.
+	writeDACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
 		windowsCorrelationAccess(current.User.Sid, windows.GENERIC_ALL),
 		windowsCorrelationAccess(everyone, windows.GENERIC_READ|windows.GENERIC_WRITE),
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil, nil, dacl, nil); err != nil {
+	stampWriteDACL := func() {
+		t.Helper()
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, writeDACL, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stampWriteDACL()
+	t.Setenv("DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS", "1")
+	if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafePermissions) {
+		t.Fatalf("strict error = %v, want unsafe permissions for an untrusted writer", err)
+	}
+	t.Setenv("DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS", "")
+	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
+		t.Fatalf("error = %v, want the untrusted writer accepted as a boundary finding", err)
+	}
+	if writers := windowsCorrelationKeyUntrustedWritersAt(t, path); len(writers) != 0 {
+		t.Fatalf("untrusted writers after load = %v, want the descriptor re-stamped", writers)
+	}
+}
+
+// An ancestor re-ACLed to deny this caller traverse is permission drift: the
+// key still loads (privileged retry, or an attribute-only hold on the
+// ancestor).
+func TestWindowsCorrelationKeyToleratesAncestorThatDeniesTraverse(t *testing.T) {
+	root := t.TempDir()
+	ancestor := filepath.Join(root, "ancestor")
+	dataDir := filepath.Join(ancestor, "data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafePermissions) {
-		t.Fatalf("error = %v, want unsafe permissions for an untrusted writer", err)
+	if _, err := LoadOrCreateCorrelationKey(dataDir); err != nil {
+		t.Fatal(err)
 	}
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := windows.GetNamedSecurityInfo(ancestor, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalDACL, _, err := original.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deny := windowsCorrelationAccess(current.User.Sid, windows.FILE_TRAVERSE)
+	deny.AccessMode = windows.DENY_ACCESS
+	dacl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{deny}, originalDACL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(ancestor, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = windows.SetNamedSecurityInfo(ancestor, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION, nil, nil, originalDACL, nil)
+		runtime.KeepAlive(original)
+	})
+	if _, err := LoadOrCreateCorrelationKey(dataDir); err != nil {
+		t.Fatalf("error = %v, want an ancestor traverse denial tolerated", err)
+	}
+}
+
+func windowsCorrelationKeyUntrustedWritersAt(t *testing.T, path string) []string {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := windowsCorrelationExpectedOwnerSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return windowsCorrelationUntrustedWriters(dacl, expected)
 }
 
 func TestWindowsCorrelationKeyRejectsInvalidLength(t *testing.T) {
