@@ -17,14 +17,12 @@
 package cli
 
 import (
-	"encoding/json"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
@@ -45,6 +43,11 @@ func newNotifyCmd() *cobra.Command {
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts := buildHookOptions("codex", "notify", "", "open")
+			if !opts.ManagedEnterprise && !opts.SecureClient && os.Getenv(codexNotifyChainedEnv) != "" {
+				// A notifier this command started called it back: the turn
+				// is already forwarded, and chaining again would loop.
+				return nil
+			}
 			hookexec.RunCodexNotify(cmd.Context(), opts, []byte(args[0]))
 			if !opts.ManagedEnterprise && !opts.SecureClient {
 				runOriginalCodexNotify(opts.Home, args[0])
@@ -54,24 +57,28 @@ func newNotifyCmd() *cobra.Command {
 	}
 }
 
+// codexNotifyChainedEnv marks the notifier runOriginalCodexNotify starts. A
+// wrapper that runs DefenseClaw's notifier again, in a spelling the backup
+// check does not know, then ends the chain instead of starting it anew on
+// every pass (a notify loop of Codex computer-use).
+const codexNotifyChainedEnv = "DEFENSECLAW_CODEX_NOTIFY_CHAINED"
+
 // The native Windows notifier keeps the user program that setup displaced.
 // Its argv is the pre-DefenseClaw snapshot, never a shell command.
 func runOriginalCodexNotify(dataDir, payload string) {
-	data, err := os.ReadFile(filepath.Join(dataDir, "codex_config_backup.json"))
-	if err != nil || len(data) > 1<<20 {
+	command := originalCodexNotifyCommand(dataDir, payload)
+	if command == nil {
 		return
 	}
-	var backup struct {
-		OriginalNotify []string `json:"original_notify"`
-	}
-	if json.Unmarshal(data, &backup) != nil || len(backup.OriginalNotify) == 0 ||
-		strings.TrimSpace(backup.OriginalNotify[0]) == "" {
-		return
-	}
-	argv := backup.OriginalNotify
-	if filepath.Base(argv[0]) == "defenseclaw-hook.exe" && len(argv) > 1 && argv[1] == "notify" {
-		return
+	_ = command.Run() // The user's notifier and gateway telemetry are independent.
+}
+
+func originalCodexNotifyCommand(dataDir, payload string) *exec.Cmd {
+	argv := connector.CodexOriginalNotify(dataDir)
+	if len(argv) == 0 {
+		return nil
 	}
 	command := exec.Command(argv[0], append(argv[1:], payload)...)
-	_ = command.Run() // The user's notifier and gateway telemetry are independent.
+	command.Env = append(os.Environ(), codexNotifyChainedEnv+"=1")
+	return command
 }
