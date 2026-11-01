@@ -45,3 +45,21 @@ def test_the_macos_bundle_stamps_the_commit_and_build_time() -> None:
     assert "BUILD_INFO_LDFLAGS := -X main.commit=$(GIT_COMMIT) -X main.date=$(BUILD_DATE)" in makefile
     pkg = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
     assert "-X main.commit=${COMMIT} -X main.date=${DATE}" in pkg
+
+
+def test_the_standalone_windows_setup_carries_its_release_version() -> None:
+    # rel-1-0-6:GAP-0296: the outer Setup had no VERSIONINFO, so MDM file-version
+    # detection and the management sidecar could not read its release. The
+    # builder stamps it before the trailer and signature and reads the shipped
+    # file back; the Windows install lanes (CI and release) check
+    # (Get-Item <Setup>).VersionInfo before they run it.
+    setup = (ROOT / "packaging" / "windows" / "standalone" / "build-setup.sh").read_text(encoding="utf-8")
+    stamp = setup.index('-target windows_amd64 -executable "${SETUP_UNSIGNED}"')
+    assert setup.index("./cmd/defenseclaw-enterprise-setup )") < stamp < setup.index("./cmd/windows-avc-assembler")
+    verify = setup.index('-verify-only \\\n    -target windows_amd64 -executable "${SETUP}"')
+    assert setup.index('"${SIGN_COMMAND}" "${SETUP}"') < verify
+    assert setup.count("-component enterprise-setup-standalone") == 2
+    lane = (ROOT / "scripts" / "test-enterprise-windows-install.ps1").read_text(encoding="utf-8")
+    check = lane.index("Assert-SetupVersionInfo -Path $Setup -Expected $Version")
+    assert check < lane.index("if ($UpgradeFrom) {", check)
+    assert "Assert-SetupVersionInfo -Path $UpgradeFrom" not in lane

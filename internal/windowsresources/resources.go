@@ -65,6 +65,13 @@ const (
 	// bootstrap owns machine-wide services and ACLs and must therefore run only
 	// with an elevated administrator token.
 	ComponentEnterpriseSetup Component = "enterprise-setup"
+	// ComponentEnterpriseStandaloneSetup is the same enterprise bootstrap
+	// built as the MDM-deployable standalone Setup
+	// (packaging/windows/standalone/build-setup.sh). It differs from
+	// ComponentEnterpriseSetup only in its file names, so MDM file-version
+	// detection and the management sidecar read the release it ships
+	// (rel-1-0-6:GAP-0296).
+	ComponentEnterpriseStandaloneSetup Component = "enterprise-setup-standalone"
 )
 
 // AllComponents is the complete resource inventory for project-built Windows
@@ -82,6 +89,7 @@ var AllComponents = []Component{
 	ComponentStartup,
 	ComponentSetup,
 	ComponentEnterpriseSetup,
+	ComponentEnterpriseStandaloneSetup,
 }
 
 // Target identifies a supported Windows build target. Resource manifests and
@@ -208,6 +216,21 @@ var componentMetadataByName = map[Component]componentMetadata{
 		CommonControlsV6:     true,
 		RequireAdministrator: true,
 	},
+	ComponentEnterpriseStandaloneSetup: {
+		AssemblyName:         "Cisco.DefenseClaw.EnterpriseSetup",
+		Description:          "DefenseClaw managed-enterprise Windows setup",
+		FileDescription:      "DefenseClaw Enterprise Setup",
+		InternalName:         "DefenseClawSetupEnterpriseStandalone",
+		OriginalFilename:     "DefenseClawSetup-Enterprise-Standalone-x64.exe",
+		CommonControlsV6:     true,
+		RequireAdministrator: true,
+	},
+}
+
+// isSetup reports the AMD64-only Setup executables.
+func isSetup(component Component) bool {
+	return component == ComponentSetup || component == ComponentEnterpriseSetup ||
+		component == ComponentEnterpriseStandaloneSetup
 }
 
 // ParseComponent validates a command-line component value.
@@ -264,8 +287,7 @@ func ManifestForTarget(target Target, component Component, versionValue string) 
 	if !ok {
 		return nil, fmt.Errorf("unsupported Windows resource component %q", component)
 	}
-	if (component == ComponentSetup || component == ComponentEnterpriseSetup) &&
-		target != TargetWindowsAMD64 {
+	if isSetup(component) && target != TargetWindowsAMD64 {
 		return nil, fmt.Errorf("Windows setup resources support only %s, got %q", TargetWindowsAMD64, target)
 	}
 	parsed, err := parseVersion(versionValue)
@@ -404,12 +426,6 @@ func expectedResourceSet(target Target, component Component, versionValue, iconP
 	return resources, nil
 }
 
-// Apply replaces the PE resource directory with the exact AMD64 DefenseClaw
-// resource set. It is retained for the AMD64-only native Setup pipeline.
-func Apply(executable string, component Component, versionValue, iconPath string) error {
-	return ApplyForTarget(executable, TargetWindowsAMD64, component, versionValue, iconPath)
-}
-
 // ApplyForTarget replaces the PE resource directory with the exact DefenseClaw
 // resource set for target. Signed binaries are rejected so resources can never
 // be changed after Authenticode signing. The requested target must match the PE
@@ -529,13 +545,6 @@ func resourceMap(resources *winres.ResourceSet) map[resourceKey][]byte {
 		return true
 	})
 	return result
-}
-
-// Verify independently parses an AMD64 PE and requires its complete resource
-// set to byte-match the canonical manifest, five-size icon, and VERSIONINFO
-// contract. It is retained for the AMD64-only native Setup pipeline.
-func Verify(executable string, component Component, versionValue, iconPath string) error {
-	return VerifyForTarget(executable, TargetWindowsAMD64, component, versionValue, iconPath)
 }
 
 func verifyPEMachine(source io.ReaderAt, target Target) error {
