@@ -541,6 +541,13 @@ on an asset in an enrolled user's folder name that user (`user.id`,
   quarantine that cannot finish leaves its asset blocked in place. The gateway
   retries after 2 minutes, then 4, up to every 30 minutes, and `status` and
   `verify` warn `asset_not_scanned` or `asset_not_quarantined`.
+- **Signed-out owners.** When the source of a quarantine is in the profile of a
+  user who is signed out and Windows gives no S4U logon for the account, the
+  copy is in quarantine and blocked, but the hook guardian removes the original
+  folder only when that user next signs in. Until then `status` and `verify`
+  warn `asset_removal_deferred`, naming the folder and why the guardian waits
+  (a Microsoft Entra ID account, an Active Directory account whose S4U logon
+  was refused, or a local account).
 - **`take_action: false`.** A rejected asset is only recorded and stays usable
   until `take_action` is on again; then `asset_rejected_not_enforced` warns.
 - **`admission.mcp.scan_on_install: false`** admits new MCP servers without a scan
