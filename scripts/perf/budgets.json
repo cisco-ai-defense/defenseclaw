@@ -72,12 +72,20 @@
     "source": "benign calls must all be allowed"
    },
    "hook_execs.claudecode.per_call_p50": {
-    "budget": 15,
-    "source": "15.0 execs per hook invocation, 1.0.1/1.0.3 sampler (rel-1-0-3 TST-1148, TST-1199)"
+    "budget": 9,
+    "source": "9 execs per hook invocation counting the agent's /bin/sh, r107-perf-hookproc (sandbox-visibility:GAP-0028): installed per-user hook of fix/r107-perf-hookproc, strace -f, 10 calls x 3 runs on dc-build-2, constant"
    },
    "hook_execs.claudecode.processes_per_call_p50": {
-    "budget": "TODO",
-    "source": "no fork-count baseline (first measured by dcperf, 1.0.7)"
+    "budget": 14,
+    "source": "14 processes per invocation (was 29 on 94d60a0462), r107-perf-hookproc (sandbox-visibility:GAP-0028): installed per-user hook of fix/r107-perf-hookproc, strace -f, 10 calls x 3 runs on dc-build-2, constant"
+   },
+   "hook_execs.codex.per_call_p50": {
+    "budget": 9,
+    "source": "9 execs per hook invocation (was 13 on 94d60a0462), r107-perf-hookproc (sandbox-visibility:GAP-0028): installed per-user hook of fix/r107-perf-hookproc, strace -f, 10 calls x 3 runs on dc-build-2, constant"
+   },
+   "hook_execs.codex.processes_per_call_p50": {
+    "budget": 14,
+    "source": "14 processes per invocation (was 45 on 94d60a0462), r107-perf-hookproc (sandbox-visibility:GAP-0028): installed per-user hook of fix/r107-perf-hookproc, strace -f, 10 calls x 3 runs on dc-build-2, constant"
    },
    "gateway_restart.to_api_ready.p50_ms": {
     "budget": 7854,
