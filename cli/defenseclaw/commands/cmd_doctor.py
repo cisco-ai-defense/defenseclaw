@@ -63,7 +63,7 @@ import click
 from defenseclaw import codex_toml, credential_provenance, envvars, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.audit_time_order import audit_time_order
-from defenseclaw.config import gateway_pid_path
+from defenseclaw.config import gateway_home_for_data_dir, gateway_pid_path
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACT_MANIFEST,
     HOOK_CONTRACTS,
@@ -5653,9 +5653,27 @@ def _gateway_process_home_binding(
     *,
     platform_name: str,
 ) -> tuple[bool, bool]:
-    """Return ``(bound_to_this_home, positively_foreign_home)``."""
+    """Return ``(bound_to_this_home, positively_foreign_home)``.
+
+    The gateway writes its PID record, with its own data home, in the install
+    home (``DEFENSECLAW_HOME``, else ``~/.defenseclaw``). After ``config set
+    data_dir`` that is not cfg.data_dir, so the install home that owns this
+    data_dir (gateway_home_for_data_dir) is this home as well; setup otherwise
+    called its own running gateway foreign and timed out (rel-1-0-6 GAP-0287).
+    """
+    homes = [cfg.data_dir]
+    try:
+        install_home = gateway_home_for_data_dir(cfg.data_dir)
+    except (OSError, TypeError, ValueError):
+        install_home = ""
+    if install_home and not paths_same(install_home, cfg.data_dir):
+        homes.append(install_home)
+
+    def bound(value: str) -> bool:
+        return any(paths_same(value, home) for home in homes)
+
     if record.data_dir:
-        matches = paths_same(record.data_dir, cfg.data_dir)
+        matches = bound(record.data_dir)
         return matches, not matches
     if not platform_name.startswith("linux"):
         return False, False
@@ -5663,7 +5681,7 @@ def _gateway_process_home_binding(
     for env_name in ("DEFENSECLAW_DATA_DIR", "DEFENSECLAW_HOME"):
         value = _read_linux_process_env_var(process.pid, env_name)
         if value:
-            matches = paths_same(value, cfg.data_dir)
+            matches = bound(value)
             return matches, not matches
     return False, False
 

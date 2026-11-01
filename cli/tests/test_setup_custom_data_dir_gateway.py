@@ -91,3 +91,28 @@ def test_setup_restarts_the_running_gateway_of_a_custom_data_dir(tmp_path, monke
     assert cmd_setup._restart_defense_gateway(str(data), previous_generation=prior)
     assert [cmd[-1] for cmd in commands] == ["restart"]
     assert waited == [str(data)]
+
+
+def test_the_install_home_pid_record_is_bound_to_a_custom_data_dir(tmp_path, monkeypatch) -> None:
+    # GAP-0287: the gateway's PID record names the install home as its data
+    # home. The listener trust check called it foreign for a custom data_dir,
+    # so setup's health wait never read /health and timed out.
+    from types import SimpleNamespace
+
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
+
+    home, data = _install(tmp_path, monkeypatch)
+    process = ProcessEvidence("ok", pid=4242)
+    cfg = SimpleNamespace(data_dir=str(data))
+
+    def binding(record_home: Path) -> tuple[bool, bool]:
+        record = PIDRecord("ok", pid=4242, data_dir=str(record_home))
+        return cmd_doctor._gateway_process_home_binding(cfg, record, process, platform_name="linux")
+
+    assert binding(home) == (True, False)
+    assert binding(data) == (True, False)
+    assert binding(tmp_path / "elsewhere") == (False, True)
+    default = SimpleNamespace(data_dir=str(home))
+    record = PIDRecord("ok", pid=4242, data_dir=str(data))
+    assert cmd_doctor._gateway_process_home_binding(default, record, process, platform_name="linux") == (False, True)

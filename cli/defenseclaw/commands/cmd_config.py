@@ -39,6 +39,7 @@ import functools
 import json
 import os
 import re
+import stat
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 
@@ -777,13 +778,90 @@ def _shadowed_hilt_notes(changes: list) -> list[str]:
     ]
 
 
-def _seed_moved_data_dir(changes: list) -> list[str]:
-    """Seed the rule packs and Rego policies under a new data_dir.
+# Connector records the gateway reads from <data_dir> at start that only
+# discovery or a first setup write: the agent versions hook contract admission
+# checks, and each connector's backup of the agent settings DefenseClaw
+# patched (teardown restores it).
+_MOVED_DATA_DIR_RECORD = "agent_discovery.json"
+_MOVED_DATA_DIR_BACKUP_SUFFIX = "_backup.json"
+
+
+def _carry_connector_records(old_dir: str, new_dir: str) -> list[str]:
+    """Copy the connector records of the old data_dir that the new one lacks.
+
+    After config set data_dir the gateway read agent_discovery.json from the
+    new folder, found no agent version and refused every action-mode
+    connector, so it could not start until setup ran discovery again, and
+    setup rolled back because the gateway would not start (rel-1-0-6
+    GAP-0287). Records already in the new folder are kept; the old folder is
+    left as it is, so setting data_dir back still works.
+
+    Never as an administrator: under sudo the account's config is resolved,
+    data_dir is not limited, and a root copy would put files the user chose
+    into any folder root can write (``data_dir /etc/cron.d``). The source is
+    opened without following links, so a symlink swapped in after the check
+    is refused.
+    """
+    from defenseclaw.file_permissions import make_private_directory, open_regular_file_no_follow
+
+    try:
+        if not old_dir or not new_dir or os.path.samefile(old_dir, new_dir):
+            return []
+    except OSError:
+        if os.path.abspath(old_dir) == os.path.abspath(new_dir):
+            return []
+    try:
+        names = sorted(
+            name
+            for name in os.listdir(old_dir)
+            if name == _MOVED_DATA_DIR_RECORD or name.endswith(_MOVED_DATA_DIR_BACKUP_SUFFIX)
+        )
+    except OSError:
+        return []
+    if not names:
+        return []
+    if config_module._is_admin_process():
+        return [
+            "Did not copy the connector records to the new data_dir: this command runs as an "
+            "administrator. Run defenseclaw setup <connector> as the account to refresh them."
+        ]
+    copied: list[str] = []
+    failed: list[str] = []
+    for name in names:
+        source = os.path.join(old_dir, name)
+        target = os.path.join(new_dir, name)
+        try:
+            info = os.lstat(source)
+            if not stat.S_ISREG(info.st_mode) or os.path.lexists(target):
+                continue
+            make_private_directory(new_dir)
+            with os.fdopen(open_regular_file_no_follow(source, expected_stat=info), "rb") as handle:
+                data = handle.read()
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            copied.append(name)
+        except OSError as exc:
+            failed.append(f"{name}: {exc.strerror or exc}")
+    notes = []
+    if copied:
+        notes.append(f"Copied the connector records to the new data_dir: {', '.join(copied)}.")
+    if failed:
+        notes.append(
+            f"warning: some connector records were not copied to {new_dir} ({'; '.join(failed)}); "
+            "if the gateway refuses a connector at start, run: defenseclaw setup <connector>"
+        )
+    return notes
+
+
+def _seed_moved_data_dir(changes: list, old_data_dir: str = "") -> list[str]:
+    """Seed the rule packs, Rego policies and connector records under a new data_dir.
 
     The gateway loads its default rule pack from <policy_dir>/guardrail, and
     an omitted policy_dir is under data_dir, so after config set data_dir it
     refused to start until init had seeded the new folder (GAP-2126). Packs
-    already there are kept.
+    already there are kept. The connector records the gateway reads at start
+    come along from ``old_data_dir`` (GAP-0287).
     """
     if not any(getattr(change, "path", "") == "data_dir" for change in changes):
         return []
@@ -791,6 +869,11 @@ def _seed_moved_data_dir(changes: list) -> list[str]:
         cfg = config_module.load()
     except Exception:  # noqa: BLE001 - the change is committed; seeding is best effort
         return []
+    notes = _carry_connector_records(old_data_dir, str(cfg.data_dir or ""))
+    return notes + _seed_moved_policies(cfg)
+
+
+def _seed_moved_policies(cfg) -> list[str]:
     policy_dir = str(cfg.policy_dir or "")
     if not policy_dir or os.path.isdir(os.path.join(policy_dir, "guardrail", "default")):
         return []
@@ -892,7 +975,7 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
         click.echo(note)
     for note in _custom_pack_registration_notes(changes):
         click.echo(note)
-    for note in _seed_moved_data_dir(changes):
+    for note in _seed_moved_data_dir(changes, str(getattr(before_cfg, "data_dir", "") or "")):
         click.echo(note, err=note.startswith("warning:"))
     pending = result.restart_required
     if pending:
