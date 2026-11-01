@@ -88,6 +88,10 @@ func sudoersMainFileWrites(t *testing.T) []sudoersHookRow {
 		{"claudecode", "Bash append redirect", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "echo Defaults use_pty >> /etc/sudoers"}))},
 		{"claudecode", "Bash tee -a", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "echo Defaults use_pty | tee -a /etc/sudoers"}))},
 		{"claudecode", "Bash sudo tee", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "echo Defaults use_pty | sudo tee /etc/sudoers"}))},
+		// An unquoted heredoc that expands only parameters runs nothing, so
+		// its redirect target is proven (rel-1-0-6:GAP-0399).
+		{"claudecode", "Bash heredoc", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "cat > /etc/sudoers <<X\nDefaults env_reset\nDefaults:$USER !lecture\nX"}))},
+		{"claudecode", "Bash heredoc append", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "cat >> /etc/sudoers <<EOF\nDefaults use_pty\nEOF"}))},
 		{"codex", "Bash redirect", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "echo Defaults use_pty >> /etc/sudoers"}))},
 		{"codex", "apply_patch relative", sudoersClaudeCall("apply_patch", func(p string) map[string]any {
 			return map[string]any{"command": patch(sudoersRelative(t, p))}
@@ -129,6 +133,10 @@ func sudoersBenignNeighbours() []sudoersHookRow {
 		{"claudecode", "Bash redirect project sudoers", sudoersClaudeCall("Bash", func(p string) map[string]any {
 			return map[string]any{"command": "echo Defaults use_pty > " + filepath.Join(p, "sudoers.bak")}
 		})},
+		{"claudecode", "Bash heredoc project sudoers", sudoersClaudeCall("Bash", func(p string) map[string]any {
+			return map[string]any{"command": "cat > " + filepath.Join(p, "sudoers") + " <<EOF\nDefaults:$USER env_reset\nEOF"}
+		})},
+		{"claudecode", "Bash heredoc read of the main file", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "grep -c -f - /etc/sudoers <<EOF\n$USER\nEOF"}))},
 		{"codex", "apply_patch project sudoers", sudoersClaudeCall("apply_patch", sudoersFixed(map[string]any{
 			"command": "*** Begin Patch\n*** Add File: sudoers\n+Defaults use_pty\n*** End Patch\n"}))},
 		{"hermes", "read_file", sudoersHermesCall("read_file", sudoersFixed(map[string]any{"path": "/etc/sudoers"}))},
