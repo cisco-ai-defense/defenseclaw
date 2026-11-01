@@ -718,6 +718,30 @@ func validateWindowsCursorManagedArtifactsRepairingHooks(
 	return validateWindowsCursorManagedArtifacts(repaired)
 }
 
+// validateWindowsCursorManagedArtifactsHealingHooks validates artifacts taken
+// without the transaction lock and, outside strict mode, heals hooks.json
+// content drift: it takes the lock, re-snapshots and repairs through
+// validateWindowsCursorManagedArtifactsRepairingHooks. The guardian reaches
+// this every tick, so drift heals instead of failing into a full repair.
+func validateWindowsCursorManagedArtifactsHealingHooks(
+	artifacts windowsCursorManagedArtifacts,
+) (windowsCursorManagedArtifacts, error) {
+	validated, err := validateWindowsCursorManagedArtifacts(artifacts)
+	if !windowsCursorManagedHooksDrifted(err) || managed.TrustStrictAncestors() {
+		return validated, err
+	}
+	err = withWindowsCursorManagedTransaction(func() error {
+		current, snapshotErr := snapshotWindowsCursorManagedArtifacts()
+		if snapshotErr != nil {
+			return snapshotErr
+		}
+		var repairErr error
+		validated, repairErr = validateWindowsCursorManagedArtifactsRepairingHooks(current)
+		return repairErr
+	})
+	return validated, err
+}
+
 func repairWindowsCursorManagedHooks(
 	artifacts windowsCursorManagedArtifacts,
 ) (windowsCursorManagedArtifacts, error) {
@@ -741,6 +765,17 @@ func repairWindowsCursorManagedHooks(
 	)
 	if err != nil {
 		return artifacts, fmt.Errorf("enterprise hooks: re-merge DefenseClaw Cursor hook entries: %w", err)
+	}
+	// The transaction lock does not bind Cursor, operators or other tools, so
+	// an edit made after the snapshot must not be overwritten: compare
+	// existence and content (not metadata) and let the next guardian tick
+	// retry from a fresh snapshot.
+	live, err := snapshotWindowsManagedFileWithLimit(artifacts.hooks.path, windowsCursorManagedHooksLimit)
+	if err != nil {
+		return artifacts, err
+	}
+	if live.existed != artifacts.hooks.existed || !bytes.Equal(live.data, artifacts.hooks.data) {
+		return artifacts, errors.New("enterprise hooks: Cursor hooks.json changed concurrently before repair")
 	}
 	if err := windowsCursorManagedHooksRepairWriter(
 		artifacts.hooks,
@@ -1361,20 +1396,7 @@ func ReadWindowsCursorManagedPolicyTargets() ([]WindowsCursorManagedRuntimeTarge
 	if err != nil {
 		return nil, false, err
 	}
-	artifacts, err = validateWindowsCursorManagedArtifacts(artifacts)
-	if windowsCursorManagedHooksDrifted(err) && !managed.TrustStrictAncestors() {
-		// Re-merge drifted hook entries under the transaction lock so the
-		// guardian's enrollment sync heals instead of failing every tick.
-		err = withWindowsCursorManagedTransaction(func() error {
-			current, snapshotErr := snapshotWindowsCursorManagedArtifacts()
-			if snapshotErr != nil {
-				return snapshotErr
-			}
-			var repairErr error
-			artifacts, repairErr = validateWindowsCursorManagedArtifactsRepairingHooks(current)
-			return repairErr
-		})
-	}
+	artifacts, err = validateWindowsCursorManagedArtifactsHealingHooks(artifacts)
 	if err != nil {
 		return nil, true, err
 	}

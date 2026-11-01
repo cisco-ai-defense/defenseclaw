@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"golang.org/x/sys/windows"
 )
@@ -425,21 +424,9 @@ func verifyWindowsCursorMachineTarget(target windowsGenericManagedTarget) error 
 	if err != nil {
 		return err
 	}
-	artifacts, err = validateWindowsCursorManagedArtifacts(artifacts)
-	if windowsCursorManagedHooksDrifted(err) && !managed.TrustStrictAncestors() {
-		// The guardian verifies every tick; hooks.json content drift is a
-		// machine-scoped repair that needs no user session, so heal it here
-		// under the transaction lock instead of failing into a full repair.
-		err = withWindowsCursorManagedTransaction(func() error {
-			current, snapshotErr := snapshotWindowsCursorManagedArtifacts()
-			if snapshotErr != nil {
-				return snapshotErr
-			}
-			var repairErr error
-			artifacts, repairErr = validateWindowsCursorManagedArtifactsRepairingHooks(current)
-			return repairErr
-		})
-	}
+	// hooks.json content drift is a machine-scoped repair that needs no user
+	// session, so it heals here rather than failing into a full repair.
+	artifacts, err = validateWindowsCursorManagedArtifactsHealingHooks(artifacts)
 	if err != nil {
 		return err
 	}

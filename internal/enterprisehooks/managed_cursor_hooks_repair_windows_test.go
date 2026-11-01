@@ -207,6 +207,35 @@ func TestWindowsCursorHooksRepairRecreatesDeletedHooksFile(t *testing.T) {
 	}
 }
 
+// An edit made to hooks.json after the snapshot is never overwritten: the
+// repair refuses and the next guardian tick retries from a fresh snapshot.
+func TestWindowsCursorHooksRepairRefusesConcurrentEdit(t *testing.T) {
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	for name, body := range map[string]func([]byte, string) []byte{
+		"edited":  func(foreign []byte, _ string) []byte { return append([]byte(nil), foreign...) },
+		"created": func([]byte, string) []byte { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newWindowsCursorHooksRepairFixture(t, body)
+			concurrent := []byte(`{"version":1,"hooks":{"operatorEvent":[{"type":"command","command":"edited-after-snapshot"}]}}`)
+			if err := os.WriteFile(fixture.artifacts.hooks.path, concurrent, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := validateWindowsCursorManagedArtifactsRepairingHooks(fixture.artifacts)
+			if err == nil || !strings.Contains(err.Error(), "changed concurrently before repair") {
+				t.Fatalf("repair over a concurrent edit = %v, want the concurrent-change refusal", err)
+			}
+			if fixture.writes != 0 {
+				t.Fatal("repair overwrote a concurrent hooks.json edit")
+			}
+			onDisk, err := os.ReadFile(fixture.artifacts.hooks.path)
+			if err != nil || !bytes.Equal(onDisk, concurrent) {
+				t.Fatalf("hooks.json on disk = %q, %v; want the concurrent edit kept", onDisk, err)
+			}
+		})
+	}
+}
+
 func TestWindowsCursorHooksRepairRefusedInStrictMode(t *testing.T) {
 	t.Setenv(managed.TrustStrictAncestorsEnv, "1")
 	for name, body := range map[string]func([]byte, string) []byte{
