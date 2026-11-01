@@ -2726,3 +2726,66 @@ def test_unix_registration_freshness_accepts_a_home_below_a_symlinked_directory(
             assert fail_mode_runtime._unix_registration_freshness(cfg, "codex") is None, command
         registration.write_text(json.dumps({"command": str(tmp_path / "other" / "codex-hook.sh")}), encoding="utf-8")
         assert fail_mode_runtime._unix_registration_freshness(cfg, "codex") == "registration-command-stale"
+
+
+def _stale_lock_after_a_pack_switch(cfg: SimpleNamespace, home: Path, *, call_time: bool) -> None:
+    """A closed per-user render whose lock still records the open the hooks had before a pack switch."""
+
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    hook_dir = Path(cfg.data_dir) / "hooks"
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    if call_time:
+        helper = b"# defenseclaw-call-time-outage-v1\ncanonical shared hook: _hardening.sh\n"
+        (hook_dir / "_hardening.sh").write_bytes(helper)
+        lock["shared_hook_script_digests"]["_hardening.sh"] = "sha256:" + hashlib.sha256(helper).hexdigest()
+    lock["connectors"]["claudecode"]["hook_fail_mode"] = "open"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS per-user shell hook")
+def test_a_lock_that_lags_a_pack_switch_is_not_drift_for_a_call_time_hook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-0272: guardrail use-pack strict with the gateway stopped saves the
+    # closed mode and rewrites the hooks' runtime records; the lock keeps the
+    # open of the last render until the gateway starts and renders again.
+    # The per-user hook reads its outage mode from the config on every call
+    # (it blocked with "fail mode closed"), yet status warned "runtime
+    # fail-mode drift: registration-stale, registration-lock-open".
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _stale_lock_after_a_pack_switch(cfg, home, call_time=True)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert state.desired == "closed" and state.runtime == "closed", state
+    assert "registration-stale" not in state.drift and "registration-lock-open" not in state.drift, state.drift
+    assert dict(state.sources)["registration-lock"] == "open"
+
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    with patch("defenseclaw.fail_mode.Path.home", return_value=home):
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "registration-lock-open" not in result.output, result.output
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS per-user shell hook")
+def test_a_stale_lock_is_still_drift_for_a_hook_that_reads_its_records(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A render without the call-time helper runs the mode its records hold,
+    # which the lock describes: a lock that disagrees stays drift, and so does
+    # a missing lock (GAP-0272 keeps both).
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _stale_lock_after_a_pack_switch(cfg, home, call_time=False)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert {"registration-stale", "registration-lock-open"} <= set(state.drift), state.drift
+
+    _stale_lock_after_a_pack_switch(cfg, home, call_time=True)
+    (Path(cfg.data_dir) / "hook_contract_lock.json").unlink()
+    state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert "registration-lock-missing" in state.drift, state.drift
