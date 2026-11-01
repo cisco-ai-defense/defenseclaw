@@ -96,10 +96,15 @@ func knownWordParameters(command string, file *syntax.File, home string) (map[*s
 			return false
 		}
 		switch node := node.(type) {
-		case *syntax.FuncDecl, *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause,
+		case *syntax.FuncDecl, *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause, *syntax.TestClause,
 			*syntax.DeclClause, *syntax.CoprocClause, *syntax.ProcSubst:
 			rejected = true
 		case *syntax.Assign:
+			// An index is arithmetic, which can assign (a[f=-3]=x).
+			if node.Index != nil || node.Array != nil {
+				rejected = true
+				break
+			}
 			if node.Name == nil {
 				rejected = true
 				break
@@ -142,6 +147,12 @@ func knownWordParameters(command string, file *syntax.File, home string) (map[*s
 			}
 			loops[name] = append(loops[name], loop{node.DoPos.Offset(), node.DonePos.Offset()})
 		case *syntax.ParamExp:
+			// An index or a slice offset is arithmetic, which can assign
+			// (${a[f=-3]}, ${x:f=1}) (rel-1-0-6:GAP-0235 review).
+			if node.Index != nil || node.Slice != nil {
+				rejected = true
+				break
+			}
 			if node.Param != nil && node.Exp != nil {
 				unsafeNames[node.Param.Value] = true
 			}
@@ -234,7 +245,20 @@ func knownWordParameters(command string, file *syntax.File, home string) (map[*s
 	return uses, values
 }
 
-// simpleScalarParameter accepts $name or ${name} of a plain variable name.
+// shellSpecialParameters are names bash sets itself (on every command, at
+// each read, or from the environment), so an assignment does not fix their
+// value: $_ is the last argument of the previous command (rel-1-0-6:GAP-0235
+// review).
+var shellSpecialParameters = []string{
+	"_", "BASHPID", "BASH_ARGC", "BASH_ARGV", "BASH_COMMAND", "BASH_LINENO", "BASH_REMATCH", "BASH_SOURCE",
+	"BASH_SUBSHELL", "COLUMNS", "COMP_CWORD", "COMP_LINE", "COMP_POINT", "DIRSTACK", "EPOCHREALTIME",
+	"EPOCHSECONDS", "FUNCNAME", "GROUPS", "HISTCMD", "HOME", "HOSTNAME", "IFS", "LINENO", "LINES",
+	"OLDPWD", "OPTARG", "OPTIND", "PATH", "PIPESTATUS", "PPID", "PWD", "RANDOM", "REPLY", "SECONDS",
+	"SHELLOPTS", "SHLVL", "SRANDOM", "UID", "EUID",
+}
+
+// simpleScalarParameter accepts $name or ${name} of a plain variable name
+// that bash does not set itself.
 func simpleScalarParameter(param *syntax.ParamExp) bool {
 	if param == nil || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet ||
 		param.Index != nil || param.Slice != nil || param.Repl != nil || param.Names != 0 ||
@@ -242,7 +266,7 @@ func simpleScalarParameter(param *syntax.ParamExp) bool {
 		return false
 	}
 	name := param.Param.Value
-	if name == "" || name == "IFS" {
+	if name == "" || slices.Contains(shellSpecialParameters, name) {
 		return false
 	}
 	for i, ch := range name {
