@@ -1986,7 +1986,12 @@ type shellLinks struct {
 	// cdScopes: the scopes follow a static top-level directory change that
 	// the statement walk placed them after. Every write is opaque but the own
 	// destination of a placed copy, which that walk places too (GAP-2579).
-	cdScopes         bool
+	cdScopes bool
+	// cdFrom and cdDirs: with cdScopes, the starting directory and every
+	// directory a top-level statement may stand in. A write is read against
+	// the scopes from each of them (rel-1-0-6:GAP-0260).
+	cdFrom           string
+	cdDirs           []string
 	opaqueScopes     []opaqueScope
 	copyDestinations []string
 	// copyEnds: the end offset of the copy call that wrote a destination,
@@ -2069,6 +2074,14 @@ func bodyOnlyChangesDirectory(command string, call *syntax.CallExpr) bool {
 		return false
 	}
 	return !tactics.RunsProgram(command[:from]+" "+command[to:], cdPrograms...)
+}
+
+// placedShellBody reports a literal shell body with no directory change of
+// its own whose call the statement walk placed in one directory, ahead of
+// any wrapper that moves it (cd p && sh -c "ln -s a b && cp -a b c").
+func placedShellBody(body string, linkDirsKnown bool, linkDirs map[*syntax.CallExpr][]string, call *syntax.CallExpr, callDirs []string, movedDir string) bool {
+	_, placed := linkDirs[call]
+	return linkDirsKnown && placed && len(callDirs) == 1 && movedDir == "" && !tactics.RunsProgram(body, cdPrograms...)
 }
 
 // unknown marks the links unknown, and opaque when a link may be created.
@@ -2188,26 +2201,44 @@ func (l shellLinks) opaqueTargetWithFacts(path, ownCopy string, facts map[string
 	} else if l.globalOpaque || len(l.opaqueScopes) == 0 {
 		return true
 	}
+	names := []string{path}
 	if l.cdScopes && (ownCopy == "" || ownCopy != path) {
-		return true
-	}
-	forms, complete := writePathForms(path, 0)
-	if !complete {
-		// The user's walk of the same operand stands in for one this process
-		// cannot finish; the scope check below still sees the name itself.
-		fact := facts[OpaqueScopeFactPrefix+path]
-		if fact != "0" && (fact != "c" || ownCopy == "" || ownCopy != path) {
+		// After a directory change a relative write may land in a scope
+		// under another name, so the operand is also read as written in
+		// every directory a statement may stand in: cd p && tar -C build
+		// -xf x; echo hi > report.txt writes no scope, cd build && tar -C .
+		// -xf x; echo hi > report.txt may (rel-1-0-6:GAP-0260).
+		rel, err := filepath.Rel(l.cdFrom, path)
+		if len(l.cdDirs) == 0 || err != nil {
 			return true
 		}
-		forms = []string{filepath.Clean(path)}
-	}
-	for _, scope := range l.opaqueScopes {
-		if scope.copy && scope.path == ownCopy {
-			continue
+		for _, dir := range l.cdDirs {
+			if name := filepath.Join(dir, rel); name != path && !slices.Contains(names, name) {
+				names = append(names, name)
+			}
 		}
-		for _, form := range forms {
-			if form == scope.path || strings.HasPrefix(form, scope.path+string(filepath.Separator)) {
+	}
+	for i, name := range names {
+		forms, complete := writePathForms(name, 0)
+		if !complete {
+			// The user's walk of the same operand stands in for one this
+			// process cannot finish; the scope check below still sees the
+			// name itself. That walk read every placement of the operand,
+			// so only its "0" answers for another directory.
+			fact := facts[OpaqueScopeFactPrefix+path]
+			if fact != "0" && (i > 0 || fact != "c" || ownCopy == "" || ownCopy != path) {
 				return true
+			}
+			forms = []string{filepath.Clean(name)}
+		}
+		for _, scope := range l.opaqueScopes {
+			if scope.copy && scope.path == ownCopy {
+				continue
+			}
+			for _, form := range forms {
+				if form == scope.path || strings.HasPrefix(form, scope.path+string(filepath.Separator)) {
+					return true
+				}
 			}
 		}
 	}
@@ -2591,7 +2622,8 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 		case slices.Contains(cdPrograms, program):
 			cds = true
 		case literalShellBody(program, words, static) != "" &&
-			(!changesDirectory || bodyOnlyChangesDirectory(command, call)):
+			(!changesDirectory || bodyOnlyChangesDirectory(command, call) ||
+				placedShellBody(literalShellBody(program, words, static), linkDirsKnown, linkDirs, call, callDirs, movedDir)):
 			// sh -c "ln -s build/out bin" makes the link the plain ln makes,
 			// in the same directory: read the body as that command, so its
 			// links are known (or opaque) exactly as they would be written
@@ -2599,14 +2631,21 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 			// Renames and link-copying archives in the body also act on
 			// links made outside it (a top-level link renamed by sh -c
 			// "mv c d"), so they count as facts of this command too.
-			inner := commandLinks(literalShellBody(program, words, static), cwd, home, facts, record, true)
+			body, bodyDir, placedBody := literalShellBody(program, words, static), cwd, false
+			if changesDirectory && !bodyOnlyChangesDirectory(command, call) {
+				// After static top-level cd statements a body with no
+				// directory change of its own runs where the statement walk
+				// placed its call (rel-1-0-6:GAP-0260).
+				bodyDir, placedBody = callDirs[0], true
+			}
+			inner := commandLinks(body, bodyDir, home, facts, record, true)
 			links.merge(inner)
 			renames = renames || inner.renames
 			cds = cds || inner.cds
 			// A directory change that only this body makes is read by the
 			// body own statement walk; the disk checks of a nested directory
 			// change still guard the links made outside it (GAP-2533).
-			wrappedCds = wrappedCds || inner.wrappedCds || changesDirectory
+			wrappedCds = wrappedCds || inner.wrappedCds || changesDirectory && !placedBody
 			copyScopes = append(copyScopes, inner.copyScopes...)
 			renameOps = append(renameOps, inner.renameOps...)
 			findMoves = append(findMoves, inner.findMoves...)
@@ -2758,8 +2797,18 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 	// the statement walk placed every scope, the own destination of a placed
 	// copy is still read against its own scope (GAP-2579).
 	if cds && len(links.opaqueScopes) > 0 {
+		_, statementDirs, statementsKnown := topLevelStatementDirectories(file, cwd, home)
 		if linkDirsKnown && !wrappedCds && !unplacedScopes {
 			links.cdScopes = true
+			if statementsKnown {
+				links.cdFrom = cwd
+				links.cdDirs = []string{cwd}
+				for _, dir := range statementDirs {
+					if !slices.Contains(links.cdDirs, dir) {
+						links.cdDirs = append(links.cdDirs, dir)
+					}
+				}
+			}
 		} else {
 			links.globalOpaque, links.globalOther = true, true
 		}
