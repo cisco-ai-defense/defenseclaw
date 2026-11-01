@@ -183,6 +183,13 @@ jobs:
           Invoke-WindowsNativeProcess $go @(
             'test', '-vet=off', '-v', '-count=2', '-run', '^TestNativeWindowsExecutableForeignCollisionAndRecovery$', './internal/cli'
           ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-native-executable-lifecycle-stress.log') | Out-Null
+          # A Windows mutex is owned by one OS thread; 20 repeats prove the
+          # named-mutex holders release on it (rel-1-0-6:GAP-0238, GAP-0254).
+          Invoke-WindowsNativeProcess $go @(
+            'test', '-vet=off', '-v', '-count=20',
+            '-run', '^(TestSetupLock|TestReleaseFromAnotherOSThread|TestTryAcquireIsBusy|TestOneHolderAtATime|TestWindowsUserRuntimeTransactionUnlockFromAnotherOSThread)',
+            './cmd/defenseclaw-setup', './internal/winmutex', './internal/enterprisehooks'
+          ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-named-mutex-stress.log') | Out-Null
       - name: Repeat Windows timing tests that flaked on hosted runners
         if: ${{ matrix.kind == 'timing' }}
         run: |
