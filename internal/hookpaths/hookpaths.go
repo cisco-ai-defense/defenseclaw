@@ -1131,7 +1131,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					if !MayNameState(command) {
 						return incompleteEvidence(cwd)
 					}
-					reduced, overflow, ok := StateNamingStatements(command)
+					reduced, overflow, ok := StateNamingStatements(command, home)
 					if !ok || overflow {
 						// No silent drop past the bound: the map says only
 						// that it is incomplete, and the gateway judges the
@@ -5143,30 +5143,111 @@ const StateNamingStatementsMax = 128
 // StateNamingStatements reduces an over-budget POSIX call to the statements
 // a state write can come from: those that may name the state
 // (MayNameState) and the directory changes that place them, at most
-// StateNamingStatementsMax. The hook client describes only those, so its map
-// names the state targets the gateway proves the write from at a bounded
-// cost (describing every statement of a 30,000-statement call took 2.5 s,
-// review R2-5 of rel-1-0-2:GAP-0568), and the gateway judges the same
-// reduced call for the state write. A call the POSIX grammar does not split
-// (a PowerShell call) is kept whole, and only up to the 64 KiB analysis
-// bound (ok false past it). overflow reports that more statements qualify
-// than the bound keeps: the reduced reading is then not the whole story,
-// and its caller must not treat it as one (review r3 finding 3).
-func StateNamingStatements(command string) (reduced string, overflow, ok bool) {
+// StateNamingStatementsMax, in their order. Statements not proven read-only
+// (stateStatementReadOnly) are kept first, so a write, redirect, link or
+// delete is never the one dropped while reads fill the bound (review r4
+// finding 2: /bin/rm, unlink, find -delete and other spellings past 130
+// statements that name the state). The hook client describes only the kept
+// statements, so its map names the state targets the gateway proves the
+// write from at a bounded cost (describing every statement of a
+// 30,000-statement call took 2.5 s, review R2-5 of rel-1-0-2:GAP-0568), and
+// the gateway judges the same reduced call for the state write. overflow
+// reports that statements not proven read-only were dropped: the reduced
+// reading is then not the whole story, and its caller must not treat it as
+// one (review r3 finding 3). A call the POSIX grammar does not split (a
+// PowerShell call) is kept whole, and only up to the 64 KiB analysis bound
+// (ok false past it).
+func StateNamingStatements(command, home string) (reduced string, overflow, ok bool) {
 	texts, ok := actionfacts.ShellStatementTexts(command)
 	if !ok {
 		return command, false, len(command) <= 64<<10
 	}
-	var kept []string
-	for _, text := range texts {
+	var first, reads []int
+	for i, text := range texts {
 		fields := strings.Fields(text)
 		place := len(fields) > 0 && (fields[0] == "cd" || fields[0] == "pushd" || fields[0] == "popd")
-		if place || MayNameState(text) {
-			if len(kept) == StateNamingStatementsMax {
-				return strings.Join(kept, "; "), true, true
+		switch {
+		case place:
+			first = append(first, i)
+		case MayNameState(text):
+			if stateStatementReadOnly(text, home) {
+				reads = append(reads, i)
+			} else {
+				first = append(first, i)
 			}
-			kept = append(kept, text)
 		}
 	}
-	return strings.Join(kept, "; "), false, true
+	if len(first) > StateNamingStatementsMax {
+		first, overflow = first[:StateNamingStatementsMax], true
+	}
+	keep := first
+	if room := StateNamingStatementsMax - len(first); room > 0 {
+		keep = append(keep, reads[:min(room, len(reads))]...)
+	}
+	slices.Sort(keep)
+	kept := make([]string, len(keep))
+	for i, index := range keep {
+		kept[i] = texts[index]
+	}
+	return strings.Join(kept, "; "), overflow, true
+}
+
+// stateStatementReadOnly reports a statement proven to change no file: the
+// known read-only commands (actionKnownReadOnlyShell), or prints and tests
+// (echo, printf, test, [, true, false, :) and the read-only DefenseClaw
+// commands, with no redirect but a discarded one (2>&1, >/dev/null), no
+// assignment, substitution or function. Anything else may write.
+func stateStatementReadOnly(text, home string) bool {
+	file, parsed := parseShell(text)
+	if !parsed {
+		return false
+	}
+	if actionKnownReadOnlyShell(file, home) {
+		return true
+	}
+	seen, safe := false, true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if !safe {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.Redirect:
+			if !actionDiscardRedirect(node, home) {
+				safe = false
+			}
+			return false
+		case *syntax.FuncDecl, *syntax.DeclClause, *syntax.CmdSubst, *syntax.ProcSubst, *syntax.ArithmExp:
+			safe = false
+			return false
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 || len(node.Assigns) != 0 {
+				safe = false
+				return false
+			}
+			program, known := staticProgramWord(node.Args[0], home)
+			if !known {
+				safe = false
+				return false
+			}
+			switch programBase(program) {
+			case "echo", "printf", "test", "[", "true", "false", ":":
+			case "defenseclaw":
+				sub := ""
+				if len(node.Args) > 1 {
+					sub, _ = StaticWord(node.Args[1], home)
+				}
+				switch sub {
+				case "status", "version", "--version", "help", "--help":
+				default:
+					safe = false
+				}
+			default:
+				safe = false
+			}
+			seen = true
+			return true
+		}
+		return true
+	})
+	return seen && safe
 }

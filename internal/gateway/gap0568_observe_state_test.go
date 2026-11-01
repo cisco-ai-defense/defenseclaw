@@ -93,6 +93,21 @@ func TestGAP0568ObserveOverBudgetStateWriteBlocks(t *testing.T) {
 	// pattern names the state (no defense or claw in it), a known limit of
 	// the managed reading (review r3 item 5).
 	perUserOnly := map[string]bool{"short glob state write after 200": true, "qmark glob state write after 200": true}
+	// managedHolds rows: past the reduced reading's bound with statements
+	// that may write, the managed gateway holds the call; per-user reads
+	// the call itself and only alerts (review r4 mutation MN5).
+	managedHolds := map[string]bool{"130 naming writes to a project file": true}
+	ovf := gap0568Assignments(200) + "; " + strings.Join(decoys, "; ") + "; "
+	reads := make([]string, 130)
+	writes := make([]string, 130)
+	greps := make([]string, 130)
+	statuses := make([]string, 130)
+	for i := range reads {
+		reads[i] = "cat " + state + " 2>/dev/null"
+		writes[i] = fmt.Sprintf("echo claw%d >> notes.txt", i)
+		greps[i] = fmt.Sprintf("grep -c claw%d README.md 2>/dev/null", i)
+		statuses[i] = "defenseclaw status 2>&1"
+	}
 	rows := []struct {
 		name, command string
 		observeBlock  bool
@@ -115,6 +130,22 @@ func TestGAP0568ObserveOverBudgetStateWriteBlocks(t *testing.T) {
 		{"qmark glob state write after 200", gap0568Assignments(200) + "; printf c >> ~/.d?f?n?e?l?w/config.yaml", true},
 		{"state write after 130 naming statements", gap0568Assignments(200) + "; " + strings.Join(decoys, "; ") + "; printf c >> " + state, true},
 		{"tilde state write after 130 naming statements", gap0568Assignments(200) + "; " + strings.Join(decoys, "; ") + "; printf c >> ~/.defenseclaw/config.yaml", true},
+		// Review r4 finding 2: other spellings of a state write or delete
+		// after 130 naming statements are kept in the reduced reading.
+		{"/bin/rm after 130 naming statements", ovf + "/bin/rm -f " + state, true},
+		{"escaped rm after 130 naming statements", ovf + "\\rm -f " + state, true},
+		{"quoted rm after 130 naming statements", ovf + "\"rm\" -f " + state, true},
+		{"sh -c rm after 130 naming statements", ovf + "sh -c 'rm -f " + state + "'", true},
+		{"unlink after 130 naming statements", ovf + "unlink " + state, true},
+		{"find -delete after 130 naming statements", ovf + "find ~/.defenseclaw -name config.yaml -delete", true},
+		{"tee -a after 130 naming statements", ovf + "printf c | /usr/bin/tee -a " + state, true},
+		{"shred -u after 130 naming statements", ovf + "shred -u " + state, true},
+		// Review r4 finding 3: overflowing reads with discarded output
+		// stay alerts in observe mode.
+		{"130 state reads with 2>/dev/null", gap0568Assignments(200) + "; " + strings.Join(reads, "; "), false},
+		{"130 defenseclaw status with 2>&1", gap0568Assignments(200) + "; " + strings.Join(statuses, "; "), false},
+		{"130 greps with 2>/dev/null", gap0568Assignments(200) + "; " + strings.Join(greps, "; "), false},
+		{"130 naming writes to a project file", gap0568Assignments(200) + "; " + strings.Join(writes, "; "), false},
 		{"benign 200", gap0568Assignments(200), false},
 		{"keys write after 200", gap0568Assignments(200) + "; echo k >> " + keys, false},
 	}
@@ -128,7 +159,7 @@ func TestGAP0568ObserveOverBudgetStateWriteBlocks(t *testing.T) {
 					}
 					// Action mode blocks every row: each is over the budget
 					// or a state write.
-					want := mode == "action" || row.observeBlock
+					want := mode == "action" || row.observeBlock || managedHolds[row.name] && cell.managed
 					action := gap0568HookAction(t, api, connector, home, cwd, row.command, cell.client, cell.managed)
 					if got := action == "block"; got != want {
 						t.Errorf("%s/%s client=%t managed=%t %s: action %q, want block=%t", connector, mode, cell.client, cell.managed, row.name, action, want)

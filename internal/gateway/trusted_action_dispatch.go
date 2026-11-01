@@ -8661,15 +8661,16 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 	if !known || !hookpaths.MayNameState(command) {
 		return findings
 	}
-	reduced, overflow, ok := hookpaths.StateNamingStatements(command)
+	reduced, overflow, ok := hookpaths.StateNamingStatements(command, request.Input.ActiveHome)
 	if !ok {
 		return findings
 	}
-	if overflow && request.ProtectedHomeHook && trustedCallMayWrite(command) {
-		// More statements may name the state than the reduced reading
-		// keeps, so the hook client sent no description (review r3 finding
-		// 3). Behind ProtectHome the gateway cannot read the home to prove
-		// or rule out a state write, so a writing call is held as one.
+	if overflow && request.ProtectedHomeHook {
+		// More statements that may name the state and are not proven
+		// read-only than the reduced reading keeps, so the hook client
+		// sent no description (review r3 finding 3, r4 finding 2). Behind
+		// ProtectHome the gateway cannot read the home to prove or rule
+		// out a state write among them, so the call is held as one.
 		generation := request.generation
 		if generation == nil {
 			generation = snapshotRulePackGenerationFor(parent, request.Connector)
@@ -8685,17 +8686,6 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 		}
 	}
 	return findings
-}
-
-// trustedCallMayWriteWord matches a redirect or a program that writes,
-// moves, links or deletes files, at the start of a word, in POSIX shells and
-// PowerShell (aliases included).
-var trustedCallMayWriteWord = regexp.MustCompile("(?i)>|(^|[\\s;&|(`])(rm|rmdir|mv|cp|tee|ln|dd|truncate|install|sed|perl|python3?|ruby|node|unzip|tar|rsync|chmod|chown|touch|mkdir|set-content|add-content|clear-content|out-file|remove-item|move-item|copy-item|rename-item|new-item|ni|ri|del|erase|rd|ren|move|copy|sc|ac|clc)(\\s|$|;)")
-
-// trustedCallMayWrite reports a call text that may write, move, link or
-// delete a file.
-func trustedCallMayWrite(command string) bool {
-	return trustedCallMayWriteWord.MatchString(command)
 }
 
 // trustedCallOverStatementBudget reports a shell call that the
