@@ -743,11 +743,11 @@ const windowsSecretDirectoryReaderAccess = "0x1200a0"
 // and Administrators hold full control, inherited by new files. The reader
 // (the gateway service SID) gets a non-inheritable ACE with only
 // windowsSecretDirectoryReaderAccess on the directory itself. The Windows
-// installer re-applies this descriptor and windowsSecretFileSDDL on install,
-// upgrade and reconcile (Set-DefenseClawStandaloneSecretsAcls in
+// installer re-applies this descriptor and windowsSecretFileSDDLFor on
+// install, upgrade and reconcile (Set-DefenseClawStandaloneSecretsAcls in
 // DefenseClawEnterprise.psm1), because a non-purge uninstall resets the
-// retained store to administrator-only ACLs; a contract test keeps the two
-// copies identical.
+// retained store to administrator-only ACLs;
+// enterprise-standalone-secrets-acl-smoke.ps1 compares the two copies.
 func windowsSecretDirectorySDDL(reader *windows.SID) string {
 	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;" + windowsSecretDirectoryReaderAccess + ";;;" + reader.String() + ")"
 }

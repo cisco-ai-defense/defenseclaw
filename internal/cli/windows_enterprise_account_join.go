@@ -52,7 +52,8 @@ func windowsAccountJoinSources(cfg *config.Config, layout managed.StandaloneLayo
 			return anchors.TenantID, nil
 		},
 		ReadSecret: func(name string) ([]byte, error) {
-			// As the gateway service account the store grants read to.
+			// Read elevated; the reader check accepts the gateway service
+			// account's entry, which these credentials do not carry.
 			value, _, err := managed.ResolveServiceCredentialAs(name, layout.SecretsDir, windowsSecretGatewayAccount)
 			return value, err
 		},
