@@ -109,12 +109,21 @@ func (l UnprotectedAgentLine) Message() string {
 // (same path and version) that two or more accounts can run, and a test for
 // the entries those lines stand for. A copy only one account has, such as one
 // under that account's home, keeps its own per-account entry.
+//
+// Some enumerator paths know an account's OpenCode only by its version and
+// not by a path: the machine's selected version for an account whose home is
+// not inspected, or the version an account's own PATH resolves. Such a
+// pathless V1 entry cannot be a private copy (a private install is found with
+// its path), so it joins the one shared copy of the same version when there
+// is exactly one; with none or several it stays a per-account line, since no
+// copy can be named (rel-1-0-6 GAP-0071, managed RHEL 9.8 rc21).
 func CollapseSharedOpenCodeV1(agents []UnprotectedAgent, record string) (lines []UnprotectedAgentLine, collapsed func(UnprotectedAgent) bool) {
 	groups := map[string][]UnprotectedAgent{}
 	var order []string
+	var pathless []UnprotectedAgent
 	seen := map[string]bool{}
 	for _, agent := range agents {
-		if agent.Code != UnprotectedCodeOpenCodeV1 || strings.TrimSpace(agent.InstallPath) == "" || unprotectedAccount(agent) == "" {
+		if agent.Code != UnprotectedCodeOpenCodeV1 || unprotectedAccount(agent) == "" {
 			continue
 		}
 		id := unprotectedAgentIdentity(agent)
@@ -122,6 +131,10 @@ func CollapseSharedOpenCodeV1(agents []UnprotectedAgent, record string) (lines [
 			continue
 		}
 		seen[id] = true
+		if strings.TrimSpace(agent.InstallPath) == "" {
+			pathless = append(pathless, agent)
+			continue
+		}
 		key := sharedOpenCodeV1Key(agent)
 		if _, ok := groups[key]; !ok {
 			order = append(order, key)
@@ -129,13 +142,46 @@ func CollapseSharedOpenCodeV1(agents []UnprotectedAgent, record string) (lines [
 		groups[key] = append(groups[key], agent)
 	}
 	shared := map[string]bool{}
+	sharedByVersion := map[string][]string{}
 	for _, key := range order {
 		if members := groups[key]; len(members) >= 2 {
-			lines = append(lines, UnprotectedAgentLine{Code: UnprotectedCodeOpenCodeV1, Members: members, Record: record})
 			shared[key] = true
+			version := strings.TrimSpace(members[0].Version)
+			sharedByVersion[version] = append(sharedByVersion[version], key)
+		}
+	}
+	foldedVersion := map[string]bool{}
+	for _, agent := range pathless {
+		version := strings.TrimSpace(agent.Version)
+		keys := sharedByVersion[version]
+		if version == "" || len(keys) != 1 {
+			continue
+		}
+		foldedVersion[version] = true
+		account := unprotectedAccount(agent)
+		joined := false
+		for _, member := range groups[keys[0]] {
+			if unprotectedAccount(member) == account {
+				joined = true
+				break
+			}
+		}
+		if !joined {
+			groups[keys[0]] = append(groups[keys[0]], agent)
+		}
+	}
+	for _, key := range order {
+		if shared[key] {
+			lines = append(lines, UnprotectedAgentLine{Code: UnprotectedCodeOpenCodeV1, Members: groups[key], Record: record})
 		}
 	}
 	return lines, func(agent UnprotectedAgent) bool {
-		return agent.Code == UnprotectedCodeOpenCodeV1 && shared[sharedOpenCodeV1Key(agent)]
+		if agent.Code != UnprotectedCodeOpenCodeV1 {
+			return false
+		}
+		if strings.TrimSpace(agent.InstallPath) == "" {
+			return foldedVersion[strings.TrimSpace(agent.Version)]
+		}
+		return shared[sharedOpenCodeV1Key(agent)]
 	}
 }

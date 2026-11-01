@@ -1102,6 +1102,47 @@ def test_setup_returns_once_the_gateway_has_loaded_the_guard(tmp_path, monkeypat
         cleanup_app(app, db_path, data_dir)
 
 
+def test_setup_waits_until_the_gateway_resolves_the_pair_to_the_profile(tmp_path, monkeypatch):
+    """GAP-0302: a pair moved back to an existing profile was refused as still on the old one."""
+    from defenseclaw.gateway import OrchestratorClient
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent = _binary(tmp_path / "kiro-cli")
+    table = {"enabled": True, "profiles": {"default": {"mode": "observe"}, "locked": {"mode": "observe"}}}
+    answers = [
+        {**table, "pair_profiles": {"zed/kiro": "locked"}},
+        {**table, "pair_profiles": {"zed/kiro": "locked"}},
+        {**table, "pair_profiles": {"zed/kiro": "default"}},
+    ]
+    calls: list[int] = []
+
+    def acp_profiles(_self):
+        calls.append(1)
+        return answers[min(len(calls), len(answers)) - 1]
+
+    monkeypatch.setattr(OrchestratorClient, "acp_profiles", acp_profiles)
+    monkeypatch.setattr(cmd_acp_module.time, "sleep", lambda _seconds: None)
+    setup = ["setup", "--client", "zed", "--agent", "kiro", "--profile", "default",
+             "--guard-binary", guard, "--agent-binary", agent]
+    try:
+        result = CliRunner().invoke(acp_cmd, setup, obj=app)
+        assert result.exit_code == 0, result.output
+        assert len(calls) == 3
+        assert "has not loaded it yet" not in result.stderr
+
+        # A gateway that reports no pair table (an older one) is waited for on
+        # the profile table alone.
+        calls.clear()
+        answers[:] = [table]
+        result = CliRunner().invoke(acp_cmd, setup, obj=app)
+        assert result.exit_code == 0, result.output
+        assert len(calls) == 1
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def _repair_args(output: str) -> list[str]:
     """The `acp setup` argv a failed verify told the operator to run."""
     import re

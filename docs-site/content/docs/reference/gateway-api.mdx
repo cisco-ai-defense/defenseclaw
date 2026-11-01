@@ -712,7 +712,7 @@ discovery is off, `enabled` is `false` and the lists are empty.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/acp/catalog` | The pinned built-in catalog of ACP clients and agents. |
-| `GET` | `/v1/acp/profiles` | The ACP posture from the running config: `enabled`, `mode`, `default_profile`, and `profiles`. |
+| `GET` | `/v1/acp/profiles` | The ACP posture from the running config: `enabled`, `mode`, `default_profile`, `profiles`, and `pair_profiles` (the profile each configured pair resolves to). |
 | `POST` | `/api/v1/acp/challenge` | Issue a server nonce for the signed ACP request scheme. Loopback only, signed with the ACP key; see [Auth](#auth). |
 | `POST` | `/api/v1/acp/evaluate` | Evaluate one ACP frame, or one completed turn, for a bound agent and return the verdict. Same signed scheme; the gateway token alone gets `401`. |
 

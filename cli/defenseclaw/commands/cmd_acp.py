@@ -1603,7 +1603,7 @@ def setup_cmd(
         f"scope={client}/{agent} mode={mode} previous={getattr(prior_profile, 'mode', '') or ''}",
     )
     if not managed:
-        _wait_for_gateway_acp(app, profile, mode, show)
+        _wait_for_gateway_acp(app, profile, mode, show, pair_key)
     _warn_left_entries(left, path, client, agent, own=sorted(written))
     # A profile setup created is named, so a typo in --profile shows (GAP-1589).
     created = f", new profile {profile}" if existing_profile is None and not managed else ""
@@ -1635,12 +1635,19 @@ def _log_acp_change(app: AppContext, operation: str, details: str) -> None:
 _GATEWAY_ACP_APPLY_SECONDS = 10.0
 
 
-def _wait_for_gateway_acp(app: AppContext, profile: str, mode: str, show: bool) -> None:
+def _wait_for_gateway_acp(app: AppContext, profile: str, mode: str, show: bool, pair_key: str = "") -> None:
     """Return once the running gateway has loaded this setup (GAP-2135).
 
     An editor session started before the reload was refused with HTTP 503
     ("ACP guard is not enabled") right after setup said Configured. A gateway
     that is stopped, or does not answer this request, is not waited for.
+
+    A pair moved back to a profile the gateway already has (observe mode, the
+    default profile) is not loaded until the gateway resolves the pair to that
+    profile: the profile table alone looks right at once, and a guard started
+    in that window was refused as bound to the profile the pair had just left
+    (GAP-0302). A gateway that does not report ``pair_profiles`` is waited for
+    on the profile table only, as before.
     """
     from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
@@ -1663,7 +1670,9 @@ def _wait_for_gateway_acp(app: AppContext, profile: str, mode: str, show: bool) 
                 return
             profiles = loaded.get("profiles")
             entry = profiles.get(profile) if isinstance(profiles, dict) else None
-            if loaded.get("enabled") is True and isinstance(entry, dict) and entry.get("mode") == mode:
+            pairs = loaded.get("pair_profiles")
+            pair_loaded = not pair_key or not isinstance(pairs, dict) or pairs.get(pair_key) == profile
+            if loaded.get("enabled") is True and isinstance(entry, dict) and entry.get("mode") == mode and pair_loaded:
                 return
             if time.monotonic() >= deadline:
                 ux.echo(
