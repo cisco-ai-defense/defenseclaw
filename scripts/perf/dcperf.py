@@ -30,7 +30,7 @@ Subcommands:
                                       codex, start the gateway on free ports
   run [--home DIR] [--rss-idle S] [--out FILE] [--budgets FILE --column C]
       [--eslogger-log FILE]
-  eslogger-parse RESULT [--eslogger-pid PID] [--out FILE]
+  eslogger-parse RESULT --eslogger-pid PID [--out FILE]
                                       after eslogger was stopped with SIGTERM:
                                       fill the exec count of a run that traced
                                       with --eslogger-log (macOS)
@@ -665,7 +665,15 @@ def parse_eslogger(
         span = [e for e in events if first <= e[0] <= last]
         dropped = 0
         for kind in ("exec", "fork"):
-            seqs = sorted({e[2][1] for e in span if e[1] == kind})
+            # From the last event of the kind before the span to the first one
+            # after it, so an event dropped at either edge of the span (the
+            # last gateway exec in the slack after the final call) is a gap too;
+            # a log from a stopped eslogger has both.
+            of_kind = [e for e in events if e[1] == kind]
+            before = [e for e in of_kind if e[0] < first]
+            after = [e for e in of_kind if e[0] > last]
+            edge = before[-1:] + after[:1]
+            seqs = sorted({e[2][1] for e in of_kind if first <= e[0] <= last} | {e[2][1] for e in edge})
             if seqs:
                 dropped += seqs[-1] - seqs[0] + 1 - len(seqs)
         out["gateway_events_dropped"] = dropped
@@ -729,28 +737,27 @@ def count_execs_eslogger(inst: Install, connector: str, calls: int, log: Path) -
     }
 
 
-def eslogger_parse(result: dict, eslogger_pid: int | None = None) -> dict:
+def eslogger_parse(result: dict, eslogger_pid: int) -> dict:
     """Fill a result's pending eslogger traces from their logs.
 
-    Refuses (SystemExit) while the eslogger pid given is still running, and
+    Refuses (SystemExit) while the eslogger pid is still running, and
     when a log ends before the last traced call: eslogger flushes its buffer
     when SIGTERM stops it, so either means a partial log.
     """
     traces = result.get("eslogger_traces") or {}
     if not traces:
         raise SystemExit("eslogger-parse: the result holds no pending eslogger trace (run with --eslogger-log)")
-    if eslogger_pid:
-        try:
-            os.kill(eslogger_pid, 0)
-            running = True
-        except ProcessLookupError:
-            running = False
-        except PermissionError:
-            running = True  # root's process, alive
-        if running:
-            raise SystemExit(
-                f"eslogger-parse: eslogger pid {eslogger_pid} is still running; stop it with SIGTERM first"
-            )
+    if eslogger_pid <= 0:
+        raise SystemExit("eslogger-parse: --eslogger-pid must name the eslogger process that wrote the log")
+    try:
+        os.kill(eslogger_pid, 0)
+        running = True
+    except ProcessLookupError:
+        running = False
+    except PermissionError:
+        running = True  # root's process, alive
+    if running:
+        raise SystemExit(f"eslogger-parse: eslogger pid {eslogger_pid} is still running; stop it with SIGTERM first")
     for connector, trace in traces.items():
         lines = _read_log_from(Path(trace["log"]), int(trace["offset"]))
         windows = [tuple(w) for w in trace["windows"]]
@@ -1103,7 +1110,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     e = sub.add_parser("eslogger-parse")
     e.add_argument("result", type=Path)
-    e.add_argument("--eslogger-pid", type=int, help="refuse while this eslogger process still runs")
+    e.add_argument(
+        "--eslogger-pid", type=int, required=True, help="the eslogger that wrote the log; refused while it still runs"
+    )
     e.add_argument("--out", type=Path, help="write here instead of over RESULT")
     c = sub.add_parser("compare")
     c.add_argument("result", type=Path, nargs="+", help="one result, or several passes to merge (later wins)")

@@ -9,6 +9,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -177,22 +179,52 @@ def _pending_trace(tmp_path: Path, lines: list[str]) -> dict:
     }
 
 
+def _stopped_pid() -> int:
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def _tail(seq: int) -> str:
+    return _es("exec", seq, "03.000000000", 778, 1, "/usr/bin/true")  # written after the last call
+
+
 def test_eslogger_parse_fills_the_exec_count_from_a_stopped_logger(tmp_path: Path) -> None:
-    tail = _es("exec", 9, "03.000000000", 778, 1, "/usr/bin/true")  # written after the last call
-    result = dcperf.eslogger_parse(_pending_trace(tmp_path, _eslogger_log(50, 900, (7, 8)) + [tail]))
+    result = dcperf.eslogger_parse(
+        _pending_trace(tmp_path, _eslogger_log(50, 900, (7, 8)) + [_tail(9)]), _stopped_pid()
+    )
     assert "eslogger_traces" not in result
+    assert result["metrics"]["hook_execs"]["claudecode"]["gateway_events_dropped"] == 0
     assert result["metrics"]["hook_execs"]["claudecode"]["gateway_execs_per_call"] == 1.0
 
 
 def test_eslogger_parse_refuses_a_log_that_may_be_partial(tmp_path: Path) -> None:
     # no event after the last call: eslogger was not stopped (its buffer was not flushed)
-    for pid, lines in ((None, _eslogger_log(50, 900, (7, 8))), (os.getpid(), _eslogger_log(50, 900, (7, 8)))):
-        try:
-            dcperf.eslogger_parse(_pending_trace(tmp_path, lines), pid)
-        except SystemExit as exc:
-            assert "SIGTERM" in str(exc)
-        else:
-            raise AssertionError(f"a partial log was parsed (pid {pid})")
+    try:
+        dcperf.eslogger_parse(_pending_trace(tmp_path, _eslogger_log(50, 900, (7, 8))), _stopped_pid())
+    except SystemExit as exc:
+        assert "ends before the last traced call" in str(exc)
+    else:
+        raise AssertionError("a log that ends before the last call was parsed")
+
+
+def test_eslogger_parse_refuses_while_the_logger_still_runs(tmp_path: Path) -> None:
+    # a complete-looking log, but the eslogger that writes it is alive (this process stands in)
+    try:
+        dcperf.eslogger_parse(_pending_trace(tmp_path, _eslogger_log(50, 900, (7, 8)) + [_tail(9)]), os.getpid())
+    except SystemExit as exc:
+        assert "still running" in str(exc)
+    else:
+        raise AssertionError("a log was parsed while its eslogger still ran")
+
+
+def test_a_dropped_event_at_the_edge_of_the_span_drops_the_gateway_count() -> None:
+    # review round 2: exec seq 9 (say, the last gateway exec in the slack after
+    # the final call) is missing; the span itself is whole, the next event is 10
+    parsed = dcperf.parse_eslogger(_eslogger_log(50, 900, (7, 8)) + [_tail(10)], _eslogger_windows(), 50, 900)
+    assert (parsed["calls"], parsed["calls_dropped"]) == (2, 0)
+    assert parsed["gateway_events_dropped"] == 1
+    assert "gateway_execs_per_call" not in parsed
 
 
 def test_passes_merge_into_one_result_for_the_gate() -> None:
