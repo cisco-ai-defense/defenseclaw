@@ -445,6 +445,28 @@ def test_yara_verdicts_keep_clean_and_malicious_tool_semantics() -> None:
     assert by_name["malicious_shell"].findings
 
 
+# rel-1-0-6 GAP-0226: this scan pays a cold node + npm start of npx.cmd, which the
+# product's 60 s scan bound (mcp._STDIO_SCAN_TIMEOUT_SECONDS) is not sized for on a
+# hosted runner. Measured 2026-10-31: Windows Native CI, 87 green runs of this test:
+# p50 7.8 s, p90 10.9 s, max 26.6 s, and one run (41246277718) where npm made no
+# progress for 60 s after it opened its log; dc-win2 1.5-3.2 s. npm's own work is
+# under 0.3 s of that (npm timing: load 45 ms, idealTree 17 ms, reify 41 ms), and a
+# warm npm cache or no registry update check changes it by under 0.15 s, so neither
+# the cache nor the network is the cause: the rest is the runner starting node and
+# npm. 180 s is about 7x the measured CI maximum. The product bound is unchanged and
+# has its own timeout tests.
+_NPX_COLD_START_SCAN_SECONDS = 180
+
+
+def _last_npm_debug_log() -> str:
+    """The tail of npm's newest debug log in the test identity, for a timeout."""
+    logs = Path(os.environ.get("LOCALAPPDATA", "")) / "npm-cache" / "_logs"
+    found = sorted(logs.glob("*-debug-*.log"), key=lambda path: path.stat().st_mtime) if logs.is_dir() else []
+    if not found:
+        return "none"
+    return " | ".join(found[-1].read_text(encoding="utf-8", errors="replace").splitlines()[-3:])
+
+
 @pytest.mark.allow_subprocess
 @pytest.mark.skipif(not HOST_NPX, reason="native npx.cmd is unavailable")
 def test_native_npx_cmd_acceptance_with_quoted_local_package(
@@ -465,7 +487,15 @@ def test_native_npx_cmd_acceptance_with_quoted_local_package(
     )
     plan = mcp._windows_stdio_launch_plan(entry)
     scanner = _RecordingScanner()
-    results, _stderr_size = asyncio.run(mcp._scan_windows_stdio_tools(scanner, plan, ["fixture"]))
+    try:
+        results, _stderr_size = asyncio.run(
+            mcp._scan_windows_stdio_tools(scanner, plan, ["fixture"], timeout_seconds=_NPX_COLD_START_SCAN_SECONDS)
+        )
+    except TimeoutError:
+        pytest.fail(
+            f"npx.cmd did not list the fixture's tools within {_NPX_COLD_START_SCAN_SECONDS} s; "
+            f"npm debug log ends: {_last_npm_debug_log()}"
+        )
 
     assert Path(plan.args[5]).name.lower() == "npx.cmd"
     assert [result.tool_name for result in results] == ["benign_echo", "malicious_shell"]

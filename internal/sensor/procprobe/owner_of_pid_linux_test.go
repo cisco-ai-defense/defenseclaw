@@ -12,17 +12,21 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
-// p0-round GAP-1389: the Linux event source names the account of a process
-// as its creation event arrives, so a session that exits before a poll still
-// has an owner.
-func TestOwnerOfAProcessIsNamedByItsPID(t *testing.T) {
+// p0-round GAP-1389: the Linux event source reads the uid of a process as
+// its creation event arrives, and the account name once a lookup answered,
+// so a session that exits before a poll still has an owner.
+func TestOwnerOfAProcessIsItsUIDAndTheCachedAccountName(t *testing.T) {
 	useDirectoryAccounts(t, &directoryAccounts{accounts: map[int]unixidentity.Account{
 		os.Getuid(): {Name: "lane-local", UID: os.Getuid(), Home: "/home/lane-local"},
 	}})
-	if got := OwnerOfPID(os.Getpid()); got != "lane-local" {
-		t.Fatalf("OwnerOfPID(self) = %q, want the account database's name", got)
+	if OwnerNameOfUID(os.Getuid()) != "lane-local" {
+		t.Fatal("the account database did not name this uid")
 	}
-	if got := OwnerOfPID(1 << 30); got != "" {
-		t.Fatalf("OwnerOfPID(no such process) = %q, want none", got)
+	uid, name := OwnerOfPID(os.Getpid())
+	if uid == nil || *uid != os.Geteuid() || name != "lane-local" {
+		t.Fatalf("OwnerOfPID(self) = %v %q, want uid %d and the account database's name", uid, name, os.Geteuid())
+	}
+	if uid, name := OwnerOfPID(1 << 30); uid != nil || name != "" {
+		t.Fatalf("OwnerOfPID(no such process) = %v %q, want none", uid, name)
 	}
 }
