@@ -7,6 +7,9 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // ShellStatementsOverBudget reports whether a POSIX shell command has more
@@ -22,7 +25,138 @@ func ShellStatementsOverBudget(command string) bool {
 		return false
 	}
 	statements, _, ok := sequenceStatementDetails(command, true, true)
-	return ok && len(statements) > maxStatementsAlone
+	if ok {
+		if len(statements) > maxStatementsAlone {
+			// The semantic splitter also accepts Bash-only syntax. The
+			// analyzer counts POSIX syntax, so a Bash-only split is not a
+			// statement-budget result for this reading.
+			_, parsed := budgetPOSIXParse(command)
+			return parsed
+		}
+		// The flattened outer call can be short while a static shell -c
+		// or eval body in it exceeds the same budget.
+		if !strings.Contains(command, " -c") && !strings.Contains(command, " --command") &&
+			!strings.Contains(command, "eval ") && !strings.Contains(command, "trap ") {
+			return false
+		}
+	}
+	// The evaluator can decline a dynamic function invocation (for
+	// example run() { "$@"; }). That does not make the surrounding
+	// statements disappear. Count their syntax without resolving the
+	// function's dynamic command name.
+	return posixStructuralStatementsOverBudget(command)
+}
+
+// posixStructuralStatementsOverBudget is the count-only fallback when the
+// evaluator cannot flatten a valid POSIX call. Function definitions are
+// inert; their bodies count when an earlier definition is invoked. Compound
+// statements are replaced by their children, as in SimpleCommands.
+func posixStructuralStatementsOverBudget(command string) bool {
+	file, ok := budgetPOSIXParse(command)
+	if !ok {
+		return false
+	}
+	functions := make(map[string]*syntax.Stmt)
+	count := 0
+	var statements func([]*syntax.Stmt, int)
+	var statement func(*syntax.Stmt, int)
+	statements = func(list []*syntax.Stmt, depth int) {
+		for _, stmt := range list {
+			if count > maxStatementsAlone {
+				return
+			}
+			statement(stmt, depth)
+		}
+	}
+	statement = func(stmt *syntax.Stmt, depth int) {
+		if stmt == nil || count > maxStatementsAlone {
+			return
+		}
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.FuncDecl:
+			if cmd.Name != nil && cmd.Body != nil {
+				functions[cmd.Name.Value] = cmd.Body
+			}
+			return
+		case *syntax.BinaryCmd:
+			statement(cmd.X, depth)
+			statement(cmd.Y, depth)
+			return
+		case *syntax.Subshell:
+			statements(cmd.Stmts, depth)
+			return
+		case *syntax.Block:
+			statements(cmd.Stmts, depth)
+			return
+		case *syntax.IfClause:
+			for clause := cmd; clause != nil; clause = clause.Else {
+				statements(clause.Cond, depth)
+				statements(clause.Then, depth)
+			}
+			return
+		case *syntax.WhileClause:
+			statements(cmd.Cond, depth)
+			statements(cmd.Do, depth)
+			return
+		case *syntax.ForClause:
+			statements(cmd.Do, depth)
+			return
+		case *syntax.CaseClause:
+			for _, item := range cmd.Items {
+				statements(item.Stmts, depth)
+			}
+			return
+		case *syntax.TimeClause:
+			statement(cmd.Stmt, depth)
+			return
+		case *syntax.CallExpr:
+			count++
+			syntax.Walk(cmd, func(node syntax.Node) bool {
+				switch nested := node.(type) {
+				case *syntax.CmdSubst:
+					statements(nested.Stmts, depth)
+					return false
+				case *syntax.ProcSubst:
+					statements(nested.Stmts, depth)
+					return false
+				}
+				return count <= maxStatementsAlone
+			})
+			if len(cmd.Args) > 0 {
+				if name, known := simpleFunctionCallName(cmd); known && depth < 8 {
+					if body := functions[name]; body != nil {
+						statement(body, depth+1)
+					}
+				}
+			}
+			if depth < 8 {
+				if script, _, nested, static := simpleNestedScript(cmd, nil, nil, nil); nested && static {
+					if child, ok := budgetPOSIXParse(script); ok {
+						statements(child.Stmts, depth+1)
+					}
+				}
+			}
+		default:
+			count++
+		}
+	}
+	statements(file.Stmts, 0)
+	return count > maxStatementsAlone
+}
+
+func budgetPOSIXParse(command string) (*syntax.File, bool) {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(command), "")
+	if err == nil {
+		return file, true
+	}
+	// Match the analyzer's narrow normalization for aggregate redirects.
+	// Other Bash syntax remains invalid in a POSIX reading.
+	normalized, valid := normalizePOSIXAggregateRedirects(command, true)
+	if !valid {
+		return nil, false
+	}
+	file, err = syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(normalized), "")
+	return file, err == nil
 }
 
 // ShellStatementTexts returns the statements of a POSIX command as the

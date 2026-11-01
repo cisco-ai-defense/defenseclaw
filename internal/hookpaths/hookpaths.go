@@ -5187,6 +5187,7 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 	if !ok {
 		return command, false, len(command) <= 64<<10
 	}
+	shadowed := shellShadowedReadNames(command, home)
 	var first []int
 	writers := 0
 	for i, text := range texts {
@@ -5195,9 +5196,15 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 		switch {
 		case place:
 			first = append(first, i)
-		case MayNameState(text) && !stateStatementReadOnly(text, home):
+		case MayNameState(text) && !stateStatementReadOnlyWithBindings(text, home, shadowed):
 			first = append(first, i)
 			writers++
+			// The reduced reading omits the definition that changed this
+			// command's binding. Rechecking only the apparent read would
+			// make that write disappear, even with one naming statement.
+			if len(shadowed) > 0 && stateStatementReadOnly(text, home) {
+				overflow = true
+			}
 		}
 	}
 	if writers == 0 {
@@ -5212,7 +5219,7 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 	// call is not reducible: it is reported as an overflow
 	// (rel-1-0-6:GAP-0414).
 	if !overflow {
-		if defined := shellWritingFunctionNames(command, home); len(defined) > 0 {
+		if defined := shellWritingFunctionNames(command, home, shadowed); len(defined) > 0 {
 			for _, index := range first {
 				if fields := strings.Fields(texts[index]); len(fields) > 0 && defined[fields[0]] {
 					overflow = true
@@ -5234,8 +5241,8 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 // not parse). A helper that only prints, such as log() { echo "$@"; },
 // writes nothing whatever it is called with, so a call of it stays
 // reducible (rel-1-0-6:GAP-0448, review r6 finding 2).
-func shellWritingFunctionNames(command, home string) map[string]bool {
-	if !strings.Contains(command, "()") && !strings.Contains(command, "function") {
+func shellWritingFunctionNames(command, home string, shadowed map[string]bool) map[string]bool {
+	if !strings.Contains(command, ")") && !strings.Contains(command, "function") {
 		return nil
 	}
 	file, ok := parseShell(command)
@@ -5247,7 +5254,7 @@ func shellWritingFunctionNames(command, home string) map[string]bool {
 		if decl, isDecl := node.(*syntax.FuncDecl); isDecl && decl.Name != nil {
 			if decl.Body != nil {
 				start, end := int(decl.Body.Pos().Offset()), int(decl.Body.End().Offset())
-				if start >= 0 && start < end && end <= len(command) && stateStatementReadOnly(command[start:end], home) {
+				if start >= 0 && start < end && end <= len(command) && stateStatementReadOnlyWithBindings(command[start:end], home, shadowed) {
 					return true
 				}
 			}
@@ -5259,6 +5266,80 @@ func shellWritingFunctionNames(command, home string) map[string]bool {
 		return true
 	})
 	return names
+}
+
+// shellShadowedReadNames records names whose apparent read command may run
+// an in-call function or alias instead. A sourced or evaluated script can
+// change any binding visible to a later statement.
+func shellShadowedReadNames(command, home string) map[string]bool {
+	if !strings.Contains(command, ")") && !strings.Contains(command, "function") &&
+		!strings.Contains(command, "alias") && !strings.Contains(command, "eval") &&
+		!strings.Contains(command, "source") && !strings.Contains(command, ". ") {
+		return nil
+	}
+	file, ok := parseShell(command)
+	if !ok {
+		return map[string]bool{"*": true}
+	}
+	var shadowed map[string]bool
+	mark := func(name string) {
+		if shadowed == nil {
+			shadowed = make(map[string]bool)
+		}
+		shadowed[name] = true
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			if node.Name != nil {
+				mark(node.Name.Value)
+			}
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				break
+			}
+			program, known := staticProgramWord(node.Args[0], home)
+			if !known {
+				break
+			}
+			args := node.Args
+			if program == "command" || program == "builtin" {
+				index := 1
+				if index < len(args) && args[index].Lit() == "-p" {
+					index++
+				}
+				if index < len(args) && args[index].Lit() == "--" {
+					index++
+				}
+				if index >= len(args) || args[index].Lit() == "-v" || args[index].Lit() == "-V" {
+					break
+				}
+				program, known = staticProgramWord(args[index], home)
+				if !known {
+					mark("*")
+					break
+				}
+				args = args[index:]
+			}
+			switch program {
+			case "eval", "source", ".":
+				mark("*")
+			case "alias":
+				for _, arg := range args[1:] {
+					value, known := StaticWord(arg, home)
+					if !known {
+						mark("*")
+						continue
+					}
+					if name, _, found := strings.Cut(value, "="); found && name != "" {
+						mark(name)
+					}
+				}
+			}
+		}
+		return true
+	})
+	return shadowed
 }
 
 // StateNamingReading is StateNamingStatements for a call read in its own
@@ -5297,23 +5378,115 @@ var powerShellReadOnlyCommands = map[string]bool{
 var (
 	powerShellLeadingAssignment = regexp.MustCompile(`^\$[A-Za-z_][\w:]*\s*=\s*`)
 	powerShellDiscardRedirect   = regexp.MustCompile(`[0-9*]?>>?\s*\$null\b`)
+	powerShellDescriptorCopy    = regexp.MustCompile(`[0-9*]?>&[0-9]+\b`)
+	powerShellQuotedPath        = regexp.MustCompile(`\(\s*'[^']*'\s*\)`)
+	powerShellLiteralAssignment = regexp.MustCompile(`(?i)^\$[a-z_]\w*\s*=\s*(?:[0-9]+|\$true|\$false|\$null|'[^']*'|"[^"]*")\s*$`)
 )
 
 // powerShellMayWriteStatePath reports a PowerShell call with a segment
-// (split at ;, | and line ends; quotes are not read, which only adds
-// segments) that names the DefenseClaw state folder and is not proven
+// (split at ;, |, && and line ends outside quotes) that names the DefenseClaw
+// state folder and is not proven
 // read-only (powerShellSegmentReadOnly). The state folder is named as
 // .defense... once quotes, backticks and backslashes are removed, in any
 // case, or as a pattern with claw in it.
 func powerShellMayWriteStatePath(command string) bool {
-	for _, segment := range strings.FieldsFunc(command, func(r rune) bool { return r == ';' || r == '|' || r == '\n' || r == '\r' }) {
+	stableBindings := true
+	pathVariables := make(map[string]bool)
+	for _, segment := range powerShellStateSegments(command) {
 		lower := strings.ToLower(strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(segment))
 		names := strings.Contains(lower, ".defense") || strings.Contains(lower, "claw") && strings.ContainsAny(lower, "*?[")
-		if names && !powerShellSegmentReadOnly(segment) {
+		readOnly := stableBindings && powerShellSegmentReadOnly(segment)
+		if names && !readOnly {
 			return true
 		}
+		if names && readOnly {
+			if powerShellLeadingAssignment.MatchString(strings.TrimSpace(segment)) {
+				name := strings.ToLower(strings.TrimSpace(segment[:strings.IndexByte(segment, '=')]))
+				pathVariables[name] = true
+			}
+		} else if !readOnly && (!stableBindings || !powerShellReadBindingsUnchanged(segment)) {
+			for name := range pathVariables {
+				if powerShellReferencesVariable(segment, name) {
+					return true
+				}
+			}
+		}
+		// An earlier command in the same scope may install an alias,
+		// function or module command with a read-only name. Only a
+		// segment known to leave command bindings alone preserves the
+		// read proof for later segments.
+		stableBindings = stableBindings && powerShellReadBindingsUnchanged(segment)
 	}
 	return false
+}
+
+// powerShellStateSegments keeps separators inside quoted arguments in the
+// same segment. A quoted pipe is text, not a pipeline to another command.
+func powerShellStateSegments(command string) []string {
+	var segments []string
+	start := 0
+	quote := byte(0)
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if quote == '\'' {
+			if c == '\'' {
+				if i+1 < len(command) && command[i+1] == '\'' {
+					i++
+				} else {
+					quote = 0
+				}
+			}
+			continue
+		}
+		if c == '`' {
+			i++
+			continue
+		}
+		if quote == '"' {
+			if c == '"' {
+				quote = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote = c
+			continue
+		}
+		if c == '&' && i+1 < len(command) && command[i+1] == '&' {
+			segments = append(segments, command[start:i])
+			i++
+			start = i + 1
+			continue
+		}
+		if c == ';' || c == '|' || c == '\n' || c == '\r' {
+			segments = append(segments, command[start:i])
+			start = i + 1
+		}
+	}
+	segments = append(segments, command[start:])
+	return segments
+}
+
+func powerShellReferencesVariable(segment, variable string) bool {
+	text := strings.ToLower(segment)
+	for start := 0; start < len(text); {
+		index := strings.Index(text[start:], variable)
+		if index < 0 {
+			return false
+		}
+		end := start + index + len(variable)
+		if end == len(text) || !strings.ContainsRune("_:", rune(text[end])) &&
+			!(text[end] >= 'a' && text[end] <= 'z') && !(text[end] >= '0' && text[end] <= '9') {
+			return true
+		}
+		start = end
+	}
+	return false
+}
+
+func powerShellReadBindingsUnchanged(segment string) bool {
+	text := strings.TrimSpace(segment)
+	return text == "" || powerShellSegmentReadOnly(text) || powerShellLiteralAssignment.MatchString(text)
 }
 
 // powerShellSegmentReadOnly reports a segment that runs a known read-only
@@ -5321,16 +5494,96 @@ func powerShellMayWriteStatePath(command string) bool {
 // with no redirect but one to $null and no subexpression, script block,
 // splat or here-string.
 func powerShellSegmentReadOnly(segment string) bool {
-	text := strings.TrimSpace(segment)
+	text := powerShellStripBlockComments(segment)
+	text = strings.TrimSpace(powerShellStripLineComment(text))
 	if loc := powerShellLeadingAssignment.FindStringIndex(text); loc != nil {
 		text = text[loc[1]:]
 	}
 	text = powerShellDiscardRedirect.ReplaceAllString(text, " ")
+	text = powerShellDescriptorCopy.ReplaceAllString(text, " ")
+	text = powerShellQuotedPath.ReplaceAllStringFunc(text, func(path string) string {
+		return strings.TrimSpace(path[1 : len(path)-1])
+	})
 	if strings.ContainsAny(text, "(){}<>@`") {
 		return false
 	}
 	fields := strings.Fields(text)
 	return len(fields) > 0 && powerShellReadOnlyCommands[strings.ToLower(fields[0])]
+}
+
+func powerShellStripLineComment(text string) string {
+	quote := byte(0)
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case '`':
+			i++
+		case '\'', '"':
+			if quote == 0 {
+				quote = text[i]
+			} else if quote == text[i] {
+				quote = 0
+			}
+		case '#':
+			if quote == 0 && (i == 0 || text[i-1] == ' ' || text[i-1] == '\t') {
+				return text[:i]
+			}
+		}
+	}
+	return text
+}
+
+// powerShellStripBlockComments removes comments only outside string
+// literals. A double-quoted string may execute $(); comment-shaped text
+// inside it must stay visible to the read-only check.
+func powerShellStripBlockComments(text string) string {
+	var out strings.Builder
+	quote := byte(0)
+	for i := 0; i < len(text); {
+		if quote == 0 && strings.HasPrefix(text[i:], "<#") {
+			start := i
+			depth := 1
+			i += 2
+			for i < len(text) && depth > 0 {
+				switch {
+				case strings.HasPrefix(text[i:], "<#"):
+					depth++
+					i += 2
+				case strings.HasPrefix(text[i:], "#>"):
+					depth--
+					i += 2
+				default:
+					i++
+				}
+			}
+			if depth > 0 {
+				out.WriteString(text[start:])
+				break
+			}
+			out.WriteByte(' ')
+			continue
+		}
+		c := text[i]
+		if c == '`' && quote != '\'' && i+1 < len(text) {
+			out.WriteString(text[i : i+2])
+			i += 2
+			continue
+		}
+		if c == '\'' || c == '"' {
+			if quote == 0 {
+				quote = c
+			} else if quote == c {
+				if i+1 < len(text) && text[i+1] == c {
+					out.WriteByte(c)
+					i++
+				} else {
+					quote = 0
+				}
+			}
+		}
+		out.WriteByte(c)
+		i++
+	}
+	return out.String()
 }
 
 // stateStatementReadOnly reports a statement proven to change no file: the
@@ -5339,9 +5592,31 @@ func powerShellSegmentReadOnly(segment string) bool {
 // commands, with no redirect but a discarded one (2>&1, >/dev/null), no
 // assignment, substitution or function. Anything else may write.
 func stateStatementReadOnly(text, home string) bool {
+	return stateStatementReadOnlyWithBindings(text, home, nil)
+}
+
+func stateStatementReadOnlyWithBindings(text, home string, shadowed map[string]bool) bool {
 	file, parsed := parseShell(text)
 	if !parsed {
 		return false
+	}
+	if len(shadowed) > 0 {
+		unsafe := false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			call, isCall := node.(*syntax.CallExpr)
+			if !isCall || len(call.Args) == 0 {
+				return true
+			}
+			program, known := staticProgramWord(call.Args[0], home)
+			if !known || !strings.ContainsRune(program, '/') &&
+				(shadowed[program] || shadowed["*"]) {
+				unsafe = true
+			}
+			return !unsafe
+		})
+		if unsafe {
+			return false
+		}
 	}
 	if actionKnownReadOnlyShell(file, home) {
 		return true

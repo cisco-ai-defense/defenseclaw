@@ -9,6 +9,34 @@ import (
 	"testing"
 )
 
+func TestShellStatementsOverBudgetDynamicFunctions(t *testing.T) {
+	assignments := func(n int) string {
+		parts := make([]string, n)
+		for i := range parts {
+			parts[i] = fmt.Sprintf("a%d=1", i)
+		}
+		return strings.Join(parts, "; ")
+	}
+	for _, tc := range []struct {
+		name, command string
+		over          bool
+	}{
+		{"at bound", `run() { "$@"; }; ` + assignments(126) + "; run git status", false},
+		{"past bound", `run() { "$@"; }; ` + assignments(127) + "; run git status", true},
+		{"nested wrapper", `outer() { inner "$@"; }; inner() { "$@"; }; ` + assignments(200) + "; outer sh -c 'printf c >> state'", true},
+		{"invoked body", "run() { " + assignments(129) + "; }; run", true},
+		{"unused body", "run() { " + assignments(129) + "; }; echo done", false},
+		{"nested shell", "sh -c '" + assignments(129) + "'", true},
+		{"normalized aggregate redirect", `run() { "$@"; }; ` + assignments(200) + "; run echo ok &>/dev/null", true},
+		{"bash-only fork bomb", ":(){ :|:& };:", false},
+		{"POSIX bracket command words", strings.Repeat("[[ 1 == 1 ]]; ", 129), true},
+	} {
+		if got := ShellStatementsOverBudget(tc.command); got != tc.over {
+			t.Errorf("%s: budget=%t, want %t", tc.name, got, tc.over)
+		}
+	}
+}
+
 // TestPowerShellStatementsOverBudget is rel-1-0-6:GAP-0318: the PowerShell
 // split's statement budget, counted past the Windows lexer's token bound,
 // with quoted and here-string separators not counted.

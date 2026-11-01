@@ -463,7 +463,9 @@ func dispatchTrustedActionWith(
 			wholeWriteSafe := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
 			simples := actionfacts.SimpleCommands(request.Input, facts)
-			if len(simples) == 0 && wholeCommandKnown && trustedStatementBudgetExceeded(request.Input, facts, wholeCommand) {
+			if len(simples) == 0 && wholeCommandKnown &&
+				(facts.Parse.Dialect != actionfacts.DialectPOSIX || facts.Parse.Status == actionfacts.StatusLimitExceeded) &&
+				trustedStatementBudgetExceeded(request.Input, facts, wholeCommand) {
 				// The analysis stopped at its node or input bound before the
 				// per-command split, so no simple command of the call was
 				// judged: the call is over the statement budget at every size,
@@ -8577,12 +8579,13 @@ func trustedStatementBudgetExceeded(input actionfacts.Input, facts actionfacts.F
 			(facts.Parse.Status == actionfacts.StatusLimitExceeded || actionfacts.PowerShellReadingStopsEarly(command)) &&
 			actionfacts.PowerShellStatementsOverBudget(command)
 	}
+	if facts.Parse.Dialect == actionfacts.DialectPOSIX {
+		return actionfacts.ShellStatementsOverBudget(command)
+	}
 	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 		return false
 	}
 	switch facts.Parse.Dialect {
-	case actionfacts.DialectPOSIX:
-		return actionfacts.ShellStatementsOverBudget(command)
 	case actionfacts.DialectNone, "":
 		powerShell := trustedPowerShellExecutionTool(input.Tool) ||
 			input.DialectHint != "" && input.DialectHint != actionfacts.DialectPOSIX ||
@@ -8694,8 +8697,8 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 // simple-command pass of dispatchTrustedActionWith judges over the
 // statement budget, by the same test: actionfacts.SimpleCommands reports a
 // "limit" failure (more than 128 statements in the POSIX, PowerShell or CMD
-// split, or nesting past its bound), or the split is empty because the
-// analysis stopped at its node or input bound first
+// split, or nesting past its bound), or the split could not flatten a valid
+// call and the independent count exceeds the budget
 // (trustedStatementBudgetExceeded). That pass adds ACTION-COMPOUND-LIMIT to
 // such a call whatever else it finds. A PowerShell reading the Windows lexer
 // stopped early is counted past the stop (rel-1-0-6:GAP-0331), so its call
@@ -8711,10 +8714,19 @@ func trustedCallOverStatementBudget(input actionfacts.Input, facts actionfacts.F
 	if !known {
 		return false
 	}
-	if facts.Parse.Dialect == actionfacts.DialectPowerShell {
-		return trustedStatementBudgetExceeded(input, facts, command)
+	if facts.Parse.Dialect == actionfacts.DialectPOSIX && facts.Parse.Status != actionfacts.StatusLimitExceeded &&
+		!slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
+			return simple.EvaluationFailure == "parse"
+		}) {
+		// A complete POSIX split already enforced the limit. The extra
+		// count is needed only when the analyzer reached its own bound or
+		// the semantic splitter declined a dynamic wrapper.
+		return false
 	}
-	return len(simples) == 0 && trustedStatementBudgetExceeded(input, facts, command)
+	// A failed POSIX flatten may return one "parse" item even though the
+	// analyzer reached its command limit. The independent statement count
+	// still governs the whole call, including a dynamic function wrapper.
+	return trustedStatementBudgetExceeded(input, facts, command)
 }
 
 // withTrustedActionLimitFinding adds the over-limit verdict once.
