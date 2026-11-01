@@ -725,7 +725,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		skipped = append(skipped, "harness images (--skip-images; the first run builds them, or `"+CommandName+" image build`)")
 	}
 	if onMicroVMs {
-		a.note("the first run of each image uses about 11 GiB while preparing its MicroVM disk (about a minute; OpenShell keeps the prepared disk)")
+		a.note("the first run of each image uses about 12 GiB while preparing its MicroVM disk (about a minute; OpenShell keeps the prepared disk)")
 	}
 	a.importIngressProfile(ctx)
 

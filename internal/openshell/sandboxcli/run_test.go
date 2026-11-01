@@ -1361,16 +1361,16 @@ func TestRunOnTheMicroVMDriver(t *testing.T) {
 		// recommended space it is warned about (OC-F1).
 		{name: "a first boot on a full disk", setup: driver("vm", firstBoot, func(ta *testApp) {
 			ta.diskFree, ta.images.sizes = 2<<30, map[string]uint64{"claudecode": 7 << 30}
-		}), do: refused(run, "not enough free disk space for this sandbox's first start: the MicroVM driver's first start uses about 11.0 GiB while preparing a disk from its image in "+
-			"~/.local/state/openshell/vm-driver/images, where 2.0 GiB is free and at least 12.0 GiB is needed; free space on that volume first "+
+		}), do: refused(run, "not enough free disk space for this sandbox's first start: the MicroVM driver's first start uses about 12.0 GiB while preparing a disk from its image in "+
+			"~/.local/state/openshell/vm-driver/images, where 2.0 GiB is free and at least 13.0 GiB is needed; free space on that volume first "+
 			"(`defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)")},
 		{name: "a first boot of an image to build on a full disk", setup: driver("vm", firstBoot, missing, func(ta *testApp) { ta.diskFree = 5 << 30 }),
-			do: refused(run, "uses about 11.0 GiB while preparing a disk from its image in ~/.local/state/openshell/vm-driver/images, where 5.0 GiB is free and at least 12.0 GiB is needed")},
+			do: refused(run, "uses about 12.0 GiB while preparing a disk from its image in ~/.local/state/openshell/vm-driver/images, where 5.0 GiB is free and at least 13.0 GiB is needed")},
 		{name: "a first boot with measured peak shortfall", setup: driver("vm", firstBoot, func(ta *testApp) { ta.diskFree = 10 << 30 }),
-			do: refused(run, "uses about 11.0 GiB while preparing a disk from its image in ~/.local/state/openshell/vm-driver/images, where 10.0 GiB is free and at least 12.0 GiB is needed")},
+			do: refused(run, "uses about 12.0 GiB while preparing a disk from its image in ~/.local/state/openshell/vm-driver/images, where 10.0 GiB is free and at least 13.0 GiB is needed")},
 		{name: "a first boot with little room", input: "a\n", setup: driver("vm", firstBoot, func(ta *testApp) { ta.diskFree = 15 << 30 }), opts: run,
-			want: []string{"only 15.0 GiB is free in ~/.local/state/openshell/vm-driver/images, and this sandbox's first start uses about 11.0 GiB while preparing a MicroVM disk there " +
-				"(22.0 GiB or more is recommended; `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)"},
+			want: []string{"only 15.0 GiB is free in ~/.local/state/openshell/vm-driver/images, and this sandbox's first start uses about 12.0 GiB while preparing a MicroVM disk there " +
+				"(24.0 GiB or more is recommended; `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)"},
 			check: func(t *testing.T, ta *testApp) {
 				if ta.creates() != 1 || !strings.HasPrefix(ta.diskProbed, ta.home) {
 					t.Fatalf("creates %d, disk probed at %q", ta.creates(), ta.diskProbed)

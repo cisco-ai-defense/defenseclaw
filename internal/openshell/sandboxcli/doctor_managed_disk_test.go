@@ -15,7 +15,7 @@ import (
 
 // The managed doctor of an account on the MicroVM driver has a Disk space
 // row for the account's MicroVM state volume: it passes at 45 GiB free,
-// warns at 22 GiB and fails at 12 GiB (GAP-0259). On the docker driver it
+// warns below 24 GiB and fails below 13 GiB (GAP-0259, GAP-0261). On the docker driver it
 // has no such row.
 func TestManagedDoctorHasTheMicroVMDiskRow(t *testing.T) {
 	for _, goos := range []string{"darwin", "linux"} {
@@ -36,7 +36,7 @@ func TestManagedDoctorHasTheMicroVMDiskRow(t *testing.T) {
 			for _, tc := range []struct {
 				gib  uint64
 				want openshell.CheckStatus
-			}{{45, openshell.StatusPass}, {22 - 1, openshell.StatusWarn}, {12 - 1, openshell.StatusFail}} {
+			}{{45, openshell.StatusPass}, {24 - 1, openshell.StatusWarn}, {13 - 1, openshell.StatusFail}} {
 				free = tc.gib << 30
 				row := ta.runDoctor(bg).Get(openshell.CheckIDDisk)
 				if row == nil || row.Status != tc.want || !strings.Contains(row.Detail, "free under "+ta.home) {

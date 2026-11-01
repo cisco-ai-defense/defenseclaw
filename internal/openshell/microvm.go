@@ -33,11 +33,13 @@ import (
 )
 
 // Free space the MicroVM driver's state directory needs. A first start
-// temporarily uses 9-11 GiB on the host, including disk preparation.
+// temporarily uses up to about 12 GiB on the host, including the image
+// build, its cache and disk preparation (12.02 GiB measured, GAP-0261), so
+// the floor keeps 1 GiB above that.
 const (
-	VMDiskFirstStartBytes = 11 << 30
-	VMDiskFailBytes       = 12 << 30
-	VMDiskWarnBytes       = 22 << 30
+	VMDiskFirstStartBytes = 12 << 30
+	VMDiskFailBytes       = 13 << 30
+	VMDiskWarnBytes       = 24 << 30
 )
 
 // EnterprisePlatformName is the enterprise subcommand for a Go OS name.
@@ -879,7 +881,7 @@ func (r *doctorRun) vmDiskCheck() Check {
 		c.Detail += fmt.Sprintf("; %s take %s (a start under way, or one that failed: `%s` removes those unchanged for 15 minutes)",
 			plural(n, "half-prepared MicroVM disk", "half-prepared MicroVM disks"), humanBytes(size), pruneCommand)
 	}
-	fix := &Fix{Summary: "free space on this volume: the first start of each harness image uses about 11 GiB while preparing a MicroVM disk in " + dir +
+	fix := &Fix{Summary: "free space on this volume: the first start of each harness image uses about 12 GiB while preparing a MicroVM disk in " + dir +
 		"; prune removes DefenseClaw's superseded harness images and the MicroVM disks prepared from them " +
 		"(a backup or indexing app that holds a removed file open keeps its space until it lets go: `lsof +L1` lists them)",
 		Command: pruneCommand}

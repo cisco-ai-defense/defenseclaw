@@ -1290,7 +1290,7 @@ func provisioningFailure(d openshell.Driver, err error) error {
 	if d.ImageCache == "" || !errors.As(err, &e) || !strings.Contains(e.Detail, "ProvisioningTimedOut") {
 		return err
 	}
-	e.Detail += ". The first start of an image uses about 11 GiB while preparing a MicroVM disk, and a full volume stops it: check Disk space in " +
+	e.Detail += ". The first start of an image uses about 12 GiB while preparing a MicroVM disk, and a full volume stops it: check Disk space in " +
 		"`defenseclaw sandbox doctor`, and free space with `defenseclaw sandbox image prune` (it also removes the half-prepared disks of failed starts)"
 	return e
 }
