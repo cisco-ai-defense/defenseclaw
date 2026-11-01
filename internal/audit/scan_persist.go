@@ -35,8 +35,8 @@ INSERT INTO scan_results (
   verdict, exit_code, error,
   schema_version, content_hash, generation, binary_version,
   agent_id, agent_instance_id, sidecar_instance_id, session_id, request_id, trace_id,
-  evaluation_id
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  evaluation_id, retention_timestamp_unix_nano
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ScanID,
 		p.Scanner,
 		p.Target,
@@ -60,6 +60,7 @@ INSERT INTO scan_results (
 		nullStr(p.RequestID),
 		nullStr(p.TraceID),
 		nullStr(p.EvaluationID),
+		retentionInstantOf(ts),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert scan summary: %w", err)

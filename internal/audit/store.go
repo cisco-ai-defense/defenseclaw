@@ -2210,7 +2210,7 @@ func (s *Store) Init() error {
 			return fmt.Errorf("audit: mandatory event-history column %s is missing", column)
 		}
 	}
-	if err := ensureRetentionTimestampInfrastructure(s.db); err != nil {
+	if err := ensureRetentionTimestampInfrastructure(s.db, !s.secureClientSchema); err != nil {
 		return fmt.Errorf("audit: verify event timestamp retention infrastructure: %w", err)
 	}
 	for _, table := range []string{
@@ -2658,8 +2658,8 @@ func (s *Store) LogEvent(e Event) error {
 			run_id, trace_id, request_id,
 			session_id, turn_id, agent_name, agent_instance_id, policy_id, destination_app, tool_name, tool_id,
 			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id,
-			connector, step_idx, enforced, rule_pack_dir)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			connector, step_idx, enforced, rule_pack_dir, retention_timestamp_unix_nano)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, structuredJSON, e.Severity,
 		nullStr(e.RunID), nullStr(e.TraceID), nullStr(e.RequestID),
 		nullStr(e.SessionID), nullStr(e.TurnID), nullStr(e.AgentName), nullStr(e.AgentInstanceID),
@@ -2667,7 +2667,7 @@ func (s *Store) LogEvent(e Event) error {
 		nullInt(e.SchemaVersion), nullStr(e.ContentHash), nullUint64(e.Generation),
 		nullStr(e.BinaryVersion), nullStr(e.AgentID), nullStr(e.SidecarInstanceID),
 		nullStr(e.Connector), nullInt(e.StepIdx), nullBool(e.Enforced),
-		nullStr(e.RulePackDir),
+		nullStr(e.RulePackDir), retentionInstantOf(ts),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: log event: %w", err)

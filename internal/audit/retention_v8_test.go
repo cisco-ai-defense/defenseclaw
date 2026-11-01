@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 type retentionTestReporter struct {
@@ -877,7 +878,7 @@ func TestRetentionStartupReinstallsForgedTimestampTrigger(t *testing.T) {
 	if !found {
 		t.Fatal("activity retention timestamp spec is missing")
 	}
-	insertName, _, insertSQL, _ := retentionTimestampTriggerDDL(spec)
+	insertName, _, insertSQL, _ := retentionTimestampTriggerDDL(spec, true)
 	var actual string
 	if err := reopened.db.QueryRow(`SELECT sql FROM sqlite_master
 		WHERE type='trigger' AND name=?`, insertName).Scan(&actual); err != nil {
@@ -911,13 +912,13 @@ func TestRetentionStartupRetriesTransientCrossProcessBusy(t *testing.T) {
 	reopened.SetMaxOpenConns(1)
 	reopened.SetMaxIdleConns(1)
 	t.Cleanup(func() { _ = reopened.Close() })
-	if err := ensureRetentionTimestampInfrastructureOnce(reopened); !isSQLiteBusy(err) {
+	if err := ensureRetentionTimestampInfrastructureOnce(reopened, true); !isSQLiteBusy(err) {
 		_ = locker.Rollback()
 		t.Fatalf("unretried startup verification did not surface the held write lock: %v", err)
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- ensureRetentionTimestampInfrastructure(reopened) }()
+	go func() { done <- ensureRetentionTimestampInfrastructure(reopened, true) }()
 	time.Sleep(35 * time.Millisecond)
 	if err := locker.Rollback(); err != nil {
 		t.Fatal(err)
@@ -1938,6 +1939,125 @@ func TestCorrelationRetentionYieldsOnlyInTheFirstHalfOfTheBudgetOutsideSecureCli
 		}
 		if got := reaper.yieldsToHooks(until); got != tc.want {
 			t.Fatalf("secureClient=%t now=%s yieldsToHooks=%t want %t", tc.secureClient, tc.now, got, tc.want)
+		}
+	}
+}
+
+// The hook path binds the exact retention instant, so the insert trigger no
+// longer rewrites each audit and scan row it just wrote: that UPDATE wrote the
+// row (and its overflow, freelist and pointer-map pages and a second
+// retention index entry) to the WAL twice per row (rel-1-0-6:GAP-0267). A
+// writer that binds no instant, or a wrong one, still gets the computed one.
+func TestRetentionInsertTriggerRewritesOnlyRowsWithoutTheExactInstant(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	if _, err := store.db.Exec(`
+		CREATE TABLE test_row_rewrites(tbl TEXT NOT NULL);
+		CREATE TRIGGER test_audit_rewrites AFTER UPDATE ON audit_events
+		BEGIN INSERT INTO test_row_rewrites(tbl) VALUES ('audit_events'); END;
+		CREATE TRIGGER test_scan_rewrites AFTER UPDATE ON scan_results
+		BEGIN INSERT INTO test_row_rewrites(tbl) VALUES ('scan_results'); END;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	rewrites := func(table string) int {
+		t.Helper()
+		var n int
+		if err := store.db.QueryRow(`SELECT count(*) FROM test_row_rewrites WHERE tbl = ?`, table).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	instant := func(table, id string) sql.NullInt64 {
+		t.Helper()
+		var v sql.NullInt64
+		if err := store.db.QueryRow(`SELECT retention_timestamp_unix_nano FROM `+table+` WHERE id = ?`, id).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	at := time.Date(2026, 11, 1, 16, 4, 5, 123456789, time.FixedZone("offset", 5*3600+30*60))
+
+	if err := store.LogEvent(Event{ID: "bound-audit", Timestamp: at, Action: "hook_decision", Target: "t", Severity: "INFO"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := instant("audit_events", "bound-audit"); !got.Valid || got.Int64 != at.UnixNano() || rewrites("audit_events") != 0 {
+		t.Fatalf("hook-path audit row: instant %v rewrites %d; want %d and no rewrite", got, rewrites("audit_events"), at.UnixNano())
+	}
+	if err := insertScanSummary(store.db, scanner.ScanSummaryParams{ScanID: "bound-scan", Scanner: "s", Target: "t", Timestamp: at}); err != nil {
+		t.Fatal(err)
+	}
+	if got := instant("scan_results", "bound-scan"); !got.Valid || got.Int64 != at.UnixNano() || rewrites("scan_results") != 0 {
+		t.Fatalf("hook-path scan row: instant %v rewrites %d; want %d and no rewrite", got, rewrites("scan_results"), at.UnixNano())
+	}
+
+	text := at.Format(time.RFC3339Nano)
+	for _, row := range []struct {
+		id    string
+		bound any
+	}{{"unbound", nil}, {"wrong", at.UnixNano() + 1}} {
+		if _, err := store.db.Exec(`INSERT INTO audit_events (id, timestamp, action, retention_timestamp_unix_nano) VALUES (?, ?, 'scan', ?)`,
+			row.id, text, row.bound); err != nil {
+			t.Fatal(err)
+		}
+		if got := instant("audit_events", row.id); !got.Valid || got.Int64 != at.UnixNano() {
+			t.Fatalf("%s row: instant %v; want the computed %d", row.id, got, at.UnixNano())
+		}
+	}
+	if got := rewrites("audit_events"); got != 2 {
+		t.Fatalf("rows without the exact instant rewritten %d times; want 2", got)
+	}
+	if _, err := store.db.Exec(`INSERT INTO audit_events (id, timestamp, action) VALUES ('not-a-time', 'yesterday', 'scan')`); err != nil {
+		t.Fatal(err)
+	}
+	if got := instant("audit_events", "not-a-time"); got.Valid || rewrites("audit_events") != 2 {
+		t.Fatalf("unparseable timestamp: instant %v rewrites %d; want NULL and no rewrite", got, rewrites("audit_events"))
+	}
+}
+
+// A store opened on an audit.db written by an earlier release (main's insert
+// trigger) gets the bound form at Init, and going back to Secure Client puts
+// main's form back: a Secure Client store keeps main's schema
+// (rel-1-0-6:GAP-0267).
+func TestRetentionInsertTriggerFormFollowsTheStoreOnEveryOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	insertForm := func(store *Store) string {
+		t.Helper()
+		var actual string
+		if err := store.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name='retention_audit_events_timestamp_insert'`).Scan(&actual); err != nil {
+			t.Fatal(err)
+		}
+		return normalizeSQLiteDDL(actual)
+	}
+	spec, found := retentionTimestampSpecForTable("audit_events")
+	if !found {
+		t.Fatal("audit_events retention timestamp spec is missing")
+	}
+	_, _, mainForm, _ := retentionTimestampTriggerDDL(spec, false)
+	_, _, boundForm, _ := retentionTimestampTriggerDDL(spec, true)
+	for step, secureClient := range []bool{true, false, true} {
+		var options []StoreOption
+		if secureClient {
+			options = append(options, WithSecureClientSchema())
+		}
+		store, err := NewStore(path, options...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Init(); err != nil {
+			_ = store.Close()
+			t.Fatalf("open %d: %v", step, err)
+		}
+		want := normalizeSQLiteDDL(boundForm)
+		if secureClient {
+			want = normalizeSQLiteDDL(mainForm)
+		}
+		got := insertForm(store)
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("open %d (secure client %t): insert trigger\n%s\nwant\n%s", step, secureClient, got, want)
 		}
 	}
 }
