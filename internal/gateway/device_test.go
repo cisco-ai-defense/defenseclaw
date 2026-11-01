@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -274,14 +275,14 @@ func TestReadOpenClawGatewayToken(t *testing.T) {
 		cfg := `{"gateway":{"auth":{"token":"secret-abc-123"}}}`
 		os.WriteFile(filepath.Join(dir, "openclaw.json"), []byte(cfg), 0o644)
 
-		token, ok := readOpenClawGatewayToken(home)
-		if !ok || token != "secret-abc-123" {
+		token, ok, err := readOpenClawGatewayToken(home)
+		if !ok || token != "secret-abc-123" || err != nil {
 			t.Errorf("got (%q, %v), want (secret-abc-123, true)", token, ok)
 		}
 	})
 
 	t.Run("returns false when file missing", func(t *testing.T) {
-		_, ok := readOpenClawGatewayToken(t.TempDir())
+		_, ok, _ := readOpenClawGatewayToken(t.TempDir())
 		if ok {
 			t.Error("expected false for missing file")
 		}
@@ -293,11 +294,54 @@ func TestReadOpenClawGatewayToken(t *testing.T) {
 		os.MkdirAll(dir, 0o755)
 		os.WriteFile(filepath.Join(dir, "openclaw.json"), []byte(`{"gateway":{}}`), 0o644)
 
-		_, ok := readOpenClawGatewayToken(home)
+		_, ok, _ := readOpenClawGatewayToken(home)
 		if ok {
 			t.Error("expected false for empty token")
 		}
 	})
+
+	// Issue #1404: OpenClaw stores gateway.auth.token as a SecretRef object.
+	secretRef := func(t *testing.T, token string) string {
+		t.Helper()
+		home := t.TempDir()
+		dir := filepath.Join(home, ".openclaw")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cfg := `{"gateway":{"mode":"local","auth":{"mode":"token","token":` + token + `}}}`
+		if err := os.WriteFile(filepath.Join(dir, "openclaw.json"), []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return home
+	}
+
+	t.Run("env SecretRef resolves from the environment", func(t *testing.T) {
+		t.Setenv("DC_TEST_GH1404_TOKEN", "env-token-1404")
+		home := secretRef(t, `{"source":"env","provider":"default","id":"DC_TEST_GH1404_TOKEN"}`)
+		token, ok, err := readOpenClawGatewayToken(home)
+		if !ok || token != "env-token-1404" || err != nil {
+			t.Fatalf("got (%q, %v, %v), want (env-token-1404, true, nil)", token, ok, err)
+		}
+	})
+
+	for name, ref := range map[string]string{
+		"env SecretRef with the variable unset": `{"source":"env","provider":"default","id":"DC_TEST_GH1404_UNSET"}`,
+		"store SecretRef":                       `{"source":"store","provider":"default","id":"OPENCLAW_GATEWAY_TOKEN"}`,
+		"malformed SecretRef":                   `{"source":"env","id":"not a name"}`,
+		"number":                                `42`,
+	} {
+		t.Run(name+" is never a token", func(t *testing.T) {
+			t.Setenv("DC_TEST_GH1404_UNSET", "")
+			home := secretRef(t, ref)
+			token, ok, err := readOpenClawGatewayToken(home)
+			if ok || token != "" || !errors.Is(err, errOpenClawTokenUnreadable) {
+				t.Fatalf("got (%q, %v, %v), want (\"\", false, errOpenClawTokenUnreadable)", token, ok, err)
+			}
+			if !strings.Contains(err.Error(), "gateway.auth.token") {
+				t.Fatalf("message %q must name the setting", err.Error())
+			}
+		})
+	}
 }
 
 // TestReadZeptoClawProviderKeys_FromConfigJSON — plan E1 / item 6.

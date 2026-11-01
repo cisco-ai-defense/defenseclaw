@@ -3532,13 +3532,17 @@ def _resolve_openclaw_gateway(claw_config_file: str) -> dict[str, str | int]:
     Looks for gateway.port and gateway.auth.token when gateway.mode is 'local'.
     Always uses the shared gateway.auth.token — device-auth.json is a
     client-side cache used by the OpenClaw Node.js client, not by our Go gateway.
+    A SecretRef token is resolved only from the environment; any other one
+    leaves ``token`` empty and sets ``token_notice`` (issue #1404).
     """
     from defenseclaw.config import _read_openclaw_config
+    from defenseclaw.connector_paths import openclaw_gateway_token
 
     result: dict[str, str | int] = {
         "host": "127.0.0.1",
         "port": 18789,
         "token": "",
+        "token_notice": "",
     }
 
     oc = _read_openclaw_config(claw_config_file)
@@ -3561,11 +3565,9 @@ def _resolve_openclaw_gateway(claw_config_file: str) -> dict[str, str | int]:
         except (ValueError, TypeError):
             pass
 
-    auth = gw.get("auth", {})
-    if isinstance(auth, dict):
-        token = auth.get("token", "")
-        if token:
-            result["token"] = token
+    token = openclaw_gateway_token(oc)
+    result["token"] = token.value
+    result["token_notice"] = token.notice
 
     return result
 
@@ -3589,6 +3591,7 @@ def _resolve_gateway_for_connector(cfg) -> dict[str, str | int]:
         "host": "127.0.0.1",
         "port": 18789,
         "token": "",
+        "token_notice": "",
     }
 
 
@@ -3660,6 +3663,8 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
         # per-connector-name token branch was unreachable and is dropped.)
         cfg.gateway.token_env = cfg.gateway.token_env or "DEFENSECLAW_GATEWAY_TOKEN"
         token_configured = bool(cfg.gateway.resolved_token())
+    if openclaw_active and gw_info.get("token_notice"):
+        ux.warn(str(gw_info["token_notice"]))
 
     if not cfg.gateway.device_key_file:
         cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")

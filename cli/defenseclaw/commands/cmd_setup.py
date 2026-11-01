@@ -5479,19 +5479,23 @@ def _interactive_gateway_remote(gw, data_dir: str) -> None:
         ux.echo("  warning: no token set — sidecar will fail to connect to a remote gateway", err=True)
 
 
-def _detect_openclaw_gateway_token(openclaw_config_file: str) -> str:
-    """Read the gateway auth token from openclaw.json (gateway.auth.token)."""
-    from pathlib import Path
+_OPENCLAW_TOKEN_NOTICES_SHOWN: set[str] = set()
 
-    path = openclaw_config_file
-    if path.startswith("~/"):
-        path = str(Path.home() / path[2:])
-    try:
-        with open(path) as f:
-            cfg = _json.load(f)
-        return cfg.get("gateway", {}).get("auth", {}).get("token", "")
-    except (OSError, ValueError, KeyError):
-        return ""
+
+def _detect_openclaw_gateway_token(openclaw_config_file: str) -> str:
+    """Read the gateway auth token from openclaw.json (gateway.auth.token).
+
+    A SecretRef token is resolved from the environment when its source is
+    ``env``; any other one is never returned as a token, and one notice per
+    process asks for the token in an environment variable (issue #1404).
+    """
+    from defenseclaw.connector_paths import _read_openclaw_json, openclaw_gateway_token
+
+    token = openclaw_gateway_token(_read_openclaw_json(openclaw_config_file))
+    if token.notice and token.notice not in _OPENCLAW_TOKEN_NOTICES_SHOWN:
+        _OPENCLAW_TOKEN_NOTICES_SHOWN.add(token.notice)
+        ux.warn(token.notice)
+    return token.value
 
 
 def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None:

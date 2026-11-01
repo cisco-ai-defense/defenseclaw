@@ -4543,8 +4543,73 @@ def _read_openclaw_json(config_file: str) -> dict[str, Any] | None:
     try:
         with open(_expand(config_file), encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
+
+
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+@dataclass(frozen=True)
+class OpenClawGatewayToken:
+    """The OpenClaw gateway token read from ``gateway.auth.token``.
+
+    ``value`` is the token, or "" when there is none DefenseClaw can use.
+    ``notice`` is set when the setting holds a token DefenseClaw cannot read
+    (a SecretRef object, issue #1404); it never contains the token.
+    """
+
+    value: str = ""
+    notice: str = ""
+
+
+_OPENCLAW_TOKEN_UNREADABLE = (
+    "The OpenClaw gateway token (gateway.auth.token) is not a plain string, and DefenseClaw cannot read it."
+)
+
+
+def _openclaw_token_notice(reason: str) -> str:
+    return (
+        f"{reason} "
+        "Give DefenseClaw that token in OPENCLAW_GATEWAY_TOKEN or DEFENSECLAW_GATEWAY_TOKEN, "
+        "for example: defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN"
+    )
+
+
+def openclaw_gateway_token(openclaw_config: Any, environ: Any = None) -> OpenClawGatewayToken:
+    """Read ``gateway.auth.token`` from a parsed ``openclaw.json``.
+
+    OpenClaw stores the token as a string or as a SecretRef object such as
+    ``{"source": "env", "provider": "default", "id": "NAME"}``. A ``source:
+    env`` reference is resolved from the named environment variable. Every
+    other reference (``store``, ``file``, ``exec``, a malformed object) is
+    never used as a token: the result carries a notice instead (issue #1404).
+    """
+    gateway = openclaw_config.get("gateway") if isinstance(openclaw_config, dict) else None
+    auth = gateway.get("auth") if isinstance(gateway, dict) else None
+    raw = auth.get("token") if isinstance(auth, dict) else None
+    if raw is None:
+        return OpenClawGatewayToken()
+    if isinstance(raw, str):
+        return OpenClawGatewayToken(raw)
+    if not isinstance(raw, dict):
+        return OpenClawGatewayToken(notice=_openclaw_token_notice(_OPENCLAW_TOKEN_UNREADABLE))
+    source = raw.get("source")
+    name = raw.get("id")
+    if source == "env" and isinstance(name, str) and _ENV_NAME_RE.fullmatch(name):
+        value = (os.environ if environ is None else environ).get(name, "")
+        if isinstance(value, str) and value:
+            return OpenClawGatewayToken(value)
+        return OpenClawGatewayToken(notice=_openclaw_token_notice(
+            f"OpenClaw reads its gateway token (gateway.auth.token) from the environment variable {name}, "
+            "which is not set here."
+        ))
+    if isinstance(source, str) and source and source != "env" and _ENV_NAME_RE.fullmatch(source):
+        return OpenClawGatewayToken(notice=_openclaw_token_notice(
+            f"OpenClaw keeps its gateway token (gateway.auth.token) in its \"{source}\" secret source, "
+            "which DefenseClaw cannot read."
+        ))
+    return OpenClawGatewayToken(notice=_openclaw_token_notice(_OPENCLAW_TOKEN_UNREADABLE))
 
 
 def _load_mcp_json_document(

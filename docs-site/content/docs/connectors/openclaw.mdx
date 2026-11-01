@@ -97,6 +97,16 @@ defenseclaw guardrail allow-private-upstream bedrock-runtime.us-east-1.amazonaws
 
 `defenseclaw setup openclaw` reads the OpenClaw gateway port from `openclaw.json` (`gateway.port`). If you onboard OpenClaw on another port later, run `defenseclaw setup openclaw` again or `defenseclaw setup gateway --port <port>`.
 
+### OpenClaw gateway token
+
+DefenseClaw also reads the gateway token from `openclaw.json` (`gateway.auth.token`). A plain string is used as it is. A secret reference with `"source": "env"` is read from the named environment variable. DefenseClaw cannot read other secret sources, such as `"source": "store"`. For those, `init` and `setup` print a warning and finish. Give DefenseClaw the token yourself:
+
+```bash
+defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN
+```
+
+You can also set `OPENCLAW_GATEWAY_TOKEN` or `DEFENSECLAW_GATEWAY_TOKEN` in the environment of the gateway.
+
 ## Files DefenseClaw will modify
 
 | What | Where |
