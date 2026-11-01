@@ -188,8 +188,9 @@ func TestSandboxHookOutcomeIgnoresExportedBashVariables(t *testing.T) {
 		"BASH_SOURCE=5", "BASH_SOURCE=/tmp/review2-nohook.sh", "FUNCNAME=5", "FUNCNEST=1", "FUNCNEST=3", "TMOUT=1", "EXECIGNORE=*", "OSTYPE=darwin"}
 	for _, tc := range sandboxHookCases() {
 		tc := tc
+		// Not parallel: a fork in another test while this one writes its
+		// hook copies made exec fail with ETXTBSY (text file busy).
 		t.Run(tc.script+"-"+tc.connector, func(t *testing.T) {
-			t.Parallel()
 			h := newSandboxHookHarness(t, tc.provider, tc.version)
 			script := SandboxHookDir + "/" + tc.script
 			for rname, reply := range map[string][]string{
