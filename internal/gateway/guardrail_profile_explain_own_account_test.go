@@ -29,22 +29,25 @@ func managedExplainView(t *testing.T) {
 
 type explainAccountStub struct{ id, name string }
 
-func explainAs(t *testing.T, ownerID, ownerName string, perUser bool, accounts map[string]explainAccountStub, user string) (map[string]any, []string) {
+func explainAs(t *testing.T, ownerID, ownerName string, perUser bool, accounts map[string]explainAccountStub, user string, answer ...profileSubject) (map[string]any, []string) {
 	t.Helper()
 	stubProfileSources(t)
-	prevLookup, prevOwner, prevAccount := profileExplainSubjectLookup, profileExplainGatewayOwner, profileExplainAccount
+	prevLookup, prevOwner, prevAccount := profileExplainSubjectLookup, profileExplainGatewayOwner, profileExplainAccountID
 	t.Cleanup(func() {
-		profileExplainSubjectLookup, profileExplainGatewayOwner, profileExplainAccount = prevLookup, prevOwner, prevAccount
+		profileExplainSubjectLookup, profileExplainGatewayOwner, profileExplainAccountID = prevLookup, prevOwner, prevAccount
 	})
 	var looked []string
-	profileExplainAccount = func(name string) (string, string, error) {
+	profileExplainAccountID = func(name, _ string) (string, error) {
 		if account, ok := accounts[name]; ok {
-			return account.id, account.name, nil
+			return account.id, nil
 		}
-		return "", "", errors.New("no account named " + strconv.Quote(name) + " (holder dcm-secret-holder)")
+		return "", errors.New("no account named " + strconv.Quote(name) + " (holder dcm-secret-holder)")
 	}
 	profileExplainSubjectLookup = func(name string) (profileSubject, error) {
 		looked = append(looked, name)
+		if len(answer) > 0 {
+			return answer[0], nil
+		}
 		account, ok := accounts[name]
 		if !ok {
 			return profileSubject{UserName: name}, errors.New("no account named " + strconv.Quote(name))
@@ -61,6 +64,16 @@ func explainAs(t *testing.T, ownerID, ownerName string, perUser bool, accounts m
 	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
 		t.Fatalf("HTTP %d: %s", rec.Code, rec.Body.String())
 	}
+	return out, looked
+}
+
+func fmtAny(v any) string { s, _ := v.(string); return s }
+
+// explainAsWithSubject is explainAs with the owner 511 and a lookup that
+// answers subject for every name.
+func explainAsWithSubject(t *testing.T, accounts map[string]explainAccountStub, user string, subject profileSubject) (map[string]any, []string) {
+	t.Helper()
+	out, looked := explainAs(t, "511", "dcm-own", true, accounts, user, subject)
 	return out, looked
 }
 
@@ -98,6 +111,12 @@ func TestPerUserProfileExplainRefusesAnotherAccount(t *testing.T) {
 		if subject, _ := out["subject"].(map[string]any); out["lookup_error"] != nil || subject["user_id"] != "511" {
 			t.Fatalf("own account --user %s: %v", user, out)
 		}
+	}
+	// A lookup of the owner's own name that names another account (a cached
+	// holder) is refused after the lookup.
+	accounts["dcm-own-alias"] = explainAccountStub{"511", "dcm-own"}
+	if out, _ := explainAsWithSubject(t, accounts, "dcm-own-alias", profileSubject{UserID: "517", UserName: "dcm-other", Groups: []string{"grp-of-dcm-other"}}); !strings.Contains(fmtAny(out["lookup_error"]), "only your own account") {
+		t.Fatalf("lookup naming another uid: %v", out)
 	}
 	// The owner's own name whose lookup fails reports that lookup's error.
 	out, looked := explainAs(t, "511", "dcm-own-renamed", true, accounts, "dcm-own-renamed")

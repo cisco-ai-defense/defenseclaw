@@ -907,7 +907,7 @@ var profileExplainGatewayOwner = func() (id, name string, perUser bool) {
 // refused it only where a directory twin lookup failed (rel-1-0-6:GAP-0328).
 // The refusal comes before explain's own lookup of the account, so none of
 // its facts are read, cached or reported: only the name or uid is resolved
-// to compare it with the owner (profileExplainAccount, without facts). The
+// to compare it with the owner (profileExplainAccountID, without facts). The
 // owner's own spellings (uid, name, a UPN or DOMAIN\name that resolves to
 // the uid) pass, and so does the owner's name when the lookup fails, so its
 // own lookup error is reported. A per-user gateway that cannot name its own
@@ -924,11 +924,22 @@ func perUserExplainRefusal(user string) error {
 	if strings.EqualFold(user, ownerID) {
 		return nil
 	}
-	id, _, err := profileExplainAccount(user)
+	id, err := profileExplainAccountID(user, ownerID)
 	switch {
 	case err == nil && strings.EqualFold(id, ownerID):
 		return nil
 	case err != nil && ownerName != "" && strings.EqualFold(user, ownerName):
+		return nil
+	}
+	return errPerUserExplainOtherAccount
+}
+
+// perUserExplainOfAnotherAccount refuses, after the lookup, an explained
+// subject that is not the per-user gateway's owner: a cached holder of the
+// owner's name or caller_facts can name another uid.
+func perUserExplainOfAnotherAccount(found profileSubject) error {
+	ownerID, _, perUser := profileExplainGatewayOwner()
+	if !perUser || found.UserID == "" || (ownerID != "" && strings.EqualFold(found.UserID, ownerID)) {
 		return nil
 	}
 	return errPerUserExplainOtherAccount
@@ -1892,6 +1903,10 @@ func (a *APIServer) serveGuardrailProfileResolve(w http.ResponseWriter, r *http.
 				// what they use.
 				found, err = caller, nil
 				out["facts_source"] = "caller"
+			}
+			if refusal := perUserExplainOfAnotherAccount(found); refusal != nil && !own {
+				found, err = profileSubject{UserName: user}, refusal
+				delete(out, "facts_source")
 			}
 		}
 		var ambiguous *useridentity.AmbiguousAccountError
