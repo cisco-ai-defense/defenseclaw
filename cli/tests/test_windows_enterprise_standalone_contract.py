@@ -1418,6 +1418,98 @@ if (@(Get-ChildItem $root -Filter 'hook.exe.backup.*').Count) { throw 'replaceme
 """, replacements=[("[IO.File]::Replace($temporary, $Destination, $backup, $true)", "Invoke-TestMappedImageReplace")])
 
 
+_PURGE_DELETED_ACCOUNT_HARNESS = r"""
+$script:UninstallDeletedAccountWaitSeconds = 20
+$script:UninstallDeletedAccountPollSeconds = 0
+$script:log = [Collections.Generic.List[string]]::new()
+$script:checks = [Collections.Generic.Queue[string]]::new()
+$script:syncs = [Collections.Generic.Queue[string]]::new()
+function Write-DefenseClawLifecyclePhase { param($Stage) $script:log.Add("phase: $Stage") }
+function Get-DefenseClawEnumeratorServiceName { param($GuardianServiceName) return 'Enum' }
+function Test-DefenseClawServiceExists { param($Name) return $true }
+function Stop-DefenseClawService { param($Name) $script:log.Add("stop $Name") }
+function Start-DefenseClawService { param($Name) $script:log.Add("start $Name") }
+function Invoke-DefenseClawManagedHooksTeardownCommand {
+    param($Layout, $GatewayServiceName, $GuardianServiceName, $Action, $TimeoutSeconds)
+    $answer = if ($script:checks.Count) { $script:checks.Dequeue() } else { 'ok' }
+    $script:log.Add("check $answer")
+    if ($answer -cne 'ok') { throw $answer }
+}
+function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
+    param($Layout, $GatewayServiceName, $GatewaySource)
+    $answer = if ($script:syncs.Count) { $script:syncs.Dequeue() } else { 'same' }
+    $script:log.Add("sync $answer")
+    if ($answer -ceq 'rebound') { return $true }
+    if ($answer -cne 'same') { throw $answer }
+    return $false
+}
+$deleted = 'managed-hook teardown check failed: protected Guardian state still lists an enrolled local account that no longer exists; the hook enumerator revokes its rows on its next pass: claudecode target S-1-5-21-1-2-3-1137'
+function Invoke-Case([string[]]$Checks, [string[]]$Syncs) {
+    $script:log.Clear(); $script:checks.Clear(); $script:syncs.Clear()
+    foreach ($c in $Checks) { $script:checks.Enqueue($c) }
+    foreach ($c in $Syncs) { $script:syncs.Enqueue($c) }
+    try {
+        Invoke-DefenseClawUninstallPrecommitHookCheck -Layout @{} -GatewayServiceName Gateway -GuardianServiceName Guardian
+        return 'passed'
+    }
+    catch { return "refused: $($_.Exception.Message)" }
+}
+"""
+
+
+def test_uninstall_after_a_deleted_enrolled_account_passes_on_the_first_call(tmp_path) -> None:
+    # rel-1-0-6:GAP-0346: the enumerator pass the check starts drops the
+    # deleted account's rows and publishes a new targets.yaml; until the
+    # guardian adopts it and the activation evidence is rebound, the check
+    # refuses the old binding. That state is asked again (and rebound), so
+    # the PURGE passes without Setup /repair.
+    _run_lifecycle_functions(tmp_path, [
+        "Test-DefenseClawDeletedAccountTeardownRefusal",
+        "Test-DefenseClawManifestCatchUpTeardownRefusal",
+        "Invoke-DefenseClawUninstallPrecommitHookCheck",
+    ], _PURGE_DELETED_ACCOUNT_HARNESS + r"""
+$stale = 'managed-hook teardown check failed: protected managed-hook activation evidence does not match the current manifest'
+$outside = 'managed-hook teardown check failed: protected Guardian state contains a target outside the deployment manifest'
+$notAdopted = 'deployment managed-hook activation evidence does not bind installed targets.yaml (guardian has not activated it)'
+$result = Invoke-Case @($deleted, $deleted, $outside, 'ok') @($notAdopted, 'same', 'rebound')
+if ($result -cne 'passed') { throw "catch-up states were not asked again: $result / $($script:log -join ' | ')" }
+$order = $script:log -join ' | '
+if ($order -notmatch 'stop Enum \| start Enum') { throw "the enumerator was not restarted: $order" }
+if ($order -notmatch 'sync rebound \| phase: deleted enrolled account: activation evidence rebound') { throw "the rebinding was not reported: $order" }
+if (@($script:log | Where-Object { $_ -like 'sync *' }).Count -ne 4) { throw "sync did not run in every wait round: $order" }
+# The stale binding after the guardian adopted the manifest: rebound, then passes.
+$result = Invoke-Case @($deleted, $stale, 'ok') @('same', 'rebound')
+if ($result -cne 'passed') { throw "a stale activation binding was not rebound: $result" }
+# No deleted account: the first refusal is given back at once, nothing restarted.
+$result = Invoke-Case @($outside) @()
+if ($result -notlike 'refused: *outside the deployment manifest*' -or ($script:log -join '|') -match 'stop Enum') { throw "a refusal without a deleted account was retried: $result" }
+# Another refusal during the wait is given back at once.
+$result = Invoke-Case @($deleted, 'managed-hook teardown check failed: runtime selector is untrusted') @()
+if ($result -notlike 'refused: *runtime selector is untrusted*') { throw "an unrelated refusal was swallowed: $result" }
+# Rows still listed at the deadline: the deleted-account refusal comes back.
+$script:UninstallDeletedAccountWaitSeconds = 1
+$script:UninstallDeletedAccountPollSeconds = 1
+$result = Invoke-Case @($deleted, $deleted, $deleted, $deleted, $deleted) @()
+if ($result -notlike 'refused: *no longer exists*') { throw "the deadline did not give back the deleted-account refusal: $result" }
+""")
+
+
+def test_uninstall_precommit_wait_rebinds_like_the_lifecycle() -> None:
+    module = _text(MODULE)
+    check = _function_body(module, "Invoke-DefenseClawUninstallPrecommitHookCheck")
+    assert check.index("Sync-DefenseClawStandaloneManagedHooksActivationBinding") < check.index("-TimeoutSeconds $left")
+    assert "Test-DefenseClawManifestCatchUpTeardownRefusal -Message $message" in check
+    assert "$script:UninstallDeletedAccountWaitSeconds = 180" in module
+    catchup = _function_body(module, "Test-DefenseClawManifestCatchUpTeardownRefusal")
+    for needle in (
+        "protected managed-hook activation evidence does not match the current manifest",
+        "contains a target outside the deployment manifest",
+        "does not exactly bind the legacy deployment manifest and authorization",
+        "deployment managed-hook activation evidence does not bind installed targets.yaml",
+    ):
+        assert needle in catchup
+        assert needle in module.replace(catchup, "") or needle in _text(ROOT / "internal" / "cli" / "windows_managed_hooks_teardown.go") or needle in _text(ROOT / "internal" / "cli" / "windows_managed_hooks_lifecycle.go")
+
 
 def test_standalone_replacement_swaps_the_launcher_in_one_step(tmp_path) -> None:
     # GAP-0240: File.Replace held the new hook open for writing and had a

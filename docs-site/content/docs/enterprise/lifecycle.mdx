@@ -782,6 +782,11 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
   `fallback_homedir = /home/%d/%u`) looks the same when the only account of a domain had its home
   folder deleted: recreate that folder as a folder the account owns, then run the uninstall again.
   Removing the account does not end the stop while a `targets.yaml` row names it (see Manifest rows).
+- **A deleted enrolled account (Windows).** When an enrolled local account was deleted since the hook
+  enumerator's last pass, Setup `/uninstall` (also with `PURGE=1`) runs that pass itself: it restarts the
+  enumerator, which drops the account's rows, waits up to three minutes for the guardian to take the new
+  `targets.yaml`, and then goes on. No `/repair` is needed. If the rows are still listed after the wait,
+  nothing was removed: run the uninstall again a few minutes later.
 - **Sandboxes (Linux and macOS).** The uninstall stops the sandbox daemon and OpenShell gateway of
   each account. On Linux, `apt remove`, `dnf remove` and `rpm -e` also stop the sandbox user units
   in the user manager of every signed-in account before the package's files go. When a user manager
