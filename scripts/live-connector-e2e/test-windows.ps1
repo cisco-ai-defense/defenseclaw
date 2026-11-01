@@ -2862,7 +2862,14 @@ threading.Event().wait()
         $nativePathInitializerText -match 'if \(\$stateRoot\.Length -gt 48\)' -and
         $nativePathInitializerText -match 'DC_WINDOWS_NATIVE_BASE_ROOT=\$stateBase' -and
         $nativePathInitializerText -match 'DC_STATE_ROOT=\$stateRoot') `
-        'shared initializer roots short mutable state below the trusted user profile'
+        'shared initializer roots short mutable state below the trusted user profile, or the hosted runner drive base for the Go gateway shards'
+    Assert-True ($nativeWorkflowText.Contains(
+        "-DiagnosticsLeaf `"windows-native-diagnostics-go-`${{ matrix.shard }}`" `${{ matrix.kind == 'gateway' && '-StateOnRunnerDrive' || '' }}"
+    ) -and
+        ([regex]::Matches($nativeWorkflowText, '-StateOnRunnerDrive').Count -eq 1) -and
+        $nativePathInitializerText -match '\$env:RUNNER_ENVIRONMENT -ne ''github-hosted''' -and
+        $nativePathInitializerText -match 'Resolve-SafeWindowsNativeBase \(Get-WindowsNativeRunnerDriveBase\)') `
+        'only the hosted Go gateway shards put their state on the runner drive base (rel-1-0-6:GAP-0443)'
     $initializeProfileIndex = $nativeSelfTestFunction.IndexOf(
         '$profile = Initialize-IsolatedProfile $root',
         [StringComparison]::Ordinal

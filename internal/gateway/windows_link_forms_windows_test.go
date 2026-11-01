@@ -49,6 +49,14 @@ func TestR107WindowsManagedLinkFormsCorpus(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	okWin := strings.ReplaceAll(ok, `\`, `\\`)
+	// The drive-relative rows use the drive of the fixture, which is not C:
+	// when TEMP is on another drive (rel-1-0-6:GAP-0443); the other-drive
+	// row uses a drive that is not the fixture one.
+	vol := filepath.VolumeName(root)
+	otherDrive := "D:"
+	if strings.EqualFold(vol, otherDrive) {
+		otherDrive = "E:"
+	}
 	// sshBody survives both parses of a bash -lc "..." body (the outer
 	// double quotes, then the unquoted word in the body): mklink gets the
 	// absolute .ssh folder.
@@ -72,13 +80,13 @@ func TestR107WindowsManagedLinkFormsCorpus(t *testing.T) {
 		{"J4", project, `cmd //c "mklink /J L4 ` + okWin + `" && echo k >> L4/a.txt`, false, []string{"claudecode"}, false},
 		{"J4-keys", project, `bash -lc "cmd //c mklink /J L5 ` + sshBody + ` && echo k >> L5/authorized_keys"`, true, nil, false},
 		{"J4-keys-quoted", project, `bash -lc "cmd //c mklink /J L5 '` + filepath.Dir(keys) + `' && echo k >> L5/authorized_keys"`, true, nil, false},
-		{"J4-other-drive", project, `bash -lc "cmd //c mklink /J L6 D:\\x && echo k >> L6/authorized_keys"`, true, nil, false},
+		{"J4-other-drive", project, `bash -lc "cmd //c mklink /J L6 ` + otherDrive + `\\x && echo k >> L6/authorized_keys"`, true, nil, false},
 		// Review 4: an up-level drive-relative target (forward slashes survive
 		// the body) that mklink resolves from the project to the .ssh decoy
 		// folder, as a junction and as a hard link of the keys decoy.
-		{"R4-up-junction", project, `bash -lc "cmd //c mklink /J L7 C:../.ssh && echo k >> L7/authorized_keys"`, true, nil, false},
-		{"R4-up-junction-ok", project, `bash -lc "cmd //c mklink /J L7 C:../project/src && echo k >> L7/a.txt"`, false, nil, false},
-		{"R4-up-hardlink", project, `bash -lc "cmd //c mklink /H L8 C:../.ssh/authorized_keys && echo k >> L8"`, true, nil, false},
+		{"R4-up-junction", project, `bash -lc "cmd //c mklink /J L7 ` + vol + `../.ssh && echo k >> L7/authorized_keys"`, true, nil, false},
+		{"R4-up-junction-ok", project, `bash -lc "cmd //c mklink /J L7 ` + vol + `../project/src && echo k >> L7/a.txt"`, false, nil, false},
+		{"R4-up-hardlink", project, `bash -lc "cmd //c mklink /H L8 ` + vol + `../.ssh/authorized_keys && echo k >> L8"`, true, nil, false},
 		// GAP-0285: a write through a disk link to the state folder. Codex
 		// on Windows runs the command as PowerShell, where /c/Users/... is
 		// \c\Users\... on the current drive, not the state file: that

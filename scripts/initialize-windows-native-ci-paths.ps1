@@ -33,12 +33,18 @@ if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
     throw 'RUNNER_TEMP is required to isolate Windows-native diagnostics and artifacts.'
 }
 
+if ($StateOnRunnerDrive -and $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
+    # The drive-root owner change below is for disposable hosted runners only.
+    Write-Host "RUNNER_ENVIRONMENT is not github-hosted: the state root stays in the profile"
+    $StateOnRunnerDrive = $false
+}
 if ($StateOnRunnerDrive) {
     $stateBase = Resolve-SafeWindowsNativeBase (Get-WindowsNativeRunnerDriveBase)
     # The hosted runner work drive root is owned by NETWORK SERVICE, an
     # owner the audit store refuses on every ancestor of its database (and
-    # must). This disposable runner gives its drive root to Administrators;
-    # the DACL is unchanged, so the runner keeps its access.
+    # must). This alters the hosted runner: the disposable runner gives its
+    # drive root to Administrators; the DACL is unchanged, so the runner
+    # keeps its access.
     $driveRoot = [IO.Path]::GetPathRoot($stateBase)
     $driveOwner = (Get-Acl -LiteralPath $driveRoot).Owner
     if ($driveOwner -notin @('BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM', 'NT SERVICE\TrustedInstaller')) {
