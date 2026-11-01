@@ -61,8 +61,15 @@ var (
 type windowsNamespacePurgeDescriptorSet struct {
 	directories []*windows.SECURITY_DESCRIPTOR
 	files       []*windows.SECURITY_DESCRIPTOR
-	quarantine  *windows.SECURITY_DESCRIPTOR
-	adminFile   *windows.SECURITY_DESCRIPTOR
+	// inheritedDirectories and inheritedFiles are what an object a killed
+	// first install created under the canonical install root carries before
+	// the install gave it its own protected DACL: owned by LocalSystem or
+	// Administrators, not protected, and only the ACEs it inherited from
+	// that root. Accepted below the root only (p0-round:GAP-1365).
+	inheritedDirectories []*windows.SECURITY_DESCRIPTOR
+	inheritedFiles       []*windows.SECURITY_DESCRIPTOR
+	quarantine           *windows.SECURITY_DESCRIPTOR
+	adminFile            *windows.SECURITY_DESCRIPTOR
 }
 
 type windowsNamespacePurgeNode struct {
@@ -386,7 +393,26 @@ func windowsNamespacePurgeCanonicalDescriptors(
 	if err != nil {
 		return nil, err
 	}
+	var inheritedDirectories, inheritedFiles []*windows.SECURITY_DESCRIPTOR
+	for _, owner := range []string{"O:SYG:SY", "O:BAG:BA", "O:SYG:BA", "O:BAG:SY"} {
+		// Inherited from the InstallDirectory shape, or from the
+		// ServiceInstallDirectory shape with the gateway read ACE.
+		for _, extra := range []string{"", fmt.Sprintf("(A;OICIID;0x1200a9;;;%s)", gatewaySID)} {
+			directory, err := build(owner+"D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x1200a9;;;BU)"+extra, "inherited InstallDirectory")
+			if err != nil {
+				return nil, err
+			}
+			file, err := build(owner+"D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)"+strings.Replace(extra, "OICIID", "ID", 1), "inherited InstallFile")
+			if err != nil {
+				return nil, err
+			}
+			inheritedDirectories = append(inheritedDirectories, directory)
+			inheritedFiles = append(inheritedFiles, file)
+		}
+	}
 	return &windowsNamespacePurgeDescriptorSet{
+		inheritedDirectories: inheritedDirectories,
+		inheritedFiles:       inheritedFiles,
 		directories: []*windows.SECURITY_DESCRIPTOR{
 			adminDirectory,
 			installDirectory,
@@ -1024,6 +1050,18 @@ func validateWindowsNamespacePurgeNode(
 		}
 	} else {
 		allowed = descriptors.files
+	}
+	if !root {
+		// Below a root that matched its own canonical descriptor, an
+		// object may carry only the ACEs it inherited from it: the shape
+		// a first install killed before it protected the object leaves
+		// (p0-round:GAP-1365). Only SYSTEM and Administrators can write
+		// it, as for the canonical shapes.
+		if node.directory {
+			allowed = append(append([]*windows.SECURITY_DESCRIPTOR(nil), allowed...), descriptors.inheritedDirectories...)
+		} else {
+			allowed = append(append([]*windows.SECURITY_DESCRIPTOR(nil), allowed...), descriptors.inheritedFiles...)
+		}
 	}
 	matched, err := windowsNamespacePurgeHandleMatches(node.handle, allowed)
 	if err != nil {
