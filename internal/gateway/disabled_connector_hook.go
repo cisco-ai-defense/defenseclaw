@@ -36,13 +36,17 @@ func disabledConnectorCall(ctx context.Context) bool {
 // the hook socket let through as a disabled connector's: DefenseClaw does
 // not inspect that agent, so its prompts and tool calls are not correlated,
 // journaled, audited or exported, and no instruction snapshot is taken. It
-// runs after the route's contract and malformed-payload checks. It reports
-// false, and the call takes the ordinary path, when a refusal still applies
-// (the require-sandbox host-run floor, the strict install window), for a
+// runs after the route's contract and malformed-payload checks, and before
+// the session-start gate and the Codex registration repair, which would
+// write back the registration the administrator removed (lead ruling,
+// rel-1-0-6:GAP-0325 r2 review). It reports false, and the call takes the
+// ordinary path, when the require-sandbox host-run floor refuses it, for a
 // sandbox or hook-side refusal report, and when the live configuration no
 // longer disables the connector (a reload re-enabled it: the call is then
-// inspected). The gateway log line written by the peer authorization is the
-// only trace.
+// inspected). The strict install window is not checked: it never applies to
+// a managed gateway (perUserInstallWindowHeld), and only the managed hook
+// socket marks a call. The gateway log line written by the peer
+// authorization is the only trace.
 func (a *APIServer) answerDisabledConnectorHook(ctx context.Context, w http.ResponseWriter, header http.Header,
 	profile connector.HookProfile, connectorName string, req agentHookRequest,
 ) bool {
@@ -57,9 +61,6 @@ func (a *APIServer) answerDisabledConnectorHook(ctx context.Context, w http.Resp
 		cwd = hookCWDForContext(ctx, req.CWD)
 	}
 	if a.requireSandboxDecision(ctx, connectorName, req.HookEventName, cwd, requireSandboxSurface(ctx, header)).refuses() {
-		return false
-	}
-	if _, gated := a.strictInstallWindowGate(ctx, profile, connectorName, req); gated {
 		return false
 	}
 	resp := agentHookResponseForProfile(profile, req, "allow", "allow", "NONE", "", nil,

@@ -40,6 +40,14 @@ func disabledConnectorSocketAPI(t *testing.T, codexEnabled bool, enrollment conf
 // gateway's audit store, so a test can prove what a call recorded.
 func disabledConnectorSocketAPIWithStore(t *testing.T, codexEnabled bool, enrollment config.EnterpriseEnrollmentConfig) (http.Handler, *audit.Store) {
 	t.Helper()
+	_, handler, store := disabledConnectorAPI(t, codexEnabled, enrollment, nil)
+	return handler, store
+}
+
+// disabledConnectorAPI is disabledConnectorSocketAPIWithStore that also
+// returns the gateway, after mutate (when set) edits its config.
+func disabledConnectorAPI(t *testing.T, codexEnabled bool, enrollment config.EnterpriseEnrollmentConfig, mutate func(*config.Config)) (*APIServer, http.Handler, *audit.Store) {
+	t.Helper()
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise"}
 	cfg.Enterprise.Profile = managed.ProfileStandalone
@@ -49,12 +57,15 @@ func disabledConnectorSocketAPIWithStore(t *testing.T, codexEnabled bool, enroll
 		"claudecode": {},
 		"codex":      {Enabled: &codexEnabled},
 	}
+	if mutate != nil {
+		mutate(cfg)
+	}
 	api := &APIServer{scannerCfg: cfg, store: store, logger: logger, connectorRegistry: connector.NewDefaultRegistry()}
 	empty := func() (managedHookLedger, error) { return managedHookLedger{}, nil }
 	// Neither connector is in machine policy: the lifecycle removed Codex's
 	// requirements, and Claude Code is held to per-user enrollment here so
 	// the empty ledger refuses it.
-	return api.managedHookPeerAuth(newManagedHookAuthorizer(enrollment, nil, empty), api.managedHookSocketMux()), store
+	return api, api.managedHookPeerAuth(newManagedHookAuthorizer(enrollment, nil, empty), api.managedHookSocketMux()), store
 }
 
 // auditRowsFor counts the audit store rows that name connector.
@@ -174,6 +185,63 @@ func TestManagedHookSocketAnswersADisabledConnectorAllowWithoutAScan(t *testing.
 	w = postDisabledConnectorHook(t, enabled, "/api/v1/codex/hook", disabledCodexPreToolUse, disabledCodexHeaders, alice)
 	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), managedHookReasonUIDUnregistered) {
 		t.Fatalf("an enabled codex keeps the enrollment check: %d %s", w.Code, w.Body.String())
+	}
+
+	// r2 review finding 2: root (enrollment.root allows it) and an
+	// exempt_users account record nothing on a disabled connector either,
+	// the enterprise-exempt-user row included.
+	for _, tc := range []struct {
+		name       string
+		enrollment config.EnterpriseEnrollmentConfig
+		peer       managedHookPeer
+	}{
+		{"root", config.EnterpriseEnrollmentConfig{}, managedHookPeer{UID: 0, Name: "root"}},
+		{"exempt", config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"alice"}}, alice},
+	} {
+		handler, store := disabledConnectorSocketAPIWithStore(t, false, tc.enrollment)
+		w := postDisabledConnectorHook(t, handler, "/api/v1/codex/hook", disabledCodexPreToolUse, disabledCodexHeaders, tc.peer)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"action":"allow"`) {
+			t.Fatalf("%s on a disabled codex: status %d body %s", tc.name, w.Code, w.Body.String())
+		}
+		if n := auditRowsFor(t, store, "codex"); n != 0 {
+			t.Fatalf("%s on a disabled codex wrote %d audit rows", tc.name, n)
+		}
+	}
+
+	// r2 review finding 3, the early answer's guards:
+	// (a) the live config no longer disables the connector when the handler
+	// runs (a reload re-enabled it after the peer authorization): the call is
+	// scanned and recorded, not answered as disabled.
+	reloaded, _, reloadedStore := disabledConnectorAPI(t, true, config.EnterpriseEnrollmentConfig{}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", strings.NewReader(disabledCodexPreToolUse))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range disabledCodexHeaders {
+		req.Header.Set(k, v)
+	}
+	req = req.WithContext(withDisabledConnectorCall(withManagedHookPeer(req.Context(), alice)))
+	rec := httptest.NewRecorder()
+	reloaded.handleAgentHook("codex").ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || auditRowsFor(t, reloadedStore, "codex") == 0 {
+		t.Fatalf("a call marked disabled whose connector the live config enables must be inspected and recorded: %d %s", rec.Code, rec.Body.String())
+	}
+	// (b) a require-sandbox floor that names codex still refuses the host
+	// run of a disabled codex.
+	useSandboxAvailability(t, sandboxDevicesUsable)
+	project := requireSandboxProject(t)
+	_, floored, _ := disabledConnectorAPI(t, false, config.EnterpriseEnrollmentConfig{}, func(cfg *config.Config) {
+		cfg.OpenShell.Enabled = true
+		cfg.OpenShell.Admin.RequiredFor = []string{"codex"}
+		cfg.OpenShell.Admin.RequestAccess = "it-security@example.com"
+	})
+	body := strings.Replace(disabledCodexPreToolUse, `"cwd":"/tmp"`, `"cwd":"`+project+`"`, 1)
+	w = postDisabledConnectorHook(t, floored, "/api/v1/codex/hook", body, disabledCodexHeaders, alice)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"action":"block"`) || !strings.Contains(w.Body.String(), "sandbox") {
+		t.Fatalf("the require-sandbox floor must still refuse a disabled codex host run: %d %s", w.Code, w.Body.String())
+	}
+	// (c) the strict install window never applies to the managed gateway
+	// that marks these calls, so the early answer does not check it.
+	if reloaded.perUserInstallWindowHeld() {
+		t.Fatal("a managed gateway must not read the per-user install window")
 	}
 }
 

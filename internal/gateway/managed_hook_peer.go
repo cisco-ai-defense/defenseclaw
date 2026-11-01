@@ -380,7 +380,12 @@ func (z *managedHookAuthorizer) decideFor(peer managedHookPeer, connectorName, s
 		if strings.EqualFold(strings.TrimSpace(z.enrollment.Root), config.EnterpriseRootDeny) {
 			return denyManagedHook(http.StatusForbidden, managedHookReasonRootDenied)
 		}
-		return allowManagedHook()
+		// Root allowed by enrollment.root is not inspected on a disabled
+		// connector either: the mark sends it to the same allow that records
+		// nothing (rel-1-0-6:GAP-0325 r2 review).
+		decision := allowManagedHook()
+		decision.Disabled = disabled
+		return decision
 	}
 	refuse := z.enrollment.UnverifiedVersionsFor(connectorName) == config.EnterpriseUnverifiedRefuse
 	if refuse && connector.SurfaceRefused(connectorName, surface, config.EnterpriseUnverifiedRefuse) {
@@ -397,7 +402,7 @@ func (z *managedHookAuthorizer) decideFor(peer managedHookPeer, connectorName, s
 	}
 	if z.hostRunExempt(peer) {
 		decision := allowManagedHook()
-		decision.Exempt = true
+		decision.Exempt, decision.Disabled = true, disabled
 		return decision
 	}
 	if disabled {
@@ -792,6 +797,13 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			ctx = withDisabledConnectorCall(ctx)
 		}
 		if decision.Exempt {
+			if decision.Disabled {
+				// A disabled connector's call writes no audit row, the
+				// enterprise-exempt-user row included; the log line above is
+				// its trace.
+				next.ServeHTTP(w, r.WithContext(withEnterpriseExemptUser(ctx)))
+				return
+			}
 			a.serveEnterpriseExemptHookCall(w, r.WithContext(withEnterpriseExemptUser(ctx)), next, peer, connectorName, route, inspect)
 			return
 		}
