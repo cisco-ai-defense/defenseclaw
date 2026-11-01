@@ -76,14 +76,14 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 			atStart = false
 			continue
 		}
-		if dialect == windowsPowerShell && char == '#' && windowsPowerShellCommentStarts(runes, i) {
+		if dialect == windowsPowerShell && char == '#' && windowsPowerShellCommentStarts(runes, i, false) {
 			for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
 				i++
 			}
 			continue
 		}
 		if dialect == windowsPowerShell && char == '<' && i+1 < len(runes) &&
-			runes[i+1] == '#' && windowsPowerShellCommentStarts(runes, i) {
+			runes[i+1] == '#' && windowsPowerShellCommentStarts(runes, i, false) {
 			end, ok := windowsPowerShellBlockCommentEnd(runes, i)
 			if !ok {
 				return "", nil, false
@@ -433,9 +433,10 @@ func windowsSimpleContinuedLexemes(lexemes []windowsLexeme) []windowsLexeme {
 	return out
 }
 
-// Identify a statement whose only top-level effect is assigning one opaque
-// value. It still occupies a simple-command budget slot; the gateway can
-// avoid a second full policy pass over the value.
+// Identify an assignment to one balanced opaque value. Its contents may run
+// code that the PowerShell reader cannot analyze. The assignment still takes
+// a statement budget slot; skipping its child pass does not imply that its
+// contents were judged.
 func windowsSimpleOpaqueValueAssignment(part string) (string, bool) {
 	runes := []rune(strings.TrimSpace(part))
 	if len(runes) < 5 || runes[0] != '$' {

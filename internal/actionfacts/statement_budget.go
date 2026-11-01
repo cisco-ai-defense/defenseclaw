@@ -82,6 +82,15 @@ func powerShellStatements(command string, limit int) (int, bool) {
 	)
 	runes := []rune(command)
 	frames := []int{frameCode}
+	argumentMode := []bool{true}
+	push := func(frame int) {
+		frames = append(frames, frame)
+		argumentMode = append(argumentMode, false)
+	}
+	pop := func() {
+		frames = frames[:len(frames)-1]
+		argumentMode = argumentMode[:len(argumentMode)-1]
+	}
 	statements := 0
 	inStatement := false
 	opaque := false
@@ -110,10 +119,10 @@ func powerShellStatements(command string, limit int) (int, bool) {
 				if i+1 < len(runes) && windowsPowerShellQuoteDelimiter(runes[i+1]) == '"' {
 					i++ // a doubled quote is one quote character
 				} else {
-					frames = frames[:len(frames)-1]
+					pop()
 				}
 			case r == '$' && i+1 < len(runes) && runes[i+1] == '(':
-				frames = append(frames, frameCode)
+				push(frameCode)
 				i++
 			}
 			continue
@@ -121,11 +130,17 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			if r == '`' {
 				i++
 			} else if r == '}' {
-				frames = frames[:len(frames)-1]
+				pop()
 			}
 			continue
 		}
 		// Code, paren and hashtable frames.
+		if !argumentMode[len(argumentMode)-1] && windowsPowerShellCommandWordBeforeBlank(runes, i) {
+			argumentMode[len(argumentMode)-1] = true
+		}
+		if r == '&' && (i == 0 || runes[i-1] != '>') {
+			argumentMode[len(argumentMode)-1] = false
+		}
 		if i > 0 && i-1 != commentEnd && !unicode.IsSpace(runes[i-1]) {
 			lastSignificant = runes[i-1]
 		}
@@ -134,7 +149,7 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			next = runes[i+1]
 		}
 		switch {
-		case r == '#' && windowsPowerShellCommentStarts(runes, i):
+		case r == '#' && windowsPowerShellCommentStarts(runes, i, len(frames) > 1 && !argumentMode[len(argumentMode)-1]):
 			// A line comment: the line goes on as the code before it ends.
 			// A comma inside the comment does not continue the line
 			// (review r3 finding 1: `Write-Output 1 # note,` lines hid
@@ -150,7 +165,7 @@ func powerShellStatements(command string, limit int) (int, bool) {
 				i++
 			}
 			commentEnd = i
-		case r == '<' && next == '#' && windowsPowerShellCommentStarts(runes, i):
+		case r == '<' && next == '#' && windowsPowerShellCommentStarts(runes, i, len(frames) > 1 && !argumentMode[len(argumentMode)-1]):
 			end, ok := windowsPowerShellBlockCommentEnd(runes, i)
 			if !ok {
 				return statements, opaque
@@ -162,7 +177,7 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			commentEnd = end
 		case r == '-' && next == '-' && i+2 < len(runes) && runes[i+2] == '%' &&
 			(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) && windowsPowerShellTokenStart(runes, i):
-			// The stop-parsing arguments end at an unquoted pipe or line end.
+			// The stop-parsing arguments end at an unquoted pipe, &&, or line end.
 			opaque, inStatement = true, true
 			i = windowsPowerShellStopParsingEnd(runes, i+3) - 1
 		case r == '`':
@@ -196,39 +211,41 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			}
 		case windowsPowerShellQuoteDelimiter(r) == '"':
 			inStatement = true
-			frames = append(frames, frameDouble)
+			push(frameDouble)
 		case r == '$' && next == '{':
 			inStatement, opaque = true, true
-			frames = append(frames, frameVariable)
+			push(frameVariable)
 			i++
 		case r == '@' && next == '{':
 			inStatement, opaque = true, true
-			frames = append(frames, frameHashtable)
+			push(frameHashtable)
 			i++
 		case (r == '$' || r == '@') && next == '(':
-			frames = append(frames, frameCode)
+			push(frameCode)
 			inStatement, opaque = false, true
 			i++
 		case r == '(':
-			frames = append(frames, frameParen)
+			push(frameParen)
 			inStatement = false
 		case r == '{':
-			frames = append(frames, frameCode)
+			push(frameCode)
 			inStatement = false
 		case r == ')' || r == '}':
 			// The statement around the bracket goes on; the last statement
 			// inside it is counted with it.
 			if len(frames) > 1 {
-				frames = frames[:len(frames)-1]
+				pop()
 			}
 			inStatement = true
 		case top == frameHashtable && (r == ';' || r == '\n' || r == '\r'):
 			// Entry separators of a hashtable, not statements.
+			argumentMode[len(argumentMode)-1] = false
 		case (r == '\n' || r == '\r') && (top == frameParen || lastSignificant == ','):
 			// A line end inside a bare ( ) or after a trailing comma
 			// continues the statement.
 		case r == ';' || r == '|' || r == '\n' || r == '\r':
 			boundary()
+			argumentMode[len(argumentMode)-1] = false
 		case r == '&' && next == '&':
 			boundary()
 			i++

@@ -23,8 +23,8 @@ type SimpleCommand struct {
 	Text string
 	CWD  string
 	// OpaqueValueAssignment has no command word outside a balanced value.
-	// The whole action has already been analyzed, so gateway judgment need
-	// not analyze this assignment again as a child.
+	// Its contents can run code that the PowerShell reader cannot analyze.
+	// The child pass is skipped because it cannot read inside that value.
 	OpaqueValueAssignment bool
 	// LiteralOutputOnly is a Write-Output with inert literal arguments. The
 	// whole action has already been analyzed; a child pass adds no evidence.
