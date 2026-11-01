@@ -250,3 +250,67 @@ func TestApplyOverlay_DeduplicatesDomains(t *testing.T) {
 		t.Fatalf("expected ollama port to remain unique, got %d copies", portCount)
 	}
 }
+
+// captureOverlayReports routes overlay diagnostics to a slice for one test.
+func captureOverlayReports(t *testing.T) *[]string {
+	t.Helper()
+	var reports []string
+	SetOverlayReporter(func(msg string) { reports = append(reports, msg) })
+	t.Cleanup(func() { SetOverlayReporter(nil) })
+	return &reports
+}
+
+// Overlay diagnostics go through the installed reporter, not stderr, so a
+// hook process can keep them off the agent-visible stream.
+func TestLoadProviders_OverlayErrorsUseReporter(t *testing.T) {
+	reports := captureOverlayReports(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom-providers.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", path)
+	if _, err := LoadProviders(); err != nil {
+		t.Fatalf("LoadProviders: %v", err)
+	}
+	if len(*reports) != 1 || !strings.Contains((*reports)[0], "overlay parse error") {
+		t.Fatalf("reports = %q, want one parse error", *reports)
+	}
+}
+
+// A relative, UNC or device override is refused, never opened.
+func TestCustomProvidersPath_RefusesRelativeAndUNCOverride(t *testing.T) {
+	for _, value := range []string{
+		"custom-providers.json",
+		`..\custom-providers.json`,
+		`\\attacker.example\share\custom-providers.json`,
+		"//attacker.example/share/custom-providers.json",
+		`\\?\C:\custom-providers.json`,
+		`\\.\pipe\custom-providers`,
+	} {
+		t.Run(value, func(t *testing.T) {
+			reports := captureOverlayReports(t)
+			t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", value)
+			if got := CustomProvidersPath(); got != "" {
+				t.Fatalf("CustomProvidersPath = %q, want refused", got)
+			}
+			if len(*reports) != 1 || !strings.Contains((*reports)[0], "absolute local path") {
+				t.Fatalf("reports = %q", *reports)
+			}
+		})
+	}
+}
+
+// Managed processes ignore the override and use the per-user overlay.
+func TestCustomProvidersPath_IgnoreEnvUsesHomeOverlay(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", filepath.Join(t.TempDir(), "elsewhere.json"))
+	SetIgnoreCustomProvidersPathEnv(true)
+	t.Cleanup(func() { SetIgnoreCustomProvidersPathEnv(false) })
+	want := filepath.Join(home, ".defenseclaw", "custom-providers.json")
+	if got := CustomProvidersPath(); got != want {
+		t.Fatalf("CustomProvidersPath = %q, want %q", got, want)
+	}
+}

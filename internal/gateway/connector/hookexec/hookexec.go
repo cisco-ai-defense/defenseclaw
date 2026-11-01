@@ -252,7 +252,7 @@ func Run(ctx context.Context, opts Options) int {
 		// so it surfaces in tests / setup rather than silently disabling the
 		// guardrail. The CLI validates --connector against the registry, so
 		// this is unreachable in normal operation.
-		fmt.Fprintf(opts.Stderr, "defenseclaw: unknown hook connector %q\n", opts.Connector)
+		writeFailureDiagnostic(opts, true, "defenseclaw: unknown hook connector %q\n", opts.Connector)
 		return blockExit
 	}
 	failMode := normalizeFailMode(opts.FailMode)
@@ -647,7 +647,7 @@ func handleMissingToken(opts Options, sp spec, failMode string) int {
 	blocked := opts.ManagedEnterprise || opts.StrictAvailability || failMode == "closed"
 	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
 	if blocked {
-		fmt.Fprintf(opts.Stderr,
+		writeFailureDiagnostic(opts, true,
 			"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
 		return emit(opts.Stdout, sp.unreachableStrict)
 	}
@@ -656,7 +656,7 @@ func handleMissingToken(opts Options, sp spec, failMode string) int {
 
 func handleUnavailableHome(opts Options, sp spec, reason string) int {
 	if opts.StrictAvailability || opts.ManagedEnterprise {
-		fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
+		writeFailureDiagnostic(opts, true, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
 		return emit(opts.Stdout, sp.unreachableStrict)
 	}
 	return emit(opts.Stdout, sp.openAllow)
@@ -671,11 +671,31 @@ func handleOversized(opts Options, sp spec, failMode string) int {
 		failMode = "closed"
 	}
 	logHookFailure(opts, sp, managedHookOversizedReason, "transport", failMode, failMode == "closed")
-	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
+	writeFailureDiagnostic(opts, failMode == "closed", "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
 	if failMode == "closed" {
 		return emit(opts.Stdout, sp.oversizedClosed)
 	}
 	return emit(opts.Stdout, sp.openAllow)
+}
+
+// ManagedHookBlockMessage is the only text a managed hook writes to stderr,
+// and only when it blocks on a failure rather than a gateway verdict. Agents
+// surface hook stderr to the user (Claude Code makes it the block message),
+// so managed failures carry no diagnostics there: every decision is already
+// in the durable record (recordManagedHookDecision).
+const ManagedHookBlockMessage = "Cisco AI Defense could not verify this request; it was blocked by your organization's policy."
+
+// writeFailureDiagnostic writes a failure path's stderr line. Unmanaged hooks
+// keep their diagnostic; a managed hook writes ManagedHookBlockMessage when it
+// blocks and nothing when it allows.
+func writeFailureDiagnostic(opts Options, blocked bool, format string, args ...any) {
+	if opts.ManagedEnterprise {
+		if blocked {
+			fmt.Fprintln(opts.Stderr, ManagedHookBlockMessage)
+		}
+		return
+	}
+	fmt.Fprintf(opts.Stderr, format, args...)
 }
 
 // failUnreachable applies the connector's effective fail mode to native hook
@@ -685,11 +705,11 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	blocked := opts.StrictAvailability || failMode == "closed"
 	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
 	if blocked {
-		fmt.Fprintf(opts.Stderr,
+		writeFailureDiagnostic(opts, true,
 			"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, reason)
 		return emit(opts.Stdout, sp.unreachableStrict)
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, reason)
+	writeFailureDiagnostic(opts, false, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, reason)
 	return emit(opts.Stdout, sp.openAllow)
 }
 
@@ -707,9 +727,13 @@ func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
-	reason = responseFailureReason(reason)
+	if !opts.ManagedEnterprise {
+		// Managed endpoints are repaired by the installer and the Guardian,
+		// not by the user, so they get no remediation advice.
+		reason = responseFailureReason(reason)
+	}
 	logHookFailure(opts, sp, reason, "response", failMode, failMode != "open")
-	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
+	writeFailureDiagnostic(opts, failMode != "open", "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
 	if failMode == "open" {
 		return emit(opts.Stdout, sp.openAllow)
 	}

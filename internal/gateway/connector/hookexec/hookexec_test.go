@@ -185,6 +185,7 @@ func TestRunUsesAuthenticatedManagedTokenSnapshotWithoutRereadingSidecars(t *tes
 }
 
 func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *testing.T) {
+	records := captureManagedHookDecisions(t)
 	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
 		path := filepath.Join(opts.HookDir, ".hook-codex.token")
 		if err := os.WriteFile(path, []byte("valid-but-different-generation-token\n"), 0o600); err != nil {
@@ -201,9 +202,8 @@ func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *
 	if result.rt.requests != 0 {
 		t.Fatalf("gateway requests = %d, want 0", result.rt.requests)
 	}
-	if !strings.Contains(result.stderr, "authenticated managed runtime token is empty") {
-		t.Fatalf("stderr = %q, want authenticated-snapshot diagnostic", result.stderr)
-	}
+	requireManagedStderr(t, result.stderr, true)
+	requireManagedRecordReason(t, *records, managedRuntimeTokenEmptyReason)
 }
 
 // TestRunCodexNotifyUsesAuthenticatedManagedTokenSnapshot mirrors the Run
@@ -1384,6 +1384,7 @@ func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
 			}, diagnostic: "enterprise_managed_runtime_home_missing"},
 		} {
 			t.Run(connectorName+"/"+tc.name, func(t *testing.T) {
+				records := captureManagedHookDecisions(t)
 				rt := ok(`{"action":"allow"}`)
 				var out, errb bytes.Buffer
 				home := tc.home(t)
@@ -1407,9 +1408,8 @@ func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
 				if rt.requests != 0 {
 					t.Fatalf("gateway called %d times, want 0", rt.requests)
 				}
-				if !strings.Contains(errb.String(), tc.diagnostic) {
-					t.Fatalf("stderr = %q, want stable diagnostic %q", errb.String(), tc.diagnostic)
-				}
+				requireManagedStderr(t, errb.String(), true)
+				requireManagedRecordReason(t, *records, tc.diagnostic)
 			})
 		}
 	}
@@ -1431,6 +1431,7 @@ func TestManagedEnterpriseResolverFailureBeforeRuntimeOrGateway(t *testing.T) {
 		{name: "state-invalid/open", reason: "enterprise_managed_runtime_state_invalid", failMode: "open", wantCode: blockExit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			records := captureManagedHookDecisions(t)
 			rt := ok(`{"action":"allow"}`)
 			var out, errb bytes.Buffer
 			home := t.TempDir()
@@ -1455,9 +1456,8 @@ func TestManagedEnterpriseResolverFailureBeforeRuntimeOrGateway(t *testing.T) {
 			if rt.requests != 0 {
 				t.Fatalf("gateway called %d times, want 0", rt.requests)
 			}
-			if !strings.Contains(errb.String(), tc.reason) {
-				t.Fatalf("stderr = %q, want stable diagnostic %q", errb.String(), tc.reason)
-			}
+			requireManagedStderr(t, errb.String(), tc.wantCode != 0)
+			requireManagedRecordReason(t, *records, tc.reason)
 		})
 	}
 }

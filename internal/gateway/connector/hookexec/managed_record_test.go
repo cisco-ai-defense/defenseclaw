@@ -6,6 +6,7 @@ package hookexec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -38,6 +40,30 @@ func captureManagedHookDecisions(t *testing.T) *[]managedDecisionRecord {
 		managedRecorderTestMu.Unlock()
 	})
 	return records
+}
+
+// requireManagedStderr asserts a managed failure's stderr: the fixed block
+// sentence when it blocked, nothing when it allowed.
+func requireManagedStderr(t *testing.T, stderr string, blocked bool) {
+	t.Helper()
+	want := ""
+	if blocked {
+		want = ManagedHookBlockMessage + "\n"
+	}
+	if stderr != want {
+		t.Fatalf("managed stderr = %q, want %q", stderr, want)
+	}
+}
+
+// requireManagedRecordReason asserts the durable records carry reason.
+func requireManagedRecordReason(t *testing.T, records []managedDecisionRecord, reason string) {
+	t.Helper()
+	for _, record := range records {
+		if strings.Contains(record.line, `reason="`+reason+`"`) {
+			return
+		}
+	}
+	t.Fatalf("durable records = %+v, want reason %q", records, reason)
 }
 
 func requireOneManagedRecord(t *testing.T, records []managedDecisionRecord, marker string, want ...string) {
@@ -116,9 +142,9 @@ func TestManagedRuntimeDriftFollowsFailModeWithDurableRecord(t *testing.T) {
 				`fail_mode="`+tc.failMode+`"`,
 				tc.wantDecision,
 			)
-			if tc.wantCode == 0 && !strings.Contains(stderr, "WARNING hook fail-open") {
-				t.Fatalf("fail-open drift did not warn: %q", stderr)
-			}
+			// The record is the warning: a managed fail-open prints nothing,
+			// and a block prints only the fixed sentence.
+			requireManagedStderr(t, stderr, tc.wantCode != 0)
 		})
 	}
 }
@@ -323,17 +349,19 @@ func captureStandardLogger(t *testing.T) *bytes.Buffer {
 }
 
 // A managed hook decision writes its durable record and nothing else: the
-// process stderr carries only the agent contract's own diagnostic lines, and
-// the standard logger (the process stderr in a hook) stays empty.
+// process stderr carries at most the fixed block sentence, and the standard
+// logger (the process stderr in a hook) stays empty.
 func TestManagedHookDecisionWritesNothingExtraToStderr(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		reason   string
 		failMode string
+		blocked  bool
 	}{
 		{name: "drift fail-open", reason: ManagedRuntimeDriftReason, failMode: "open"},
-		{name: "drift fail-closed", reason: ManagedRuntimeDriftReason, failMode: "closed"},
-		{name: "boundary", reason: managedRuntimeStateInvalidReason, failMode: "open"},
+		{name: "drift fail-closed", reason: ManagedRuntimeDriftReason, failMode: "closed", blocked: true},
+		{name: "unregistered fail-open", reason: ManagedSIDUnregisteredReason, failMode: "open"},
+		{name: "boundary", reason: managedRuntimeStateInvalidReason, failMode: "open", blocked: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			records := captureManagedHookDecisions(t)
@@ -345,11 +373,7 @@ func TestManagedHookDecisionWritesNothingExtraToStderr(t *testing.T) {
 			if logged.Len() != 0 {
 				t.Fatalf("decision reached the standard logger: %q", logged.String())
 			}
-			for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
-				if !strings.HasPrefix(line, "defenseclaw: ") {
-					t.Fatalf("stderr carries a non-contract line: %q", line)
-				}
-			}
+			requireManagedStderr(t, stderr, tc.blocked)
 			for _, marker := range []string{managed.MarkerDegraded, managed.MarkerBoundary} {
 				if strings.Contains(stderr, marker) {
 					t.Fatalf("stderr carries the resilience record: %q", stderr)
@@ -371,6 +395,8 @@ func TestInstallManagedHookDiagnosticSinksKeepsManagedChecksOffStderr(t *testing
 		managed.ReportResilienceEvent = previousResilience
 		managed.ReportTrustAdvisory = previousAdvisory
 		managed.ReportTrustDrift = previousDrift
+		configs.SetOverlayReporter(nil)
+		configs.SetIgnoreCustomProvidersPathEnv(false)
 	})
 
 	InstallManagedHookDiagnosticSinks()
@@ -387,6 +413,88 @@ func TestInstallManagedHookDiagnosticSinksKeepsManagedChecksOffStderr(t *testing
 	for _, record := range *records {
 		if record.source != managedHookDecisionRecordDefaultSource {
 			t.Fatalf("record source = %q", record.source)
+		}
+	}
+}
+
+// The hook's sinks also cover the provider overlay: an unreadable overlay is
+// recorded durably, and the agent-inherited path override is not opened.
+func TestInstallManagedHookDiagnosticSinksCoversProviderOverlay(t *testing.T) {
+	records := captureManagedHookDecisions(t)
+	t.Cleanup(func() {
+		configs.SetOverlayReporter(nil)
+		configs.SetIgnoreCustomProvidersPathEnv(false)
+	})
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	overlayDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(overlayDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "custom-providers.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", `\\attacker.example\share\custom-providers.json`)
+
+	InstallManagedHookDiagnosticSinks()
+	if path := configs.CustomProvidersPath(); path != filepath.Join(overlayDir, "custom-providers.json") {
+		t.Fatalf("CustomProvidersPath = %q, want the per-user overlay", path)
+	}
+	if _, err := configs.LoadProviders(); err != nil {
+		t.Fatalf("LoadProviders: %v", err)
+	}
+	if len(*records) != 1 ||
+		!strings.HasPrefix((*records)[0].line, managed.MarkerDegraded+" ") ||
+		!strings.Contains((*records)[0].line, "provider_overlay") {
+		t.Fatalf("durable records = %+v", *records)
+	}
+}
+
+// Managed transport, response and payload failures print no diagnostics:
+// nothing on a fail-open and only the fixed sentence on a block, so neither
+// a transport error nor remediation advice reaches the agent's block message.
+// The unmanaged hook keeps its diagnostics.
+func TestManagedFailurePathsWriteOnlyTheFixedBlockSentence(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		rt       *stubRT
+		failMode string
+		stdin    string
+		blocked  bool
+	}{
+		{name: "unreachable/open", rt: &stubRT{err: errors.New("dial tcp: refused")}, failMode: "open"},
+		{name: "unreachable/closed", rt: &stubRT{err: errors.New("dial tcp: refused")}, failMode: "closed", blocked: true},
+		{name: "auth/open", rt: &stubRT{status: 401}, failMode: "open"},
+		{name: "auth/closed", rt: &stubRT{status: 403}, failMode: "closed", blocked: true},
+		{name: "invalid-json/open", rt: ok("not json"), failMode: "open"},
+		{name: "oversized", rt: ok(`{"action":"allow"}`), failMode: "open", stdin: strings.Repeat("x", 64), blocked: true},
+	} {
+		for _, managedHook := range []bool{true, false} {
+			t.Run(tc.name+"/managed="+map[bool]string{true: "1", false: "0"}[managedHook], func(t *testing.T) {
+				captureManagedHookDecisions(t)
+				r := run(t, "claudecode", tc.rt, func(opts *Options) {
+					opts.FailMode = tc.failMode
+					opts.ManagedEnterprise = managedHook
+					token := "authenticated-token"
+					opts.AuthenticatedManagedToken = &token
+					opts.Token = token
+					if tc.stdin != "" {
+						opts.Stdin = strings.NewReader(tc.stdin)
+						opts.MaxBody = 8
+					}
+				})
+				if managedHook {
+					requireManagedStderr(t, r.stderr, tc.blocked)
+					if (r.code == blockExit) != tc.blocked {
+						t.Fatalf("code = %d, blocked = %v", r.code, tc.blocked)
+					}
+					return
+				}
+				if !strings.HasPrefix(r.stderr, "defenseclaw: ") {
+					t.Fatalf("unmanaged stderr = %q, want its diagnostic", r.stderr)
+				}
+			})
 		}
 	}
 }
