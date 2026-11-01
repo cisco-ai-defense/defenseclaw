@@ -360,12 +360,6 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 	return "", fmt.Sprintf("no %s installation found for this user", connector)
 }
 
-// UnixAgentUnversionedReasonPrefix starts the discovery reason for an agent
-// whose CLI exists for the user but printed no usable version. The
-// enumerator cannot select a hook contract for it, so it reports the agent
-// as unprotected instead of skipping it silently.
-const UnixAgentUnversionedReasonPrefix = "installed, but its version could not be read: "
-
 // unixUntrustedCandidateNote follows the path of an installed CLI that
 // discovery did not run because an account other than root and the user can
 // change it (the parent keeps the first 256 bytes of a reason).

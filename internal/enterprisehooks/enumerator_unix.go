@@ -687,7 +687,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				}
 			} else if reason := reasons[conn]; UnixAgentInstalledWithoutVersion(reason) {
 				report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
-					Code: UnprotectedCodeHookContractUnverified, Reason: reason + "; its managed hook contract cannot be verified"})
+					Code: UnprotectedCodeHookContractUnverified, Reason: reason + UnixAgentUnversionedContractSuffix})
 			}
 			// An editor extension or desktop app runs its own engine: one
 			// below the hook contract may ignore the managed hooks as an

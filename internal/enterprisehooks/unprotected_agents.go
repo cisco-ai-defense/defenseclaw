@@ -106,6 +106,16 @@ func UnprotectedAgentsScanPending(age, remedy string) string {
 }
 
 // Status codes for an unprotected agent.
+// UnixAgentUnversionedReasonPrefix starts the discovery reason for an agent
+// whose CLI exists for the user but printed no usable version. The
+// enumerator cannot select a hook contract for it, so it reports the agent
+// as unprotected instead of skipping it silently.
+const UnixAgentUnversionedReasonPrefix = "installed, but its version could not be read: "
+
+// UnixAgentUnversionedContractSuffix ends the hook_contract_unverified
+// reason the Linux and macOS enumerator writes for such an agent.
+const UnixAgentUnversionedContractSuffix = "; its managed hook contract cannot be verified"
+
 const (
 	// UnprotectedCodeHookContractUnverified: the agent's version has no
 	// verified DefenseClaw hook contract.
