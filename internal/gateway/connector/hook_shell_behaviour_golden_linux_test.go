@@ -662,6 +662,16 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		return obs, err
 	}
 	script := filepath.Join(hookDir, c.hook.script)
+	if helper := os.Getenv("DC_REVIEW2_HELPER"); helper != "" {
+		// Rollback check: the hooks this tree renders beside another tree's helper.
+		b, err := os.ReadFile(helper)
+		if err != nil {
+			return obs, err
+		}
+		if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), b, 0o644); err != nil {
+			return obs, err
+		}
+	}
 	if dir := os.Getenv("DC_HOOK_GOLDEN_SCRIPTS"); dir != "" {
 		// The rendered hooks of each mode, for bash -n and shellcheck.
 		target := filepath.Join(dir, c.mode.name)
@@ -712,12 +722,22 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 	env = append(env, c.mode.env...)
 	env = append(env, c.hook.env...)
 	env = append(env, c.env...)
+	env, review2Delay := review2Env(env, base)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, script, c.hook.args(c.event)...)
+	if sh := os.Getenv("DC_REVIEW2_BASH"); sh != "" {
+		cmd = exec.CommandContext(ctx, sh, append([]string{script}, c.hook.args(c.event)...)...)
+	}
 	cmd.Dir = work
 	cmd.Env = env
-	cmd.Stdin = bytes.NewReader(stdin)
+	if review2Delay > 0 {
+		pr, pw := io.Pipe()
+		go func() { time.Sleep(review2Delay); _, _ = pw.Write(stdin); _ = pw.Close() }()
+		cmd.Stdin = pr
+	} else {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	runErr := cmd.Run()
