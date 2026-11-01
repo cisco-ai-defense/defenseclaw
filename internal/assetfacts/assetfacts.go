@@ -28,9 +28,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // Header carries the encoded Facts on a standalone hook request.
@@ -450,6 +453,22 @@ func commandPathTokens(value string) []string {
 	return tokens
 }
 
+// msysDriveSpelling spells a Git Bash drive mount (/c/x, /cygdrive/c/x,
+// and //c/x) as the drive path C:/x on Windows, where Git Bash, the shell
+// Claude Code and other agents run, maps it to that drive: the deny list
+// then sees one name for the folder whatever spelling a call uses
+// (rel-1-0-6:GAP-0299). //c/x is read as the drive too, the cautious
+// reading for a deny list. Elsewhere the path is returned unchanged.
+func msysDriveSpelling(path string) string {
+	if runtime.GOOS != "windows" || !strings.HasPrefix(path, "/") {
+		return path
+	}
+	if len(path) > 3 && path[1] == '/' && path[3] == '/' {
+		path = path[1:]
+	}
+	return actionfacts.MSYSDrivePath(path)
+}
+
 func skillFolderRefs(token, home, cwd string) []FolderRef {
 	if !strings.ContainsAny(token, "/\\") {
 		return nil
@@ -461,6 +480,7 @@ func skillFolderRefs(token, home, cwd string) []FolderRef {
 			break
 		}
 	}
+	path = msysDriveSpelling(path)
 	// Resolve the entire path before selecting skills/<name> pairs. A
 	// parent segment can otherwise change which skill folders are reached.
 	dir := filepath.FromSlash(path)
