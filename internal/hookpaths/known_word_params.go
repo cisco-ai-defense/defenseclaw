@@ -95,6 +95,14 @@ func cdEnterable(cwd string, facts map[string]string, record bool) func(string) 
 			// DirectoryFactPrefix value is the physical name of a logical
 			// directory and is written for a missing one too, so it does
 			// not prove the cd succeeds (rel-1-0-6:GAP-0320 review 5).
+			// Where this process can walk the path itself it also checks
+			// it, as the opaque-scope fact stands in only for an
+			// incomplete walk: a forged fact cannot make a missing
+			// directory enterable (review 6). Both must hold, since a
+			// managed service may enter what the user cannot.
+			if _, complete := writePathForms(path, 0); complete && !directoryEnterable(path) {
+				return false
+			}
 			return facts[key] == "1"
 		}
 		enterable := directoryEnterable(path)

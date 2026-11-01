@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // TestR107KnownCopyWordAfterCdGetsTheVerdictWithoutTheCd: the unquoted
@@ -94,5 +96,59 @@ func TestR107Review5CdConditionsOfTheKnownCopyWord(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestR107Review6ForgedCdEnterableFact: review 6 of 74119a1a2b
+// (rel-1-0-6:GAP-0320). The managed client evidence is edited to claim
+// that a missing or mode-0 directory is enterable (a forged
+// CdEnterableFactPrefix "1"). The forged fact may change how a copy source
+// word is read, but no write onto the keys decoy may pass: every row
+// below must still block on managed Claude Code and Codex. A value other
+// than "1" must make the evidence invalid, which keeps the block.
+func TestR107Review6ForgedCdEnterableFact(t *testing.T) {
+	home, project := dynamicWordParityProject(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root enters a mode 0 directory")
+	}
+	locked := filepath.Join(project, "locked")
+	if err := os.MkdirAll(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	forge := func(value string, dirs ...string) func(map[string]string) {
+		return func(targets map[string]string) {
+			for _, dir := range dirs {
+				targets[hookpaths.CdEnterableFactPrefix+dir] = value
+			}
+		}
+	}
+	nosuch := filepath.Join(project, "nosuch")
+	sshDir := filepath.Join(home, ".ssh")
+	rows := []struct {
+		name, command string
+		edit          func(map[string]string)
+	}{
+		{"missing dir, copy onto the keys link", `cd nosuch && f=a.txt; cp $f disklink`, forge("1", nosuch)},
+		{"missing dir, copy onto the keys file", `cd nosuch && f=a.txt; cp $f ~/.ssh/authorized_keys`, forge("1", nosuch)},
+		{"missing dir, write the keys link after the copy", `cd nosuch && f=a.txt; cp $f build/; echo hi > disklink`, forge("1", nosuch)},
+		{"locked dir, known word names the keys link, copy then write", `cd locked && f=disklink; cp -a $f kbak && echo k >> kbak`, forge("1", locked)},
+		{"locked dir, copy onto the keys link", `cd locked && f=a.txt; cp $f disklink`, forge("1", locked)},
+		{"ssh dir, copy onto the keys file", `cd ~/.ssh && f=a.txt; cp ~/proj/$f authorized_keys`, forge("1", sshDir)},
+		{"missing dir, a fact value other than 1", `cd nosuch && f=a.txt; cp $f build/ && echo hi > report.txt`, forge("0", nosuch)},
+		{"missing dir, a relative fact key", `cd nosuch && f=a.txt; cp $f build/ && echo hi > report.txt`, forge("1", "nosuch")},
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, row := range rows {
+			if got := postDynamicWordParity(t, home, project, connector, true, row.command, row.edit); !strings.HasPrefix(got, `{"action":"block"`) {
+				t.Errorf("%s managed %s: %.200s, want block", connector, row.name, got)
+			}
+		}
+		// Informational: a forged "1" for a missing dir with no decoy write.
+		got := postDynamicWordParity(t, home, project, connector, true, `cd nosuch && f=a.txt; cp $f build/ && echo hi > report.txt`, forge("1", nosuch))
+		t.Logf("INFO %s managed forged missing dir, plain copy: %.40s", connector, got)
 	}
 }
