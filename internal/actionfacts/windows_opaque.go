@@ -46,13 +46,15 @@ func windowsPowerShellOpaqueEnd(runes []rune, start int) (int, bool) {
 	for i := start + 2; i < len(runes); i++ {
 		r := runes[i]
 		top := frames[len(frames)-1]
-		if top == 'v' {
-			if r == '`' {
+		switch top {
+		case 'v':
+			switch r {
+			case '`':
 				i++
-			} else if r == '}' {
+			case '}':
 				pop()
 			}
-		} else if top == '\'' || top == '"' {
+		case '\'', '"':
 			switch {
 			case top == '"' && r == '`':
 				i++
@@ -66,7 +68,7 @@ func windowsPowerShellOpaqueEnd(runes []rune, start int) (int, bool) {
 					pop()
 				}
 			}
-		} else {
+		default:
 			if !argumentMode[len(argumentMode)-1] && windowsPowerShellCommandWordBeforeBlank(runes, i) {
 				argumentMode[len(argumentMode)-1] = true
 			}

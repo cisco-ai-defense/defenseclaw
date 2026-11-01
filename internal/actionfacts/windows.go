@@ -636,7 +636,6 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			}
 			end, ok := windowsPowerShellOpaqueEnd(runes, i)
 			if !ok {
-				i = len(runes)
 				break
 			}
 			i = end
