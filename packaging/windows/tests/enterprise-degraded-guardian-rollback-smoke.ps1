@@ -38,6 +38,7 @@ if (@($parseErrors).Count -ne 0) {
 foreach ($name in @(
         'Test-DefenseClawGuardianCoverageReport',
         'Test-DefenseClawGuardianReportCompletedWithFailedTargets',
+        'Test-DefenseClawGuardianReportErrorsAttributable',
         'Get-DefenseClawGuardianGeneration',
         'Get-DefenseClawGuardianReadinessProbe',
         'Get-DefenseClawGuardianFailedTargets',
@@ -71,7 +72,12 @@ $digest = 'a' * 64
 function New-Report([int]$Failures, [int]$Rows = 3, [bool]$WithState = $true, [string]$ActivationDigest = '') {
     $report = [ordered]@{
         ok = ($Failures -eq 0)
-        errors = @($(if ($Failures -gt 0) { 'claudecode target S-1-5-21-1-2-3-1003 failed' }))
+        # The exact lines `enterprise hooks status` emits for a failed target.
+        errors = @($(if ($Failures -gt 0) {
+                    'last guardian reconcile failed for claudecode@S-1-5-21-1-2-3-1003: hook write denied'
+                    "last guardian reconcile is incomplete ($(3 - $Failures - 1) succeeded, 1 pending, 3 total)"
+                    "protected guardian authorization is incomplete ($(3 - $Failures - 1) succeeded, 1 pending, 3 total)"
+                }))
     }
     if ($WithState) {
         $targetRows = @(
@@ -255,6 +261,19 @@ $script:VerifyOutput = @()
 $script:StatusReport = New-Report -Failures 1 -Rows 2
 if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets).ready) {
     throw 'rollback readiness accepted an incomplete reconcile'
+}
+
+# A degraded report also carrying an error that is not about the failed
+# target (a missing authorization) is not degraded coverage.
+$unattributable = New-Report -Failures 1
+$unattributable.errors = @($unattributable.errors) + 'protected hook guardian authorization is missing'
+if (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report ([pscustomobject]$unattributable)) {
+    throw 'a degraded report with a missing authorization was accepted as degraded coverage'
+}
+$foreignTarget = New-Report -Failures 1
+$foreignTarget.errors = @('last guardian reconcile failed for codex@S-1-5-21-1-2-3-1001: denied')
+if (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report ([pscustomobject]$foreignTarget)) {
+    throw 'a failure line for a target the state reports healthy was accepted as degraded coverage'
 }
 
 'degraded guardian rollback smoke passed'

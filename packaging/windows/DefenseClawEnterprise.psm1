@@ -21879,10 +21879,77 @@ function Test-DefenseClawGuardianReportCompletedWithFailedTargets {
     catch {
         return $false
     }
-    return ($failures -gt 0 -and
-        $successes -ge 0 -and $pending -ge 0 -and
-        $successes + $failures + $pending -eq $targets -and
-        @($state.results).Count -eq $targets)
+    if (-not ($failures -gt 0 -and
+            $successes -ge 0 -and $pending -ge 0 -and
+            $successes + $failures + $pending -eq $targets -and
+            @($state.results).Count -eq $targets)) {
+        return $false
+    }
+    return (Test-DefenseClawGuardianReportErrorsAttributable `
+        -Report $Report `
+        -Successes $successes `
+        -Pending $pending `
+        -Targets $targets)
+}
+
+# Degraded coverage is accepted only when every status error comes from the
+# failed targets themselves: one "last guardian reconcile failed for
+# <connector>@<sid>" line per failed row, and the reconcile, authorization and
+# activation "is incomplete" lines carrying exactly the state's counts. Any
+# other error (a missing or unreadable authorization or activation, an
+# untrusted manifest, an unreadable state) rejects the report.
+function Test-DefenseClawGuardianReportErrorsAttributable {
+    param(
+        [Parameter(Mandatory)]$Report,
+        [Parameter(Mandatory)][long]$Successes,
+        [Parameter(Mandatory)][long]$Pending,
+        [Parameter(Mandatory)][long]$Targets
+    )
+    $failedLabels = @{}
+    foreach ($row in @($Report.state.results)) {
+        if ($null -eq $row) {
+            continue
+        }
+        $okProperty = $row.PSObject.Properties['ok']
+        $pendingProperty = $row.PSObject.Properties['pending']
+        $rowOk = $null -ne $okProperty -and $okProperty.Value -is [bool] -and [bool]$okProperty.Value
+        $rowPending = $null -ne $pendingProperty -and $pendingProperty.Value -is [bool] -and [bool]$pendingProperty.Value
+        if ($rowOk -or $rowPending) {
+            continue
+        }
+        $connector = ''
+        $sid = ''
+        if ($null -ne $row.PSObject.Properties['connector']) { $connector = ([string]$row.connector).Trim() }
+        if ($null -ne $row.PSObject.Properties['sid']) { $sid = [string]$row.sid }
+        if ([string]::IsNullOrEmpty($sid)) {
+            return $false
+        }
+        $failedLabels["$connector@$sid"] = $true
+    }
+    $errorsProperty = $Report.PSObject.Properties['errors']
+    if ($null -eq $errorsProperty -or $null -eq $errorsProperty.Value) {
+        return $true
+    }
+    $countsPattern = '^(?:last guardian reconcile|protected guardian authorization|protected guardian activation) is incomplete \((\d+) succeeded, (\d+) pending, (\d+) total\)$'
+    foreach ($entry in @($errorsProperty.Value)) {
+        $text = ([string]$entry).Trim()
+        $failed = [regex]::Match($text, '^last guardian reconcile failed for (\S+): ')
+        if ($failed.Success) {
+            if (-not $failedLabels.ContainsKey($failed.Groups[1].Value)) {
+                return $false
+            }
+            continue
+        }
+        $counts = [regex]::Match($text, $countsPattern)
+        if ($counts.Success -and
+            [long]$counts.Groups[1].Value -eq $Successes -and
+            [long]$counts.Groups[2].Value -eq $Pending -and
+            [long]$counts.Groups[3].Value -eq $Targets) {
+            continue
+        }
+        return $false
+    }
+    return $true
 }
 
 # The pending (signed-out) target rows of a Guardian status report, each as
@@ -27897,17 +27964,26 @@ function Remove-DefenseClawNuclearPath {
     # Whatever is still held open is queued for the next restart, deepest
     # entries first so each folder is empty by the time its turn comes.
     $scheduled = $false
+    # A restart only removes a queued folder once it is empty, so a listing
+    # that skipped a child (access denied, say) cannot be reported as queued.
+    $listingComplete = $false
     if ($null -ne $nativeSecurity) {
+        $listingErrors = $null
         $leftovers = @(
             @(Microsoft.PowerShell.Management\Get-ChildItem `
                 -LiteralPath $scheduleRoot `
                 -Recurse `
                 -Force `
-                -ErrorAction SilentlyContinue |
+                -ErrorAction SilentlyContinue `
+                -ErrorVariable listingErrors |
                 Microsoft.PowerShell.Core\ForEach-Object { [string]$_.FullName } |
                 Microsoft.PowerShell.Utility\Sort-Object -Property Length -Descending) +
             @($scheduleRoot)
         )
+        $listingComplete = (@($listingErrors).Count -eq 0)
+        if (-not $listingComplete) {
+            $detail += " (could not list every entry for restart deletion: $(@($listingErrors)[0]))"
+        }
         $scheduled = $true
         foreach ($leftover in $leftovers) {
             try {
@@ -27941,7 +28017,7 @@ function Remove-DefenseClawNuclearPath {
             }
         }
     }
-    if ($scheduled -and $AcceptScheduledDelete) {
+    if ($scheduled -and $listingComplete -and $AcceptScheduledDelete) {
         $recoverFields = @{
             path   = $scheduleRoot
             role   = $Role
