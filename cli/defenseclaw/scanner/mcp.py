@@ -1979,8 +1979,8 @@ class MCPScannerWrapper:
             analyzer = getattr(sf, "analyzer", "")
             if analyzer in _DEFENSECLAW_YARA_ANALYZER_NAMES:
                 analyzer = "YARA"
-            # The SDK reports UNKNOWN when a matching YARA rule has no
-            # threat_type metadata. Give that finding a valid severity.
+            # The SDK reports UNKNOWN for a missing or unrecognized threat_type.
+            # Give that YARA finding a valid severity.
             if analyzer == "YARA" and severity == "UNKNOWN":
                 severity = "HIGH"
             scanner_name = f"mcp-scanner/{analyzer}" if analyzer else "mcp-scanner"
