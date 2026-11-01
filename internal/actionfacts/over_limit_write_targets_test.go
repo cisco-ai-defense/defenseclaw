@@ -55,6 +55,8 @@ func TestOverLimitWriteTargetReductionNamesTheTarget(t *testing.T) {
 		{"hermes write_file", "write_file", "/home/u/proj", keys, map[string]any{"path": keys, "content": overLimitText}},
 		{"apply_patch", "apply_patch", "/home/u", ".ssh/authorized_keys", map[string]any{"command": overLimitPatch(".ssh/authorized_keys")}},
 		{"apply_patch patchText", "apply_patch", "/home/u", ".ssh/authorized_keys", map[string]any{"patchText": overLimitPatch(".ssh/authorized_keys")}},
+		// An absolute target is read as one (rel-1-0-6:GAP-0361).
+		{"apply_patch absolute", "apply_patch", "/home/u/proj", keys, map[string]any{"command": overLimitPatch(keys)}},
 		{"benign write", "Write", "/home/u/proj", "/home/u/proj/big.json", map[string]any{"file_path": "/home/u/proj/big.json", "content": overLimitText}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -105,7 +107,6 @@ func TestOverLimitWriteTargetReductionRefuses(t *testing.T) {
 		{"duplicate key", "Write", json.RawMessage(`{"file_path":"/tmp/a","file_path":"` + keys + `","content":"` + strings.Repeat("k", 300<<10) + `"}`), true},
 		{"top-level string", "apply_patch", mustOverLimitJSON(t, overLimitPatch("a.txt")), true},
 		{"patch without envelope", "apply_patch", overLimitArgs(t, map[string]any{"command": overLimitText}), true},
-		{"absolute patch path", "apply_patch", overLimitArgs(t, map[string]any{"command": overLimitPatch(keys)}), true},
 		{"over the scan ceiling", "Write", overLimitArgs(t, map[string]any{"file_path": keys, "content": strings.Repeat("k", maxOverLimitWriteArgsBytes)}), true},
 		{"read tool", "Read", overLimitArgs(t, map[string]any{"file_path": keys, "pages": overLimitText}), false},
 		{"grep tool", "Grep", overLimitArgs(t, map[string]any{"pattern": overLimitText}), false},
