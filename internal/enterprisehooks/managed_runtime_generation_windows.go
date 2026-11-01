@@ -1274,6 +1274,13 @@ func collectWindowsManagedRuntimeGenerations(
 			if candidates > windowsManagedRuntimeGenerationGCMaxCandidates {
 				return windowsManagedRuntimeBundleRefusal{errors.New("enterprise hooks: managed runtime generation GC candidate limit exceeded")}
 			}
+			if !classifyOnly {
+				// An owner write removed the bundle's OWNER RIGHTS entry
+				// (rel-1-0-6:GAP-0303): put it back on a bundle that stays
+				// (selected or young). The classification below accepts
+				// that exact shape either way; a classification only reads.
+				restoreWindowsManagedRuntimeBundleOwnerRights(validated, target, generationID)
+			}
 			// The selected bundle is classified with the rules this GC will
 			// apply once a later publication unselects it, so a retire before
 			// a transaction refuses what that transaction's retire would
@@ -1310,6 +1317,27 @@ func collectWindowsManagedRuntimeGenerations(
 		return nil
 	})
 	return removed, err
+}
+
+// restoreWindowsManagedRuntimeBundleOwnerRights restores the canonical DACL
+// of one generation bundle left in the owner-rewritten shape. A failure is
+// reported and left to the trust check, which accepts that shape.
+func restoreWindowsManagedRuntimeBundleOwnerRights(
+	opts WindowsManagedRuntimeSelectorSnapshotOptions,
+	target *windows.SID,
+	generationID string,
+) {
+	path, err := windowsManagedRuntimeBundlePath(opts.DataDir, opts.Connector, generationID)
+	if err != nil {
+		return
+	}
+	restored, err := windowsManagedRuntimeBundleRestoreOwnerRights(path, target)
+	switch {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "[enterprise-hooks] could not restore the OWNER RIGHTS entry of %s: %v\n", path, err)
+	case restored:
+		fmt.Fprintf(os.Stderr, "[enterprise-hooks] restored the OWNER RIGHTS entry an owner change removed from %s\n", path)
+	}
 }
 
 func loadUnselectedWindowsManagedRuntimeBundle(
@@ -2238,7 +2266,7 @@ func loadWindowsManagedRuntimeBundleAtPath(
 	if target == nil {
 		return nil, errors.New("enterprise hooks: managed runtime bundle target SID is unavailable")
 	}
-	if err := validateWindowsUserPathElement(path, target, false, false, true); err != nil {
+	if err := validateWindowsManagedRuntimeBundleElement(path, target); err != nil {
 		return nil, fmt.Errorf("enterprise hooks: managed runtime bundle trust check failed: %w", err)
 	}
 	data, err := connector.ReadManagedHookRuntimeFile(
@@ -2249,7 +2277,7 @@ func loadWindowsManagedRuntimeBundleAtPath(
 	if err != nil {
 		return nil, fmt.Errorf("enterprise hooks: read immutable managed runtime generation: %w", err)
 	}
-	if err := validateWindowsUserPathElement(path, target, false, false, true); err != nil {
+	if err := validateWindowsManagedRuntimeBundleElement(path, target); err != nil {
 		return nil, fmt.Errorf("enterprise hooks: managed runtime bundle changed protection during read: %w", err)
 	}
 	return data, nil
@@ -2918,7 +2946,7 @@ func deleteWindowsManagedRuntimeBundle(
 	if err != nil {
 		return err
 	}
-	if err := validateWindowsUserPathElement(path, target, false, false, true); err != nil {
+	if err := validateWindowsManagedRuntimeBundleElement(path, target); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
@@ -2978,7 +3006,8 @@ func deleteWindowsManagedRuntimeBundle(
 	if err != nil || dacl == nil {
 		return errors.New("enterprise hooks: unselected managed runtime generation DACL is unavailable")
 	}
-	if err := validateWindowsUserPathProtectionACL(path, descriptor, dacl, target, false); err != nil {
+	if err := validateWindowsUserPathProtectionACL(path, descriptor, dacl, target, false); err != nil &&
+		!windowsManagedFileOwnerRewrittenDescriptor(descriptor, target) {
 		return err
 	}
 	file := os.NewFile(uintptr(handle), filepath.Base(path))
