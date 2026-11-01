@@ -266,6 +266,10 @@ async def test_native_windows_high_volume_tab_ack_under_150ms(
             # Wall time includes pauses when a shared Windows runner does
             # not schedule the UI thread. Measure work done by that thread:
             # the regression here is synchronous rendering on the UI loop.
+            # Measured 8.8-16.4 ms over 20 runs (Linux build box, 10-31); a UI
+            # thread descheduled for 0.2 s in the switch reads ~210 ms of wall
+            # time and ~10 ms here. 150 ms is the tab acknowledgement budget
+            # (WIN-AUD-041), not a timeout (rel-1-0-6:GAP-0242).
             started = thread_time()
             app.action_switch_panel("overview")
             # Model a health/config/audit invalidation landing in the same turn;
