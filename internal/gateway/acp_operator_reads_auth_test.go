@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -174,5 +175,32 @@ func TestACPManagedEnrollmentCredentialDoesNotReadOperatorRoutes(t *testing.T) {
 		if rec := serveACPOperatorRead(api, dispatch, http.MethodGet, path, gatewayToken, "127.0.0.1:45678"); rec.Code != http.StatusOK {
 			t.Errorf("GET %s with the gateway token: status = %d, want 200", path, rec.Code)
 		}
+	}
+}
+
+// rel-1-0-6 GAP-0302: the profiles read names the profile each configured pair
+// resolves to, so `acp setup` can wait for the pair and not only the profile.
+func TestACPProfilesReadReportsTheProfileOfEachPair(t *testing.T) {
+	api, dispatch, _, gatewayToken := newACPOperatorReadsTestServer(t)
+	api.scannerCfg.ACP.Enabled = true
+	api.scannerCfg.ACP.DefaultProfile = "default"
+	api.scannerCfg.ACP.Clients, api.scannerCfg.ACP.Agents = nil, nil
+	api.scannerCfg.ACP.Profiles = map[string]config.ACPProfile{"default": {}, "locked": {}}
+	api.scannerCfg.ACP.Bindings = map[string]config.ACPBinding{
+		"zed/kiro":    {Enabled: true, Profile: "locked"},
+		"zed/copilot": {Enabled: true},
+	}
+	rec := serveACPOperatorRead(api, dispatch, http.MethodGet, "/v1/acp/profiles", gatewayToken, "127.0.0.1:45678")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		PairProfiles map[string]string `json:"pair_profiles"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.PairProfiles["zed/kiro"] != "locked" || body.PairProfiles["zed/copilot"] != "default" || len(body.PairProfiles) != 2 {
+		t.Fatalf("pair_profiles = %v, want zed/kiro on locked and zed/copilot on the default profile", body.PairProfiles)
 	}
 }
