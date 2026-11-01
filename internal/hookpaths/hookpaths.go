@@ -842,7 +842,8 @@ func clientStatementBudgetExceeded(connector, tool string, facts actionfacts.Fac
 		return actionfacts.ShellStatementsOverBudget(command)
 	case actionfacts.DialectPowerShell:
 		return facts.Parse.Status != actionfacts.StatusComplete &&
-			actionfacts.PowerShellReadingStopsEarly(command) && actionfacts.PowerShellStatementsOverBudget(command)
+			(facts.Parse.Status == actionfacts.StatusLimitExceeded || actionfacts.PowerShellReadingStopsEarly(command)) &&
+			actionfacts.PowerShellStatementsOverBudget(command)
 	case actionfacts.DialectNone, "":
 		if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 			return false
@@ -1119,13 +1120,23 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// the client about 3 ms per statement on Windows, past the
 				// hook answer window at 3000 statements (rel-1-0-2:GAP-0568):
 				// the map says only that it is incomplete, which is never more
-				// permissive than a full one. A call that names the
+				// permissive than a full one. A call that may name the
 				// DefenseClaw state folder is still described: in observe
 				// mode a proven state write blocks over the budget too, and
 				// a gateway behind ProtectHome proves it only from this map.
-				if !isApplyPatchToolName(tool) && !strings.Contains(strings.ToLower(command), ".defenseclaw") &&
-					clientStatementBudgetExceeded(connector, tool, facts, command) {
-					return incompleteEvidence(cwd)
+				// Only its statements that may name the state are described,
+				// at most StateNamingStatementsMax of them, so padding the call
+				// does not push the description past the hook window.
+				if !isApplyPatchToolName(tool) && clientStatementBudgetExceeded(connector, tool, facts, command) {
+					if !MayNameState(command) {
+						return incompleteEvidence(cwd)
+					}
+					reduced, ok := StateNamingStatements(command)
+					if !ok {
+						return incompleteEvidence(cwd)
+					}
+					command = reduced
+					truncated = true
 				}
 				// A ~<login> tilde-prefix names this user's home from the
 				// password database. The gateway judges that spelling as the
@@ -5110,4 +5121,47 @@ func sequentialListCalls(file *syntax.File) map[*syntax.CallExpr]bool {
 		visit(stmt)
 	}
 	return calls
+}
+
+// MayNameState reports a command that may name the DefenseClaw state
+// folder however the shell spells it: with quotes, escapes or backticks in
+// the name (~/.defense”claw), in any case, as a pattern (~/.defense?law)
+// or split across variables (d=.defense; e=claw). Over-matching only costs
+// the description time, never a verdict (review R2-2 of rel-1-0-2:GAP-0568).
+func MayNameState(command string) bool {
+	lower := strings.ToLower(strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(command))
+	return strings.Contains(lower, "defense") || strings.Contains(lower, "claw")
+}
+
+// StateNamingStatementsMax bounds the statements kept for an over-budget
+// call that may name the state (StateNamingStatements).
+const StateNamingStatementsMax = 128
+
+// StateNamingStatements reduces an over-budget POSIX call to the statements
+// a state write can come from: those that may name the state
+// (MayNameState) and the directory changes that place them, at most
+// StateNamingStatementsMax. The hook client describes only those, so its map
+// names the state targets the gateway proves the write from at a bounded
+// cost (describing every statement of a 30,000-statement call took 2.5 s,
+// review R2-5 of rel-1-0-2:GAP-0568), and the gateway judges the same
+// reduced call for the state write. A call the POSIX grammar does not split
+// (a PowerShell call) is kept whole, and only up to the 64 KiB analysis
+// bound (ok false past it).
+func StateNamingStatements(command string) (string, bool) {
+	texts, ok := actionfacts.ShellStatementTexts(command)
+	if !ok {
+		return command, len(command) <= 64<<10
+	}
+	var kept []string
+	for _, text := range texts {
+		fields := strings.Fields(text)
+		place := len(fields) > 0 && (fields[0] == "cd" || fields[0] == "pushd" || fields[0] == "popd")
+		if place || MayNameState(text) {
+			kept = append(kept, text)
+			if len(kept) == StateNamingStatementsMax {
+				break
+			}
+		}
+	}
+	return strings.Join(kept, "; "), true
 }

@@ -24,6 +24,21 @@ func ShellStatementsOverBudget(command string) bool {
 	return ok && len(statements) > maxStatementsAlone
 }
 
+// ShellStatementTexts returns the statements of a POSIX command as the
+// statement budget counts them (ShellStatementsOverBudget), in order; ok is
+// false when the command does not parse.
+func ShellStatementTexts(command string) ([]string, bool) {
+	statements, _, ok := sequenceStatementDetails(command, true, true)
+	if !ok {
+		return nil, false
+	}
+	texts := make([]string, len(statements))
+	for i, statement := range statements {
+		texts[i] = statement.text
+	}
+	return texts, true
+}
+
 // PowerShellStatementsOverBudget reports whether a command has more
 // statements than one action evaluates (maxStatementsAlone) as PowerShell
 // splits it: list members (;, &&, ||, line ends) and pipeline stages, at
@@ -49,8 +64,8 @@ func PowerShellStatementsOverBudget(command string) bool {
 // PowerShellReadingStopsEarly reports a command with a construct, outside
 // quotes, at which the Windows lexer stops reading and leaves the rest of
 // the command unread: a subexpression $( ), an array @( ), a hashtable
-// @{ }, a braced variable ${ }, a here-string or the stop-parsing token
-// --%. The split of such a reading holds only the statements before it
+// @{ }, a braced variable ${ }, a here-string, the stop-parsing token --%
+// or an & call. The split of such a reading holds only the statements before it
 // (rel-1-0-6:GAP-0331).
 func PowerShellReadingStopsEarly(command string) bool {
 	_, opaque := powerShellStatements(command, len(command)+1)
@@ -65,12 +80,18 @@ func powerShellStatements(command string, limit int) (int, bool) {
 		frameHashtable
 		frameDouble
 		frameVariable
+		// frameParen is a bare ( ): one expression or pipeline, so a line
+		// end inside it continues the statement (a multi-line param( )).
+		frameParen
 	)
 	runes := []rune(command)
 	frames := []int{frameCode}
 	statements := 0
 	inStatement := false
 	opaque := false
+	// lastSignificant is the last non-blank character before i: a line end
+	// right after a comma continues the statement (a multi-line array).
+	lastSignificant := rune(0)
 	boundary := func() {
 		if inStatement {
 			statements++
@@ -109,7 +130,10 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			}
 			continue
 		}
-		// Code and hashtable frames.
+		// Code, paren and hashtable frames.
+		if i > 0 && !unicode.IsSpace(runes[i-1]) {
+			lastSignificant = runes[i-1]
+		}
 		next := rune(0)
 		if i+1 < len(runes) {
 			next = runes[i+1]
@@ -178,7 +202,10 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			frames = append(frames, frameCode)
 			inStatement, opaque = false, true
 			i++
-		case r == '(' || r == '{':
+		case r == '(':
+			frames = append(frames, frameParen)
+			inStatement = false
+		case r == '{':
 			frames = append(frames, frameCode)
 			inStatement = false
 		case r == ')' || r == '}':
@@ -190,11 +217,24 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			inStatement = true
 		case top == frameHashtable && (r == ';' || r == '\n' || r == '\r'):
 			// Entry separators of a hashtable, not statements.
+		case (r == '\n' || r == '\r') && (top == frameParen || lastSignificant == ','):
+			// A line end inside a bare ( ) or after a trailing comma
+			// continues the statement.
 		case r == ';' || r == '|' || r == '\n' || r == '\r':
 			boundary()
 		case r == '&' && next == '&':
 			boundary()
 			i++
+		case r == '&' && (i == 0 || runes[i-1] != '>'):
+			// After a statement, the PowerShell 7 background operator ends
+			// it; at a statement start, the call operator. The Windows
+			// lexer stops at a call whose target is not quoted.
+			opaque = true
+			if inStatement {
+				boundary()
+			} else {
+				inStatement = true
+			}
 		case !unicode.IsSpace(r):
 			inStatement = true
 		}

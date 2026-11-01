@@ -51,6 +51,15 @@ func TestPowerShellStatementsOverBudget(t *testing.T) {
 		{"CRLF lines", strings.Repeat("Get-Date\r\n", 129), true},
 		{"smart-quoted separators", "Write-Output \u2018" + strings.Repeat("a; b | ", 300) + "\u2019", false},
 		{"multi-line if blocks", strings.Repeat("if ($x) {\n  Get-Date\n}\n", 60), false},
+		// Review R2-4: a line end inside a bare ( ) or after a trailing
+		// comma continues the statement.
+		{"multi-line array with trailing commas", "$list = @(\n" + strings.ReplaceAll(statements(300, "  'item%d',"), "; ", "\n") + "\n  'last'\n)\nWrite-Output $list", false},
+		{"multi-line param block", "param(\n" + strings.ReplaceAll(statements(200, "  [string]$p%d,"), "; ", "\n") + "\n  [int]$last\n)\nWrite-Output $(1)", false},
+		{"comma continuation at top level", "$a = 1,\n" + strings.ReplaceAll(statements(200, "%d,"), "; ", "\n") + "\n2; $x = $(1)", false},
+		{"multi-line hashtable", "$h = @{\n" + strings.ReplaceAll(statements(300, "  k%d = 1"), "; ", "\n") + "\n}\nWrite-Output $h", false},
+		{"PowerShell 7 background chain", strings.ReplaceAll(statements(200, "Write-Output %d"), "; ", " & "), true},
+		{"call operator at each statement start", statements(129, "& git status %d"), true},
+		{"redirect 2>&1 is no separator", strings.Repeat("Write-Output 1 2>&1 ", 200), false},
 	} {
 		if got := PowerShellStatementsOverBudget(tc.command); got != tc.over {
 			t.Errorf("%s (%d bytes): over budget %t, want %t", tc.name, len(tc.command), got, tc.over)
@@ -71,6 +80,9 @@ func TestPowerShellReadingStopsEarly(t *testing.T) {
 		{"${x} = 1", true},
 		{"$t = @'\nbody\n'@", true},
 		{"cmd /c dir --% /s", true},
+		{"& { Get-Date }; Write-Output 1", true},
+		{"& $env:ComSpec /c ver", true},
+		{"Write-Output 1 2>&1", false},
 		{`Write-Host "defenseclaw step 1"; Get-Content $HOME\.defenseclaw\config.yaml`, false},
 		{"Write-Output '$(not a subexpression)'", false},
 		{"Get-ChildItem | Select-Object -First 5", false},

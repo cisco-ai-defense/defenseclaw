@@ -91,6 +91,13 @@ func TestGAP0568ObserveOverBudgetStateWriteBlocks(t *testing.T) {
 		{"state write after 200", gap0568Assignments(200) + "; printf changed >> " + state, true},
 		{"state write after 3000", gap0568Assignments(3000) + "; printf changed >> " + state, true},
 		{"state write through a new link after 200", gap0568Assignments(200) + "; ln -s " + state + " s9; printf c >> s9", true},
+		// Review round 2: the state named by a pattern (R2-1, the glob
+		// twin) and with a quote inside the name (R2-2, the client's
+		// state-name check), under and over the budget.
+		{"glob-spelled state write alone", "printf c >> ~/.defense?law/config.yaml", true},
+		{"glob-spelled state write after 200", gap0568Assignments(200) + "; printf c >> ~/.defense?law/config.yaml", true},
+		{"quote-split state write alone", "printf c >> ~/.defense''claw/config.yaml", true},
+		{"quote-split state write after 200", gap0568Assignments(200) + "; printf c >> ~/.defense''claw/config.yaml", true},
 		{"benign 200", gap0568Assignments(200), false},
 		{"keys write after 200", gap0568Assignments(200) + "; echo k >> " + keys, false},
 	}

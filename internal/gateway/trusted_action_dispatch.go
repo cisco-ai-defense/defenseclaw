@@ -8563,8 +8563,11 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 // allowed, as before.
 func trustedStatementBudgetExceeded(input actionfacts.Input, facts actionfacts.Facts, command string) bool {
 	if facts.Parse.Dialect == actionfacts.DialectPowerShell {
+		// The reading stopped at the lexer's token bound or at a construct
+		// it does not read past, so its split is short (rel-1-0-6:GAP-0331).
 		return facts.Parse.Status != actionfacts.StatusComplete &&
-			actionfacts.PowerShellReadingStopsEarly(command) && actionfacts.PowerShellStatementsOverBudget(command)
+			(facts.Parse.Status == actionfacts.StatusLimitExceeded || actionfacts.PowerShellReadingStopsEarly(command)) &&
+			actionfacts.PowerShellStatementsOverBudget(command)
 	}
 	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 		return false
@@ -8591,23 +8594,73 @@ func trustedStatementBudgetExceeded(input actionfacts.Input, facts actionfacts.F
 // provenActiveStateMutation). Only the whole-call state check runs, once
 // per generation and once per member of a strictest combination (each
 // finding keeping its member), not the twins or the per-statement passes,
-// so the refusal stays linear: about one memo unit per statement.
+// so the refusal stays linear: about one memo unit per statement. A state
+// name spelled with a pattern (~/.defense?law/config.yaml) is proved by the
+// state glob twin, as on the full path: that twin is checked too and only
+// its state-write finding counts (review R2-1 of rel-1-0-2:GAP-0568). A call
+// that may name the state (hookpaths.MayNameState) and has no state finding
+// yet is also judged in full on its reduced reading, the statements that may
+// name the state and the directory changes that place them, at most 128
+// (hookpaths.StateNamingStatements): that is the call the hook client
+// described for a gateway behind ProtectHome, whose proof of a patterned or
+// quoted state name comes from the full pipeline (review R2-2). Only the
+// reduced reading's state-write finding counts.
 func withOverBudgetStateMutation(parent context.Context, request trustedActionRequest, facts actionfacts.Facts, findings []RuleFinding) []RuleFinding {
 	generation := request.generation
 	if generation == nil {
 		generation = snapshotRulePackGenerationFor(parent, request.Connector)
 	}
-	if generation == nil || len(generation.members) == 0 {
-		return withActiveStateTargetMention(generation, request, facts, findings)
+	twin, hasTwin := stateGlobTwinRequest(request)
+	var twinFacts actionfacts.Facts
+	if hasTwin {
+		twinFacts = actionfacts.Analyze(twin.Input)
 	}
-	for i, member := range generation.members {
-		found := withActiveStateTargetMention(member, request, facts, nil)
-		if i < len(generation.memberNames) {
-			for j := range found {
-				found[j].profile = generation.memberNames[i]
+	state := func(member *compiledRulePackCategories, findings []RuleFinding) []RuleFinding {
+		findings = withActiveStateTargetMention(member, request, facts, findings)
+		if !hasTwin || slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == "tamper.detector_state_write" }) {
+			return findings
+		}
+		for _, finding := range withActiveStateTargetMention(member, twin, twinFacts, nil) {
+			if finding.RuleID == "tamper.detector_state_write" {
+				findings = append(findings, finding)
 			}
 		}
-		findings = append(findings, found...)
+		return findings
+	}
+	if generation == nil || len(generation.members) == 0 {
+		findings = state(generation, findings)
+	} else {
+		for i, member := range generation.members {
+			found := state(member, nil)
+			if i < len(generation.memberNames) {
+				for j := range found {
+					found[j].profile = generation.memberNames[i]
+				}
+			}
+			findings = append(findings, found...)
+		}
+	}
+	return withReducedStateReading(parent, request, findings)
+}
+
+// withReducedStateReading adds the state-write finding of the reduced
+// reading of an over-budget call (withOverBudgetStateMutation).
+func withReducedStateReading(parent context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+	if slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == "tamper.detector_state_write" }) {
+		return findings
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known || !hookpaths.MayNameState(command) {
+		return findings
+	}
+	reduced, ok := hookpaths.StateNamingStatements(command)
+	if !ok || reduced == "" || reduced == command {
+		return findings
+	}
+	for _, finding := range dispatchTrustedAction(parent, bashReadingRequest(request, command, reduced)) {
+		if finding.RuleID == "tamper.detector_state_write" {
+			findings = append(findings, finding)
+		}
 	}
 	return findings
 }

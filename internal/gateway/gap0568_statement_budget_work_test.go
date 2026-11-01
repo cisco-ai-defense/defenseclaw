@@ -267,6 +267,20 @@ func TestGAP0331PowerShellPrefixDoesNotHideTheBudget(t *testing.T) {
 		"$h = @{ a = 1; b = 2 }; ",
 		"${x} = 1; ",
 		"$t = @'\nbody; | ;\n'@\n",
+		// Review R2-3: no prefix (the reading stops at the lexer's token
+		// bound), an & call, and other ordinary first statements.
+		"",
+		"& { Get-Date }; ",
+		"& $env:ComSpec /c ver; ",
+		". { 1 }; ",
+		"Get-ChildItem | ForEach-Object { $_ }; ",
+		"if ($true) { 1 }; ",
+		"$a = 1, 2; ",
+		"[int]$a = 1; ",
+		"function f { 1 }; ",
+		"& 'C:\\x.exe'; ",
+		"Write-Output 1 2>&1; ",
+		"Write-Output ~; ",
 	} {
 		for _, route := range []struct {
 			tool string
@@ -277,6 +291,7 @@ func TestGAP0331PowerShellPrefixDoesNotHideTheBudget(t *testing.T) {
 				refused bool
 			}{
 				{prefix + statements(100), false},
+				{prefix + statements(200) + "; Remove-Item -Recurse -Force " + home, true},
 				{prefix + statements(3000), true},
 				// Under the 64 KiB input bound: the reading is partial, not
 				// limit-exceeded, and still counted past the lexer's stop.

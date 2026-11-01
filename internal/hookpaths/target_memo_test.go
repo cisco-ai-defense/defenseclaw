@@ -213,4 +213,43 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 	if _, listed := got[state]; !listed {
 		t.Errorf("over-budget state write: header %v does not list %s", got, state)
 	}
+	// Review R2-2: the state name with a quote inside it is still described.
+	quoted := header(gap0568Assignments(200) + "; printf changed >> ~/.defense''claw/config.yaml")
+	if incomplete(quoted) {
+		t.Errorf("over-budget quote-split state write: header %v, want the call described", quoted)
+	}
+}
+
+// TestClientStateStatementsAreBounded is review R2-5 of rel-1-0-2:GAP-0568:
+// an over-budget call that may name the state is described only through
+// its statements that may name it and the directory changes that place
+// them, at most StateNamingStatementsMax, so padding the call cannot push
+// the description past the hook window.
+func TestClientStateStatementsAreBounded(t *testing.T) {
+	padding := make([]string, 3000)
+	for i := range padding {
+		padding[i] = fmt.Sprintf("echo claw%d", i)
+	}
+	reduced, ok := StateNamingStatements(gap0568Assignments(500) + "; cd sub; " + strings.Join(padding, "; "))
+	if !ok {
+		t.Fatal("POSIX call not split")
+	}
+	if got := len(strings.Split(reduced, "; ")); got != StateNamingStatementsMax {
+		t.Errorf("%d statements described, want %d", got, StateNamingStatementsMax)
+	}
+	if !strings.HasPrefix(reduced, "cd sub; echo claw0; ") {
+		t.Errorf("reduced call %.60q: want the directory change and the naming statements, no assignments", reduced)
+	}
+	state := "printf c >> ~/.defense''claw/config.yaml"
+	if reduced, _ := StateNamingStatements(gap0568Assignments(200) + "; " + state); reduced != state {
+		t.Errorf("reduced call %q, want only %q", reduced, state)
+	}
+	for _, text := range []string{"~/.DefenseClaw", `~/.defense\claw`, "~/.defense?law", "e=claw"} {
+		if !MayNameState(text) {
+			t.Errorf("%q: not taken as naming the state", text)
+		}
+	}
+	if MayNameState("echo hello; ls -la") {
+		t.Error("an ordinary call was taken as naming the state")
+	}
 }
