@@ -6050,6 +6050,30 @@ def _connector_not_detected_message(label: str) -> str:
     )
 
 
+def _untrusted_install_found(label: str, signal: Any, probe_error: str) -> tuple[str, str, str]:
+    """The agent discovery found in a folder it does not trust (GAP-2479).
+
+    Returns the sentence that names the folder and the cause, the resolved
+    binary and its folder; empty strings when the agent was not found that
+    way. Discovery lists such an agent with the error "binary path is not in
+    a trusted install prefix" and does not run it, so setup must not call it
+    "not installed" or tell the person to install it.
+    """
+    binary = getattr(signal, "binary_path", "") if signal is not None else ""
+    # Discovery records the cause with the binary in front of it
+    # ("/path/codex: binary path is not in a trusted install prefix").
+    if agent_discovery.UNTRUSTED_PREFIX_ERROR not in probe_error or not binary:
+        return "", "", ""
+    resolved = os.path.realpath(binary)
+    parent = os.path.dirname(resolved)
+    return (
+        f"{label}: the agent was found at {resolved}, in a folder that is not a built-in or operator-approved "
+        "trusted install prefix, so setup did not run it to read its version",
+        resolved,
+        parent,
+    )
+
+
 def _connector_contract_upgrade_guidance(
     connector: str,
     label: str,
@@ -6341,6 +6365,7 @@ def _check_connector_version_supported_for_setup(
         did_not_run = ""
         if probe_error_means_agent_did_not_run(probe_error):
             did_not_run = agent_did_not_run_message(label, probe_error)
+        untrusted, untrusted_binary, untrusted_parent = _untrusted_install_found(label, signal, probe_error)
         # Kiro is not version-gated, but nothing proves a protected Kiro form
         # on this host, so action mode refuses it like a gated connector.
         if action_mode and (compatibility.status != STATUS_NOT_GATED or connector == "kiro") and not allow_drift:
@@ -6364,11 +6389,23 @@ def _check_connector_version_supported_for_setup(
                 if did_not_run:
                     ux.err(f"{did_not_run}; refusing action-mode hook setup.")
                     return False
+                if untrusted:
+                    ux.err(f"{untrusted}; refusing action-mode hook setup.")
+                    _emit_untrusted_prefix_setup_hints(untrusted_binary, untrusted_parent)
+                    ux.subhead("  Or install the agent where only administrators or this account can write.")
+                    return False
                 ux.err(f"{label}: connector was not detected locally; refusing action-mode hook setup.")
                 ux.subhead("Install the connector locally, or use observe mode until it is available.")
             return False
         if emit:
-            ux.warn(did_not_run or _connector_not_detected_message(label))
+            if untrusted:
+                ux.warn(
+                    f"{untrusted}; setup will write DefenseClaw config, but the agent is not protected until "
+                    "its folder is trusted or it is installed in a trusted one."
+                )
+                _emit_untrusted_prefix_setup_hints(untrusted_binary, untrusted_parent)
+            else:
+                ux.warn(did_not_run or _connector_not_detected_message(label))
         return True
 
     if compatibility.status == STATUS_KNOWN:
