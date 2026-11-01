@@ -1674,12 +1674,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// a directory the session created keeps its identity under the name a
 	// mv gives it, also when no call reached it before (GAP-1432).
 	for _, candidate := range facts.Paths {
-		if candidate.Access != actionfacts.PathAccessDelete || !filepath.IsAbs(candidate.Resolved) {
+		path := movedDirectorySightingPath(candidate, facts, cwd)
+		if path == "" {
 			continue
 		}
-		if info, err := pathLstat(candidate.Resolved); err == nil && info.IsDir() &&
+		if info, err := pathLstat(path); err == nil && info.IsDir() &&
 			info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
-			reached = append(reached, filepath.Clean(candidate.Resolved))
+			reached = append(reached, path)
 		}
 	}
 	for _, directories := range [][]string{append(slices.Clone(reached), InstructionDirectories(cwd, home)...), reached} {
@@ -1705,6 +1706,35 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		return incompleteEvidence(cwd)
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+// movedDirectorySightingPath names a directory a complete, plain move may
+// take before the call runs. ActionFacts leaves a POSIX relative operand
+// unresolved under a Windows cwd outside the trusted home. For this local
+// sighting only, the native cwd still names the source of a single mv call.
+func movedDirectorySightingPath(candidate actionfacts.PathFact, facts actionfacts.Facts, cwd string) string {
+	if candidate.Access != actionfacts.PathAccessDelete {
+		return ""
+	}
+	if filepath.IsAbs(candidate.Resolved) {
+		return filepath.Clean(candidate.Resolved)
+	}
+	if runtime.GOOS != "windows" || facts.Parse.Dialect != actionfacts.DialectPOSIX ||
+		!filepath.IsAbs(cwd) || candidate.Resolved != "" || candidate.Flavor != actionfacts.PathFlavorPOSIX ||
+		len(facts.Commands) != 1 {
+		return ""
+	}
+	command := facts.Commands[0]
+	if command.ID != candidate.CommandID || !command.ArgvComplete ||
+		!slices.Contains(command.Operations, actionfacts.OperationMove) {
+		return ""
+	}
+	value := candidate.Value
+	if value == "" || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~") ||
+		strings.HasPrefix(value, "-") || strings.ContainsAny(value, "\\:*?[]$`{}") {
+		return ""
+	}
+	return filepath.Join(cwd, filepath.FromSlash(value))
 }
 
 // copilotCall returns the tool name and the projected arguments of a Copilot
