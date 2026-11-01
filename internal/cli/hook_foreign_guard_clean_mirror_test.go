@@ -144,6 +144,12 @@ func TestForeignGuardCleanSessionOutageCheck(t *testing.T) {
 func newCleanOutageFixture(t *testing.T, id string, tc cleanOutageCase) *foreignGuardFixture {
 	t.Helper()
 	fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+	// The scan reads the agent environment: XDG_CONFIG_HOME (set on the
+	// GitHub Ubuntu runners) moves the OpenCode and Amp user folders away
+	// from the fixture home, and Windows Hermes reads LOCALAPPDATA, so pin
+	// both to the fixture home.
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HERMES_HOME", filepath.Join(fixture.home, ".hermes"))
 	policies := map[string]config.ResolvedConnectorPolicy{}
 	policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(id)
 	policy.ForeignHooks = config.ForeignHooksRemove
