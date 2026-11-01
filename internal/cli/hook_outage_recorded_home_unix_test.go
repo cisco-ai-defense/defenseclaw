@@ -146,3 +146,39 @@ func writeRecord(t *testing.T, dataDir, target string) {
 		t.Fatal(err)
 	}
 }
+
+// Review 3 P2 (GAP-0309 on the moved-data_dir route), record shape R1: the
+// account database's config is strict and names X, and X/hooks/.config-record
+// is rewritten to Z/config.yaml, a default config naming Z. X/hooks then
+// load Z's config, a moved folder's, and the floor must still close.
+func TestHookOutageFailModeNowRewrittenRecordToAMovedFolderKeepsTheAccountFloor(t *testing.T) {
+	for _, tc := range []struct {
+		name, account, want string
+	}{
+		{name: "account strict", account: outageNowStrictConfig, want: "closed"},
+		{name: "account saved closed", account: outageNowDefaultConfig + "  hook_fail_mode: closed\n", want: "closed"},
+		{name: "account default", account: outageNowDefaultConfig, want: "open"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := t.TempDir()
+			x := filepath.Join(t.TempDir(), "dcdata")
+			z := filepath.Join(t.TempDir(), "other")
+			oldAccount, oldRoot := outageAccountHome, outageInstalledDataRoot
+			outageAccountHome = func() string { return account }
+			outageInstalledDataRoot = func() (string, bool) { return "", false }
+			t.Cleanup(func() { outageAccountHome, outageInstalledDataRoot = oldAccount, oldRoot })
+			t.Setenv("HOME", account)
+			t.Setenv("DEFENSECLAW_HOME", "")
+			t.Setenv("DEFENSECLAW_CONFIG", "")
+			writeOutageNowConfig(t, filepath.Join(account, ".defenseclaw"), "data_dir: "+x+"\n"+tc.account)
+			for _, dir := range []string{filepath.Join(x, "hooks"), filepath.Join(z, "hooks")} {
+				mkdirAll(t, dir)
+			}
+			writeOutageNowConfig(t, z, "data_dir: "+z+"\n"+outageNowDefaultConfig)
+			writeRecord(t, x, filepath.Join(z, "config.yaml"))
+			if got := hookOutageFailModeNow("claudecode", filepath.Join(x, "hooks")); got != tc.want {
+				t.Fatalf("hookOutageFailModeNow = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

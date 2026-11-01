@@ -621,3 +621,43 @@ func TestHookOutageFailModeNowInstalledRootPointerNeverOutranksTheAccountConfig(
 		})
 	}
 }
+
+// Review 3 P2 (GAP-0309 on the moved-data_dir route), Windows root shape R3:
+// the installed data root (a user-owned state file on a PowerShell install)
+// is steered to R, whose config names M, and M keeps a default config of its
+// own. R/hooks are then hooks left by a move, and the account database's
+// strict or saved-closed config must still close them.
+func TestHookOutageFailModeNowSteeredInstalledRootToAMovedFolderKeepsTheAccountFloor(t *testing.T) {
+	for _, tc := range []struct {
+		name, account, want string
+	}{
+		{name: "account strict", account: outageNowStrictConfig, want: "closed"},
+		{name: "account saved closed", account: outageNowDefaultConfig + "  hook_fail_mode: closed\n", want: "closed"},
+		{name: "account default", account: outageNowDefaultConfig, want: "open"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := t.TempDir()
+			root := t.TempDir()
+			moved := t.TempDir()
+			oldAccount, oldRoot := outageAccountHome, outageInstalledDataRoot
+			outageAccountHome = func() string { return account }
+			outageInstalledDataRoot = func() (string, bool) { return root, true }
+			t.Cleanup(func() { outageAccountHome, outageInstalledDataRoot = oldAccount, oldRoot })
+			t.Setenv("HOME", account)
+			t.Setenv("USERPROFILE", account)
+			t.Setenv("DEFENSECLAW_HOME", "")
+			t.Setenv("DEFENSECLAW_CONFIG", "")
+			writeOutageNowConfig(t, filepath.Join(account, ".defenseclaw"), tc.account)
+			writeOutageNowConfig(t, root, "data_dir: "+moved+"\n"+outageNowDefaultConfig)
+			writeOutageNowConfig(t, moved, "data_dir: "+moved+"\n"+outageNowDefaultConfig)
+			for _, dir := range []string{filepath.Join(root, "hooks"), filepath.Join(moved, "hooks")} {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := hookOutageFailModeNow("claudecode", filepath.Join(root, "hooks")); got != tc.want {
+				t.Fatalf("hookOutageFailModeNow = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

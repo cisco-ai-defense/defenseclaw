@@ -251,8 +251,16 @@ func plainConfigDataDir(configFile string) (string, error) {
 // folder), and an install lock in their own folder closes too. A folder with
 // a config.yaml of its own that keeps its data elsewhere stays closed.
 func movedDataDirOutageMode(name, dataDir, configFile, ownDataDir string, installWindow bool) string {
+	// The account database's config is a floor on this route too: a
+	// rewritten pointer (.config-record, the Windows installed root) that
+	// makes these hooks a moved folder's never opens what it closes
+	// (GAP-0309 review 3).
+	if accountConfigClosesOutage(name, dataDir, configFile) {
+		return "closed"
+	}
 	// The config these hooks loaded is the account's: its own tier and saved
-	// mode are a floor, whatever config.yaml the moved folder keeps.
+	// mode are a floor, whatever config.yaml the moved folder keeps. (A belt
+	// since the line above.)
 	if left, _, err := loadHookRuntimeConfig(configFile); err != nil || left.EffectiveHookOutageFailModeForConnector(name) != "open" {
 		return "closed"
 	}
