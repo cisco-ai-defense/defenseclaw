@@ -27,6 +27,15 @@ import (
 // redelivery of the flood): every answer is a benign allow, and each
 // (session, tool id) keeps its own pending operation, never one shared
 // across sessions.
+//
+// The calls run in action mode, where every call waits for its correlation
+// ledger. In observe mode a call whose ledger is late for its answer window
+// goes on without it (rel-1-0-6 GAP-0152, hook_correlation_observe_window_test.go),
+// and this flood is about ten times what a -race build on four processors
+// serves: before that fix every call waited 12-17 s for the ledger here, far
+// past any hook's wait, and after it most calls rightly took the late-ledger
+// path, so an observe-mode count of pending operations depended on the
+// machine (rel-1-0-6 GAP-0256).
 func TestPendingOperationsStayPerSessionUnderReusedToolIDs(t *testing.T) {
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, "claudecode")
@@ -38,7 +47,7 @@ func TestPendingOperationsStayPerSessionUnderReusedToolIDs(t *testing.T) {
 	logger := audit.NewLogger(fixture.store)
 	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints})
 	cfg := &config.Config{}
-	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
 	bindHookLifecycleV8(t, api, fixture.runtime)

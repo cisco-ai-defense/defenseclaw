@@ -1809,9 +1809,7 @@ jobs:
           enable-cache: true
           # Only main writes the uv cache; other refs restore it.
           save-cache: ${{ github.ref == 'refs/heads/main' }}
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
-        with:
-          cosign-release: "v2.6.3"
+      - uses: ./.github/actions/install-cosign-windows
       - name: Fetch and verify the latest release's enterprise package
         id: previous
         shell: bash

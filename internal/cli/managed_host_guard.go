@@ -225,11 +225,11 @@ func managedWindowsAdminCommandAnswer(where, command string) error {
 // the DefenseClaw TUI, part of the per-user CLI, is not installed there, and
 // names the administrator's checks instead.
 func managedWindowsTUIAnswer(where string) error {
-	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so the DefenseClaw TUI is not installed on this computer: "+
+	return managedDeviceAnswer(fmt.Sprintf("this computer's DefenseClaw is managed by your organization (%s), so the DefenseClaw TUI is not installed on this computer: "+
 		"it is part of the per-user DefenseClaw, which a managed computer does not have, and there is nothing for you to set up. "+
 		"Your administrator can check the managed deployment %s, and your account's agents with `& '%s' enterprise policy show --user %s`. "+
 		"Nothing was changed.",
-		where, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName())
+		where, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName()))
 }
 
 // managedWindowsVersionChangeAnswer tells a user on a managed Windows
