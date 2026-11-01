@@ -632,7 +632,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	// Before the sandbox is saved and watched: one that does not run as
 	// prepared is rolled back like one OpenShell rejected.
-	facts, err := m.verifyWorkload(ctx, gw, name, *rec.Verify, eff, "DefenseClaw deleted it")
+	facts, err := m.verifyWorkload(ctx, gw, name, *rec.Verify, eff, "DefenseClaw deleted it", in.req.Env)
 	if err != nil {
 		return nil, err
 	}
