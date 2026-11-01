@@ -63,6 +63,11 @@ type DecisionStore interface {
 	Add(uid int, d Decision) error
 	// List returns uid's decisions; registration "" lists all of them.
 	List(uid int, registration string) ([]Decision, error)
+	// ForgetOtherAccounts drops uid's decisions of another account than
+	// subjectKey's, and, when legacyKeep is set, the decisions without a
+	// subject key whose registration it does not keep; it returns how many
+	// it dropped (rel-1-0-6:GAP-0262).
+	ForgetOtherAccounts(uid int, subjectKey string, legacyKeep func(registration string) bool) (int, error)
 	// Purge removes the whole store.
 	Purge() error
 }

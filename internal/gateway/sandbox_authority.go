@@ -131,6 +131,9 @@ type sandboxRegistrationStore interface {
 	// Restart runs a bound registration's sandbox again under a new
 	// registration (GAP-0673).
 	Restart(uid int, id string) (sandboxreg.Registration, error)
+	// ForgetOtherAccounts removes the uid's registrations of another
+	// account than subjectKey's (rel-1-0-6:GAP-0262).
+	ForgetOtherAccounts(uid int, subjectKey string) ([]sandboxreg.Registration, error)
 }
 
 func (s *sandboxAuthority) clock() time.Time {
@@ -209,6 +212,45 @@ func (a *APIServer) sandboxAuth() (*sandboxAuthority, error) {
 	}
 	holder.ready.Store(auth)
 	return auth, nil
+}
+
+// sandboxForgetPreviousAccounts removes, before subjectKey's account
+// registers or restarts a sandbox, the registrations and saved decisions
+// that an earlier account holding the same uid left behind: a deleted
+// account whose uid the account database gave to a new one, or an account
+// since renamed. The account holding the uid now never inherits them, never
+// sees them and is never refused because of them (rel-1-0-6:GAP-0262).
+// Only the administrator is told, in the gateway log; the account is not,
+// since what another account ran is not its business. A store error is
+// logged and leaves the records; the write that follows reports it.
+func (a *APIServer) sandboxForgetPreviousAccounts(auth *sandboxAuthority, uid int, subjectKey string) {
+	if subjectKey == "" {
+		return
+	}
+	gone, err := auth.store.ForgetOtherAccounts(uid, subjectKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] forget previous accounts uid=%d: %v\n", uid, err)
+		return
+	}
+	dropped := 0
+	if auth.decisions != nil {
+		var legacyKeep func(string) bool
+		if len(gone) > 0 {
+			kept := map[string]bool{}
+			if regs, err := auth.store.List(uid); err == nil {
+				for _, r := range regs {
+					kept[r.ID] = true
+				}
+			}
+			legacyKeep = func(id string) bool { return kept[id] }
+		}
+		if dropped, err = auth.decisions.ForgetOtherAccounts(uid, subjectKey, legacyKeep); err != nil {
+			fmt.Fprintf(os.Stderr, "[sandbox-authority] forget previous accounts uid=%d decisions: %v\n", uid, err)
+		}
+	}
+	if len(gone) > 0 || dropped > 0 {
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] uid=%d now belongs to another account than the one that registered %d sandbox registrations and %d saved decisions on it (a deleted or renamed account); removed them, the new account does not inherit them\n", uid, len(gone), dropped)
+	}
 }
 
 // sandboxSubjectKey is a registration's subject key: DigestPrefix and the

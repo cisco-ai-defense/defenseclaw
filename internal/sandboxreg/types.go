@@ -203,6 +203,19 @@ type Decision struct {
 	Scope        string        `json:"scope"`
 	Actor        DecisionActor `json:"actor"`
 	CreatedAt    time.Time     `json:"created_at"`
+	// SubjectKey is the subject key of the registration the decision was
+	// made in: the account that made it. A decision applies only to that
+	// account's registrations, never to a later account given the same uid
+	// (AppliesTo, rel-1-0-6:GAP-0262). Empty for a decision saved before
+	// 1.0.7; ForgetOtherAccounts drops those once the uid is seen to have
+	// changed accounts.
+	SubjectKey string `json:"subject_key,omitempty"`
+}
+
+// AppliesTo reports whether d may apply to reg: d was made by reg's account,
+// or it predates the subject key on decisions.
+func (d Decision) AppliesTo(reg Registration) bool {
+	return d.SubjectKey == "" || d.SubjectKey == reg.SubjectKey
 }
 
 // DecisionActor is the person who made a decision.

@@ -187,6 +187,41 @@ func (s *FileDecisionStore) List(uid int, registration string) ([]Decision, erro
 	return out, nil
 }
 
+// ForgetOtherAccounts drops uid's decisions another account made: one whose
+// subject key is set and is not subjectKey. When legacyKeep is set (the uid
+// is known to have changed accounts), a decision saved before decisions
+// carried a subject key goes too unless legacyKeep keeps its registration:
+// such a decision cannot be told apart from the earlier account's, and the
+// account now holding the uid never inherits that one's egress decisions
+// (rel-1-0-6:GAP-0262). It returns how many it dropped; with none, nothing
+// is written.
+func (s *FileDecisionStore) ForgetOtherAccounts(uid int, subjectKey string, legacyKeep func(registration string) bool) (int, error) {
+	if subjectKey == "" {
+		return 0, fmt.Errorf("%w: subject key is required", ErrInvalid)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ds, err := s.loadLocked(uid)
+	if err != nil {
+		return 0, err
+	}
+	next := slices.DeleteFunc(slices.Clone(ds), func(d Decision) bool {
+		if d.SubjectKey != "" {
+			return d.SubjectKey != subjectKey
+		}
+		return legacyKeep != nil && !legacyKeep(d.Registration)
+	})
+	dropped := len(ds) - len(next)
+	if dropped == 0 {
+		return 0, nil
+	}
+	if err := writeStoreFile(s.dir, s.path(uid), decisionFile{V: storeFileVersion, Decisions: next}); err != nil {
+		return 0, err
+	}
+	s.uids[uid] = next
+	return dropped, nil
+}
+
 // Purge removes the whole store.
 func (s *FileDecisionStore) Purge() error {
 	s.mu.Lock()
