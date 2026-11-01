@@ -9,6 +9,7 @@ from click.testing import CliRunner
 from defenseclaw import config as config_module
 from defenseclaw.commands import cmd_config
 from defenseclaw.context import AppContext
+from defenseclaw.file_permissions import windows_acl_confidentiality_error
 
 from tests.environment import isolated_home_env
 
@@ -83,12 +84,18 @@ def test_config_set_data_dir_carries_the_records_the_gateway_needs_to_start(tmp_
     moved = tmp_path / "dcdata"
     moved.mkdir()
     (moved / "claudecode_backup.json").write_bytes(b'{"kept": true}\n')
+    # The account path: an elevated Windows runner is an administrator, and an
+    # administrator copies nothing (the next test).
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
 
     result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
 
     assert result.exit_code == 0, result.output
     assert (moved / "agent_discovery.json").read_bytes() == discovery
-    assert os.stat(moved / "agent_discovery.json").st_mode & 0o077 == 0
+    if os.name == "nt":
+        assert windows_acl_confidentiality_error(moved / "agent_discovery.json") is None
+    else:
+        assert os.stat(moved / "agent_discovery.json").st_mode & 0o077 == 0
     assert (moved / "claudecode_backup.json").read_bytes() == b'{"kept": true}\n'
     assert not os.path.lexists(moved / "codex_backup.json")
     assert not os.path.lexists(moved / "gateway.pid")
