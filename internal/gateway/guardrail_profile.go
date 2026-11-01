@@ -880,6 +880,38 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 	}
 }
 
+// profileExplainGatewayOwner is the account id a per-user gateway runs as
+// (the uid on Linux and macOS, the SID on Windows), and false on a managed
+// gateway, which serves every account's administrator view. Tests replace
+// it.
+var profileExplainGatewayOwner = func() (string, bool) {
+	if gatewayRunsAsServiceAccount() {
+		return "", false
+	}
+	id, _ := localProcessUser()
+	return id, true
+}
+
+// perUserExplainOfAnotherAccount refuses `profile explain --user` on a
+// per-user gateway when the named account is not the one the gateway runs
+// as: a per-user install shows a person only their own effective policy.
+// On macOS another local account resolved and explain printed its uid,
+// groups and profile, while Linux refused it only where a directory twin
+// lookup failed (rel-1-0-6:GAP-0328). A per-user gateway that cannot name
+// its own account refuses every other account too. An account that did
+// not resolve (no id) keeps the lookup's own answer.
+func perUserExplainOfAnotherAccount(found profileSubject) error {
+	owner, perUser := profileExplainGatewayOwner()
+	if !perUser || found.UserID == "" || (owner != "" && strings.EqualFold(found.UserID, owner)) {
+		return nil
+	}
+	return errPerUserExplainOtherAccount
+}
+
+// errPerUserExplainOtherAccount is the refusal of another account's explain
+// on a per-user gateway. It names no fact of the account.
+var errPerUserExplainOtherAccount = errors.New("a per-user install explains only your own account; another account's profile is shown only to an administrator of a managed install")
+
 // lookupDirectoryProfileSubject resolves the account an administrator names
 // to `guardrail profile explain --user` with the directory facts a request
 // from that account would carry. An account the directory lookup cannot
@@ -1818,6 +1850,12 @@ func (a *APIServer) serveGuardrailProfileResolve(w http.ResponseWriter, r *http.
 			// hooks read, and the cache block says what they use.
 			found, err = caller, nil
 			out["facts_source"] = "caller"
+		}
+		if refusal := perUserExplainOfAnotherAccount(found); refusal != nil {
+			// A per-user gateway explains its own account only: users see
+			// only their own effective policy. Another account is answered
+			// as one the lookup cannot name, with none of its facts.
+			found, err = profileSubject{UserName: user}, refusal
 		}
 		var ambiguous *useridentity.AmbiguousAccountError
 		if errors.As(err, &ambiguous) {

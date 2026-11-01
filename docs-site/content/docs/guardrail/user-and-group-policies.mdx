@@ -18,8 +18,9 @@ Active Directory, Okta or Entra. Only facts the OS vouches for (`verified`)
 can select a profile. See
 [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources).
 Group assignments follow the OS-verified account ID. When two accounts share
-a visible name, use each uid or SID with `guardrail profile explain --user`
-to inspect their decisions separately.
+a visible name, an administrator uses each uid or SID with the managed
+`enterprise <os> profile-explain --user` to inspect their decisions
+separately; a per-user install explains only your own account.
 </Callout>
 
 ## Give a group its own policy
@@ -79,7 +80,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 
    `config validate` rejects an unknown profile name, an empty `match`, a malformed agent id and a forbidden key.
 
-3. Ask which profile a person gets. With no `--user`, `guardrail profile explain` explains the account that runs the command. The managed `enterprise linux|macos|windows profile-explain` commands need `--user` when an administrator runs them; on Linux and macOS a standard user leaves it out and gets their own profile only.
+3. Ask which profile a person gets. With no `--user`, `guardrail profile explain` explains the account that runs the command. The managed `enterprise linux|macos|windows profile-explain` commands need `--user` when an administrator runs them; on Linux and macOS a standard user leaves it out and gets their own profile only. A per-user install also explains only the account that runs it: run the command as the person, since `--user` with another account is refused.
 
    ```bash
    defenseclaw guardrail profile explain --user alice@corp.example.com --connector claudecode
