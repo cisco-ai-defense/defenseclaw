@@ -998,14 +998,24 @@ func posixHeredocBodyRunsNothing(body *syntax.Word) bool {
 		return true
 	}
 	runs := false
+	// The POSIX grammar keeps the legacy $[expr] arithmetic as text (split
+	// into adjacent literals), but bash evaluates it, and a subscript in a
+	// variable value it names can run a command (rel-1-0-6:GAP-0419).
+	var text strings.Builder
 	syntax.Walk(body, func(node syntax.Node) bool {
-		switch node.(type) {
+		switch typed := node.(type) {
 		case *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ProcSubst:
 			runs = true
+		case *syntax.Lit:
+			text.WriteString(typed.Value)
+		case *syntax.Word:
+		case nil:
+		default:
+			text.WriteByte(0)
 		}
 		return !runs
 	})
-	return !runs
+	return !runs && !strings.Contains(text.String(), "$[")
 }
 
 func posixDescriptorIsRedirected(command *CommandFact, fd int64) bool {

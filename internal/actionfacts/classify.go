@@ -86,6 +86,7 @@ func classifyOutputAt(out *parseOutput, wrapperDepth int) {
 			return
 		}
 	}
+	markPOSIXStdinCodeBehindWrapper(out)
 	classifyEmbeddedPrograms(out, wrapperDepth)
 
 	allowPreview := out.status == StatusComplete
@@ -13176,4 +13177,109 @@ func deduplicate[T any](values []T, key func(T) string) []T {
 		out = append(out, value)
 	}
 	return out
+}
+
+// markPOSIXStdinCodeBehindWrapper keeps the parse partial when a command
+// that runs its standard input as code is given one: a heredoc, a stdin
+// redirect or the output of an earlier pipeline stage. A shell started by
+// sudo, doas or pkexec (sudo sh, sudo -s, sudo -u root bash), su without -c,
+// at or batch without -f, and crontab reading - or no file run that input,
+// which ActionFacts does not read; direct shells already stay partial
+// (rel-1-0-6:GAP-0419).
+func markPOSIXStdinCodeBehindWrapper(out *parseOutput) {
+	// A pipeline counts when an earlier stage reads a heredoc (cat <<X |
+	// sudo sh); a download piped into a shell keeps its own modeled flow.
+	heredocPipeline := make(map[int64]bool, len(out.commands))
+	for index := range out.commands {
+		command := &out.commands[index]
+		piped := command.PipelineID != 0 && heredocPipeline[command.PipelineID]
+		if command.PipelineID != 0 && (command.LiteralStdinComplete || command.LiteralStdinAmbiguous) {
+			heredocPipeline[command.PipelineID] = true
+		}
+		if command.Dialect != DialectPOSIX {
+			continue
+		}
+		fed := piped || command.LiteralStdinComplete || command.LiteralStdinAmbiguous
+		for _, redirect := range command.Redirects {
+			if redirect.FD == 0 {
+				fed = true
+			}
+		}
+		if fed && posixWrapperRunsStdinAsCode(command.Argv) {
+			out.markPartial(IssueUnsupportedConstruct)
+		}
+	}
+}
+
+// posixWrapperRunsStdinAsCode reports an argv that reads its standard input
+// as commands through a privilege wrapper or a scheduler. A direct shell is
+// not one: its stdin mode is modeled where it is classified.
+func posixWrapperRunsStdinAsCode(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	switch commandProgram(argv[0]) {
+	case "sudo", "doas", "pkexec":
+		rest := argv[1:]
+		for len(rest) > 0 && strings.HasPrefix(rest[0], "-") && rest[0] != "-" {
+			option := rest[0]
+			rest = rest[1:]
+			if option == "--" {
+				break
+			}
+			switch option {
+			case "-s", "--shell", "-i", "--login":
+				if len(rest) == 0 {
+					return true
+				}
+			case "-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "-R":
+				if len(rest) > 0 {
+					rest = rest[1:]
+				}
+			}
+		}
+		return len(rest) > 0 && posixStdinCodeTarget(rest)
+	case "su":
+		for _, argument := range argv[1:] {
+			if argument == "-c" || argument == "--command" || strings.HasPrefix(argument, "--command=") {
+				return false
+			}
+		}
+		return true
+	case "at", "batch":
+		for _, argument := range argv[1:] {
+			switch argument {
+			case "-f", "-l", "-r", "-d", "-c", "-V":
+				return false
+			}
+		}
+		return true
+	case "crontab":
+		if len(argv) == 1 {
+			return true
+		}
+		for _, argument := range argv[1:] {
+			if argument == "-" {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+// posixStdinCodeTarget reports the program a privilege wrapper starts when
+// it runs its standard input as code: a shell without -c, or another
+// wrapper or scheduler that does.
+func posixStdinCodeTarget(argv []string) bool {
+	if posixShellProgram(commandProgram(argv[0])) {
+		for _, argument := range argv[1:] {
+			if argument == "-c" {
+				return false
+			}
+		}
+		return true
+	}
+	return posixWrapperRunsStdinAsCode(argv)
 }
