@@ -5212,7 +5212,7 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 	// call is not reducible: it is reported as an overflow
 	// (rel-1-0-6:GAP-0414).
 	if !overflow {
-		if defined := shellFunctionNames(command); len(defined) > 0 {
+		if defined := shellWritingFunctionNames(command, home); len(defined) > 0 {
 			for _, index := range first {
 				if fields := strings.Fields(texts[index]); len(fields) > 0 && defined[fields[0]] {
 					overflow = true
@@ -5228,9 +5228,13 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 	return strings.Join(kept, "; "), overflow, true
 }
 
-// shellFunctionNames returns the names of the functions a POSIX command
-// defines, or nil when it defines none (or does not parse).
-func shellFunctionNames(command string) map[string]bool {
+// shellWritingFunctionNames returns the names of the functions a POSIX
+// command defines whose body is not proven read-only
+// (stateStatementReadOnly), or nil when there are none (or the command does
+// not parse). A helper that only prints, such as log() { echo "$@"; },
+// writes nothing whatever it is called with, so a call of it stays
+// reducible (rel-1-0-6:GAP-0448, review r6 finding 2).
+func shellWritingFunctionNames(command, home string) map[string]bool {
 	if !strings.Contains(command, "()") && !strings.Contains(command, "function") {
 		return nil
 	}
@@ -5241,6 +5245,12 @@ func shellFunctionNames(command string) map[string]bool {
 	var names map[string]bool
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if decl, isDecl := node.(*syntax.FuncDecl); isDecl && decl.Name != nil {
+			if decl.Body != nil {
+				start, end := int(decl.Body.Pos().Offset()), int(decl.Body.End().Offset())
+				if start >= 0 && start < end && end <= len(command) && stateStatementReadOnly(command[start:end], home) {
+					return true
+				}
+			}
 			if names == nil {
 				names = map[string]bool{}
 			}
@@ -5258,11 +5268,69 @@ func shellFunctionNames(command string) map[string]bool {
 // (rel-1-0-6:GAP-0413). It is kept whole and reported as an overflow, so
 // the hook client sends only the incomplete header and a gateway behind
 // ProtectHome holds the call when it may name the state.
+//
+// The hold is for a call that may write the state path itself
+// (powerShellMayWriteStatePath): one that only mentions a defense or claw
+// word, or names the state in a known read-only command (Get-Content,
+// Test-Path), keeps nothing, as a POSIX call with no writer does
+// (rel-1-0-6:GAP-0448: long scripts that read the state or log a
+// defenseclaw word were held in managed observe).
 func StateNamingReading(command, home string, powershell bool) (reduced string, overflow, ok bool) {
 	if powershell {
+		if !powerShellMayWriteStatePath(command) {
+			return "", false, true
+		}
 		return command, true, true
 	}
 	return StateNamingStatements(command, home)
+}
+
+// powerShellReadOnlyCommands are PowerShell commands, cmdlets and aliases
+// that read or print and change no file.
+var powerShellReadOnlyCommands = map[string]bool{
+	"get-content": true, "gc": true, "cat": true, "type": true, "test-path": true, "get-item": true, "gi": true,
+	"get-childitem": true, "gci": true, "ls": true, "dir": true, "select-string": true, "sls": true,
+	"resolve-path": true, "rvpa": true, "get-filehash": true, "get-acl": true, "get-itemproperty": true, "gp": true,
+	"split-path": true, "join-path": true, "write-host": true, "write-output": true, "echo": true,
+}
+
+var (
+	powerShellLeadingAssignment = regexp.MustCompile(`^\$[A-Za-z_][\w:]*\s*=\s*`)
+	powerShellDiscardRedirect   = regexp.MustCompile(`[0-9*]?>>?\s*\$null\b`)
+)
+
+// powerShellMayWriteStatePath reports a PowerShell call with a segment
+// (split at ;, | and line ends; quotes are not read, which only adds
+// segments) that names the DefenseClaw state folder and is not proven
+// read-only (powerShellSegmentReadOnly). The state folder is named as
+// .defense... once quotes, backticks and backslashes are removed, in any
+// case, or as a pattern with claw in it.
+func powerShellMayWriteStatePath(command string) bool {
+	for _, segment := range strings.FieldsFunc(command, func(r rune) bool { return r == ';' || r == '|' || r == '\n' || r == '\r' }) {
+		lower := strings.ToLower(strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(segment))
+		names := strings.Contains(lower, ".defense") || strings.Contains(lower, "claw") && strings.ContainsAny(lower, "*?[")
+		if names && !powerShellSegmentReadOnly(segment) {
+			return true
+		}
+	}
+	return false
+}
+
+// powerShellSegmentReadOnly reports a segment that runs a known read-only
+// command (powerShellReadOnlyCommands), optionally assigned to a variable,
+// with no redirect but one to $null and no subexpression, script block,
+// splat or here-string.
+func powerShellSegmentReadOnly(segment string) bool {
+	text := strings.TrimSpace(segment)
+	if loc := powerShellLeadingAssignment.FindStringIndex(text); loc != nil {
+		text = text[loc[1]:]
+	}
+	text = powerShellDiscardRedirect.ReplaceAllString(text, " ")
+	if strings.ContainsAny(text, "(){}<>@`") {
+		return false
+	}
+	fields := strings.Fields(text)
+	return len(fields) > 0 && powerShellReadOnlyCommands[strings.ToLower(fields[0])]
 }
 
 // stateStatementReadOnly reports a statement proven to change no file: the

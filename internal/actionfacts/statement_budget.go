@@ -287,10 +287,17 @@ func powerShellStatements(command string, limit int) (int, bool) {
 	return statements, opaque
 }
 
-// powerShellAssignable matches an assignable PowerShell expression with an
-// optional compound operator before its =: $x, $env:X, ${x}, $a[0], $o.p,
-// [int]$n, $x + (for +=), $x ?? (for ??=).
-var powerShellAssignable = regexp.MustCompile(`^(\[[^\]]+\]\s*)*(\$\{[^}]+\}|\$[A-Za-z_][\w:]*)(\[[^\]]*\]|\.[A-Za-z_]\w*)*\s*(\?\?|[-+*/%])?$`)
+// powerShellAssignable matches the targets of a PowerShell assignment with
+// an optional compound operator before its =: $x, $env:X, ${x}, $a[0],
+// $o.p, [int]$n, [string[]]$s and [List[string]]$l (one level of nested
+// type brackets), $a, $b (multiple assignment), $x = $y (a chain), and
+// $x + (for +=), $x ?? (for ??=). Review r6 finding 5: the nested types,
+// the list and the chain counted two statements a line.
+var powerShellAssignable = func() *regexp.Regexp {
+	target := `(\[(?:[^\[\]]|\[[^\[\]]*\])+\]\s*)*(\$\{[^}]+\}|\$[A-Za-z_][\w:]*)(\[[^\]]*\]|\.[A-Za-z_]\w*)*`
+	list := target + `(\s*,\s*` + target + `)*`
+	return regexp.MustCompile(`^(` + list + `\s*=\s*)*` + list + `\s*(\?\?|[-+*/%])?$`)
+}()
 
 var powerShellBlockComment = regexp.MustCompile(`<#[\s\S]*?#>`)
 

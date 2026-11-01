@@ -8663,9 +8663,7 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 	}
 	// A PowerShell call is kept whole and held behind ProtectHome: the
 	// POSIX read-only proof is not its reading (rel-1-0-6:GAP-0413).
-	powershell := trustedPowerShellExecutionTool(request.Input.Tool) || request.Input.DialectHint == actionfacts.DialectPowerShell ||
-		facts.Parse.Dialect == actionfacts.DialectPowerShell
-	reduced, overflow, ok := hookpaths.StateNamingReading(command, request.Input.ActiveHome, powershell)
+	reduced, overflow, ok := hookpaths.StateNamingReading(command, request.Input.ActiveHome, trustedPowerShellReading(request.Input, facts))
 	if !ok {
 		return findings
 	}
@@ -8805,6 +8803,13 @@ func trustedBashExecutionTool(tool string) bool {
 // command is read by the same whole-command proofs as a Bash call, so the
 // same text gets the same decision whichever shell tool carries it
 // (GAP-1779, GAP-2389). The dialect hint still chooses the grammar.
+// trustedPowerShellReading reports a call the gateway reads as PowerShell:
+// a PowerShell tool, a PowerShell dialect hint or a PowerShell parse.
+func trustedPowerShellReading(input actionfacts.Input, facts actionfacts.Facts) bool {
+	return trustedPowerShellExecutionTool(input.Tool) || input.DialectHint == actionfacts.DialectPowerShell ||
+		facts.Parse.Dialect == actionfacts.DialectPowerShell
+}
+
 func trustedPowerShellExecutionTool(tool string) bool {
 	switch strings.ToLower(strings.TrimSpace(tool)) {
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":

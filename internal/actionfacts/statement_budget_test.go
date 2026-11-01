@@ -103,6 +103,23 @@ func TestPowerShellStatementsOverBudget(t *testing.T) {
 		{"background chain after == and a block comment, 3000", strings.Repeat("Write-Output YWJjZA== <#c#> & ", 3000) + "Remove-Item -Recurse -Force x", true},
 		{"background chain after a lone = argument", strings.Repeat("Write-Output = & ", 200) + "Remove-Item -Recurse -Force x", true},
 		{"background chain after key= in an assigned command", strings.Repeat("$x = Write-Output key= & ", 200) + "Remove-Item -Recurse -Force x", true},
+		// Review r6 finding 4: the statement start is reset at { and (
+		// (MT7, MT7b) and after a background & (MT10), and a block comment
+		// inside the target is not part of it (MT8).
+		{"call operator in an if block, 128 lines", strings.ReplaceAll(statements(128, "if ($c) { $o%d = & git rev-parse HEAD }"), "; ", "\n"), false},
+		{"call operator in an if block, 129 lines", strings.ReplaceAll(statements(129, "if ($c) { $o%d = & git rev-parse HEAD }"), "; ", "\n"), true},
+		{"call operator in parentheses, 128 lines", strings.ReplaceAll(statements(128, "($o%d = & git rev-parse HEAD)"), "; ", "\n"), false},
+		{"call operator in a foreach block, 128 lines", strings.ReplaceAll(statements(128, "foreach ($i in $l) { $o%d = & git rev-parse HEAD }"), "; ", "\n"), false},
+		{"block comment inside the target, 128 lines", strings.ReplaceAll(statements(128, "$o%d <#c#> = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"call operator after a background job, 64 lines", strings.ReplaceAll(statements(64, "Get-Date & $o%d = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"call operator after a background job, 65 lines", strings.ReplaceAll(statements(65, "Get-Date & $o%d = & git rev-parse HEAD"), "; ", "\n"), true},
+		// Review r6 finding 5: nested type literals, multiple and chained
+		// assignment are one statement each.
+		{"nested array type target, 128 lines", strings.ReplaceAll(statements(128, "[string[]]$s%d = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"generic type target, 128 lines", strings.ReplaceAll(statements(128, "[System.Collections.Generic.List[string]]$l%d = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"multiple assignment target, 128 lines", strings.ReplaceAll(statements(128, "$a%d, $b = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"chained assignment target, 128 lines", strings.ReplaceAll(statements(128, "$x%d = $y = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"chained assignment target, 129 lines", strings.ReplaceAll(statements(129, "$x%d = $y = & git rev-parse HEAD"), "; ", "\n"), true},
 		// Assignment operators: the & after them is the call operator.
 		{"call operator after =, no blank", strings.ReplaceAll(statements(70, "$o%d=& git rev-parse HEAD"), "; ", "\n"), false},
 		{"call operator after +=", strings.ReplaceAll(statements(70, "$o%d += & git rev-parse HEAD"), "; ", "\n"), false},
