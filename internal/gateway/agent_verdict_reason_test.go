@@ -155,7 +155,9 @@ func TestObserveNoticeNamesTheRuleLikeTheBlock(t *testing.T) {
 // error inside the reason stays out of the agent's view in both modes.
 func TestObserveNoticeNamesTheRejectedMCPServerLikeTheBlock(t *testing.T) {
 	source := `mcp server "fcpend" is disabled because its install admission rejected it (scanner failure (fail-closed): scanner: mcp-scanner exited 1: ValueError: refusing to scan local MCP server 'fcpend': command 'node' is not an allowlisted stdio launcher (allowed: npx, uvx)); asset_policy.mode does not apply to admission verdicts`
-	subject := "MCP server fcpend is disabled because its install admission rejected it (scanner failure (fail-closed))"
+	// A launcher refusal names its cause and fix in fixed words
+	// (rel-1-0-6:GAP-0258); the scanner text stays out.
+	subject := "MCP server fcpend is disabled because its install admission rejected it (" + mcpLauncherRefusalVerdict + ")"
 	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__fcpend__ping"}
 	for _, standalone := range []bool{true, false} {
 		useAgentVerdictProfile(t, standalone, false)
@@ -368,5 +370,44 @@ func TestStandaloneBlocksAConfirmationHermesCannotAsk(t *testing.T) {
 		if want := "needs your confirmation for it (rule TEST-MARKER-BLOCK), and " + c.agent + " cannot ask for it."; !strings.Contains(string(data), want) {
 			t.Fatalf("%s hook output %s\nwant %q", c.agent, data, want)
 		}
+	}
+}
+
+// rel-1-0-6:GAP-0258: the tool call of an MCP server whose scan refused its
+// bare node launcher is refused for that cause, with the fix, and as a block
+// not to retry: the agent saw only "still scanning, try again in a minute".
+// The scanner text (the server's command and arguments) stays out, a long
+// reason (a folder note before it) still matches, and a scan that could not
+// finish keeps the bare failure kind.
+func TestAgentBlockNamesTheRefusedMCPLauncherAndItsFix(t *testing.T) {
+	refusal := "scanner: mcp-scanner exited 1: the server was not started in its folder C:\\Users\\dcw-vs7ba\\gb1\\" + strings.Repeat("deep\\", 20) +
+		"; it ran in the scanner folder instead: ValueError: refusing to scan local MCP server 'vs7time': command 'node' is not an allowlisted stdio launcher (allowed: npx, uvx): " +
+		"a scan starts only npm or PyPI packages through npx or uvx, never another program. Start the server with npx or uvx, serve it over HTTP and use its URL, " +
+		"or review it and allow that definition with 'defenseclaw mcp allow <name> --command ... --args ...'"
+	source := `mcp server "vs7time" is disabled because its install admission rejected it (scanner failure (fail-closed): ` + refusal + `); asset_policy.mode does not apply to admission verdicts`
+	if len(source) <= 512 {
+		t.Fatalf("the reason (%d bytes) does not exercise the old 512-byte bound", len(source))
+	}
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__vs7time__get_current_time"}
+	for _, standalone := range []bool{true, false} {
+		useAgentVerdictProfile(t, standalone, false)
+		block := claudeCodeResponseFor(req, "block", "block", "HIGH", source, nil, "action", true)
+		for _, want := range []string{"MCP server vs7time is disabled", "only as a package through the bare npx or uvx",
+			"start it with npx or uvx, or serve it over HTTP", agentBlockNoRetry} {
+			if !strings.Contains(block.Reason, want) {
+				t.Fatalf("standalone=%v block = %q, want it to say %q", standalone, block.Reason, want)
+			}
+		}
+		for _, leaked := range []string{"node", "allowlisted", "still scanning", "try the same call again", redactedTokenPrefix} {
+			if strings.Contains(block.Reason, leaked) {
+				t.Fatalf("standalone=%v block = %q, must not contain %q", standalone, block.Reason, leaked)
+			}
+		}
+	}
+	useAgentVerdictProfile(t, true, false)
+	timeout := `mcp server "vs7time" is disabled because its install admission rejected it (scanner failure (fail-closed): scanner: mcp-scanner exited 1: TimeoutError: no answer); asset_policy.mode does not apply to admission verdicts`
+	block := claudeCodeResponseFor(req, "block", "block", "HIGH", timeout, nil, "action", true)
+	if !strings.Contains(block.Reason, "(MCP server vs7time is disabled because its install admission rejected it (scanner failure (fail-closed)))") {
+		t.Fatalf("a scan that did not finish = %q, want the bare failure kind", block.Reason)
 	}
 }
