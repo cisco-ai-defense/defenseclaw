@@ -668,6 +668,10 @@ func TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget(t *testing.T
 		}
 	}
 
+	// The corpus rows of a profile run concurrently: they are independent
+	// calls, as a gateway answers them. One row after another this test
+	// took 321 s of a CI race shard and 123 s on four cores of dc-build-2
+	// under -race; concurrently 35 s (rel-1-0-6:GAP-0252).
 	const connector = "redirect-reduction-corpus"
 	for _, profile := range toolCallCorpusProfiles {
 		t.Run(profile, func(t *testing.T) {
@@ -684,7 +688,8 @@ func TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget(t *testing.T
 				})
 				return buildVerdict(findings, "tool_call").Action == guardrailActionBlock
 			}
-			for _, test := range posix {
+			eachConcurrently(len(posix), func(i int) {
+				test := posix[i]
 				base := strings.TrimSpace(test.Command)
 				for _, home := range []string{"/home/alice", ""} {
 					want := blocks(test, base+" > /home/alice/out.txt", home)
@@ -696,7 +701,7 @@ func TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget(t *testing.T
 						}
 					}
 				}
-			}
+			})
 		})
 	}
 }
