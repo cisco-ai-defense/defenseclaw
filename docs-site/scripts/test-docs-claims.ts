@@ -2673,3 +2673,14 @@ describe('retained-state file names match the Remove pages (sidecar-aispg-retest
     assert.ok(go.includes('retainedStateFileName      = "retained-state.json"') && go.includes('retainedMarkerName         = ".defenseclaw-retained"'), 'retained-state names changed: re-check enterprise/lifecycle.mdx What uninstall keeps, linux.mdx and macos.mdx Remove');
   });
 });
+
+describe('hook_process_fail_open next to fail-closed managed hooks (rel-1-0-6:GAP-0411)', () => {
+  it('the warning and the troubleshooting row say it is the agent limit, not the hook fail mode', () => {
+    const go = source('internal/enterprisestatus/hook_process_failure.go');
+    assert.ok(go.includes("This is the agent's own behavior, not DefenseClaw's fail mode: the managed hook still fails closed (effective_hook_fail_mode closed) when the gateway does not answer. "),
+      'the hook_process_fail_open warning no longer explains the fail mode');
+    const text = page('enterprise/troubleshooting.mdx');
+    assert.ok(text.includes("It is an agent limit, not DefenseClaw's hook fail mode: a managed hook still fails closed when the gateway does not answer"),
+      'troubleshooting.mdx hook_process_fail_open row no longer separates the agent limit from the fail mode');
+  });
+});
