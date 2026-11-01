@@ -21,6 +21,8 @@ type judgeBodyPathHooks struct {
 	chmodFile        func(*os.File, os.FileMode) error
 	chmodPath        func(string, os.FileMode) error
 	beforeSQLiteOpen func(string) error
+	// secureClient opens with the pragmas of main (auditPragmasFor).
+	secureClient bool
 }
 
 func (hooks judgeBodyPathHooks) withDefaults() judgeBodyPathHooks {
@@ -48,7 +50,7 @@ func (prepared *preparedJudgeBodyPath) close() {
 }
 
 func prepareJudgeBodyDatabasePath(path string, hooks judgeBodyPathHooks) (*preparedJudgeBodyPath, error) {
-	// openSQLite appends its pragma query to the filename. Reject a filename
+	// openSQLiteWithPragmas appends its pragma query to the filename. Reject a filename
 	// that already contains the DSN delimiter so the validated filesystem path
 	// cannot differ from the file SQLite actually opens.
 	if strings.ContainsRune(path, '?') {

@@ -116,3 +116,5 @@ edge-connector/third_party/** -whitespace
 docs-site/content/**/*.mdx text eol=lf
 cli/defenseclaw/enforce/_asset_name_fold.py text eol=lf
 internal/enterprisepolicy/testdata/copilot-vscode-guarded/** text eol=lf
+# dscl output fixtures: a value dscl prints with its own trailing spaces is part of the case.
+internal/unixidentity/testdata/dscl-listing/* text eol=lf -whitespace

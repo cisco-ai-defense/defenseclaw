@@ -1,0 +1,11 @@
+_www                     70
+_wwwproxy                252
+daemon                   1
+nobody                   -2
+root                     0
+alice                    3000000001
+bob                    3000000002
+carol                    3000000003 3000000013
+dave                    3000000004
+josé                   3000000005
+frank                    -3000000006

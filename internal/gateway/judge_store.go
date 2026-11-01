@@ -215,7 +215,7 @@ func NewJudgeStoreFromBodyStore(s *audit.JudgeBodyStore, logger *audit.Logger, q
 // bodies. It returns a cutover-complete dedicated store or an error; callers must
 // abort startup on error and must never substitute audit.Store.
 func openAuthoritativeJudgeBodyStore(ctx context.Context, path string, legacy *audit.Store) (*audit.JudgeBodyStore, error) {
-	store, err := audit.NewJudgeBodyStoreForCutover(path)
+	store, err := audit.NewJudgeBodyStoreForCutover(path, legacy.StoreOptions()...)
 	if err != nil {
 		return nil, fmt.Errorf("initialize authoritative judge-body store: %w", err)
 	}

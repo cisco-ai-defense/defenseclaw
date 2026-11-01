@@ -27,6 +27,8 @@ type auditDBPathHooks struct {
 	// schemaTolerant opens with writable_schema on (schemaTolerantPragmas):
 	// only the rebuild of a damaged 0.x store sets it.
 	schemaTolerant bool
+	// secureClient opens with the pragmas of main (auditPragmasFor).
+	secureClient bool
 	// reopenSidecarForHardening reopens a pinned SQLite sidecar with the
 	// ACL-changing capability.
 	reopenSidecarForHardening func(string, *os.File) (*os.File, error)
@@ -106,7 +108,7 @@ func (opened *hardenedAuditSQLite) Close() error {
 }
 
 // openHardenedAuditSQLite is the intended NewStore integration seam. It
-// preserves the existing pool/pragma behavior in openSQLite while adding a
+// preserves the existing pool/pragma behavior in openSQLiteWithPragmas while adding a
 // fail-closed filesystem trust boundary around the lazy database/sql open.
 func openHardenedAuditSQLite(dbPath string, hooks auditDBPathHooks) (*hardenedAuditSQLite, error) {
 	db, _, prepared, err := openHardenedAuditSQLiteWithIdentity(dbPath, hooks)
@@ -131,7 +133,7 @@ func openHardenedAuditSQLiteWithIdentity(
 	}
 
 	if prepared.inMemory {
-		db, err := openSQLite(prepared.path)
+		db, err := openSQLiteWithPragmas(prepared.path, auditPragmasFor(hooks.secureClient))
 		if err != nil {
 			prepared.close()
 			return nil, "", nil, err
@@ -144,7 +146,7 @@ func openHardenedAuditSQLiteWithIdentity(
 			return nil, "", nil, fmt.Errorf("audit: pre-open path check: %w", err)
 		}
 	}
-	pragmas := auditPragmas
+	pragmas := auditPragmasFor(hooks.secureClient)
 	if hooks.schemaTolerant {
 		pragmas = schemaTolerantPragmas
 	}
@@ -187,7 +189,7 @@ func prepareAuditDatabasePath(path string, hooks auditDBPathHooks) (*preparedAud
 	if path == ":memory:" {
 		return &preparedAuditDatabasePath{path: path, hooks: hooks, inMemory: true}, nil
 	}
-	// openSQLite appends its pragma query to the filename. Reject a filename
+	// openSQLiteWithPragmas appends its pragma query to the filename. Reject a filename
 	// that already contains the delimiter so the validated path cannot differ
 	// from the resource SQLite opens.
 	if strings.ContainsRune(path, '?') {

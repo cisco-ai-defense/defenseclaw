@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"sync"
@@ -1343,26 +1344,50 @@ func TestCheckpointWALIfLargeBoundedCatchUpHoldsOffAnotherWriter(t *testing.T) {
 
 // rel-1-0-3 GAP-0247, GAP-0136: audit.db is never memory-mapped on Windows,
 // where a sync of a mapped database grew with its size and kept the log from
-// being restarted; elsewhere every audit connection maps up to 256 MiB.
-func TestAuditConnectionsMapTheDatabaseOnlyOffWindows(t *testing.T) {
-	store, cleanup := newTestStore(t)
-	defer cleanup()
-	want := int64(256 << 20)
+// being restarted. rel-1-0-6 GAP-0327: nor elsewhere, where the pages read
+// through the map stayed resident and the gateway's RSS grew with the store.
+// A Secure Client store keeps main's map (256 MiB off Windows, #1092) on
+// every connection it opens, the judge-body store too.
+func TestAuditConnectionsNeverMapTheDatabaseOutsideSecureClient(t *testing.T) {
+	scWant := int64(256 << 20)
 	if runtime.GOOS == "windows" {
-		want = 0
+		scWant = 0
 	}
-	if got := auditMmapSizeBytes(); got != want {
-		t.Fatalf("auditMmapSizeBytes() = %d on %s; want %d", got, runtime.GOOS, want)
-	}
-	checkpointDB, err := store.checkpointConn()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, db := range map[string]*sql.DB{"writer": store.db, "checkpoint": checkpointDB} {
-		var size int64
-		if err := db.QueryRow(`PRAGMA mmap_size`).Scan(&size); err != nil || size != want {
-			t.Fatalf("%s connection mmap_size = %d, %v; want %d", name, size, err, want)
-		}
+	for _, tc := range []struct {
+		name string
+		opts []StoreOption
+		want int64
+	}{{"standalone", nil, 0}, {"secure-client", []StoreOption{WithSecureClientSchema()}, scWant}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := NewStore(filepath.Join(dir, "audit.db"), tc.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if err := store.Init(); err != nil {
+				t.Fatal(err)
+			}
+			checkpointDB, err := store.checkpointConn()
+			if err != nil {
+				t.Fatal(err)
+			}
+			durableDB, err := store.durableConn()
+			if err != nil {
+				t.Fatal(err)
+			}
+			bodies, err := NewJudgeBodyStoreForCutover(filepath.Join(dir, "judge_bodies.db"), store.StoreOptions()...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer bodies.Close()
+			for name, db := range map[string]*sql.DB{"writer": store.db, "checkpoint": checkpointDB, "durable": durableDB, "judge-body": bodies.db} {
+				var size int64
+				if err := db.QueryRow(`PRAGMA mmap_size`).Scan(&size); err != nil || size != tc.want {
+					t.Fatalf("%s connection mmap_size = %d, %v; want %d", name, size, err, tc.want)
+				}
+			}
+		})
 	}
 }
 
