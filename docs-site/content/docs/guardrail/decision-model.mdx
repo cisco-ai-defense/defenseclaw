@@ -1,50 +1,53 @@
 ---
 title: Decision model
-description: An optional fast model in front of the LLM judge. It allows the clear benign tool calls itself and sends the rest to the judge. Off by default. The skill scanner records its score as advisory only.
+description: An optional fast model for tool calls. It runs in front of the LLM judge, or on its own for the connectors you list. Off by default. The skill scanner records its score as advisory only.
 keywords:
   - DefenseClaw decision model
   - decision_model
+  - decision_model.hook_connectors
   - System One
   - DEFENSECLAW_DECISION_MODEL_KEY
   - defenseclaw setup decision-model
   - LLM judge cost
 ---
 
-The decision model is a small, fast model that sits between the rules and the [LLM judge](/docs/guardrail). It answers one question per tool call, "allow, confirm or block?", with calibrated probabilities. DefenseClaw lets it decide the clear calls and sends the unclear ones to the judge. It is off by default.
+The decision model is a small, fast model that answers one question per tool call, "allow, confirm or block?", with calibrated probabilities. It is off by default.
 
 Like the [unified LLM key](/docs/guardrail/unified-llm-key), it is one setting, `decision_model:`, used by two components:
 
 | Component | What it does with the decision model |
 | --- | --- |
-| Guardrail (tool calls) | A first pass before the LLM judge: a confident allow skips the judge, a confident block is checked by the judge, everything else goes to the judge. |
+| Guardrail (tool calls) | Answers tool calls, in front of the LLM judge or on its own (see the cascades below). |
 | `defenseclaw skill scan` | Records the model's score for the skill. Advisory only: it never adds a finding or changes the verdict. |
+
+## Three cascades
+
+The rules always run first. What runs after them is set per connector:
+
+| Cascade | Set up with | Who answers a tool call the rules let through |
+| --- | --- | --- |
+| 1. Rules only | nothing (the default) | Nobody: the rule verdict stands. |
+| 2. Rules, then the decision model | the connector in `decision_model.hook_connectors`, no LLM judge for it | The decision model. |
+| 3. Rules, then the decision model, then the LLM judge | the connector in `guardrail.judge.hook_connectors`, with the decision model on | The decision model decides the clear calls and the judge the rest. |
+
+A connector the judge covers always gets cascade 3, listed or not. A connector in neither list stays rules only.
 
 ## Before you start
 
 - A decision model endpoint that speaks the System One protocol: `POST` a JSON body `{model, state, questions}` and get back `answers` with probabilities. It can be a server on the same machine (`http://127.0.0.1:...`) or a hosted service over `https`.
-- The LLM judge turned on for the connectors you want covered. The decision model only runs where the judge runs: tool calls of a connector in `guardrail.judge.hook_connectors`, with a judge detection strategy (`regex_judge` or `judge_first`).
+- For cascade 3, the [LLM judge](/docs/guardrail) turned on for the connector. Cascade 2 needs no judge.
 
-Turning it on adds one network call per judged tool call, to the URL you configure. Plain `http` is accepted only for a loopback host; any other host needs `https`.
+Each tool call the model answers is one network call to the URL you configure. Plain `http` is accepted only for a loopback host; any other host needs `https`.
 
 ## Turn it on
 
-1. Point DefenseClaw at the endpoint.
+1. Point DefenseClaw at the endpoint, and name the connectors it should answer for on its own:
 
    ```bash
-   defenseclaw setup decision-model --base-url https://dm.example.com/v1/systemone --model jev-1.13.0 --ping
+   defenseclaw setup decision-model --base-url https://dm.example.com/v1/systemone --model jev-1.13.0 --connectors claudecode,codex --ping
    ```
 
-   ```text
-     OK Saved to /home/alice/.defenseclaw/config.yaml
-       decision_model.enabled:        true
-       decision_model.model:          jev-1.13.0
-       decision_model.base_url:       https://dm.example.com/v1/systemone
-       decision_model.api_key_env:    DEFENSECLAW_DECISION_MODEL_KEY = not set (fine for a local server)
-       ...
-     OK Decision model reachable: answered allow (risk 0.00) in 64 ms
-   ```
-
-   Run it with no flags to answer the questions instead. The running gateway applies the change without a restart.
+   `--connectors` takes names or `*` and replaces the list; `--connectors ""` clears it (cascade 3 only). Run the command with no flags to answer the questions instead. The running gateway applies the change without a restart.
 
 2. If the endpoint needs a token, store it. The prompt is hidden and the value goes to `~/.defenseclaw/.env`.
 
@@ -61,36 +64,47 @@ Turning it on adds one network call per judged tool call, to the URL you configu
    defenseclaw doctor
    ```
 
-   `doctor` shows a `Decision model` row while it is on, and nothing while it is off.
+   `--show` and the `doctor` **Decision model** row name the cascade of each active connector, for example `claudecode: rules -> decision model; codex: rules -> decision model -> LLM judge`. `doctor` shows the row only while the model is on.
 
 ### During `defenseclaw init`
 
-The init wizard asks one optional question, **Do you want to use a decision model?**, after the LLM judge step and only when you turned the judge on for a connector. The default is no. Yes asks for the endpoint URL, the model name, the token variable and, hidden, the token.
+The init wizard asks one optional question, **Do you want to use a decision model?**, when it puts at least one connector in action mode, with or without the LLM judge. The default is no. Yes asks for the endpoint URL, the model name, the token variable and, hidden, the token, and lists the action-mode connectors in `decision_model.hook_connectors`.
 
 In scripts, pass the flags; `--yes` alone leaves it off:
 
 ```bash
 defenseclaw init --yes --decision-model-url https://dm.example.com/v1/systemone --decision-model-name jev-1.13.0
-defenseclaw quickstart --decision-model-url http://127.0.0.1:8791/v1/systemone --decision-model-name my-model
+defenseclaw quickstart --decision-model-url http://127.0.0.1:8791/v1/systemone --decision-model-name my-model --decision-model-connectors codex
 ```
 
-`init --no-decision-model` turns it off. The init report has a `Decision Model` step that says whether the endpoint answered.
+Without `--decision-model-connectors` the action-mode connectors are listed. `init --no-decision-model` turns it off. The init report has a `Decision Model` step that says whether the endpoint answered.
 
 ## How it decides
 
 Risk is `1 - P(allow)` from the model's answer.
 
-| The model says | DefenseClaw does |
-| --- | --- |
-| allow, risk at or below `allow_threshold` (0.30) | Allows the call. The judge does not run, unless a rule flagged the call: then the rule finding stands and the judge still runs. |
-| block, risk at or above `block_threshold` (0.75) | Adds a HIGH `JUDGE-DECISION-MODEL` finding and runs the judge, which can raise it (`on_confident_block: escalate`, the default). With `decide`, the finding stands and the judge does not run. |
-| anything else | Runs the judge as usual. |
+| The model says | Cascade 2 (no judge) | Cascade 3 (with the judge) |
+| --- | --- | --- |
+| allow, risk at or below `allow_threshold` (0.30) | Allow. | Allow; the judge does not run. |
+| block, risk at or above `block_threshold` (0.75) | A CRITICAL `JUDGE-DECISION-MODEL` finding: blocked at every built-in `block_at`. | A HIGH `JUDGE-DECISION-MODEL` finding, and the judge runs and can raise it (`on_confident_block: escalate`, the default). With `decide` the finding stands and the judge does not run. |
+| anything else (confirm, or a weaker allow or block) | A HIGH `JUDGE-DECISION-MODEL` finding that asks for confirmation (below). | The judge decides. |
 
-The rules always run first. A rule block is never revisited, and the decision model can never turn a rule finding into an allow. Its finding goes through `block_at` and `alert_at` like any judge finding, so at the default `block_at: CRITICAL` a decision-model block alone is an alert, not a block. In observe mode nothing is blocked.
+A cascade-2 confirmation:
+
+- At a `block_at` of HIGH or lower (the strict policy) it blocks.
+- Otherwise the agent asks the user where its hook can ask before a tool runs: Claude Code (in its default Manual permission mode), Antigravity, Amp and GitHub Copilot in VS Code.
+- Where the agent cannot ask (Codex, or Claude Code outside Manual mode) it is a HIGH alert under the default and permissive policies, as an LLM judge HIGH finding is.
+
+The rules always come first. A rule block is never revisited, and the decision model never lowers a rule finding: on a call the rules flagged, an allow keeps the rule verdict (cascade 2) or still runs the judge (cascade 3). Every finding goes through `block_at` and `alert_at` like a judge finding. In observe mode nothing is blocked or asked.
 
 ## When it is down
 
-A decision model that is unreachable, slower than `timeout` (1 second, and never more than a quarter of the judge's remaining time), or answers outside the protocol changes nothing: the judge decides that call exactly as it does without a decision model. Each call is recorded as a judge event of kind `decision_model` with its action (`allow`, `block`, `escalate` or `error`), latency and failure class, and the gateway log says `decision model unavailable; the LLM judge decides this call as before`. After three failures in a row DefenseClaw stops calling it for 30 seconds, so an outage costs the judge no time.
+A decision model that is unreachable, slower than `timeout` (1 second; in cascade 3 never more than a quarter of the judge's remaining time), or answers outside the protocol never allows a call by itself:
+
+- Cascade 2: the rule verdict stands, exactly as when the LLM judge is down. The gateway log says `hook judge unavailable`, and the judge fallback counter goes up.
+- Cascade 3: the judge decides that call exactly as it does without a decision model.
+
+Each call is recorded as a judge event of kind `decision_model` with its action (`allow`, `block`, `confirm`, `escalate` or `error`), latency and failure class. After three failures in a row DefenseClaw stops calling it for 30 seconds.
 
 ## Skill scans
 
@@ -113,22 +127,30 @@ On a managed device the administrator sets `decision_model:` in the admin `confi
 | `decision_model.enabled` | `false` | Turn it on. Needs `base_url` and `model`. |
 | `decision_model.model` | empty | Model name sent in each request. |
 | `decision_model.base_url` | empty | Full endpoint URL. `https`, or `http` to `127.0.0.1`, `::1` or `localhost`. No credentials in the URL. |
+| `decision_model.hook_connectors` | empty | Connectors (or `*`) whose tool calls it answers on its own where the LLM judge does not run (cascade 2). Empty: only in front of the judge. |
 | `decision_model.api_key_env` | `DEFENSECLAW_DECISION_MODEL_KEY` | Variable that holds the bearer token. An unset variable sends no token. |
 | `decision_model.credential` | empty | Managed devices only: protected credential that holds the token. |
-| `decision_model.timeout` | `1` | Seconds per call (up to 30). The gateway also caps each call at a quarter of the time left for the judge. |
-| `decision_model.allow_threshold` | `0.30` | Risk at or below which an allow skips the judge. |
-| `decision_model.block_threshold` | `0.75` | Risk at or above which a block answer is a confident block. |
-| `decision_model.on_confident_block` | `escalate` | `escalate` or `decide`. |
+| `decision_model.timeout` | `1` | Seconds per call (up to 30). In cascade 3 the gateway also caps each call at a quarter of the time left for the judge. |
+| `decision_model.allow_threshold` | `0.30` | Risk at or below which an allow is confident. |
+| `decision_model.block_threshold` | `0.75` | Risk at or above which a block answer is confident. |
+| `decision_model.on_confident_block` | `escalate` | Cascade 3 only: `escalate` or `decide`. |
 
 In the TUI, open **0 Setup**, press `c` for the config editor and pick the **Decision Model** section.
 
 ## Benchmarks
 
-The routing and thresholds are the operating point measured in the [System One benchmark](https://huggingface.co/spaces/Vineethsain/defenseclaw-system-one). On its broad tool-call corpus (3,817 cases), rules, then OpenJev, then the Gemma 4 judge cut judge traffic from 100% to 16% and false blocks from 23 to 14 of 3,381 benign calls, with block-only F1 from 0.712 to 0.738 (0.752 with escalate-on-confirm). The board ranks twelve candidate models; check each model's licence before you deploy it (the OpenJev weights are CC BY-NC 4.0, non-commercial).
+The routing and thresholds are the operating point measured in the [System One benchmark](https://huggingface.co/spaces/Vineethsain/defenseclaw-system-one), with OpenJev as the decision model and Gemma 4 as the judge:
+
+- Broad corpus (3,817 tool calls, 3,381 benign): cascade 3 cut judge traffic from 100% to 16% and false blocks from 23 to 14, with block-only F1 from 0.712 to 0.738. Cascade 2 had 13 false blocks, F1 0.702, and asked for confirmation on 8.5% of calls.
+- Production-weighted corpus (24,476 calls, 99% benign): cascade 2 scored F1 0.213 against 0.082 for cascade 3, with 224 false blocks of 24,255 benign calls and confirmations on 6.6%.
+- Latency depends on the server: the hosted Jev 1.13.0 answered in 1.4 s median (7.4 s at p95) on the broad corpus. The default 1-second timeout suits a local server; raise `timeout` for a hosted one.
+
+Check each model's licence before you deploy it (the OpenJev weights are CC BY-NC 4.0, non-commercial).
 
 ## Limits
 
 - Tool calls only. Prompts, completions and tool results go to the judge as before.
-- It runs only where the judge runs; with the judge off, turning it on changes no guardrail verdict (`doctor` and `setup decision-model` say so).
+- A connector in neither `decision_model.hook_connectors` nor the judge's list gets no decision model (`doctor` and `setup decision-model` say so).
+- Even the best model in the benchmark blocked only about 58% of proven compromises: it adds a layer, it does not replace the rules.
 - The skill-scan score is advisory and is not used by the install watcher.
 - Secure Client deployments refuse `decision_model`.
