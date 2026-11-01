@@ -136,7 +136,18 @@ rules:
     confidence: 0.95
     tags: [system-file, credential]
   - id: PATH-ETC-SUDOERS
-    expression: 'false'
+    # The main sudoers file is changed only through visudo. A tool call that
+    # writes, appends to or deletes /etc/sudoers itself is this rule's own
+    # form (rel-1-0-6:GAP-0353); the ActionFacts owner proves the executing
+    # mutation. Reads, visudo -c and project files that only share the name
+    # stay quiet. A drop-in under /etc/sudoers.d is strict-only here, and an
+    # unrestricted NOPASSWD grant has its own rule.
+    expression: >-
+      f.paths.exists(p,
+      (p.resolved == '/etc/sudoers' || p.normalized == '/etc/sudoers') &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     pattern: 'a^'
     title: "/etc/sudoers access"
     severity: HIGH

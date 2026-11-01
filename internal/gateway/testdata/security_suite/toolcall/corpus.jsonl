@@ -236,7 +236,13 @@
 {"id":"history-unset-function","rule_id":"integrity.history_tamper","command":"unset -f HISTFILE","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"history-unset-function-and-variable","rule_id":"integrity.history_tamper","command":"unset -fv HISTFILE","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"history-unset-unknown-option","rule_id":"integrity.history_tamper","command":"unset --future-mode HISTFILE","is_attack":false,"expect_route":"none","no_other_finding":true}
-{"id":"sudoers-write","rule_id":"PATH-ETC-SUDOERS","command":"tee /etc/sudoers","is_attack":true,"expect_route":"semantic","no_other_finding":true,"profile_posture":"strict_only"}
+{"id":"sudoers-write","rule_id":"PATH-ETC-SUDOERS","command":"tee /etc/sudoers","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"sudoers-dropin-write","rule_id":"PATH-ETC-SUDOERS","command":"tee /etc/sudoers.d/opsbot","is_attack":true,"expect_route":"semantic","no_other_finding":true,"profile_posture":"strict_only"}
+{"id":"structured-sudoers-write","rule_id":"PATH-ETC-SUDOERS","tool":"write_file","args":{"path":"/etc/sudoers","content":"Defaults env_reset\n"},"is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"patch-sudoers-write","rule_id":"PATH-ETC-SUDOERS","tool":"apply_patch","args":{"command":"*** Begin Patch\n*** Update File: sudoers\n@@\n Defaults env_reset\n+Defaults use_pty\n*** End Patch"},"cwd":"/etc","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"structured-sudoers-read","rule_id":"PATH-ETC-SUDOERS","tool":"read_file","args":{"path":"/etc/sudoers"},"is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"structured-project-sudoers-write","rule_id":"PATH-ETC-SUDOERS","tool":"write_file","args":{"path":"/repo/etc/sudoers","content":"Defaults env_reset\n"},"cwd":"/repo","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"sudoers-visudo-check","rule_id":"PATH-ETC-SUDOERS","command":"visudo -c -f /etc/sudoers","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"sudoers-read","rule_id":"PATH-ETC-SUDOERS","command":"cat /etc/sudoers","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"authorized-keys-structured-write","rule_id":"persistence.ssh_authorized_keys_command","tool":"write_file","args":{"path":"/home/alice/.ssh/authorized_keys","content":"key"},"is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"oversized-prefix-authorized-keys-write","rule_id":"persistence.ssh_authorized_keys_command","tool":"write_file","args":{"file_path":"/home/alice/.ssh/authorized_keys","content":"head of oversized input"},"is_attack":true,"expect_route":"semantic","no_other_finding":true}

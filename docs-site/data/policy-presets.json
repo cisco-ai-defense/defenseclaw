@@ -3043,7 +3043,7 @@
                 },
                 {
                   "id": "PATH-ETC-SUDOERS",
-                  "expression": "false",
+                  "expression": "f.paths.exists(p, (p.resolved == '/etc/sudoers' || p.normalized == '/etc/sudoers') && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "a^",
                   "title": "/etc/sudoers access",
                   "severity": "HIGH",
@@ -10691,7 +10691,7 @@
                 },
                 {
                   "id": "PATH-ETC-SUDOERS",
-                  "expression": "false",
+                  "expression": "f.paths.exists(p, (p.resolved == '/etc/sudoers' || p.normalized == '/etc/sudoers') && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "a^",
                   "title": "/etc/sudoers access",
                   "severity": "HIGH",
