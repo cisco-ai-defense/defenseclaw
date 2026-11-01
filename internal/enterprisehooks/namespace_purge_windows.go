@@ -63,9 +63,13 @@ type windowsNamespacePurgeDescriptorSet struct {
 	files       []*windows.SECURITY_DESCRIPTOR
 	// inheritedDirectories and inheritedFiles are what an object a killed
 	// first install created under the canonical install root carries before
-	// the install gave it its own protected DACL: owned by LocalSystem or
-	// Administrators, not protected, and only the ACEs it inherited from
-	// that root. Accepted below the root only (p0-round:GAP-1365).
+	// the install gave it its own protected DACL: not protected, and only
+	// the ACEs it inherited from that root. Matched by owner (SYSTEM or
+	// Administrators, whichever ran Setup), control bits and the exact DACL;
+	// the primary group, which grants nothing in an access check, is
+	// ignored (p0-round:GAP-1587). Set for the standalone profile only, and
+	// accepted below the root only (p0-round:GAP-1365); a Secure Client
+	// purge keeps the canonical shapes alone.
 	inheritedDirectories []*windows.SECURITY_DESCRIPTOR
 	inheritedFiles       []*windows.SECURITY_DESCRIPTOR
 	quarantine           *windows.SECURITY_DESCRIPTOR
@@ -185,7 +189,95 @@ func validateWindowsNamespacePurgeRequest(
 	if _, err := parseWindowsNamespacePurgeGatewaySID(request.GatewayServiceSID); err != nil {
 		return nil, err
 	}
-	return windowsNamespacePurgeCanonicalDescriptors(request.GatewayServiceSID)
+	descriptors, err := windowsNamespacePurgeCanonicalDescriptors(request.GatewayServiceSID)
+	if err != nil {
+		return nil, err
+	}
+	if request.Profile == winpath.EnterpriseProfileStandalone {
+		if err := addWindowsNamespacePurgeInheritedDescriptors(descriptors, request.GatewayServiceSID); err != nil {
+			return nil, err
+		}
+	}
+	return descriptors, nil
+}
+
+// addWindowsNamespacePurgeInheritedDescriptors adds the inherited shapes of
+// the standalone install root (InstallDirectory and ServiceInstallDirectory)
+// to descriptors. Their owner is a placeholder: the match takes SYSTEM or
+// Administrators (windowsNamespacePurgeInheritedMatches).
+func addWindowsNamespacePurgeInheritedDescriptors(descriptors *windowsNamespacePurgeDescriptorSet, gatewaySID string) error {
+	for _, extra := range []string{"", fmt.Sprintf("(A;OICIID;0x1200a9;;;%s)", gatewaySID)} {
+		directory, err := windows.SecurityDescriptorFromString("O:SYG:SYD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x1200a9;;;BU)" + extra)
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: build inherited namespace cleanup directory descriptor: %w", err)
+		}
+		file, err := windows.SecurityDescriptorFromString("O:SYG:SYD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)" + strings.Replace(extra, "OICIID", "ID", 1))
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: build inherited namespace cleanup file descriptor: %w", err)
+		}
+		descriptors.inheritedDirectories = append(descriptors.inheritedDirectories, directory)
+		descriptors.inheritedFiles = append(descriptors.inheritedFiles, file)
+	}
+	return nil
+}
+
+// windowsNamespacePurgeInheritedMatches reports whether the object behind
+// handle is owned by SYSTEM or Administrators and has the control bits and
+// exact DACL of one of allowed, whatever its primary group.
+func windowsNamespacePurgeInheritedMatches(handle windows.Handle, allowed []*windows.SECURITY_DESCRIPTOR) (bool, error) {
+	if len(allowed) == 0 {
+		return false, nil
+	}
+	actual, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	owner, ownerDefaulted, err := actual.Owner()
+	if err != nil || owner == nil || ownerDefaulted ||
+		!(owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid)) {
+		return false, err
+	}
+	actualControl, _, err := actual.Control()
+	if err != nil {
+		return false, err
+	}
+	actualDACL, actualDefaulted, err := actual.DACL()
+	if err != nil || actualDACL == nil {
+		return false, err
+	}
+	actualBytes, err := windowsNamespacePurgeACLBytes(actualDACL)
+	if err != nil {
+		return false, err
+	}
+	for _, candidate := range allowed {
+		expectedControl, _, err := candidate.Control()
+		if err != nil {
+			return false, err
+		}
+		if actualControl&^windows.SE_DACL_AUTO_INHERITED != expectedControl&^windows.SE_DACL_AUTO_INHERITED {
+			continue
+		}
+		expectedDACL, expectedDefaulted, err := candidate.DACL()
+		if err != nil || expectedDACL == nil {
+			return false, err
+		}
+		if actualDefaulted != expectedDefaulted {
+			continue
+		}
+		expectedBytes, err := windowsNamespacePurgeACLBytes(expectedDACL)
+		if err != nil {
+			return false, err
+		}
+		equal := bytes.Equal(actualBytes, expectedBytes)
+		runtime.KeepAlive(candidate)
+		if equal {
+			runtime.KeepAlive(actual)
+			return true, nil
+		}
+	}
+	runtime.KeepAlive(actual)
+	return false, nil
 }
 
 func validateWindowsNamespacePurgeRootPath(path string) error {
@@ -393,26 +485,7 @@ func windowsNamespacePurgeCanonicalDescriptors(
 	if err != nil {
 		return nil, err
 	}
-	var inheritedDirectories, inheritedFiles []*windows.SECURITY_DESCRIPTOR
-	for _, owner := range []string{"O:SYG:SY", "O:BAG:BA", "O:SYG:BA", "O:BAG:SY"} {
-		// Inherited from the InstallDirectory shape, or from the
-		// ServiceInstallDirectory shape with the gateway read ACE.
-		for _, extra := range []string{"", fmt.Sprintf("(A;OICIID;0x1200a9;;;%s)", gatewaySID)} {
-			directory, err := build(owner+"D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x1200a9;;;BU)"+extra, "inherited InstallDirectory")
-			if err != nil {
-				return nil, err
-			}
-			file, err := build(owner+"D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)"+strings.Replace(extra, "OICIID", "ID", 1), "inherited InstallFile")
-			if err != nil {
-				return nil, err
-			}
-			inheritedDirectories = append(inheritedDirectories, directory)
-			inheritedFiles = append(inheritedFiles, file)
-		}
-	}
 	return &windowsNamespacePurgeDescriptorSet{
-		inheritedDirectories: inheritedDirectories,
-		inheritedFiles:       inheritedFiles,
 		directories: []*windows.SECURITY_DESCRIPTOR{
 			adminDirectory,
 			installDirectory,
@@ -1051,21 +1124,24 @@ func validateWindowsNamespacePurgeNode(
 	} else {
 		allowed = descriptors.files
 	}
-	if !root {
-		// Below a root that matched its own canonical descriptor, an
-		// object may carry only the ACEs it inherited from it: the shape
-		// a first install killed before it protected the object leaves
-		// (p0-round:GAP-1365). Only SYSTEM and Administrators can write
-		// it, as for the canonical shapes.
-		if node.directory {
-			allowed = append(append([]*windows.SECURITY_DESCRIPTOR(nil), allowed...), descriptors.inheritedDirectories...)
-		} else {
-			allowed = append(append([]*windows.SECURITY_DESCRIPTOR(nil), allowed...), descriptors.inheritedFiles...)
-		}
-	}
 	matched, err := windowsNamespacePurgeHandleMatches(node.handle, allowed)
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: inspect Windows namespace purge descriptor for %s: %w", node.label, err)
+	}
+	if !matched && !root {
+		// Below a root that matched its own canonical descriptor, an
+		// object of a standalone purge may carry only the ACEs it inherited
+		// from it: the shape a first install killed before it protected the
+		// object leaves (p0-round:GAP-1365, GAP-1587). Only SYSTEM and
+		// Administrators can write it, as for the canonical shapes.
+		inherited := descriptors.inheritedFiles
+		if node.directory {
+			inherited = descriptors.inheritedDirectories
+		}
+		matched, err = windowsNamespacePurgeInheritedMatches(node.handle, inherited)
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: inspect Windows namespace purge descriptor for %s: %w", node.label, err)
+		}
 	}
 	if !matched {
 		return fmt.Errorf("enterprise hooks: Windows namespace purge object has a foreign descriptor: %s", node.label)

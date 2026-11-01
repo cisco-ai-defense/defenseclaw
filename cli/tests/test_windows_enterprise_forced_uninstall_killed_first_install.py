@@ -95,6 +95,19 @@ def test_the_route_keys_on_force_and_the_missing_record_flag() -> None:
     assert "MetadataExists" not in decision
 
 
+def test_the_pre_check_shares_the_repair_ancestor_rule_and_a_no_follow_probe() -> None:
+    text = _module()
+    helper = _function(text, "Assert-DefenseClawStateRootAncestorsAdminOnly")
+    assert "@($Layout.StateRootAncestors)" in helper
+    repair = _function(text, "Repair-DefenseClawUninstallAdminFileAcl")
+    assert "Assert-DefenseClawStateRootAncestorsAdminOnly -Layout $Layout" in repair
+    assert "foreach ($ancestor in" not in repair
+    precheck = _function(text, "Test-DefenseClawForcedUninstallStateRootAdminOnly")
+    assert "Assert-DefenseClawStateRootAncestorsAdminOnly -Layout $Layout" in precheck
+    assert "GetDirectorySecuritySnapshotNoFollowIfExists($candidate)" in precheck
+    assert "Management\\Test-Path" not in precheck
+
+
 def test_the_forced_uninstall_checks_service_ownership_strictly() -> None:
     text = _module()
     preparation = _function(text, "Invoke-DefenseClawForcedUninstallPreparation")
@@ -129,18 +142,25 @@ $refusal = & $module {
     } catch { $_.Exception.Message }
 }
 "pending refusal: $refusal"
-# The StateRoot pre-check on real folders.
-$state = Join-Path $Work 'StateRoot'; $install = Join-Path $state 'install'
+# The StateRoot pre-check on real folders: an admin-only vendor ancestor
+# holding an admin-only StateRoot passes; a Users-writable install folder, a
+# Users-writable ancestor (p0-round:GAP-1586) or a junction fails.
+$vendor = Join-Path $Work 'Cisco'; $state = Join-Path $vendor 'DefenseClaw'; $install = Join-Path $state 'install'
 New-Item -ItemType Directory -Force $install | Out-Null
-icacls $state /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /Q | Out-Null
-icacls $state /setowner '*S-1-5-32-544' /T /Q | Out-Null
-$layout = @{ StateRoot = $state; InstallStateDirectory = $install }
+icacls $vendor /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /Q | Out-Null
+icacls $vendor /setowner '*S-1-5-32-544' /T /Q | Out-Null
+$layout = @{ StateRoot = $state; InstallStateDirectory = $install; StateRootAncestors = @($vendor) }
 "precheck admin-only: " + (& $module { param($l) Test-DefenseClawForcedUninstallStateRootAdminOnly -Layout $l } $layout)
+icacls $vendor /grant '*S-1-5-32-545:(M)' /Q | Out-Null
+"precheck users-modify ancestor: " + (& $module { param($l) Test-DefenseClawForcedUninstallStateRootAdminOnly -Layout $l } $layout)
+icacls $vendor /remove:g '*S-1-5-32-545' /Q | Out-Null
+"precheck admin-only again: " + (& $module { param($l) Test-DefenseClawForcedUninstallStateRootAdminOnly -Layout $l } $layout)
 icacls $install /grant '*S-1-5-32-545:(OI)(CI)M' /Q | Out-Null
 "precheck users-modify install: " + (& $module { param($l) Test-DefenseClawForcedUninstallStateRootAdminOnly -Layout $l } $layout)
 $target = Join-Path $Work 'Target'; New-Item -ItemType Directory -Force $target | Out-Null
-$link = Join-Path $Work 'LinkRoot'; cmd /c mklink /J $link $target | Out-Null
-"precheck junction: " + (& $module { param($l) Test-DefenseClawForcedUninstallStateRootAdminOnly -Layout $l } @{ StateRoot = $link; InstallStateDirectory = (Join-Path $link 'install') })
+$link = Join-Path $vendor 'LinkRoot'; cmd /c mklink /J $link $target | Out-Null
+"precheck junction: " + (& $module { param($l) Test-DefenseClawForcedUninstallStateRootAdminOnly -Layout $l } @{ StateRoot = $link; InstallStateDirectory = (Join-Path $link 'install'); StateRootAncestors = @($vendor) })
+cmd /c rmdir $link | Out-Null
 "__END__"
 """
 
@@ -159,6 +179,8 @@ def check_harness_output(output: str) -> None:
         assert f"route {name} force=False purge={without_force}" in output, (name, output)
     assert "pending refusal: untrusted deployment evidence requires authenticated recovery of the existing pending transaction" in output
     assert "precheck admin-only: True" in output
+    assert "precheck users-modify ancestor: False" in output
+    assert "precheck admin-only again: True" in output
     assert "precheck users-modify install: False" in output
     assert "precheck junction: False" in output
 

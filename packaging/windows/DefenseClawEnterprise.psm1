@@ -11827,6 +11827,58 @@ function Assert-DefenseClawUninstallAuthorityRawAcl {
     }
 }
 
+function Assert-DefenseClawStateRootAncestorsAdminOnly {
+    <#
+        Throws unless ProgramData and every StateRoot ancestor is a plain
+        folder owned by SYSTEM, Administrators or TrustedInstaller with no
+        replacement rights for anyone else: DELETE_CHILD or ownership rights
+        on any ancestor could replace StateRoot after its identity was
+        checked. The uninstall ACL recovery of authority-bearing metadata and
+        the forced missing-record route (p0-round:GAP-1586) share it.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    foreach ($ancestor in @(
+        [string]$script:ProgramData
+    ) + @($Layout.StateRootAncestors)) {
+        Assert-DefenseClawNoReparsePath -Path $ancestor
+        $ancestorAcl = Microsoft.PowerShell.Security\Get-Acl `
+            -LiteralPath $ancestor
+        $ancestorRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$ancestorAcl.GetSecurityDescriptorBinaryForm(), 0
+        )
+        if ($null -eq $ancestorRaw.DiscretionaryAcl) {
+            throw "refusing uninstall ACL recovery through a null DACL: $ancestor"
+        }
+        $ancestorOwner = ConvertTo-DefenseClawSID `
+            -Identity $ancestorAcl.Owner
+        if ($ancestorOwner -notin @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        )) {
+            throw "refusing uninstall ACL recovery through an untrusted ancestor owner: $ancestor"
+        }
+        foreach ($rule in $ancestorAcl.Access) {
+            if ($rule.AccessControlType -ne
+                    [Security.AccessControl.AccessControlType]::Allow -or
+                (($rule.PropagationFlags -band
+                        [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)) {
+                continue
+            }
+            $sid = ConvertTo-DefenseClawSID `
+                -Identity $rule.IdentityReference
+            if ($sid -notin @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) -and (Test-DefenseClawReplacementRights `
+                -Rights $rule.FileSystemRights)) {
+                throw "refusing uninstall ACL recovery through a replaceable ancestor: $ancestor"
+            }
+        }
+    }
+}
+
 function Repair-DefenseClawUninstallAdminFileAcl {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -11900,46 +11952,7 @@ function Repair-DefenseClawUninstallAdminFileAcl {
         # lifecycle work. A repair of authority-bearing metadata needs a
         # stricter boundary: DELETE_CHILD or ownership rights on any ancestor
         # could replace StateRoot after its identity was checked.
-        foreach ($ancestor in @(
-            [string]$script:ProgramData
-        ) + @($Layout.StateRootAncestors)) {
-            Assert-DefenseClawNoReparsePath -Path $ancestor
-            $ancestorAcl = Microsoft.PowerShell.Security\Get-Acl `
-                -LiteralPath $ancestor
-            $ancestorRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
-                [byte[]]$ancestorAcl.GetSecurityDescriptorBinaryForm(), 0
-            )
-            if ($null -eq $ancestorRaw.DiscretionaryAcl) {
-                throw "refusing uninstall ACL recovery through a null DACL: $ancestor"
-            }
-            $ancestorOwner = ConvertTo-DefenseClawSID `
-                -Identity $ancestorAcl.Owner
-            if ($ancestorOwner -notin @(
-                $script:SystemSID,
-                $script:AdministratorsSID,
-                $script:TrustedInstallerSID
-            )) {
-                throw "refusing uninstall ACL recovery through an untrusted ancestor owner: $ancestor"
-            }
-            foreach ($rule in $ancestorAcl.Access) {
-                if ($rule.AccessControlType -ne
-                        [Security.AccessControl.AccessControlType]::Allow -or
-                    (($rule.PropagationFlags -band
-                            [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)) {
-                    continue
-                }
-                $sid = ConvertTo-DefenseClawSID `
-                    -Identity $rule.IdentityReference
-                if ($sid -notin @(
-                    $script:SystemSID,
-                    $script:AdministratorsSID,
-                    $script:TrustedInstallerSID
-                ) -and (Test-DefenseClawReplacementRights `
-                    -Rights $rule.FileSystemRights)) {
-                    throw "refusing uninstall ACL recovery through a replaceable ancestor: $ancestor"
-                }
-            }
-        }
+        Assert-DefenseClawStateRootAncestorsAdminOnly -Layout $Layout
         foreach ($candidate in @(
             [string]$Layout.StateRoot,
             [string]$Layout.InstallStateDirectory
@@ -34584,9 +34597,10 @@ function Test-DefenseClawUninstallUsesUntrustedMetadataPurge {
 
 function Test-DefenseClawForcedUninstallStateRootAdminOnly {
     <#
-        p0-round:GAP-1585: whether StateRoot, and its install folder when it
-        exists, are plain folders (no reparse point) that only SYSTEM,
-        Administrators and TrustedInstaller own or can write, as the
+        p0-round:GAP-1585, GAP-1586: whether ProgramData and the StateRoot
+        ancestors cannot replace StateRoot, and StateRoot and its install
+        folder when it exists are plain folders (no reparse point) that only
+        SYSTEM, Administrators and TrustedInstaller own or can write, as the
         uninstall ACL recovery requires of them. A record missing from a
         StateRoot someone else could write may have been deleted through
         that weakened ACL; then the forced route is not taken.
@@ -34598,6 +34612,10 @@ function Test-DefenseClawForcedUninstallStateRootAdminOnly {
         $script:TrustedInstallerSID
     )
     try {
+        # The ancestors first: a user-owned or user-replaceable vendor
+        # folder could have swapped StateRoot (p0-round:GAP-1586).
+        Assert-DefenseClawStateRootAncestorsAdminOnly -Layout $Layout
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
         foreach ($candidate in @(
                 [string]$Layout.StateRoot,
                 [string]$Layout.InstallStateDirectory
@@ -34605,8 +34623,10 @@ function Test-DefenseClawForcedUninstallStateRootAdminOnly {
             if ([string]::IsNullOrWhiteSpace($candidate)) {
                 continue
             }
+            # Test-Path can misreport an ACL-denied folder as absent; the
+            # no-follow snapshot cannot.
             if ($candidate -ne [string]$Layout.StateRoot -and
-                -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $candidate -PathType Container)) {
+                $null -eq $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists($candidate)) {
                 continue
             }
             Assert-DefenseClawNoReparsePath -Path $candidate
