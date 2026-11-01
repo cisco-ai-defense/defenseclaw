@@ -570,7 +570,7 @@ func identitySpoolDirectoryDeparture(ctx context.Context, dir, name string) iden
 // resolves. On macOS a record of 1.0.6 or older has none either, and one
 // written while the domain was away before any pass reached it: there the
 // SID is compared only when both have one (rel-1-0-6:GAP-0275 review).
-var identitySpoolMissingSIDIsAnotherIdentity = runtime.GOOS == "linux"
+var identitySpoolMissingSIDIsAnotherIdentity = runtime.GOOS != "darwin"
 
 // identitySpoolSameIdentity compares a record's directory identity with
 // fresh, what the directory answers for its uid now; complete says every

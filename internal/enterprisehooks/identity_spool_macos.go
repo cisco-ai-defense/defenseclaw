@@ -123,6 +123,11 @@ func carryMacOSAccountSID(record, previous IdentitySpoolRecord) IdentitySpoolRec
 		!strings.EqualFold(record.User, previous.User) || !strings.EqualFold(record.Facts.Domain, previous.Facts.Domain) {
 		return record
 	}
+	for _, pair := range [][2]string{{record.Facts.Principal, previous.Facts.Principal}, {record.Facts.Realm, previous.Facts.Realm}} {
+		if pair[0] != "" && pair[1] != "" && !strings.EqualFold(pair[0], pair[1]) {
+			return record
+		}
+	}
 	record.AccountSID = previous.AccountSID
 	return record
 }

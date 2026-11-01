@@ -8,6 +8,7 @@ package enterprisehooks
 import (
 	"context"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -114,10 +115,43 @@ func TestCarryMacOSAccountSID(t *testing.T) {
 			t.Errorf("%s: carried %q", name, got.AccountSID)
 		}
 	}
+	other := away
+	other.Facts.Principal = "bob@CORP.EXAMPLE.COM"
+	withPrincipal := previous
+	withPrincipal.Facts.Principal = "alice@CORP.EXAMPLE.COM"
+	if got := carryMacOSAccountSID(other, withPrincipal); got.AccountSID != "" {
+		t.Errorf("another principal: carried %q", got.AccountSID)
+	}
 	// The mark is never written.
 	data, err := MarshalIdentitySpoolRecord(away)
 	if err != nil || strings.Contains(string(data), "unanswered") {
 		t.Fatalf("marshal %s, %v", data, err)
+	}
+}
+
+// The guardian pass writes the carried SID: a pass that cannot reach the
+// domain keeps the account's SID in its record.
+func TestIdentitySpoolPassKeepsTheMacOSSIDWhileTheDomainIsAway(t *testing.T) {
+	const uid = 94401471
+	dir := t.TempDir()
+	old := testDirectoryRecord(uid, "dcad-alice", "dclab.test")
+	old.Facts.Directory = useridentity.DirectoryActiveDirectory
+	old.AccountSID = testMacOSSID
+	writeTestSpoolRecord(t, dir, old)
+	previous := identitySpoolCollect
+	t.Cleanup(func() { identitySpoolCollect = previous })
+	identitySpoolCollect = func(_ context.Context, account IdentitySpoolAccount, _ time.Time) (IdentitySpoolRecord, error) {
+		fresh := testDirectoryRecord(account.UID, account.User, "dclab.test")
+		fresh.Facts.Directory = useridentity.DirectoryActiveDirectory
+		fresh.macOSSIDUnanswered = true
+		return fresh, nil
+	}
+	if err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: uid, User: old.User}}, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), nil)
+	if err != nil || got.AccountSID != testMacOSSID {
+		t.Fatalf("record after a pass away from the domain: %+v (%v)", got, err)
 	}
 }
 
