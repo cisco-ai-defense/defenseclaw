@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 type fakeDaemonState struct {
@@ -379,11 +380,11 @@ func TestInspectConfiguredListenerRejectsManagedPIDWithoutListener(t *testing.T)
 	}
 	// GAP-1573: after setup gateway --api-port, restart stops the gateway on
 	// the old port and starts it on the new one instead of failing.
-	running, pid, err := inspectRestartTarget(fakeDaemonState{running: true, pid: 42}, cfg, http.DefaultClient)
+	running, pid, _, err := inspectRestartTarget(fakeDaemonState{running: true, pid: 42}, cfg, http.DefaultClient)
 	if err != nil || !running || pid != 42 {
 		t.Fatalf("restart target = %v, %d, %v; want the running gateway PID 42", running, pid, err)
 	}
-	if running, _, err := inspectRestartTarget(fakeDaemonState{running: false}, cfg, http.DefaultClient); err != nil || running {
+	if running, _, _, err := inspectRestartTarget(fakeDaemonState{running: false}, cfg, http.DefaultClient); err != nil || running {
 		t.Fatalf("stopped gateway restart target = %v, %v", running, err)
 	}
 }
@@ -637,4 +638,101 @@ func splitHostPortForTest(t *testing.T, address string) (string, int) {
 		t.Fatal(err)
 	}
 	return host, port
+}
+
+// rel-1-0-6 GAP-0323: after `defenseclaw config set data_dir`, this account's
+// gateway still runs on the data directory it started with. Restart checks
+// the listener's identity (Windows) and refused it ("gateway identity
+// mismatch"), so the old gateway kept running. It now takes the gateway whose
+// authenticated status names the managed PID and whose own data directory's
+// private runtime record (gateway-api.json) names that PID, and stops it as
+// the runtime of that data directory. A missing, public or other-PID record,
+// or another PID, still refuses; start (not restart) still refuses.
+func TestRestartTargetStopsTheGatewayOfTheDataDirItStartedWith(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		record     func(t *testing.T, oldDir string)
+		statusPID  int
+		wantTarget bool
+	}{
+		{name: "private record names the PID", statusPID: 42, wantTarget: true,
+			record: func(t *testing.T, oldDir string) { writeGatewayRuntimeRecordForTest(t, oldDir, 42, 0o600) }},
+		{name: "no record", statusPID: 42},
+		{name: "record others can read", statusPID: 42,
+			record: func(t *testing.T, oldDir string) { writeGatewayRuntimeRecordForTest(t, oldDir, 42, 0o644) }},
+		{name: "record names another PID", statusPID: 42,
+			record: func(t *testing.T, oldDir string) { writeGatewayRuntimeRecordForTest(t, oldDir, 43, 0o600) }},
+		{name: "status names another PID", statusPID: 43,
+			record: func(t *testing.T, oldDir string) { writeGatewayRuntimeRecordForTest(t, oldDir, 42, 0o600) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := startupTestConfig(t)
+			pinStartupTestToken(t, cfg)
+			oldDir := t.TempDir()
+			if tc.record != nil {
+				tc.record(t, oldDir)
+			}
+			status := gatewayStatusEnvelope{}
+			status.Runtime.PID = tc.statusPID
+			status.Runtime.DataDir = oldDir
+			srv := authenticatedStatusServer(t, cfg.Gateway.Token, status)
+			defer srv.Close()
+			host, port := splitHostPortForTest(t, strings.TrimPrefix(srv.URL, "http://"))
+			cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+			withStartupListenerInspector(t, func(string, int) (int, error) { return 42, nil })
+			running, pid, dataDir, err := inspectRestartTarget(fakeDaemonState{running: true, pid: 42}, cfg, srv.Client())
+			if tc.wantTarget {
+				if err != nil || !running || pid != 42 || !sameGatewayDataDir(dataDir, oldDir) {
+					t.Fatalf("restart target = (%v, %d, %q, %v), want PID 42 on %s", running, pid, dataDir, err, oldDir)
+				}
+			} else if !errors.Is(err, errGatewayIdentityMismatch) {
+				t.Fatalf("restart target = (%v, %d, %q, %v), want an identity mismatch", running, pid, dataDir, err)
+			}
+			// start keeps refusing a gateway on another data directory.
+			if _, _, err := inspectConfiguredListener(fakeDaemonState{running: true, pid: 42}, cfg, srv.Client()); !errors.Is(err, errGatewayIdentityMismatch) {
+				t.Fatalf("start inspect error = %v, want an identity mismatch", err)
+			}
+		})
+	}
+}
+
+// The shutdown request names the data directory the gateway runs on, which
+// the gateway compares with its own (api.go, sameRuntimeDataDir).
+func TestRestartShutdownRequestNamesTheRunningDataDir(t *testing.T) {
+	cfg := startupTestConfig(t)
+	pinStartupTestToken(t, cfg)
+	oldDir := t.TempDir()
+	var got map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+	}))
+	defer srv.Close()
+	host, port := splitHostPortForTest(t, strings.TrimPrefix(srv.URL, "http://"))
+	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+	withStartupListenerInspector(t, func(string, int) (int, error) { return 42, nil })
+	_ = requestGatewayShutdownOnDataDir(srv.Client(), cfg, cfg.Gateway.Token, 42, oldDir)
+	if got == nil || got["data_dir"] != oldDir {
+		t.Fatalf("shutdown body = %v, want data_dir %s", got, oldDir)
+	}
+}
+
+// writeGatewayRuntimeRecordForTest writes the gateway-api.json a gateway
+// publishes in its data directory, private, or with mode on POSIX when mode
+// is not 0600 (Windows skips the test row then).
+func writeGatewayRuntimeRecordForTest(t *testing.T, dataDir string, pid int, mode os.FileMode) {
+	t.Helper()
+	if mode != 0o600 && runtime.GOOS == "windows" {
+		t.Skip("POSIX mode row")
+	}
+	body := []byte(fmt.Sprintf(`{"pid":%d,"host":"127.0.0.1","port":1}`, pid))
+	path := filepath.Join(dataDir, "gateway-api.json")
+	if err := safefile.WritePrivate(path, body); err != nil {
+		t.Fatal(err)
+	}
+	if mode != 0o600 {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
