@@ -737,6 +737,40 @@ def count_execs_eslogger(inst: Install, connector: str, calls: int, log: Path) -
     }
 
 
+def _pid_running(pid: int) -> bool:
+    """Whether process pid is running.
+
+    On Windows os.kill(pid, 0) is TerminateProcess, not a probe, and an
+    exited pid raises OSError (WinError 87): ask for its exit code instead.
+    """
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: alive, another account's
+        try:
+            code = wintypes.DWORD()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # root's process, alive
+    return True
+
+
 def eslogger_parse(result: dict, eslogger_pid: int) -> dict:
     """Fill a result's pending eslogger traces from their logs.
 
@@ -749,14 +783,7 @@ def eslogger_parse(result: dict, eslogger_pid: int) -> dict:
         raise SystemExit("eslogger-parse: the result holds no pending eslogger trace (run with --eslogger-log)")
     if eslogger_pid <= 0:
         raise SystemExit("eslogger-parse: --eslogger-pid must name the eslogger process that wrote the log")
-    try:
-        os.kill(eslogger_pid, 0)
-        running = True
-    except ProcessLookupError:
-        running = False
-    except PermissionError:
-        running = True  # root's process, alive
-    if running:
+    if _pid_running(eslogger_pid):
         raise SystemExit(f"eslogger-parse: eslogger pid {eslogger_pid} is still running; stop it with SIGTERM first")
     for connector, trace in traces.items():
         lines = _read_log_from(Path(trace["log"]), int(trace["offset"]))
