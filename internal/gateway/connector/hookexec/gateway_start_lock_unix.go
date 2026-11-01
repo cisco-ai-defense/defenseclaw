@@ -6,10 +6,12 @@
 package hookexec
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
 )
@@ -60,22 +62,58 @@ func PerUserGatewayStartInProgress(dataDir string) bool {
 // peer that cannot be read again, and a port nobody listens on are no proof,
 // and a held lock while the same gateway stays up and slow is a gateway that
 // is up and slow: the call stays closed (GAP-2279).
+//
+// The whole proof runs within perUserRestartProofBudget after the call's
+// deadline (review r3 finding 3): a proof that is not done by then is no
+// proof, and hook-post exits 9.
 func PerUserGatewayRestartProven(dataDir string, peer *PerUserPeerRecord) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), perUserRestartProofBudget)
+	defer cancel()
+	proven := make(chan bool, 1)
+	go func() { proven <- perUserGatewayRestartProof(ctx, dataDir, peer) }()
+	select {
+	case ok := <-proven:
+		return ok && ctx.Err() == nil
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// perUserRestartProofBudget bounds PerUserGatewayRestartProven.
+var perUserRestartProofBudget = 300 * time.Millisecond
+
+func perUserGatewayRestartProof(ctx context.Context, dataDir string, peer *PerUserPeerRecord) bool {
 	if !PerUserGatewayStartInProgress(dataDir) {
 		return false
 	}
-	before, ok := peer.wait(perUserPeerReadWait)
+	wait := perUserPeerReadWait
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < wait {
+		wait = time.Until(deadline)
+	}
+	before, ok := peer.wait(wait)
 	if !ok {
 		return false
 	}
 	if perUserPeerGone(before) {
 		return true
 	}
-	owner, ok := perUserListenerOwner(before.server)
-	if !ok || owner.pid == before.pid {
+	// Every process of this account that holds a listener on the exact
+	// gateway address now (review r3 findings 1 and 2): the old peer among
+	// them is no change, whatever else holds one.
+	owners, ok := perUserListenerOwners(ctx, before.server)
+	if !ok || ctx.Err() != nil {
 		return false
 	}
-	return owner.identity != "" && owner.identity != before.identity
+	other := false
+	for _, owner := range owners {
+		if owner.pid == before.pid {
+			return false
+		}
+		if owner.identity != "" && owner.identity != before.identity {
+			other = true
+		}
+	}
+	return other
 }
 
 // perUserPeerGone reports a peer process that has exited (no such process,

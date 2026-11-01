@@ -5,12 +5,15 @@
 
 package hookexec
 
-import "net"
+import (
+	"context"
+	"net"
+)
 
 // perUserConnectedPeerPID is unknown here: no restart is proven.
 func perUserConnectedPeerPID(*net.TCPAddr, *net.TCPAddr) (int, bool) { return 0, false }
 
-// perUserListenerOwner is unknown here.
-func perUserListenerOwner(*net.TCPAddr) (perUserPeerProcess, bool) {
-	return perUserPeerProcess{}, false
+// perUserListenerOwners is unknown here.
+func perUserListenerOwners(context.Context, *net.TCPAddr) ([]perUserPeerProcess, bool) {
+	return nil, false
 }

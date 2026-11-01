@@ -7,6 +7,7 @@ package hookexec
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -33,15 +34,22 @@ func perUserConnectedPeerPID(client, server *net.TCPAddr) (int, bool) {
 	if inode == "" && table == "tcp" {
 		inode = procSocketInode("tcp6", "01", mappedTCP6Endpoint(server), mappedTCP6Endpoint(client))
 	}
-	return procSocketOwner(inode)
+	// More than one holder of the accepted socket (a dup in another
+	// process) is no known peer (review r3 finding 2).
+	holders := procSocketHolders(context.Background(), inode)
+	if len(holders) != 1 {
+		return 0, false
+	}
+	return holders[0], true
 }
 
-// perUserListenerOwner is the process of this account that listens on
-// server's address now (exact or wildcard listener), with its identity.
-func perUserListenerOwner(server *net.TCPAddr) (perUserPeerProcess, bool) {
+// perUserListenerOwners is every process of this account that holds a
+// listener on server's address now (exact, or the wildcard of its family),
+// with its identity; false when there is none or the read did not finish.
+func perUserListenerOwners(ctx context.Context, server *net.TCPAddr) ([]perUserPeerProcess, bool) {
 	serverKey, table, err := procTCPEndpoint(server)
 	if err != nil {
-		return perUserPeerProcess{}, false
+		return nil, false
 	}
 	port := serverKey[strings.LastIndex(serverKey, ":"):]
 	keys := []string{serverKey}
@@ -61,12 +69,16 @@ func perUserListenerOwner(server *net.TCPAddr) (perUserPeerProcess, bool) {
 			}
 		}
 	}
-	pid, ok := procSocketOwner(inode)
-	if !ok {
-		return perUserPeerProcess{}, false
+	holders := procSocketHolders(ctx, inode)
+	if len(holders) == 0 || ctx.Err() != nil {
+		return nil, false
 	}
-	identity, ok := procidentity.Of(pid)
-	return perUserPeerProcess{pid: pid, identity: identity, server: server}, ok
+	owners := make([]perUserPeerProcess, 0, len(holders))
+	for _, pid := range holders {
+		identity, _ := procidentity.Of(pid)
+		owners = append(owners, perUserPeerProcess{pid: pid, identity: identity, server: server})
+	}
+	return owners, true
 }
 
 // procSocketInode is the inode of the first row of table in state with
@@ -92,18 +104,23 @@ func procSocketInode(table, state, local, remote string) string {
 	return ""
 }
 
-// procSocketOwner is the process of this account that holds socket inode.
-func procSocketOwner(inode string) (int, bool) {
+// procSocketHolders is every process of this account that holds socket
+// inode, until ctx ends.
+func procSocketHolders(ctx context.Context, inode string) []int {
 	if inode == "" {
-		return 0, false
+		return nil
 	}
 	want := "socket:[" + inode + "]"
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return 0, false
+		return nil
 	}
 	uid := uint32(os.Geteuid())
+	var holders []int
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return nil
+		}
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil || pid <= 0 {
 			continue
@@ -122,9 +139,10 @@ func procSocketOwner(inode string) (int, bool) {
 		}
 		for _, fd := range fds {
 			if link, err := os.Readlink(filepath.Join(dir, "fd", fd.Name())); err == nil && link == want {
-				return pid, true
+				holders = append(holders, pid)
+				break
 			}
 		}
 	}
-	return 0, false
+	return holders
 }
