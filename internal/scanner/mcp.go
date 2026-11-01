@@ -27,9 +27,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
@@ -495,35 +497,71 @@ func MCPScanRefused(err error) bool {
 	return err != nil && (errors.Is(err, ErrMCPScanRefused) || mentionsMCPScanRefusal(err.Error()))
 }
 
-// mcpLauncherRefusalWords are how the scanner (cli/defenseclaw/scanner/mcp.py
-// _stdio_scan_command_error) and the managed as-user launch (enterprisehooks
-// checkMCPAsUserDefinition) word a local server whose command or arguments
-// a scan never starts: a launcher other than the bare npx or uvx, a command
-// path, a code-running flag, no package argument, or a cmd.exe metacharacter
-// in an npx argument. Each is about the definition alone. A refusal that
-// comes from the host (the npx.cmd path the user's PATH resolves holding a
-// metacharacter, a launcher not on PATH or not trusted, a folder) is not one:
-// fixing the host fixes it with no change to the definition, so it is retried
-// with backoff.
-var mcpLauncherRefusalWords = []string{
-	"allowlisted stdio launcher",
-	"a scan starts only the bare names npx or uvx",
-	"uses forbidden execution flag",
-	"requires a package/server argument",
-	"an npx argument contains a Windows command metacharacter",
+// mcpQuoted is a quoted value as Python repr and Go %q write it.
+const mcpQuoted = `(?:'(?:[^'\\\r\n]|\\.){0,512}'|"(?:[^"\\\r\n]|\\.){0,512}")`
+
+// mcpLauncherRefusalPattern is the scanner's own refusal of a local
+// server's launcher, at the start of the scanner's message: the Python
+// scanner (cli/defenseclaw/scanner/mcp.py _stdio_scan_command_error, as
+// `mcp scan --json` reports it on stdout or the managed runtime's ValueError
+// on stderr) and the managed as-user launch (enterprisehooks
+// checkMCPAsUserDefinition, as the hook enumerator answers the relay). It
+// names a launcher other than the bare npx or uvx, a command path, a
+// code-running flag, no package argument, or a cmd.exe metacharacter in an
+// npx argument: each is about the definition alone. A refusal from the host
+// (the npx.cmd path the user's PATH resolves holding a metacharacter, a
+// launcher not on PATH or not trusted, a folder) is not one; it is retried
+// with backoff. The match is anchored: text that only quotes a refusal (an
+// exception message, a server's stderr) is not the scanner's refusal
+// (rel-1-0-6:GAP-0364). Group 1 is the quoted launcher.
+var mcpLauncherRefusalPattern = regexp.MustCompile(`^(?:(?:scan failed|ValueError): refusing to scan local MCP server ` + mcpQuoted + `: ` +
+	`|(?:\[[A-Za-z0-9._-]{1,64} stderr\] mcp as-user scan: the hook enumerator did not start the server: )?MCP server ` + mcpQuoted + ` is not started: )` +
+	`(?:(?:command|launcher) (` + mcpQuoted + `) (?:is not an allowlisted stdio launcher|is a path, and paths are never an allowlisted stdio launcher` +
+	`|is a path; a scan starts only the bare names npx or uvx|uses forbidden execution flag |requires a package/server argument)` +
+	`|an npx argument contains a Windows command metacharacter)`)
+
+// mcpScanErrorLeadPattern is what the gateway puts before the scanner's
+// message: the fail-closed block reason and the error Scan builds.
+var mcpScanErrorLeadPattern = regexp.MustCompile(`^(?:scanner failure \(fail-closed\): )?(?:scanner: mcp-scanner exited -?[0-9]{1,10}: |scanner mcp-scanner exited -?[0-9]{1,10} \()?`)
+
+// mcpBareLauncherPattern is a launcher the agent text may name.
+var mcpBareLauncherPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
+
+// mcpScannerMessage is text with the gateway's lead and the work-folder
+// note (workDirNote) taken off: where the scanner's own message starts.
+func mcpScannerMessage(text string) string {
+	text = text[len(mcpScanErrorLeadPattern.FindString(text)):]
+	if rest, ok := strings.CutPrefix(text, "the server was not started in its folder "); ok {
+		if _, after, found := strings.Cut(rest, "; it ran in the scanner folder instead: "); found {
+			text = after
+		}
+	}
+	return text
 }
 
-// MCPLauncherRefusal reports a failed MCP scan whose text says the scanner
-// refused the server's local launcher (rel-1-0-6:GAP-0258). That refusal is
+// MCPRefusedLauncher reports a failed MCP scan whose scanner refused the
+// server's local launcher (rel-1-0-6:GAP-0258), and the launcher it names
+// when that is a bare program name ("" for a path or none). That refusal is
 // a pure function of the definition: the same command and arguments are
 // refused again on every try, so a retry of an unchanged definition can only
 // repeat it. Nothing else (a URL refusal, a folder the scan may not use, a
-// scanner that could not finish) is one.
-func MCPLauncherRefusal(text string) bool {
-	if !strings.Contains(text, "refusing to scan local MCP server ") && !strings.Contains(text, " is not started: ") {
-		return false
+// scanner that could not finish, text that only quotes a refusal) is one.
+func MCPRefusedLauncher(text string) (launcher string, refused bool) {
+	m := mcpLauncherRefusalPattern.FindStringSubmatch(mcpScannerMessage(text))
+	if m == nil {
+		return "", false
 	}
-	return slices.ContainsFunc(mcpLauncherRefusalWords, func(words string) bool { return strings.Contains(text, words) })
+	if len(m[1]) >= 2 && mcpBareLauncherPattern.MatchString(m[1][1:len(m[1])-1]) {
+		launcher = m[1][1 : len(m[1])-1]
+	}
+	return launcher, true
+}
+
+// MCPLauncherRefusal reports a failed MCP scan whose scanner refused the
+// server's local launcher (MCPRefusedLauncher).
+func MCPLauncherRefusal(text string) bool {
+	_, refused := MCPRefusedLauncher(text)
+	return refused
 }
 
 // runMCPScannerCommand owns the runtime process and its Python descendants.
@@ -676,11 +714,8 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	outputError := ""
 	if exitCode != 0 {
 		result.ScanError = stderrStr
-		if outputError = mcpOutputError(stdout.Bytes()); outputError != "" {
-			outputError += "; "
-			if strings.TrimSpace(stderrStr) == "" {
-				result.ScanError = outputError
-			}
+		if outputError = mcpOutputError(stdout.Bytes()); outputError != "" && strings.TrimSpace(stderrStr) == "" {
+			result.ScanError = outputError
 		}
 	}
 
@@ -704,6 +739,9 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	// watcher and REST scan handlers. See finding "Non-zero MCP
 	// scanner exits can be treated as successful scans".
 	if exitCode != 0 {
+		if outputError != "" {
+			outputError += "; "
+		}
 		scanErr = refusedMCPScan(fmt.Errorf("scanner %s exited %d (%s%sstderr=%s)", s.Name(), exitCode, s.workDirNote(), outputError, scannerFailureText(stderrStr)), stderrStr, stdout.String())
 		return result, scanErr
 	}
@@ -721,8 +759,10 @@ const maxMCPOutputErrorBytes = 1000
 // the refusal read "exited 1 (stderr=)": it was retried with backoff instead
 // of final, and the agent never got the launcher reason
 // (rel-1-0-6:GAP-0258). The managed Windows scanner runtime reports its
-// refusal on stderr. One line, a traceback cut as scannerFailureText cuts
-// stderr, at most maxMCPOutputErrorBytes; "" when stdout holds no error.
+// refusal on stderr. One printable line: a traceback cut as
+// scannerFailureText cuts stderr, control and format characters (ESC, BEL,
+// NUL, bidi overrides) dropped before the cap (rel-1-0-6:GAP-0366), at most
+// maxMCPOutputErrorBytes; "" when stdout holds no error.
 // Secure Client keeps the error of main (issue #1092).
 func mcpOutputError(stdout []byte) string {
 	if keepFullFailureText.Load() {
@@ -734,7 +774,16 @@ func mcpOutputError(stdout []byte) string {
 	if json.Unmarshal(extractJSON(ansiRe.ReplaceAll(stdout, nil)), &out) != nil {
 		return ""
 	}
-	text := strings.Join(strings.Fields(scannerFailureText(out.Error)), " ")
+	text := strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return ' '
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			return -1
+		}
+		return r
+	}, scannerFailureText(out.Error))
+	text = strings.Join(strings.Fields(text), " ")
 	if len(text) > maxMCPOutputErrorBytes {
 		text = strings.ToValidUTF8(text[:maxMCPOutputErrorBytes], "") + "..."
 	}

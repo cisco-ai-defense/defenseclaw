@@ -435,30 +435,14 @@ const mcpLauncherRefusalCause = "is refused because a scan starts a local MCP se
 	"with a package argument and no code-running flag; start it with npx or uvx, or serve it over HTTP and use its URL, " +
 	"or have the reviewed definition allowed"
 
-// mcpRefusedLauncherPattern finds the launcher a refusal names after its
-// lead words ("command 'node' is not an allowlisted ...", "launcher 'npx'
-// uses ..."): a bare program name only, never a path or argument.
-var mcpRefusedLauncherPattern = lazyregexp.New(`^(?:command|launcher) ['"]([A-Za-z0-9][A-Za-z0-9._+-]{0,63})['"] `)
-
 // mcpLauncherRefusalVerdict is the verdict of an MCP server whose scan
 // refused its local launcher: "the launcher node is refused because ...",
-// a plain sentence. Only a bare launcher name is taken from the scanner
-// text, which can carry the server's command path and arguments.
-func mcpLauncherRefusalVerdict(reason string) string {
-	for _, lead := range []string{"refusing to scan local MCP server ", " is not started: "} {
-		_, after, found := strings.Cut(reason, lead)
-		if !found {
-			continue
-		}
-		if lead == "refusing to scan local MCP server " {
-			// Skip the quoted server name: "'vs9time': command ...".
-			if _, rest, ok := strings.Cut(after, ": "); ok {
-				after = rest
-			}
-		}
-		if m := mcpRefusedLauncherPattern.FindStringSubmatch(after); m != nil {
-			return "the launcher " + m[1] + " " + mcpLauncherRefusalCause
-		}
+// a plain sentence. Only a bare launcher name the scanner's own refusal
+// names (scanner.MCPRefusedLauncher) is taken from the scanner text, which
+// can carry the server's command path and arguments.
+func mcpLauncherRefusalVerdict(launcher string) string {
+	if launcher != "" {
+		return "the launcher " + launcher + " " + mcpLauncherRefusalCause
 	}
 	return "the launcher " + mcpLauncherRefusalCause
 }
@@ -469,13 +453,14 @@ func agentMCPAdmissionSubject(reason string) string {
 		return ""
 	}
 	var verdict string
+	launcher, launcherRefused := scanner.MCPRefusedLauncher(m[2])
 	switch {
-	case strings.HasPrefix(m[2], "scanner failure (fail-closed): ") && scanner.MCPLauncherRefusal(m[2]):
+	case strings.HasPrefix(m[2], "scanner failure (fail-closed): ") && launcherRefused:
 		// The scan refused the server's launcher: say so, and how to give it
 		// a definition a scan starts, in fixed words. The agent saw only
 		// "still scanning" or the bare failure kind, and retried a refusal
 		// that never changes (rel-1-0-6:GAP-0258).
-		verdict = mcpLauncherRefusalVerdict(m[2])
+		verdict = mcpLauncherRefusalVerdict(launcher)
 	case strings.HasPrefix(m[2], "scanner failure (fail-closed): ") && len(m[2]) > len("scanner failure (fail-closed): "):
 		verdict = "scanner failure (fail-closed)"
 	case agentMCPFindingPattern.MatchString(m[2]):
