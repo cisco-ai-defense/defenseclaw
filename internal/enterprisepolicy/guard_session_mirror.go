@@ -44,6 +44,10 @@ const (
 	// foreignHookCleanMirrorSkew is the clock skew allowed for written_at.
 	foreignHookCleanMirrorSkew    = time.Minute
 	foreignHookCleanMirrorVersion = 1
+	// ForeignHookCleanMirrorTempPrefix starts the name of an entry the
+	// gateway is still writing (it renames it into place); the lifecycle's
+	// mode walk skips such a file.
+	ForeignHookCleanMirrorTempPrefix = ".clean-"
 )
 
 // foreignHookCleanMirror is one entry.
