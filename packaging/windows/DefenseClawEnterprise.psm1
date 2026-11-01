@@ -22239,6 +22239,36 @@ function Test-DefenseClawDeletedAccountTeardownRefusal {
     )
 }
 
+function Test-DefenseClawManifestCatchUpTeardownRefusal {
+    <#
+        rel-1-0-6:GAP-0346: whether a teardown refusal says only that the
+        deployment's activation evidence or the guardian's records name
+        another targets.yaml generation than the one installed now. That is
+        the state between an enumerator pass that dropped a deleted account's
+        rows and the guardian's adoption of that manifest (and the rebinding
+        of the activation evidence to it).
+    #>
+    param([string]$Message)
+    $text = [string]$Message
+    foreach ($needle in @(
+            'protected managed-hook activation evidence does not match the current manifest',
+            'contains a target outside the deployment manifest',
+            'does not exactly bind the legacy deployment manifest and authorization',
+            'deployment managed-hook activation evidence does not bind installed targets.yaml'
+        )) {
+        if ($text.Contains($needle)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+# rel-1-0-6:GAP-0319/GAP-0346: how long the uninstall pre-commit check waits
+# for the enumerator pass and the guardian's adoption after a deleted
+# enrolled account, and how often it asks again. Tests shorten them.
+$script:UninstallDeletedAccountWaitSeconds = 180
+$script:UninstallDeletedAccountPollSeconds = 10
+
 function Invoke-DefenseClawUninstallPrecommitHookCheck {
     <#
         GAP-0571 read-only check of the hook removal before the uninstall
@@ -22247,6 +22277,21 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
         enumerator revokes that account's rows on its next pass, so the check
         restarts the enumerator once and asks again for up to three minutes
         before it gives the refusal back.
+        rel-1-0-6:GAP-0346, GAP-0319: that pass publishes a new targets.yaml
+        (the scheduled pass can also publish it just before the check, which
+        then refuses the stale binding at once and starts the same wait). Until the
+        guardian adopts it, the check refuses because the records name the old
+        manifest, and the activation evidence the lifecycle rebound before the
+        uninstall still names it after the adoption: an uninstall right after
+        a deleted enrolled account stopped with "run Setup /repair" every time.
+        So each round first rebinds the activation evidence to a manifest the
+        guardian has adopted (Sync-DefenseClawStandaloneManagedHooksActivationBinding,
+        the same step Upgrade, Repair and Uninstall run before their
+        transaction), and a refusal of that in-between state is asked again
+        within the wait like the deleted-account one. Any other refusal is
+        given back at once. Returns $true when it rebound the evidence: the
+        caller must read the deployment metadata again before it writes the
+        tombstone from it.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -22259,52 +22304,90 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -Action check)
-        return
+        return $false
     }
     catch {
-        if (-not (Test-DefenseClawDeletedAccountTeardownRefusal -Message $_.Exception.Message)) {
+        $deletedAccount = Test-DefenseClawDeletedAccountTeardownRefusal -Message $_.Exception.Message
+        if (-not $deletedAccount -and
+            -not (Test-DefenseClawManifestCatchUpTeardownRefusal -Message $_.Exception.Message)) {
             throw
         }
         $refusal = $_
     }
-    $enumerator = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
-    if (-not (Test-DefenseClawServiceExists -Name $enumerator)) {
-        throw $refusal
+    $rebound = $false
+    # The whole wait, the enumerator restart included, stays within the wait
+    # budget, and each check gets only the time left (at least 30 s). The
+    # enumerator is restarted once, on the first deleted-account refusal,
+    # whether that is the first refusal or one met inside the wait. A failed
+    # restart never leaves the enumerator stopped. The refusal given back at
+    # the deadline is the last deleted-account one, or the first refusal when
+    # no deleted account was seen.
+    $deadline = [DateTime]::UtcNow.AddSeconds($script:UninstallDeletedAccountWaitSeconds)
+    $restartEnumerator = $deletedAccount
+    $enumeratorRestarted = $false
+    if (-not $deletedAccount) {
+        # rel-1-0-6:GAP-0319: the enumerator pass already ran between the
+        # lifecycle's own rebinding and this check (or the guardian had not
+        # adopted its manifest yet), so the first refusal is the stale
+        # binding itself. Rebind and ask again within the same wait.
+        Write-DefenseClawLifecyclePhase -Stage 'hook targets changed since the activation evidence was bound: waiting for the guardian to adopt them before the uninstall'
     }
-    Write-DefenseClawLifecyclePhase -Stage 'deleted enrolled account: running a hook enumerator pass before the uninstall'
-    # The whole wait, the enumerator restart included, stays within three
-    # minutes, and each check gets only the time left (at least 30 s). A
-    # failed restart never leaves the enumerator stopped, and the refusal
-    # given back stays the deleted-account one.
-    $deadline = [DateTime]::UtcNow.AddMinutes(3)
-    try {
-        Stop-DefenseClawService -Name $enumerator
-    }
-    finally {
-        try {
-            Start-DefenseClawService -Name $enumerator
+    while ($true) {
+        if ($restartEnumerator -and -not $enumeratorRestarted) {
+            # rel-1-0-6:GAP-0450: also when the deleted-account refusal comes
+            # only after a stale-binding one, or the wait would rest on the
+            # scheduled pass and could give the refusal back after the budget.
+            $enumeratorRestarted = $true
+            $enumerator = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+            if (-not (Test-DefenseClawServiceExists -Name $enumerator)) {
+                throw $refusal
+            }
+            Write-DefenseClawLifecyclePhase -Stage 'deleted enrolled account: running a hook enumerator pass before the uninstall'
+            try {
+                Stop-DefenseClawService -Name $enumerator
+            }
+            finally {
+                try {
+                    Start-DefenseClawService -Name $enumerator
+                }
+                catch {
+                    Write-DefenseClawLifecyclePhase -Stage "hook enumerator restart failed: $($_.Exception.Message)"
+                }
+            }
         }
-        catch {
-            Write-DefenseClawLifecyclePhase -Stage "hook enumerator restart failed: $($_.Exception.Message)"
+        if (-not ([DateTime]::UtcNow -lt $deadline)) {
+            break
         }
-    }
-    while ([DateTime]::UtcNow -lt $deadline) {
-        Microsoft.PowerShell.Utility\Start-Sleep -Seconds 10
+        Microsoft.PowerShell.Utility\Start-Sleep -Seconds $script:UninstallDeletedAccountPollSeconds
         $left = [int][Math]::Max(30, ($deadline - [DateTime]::UtcNow).TotalSeconds)
         try {
+            if (Sync-DefenseClawStandaloneManagedHooksActivationBinding `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName) {
+                $rebound = $true
+                Write-DefenseClawLifecyclePhase -Stage 'hook targets changed: activation evidence rebound to the targets.yaml the guardian adopted'
+            }
             [void](Invoke-DefenseClawManagedHooksTeardownCommand `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
                 -Action check `
                 -TimeoutSeconds $left)
-            return
+            return $rebound
         }
         catch {
-            if (-not (Test-DefenseClawDeletedAccountTeardownRefusal -Message $_.Exception.Message)) {
+            $message = $_.Exception.Message
+            if (Test-DefenseClawManifestCatchUpTeardownRefusal -Message $message) {
+                # The enumerator's new manifest is not adopted yet. This
+                # in-between refusal never replaces the one kept for the
+                # deadline (the first refusal or the last deleted-account one).
+                continue
+            }
+            if (-not (Test-DefenseClawDeletedAccountTeardownRefusal -Message $message)) {
                 throw
             }
             $refusal = $_
+            $restartEnumerator = $true
         }
     }
     throw $refusal
@@ -38296,16 +38379,17 @@ function Invoke-DefenseClawUninstallLifecycle {
     # refusal then leaves the deployment fully installed and says what to
     # repair, instead of a committed tombstone that every retry refuses. The
     # OWNER RIGHTS restore that runs first (GAP-0303) only tightens.
+    $precheckRebound = $false
     if ($postCommitHookTeardown -and
         (Test-DefenseClawManagedHooksCommittedTeardownSupported `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -Capability precommit_check)) {
         try {
-            Invoke-DefenseClawUninstallPrecommitHookCheck `
+            $precheckRebound = [bool](Invoke-DefenseClawUninstallPrecommitHookCheck `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName
+                -GuardianServiceName $GuardianServiceName)
         }
         catch {
             $reason = $_.Exception.Message
@@ -38321,6 +38405,21 @@ function Invoke-DefenseClawUninstallLifecycle {
                 "$reason. Repair that (run Setup /repair, or undo the change to the file it names), " +
                 "then run the uninstall again.")
         }
+    }
+    if ($precheckRebound) {
+        # rel-1-0-6:GAP-0346: the check rebound the activation evidence to the
+        # targets.yaml the enumerator published for a deleted account. The
+        # tombstone below carries that evidence, so read it again: the record
+        # read above names the manifest before the pass, and a tombstone with
+        # it made the post-commit hook removal refuse every later run.
+        $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
+        Assert-DefenseClawMetadataIdentity `
+            -Metadata $metadata `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+        $managedHooksActivation =
+            Assert-DefenseClawManagedHooksActivationRecord `
+                -Record $metadata.managed_hooks_activation
     }
     # The native InstallRoot seal/delete (#1068) admits only the Secure Client
     # tree and its single gateway socket. Standalone keeps the PowerShell
