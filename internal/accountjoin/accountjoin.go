@@ -384,6 +384,10 @@ func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest
 	return slots, reasons, highest
 }
 
+// IsTenantSecret reports whether credential name holds a tenant secret of
+// the account join key (SecretName, NextSecretName).
+func IsTenantSecret(name string) bool { return name == SecretName || name == NextSecretName }
+
 // ValueMatches reports whether a secret value (as stored, one line) has the
 // SHA-256 the config signs (lowercase hex).
 func ValueMatches(value []byte, want string) bool {

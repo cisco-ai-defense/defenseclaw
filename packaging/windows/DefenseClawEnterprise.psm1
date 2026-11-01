@@ -28207,7 +28207,16 @@ function Get-DefenseClawStandaloneSecretsDirectorySddl {
 }
 
 function Get-DefenseClawStandaloneSecretFileSddl {
-    param([Parameter(Mandatory)][string]$GatewayServiceSID)
+    param(
+        [Parameter(Mandatory)][string]$GatewayServiceSID,
+        [string]$Name = ''
+    )
+    # The tenant secrets of the account join key are read only by SYSTEM
+    # and elevated administrators, never by the gateway
+    # (managed.GatewayReadsCredential, windowsSecretFileSDDLFor).
+    if ($Name -ceq 'account-join-key' -or $Name -ceq 'account-join-key-next') {
+        return 'O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)'
+    }
     return (
         'O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;{0})' -f
             $GatewayServiceSID
@@ -28288,7 +28297,8 @@ function Set-DefenseClawStandaloneSecretsAcls {
             -Path $item.FullName `
             -IsDirectory $false `
             -Sddl (Get-DefenseClawStandaloneSecretFileSddl `
-                -GatewayServiceSID $GatewayServiceSID)
+                -GatewayServiceSID $GatewayServiceSID `
+                -Name $item.Name)
     }
 }
 

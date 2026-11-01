@@ -574,7 +574,7 @@ func keepIdenticalWindowsSecret(store *windowsSecretStore, name string, value []
 	if !bytes.Equal(raw, value) || ensureWindowsSecretsDir(store, gateway) != nil {
 		return false
 	}
-	return applyWindowsSDDLToHandle(entry, windowsSecretFileSDDL(gateway)) == nil
+	return applyWindowsSDDLToHandle(entry, windowsSecretFileSDDLFor(name, gateway)) == nil
 }
 
 // requireWindowsSecretDeployment refuses not_installed (1603) unless a
@@ -756,6 +756,19 @@ func windowsSecretDirectorySDDL(reader *windows.SID) string {
 // gateway service SID) and writable only by LocalSystem and Administrators.
 func windowsSecretFileSDDL(reader *windows.SID) string {
 	return "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + reader.String() + ")"
+}
+
+// windowsSecretAdminFileSDDL is the descriptor of a credential the gateway
+// is not given (managed.GatewayReadsCredential): LocalSystem and
+// Administrators only.
+const windowsSecretAdminFileSDDL = "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)"
+
+// windowsSecretFileSDDLFor is the descriptor of credential name.
+func windowsSecretFileSDDLFor(name string, reader *windows.SID) string {
+	if !managed.GatewayReadsCredential(name) {
+		return windowsSecretAdminFileSDDL
+	}
+	return windowsSecretFileSDDL(reader)
 }
 
 // errWindowsSecretsDirNotReal refuses a junction, mount point, symlink or
@@ -1088,7 +1101,7 @@ func storeWindowsSecret(store *windowsSecretStore, name string, value []byte, re
 		return "", err
 	}
 	cleanup := func() { _ = os.Remove(tmp) }
-	if err := applyWindowsSDDL(tmp, windowsSecretFileSDDL(reader)); err != nil {
+	if err := applyWindowsSDDL(tmp, windowsSecretFileSDDLFor(name, reader)); err != nil {
 		_ = file.Close()
 		cleanup()
 		return "", err

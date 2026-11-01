@@ -34,6 +34,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -548,6 +549,59 @@ func runWindowsSecretCommand(t *testing.T, action string, opts enterpriseSecretO
 	cmd.SetIn(strings.NewReader(stdin))
 	err := runEnterpriseSecret(cmd, action, &opts)
 	return out.String(), err
+}
+
+// rel-1-0-6:GAP-0301: the tenant secrets of the account join key get no
+// read entry for the gateway service SID, on the first set and on a set of
+// the same value (which re-applies the descriptor); an elevated
+// administrator still reads them through the gateway reader check, as
+// enterprise account-keys does, and the other credentials keep the
+// gateway's entry.
+func TestWindowsAccountJoinSecretsAreAdministratorOnly(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	const value = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+	gateway, err := managed.WindowsServiceAccountSID(windowsSecretGatewayAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principals := func(name string) map[string]bool {
+		t.Helper()
+		extended, _ := winpath.Extended(filepath.Join(dir, name))
+		sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, _ := sd.DACL()
+		seen := map[string]bool{}
+		for i := uint16(0); i < dacl.AceCount; i++ {
+			var ace *windows.ACCESS_ALLOWED_ACE
+			if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+				t.Fatal(err)
+			}
+			seen[(*windows.SID)(unsafe.Pointer(&ace.SidStart)).String()] = true
+		}
+		return seen
+	}
+	for _, name := range []string{accountjoin.SecretName, accountjoin.NextSecretName} {
+		for pass := 0; pass < 2; pass++ {
+			if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true, json: true}, value+"\r\n"); err != nil {
+				t.Fatalf("set %s (pass %d): %v", name, pass, err)
+			}
+			if seen := principals(name); len(seen) != 2 || seen[gateway.String()] {
+				t.Fatalf("%s (pass %d): DACL principals %v, want LocalSystem and Administrators only", name, pass, seen)
+			}
+		}
+		stored, _, err := managed.ResolveServiceCredentialAs(name, dir, windowsSecretGatewayAccount)
+		if err != nil || string(stored) != value {
+			t.Fatalf("the administrator cannot read %s: %v", name, err)
+		}
+	}
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "aid-test-key-0123456789\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if seen := principals("ai-defense-api-key"); !seen[gateway.String()] {
+		t.Fatalf("the gateway lost its read entry on a credential it uses: %v", seen)
+	}
 }
 
 func TestWindowsSecretStoreUsesTheGatewayReaderDACL(t *testing.T) {
