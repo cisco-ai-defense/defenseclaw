@@ -6,9 +6,11 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -83,6 +85,14 @@ func TestGAP0568ObserveOverBudgetStateWriteBlocks(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
+	decoys := make([]string, 130)
+	for i := range decoys {
+		decoys[i] = fmt.Sprintf("echo claw%d", i)
+	}
+	// perUserOnly rows: behind ProtectHome the hook client cannot tell the
+	// pattern names the state (no defense or claw in it), a known limit of
+	// the managed reading (review r3 item 5).
+	perUserOnly := map[string]bool{"short glob state write after 200": true, "qmark glob state write after 200": true}
 	rows := []struct {
 		name, command string
 		observeBlock  bool
@@ -98,6 +108,13 @@ func TestGAP0568ObserveOverBudgetStateWriteBlocks(t *testing.T) {
 		{"glob-spelled state write after 200", gap0568Assignments(200) + "; printf c >> ~/.defense?law/config.yaml", true},
 		{"quote-split state write alone", "printf c >> ~/.defense''claw/config.yaml", true},
 		{"quote-split state write after 200", gap0568Assignments(200) + "; printf c >> ~/.defense''claw/config.yaml", true},
+		// Review r3: patterns with neither defense nor claw, proved by the
+		// glob twin (mutation MD), and a state write after 130 statements
+		// that name the state, past the reduced reading's bound (finding 3).
+		{"short glob state write after 200", gap0568Assignments(200) + "; printf c >> ~/.def*/config.yaml", true},
+		{"qmark glob state write after 200", gap0568Assignments(200) + "; printf c >> ~/.d?f?n?e?l?w/config.yaml", true},
+		{"state write after 130 naming statements", gap0568Assignments(200) + "; " + strings.Join(decoys, "; ") + "; printf c >> " + state, true},
+		{"tilde state write after 130 naming statements", gap0568Assignments(200) + "; " + strings.Join(decoys, "; ") + "; printf c >> ~/.defenseclaw/config.yaml", true},
 		{"benign 200", gap0568Assignments(200), false},
 		{"keys write after 200", gap0568Assignments(200) + "; echo k >> " + keys, false},
 	}
@@ -106,6 +123,9 @@ func TestGAP0568ObserveOverBudgetStateWriteBlocks(t *testing.T) {
 			api := instructionProtectionTestAPI(t, connector, mode, "HIGH")
 			for _, cell := range []struct{ client, managed bool }{{false, false}, {true, false}, {true, true}} {
 				for _, row := range rows {
+					if perUserOnly[row.name] && cell.managed {
+						continue
+					}
 					// Action mode blocks every row: each is over the budget
 					// or a state write.
 					want := mode == "action" || row.observeBlock

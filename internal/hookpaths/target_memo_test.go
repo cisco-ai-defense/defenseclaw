@@ -213,6 +213,31 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 	if _, listed := got[state]; !listed {
 		t.Errorf("over-budget state write: header %v does not list %s", got, state)
 	}
+	// Review r3 mutation MC: the header is built from the reduced call, so
+	// the padding's own write targets (past the 64 KiB analysis bound, so
+	// no path fact lists them) are not described.
+	var writes []string
+	for i := range 30000 {
+		writes = append(writes, fmt.Sprintf("echo x > ordinary/f%d.txt", i))
+	}
+	reducedHeader := header(strings.Join(writes, "; ") + "; printf changed >> " + state)
+	if _, listed := reducedHeader[state]; !listed || reducedHeader[TruncatedKey] != "1" {
+		t.Errorf("over-budget state write after 30000 writes: header %v, want the state listed and the truncated marker", reducedHeader)
+	}
+	for key := range reducedHeader {
+		if strings.Contains(key, "ordinary/f") {
+			t.Errorf("header lists the padding target %s: the full call was described, not its reduced reading", key)
+			break
+		}
+	}
+	// Past the bound the client sends only the incomplete header.
+	var decoys []string
+	for i := range StateNamingStatementsMax + 2 {
+		decoys = append(decoys, fmt.Sprintf("echo claw%d", i))
+	}
+	if got := header(gap0568Assignments(200) + "; " + strings.Join(decoys, "; ") + "; printf changed >> " + state); !incomplete(got) {
+		t.Errorf("over-budget call past the reduced bound: header %v, want only the incomplete marker and cwd", got)
+	}
 	// Review R2-2: the state name with a quote inside it is still described.
 	quoted := header(gap0568Assignments(200) + "; printf changed >> ~/.defense''claw/config.yaml")
 	if incomplete(quoted) {
@@ -230,9 +255,9 @@ func TestClientStateStatementsAreBounded(t *testing.T) {
 	for i := range padding {
 		padding[i] = fmt.Sprintf("echo claw%d", i)
 	}
-	reduced, ok := StateNamingStatements(gap0568Assignments(500) + "; cd sub; " + strings.Join(padding, "; "))
-	if !ok {
-		t.Fatal("POSIX call not split")
+	reduced, overflow, ok := StateNamingStatements(gap0568Assignments(500) + "; cd sub; " + strings.Join(padding, "; "))
+	if !ok || !overflow {
+		t.Fatalf("POSIX call: ok %t overflow %t, want both (3001 qualifying statements)", ok, overflow)
 	}
 	if got := len(strings.Split(reduced, "; ")); got != StateNamingStatementsMax {
 		t.Errorf("%d statements described, want %d", got, StateNamingStatementsMax)
@@ -241,8 +266,11 @@ func TestClientStateStatementsAreBounded(t *testing.T) {
 		t.Errorf("reduced call %.60q: want the directory change and the naming statements, no assignments", reduced)
 	}
 	state := "printf c >> ~/.defense''claw/config.yaml"
-	if reduced, _ := StateNamingStatements(gap0568Assignments(200) + "; " + state); reduced != state {
-		t.Errorf("reduced call %q, want only %q", reduced, state)
+	if reduced, overflow, _ := StateNamingStatements(gap0568Assignments(200) + "; " + state); reduced != state || overflow {
+		t.Errorf("reduced call %q (overflow %t), want only %q", reduced, overflow, state)
+	}
+	if _, overflow, _ := StateNamingStatements(strings.Join(padding[:StateNamingStatementsMax], "; ")); overflow {
+		t.Error("exactly the bound overflowed")
 	}
 	for _, text := range []string{"~/.DefenseClaw", `~/.defense\claw`, "~/.defense?law", "e=claw"} {
 		if !MayNameState(text) {

@@ -1005,6 +1005,14 @@ func withActiveStateTargetMention(
 			return findings
 		}
 	}
+	return withProvenActiveStateMutation(generation, request, findings)
+}
+
+// withProvenActiveStateMutation adds (or upgrades) the
+// tamper.detector_state_write finding of a proven mutation of the active
+// state: the one finding observe mode still blocks on
+// (provenActiveStateMutation).
+func withProvenActiveStateMutation(generation *compiledRulePackCategories, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	const ruleID = "tamper.detector_state_write"
 	_, rule, ok := trustedActionCatalogRule(generation, ruleID)
 	if !ok {
@@ -8653,8 +8661,22 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 	if !known || !hookpaths.MayNameState(command) {
 		return findings
 	}
-	reduced, ok := hookpaths.StateNamingStatements(command)
-	if !ok || reduced == "" || reduced == command {
+	reduced, overflow, ok := hookpaths.StateNamingStatements(command)
+	if !ok {
+		return findings
+	}
+	if overflow && request.ProtectedHomeHook && trustedCallMayWrite(command) {
+		// More statements may name the state than the reduced reading
+		// keeps, so the hook client sent no description (review r3 finding
+		// 3). Behind ProtectHome the gateway cannot read the home to prove
+		// or rule out a state write, so a writing call is held as one.
+		generation := request.generation
+		if generation == nil {
+			generation = snapshotRulePackGenerationFor(parent, request.Connector)
+		}
+		return withProvenActiveStateMutation(generation, request, findings)
+	}
+	if reduced == "" || reduced == command {
 		return findings
 	}
 	for _, finding := range dispatchTrustedAction(parent, bashReadingRequest(request, command, reduced)) {
@@ -8663,6 +8685,17 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 		}
 	}
 	return findings
+}
+
+// trustedCallMayWriteWord matches a redirect or a program that writes,
+// moves, links or deletes files, at the start of a word, in POSIX shells and
+// PowerShell (aliases included).
+var trustedCallMayWriteWord = regexp.MustCompile("(?i)>|(^|[\\s;&|(`])(rm|rmdir|mv|cp|tee|ln|dd|truncate|install|sed|perl|python3?|ruby|node|unzip|tar|rsync|chmod|chown|touch|mkdir|set-content|add-content|clear-content|out-file|remove-item|move-item|copy-item|rename-item|new-item|ni|ri|del|erase|rd|ren|move|copy|sc|ac|clc)(\\s|$|;)")
+
+// trustedCallMayWrite reports a call text that may write, move, link or
+// delete a file.
+func trustedCallMayWrite(command string) bool {
+	return trustedCallMayWriteWord.MatchString(command)
 }
 
 // trustedCallOverStatementBudget reports a shell call that the

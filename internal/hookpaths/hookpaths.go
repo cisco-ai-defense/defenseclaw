@@ -1131,8 +1131,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					if !MayNameState(command) {
 						return incompleteEvidence(cwd)
 					}
-					reduced, ok := StateNamingStatements(command)
-					if !ok {
+					reduced, overflow, ok := StateNamingStatements(command)
+					if !ok || overflow {
+						// No silent drop past the bound: the map says only
+						// that it is incomplete, and the gateway judges the
+						// overflow itself (withReducedStateReading).
 						return incompleteEvidence(cwd)
 					}
 					command = reduced
@@ -5146,22 +5149,24 @@ const StateNamingStatementsMax = 128
 // review R2-5 of rel-1-0-2:GAP-0568), and the gateway judges the same
 // reduced call for the state write. A call the POSIX grammar does not split
 // (a PowerShell call) is kept whole, and only up to the 64 KiB analysis
-// bound (ok false past it).
-func StateNamingStatements(command string) (string, bool) {
+// bound (ok false past it). overflow reports that more statements qualify
+// than the bound keeps: the reduced reading is then not the whole story,
+// and its caller must not treat it as one (review r3 finding 3).
+func StateNamingStatements(command string) (reduced string, overflow, ok bool) {
 	texts, ok := actionfacts.ShellStatementTexts(command)
 	if !ok {
-		return command, len(command) <= 64<<10
+		return command, false, len(command) <= 64<<10
 	}
 	var kept []string
 	for _, text := range texts {
 		fields := strings.Fields(text)
 		place := len(fields) > 0 && (fields[0] == "cd" || fields[0] == "pushd" || fields[0] == "popd")
 		if place || MayNameState(text) {
-			kept = append(kept, text)
 			if len(kept) == StateNamingStatementsMax {
-				break
+				return strings.Join(kept, "; "), true, true
 			}
+			kept = append(kept, text)
 		}
 	}
-	return strings.Join(kept, "; "), true
+	return strings.Join(kept, "; "), false, true
 }
