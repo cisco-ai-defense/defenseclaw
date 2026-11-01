@@ -537,7 +537,72 @@ func (writer *EventHistoryWriter) appendContextTx(
 			fmt.Errorf("audit: local log projection does not belong to the active graph"),
 		)
 	}
-	return writer.appendContextTxResolvedProfile(ctx, tx, record, trustedProjection, expectedProfile.Name())
+	return writer.appendContextTxResolvedProfile(ctx, tx, record, trustedProjection, expectedProfile.Name(), nil)
+}
+
+// preparedEventHistoryAppend is the part of an event-history append that
+// reads no store state: the effective local profile, the trusted
+// projection, its check against the record and its decoded payload. A hook
+// call computes it before its write batch waits for the store's one
+// connection (deferAppend), so the transaction that holds the connection
+// for every queued call no longer spends that CPU (rel-1-0-6 GAP-0381: about
+// half of the event-history time inside the hook-call transaction).
+type preparedEventHistoryAppend struct {
+	projection        observabilityredaction.Projection
+	profile           observabilityredaction.ProfileName
+	projectedEnvelope []byte
+	payloadJSON       []byte
+	projectedPayload  map[string]any
+	err               error
+}
+
+// prepareAppend is the store-free part of appendContextTx for record.
+func (writer *EventHistoryWriter) prepareAppend(
+	ctx context.Context,
+	record observability.Record,
+	projection observabilityredaction.Projection,
+) *preparedEventHistoryAppend {
+	if writer == nil || writer.store == nil || !writer.store.Ready() || writer.localProfiles == nil ||
+		writer.projectionEngine == nil || writer.graphDigest == "" {
+		return nil // appendContextTx reports it inside the transaction
+	}
+	prepared := &preparedEventHistoryAppend{}
+	expectedProfile, ok := writer.localProfiles[record.Bucket()]
+	if !ok {
+		return nil
+	}
+	expectedProfile, ok = observabilityredaction.ResolveSinkPolicyProfile(
+		expectedProfile, legacyredaction.SinkPolicyFromContext(ctx),
+	)
+	if !ok {
+		return nil
+	}
+	trustedProjection, _, err := writer.projectionEngine.Reproject(projection, expectedProfile)
+	if err != nil {
+		return nil
+	}
+	prepared.projection, prepared.profile = trustedProjection, expectedProfile.Name()
+	prepared.projectedEnvelope, prepared.payloadJSON, prepared.err =
+		validateLocalProjection(record, trustedProjection, prepared.profile)
+	if prepared.err == nil {
+		prepared.projectedPayload, _ = trustedProjection.Payload().Object()
+	}
+	return prepared
+}
+
+// appendPreparedTx is appendContextTx for a record prepared by
+// prepareAppend; a nil prepared append takes the whole path in tx.
+func (writer *EventHistoryWriter) appendPreparedTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	record observability.Record,
+	projection observabilityredaction.Projection,
+	prepared *preparedEventHistoryAppend,
+) (eventHistoryAppendOutcome, error) {
+	if prepared == nil || writer == nil || writer.store == nil || !writer.store.Ready() {
+		return writer.appendContextTx(ctx, tx, record, projection)
+	}
+	return writer.appendContextTxResolvedProfile(ctx, tx, record, prepared.projection, prepared.profile, prepared)
 }
 
 func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
@@ -546,6 +611,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	record observability.Record,
 	projection observabilityredaction.Projection,
 	expectedProfile observabilityredaction.ProfileName,
+	prepared *preparedEventHistoryAppend,
 ) (eventHistoryAppendOutcome, error) {
 	if writer == nil || writer.store == nil || writer.store.db == nil || tx == nil {
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(
@@ -566,7 +632,22 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		)
 	}
 
-	projectedEnvelope, payloadJSON, err := validateLocalProjection(record, projection, expectedProfile)
+	var projectedEnvelope, payloadJSON []byte
+	var projectedPayload map[string]any
+	var err error
+	if prepared != nil {
+		projectedEnvelope, payloadJSON, projectedPayload, err =
+			prepared.projectedEnvelope, prepared.payloadJSON, prepared.projectedPayload, prepared.err
+	} else {
+		projectedEnvelope, payloadJSON, err = validateLocalProjection(record, projection, expectedProfile)
+		if err == nil {
+			// The projected payload is decoded once for every compatibility
+			// column below; each lookup decoded the whole payload again (nine
+			// times a row, r106 performance audit). A payload that does not
+			// decode reads as empty, as each lookup did.
+			projectedPayload, _ = projection.Payload().Object()
+		}
+	}
 	if err != nil {
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(EventHistoryHealthProjectionRejected, err)
 	}
@@ -596,11 +677,6 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	correlation := record.Correlation()
 	provenance := record.Provenance()
 	metadata := projection.Metadata()
-	// The projected payload is decoded once for every compatibility column
-	// below; each lookup decoded the whole payload again (nine times a row,
-	// r106 performance audit). A payload that does not decode reads as
-	// empty, as each lookup did.
-	projectedPayload, _ := projection.Payload().Object()
 	target := projectedCompatibilityTarget(projectedPayload)
 	if target == "" && strings.TrimSpace(record.Connector()) != "" &&
 		strings.TrimSpace(projectedCompatibilityString(projectedPayload, "defenseclaw.health.subsystem")) != "" {

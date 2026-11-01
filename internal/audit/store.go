@@ -284,6 +284,13 @@ type Store struct {
 	// observationGroup groups concurrent correlation observation writes
 	// into one transaction (CorrelationRepository.RecordObservations).
 	observationGroup writeGroup
+	// connectorInstances holds the connector instances this store resolved
+	// (connectorInstanceKey -> ConnectorInstance), so a hook call whose
+	// instance needs no change does not take the store's one connection to
+	// read it again (rel-1-0-6 GAP-0381). Only this store writes the table
+	// (resolveConnectorInstance, UpsertConnectorInstance); an upsert and a
+	// failed occurrence forget every entry.
+	connectorInstances sync.Map
 	// callGroup groups the flushes of concurrent hook calls' write batches
 	// into one transaction (CallWriteBatch).
 	callGroup writeGroup
