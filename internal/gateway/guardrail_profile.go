@@ -880,37 +880,64 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 	}
 }
 
-// profileExplainGatewayOwner is the account id a per-user gateway runs as
-// (the uid on Linux and macOS, the SID on Windows), and false on a managed
-// gateway, which serves every account's administrator view. Tests replace
-// it.
-var profileExplainGatewayOwner = func() (string, bool) {
+// profileExplainGatewayOwner is the account a per-user gateway runs as: its
+// id (the uid on Linux and macOS, from the kernel; the token SID on
+// Windows) and name. perUser is false on a managed gateway, which serves
+// every account's administrator view, and on a gateway run as root, the
+// host's administrator. Tests replace it.
+var profileExplainGatewayOwner = func() (id, name string, perUser bool) {
 	if gatewayRunsAsServiceAccount() {
-		return "", false
+		return "", "", false
 	}
-	id, _ := localProcessUser()
-	return id, true
+	sid, name := localProcessUser()
+	if runtime.GOOS == "windows" {
+		return sid, name, true
+	}
+	uid := os.Getuid()
+	if uid == 0 {
+		return "", "", false
+	}
+	return strconv.Itoa(uid), name, true
 }
 
-// perUserExplainOfAnotherAccount refuses `profile explain --user` on a
-// per-user gateway when the named account is not the one the gateway runs
-// as: a per-user install shows a person only their own effective policy.
-// On macOS another local account resolved and explain printed its uid,
-// groups and profile, while Linux refused it only where a directory twin
-// lookup failed (rel-1-0-6:GAP-0328). A per-user gateway that cannot name
-// its own account refuses every other account too. An account that did
-// not resolve (no id) keeps the lookup's own answer.
-func perUserExplainOfAnotherAccount(found profileSubject) error {
-	owner, perUser := profileExplainGatewayOwner()
-	if !perUser || found.UserID == "" || (owner != "" && strings.EqualFold(found.UserID, owner)) {
+// perUserExplainRefusal refuses `profile explain --user` on a per-user
+// gateway for any account but the one it runs as: a per-user install shows
+// a person only their own effective policy. On macOS another local account
+// resolved and explain printed its uid, groups and profile, while Linux
+// refused it only where a directory twin lookup failed (rel-1-0-6:GAP-0328).
+// The refusal comes before explain's own lookup of the account, so none of
+// its facts are read, cached or reported: only the name or uid is resolved
+// to compare it with the owner (profileExplainAccount, without facts). The
+// owner's own spellings (uid, name, a UPN or DOMAIN\name that resolves to
+// the uid) pass, and so does the owner's name when the lookup fails, so its
+// own lookup error is reported. A per-user gateway that cannot name its own
+// account explains none.
+func perUserExplainRefusal(user string) error {
+	ownerID, ownerName, perUser := profileExplainGatewayOwner()
+	user = strings.TrimSpace(user)
+	if !perUser || user == "" {
+		return nil
+	}
+	if ownerID == "" {
+		return errPerUserExplainOtherAccount
+	}
+	if strings.EqualFold(user, ownerID) {
+		return nil
+	}
+	id, _, err := profileExplainAccount(user)
+	switch {
+	case err == nil && strings.EqualFold(id, ownerID):
+		return nil
+	case err != nil && ownerName != "" && strings.EqualFold(user, ownerName):
 		return nil
 	}
 	return errPerUserExplainOtherAccount
 }
 
 // errPerUserExplainOtherAccount is the refusal of another account's explain
-// on a per-user gateway. It names no fact of the account.
-var errPerUserExplainOtherAccount = errors.New("a per-user install explains only your own account; another account's profile is shown only to an administrator of a managed install")
+// on a per-user gateway. It names no fact of the account, and reads the same
+// whether the account exists or not.
+var errPerUserExplainOtherAccount = errors.New("a per-user install explains only your own account; run the command as that account, or ask an administrator of a managed install")
 
 // lookupDirectoryProfileSubject resolves the account an administrator names
 // to `guardrail profile explain --user` with the directory facts a request
@@ -1777,7 +1804,9 @@ func profileEnrollmentExemption(cfg *config.Config, subject *profileSubject, wit
 // handleGuardrailProfileResolve serves GET
 // /api/v1/guardrail/profiles/resolve?user=&connector=&agent=: which profile
 // the named subject would get, for `defenseclaw guardrail profile explain`.
-// It is an administrator view: loopback only, behind the gateway token.
+// Loopback only, behind the gateway token. On a managed gateway it is the
+// administrator view of every account; a per-user gateway explains only
+// its own account (perUserExplainRefusal).
 func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -1843,19 +1872,27 @@ func (a *APIServer) serveGuardrailProfileResolve(w http.ResponseWriter, r *http.
 	source := ""
 	refreshedFacts := false
 	if user != "" {
-		found, err := profileExplainSubjectLookup(user)
-		if caller, ok := profileExplainCallerSubject(query.Get("caller_facts"), user); ok && !own {
-			// The administrator's own NSS lookup as root resolved the account
-			// (GAP-0500); the gateway's lookup above still refreshed what the
-			// hooks read, and the cache block says what they use.
-			found, err = caller, nil
-			out["facts_source"] = "caller"
+		var found profileSubject
+		var err error
+		var refusal error
+		if !own {
+			refusal = perUserExplainRefusal(user)
 		}
-		if refusal := perUserExplainOfAnotherAccount(found); refusal != nil {
+		if refusal != nil {
 			// A per-user gateway explains its own account only: users see
 			// only their own effective policy. Another account is answered
 			// as one the lookup cannot name, with none of its facts.
 			found, err = profileSubject{UserName: user}, refusal
+		} else {
+			found, err = profileExplainSubjectLookup(user)
+			if caller, ok := profileExplainCallerSubject(query.Get("caller_facts"), user); ok && !own {
+				// The administrator's own NSS lookup as root resolved the
+				// account (GAP-0500); the gateway's lookup above still
+				// refreshed what the hooks read, and the cache block says
+				// what they use.
+				found, err = caller, nil
+				out["facts_source"] = "caller"
+			}
 		}
 		var ambiguous *useridentity.AmbiguousAccountError
 		if errors.As(err, &ambiguous) {

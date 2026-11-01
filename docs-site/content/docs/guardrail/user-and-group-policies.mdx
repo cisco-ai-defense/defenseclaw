@@ -29,7 +29,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 
 ### Before you start
 
-- The users are in a directory group or a local group on the host. Find the exact spelling: `id -Gn` on Linux, or `defenseclaw guardrail profile explain --user alice --json | jq .subject`.
+- The users are in a directory group or a local group on the host. Find the exact spelling: `id -Gn` on Linux, or `defenseclaw guardrail profile explain --user alice --json | jq .subject` run as alice (a per-user install explains only your own account).
 - On Windows, group profiles need the standalone enterprise install. Per-user installs have no group list.
 - Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no per-user `config.yaml` and no `defenseclaw guardrail` commands except `defenseclaw guardrail profile explain` on Linux and macOS, which shows a standard user their own profile: put the profiles in the machine config and check them as [Deliver it to managed hosts](#deliver-it-to-managed-hosts) shows. On Windows that is `defenseclaw.exe config validate FILE` and `defenseclaw.exe enterprise windows profile-explain --user CORP\alice`, from an elevated prompt.
 

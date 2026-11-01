@@ -49,6 +49,7 @@ func (r outageAccounts) LookupUID(uid int) (unixidentity.Account, error) {
 // facts are kept now agree; an account with no cached facts gets the
 // provisional default from both, and so do both once the hour is over.
 func TestProfileExplainDuringOutageAgreesWithTheHooksOfAnExplainedAccount(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	const engUID, eng2UID = 94404116, 94404117
 	eng := unixidentity.Account{Name: "dcad-r102-eng1@dclab.test", UID: engUID, Home: "/home/dcad-r102-eng1@dclab.test"}
 	eng2 := unixidentity.Account{Name: "dcad-r102-eng2@dclab.test", UID: eng2UID, Home: "/home/dcad-r102-eng2@dclab.test"}

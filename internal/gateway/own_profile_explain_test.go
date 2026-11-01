@@ -21,6 +21,7 @@ import (
 // caller; another account, or administrator caller_facts, are not taken,
 // and the answer leaves out the other profiles (users see only their own).
 func TestOwnProfileExplainAnswersOnlyTheCaller(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"engineering": {Mode: "observe"}, "strict": {Mode: "action", BlockAt: "LOW"}}

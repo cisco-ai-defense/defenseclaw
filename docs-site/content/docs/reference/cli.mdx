@@ -522,7 +522,7 @@ defenseclaw guardrail block-message --clear                # clear global + acti
 defenseclaw guardrail disable --connector codex           # then `enable --connector codex` to restore
 defenseclaw guardrail use-pack strict                     # every connector, clears overrides
 defenseclaw guardrail use-pack ~/packs/my-org --connector codex
-defenseclaw guardrail profile explain --user alice --connector codex
+defenseclaw guardrail profile explain --user alice --connector codex   # as alice: a per-user install explains only your own account
 defenseclaw guardrail use-pack --clear --connector codex  # back to the global pack
 defenseclaw guardrail mode action                         # every connector without its own mode
 defenseclaw guardrail mode observe --connector codex      # codex only logs

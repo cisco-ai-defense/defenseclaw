@@ -184,7 +184,7 @@ sudo ./verify-okta-identity.sh --user alice --expect-profile okta-observe --conn
 sudo ./verify-okta-identity.sh --user bob --expect-profile okta-strict --connector claudecode
 ```
 
-On a managed host, run it as root: it calls `defenseclaw-gateway enterprise linux profile-explain`. On a per-user install, run it as the user whose gateway you want to ask: it calls `defenseclaw guardrail profile explain`. Those commands work on their own:
+On a managed host, run it as root: it calls `defenseclaw-gateway enterprise linux profile-explain`. On a per-user install, run it as the user whose gateway you want to ask: it calls `defenseclaw guardrail profile explain`, which explains only that user's own account. Those commands work on their own:
 
 ```bash
 defenseclaw guardrail profile explain --user alice --connector claudecode

@@ -23,6 +23,7 @@ import (
 // A no-profile deployment still has an organization sandbox floor. Resolve
 // must report the same enrollment exemption as the hook for that floor.
 func TestProfileResolveWithoutProfilesReportsHookExemption(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	previousLookup, previousFacts := profileExplainSubjectLookup, managedHookExemptFacts
 	previousEnabled := identityFactsEnabled.Load()
 	t.Cleanup(func() {
