@@ -57,7 +57,12 @@ func windowsAccountJoinSources(cfg *config.Config, layout managed.StandaloneLayo
 			value, _, err := managed.ResolveServiceCredentialAs(name, layout.SecretsDir, windowsSecretGatewayAccount)
 			return value, err
 		},
-		SpoolDir:   enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir)),
+		// The folder the guardian and the enumerator write, which the
+		// services find through the DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR pin:
+		// an administrator shell has no pin, and data_dir plus
+		// -hook-guardian named a folder that does not exist, so every
+		// enrolled account was missing (rel-1-0-6:GAP-0344).
+		SpoolDir:   enterprisehooks.IdentitySpoolDir(layout.GuardianAuthDir),
 		SpoolTrust: managed.ValidateTrustedFilePath,
 		// next_not_after is bounded by the time the confirmed bundle that
 		// carries it was signed (rel-1-0-6:GAP-0277).

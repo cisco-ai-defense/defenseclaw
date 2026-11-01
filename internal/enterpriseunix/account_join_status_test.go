@@ -6,12 +6,43 @@
 package enterpriseunix
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
+
+// rel-1-0-6:GAP-0344 (Linux and macOS side): account-keys and status read
+// the identity spool in the folder the guardian is pinned to
+// (DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR of the service environment), the
+// layout's guardian folder: /var/lib/defenseclaw-hook-guardian on Linux and
+// /opt/cisco/defenseclaw/hook-guardian-state on macOS, which is not data_dir
+// plus -hook-guardian there.
+func TestAccountJoinReadsTheSpoolTheGuardianWrites(t *testing.T) {
+	for goos, want := range map[string]string{
+		"linux":  "/var/lib/defenseclaw-hook-guardian/identity",
+		"darwin": "/opt/cisco/defenseclaw/hook-guardian-state/identity",
+	} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			pinned := ""
+			for _, entry := range h.env.serviceEnvironment() {
+				if value, ok := strings.CutPrefix(entry, "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR="); ok {
+					pinned = value
+				}
+			}
+			if got := enterprisehooks.IdentitySpoolDir(pinned); got != want {
+				t.Fatalf("the guardian writes %s, want %s", got, want)
+			}
+			if got := h.env.accountJoinSources(&config.Config{DataDir: h.env.Layout.DataDir}).SpoolDir; got != h.env.P(want) {
+				t.Fatalf("account-keys reads %s, want %s", got, h.env.P(want))
+			}
+		})
+	}
+}
 
 // rel-1-0-6:GAP-0277: the status inputs ask this deployment's bundle store
 // for the signing time of the confirmed bundle that carries next_not_after.

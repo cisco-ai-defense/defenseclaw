@@ -6,13 +6,46 @@
 package cli
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// rel-1-0-6:GAP-0344: the Windows account join keys read the identity spool
+// the guardian writes, the standalone layout's hook-guardian-state folder
+// the services are pinned to, whatever data_dir or the shell's environment
+// say (an elevated shell has no pin; a per-user style data_dir under a
+// profile named another folder).
+func TestWindowsAccountJoinReadsTheGuardianSpoolOfTheLayout(t *testing.T) {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(layout.GuardianAuthDir, enterprisehooks.IdentitySpoolDirName)
+	if !strings.HasSuffix(strings.ToLower(want), strings.ToLower(`\hook-guardian-state\identity`)) {
+		t.Fatalf("standalone spool %s", want)
+	}
+	pins := windowsEnterpriseServicePins(layout)
+	pins[managed.HookGuardianAuthorizationDirEnv] = layout.GuardianAuthDir
+	for _, dataDir := range []string{layout.DataDir, `C:\Users\dcw-std1\.defenseclaw`} {
+		for _, env := range []string{"", `C:\elsewhere`} {
+			t.Setenv(managed.HookGuardianAuthorizationDirEnv, env)
+			sources := windowsAccountJoinSources(&config.Config{DataDir: dataDir}, layout)
+			if sources.SpoolDir != want {
+				t.Errorf("data_dir %s, pin %q: spool %s, want %s", dataDir, env, sources.SpoolDir, want)
+			}
+			if guardian := enterprisehooks.IdentitySpoolDir(pins[managed.HookGuardianAuthorizationDirEnv]); guardian != sources.SpoolDir {
+				t.Errorf("the guardian writes %s, account-keys reads %s", guardian, sources.SpoolDir)
+			}
+		}
+	}
+}
 
 // rel-1-0-6:GAP-0277: the Windows status inputs ask the bundle store for the
 // signing time of the confirmed bundle that carries next_not_after.
