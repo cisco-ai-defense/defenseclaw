@@ -174,7 +174,7 @@ func (m *Manager) refreshEgress() {
 	}
 	proxy := m.proxy
 	m.mu.Unlock()
-	done := m.prefetchDecisions(boxes)
+	m.prefetchDecisions(boxes)
 	for _, b := range boxes {
 		eff, err := m.resolveBox(b)
 		if err != nil {
@@ -184,7 +184,6 @@ func (m *Manager) refreshEgress() {
 		m.syncCredential(b, eff)
 		m.announcePosture(b, eff)
 	}
-	done()
 	if proxy == nil {
 		return
 	}

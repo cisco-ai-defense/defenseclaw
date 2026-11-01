@@ -166,6 +166,10 @@ type SandboxDaemonOptions struct {
 	// only (config.ReadUserMCPServersForConnector when nil in
 	// NewSandboxDaemon); tests replace it.
 	mcpRead func(connector string) ([]config.MCPServerEntry, error)
+	// gatewayCallTimeout bounds each managed gateway call of the start-up
+	// confirmation, the policy poll and a packs view (managedViewTimeout
+	// when zero); tests shorten it.
+	gatewayCallTimeout time.Duration
 }
 
 // SandboxDaemon is a managed computer's per-user sandbox daemon.
@@ -637,8 +641,10 @@ func (d *SandboxDaemon) handlePacks(w http.ResponseWriter, r *http.Request) {
 		registration, _ = d.registrationOf(sandboxauth.Binding{SandboxName: name})
 	}
 	connector := d.managedConnector(q.Get("harness"))
+	ctx, cancel := context.WithTimeout(r.Context(), d.gatewayCallTimeout())
+	defer cancel()
 	if name := r.PathValue("name"); name != "" {
-		view, err := d.relay.Pack(r.Context(), registration, connector, name)
+		view, err := d.relay.Pack(ctx, registration, connector, name)
 		if err != nil {
 			writeSandboxError(w, managedPackError(err))
 			return
@@ -646,7 +652,7 @@ func (d *SandboxDaemon) handlePacks(w http.ResponseWriter, r *http.Request) {
 		d.api.writeJSON(w, http.StatusOK, sandboxapi.ManagedPack(view))
 		return
 	}
-	views, err := d.relay.Packs(r.Context(), registration, connector)
+	views, err := d.relay.Packs(ctx, registration, connector)
 	if err != nil {
 		writeSandboxError(w, managedPackError(err))
 		return
@@ -704,17 +710,24 @@ func sandboxDaemonPeerCheck(uid int, next http.Handler) http.Handler {
 const (
 	sandboxDaemonUnavailableLinger = 15 * time.Second
 	sandboxDaemonUnavailableMax    = 2 * time.Minute
+	// sandboxDaemonUnavailableRecheck paces the recovered check.
+	sandboxDaemonUnavailableRecheck = 5 * time.Second
 )
 
 // ServeSandboxDaemonUnavailable answers every request of the daemon's own
 // account on ln with why sandboxes cannot run (cause, as the sandbox API
 // error a relay failure maps to) until the socket idles, then returns nil.
-// It closes ln.
-func ServeSandboxDaemonUnavailable(ctx context.Context, ln net.Listener, cause error) error {
-	return serveSandboxDaemonUnavailable(ctx, ln, cause, sandboxDaemonUnavailableLinger, sandboxDaemonUnavailableMax)
+// It closes ln. recovered, when set, is asked every
+// sandboxDaemonUnavailableRecheck whether the cause has gone (the managed
+// gateway answers again); then it returns at once, and the next command
+// starts a daemon that serves. Without it, a command that kept asking kept
+// the stale answer alive for up to sandboxDaemonUnavailableMax after the
+// gateway came back (GAP-0608).
+func ServeSandboxDaemonUnavailable(ctx context.Context, ln net.Listener, cause error, recovered func(context.Context) bool) error {
+	return serveSandboxDaemonUnavailable(ctx, ln, cause, recovered, sandboxDaemonUnavailableLinger, sandboxDaemonUnavailableMax, sandboxDaemonUnavailableRecheck)
 }
 
-func serveSandboxDaemonUnavailable(ctx context.Context, ln net.Listener, cause error, linger, limit time.Duration) error {
+func serveSandboxDaemonUnavailable(ctx context.Context, ln net.Listener, cause error, recovered func(context.Context) bool, linger, limit, recheck time.Duration) error {
 	var refusal *sandboxapi.Error
 	if !errors.As(managedRelayError(cause), &refusal) {
 		refusal = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
@@ -745,9 +758,15 @@ func serveSandboxDaemonUnavailable(ctx context.Context, ln net.Listener, cause e
 	if step <= 0 || step > time.Second {
 		step = time.Second
 	}
+	if recovered != nil && recheck > 0 && recheck < step {
+		step = recheck
+	}
 	tick := time.NewTicker(step)
 	defer tick.Stop()
 	deadline := time.Now().Add(limit)
+	nextCheck := time.Now().Add(recheck)
+	checked := make(chan bool, 1)
+	checking := false
 	var err error
 wait:
 	for {
@@ -759,10 +778,19 @@ wait:
 				err = nil
 			}
 			break wait
+		case ok := <-checked:
+			checking = false
+			if ok {
+				break wait
+			}
 		case now := <-tick.C:
 			idle := conns.Load() == 0 && now.Sub(time.Unix(0, last.Load())) >= linger
 			if idle || now.After(deadline) {
 				break wait
+			}
+			if recovered != nil && !checking && !now.Before(nextCheck) {
+				checking, nextCheck = true, now.Add(recheck)
+				go func() { checked <- recovered(ctx) }()
 			}
 		}
 	}
@@ -1187,8 +1215,14 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 	// ends after it was taken may have listed its sandbox stopped (GAP-0433).
 	listedAt := d.startsEnded.Load()
 	phases, listed := d.sandboxPhases(ctx)
+	// silent: the managed gateway took a call of this pass and did not
+	// answer within its bound (gatewayCall). No other registration is asked:
+	// each would wait out the same bound, one after the other (GAP-0608).
+	// Unasked, a registration stays as it was (at start: unconfirmed, under
+	// the closed floor) and the next poll asks again.
+	silent := false
 	for _, r := range d.regs.list() {
-		if r.Revoked {
+		if r.Revoked || silent {
 			continue
 		}
 		running, report := sandboxStateReport(phases, listed, r.Sandbox)
@@ -1205,17 +1239,27 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 		}
 		// With report, tell the gateway whether the sandbox runs: a stopped
 		// one's registration authorizes no relayed call (GAP-0505).
-		ans := d.askPolicy(ctx, r, report, running)
-		if report && running && registrationStopped(ans.err) && d.tryLockLifecycle() {
+		var ans policyAnswer
+		ask := func(cctx context.Context) error {
+			ans = d.askPolicy(cctx, r, report, running)
+			return ans.err
+		}
+		silent = d.gatewayCall(ctx, ask)
+		if !silent && report && running && registrationStopped(ans.err) && d.tryLockLifecycle() {
 			// It runs again, but not by a start of this daemon (one
 			// started outside it, or a stop listed while it ran): it runs
 			// under a new registration from now, as after a start. A
 			// start under way registers it itself.
-			next, err := d.restartRegistration(ctx, r)
+			var next daemonRegistration
+			var err error
+			silent = d.gatewayCall(ctx, func(cctx context.Context) error {
+				next, err = d.restartRegistration(cctx, r)
+				return err
+			})
 			d.unlockLifecycle()
 			if err == nil && next.ID != r.ID {
 				r = next
-				ans = d.askPolicy(ctx, r, report, running)
+				silent = d.gatewayCall(ctx, ask)
 			}
 		}
 		if ans.gone {
@@ -1235,7 +1279,9 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 		answered = append(answered, ans)
 	}
 	if moved {
-		d.refreshSettings(ctx)
+		sctx, cancel := context.WithTimeout(ctx, d.gatewayCallTimeout())
+		d.refreshSettings(sctx)
+		cancel()
 	}
 	if adopt {
 		d.adoptMu.Lock()
@@ -1680,7 +1726,9 @@ func (d *SandboxDaemon) stopRevoked(ctx context.Context, r daemonRegistration) {
 	// allowed) ends the registration at the gateway only when it hears the
 	// sandbox stopped; the poll no longer reports a registration this daemon
 	// marked revoked, so it stayed live there (GAP-0488).
-	if _, err := d.relay.Report(ctx, r.ID, false); err != nil {
+	rctx, cancel := context.WithTimeout(ctx, d.gatewayCallTimeout())
+	defer cancel()
+	if _, err := d.relay.Report(rctx, r.ID, false); err != nil {
 		if _, gone := registrationGone(err); !gone {
 			d.logf("report %s stopped after its registration was revoked: %v", r.Sandbox, err)
 		}
@@ -1986,6 +2034,28 @@ func managedPolicyUnread(err error) (string, bool) {
 
 // managedViewTimeout bounds the managed gateway calls a status makes.
 const managedViewTimeout = 5 * time.Second
+
+// gatewayCallTimeout bounds one managed gateway call of the start-up
+// confirmation, the policy poll and a packs view.
+func (d *SandboxDaemon) gatewayCallTimeout() time.Duration {
+	if d.opts.gatewayCallTimeout > 0 {
+		return d.opts.gatewayCallTimeout
+	}
+	return managedViewTimeout
+}
+
+// gatewayCall runs call with its own deadline (gatewayCallTimeout) within
+// ctx and reports whether that deadline ended it: the managed gateway took
+// the call and did not answer in time (stopped, hung). The relay client
+// allows two minutes, for relayed hooks that wait on a judge; a start-up
+// confirmation that waited on a stopped gateway held the daemon, and every
+// command on its socket, until the gateway was replaced (GAP-0608).
+func (d *SandboxDaemon) gatewayCall(ctx context.Context, call func(context.Context) error) (silent bool) {
+	cctx, cancel := context.WithTimeout(ctx, d.gatewayCallTimeout())
+	defer cancel()
+	err := call(cctx)
+	return err != nil && ctx.Err() == nil && errors.Is(cctx.Err(), context.DeadlineExceeded)
+}
 
 // defaultManagedConnector is the connector a policy view that names no
 // agent claims when the organization names no sandbox harness.

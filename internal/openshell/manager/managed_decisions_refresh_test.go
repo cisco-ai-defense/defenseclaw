@@ -19,8 +19,10 @@ import (
 // before it serves, and loaded each sandbox's saved decisions in turn, up
 // to loadDecisionsTimeout each: with the managed gateway slow to answer
 // them, three sandboxes held the daemon back 15 s. A refresh now waits one
-// load for all of them; a registration whose load got no answer is asked
-// again by the next refresh, which then applies its decisions.
+// load for all of them. The start refreshes again at once (the egress
+// proxy, the confirmed floor): those do not wait for a registration whose
+// load got no answer within decisionsRetryAfter. The first refresh after
+// that asks again and applies its decisions.
 func TestARefreshWaitsOneDecisionsLoadNotOnePerSandbox(t *testing.T) {
 	e, auth := managedEnv(t, nil)
 	names := []string{"slowbox1", "slowbox2", "slowbox3"}
@@ -39,6 +41,26 @@ func TestARefreshWaitsOneDecisionsLoadNotOnePerSandbox(t *testing.T) {
 		t.Fatalf("a refresh of %d sandboxes took %s on a gateway that does not answer their decisions, want under %s",
 			len(names), took.Round(time.Second), 2*loadDecisionsTimeout)
 	}
+	hung := auth.hungLoads.Load()
+	if hung < int64(len(names)) {
+		t.Fatalf("the refresh asked %d decisions loads, want one per sandbox (%d)", hung, len(names))
+	}
+	// The start-up refreshes that follow at once do not wait again.
+	e.m.RefreshPolicies()
+	e.m.RefreshPolicies()
+	if again := auth.hungLoads.Load() - hung; again != 0 {
+		t.Fatalf("%d decisions loads waited again within decisionsRetryAfter of no answer", again)
+	}
+	// decisionsRetryAfter passes: the misses move that far into the past
+	// (the running manager reads its clock, which the test leaves alone).
+	st.mu.Lock()
+	if len(st.unanswered) < len(names) {
+		t.Fatalf("missed loads recorded: %v", st.unanswered)
+	}
+	for r, at := range st.unanswered {
+		st.unanswered[r] = at.Add(-decisionsRetryAfter)
+	}
+	st.mu.Unlock()
 	auth.hang.Store(false)
 	id := sandboxreg.IDPrefix + strings.Repeat("a", sandboxreg.IDRandomChars-len(names[0])) + names[0]
 	auth.set(func(a *fakeAuthority) {

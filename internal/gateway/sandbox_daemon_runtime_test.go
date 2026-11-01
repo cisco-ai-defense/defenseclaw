@@ -286,6 +286,9 @@ type fakeRelay struct {
 	unchanged func() sandboxrelay.DaemonSettings
 	resolve   func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error)
 	current   func(string) (sandboxrelay.CurrentPolicy, error)
+	// currentCtx, when set, answers Current and Report with the caller's
+	// context: a gateway that takes the call and never answers.
+	currentCtx func(context.Context, string) (sandboxrelay.CurrentPolicy, error)
 	// rawCurrent lets a test exercise an incomplete wire answer. Ordinary
 	// fake answers model the complete floor sent by the current gateway.
 	rawCurrent bool
@@ -343,7 +346,10 @@ func (f *fakeRelay) Bind(context.Context, string, sandboxrelay.BindRequest) (san
 	return sandboxrelay.RegistrationView{}, nil
 }
 func (f *fakeRelay) Deleted(context.Context, string) error { f.deleted.Add(1); return nil }
-func (f *fakeRelay) Current(_ context.Context, id string) (sandboxrelay.CurrentPolicy, error) {
+func (f *fakeRelay) Current(ctx context.Context, id string) (sandboxrelay.CurrentPolicy, error) {
+	if f.currentCtx != nil {
+		return f.currentCtx(ctx, id)
+	}
 	var cp sandboxrelay.CurrentPolicy
 	var err error
 	if f.current != nil {

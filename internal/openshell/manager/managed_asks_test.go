@@ -78,6 +78,8 @@ type fakeAuthority struct {
 	// hang is a gateway that never answers a decisions load (it waits for
 	// the caller's deadline).
 	hang atomic.Bool
+	// hungLoads counts the decisions loads hang held.
+	hungLoads atomic.Int64
 }
 
 // floor is the floor of the person's profile.
@@ -139,6 +141,7 @@ func (a *fakeAuthority) Decide(_ context.Context, req sandboxrelay.DecisionReque
 
 func (a *fakeAuthority) Decisions(ctx context.Context, registration string) ([]sandboxrelay.Decision, error) {
 	if a.hang.Load() {
+		a.hungLoads.Add(1)
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
