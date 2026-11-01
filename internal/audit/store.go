@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -404,7 +405,8 @@ func (s *Store) groupedTxBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //     disk; eliminates a common contention
 //     source on writes that allocate temp.
 //   - mmap_size=0               never map audit.db into the process; pages
-//     are read into the page cache above (auditMmapSizeBytes).
+//     are read into the page cache above (auditMmapSizeBytes). Secure
+//     Client keeps main's 256 MiB map (secureClientMmapSizeBytes).
 //   - foreign_keys=ON           defenseclaw relies on the FK between
 //     findings and scan_results; turning
 //     this off at the DSN level would be a
@@ -425,20 +427,33 @@ var auditMandatoryIntegerPragmas = [...]auditIntegerPragma{
 	{name: "foreign_keys", dsnValue: "ON", want: 1},
 }
 
-var auditPragmas = buildAuditPragmas()
+var (
+	auditPragmas = buildAuditPragmas(auditMmapSizeBytes)
+	// secureClientAuditPragmas keep main's memory map on a Secure Client host
+	// (#1092): 256 MiB, 0 on Windows (secureClientMmapSizeBytes).
+	secureClientAuditPragmas = buildAuditPragmas(secureClientMmapSizeBytes())
+)
 
-func buildAuditPragmas() string {
+// auditPragmasFor is the pragma set of a store's connections.
+func auditPragmasFor(secureClient bool) string {
+	if secureClient {
+		return secureClientAuditPragmas
+	}
+	return auditPragmas
+}
+
+func buildAuditPragmas(mmapSize int64) string {
 	var result strings.Builder
 	result.WriteString("?_pragma=journal_mode(WAL)")
 	for _, pragma := range auditMandatoryIntegerPragmas {
 		fmt.Fprintf(&result, "&_pragma=%s(%s)", pragma.name, pragma.dsnValue)
 	}
-	fmt.Fprintf(&result, "&_pragma=mmap_size(%d)", auditMmapSizeBytes())
+	fmt.Fprintf(&result, "&_pragma=mmap_size(%d)", mmapSize)
 	return result.String()
 }
 
-// auditMmapSizeBytes is the mmap_size of every audit connection: 0, so
-// audit.db is never mapped into the gateway.
+// auditMmapSizeBytes is the mmap_size of every audit connection outside
+// Secure Client: 0, so audit.db is never mapped into the gateway.
 //
 // Windows: a FlushFileBuffers of the memory-mapped audit.db cost about as much
 // with a few dirty pages as with many and grew with the database: 120 ms at
@@ -460,7 +475,16 @@ func buildAuditPragmas() string {
 // 56-57 ms, p95 61-63 against 66-76 ms, burst-32 p95 671-701 against
 // 676-707 ms). The page cache the pragmas set (cache_size) bounds what a
 // connection keeps.
-func auditMmapSizeBytes() int64 { return 0 }
+const auditMmapSizeBytes = 0
+
+// secureClientMmapSizeBytes is main's mmap_size, which a Secure Client host
+// keeps (#1092): 256 MiB, and 0 on Windows (rel-1-0-3 GAP-0247, above).
+func secureClientMmapSizeBytes() int64 {
+	if runtime.GOOS == "windows" {
+		return 0
+	}
+	return 256 << 20
+}
 
 // openSQLite opens a SQLite connection with the audit-tier hardening
 // applied (DSN pragmas + a single-connection pool). Sharing this
@@ -496,6 +520,7 @@ func NewStore(dbPath string, opts ...StoreOption) (*Store, error) {
 }
 
 func newStoreWithHooks(dbPath string, hooks auditDBPathHooks, opts ...StoreOption) (*Store, error) {
+	hooks.secureClient = secureClientStoreOptions(opts)
 	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, hooks)
 	if err != nil {
 		return nil, err
@@ -509,6 +534,15 @@ func newStoreWithHooks(dbPath string, hooks auditDBPathHooks, opts ...StoreOptio
 
 // StoreOption configures a Store when it is opened.
 type StoreOption func(*Store)
+
+// StoreOptions are the options a store of the same deployment opens with
+// (WithSecureClientSchema), for a store opened beside this one.
+func (s *Store) StoreOptions() []StoreOption {
+	if s != nil && s.secureClientSchema {
+		return []StoreOption{WithSecureClientSchema()}
+	}
+	return nil
+}
 
 // WithSecureClientSchema keeps audit.db identical to main's on a Secure
 // Client host: the indexes no query reads stay (#1092, GAP-0253). Every

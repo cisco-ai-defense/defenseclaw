@@ -111,9 +111,11 @@ func NewJudgeBodyStore(dbPath string) (*JudgeBodyStore, error) {
 
 // NewJudgeBodyStoreForCutover opens the authoritative database with reads and
 // writes disabled until CutoverLegacyJudgeBodies completes successfully. The
-// gateway MUST use this constructor whenever audit.db is present.
-func NewJudgeBodyStoreForCutover(dbPath string) (*JudgeBodyStore, error) {
-	return newJudgeBodyStore(dbPath, true)
+// gateway MUST use this constructor whenever audit.db is present. opts are
+// those of the audit store (Store.StoreOptions): a Secure Client host opens
+// the judge-body store with main's pragmas too.
+func NewJudgeBodyStoreForCutover(dbPath string, opts ...StoreOption) (*JudgeBodyStore, error) {
+	return newJudgeBodyStoreWithPathHooks(dbPath, true, judgeBodyPathHooks{secureClient: secureClientStoreOptions(opts)})
 }
 
 func newJudgeBodyStore(dbPath string, requireCutover bool) (*JudgeBodyStore, error) {
@@ -140,7 +142,7 @@ func newJudgeBodyStoreWithPathHooks(
 			return nil, fmt.Errorf("judge_body: pre-open path check: %w", err)
 		}
 	}
-	db, err := openSQLite(dbPath)
+	db, err := openSQLiteWithPragmas(dbPath, auditPragmasFor(hooks.secureClient))
 	if err != nil {
 		prepared.close()
 		// Strip the leading "audit:" tier that openSQLite stamps so

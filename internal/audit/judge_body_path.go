@@ -21,6 +21,8 @@ type judgeBodyPathHooks struct {
 	chmodFile        func(*os.File, os.FileMode) error
 	chmodPath        func(string, os.FileMode) error
 	beforeSQLiteOpen func(string) error
+	// secureClient opens with the pragmas of main (auditPragmasFor).
+	secureClient bool
 }
 
 func (hooks judgeBodyPathHooks) withDefaults() judgeBodyPathHooks {
