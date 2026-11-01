@@ -530,6 +530,25 @@ def test_nuclear_purge_is_bounded_scoped_and_truthful() -> None:
     assert '"*-$purgeScope.*"' in nuclear
     assert ".retired-" in nuclear
     assert "Get-DefenseClawNuclearUserDataPaths" in nuclear
+    # Users are listed before any teardown step can touch the manifest.
+    assert nuclear.index("Get-DefenseClawNuclearUserDataPaths") < nuclear.index("# 1a. Disarm SCM FIRST")
+    user_data = _extract_function_body(
+        source,
+        "function Get-DefenseClawNuclearUserDataPaths",
+        "function Invoke-DefenseClawNuclearUninstall",
+    )
+    # The manifest's data_dir rows are optional; managed-runtime evidence in
+    # a registered interactive profile also counts.
+    assert "Get-DefenseClawNuclearRegisteredProfiles" in user_data
+    assert "Test-DefenseClawNuclearManagedUserDataFolder" in user_data
+    evidence = _extract_function_body(
+        source,
+        "function Test-DefenseClawNuclearManagedUserDataFolder",
+        "function Get-DefenseClawNuclearRegisteredProfiles",
+    )
+    assert "ReparsePoint" in evidence
+    assert "'.managed-runtime-*.json'" in evidence
+    assert '"managed_gateway_service_name"' in evidence
     assert "ok                                       = ($incomplete.Count -eq 0)" in nuclear
     assert "reboot_required" in nuclear
     assert "1072" in nuclear

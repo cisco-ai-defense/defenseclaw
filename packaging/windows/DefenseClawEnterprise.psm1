@@ -27238,15 +27238,56 @@ function Remove-DefenseClawNuclearPath {
     return ('{0} {1} survived the purge: {2}' -f $Role, $Path, $detail)
 }
 
-# Lists each enrolled user's DefenseClaw data folder from the protected target
-# manifest, before StateRoot is deleted. Only a canonical <profile>\.defenseclaw
-# under a registered local profile is returned, together with that profile's
-# setup staging folders, so the purge never reaches anything else in a home.
-function Get-DefenseClawNuclearUserDataPaths {
-    param([Parameter(Mandatory)][string]$StateRoot)
-    $paths = [Collections.Generic.List[string]]::new()
-    $manifest = [IO.Path]::Combine($StateRoot, 'hook-guardian', 'targets.yaml')
-    $profiles = @{}
+# True when <profile>\.defenseclaw is a real folder (no reparse point) that
+# holds the managed runtime's own evidence: an immutable runtime generation
+# (hooks\.managed-runtime-<connector>-<id>.json) or a hook contract lock bound
+# to a managed gateway service. A per-user DefenseClaw install never writes
+# either, so its data is not taken by the managed purge.
+function Test-DefenseClawNuclearManagedUserDataFolder {
+    param([Parameter(Mandatory)][string]$Path)
+    $reparse = [IO.FileAttributes]::ReparsePoint
+    try {
+        $attributes = [IO.File]::GetAttributes($Path)
+        if (($attributes -band [IO.FileAttributes]::Directory) -eq 0 -or
+            ($attributes -band $reparse) -ne 0) {
+            return $false
+        }
+        $hooks = [IO.Path]::Combine($Path, 'hooks')
+        if ([IO.Directory]::Exists($hooks) -and
+            ([IO.File]::GetAttributes($hooks) -band $reparse) -eq 0) {
+            foreach ($bundle in @(Microsoft.PowerShell.Management\Get-ChildItem `
+                    -LiteralPath $hooks `
+                    -Force `
+                    -File `
+                    -Filter '.managed-runtime-*.json' `
+                    -ErrorAction SilentlyContinue)) {
+                if ([string]$bundle.Name -cmatch '^\.managed-runtime-(claudecode|codex|cursor)-[^\\/]+\.json$' -and
+                    ($bundle.Attributes -band $reparse) -eq 0) {
+                    return $true
+                }
+            }
+        }
+        $lock = [IO.Path]::Combine($Path, 'hook_contract_lock.json')
+        if ([IO.File]::Exists($lock)) {
+            $lockInfo = [IO.FileInfo]::new($lock)
+            if (($lockInfo.Attributes -band $reparse) -eq 0 -and
+                $lockInfo.Length -le 1048576 -and
+                [IO.File]::ReadAllText($lock).Contains('"managed_gateway_service_name"')) {
+                return $true
+            }
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "user data folder $Path is unreadable: $($_.Exception.Message)"
+    }
+    return $false
+}
+
+# Returns every registered local profile as { sid, home }, with home the
+# expanded full ProfileImagePath without a trailing separator. An unreadable
+# profile list returns nothing, which keeps the purge away from every home.
+function Get-DefenseClawNuclearRegisteredProfiles {
+    $registered = [Collections.Generic.List[object]]::new()
     try {
         foreach ($entry in @(Microsoft.PowerShell.Management\Get-ChildItem `
                 -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' `
@@ -27256,13 +27297,54 @@ function Get-DefenseClawNuclearUserDataPaths {
                 -Name ProfileImagePath `
                 -ErrorAction SilentlyContinue).ProfileImagePath
             if (-not [string]::IsNullOrWhiteSpace($image)) {
-                $expanded = [Environment]::ExpandEnvironmentVariables($image)
-                $profiles[[IO.Path]::GetFullPath($expanded).TrimEnd('\').ToUpperInvariant()] = $true
+                $registered.Add([pscustomobject]@{
+                    sid  = [string]$entry.PSChildName
+                    home = [IO.Path]::GetFullPath(
+                        [Environment]::ExpandEnvironmentVariables($image)
+                    ).TrimEnd('\')
+                })
             }
         }
     }
     catch {
         Microsoft.PowerShell.Utility\Write-Verbose "profile list is unreadable: $($_.Exception.Message)"
+    }
+    return $registered.ToArray()
+}
+
+# Lists each enrolled user's DefenseClaw data folder, before anything of the
+# deployment is removed. Users come from the protected target manifest's
+# data_dir rows and, because those rows are optional (Go derives the default
+# <home>\.defenseclaw, and the installer-rendered manifest never writes one)
+# and the manifest can be missing or unreadable, also from every registered
+# interactive profile whose <profile>\.defenseclaw holds managed-runtime
+# evidence. Only a canonical <profile>\.defenseclaw under a registered local
+# profile is returned, together with that profile's setup staging folders, so
+# the purge never reaches anything else in a home.
+function Get-DefenseClawNuclearUserDataPaths {
+    param([Parameter(Mandatory)][string]$StateRoot)
+    $paths = [Collections.Generic.List[string]]::new()
+    $manifest = [IO.Path]::Combine($StateRoot, 'hook-guardian', 'targets.yaml')
+    $profiles = @{}
+    $interactiveProfiles = [Collections.Generic.List[string]]::new()
+    foreach ($registered in @(Get-DefenseClawNuclearRegisteredProfiles)) {
+        $profiles[([string]$registered.home).ToUpperInvariant()] = $true
+        if ([string]$registered.sid -match '^S-1-(5-21|12-1)-[0-9-]+$') {
+            $interactiveProfiles.Add([string]$registered.home)
+        }
+    }
+    $addStaging = {
+        param([string]$ProfileHome)
+        foreach ($staging in @(Microsoft.PowerShell.Management\Get-ChildItem `
+                -LiteralPath $ProfileHome `
+                -Force `
+                -Filter '.defenseclaw.setup-*' `
+                -ErrorAction SilentlyContinue)) {
+            if ([string]$staging.Name -cmatch '^\.defenseclaw\.setup-[0-9a-f]{32}$' -and
+                -not $paths.Contains([string]$staging.FullName)) {
+                $paths.Add([string]$staging.FullName)
+            }
+        }
     }
     $text = ''
     try {
@@ -27291,16 +27373,22 @@ function Get-DefenseClawNuclearUserDataPaths {
         if (-not $paths.Contains($data)) {
             $paths.Add($data)
         }
-        foreach ($staging in @(Microsoft.PowerShell.Management\Get-ChildItem `
-                -LiteralPath $profileHome `
-                -Force `
-                -Filter '.defenseclaw.setup-*' `
-                -ErrorAction SilentlyContinue)) {
-            if ([string]$staging.Name -cmatch '^\.defenseclaw\.setup-[0-9a-f]{32}$' -and
-                -not $paths.Contains([string]$staging.FullName)) {
-                $paths.Add([string]$staging.FullName)
+        & $addStaging $profileHome
+    }
+    foreach ($profileHome in $interactiveProfiles) {
+        $data = [IO.Path]::Combine($profileHome, '.defenseclaw')
+        $known = $false
+        foreach ($path in $paths) {
+            if ([string]::Equals($path, $data, [StringComparison]::OrdinalIgnoreCase)) {
+                $known = $true
+                break
             }
         }
+        if ($known -or -not (Test-DefenseClawNuclearManagedUserDataFolder -Path $data)) {
+            continue
+        }
+        $paths.Add($data)
+        & $addStaging $profileHome
     }
     return $paths.ToArray()
 }
@@ -27340,6 +27428,20 @@ function Invoke-DefenseClawNuclearUninstall {
         -GuardianServiceName $GuardianServiceName
     $brokerName = Get-DefenseClawCMIDBrokerServiceName `
         -GatewayServiceName $GatewayServiceName
+    $machineRootPattern = '(?:{0}|{1})' -f
+        [regex]::Escape([string]$script:ProgramFiles),
+        [regex]::Escape([string]$script:ProgramData)
+    $safeRootPattern =
+        '^' + $machineRootPattern + '\\Cisco\\' +
+        'Cisco Secure Client\\DefenseClaw(-Cert|-Lifecycle)?' +
+        '(\.retired-[0-9a-f]{32})?(\\|$)'
+    # 0. List every enrolled user's data folder first, while the target
+    #    manifest is still in place and before any teardown step runs.
+    $userDataPaths = @()
+    if (-not [string]::IsNullOrWhiteSpace([string]$Layout.StateRoot) -and
+        [string]$Layout.StateRoot -match $safeRootPattern) {
+        $userDataPaths = @(Get-DefenseClawNuclearUserDataPaths -StateRoot ([string]$Layout.StateRoot))
+    }
 
     # 1. Tear down every managed service in dependency-safe order
     #    (Gateway -> Guardian -> Enumerator -> Broker). Design principles:
@@ -27538,20 +27640,8 @@ function Invoke-DefenseClawNuclearUninstall {
     #    before anything is deleted. The lifecycle folder is shared with the
     #    other scopes and holds the persistent lifecycle lock, so only this
     #    scope's receipts, intents and helper files are removed from it.
-    #    Enrolled users are read from the target manifest before StateRoot
-    #    goes.
-    $machineRootPattern = '(?:{0}|{1})' -f
-        [regex]::Escape([string]$script:ProgramFiles),
-        [regex]::Escape([string]$script:ProgramData)
-    $safeRootPattern =
-        '^' + $machineRootPattern + '\\Cisco\\' +
-        'Cisco Secure Client\\DefenseClaw(-Cert|-Lifecycle)?' +
-        '(\.retired-[0-9a-f]{32})?(\\|$)'
-    $userDataPaths = @()
-    if (-not [string]::IsNullOrWhiteSpace([string]$Layout.StateRoot) -and
-        [string]$Layout.StateRoot -match $safeRootPattern) {
-        $userDataPaths = @(Get-DefenseClawNuclearUserDataPaths -StateRoot ([string]$Layout.StateRoot))
-    }
+    #    The enrolled users' data folders were listed in step 0, before
+    #    anything of the deployment was touched.
     $nuclearLifecycleDir = [IO.Path]::Combine(
         $script:ProgramData,
         'Cisco',
