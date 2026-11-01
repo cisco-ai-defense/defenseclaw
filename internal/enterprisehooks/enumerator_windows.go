@@ -1174,10 +1174,6 @@ func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
 // lookups, by SID.
 var windowsEnrollmentAccountLookupGate identityLookupGate
 
-// windowsDeletedLocalAccount reports a local account SID that no longer
-// names an account. A domain or Entra account lookup also fails while its
-// directory is unreachable, so only local accounts are judged, and only by
-// ERROR_NONE_MAPPED (a timeout or a spent budget is not proof).
 // WindowsDeletedLocalAccount reports whether sid names a local account of
 // this computer that no longer exists. The enumerator revokes the rows of
 // such an account on its next pass; until then a teardown check names it
@@ -1186,6 +1182,10 @@ func WindowsDeletedLocalAccount(sid string) bool {
 	return windowsDeletedLocalAccount(sid, newWindowsEnrollmentAccountLookup())
 }
 
+// windowsDeletedLocalAccount reports a local account SID that no longer
+// names an account. A domain or Entra account lookup also fails while its
+// directory is unreachable, so only local accounts are judged, and only by
+// ERROR_NONE_MAPPED (a timeout or a spent budget is not proof).
 func windowsDeletedLocalAccount(sid string, lookup windowsEnrollmentAccountLookup) bool {
 	if !WindowsLocalAccountSID(sid) {
 		return false

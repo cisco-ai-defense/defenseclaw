@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"io"
 	"os"
 	"os/exec"
@@ -28,12 +27,12 @@ import (
 	"time"
 	"unsafe"
 
-	"golang.org/x/sys/windows"
-
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
 )
 
 // The hash-pinned trust anchor staged next to an unsigned standalone payload.

@@ -8,9 +8,10 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"io"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // enterpriseSetupRecordedDeployment reads no deployment off Windows.

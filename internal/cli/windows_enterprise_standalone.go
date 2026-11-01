@@ -3266,7 +3266,7 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 			continue
 		}
 		result.Profile, result.Installed, result.InstalledVersion = profile, true, deployment.ProductVersion
-		for _, service := range windowsEnterpriseStandaloneServiceRoster {
+		for _, service := range winpath.EnterpriseStandaloneServices {
 			state := windowsEnterpriseServiceState(service.Name)
 			if state == "absent" {
 				continue
@@ -3292,7 +3292,7 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 // have restarted them after its report was taken.
 func windowsEnterpriseLiveStandaloneServices() []enterprisestatus.Service {
 	var services []enterprisestatus.Service
-	for _, service := range windowsEnterpriseStandaloneServiceRoster {
+	for _, service := range winpath.EnterpriseStandaloneServices {
 		if state := windowsEnterpriseServiceState(service.Name); state != "absent" {
 			services = append(services, enterprisestatus.Service{
 				Name: service.Name, Kind: service.Kind, State: state, Required: true,
@@ -3326,8 +3326,8 @@ func windowsEnterpriseStandaloneFootprintPresent() (bool, error) {
 		return true, nil
 	}
 	defer windows.CloseServiceHandle(manager)
-	for _, name := range []string{"DefenseClawGateway", "DefenseClawHookGuardian", "DefenseClawHookEnumerator", "DefenseClawSensorHelper"} {
-		namePointer, err := windows.UTF16PtrFromString(name)
+	for _, service := range winpath.EnterpriseStandaloneServices {
+		namePointer, err := windows.UTF16PtrFromString(service.Name)
 		if err != nil {
 			return true, nil
 		}

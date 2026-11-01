@@ -126,8 +126,17 @@ func TestWindowsManagedFileOwnerRewrittenDACLRefusesAnythingLooser(t *testing.T)
 		t.Error("the four-entry canonical DACL matched the owner-rewritten shape")
 	}
 	// The target itself must be a real account.
+	// The entries are built for each such target, so only the target guard
+	// can refuse them.
 	for _, target := range []string{"", " ", windowsSIDLocalSystem, windowsSIDAdministrators, windowsSIDOwnerRights} {
-		if windowsManagedFileOwnerRewrittenDACL(base, target) {
+		var entries []windowsDACLEntry
+		for _, want := range windowsManagedFileCanonicalExpected(target) {
+			if want.sid == windowsSIDOwnerRights && want.mask == windowsACEReadControlOnly && want.flags == 0 {
+				continue
+			}
+			entries = append(entries, windowsDACLEntry{aceType: windowsACEAccessAllowedType, mask: want.mask, flags: want.flags, sid: want.sid})
+		}
+		if windowsManagedFileOwnerRewrittenDACL(entries, target) {
 			t.Errorf("target %q: accepted, want refused", target)
 		}
 	}

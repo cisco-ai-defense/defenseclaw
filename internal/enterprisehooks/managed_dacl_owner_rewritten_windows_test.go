@@ -553,3 +553,46 @@ func TestRestoreWindowsManagedUserStateOwnerRightsAfterAnOwnerWriteOfTheTree(t *
 		t.Fatal("restore accepted LocalSystem as the account")
 	}
 }
+
+// The owner-rewritten shape counts only for an object the account owns: owned
+// by Administrators or by another account it is refused by the bundle trust
+// check and left alone by the restore.
+func TestWindowsOwnerRewrittenShapeRefusesAnotherOwner(t *testing.T) {
+	target := currentWindowsTestSID(t)
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for name, owner := range map[string]*windows.SID{"administrators": administrators, "another account": other} {
+		path := filepath.Join(dir, ".managed-runtime-codex-"+strings.Repeat(string(name[0]), 32)+".json")
+		writeOwnerRewrittenTestFile(t, path, target, ownerRewrittenShapeSDDL)
+		extended, err := winpath.Extended(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
+			t.Fatalf("%s: set the owner: %v", name, err)
+		}
+		if windowsUserPathOwnerRewritten(path, target, false) {
+			t.Errorf("%s: owner-rewritten shape matched an object the account does not own", name)
+		}
+		if name == "another account" {
+			if err := validateWindowsManagedRuntimeBundleElement(path, target); err == nil {
+				t.Errorf("%s: bundle trust check accepted it", name)
+			}
+		}
+		before := ownerRewrittenTestSDDL(t, path)
+		if restored, err := restoreWindowsUserPathOwnerRights(path, target, false); err != nil || restored {
+			t.Errorf("%s: restore changed it: restored=%v err=%v", name, restored, err)
+		}
+		if after := ownerRewrittenTestSDDL(t, path); after != before {
+			t.Errorf("%s: DACL changed from %s to %s", name, before, after)
+		}
+	}
+}
