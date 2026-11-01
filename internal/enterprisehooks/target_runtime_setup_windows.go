@@ -2601,7 +2601,11 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		if ownerDefaulted || daclDefaulted || !owner.Equals(target.sid) {
 			return "", fmt.Errorf("enterprise hooks: canonical cleanup file owner or DACL provenance is invalid")
 		}
-		if err := validateWindowsUserPathProtectionACL(label, descriptor, dacl, target.sid, false); err != nil {
+		// The cleanup only deletes the file: the canonical DACL an owner
+		// write left without its OWNER RIGHTS entry is accepted too
+		// (rel-1-0-6:GAP-0303), nothing looser.
+		if err := validateWindowsUserPathProtectionACL(label, descriptor, dacl, target.sid, false); err != nil &&
+			!windowsManagedFileOwnerRewrittenDescriptor(descriptor, target.sid) {
 			return "", err
 		}
 		var info windows.ByHandleFileInformation

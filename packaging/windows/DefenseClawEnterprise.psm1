@@ -199,6 +199,12 @@ $script:DefenseClawQuarantinedRoots = @()
 # ran with that gateway, and why it declined one. Reset per lifecycle run.
 $script:DefenseClawRecoveryGatewayCandidate = $null
 $script:DefenseClawRecoveryGatewayRuns = @()
+# Standalone: the gateway of the running Setup payload, which puts back the
+# OWNER RIGHTS entry an owner write took out of the managed state of the
+# enrolled accounts before the installed helper prepares, collects or purges
+# it (rel-1-0-6:GAP-0303). Set per lifecycle run.
+$script:DefenseClawOwnerRightsSource = $null
+$script:DefenseClawOwnerRightsRestored = $false
 $script:DefenseClawRecoveryGatewayRefusal = $null
 # Standalone uninstall: the bundle.lock handle an uninstall holds while it
 # removes StateRoot (Enter-DefenseClawBundleStoreLock, GAP-2438). Set here so
@@ -22021,6 +22027,139 @@ function Write-DefenseClawDeploymentMetadataBytes {
     }
 }
 
+function Test-DefenseClawDeletedAccountTeardownRefusal {
+    <#
+        rel-1-0-6:GAP-0319: whether a teardown refusal names an enrolled local
+        account deleted after the hook enumerator last ran (the helper text of
+        errWindowsManagedHooksDeletedLocalAccount).
+    #>
+    param([string]$Message)
+    return ([string]$Message).Contains(
+        'still lists an enrolled local account that no longer exists'
+    )
+}
+
+function Invoke-DefenseClawUninstallPrecommitHookCheck {
+    <#
+        GAP-0571 read-only check of the hook removal before the uninstall
+        commits. rel-1-0-6:GAP-0319: when it refuses only because an enrolled
+        local account was deleted after the hook enumerator last ran, the
+        enumerator revokes that account's rows on its next pass, so the check
+        restarts the enumerator once and asks again for up to three minutes
+        before it gives the refusal back.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    try {
+        [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Action check)
+        return
+    }
+    catch {
+        if (-not (Test-DefenseClawDeletedAccountTeardownRefusal -Message $_.Exception.Message)) {
+            throw
+        }
+        $refusal = $_
+    }
+    $enumerator = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    if (-not (Test-DefenseClawServiceExists -Name $enumerator)) {
+        throw $refusal
+    }
+    Write-DefenseClawLifecyclePhase -Stage 'deleted enrolled account: running a hook enumerator pass before the uninstall'
+    # The whole wait, the enumerator restart included, stays within three
+    # minutes, and each check gets only the time left (at least 30 s). A
+    # failed restart never leaves the enumerator stopped, and the refusal
+    # given back stays the deleted-account one.
+    $deadline = [DateTime]::UtcNow.AddMinutes(3)
+    try {
+        Stop-DefenseClawService -Name $enumerator
+    }
+    finally {
+        try {
+            Start-DefenseClawService -Name $enumerator
+        }
+        catch {
+            Write-DefenseClawLifecyclePhase -Stage "hook enumerator restart failed: $($_.Exception.Message)"
+        }
+    }
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Microsoft.PowerShell.Utility\Start-Sleep -Seconds 10
+        $left = [int][Math]::Max(30, ($deadline - [DateTime]::UtcNow).TotalSeconds)
+        try {
+            [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName `
+                -Action check `
+                -TimeoutSeconds $left)
+            return
+        }
+        catch {
+            if (-not (Test-DefenseClawDeletedAccountTeardownRefusal -Message $_.Exception.Message)) {
+                throw
+            }
+            $refusal = $_
+        }
+    }
+    throw $refusal
+}
+
+function Invoke-DefenseClawManagedUserStateOwnerRightsRestore {
+    <#
+        rel-1-0-6:GAP-0303: Windows takes the OWNER RIGHTS entry out of a DACL
+        when the owner of the object is written (icacls /setowner, takeown,
+        a profile backup and restore), and the installed helper of an older
+        release refuses the managed folders and generation bundles of an
+        enrolled account in that shape, so its uninstall stopped after the
+        commit and every later uninstall or reinstall failed the same way.
+        Before the installed helper prepares, verifies, collects or purges
+        that state, the gateway of the running Setup payload puts the entry
+        back on exactly that shape ("teardown-managed-hooks
+        restore-owner-rights"), once per lifecycle run. It never fails the
+        lifecycle: the helper check that follows still decides. Before the
+        read-only GAP-0571 "check" and "verify" it changes no deployment
+        state: it only puts back the entry an owner write took out (a
+        tightening), so "the uninstall stopped before it removed anything"
+        stays true.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $source = $script:DefenseClawOwnerRightsSource
+    if ($null -eq $source -or $script:DefenseClawOwnerRightsRestored -or
+        -not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    # Once per lifecycle run: nothing in one run writes an owner again.
+    $script:DefenseClawOwnerRightsRestored = $true
+    try {
+        [void](Invoke-DefenseClawGatewayCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GatewaySource $source `
+            -Arguments @(
+                'enterprise',
+                'windows',
+                'teardown-managed-hooks',
+                'restore-owner-rights',
+                '--json'
+            ) `
+            -Capture `
+            -AllowFailure `
+            -TimeoutSeconds 120)
+    }
+    catch {
+        Write-DefenseClawLifecyclePhase -Stage "OWNER RIGHTS restore skipped: $($_.Exception.Message)"
+    }
+}
+
 function Invoke-DefenseClawManagedHooksTeardownCommand {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -22029,9 +22168,15 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         [Parameter(Mandatory)]
         [ValidateSet('prepare', 'verify', 'rollback', 'finalize', 'check')]
         [string]$Action,
-        [switch]$PurgeContractLocks
+        [switch]$PurgeContractLocks,
+        [ValidateRange(1, 1800)][int]$TimeoutSeconds = 300
     )
     Assert-DefenseClawAdministrator
+    if ($Action -cne 'rollback') {
+        Invoke-DefenseClawManagedUserStateOwnerRightsRestore `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
+    }
     $contractCleanupReceipt = [string](
         $Layout.ManagedHookContractCleanupReceiptPath
     )
@@ -22088,7 +22233,8 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         -GatewayServiceName $GatewayServiceName `
         -Arguments $arguments `
         -Capture `
-        -AllowFailure
+        -AllowFailure `
+        -TimeoutSeconds $TimeoutSeconds
     $reports = [Collections.Generic.List[object]]::new()
     foreach ($line in @($probe.output)) {
         $text = ([string]$line).Trim()
@@ -37848,23 +37994,31 @@ function Invoke-DefenseClawUninstallLifecycle {
     # bind (a failed guardian row, a selector it cannot read). Ask the same
     # helper the same questions, read-only, while nothing has changed: a
     # refusal then leaves the deployment fully installed and says what to
-    # repair, instead of a committed tombstone that every retry refuses.
+    # repair, instead of a committed tombstone that every retry refuses. The
+    # OWNER RIGHTS restore that runs first (GAP-0303) only tightens.
     if ($postCommitHookTeardown -and
         (Test-DefenseClawManagedHooksCommittedTeardownSupported `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -Capability precommit_check)) {
         try {
-            [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+            Invoke-DefenseClawUninstallPrecommitHookCheck `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName `
-                -Action check)
+                -GuardianServiceName $GuardianServiceName
         }
         catch {
+            $reason = $_.Exception.Message
+            if (Test-DefenseClawDeletedAccountTeardownRefusal -Message $reason) {
+                throw ("The uninstall stopped before it removed anything; DefenseClaw is still installed. " +
+                    "An enrolled local account was deleted after the hook enumerator last ran, and its rows are still listed: " +
+                    "$reason. Nothing needs repair: run the uninstall again after the enumerator's next pass " +
+                    "(a few minutes), or restart the $(Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName) " +
+                    "service first.")
+            }
             throw ("The uninstall stopped before it removed anything; DefenseClaw is still installed. " +
                 "The hook removal it runs after the commit would refuse this deployment: " +
-                "$($_.Exception.Message). Repair that (run Setup /repair, or undo the change to the file it names), " +
+                "$reason. Repair that (run Setup /repair, or undo the change to the file it names), " +
                 "then run the uninstall again.")
         }
     }
@@ -39524,6 +39678,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -ModuleSource $ModuleSource `
         -AllowUnsigned:$AllowUnsigned `
         -DeferredConfig:$DeferredConfig
+    $script:DefenseClawOwnerRightsSource = $null
+    $script:DefenseClawOwnerRightsRestored = $false
+    if ((Test-DefenseClawStandaloneProfile) -and $sources.ContainsKey('gateway')) {
+        $script:DefenseClawOwnerRightsSource = [hashtable]$sources['gateway']
+    }
 
     # Secure creation is race-safe and validates every existing ancestor
     # before the first lifecycle coordination object is opened. The lock then

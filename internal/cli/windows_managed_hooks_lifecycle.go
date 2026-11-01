@@ -1270,6 +1270,18 @@ func validateWindowsManagedHooksLifecycleSelectorAbsent(path, connectorName stri
 	}
 }
 
+// errWindowsManagedHooksDeletedLocalAccount is the teardown refusal of a
+// target whose local account was deleted after the last enumerator pass.
+// The lifecycle module recognizes its text: it has the enumerator run a pass
+// and checks again, and otherwise says to wait for that pass.
+var errWindowsManagedHooksDeletedLocalAccount = errors.New(
+	"protected Guardian state still lists an enrolled local account that no longer exists; " +
+		"the hook enumerator revokes its rows on its next pass",
+)
+
+// windowsManagedHooksLifecycleDeletedLocalAccount is replaceable in tests.
+var windowsManagedHooksLifecycleDeletedLocalAccount = enterprisehooks.WindowsDeletedLocalAccount
+
 func validateLegacyWindowsManagedHooksGuardianActivation(
 	activation enterpriseHookGuardianActivation,
 	authorization enterpriseHookGuardianAuthorization,
@@ -1345,6 +1357,18 @@ func validateWindowsManagedHooksGuardianActivation(
 			}
 			if detail == "" {
 				detail = "no error recorded"
+			}
+			if windowsManagedHooksLifecycleDeletedLocalAccount(target.SID) {
+				// The account was deleted after the last enumerator pass:
+				// no repair applies, and the next pass revokes its rows
+				// (rel-1-0-6:GAP-0319).
+				return nil, fmt.Errorf(
+					"%w: %s target %s (%s)",
+					errWindowsManagedHooksDeletedLocalAccount,
+					target.Connector,
+					target.SID,
+					detail,
+				)
 			}
 			return nil, fmt.Errorf(
 				"protected Guardian state contains an ambiguous target disposition: %s target %s is neither protected nor pending (%s)",

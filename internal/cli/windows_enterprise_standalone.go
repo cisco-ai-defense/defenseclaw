@@ -3241,7 +3241,7 @@ const windowsEnterpriseHealthNotChecked = "health_not_checked"
 
 // windowsEnterpriseServiceState is a service's state as the installer
 // names it (running, stopped, absent, ...); tests replace it.
-var windowsEnterpriseServiceState = windowsEnterpriseSCMServiceState
+var windowsEnterpriseServiceState = winpath.EnterpriseServiceState
 
 // applyWindowsEnterpriseRecordedDeployment gives a refused request's result
 // the deployment this computer records and its services' states. An unknown
@@ -3266,15 +3266,15 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 			continue
 		}
 		result.Profile, result.Installed, result.InstalledVersion = profile, true, deployment.ProductVersion
-		for _, service := range windowsEnterpriseStandaloneServiceRoster {
-			state := windowsEnterpriseServiceState(service.name)
+		for _, service := range winpath.EnterpriseStandaloneServices {
+			state := windowsEnterpriseServiceState(service.Name)
 			if state == "absent" {
 				continue
 			}
 			result.Services = append(result.Services, enterprisestatus.Service{
-				Name: service.name, Kind: service.kind, State: state, Required: true,
+				Name: service.Name, Kind: service.Kind, State: state, Required: true,
 			})
-			switch service.kind {
+			switch service.Kind {
 			case "enumerator":
 				result.Readiness.Enumerator = state == "running"
 			case "sensor_helper":
@@ -3292,53 +3292,14 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 // have restarted them after its report was taken.
 func windowsEnterpriseLiveStandaloneServices() []enterprisestatus.Service {
 	var services []enterprisestatus.Service
-	for _, service := range windowsEnterpriseStandaloneServiceRoster {
-		if state := windowsEnterpriseServiceState(service.name); state != "absent" {
+	for _, service := range winpath.EnterpriseStandaloneServices {
+		if state := windowsEnterpriseServiceState(service.Name); state != "absent" {
 			services = append(services, enterprisestatus.Service{
-				Name: service.name, Kind: service.kind, State: state, Required: true,
+				Name: service.Name, Kind: service.Kind, State: state, Required: true,
 			})
 		}
 	}
 	return services
-}
-
-// windowsEnterpriseSCMServiceState reads a service's state from the service
-// manager, which any account may query.
-func windowsEnterpriseSCMServiceState(name string) string {
-	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
-	if err != nil {
-		return "unknown"
-	}
-	defer windows.CloseServiceHandle(manager)
-	namePointer, err := windows.UTF16PtrFromString(name)
-	if err != nil {
-		return "unknown"
-	}
-	service, err := windows.OpenService(manager, namePointer, windows.SERVICE_QUERY_STATUS)
-	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-		return "absent"
-	}
-	if err != nil {
-		return "unknown"
-	}
-	defer windows.CloseServiceHandle(service)
-	var status windows.SERVICE_STATUS
-	if err := windows.QueryServiceStatus(service, &status); err != nil {
-		return "unknown"
-	}
-	switch status.CurrentState {
-	case windows.SERVICE_RUNNING:
-		return "running"
-	case windows.SERVICE_STOPPED:
-		return "stopped"
-	case windows.SERVICE_START_PENDING:
-		return "startpending"
-	case windows.SERVICE_STOP_PENDING:
-		return "stoppending"
-	case windows.SERVICE_PAUSED:
-		return "paused"
-	}
-	return "unknown"
 }
 
 // windowsEnterpriseStandaloneFootprintPresent reports any standalone
@@ -3365,8 +3326,8 @@ func windowsEnterpriseStandaloneFootprintPresent() (bool, error) {
 		return true, nil
 	}
 	defer windows.CloseServiceHandle(manager)
-	for _, name := range []string{"DefenseClawGateway", "DefenseClawHookGuardian", "DefenseClawHookEnumerator", "DefenseClawSensorHelper"} {
-		namePointer, err := windows.UTF16PtrFromString(name)
+	for _, service := range winpath.EnterpriseStandaloneServices {
+		namePointer, err := windows.UTF16PtrFromString(service.Name)
 		if err != nil {
 			return true, nil
 		}

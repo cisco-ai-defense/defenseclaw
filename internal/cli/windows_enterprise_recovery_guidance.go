@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Recovery evidence and failure guidance for the standalone Windows
@@ -443,15 +444,6 @@ func windowsEnterprisePendingInspectionStep(configPath string) string {
 		windowsEnterpriseStandaloneSetupCommand("ensure", configPath, false) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 }
 
-// windowsEnterpriseStandaloneServiceRoster is every service a standalone
-// deployment registers, by name and status kind.
-var windowsEnterpriseStandaloneServiceRoster = []struct{ name, kind string }{
-	{"DefenseClawGateway", "gateway"},
-	{"DefenseClawHookGuardian", "guardian"},
-	{"DefenseClawHookEnumerator", "enumerator"},
-	{"DefenseClawSensorHelper", "sensor_helper"},
-}
-
 // windowsEnterprisePendingLead says what a pending transaction means for the
 // DefenseClaw services, from their states when the result is written. It said
 // "the DefenseClaw services stay stopped" also after a rollback had restarted
@@ -476,10 +468,10 @@ func windowsEnterprisePendingLead(services []enterprisestatus.Service) string {
 // every service of the standalone roster as running. A service it does not
 // list (absent) counts as not running.
 func windowsEnterpriseStandaloneRosterRunning(services []enterprisestatus.Service) bool {
-	for _, required := range windowsEnterpriseStandaloneServiceRoster {
+	for _, required := range winpath.EnterpriseStandaloneServices {
 		running := false
 		for _, service := range services {
-			if strings.EqualFold(strings.TrimSpace(service.Name), required.name) &&
+			if strings.EqualFold(strings.TrimSpace(service.Name), required.Name) &&
 				strings.EqualFold(strings.TrimSpace(service.State), "running") {
 				running = true
 				break
