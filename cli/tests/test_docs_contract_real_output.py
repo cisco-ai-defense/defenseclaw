@@ -53,6 +53,8 @@ def test_hermes_page_quotes_the_doctor_row(tmp_path, running, tag):
         # host-state rows, not the probe's own setup failure.
         mock.patch.object(cmd_doctor, "hermes_config_path", return_value=str(hook)),
         mock.patch.object(cmd_doctor, "_hermes_registered_execution_problem", return_value=""),
+        # Doctor warns instead when the host disables user namespaces (user.max_user_namespaces=0).
+        mock.patch.object(cmd_doctor, "_hermes_execution_proof_unavailable", return_value=""),
         mock.patch.object(cmd_doctor, "_json_mode", False),
         mock.patch.object(cmd_doctor.ux, "_color_enabled", return_value=False),
         mock.patch.object(ux, "_configured_unicode_output", True),

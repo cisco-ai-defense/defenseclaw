@@ -44,11 +44,16 @@ class ReferencePolicyDocsTest(unittest.TestCase):
     def test_foreign_hook_outage_scope_names_the_shared_remove_setting(self):
         text = (DOCS / "fail-modes.mdx").read_text()
         guard = next(line for line in text.splitlines()
-                     if "foreign-hook guard" in line and "requires a current gateway answer" in line)
+                     if "foreign-hook guard" in line and "asks the gateway for its session" in line)
         self.assertIn("On a managed standalone host with `foreign_hooks: remove`", guard)
         self.assertIn("GitHub Copilot CLI, Cursor, Devin, OpenCode and Amp", guard)
         self.assertIn("Hermes on Linux and macOS", guard)
-        self.assertIn("Each gateway-backed guarded call requires a current gateway answer", guard)
+        # GAP-0352: on Linux and macOS a clean-session note lets a later call follow the
+        # administrator's fail mode; without a current note, and on Windows, the call blocks.
+        self.assertIn("Each gateway-backed guarded call asks the gateway for its session's record", guard)
+        self.assertIn("leaves a read-only note that this agent process's session was clean", guard)
+        self.assertIn("when there is no current note for its agent process", guard)
+        self.assertIn("On Windows a guarded call blocks during an outage in every mode", guard)
         self.assertIn("Windows Amp checks its session record locally", guard)
         effective = text.split("## Effective behavior", 1)[1].split("These outcomes apply", 1)[0]
         self.assertIn("A gateway-backed guarded tool call", effective)

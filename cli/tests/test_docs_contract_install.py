@@ -34,6 +34,9 @@ def test_install_page_shows_doctor_before_init(tmp_path, monkeypatch: pytest.Mon
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
     monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    # The page shows a terminal. With TERM=dumb (a CI step or a detached job)
+    # the CLI prints a hyphen where it prints an em dash on a terminal.
+    monkeypatch.setenv("TERM", "xterm-256color")
     shown_home = str(home)
     if flavor == "windows":
         shown_home = r"C:\Users\dev\home"
@@ -74,7 +77,7 @@ def test_install_page_check_passes_without_utf8_locale() -> None:
 
     Runs on every OS: on Windows UTF-8 mode off means cp1252, elsewhere the C locale means ASCII.
     """
-    env = {**os.environ, "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0", "LC_ALL": "C", "LANG": "C"}
+    env = {**os.environ, "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0", "LC_ALL": "C", "LANG": "C", "TERM": "xterm-256color"}
     node = Path(__file__).resolve().relative_to(REPO).as_posix()
     proc = subprocess.run(
         [
