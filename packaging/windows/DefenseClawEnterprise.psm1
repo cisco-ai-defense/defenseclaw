@@ -1978,6 +1978,119 @@ namespace $nativeNamespace
             }
         }
 
+        // Lists a tree for restart deletion the way DeleteTreePrivileged walks
+        // it: every entry is opened no-follow with backup semantics, and only
+        // a handle that is a directory and not a reparse point is descended,
+        // so a root or child swapped for a junction is listed as the link
+        // itself and its target is never reached. Entries are returned
+        // parent first; failures name what could not be opened or listed.
+        public static string[] ListTreeNoFollow(string root, out string[] failures)
+        {
+            List<string> entries = new List<string>();
+            List<string> errors = new List<string>();
+            using (UninstallFilePrivilegeScope scope = new UninstallFilePrivilegeScope(true))
+            {
+                ListEntryNoFollow(root, entries, errors, 0);
+            }
+            failures = errors.ToArray();
+            return entries.ToArray();
+        }
+
+        private static void ListEntryNoFollow(
+            string path,
+            List<string> entries,
+            List<string> errors,
+            int depth)
+        {
+            const uint SYNCHRONIZE = 0x00100000;
+            const uint FILE_LIST_DIRECTORY = 0x00000001;
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+            const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+            const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+            const int ERROR_FILE_NOT_FOUND = 2;
+            const int ERROR_PATH_NOT_FOUND = 3;
+            const int ERROR_NO_MORE_FILES = 18;
+            const int FileFullDirectoryInfo = 14;
+            const int FileFullDirectoryRestartInfo = 15;
+            if (depth > 128)
+            {
+                errors.Add(path + ": nesting is too deep");
+                return;
+            }
+            int openError;
+            IntPtr handle = CreateFileNoFollowWithRetry(
+                path,
+                SYNCHRONIZE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                out openError);
+            if (handle == new IntPtr(-1))
+            {
+                if (openError != ERROR_FILE_NOT_FOUND &&
+                    openError != ERROR_PATH_NOT_FOUND)
+                    errors.Add(path + ": open failed (" + openError + ")");
+                return;
+            }
+            try
+            {
+                entries.Add(path);
+                BY_HANDLE_FILE_INFORMATION information;
+                if (!GetFileInformationByHandle(handle, out information))
+                {
+                    errors.Add(path + ": query failed (" + Marshal.GetLastWin32Error() + ")");
+                    return;
+                }
+                uint attributes = information.FileAttributes;
+                if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+                    (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                    return;
+                List<string> names = new List<string>();
+                byte[] buffer = new byte[65536];
+                int informationClass = FileFullDirectoryRestartInfo;
+                while (true)
+                {
+                    if (!GetFileInformationByHandleEx(
+                            handle,
+                            informationClass,
+                            buffer,
+                            (uint)buffer.Length))
+                    {
+                        int listError = Marshal.GetLastWin32Error();
+                        if (listError != ERROR_NO_MORE_FILES)
+                            errors.Add(path + ": list failed (" + listError + ")");
+                        break;
+                    }
+                    informationClass = FileFullDirectoryInfo;
+                    int offset = 0;
+                    while (true)
+                    {
+                        int next = BitConverter.ToInt32(buffer, offset);
+                        int nameLength = BitConverter.ToInt32(buffer, offset + 60);
+                        string name = System.Text.Encoding.Unicode.GetString(
+                            buffer,
+                            offset + 68,
+                            nameLength);
+                        if (name != "." && name != "..")
+                            names.Add(name);
+                        if (next == 0)
+                            break;
+                        offset += next;
+                    }
+                }
+                foreach (string name in names)
+                    ListEntryNoFollow(
+                        System.IO.Path.Combine(path, name),
+                        entries,
+                        errors,
+                        depth + 1);
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+
         // Reads a managed file's bytes through a no-follow backup-semantics
         // handle with backup privilege enabled, so a transaction can capture
         // the preimage of a file whose DACL no longer grants Administrators
@@ -27968,36 +28081,30 @@ function Remove-DefenseClawNuclearPath {
     # that skipped a child (access denied, say) cannot be reported as queued.
     $listingComplete = $false
     if ($null -ne $nativeSecurity) {
-        # Walk by hand: Windows PowerShell 5.1's -Recurse can follow a
-        # junction out of the tree. A reparse point is queued as itself and
-        # never descended into.
+        # Bind the listing to no-follow handles: a path walk could enumerate
+        # the target of a root or child swapped for a junction after
+        # discovery. A reparse point is listed as the link itself.
         $listingErrors = [Collections.Generic.List[object]]::new()
-        $collected = [Collections.Generic.List[string]]::new()
-        $pendingDirectories = [Collections.Generic.Stack[string]]::new()
-        $pendingDirectories.Push($scheduleRoot)
-        while ($pendingDirectories.Count -gt 0) {
-            $directory = $pendingDirectories.Pop()
-            $entryErrors = $null
-            foreach ($entry in @(Microsoft.PowerShell.Management\Get-ChildItem `
-                    -LiteralPath $directory `
-                    -Force `
-                    -ErrorAction SilentlyContinue `
-                    -ErrorVariable entryErrors)) {
-                $collected.Add([string]$entry.FullName)
-                $isDirectory = ([int]$entry.Attributes -band [int][IO.FileAttributes]::Directory) -ne 0
-                $isReparse = ([int]$entry.Attributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0
-                if ($isDirectory -and -not $isReparse) {
-                    $pendingDirectories.Push([string]$entry.FullName)
-                }
-            }
-            foreach ($entryError in @($entryErrors)) {
-                if ($null -ne $entryError) {
-                    $listingErrors.Add($entryError)
-                }
+        $treeFailures = [string[]]@()
+        $treeEntries = [string[]]@()
+        try {
+            $treeEntries = [string[]]$nativeSecurity::ListTreeNoFollow($scheduleRoot, [ref]$treeFailures)
+        }
+        catch {
+            $listingErrors.Add("$scheduleRoot : $($_.Exception.Message)")
+        }
+        foreach ($treeFailure in @($treeFailures)) {
+            if (-not [string]::IsNullOrEmpty([string]$treeFailure)) {
+                $listingErrors.Add([string]$treeFailure)
             }
         }
+        if (@($treeEntries).Count -eq 0 -and $listingErrors.Count -eq 0) {
+            $listingErrors.Add("$scheduleRoot : could not be opened for listing")
+        }
         $leftovers = @(
-            @($collected | Microsoft.PowerShell.Utility\Sort-Object -Property Length -Descending) +
+            @(@($treeEntries) | Microsoft.PowerShell.Core\Where-Object {
+                    -not [string]::Equals([string]$_, $scheduleRoot, [StringComparison]::OrdinalIgnoreCase)
+                } | Microsoft.PowerShell.Utility\Sort-Object -Property Length -Descending) +
             @($scheduleRoot)
         )
         $listingComplete = ($listingErrors.Count -eq 0)
