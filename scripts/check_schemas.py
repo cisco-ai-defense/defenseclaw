@@ -1116,6 +1116,10 @@ MDM_FORWARD_BANNED_MEMBERS = {
     "group", "groups", "principal", "actor", "created_by", "change_summary", "message", "messages",
     "subject", "path", "paths", "pid", "entries", "changes", "home", "tenant_id", "device_group",
     "signer_key_id", "key_id", "anchors", "log_path", "last_reload_error", "reason", "detail",
+    # Account ids and names, enrollment exclusions, device groups and receipt
+    # error text (sidecar-r107 GAP-0006 review).
+    "user_name", "excluded_users", "excluded_groups", "device_groups", "windows_token_groups_pending",
+    "error_message",
 }
 # Strings that must not survive a projection of the fixtures: account
 # names, identifiers (SID, UPN, uid forms), group names and paths.
