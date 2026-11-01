@@ -68,7 +68,7 @@ func windowsManagedPolicySelfHealFolders() []windowsManagedPolicySelfHealFolder 
 		folders = append(folders, windowsManagedPolicySelfHealFolder{
 			path: filepath.Dir(policyPath),
 			files: append([]windowsManagedPolicySelfHealFile{
-				{name: windowsClaudeManagedPolicyFile, userReadable: true, exact: true},
+				{name: windowsClaudeManagedPolicyFile, userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true},
 				{name: windowsClaudeManagedStateFile, userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true, marker: true},
 				{name: windowsClaudeManagedLockFile, clear: windowsManagedPolicyLockAttributes, exact: true},
 			}, selector...),
@@ -80,7 +80,7 @@ func windowsManagedPolicySelfHealFolders() []windowsManagedPolicySelfHealFolder 
 		folders = append(folders, windowsManagedPolicySelfHealFolder{
 			path: filepath.Dir(requirementsPath),
 			files: append([]windowsManagedPolicySelfHealFile{
-				{name: filepath.Base(requirementsPath), userReadable: true, exact: true},
+				{name: filepath.Base(requirementsPath), userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true},
 				{name: windowsClaudeManagedStateFile, userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true, marker: true},
 				{name: windowsClaudeManagedLockFile, userReadable: true, clear: windowsManagedPolicyLockAttributes, exact: true},
 			}, selector...),
@@ -91,8 +91,8 @@ func windowsManagedPolicySelfHealFolders() []windowsManagedPolicySelfHealFolder 
 			path:  paths.Root,
 			exact: true,
 			files: append([]windowsManagedPolicySelfHealFile{
-				{name: filepath.Base(paths.Hooks), userReadable: true},
-				{name: filepath.Base(paths.Adapter), userReadable: true, exact: true},
+				{name: filepath.Base(paths.Hooks), userReadable: true, clear: windowsManagedPolicyStateAttributes},
+				{name: filepath.Base(paths.Adapter), userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true},
 				{name: filepath.Base(paths.State), userReadable: true, clear: windowsManagedPolicyStateAttributes, exact: true, marker: true},
 				{name: filepath.Base(paths.Receipt), clear: windowsManagedPolicyStateAttributes, exact: true, marker: true},
 				{name: filepath.Base(paths.Lock), clear: windowsManagedPolicyLockAttributes, exact: true},
@@ -109,7 +109,7 @@ func windowsManagedPolicySelfHealFolders() []windowsManagedPolicySelfHealFolder 
 // selector file is present), and only DefenseClaw's own files in it are
 // examined; vendor files are never opened. Each object is read first and
 // written only when it drifted: restrictive attributes are cleared from
-// DefenseClaw's lock and state files, and owner and DACL are re-stamped
+// DefenseClaw's policy, lock and state files, and owner and DACL are re-stamped
 // through the no-follow, owner-checked writers the policy transactions use.
 // Every repair is logged once with MarkerRepair; anything that cannot be
 // repaired is logged once and left for the transactions to judge. Nothing
@@ -236,7 +236,7 @@ func clearWindowsManagedPolicyFileAttributes(path string, mask uint32) {
 	reportWindowsManagedPolicySelfHeal("", path+"#attributes", nil)
 	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
 		"path":   path,
-		"reason": fmt.Sprintf("cleared file attributes 0x%x on a DefenseClaw lock or state file", attributes&mask),
+		"reason": fmt.Sprintf("cleared file attributes 0x%x on a DefenseClaw-managed policy file", attributes&mask),
 	})
 }
 

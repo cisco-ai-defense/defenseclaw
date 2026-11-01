@@ -97,6 +97,12 @@ func RepairWindowsManagedInstall(layout ManagedInstallLayout, opts CanonicalOpti
 	targets := layout.targets()
 	results := make([]CanonicalResult, 0, len(targets))
 	for _, target := range targets {
+		if !target.kind.Directory() {
+			// ReadOnly, Hidden or System set by a user or a hardening tool
+			// stops the next managed write, so the guardian clears them
+			// along with the descriptor.
+			clearManagedFileRestrictiveAttributes(target.path)
+		}
 		result, _ := EnsureCanonical(target.path, target.kind, opts)
 		results = append(results, result)
 	}
