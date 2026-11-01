@@ -101,7 +101,7 @@ func TestPerUserProfileExplainRefusesAnotherAccount(t *testing.T) {
 		}
 		body, _ := json.Marshal(out)
 		for _, fact := range []string{"grp-of-", "dcm-secret-holder", "\"517\""} {
-			if strings.Contains(string(body), fact) && !(fact == "\"517\"" && user == "517") {
+			if strings.Contains(string(body), fact) && (fact != "\"517\"" || user != "517") {
 				t.Errorf("--user %s: the answer carries %s: %s", user, fact, body)
 			}
 		}
