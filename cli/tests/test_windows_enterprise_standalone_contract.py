@@ -1449,7 +1449,7 @@ function Invoke-Case([string[]]$Checks, [string[]]$Syncs) {
     foreach ($c in $Checks) { $script:checks.Enqueue($c) }
     foreach ($c in $Syncs) { $script:syncs.Enqueue($c) }
     try {
-        Invoke-DefenseClawUninstallPrecommitHookCheck -Layout @{} -GatewayServiceName Gateway -GuardianServiceName Guardian
+        $script:rebound = @(Invoke-DefenseClawUninstallPrecommitHookCheck -Layout @{} -GatewayServiceName Gateway -GuardianServiceName Guardian)[-1]
         return 'passed'
     }
     catch { return "refused: $($_.Exception.Message)" }
@@ -1473,13 +1473,17 @@ $outside = 'managed-hook teardown check failed: protected Guardian state contain
 $notAdopted = 'deployment managed-hook activation evidence does not bind installed targets.yaml (guardian has not activated it)'
 $result = Invoke-Case @($deleted, $deleted, $outside, 'ok') @($notAdopted, 'same', 'rebound')
 if ($result -cne 'passed') { throw "catch-up states were not asked again: $result / $($script:log -join ' | ')" }
+if ($script:rebound -ne $true) { throw 'the check did not report that it rebound the activation evidence' }
 $order = $script:log -join ' | '
 if ($order -notmatch 'stop Enum \| start Enum') { throw "the enumerator was not restarted: $order" }
 if ($order -notmatch 'sync rebound \| phase: deleted enrolled account: activation evidence rebound') { throw "the rebinding was not reported: $order" }
 if (@($script:log | Where-Object { $_ -like 'sync *' }).Count -ne 4) { throw "sync did not run in every wait round: $order" }
 # The stale binding after the guardian adopted the manifest: rebound, then passes.
 $result = Invoke-Case @($deleted, $stale, 'ok') @('same', 'rebound')
-if ($result -cne 'passed') { throw "a stale activation binding was not rebound: $result" }
+if ($result -cne 'passed' -or $script:rebound -ne $true) { throw "a stale activation binding was not rebound: $result" }
+# A first check that passes rebinds nothing.
+$result = Invoke-Case @('ok') @()
+if ($result -cne 'passed' -or $script:rebound -ne $false) { throw "a passing first check reported a rebinding: $result" }
 # No deleted account: the first refusal is given back at once, nothing restarted.
 $result = Invoke-Case @($outside) @()
 if ($result -notlike 'refused: *outside the deployment manifest*' -or ($script:log -join '|') -match 'stop Enum') { throw "a refusal without a deleted account was retried: $result" }
@@ -1500,6 +1504,14 @@ def test_uninstall_precommit_wait_rebinds_like_the_lifecycle() -> None:
     assert check.index("Sync-DefenseClawStandaloneManagedHooksActivationBinding") < check.index("-TimeoutSeconds $left")
     assert "Test-DefenseClawManifestCatchUpTeardownRefusal -Message $message" in check
     assert "$script:UninstallDeletedAccountWaitSeconds = 180" in module
+    # The tombstone is written from metadata read after a rebinding check.
+    uninstall = _function_body(module, "Invoke-DefenseClawUninstallLifecycle")
+    reread = uninstall.index("if ($precheckRebound) {")
+    assert uninstall.index("$precheckRebound = [bool](Invoke-DefenseClawUninstallPrecommitHookCheck") < reread
+    block = uninstall[reread: uninstall.index("\n    }\n", reread)]
+    assert "$metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required" in block
+    assert "$managedHooksActivation =" in block
+    assert reread < uninstall.index("-ManagedHooksActivation $managedHooksActivation")
     catchup = _function_body(module, "Test-DefenseClawManifestCatchUpTeardownRefusal")
     for needle in (
         "protected managed-hook activation evidence does not match the current manifest",

@@ -22287,7 +22287,9 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
         the same step Upgrade, Repair and Uninstall run before their
         transaction), and a refusal of that in-between state is asked again
         within the wait like the deleted-account one. Any other refusal is
-        given back at once.
+        given back at once. Returns $true when it rebound the evidence: the
+        caller must read the deployment metadata again before it writes the
+        tombstone from it.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -22300,7 +22302,7 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -Action check)
-        return
+        return $false
     }
     catch {
         if (-not (Test-DefenseClawDeletedAccountTeardownRefusal -Message $_.Exception.Message)) {
@@ -22308,6 +22310,7 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
         }
         $refusal = $_
     }
+    $rebound = $false
     $enumerator = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     if (-not (Test-DefenseClawServiceExists -Name $enumerator)) {
         throw $refusal
@@ -22336,6 +22339,7 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
             if (Sync-DefenseClawStandaloneManagedHooksActivationBinding `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName) {
+                $rebound = $true
                 Write-DefenseClawLifecyclePhase -Stage 'deleted enrolled account: activation evidence rebound to the targets.yaml the guardian adopted'
             }
             [void](Invoke-DefenseClawManagedHooksTeardownCommand `
@@ -22344,7 +22348,7 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
                 -GuardianServiceName $GuardianServiceName `
                 -Action check `
                 -TimeoutSeconds $left)
-            return
+            return $rebound
         }
         catch {
             $message = $_.Exception.Message
@@ -38348,16 +38352,17 @@ function Invoke-DefenseClawUninstallLifecycle {
     # refusal then leaves the deployment fully installed and says what to
     # repair, instead of a committed tombstone that every retry refuses. The
     # OWNER RIGHTS restore that runs first (GAP-0303) only tightens.
+    $precheckRebound = $false
     if ($postCommitHookTeardown -and
         (Test-DefenseClawManagedHooksCommittedTeardownSupported `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -Capability precommit_check)) {
         try {
-            Invoke-DefenseClawUninstallPrecommitHookCheck `
+            $precheckRebound = [bool](Invoke-DefenseClawUninstallPrecommitHookCheck `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName
+                -GuardianServiceName $GuardianServiceName)
         }
         catch {
             $reason = $_.Exception.Message
@@ -38373,6 +38378,21 @@ function Invoke-DefenseClawUninstallLifecycle {
                 "$reason. Repair that (run Setup /repair, or undo the change to the file it names), " +
                 "then run the uninstall again.")
         }
+    }
+    if ($precheckRebound) {
+        # rel-1-0-6:GAP-0346: the check rebound the activation evidence to the
+        # targets.yaml the enumerator published for a deleted account. The
+        # tombstone below carries that evidence, so read it again: the record
+        # read above names the manifest before the pass, and a tombstone with
+        # it made the post-commit hook removal refuse every later run.
+        $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
+        Assert-DefenseClawMetadataIdentity `
+            -Metadata $metadata `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+        $managedHooksActivation =
+            Assert-DefenseClawManagedHooksActivationRecord `
+                -Record $metadata.managed_hooks_activation
     }
     # The native InstallRoot seal/delete (#1068) admits only the Secure Client
     # tree and its single gateway socket. Standalone keeps the PowerShell
