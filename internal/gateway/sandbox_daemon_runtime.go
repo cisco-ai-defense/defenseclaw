@@ -710,17 +710,24 @@ func sandboxDaemonPeerCheck(uid int, next http.Handler) http.Handler {
 const (
 	sandboxDaemonUnavailableLinger = 15 * time.Second
 	sandboxDaemonUnavailableMax    = 2 * time.Minute
+	// sandboxDaemonUnavailableRecheck paces the recovered check.
+	sandboxDaemonUnavailableRecheck = 5 * time.Second
 )
 
 // ServeSandboxDaemonUnavailable answers every request of the daemon's own
 // account on ln with why sandboxes cannot run (cause, as the sandbox API
 // error a relay failure maps to) until the socket idles, then returns nil.
-// It closes ln.
-func ServeSandboxDaemonUnavailable(ctx context.Context, ln net.Listener, cause error) error {
-	return serveSandboxDaemonUnavailable(ctx, ln, cause, sandboxDaemonUnavailableLinger, sandboxDaemonUnavailableMax)
+// It closes ln. recovered, when set, is asked every
+// sandboxDaemonUnavailableRecheck whether the cause has gone (the managed
+// gateway answers again); then it returns at once, and the next command
+// starts a daemon that serves. Without it, a command that kept asking kept
+// the stale answer alive for up to sandboxDaemonUnavailableMax after the
+// gateway came back (GAP-0608).
+func ServeSandboxDaemonUnavailable(ctx context.Context, ln net.Listener, cause error, recovered func(context.Context) bool) error {
+	return serveSandboxDaemonUnavailable(ctx, ln, cause, recovered, sandboxDaemonUnavailableLinger, sandboxDaemonUnavailableMax, sandboxDaemonUnavailableRecheck)
 }
 
-func serveSandboxDaemonUnavailable(ctx context.Context, ln net.Listener, cause error, linger, limit time.Duration) error {
+func serveSandboxDaemonUnavailable(ctx context.Context, ln net.Listener, cause error, recovered func(context.Context) bool, linger, limit, recheck time.Duration) error {
 	var refusal *sandboxapi.Error
 	if !errors.As(managedRelayError(cause), &refusal) {
 		refusal = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
@@ -751,9 +758,15 @@ func serveSandboxDaemonUnavailable(ctx context.Context, ln net.Listener, cause e
 	if step <= 0 || step > time.Second {
 		step = time.Second
 	}
+	if recovered != nil && recheck > 0 && recheck < step {
+		step = recheck
+	}
 	tick := time.NewTicker(step)
 	defer tick.Stop()
 	deadline := time.Now().Add(limit)
+	nextCheck := time.Now().Add(recheck)
+	checked := make(chan bool, 1)
+	checking := false
 	var err error
 wait:
 	for {
@@ -765,10 +778,19 @@ wait:
 				err = nil
 			}
 			break wait
+		case ok := <-checked:
+			checking = false
+			if ok {
+				break wait
+			}
 		case now := <-tick.C:
 			idle := conns.Load() == 0 && now.Sub(time.Unix(0, last.Load())) >= linger
 			if idle || now.After(deadline) {
 				break wait
+			}
+			if recovered != nil && !checking && !now.Before(nextCheck) {
+				checking, nextCheck = true, now.Add(recheck)
+				go func() { checked <- recovered(ctx) }()
 			}
 		}
 	}

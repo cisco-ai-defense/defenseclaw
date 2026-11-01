@@ -20,13 +20,19 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -108,5 +114,66 @@ func TestSandboxDaemonRevalidateBoundsEachCallOnASilentGateway(t *testing.T) {
 func TestSandboxDaemonGatewayCallTimeoutDefault(t *testing.T) {
 	if got := (&SandboxDaemon{}).gatewayCallTimeout(); got != managedViewTimeout || got > 5*time.Second {
 		t.Fatalf("gateway call bound = %s, want managedViewTimeout (%s)", got, managedViewTimeout)
+	}
+}
+
+// GAP-0608: a daemon that could not read the managed settings serves why
+// and lingers while commands keep asking: once the managed gateway answered
+// again, it still refused for up to two minutes. It now exits as soon as
+// the recovered check says the gateway answers, so the next command starts
+// a daemon that serves. Linger and limit are an hour here: only the
+// recovery (or a hang) can end it.
+func TestSandboxDaemonUnavailableExitsOnceTheGatewayAnswers(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("the peer check serves only the daemon's own uid")
+	}
+	dir, err := os.MkdirTemp("", "dsr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "run", "sandbox.sock")
+	ln, err := BindSandboxDaemonSocket(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checks atomic.Int64
+	answers := make(chan bool, 1) // the gateway is silent until the test says
+	recovered := func(context.Context) bool {
+		checks.Add(1)
+		select {
+		case ok := <-answers:
+			return ok
+		default:
+			return false
+		}
+	}
+	cause := fmt.Errorf("read the managed sandbox settings: the managed gateway did not answer within 5s: %w", sandboxrelay.ErrGatewayUnreachable)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveSandboxDaemonUnavailable(context.Background(), ln, cause, recovered, time.Hour, time.Hour, time.Millisecond)
+	}()
+	client := sandboxapi.NewUnixClient(socket)
+	_, err = client.Status(context.Background())
+	var refused *sandboxapi.Error
+	if !errors.As(err, &refused) || refused.Status != http.StatusServiceUnavailable || !strings.Contains(refused.Message, "not reachable") {
+		t.Fatalf("status while the gateway is silent: %v, want 503 the managed gateway is not reachable", err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("the unavailable daemon exited while the gateway was still silent: %v", err)
+	default:
+	}
+	answers <- true
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("exit: %v", err)
+		}
+	case <-time.After(20 * time.Second): // a guard against a hang, not the bound
+		t.Fatal("the unavailable daemon kept serving after the gateway answered")
+	}
+	if checks.Load() < 1 {
+		t.Fatal("the gateway was never asked again")
 	}
 }

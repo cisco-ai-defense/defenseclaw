@@ -330,13 +330,13 @@ func runSandboxDaemon(ctx context.Context, logw io.Writer) error {
 	logf := func(format string, args ...any) {
 		fmt.Fprintf(logw, "[sandbox-daemon] "+format+"\n", args...)
 	}
-	unavailable := func(cause error) error {
+	unavailable := func(cause error, recovered func(context.Context) bool) error {
 		if ctx.Err() != nil {
 			_ = ln.Close()
 			return nil
 		}
 		logf("sandboxes cannot run now: %v", cause)
-		return gateway.ServeSandboxDaemonUnavailable(ctx, ln, cause)
+		return gateway.ServeSandboxDaemonUnavailable(ctx, ln, cause, recovered)
 	}
 	hookSocket := descriptor.HookSocket
 	if hookSocket == "" {
@@ -348,12 +348,19 @@ func runSandboxDaemon(ctx context.Context, logw io.Writer) error {
 	}
 	relay, err := sandboxrelay.NewClient(sandboxrelay.ClientOptions{SocketPath: hookSocket, TrustedOwners: trusted})
 	if err != nil {
-		return unavailable(fmt.Errorf("the managed gateway's hook socket: %w", err))
+		return unavailable(fmt.Errorf("the managed gateway's hook socket: %w", err), nil)
 	}
 	defer relay.Close()
 	settings, err := sandboxDaemonSettings(ctx, relay, sandboxDaemonSettingsCallTimeout)
 	if err != nil {
-		return unavailable(err)
+		// Once the managed gateway answers the settings again, this daemon
+		// exits and the next command starts one that serves.
+		return unavailable(err, func(ctx context.Context) bool {
+			cctx, cancel := context.WithTimeout(ctx, sandboxDaemonSettingsCallTimeout)
+			defer cancel()
+			_, err := relay.Settings(cctx)
+			return err == nil
+		})
 	}
 	d, err := gateway.NewSandboxDaemon(gateway.SandboxDaemonOptions{
 		RuntimeOptions: gateway.RuntimeOptions{Managed: true, Relay: relay, Settings: &settings},
