@@ -76,7 +76,7 @@ func pythonPathWriteMatch(rule *regexp.Regexp, source, script string) []int {
 			stmts, lineStmt = pythonStatements(lines, callLines)
 			// The exemption also needs an import path that loads nothing from
 			// the script's directory: a module there may patch Path.
-			if pythonImportPathOrdinary(masked, dir, self) {
+			if pythonImportPathOrdinary(masked, dir, self) && pythonRawSourceAllowsRebinding(source) {
 				gate, pathImported = pythonFileAllowsRebinding(masked, stmts)
 			}
 		}
@@ -211,6 +211,39 @@ func pythonFileAllowsRebinding(calls string, stmts []pythonStmt) (ok, pathImport
 	return true, pathImported
 }
 
+var pythonCodingCookie = lazyregexp.New(`^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)`)
+
+// pythonRawSourceAllowsRebinding is the raw-source part of the GAP-1312
+// gate: the masked views blank comments, so it reads the file itself. A
+// coding cookie other than utf-8 in the first two lines, a form feed, or a
+// carriage return not followed by a newline (Python reads it as a line end)
+// turns the exemption off. py_raw_source_allows_rebinding in the Python
+// plugin scanner is the same check.
+func pythonRawSourceAllowsRebinding(source string) bool {
+	if strings.ContainsRune(source, '\f') {
+		return false
+	}
+	for i := 0; i < len(source); i++ {
+		if source[i] == '\r' && (i+1 == len(source) || source[i+1] != '\n') {
+			return false
+		}
+	}
+	lines := strings.SplitN(source, "\n", 3)
+	if len(lines) > 2 {
+		lines = lines[:2]
+	}
+	for _, line := range lines {
+		if m := pythonCodingCookie.FindStringSubmatch(line); m != nil {
+			switch strings.ReplaceAll(strings.ToLower(m[1]), "_", "-") {
+			case "utf-8", "utf8":
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func pythonWordByte(c byte) bool {
 	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
@@ -270,6 +303,13 @@ func pythonRebindingHides(stmts []pythonStmt, lineStmt []int, at int, name strin
 	}
 	if ri < 0 {
 		return nil
+	}
+	// A statement between them that names name (a link made from it, as in
+	// Path("x").symlink_to(name)) may keep the path past the rebinding.
+	for _, st := range stmts[ai+1 : ri] {
+		if containsPythonName(st.calls, name) {
+			return nil
+		}
 	}
 	carriers := map[string]bool{name: true}
 	for changed := true; changed; {

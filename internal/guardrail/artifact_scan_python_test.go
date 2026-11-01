@@ -582,6 +582,13 @@ func TestPythonPathWriteMatchRebindingMustDominateTheWrite(t *testing.T) {
 		{"Path not imported", "t = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nt.write_text(x)\n", true},
 		{"module outside the gate list", "from pathlib import Path\nimport subprocess\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nt.write_text(x)\n", true},
 		{"comprehension after the rebinding", "from pathlib import Path\nt = Path(\"MEMORY.md\")\nt = Path(\"safe.txt\")\nitems = [n for n in range(3)]\nt.write_text(x)\n", true},
+		// Review 4 of f03ff012b6 (IN-bd-w2hooks4-REVIEW.md): each flags at base.
+		{"utf-7 coding cookie", "# -*- coding: utf-7 -*-\nfrom pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n", true},
+		{"form-feed indent", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\nif ok:\n\f    target = Path(\"safe.txt\")\ntarget.write_text(x)\n", true},
+		{"lone carriage return in a comment", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\ntarget = Path(\"safe.txt\")\n# note\rtarget = Path(\"MEMORY.md\")\ntarget.write_text(\"hello\")\n", true},
+		{"symlink_to between the assignment and the rebinding", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\nPath(\"safe.txt\").symlink_to(target)\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n", true},
+		{"os.symlink between the assignment and the rebinding", "import os\nfrom pathlib import Path\ntarget = Path(\"MEMORY.md\")\nos.symlink(target, \"safe.txt\")\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n", true},
+		{"hardlink_to between the assignment and the rebinding", "from pathlib import Path\ntarget = Path(\"MEMORY.md\")\nPath(\"safe.txt\").hardlink_to(target)\ntarget = Path(\"safe.txt\")\ntarget.write_text(\"hello\")\n", true},
 	} {
 		// Each script alone in its directory: the import path loads
 		// nothing beside it (pythonImportPathOrdinary).

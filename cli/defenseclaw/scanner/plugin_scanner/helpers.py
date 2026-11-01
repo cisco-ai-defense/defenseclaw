@@ -310,6 +310,8 @@ class PySource:
         # the rebinding exemption needs it (a module beside the script may
         # patch Path).
         self.import_dir_clean = False
+        # GAP-1312: py_raw_source_allows_rebinding of the file, set by python_source.
+        self.raw_ok = False
 
     def openers(self, line_idx: int) -> tuple[int, ...]:
         """Indexes of the lines whose brackets are still open at *line_idx*."""
@@ -375,7 +377,7 @@ class PySource:
         Returns (applies, Path imported that way). The Go artifact scan
         (pythonFileAllowsRebinding) is the same gate.
         """
-        if not self.import_dir_clean:
+        if not self.import_dir_clean or not self.raw_ok:
             return False, False
         if self._gate is None:
             self._gate = self._compute_gate()
@@ -450,6 +452,10 @@ class PySource:
                 rebind = k
                 break
         if rebind < 0:
+            return set()
+        # A statement between them that names name (a link made from it, as
+        # in Path("x").symlink_to(name)) may keep the path past the rebinding.
+        if any(name in st.words for st in stmts[first_idx + 1 : rebind]):
             return set()
         carriers = {name}
         changed = True
@@ -788,7 +794,29 @@ def python_source(content: str) -> PySource | None:
     _blank_spans(rows, doc_spans)
     code = [r.rstrip() for r in rows]
     _blank_spans(rows, string_spans)
-    return PySource(toks, code, [r.rstrip() for r in rows])
+    py = PySource(toks, code, [r.rstrip() for r in rows])
+    py.raw_ok = py_raw_source_allows_rebinding(content)
+    return py
+
+
+_PY_CODING_COOKIE = re.compile(r"[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+
+
+def py_raw_source_allows_rebinding(content: str) -> bool:
+    """The raw-source part of the GAP-1312 gate (the blanked views lose
+    comments): a coding cookie other than utf-8 in the first two lines, a
+    form feed, or a carriage return not followed by a newline (Python reads
+    it as a line end) turns the rebinding exemption off. The Go artifact scan
+    (pythonRawSourceAllowsRebinding) is the same check."""
+    if "\f" in content:
+        return False
+    if any(content[i + 1 : i + 2] != "\n" for i, ch in enumerate(content) if ch == "\r"):
+        return False
+    for line in content.split("\n", 2)[:2]:
+        m = _PY_CODING_COOKIE.match(line)
+        if m and m.group(1).lower().replace("_", "-") not in ("utf-8", "utf8"):
+            return False
+    return True
 
 
 def _blank_spans(rows: list[str], spans) -> None:
