@@ -331,6 +331,15 @@ func runWindowsManagedHooksLifecycle(
 		if !snapshot.PolicyExisted {
 			prior = prior[:0]
 		}
+		// Setup puts back DefenseClaw's Cursor entries that were removed
+		// from hooks.json, so Install, Upgrade and Repair can capture and
+		// reconcile the policy. The Guardian never runs this and keeps the
+		// edit.
+		if _, err := enterprisehooks.RepairWindowsCursorManagedRegistration(
+			windowsManagedHooksCursorOptions(ctx.opts, nil),
+		); err != nil {
+			return fail(err)
+		}
 		currentCursor, cursorActive, err := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
 		if err != nil {
 			return fail(err)

@@ -2035,6 +2035,100 @@ func windowsCursorMatchesReceiptOriginal(
 		current.hooksMetadata.attributes == receipt.ConfigOriginalAttributes
 }
 
+// RepairWindowsCursorManagedRegistration puts DefenseClaw's entries back into
+// hooks.json after they were removed or changed, when everything else
+// DefenseClaw recorded still authenticates: the protected state, the adapter
+// and rollback receipt it binds, and a trusted hooks.json that is a Cursor
+// version 1 document. Setup calls it before it captures the lifecycle
+// snapshot, so Install, Upgrade and Repair restore the registration instead
+// of refusing it. The Guardian does not call it and keeps an administrator's
+// edit. Unrelated hooks.json entries are kept.
+//
+// It writes nothing, and the snapshot then reports the original error, when
+// the deployment does not authenticate, belongs to another hook executable or
+// gateway, or strict ancestor trust is set. It reports whether it rewrote
+// hooks.json.
+func RepairWindowsCursorManagedRegistration(
+	opts WindowsCursorManagedPolicyTeardownOptions,
+) (bool, error) {
+	paths, err := windowsCursorManagedPaths()
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Lstat(paths.State); err != nil {
+		return false, nil
+	}
+	repaired := false
+	err = withWindowsCursorManagedTransaction(func() error {
+		var repairErr error
+		repaired, repairErr = repairWindowsCursorManagedRegistrationUnlocked(opts)
+		return repairErr
+	})
+	return repaired, err
+}
+
+func repairWindowsCursorManagedRegistrationUnlocked(
+	opts WindowsCursorManagedPolicyTeardownOptions,
+) (bool, error) {
+	if managed.TrustStrictAncestors() {
+		// Strict mode refuses drift instead of reclaiming it.
+		return false, nil
+	}
+	current, err := snapshotWindowsCursorManagedArtifacts()
+	if err != nil {
+		return false, err
+	}
+	if !current.state.existed || !current.hooks.existed || !current.adapter.existed {
+		return false, nil
+	}
+	if err := windowsManagedPolicyFileTrustCheck(current.hooks.path); err != nil {
+		return false, nil
+	}
+	identified, err := validateWindowsCursorManagedStateIdentity(current)
+	if err != nil {
+		return false, nil
+	}
+	gateway, err := connector.NormalizeWindowsManagedGatewayAddr(opts.GatewayAddr)
+	if err != nil || gateway != identified.parsed.GatewayAddr ||
+		!sameWindowsEnterprisePath(opts.HookExecutable, identified.parsed.HookExecutable) ||
+		opts.GatewayServiceName != identified.parsed.GatewayServiceName {
+		return false, nil
+	}
+	failMode := cursorManagedPolicyFailMode(identified.parsed)
+	if connector.VerifyWindowsCursorEnterpriseHooksForMigration(current.hooks.data, current.adapter.path, failMode) == nil {
+		return false, nil
+	}
+	merged, err := connector.MergeWindowsCursorEnterpriseHooks(current.hooks.data, current.adapter.path, failMode)
+	if err != nil {
+		// Not a Cursor version 1 hooks document: it is left as it is.
+		return false, nil
+	}
+	candidate := current
+	candidate.hooks.data = merged
+	if _, err := validateWindowsCursorManagedArtifacts(candidate); err != nil {
+		// The rollback receipt does not authenticate.
+		return false, nil
+	}
+	if err := writeWindowsCursorManagedFilePreservingMetadata(current.hooks, current.hooksMetadata, merged); err != nil {
+		return false, fmt.Errorf("enterprise hooks: restore Cursor enterprise hooks: %w", err)
+	}
+	written, err := snapshotWindowsCursorManagedArtifacts()
+	if err == nil {
+		_, err = validateWindowsCursorManagedArtifacts(written)
+	}
+	if err != nil {
+		return false, errors.Join(
+			fmt.Errorf("enterprise hooks: verify restored Cursor enterprise hooks: %w", err),
+			restoreWindowsCursorManagedFile(current.hooks, current.hooksMetadata),
+		)
+	}
+	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+		"path":   current.hooks.path,
+		"reason": "restored DefenseClaw's Cursor hook entries from the protected state",
+	})
+	return true, nil
+}
+
 func CaptureWindowsCursorManagedPolicySnapshot(
 	opts WindowsCursorManagedPolicyTeardownOptions,
 ) (WindowsCursorManagedPolicyTeardownSnapshot, error) {
