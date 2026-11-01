@@ -13,7 +13,6 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -172,9 +171,6 @@ func repairWindowsManagedPolicySelfHealFile(path string, file windowsManagedPoli
 		reportWindowsManagedPolicySelfHeal(managed.MarkerBoundary, path, err)
 		return
 	}
-	// Cleared after the descriptor repair below, which may restore the
-	// FILE_WRITE_ATTRIBUTES right the clear needs.
-	defer clearWindowsManagedPolicyFileAttributes(path, file.clear)
 	check := windowsManagedPolicyLeafTrust(managed.ObjectInstallFile)
 	if file.exact {
 		userReadable := file.userReadable
@@ -182,8 +178,12 @@ func repairWindowsManagedPolicySelfHealFile(path string, file windowsManagedPoli
 			return validateWindowsManagedMachineFileDescriptor(path, userReadable)
 		}
 	}
+	// Attributes are cleared only once the descriptor is accepted or
+	// repaired: the repair may restore FILE_WRITE_ATTRIBUTES, and a refused
+	// object is left untouched.
 	if check(path) == nil {
 		reportWindowsManagedPolicySelfHeal("", path, nil)
+		clearWindowsManagedPolicyFileAttributes(path, file.clear)
 		return
 	}
 	if _, err := repairWindowsManagedMachineFile(path, file.userReadable, check); err != nil {
@@ -191,6 +191,7 @@ func repairWindowsManagedPolicySelfHealFile(path string, file windowsManagedPoli
 		return
 	}
 	reportWindowsManagedPolicySelfHeal("", path, nil)
+	clearWindowsManagedPolicyFileAttributes(path, file.clear)
 }
 
 // windowsManagedPolicyLeafTrust judges only the object's own descriptor: it
@@ -211,35 +212,23 @@ func windowsManagedPolicyLeafTrust(kind managed.ObjectKind) func(string) error {
 	}
 }
 
-// clearWindowsManagedPolicyFileAttributes clears mask from an existing
-// DefenseClaw file. The caller has already refused a reparse point on the
-// path; only the attributes change.
+// clearWindowsManagedPolicyFileAttributes clears mask from a DefenseClaw
+// policy file through one no-follow, single-link handle, after the caller
+// accepted or repaired its descriptor; only the attributes change.
 func clearWindowsManagedPolicyFileAttributes(path string, mask uint32) {
-	if mask == 0 {
-		return
-	}
-	pointer, err := winpath.UTF16Ptr(path)
+	cleared, err := managed.ClearRestrictiveFileAttributesNoFollow(path, mask)
 	if err != nil {
-		return
-	}
-	attributes, err := windows.GetFileAttributes(pointer)
-	if err != nil || attributes&mask == 0 || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return
-	}
-	remaining := attributes &^ mask
-	if remaining == 0 {
-		remaining = windows.FILE_ATTRIBUTE_NORMAL
-	}
-	if err := windows.SetFileAttributes(pointer, remaining); err != nil {
 		reportWindowsManagedPolicySelfHeal(managed.MarkerAccept, path+"#attributes",
-			fmt.Errorf("clear file attributes 0x%x: %w", attributes&mask, err))
+			fmt.Errorf("clear restrictive file attributes: %w", err))
 		return
 	}
 	reportWindowsManagedPolicySelfHeal("", path+"#attributes", nil)
-	managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
-		"path":   path,
-		"reason": fmt.Sprintf("cleared file attributes 0x%x on a DefenseClaw-managed policy file", attributes&mask),
-	})
+	if cleared != 0 {
+		managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+			"path":   path,
+			"reason": fmt.Sprintf("cleared file attributes 0x%x on a DefenseClaw-managed policy file", cleared),
+		})
+	}
 }
 
 // windowsManagedPolicySelfHealReported holds the last unrepaired finding per

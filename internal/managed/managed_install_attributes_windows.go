@@ -13,7 +13,10 @@
 package managed
 
 import (
+	"errors"
 	"fmt"
+	"path/filepath"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 
@@ -24,33 +27,81 @@ const managedFileRestrictiveAttributes = windows.FILE_ATTRIBUTE_READONLY |
 	windows.FILE_ATTRIBUTE_HIDDEN | windows.FILE_ATTRIBUTE_SYSTEM
 
 // clearManagedFileRestrictiveAttributes clears ReadOnly, Hidden and System
-// from an existing managed regular file and logs the repair. A missing file,
-// a reparse point or a directory is left alone; a failure is logged as
-// accepted drift.
+// from a managed regular file and logs the repair. Callers run it only after
+// the object passed its structural check and descriptor repair.
 func clearManagedFileRestrictiveAttributes(path string) {
-	pointer, err := winpath.UTF16Ptr(path)
+	cleared, err := ClearRestrictiveFileAttributesNoFollow(path, managedFileRestrictiveAttributes)
 	if err != nil {
-		return
-	}
-	attributes, err := windows.GetFileAttributes(pointer)
-	if err != nil || attributes&managedFileRestrictiveAttributes == 0 ||
-		attributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
-		return
-	}
-	cleared := attributes & managedFileRestrictiveAttributes
-	remaining := attributes &^ managedFileRestrictiveAttributes
-	if remaining == 0 {
-		remaining = windows.FILE_ATTRIBUTE_NORMAL
-	}
-	if err := windows.SetFileAttributes(pointer, remaining); err != nil {
 		EmitResilienceEvent(MarkerAccept, map[string]string{
 			"path":   path,
-			"reason": fmt.Sprintf("could not clear file attributes 0x%x: %v", cleared, err),
+			"reason": fmt.Sprintf("restrictive file attributes were not cleared: %v", err),
 		})
 		return
 	}
-	EmitResilienceEvent(MarkerRepair, map[string]string{
-		"path":   path,
-		"reason": fmt.Sprintf("cleared file attributes 0x%x on a managed file", cleared),
-	})
+	if cleared != 0 {
+		EmitResilienceEvent(MarkerRepair, map[string]string{
+			"path":   path,
+			"reason": fmt.Sprintf("cleared file attributes 0x%x on a managed file", cleared),
+		})
+	}
+}
+
+// ClearRestrictiveFileAttributesNoFollow clears mask from the regular file at
+// path and returns the bits it cleared (0 when none were set or the file is
+// gone). The change is made through one no-follow handle that must be a
+// regular file with exactly one link, under an ancestor chain with no
+// reparse point: hard links share attributes, and a by-path change could
+// follow a junction.
+func ClearRestrictiveFileAttributesNoFollow(path string, mask uint32) (uint32, error) {
+	if mask == 0 {
+		return 0, nil
+	}
+	if err := winpath.RejectReparseChain(filepath.Dir(path)); err != nil {
+		return 0, err
+	}
+	pointer, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return 0, err
+	}
+	handle, err := windows.CreateFile(
+		pointer,
+		windows.FILE_READ_ATTRIBUTES|windows.FILE_WRITE_ATTRIBUTES|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS,
+		0,
+	)
+	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return 0, err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
+		return 0, fmt.Errorf("%s is not a regular file", path)
+	}
+	if info.NumberOfLinks != 1 {
+		return 0, fmt.Errorf("%s has %d hard links", path, info.NumberOfLinks)
+	}
+	cleared := info.FileAttributes & mask
+	if cleared == 0 {
+		return 0, nil
+	}
+	remaining := info.FileAttributes &^ mask
+	if remaining == 0 {
+		remaining = windows.FILE_ATTRIBUTE_NORMAL
+	}
+	// Zero timestamps leave them unchanged.
+	basic := setupBasicInfo{FileAttributes: remaining}
+	if err := windows.SetFileInformationByHandle(handle, windows.FileBasicInfo,
+		(*byte)(unsafe.Pointer(&basic)), uint32(unsafe.Sizeof(basic))); err != nil {
+		return 0, err
+	}
+	return cleared, nil
 }
