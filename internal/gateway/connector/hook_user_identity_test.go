@@ -164,69 +164,77 @@ func TestIdentityHeadersSurviveTheSystemShellsReader(t *testing.T) {
 	// Matches the reader block each hook uses, so a hook that changes how it
 	// reads the helper is exercised here rather than silently going quiet.
 	// The hooks fill the array in the shell (defenseclaw_user_identity_header_args,
-	// issue #1130); the read loop they had is what bash 3.2 broke with mapfile.
+	// issue #1130); a Secure Client render keeps the read loop it had before
+	// 1.0.7 (review of 0f2e3b002c). The loop is what bash 3.2 broke with
+	// mapfile once, so both readers run on the system shell.
 	readerPattern := regexp.MustCompile(
-		`IDENTITY_HEADER_ARGS=\(\)\ndefenseclaw_user_identity_header_args\n`,
+		`IDENTITY_HEADER_ARGS=\(\)\n\{\{if \.SecureClient\}\}((?s:.*?))\{\{else\}\}(defenseclaw_user_identity_header_args\n)\{\{end\}\}`,
 	)
 
 	for _, script := range identityHookScripts(t) {
-		t.Run(filepath.Base(script), func(t *testing.T) {
-			body, err := hookFS.ReadFile(script)
-			if err != nil {
-				t.Fatalf("read embed: %v", err)
-			}
-			reader := readerPattern.Find(body)
-			if reader == nil {
-				t.Fatalf(
-					"%s has no identity reader block, so every event from this "+
-						"connector reaches AI Defense with no user attribution",
-					script,
-				)
-			}
+		body, err := hookFS.ReadFile(script)
+		if err != nil {
+			t.Fatalf("read embed: %v", err)
+		}
+		m := readerPattern.FindSubmatch(body)
+		if m == nil {
+			t.Fatalf(
+				"%s has no identity reader block, so every event from this "+
+					"connector reaches AI Defense with no user attribution",
+				script,
+			)
+		}
+		for _, variant := range []struct{ name, reader string }{
+			{"", "IDENTITY_HEADER_ARGS=()\n" + string(m[2])},
+			{"/secure-client", "IDENTITY_HEADER_ARGS=()\n" + string(m[1])},
+		} {
+			script, reader := script, []byte(variant.reader)
+			t.Run(filepath.Base(script)+variant.name, func(t *testing.T) {
 
-			program := `set -euo pipefail
+				program := `set -euo pipefail
 source "$1"
 ` + string(reader) + `
 printf '%s\n' "${#IDENTITY_HEADER_ARGS[@]}"
 printf '%s\n' "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"
 `
-			command := exec.Command(shell, "-c", program, shell, helperPath)
-			// The session facts header depends on the SSH and logind
-			// variables of whoever runs the test; count only the user
-			// identity arguments.
-			command.Env = withoutSessionFactsEnv(os.Environ())
-			out, err := command.CombinedOutput()
-			if err != nil {
-				t.Fatalf("reader failed under %s: %v\n%s", shell, err, out)
-			}
-			lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-			wantArgs := strconv.Itoa(identityHeaderLineCountForHost(t))
-			if lines[0] != wantArgs {
-				t.Fatalf(
-					"%s collected %s identity arguments under %s, want %s — "+
-						"the endpoint would send no user identity at all\noutput: %q",
-					script, lines[0], shell, wantArgs, string(out),
-				)
-			}
-			if !strings.Contains(string(out), "X-DefenseClaw-User-Id: "+strconv.Itoa(os.Geteuid())) {
-				t.Fatalf("%s did not carry the caller's uid: %q", script, string(out))
-			}
-			if identityHeaderLineCountForHost(t) == identityHeaderLinesWithName {
-				wantName := "X-DefenseClaw-User-Name: " + hostAccountName(t)
-				if !strings.Contains(string(out), wantName) {
-					t.Fatalf("%s did not carry %q: %q", script, wantName, string(out))
+				command := exec.Command(shell, "-c", program, shell, helperPath)
+				// The session facts header depends on the SSH and logind
+				// variables of whoever runs the test; count only the user
+				// identity arguments.
+				command.Env = withoutSessionFactsEnv(os.Environ())
+				out, err := command.CombinedOutput()
+				if err != nil {
+					t.Fatalf("reader failed under %s: %v\n%s", shell, err, out)
 				}
-			}
+				lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+				wantArgs := strconv.Itoa(identityHeaderLineCountForHost(t))
+				if lines[0] != wantArgs {
+					t.Fatalf(
+						"%s collected %s identity arguments under %s, want %s — "+
+							"the endpoint would send no user identity at all\noutput: %q",
+						script, lines[0], shell, wantArgs, string(out),
+					)
+				}
+				if !strings.Contains(string(out), "X-DefenseClaw-User-Id: "+strconv.Itoa(os.Geteuid())) {
+					t.Fatalf("%s did not carry the caller's uid: %q", script, string(out))
+				}
+				if identityHeaderLineCountForHost(t) == identityHeaderLinesWithName {
+					wantName := "X-DefenseClaw-User-Name: " + hostAccountName(t)
+					if !strings.Contains(string(out), wantName) {
+						t.Fatalf("%s did not carry %q: %q", script, wantName, string(out))
+					}
+				}
 
-			// Collecting the arguments and never passing them to curl fails
-			// exactly as quietly as not collecting them.
-			if !strings.Contains(string(body), `"${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"`) {
-				t.Fatalf(
-					"%s builds IDENTITY_HEADER_ARGS but never expands it into its request",
-					script,
-				)
-			}
-		})
+				// Collecting the arguments and never passing them to curl fails
+				// exactly as quietly as not collecting them.
+				if !strings.Contains(string(body), `"${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"`) {
+					t.Fatalf(
+						"%s builds IDENTITY_HEADER_ARGS but never expands it into its request",
+						script,
+					)
+				}
+			})
+		}
 	}
 }
 

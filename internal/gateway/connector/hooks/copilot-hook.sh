@@ -573,7 +573,7 @@ done < <(defenseclaw_extract_trace_context)
 {{if .SecureClient}}# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
 # no mapfile, and there the array would stay empty and the endpoint would send
 # no identity at all.
-{{else}}{{end}}IDENTITY_HEADER_ARGS=()
+{{end}}IDENTITY_HEADER_ARGS=()
 {{if .SecureClient}}if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   while IFS= read -r identity_header_arg; do
     IDENTITY_HEADER_ARGS+=("$identity_header_arg")
