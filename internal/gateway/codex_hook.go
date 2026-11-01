@@ -257,7 +257,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		}
 	case "UserPromptSubmit":
 		if !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
-			if judge := a.judgeFor(ctx); judge != nil {
+			for _, judge := range a.hookSessionJudges(ctx) {
 				judge.ObserveSessionPrompt(ctx, req.Prompt)
 			}
 			a.observeUserDownloadRequest(ctx, req.Prompt)

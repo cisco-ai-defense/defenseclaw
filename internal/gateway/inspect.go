@@ -157,6 +157,11 @@ type ToolInspectVerdict struct {
 	// sandbox unblock lift (liftUnblockedDestinations) must keep such a
 	// verdict. Never serialized.
 	laneVerdict bool
+	// decisionConfirm reports that the confirm action came from the
+	// decision model answering without the LLM judge (cascade 2). Where the
+	// agent cannot ask, such a confirm is the HIGH alert the judge mapping
+	// gives, not a block (decisionConfirmWithoutAsk). Never serialized.
+	decisionConfirm bool
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,
@@ -477,6 +482,7 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 	// findings + reason so the audit trail shows both lanes.
 	if rank(aid.Action) > rank(local.Action) {
 		local.Action = aid.Action
+		local.decisionConfirm = aid.decisionConfirm && strings.EqualFold(aid.Action, guardrailActionConfirm)
 	}
 	if sevRank(aid.Severity) > sevRank(local.Severity) {
 		local.Severity = aid.Severity
@@ -1566,8 +1572,7 @@ func meetMemberJudgeCurrent(ctx context.Context, connector string, current *Tool
 }
 
 func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
-	judge := a.judgeFor(ctx)
-	if judge == nil || content == "" {
+	if content == "" {
 		return nil
 	}
 	// Gate on the configuration of the generation the judge came from: the
@@ -1580,12 +1585,12 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	if cfg == nil {
 		return nil
 	}
-	jcfg := &cfg.Guardrail.Judge
-	if !jcfg.HookConnectorEnabled(connector) {
+	judge, strategy := a.hookLaneJudge(ctx, cfg, strategyDirection, connector)
+	if judge == nil {
 		return nil
 	}
 
-	switch cfg.Guardrail.EffectiveStrategy(strategyDirection) {
+	switch strategy {
 	case "judge_first":
 		// Judge always runs.
 	case "regex_judge":
@@ -1715,6 +1720,36 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	return nil
 }
 
+// hookLaneJudge picks the judge of one hook-lane call and the detection
+// strategy it runs under, or nil when no model judges the call:
+//   - the LLM judge (with the decision model in front when one is on, cascade
+//     3) for a connector in guardrail.judge.hook_connectors under a judge
+//     strategy;
+//   - else, for a tool call of a connector in decision_model.hook_connectors,
+//     the decision model alone (cascade 2). It runs like regex_judge: a rule
+//     verdict that already blocks or is CRITICAL is decisive; judge_first
+//     runs it on every call;
+//   - else nothing (rules only).
+func (a *APIServer) hookLaneJudge(ctx context.Context, cfg *config.Config, strategyDirection, connector string) (*LLMJudge, string) {
+	strategy := cfg.Guardrail.EffectiveStrategy(strategyDirection)
+	if judge := a.judgeFor(ctx); judge != nil && cfg.Guardrail.Judge.HookConnectorEnabled(connector) &&
+		(strategy == "judge_first" || strategy == "regex_judge") {
+		return judge, strategy
+	}
+	if !strings.EqualFold(strategyDirection, "tool_call") || cfg.SecureClientIntegration() ||
+		!cfg.DecisionModel.AnswersAlone(connector) {
+		return nil, ""
+	}
+	judge := a.decisionJudgeFor(ctx)
+	if judge == nil {
+		return nil, ""
+	}
+	if strategy != "judge_first" {
+		strategy = "regex_judge"
+	}
+	return judge, strategy
+}
+
 // hookJudgeLaneVerdict is the hook-lane verdict of judge result v: nil when
 // the judge gave none (the caller keeps the regex/AID verdict), else v with
 // its action set by the connector block_at / alert_at.
@@ -1740,6 +1775,9 @@ func hookJudgeLaneVerdict(cfg *config.Config, connector, strategyDirection strin
 		// (GAP-0235). Secure Client keeps the judge action (issue #1092).
 		out := *v
 		out.Action = guardrailContentAction(cfg, connector, v.Severity, false)
+		if v.decisionConfirm {
+			out.Action = decisionModelConfirmAction(cfg, connector, v.Severity)
+		}
 		return &out
 	}
 	return v

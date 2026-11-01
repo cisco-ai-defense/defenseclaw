@@ -15,6 +15,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,13 @@ import (
 // first and a rule block is never revisited here. A model that is down,
 // late or answers out of contract changes nothing: the judge runs exactly
 // as it does without a decision model, and the failure is recorded.
+//
+// Without the judge (cascade 2, decision_model.hook_connectors) the decision
+// model answers the call itself: a confident allow allows, a confident block
+// is a CRITICAL finding, and every other answer is a HIGH confirm, which the
+// hook asks the user about where the agent can ask. A model that is down,
+// late or out of contract gives a failed verdict, and the hook lane keeps the
+// rule verdict exactly as for a judge outage.
 
 // decisionModelScanner names verdicts the decision model made.
 const decisionModelScanner = "decision-model"
@@ -110,7 +118,10 @@ type decisionModel struct {
 	allowAt      float64
 	blockAt      float64
 	decideBlocks bool
-	client       *http.Client
+	// alone: no judge follows (cascade 2), so the model may use all of the
+	// time left rather than a quarter of it.
+	alone  bool
+	client *http.Client
 
 	// The breaker stops calling a model that keeps failing, so an outage
 	// costs the judge no time and the log one line per outage.
@@ -195,12 +206,15 @@ type decisionModelResponse struct {
 // at a quarter of what is left before the hook answer window or the judge
 // deadline ends.
 func (d *decisionModel) budget(ctx context.Context) time.Duration {
-	limit := d.timeout
+	limit, share := d.timeout, time.Duration(decisionBudgetShare)
+	if d.alone {
+		share = 1
+	}
 	if end, ok := hookJudgeAnswerEnd(ctx); ok {
-		limit = min(limit, time.Until(end)/decisionBudgetShare)
+		limit = min(limit, time.Until(end)/share)
 	}
 	if dl, ok := ctx.Deadline(); ok {
-		limit = min(limit, time.Until(dl)/decisionBudgetShare)
+		limit = min(limit, time.Until(dl)/share)
 	}
 	return limit
 }
@@ -407,6 +421,9 @@ func (j *LLMJudge) takeDecisionState(sample, toolName, args string) decisionMode
 // It returns the verdict the judge lane uses.
 func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 	dm := j.decision
+	if j.decisionOnly {
+		return j.runDecisionAlone(ctx, toolName, args, sample)
+	}
 	if dm == nil {
 		return j.runToolJudgeLLM(ctx, toolName, args, sample)
 	}
@@ -453,6 +470,103 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 		}
 		return j.runToolJudgeLLM(ctx, toolName, args, sample)
 	}
+}
+
+// newDecisionOnlyJudge builds the hook-lane judge of cascade 2: no LLM, the
+// decision model alone, for the connectors in decision_model.hook_connectors
+// where the LLM judge does not run. nil when the list is empty, the decision
+// model is off or unusable, or under Secure Client.
+func newDecisionOnlyJudge(cfg *config.Config) *LLMJudge {
+	if cfg == nil || cfg.SecureClientIntegration() || len(cfg.DecisionModel.HookConnectors) == 0 {
+		return nil
+	}
+	dm := newDecisionModel(cfg, filepath.Join(cfg.DataDir, ".env"))
+	if dm == nil {
+		return nil
+	}
+	dm.alone = true
+	// The judge settings only bound the session context it keeps; the tool
+	// call is always answered (tool_injection is an LLM judge switch).
+	jc := cfg.Guardrail.Judge
+	jc.ToolInjection = true
+	fmt.Fprintf(os.Stderr, "[sidecar] decision model answers tool calls alone where the LLM judge does not run, for: %s (model=%s)\n",
+		strings.Join(cfg.DecisionModel.HookConnectors, ", "), dm.model)
+	return &LLMJudge{cfg: &jc, decision: dm, decisionOnly: true}
+}
+
+// runDecisionAlone answers one tool call with the decision model and no
+// judge (cascade 2). A failure returns a failed verdict, so the hook lane
+// keeps the rule verdict (the judge-unavailable path): a decision-model fault
+// is never an allow of its own.
+func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample string) *ScanVerdict {
+	dm := j.decision
+	res := dm.decide(ctx, j.takeDecisionState(sample, toolName, args))
+	if res.failure != "" {
+		if res.logLine != "" {
+			fmt.Fprintf(os.Stderr, "[guardrail] %s (%s); no LLM judge, the rule verdict stands\n", res.logLine, res.failureCause)
+		}
+		if !res.skipped {
+			emitDecisionModel(ctx, dm.model, toolName, args, res, nil)
+		}
+		return errorVerdict(decisionModelScanner)
+	}
+	if res.logLine != "" {
+		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", res.logLine)
+	}
+	var v *ScanVerdict
+	switch res.route {
+	case decisionAllow:
+		v = allowVerdict(decisionModelScanner)
+		v.Reason = fmt.Sprintf("decision-model: confident allow (risk %.2f <= %.2f)", res.risk, dm.allowAt)
+		if decisionRuleFloorFrom(ctx) {
+			v.Reason += "; the rule finding stands"
+		}
+		v.Confidence = 1 - res.risk
+	case decisionBlock:
+		v = &ScanVerdict{
+			Action:     guardrailActionBlock,
+			Severity:   "CRITICAL",
+			Reason:     fmt.Sprintf("decision-model: confident block (risk %.2f >= %.2f)", res.risk, dm.blockAt),
+			Findings:   []string{decisionModelFindingID},
+			Scanner:    decisionModelScanner,
+			Confidence: res.risk,
+		}
+	default:
+		v = &ScanVerdict{
+			Action:          guardrailActionConfirm,
+			Severity:        "HIGH",
+			Reason:          fmt.Sprintf("decision-model: %s (risk %.2f), needs a person's confirmation", res.choice, res.risk),
+			Findings:        []string{decisionModelFindingID},
+			Scanner:         decisionModelScanner,
+			Confidence:      res.risk,
+			decisionConfirm: true,
+		}
+	}
+	emitDecisionModel(ctx, dm.model, toolName, args, res, v)
+	return v
+}
+
+// decisionModelConfirmAction maps a decision-model confirm made without the
+// judge the way a confirmable finding of that severity maps with the human
+// ask armed (guardrailActionForRank): a block at or above block_at, else a
+// confirm, which the hook turns into the agent's ask or, where the agent
+// cannot ask, its usual confirm fallback (an alert).
+func decisionModelConfirmAction(cfg *config.Config, connector, severity string) string {
+	blockThreshold, alertThreshold := guardrailThresholdRanks(resolveThresholds(cfg, connector))
+	rank := guardrailSeverityRank(severity)
+	return guardrailActionForRank(rank, blockThreshold, alertThreshold, true, rank)
+}
+
+// decisionConfirmWithoutAsk is the hook action of a confirm the agent cannot
+// ask about: a decision-model confirm made without the judge (cascade 2)
+// stays the HIGH alert the judge mapping gives below block_at (the hook
+// would otherwise block it for want of an ask); any other confirm keeps the
+// hook's own fallback, the block.
+func decisionConfirmWithoutAsk(verdict *ToolInspectVerdict, action string) string {
+	if verdict != nil && verdict.decisionConfirm && action == guardrailActionBlock {
+		return guardrailActionAlert
+	}
+	return action
 }
 
 // strongerDecisionVerdict returns the judge verdict unless the decision

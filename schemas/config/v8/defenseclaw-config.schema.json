@@ -430,7 +430,7 @@
     "decisionModel": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Unified decision model (System One protocol): a fast first pass in front of the LLM judge on tool calls, and the skill scanner's advisory score. Off by default.",
+      "description": "Unified decision model (System One protocol): a fast first pass in front of the LLM judge on tool calls, or on its own for the connectors in hook_connectors where the judge does not run, and the skill scanner's advisory score. Off by default.",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -475,6 +475,20 @@
             "decide"
           ],
           "default": "escalate"
+        },
+        "hook_connectors": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "anyOf": [
+              {
+                "const": "*"
+              },
+              {
+                "$ref": "#/$defs/connectorName"
+              }
+            ]
+          }
         }
       }
     },

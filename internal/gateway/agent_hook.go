@@ -658,7 +658,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		ctx = withHookPanicCapture(ctx)
 		if shouldResetToolJudgeSession(req) {
 			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
-			if judge := a.judgeFor(ctx); judge != nil {
+			for _, judge := range a.hookSessionJudges(ctx) {
 				judge.ResetToolJudgeSession(sessionKey)
 			}
 			a.resetUserDownloadRequests(sessionKey)
@@ -3227,7 +3227,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// letting them replace the user's task would make the judge trust the
 		// very content it is meant to evaluate.
 		if isToolJudgeIntentEvent(req.HookEventName) {
-			if judge := a.judgeFor(ctx); judge != nil {
+			for _, judge := range a.hookSessionJudges(ctx) {
 				judge.ObserveSessionPrompt(ctx, req.Content)
 			}
 			a.observeUserDownloadRequest(ctx, req.Content)
@@ -3363,6 +3363,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		effectiveMode = "action"
 	}
 	action, wouldBlock := mapHookActionForProfile(rawAction, effectiveMode, req.HookEventName, caps, profile, req.Payload)
+	if rawAction == "confirm" {
+		action = decisionConfirmWithoutAsk(verdict, action)
+	}
 	aiDefenseEnforced := verdict.aiDefenseBlock && action == "block"
 	severity := verdict.Severity
 	reason := verdict.Reason

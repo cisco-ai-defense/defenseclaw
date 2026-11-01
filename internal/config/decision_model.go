@@ -74,11 +74,35 @@ type DecisionModelConfig struct {
 	// decision model's finding is a floor) or decide (the finding stands
 	// without the judge).
 	OnConfidentBlock string `mapstructure:"on_confident_block" yaml:"on_confident_block,omitempty"`
+	// HookConnectors lists the connectors whose hook tool calls the
+	// decision model answers on its own where the LLM judge does not judge
+	// them (cascade 2: rules, then the decision model). "*" matches every
+	// connector. Where the judge runs, the decision model stays in front of
+	// it (cascade 3) whether or not the connector is listed. Empty, the
+	// default, keeps the decision model in front of the judge only.
+	HookConnectors []string `mapstructure:"hook_connectors" yaml:"hook_connectors,omitempty"`
 }
 
 // Active reports whether the decision model should be called.
 func (d DecisionModelConfig) Active() bool {
 	return d.Enabled && strings.TrimSpace(d.BaseURL) != "" && strings.TrimSpace(d.Model) != ""
+}
+
+// AnswersAlone reports whether the decision model answers the connector's
+// hook tool calls on its own where the LLM judge does not run (cascade 2).
+// Matching is case-insensitive; "*" matches every connector.
+func (d DecisionModelConfig) AnswersAlone(connector string) bool {
+	connector = strings.TrimSpace(connector)
+	if !d.Active() || connector == "" {
+		return false
+	}
+	for _, entry := range d.HookConnectors {
+		entry = strings.TrimSpace(entry)
+		if entry == "*" || strings.EqualFold(entry, connector) {
+			return true
+		}
+	}
+	return false
 }
 
 // EffectiveTimeoutSeconds returns Timeout or the default.
@@ -140,6 +164,11 @@ func (d DecisionModelConfig) Validate() error {
 	case DecisionModelEscalate, DecisionModelDecide:
 	default:
 		return fmt.Errorf("on_confident_block must be %q or %q, got %q", DecisionModelEscalate, DecisionModelDecide, d.OnConfidentBlock)
+	}
+	for _, entry := range d.HookConnectors {
+		if strings.TrimSpace(entry) == "" {
+			return fmt.Errorf("hook_connectors must not contain an empty name")
+		}
 	}
 	if strings.TrimSpace(d.BaseURL) != "" {
 		if err := ValidateDecisionModelURL(d.BaseURL); err != nil {

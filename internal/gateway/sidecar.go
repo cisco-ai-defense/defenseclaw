@@ -588,6 +588,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	bootGen.activeRules = initialRules
 	bootGen.activePatterns = initialPatterns
 	bootGen.judge = hookJudge
+	bootGen.decisionJudge = newDecisionOnlyJudge(cfg)
 	bootGen.Config = sidecar.publishConfig(cfg)
 	sidecar.publishGeneration(bootGen)
 	// Publish the process-global managed carve-out only after every fallible
@@ -2207,6 +2208,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	} else {
 		nextGen.judge = s.sharedJudge()
 	}
+	// The cascade-2 judge (decision model, no LLM) follows the same inputs.
+	if judgeChanged || previousGen == nil {
+		nextGen.decisionJudge = newDecisionOnlyJudge(&next)
+	} else {
+		nextGen.decisionJudge = previousGen.decisionJudge
+	}
 
 	// Application-protection observer attachment must be infallible after the
 	// commit point below. Resolve the only fallible dependency (the gateway
@@ -2274,6 +2281,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		judgeHealth.applyJudge(nextJudge, nextJudgeUnavailable)
 		if api := s.apiSnapshot(); api != nil {
 			api.SetHookJudge(nextJudge)
+			api.SetHookDecisionJudge(nextGen.decisionJudge)
 		}
 		if proxy := s.proxySnapshot(); proxy != nil {
 			proxy.SetJudge(nextJudge)
@@ -8508,6 +8516,9 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// then skips the judge exactly as before.
 	if judge := s.sharedJudge(); judge != nil {
 		api.SetHookJudge(judge)
+	}
+	if g := currentGeneration(); g != nil {
+		api.SetHookDecisionJudge(g.decisionJudge)
 	}
 	api.SetAIDiscoveryService(s.aiDiscoverySnapshot())
 	api.SetAIRuntimeService(s.aiRuntimeSnapshot())

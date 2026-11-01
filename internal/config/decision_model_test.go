@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func writeDecisionModelConfig(t *testing.T, version int, section string) string {
@@ -119,5 +121,51 @@ func TestDecisionModelRefusedInSecureClientV8(t *testing.T) {
 	_, err := ParseV8YAML("config.yaml", []byte(raw))
 	if err == nil || !strings.Contains(err.Error(), "decision_model") {
 		t.Fatalf("Secure Client v8 source with decision_model: err = %v", err)
+	}
+}
+
+// A config written before decision_model.hook_connectors existed loads and
+// saves unchanged: the list is empty, no connector gets cascade 2, and the
+// key is not written back.
+func TestDecisionModelHookConnectorsCompat(t *testing.T) {
+	section := `decision_model:
+  enabled: true
+  model: openjev
+  base_url: http://127.0.0.1:8791/v1/systemone
+`
+	cfg, err := LoadFromFile(writeDecisionModelConfig(t, 9, section))
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if len(cfg.DecisionModel.HookConnectors) != 0 || cfg.DecisionModel.AnswersAlone("claudecode") {
+		t.Fatalf("an existing config must keep the decision model in front of the judge only: %+v", cfg.DecisionModel)
+	}
+	out, err := yaml.Marshal(cfg.DecisionModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "hook_connectors") {
+		t.Fatalf("an empty list must not be written: %s", out)
+	}
+
+	cfg, err = LoadFromFile(writeDecisionModelConfig(t, 9, section+"  hook_connectors: [ClaudeCode, codex]\n"))
+	if err != nil {
+		t.Fatalf("LoadFromFile with hook_connectors: %v", err)
+	}
+	d := cfg.DecisionModel
+	if !d.AnswersAlone("claudecode") || !d.AnswersAlone("codex") || d.AnswersAlone("cursor") {
+		t.Fatalf("hook_connectors = %v", d.HookConnectors)
+	}
+	d.HookConnectors = []string{"*"}
+	if !d.AnswersAlone("cursor") {
+		t.Fatal(`"*" must match every connector`)
+	}
+	d.Enabled = false
+	if d.AnswersAlone("cursor") {
+		t.Fatal("a disabled decision model must not answer alone")
+	}
+	d.Enabled, d.HookConnectors = true, []string{" "}
+	if err := d.Validate(); err == nil {
+		t.Fatal("an empty connector name must be refused")
 	}
 }
