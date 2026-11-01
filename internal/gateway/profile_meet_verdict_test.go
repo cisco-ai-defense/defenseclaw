@@ -376,3 +376,27 @@ func TestProfileMeetKeepsTheDecisionModelConfirm(t *testing.T) {
 		t.Fatalf("meet verdict = %+v (decision model calls %d), want the decision model's confirm", verdict, calls.Load())
 	}
 }
+
+// When another member confirms the same call for another reason, the meet's
+// confirm is not the decision model's alone: the flag is cleared.
+func TestProfileMeetClearsTheDecisionModelConfirmBesideAnotherConfirm(t *testing.T) {
+	dm := &ScanVerdict{Action: guardrailActionConfirm, Severity: "HIGH", decisionConfirm: true}
+	other := &ScanVerdict{Action: guardrailActionConfirm, Severity: "HIGH"}
+	alert := &ScanVerdict{Action: guardrailActionAlert, Severity: "HIGH"}
+	flag := meetDecisionConfirm(false, guardrailActionAllow, dm, true)
+	if !flag {
+		t.Fatal("a member that raises the meet to the decision model's confirm must set the flag")
+	}
+	if !meetDecisionConfirm(flag, guardrailActionConfirm, alert, false) {
+		t.Fatal("a weaker member must leave the flag")
+	}
+	if !meetDecisionConfirm(flag, guardrailActionConfirm, dm, false) {
+		t.Fatal("a second decision-model confirm must leave the flag")
+	}
+	if meetDecisionConfirm(flag, guardrailActionConfirm, other, false) {
+		t.Fatal("another member's confirm at the same action must clear the flag")
+	}
+	if meetDecisionConfirm(false, guardrailActionAlert, other, true) {
+		t.Fatal("a non-model confirm that raises the meet must not set the flag")
+	}
+}

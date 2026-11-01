@@ -172,3 +172,18 @@ func TestDecisionModelHookConnectorsCompat(t *testing.T) {
 		t.Fatal("names must match in canonical form and a blank entry must match nothing")
 	}
 }
+
+// The judge's connector gate matches names the way the decision model's list
+// and the CLI do: "claude-code" in guardrail.judge.hook_connectors enables
+// claudecode, so the CLI never reports cascade 3 where the gateway runs 2.
+func TestJudgeHookConnectorEnabledMatchesCanonicalNames(t *testing.T) {
+	j := JudgeConfig{Enabled: true, HookConnectors: []string{"claude-code", " ", "Codex"}}
+	for _, name := range []string{"claudecode", "Claude_Code", "codex"} {
+		if !j.HookConnectorEnabled(name) {
+			t.Fatalf("%q must be enabled by %v", name, j.HookConnectors)
+		}
+	}
+	if j.HookConnectorEnabled("") || j.HookConnectorEnabled("cursor") {
+		t.Fatal("a blank or unlisted connector must not be enabled")
+	}
+}

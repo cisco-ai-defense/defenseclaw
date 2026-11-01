@@ -155,12 +155,41 @@ def _judge_builds(cfg: Config) -> bool:
         return False
     if not (llm.model or "").strip():
         return False
-    if not llm.needs_api_key() or llm.resolved_api_key():
+    if _judge_allows_empty_key(cfg, llm) or llm.resolved_api_key():
         return True
     from defenseclaw import credentials
 
     env = (llm.api_key_env or "").strip() or "DEFENSECLAW_LLM_KEY"
     return bool(credentials.resolve(env, cfg.data_dir).value)
+
+
+def _judge_allows_empty_key(cfg: Config, llm: Any) -> bool:
+    """Mirrors internal/gateway/llm_judge.go llmJudgeAllowsEmptyAPIKey: a local
+    provider, or Bedrock (by provider, by the base type of a custom provider
+    instance, or by the model's provider prefix) builds without a key."""
+    if llm.is_local_provider():
+        return True
+    provider = (llm.provider or "").strip().lower()
+    instance = (getattr(llm, "instance_name", "") or "").strip().lower()
+    if provider in ("", "custom") and instance:
+        for entry in _provider_instances(cfg):
+            if str(entry.get("name", "")).strip().lower() == instance:
+                provider = str(entry.get("base_provider_type", "")).strip().lower()
+                break
+    if not provider:
+        provider = (llm.provider_prefix() or "").strip().lower()
+    return provider in ("bedrock", "amazon-bedrock")
+
+
+def _provider_instances(cfg: Config) -> list[dict]:
+    """The custom provider instances (llm_providers, else a legacy
+    custom-providers.json), as the gateway reads them; empty when none."""
+    try:
+        from defenseclaw import derived_providers
+
+        return [dict(p) for p in derived_providers.configured_providers(cfg)]
+    except Exception:  # noqa: BLE001 - no registry means no instance
+        return []
 
 
 def answers_alone_for(cfg: Config, connector: str) -> bool:

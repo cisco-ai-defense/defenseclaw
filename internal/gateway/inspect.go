@@ -1526,11 +1526,10 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 				if combined == nil {
 					combined = &ScanVerdict{Action: guardrailActionAllow, Severity: "NONE"}
 				}
-				if strongerGuardrailAction(combined.Action, verdict.Action) != combined.Action {
+				raises := strongerGuardrailAction(combined.Action, verdict.Action) != combined.Action
+				combined.decisionConfirm = meetDecisionConfirm(combined.decisionConfirm, combined.Action, verdict, raises)
+				if raises {
 					combined.Action, combined.Reason = verdict.Action, verdict.Reason
-					combined.decisionConfirm = verdict.decisionConfirm && verdict.Action == guardrailActionConfirm
-				} else if verdict.Action == combined.Action && !verdict.decisionConfirm {
-					combined.decisionConfirm = false
 				}
 				if guardrailSeverityRank(verdict.Severity) > guardrailSeverityRank(combined.Severity) {
 					combined.Severity = verdict.Severity
@@ -1725,6 +1724,21 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		hookJudgeAnswerWindow, connector, strategyDirection)
 	fallback(judgeFallbackLate)
 	return nil
+}
+
+// meetDecisionConfirm is the decisionConfirm of a profile meet after member
+// verdict v: v's own when v raises the action to a confirm, cleared when v
+// confirms at the same action for another reason, else unchanged. Only the
+// decision model's cascade-2 lane confirms on the hook lane today, so the
+// clear is a guard for any other confirming lane.
+func meetDecisionConfirm(current bool, action string, v *ScanVerdict, raises bool) bool {
+	if raises {
+		return v.decisionConfirm && v.Action == guardrailActionConfirm
+	}
+	if v.Action == action && !v.decisionConfirm {
+		return false
+	}
+	return current
 }
 
 // hookLaneJudge picks the judge of one hook-lane call and the detection

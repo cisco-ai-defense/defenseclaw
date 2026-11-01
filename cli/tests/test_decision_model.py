@@ -580,3 +580,26 @@ def test_cascade_matches_the_gateway_when_the_judge_cannot_start(tmp_path, monke
     assert dmod.cascade_for(cfg, "claudecode") == "rules -> decision model -> LLM judge"
     # A blank entry matches nothing, as in the gateway.
     assert not dmod.answers_alone_for(cfg, "")
+
+
+def test_cascade_counts_a_keyless_bedrock_judge_as_the_gateway_does(tmp_path, monkeypatch):
+    """The gateway builds a Bedrock judge without a key whatever its auth mode
+    (llmJudgeAllowsEmptyAPIKey), also through a custom provider instance whose
+    base type is Bedrock."""
+    from defenseclaw import decision_model as dmod
+
+    for name in ("DEFENSECLAW_LLM_KEY", "AWS_BEARER_TOKEN_BEDROCK"):
+        monkeypatch.delenv(name, raising=False)
+    cfg = _cascade_cfg(judge_gate=["claudecode"], dm_gate=["claudecode"])
+    cfg.data_dir = str(tmp_path)
+    cfg.guardrail.judge.llm.provider = "bedrock"
+    cfg.guardrail.judge.llm.model = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert dmod.cascade_for(cfg, "claudecode") == "rules -> decision model -> LLM judge"
+
+    cfg.guardrail.judge.llm.provider = "custom"
+    cfg.guardrail.judge.llm.model = "my-haiku"
+    cfg.guardrail.judge.llm.instance_name = "corp-bedrock"
+    monkeypatch.setattr(dmod, "_provider_instances", lambda _cfg: [{"name": "corp-bedrock", "base_provider_type": "bedrock"}])
+    assert dmod.cascade_for(cfg, "claudecode") == "rules -> decision model -> LLM judge"
+    monkeypatch.setattr(dmod, "_provider_instances", lambda _cfg: [{"name": "corp-bedrock", "base_provider_type": "openai"}])
+    assert dmod.cascade_for(cfg, "claudecode") == "rules -> decision model"
