@@ -53,7 +53,7 @@ func TestRecoveryAuditKeepsEachUncheckedCallAndSession(t *testing.T) {
 		`{"ts":"2026-10-24T15:59:01Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_open","session_id":"session-a","call_id":"call-a"}`+"\n",
 		`{"ts":"2026-10-24T15:59:02Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_open","session_id":"session-b","call_id":"call-b"}`+"\n",
 	)
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := store.ListEvents(100)
@@ -69,7 +69,7 @@ func TestRecoveryAuditKeepsEachUncheckedCallAndSession(t *testing.T) {
 	if len(seen) != 2 || seen["session-a"] != "call-a" || seen["session-b"] != "call-b" {
 		t.Fatalf("recovery audit lost per-call correlation: %+v", seen)
 	}
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatal(err)
 	}
 	rows, err = store.ListEvents(100)
@@ -106,7 +106,7 @@ func TestReportHookFailOpenCalls(t *testing.T) {
 		"not json\n",
 	)
 
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatalf("report: %v", err)
 	}
 	alerts := degradedAlerts(t, store)
@@ -132,7 +132,7 @@ func TestReportHookFailOpenCalls(t *testing.T) {
 
 	// The next start reports nothing again, then only the new call. A last
 	// line still being written waits for the next report.
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(degradedAlerts(t, store)); got != 2 {
@@ -142,7 +142,7 @@ func TestReportHookFailOpenCalls(t *testing.T) {
 		`{"ts":"2026-10-13T09:55:00Z","connector":"copilot","hook":"copilot-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open"}`+"\n",
 		`{"ts":"2026-10-13T09:56:00Z","connector":"hermes"`,
 	)
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(degradedAlerts(t, store)); got != 3 {
@@ -154,7 +154,7 @@ func TestReportHookFailOpenCalls(t *testing.T) {
 		[]byte(`{"ts":"2026-10-13T09:58:00Z","connector":"hermes","reason":"gateway unreachable","category":"transport","fail_mode":"open"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(degradedAlerts(t, store)); got != 4 {
@@ -165,7 +165,7 @@ func TestReportHookFailOpenCalls(t *testing.T) {
 func TestReportHookFailOpenCallsWithoutAFile(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	logDir := filepath.Join(t.TempDir(), "logs")
-	if err := reportHookFailOpenCallsIn(logDir, logger, time.Now().UTC()); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, time.Now().UTC()); err != nil {
 		t.Fatalf("report without hook-failures.jsonl: %v", err)
 	}
 	if got := len(degradedAlerts(t, store)); got != 0 {
@@ -186,7 +186,7 @@ func TestReportHookFailOpenCallsSkipsStrictClosedCalls(t *testing.T) {
 		`{"ts":"2026-10-21T08:27:47Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_closed"}`+"\n",
 		`{"ts":"2026-10-21T08:27:48Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_closed"}`+"\n",
 	)
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatalf("report: %v", err)
 	}
 	alerts := degradedAlerts(t, store)
@@ -214,7 +214,7 @@ func TestReportHookFailOpenCallsCountsOnlyCallsThatRanUnchecked(t *testing.T) {
 		`{"ts":"2026-10-21T08:27:24Z","connector":"kiro","hook":"kiro-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open"}`+"\n",
 		`{"ts":"2026-10-21T08:27:25Z","connector":"kiro","hook":"kiro-hook","reason":"gateway unreachable","category":"transport","fail_mode":"closed","outcome":"unknown"}`+"\n",
 	)
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatalf("report: %v", err)
 	}
 	alerts := degradedAlerts(t, store)

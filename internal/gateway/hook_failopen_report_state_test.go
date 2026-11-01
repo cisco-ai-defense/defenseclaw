@@ -25,7 +25,7 @@ func TestReportHookFailOpenCallsRereadsALongerReplacement(t *testing.T) {
 	logDir := filepath.Join(t.TempDir(), "logs")
 	now := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
 	appendHookFailures(t, logDir, hookFailOpenLine("hermes", "2026-10-13T09:00:00Z"))
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatal(err)
 	}
 	var replacement strings.Builder
@@ -35,7 +35,7 @@ func TestReportHookFailOpenCallsRereadsALongerReplacement(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(logDir, hookFailuresFile), []byte(replacement.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatal(err)
 	}
 	var copilot string
@@ -56,7 +56,7 @@ func TestReadHookFailOpenCallsSkipsConnectorsAlreadyRecorded(t *testing.T) {
 	now := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
 	first := hookFailOpenLine("hermes", "2026-10-13T09:00:00Z") + hookFailOpenLine("copilot", "2026-10-13T09:01:00Z")
 	appendHookFailures(t, logDir, first)
-	_, read, err := readHookFailOpenCalls(logDir, now)
+	_, read, err := readHookFailureCalls(logDir, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestReadHookFailOpenCallsSkipsConnectorsAlreadyRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	appendHookFailures(t, logDir, hookFailOpenLine("hermes", "2026-10-13T09:02:00Z"))
-	summaries, _, err := readHookFailOpenCalls(logDir, now)
+	summaries, _, err := readHookFailureCalls(logDir, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestReadHookFailOpenCallsReadsTheNewestLinesOfALargeFile(t *testing.T) {
 	}
 	body.WriteString(hookFailOpenLine("hermes", "2026-10-13T09:59:00Z"))
 	appendHookFailures(t, logDir, body.String())
-	summaries, read, err := readHookFailOpenCalls(logDir, now)
+	summaries, read, err := readHookFailureCalls(logDir, now)
 	if err != nil {
 		t.Fatal(err)
 	}

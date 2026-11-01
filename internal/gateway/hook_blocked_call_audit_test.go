@@ -6,16 +6,21 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 )
 
 // lateAnswerTransport lets the gateway decide and record a hook call, then
@@ -54,7 +59,9 @@ func deliveredVerdicts(t *testing.T, store *audit.Store) map[string]string {
 				out[id] = action
 			}
 		case string(audit.ActionGuardrailBlock):
-			if id := strings.TrimSpace(event.ToolID); id != "" {
+			// Only the hook's own block of a pre-execution event is the
+			// call's verdict (GAP-0271 review).
+			if id := strings.TrimSpace(event.ToolID); id != "" && strings.Contains(event.Details, "hook blocked the call itself") {
 				out[id] = "block"
 			}
 		}
@@ -105,7 +112,7 @@ func TestHookBlockAfterTheAnswerBudgetIsAuditedAsTheBlockTheAgentGot(t *testing.
 	}
 	logDir := filepath.Join(home, "logs")
 	for range 2 {
-		if err := reportHookFailOpenCallsIn(logDir, fixture.api.logger, time.Now().UTC()); err != nil {
+		if err := reportHookFailureCallsIn(logDir, fixture.api.logger, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -147,7 +154,7 @@ func TestHookBlockedCallRowWithoutAToolID(t *testing.T) {
 		`{"ts":"2026-11-01T00:59:02Z","connector":"claudecode","hook":"claude-code-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_open","session_id":"s1","call_id":"c2","tool_id":"c2"}`+"\n",
 		`{"ts":"2026-11-01T00:59:03Z","connector":"claudecode","hook":"claude-code-hook","reason":"gateway unreachable","category":"transport","fail_mode":"closed","session_id":"s1","call_id":"c3"}`+"\n",
 	)
-	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+	if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
 		t.Fatal(err)
 	}
 	events, err := store.ListEvents(100)
@@ -171,5 +178,190 @@ func TestHookBlockedCallRowWithoutAToolID(t *testing.T) {
 	}
 	if alerts := degradedAlerts(t, store); len(alerts) != 1 || !strings.Contains(alerts[0].Details, "1 claudecode hook call ") {
 		t.Fatalf("fail-open alerts = %+v, want the one call that ran unchecked", alerts)
+	}
+}
+
+// blockedHookLine is a hook-failures.jsonl line of a call the hook blocked
+// itself, as the 1.0.7 hooks write it.
+func blockedHookLine(ts, event, session, toolID string) string {
+	return fmt.Sprintf(`{"ts":%q,"connector":"claudecode","hook":"claude-code-hook","event":%q,"reason":"gateway did not answer in time","category":"transport","fail_mode":"open","outcome":"fail_closed","session_id":%q,"call_id":%q,"tool_id":%q}`+"\n",
+		ts, event, session, toolID, toolID)
+}
+
+// GAP-0271 review, P2: Claude Code allowed a PreToolUse and the tool ran;
+// the PostToolUse of the same call (same tool_use_id) then failed closed.
+// Its row said "the agent got this block" under the tool id of a call that
+// ran. A post-execution block now says the tool had already run, names the
+// event, and is not the call's verdict.
+func TestPostExecutionHookBlockIsNotTheVerdictOfACallThatRan(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	fixture := newAuditFailureHookFixture(t, "")
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=\"tkn\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const ran, blocked = "toolu_0271_ran", "toolu_0271_pre"
+	var stdout, stderr bytes.Buffer
+	if code := hookexec.Run(t.Context(), hookexec.Options{
+		Connector: "claudecode", Event: "PreToolUse", APIAddr: "127.0.0.1:8787", FailMode: "open",
+		Home: home, HookDir: hookDir, Stdin: bytes.NewReader(preToolUseBody(t, ran)),
+		Stdout: &stdout, Stderr: &stderr, HTTPClient: &http.Client{Transport: handlerTransport{handler: fixture.api.handleAgentHook("claudecode")}},
+	}); code != 0 || strings.Contains(stdout.String(), "deny") {
+		t.Fatalf("PreToolUse: exit %d %q %q, want the gateway's allow", code, stdout.String(), stderr.String())
+	}
+	logDir := filepath.Join(home, "logs")
+	now := time.Now().UTC()
+	appendHookFailures(t, logDir,
+		blockedHookLine(now.Format(time.RFC3339), "PostToolUse", "s-audit-"+ran, ran),
+		blockedHookLine(now.Format(time.RFC3339), "PreToolUse", "s-pre", blocked),
+		blockedHookLine(now.Format(time.RFC3339), "UserPromptSubmit", "s-prompt", ""),
+	)
+	if err := reportHookFailureCallsIn(logDir, fixture.api.logger, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := deliveredVerdicts(t, fixture.api.store); got[ran] != "allow" || got[blocked] != "block" {
+		t.Fatalf("verdicts = %v, want %s allow (it ran) and %s block", got, ran, blocked)
+	}
+	events, err := fixture.api.store.ListEvents(500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]audit.Event{}
+	for _, event := range events {
+		if event.Action == string(audit.ActionGuardrailBlock) {
+			rows[event.Target] = event
+		}
+	}
+	post, pre, prompt := rows["claudecode:PostToolUse"], rows["claudecode:PreToolUse"], rows["claudecode:UserPromptSubmit"]
+	if post.ToolID != ran || !strings.Contains(post.Details, "the tool had already run; the hook blocked its result (fail-closed, PostToolUse)") ||
+		strings.Contains(post.Details, "agent got this block") {
+		t.Fatalf("PostToolUse row = %+v, want it to say the tool had already run", post)
+	}
+	if pre.ToolID != blocked || !strings.Contains(pre.Details, "hook blocked the call itself (fail-closed, PreToolUse): the agent got this block") {
+		t.Fatalf("PreToolUse row = %+v", pre)
+	}
+	if !strings.Contains(prompt.Details, "hook blocked its UserPromptSubmit event itself (fail-closed), not a tool call") {
+		t.Fatalf("UserPromptSubmit row = %+v", prompt)
+	}
+}
+
+// Review note 5: after a long strict or install-window outage the backlog
+// (up to 16 MiB of lines) was written row by row on the audit writer the
+// resuming hooks need. One run writes at most hookFailureRowsPerReport rows
+// and one summary row with the count of the rest, and never writes them
+// again.
+func TestHookFailureReportCapsItsRowsPerRun(t *testing.T) {
+	previous := hookFailureRowsPerReport
+	hookFailureRowsPerReport = 3
+	t.Cleanup(func() { hookFailureRowsPerReport = previous })
+	store, logger := testStoreAndLogger(t)
+	logDir := filepath.Join(t.TempDir(), "logs")
+	now := time.Date(2026, 11, 1, 4, 0, 0, 0, time.UTC)
+	for i := range 5 {
+		appendHookFailures(t, logDir, blockedHookLine("2026-11-01T03:59:00Z", "PreToolUse", "s", fmt.Sprintf("toolu_cap_%d", i)))
+	}
+	appendHookFailures(t, logDir,
+		`{"ts":"2026-11-01T03:59:01Z","connector":"claudecode","hook":"claude-code-hook","event":"PreToolUse","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_open","session_id":"s","call_id":"open-1"}`+"\n")
+	count := func() (blocks, warns int, summary string) {
+		events, err := store.ListEvents(200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			switch {
+			case event.Action == string(audit.ActionGuardrailBlock):
+				blocks++
+			case event.Action == string(audit.ActionGuardrailWarn) && strings.HasPrefix(event.Details, "hook failure report:"):
+				summary = event.Details
+			case event.Action == string(audit.ActionGuardrailWarn):
+				warns++
+			}
+		}
+		return
+	}
+	for range 2 {
+		if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blocks, warns, summary := count()
+	if blocks != 3 || warns != 0 || !strings.Contains(summary, "3 more hook calls (2 blocked by the hook, 1 unchecked)") ||
+		!strings.Contains(summary, "this run recorded 3") {
+		t.Fatalf("blocks=%d warns=%d summary=%q, want 3 rows and one summary of the other 3", blocks, warns, summary)
+	}
+	if alerts := degradedAlerts(t, store); len(alerts) != 1 || !strings.Contains(alerts[0].Details, "1 claudecode hook call") {
+		t.Fatalf("fail-open alert = %+v, want the one unchecked call counted", alerts)
+	}
+}
+
+// countingFailEmitter fails every audit emit after failAfter of them.
+type countingFailEmitter struct {
+	audit.RuntimeV8Emitter
+	emits, failAfter atomic.Int64
+}
+
+func (emitter *countingFailEmitter) EmitRuntimeV8(
+	ctx context.Context, metadata router.Metadata, builder audit.RuntimeV8Builder,
+) (audit.RuntimeV8EmitOutcome, error) {
+	if limit := emitter.failAfter.Load(); limit > 0 && emitter.emits.Load() >= limit {
+		return audit.RuntimeV8EmitOutcome{}, errors.New("audit: persist runtime record: database is locked (5) (SQLITE_BUSY)")
+	}
+	emitter.emits.Add(1)
+	return emitter.RuntimeV8Emitter.EmitRuntimeV8(ctx, metadata, builder)
+}
+
+// Review note 3 (mutant M2 survived): a run whose second row write fails
+// keeps Offset and records how far its rows got (AuditOffset). The next run
+// reads the same lines again and must not record the first call twice.
+func TestHookFailureReportDoesNotRecordACallTwiceAfterAFailedWrite(t *testing.T) {
+	fixture := newSidecarRuntimeFixture(t, true)
+	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitter := &countingFailEmitter{RuntimeV8Emitter: &sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints}}
+	logger := audit.NewLogger(fixture.store)
+	logger.SetRuntimeV8Emitter(emitter)
+	now := time.Date(2026, 11, 1, 4, 0, 0, 0, time.UTC)
+	// How many emits one row takes.
+	probe := filepath.Join(t.TempDir(), "logs")
+	appendHookFailures(t, probe, blockedHookLine("2026-11-01T03:59:00Z", "PreToolUse", "s", "toolu_probe"))
+	if err := reportHookFailureCallsIn(probe, logger, now); err != nil {
+		t.Fatal(err)
+	}
+	perRow := emitter.emits.Load()
+	if perRow == 0 {
+		t.Fatal("a hook failure row made no audit emit")
+	}
+	logDir := filepath.Join(t.TempDir(), "logs")
+	appendHookFailures(t, logDir,
+		blockedHookLine("2026-11-01T03:59:01Z", "PreToolUse", "s", "toolu_first"),
+		blockedHookLine("2026-11-01T03:59:02Z", "PreToolUse", "s", "toolu_second"))
+	emitter.failAfter.Store(emitter.emits.Load() + perRow)
+	if err := reportHookFailureCallsIn(logDir, logger, now); err == nil {
+		t.Fatal("the second row's failed write was not reported")
+	}
+	emitter.failAfter.Store(0)
+	for range 2 {
+		if err := reportHookFailureCallsIn(logDir, logger, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := fixture.store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]int{}
+	for _, event := range events {
+		if event.Action == string(audit.ActionGuardrailBlock) {
+			rows[event.ToolID]++
+		}
+	}
+	if rows["toolu_first"] != 1 || rows["toolu_second"] != 1 {
+		t.Fatalf("rows per tool id = %v, want one each", rows)
 	}
 }

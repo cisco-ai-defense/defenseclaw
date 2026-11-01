@@ -43,7 +43,7 @@ func TestShellHookBlockedCallRecordNamesTheToolUseID(t *testing.T) {
 	}
 	last := records[len(records)-1]
 	if last["outcome"] != "fail_closed" || last["session_id"] != "s-0271" ||
-		last["call_id"] != "toolu_0271_shell" || last["tool_id"] != "toolu_0271_shell" {
-		t.Fatalf("record %+v, want fail_closed under session s-0271 and tool id toolu_0271_shell", last)
+		last["call_id"] != "toolu_0271_shell" || last["tool_id"] != "toolu_0271_shell" || last["event"] != "PreToolUse" {
+		t.Fatalf("record %+v, want fail_closed PreToolUse under session s-0271 and tool id toolu_0271_shell", last)
 	}
 }

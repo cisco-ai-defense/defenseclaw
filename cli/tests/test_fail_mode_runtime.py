@@ -2789,3 +2789,19 @@ def test_a_stale_lock_is_still_drift_for_a_hook_that_reads_its_records(
     (Path(cfg.data_dir) / "hook_contract_lock.json").unlink()
     state = resolve_connector_fail_mode(cfg, "claudecode")
     assert "registration-lock-missing" in state.drift, state.drift
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS shell hook")
+def test_a_stale_lock_is_still_drift_on_a_managed_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # GAP-0272 review (mutant M3): every _hardening.sh render carries the
+    # call-time marker, managed ones too, but a managed hook runs the
+    # administrator's resolved mode, which the lock records. A managed lock
+    # that disagrees is drift whatever the helper says.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    cfg.deployment_mode = "managed_enterprise"
+    _stale_lock_after_a_pack_switch(cfg, home, call_time=True)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    assert not fail_mode_runtime._outage_mode_read_at_call_time(cfg, "claudecode", ("hook-script", "closed"))
+    state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert {"registration-stale", "registration-lock-open"} <= set(state.drift), state.drift
