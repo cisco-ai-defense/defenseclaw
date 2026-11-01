@@ -187,15 +187,16 @@ func (s *FileDecisionStore) List(uid int, registration string) ([]Decision, erro
 	return out, nil
 }
 
-// ForgetOtherAccounts drops uid's decisions another account made: one whose
-// subject key is set and is not subjectKey. When legacyKeep is set (the uid
-// is known to have changed accounts), a decision saved before decisions
-// carried a subject key goes too unless legacyKeep keeps its registration:
-// such a decision cannot be told apart from the earlier account's, and the
-// account now holding the uid never inherits that one's egress decisions
-// (rel-1-0-6:GAP-0262). It returns how many it dropped; with none, nothing
-// is written.
-func (s *FileDecisionStore) ForgetOtherAccounts(uid int, subjectKey string, legacyKeep func(registration string) bool) (int, error) {
+// SettleAccount keeps uid's decisions to the account subjectKey names, the
+// account that holds the uid now (rel-1-0-6:GAP-0262). A decision saved
+// before decisions carried a subject key is stamped with the key of the
+// registration it was made in when owner knows that registration; one whose
+// registration is gone is dropped when reused is set (the uid is known to
+// have held another account) and stamped with subjectKey otherwise. Then
+// every decision of another account is dropped. It returns how many it
+// dropped; with nothing to stamp or drop, nothing is written. The caller
+// confirms subjectKey with the account database first.
+func (s *FileDecisionStore) SettleAccount(uid int, subjectKey string, owner func(registration string) (string, bool), reused bool) (int, error) {
 	if subjectKey == "" {
 		return 0, fmt.Errorf("%w: subject key is required", ErrInvalid)
 	}
@@ -205,14 +206,31 @@ func (s *FileDecisionStore) ForgetOtherAccounts(uid int, subjectKey string, lega
 	if err != nil {
 		return 0, err
 	}
-	next := slices.DeleteFunc(slices.Clone(ds), func(d Decision) bool {
-		if d.SubjectKey != "" {
-			return d.SubjectKey != subjectKey
+	next := make([]Decision, 0, len(ds))
+	stamped := 0
+	for _, d := range ds {
+		if d.SubjectKey == "" {
+			key, ok := "", false
+			if owner != nil {
+				key, ok = owner(d.Registration)
+			}
+			switch {
+			case ok && key != "":
+			case reused:
+				continue
+			default:
+				key = subjectKey
+			}
+			d.SubjectKey = key
+			stamped++
 		}
-		return legacyKeep != nil && !legacyKeep(d.Registration)
-	})
+		if d.SubjectKey != subjectKey {
+			continue
+		}
+		next = append(next, d)
+	}
 	dropped := len(ds) - len(next)
-	if dropped == 0 {
+	if dropped == 0 && stamped == 0 {
 		return 0, nil
 	}
 	if err := writeStoreFile(s.dir, s.path(uid), decisionFile{V: storeFileVersion, Decisions: next}); err != nil {

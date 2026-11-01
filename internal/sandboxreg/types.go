@@ -207,8 +207,8 @@ type Decision struct {
 	// made in: the account that made it. A decision applies only to that
 	// account's registrations, never to a later account given the same uid
 	// (AppliesTo, rel-1-0-6:GAP-0262). Empty for a decision saved before
-	// 1.0.7; ForgetOtherAccounts drops those once the uid is seen to have
-	// changed accounts.
+	// 1.0.7 until the first sandbox start after the upgrade stamps it
+	// (FileDecisionStore.SettleAccount).
 	SubjectKey string `json:"subject_key,omitempty"`
 }
 

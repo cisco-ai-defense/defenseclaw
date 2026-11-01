@@ -214,38 +214,78 @@ func (a *APIServer) sandboxAuth() (*sandboxAuthority, error) {
 	return auth, nil
 }
 
-// sandboxForgetPreviousAccounts removes, before subjectKey's account
-// registers or restarts a sandbox, the registrations and saved decisions
-// that an earlier account holding the same uid left behind: a deleted
-// account whose uid the account database gave to a new one, or an account
-// since renamed. The account holding the uid now never inherits them, never
-// sees them and is never refused because of them (rel-1-0-6:GAP-0262).
-// Only the administrator is told, in the gateway log; the account is not,
-// since what another account ran is not its business. A store error is
-// logged and leaves the records; the write that follows reports it.
-func (a *APIServer) sandboxForgetPreviousAccounts(auth *sandboxAuthority, uid int, subjectKey string) {
-	if subjectKey == "" {
+// sandboxForgetPreviousAccounts removes, before peer's account (subjectKey)
+// registers or restarts a sandbox, the registrations and saved decisions an
+// earlier account holding the same uid left behind: a deleted account whose
+// uid the account database gave to a new one, or an account since renamed.
+// The account holding the uid now never inherits them, never sees them and
+// is never refused because of them (rel-1-0-6:GAP-0262). Only the
+// administrator is told, in the gateway log; the account is not, since what
+// another account ran is not its business.
+//
+// Nothing is removed on the strength of a name the account database did not
+// just give: not while the peer's lookup failed (peer.Name is empty and the
+// last name stands in), and not before sandboxAccountNow, asked again with no
+// cache, names the same account. The decisions go first, and the
+// registrations only once that write is stored: a failed write or a crash in
+// between leaves the registrations, so the next start finds them and tries
+// again. A decision saved before 1.0.7 is stamped with its account's key on
+// the way (FileDecisionStore.SettleAccount).
+func (a *APIServer) sandboxForgetPreviousAccounts(auth *sandboxAuthority, peer managedHookPeer, subjectKey string) {
+	uid := peer.UID
+	if subjectKey == "" || strings.TrimSpace(peer.Name) == "" {
 		return
 	}
-	gone, err := auth.store.ForgetOtherAccounts(uid, subjectKey)
+	regs, err := auth.store.List(uid)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sandbox-authority] forget previous accounts uid=%d: %v\n", uid, err)
 		return
 	}
-	dropped := 0
+	owners := make(map[string]string, len(regs))
+	reused := false
+	for _, r := range regs {
+		owners[r.ID] = r.SubjectKey
+		reused = reused || r.SubjectKey != subjectKey
+	}
+	var saved []sandboxreg.Decision
 	if auth.decisions != nil {
-		var legacyKeep func(string) bool
-		if len(gone) > 0 {
-			kept := map[string]bool{}
-			if regs, err := auth.store.List(uid); err == nil {
-				for _, r := range regs {
-					kept[r.ID] = true
-				}
-			}
-			legacyKeep = func(id string) bool { return kept[id] }
-		}
-		if dropped, err = auth.decisions.ForgetOtherAccounts(uid, subjectKey, legacyKeep); err != nil {
+		if saved, err = auth.decisions.List(uid, ""); err != nil {
 			fmt.Fprintf(os.Stderr, "[sandbox-authority] forget previous accounts uid=%d decisions: %v\n", uid, err)
+			return
+		}
+	}
+	settle := false
+	confirm := reused
+	for _, d := range saved {
+		_, owned := owners[d.Registration]
+		settle = settle || d.SubjectKey == "" || d.SubjectKey != subjectKey
+		confirm = confirm || (d.SubjectKey == "" && !owned) || (d.SubjectKey != "" && d.SubjectKey != subjectKey)
+	}
+	if !reused && !settle {
+		return
+	}
+	if confirm {
+		name, err := sandboxAccountNow(uid)
+		if err == nil && sandboxSubjectKey(auth.key, uid, name, "") != subjectKey {
+			err = errors.New("the account database names another account for the uid")
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[sandbox-authority] uid=%d: records of another account are kept until the account database confirms the account that holds the uid: %v\n", uid, err)
+			return
+		}
+	}
+	dropped := 0
+	if settle {
+		owner := func(id string) (string, bool) { key, ok := owners[id]; return key, ok }
+		if dropped, err = auth.decisions.SettleAccount(uid, subjectKey, owner, reused); err != nil {
+			fmt.Fprintf(os.Stderr, "[sandbox-authority] forget previous accounts uid=%d decisions: %v; the registrations stay until a later start\n", uid, err)
+			return
+		}
+	}
+	var gone []sandboxreg.Registration
+	if reused {
+		if gone, err = auth.store.ForgetOtherAccounts(uid, subjectKey); err != nil {
+			fmt.Fprintf(os.Stderr, "[sandbox-authority] forget previous accounts uid=%d: %v\n", uid, err)
 		}
 	}
 	if len(gone) > 0 || dropped > 0 {

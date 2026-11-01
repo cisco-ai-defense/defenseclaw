@@ -661,7 +661,7 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		PolicyKey: a.sandboxPolicyKey(r.Context(), cfg), FloorDigest: floorDigest,
 		HostPorts: slices.Clone(eff.MCP.HostPorts),
 	}
-	a.sandboxForgetPreviousAccounts(auth, peer.UID, reg.SubjectKey)
+	a.sandboxForgetPreviousAccounts(auth, peer, reg.SubjectKey)
 	if err := auth.store.CreateRun(peer.UID, reg, run); err != nil {
 		fmt.Fprintf(os.Stderr, "[sandbox-authority] register uid=%d: %v\n", peer.UID, err)
 		if errors.Is(err, sandboxreg.ErrFull) {
@@ -836,7 +836,7 @@ func (a *APIServer) handleSandboxRestart(w http.ResponseWriter, r *http.Request)
 		writeSandboxReason(w, sandboxrelay.ReasonRegistrationRevoked, sandboxRevokedText(auth, reg))
 		return
 	}
-	a.sandboxForgetPreviousAccounts(auth, peer.UID, reg.SubjectKey)
+	a.sandboxForgetPreviousAccounts(auth, peer, reg.SubjectKey)
 	fresh, err := auth.store.Restart(peer.UID, reg.ID)
 	switch {
 	case err == nil:

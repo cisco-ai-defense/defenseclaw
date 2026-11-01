@@ -70,3 +70,36 @@ func TestRetentionControllerRetriesAFailedRunSoonAndOnAPolicyChange(t *testing.T
 		t.Fatal(err)
 	}
 }
+
+// Review of rel-1-0-6:GAP-0263: Secure Client keeps its cadence after a
+// failed run, and a looser policy then runs nothing, as documented.
+func TestRetentionControllerSecureClientKeepsItsCadenceAfterAFailedRun(t *testing.T) {
+	reaper := newFakeRetentionReaper(7)
+	scheduler := newScriptedRetentionScheduler()
+	reporter := &recordingRetentionReporter{statuses: make(chan RetentionControllerStatus, 16)}
+	controller, err := newRetentionController(reaper, RetentionControllerOptions{Scheduler: scheduler, Reporter: reporter, SecureClient: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	receiveRetentionTest(t, reaper.started)
+	reaper.responses <- fakeRetentionResponse{err: errors.New("database is locked")}
+	receiveRetentionTest(t, reporter.statuses)
+	if wait := receiveRetentionTest(t, scheduler.waits); wait != audit.RetentionScheduleInterval {
+		t.Fatalf("Secure Client wait after a failed run = %s, want %s", wait, audit.RetentionScheduleInterval)
+	}
+	if err := controller.ApplyPolicy(30); err != nil {
+		t.Fatal(err)
+	}
+	if again := receiveRetentionTest(t, reporter.statuses); again.State != RetentionStateDegraded || again.RunCount != 1 {
+		t.Fatalf("Secure Client looser policy after a failure: %#v", again)
+	}
+	if runs, _, _, _ := reaper.snapshot(); runs != 1 {
+		t.Fatalf("runs = %d, want 1", runs)
+	}
+	if err := controller.Stop(lifecycleTestContext(t)); err != nil {
+		t.Fatal(err)
+	}
+}

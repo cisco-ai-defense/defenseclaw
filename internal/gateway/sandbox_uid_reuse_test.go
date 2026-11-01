@@ -72,6 +72,7 @@ func TestSandboxNewAccountOnAReusedUIDDoesNotInheritTheEarlierAccountsState(t *t
 	writeSandboxStoreFile(t, sandboxreg.DecisionsDir(f.cfg.DataDir), uid, map[string]any{"v": 1, "decisions": decisions})
 
 	newcomer := managedHookPeer{UID: uid, Name: "r106vs7a1"}
+	stubSandboxAccountNow(t, func(int) (string, error) { return newcomer.Name, nil })
 	f.setGroups(newcomer, "dc-sbx-contractors")
 	rec := f.do(newcomer, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(), map[string]string{sandboxrelay.ConnectorHeader: "claudecode"})
 	if rec.Code != http.StatusOK {
@@ -121,6 +122,48 @@ func TestSandboxNewAccountOnAReusedUIDDoesNotInheritTheEarlierAccountsState(t *t
 	if got := listDecisions(); len(got) != 1 {
 		t.Fatalf("own decision listed: %+v", got)
 	}
+}
+
+func stubSandboxAccountNow(t *testing.T, fn func(int) (string, error)) {
+	t.Helper()
+	prev := sandboxAccountNow
+	sandboxAccountNow = fn
+	t.Cleanup(func() { sandboxAccountNow = prev })
+}
+
+// seedEarlierAccount stores n stopped registrations of the deleted account
+// r106fs7a on uid and one keyed and one legacy "always" decision of it, and
+// returns that account's subject key.
+func seedEarlierAccount(t *testing.T, f *sandboxFixture, uid, n int) string {
+	t.Helper()
+	key, err := sandboxAuthorityKey(f.cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey := sandboxSubjectKey(key, uid, "r106fs7a", "")
+	at := time.Now().UTC().Add(-2 * time.Hour)
+	regs := make([]sandboxreg.Registration, 0, n)
+	for i := range n {
+		id, err := sandboxreg.NewID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		regs = append(regs, sandboxreg.Registration{
+			V: sandboxreg.RecordVersion, ID: id, UID: uid, UserName: "r106fs7a", SubjectKey: oldKey,
+			Connector: "claudecode", Harness: "claudecode", WorkdirMode: "copy", ProjectReal: "/home/r106fs7a/project",
+			State: sandboxreg.StateStopped, CreatedAt: at, BoundAt: at, SeenAt: at,
+			SandboxName: "dc-old-" + strconv.Itoa(i), SandboxID: "sbx-old-" + strconv.Itoa(i), BindingID: fmt.Sprintf("sb_%032x", i+1<<20),
+		})
+	}
+	writeSandboxStoreFile(t, sandboxreg.RegistrationsDir(f.cfg.DataDir), uid, map[string]any{"v": 1, "registrations": regs})
+	decisions := []sandboxreg.Decision{
+		{V: sandboxreg.RecordVersion, ID: "dec-" + regs[0].ID[4:], Registration: regs[0].ID, Kind: sandboxrelay.DecisionEgressAllow,
+			Host: "earlier-keyed.example.com", Scope: sandboxrelay.DecisionScopeAlways, Actor: sandboxreg.DecisionActor{UID: uid}, CreatedAt: at, SubjectKey: oldKey},
+		{V: sandboxreg.RecordVersion, ID: "dec-" + regs[1].ID[4:], Registration: regs[1].ID, Kind: sandboxrelay.DecisionEgressAllow,
+			Host: "earlier-legacy.example.com", Scope: sandboxrelay.DecisionScopeAlways, Actor: sandboxreg.DecisionActor{UID: uid}, CreatedAt: at},
+	}
+	writeSandboxStoreFile(t, sandboxreg.DecisionsDir(f.cfg.DataDir), uid, map[string]any{"v": 1, "decisions": decisions})
+	return oldKey
 }
 
 func writeSandboxStoreFile(t *testing.T, dir string, uid int, v any) {

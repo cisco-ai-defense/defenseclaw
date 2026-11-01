@@ -447,8 +447,9 @@ func (controller *RetentionController) run(ctx context.Context) {
 			}
 			// After a failed run any policy change runs again at once, so
 			// the state shown is that of the policy now in force, not the
-			// failure of the previous one (rel-1-0-6:GAP-0263).
-			prompt := controller.consumePromptRun() || controller.failedRuns.Load() > 0
+			// failure of the previous one (rel-1-0-6:GAP-0263). Secure
+			// Client keeps its cadence.
+			prompt := controller.consumePromptRun() || (controller.failedRuns.Load() > 0 && !controller.secureClient)
 			if !controller.enabled() {
 				controller.publishStatus(controller.nextStatus(
 					RetentionStateDisabled, RetentionFailureNone, nil,
@@ -574,9 +575,9 @@ func (controller *RetentionController) logRunOutcome(err error) {
 	class, cause := audit.RetentionFailureDetail(err)
 	next := "at the next scheduled run"
 	if !controller.secureClient {
-		next = "in " + retryInterval(failed).String()
+		next = "in " + retryInterval(failed).String() + " or at the next policy change"
 	}
-	fmt.Fprintf(controller.log, "[sidecar] audit retention run failed (%s, %d in a row): %s; retention tries again %s or at the next policy change\n",
+	fmt.Fprintf(controller.log, "[sidecar] audit retention run failed (%s, %d in a row): %s; retention tries again %s\n",
 		class, failed, cause, next)
 }
 
