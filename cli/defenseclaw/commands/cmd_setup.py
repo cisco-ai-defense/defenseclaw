@@ -55,6 +55,7 @@ import click
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
 from defenseclaw import (
+    agent_config_notice,
     codex_toml,
     connector_paths,
     envvars,
@@ -16270,7 +16271,6 @@ def _restart_services(
     ``teardown`` marks a ``guardrail disable`` restart: the closing line says
     the hooks were removed instead of announcing enforcement (GAP-1985)."""
     ux.section(title)
-    restart_started = time.time()
     ctx = click.get_current_context(silent=True)
     if ctx is not None:
         ctx.meta.pop(_CONFIG_WRITE_REMEDY_KEY, None)
@@ -16404,10 +16404,12 @@ def _restart_services(
                 _note_gateway_launcher_missing()
                 click.echo(f"  {_LAUNCHER_MISSING_RESTART_TEXT}: {LAUNCHER_REINSTALL_STEP}.")
             failed.append(f"{readiness_label} readiness")
-        # A settings file the restarted setup put back or recreated (GAP-0581).
-        from defenseclaw.agent_config_notice import put_back_notes
-
-        for note in put_back_notes(data_dir, wait_targets, restart_started):
+    # A settings file this setup put back or recreated (GAP-0581). Said every
+    # time, also when the step did not wait for the connector runtime (a
+    # `setup hermes` run said nothing then, GAP-0333).
+    if hook_targets and not teardown:
+        agent_config_notice.wait_for_put_back(data_dir, hook_targets)
+        for note in agent_config_notice.put_back_notes(data_dir, hook_targets):
             ux.warn(note)
 
     # Multi-connector global change: every active hook connector is affected
