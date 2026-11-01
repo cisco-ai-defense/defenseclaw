@@ -45,7 +45,8 @@ func ExactPOSIXInteractiveDevTCPShell(source string, facts Facts) bool {
 		!ProvesPOSIXInteractiveShell(command) ||
 		command.ParentCommandID != 0 || command.PipelineID != 0 ||
 		command.Background || command.ControlFlowUncertain ||
-		len(command.Wrappers) != 0 {
+		len(command.Wrappers) != 0 ||
+		!hasLiteralDevTCPPrefix(source) {
 		return false
 	}
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
@@ -72,7 +73,10 @@ func ExactPOSIXInteractiveDevTCPShell(source string, facts Facts) bool {
 		return false
 	}
 	target := projectPOSIXWord(output.Word)
-	if target.Expands {
+	// Bash treats only the case-sensitive /dev/tcp/ spelling as a network
+	// redirect. The shared network projection accepts other casing, so the
+	// exact shell proof must check the target before using that projection.
+	if target.Expands || !strings.HasPrefix(target.Value, "/dev/tcp/") {
 		return false
 	}
 	network, ok := devNetworkRedirect(command.ID, target.Value)
@@ -100,6 +104,44 @@ func ExactPOSIXInteractiveDevTCPShell(source string, facts Facts) bool {
 	}
 	sourceFD := projectPOSIXWord(input.Word)
 	return !sourceFD.Expands && sourceFD.Value == "1"
+}
+
+// hasLiteralDevTCPPrefix rejects ordinary redirects before building a Bash
+// syntax tree. Quotes and backslashes can split a literal network path, so
+// this scan is only a candidate check; the parsed target is checked above.
+func hasLiteralDevTCPPrefix(source string) bool {
+	const prefix = "/dev/tcp/"
+	if strings.Contains(source, prefix) {
+		return true
+	}
+	for start := 0; start < len(source); start++ {
+		if source[start] != '/' {
+			continue
+		}
+		i, j := 0, start
+		for i < len(prefix) && j < len(source) {
+			switch source[j] {
+			case '\\':
+				j++
+				if j < len(source) && source[j] == '\n' {
+					j++
+				}
+				continue
+			case '\'', '"':
+				j++
+				continue
+			}
+			if source[j] != prefix[i] {
+				break
+			}
+			i++
+			j++
+		}
+		if i == len(prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ExactPOSIXDescriptorFeedbackShell proves a closed descriptor-to-shell

