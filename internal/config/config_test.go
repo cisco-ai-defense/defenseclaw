@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -212,29 +213,49 @@ func TestLoadLegacySplunkPointsToReleaseUpgrade(t *testing.T) {
 	}
 }
 
-func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) {
-	dir := t.TempDir()
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(dir, 0o777); err != nil {
-			t.Fatalf("chmod untrusted config dir: %v", err)
+// captureBoundaryPaths records the path named by every MarkerBoundary event
+// emitted while the test runs.
+func captureBoundaryPaths(t *testing.T) func() []string {
+	t.Helper()
+	var mu sync.Mutex
+	var paths []string
+	original := managed.ReportResilienceEvent
+	managed.ReportResilienceEvent = func(marker string, fields map[string]string) {
+		if marker != managed.MarkerBoundary {
+			return
 		}
+		mu.Lock()
+		defer mu.Unlock()
+		paths = append(paths, fields["path"])
 	}
-	path := filepath.Join(dir, DefaultConfigName)
-	data := []byte("config_version: 6\ndeployment_mode: managed_enterprise\ndata_dir: " + dir + "\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	grantUntrustedWriterForTest(t, path)
-	_, err := LoadFromFile(path)
-	if err == nil {
-		t.Fatal("LoadFromFile succeeded for untrusted managed_enterprise config path")
-	}
-	if !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
-		t.Fatalf("LoadFromFile error = %v, want managed trust check failure", err)
+	t.Cleanup(func() { managed.ReportResilienceEvent = original })
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), paths...)
 	}
 }
 
-func TestLoadFromFile_ManagedEnterpriseEnvPinRejectsUntrustedUnmanagedFile(t *testing.T) {
+func boundaryNamesPath(paths []string, want string) bool {
+	for _, path := range paths {
+		if strings.EqualFold(filepath.Clean(path), filepath.Clean(want)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isolateManagedTrustEnv clears the knobs that change how the managed trust
+// check treats a config path: no service-pinned config to re-stamp and no
+// strict pin.
+func isolateManagedTrustEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv(managed.ConfigPathEnv, "")
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+}
+
+func writeUntrustedManagedConfigForTest(t *testing.T, body func(dir string) string) string {
+	t.Helper()
 	dir := t.TempDir()
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(dir, 0o777); err != nil {
@@ -242,14 +263,98 @@ func TestLoadFromFile_ManagedEnterpriseEnvPinRejectsUntrustedUnmanagedFile(t *te
 		}
 	}
 	path := filepath.Join(dir, DefaultConfigName)
-	if err := os.WriteFile(path, []byte("config_version: 6\ndeployment_mode: unmanaged_byod\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(body(dir)), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	grantUntrustedWriterForTest(t, path)
-	t.Setenv(managed.DeploymentModeEnv, string(DeploymentModeManagedEnterprise))
+	return path
+}
+
+// An untrusted writer on a managed config is permission drift. Unix refuses
+// it; Windows accepts the config and logs a boundary finding naming it.
+func TestLoadFromFile_ManagedEnterpriseUntrustedWriterOnConfigPath(t *testing.T) {
+	isolateManagedTrustEnv(t)
+	path := writeUntrustedManagedConfigForTest(t, func(dir string) string {
+		return "config_version: 6\ndeployment_mode: managed_enterprise\ndata_dir: " + dir + "\n"
+	})
+	boundaries := captureBoundaryPaths(t)
 	_, err := LoadFromFile(path)
-	if err == nil || !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
-		t.Fatalf("LoadFromFile error = %v, want pre-parse managed trust failure", err)
+	if !untrustedWriterAcceptedAsBoundary {
+		if err == nil || !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
+			t.Fatalf("LoadFromFile error = %v, want managed trust check failure", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("LoadFromFile error = %v, want drifted managed config accepted", err)
+	}
+	if !boundaryNamesPath(boundaries(), path) {
+		t.Fatalf("boundary findings = %v, want one naming %s", boundaries(), path)
+	}
+}
+
+// With the deployment mode pinned by the environment the trust walk runs
+// before the file is parsed. A drifted unmanaged_byod file is still refused:
+// on Unix by the trust walk, on Windows (where the walk accepts the writer as a
+// boundary finding) by the immutable deployment-mode conflict.
+func TestLoadFromFile_ManagedEnterpriseEnvPinRefusesUntrustedUnmanagedFile(t *testing.T) {
+	isolateManagedTrustEnv(t)
+	path := writeUntrustedManagedConfigForTest(t, func(string) string {
+		return "config_version: 6\ndeployment_mode: unmanaged_byod\n"
+	})
+	t.Setenv(managed.DeploymentModeEnv, string(DeploymentModeManagedEnterprise))
+	boundaries := captureBoundaryPaths(t)
+	_, err := LoadFromFile(path)
+	if !untrustedWriterAcceptedAsBoundary {
+		if err == nil || !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
+			t.Fatalf("LoadFromFile error = %v, want pre-parse managed trust failure", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), "conflicts with immutable "+managed.DeploymentModeEnv) {
+		t.Fatalf("LoadFromFile error = %v, want immutable deployment_mode conflict", err)
+	}
+	if !boundaryNamesPath(boundaries(), path) {
+		t.Fatalf("boundary findings = %v, want the pre-parse walk to name %s", boundaries(), path)
+	}
+}
+
+// Structure stays fatal on every platform: a managed config reached through a
+// symlink is refused whether the mode comes from the environment (pre-parse)
+// or from the file.
+func TestLoadFromFile_ManagedEnterpriseRejectsSymlinkedConfigPath(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		envPin bool
+	}{
+		{name: "env-pin", envPin: true},
+		{name: "file-mode", envPin: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateManagedTrustEnv(t)
+			dir := t.TempDir()
+			target := filepath.Join(dir, "real-config.yaml")
+			data := "config_version: 6\ndeployment_mode: managed_enterprise\ndata_dir: " + dir + "\n"
+			if err := os.WriteFile(target, []byte(data), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			link := filepath.Join(dir, DefaultConfigName)
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			if tc.envPin {
+				t.Setenv(managed.DeploymentModeEnv, string(DeploymentModeManagedEnterprise))
+			} else {
+				t.Setenv(managed.DeploymentModeEnv, "")
+			}
+			_, err := LoadFromFile(link)
+			if err == nil || !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
+				t.Fatalf("LoadFromFile error = %v, want managed trust check failure", err)
+			}
+			if runtime.GOOS == "windows" && !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("LoadFromFile error = %v, want a symlink refusal", err)
+			}
+		})
 	}
 }
 

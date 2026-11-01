@@ -1756,7 +1756,9 @@ func loadWindowsManagedRuntimeBundle(
 		return bundle, nil, path, err
 	}
 	if windowsManagedRuntimeSHA256(data) != entry.BundleSHA256 {
-		return bundle, nil, path, errors.New("enterprise hooks: managed runtime bundle digest does not match protected selector")
+		return bundle, nil, path, windowsManagedRuntimeBoundaryError(
+			errors.New("enterprise hooks: managed runtime bundle digest does not match protected selector"),
+		)
 	}
 	bundle, err = decodeWindowsManagedRuntimeBundle(data)
 	if err != nil {
@@ -1776,7 +1778,9 @@ func loadWindowsManagedRuntimeBundleAtPath(
 		return nil, errors.New("enterprise hooks: managed runtime bundle target SID is unavailable")
 	}
 	if err := validateWindowsUserPathElement(path, target, false, false, true); err != nil {
-		return nil, fmt.Errorf("enterprise hooks: managed runtime bundle trust check failed: %w", err)
+		return nil, windowsManagedRuntimeSelectedBundleReadError(
+			fmt.Errorf("enterprise hooks: managed runtime bundle trust check failed: %w", err),
+		)
 	}
 	data, err := connector.ReadManagedHookRuntimeFile(
 		path,
@@ -1784,12 +1788,27 @@ func loadWindowsManagedRuntimeBundleAtPath(
 		windowsManagedRuntimeBundleMaxBytes,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: read immutable managed runtime generation: %w", err)
+		return nil, windowsManagedRuntimeSelectedBundleReadError(
+			fmt.Errorf("enterprise hooks: read immutable managed runtime generation: %w", err),
+		)
 	}
 	if err := validateWindowsUserPathElement(path, target, false, false, true); err != nil {
-		return nil, fmt.Errorf("enterprise hooks: managed runtime bundle changed protection during read: %w", err)
+		return nil, windowsManagedRuntimeSelectedBundleReadError(
+			fmt.Errorf("enterprise hooks: managed runtime bundle changed protection during read: %w", err),
+		)
 	}
 	return data, nil
+}
+
+// windowsManagedRuntimeSelectedBundleReadError types a selected-bundle read
+// failure the target user can cause by deleting or enlarging the bundle as a
+// boundary, so a later probe that finds the bundle restored cannot turn it
+// into drift. ACL, owner and busy-handle failures are returned unchanged.
+func windowsManagedRuntimeSelectedBundleReadError(err error) error {
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, connector.ErrManagedRuntimeFileTooLarge) {
+		return windowsManagedRuntimeBoundaryError(err)
+	}
+	return err
 }
 
 func defaultWindowsManagedRuntimeSelectorPath(connectorName string) (string, error) {
@@ -2077,11 +2096,13 @@ func validateWindowsManagedRuntimeSelectorTargetAgainstRemoval(
 		// defenseclaw-hook.exe). The connector+SID match confirms the
 		// entry is ours by role; allow the removal so the install reconcile
 		// can retire the orphan entry and publish a fresh one.
-		fmt.Fprintf(os.Stderr,
-			"[enterprise-hooks] reclaiming stale managed runtime selector for "+
-				"%s/%s: entry HookExecutable=%q, current install's HookExecutable=%q\n",
-			opts.Connector, opts.TargetSID,
-			entry.HookExecutable, opts.HookExecutable)
+		managed.EmitResilienceEvent(managed.MarkerRecover, map[string]string{
+			"connector":               opts.Connector,
+			"target_sid":              opts.TargetSID,
+			"entry_hook_executable":   entry.HookExecutable,
+			"current_hook_executable": opts.HookExecutable,
+			"reason":                  "reclaiming stale managed runtime selector entry: hook executable differs from the current install",
+		})
 	}
 	if opts.DataDir != "" && (entry.DataDir != opts.DataDir ||
 		!sameWindowsEnterprisePath(entry.DataDir, opts.DataDir)) {
@@ -2097,11 +2118,13 @@ func validateWindowsManagedRuntimeSelectorTargetAgainstRemoval(
 		// stale DataDir from a prior install's per-user runtime path does
 		// not block removal; the install reconcile replaces it with the
 		// current scope's DataDir.
-		fmt.Fprintf(os.Stderr,
-			"[enterprise-hooks] reclaiming stale managed runtime selector for "+
-				"%s/%s: entry DataDir=%q, current install's DataDir=%q\n",
-			opts.Connector, opts.TargetSID,
-			entry.DataDir, opts.DataDir)
+		managed.EmitResilienceEvent(managed.MarkerRecover, map[string]string{
+			"connector":        opts.Connector,
+			"target_sid":       opts.TargetSID,
+			"entry_data_dir":   entry.DataDir,
+			"current_data_dir": opts.DataDir,
+			"reason":           "reclaiming stale managed runtime selector entry: data directory differs from the current install",
+		})
 	}
 	return nil
 }

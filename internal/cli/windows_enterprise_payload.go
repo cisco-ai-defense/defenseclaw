@@ -48,8 +48,10 @@ func stageWindowsEnterprisePayloadIn(
 	if err != nil {
 		return "", nil, err
 	}
+	// The staging directory is removed without following any reparse point
+	// inside it, with bounded retries on sharing violations.
 	cleanup := func() error {
-		if err := os.RemoveAll(directory); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := managed.RemoveSetupTree(directory); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove the staged Windows enterprise installer: %w", err)
 		}
 		return nil
@@ -118,12 +120,14 @@ func newWindowsEnterprisePayloadDirectory() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("resolve the trusted ProgramData directory: %w", err)
 		}
-		return createProtectedWindowsEnterpriseDirectory(
+		sweepWindowsEnterpriseLeftovers(parent)
+		return createProtectedWindowsEnterpriseDirectoryWithFallback(
 			parent,
-			"DefenseClaw-Installer-",
+			managed.SetupInstallerStagePrefix,
 			"Windows enterprise installer staging",
 			rand.Read,
 			windows.CreateDirectory,
+			managed.SetupStagingFallbackRoot,
 		)
 	}
 	// Unelevated status runs stage in the caller's own temp directory, whose
@@ -132,7 +136,7 @@ func newWindowsEnterprisePayloadDirectory() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	directory, err := os.MkdirTemp(parent, "DefenseClaw-Installer-")
+	directory, err := os.MkdirTemp(parent, managed.SetupInstallerStagePrefix)
 	if err != nil {
 		return "", fmt.Errorf("create the Windows enterprise installer staging directory: %w", err)
 	}

@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1549,7 +1550,58 @@ func TestEnterpriseHookReconcileRowsHash(t *testing.T) {
 	}
 }
 
-func TestEnterpriseHooksReconcileManagedRejectsUntrustedManifest(t *testing.T) {
+// runManagedReconcileAgainstManifestForTest runs one managed reconcile
+// against manifest with the LocalSystem mutation gate stubbed, so only the
+// manifest trust gate and what follows it are exercised. The manifest ACL
+// repair is replaced by a recorder that changes nothing, which keeps the
+// result independent of the runner's privileges.
+func runManagedReconcileAgainstManifestForTest(t *testing.T, dataDir, manifest string) ([]string, error) {
+	t.Helper()
+	origCfg := cfg
+	origManifest := enterpriseHookManifest
+	origJSON := enterpriseHookJSON
+	origAPIAddr := enterpriseHookAPIAddr
+	origProxyAddr := enterpriseHookProxyAddr
+	origMutationPreflight := enterpriseHooksMutationIdentityPreflight
+	origRepair := enterpriseHookManifestACLRepair
+	t.Cleanup(func() {
+		cfg = origCfg
+		enterpriseHookManifest = origManifest
+		enterpriseHookJSON = origJSON
+		enterpriseHookAPIAddr = origAPIAddr
+		enterpriseHookProxyAddr = origProxyAddr
+		enterpriseHooksMutationIdentityPreflight = origMutationPreflight
+		enterpriseHookManifestACLRepair = origRepair
+	})
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+
+	cfg = &config.Config{DataDir: dataDir, DeploymentMode: "managed_enterprise"}
+	cfg.Gateway.Token = "tok"
+	cfg.Gateway.APIPort = 18970
+	cfg.Guardrail.Port = 4000
+	enterpriseHookManifest = manifest
+	enterpriseHookJSON = false
+	enterpriseHookAPIAddr = ""
+	enterpriseHookProxyAddr = ""
+	// Production performs the LocalSystem mutation gate first, before reading
+	// any manifest bytes.
+	enterpriseHooksMutationIdentityPreflight = func() error { return nil }
+	var repaired []string
+	enterpriseHookManifestACLRepair = func(path string) error {
+		repaired = append(repaired, path)
+		return nil
+	}
+
+	err := runEnterpriseHooksReconcile(&cobra.Command{}, nil)
+	return repaired, err
+}
+
+// An untrusted writer on targets.yaml is permission drift. Unix refuses it at
+// the manifest gate. Windows first asks the privileged repair to re-stamp the
+// manifest, re-checks it (the stubbed repair changed nothing, so it still
+// fails), then accepts it and logs a boundary finding naming it, and the
+// reconcile moves past the manifest gate.
+func TestEnterpriseHooksReconcileManagedUntrustedWriterOnManifest(t *testing.T) {
 	dir := t.TempDir()
 	manifest := filepath.Join(dir, "targets.yaml")
 	if err := os.WriteFile(manifest, []byte("version: 1\ntargets: []\n"), 0o666); err != nil {
@@ -1560,37 +1612,66 @@ func TestEnterpriseHooksReconcileManagedRejectsUntrustedManifest(t *testing.T) {
 	}
 	grantUntrustedWriterForTest(t, manifest)
 
-	origCfg := cfg
-	origManifest := enterpriseHookManifest
-	origJSON := enterpriseHookJSON
-	origAPIAddr := enterpriseHookAPIAddr
-	origProxyAddr := enterpriseHookProxyAddr
-	origMutationPreflight := enterpriseHooksMutationIdentityPreflight
-	t.Cleanup(func() {
-		cfg = origCfg
-		enterpriseHookManifest = origManifest
-		enterpriseHookJSON = origJSON
-		enterpriseHookAPIAddr = origAPIAddr
-		enterpriseHookProxyAddr = origProxyAddr
-		enterpriseHooksMutationIdentityPreflight = origMutationPreflight
-	})
+	var mu sync.Mutex
+	var boundaries []string
+	originalSink := managed.ReportResilienceEvent
+	t.Cleanup(func() { managed.ReportResilienceEvent = originalSink })
+	managed.ReportResilienceEvent = func(marker string, fields map[string]string) {
+		if marker != managed.MarkerBoundary {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		boundaries = append(boundaries, fields["path"])
+	}
 
-	cfg = &config.Config{DataDir: dir, DeploymentMode: "managed_enterprise"}
-	cfg.Gateway.Token = "tok"
-	cfg.Gateway.APIPort = 18970
-	cfg.Guardrail.Port = 4000
-	enterpriseHookManifest = manifest
-	enterpriseHookJSON = false
-	enterpriseHookAPIAddr = ""
-	enterpriseHookProxyAddr = ""
-	// This unit isolates manifest trust. Production intentionally performs
-	// the LocalSystem mutation gate first, before reading any manifest bytes.
-	enterpriseHooksMutationIdentityPreflight = func() error { return nil }
+	repaired, err := runManagedReconcileAgainstManifestForTest(t, dir, manifest)
+	if !untrustedWriterAcceptedAsBoundary {
+		if err == nil || !strings.Contains(err.Error(), "manifest trust check failed") {
+			t.Fatalf("runEnterpriseHooksReconcile error = %v, want manifest trust check failure", err)
+		}
+		return
+	}
+	// The fixture provisions no guardian runtime, so the reconcile still stops
+	// at a later gate; only the manifest gate is under test here.
+	if err != nil && strings.Contains(err.Error(), "manifest trust check failed") {
+		t.Fatalf("runEnterpriseHooksReconcile error = %v, want the drifted manifest accepted", err)
+	}
+	if len(repaired) == 0 || repaired[0] != manifest {
+		t.Fatalf("manifest repair calls = %v, want the first for %s", repaired, manifest)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	named := false
+	for _, boundary := range boundaries {
+		if strings.EqualFold(filepath.Clean(boundary), filepath.Clean(manifest)) {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("boundary findings = %v, want one naming %s", boundaries, manifest)
+	}
+}
 
-	cmd := &cobra.Command{}
-	err := runEnterpriseHooksReconcile(cmd, nil)
+// Structure stays fatal on every platform: a targets.yaml reached through a
+// symlink is refused at the manifest gate.
+func TestEnterpriseHooksReconcileManagedRejectsSymlinkedManifest(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real-targets.yaml")
+	if err := os.WriteFile(target, []byte("version: 1\ntargets: []\n"), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	manifest := filepath.Join(dir, "targets.yaml")
+	if err := os.Symlink(target, manifest); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	_, err := runManagedReconcileAgainstManifestForTest(t, dir, manifest)
 	if err == nil || !strings.Contains(err.Error(), "manifest trust check failed") {
-		t.Fatalf("runEnterpriseHooksReconcile error = %v, want trust check failure", err)
+		t.Fatalf("runEnterpriseHooksReconcile error = %v, want manifest trust check failure", err)
+	}
+	if runtime.GOOS == "windows" && !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("runEnterpriseHooksReconcile error = %v, want a symlink refusal", err)
 	}
 }
 

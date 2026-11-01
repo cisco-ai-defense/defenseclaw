@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -182,9 +183,13 @@ func TestReadBoundedCodexSystemRequirementsRejectsReplacementBeforeOpen(t *testi
 	}
 }
 
-func TestInspectManagedCodexSystemRequirementsRejectsUserWritableSource(t *testing.T) {
+// An untrusted writer on the managed Codex requirements source is permission
+// drift. Unix refuses it; Windows reads the source and logs a boundary finding
+// naming it.
+func TestInspectManagedCodexSystemRequirementsUserWritableSource(t *testing.T) {
 	original := codexSystemRequirementsPathForInspection
 	t.Cleanup(func() { codexSystemRequirementsPathForInspection = original })
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
 	path := filepath.Join(t.TempDir(), "requirements.toml")
 	if err := os.WriteFile(path, []byte("allow_managed_hooks_only = false\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -192,9 +197,64 @@ func TestInspectManagedCodexSystemRequirementsRejectsUserWritableSource(t *testi
 	grantTestUntrustedWriter(t, path)
 	codexSystemRequirementsPathForInspection = func() (string, error) { return path, nil }
 
+	var mu sync.Mutex
+	var boundaries []string
+	originalSink := managed.ReportResilienceEvent
+	t.Cleanup(func() { managed.ReportResilienceEvent = originalSink })
+	managed.ReportResilienceEvent = func(marker string, fields map[string]string) {
+		if marker != managed.MarkerBoundary {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		boundaries = append(boundaries, fields["path"])
+	}
+
+	policy, err := inspectCodexSystemRequirementsForMode(true)
+	if runtime.GOOS != "windows" {
+		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "untrusted") {
+			t.Fatalf("managed user-writable requirements error = %v, want untrusted refusal", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("managed user-writable requirements error = %v, want drifted source accepted", err)
+	}
+	if policy.Source != path || policy.AllowManagedHooksOnly == nil || *policy.AllowManagedHooksOnly {
+		t.Fatalf("managed user-writable requirements policy = %+v, want the source's allow_managed_hooks_only=false", policy)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	named := false
+	for _, boundary := range boundaries {
+		if strings.EqualFold(filepath.Clean(boundary), filepath.Clean(path)) {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("boundary findings = %v, want one naming %s", boundaries, path)
+	}
+}
+
+// Structure stays fatal: a managed requirements source reached through a
+// symlink is refused on every platform.
+func TestInspectManagedCodexSystemRequirementsRejectsSymlinkedSource(t *testing.T) {
+	original := codexSystemRequirementsPathForInspection
+	t.Cleanup(func() { codexSystemRequirementsPathForInspection = original })
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real-requirements.toml")
+	if err := os.WriteFile(target, []byte("allow_managed_hooks_only = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "requirements.toml")
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	codexSystemRequirementsPathForInspection = func() (string, error) { return path, nil }
+
 	if _, err := inspectCodexSystemRequirementsForMode(true); err == nil ||
-		!strings.Contains(strings.ToLower(err.Error()), "untrusted") {
-		t.Fatalf("managed user-writable requirements error = %v", err)
+		!strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("managed symlinked requirements error = %v, want not-a-regular-file refusal", err)
 	}
 }
 

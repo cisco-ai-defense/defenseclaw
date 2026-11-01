@@ -41,3 +41,10 @@ func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd 
 func CombinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, error) {
 	return combinedOutputTree(cmd, allowManagedBreakaway)
 }
+
+// OutputTree is CombinedOutputTree with standard output and standard error
+// captured separately, for a caller that publishes the child's machine-readable
+// stdout on its own stdout and its diagnostics elsewhere.
+func OutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) (stdout, stderr []byte, err error) {
+	return outputTree(cmd, allowManagedBreakaway)
+}

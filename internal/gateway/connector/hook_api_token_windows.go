@@ -244,7 +244,7 @@ func hookAPIValidateDirectory(path string) error {
 		// managed data and hooks directories live under, so an untrusted grant on
 		// one of those ancestors is reported, not fatal. The named directory,
 		// ancestors outside that tree, and structural failures stay fatal.
-		advisory := cur != clean && managed.PlatformInstallerOwnedPath(cur)
+		advisory := cur != clean && managed.AdvisoryAncestorPath(cur)
 		// An ancestor the user owns (the profile root) accepts and logs
 		// permission drift; helpdesk and Domain Admins grants there are
 		// routine. The named directory keeps its rules.
@@ -292,7 +292,7 @@ func hookAPIValidateUserConfigDirectory(path string, created bool) error {
 		return err
 	}
 	for cur := filepath.Dir(clean); ; cur = filepath.Dir(cur) {
-		advisory := managed.PlatformInstallerOwnedPath(cur)
+		advisory := managed.AdvisoryAncestorPath(cur)
 		if err := hookAPIValidateWindowsPathElementMode(cur, true, false, advisory, hookAPIDriftUserOwned); err != nil {
 			return err
 		}

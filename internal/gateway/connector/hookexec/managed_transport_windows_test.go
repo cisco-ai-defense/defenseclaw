@@ -122,8 +122,8 @@ func stoppedManagedGatewaySeams(t *testing.T) *bool {
 }
 
 // A stopped gateway service is "not running" only when nothing listens on
-// its port. Another listener, or a listen table the hook cannot read, keeps
-// the peer failure closed.
+// its port. Another listener keeps the peer failure closed; a listen table
+// the hook cannot read identifies no owner, so it follows the fail mode.
 func TestManagedEnterpriseTransportStoppedServiceClassifiesListenerBeforeDial(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
@@ -133,11 +133,12 @@ func TestManagedEnterpriseTransportStoppedServiceClassifiesListenerBeforeDial(t 
 	}{
 		{name: "port free", known: true, wantReason: managedGatewayNotRunningReason, wantNotRunning: true},
 		{name: "port held", listening: true, known: true, wantReason: managedGatewayPortHeldReason},
-		{name: "table unreadable", wantReason: managedGatewayPeerUnverifiedReason},
+		{name: "table unreadable", wantReason: managedGatewayPeerUnconfirmedReason, wantNotRunning: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			managedTransportTestMu.Lock()
 			defer managedTransportTestMu.Unlock()
+			fastManagedPeerRetries(t)
 			dialed := stoppedManagedGatewaySeams(t)
 			stubManagedTransportListening(t, tc.listening, tc.known)
 
