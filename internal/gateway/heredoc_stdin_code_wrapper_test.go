@@ -8,6 +8,9 @@
 package gateway
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -127,4 +130,114 @@ func TestStdinCodeWrapperKeepsTheStrictSignal(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestStdinCodeWrapperStrictSignalReadsMoreSudoForms: strict also names
+// CMD-SUDO (a LOW alert) when the elevated shell fed a heredoc is spelled
+// with clustered sudo short options, behind env or command under sudo, or
+// with doas -s and pkexec <shell>. The default and permissive packs disable
+// the rule and still allow with no finding (rel-1-0-6:GAP-0419 review
+// round 4, item 4).
+func TestStdinCodeWrapperStrictSignalReadsMoreSudoForms(t *testing.T) {
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		for _, managed := range []bool{false, true} {
+			for _, wrapper := range []string{
+				"sudo -iu root", "sudo -Eu root sh", "sudo env sh", "sudo command sh",
+				"sudo env -u FOO bash", "doas -s", "doas -u root sh", "pkexec sh", "pkexec --user root bash",
+			} {
+				command := wrapper + " <<X\nid\nX"
+				name := profile + "/" + map[bool]string{false: "per-user", true: "managed"}[managed] + "/" + wrapper
+				t.Run(name, func(t *testing.T) {
+					hook := sudoersHookRow{"claudecode", "wrapper", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": command}))}
+					blocked, _, body := postSudoersHook(t, hook, profile, managed)
+					got := "allow"
+					if blocked {
+						got = "block"
+					} else if strings.Contains(body, `"action":"alert"`) {
+						got = "alert"
+					}
+					named := strings.Contains(body, "CMD-SUDO:")
+					if profile != "strict" {
+						if named || got != "allow" {
+							t.Fatalf("%s pack: decision %s, names CMD-SUDO = %t; want allow with no finding: %.600s", profile, got, named, body)
+						}
+						return
+					}
+					if !named || got != "alert" {
+						t.Fatalf("strict: decision %s, names CMD-SUDO = %t; want an alert naming it: %.600s", got, named, body)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestStdinCodeWrapperBoundedLaneFollowsTheCustomPack: the bounded lane
+// that keeps CMD-SUDO on a partial action follows the pack's own
+// expression. A copy of the strict pack whose admin narrowed CMD-SUDO to
+// sudo -l, or turned it off with an expression other than the literal
+// false, names no CMD-SUDO for sudo sh fed a heredoc; the narrowed pack
+// still names it for sudo -l (rel-1-0-6:GAP-0419 review round 4, item 5).
+func TestStdinCodeWrapperBoundedLaneFollowsTheCustomPack(t *testing.T) {
+	for _, pack := range []struct{ name, expression string }{
+		{"narrowed", `f.commands.exists(c, c.argv_complete && c.program == 'sudo' && ('-l' in c.argv || '--list' in c.argv))`},
+		{"off", `f.tool == 'no-such-tool'`},
+	} {
+		dir := customStrictSudoPack(t, pack.expression)
+		for _, managed := range []bool{false, true} {
+			t.Run(pack.name+"/"+map[bool]string{false: "per-user", true: "managed"}[managed], func(t *testing.T) {
+				if pack.name == "narrowed" {
+					hook := sudoersHookRow{"claudecode", "wrapper", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "sudo -l"}))}
+					if _, _, body := postSudoersHookPack(t, hook, dir, managed); !strings.Contains(body, "CMD-SUDO:") {
+						t.Fatalf("narrowed pack: sudo -l names no CMD-SUDO, the pack did not load: %.600s", body)
+					}
+				}
+				for _, command := range []string{"sudo sh <<X\nid\nX", "sudo -s <<\x27X\x27\nid\nX", "cat <<X | sudo sh\nid\nX"} {
+					hook := sudoersHookRow{"claudecode", "wrapper", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": command}))}
+					blocked, _, body := postSudoersHookPack(t, hook, dir, managed)
+					if blocked || strings.Contains(body, "CMD-SUDO:") {
+						t.Fatalf("%s pack: %q blocked = %t or names CMD-SUDO: %.600s", pack.name, command, blocked, body)
+					}
+				}
+			})
+		}
+	}
+}
+
+// customStrictSudoPack copies the strict pack and sets the CMD-SUDO
+// expression.
+func customStrictSudoPack(t *testing.T, expression string) string {
+	t.Helper()
+	source := filepath.Join(guardrailPoliciesRoot(t), "strict")
+	dir := filepath.Join(t.TempDir(), "custom")
+	err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dir, relative)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if relative == filepath.Join("rules", "commands.yaml") {
+			const strictSudo = "    expression: 'true'\n    pattern: 'a^'\n    title: \"sudo privilege discovery or elevated shell\""
+			if strings.Count(string(data), strictSudo) != 1 {
+				t.Fatalf("strict CMD-SUDO rule not found in %s", path)
+			}
+			data = []byte(strings.Replace(string(data), strictSudo,
+				"    expression: \""+expression+"\"\n    pattern: 'a^'\n    title: \"sudo privilege discovery or elevated shell\"", 1))
+		}
+		return os.WriteFile(target, data, 0o600)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

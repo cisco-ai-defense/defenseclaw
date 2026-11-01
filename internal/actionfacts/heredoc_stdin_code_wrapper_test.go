@@ -83,3 +83,46 @@ func TestPOSIXStdinCodeBehindAWrapperStaysPartial(t *testing.T) {
 		})
 	}
 }
+
+// TestPOSIXStdinCodeWrapperReadsEnvOptionsAndAttachedCrontabUser: the env
+// unwrap skips env options that take a value (-u NAME, --unset NAME,
+// --unset=NAME) and the end-of-options marker, and crontab reads an attached
+// -uUSER, so a shell or crontab fed stdin behind them keeps the parse
+// partial. The benign twins stay complete (rel-1-0-6:GAP-0419 review round
+// 4, item 3).
+func TestPOSIXStdinCodeWrapperReadsEnvOptionsAndAttachedCrontabUser(t *testing.T) {
+	for _, wrapper := range []string{
+		"env -u FOO sudo sh",
+		"env --unset=FOO sudo -s",
+		"env --unset FOO sudo sh",
+		"env -- sudo sh",
+		"crontab -uroot",
+		"crontab -uroot -",
+		"sudo crontab -uroot",
+	} {
+		for _, form := range []string{
+			wrapper + " <<X\nrm -rf $D\nX",
+			wrapper + " <<\x27X\x27\nrm -rf /tmp/d\nX",
+		} {
+			t.Run(form, func(t *testing.T) {
+				facts := Analyze(Input{Tool: "shell", Command: form, CWD: "/repo", ActiveHome: "/home/alice", DialectHint: DialectPOSIX})
+				if facts.Authoritative() {
+					t.Fatalf("stdin run as code became authoritative: %#v", facts.Parse)
+				}
+			})
+		}
+	}
+	for _, form := range []string{
+		"env -u FOO sudo tee /repo/out.txt <<X\nhello $USER\nX",
+		"env -- sudo tee /repo/out.txt <<X\nhello $USER\nX",
+		"crontab -uroot -l",
+		"crontab -uroot /repo/jobs.cron",
+	} {
+		t.Run(form, func(t *testing.T) {
+			facts := Analyze(Input{Tool: "shell", Command: form, CWD: "/repo", ActiveHome: "/home/alice", DialectHint: DialectPOSIX})
+			if !facts.Authoritative() {
+				t.Fatalf("benign twin became partial: %#v", facts.Parse)
+			}
+		})
+	}
+}

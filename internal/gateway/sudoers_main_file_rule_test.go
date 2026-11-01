@@ -159,6 +159,12 @@ func sudoersBenignNeighbours() []sudoersHookRow {
 // whether the response names the sudoers rule, and the response.
 func postSudoersHook(t *testing.T, row sudoersHookRow, profile string, managed bool) (bool, bool, string) {
 	t.Helper()
+	return postSudoersHookPack(t, row, filepath.Join(guardrailPoliciesRoot(t), profile), managed)
+}
+
+// postSudoersHookPack is postSudoersHook with the rule pack in packDir.
+func postSudoersHookPack(t *testing.T, row sudoersHookRow, packDir string, managed bool) (bool, bool, string) {
+	t.Helper()
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	project := filepath.Join(home, "proj")
@@ -174,12 +180,12 @@ func postSudoersHook(t *testing.T, row sudoersHookRow, profile string, managed b
 		}
 	}
 	t.Setenv("HOME", home)
-	installToolCallCorpusProfileConnector(t, row.connector, profile)
+	installToolCallCorpusPackDirConnector(t, row.connector, packDir)
 	raw := string(mustJSON(t, row.body(project)))
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = row.connector
-	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile)
+	cfg.Guardrail.RulePackDir = packDir
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/"+row.connector+"/hook", strings.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")

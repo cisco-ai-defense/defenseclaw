@@ -13238,6 +13238,26 @@ func posixWrapperRunsStdinAsCode(argv []string) bool {
 				if len(rest) > 0 {
 					rest = rest[1:]
 				}
+			default:
+				// A cluster of short options (-iu root, -Eu root sh): a
+				// value option takes the rest of the word, or the next
+				// word when it ends the cluster.
+				if strings.HasPrefix(option, "--") {
+					continue
+				}
+				for index := 1; index < len(option); index++ {
+					letter := option[index]
+					if letter == 's' || letter == 'i' {
+						shell = true
+						continue
+					}
+					if strings.IndexByte(privilegeWrapperValueOptions, letter) >= 0 {
+						if index == len(option)-1 && len(rest) > 0 {
+							rest = rest[1:]
+						}
+						break
+					}
+				}
 			}
 		}
 		if len(rest) == 0 {
@@ -13266,6 +13286,8 @@ func posixWrapperRunsStdinAsCode(argv []string) bool {
 			switch argument := argv[index]; {
 			case argument == "-u":
 				index++
+			case strings.HasPrefix(argument, "-u"):
+				// -uUSER: the user is attached to the option.
 			case argument == "-":
 				return true
 			case strings.HasPrefix(argument, "-"):
@@ -13280,20 +13302,21 @@ func posixWrapperRunsStdinAsCode(argv []string) bool {
 	}
 }
 
-// posixStdinCodeUnwrap drops a leading env (with its assignments and -i)
-// or command (-p), which start the next word with the same stdin.
+// privilegeWrapperValueOptions are the short options of sudo, doas and
+// pkexec that take a value.
+const privilegeWrapperValueOptions = "aCDghpRrTtUu"
+
+// posixStdinCodeUnwrap drops a leading env (its options, --, and its
+// NAME=VALUE assignments) or command (-p, --), which start the next word
+// with the same stdin.
 func posixStdinCodeUnwrap(argv []string) []string {
 	for len(argv) > 0 {
 		switch commandProgram(argv[0]) {
 		case "env":
-			argv = argv[1:]
-			for len(argv) > 0 && (argv[0] == "-i" || argv[0] == "-" ||
-				strings.Contains(argv[0], "=") && !strings.HasPrefix(argv[0], "-")) {
-				argv = argv[1:]
-			}
+			argv = posixEnvCommand(argv[1:])
 		case "command":
 			argv = argv[1:]
-			for len(argv) > 0 && argv[0] == "-p" {
+			for len(argv) > 0 && (argv[0] == "-p" || argv[0] == "--") {
 				argv = argv[1:]
 			}
 		default:
@@ -13303,10 +13326,66 @@ func posixStdinCodeUnwrap(argv []string) []string {
 	return argv
 }
 
+// posixEnvCommand is the command env runs, given env's arguments: it skips
+// the flags (-i, -, -0, -v and their long forms), the options that take a
+// value (-u NAME, -C DIR, -P PATH, attached or as the next word, and
+// --name=value), the end-of-options marker and the assignments. -S splits
+// its value into the words of the command. An unknown option is returned
+// as it is, so nothing past it counts as the command.
+func posixEnvCommand(argv []string) []string {
+	for len(argv) > 0 {
+		option := argv[0]
+		switch {
+		case option == "--":
+			argv = argv[1:]
+			for len(argv) > 0 && posixEnvAssignment(argv[0]) {
+				argv = argv[1:]
+			}
+			return argv
+		case option == "-" || option == "-i" || option == "-0" || option == "-v",
+			option == "--ignore-environment" || option == "--null" || option == "--debug",
+			option == "--block-signal" || option == "--default-signal" || option == "--ignore-signal",
+			strings.HasPrefix(option, "--") && strings.Contains(option, "=") &&
+				!strings.HasPrefix(option, "--split-string="):
+			argv = argv[1:]
+		case option == "-u" || option == "-C" || option == "-P" ||
+			option == "--unset" || option == "--chdir":
+			if len(argv) < 2 {
+				return nil
+			}
+			argv = argv[2:]
+		case option == "-S" || option == "--split-string":
+			if len(argv) < 2 {
+				return nil
+			}
+			return append(strings.Fields(argv[1]), argv[2:]...)
+		case strings.HasPrefix(option, "--split-string="):
+			return append(strings.Fields(strings.TrimPrefix(option, "--split-string=")), argv[1:]...)
+		case len(option) > 2 && option[0] == '-' && option[1] == 'S':
+			return append(strings.Fields(option[2:]), argv[1:]...)
+		case len(option) > 2 && option[0] == '-' && strings.IndexByte("uCP", option[1]) >= 0:
+			argv = argv[1:]
+		case posixEnvAssignment(option):
+			argv = argv[1:]
+		default:
+			return argv
+		}
+	}
+	return argv
+}
+
+func posixEnvAssignment(word string) bool {
+	return strings.Contains(word, "=") && !strings.HasPrefix(word, "-")
+}
+
 // posixStdinCodeTarget reports the program a privilege wrapper starts when
-// it runs its standard input as code: a shell without -c, or another
-// wrapper or scheduler that does.
+// it runs its standard input as code: a shell without -c (also behind env
+// or command), or another wrapper or scheduler that does.
 func posixStdinCodeTarget(argv []string) bool {
+	argv = posixStdinCodeUnwrap(argv)
+	if len(argv) == 0 {
+		return false
+	}
 	if posixShellProgram(commandProgram(argv[0])) {
 		for _, argument := range argv[1:] {
 			if argument == "-c" {
@@ -13316,4 +13395,10 @@ func posixStdinCodeTarget(argv []string) bool {
 		return true
 	}
 	return posixWrapperRunsStdinAsCode(argv)
+}
+
+// POSIXExecWrapperTarget is argv without a leading env or command wrapper
+// (their options and assignments): the command they start.
+func POSIXExecWrapperTarget(argv []string) []string {
+	return posixStdinCodeUnwrap(argv)
 }
