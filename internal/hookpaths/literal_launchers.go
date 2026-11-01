@@ -331,7 +331,7 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		if dest := cpDestination(words[1:], makeStatic(len(words)-1), cwd); dest != "" {
 			return []string{dest}
 		}
-	case program == "tee":
+	case program == "tee" || program == "gtee":
 		var names []string
 		for _, word := range words[1:] {
 			if word == "--" {
@@ -341,6 +341,33 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 				continue
 			}
 			names = append(names, word)
+		}
+		return add(names)
+	case program == "dd" || program == "gdd":
+		// dd writes its of= operand; with several, GNU dd uses the last,
+		// so each is listed (GAP-0228).
+		var names []string
+		for _, word := range words[1:] {
+			if output, ok := strings.CutPrefix(word, "of="); ok && output != "" {
+				names = append(names, output)
+			}
+		}
+		return add(names)
+	case program == "truncate" || program == "gtruncate":
+		// truncate FILE... rewrites every file operand; -s and -r take a
+		// value (GAP-0228: a brace operand is read as its fixed words).
+		var names []string
+		for i := 1; i < len(words); i++ {
+			switch word := words[i]; {
+			case word == "--":
+				names = append(names, words[i+1:]...)
+				return add(names)
+			case word == "-s" || word == "-r" || word == "--size" || word == "--reference":
+				i++
+			case strings.HasPrefix(word, "-"):
+			default:
+				names = append(names, word)
+			}
 		}
 		return add(names)
 	case program == "ln":

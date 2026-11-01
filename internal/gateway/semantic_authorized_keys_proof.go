@@ -19,6 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -535,7 +536,10 @@ func trustedDDOutputAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if err != nil || len(file.Stmts) != 1 {
 		return false
 	}
-	var output string
+	// Every of= operand is read, and a brace word as the words bash makes
+	// of it: dd of=x of=keys and dd of=~/.ssh/authorized_key{x,s} write
+	// the keys file, because dd uses its last of= (GAP-0228).
+	var outputs []string
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Assigns) != 0 || len(call.Args) < 2 ||
@@ -547,18 +551,49 @@ func trustedDDOutputAuthorizedKeysWrite(input actionfacts.Input) bool {
 			return true
 		}
 		for _, word := range call.Args[1:] {
-			start, end := int(word.Pos().Offset()), int(word.End().Offset())
-			if start < 0 || end > len(input.Command) || end-start <= 3 {
-				continue
-			}
-			if candidate := input.Command[start:end]; strings.HasPrefix(candidate, "of=") {
-				output = candidate[3:]
-				return false
+			for _, candidate := range trustedBraceWordTexts(input.Command, word) {
+				if len(candidate) > 3 && strings.HasPrefix(candidate, "of=") {
+					outputs = append(outputs, candidate[3:])
+				}
 			}
 		}
 		return false
 	})
-	return output != "" && trustedAuthorizedKeysRedirectText(input, output)
+	for _, output := range outputs {
+		if trustedAuthorizedKeysRedirectText(input, output) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedBraceWordTexts is the source text of word, or of each word its
+// brace expansion makes, printed back with its quotes and parameters so the
+// home spelling is read as before. Past 64 words only the last is kept: a
+// repeated dd operand takes its last value.
+func trustedBraceWordTexts(command string, word *syntax.Word) []string {
+	start, end := int(word.Pos().Offset()), int(word.End().Offset())
+	if start < 0 || end > len(command) || end <= start {
+		return nil
+	}
+	split := *word
+	if !syntax.SplitBraces(&split) {
+		return []string{command[start:end]}
+	}
+	words := expand.Braces(&split)
+	if len(words) > 64 {
+		words = words[len(words)-1:]
+	}
+	printer := syntax.NewPrinter()
+	texts := make([]string, 0, len(words))
+	for _, expanded := range words {
+		var text strings.Builder
+		if err := printer.Print(&text, expanded); err != nil {
+			return nil
+		}
+		texts = append(texts, text.String())
+	}
+	return texts
 }
 
 func trustedAuthorizedKeysRedirectTarget(input actionfacts.Input, target *syntax.Word) bool {

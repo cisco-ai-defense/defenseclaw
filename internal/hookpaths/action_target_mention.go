@@ -2930,8 +2930,9 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 	skip := make([]bool, len(words))
 	// The printed ~ is text only in a command whose statements all print,
 	// read or run git: a writer elsewhere keeps the TGT-0194 mention rule.
-	// The scanner does not split statements at a line end, so a command of
-	// several lines is not text only.
+	// The scanner ends a statement at a line end (GAP-0234), but a command
+	// of several lines may be one script block or a here-string body, so
+	// it is not text only.
 	textOnly := !multiline
 	for start, i := 0, 0; i <= len(words); i++ {
 		if i < len(words) && words[i] != ";" && words[i] != "|" && words[i] != "||" && words[i] != "&" && words[i] != "&&" {
@@ -2959,6 +2960,20 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 		if i < len(words) && words[i] != ";" && words[i] != "|" && words[i] != "||" && words[i] != "&" && words[i] != "&&" {
 			continue
 		}
+		if i > start && actionWindowsTextProgram(words[start]) && actionWindowsNestedArgument(scan, start, i) {
+			// PowerShell runs a (...), $(...) or @(...) argument of a
+			// print as a nested statement: its words are a command, not
+			// text, and its parentheses are no part of a path
+			// (rel-1-0-6:GAP-0234, echo (cp a.txt '<pattern>')).
+			for j := start + 1; j < i; j++ {
+				if !scan.quoted[j] {
+					words[j] = strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(words[j], "$("), "@("), "(")
+				}
+				words[j] = strings.TrimRight(words[j], ")")
+			}
+			start = i + 1
+			continue
+		}
 		if i > start && (actionWindowsTextProgram(words[start]) || actionWindowsNativeProgram(words[start])) {
 			pattern := start + actionWindowsSearchPatternWord(words[start:i])
 			for j := start + 1; j < i; j++ {
@@ -2983,6 +2998,19 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 		start = i + 1
 	}
 	return skip
+}
+
+// actionWindowsNestedArgument reports a statement words[start:end] with an
+// unquoted argument that opens a PowerShell grouping or subexpression:
+// (, $( or @( (rel-1-0-6:GAP-0234).
+func actionWindowsNestedArgument(scan actionWindowsScanResult, start, end int) bool {
+	for j := start + 1; j < end; j++ {
+		word := scan.words[j]
+		if !scan.quoted[j] && (strings.HasPrefix(word, "(") || strings.HasPrefix(word, "@(")) || strings.Contains(word, "$(") {
+			return true
+		}
+	}
+	return false
 }
 
 func actionWindowsLocationProgram(word string) bool {
