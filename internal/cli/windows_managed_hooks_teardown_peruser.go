@@ -89,17 +89,24 @@ const windowsManagedClaudeTransactionLock = ".defenseclaw-v2-protocol.lock"
 var windowsManagedClaudeTransactionLeftoverRemover = func() error {
 	dir, err := windowsManagedClaudeTransactionDir()
 	if err != nil {
-		return err
+		return fmt.Errorf(`%%LOCALAPPDATA%%\DefenseClaw\claude-settings-teardown: kept: %w`, err)
 	}
 	return removeWindowsManagedClaudeTransactionFolder(dir)
 }
 
+// windowsManagedClaudeTransactionKept is the error, and the
+// machine_state_remaining entry ("path: kept: reason"), for a transaction
+// folder that stays.
+func windowsManagedClaudeTransactionKept(dir, reason string) error {
+	return fmt.Errorf("%s: kept: %s", dir, reason)
+}
+
 // removeWindowsManagedClaudeTransactionFolder removes the Claude cleanup
-// transaction folder once an uninstall has committed, when all it holds is
-// the empty protocol lock, and then the DefenseClaw folder above it once that
-// is empty. The guardian and a Setup or bundle uninstall run the cleanup as
-// LocalSystem, so the uninstall left this behind (sidecar-r107:GAP-0007), as
-// it left the lifecycle lock before (sidecar-aispg-retest:GAP-0022):
+// transaction folder when all it holds is the empty protocol lock, and then
+// the DefenseClaw folder above it once that is empty. The guardian and a
+// Setup or bundle uninstall run the cleanup as LocalSystem, so the uninstall
+// left this behind (sidecar-r107:GAP-0007), as it left the lifecycle lock
+// before (sidecar-aispg-retest:GAP-0022):
 //
 //	C:\Windows\System32\config\systemprofile\AppData\Local\DefenseClaw\claude-settings-teardown
 //
@@ -107,50 +114,95 @@ var windowsManagedClaudeTransactionLeftoverRemover = func() error {
 // transaction needs a folder the current token owns, and its receipts must
 // outlive the StateRoot an uninstall retires. A folder that holds anything
 // else (the receipts of an unfinished transaction), a lock with content or
-// one another process holds open, and any link stay.
+// one another process holds open, and any link or junction stay, with a
+// windowsManagedClaudeTransactionKept error.
 func removeWindowsManagedClaudeTransactionFolder(dir string) error {
 	info, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return err
+		return windowsManagedClaudeTransactionKept(dir, err.Error())
 	}
 	if info.Mode()&os.ModeType != os.ModeDir {
-		return fmt.Errorf("%s is not a plain folder", dir)
+		return windowsManagedClaudeTransactionKept(dir, "it is not a plain folder")
+	}
+	parent := filepath.Dir(dir)
+	if parentInfo, err := os.Lstat(parent); err != nil || parentInfo.Mode()&os.ModeType != os.ModeDir {
+		return windowsManagedClaudeTransactionKept(dir, "its DefenseClaw folder is not a plain folder")
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return err
+		return windowsManagedClaudeTransactionKept(dir, err.Error())
 	}
 	if len(entries) > 1 || (len(entries) == 1 && !strings.EqualFold(entries[0].Name(), windowsManagedClaudeTransactionLock)) {
-		return fmt.Errorf("%s holds an unfinished Claude settings transaction", dir)
+		return windowsManagedClaudeTransactionKept(dir, "it holds an unfinished Claude Code settings cleanup")
 	}
 	if len(entries) == 1 {
 		lock := filepath.Join(dir, entries[0].Name())
 		lockInfo, err := os.Lstat(lock)
 		if err != nil {
-			return err
+			return windowsManagedClaudeTransactionKept(dir, err.Error())
 		}
 		if !lockInfo.Mode().IsRegular() || lockInfo.Size() != 0 {
-			return fmt.Errorf("%s is not an empty lock file", lock)
+			return windowsManagedClaudeTransactionKept(dir, entries[0].Name()+" is not an empty lock file")
 		}
 		// The connector opens the lock without delete sharing, so a
 		// transaction still running makes this fail and keeps it.
 		if err := os.Remove(lock); err != nil {
-			return err
+			return windowsManagedClaudeTransactionKept(dir, "its lock is in use: "+err.Error())
 		}
 	}
 	if err := os.Remove(dir); err != nil {
-		return err
+		return windowsManagedClaudeTransactionKept(dir, err.Error())
 	}
-	parent := filepath.Dir(dir)
-	if parentInfo, err := os.Lstat(parent); err == nil && parentInfo.Mode()&os.ModeType == os.ModeDir {
-		if left, err := os.ReadDir(parent); err == nil && len(left) == 0 {
-			_ = os.Remove(parent)
-		}
+	if left, err := os.ReadDir(parent); err == nil && len(left) == 0 {
+		_ = os.Remove(parent)
 	}
 	return nil
+}
+
+// windowsManagedClaudeGuardianLeftoverRemover runs after each Claude
+// settings migration pass of the guardian, so its LocalSystem copy of the
+// transaction folder exists only while a cleanup runs: that copy's DACL
+// grants LocalSystem alone, so an uninstall from an elevated prompt could
+// not remove it. It also takes a copy an earlier release left. Replaceable
+// in tests.
+var windowsManagedClaudeGuardianLeftoverRemover = func() error {
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return nil
+	}
+	dir, err := windowsManagedClaudeTransactionDir()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
+	if err != nil {
+		return err
+	}
+	return removeWindowsManagedClaudeTransactionFolderOutsideLifecycle(dir, filepath.Join(roots.LifecycleDir, "lifecycle.lock"))
+}
+
+// windowsManagedClaudeLifecycleLock is replaceable in tests.
+var windowsManagedClaudeLifecycleLock = acquireWindowsEnterpriseLifecycleLock
+
+// removeWindowsManagedClaudeTransactionFolderOutsideLifecycle removes the
+// transaction folder holding the lifecycle lock, and does nothing while a
+// lifecycle run (install, upgrade, repair, uninstall) holds it or the lock is
+// absent: that run's own cleanups use the folder, and its finalize removes it.
+func removeWindowsManagedClaudeTransactionFolderOutsideLifecycle(dir, lifecycleLock string) error {
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	release, err := windowsManagedClaudeLifecycleLock(lifecycleLock)
+	if err != nil {
+		return nil
+	}
+	defer release()
+	return removeWindowsManagedClaudeTransactionFolder(dir)
 }
 
 var windowsManagedClaudeSettingsRemover = removeWindowsManagedClaudeUserSettings

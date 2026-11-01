@@ -910,13 +910,13 @@ without `PURGE=1`. A plain installed CLI uninstall leaves the lock file and its 
 in place (without `--purge`). They are harmless and the next install reuses them; to remove them, delete
 `C:\ProgramData\Cisco\DefenseClaw-Lifecycle` from an elevated prompt once no
 DefenseClaw run is active. The Secure Client profile keeps the lock unless `PURGE=1`.
-A standalone uninstall also removes, with or without purge, the folder the Claude Code
-settings cleanup keeps in the profile of the account that runs it,
-`C:\Windows\System32\config\systemprofile\AppData\Local\DefenseClaw\claude-settings-teardown`
-for the guardian and a Setup uninstall (it holds one empty lock file), and the `DefenseClaw`
-folder above it once that is empty. The folder stays while it holds an unfinished cleanup.
-An uninstall from an elevated prompt removes only that
-administrator's own copy.
+The Claude Code settings cleanup keeps a folder in the profile of the account that runs
+it: `C:\Windows\System32\config\systemprofile\AppData\Local\DefenseClaw\claude-settings-teardown`
+for the guardian and a Setup uninstall. Once a cleanup ends, the folder holds one empty lock
+file. The guardian removes that folder, and the empty `DefenseClaw` folder above it, after each
+pass. A standalone uninstall removes the copy of the account that runs it, with or without
+purge. A folder that still holds an unfinished cleanup stays, and the result names it in a
+`machine_state_kept` warning.
 On a computer without DefenseClaw, uninstall succeeds and changes nothing, so it does
 not remove a lock an earlier uninstall left.
 

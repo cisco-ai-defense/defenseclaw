@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -821,8 +822,9 @@ func TestWindowsUninstallKeepsClaudeCleanupTransactionFolderInUse(t *testing.T) 
 	}
 	assertKept := func(t *testing.T, dir string) {
 		t.Helper()
-		if err := removeWindowsManagedClaudeTransactionFolder(dir); err == nil {
-			t.Fatal("the transaction folder was removed")
+		err := removeWindowsManagedClaudeTransactionFolder(dir)
+		if err == nil || !strings.HasPrefix(err.Error(), dir+": kept: ") {
+			t.Fatalf("the transaction folder was not kept and named: %v", err)
 		}
 		if _, err := os.Lstat(filepath.Join(dir, windowsManagedClaudeTransactionLock)); err != nil {
 			t.Fatalf("the lock went: %v", err)
@@ -889,6 +891,139 @@ func TestWindowsUninstallKeepsClaudeCleanupTransactionFolderInUse(t *testing.T) 
 			t.Fatalf("the link target's lock went: %v", err)
 		}
 	})
+	junction := func(t *testing.T, link, target string) {
+		t.Helper()
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Fatalf("mklink /J: %v: %s", err, out)
+		}
+	}
+	t.Run("junction", func(t *testing.T) {
+		_, target := newFolder(t, nil)
+		link := filepath.Join(t.TempDir(), "claude-settings-teardown")
+		junction(t, link, target)
+		assertKept(t, link)
+		if _, err := os.Lstat(link); err != nil {
+			t.Fatalf("the junction went: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(target, windowsManagedClaudeTransactionLock)); err != nil {
+			t.Fatalf("the junction target's lock went: %v", err)
+		}
+	})
+	t.Run("junction at the DefenseClaw folder", func(t *testing.T) {
+		realParent, _ := newFolder(t, nil)
+		parent := filepath.Join(t.TempDir(), "DefenseClaw")
+		junction(t, parent, realParent)
+		assertKept(t, filepath.Join(parent, "claude-settings-teardown"))
+		if _, err := os.Lstat(parent); err != nil {
+			t.Fatalf("the junction went: %v", err)
+		}
+	})
+}
+
+// The guardian removes its own leftover after a migration pass, holding the
+// lifecycle lock, and leaves it while a lifecycle run holds that lock or the
+// lock is absent, so an uninstall from an elevated prompt, which cannot open
+// the LocalSystem copy, finds nothing left (sidecar-r107:GAP-0007).
+func TestWindowsGuardianRemovesClaudeTransactionLeftoverOutsideLifecycle(t *testing.T) {
+	newFolder := func(t *testing.T) string {
+		t.Helper()
+		dir := filepath.Join(t.TempDir(), "DefenseClaw", "claude-settings-teardown")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, windowsManagedClaudeTransactionLock), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	lifecycleLock := filepath.Join(t.TempDir(), "lifecycle.lock")
+	if err := os.WriteFile(lifecycleLock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := newFolder(t)
+	if err := removeWindowsManagedClaudeTransactionFolderOutsideLifecycle(dir, lifecycleLock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Dir(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the guardian left its transaction folder: %v", err)
+	}
+
+	// A lifecycle run holds the lock exclusively, as the PowerShell
+	// lifecycle opens it.
+	dir = newFolder(t)
+	name, err := windows.UTF16PtrFromString(lifecycleLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil,
+		windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := removeWindowsManagedClaudeTransactionFolderOutsideLifecycle(dir, lifecycleLock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, windowsManagedClaudeTransactionLock)); err != nil {
+		t.Fatalf("the guardian removed the folder during a lifecycle run: %v", err)
+	}
+	if err := windows.CloseHandle(held); err != nil {
+		t.Fatal(err)
+	}
+
+	// No lifecycle lock: the folder stays.
+	if err := removeWindowsManagedClaudeTransactionFolderOutsideLifecycle(dir, filepath.Join(t.TempDir(), "lifecycle.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, windowsManagedClaudeTransactionLock)); err != nil {
+		t.Fatalf("the guardian removed the folder without a lifecycle lock: %v", err)
+	}
+	// Absent folder: nothing to do.
+	if err := removeWindowsManagedClaudeTransactionFolderOutsideLifecycle(filepath.Join(t.TempDir(), "absent"), lifecycleLock); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The migration pass runs the guardian's leftover removal after the read-only
+// probe or the settings remover succeeded, and not after a failure.
+func TestMigrateWindowsClaudeUserHooksRemovesTransactionLeftover(t *testing.T) {
+	previousRemover, previousProbe := windowsManagedClaudeSettingsRemover, windowsManagedClaudeRegistrationProbe
+	previousLeftover := windowsManagedClaudeGuardianLeftoverRemover
+	t.Cleanup(func() {
+		windowsManagedClaudeSettingsRemover, windowsManagedClaudeRegistrationProbe = previousRemover, previousProbe
+		windowsManagedClaudeGuardianLeftoverRemover = previousLeftover
+	})
+	leftovers := 0
+	windowsManagedClaudeGuardianLeftoverRemover = func() error {
+		leftovers++
+		return nil
+	}
+	target := enterprisehooks.TargetCredentials{UserHome: `C:\Users\alice`, SID: userCleanupSIDA}
+	for _, tc := range []struct {
+		name       string
+		present    bool
+		probeErr   error
+		removerErr error
+		want       int
+	}{
+		{name: "removed", present: true, want: 1},
+		{name: "nothing to remove", present: false, want: 1},
+		{name: "remover failed", present: true, removerErr: errors.New("access denied"), want: 0},
+		{name: "probe failed", probeErr: errors.New("unreadable"), want: 0},
+	} {
+		leftovers = 0
+		windowsManagedClaudeRegistrationProbe = func(string, string) (bool, []string, error) {
+			return tc.present, nil, tc.probeErr
+		}
+		windowsManagedClaudeSettingsRemover = func(string, string) (int, []string, error) {
+			return 1, nil, tc.removerErr
+		}
+		var log strings.Builder
+		migrateWindowsClaudeUserHooks(&log, &log, target)
+		if leftovers != tc.want {
+			t.Fatalf("%s: leftover removal ran %d time(s), want %d\n%s", tc.name, leftovers, tc.want, log.String())
+		}
+	}
 }
 
 // The standalone finalize removes the leftover with and without purge and
@@ -916,9 +1051,11 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupRemovesClaudeTransactionL
 	windowsManagedHooksStandaloneCursorTombstonePurger = func() error { return nil }
 	enterpriseHookWindowsUserCleanupIdentity = func() error { return errors.New("not LocalSystem") }
 	calls := 0
+	kept := windowsManagedClaudeTransactionKept(`C:\Windows\System32\config\systemprofile\AppData\Local\DefenseClaw\claude-settings-teardown`,
+		"it holds an unfinished Claude Code settings cleanup")
 	windowsManagedClaudeTransactionLeftoverRemover = func() error {
 		calls++
-		return errors.New("holds an unfinished Claude settings transaction")
+		return kept
 	}
 	manifest := perUserTeardownManifest("claudecode")
 	manifest.Targets[0].UserHome = t.TempDir()
@@ -940,5 +1077,19 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupRemovesClaudeTransactionL
 		if len(report.UserRegistrationsFailed) != 0 {
 			t.Fatalf("purge=%s: a kept transaction folder failed the finalize: %v", purge, report.UserRegistrationsFailed)
 		}
+		// The kept folder is named, as machine_state_kept, not dropped.
+		if len(report.MachineStateRemaining) != 1 || report.MachineStateRemaining[0] != kept.Error() {
+			t.Fatalf("purge=%s: kept transaction folder not reported: %v", purge, report.MachineStateRemaining)
+		}
+		if body, _ := json.Marshal(report); !strings.Contains(string(body), `"machine_state_remaining":["C:\\Windows\\`) {
+			t.Fatalf("purge=%s: report JSON lacks machine_state_remaining: %s", purge, body)
+		}
+	}
+	// A removed folder adds nothing.
+	windowsManagedClaudeTransactionLeftoverRemover = func() error { return nil }
+	report = windowsManagedHooksTeardownReport{}
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if len(report.MachineStateRemaining) != 0 {
+		t.Fatalf("a removed transaction folder was reported: %v", report.MachineStateRemaining)
 	}
 }

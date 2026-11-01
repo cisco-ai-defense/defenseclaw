@@ -110,6 +110,7 @@ type windowsManagedHooksTeardownReport struct {
 	UserStatePurged              []string                            `json:"user_state_purged,omitempty"`
 	UserSettingsEdited           []string                            `json:"user_settings_edited,omitempty"`
 	UserSettingsHooksLeft        []string                            `json:"user_settings_hooks_left,omitempty"`
+	MachineStateRemaining        []string                            `json:"machine_state_remaining,omitempty"`
 	Results                      []windowsManagedHooksTeardownResult `json:"results"`
 	Error                        string                              `json:"error,omitempty"`
 }
@@ -140,9 +141,12 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	revokeErr := windowsManagedHooksStandaloneInventoryACERevoker(manifest)
 	cleanup := windowsManagedHooksStandaloneUserRegistrationRemover(context.Background(), runtimeDir, manifest)
 	// The settings cleanups are done, so their transaction folder in this
-	// token's cache goes too, also without purge. A folder that stays holds
-	// an unfinished transaction for the next install to recover.
-	_ = windowsManagedClaudeTransactionLeftoverRemover()
+	// token's cache goes too, also without purge. One that stays is named in
+	// machine_state_remaining ("path: kept: reason"), which the lifecycle
+	// reports as machine_state_kept (sidecar-r107:GAP-0007).
+	if err := windowsManagedClaudeTransactionLeftoverRemover(); err != nil {
+		report.MachineStateRemaining = append(report.MachineStateRemaining, boundedEnterpriseHookUserCleanupText(err.Error()))
+	}
 	report.UserRegistrationsRemoved = len(cleanup.Removed)
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
