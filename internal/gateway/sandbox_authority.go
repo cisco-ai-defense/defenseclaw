@@ -230,8 +230,10 @@ func (a *APIServer) sandboxAuth() (*sandboxAuthority, error) {
 // registrations only once that write is stored: a failed write or a crash in
 // between leaves the registrations, so the next start finds them and tries
 // again. A decision saved before 1.0.7 is stamped with its account's key on
-// the way (FileDecisionStore.SettleAccount).
-func (a *APIServer) sandboxForgetPreviousAccounts(auth *sandboxAuthority, peer managedHookPeer, subjectKey string) {
+// the way (FileDecisionStore.SettleAccount); one whose registration is gone
+// but whose actor's directory principal is not the caller's is dropped as
+// another account's.
+func (a *APIServer) sandboxForgetPreviousAccounts(ctx context.Context, auth *sandboxAuthority, peer managedHookPeer, subjectKey string) {
 	uid := peer.UID
 	if subjectKey == "" || strings.TrimSpace(peer.Name) == "" {
 		return
@@ -254,10 +256,22 @@ func (a *APIServer) sandboxForgetPreviousAccounts(auth *sandboxAuthority, peer m
 			return
 		}
 	}
+	// A legacy decision of a registration that is gone names no account,
+	// but its actor's directory principal can prove another one: both
+	// principals known and different (a principal the directory does not
+	// give now proves nothing).
+	principal := sandboxPrincipalHash(auth.key, sandboxPeerPrincipal(ctx))
+	for _, d := range saved {
+		if _, owned := owners[d.Registration]; !owned && d.SubjectKey == "" && principal != "" &&
+			d.Actor.PrincipalHash != "" && d.Actor.PrincipalHash != principal {
+			owners[d.Registration] = sandboxreg.DigestPrefix + "another-principal"
+		}
+	}
 	settle := false
 	confirm := reused
 	for _, d := range saved {
-		_, owned := owners[d.Registration]
+		owner, owned := owners[d.Registration]
+		owned = owned && owner == subjectKey
 		settle = settle || d.SubjectKey == "" || d.SubjectKey != subjectKey
 		confirm = confirm || (d.SubjectKey == "" && !owned) || (d.SubjectKey != "" && d.SubjectKey != subjectKey)
 	}

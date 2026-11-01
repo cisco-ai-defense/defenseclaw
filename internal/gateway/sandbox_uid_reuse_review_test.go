@@ -186,3 +186,38 @@ func TestSandboxFirstStartAfterTheUpgradeStampsLegacyDecisions(t *testing.T) {
 		t.Fatal("a stamped decision must apply to its account only")
 	}
 }
+
+// Review of rel-1-0-6:GAP-0262, item 3: a legacy decision whose
+// registration is gone is another account's when its actor's directory
+// principal is known and is not the caller's: it is dropped, not stamped.
+// One with no principal is stamped to the caller (the documented residual,
+// rel-1-0-6:GAP-0282).
+func TestSandboxLegacyDecisionOfAnotherPrincipalIsDropped(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
+	stubSandboxAccountNow(t, func(int) (string, error) { return sbxAlice.Name, nil })
+	auth, err := f.api.sandboxAuth()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, principal := range []string{"ent-mallory@DCLAB.TEST", "ent-alice@DCLAB.TEST", ""} {
+		gone, err := sandboxreg.NewID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := sandboxreg.Decision{Registration: gone, Kind: sandboxrelay.DecisionEgressAllow, Host: "h" + string(rune('a'+i)) + ".example.com",
+			Scope: sandboxrelay.DecisionScopeAlways, Actor: sandboxreg.DecisionActor{PrincipalHash: sandboxPrincipalHash(auth.key, principal)}}
+		if err := auth.decisions.Add(sbxAlice.UID, d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.resolve(sbxAlice, claudeResolve())
+	saved, _ := auth.decisions.List(sbxAlice.UID, "")
+	hosts := ""
+	for _, d := range saved {
+		hosts += d.Host[:2]
+	}
+	if hosts != "hbhc" {
+		t.Fatalf("kept %q: the decision of another principal must go, the own and unknown ones stay", hosts)
+	}
+}
