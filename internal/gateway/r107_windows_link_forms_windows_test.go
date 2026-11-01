@@ -49,7 +49,10 @@ func TestR107WindowsManagedLinkFormsCorpus(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	okWin := strings.ReplaceAll(ok, `\`, `\\`)
-	sshWin := strings.ReplaceAll(filepath.Dir(keys), `\`, `\\`)
+	// sshBody survives both parses of a bash -lc "..." body (the outer
+	// double quotes, then the unquoted word in the body): mklink gets the
+	// absolute .ssh folder.
+	sshBody := strings.ReplaceAll(filepath.Dir(keys), `\`, `\\\\`)
 	yConfig := filepath.Join(ext, "y", "config.yaml")
 	rows := []struct {
 		id, cwd, command string
@@ -67,9 +70,15 @@ func TestR107WindowsManagedLinkFormsCorpus(t *testing.T) {
 		{"J4q", project, `bash -lc "cmd //c mklink /J L4 '` + ok + `' && echo k >> L4/ok.txt"`, false, nil, false},
 		{"J4n", project, `bash -lc "cmd //c mklink /J L4 ` + okWin + `"`, false, nil, false},
 		{"J4", project, `cmd //c "mklink /J L4 ` + okWin + `" && echo k >> L4/a.txt`, false, []string{"claudecode"}, false},
-		{"J4-keys", project, `bash -lc "cmd //c mklink /J L5 ` + sshWin + ` && echo k >> L5/authorized_keys"`, true, nil, false},
+		{"J4-keys", project, `bash -lc "cmd //c mklink /J L5 ` + sshBody + ` && echo k >> L5/authorized_keys"`, true, nil, false},
 		{"J4-keys-quoted", project, `bash -lc "cmd //c mklink /J L5 '` + filepath.Dir(keys) + `' && echo k >> L5/authorized_keys"`, true, nil, false},
 		{"J4-other-drive", project, `bash -lc "cmd //c mklink /J L6 D:\\x && echo k >> L6/authorized_keys"`, true, nil, false},
+		// Review 4: an up-level drive-relative target (forward slashes survive
+		// the body) that mklink resolves from the project to the .ssh decoy
+		// folder, as a junction and as a hard link of the keys decoy.
+		{"R4-up-junction", project, `bash -lc "cmd //c mklink /J L7 C:../.ssh && echo k >> L7/authorized_keys"`, true, nil, false},
+		{"R4-up-junction-ok", project, `bash -lc "cmd //c mklink /J L7 C:../project/src && echo k >> L7/a.txt"`, false, nil, false},
+		{"R4-up-hardlink", project, `bash -lc "cmd //c mklink /H L8 C:../.ssh/authorized_keys && echo k >> L8"`, true, nil, false},
 		// GAP-0285: a write through a disk link to the state folder. Codex
 		// on Windows runs the command as PowerShell, where /c/Users/... is
 		// \c\Users\... on the current drive, not the state file: that
