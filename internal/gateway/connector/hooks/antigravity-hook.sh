@@ -367,8 +367,12 @@ fi
 # counts as loaded only when its functions are defined.
 if [ ! -r "${HOOK_DIR}/_hardening.sh" ] || ! command . "${HOOK_DIR}/_hardening.sh" ||
   ! declare -F defenseclaw_harden_env >/dev/null; then
-  _DC_BOOT_FAIL_MODE=closed
   echo "defenseclaw: hook hardening helper unavailable; blocking (fail mode closed)" >&2
+  # Antigravity acts on the deny object of a tool call, not on the exit status.
+  if [ "${HOOK_EVENT:-}" = "PreToolUse" ]; then
+    printf '%s\n' '{"decision":"deny","reason":"DefenseClaw hook failed closed"}'
+    exit 0
+  fi
   exit 2
 fi
 {{end}}{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook

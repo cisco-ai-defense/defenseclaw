@@ -291,7 +291,6 @@ _DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
 # counts as loaded only when its functions are defined.
 if [ ! -r "${HOOK_DIR}/_hardening.sh" ] || ! command . "${HOOK_DIR}/_hardening.sh" ||
   ! declare -F defenseclaw_harden_env >/dev/null; then
-  _DC_BOOT_FAIL_MODE=closed
   echo "defenseclaw: hook hardening helper unavailable; blocking (fail mode closed)" >&2
   exit 2
 fi

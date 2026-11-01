@@ -343,7 +343,6 @@ fi
 # counts as loaded only when its functions are defined.
 if [ ! -r "${HOOK_DIR}/_hardening.sh" ] || ! command . "${HOOK_DIR}/_hardening.sh" ||
   ! declare -F defenseclaw_harden_env >/dev/null; then
-  _DC_BOOT_FAIL_MODE=closed
   echo "defenseclaw: hermes hook hardening helper unavailable; blocking (fail mode closed)" >&2
   printf '%s\n' '{"action":"block","message":"DefenseClaw hook failed closed"}'
   exit 0
