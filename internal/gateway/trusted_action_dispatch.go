@@ -4968,6 +4968,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return staticReverseShellPrerequisite(facts) ||
 				devTCPFallbackProof(facts, true)
 		},
+		boundedSubgraphProves: interactiveDevTCPShellProof,
 	},
 	"CMD-REVSHELL-NC": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -4987,8 +4988,9 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return devTCPFallbackProof(facts, false) ||
 				scriptDevTCPReverseShellProof(facts)
 		},
-		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return actionfacts.ExactPOSIXDescriptorFeedbackShell(facts)
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXDescriptorFeedbackShell(facts) ||
+				interactiveDevTCPShellProof(input, facts)
 		},
 		codeOwnedDetection: true,
 	},
@@ -5342,6 +5344,15 @@ func dnsSubstitutionSource(command actionfacts.CommandFact) bool {
 	default:
 		return false
 	}
+}
+
+func interactiveDevTCPShellProof(input actionfacts.Input, facts actionfacts.Facts) bool {
+	if facts.Parse.Dialect != actionfacts.DialectPOSIX ||
+		facts.Parse.Status != actionfacts.StatusPartial || len(facts.Commands) != 1 {
+		return false
+	}
+	command, ok := trustedBashCommandInput(input)
+	return ok && actionfacts.ExactPOSIXInteractiveDevTCPShell(command, facts)
 }
 
 func devTCPFallbackProof(
