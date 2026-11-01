@@ -39,6 +39,9 @@ func newOutageAccountHome(lookup func() string) func() string {
 }
 
 func lookupOutageAccountHome() string {
+	if filepath.IsAbs(outageAccountHomeBake) {
+		return filepath.Clean(outageAccountHomeBake)
+	}
 	uid := os.Getuid()
 	account, err := user.LookupId(strconv.Itoa(uid))
 	if err == nil && account != nil && filepath.IsAbs(account.HomeDir) {
@@ -144,6 +147,14 @@ func ownedByUID(info os.FileInfo, uid int) bool {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	return ok && uid >= 0 && int(st.Uid) == uid
 }
+
+// outageAccountHomeBake is empty in every release build. The shell hook tests
+// set it at link time (go build -ldflags -X) to an empty folder of their own,
+// so the gateway binary they run does not read the build account's real
+// ~/.defenseclaw: an install lock another test or build left there for a
+// moment closed the outage of a hook test case at random
+// (rel-1-0-6:GAP-0345). Nothing at run time can set it.
+var outageAccountHomeBake string
 
 // outageInstalledDataRoot is the data root of the installed runtime's
 // protected install state. Linux and macOS per-user installs keep none, so
