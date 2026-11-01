@@ -83,12 +83,14 @@ func hookOutageFailModeFor(connectorName, hookDir string, installWindow bool) st
 			return "closed"
 		}
 	}
-	// A config whose data_dir is elsewhere is not this runtime's config.
+	// A config whose data_dir is elsewhere is not this runtime's config,
+	// except the account's own after a data_dir move, whose hooks follow
+	// the moved folder's answer (movedDataDirOutageMode).
 	// The data directory is the one hook-data-dir names for install.sh to
 	// lock (loadHookRuntimeConfig): a relative data_dir is taken from the
 	// config's folder, never from the agent's working directory.
 	if ownDataDir == "" || !pathidentity.Same(ownDataDir, dataDir) {
-		return "closed"
+		return movedDataDirOutageMode(name, dataDir, ownDataDir, installWindow)
 	}
 	if !installWindow && hookOutageInstallHeld(dataDir) {
 		return "closed"
@@ -97,6 +99,42 @@ func hookOutageFailModeFor(connectorName, hookDir string, installWindow bool) st
 		return "open"
 	}
 	return "closed"
+}
+
+// movedDataDirOutageMode is the outage mode of the hooks in the account's
+// own .defenseclaw after `defenseclaw config set data_dir` moved the data
+// directory to ownDataDir (rel-1-0-6 GAP-0224, sweep 8). The gateway renders
+// the hooks into <data_dir>/hooks, but an agent session started before the
+// move keeps running the hooks it loaded at its start: Claude Code keeps a
+// snapshot of its hook commands for the session, Codex and OpenCode read
+// theirs once. Those hooks are the account's, and their config.yaml is the
+// account's config, the one the new folder's hooks read too
+// (hookRuntimeConfigPath). So they get the answer the hooks of ownDataDir get
+// now, with every check that answer makes (an install holding either
+// folder, a config.yaml of the new folder, strict, a saved closed). Before
+// this, such a session failed closed on every outage while a new session
+// failed open. Any other folder whose config.yaml keeps its data elsewhere
+// stays closed: only the account database names the account's folder, never
+// HOME or DEFENSECLAW_HOME.
+func movedDataDirOutageMode(name, dataDir, ownDataDir string, installWindow bool) string {
+	home := outageAccountHome()
+	if home == "" || ownDataDir == "" || !filepath.IsAbs(ownDataDir) {
+		return "closed"
+	}
+	if !pathidentity.Same(dataDir, filepath.Join(home, config.DefaultDataDirName)) {
+		return "closed"
+	}
+	if !installWindow && hookOutageInstallHeld(dataDir) {
+		return "closed"
+	}
+	// The new folder's config (its own config.yaml, or the account's when it
+	// has none) must name ownDataDir as its data directory, so the answer
+	// below takes one step and never comes back here.
+	_, movedOwn, err := loadHookRuntimeConfig(hookRuntimeConfigPath(ownDataDir))
+	if err != nil || movedOwn == "" || !pathidentity.Same(movedOwn, ownDataDir) {
+		return "closed"
+	}
+	return hookOutageFailModeFor(name, filepath.Join(ownDataDir, "hooks"), installWindow)
 }
 
 // hookRuntimeConfigPath is the config file of the per-user hook runtime

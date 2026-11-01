@@ -293,3 +293,94 @@ func TestHookOutageFailModeNowFollowsTheAccountConfigOfACustomDataDir(t *testing
 		})
 	}
 }
+
+// rel-1-0-6 GAP-0224 (sweep 8): an agent session started before `defenseclaw
+// config set data_dir` keeps running the hooks it loaded, the ones in the
+// account's own .defenseclaw (Claude Code keeps its hook commands for the
+// session). Their config.yaml is the account's config, now naming the new
+// data directory. They get the answer the new folder's hooks get: the
+// default and permissive tiers open; strict, a saved closed, an install
+// lock in either folder, a strict config.yaml of the new folder, a new
+// folder config that names yet another folder and an account the database
+// does not list close. The agent's HOME and DEFENSECLAW_HOME never stand in
+// for the account's folder.
+func TestHookOutageFailModeNowStaleAccountHooksFollowTheMovedDataDir(t *testing.T) {
+	lock := func(t *testing.T, root string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, ".install.lock"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name, account, moved string
+		lockAccount          bool
+		lockMoved            bool
+		movedElsewhere       bool
+		noAccount            bool
+		envHomeOnly          bool
+		want                 string
+	}{
+		{name: "default tier", account: outageNowDefaultConfig, want: "open"},
+		{name: "permissive tier", account: outageNowDefaultConfig + "  rule_pack: permissive\n", want: "open"},
+		{name: "strict tier", account: outageNowStrictConfig, want: "closed"},
+		{name: "saved closed", account: outageNowDefaultConfig + "  hook_fail_mode: closed\n", want: "closed"},
+		{name: "install holds the account folder", account: outageNowDefaultConfig, lockAccount: true, want: "closed"},
+		{name: "install holds the moved folder", account: outageNowDefaultConfig, lockMoved: true, want: "closed"},
+		{name: "moved folder keeps its own strict config", account: outageNowDefaultConfig, moved: outageNowStrictConfig, want: "closed"},
+		{name: "moved folder config names yet another folder", account: outageNowDefaultConfig, moved: outageNowDefaultConfig, movedElsewhere: true, want: "closed"},
+		{name: "account not in the database", account: outageNowDefaultConfig, noAccount: true, want: "closed"},
+		{name: "only the agent HOME names the folder", account: outageNowDefaultConfig, envHomeOnly: true, want: "closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := t.TempDir()
+			envHome := t.TempDir()
+			moved := t.TempDir()
+			elsewhere := t.TempDir()
+			oldAccount, oldRoot := outageAccountHome, outageInstalledDataRoot
+			outageAccountHome = func() string {
+				if tc.noAccount {
+					return ""
+				}
+				if tc.envHomeOnly {
+					return t.TempDir()
+				}
+				return account
+			}
+			outageInstalledDataRoot = func() (string, bool) { return "", false }
+			t.Cleanup(func() { outageAccountHome, outageInstalledDataRoot = oldAccount, oldRoot })
+			hooksHome := account
+			if tc.envHomeOnly {
+				hooksHome = envHome
+			}
+			t.Setenv("HOME", hooksHome)
+			t.Setenv("USERPROFILE", hooksHome)
+			t.Setenv("DEFENSECLAW_HOME", filepath.Join(hooksHome, ".defenseclaw"))
+			t.Setenv("DEFENSECLAW_CONFIG", "")
+			own := filepath.Join(hooksHome, ".defenseclaw")
+			writeOutageNowConfig(t, own, "data_dir: "+moved+"\n"+tc.account)
+			if tc.moved != "" {
+				named := moved
+				if tc.movedElsewhere {
+					named = elsewhere
+				}
+				writeOutageNowConfig(t, moved, "data_dir: "+named+"\n"+tc.moved)
+			}
+			for _, dir := range []string{filepath.Join(own, "hooks"), filepath.Join(moved, "hooks")} {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.lockAccount {
+				lock(t, own)
+			}
+			if tc.lockMoved {
+				lock(t, moved)
+			}
+			for _, connector := range []string{"claudecode", "codex", "opencode"} {
+				if got := hookOutageFailModeNow(connector, filepath.Join(own, "hooks")); got != tc.want {
+					t.Fatalf("stale hooks hookOutageFailModeNow(%s) = %q, want %q", connector, got, tc.want)
+				}
+			}
+		})
+	}
+}
