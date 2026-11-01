@@ -35,6 +35,16 @@ if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
 
 if ($StateOnRunnerDrive) {
     $stateBase = Resolve-SafeWindowsNativeBase (Get-WindowsNativeRunnerDriveBase)
+    # The hosted runner work drive root is owned by NETWORK SERVICE, an
+    # owner the audit store refuses on every ancestor of its database (and
+    # must). This disposable runner gives its drive root to Administrators;
+    # the DACL is unchanged, so the runner keeps its access.
+    $driveRoot = [IO.Path]::GetPathRoot($stateBase)
+    $driveOwner = (Get-Acl -LiteralPath $driveRoot).Owner
+    if ($driveOwner -notin @('BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM', 'NT SERVICE\TrustedInstaller')) {
+        & icacls.exe $driveRoot /setowner '*S-1-5-32-544' /c /q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "could not give $driveRoot (owner $driveOwner) to Administrators" }
+    }
     New-Item -ItemType Directory -Force -Path $stateBase | Out-Null
     # The owners the audit store checks, for the job log.
     for ($path = $stateBase; $path; $path = Split-Path -Parent $path) {
