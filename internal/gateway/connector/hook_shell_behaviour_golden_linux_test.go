@@ -566,6 +566,8 @@ type hookGoldenRaw struct {
 	HookMs       int64  `json:"hook_ms"`
 	LoadBefore   string `json:"load_before"`
 	LoadAfter    string `json:"load_after"`
+	// Rejected is every request the gateway refused for its bearer.
+	Rejected []hookGoldenRequest `json:"rejected,omitempty"`
 }
 
 // hookGoldenMismatch is one case whose digest is not the golden's.
@@ -667,6 +669,9 @@ type hookGoldenGateway struct {
 	requests []hookGoldenRequest
 	// bearer, when set, is the only Authorization this gateway answers.
 	bearer string
+	// rejected is every request refused for its bearer: kept out of the
+	// digest, checked by hookGoldenOwnRejected.
+	rejected []hookGoldenRequest
 }
 
 func (g *hookGoldenGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -676,12 +681,20 @@ func (g *hookGoldenGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// probe, is not this case's hook: only that hook holds the case's
 	// bearer. Such a request is neither answered with the case's answer nor
 	// recorded or counted, so it cannot change the case's digest
-	// (rel-1-0-6:GAP-0453).
+	// (rel-1-0-6:GAP-0453). It is kept aside, so that a request of this
+	// case's own hook without the bearer still fails the case.
+	body, _ := io.ReadAll(r.Body)
 	if g.bearer != "" && r.Header.Get("Authorization") != g.bearer {
+		header := map[string][]string{}
+		for k, v := range r.Header {
+			header[k] = append([]string(nil), v...)
+		}
+		g.mu.Lock()
+		g.rejected = append(g.rejected, hookGoldenRequest{Method: r.Method, Path: r.URL.RequestURI(), Header: header, Body: string(body)})
+		g.mu.Unlock()
 		http.Error(w, "not this golden case's hook", http.StatusMisdirectedRequest)
 		return
 	}
-	body, _ := io.ReadAll(r.Body)
 	event := r.Header.Get("X-DefenseClaw-Hook-Event")
 	if event == "" {
 		event = r.Header.Get("X-DefenseClaw-Antigravity-Event")
@@ -932,9 +945,50 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		}
 		obs.Requests = append(obs.Requests, hookGoldenRequest{Method: r.Method, Path: r.Path, Header: header, Body: norm(r.Body)})
 	}
+	obs.raw.Rejected = append([]hookGoldenRequest(nil), gateway.rejected...)
 	gateway.mu.Unlock()
 	obs.raw.CaseMs = time.Since(caseStart).Milliseconds()
+	if err := hookGoldenOwnRejected(obs.raw.Rejected, root); err != nil {
+		return obs, err
+	}
 	return obs, nil
+}
+
+// hookGoldenOwnRejected returns an error when the gateway refused a request
+// that names this case's folder. Only this case's hook knows that folder, so
+// such a request is its own hook calling without the case's bearer. The
+// bearer filter drops it, and when the hook sends it beside its expected
+// call the digest does not change: this error fails the case instead.
+// Requests of other programs name other folders and stay dropped.
+func hookGoldenOwnRejected(rejected []hookGoldenRequest, root string) error {
+	for _, r := range rejected {
+		texts := []string{r.Path, r.Body}
+		for _, v := range r.Header {
+			texts = append(texts, v...)
+		}
+		for _, s := range texts {
+			if hookGoldenNamesPath(s, root) {
+				return fmt.Errorf("the golden gateway refused a %s %s request of this case's own hook: it did not send the case's bearer", r.Method, r.Path)
+			}
+		}
+	}
+	return nil
+}
+
+// hookGoldenNamesPath reports whether s names path or a file under it. Case
+// folders are numbered, so case 1's folder must not match case 12's.
+func hookGoldenNamesPath(s, path string) bool {
+	for from := 0; ; {
+		i := strings.Index(s[from:], path)
+		if i < 0 {
+			return false
+		}
+		end := from + i + len(path)
+		if end == len(s) || s[end] < '0' || s[end] > '9' {
+			return true
+		}
+		from += i + 1
+	}
 }
 
 // hookGoldenRefusingPort binds a loopback TCP port without listening on it.
