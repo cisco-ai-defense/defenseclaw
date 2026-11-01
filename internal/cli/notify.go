@@ -17,11 +17,14 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
@@ -42,26 +45,51 @@ func newNotifyCmd() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Both runtimes that reach this command, the per-user notifier and
+			// the Secure Client Windows notifier, build their options here with
+			// enterpriseManaged false, so both read the chain marker and both
+			// chain the displaced notifier.
 			opts := buildHookOptions("codex", "notify", "", "open")
-			if !opts.ManagedEnterprise && !opts.SecureClient && os.Getenv(codexNotifyChainedEnv) != "" {
-				// A notifier this command started called it back: the turn
-				// is already forwarded, and chaining again would loop.
+			if codexNotifyChainEnded(args[0]) {
+				// A notifier this command started called it back with the
+				// same turn: it is already forwarded, and chaining again
+				// would loop.
 				return nil
 			}
-			hookexec.RunCodexNotify(cmd.Context(), opts, []byte(args[0]))
-			if !opts.ManagedEnterprise && !opts.SecureClient {
-				runOriginalCodexNotify(opts.Home, args[0])
-			}
+			forwardCodexNotify(cmd.Context(), opts, []byte(args[0]))
+			runOriginalCodexNotify(opts.Home, args[0])
 			return nil
 		},
 	}
 }
 
-// codexNotifyChainedEnv marks the notifier runOriginalCodexNotify starts. A
-// wrapper that runs DefenseClaw's notifier again, in a spelling the backup
-// check does not know, then ends the chain instead of starting it anew on
-// every pass (a notify loop of Codex computer-use).
+// forwardCodexNotify is the gateway forward; a variable so tests can stand in
+// for the gateway.
+var forwardCodexNotify = hookexec.RunCodexNotify
+
+// codexNotifyChainedEnv marks the notifier runOriginalCodexNotify starts. Its
+// value is the hex SHA-256 of that turn's payload, so only a call that carries
+// the same payload ends the chain: a wrapper that runs DefenseClaw's notifier
+// again, in a spelling the backup check does not know, stops after one pass
+// instead of looping (a notify loop of Codex computer-use). A constant or
+// inherited value, such as one a nested Codex got for another turn, matches no
+// payload and suppresses nothing. Every defenseclaw-hook notify reads it,
+// wherever it chains; the machine-policy "ignore" of the registry is not
+// applied in this process (notify skips the command pre-run that records it).
 const codexNotifyChainedEnv = "DEFENSECLAW_CODEX_NOTIFY_CHAINED"
+
+func codexNotifyPayloadDigest(payload string) string {
+	sum := sha256.Sum256([]byte(payload))
+	return hex.EncodeToString(sum[:])
+}
+
+// codexNotifyChainEnded reports whether this notify call is the second pass
+// of a turn the chained notifier handed back: the marker equals the digest of
+// this call's own payload.
+func codexNotifyChainEnded(payload string) bool {
+	value := envvars.Getenv(codexNotifyChainedEnv)
+	return value != "" && value == codexNotifyPayloadDigest(payload)
+}
 
 // The native Windows notifier keeps the user program that setup displaced.
 // Its argv is the pre-DefenseClaw snapshot, never a shell command.
@@ -79,6 +107,6 @@ func originalCodexNotifyCommand(dataDir, payload string) *exec.Cmd {
 		return nil
 	}
 	command := exec.Command(argv[0], append(argv[1:], payload)...)
-	command.Env = append(os.Environ(), codexNotifyChainedEnv+"=1")
+	command.Env = append(os.Environ(), codexNotifyChainedEnv+"="+codexNotifyPayloadDigest(payload))
 	return command
 }
