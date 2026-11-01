@@ -347,8 +347,9 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 # bearer in its environment.
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
-defenseclaw_read_stdin_into CONTENT fail_closed || {
-  _DC_STDIN_RC=$?
+{{if .SecureClient}}CONTENT="$(defenseclaw_read_stdin_capped fail_closed)" || {
+{{else}}defenseclaw_read_stdin_into CONTENT fail_closed || {
+{{end}}  _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
   PAYLOAD="$CONTENT"
   if defenseclaw_prepare_oversized_stdin "$_DC_STDIN_RC"; then
@@ -448,8 +449,10 @@ RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/response"
 {{end}}  fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"
 }{{end}}
 
-defenseclaw_split_response
-
+{{if .SecureClient}}HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+RESULT=$(echo "$RESPONSE" | sed '$d')
+{{else}}defenseclaw_split_response
+{{end}}
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
 {{else}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
@@ -465,24 +468,28 @@ fi{{end}}
 {{end}}
 {{if .Sandbox}}# Every DefenseClaw inspect verdict names its action: an empty or
 # action-less reply from the sandbox ingress is not a verdict.
-_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
-  fail_response "failed to parse action from response"
+{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{else}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
+{{end}}  fail_response "failed to parse action from response"
 }
 [ -n "$ACTION" ] || fail_response "missing action in ingress response"
-{{else}}{{if .SecureClient}}_dc_jq_into ACTION line "$RESULT" -r '.action // "allow"' 2>/dev/null || {
-  fail_response "failed to parse action from response"
+{{else}}{{if .SecureClient}}{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+{{else}}_dc_jq_into ACTION line "$RESULT" -r '.action // "allow"' 2>/dev/null || {
+{{end}}  fail_response "failed to parse action from response"
 }
 {{else}}# Only a recognized string action is a usable gateway verdict.
-_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
-  fail_response "failed to parse action from response"
+{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{else}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
+{{end}}  fail_response "failed to parse action from response"
 }
 case "$ACTION" in
   allow|alert|block|confirm) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
 {{end}}{{end}}if [ "$ACTION" = "block" ]; then
-  _dc_jq_into REASON line "$RESULT" -r '.reason // "blocked by DefenseClaw"' 2>/dev/null
-  echo "DefenseClaw: $REASON" >&2
+{{if .SecureClient}}  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // "blocked by DefenseClaw"' 2>/dev/null)
+{{else}}  _dc_jq_into REASON line "$RESULT" -r '.reason // "blocked by DefenseClaw"' 2>/dev/null
+{{end}}  echo "DefenseClaw: $REASON" >&2
   exit 2
 fi
 exit 0

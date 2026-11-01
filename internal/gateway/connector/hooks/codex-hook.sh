@@ -461,8 +461,9 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
 # fail mode: the agent chooses the size.
-{{end}}defenseclaw_read_hook_stdin PAYLOAD response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" || {
-  _DC_STDIN_RC=$?
+{{end}}{{if .SecureClient}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{else}}defenseclaw_read_hook_stdin PAYLOAD response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" || {
+{{end}}  _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
   if defenseclaw_prepare_oversized_stdin "$_DC_STDIN_RC"; then
     : # the normal gateway path judges the bounded review payload
@@ -481,8 +482,9 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 {{end}}
 }
 
-_dc_jq_into PAYLOAD_EVENT text "$PAYLOAD" -r '.hook_event_name // empty' 2>/dev/null || {
-  fail_binding "Codex hook stdin is not valid JSON"
+{{if .SecureClient}}PAYLOAD_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || {
+{{else}}_dc_jq_into PAYLOAD_EVENT text "$PAYLOAD" -r '.hook_event_name // empty' 2>/dev/null || {
+{{end}}  fail_binding "Codex hook stdin is not valid JSON"
 }
 if [ -z "$PAYLOAD_EVENT" ]; then
   fail_binding "Codex hook stdin is missing hook_event_name"
@@ -587,13 +589,25 @@ fail_response() {
 # `-H "traceparent: …"` / `-H "tracestate: …"` arguments; invalid env
 # values are dropped by defenseclaw_extract_trace_context.
 TRACE_HEADER_ARGS=()
-defenseclaw_trace_header_args
-
+{{if .SecureClient}}# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+while IFS= read -r trace_header_arg; do
+  TRACE_HEADER_ARGS+=("$trace_header_arg")
+done < <(defenseclaw_extract_trace_context)
+{{else}}defenseclaw_trace_header_args
+{{end}}
 # Per-user attribution: the gateway cannot read the real user's identity from
 # its own service-account process, so the hook reports it.
-IDENTITY_HEADER_ARGS=()
-defenseclaw_user_identity_header_args
-
+{{if .SecureClient}}# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
+# no mapfile, and there the array would stay empty and the endpoint would send
+# no identity at all.
+{{else}}{{end}}IDENTITY_HEADER_ARGS=()
+{{if .SecureClient}}if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
+  while IFS= read -r identity_header_arg; do
+    IDENTITY_HEADER_ARGS+=("$identity_header_arg")
+  done < <(defenseclaw_user_identity_args)
+fi
+{{else}}defenseclaw_user_identity_header_args
+{{end}}
 {{if .Sandbox}}HOOK_MAX_TIME="$DC_SANDBOX_MAX_TIME"
 HOOK_RETRY_MAX_TIME="$DC_SANDBOX_RETRY_MAX_TIME"
 if [ "$BOUND_EVENT" = "SessionEnd" ]; then
@@ -718,8 +732,10 @@ fi
 {{if not .SecureClient}}PAYLOAD=
 unset PAYLOAD{{end}}{{end}}
 
-defenseclaw_split_response
-
+{{if .SecureClient}}HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+RESULT=$(echo "$RESPONSE" | sed '$d')
+{{else}}defenseclaw_split_response
+{{end}}
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
 {{else}}# 5xx (server error) is treated as transport — the gateway hit an
 # infrastructure problem, not a policy verdict. 4xx falls through to
@@ -748,7 +764,8 @@ if command -v jq >/dev/null 2>&1 &&
   [ "$OUTPUT" = "$_DC_CODEX_FIELDS" ] || _DC_CODEX_ACTION="${_DC_CODEX_FIELDS#*$'\n'}"
 fi
 unset _DC_CODEX_FIELDS
-[ "$_DC_CODEX_FIELDS_READ" = 1 ] || {{end}}_dc_jq_into OUTPUT line "$RESULT" -c '.codex_output // empty' 2>/dev/null || {
+[ "$_DC_CODEX_FIELDS_READ" = 1 ] || {{end}}{{if .SecureClient}}
+OUTPUT=$(echo "$RESULT" | _dc_jq -c '.codex_output // empty' 2>/dev/null) || {{else}}_dc_jq_into OUTPUT line "$RESULT" -c '.codex_output // empty' 2>/dev/null || {{end}}{
   fail_response "invalid JSON response"
 }
 {{if not .SecureClient}}# A block or confirmation reaches Codex as the native object, which Codex acts
@@ -757,13 +774,15 @@ unset _DC_CODEX_FIELDS
 # closed, in every fail mode, as the native hook does (GAP-0950). A
 # confirmation with no object at all would let the call run too: Codex asks
 # only through it (GAP-0983).
-{{if not .Sandbox}}if [ "$_DC_CODEX_FIELDS_READ" = 1 ]; then
+{{if .SecureClient}}_DC_GATEWAY_ACTION="$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null)" || _DC_GATEWAY_ACTION=""
+if { [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; } && [ "$_DC_GATEWAY_ACTION" = "confirm" ] &&
+{{else}}{{if not .Sandbox}}if [ "$_DC_CODEX_FIELDS_READ" = 1 ]; then
   _DC_GATEWAY_ACTION="$_DC_CODEX_ACTION"
 else
   {{end}}_dc_jq_into _DC_GATEWAY_ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || _DC_GATEWAY_ACTION=""
 {{if not .Sandbox}}fi
 {{end}}if { [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; } && [ "$_DC_GATEWAY_ACTION" = "confirm" ] &&
-  codex_event_can_control "$BOUND_CONTRACT" "$BOUND_EVENT"; then
+{{end}}  codex_event_can_control "$BOUND_CONTRACT" "$BOUND_EVENT"; then
   [ "$FAIL_MODE" = "closed" ] || FAIL_MODE=closed
   fail_response "confirm without native output in gateway response"
 fi
@@ -783,15 +802,17 @@ fi
 fi
 {{end}}
 
-{{if and (not .SecureClient) (not .Sandbox)}}if [ "$_DC_CODEX_FIELDS_READ" = 1 ]; then
+{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{else}}{{if and (not .SecureClient) (not .Sandbox)}}if [ "$_DC_CODEX_FIELDS_READ" = 1 ]; then
   ACTION="$_DC_CODEX_ACTION"
 else
   {{end}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
-  fail_response "failed to parse action from response"
+{{end}}  fail_response "failed to parse action from response"
 }
-{{if and (not .SecureClient) (not .Sandbox)}}fi
+{{if .SecureClient}}# alert is advisory (would_block=false): the notice printed above is all
+{{else}}{{if and (not .SecureClient) (not .Sandbox)}}fi
 {{end}}# alert is advisory (would_block=false): the notice printed above is all
-# Codex gets, and the tool runs, as with allow.
+{{end}}# Codex gets, and the tool runs, as with allow.
 case "$ACTION" in
   allow|alert|block|confirm) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
@@ -827,8 +848,9 @@ if [ "$ACTION" = "block" ]; then
   # Construct minimal structured block JSON so Codex sees exit 0 + JSON
   # rather than exit 2 — newer Codex versions (v0.130+) treat exit 2 on
   # UserPromptSubmit as "hook failed" rather than "hook blocked".
-  _dc_jq_into REASON line "$RESULT" -r '.reason // empty' 2>/dev/null
-  if [ -z "$REASON" ]; then
+{{if .SecureClient}}  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null)
+{{else}}  _dc_jq_into REASON line "$RESULT" -r '.reason // empty' 2>/dev/null
+{{end}}  if [ -z "$REASON" ]; then
     REASON="Blocked by DefenseClaw Codex policy."
   fi
 {{if and (not .Managed) (not .Sandbox)}}  codex_closed_answer "$REASON"

@@ -65,6 +65,12 @@ func TestShellHookBehaviourMatchesGolden(t *testing.T) {
 		t.Fatal("DC_HOOK_GOLDEN_UPDATE=1 needs DC_HOOK_GOLDEN_FULL=1: the golden holds every case")
 	}
 
+	// A Secure Client mode renders the Secure Client profile only on a
+	// verified deployment; every other mode renders no differently with it.
+	verified := SecureClientDeploymentVerified
+	SecureClientDeploymentVerified = func() bool { return true }
+	t.Cleanup(func() { SecureClientDeploymentVerified = verified })
+
 	// Build the per-user helpers once, from this goroutine.
 	scratch := t.TempDir()
 	installNativeGatewayForHookTest(t, filepath.Join(scratch, "probe-gw"))
@@ -305,6 +311,9 @@ type hookGoldenMode struct {
 	failMode string
 	config   string
 	env      []string
+	// secureClient renders the Secure Client profile (managed, loopback
+	// TCP, no hook socket); delivery adds its delivery contract (#1163).
+	secureClient, delivery bool
 }
 
 func hookGoldenModes() []hookGoldenMode {
@@ -316,6 +325,12 @@ func hookGoldenModes() []hookGoldenMode {
 		{name: "user-no-config", failMode: "open"},
 		{name: "managed-closed", managed: true, failMode: "closed"},
 		{name: "managed-open", managed: true, failMode: "open"},
+		// Secure Client hooks behave as before the 1.0.7 perf rewrite
+		// (review of 0f2e3b002c): these digests were checked against the
+		// pre-perf f869816d41 helper (DC_REVIEW2_HELPER).
+		{name: "sc-open", managed: true, secureClient: true, failMode: "open"},
+		{name: "sc-closed", managed: true, secureClient: true, failMode: "closed"},
+		{name: "sc-delivery-open", managed: true, secureClient: true, delivery: true, failMode: "open"},
 	}
 }
 
@@ -457,7 +472,7 @@ func hookGoldenCases(t *testing.T, full bool) []hookGoldenCase {
 						continue
 					}
 					if a.unreachable && !full && ei == 0 && m.name != "user-default-open" && m.name != "user-default-closed" &&
-						m.name != "user-strict-availability" && m.name != "managed-closed" {
+						m.name != "user-strict-availability" && m.name != "managed-closed" && !m.secureClient {
 						continue
 					}
 					add(hookGoldenCase{hook: h, mode: m, answer: a, event: event, command: command})
@@ -593,7 +608,7 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 	var listener net.Listener
 	var err error
 	socket := ""
-	if c.mode.managed {
+	if c.mode.managed && !c.mode.secureClient {
 		socket = filepath.Join(root, "run", "hook.sock")
 		if err := os.MkdirAll(filepath.Dir(socket), 0o755); err != nil {
 			return obs, err
@@ -617,7 +632,7 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 	if listener != nil {
 		go func() { _ = server.Serve(listener) }()
 		defer server.Close()
-		if !c.mode.managed {
+		if !c.mode.managed || c.mode.secureClient {
 			addr = listener.Addr().String()
 		}
 	}
@@ -654,6 +669,7 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		opts.ManagedEnterprise = true
 		opts.ManagedHookSocket = socket
 		opts.ManagedServiceUID = os.Getuid()
+		opts.SecureClientHookDelivery = c.mode.delivery
 	}
 	hookGoldenRenderMu.Lock()
 	err = WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c.hook.conn())

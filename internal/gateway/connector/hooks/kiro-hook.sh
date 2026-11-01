@@ -370,8 +370,9 @@ fi
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token kiro kiro-hook "kiro tool"
 
-defenseclaw_read_hook_stdin PAYLOAD response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" || {
-{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{if .SecureClient}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{else}}defenseclaw_read_hook_stdin PAYLOAD response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" || {
+{{end}}{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
 {{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
 {{end}}
   echo "defenseclaw: kiro hook refusing oversized payload, blocking kiro tool (sandbox hooks fail closed)" >&2
@@ -403,8 +404,9 @@ fi
 
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
 # fail mode: the administrator's open covers a gateway outage only.
-{{end}}defenseclaw_read_hook_stdin PAYLOAD response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" || {
-  _DC_STDIN_RC=$?
+{{end}}{{if .SecureClient}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{else}}defenseclaw_read_hook_stdin PAYLOAD response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" || {
+{{end}}  _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
   if defenseclaw_prepare_oversized_stdin "$_DC_STDIN_RC"; then
     : # the normal gateway path judges the bounded review payload
@@ -474,13 +476,25 @@ if [ -n "${API_TOKEN}" ]; then
 fi
 
 TRACE_HEADER_ARGS=()
-defenseclaw_trace_header_args
-
+{{if .SecureClient}}# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+while IFS= read -r trace_header_arg; do
+  TRACE_HEADER_ARGS+=("$trace_header_arg")
+done < <(defenseclaw_extract_trace_context)
+{{else}}defenseclaw_trace_header_args
+{{end}}
 # Per-user attribution: the gateway cannot read the real user's identity from
 # its own service-account process, so the hook reports it.
-IDENTITY_HEADER_ARGS=()
-defenseclaw_user_identity_header_args
-
+{{if .SecureClient}}# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
+# no mapfile, and there the array would stay empty and the endpoint would send
+# no identity at all.
+{{else}}{{end}}IDENTITY_HEADER_ARGS=()
+{{if .SecureClient}}if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
+  while IFS= read -r identity_header_arg; do
+    IDENTITY_HEADER_ARGS+=("$identity_header_arg")
+  done < <(defenseclaw_user_identity_args)
+fi
+{{else}}defenseclaw_user_identity_header_args
+{{end}}
 {{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
 # OpenShell relay occasionally drops a request, and the ingress dedupes by key.
 RESPONSE="$(defenseclaw_sandbox_post "/api/v1/kiro/hook" "$PAYLOAD" \
@@ -524,8 +538,10 @@ RESPONSE=$(defenseclaw_hook_post) || {
 # outage in a standalone managed hook.
 {{end}}defenseclaw_retry_busy _dc_hook_post_response || {{if and (not .SecureClient) (not .Sandbox)}}fail_response "gateway returned HTTP 429"{{else}}fail_unreachable "gateway unreachable"{{end}}{{end}}
 
-defenseclaw_split_response
-
+{{if .SecureClient}}HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+RESULT=$(echo "$RESPONSE" | sed '$d')
+{{else}}defenseclaw_split_response
+{{end}}
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
 {{else}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
@@ -550,14 +566,16 @@ kiro_block_reason() {
 
 {{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_answer_valid "$RESULT" action || fail_response "invalid or ambiguous JSON response"
 {{end}}
-_dc_jq_into OUTPUT line "$RESULT" -c '.hook_output // empty' 2>/dev/null || {
-  fail_response "invalid JSON response"
+{{if .SecureClient}}OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
+{{else}}_dc_jq_into OUTPUT line "$RESULT" -c '.hook_output // empty' 2>/dev/null || {
+{{end}}  fail_response "invalid JSON response"
 }
 {{if or .Sandbox (not .SecureClient)}}{{/* Every DefenseClaw verdict names its action: an empty or unknown one is no
 verdict, never an allow (a sandbox workload may have shaped it; a hook in fail
 mode closed blocks on it, open lets the call run: rel-1-0-3 GAP-0037, GAP-0153;
-a Secure Client render keeps its own contract). */}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
-  fail_response "failed to parse action from response"
+a Secure Client render keeps its own contract). */}}{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{else}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
+{{end}}  fail_response "failed to parse action from response"
 }
 case "$ACTION" in
   allow|block|confirm|alert) ;;
@@ -566,23 +584,28 @@ esac
 DECISION=""
 REASON=""
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
-  _dc_jq_into DECISION line "$OUTPUT" -r '.decision // empty' 2>/dev/null || DECISION=""
+{{if .SecureClient}}  DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || DECISION=""
+  REASON=$(echo "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+{{else}}  _dc_jq_into DECISION line "$OUTPUT" -r '.decision // empty' 2>/dev/null || DECISION=""
   _dc_jq_into REASON line "$OUTPUT" -r '.reason // empty' 2>/dev/null || REASON=""
-fi
+{{end}}fi
 # A block verdict denies with or without the event-native hook_output: exit
 # 2 is Kiro's only tool veto. Stdout stays empty (Kiro adds it to the agent
 # context).
 if [ "$ACTION" = "block" ] || [ "$DECISION" = "deny" ] || [ "$DECISION" = "block" ]; then
   if [ -z "$REASON" ]; then
-    _dc_jq_into REASON line "$RESULT" -r '.reason // empty' 2>/dev/null || REASON=""
-  fi
+{{if .SecureClient}}    REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+{{else}}    _dc_jq_into REASON line "$RESULT" -r '.reason // empty' 2>/dev/null || REASON=""
+{{end}}  fi
   kiro_block_reason "${REASON:-Blocked by DefenseClaw Kiro policy.}"
   exit 2
 fi
 exit 0{{else}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
-  _dc_jq_into DECISION line "$OUTPUT" -r '.decision // empty' 2>/dev/null || true
+{{if .SecureClient}}  DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null || true)
+  REASON=$(echo "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null || true)
+{{else}}  _dc_jq_into DECISION line "$OUTPUT" -r '.decision // empty' 2>/dev/null || true
   _dc_jq_into REASON line "$OUTPUT" -r '.reason // empty' 2>/dev/null || true
-  if [ "$DECISION" = "deny" ] || [ "$DECISION" = "block" ]; then
+{{end}}  if [ "$DECISION" = "deny" ] || [ "$DECISION" = "block" ]; then
     if [ -n "$REASON" ]; then
       kiro_block_reason "$REASON"
     fi

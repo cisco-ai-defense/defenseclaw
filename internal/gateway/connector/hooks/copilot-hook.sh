@@ -458,8 +458,9 @@ esac
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token copilot copilot-hook "copilot tool"
 
-defenseclaw_read_hook_stdin PAYLOAD response "$FAIL_MODE" || {
-{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{if .SecureClient}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
+{{else}}defenseclaw_read_hook_stdin PAYLOAD response "$FAIL_MODE" || {
+{{end}}{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
 {{end}}  echo "defenseclaw: copilot hook refusing oversized payload, blocking copilot tool (sandbox hooks fail closed)" >&2
   exit 2
 }
@@ -489,8 +490,9 @@ fail_response() {
   {{$failure}}
 fi
 
-defenseclaw_read_hook_stdin PAYLOAD response "$FAIL_MODE" || {
-  _DC_STDIN_RC=$?
+{{if .SecureClient}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
+{{else}}defenseclaw_read_hook_stdin PAYLOAD response "$FAIL_MODE" || {
+{{end}}  _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
   if defenseclaw_prepare_oversized_stdin "$_DC_STDIN_RC"; then
     : # the normal gateway path judges the bounded review payload
@@ -560,13 +562,25 @@ fi
 
 # W3C trace propagation: forward validated traceparent / tracestate.
 TRACE_HEADER_ARGS=()
-defenseclaw_trace_header_args
-
+{{if .SecureClient}}# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+while IFS= read -r trace_header_arg; do
+  TRACE_HEADER_ARGS+=("$trace_header_arg")
+done < <(defenseclaw_extract_trace_context)
+{{else}}defenseclaw_trace_header_args
+{{end}}
 # Per-user attribution: the gateway cannot read the real user's identity from
 # its own service-account process, so the hook reports it.
-IDENTITY_HEADER_ARGS=()
-defenseclaw_user_identity_header_args
-
+{{if .SecureClient}}# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
+# no mapfile, and there the array would stay empty and the endpoint would send
+# no identity at all.
+{{else}}{{end}}IDENTITY_HEADER_ARGS=()
+{{if .SecureClient}}if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
+  while IFS= read -r identity_header_arg; do
+    IDENTITY_HEADER_ARGS+=("$identity_header_arg")
+  done < <(defenseclaw_user_identity_args)
+fi
+{{else}}defenseclaw_user_identity_header_args
+{{end}}
 {{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
 # OpenShell relay occasionally drops a request, and the ingress dedupes by key.
 RESPONSE="$(defenseclaw_sandbox_post "/api/v1/copilot/hook" "$PAYLOAD" \
@@ -608,8 +622,10 @@ RESPONSE=$(defenseclaw_hook_post) || {
 }
 defenseclaw_retry_busy _dc_hook_post_response || {{if and .Managed (not .SecureClient) (not .Sandbox)}}fail_response "gateway returned HTTP 429"{{else}}fail_unreachable "gateway unreachable"{{end}}{{end}}
 
-defenseclaw_split_response
-
+{{if .SecureClient}}HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+RESULT=$(echo "$RESPONSE" | sed '$d')
+{{else}}defenseclaw_split_response
+{{end}}
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
 {{else}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
@@ -621,11 +637,13 @@ fi{{end}}
 
 {{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_answer_valid "$RESULT" action || fail_response "invalid or ambiguous JSON response"
 {{end}}
-_dc_jq_into OUTPUT line "$RESULT" -c '.hook_output // empty' 2>/dev/null || {
-  fail_response "invalid JSON response"
+{{if .SecureClient}}OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
+{{else}}_dc_jq_into OUTPUT line "$RESULT" -c '.hook_output // empty' 2>/dev/null || {
+{{end}}  fail_response "invalid JSON response"
 }
-{{if .Sandbox}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
-  fail_response "failed to parse action from response"
+{{if .Sandbox}}{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{else}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
+{{end}}  fail_response "failed to parse action from response"
 }
 case "$ACTION" in
   allow|block|confirm|alert) ;;
@@ -638,13 +656,15 @@ fi
 # A block without an event-native verdict still denies: exit 2 is Copilot's
 # hook deny for preToolUse and permissionRequest.
 if [ "$ACTION" = "block" ]; then
-  _dc_jq_into REASON line "$RESULT" -r '.reason // empty' 2>/dev/null || REASON=""
-  printf '%s\n' "${REASON:-Blocked by DefenseClaw Copilot policy.}" >&2
+{{if .SecureClient}}  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+{{else}}  _dc_jq_into REASON line "$RESULT" -r '.reason // empty' 2>/dev/null || REASON=""
+{{end}}  printf '%s\n' "${REASON:-Blocked by DefenseClaw Copilot policy.}" >&2
   exit 2
 fi
 exit 0
-{{else}}{{if and .Managed (not .SecureClient)}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || fail_response "invalid action in gateway response"
-case "$ACTION" in
+{{else}}{{if and .Managed (not .SecureClient)}}{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || fail_response "invalid action in gateway response"
+{{else}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || fail_response "invalid action in gateway response"
+{{end}}case "$ACTION" in
   allow|block|confirm|alert) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
@@ -674,8 +694,9 @@ if [ "$FAIL_MODE" != "open" ]; then
   # Every verdict names its action, and on a tool boundary a block carries
   # Copilot's native deny and a confirmation its native ask, as the Windows
   # hook checks: anything else is no verdict, and would let the call run.
-  _dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || fail_response "invalid action in gateway response"
-  case "$ACTION" in
+{{if .SecureClient}}  ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || fail_response "invalid action in gateway response"
+{{else}}  _dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || fail_response "invalid action in gateway response"
+{{end}}  case "$ACTION" in
     allow|block|confirm|alert) ;;
     *) fail_response "invalid or missing action in gateway response" ;;
   esac
@@ -693,8 +714,9 @@ if [ "$FAIL_MODE" != "open" ]; then
     esac
   fi
 fi
-{{end}}_dc_jq_into UNPARSED_WARNING line "$RESULT" -r 'if (.action == "allow" or .action == "alert") and ((.rule_ids // []) | index("HOOK-TOOL-CALL-UNPARSED")) then .reason // empty else empty end' 2>/dev/null || UNPARSED_WARNING=""
-if [ -n "$UNPARSED_WARNING" ]; then
+{{end}}{{if .SecureClient}}UNPARSED_WARNING=$(echo "$RESULT" | _dc_jq -r 'if (.action == "allow" or .action == "alert") and ((.rule_ids // []) | index("HOOK-TOOL-CALL-UNPARSED")) then .reason // empty else empty end' 2>/dev/null) || UNPARSED_WARNING=""
+{{else}}_dc_jq_into UNPARSED_WARNING line "$RESULT" -r 'if (.action == "allow" or .action == "alert") and ((.rule_ids // []) | index("HOOK-TOOL-CALL-UNPARSED")) then .reason // empty else empty end' 2>/dev/null || UNPARSED_WARNING=""
+{{end}}if [ -n "$UNPARSED_WARNING" ]; then
   printf 'defenseclaw: %s\n' "$UNPARSED_WARNING" >&2
 fi
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then

@@ -146,10 +146,29 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 # before their first function call; this covers hooks an older build
 # rendered. Secure Client hooks keep their contract (owner rule): none of
 # the review-2 changes apply to them.
+#
+# _DC_SC_RENDER is 1 only in a hook a Secure Client render ran: the render
+# assigns _DC_SECURE_CLIENT_HOOK without exporting it, so an exported one came
+# from the agent's environment. A per-user hook rendered by 1.0.3 or earlier
+# did not clear the markers, and with an inherited pair it skipped these
+# checks (review of 0f2e3b002c, item 3). Only the review-2 checks read it:
+# this unset, the 1 MiB cap clamp and the refusal of an unreadable stdin.
+_DC_SC_RENDER=0
 case "${DEFENSECLAW_MANAGED_HOOK:-0}:${_DC_SECURE_CLIENT_HOOK:-0}" in
-  1:1 | true:1 | TRUE:1 | yes:1 | YES:1) ;;
-  *) unset -v FUNCNEST TMOUT EXECIGNORE 2>/dev/null || true ;;
+  1:1 | true:1 | TRUE:1 | yes:1 | YES:1)
+    if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] || { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 4 ]; }; then
+      _DC_SC_ATTRS="${_DC_SECURE_CLIENT_HOOK@a}"
+    else
+      # bash 3.2 (macOS) has no attribute expansion.
+      _DC_SC_ATTRS="$(declare -p _DC_SECURE_CLIENT_HOOK 2>/dev/null)"
+      _DC_SC_ATTRS="${_DC_SC_ATTRS#declare -}"
+      _DC_SC_ATTRS="${_DC_SC_ATTRS%% *}"
+    fi
+    case "$_DC_SC_ATTRS" in *x*) ;; *) _DC_SC_RENDER=1 ;; esac
+    unset -v _DC_SC_ATTRS
+    ;;
 esac
+[ "$_DC_SC_RENDER" = 1 ] || unset -v FUNCNEST TMOUT EXECIGNORE 2>/dev/null || true
 
 # Windows compatibility: some agent runtimes (e.g. Codex on Windows) do
 # not set HOME when spawning hook subprocesses. Without this, `set -u`
@@ -202,6 +221,20 @@ defenseclaw_stat_into() {
       darwin*|*bsd*) _DC_STAT_DIALECT=bsd ;;
       *) _DC_STAT_DIALECT=gnu ;;
     esac
+  fi
+  if defenseclaw_secure_client_hook; then
+    # A Secure Client hook keeps the pre-1.0.7 spelling, which runs a stat
+    # function the agent exported (owner rule: its behaviour does not change).
+    if [ "$_DC_STAT_DIALECT" = bsd ]; then
+      _DC_STAT_OUT="$(stat -f "$bsd" "$@" 2>/dev/null)" && return 0
+      _DC_STAT_OUT="$(stat -c "$gnu" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
+      _DC_STAT_DIALECT=gnu
+    else
+      _DC_STAT_OUT="$(stat -c "$gnu" "$@" 2>/dev/null)" && return 0
+      _DC_STAT_OUT="$(stat -f "$bsd" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
+      _DC_STAT_DIALECT=bsd
+    fi
+    return 0
   fi
   if [ "$_DC_STAT_DIALECT" = bsd ]; then
     _DC_STAT_OUT="$(exec stat -f "$bsd" "$@" 2>/dev/null)" && return 0
@@ -266,14 +299,15 @@ defenseclaw_harden_env() {
   # same name, which would copy the value into the environment of every child
   # process (curl, jq, the cold-started gateway), so drop inherited ones first.
   unset -v API_TOKEN PAYLOAD CONTENT TOOL_INPUT TOOL_OUTPUT INSPECT_BODY RESPONSE RESULT OUTPUT
-  defenseclaw_secure_client_hook || unset -v FUNCNEST TMOUT EXECIGNORE 2>/dev/null || true
+  [ "${_DC_SC_RENDER:-0}" = 1 ] || unset -v FUNCNEST TMOUT EXECIGNORE 2>/dev/null || true
   # The values the in-shell readers keep (issue #1130), which lived in
   # subshells before: an inherited exported name would hand them to every
   # child process.
   unset -v _DC_SESSION_FACTS _DC_SESSION_FACTS_FULL _DC_CCACHE_CHANGED _DC_CODEX_FIELDS _DC_CODEX_FIELDS_READ _DC_CODEX_ACTION
   # echo prints the gateway's answer as it is: an inherited BASHOPTS with
-  # xpg_echo would turn the escapes in its JSON strings into bytes.
-  shopt -u xpg_echo 2>/dev/null || true
+  # xpg_echo would turn the escapes in its JSON strings into bytes. A Secure
+  # Client hook keeps the shell options it inherits (owner rule).
+  defenseclaw_secure_client_hook || shopt -u xpg_echo 2>/dev/null || true
   # The stat spelling is learned per process, never taken from the caller.
   unset -v _DC_STAT_OUT _DC_STAT_DIALECT
 
@@ -296,7 +330,11 @@ defenseclaw_harden_env() {
     # exec: the substitution's shell becomes mktemp (bash forks a shell
     # first while this hook has an EXIT trap, issue #1130). Its status stays
     # off errexit, and a failed run leaves its output, empty.
-    DEFENSECLAW_HOOK_HOME="$(exec mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null)" || :
+    if defenseclaw_secure_client_hook; then
+      DEFENSECLAW_HOOK_HOME="$(mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null || true)"
+    else
+      DEFENSECLAW_HOOK_HOME="$(exec mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null)" || :
+    fi
     if [ -n "$DEFENSECLAW_HOOK_HOME" ]; then
       _DEFENSECLAW_HOOK_HOME_OWNED=1
     fi
@@ -1059,7 +1097,7 @@ defenseclaw_json_string_field() {
     }
 '
   status=0
-  if _dc_herestring_in_memory "$json"; then
+  if ! defenseclaw_secure_client_hook && _dc_herestring_in_memory "$json"; then
     extracted="$(exec awk -v wanted="$field" "$program" <<<"$json")" || status=$?
   else
     extracted="$(printf '%s' "$json" | awk -v wanted="$field" "$program")" || status=$?
@@ -3128,7 +3166,7 @@ defenseclaw_missing_token_next_step() {
 _dc_stdin_cap() {
   _DC_STDIN_CAP="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
   # A Secure Client hook keeps its earlier cap rule (owner rule).
-  if defenseclaw_secure_client_hook; then
+  if [ "${_DC_SC_RENDER:-0}" = 1 ]; then
     case "$_DC_STDIN_CAP" in '' | *[!0-9]*) _DC_STDIN_CAP=1048576 ;; esac
     return 0
   fi
@@ -3186,7 +3224,7 @@ defenseclaw_read_stdin_into() {
     printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" nul "$_dc_rsi_outcome")"
     return 4
   fi
-  if [ "$_dc_rsi_read" -gt 1 ] && ! defenseclaw_secure_client_hook; then
+  if [ "$_dc_rsi_read" -gt 1 ] && [ "${_DC_SC_RENDER:-0}" != 1 ]; then
     # read could not read (_dc_read_stdin_exact): refused, never sent empty.
     printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" unreadable "$_dc_rsi_outcome")"
     return 5
@@ -3230,7 +3268,7 @@ _dc_read_stdin_exact() {
     _dc_stdin_refused "$cap" nul "$outcome"
     return 4
   fi
-  if [ "$status" -gt 1 ] && ! defenseclaw_secure_client_hook; then
+  if [ "$status" -gt 1 ] && [ "${_DC_SC_RENDER:-0}" != 1 ]; then
     _dc_stdin_refused "$cap" unreadable "$outcome"
     return 5
   fi
@@ -3743,9 +3781,10 @@ defenseclaw_payload_tool_gate_max_time() {
   local event="" program='
       if length != 1 or (.[0] | type) != "object" then error("not one JSON object") else .[0][$f] end
       | if . == null then empty elif type == "string" then . else error("not a string") end'
-  if command -v jq >/dev/null 2>&1; then
+  if ! defenseclaw_secure_client_hook && command -v jq >/dev/null 2>&1; then
     # _dc_hook_event_field's jq branch, read into the variable by one
-    # process (_dc_jq_into, issue #1130).
+    # process (_dc_jq_into, issue #1130). A Secure Client hook keeps the
+    # pre-1.0.7 read below (owner rule).
     _dc_jq_into event text "${1:-}" -rs --arg f hook_event_name "$program" 2>/dev/null || event=""
   else
     event="$(_dc_hook_event_field "$1" hook_event_name 2>/dev/null)" || event=""
