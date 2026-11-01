@@ -34,27 +34,51 @@ if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
 }
 
 if ($StateOnRunnerDrive -and $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
-    # The drive-root owner change below is for disposable hosted runners only.
+    # The test volume below changes the runner: disposable hosted runners only.
     Write-Host "RUNNER_ENVIRONMENT is not github-hosted: the state root stays in the profile"
     $StateOnRunnerDrive = $false
 }
 if ($StateOnRunnerDrive) {
+    # This alters the hosted runner. The state goes on a test volume of its
+    # own (an expandable VHDX in RUNNER_TEMP on the runner work drive D:,
+    # attached as T:), not on D: itself: the D: root of hosted runners
+    # differs from runner to runner (owner NETWORK SERVICE on some, a
+    # modify grant to Authenticated Users on others), and the audit store
+    # refuses both on an ancestor of its database, as it must. The volume
+    # root gets owner Administrators and a protected DACL of Administrators
+    # and SYSTEM, the trust chain the profile gives on C:.
     $stateBase = Resolve-SafeWindowsNativeBase (Get-WindowsNativeRunnerDriveBase)
-    # The hosted runner work drive root is owned by NETWORK SERVICE, an
-    # owner the audit store refuses on every ancestor of its database (and
-    # must). This alters the hosted runner: the disposable runner gives its
-    # drive root to Administrators; the DACL is unchanged, so the runner
-    # keeps its access.
-    $driveRoot = [IO.Path]::GetPathRoot($stateBase)
-    $driveOwner = (Get-Acl -LiteralPath $driveRoot).Owner
-    if ($driveOwner -notin @('BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM', 'NT SERVICE\TrustedInstaller')) {
-        & icacls.exe $driveRoot /setowner '*S-1-5-32-544' /c /q | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "could not give $driveRoot (owner $driveOwner) to Administrators" }
+    $volumeRoot = [IO.Path]::GetPathRoot($stateBase)
+    if (Test-Path -LiteralPath $volumeRoot) { throw "test volume $volumeRoot already exists" }
+    $vhd = Join-Path $env:RUNNER_TEMP 'dc-ci.vhdx'
+    $script = Join-Path $env:RUNNER_TEMP 'dc-ci-diskpart.txt'
+    [IO.File]::WriteAllLines($script, @(
+        "create vdisk file=`"$vhd`" maximum=40960 type=expandable",
+        'attach vdisk',
+        'create partition primary',
+        'format fs=ntfs quick label=dcci',
+        "assign letter=$($volumeRoot.Substring(0, 1))"
+    ))
+    & diskpart.exe /s $script | Out-Host
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $volumeRoot)) { throw "could not attach the test volume $volumeRoot" }
+    Remove-Item -LiteralPath $script -Force
+    $rootSecurity = [Security.AccessControl.DirectorySecurity]::new()
+    $rootSecurity.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-32-544', 'S-1-5-18')) {
+        $rootSecurity.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($sid),
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow))
     }
+    $rootSecurity.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    Set-Acl -LiteralPath $volumeRoot -AclObject $rootSecurity
     New-Item -ItemType Directory -Force -Path $stateBase | Out-Null
-    # The owners the audit store checks, for the job log.
+    # The owners and grants the audit store checks, for the job log.
     for ($path = $stateBase; $path; $path = Split-Path -Parent $path) {
-        Write-Host "state base ancestor $path owner $((Get-Acl -LiteralPath $path).Owner)"
+        $acl = Get-Acl -LiteralPath $path
+        Write-Host "state base ancestor $path owner $($acl.Owner) access $(($acl.Access | ForEach-Object { $_.IdentityReference }) -join ', ')"
     }
 } else {
     $stateBase = Resolve-SafeWindowsNativeBase (Join-Path $env:USERPROFILE '.dc-ci')

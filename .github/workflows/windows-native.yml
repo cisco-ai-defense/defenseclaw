@@ -106,10 +106,11 @@ jobs:
           persist-credentials: false
       - name: Initialize isolated paths
         # The gateway shards (gateway and connector parts) keep their test
-        # temp folders on the hosted runner work drive (D:), not the profile
-        # on C:, whose slow disk made connector file flushes miss the package
-        # timeout (rel-1-0-6:GAP-0443). This changes the hosted runner (the
-        # owner of its D: root); every other shard keeps C:.
+        # temp folders on a test volume on the hosted runner work drive (D:),
+        # not in the profile on C:, whose slow disk made connector file
+        # flushes miss the package timeout (rel-1-0-6:GAP-0443). This changes
+        # the hosted runner (it attaches a VHDX as T:); every other shard
+        # keeps C:.
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}" ${{ matrix.kind == 'gateway' && '-StateOnRunnerDrive' || '' }}
       - uses: ./.github/actions/setup-go
         id: go

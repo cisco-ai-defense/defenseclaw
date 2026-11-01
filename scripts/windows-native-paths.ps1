@@ -14,12 +14,14 @@ function Test-PathWithinOrEqual([string]$Path, [string]$Root) {
         (Test-PathWithin $candidate $parent)
 }
 
-# Get-WindowsNativeRunnerDriveBase is the CI state base on the runner work
-# drive, <drive of RUNNER_TEMP>\dc-ci; empty outside CI (rel-1-0-6:GAP-0443).
+# Get-WindowsNativeRunnerDriveBase is the CI state base on the hosted
+# runner test volume (T:, a VHDX on the runner work drive that
+# initialize-windows-native-ci-paths.ps1 -StateOnRunnerDrive attaches),
+# T\dc-ci; empty outside CI (rel-1-0-6:GAP-0443).
 function Get-WindowsNativeRunnerDriveBase {
     $runnerTemp = [Environment]::GetEnvironmentVariable('RUNNER_TEMP')
     if ([string]::IsNullOrWhiteSpace($runnerTemp)) { return '' }
-    return [IO.Path]::GetFullPath([IO.Path]::Combine([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($runnerTemp)), 'dc-ci')).TrimEnd('\')
+    return 'T:\dc-ci'
 }
 
 function Resolve-SafeWindowsNativeBase([AllowNull()][string]$Path) {
