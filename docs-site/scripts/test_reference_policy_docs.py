@@ -53,7 +53,14 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertIn("Each gateway-backed guarded call asks the gateway for its session's record", guard)
         self.assertIn("leaves a read-only note that this agent process's session was clean", guard)
         self.assertIn("when there is no current note for its agent process", guard)
+        self.assertIn("`open` lets it run with the outage warning, and `closed`, strict availability and the default block it", guard)
+        self.assertIn("and when the gateway is restarting or gives no answer", guard)
         self.assertIn("On Windows a guarded call blocks during an outage in every mode", guard)
+        # The summary near the top says the same as the detailed paragraph.
+        summary = next(line for line in text.splitlines() if line.startswith("On a per-user install, an explicit saved"))
+        self.assertIn("a Linux or macOS session that has a clean-session note follows the administrator's mode", summary)
+        self.assertIn("every other guarded call blocks", summary)
+        self.assertNotIn("A guarded connector (foreign-hook guard) blocks during an outage too", text)
         self.assertIn("Windows Amp checks its session record locally", guard)
         effective = text.split("## Effective behavior", 1)[1].split("These outcomes apply", 1)[0]
         self.assertIn("A gateway-backed guarded tool call", effective)

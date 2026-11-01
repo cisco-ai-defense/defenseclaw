@@ -116,8 +116,9 @@ def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check()
     assert "in observe mode | Open" not in per_layer
     assert "Managed Claude Code and Codex hooks | Always closed" not in per_layer
     assert "observe and action mode alike" in per_layer and "outage only" in per_layer
-    # Decision 16: the administrator open never covers a guarded call.
-    assert "not for a connector whose foreign-hook guard checks the session" in per_layer
+    # GAP-0352: the administrator open covers a guarded call only on Linux and macOS, for a session with a clean-session note.
+    assert "for a connector whose foreign-hook guard checks the session with the gateway, only on Linux and macOS" in per_layer
+    assert "for a session with a clean-session note" in per_layer
     assert "observe mode fails open" not in coverage
 
     troubleshooting = (DOCS / "enterprise/troubleshooting.mdx").read_text(encoding="utf-8")
