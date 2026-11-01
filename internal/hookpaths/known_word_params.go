@@ -15,11 +15,13 @@ import (
 // other program (read, wait -p, printf -v, eval, source, trap, command,
 // builtin, exec, env, cd, a function or a dynamic program word) has no known
 // parameter words: a wrapper or a deferred string can rebind the name
-// (rel-1-0-2:GAP-0004 review). The list is an allowlist on purpose.
+// (rel-1-0-2:GAP-0004 review). The list is an allowlist on purpose. test and
+// [ are left out: test -v "a[f=-3]" evaluates the subscript, which assigns
+// (rel-1-0-6:GAP-0235 review).
 var knownWordPrograms = []string{
-	":", "[", "awk", "cat", "chmod", "cmp", "cp", "diff", "echo", "false", "find", "gcp", "git", "go",
+	":", "awk", "cat", "chmod", "cmp", "cp", "diff", "echo", "false", "find", "gcp", "git", "go",
 	"grep", "head", "ln", "ls", "make", "mkdir", "mv", "rm", "rmdir", "sed", "sort", "tail", "tar",
-	"test", "touch", "true", "uniq", "wc",
+	"touch", "true", "uniq", "wc",
 }
 
 // mayHaveKnownCopyWord is the cheap gate of knownWordParameterUses: the
@@ -248,7 +250,7 @@ func knownWordParameters(command string, file *syntax.File, home string) (map[*s
 // shellSpecialParameters are names bash sets itself (on every command, at
 // each read, or from the environment), so an assignment does not fix their
 // value: $_ is the last argument of the previous command (rel-1-0-6:GAP-0235
-// review).
+// review). Every BASH_ name is rejected as well.
 var shellSpecialParameters = []string{
 	"_", "BASHPID", "BASH_ARGC", "BASH_ARGV", "BASH_COMMAND", "BASH_LINENO", "BASH_REMATCH", "BASH_SOURCE",
 	"BASH_SUBSHELL", "COLUMNS", "COMP_CWORD", "COMP_LINE", "COMP_POINT", "DIRSTACK", "EPOCHREALTIME",
@@ -266,7 +268,7 @@ func simpleScalarParameter(param *syntax.ParamExp) bool {
 		return false
 	}
 	name := param.Param.Value
-	if name == "" || slices.Contains(shellSpecialParameters, name) {
+	if name == "" || slices.Contains(shellSpecialParameters, name) || strings.HasPrefix(name, "BASH_") {
 		return false
 	}
 	for i, ch := range name {

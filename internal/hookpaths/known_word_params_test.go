@@ -82,6 +82,9 @@ func TestUnquotedCopySourceIsOneKnownWordOnlyWithOneFixedPlainValue(t *testing.T
 		`OPTARG=a.txt; cp $OPTARG out.txt`,
 		`HOME=a.txt; cp $HOME out.txt`,
 		`PATH=a.txt; cp $PATH out.txt`,
+		`BASH_X=a.txt; cp $BASH_X out.txt`,
+		`f=a.txt; test -v "a[f=-3]"; cp $f out.txt`,
+		`f=a.txt; [ -v "a[f=-3]" ]; cp $f out.txt`,
 		// Builtins and bodies the allowlist keeps unknown.
 		`f=a.txt; source x; cp $f out.txt`,
 		`f=a.txt; . x; cp $f out.txt`,
