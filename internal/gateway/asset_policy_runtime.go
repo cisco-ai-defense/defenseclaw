@@ -95,10 +95,11 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 	if decision, refused := a.mcpStateUnreadableDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
+	a.noteHookReportedMCPServer(ctx, "claudecode", req.HookEventName, probe)
 	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
-	if decision, refused := unresolvedPluginMCPDefinitionDecision(a.liveConfig(), rawServer, probe); refused {
+	if decision, refused := unresolvedPluginMCPDefinitionDecision(a.requestConfig(ctx), rawServer, probe); refused {
 		a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", "claudecode", req.HookEventName)
 		a.logAssetPolicyAudit(ctx, "claudecode", "mcp:"+rawServer, "action=block source=mcp-definition-unproven")
 		return decision, true
@@ -112,7 +113,7 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 // it match whatever asset_policy.enabled says (GAP-1191). Other servers keep
 // their name. Secure Client keeps main (issue #1092).
 func (a *APIServer) claudeCodePluginMCPServerName(ctx context.Context, probe mcpRuntimeProbe) string {
-	cfg := a.liveConfig()
+	cfg := a.requestConfig(ctx)
 	if cfg == nil || cfg.SecureClientIntegration() || !probe.Matched || probe.Surface != "hook" ||
 		!strings.HasPrefix(probe.ServerName, "plugin_") {
 		return probe.ServerName
@@ -133,7 +134,7 @@ func (a *APIServer) claudeCodePluginMCPServerName(ctx context.Context, probe mcp
 // the file; status names it too. Secure Client has no enrolled-user watcher
 // (issue #1092).
 func (a *APIServer) mcpStateUnreadableDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
-	cfg := a.liveConfig()
+	cfg := a.requestConfig(ctx)
 	if cfg == nil || cfg.SecureClientIntegration() || !probe.Matched || probe.Surface != "hook" {
 		return config.AssetPolicyDecision{}, false
 	}
@@ -162,7 +163,7 @@ func (a *APIServer) mcpStateUnreadableDecision(ctx context.Context, connectorNam
 // gateway.log says why. Every other gateway has nothing to refresh. Secure
 // Client keeps main (#1092).
 func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
-	cfg := a.liveConfig()
+	cfg := a.requestConfig(ctx)
 	if a.mcpRefreshBeforeCall == nil || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
 		probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return config.AssetPolicyDecision{}, false
@@ -197,7 +198,7 @@ func mcpCallAboutToRun(hookEvent string) bool {
 // goes through; a rejected server is then refused by its runtime disable.
 // Only calls about to run are refused. Secure Client keeps main (#1092).
 func (a *APIServer) mcpAdmissionPendingDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
-	cfg := a.liveConfig()
+	cfg := a.requestConfig(ctx)
 	if a.mcpAdmissionPending == nil || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
 		probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return config.AssetPolicyDecision{}, false
@@ -248,6 +249,7 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 	}
 	probe := mcpProbeFromFields(a.codexMCPServerName(ctx, req), req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
+	a.noteHookReportedMCPServer(ctx, "codex", req.HookEventName, probe)
 	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "codex", req.HookEventName, probe); refused {
 		return decision, true
 	}
@@ -261,7 +263,7 @@ func (a *APIServer) codexMCPServerAmbiguous(ctx context.Context, req codexHookRe
 	if strings.TrimSpace(firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name"))) != "" {
 		return false
 	}
-	cfg := a.liveConfig()
+	cfg := a.requestConfig(ctx)
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return false
 	}
@@ -286,7 +288,7 @@ func (a *APIServer) codexMCPServerAmbiguous(ctx context.Context, req codexHookRe
 // names no server. Secure Client keeps main: only the payload field (#1092).
 func (a *APIServer) codexMCPServerName(ctx context.Context, req codexHookRequest) string {
 	explicit := strings.TrimSpace(firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")))
-	cfg := a.liveConfig()
+	cfg := a.requestConfig(ctx)
 	if explicit != "" || cfg == nil || cfg.SecureClientIntegration() {
 		return explicit
 	}
@@ -307,7 +309,7 @@ func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claude
 		return a.skillFolderAccessDecision(ctx, "claudecode", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
 	}
 	probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
-	if skill := pluginBundledSkillName(a.liveConfig(), probe.SkillName); skill != "" {
+	if skill := pluginBundledSkillName(a.requestConfig(ctx), probe.SkillName); skill != "" {
 		probe.DeclaredNames = append(probe.DeclaredNames, skill)
 	}
 	probe.SourcePaths = a.skillSourcePaths(ctx, "claudecode", req.CWD, probe)
@@ -361,7 +363,7 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 	if targetType == "plugin" && commandOK && !identityMalformed {
 		// /plugin:skill runs a skill the plugin bundles: a skill on
 		// asset_policy.skill.denied is refused there too (GAP-1104).
-		if skill := pluginBundledSkillName(a.liveConfig(), commandName); skill != "" {
+		if skill := pluginBundledSkillName(a.requestConfig(ctx), commandName); skill != "" {
 			if bundled, ok := claudeCodeSlashAssetIdentity("skill", skill); ok {
 				identities = append(identities, bundled)
 			}
@@ -476,7 +478,7 @@ func (a *APIServer) codexPromptSkillAssetDecision(
 }
 
 func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
-	cfg := a.liveConfig()
+	cfg := a.requestConfig(ctx)
 	if cfg == nil || !probe.Matched {
 		return config.AssetPolicyDecision{}, false
 	}
@@ -602,7 +604,12 @@ func unprovenMCPDefinitionDecision(ctx context.Context, cfg *config.Config, conn
 	policy, _ := cfg.EffectiveAssetTypePolicy(connector, "mcp")
 	mode := config.AssetPolicyModeAction
 	if !rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName) {
-		gated := cfg.AssetPolicy.Enabled && (policy.RegistryRequired || strings.EqualFold(strings.TrimSpace(policy.Default), "deny"))
+		// Explicit endpoint denies survive the off switch; registry, allow
+		// and default checks follow runtime detection even when the agent's
+		// command-line definition could not be read.
+		detection, _ := cfg.AssetRuntimeDetectionFor("mcp")
+		gated := cfg.AssetPolicy.Enabled && detection.Enabled &&
+			(policy.RegistryRequired || strings.EqualFold(strings.TrimSpace(policy.Default), "deny"))
 		if !gated || (!rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Allowed, connector, probe.ServerName) &&
 			!rulesPinEndpointForServer(policy.Registry, connector, probe.ServerName)) {
 			return config.AssetPolicyDecision{}, false
@@ -660,7 +667,7 @@ func mcpListsPinEndpoint(p config.AssetTypePolicy) bool {
 }
 
 func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connector, hookEvent string, probe skillRuntimeProbe) (config.AssetPolicyDecision, bool) {
-	decision, matched := a.runtimeSkillAssetPolicyDecision(connector, probe)
+	decision, matched := a.runtimeSkillAssetPolicyDecision(ctx, connector, probe)
 	if matched {
 		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
 	}
@@ -668,7 +675,7 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 }
 
 func (a *APIServer) runtimeSkillAssetPolicyDecision(
-	connector string, probe skillRuntimeProbe,
+	ctx context.Context, connector string, probe skillRuntimeProbe,
 ) (config.AssetPolicyDecision, bool) {
 	if !probe.Matched {
 		return config.AssetPolicyDecision{}, false
@@ -688,7 +695,7 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	if probe.RuntimeDisableOnly {
 		return config.AssetPolicyDecision{}, false
 	}
-	cfg := a.liveConfig()
+	cfg := a.requestConfig(ctx)
 	if cfg == nil {
 		return config.AssetPolicyDecision{}, false
 	}
@@ -787,7 +794,7 @@ func (a *APIServer) evaluateNativeRuntimeSkillSelection(
 	connector, sessionID, hookEvent, provenance string,
 	probe skillRuntimeProbe,
 ) (config.AssetPolicyDecision, bool) {
-	decision, matched := a.runtimeSkillAssetPolicyDecision(connector, probe)
+	decision, matched := a.runtimeSkillAssetPolicyDecision(ctx, connector, probe)
 	if probe.RuntimeDisableOnly && !matched {
 		return decision, false
 	}
@@ -897,7 +904,7 @@ func (a *APIServer) runtimeAssetDisableDecision(targetType, name, connector, run
 // stop it, and a denied plugin's MCP tool still answered (GAP-1189).
 // Secure Client keeps main (issue #1092).
 func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
-	cfg := a.liveConfig()
+	cfg := a.requestConfig(ctx)
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return config.AssetPolicyDecision{}, false
 	}
@@ -918,7 +925,7 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 		probe := skillRuntimeProbe{
 			TargetType: "plugin", SkillName: plugin, ToolName: req.ToolName, Surface: "hook", Matched: true,
 		}
-		decision, matched := a.runtimeSkillAssetPolicyDecision("claudecode", probe)
+		decision, matched := a.runtimeSkillAssetPolicyDecision(ctx, "claudecode", probe)
 		if !matched {
 			continue
 		}
@@ -948,7 +955,7 @@ func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHoo
 		server = serverFromMCPToolName(req.ToolName)
 	}
 	if rest, ok := strings.CutPrefix(server, "plugin_"); ok {
-		cfg := a.liveConfig()
+		cfg := a.requestConfig(ctx)
 		resolved := false
 		if cfg != nil {
 			if entry, found := a.lookupCallerMCPServer(ctx, cfg, "claudecode", req.CWD, server); found {

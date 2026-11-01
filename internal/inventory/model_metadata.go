@@ -12,9 +12,10 @@ import (
 	"io"
 	"math"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -41,7 +42,7 @@ const (
 	ggufTypeFloat64
 )
 
-var ggufBaseModelKeyPattern = regexp.MustCompile(`^general\.base_model\.([0-9]+)\.(name|author|organization|repo_url)$`)
+var ggufBaseModelKeyPattern = lazyregexp.New(`^general\.base_model\.([0-9]+)\.(name|author|organization|repo_url)$`)
 
 type ggufMetadataValue struct {
 	text   string

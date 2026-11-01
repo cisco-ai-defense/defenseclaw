@@ -81,8 +81,8 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 		Reason: "The Antigravity integration is supported on native Windows x64.",
 	},
 	"opencode": {
-		Status: PlatformSupported,
-		Reason: "OpenCode native Windows setup is supported; OpenCode recommends WSL but does not require it.",
+		Status: PlatformPreview,
+		Reason: "OpenCode V2 is available as a native Windows preview using the reviewed @opencode/cli contract.",
 	},
 	"amp": {
 		Status: PlatformSupported,
@@ -121,6 +121,9 @@ func ConnectorSupportOnOS(name, goos string) PlatformSupport {
 			Status: PlatformNotCertified,
 			Reason: "This connector has not completed native Windows x64 certification.",
 		}
+	}
+	if name == "opencode" {
+		return PlatformSupport{Status: PlatformPreview, Reason: "The OpenCode V2 integration is a preview; live vendor-CLI certification is not claimed."}
 	}
 	return PlatformSupport{
 		Status: PlatformSupported,

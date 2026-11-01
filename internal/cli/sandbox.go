@@ -53,6 +53,9 @@ var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 			return settings.Operational.TrustedCAs, settings.Operational.TrustedCAError, ok
 		},
 		ManagedAccountHome: sandboxAccountHome,
+		ManagedAccountPolicy: func(ctx context.Context, harness string) (*sandboxapi.ManagedExplain, error) {
+			return launcherAccountPolicy(ctx, harness)
+		},
 		IO: sandboxcli.IO{
 			In: cmd.InOrStdin(), Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
 			TTY:    term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())),
@@ -169,7 +172,7 @@ with --output json it prints the pull's result.`
 
 func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 	if err := sandboxHostRefusal(runtime.GOOS, runtime.GOARCH, cmd.Annotations[sandboxConfigOptional] == "true"); err != nil {
-		return withExitCode(err, 3)
+		return withExitCode(managedWindowsSandboxRefusal(err), 3)
 	}
 	// A nested `sandbox run` inside a sandbox runs the harness natively and
 	// needs no configuration (there is none inside the sandbox).
@@ -264,6 +267,17 @@ func sandboxHostRefusal(goos, goarch string, cleanup bool) error {
 			strings.TrimPrefix(err.Error(), "openshell: "))
 	}
 	return nil
+}
+
+// managedWindowsSandboxRefusal adds to the platform refusal on a managed
+// Windows computer the one sandbox view there is, the administrator's list
+// of the account's registrations: it named no next step (GAP-0523).
+func managedWindowsSandboxRefusal(err error) error {
+	if _, managed := managedHostWindowsStandalone(); !managed {
+		return err
+	}
+	return fmt.Errorf("%w. %s", err, windowsManagedStandardUserViewAnswer("The sandbox registrations",
+		"enterprise windows sandbox list --user "+managedHostCurrentAccountName()))
 }
 
 // sandboxRunE adapts a command to cobra: it prints the error once, styled,
@@ -665,7 +679,10 @@ func newSandboxStopCmd() *cobra.Command {
 		Long: `Stops a sandbox and keeps it for start or connect. When its detached run is still
 going, the stop ends it: stop asks first on a terminal (--yes does not). Every stop,
 this one or one from the TUI, the macOS app or undo, marks the run interrupted and
-keeps its log, so "sandbox logs" still shows it.`,
+keeps its log, so "sandbox logs" still shows it. A MicroVM's disk is synced before
+its stop; when that sync fails the MicroVM keeps running, and stop says what a stop
+would lose and asks on a terminal (--yes does not answer that): --discard-unsynced
+stops it anyway.`,
 		Args: nameArg("sandbox"),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
 			o.Name = args[0]
@@ -673,6 +690,7 @@ keeps its log, so "sandbox logs" still shows it.`,
 		}),
 	}
 	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "stop without asking when a detached run or a session in another terminal is still going")
+	cmd.Flags().BoolVar(&o.DiscardUnsynced, "discard-unsynced", false, "stop a MicroVM whose disk could not be synced first, losing what it wrote since its last sync")
 	return cmd
 }
 

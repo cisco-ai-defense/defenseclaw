@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // lastHookFailure is the last line of the hook-failure log under home.
@@ -163,6 +164,74 @@ func TestHermesNeutralResultOutsideManagedToolCalls(t *testing.T) {
 				t.Fatalf("logged fail_mode = %q, want open", got)
 			}
 		})
+	}
+}
+
+// rel-1-0-2 GAP-0446 item 5, Copilot: a per-user Copilot event that cannot
+// block (sessionStart, postToolUse) runs on an outage in fail mode closed
+// too; the hook-failure log records that it ran fail-open, not the
+// configured closed mode, so the gateway reports it.
+func TestPerUserCopilotNonBlockingEventLogsFailOpenInModeClosed(t *testing.T) {
+	for _, event := range []string{"sessionStart", "postToolUse"} {
+		t.Run(event, func(t *testing.T) {
+			var home string
+			result := run(t, "copilot", &stubRT{err: errors.New("connection refused")}, func(o *Options) {
+				o.Event = event
+				o.FailMode = "closed"
+				home = o.Home
+			})
+			if blocked(result) {
+				t.Fatalf("%s blocked: %+v", event, result)
+			}
+			row := lastHookFailure(t, home)
+			if row["fail_mode"] != "open" || row["outcome"] != "fail_open" {
+				t.Fatalf("logged %v, want fail_mode open and outcome fail_open", row)
+			}
+		})
+	}
+}
+
+// rel-1-0-4 GAP-1320, native hook: a per-user Copilot CLI outage allow shows
+// the cause-and-recovery notice once per session, as postToolUse
+// additionalContext (the only text Copilot CLI shows on an allow); the
+// preToolUse allow prints nothing and keeps the marker.
+func TestPerUserCopilotOutageNoticeIsPostToolUseAdditionalContext(t *testing.T) {
+	home := t.TempDir()
+	sp, ok := specFor("copilot")
+	if !ok {
+		t.Fatal("Copilot spec missing")
+	}
+	call := func(event string, i int) (string, string) {
+		var stdout, stderr bytes.Buffer
+		opts := withPerUserOutage(Options{
+			Connector: "copilot", Event: event, Home: home,
+			HookDir: filepath.Join(home, "hooks"), Stdout: &stdout, Stderr: &stderr,
+			Now:               time.Now,
+			OutageFailModeNow: func() string { return "open" },
+			failurePayload:    []byte(fmt.Sprintf(`{"sessionId":"s1","toolCallId":"call-%d"}`, i)),
+		})
+		if code := failUnreachable(opts, sp, "closed", "gateway unreachable"); code != 0 {
+			t.Fatalf("%s exit %d: stdout=%q stderr=%q", event, code, stdout.String(), stderr.String())
+		}
+		return stdout.String(), stderr.String()
+	}
+	out, errOut := call("preToolUse", 0)
+	if strings.Contains(out, "not checking this session") || strings.Contains(out, "deny") {
+		t.Fatalf("preToolUse outage allow printed %q, want no notice and no deny", out)
+	}
+	if !strings.Contains(errOut, "fail mode open for an outage") {
+		t.Fatalf("preToolUse stderr %q, want the log line", errOut)
+	}
+	out, _ = call("postToolUse", 1)
+	var notice map[string]string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &notice); err != nil ||
+		!strings.Contains(notice["additionalContext"], "DefenseClaw is not checking this session") ||
+		!strings.Contains(notice["additionalContext"], "defenseclaw-gateway start") ||
+		!strings.Contains(notice["additionalContext"], "defenseclaw doctor") {
+		t.Fatalf("postToolUse outage allow printed %q, want the notice as additionalContext", out)
+	}
+	if out, _ := call("postToolUse", 2); strings.Contains(out, "additionalContext") {
+		t.Fatalf("second postToolUse printed %q, want the notice once per session", out)
 	}
 }
 

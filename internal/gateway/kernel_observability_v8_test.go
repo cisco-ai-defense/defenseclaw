@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	osuser "os/user"
 	"strings"
@@ -256,7 +257,7 @@ func hostFinding() sensor.Finding {
 			{
 				Tactic: tactics.Persistence, Source: plane.SourceFanotify,
 				UID: intPtr(0), AUID: intPtr(1000), User: "root",
-				Outcome: plane.OutcomeWouldBlock, Control: "kernel.persistence_write",
+				Outcome: plane.OutcomeWouldBlock, Control: "kernel.persistence_write", Hits: 2,
 				Hook: &sensor.HookJoin{Seen: false},
 			},
 		},
@@ -318,6 +319,10 @@ func TestActivityAndFindingCarryIdentitySourceKernelOutcomeAndHookJoin(t *testin
 			t.Errorf("persistence %s = %v, want %v", key, got, want)
 		}
 	}
+	// Two would-block files on one tactic are two hits (GAP-1400).
+	if got := fmt.Sprint(persistence["defenseclaw.ai.runtime.kernel.count"]); got != "2" {
+		t.Errorf("persistence kernel.count = %s, want 2", got)
+	}
 	if _, present := persistence["defenseclaw.ai.runtime.hook_join"]; present {
 		t.Error("an unjoined activity carries a hook_join")
 	}
@@ -361,7 +366,7 @@ func TestRecordsWithoutHostPlaneDetailCarryNoNewFields(t *testing.T) {
 				"user.id", "defenseclaw.user.login_id", "defenseclaw.ai.runtime.event_source",
 				"defenseclaw.ai.runtime.kernel.outcome", "defenseclaw.ai.runtime.kernel.control",
 				"defenseclaw.ai.runtime.hook_seen", "defenseclaw.ai.runtime.hook_join",
-				"defenseclaw.agent.identity.id",
+				"defenseclaw.agent.identity.id", "defenseclaw.ai.runtime.kernel.count",
 			} {
 				if _, present := body[key]; present {
 					t.Errorf("%s carries %s without host-plane detail", name, key)

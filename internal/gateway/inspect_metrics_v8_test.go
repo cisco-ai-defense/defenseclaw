@@ -117,6 +117,37 @@ func TestInspectMetricsV8DoNotFallBackWhenRuntimeIsUnbound(t *testing.T) {
 	api.recordParserUncertaintyMetricV8(context.Background(), "codex", 1)
 }
 
+func TestInspectMetricsV8DoNotExportCallerChosenToolNames(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"metrics"})
+	for _, tool := range []string{"codex:alice", "codex:mcp__private_workspace", "codex:session_123"} {
+		api.recordInspectMetricsV8(context.Background(), "codex", tool, "allow", "NONE", time.Millisecond)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, requests := capture.snapshot()
+		if hookModelV8MetricPointCount(requests, observability.TelemetryInstrumentDefenseClawInspectEvaluations) > 0 &&
+			hookModelV8MetricPointCount(requests, observability.TelemetryInstrumentDefenseClawInspectLatency) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_, requests := capture.snapshot()
+	for _, family := range []string{
+		observability.TelemetryInstrumentDefenseClawInspectEvaluations,
+		observability.TelemetryInstrumentDefenseClawInspectLatency,
+	} {
+		points := hookModelV8MetricPoints(requests, family)
+		if len(points) == 0 {
+			t.Fatalf("no %s metrics exported", family)
+		}
+		for _, point := range points {
+			if got := point.attributes["defenseclaw.metric.tool"]; got != "codex:other" {
+				t.Fatalf("%s exported caller tool name %q", family, got)
+			}
+		}
+	}
+}
+
 func TestParserUncertaintyV8IsCounterOnlyNotAlert(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"metrics"})
 	api.recordParserUncertaintyMetricV8(context.Background(), "CoDeX", 3)

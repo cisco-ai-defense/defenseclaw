@@ -13,6 +13,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -22,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -30,18 +32,21 @@ import (
 // blocks until release is closed (a directory user whose NSS lookup hangs).
 type slowPeerResolver struct {
 	unixidentity.Resolver
-	slowUID   int
-	started   chan struct{}
-	release   chan struct{}
-	once      sync.Once
-	slowCalls atomic.Int32
+	slowUID          int
+	started          chan struct{}
+	release          chan struct{}
+	once             sync.Once
+	slowCalls        atomic.Int32
+	pauseIncarnation bool
 }
 
 func (r *slowPeerResolver) LookupUID(uid int) (unixidentity.Account, error) {
 	if uid == r.slowUID {
 		r.slowCalls.Add(1)
-		r.once.Do(func() { close(r.started) })
-		<-r.release
+		if !r.pauseIncarnation {
+			r.once.Do(func() { close(r.started) })
+			<-r.release
+		}
 	}
 	return unixidentity.Account{Name: fmt.Sprintf("user%d", uid), UID: uid, Home: fmt.Sprintf("/home/user%d", uid)}, nil
 }
@@ -60,59 +65,111 @@ func useTestPeerResolver(t *testing.T, resolver unixidentity.Resolver) {
 // runs ConnContext in its single accept loop. The caller's account lookup
 // must not run there, or one directory user whose lookup hangs holds up the
 // hook connections of every other user on the host. Other connections of the
-// slow account wait for its lookup instead of each starting one.
+// slow account share its lookup instead of each starting one.
 func TestManagedHookSocketSlowAccountLookupDoesNotDelayOtherCallers(t *testing.T) {
-	resolver := &slowPeerResolver{slowUID: 5001, started: make(chan struct{}), release: make(chan struct{})}
-	useTestPeerResolver(t, resolver)
-	var accepted atomic.Int32
-	restoreCredentials := hookSocketPeerCredentials
-	hookSocketPeerCredentials = func(net.Conn) (peercred.Credentials, error) {
-		// The first accepted connection is the slow caller, every later
-		// one another account.
-		if accepted.Add(1) == 1 {
-			return peercred.Credentials{UID: 5001, GID: 5001, PID: 101}, nil
-		}
-		return peercred.Credentials{UID: 5002, GID: 5002, PID: 102}, nil
-	}
-	t.Cleanup(func() { hookSocketPeerCredentials = restoreCredentials })
-	socket, _, _ := startTestHookSocketServer(t, hookSocketTestServer{})
+	for _, stage := range []string{"passwd", "incarnation"} {
+		t.Run(stage, func(t *testing.T) {
+			resolver := &slowPeerResolver{slowUID: 5001, started: make(chan struct{}), release: make(chan struct{})}
+			resolver.pauseIncarnation = stage == "incarnation"
+			previousIncarnation := managedHookPeerAccountIncarnation
+			managedHookPeerAccountIncarnation = func(account unixidentity.Account) (string, bool) {
+				if resolver.pauseIncarnation && account.UID == resolver.slowUID {
+					resolver.once.Do(func() { close(resolver.started) })
+					<-resolver.release
+				}
+				return "files", true
+			}
+			t.Cleanup(func() { managedHookPeerAccountIncarnation = previousIncarnation })
+			useTestPeerResolver(t, resolver)
+			var accepted atomic.Int32
+			restoreCredentials := hookSocketPeerCredentials
+			hookSocketPeerCredentials = func(net.Conn) (peercred.Credentials, error) {
+				// The first accepted connection is the slow caller, every later
+				// one another account.
+				if accepted.Add(1) == 1 {
+					return peercred.Credentials{UID: 5001, GID: 5001, PID: 101}, nil
+				}
+				return peercred.Credentials{UID: 5002, GID: 5002, PID: 102}, nil
+			}
+			t.Cleanup(func() { hookSocketPeerCredentials = restoreCredentials })
+			socket, api, _ := startTestHookSocketServer(t, hookSocketTestServer{machinePolicy: []string{"claudecode"}})
+			previousFacts := identityFactsEnabled.Load()
+			setIdentityFactsEnabled(true)
+			t.Cleanup(func() { setIdentityFactsEnabled(previousFacts) })
+			strict := api.runtimeConfigSnapshot()
+			strict.Guardrail.Enabled, strict.Guardrail.Mode = true, "action"
+			api.SetConfigRuntime(nil, func() *config.Config { return strict })
 
-	slowDone := make(chan error, 1)
-	go func() {
-		_, _, err := hookSocketPost(hookSocketClient(socket, 20*time.Second), "/api/v1/not-a-hook-route", []byte(`{}`))
-		slowDone <- err
-	}()
-	select {
-	case <-resolver.started:
-	case <-time.After(5 * time.Second):
-		close(resolver.release)
-		t.Fatal("the slow caller's account lookup never started")
-	}
-	shared := make(chan string, 4)
-	for i := 0; i < cap(shared); i++ {
-		go func() { shared <- managedHookPeerHomes.lookup(5001) }()
-	}
+			slowDone := make(chan error, 1)
+			go func() {
+				code, body, err := hookSocketCall(hookSocketClient(socket, 3*time.Second), http.MethodPost, "/api/v1/claude-code/hook",
+					map[string]string{"X-DefenseClaw-Client": "claude-code-hook/1.0"},
+					[]byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ok"},"session_id":"cold-nss-hook"}`))
+				var verdict struct {
+					Action string `json:"action"`
+					Mode   string `json:"mode"`
+				}
+				if err == nil && (code != http.StatusOK || json.Unmarshal([]byte(body), &verdict) != nil || verdict.Action != "allow" || verdict.Mode != "action") {
+					err = fmt.Errorf("benign call under the global action policy got HTTP %d: %s", code, body)
+				}
+				slowDone <- err
+			}()
+			select {
+			case <-resolver.started:
+			case <-time.After(5 * time.Second):
+				close(resolver.release)
+				t.Fatal("the slow caller's account lookup never started")
+			}
+			shared := make(chan string, 4)
+			for i := 0; i < cap(shared); i++ {
+				go func() { shared <- managedHookPeerHomes.lookup(5001) }()
+			}
 
-	start := time.Now()
-	status, body, err := hookSocketPost(hookSocketClient(socket, 3*time.Second), "/api/v1/not-a-hook-route", []byte(`{}`))
-	elapsed := time.Since(start)
-	close(resolver.release)
-	if err != nil {
-		t.Fatalf("another account's request waited behind a slow account lookup: %v after %s", err, elapsed)
-	}
-	if status != http.StatusForbidden || elapsed > 2*time.Second {
-		t.Fatalf("other caller = %d %q after %s, want a prompt refusal of the unknown route", status, body, elapsed)
-	}
-	if err := <-slowDone; err != nil {
-		t.Fatalf("the slow caller's own request failed: %v", err)
-	}
-	for i := 0; i < cap(shared); i++ {
-		if home := <-shared; home != "/home/user5001" {
-			t.Fatalf("a shared lookup answered %q", home)
-		}
-	}
-	if got := resolver.slowCalls.Load(); got != 1 {
-		t.Fatalf("lookups of the slow account = %d, want one shared lookup", got)
+			start := time.Now()
+			status, body, err := hookSocketPost(hookSocketClient(socket, 3*time.Second), "/api/v1/not-a-hook-route", []byte(`{}`))
+			elapsed := time.Since(start)
+			// The stalled caller itself must also get a gateway answer before
+			// its watchdog. Machine policy authorizes this connector for every
+			// kernel-verified uid; no directory facts select a looser profile.
+			answered := false
+			select {
+			case err := <-slowDone:
+				answered = true
+				if err != nil {
+					t.Errorf("stalled caller got no gateway answer: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Error("stalled account lookup outlasted the gateway answer budget")
+			}
+			close(resolver.release)
+			if !answered {
+				if err := <-slowDone; err != nil {
+					t.Errorf("stalled caller: %v", err)
+				}
+			}
+			managedHookPeerHomes.mu.Lock()
+			ready := managedHookPeerHomes.accounts[5001].ready
+			managedHookPeerHomes.mu.Unlock()
+			select {
+			case <-ready:
+			case <-time.After(5 * time.Second):
+				t.Fatal("released account lookup did not finish")
+			}
+			if err != nil {
+				t.Fatalf("another account's request waited behind a slow account lookup: %v after %s", err, elapsed)
+			}
+			if status != http.StatusForbidden || elapsed > 2*time.Second {
+				t.Fatalf("other caller = %d %q after %s, want a prompt refusal of the unknown route", status, body, elapsed)
+			}
+			for i := 0; i < cap(shared); i++ {
+				if home := <-shared; home != "" && home != "/home/user5001" {
+					t.Fatalf("a shared lookup answered %q", home)
+				}
+			}
+			if got := resolver.slowCalls.Load(); got != 1 {
+				t.Fatalf("lookups of the slow account = %d, want one shared lookup", got)
+			}
+		})
 	}
 }
 

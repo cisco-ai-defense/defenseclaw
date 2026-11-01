@@ -51,7 +51,7 @@ func TestPurgeKeepsTheStateWhileATeardownKeepsAnEditedFile(t *testing.T) {
 	installOpenCode := func(t *testing.T) (string, string, string, InstallOptions) {
 		t.Helper()
 		home := newTestHome(t)
-		opts := options(home, "opencode", "1.18.34")
+		opts := options(home, "opencode", "2.1.4")
 		if _, err := Install(context.Background(), opts); err != nil {
 			t.Fatal(err)
 		}

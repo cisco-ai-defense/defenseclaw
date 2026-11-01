@@ -71,6 +71,26 @@ func userOwnedSettingsReadPath(path string) (string, error) {
 	return target, nil
 }
 
+// windowsSettingsFileLinkRefusal refuses, on Windows, an agent settings file
+// that is a symbolic link or junction. The Windows writer replaces only a
+// regular file, so such a file used to fail later with "settings source is not
+// a regular file", which named neither the link nor its target (GAP-0034).
+// A missing or unreadable path is left to the readers, which report it.
+func windowsSettingsFileLinkRefusal(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil
+	}
+	if info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+		return nil
+	}
+	target, linkErr := os.Readlink(path)
+	if linkErr != nil || target == "" {
+		target = "a target Windows does not report"
+	}
+	return fmt.Errorf("%s is a symbolic link or junction to %s; on Windows setup changes only a regular settings file: replace the link with the file it points to", path, target)
+}
+
 // validateSettingsLinkOwnerFromInfo is deliberately narrower than the plugin
 // owner check: root may create a user's settings link during installation,
 // but the linked settings destination still has to be owned by that user.

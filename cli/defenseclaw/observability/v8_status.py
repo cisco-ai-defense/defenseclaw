@@ -236,10 +236,23 @@ class V8OperatorStatus:
     buckets: tuple[V8BucketStatus, ...]
     warnings: tuple[tuple[str, str, str], ...]
     judge_bodies_enabled: bool = True
+    # observability.defaults.redaction_profile as config.yaml sets it
+    # ("none" when it does not), for summaries that name the global default.
+    default_redaction_profile: str = "none"
+    # observability.local.max_store_mb, the opt-in audit.db size cap (0: none).
+    max_store_mb: int = 0
 
     @property
     def unbounded_retention(self) -> bool:
         return self.retention_days == 0
+
+    @property
+    def retention_label(self) -> str:
+        """Retention as the status views show it, with the size cap when set."""
+        if self.max_store_mb > 0:
+            cap = f"size cap {self.max_store_mb} MiB"
+            return cap if self.unbounded_retention else f"{self.retention_days} days, {cap}"
+        return "unbounded" if self.unbounded_retention else f"{self.retention_days} days"
 
 
 def source_is_v8(config_path: str | Path) -> bool:
@@ -318,6 +331,12 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
     if isinstance(guardrail, Mapping) and "retain_judge_bodies" in guardrail:
         retain_judge_bodies = guardrail["retain_judge_bodies"] is True
 
+    defaults = (validated.get("observability") or {}).get("defaults") if isinstance(
+        validated.get("observability"), Mapping
+    ) else None
+    default_profile = defaults.get("redaction_profile") if isinstance(defaults, Mapping) else None
+    default_profile = default_profile if isinstance(default_profile, str) and default_profile.strip() else "none"
+
     source_data_dir = validated.get("data_dir")
     inspection_data_dir = (
         source_data_dir.strip()
@@ -386,6 +405,7 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
         data_dir=result.data_dir,
         plan_digest=result.plan_digest,
         judge_bodies_enabled=retain_judge_bodies,
+        default_redaction_profile=default_profile,
     )
 
 
@@ -396,6 +416,7 @@ def operator_status_from_effective(
     data_dir: str,
     plan_digest: str,
     judge_bodies_enabled: bool = True,
+    default_redaction_profile: str = "none",
 ) -> V8OperatorStatus:
     """Normalize a decoded canonical effective plan without adding policy."""
 
@@ -408,6 +429,7 @@ def operator_status_from_effective(
     )
     local = _mapping(effective.get("local"), "local")
     retention_days = _required_integer(local, "retention_days", minimum=0)
+    max_store_mb = _optional_integer(local, "max_store_mb", minimum=0) or 0
     catalog_version = _required_integer(effective, "bucket_catalog_version", minimum=1)
     warnings = tuple(
         (
@@ -423,12 +445,14 @@ def operator_status_from_effective(
         plan_digest=plan_digest,
         bucket_catalog_version=catalog_version,
         retention_days=retention_days,
+        max_store_mb=max_store_mb,
         local_path=_optional_string(local.get("path")),
         judge_bodies_path=_optional_string(local.get("judge_bodies_path")),
         destinations=destinations,
         buckets=buckets,
         warnings=warnings,
         judge_bodies_enabled=judge_bodies_enabled,
+        default_redaction_profile=default_redaction_profile,
     )
 
 

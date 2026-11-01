@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Command defenseclaw-scanners runs the Python scanners the standalone
-// Windows enterprise payload ships: skill-scanner, the MCP scan and
+// enterprise deployments ship (on Linux and macOS the package installs the
+// runtime tree; see installed_other.go). On Windows the payload ships: skill-scanner, the MCP scan and
 // DefenseClaw's plugin scanner. The CPython runtime and the locked
 // site-packages tree (the same pins the per-user Windows install resolves)
 // are embedded in this executable, so the payload stays one signed file per
@@ -36,6 +37,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,6 +49,9 @@ const (
 	runtimeArchiveName  = "payload/runtime.zip"
 	runtimeManifestName = "payload/runtime.json"
 	completeMarker      = ".complete"
+	// compiledMarker names, inside a published runtime folder, the archive
+	// SHA-256 whose Python files prepare byte-compiled.
+	compiledMarker = ".compiled"
 	// unpackMarker names, inside a staging folder, the archive SHA-256 the
 	// unpack in it belongs to.
 	unpackMarker = ".unpack-sha256"
@@ -64,7 +70,9 @@ type runtimeManifest struct {
 // The Python programs each tool runs. Arguments after the program reach it
 // as sys.argv[1:].
 const (
-	consoleEntryPointScript = `import importlib.metadata as m,sys; name=sys.argv[1]; sys.argv=[name,*sys.argv[2:]]; matches=[e for e in m.entry_points(group="console_scripts") if e.name==name]; sys.exit(matches[0].load()() if len(matches)==1 else 1)`
+	// skillScannerScript runs skill-scanner with the DefenseClaw fix that
+	// accepts a well-formed judge answer from any supported model (GAP-2609).
+	skillScannerScript = `import sys; from defenseclaw.scanner._skill_judge_compat import main; sys.exit(main())`
 
 	// pluginScanScript runs the plugin judge the gateway resolved for
 	// scanners.plugin, as the CLI wrapper does; a judge it cannot run stops
@@ -166,6 +174,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: defenseclaw-scanners skill-scanner|mcp-scan|plugin-scan|versions|prepare [arguments]")
 		return 2
 	}
+	if runtime.GOOS != "windows" {
+		// Linux and macOS run the runtime the managed package installed.
+		return runInstalled(args, stdout, stderr)
+	}
 	manifest, err := loadManifest()
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw-scanners: %v\n", err)
@@ -194,10 +206,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, versionLine(manifest))
 		return 0
 	}
-	if runtime.GOOS != "windows" {
-		fmt.Fprintln(stderr, "defenseclaw-scanners: the embedded scanner runtime runs only on Windows")
-		return 1
-	}
 	var script string
 	var scriptArgs []string
 	switch args[0] {
@@ -208,8 +216,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "defenseclaw-scanners: %v\n", err)
 			return 1
 		}
-		fmt.Fprintln(stderr, "defenseclaw-scanners: compiling the Python files")
-		compileRuntime(dir, stderr)
+		compilePreparedRuntime(dir, manifest.SHA256, stderr)
 		fmt.Fprintln(stdout, dir)
 		return 0
 	case "prune":
@@ -223,7 +230,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		pruneOtherRuntimes(root, manifest.SHA256[:16])
 		return 0
 	case "skill-scanner":
-		script, scriptArgs = consoleEntryPointScript, append([]string{"skill-scanner"}, args[1:]...)
+		script, scriptArgs = skillScannerScript, args[1:]
 	case "plugin-scan":
 		script, scriptArgs = pluginScanScript, args[1:]
 	case "mcp-scan":
@@ -260,16 +267,48 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// compilePreparedRuntime byte-compiles a prepared runtime once. Every Setup
+// /ensure, also a no-op one, runs prepare; its compileall found nothing to do
+// on a compiled tree but still started a Python and one worker process per
+// CPU, about 6 s of a no-op ensure on a managed Windows host (rel-1-0-4
+// GAP-2607). A tree prepare compiled carries compiledMarker; one that prepare
+// unpacked again (a changed or untrusted tree is removed first) has none and
+// is compiled. The marker is written only after compileall ran to its end,
+// so a compile that was stopped is done again by the next prepare. It
+// reports whether it compiled. The byte-compiled caches are a speed-up only:
+// the scans run python -B, and Python recompiles in memory any cache it
+// cannot use.
+func compilePreparedRuntime(dir, sha string, stderr io.Writer) bool {
+	marker := filepath.Join(dir, compiledMarker)
+	if recorded, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(recorded)) == sha {
+		fmt.Fprintln(stderr, "defenseclaw-scanners: the Python files are already compiled")
+		return false
+	}
+	fmt.Fprintln(stderr, "defenseclaw-scanners: compiling the Python files")
+	if compileRuntime(dir, stderr) {
+		if err := os.WriteFile(marker, []byte(sha), 0o644); err != nil {
+			fmt.Fprintf(stderr, "defenseclaw-scanners: record the compiled runtime: %v\n", err)
+		}
+	}
+	return true
+}
+
 // compileRuntime byte-compiles the unpacked runtime so the read-only scans
-// start fast. A file that does not compile only costs its own speed-up.
-func compileRuntime(dir string, stderr io.Writer) {
+// start fast. A file that does not compile only costs its own speed-up. It
+// reports whether compileall ran to its end: exit status 0, or 1, which
+// compileall returns when some file did not compile (the runtime always has
+// a few). A variable so a test can count the compiles.
+var compileRuntime = func(dir string, stderr io.Writer) bool {
 	pythonDir := filepath.Join(dir, "python")
 	cmd := exec.Command(filepath.Join(pythonDir, "python.exe"), "-I", "-m", "compileall", "-q", "-j", "0",
 		filepath.Join(pythonDir, "Lib", "site-packages"))
 	cmd.Env = pythonEnv(os.Environ(), pythonDir)
-	if out, err := cmd.CombinedOutput(); err != nil && len(out) > 0 {
+	out, err := cmd.CombinedOutput()
+	if err != nil && len(out) > 0 {
 		fmt.Fprintf(stderr, "defenseclaw-scanners: compile: %d bytes of warnings\n", len(out))
 	}
+	var exitErr *exec.ExitError
+	return err == nil || (errors.As(err, &exitErr) && exitErr.ExitCode() == 1)
 }
 
 func loadManifest() (runtimeManifest, error) {
@@ -540,12 +579,19 @@ func runtimeFilesPresent(dir string) error {
 // verifyRuntime checks that every file of archive exists under dir as a
 // regular file with the archived size and, with hashes, SHA-256. Files
 // prepare adds (the byte-compiled caches) are not in the archive and are not
-// checked. The error names the first file that differs.
+// checked. The error names the first file, in archive order, that differs.
+//
+// The SHA-256 pass inflates every archived entry and reads every unpacked
+// file. Done one file at a time it was most of a no-op Setup /ensure on a
+// managed Windows host (76 s of 131 s quiet, 5 min under hook load,
+// rel-1-0-4 GAP-2607), so the files are hashed by verifyRuntimeWorkers
+// goroutines; every file is still compared.
 func verifyRuntime(dir string, archive io.ReaderAt, size int64, hashes bool) error {
 	reader, err := zip.NewReader(archive, size)
 	if err != nil {
 		return err
 	}
+	var files []*zip.File
 	for _, file := range reader.File {
 		if file.FileInfo().IsDir() {
 			continue
@@ -555,15 +601,63 @@ func verifyRuntime(dir string, archive io.ReaderAt, size int64, hashes bool) err
 		if err != nil || !info.Mode().IsRegular() || uint64(info.Size()) != file.UncompressedSize64 {
 			return fmt.Errorf("%s is missing or changed", file.Name)
 		}
-		if !hashes {
-			continue
-		}
-		want, err := entrySHA256(file)
+		files = append(files, file)
+	}
+	if !hashes {
+		return nil
+	}
+	return verifyRuntimeHashes(dir, files)
+}
+
+// verifyRuntimeWorkers is how many files verifyRuntime hashes at once (a
+// variable so a test can pin it).
+var verifyRuntimeWorkers = func() int { return min(max(runtime.NumCPU(), 1), 16) }
+
+// verifyRuntimeHashes compares the SHA-256 of each archived entry with the
+// unpacked file. The error is that of the first file in archive order that
+// differs, whatever order the workers finish in.
+func verifyRuntimeHashes(dir string, files []*zip.File) error {
+	errs := make([]error, len(files))
+	var next atomic.Int64
+	// first is the lowest failing index: files after it are not hashed,
+	// the ones before it still are, so the error is the archive-order first.
+	var first atomic.Int64
+	first.Store(int64(len(files)))
+	var wg sync.WaitGroup
+	workers := min(verifyRuntimeWorkers(), len(files))
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				index := int(next.Add(1) - 1)
+				if int64(index) >= first.Load() {
+					return
+				}
+				file := files[index]
+				want, err := entrySHA256(file)
+				if err == nil {
+					var got [sha256.Size]byte
+					if got, err = fileSHA256(filepath.Join(dir, filepath.FromSlash(file.Name))); err != nil || got != want {
+						err = fmt.Errorf("%s is missing or changed", file.Name)
+					}
+				}
+				if err != nil {
+					errs[index] = err
+					for {
+						current := first.Load()
+						if int64(index) >= current || first.CompareAndSwap(current, int64(index)) {
+							break
+						}
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
 		if err != nil {
 			return err
-		}
-		if got, err := fileSHA256(path); err != nil || got != want {
-			return fmt.Errorf("%s is missing or changed", file.Name)
 		}
 	}
 	return nil
@@ -578,7 +672,8 @@ func entrySHA256(file *zip.File) ([sha256.Size]byte, error) {
 	return readerSHA256(in)
 }
 
-func fileSHA256(path string) ([sha256.Size]byte, error) {
+// fileSHA256 is a variable so a test can observe the parallel hashing.
+var fileSHA256 = func(path string) ([sha256.Size]byte, error) {
 	in, err := os.Open(path)
 	if err != nil {
 		return [sha256.Size]byte{}, err

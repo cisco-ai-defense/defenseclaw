@@ -18,13 +18,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 )
 
@@ -79,8 +80,15 @@ func (l *lifecycle) currentOpenShellSettings() (openshellSettings, bool) {
 	if applied == nil {
 		return openshellSettings{}, false
 	}
-	return openshellSettings{Enabled: applied.Enabled, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
-		RaisedFrom: applied.RaisedFrom, GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}, applied.Enabled
+	s := openshellSettings{Enabled: applied.Enabled, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
+		RaisedFrom: applied.RaisedFrom, GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}
+	// The applied state keeps no policy: the docker group advisory reads
+	// required_for from the installed config (GAP-0554); one that does not
+	// load leaves the advisory without it (describeConnectors warns).
+	if cfg, err := l.env.InstalledConfig(); err == nil {
+		s.RequiredFor = requiredForConfigured(cfg)
+	}
+	return s, applied.Enabled
 }
 
 // describeOpenShell adds the sandbox rows to the result and warns for every
@@ -90,6 +98,9 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	env, r := l.env, l.result
 	settings, on := l.currentOpenShellSettings()
 	state := env.loadOpenShellState()
+	if on || len(state.Pending) > 0 {
+		l.describeLegacySandboxes(ctx)
+	}
 	if !on {
 		if settings.Install == config.EnterpriseOpenShellInstallSetup && strings.TrimSpace(settings.Version) == "" {
 			r.AddWarning(codeOpenShellPrerequisite, "sandboxes remain off: enterprise.openshell.install: setup has no pin; set enterprise.openshell.version to an exact supported OpenShell release before enabling openshell.enabled")
@@ -172,6 +183,78 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify && (l.osPlan != nil || len(r.Errors) == 0) {
 		if err := env.publishPrerequisites(ctx, settings); err != nil {
 			r.AddWarning(stateWriteCode(err, codeState), "could not record "+openshell.PrerequisitesFile+": "+err.Error())
+		}
+	}
+}
+
+// describeLegacySandboxes reports, for every account whose sandbox daemon
+// runs, each legacy sandbox as running unprotected (GAP-0901): a live guest
+// whose session runs the supervisor of an OpenShell release older than the
+// oldest supported one, whose network broker can let its connections bypass
+// sandbox policy and which DefenseClaw cannot contain
+// (sandboxapi.Status.Unprotected), and every sandbox that a daemon of
+// DefenseClaw 1.0.3 or older still holds. Each is a row and a warning with
+// the command its user runs to end it, since DefenseClaw stops none itself
+// and the account's daemon runs no new sandbox until it is gone; the
+// deployment is then not security-complete, and verify fails. A daemon that
+// runs but cannot answer is reported the same way: what cannot be shown
+// protected is not. A user daemon runs only under a running user manager
+// (Linux: the signed-in and lingering accounts).
+func (l *lifecycle) describeLegacySandboxes(ctx context.Context) {
+	ops := l.env.sandboxOps()
+	accounts := ops.LoggedIn(ctx)
+	if l.env.GOOS == "darwin" {
+		accounts = ops.Accounts(ctx)
+	}
+	seen := map[int]bool{}
+	for _, a := range accounts {
+		if seen[a.UID] {
+			continue
+		}
+		seen[a.UID] = true
+		st, err := ops.Status(ctx, a)
+		type unprotected struct{ state, line, why string }
+		legacy := ". Its session runs the supervisor of an OpenShell release older than " + openshell.SupportedMin + ", whose network broker can " +
+			"let its connections bypass sandbox policy and DefenseClaw cannot contain; DefenseClaw stops no sandbox for its user, and runs no new " +
+			"sandbox for " + a.Name + " until it is gone"
+		var lines []unprotected
+		switch {
+		case err != nil:
+			lines = []unprotected{{sandboxapi.LegacyUnprotected, "its sandbox daemon could not say whether one runs (" + err.Error() + "); as " + a.Name +
+				", `defenseclaw sandbox status` names any", legacy}}
+		case st.Legacy && st.busy() > 0:
+			held := "1 sandbox"
+			if n := st.busy(); n != 1 {
+				held = fmt.Sprintf("%d sandboxes", n)
+			}
+			lines = []unprotected{{sandboxapi.LegacyUnprotected, "the sandbox daemon of an earlier DefenseClaw holds " + held + ", which this version " +
+				"cannot show protected; as " + a.Name + ", `defenseclaw sandbox list` names them, and `defenseclaw sandbox stop NAME` ends a running one", legacy}}
+		default:
+			for _, u := range st.Unprotected {
+				line := u.Name + "; as " + a.Name + ", `" + u.Stop + "` ends it"
+				if u.Detail != "" {
+					line = u.Name + "; as " + a.Name + ": " + u.Detail
+				}
+				if u.Reason == sandboxapi.UnprotectedUnknown {
+					lines = append(lines, unprotected{sandboxapi.UnknownUnprotected, line, ". It may be a legacy or contained sandbox, and its " +
+						"gateway has not said whether it runs; DefenseClaw stops no sandbox for its user, and runs no new sandbox for " + a.Name +
+						" until its gateway says"})
+					continue
+				}
+				if u.Reason == sandboxapi.UnprotectedContained {
+					lines = append(lines, unprotected{sandboxapi.ContainedUnprotected, line, ". DefenseClaw had to stop it, but its MicroVM's disk " +
+						"could not be synced first, so it keeps running with its network withdrawn; DefenseClaw stops no sandbox for its user after a " +
+						"failed sync, and runs no new sandbox for " + a.Name + " until it is gone"})
+					continue
+				}
+				lines = append(lines, unprotected{sandboxapi.LegacyUnprotected, line, legacy})
+			}
+		}
+		for _, u := range lines {
+			l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox unprotected " + a.Name, Kind: sandboxRowKind,
+				State: u.state + ": " + u.line})
+			l.result.AddWarning(codeLegacySandbox, a.Name+": "+u.state+": "+u.line+u.why)
+			l.result.SecurityComplete = false
 		}
 	}
 }
@@ -383,7 +466,7 @@ func (e *Env) openshellBinaryVersion(ctx context.Context, path string) (openshel
 	return openshell.VersionFromOutput(strings.TrimSpace(string(res.Stdout)))
 }
 
-var versionRange = regexp.MustCompile(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9]+\.[0-9]+))?$`)
+var versionRange = lazyregexp.New(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9]+\.[0-9]+))?$`)
 
 // versionAllowed reports whether have satisfies enterprise.openshell.version:
 // an exact release, a ">=x <y" range, or (empty) the releases DefenseClaw
@@ -690,7 +773,7 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereq
 			accounts = append(accounts, a)
 		}
 	}
-	advisory = e.dockerGroupAdvisory(members, enrolled)
+	advisory = e.dockerGroupAdvisory(members, enrolled, s.RequiredFor)
 	if len(accounts) == 0 {
 		need := "docker"
 		if needKVM {
@@ -752,17 +835,24 @@ const codeDockerGroupMembers = "docker_group_members"
 // administrator policy, the protected credentials and the services'
 // environment included, and the rule that each person sees only their own
 // effective policy does not hold for them. References do not help against a
-// member, so the only mitigation is a small group. It counts and never names
+// member, so the only mitigation is a small group. With required set (a
+// required_for in the policy) it also says that a member can run a required
+// agent outside its sandbox policy (GAP-0554). It counts and never names
 // the accounts. "" when none is a member.
-func (e *Env) dockerGroupAdvisory(members, enrolled int) string {
+func (e *Env) dockerGroupAdvisory(members, enrolled int, required bool) string {
 	if members == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d of %d enrolled accounts are in the docker group, which is root-equivalent on this host: a member can read and "+
+	advisory := fmt.Sprintf("%d of %d enrolled accounts are in the docker group, which is root-equivalent on this host: a member can read and "+
 		"change what root can, including the administrator policy (%s), the protected credentials and the services' environment, so the "+
 		"rule that each person sees only their own effective policy does not hold for them, and references keep secrets out of the policy "+
 		"file but do not protect them from a member; sandboxes on Linux need the group, so the only mitigation is to add only the accounts "+
 		"that run sandboxes", members, enrolled, e.Layout.ConfigPath)
+	if required {
+		advisory += "; the policy sets required_for, and a member can also run a required agent in a container outside its sandbox policy, " +
+			"where DefenseClaw does not inspect it, so where required_for must hold against deliberate users, keep those accounts out of the group"
+	}
+	return advisory
 }
 
 // groupFix is the one fix of a groups row: no ready-made command per

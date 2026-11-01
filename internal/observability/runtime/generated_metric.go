@@ -224,6 +224,26 @@ func recordGeneratedMetricsWithLease(
 			return results, buildErr
 		}
 	}
+	if len(observations) > 0 && audit.CallWritesOpen(ctx, store) {
+		// The observations wait in the hook call's batch: the provider gets
+		// the records after the call commits them (commit before export).
+		if fork := lease.Fork(); fork != nil {
+			exportCtx := context.WithoutCancel(ctx)
+			deferred := append([]preparedGeneratedMetric(nil), prepared...)
+			if audit.DeferAfterCallWrites(ctx, store, func() {
+				defer fork.Release()
+				scratch := make([]telemetry.V8MetricRecordResult, len(items))
+				for _, metric := range deferred {
+					if exportPreparedGeneratedMetric(exportCtx, metric, scratch) != nil {
+						return
+					}
+				}
+			}) {
+				return results, buildErr
+			}
+			fork.Release()
+		}
+	}
 	for _, metric := range prepared {
 		if err := exportPreparedGeneratedMetric(ctx, metric, results); err != nil {
 			return results, err

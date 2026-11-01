@@ -47,6 +47,7 @@ ALERT_LEGACY_FINDING_ACTIONS = (
     "gateway-session-prompt-alert",
     "gateway-tool-call-flagged",
     "gateway-tool-call-judge-flagged",
+    "protected-file-changed",
     "scan-finding",
     "tool-result-pii-alert",
 )

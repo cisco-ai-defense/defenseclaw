@@ -19,11 +19,11 @@
 // so a hook that connects while the gateway restarts queues instead of
 // reaching a user-owned impostor.
 //
-// macOS: launchd hands over its sockets only through launch_activate_socket(3),
-// a libxpc call that needs cgo, and release builds are CGO_ENABLED=0. The
-// darwin gateway therefore binds its own listeners; the standalone hook
-// socket still lives in a directory only root or the service account can
-// write, so a user cannot pre-create an impostor there either.
+// macOS: launchd binds the gateway plist's Sockets the same way and keeps
+// 127.0.0.1:18970 bound across gateway restarts; the gateway adopts it
+// through launch_activate_socket(3), reached without cgo (launchd_darwin.go).
+// The standalone hook socket lives in a directory only root or the service
+// account can write, so a user cannot pre-create an impostor there either.
 package systemd
 
 import (

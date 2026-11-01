@@ -43,7 +43,7 @@ func TestCopilotSubagentStartDoesNotTakeAnotherAccountsParent(t *testing.T) {
 			})
 			api.noteCopilotSubagentStart(llmEventMeta{
 				Source: "copilot", SessionID: session, AgentIdentityID: tc.identity, UserID: tc.user,
-			}, time.Now())
+			}, "", time.Now())
 			api.llmPromptMu.Lock()
 			pending := len(api.copilotSubagents)
 			api.llmPromptMu.Unlock()
@@ -61,7 +61,7 @@ func TestCopilotSubagentStartDoesNotTakeAnotherAccountsParent(t *testing.T) {
 	})
 	api.noteCopilotSubagentStart(llmEventMeta{
 		Source: "copilot", SessionID: session, AgentIdentityID: cases[0].parentIdentity, UserID: "1047",
-	}, time.Now())
+	}, "", time.Now())
 	if len(api.copilotSubagents) != 1 {
 		t.Fatal("the account's own session did not parent its sub-agent")
 	}

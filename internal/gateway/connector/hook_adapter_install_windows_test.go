@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCopilotAdapterChecksInstallerHomeFromNativeHookState(t *testing.T) {
@@ -42,6 +43,28 @@ func TestCopilotAdapterChecksInstallerHomeFromNativeHookState(t *testing.T) {
 	if stdout, stderr, code := call(); code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) ||
 		!strings.Contains(stderr, "being installed or upgraded") {
 		t.Fatalf("installer home lock missed: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	// The one stale-lock rule reads no clock for a lock without a pid (an
+	// installer that has not written it yet): an aged one still holds
+	// (GAP-1025, hookexec installLockStale).
+	then := time.Now().Add(-11 * time.Minute)
+	if err := os.Chtimes(lock, then, then); err != nil {
+		t.Fatal(err)
+	}
+	if stdout, stderr, code := call(); code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("aged installer home lock without a pid no longer held: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if err := os.Chtimes(lock, time.Now(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lock, "pid"), []byte("99999999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if stdout, stderr, code := call(); code != 0 || strings.TrimSpace(stdout) != "" {
+		t.Fatalf("dead installer home lock still denied: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if err := os.Remove(filepath.Join(lock, "pid")); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.Remove(lock); err != nil {
 		t.Fatal(err)

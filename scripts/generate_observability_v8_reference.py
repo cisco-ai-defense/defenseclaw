@@ -168,6 +168,7 @@ YAML_ANNOTATIONS_TEMPLATE = {
         "    # Separate forensic judge-body store; must not alias any configured file.",
     ),
     "    retention_days: 7": ("    # Applies to eligible local event/evidence/judge/correlation history; zero means retain forever.",),
+    "    max_store_mb: 0": ("    # Opt-in size cap in MiB (64 or more); 0 keeps retention by days only.",),
     "  destinations:": (
         "  # Optional exports. Presence defaults enabled:true. Every example is disabled",
         "  # so this exhaustive reference is safe to inspect without exporting data.",
@@ -316,6 +317,7 @@ def _reference_document(version: int) -> dict[str, Any]:
                 "path": "~/.defenseclaw/audit.db",
                 "judge_bodies_path": "~/.defenseclaw/judge_bodies.db",
                 "retention_days": 7,
+                "max_store_mb": 0,
             },
             "destinations": [
                 {

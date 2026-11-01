@@ -44,13 +44,13 @@ func ClassifyToolName(tool string) ToolCapabilityClass {
 	t := strings.ToLower(strings.TrimSpace(tool))
 	switch t {
 	// Filesystem reads
-	case "read_file", "read-file", "fs_read", "file_read", "cat", "head", "tail", "grep":
+	case "read_file", "read-file", "fs_read", "file_read", "read", "cat", "head", "tail", "grep":
 		return CapReadFS
 	// Filesystem writes
-	case "write_file", "write-file", "fs_write", "file_write", "edit_file", "apply_patch":
+	case "write_file", "write-file", "fs_write", "file_write", "edit_file", "apply_patch", "write", "edit", "patch":
 		return CapWriteFS
 	// Shell execution — the destructive class
-	case "run_shell", "shell_exec", "bash", "sh", "zsh", "cmd", "powershell", "execute_command":
+	case "run_shell", "shell_exec", "shell", "bash", "sh", "zsh", "cmd", "powershell", "execute_command":
 		return CapExecShell
 	// Network fetches
 	case "fetch", "http_request", "http_get", "curl", "wget", "web_fetch", "web_get":
@@ -144,15 +144,18 @@ var ruleCapabilities = map[string]ToolCapabilityClass{
 	"SRC-BUN-SPAWN":                          CapExecShell,
 
 	// Outbound network fetch / listener.
-	"CMD-CURL-UPLOAD": CapNetworkFetch,
-	"CMD-WGET-POST":   CapNetworkFetch,
-	"CMD-ENV-DUMP":    CapNetworkFetch,
-	"CMD-PIPE-CURL":   CapNetworkFetch,
-	"CMD-PIPE-WGET":   CapNetworkFetch,
-	"SRC-FETCH":       CapNetworkFetch,
-	"SRC-NET-SERVER":  CapNetworkFetch,
-	"SRC-HTTP-SERVER": CapNetworkFetch,
-	"SRC-WS":          CapNetworkFetch,
+	"CMD-CURL-UPLOAD":           CapNetworkFetch,
+	"CMD-WGET-POST":             CapNetworkFetch,
+	"CMD-ENV-DUMP":              CapNetworkFetch,
+	"CMD-PIPE-CURL":             CapNetworkFetch,
+	"CMD-PIPE-WGET":             CapNetworkFetch,
+	"CMD-WRAPPED-DOWNLOAD-EXEC": CapNetworkFetch,
+	"CMD-SUBST-DOWNLOAD-EXEC":   CapNetworkFetch,
+	"CMD-PYTHON-SOCKET-CONNECT": CapNetworkFetch,
+	"SRC-FETCH":                 CapNetworkFetch,
+	"SRC-NET-SERVER":            CapNetworkFetch,
+	"SRC-HTTP-SERVER":           CapNetworkFetch,
+	"SRC-WS":                    CapNetworkFetch,
 
 	// Filesystem writes.
 	"SRC-FS-WRITE": CapWriteFS,

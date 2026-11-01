@@ -86,6 +86,13 @@ func (s *MCPScanner) runtimeEnv() []string {
 	return scannerRuntimeEnv(base, derived, nil)
 }
 
+// VersionProbeEnv is the environment of a `<scanner> --version` probe: the
+// scan allowlist of the gateway environment and nothing derived from config,
+// so an ambient AI_DEFENSE_API_KEY or provider key never reaches the probe.
+func VersionProbeEnv() []string {
+	return scannerRuntimeEnv(os.Environ(), map[string]string{"NO_COLOR": "1", "TERM": "dumb"}, nil)
+}
+
 // scannerRuntimeEnv is a scanner runtime child's environment: the variables
 // of base on the scanner allowlist (skillScannerEnvPassthrough) or in keep,
 // then the values the gateway derived from config. Nothing else from the

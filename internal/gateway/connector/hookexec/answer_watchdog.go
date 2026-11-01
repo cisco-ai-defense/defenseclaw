@@ -142,6 +142,7 @@ func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {
 		// The look is bounded: arming must not wait on a stalled disk.
 		opts.FailMode = "closed"
 		opts.StrictAvailability = true
+		opts.installWindowSeen = true
 	} else if strings.EqualFold(strings.TrimSpace(opts.FailMode), "open") {
 		failMode = "open"
 	}
@@ -220,6 +221,8 @@ func renderInstallAnswer(opts Options, sp spec, failMode string) (check func() b
 	closed := opts
 	closed.FailMode = "closed"
 	closed.StrictAvailability = true
+	// Given only when the look at the deadline finds the install (watch).
+	closed.installWindowSeen = true
 	stdout, stderr, code, logFailure = renderNoAnswer(closed, sp, "closed")
 	return check, stdout, stderr, code, logFailure
 }

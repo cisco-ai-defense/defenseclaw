@@ -39,7 +39,7 @@ For pre/post tool-call pairing and outcome tiers per connector, see the [statefu
 | <ConnectorLabel id="copilot" /> | `>=1.0.18, <1.0.76` | `copilot-hooks-v1` / `v7` | 13 | prompt, tool_call, tool_result |
 | <ConnectorLabel id="copilot" /> | `>=1.0.76` | `copilot-hooks-v2` / `v7` | 14 | prompt, tool_call, tool_result |
 | <ConnectorLabel id="antigravity" /> | `>=1.1.8` | `antigravity-hooks-v2` / `v8` | 5 | tool_call, event_content |
-| <ConnectorLabel id="opencode" /> | `>=1.18.10, <1.19.0` | `opencode-hooks-v1` / `v7` | 10 | tool_call, tool_result |
+| <ConnectorLabel id="opencode" /> | `>=2.0.0, <2.3.0` (preview) | `opencode-hooks-v2` / `v7` | 8 | tool_call, tool_result |
 | <ConnectorLabel id="amp" /> | `>=0.0.1785334225` | `amp-plugin-v1` / `v2` | 5 | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="kiro" /> | kiro-cli `>=2.27.1`; Kiro IDE `>=1.0.182` | native hooks on both Kiro hook surfaces, plus the optional ACP contract | n/a | prompt, tool_call, tool_result; ACP adds permission, filesystem, terminal |
 
@@ -55,6 +55,8 @@ For pre/post tool-call pairing and outcome tiers per connector, see the [statefu
 Open-ended contracts leave `max_exclusive` empty until an upstream release publishes a breaking hook change. A bounded contract records how far DefenseClaw tested a connector, not where it stops working.
 
 ## Version policy
+
+OpenCode supports V2 only. Detected V1 and future majors are refused even with the exploratory drift override. Newer V2 minors use the V2 contract with an untested-version warning outside strict profiles.
 
 DefenseClaw assumes a connector version works unless it knows otherwise.
 
@@ -95,5 +97,12 @@ After gateway setup, DefenseClaw writes `hook_contract_lock.json` in the data di
 | `hook_script_version` | The hook script generation installed on disk. |
 | `hook_script_digests` | Hashes of installed hook scripts, for drift detection. |
 | `defenseclaw_version` | The DefenseClaw build that wrote the lock. |
+| `updated_at` | When the gateway last wrote the lock, for the file and for each connector. |
 
 `defenseclaw doctor` compares the lock with the current discovery cache, so upgrades, contract changes and script drift show up before action-mode enforcement depends on them.
+
+### Fields the gateway rewrites
+
+The gateway writes the lock again each time it starts, and on every upgrade, rollback or roll-forward. Those writes change only `updated_at` (for the file and for each connector) and, when the DefenseClaw version changed, `defenseclaw_version`. The new `updated_at` tells `defenseclaw setup` that the restarted gateway checked the hooks. The other fields change only when the agent, its hooks or your setup change.
+
+A saved lock that you put back keeps its bytes until the gateway next starts. To check a restored lock, compare it without these two fields.

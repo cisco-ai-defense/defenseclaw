@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -461,8 +462,14 @@ func TestRepairRemovesMacOSACLEntriesThatLetOtherAccountsChangeTheDeployment(t *
 				}
 			}
 			requireOK(t, h.run(Options{Action: ActionRepair}))
-			if len(h.runner.acls) != 1 || h.runner.acls[denyOnly] == nil || h.runner.acls[managedDir] != nil {
-				t.Fatalf("after repair the ACL entries are %v, want only the deny entry on %s", h.runner.acls, l.ConfigDir)
+			// Only the harmful entries go; the deny delete entries stay (GAP-0034).
+			if h.runner.acls[denyOnly] == nil || h.runner.acls[managedDir] != nil {
+				t.Fatalf("after repair the ACL entries are %v, want the deny entry on %s and none on the managed directory", h.runner.acls, l.ConfigDir)
+			}
+			for canonical := range writable {
+				if got := h.runner.acls[h.env.P(canonical)]; !slices.Equal(got, []string{"group:everyone deny delete"}) {
+					t.Errorf("after repair %s has the ACL entries %v, want only the deny delete entry", canonical, got)
+				}
 			}
 			requireOK(t, h.run(Options{Action: ActionStatus}))
 		})

@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -320,6 +321,25 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 		if !statusChecked {
 			status, statusErr = e.sandboxOps().Status(ctx, a)
 		}
+		if statusErr != nil {
+			// The account's status could not answer: with the daemon of an
+			// earlier label exited and the installed label not loaded, it
+			// cannot load the job itself (GAP-0049).
+			if next, replaced := l.replaceIdleEarlierSandboxAgent(ctx, a, jobs); replaced {
+				jobs = next
+				status, statusErr = e.sandboxOps().Status(ctx, a)
+				needed = needed[:0]
+				for _, job := range jobs {
+					if changed || job.old() || job.state.Failure(job.base == labelOpenShellGateway && status.Running > 0) != "" {
+						needed = append(needed, job)
+					}
+				}
+				if len(needed) == 0 {
+					delete(state.Pending, strconv.Itoa(a.UID))
+					continue
+				}
+			}
+		}
 		key := strconv.Itoa(a.UID)
 		if old, waiting := state.Pending[key]; waiting {
 			if old.Kind == "switch" || old.Kind == "stop" {
@@ -398,6 +418,46 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 	return changed
 }
 
+// replaceIdleEarlierSandboxAgent puts the installed sandbox LaunchAgent in
+// place of a sandbox job of an earlier label that is loaded in an account's
+// domain and does not run, when the domain has not loaded the installed
+// label. A package upgrade renames the job (its label carries the gateway's
+// tag, GAP-0206) and the daemon of the earlier label exits by itself once
+// the sandbox it ran has stopped; nothing then loads the installed label:
+// the account's `sandbox status`, which the lifecycle asks as the account,
+// cannot bootstrap a job into a domain it is not signed in to, so status
+// and verify could not say whether a sandbox runs, ensure waited for that
+// answer and repair found nothing to repair (GAP-0049). A job that does not
+// run stops nothing when it is booted out, and the installed one is
+// bootstrapped idle (its next sandbox command or the status starts it), as
+// the account's own launcher does; the account's OpenShell gateway job,
+// which may still host a sandbox, is left to the drain below. It returns the
+// account's jobs after the change and whether it made one.
+func (l *lifecycle) replaceIdleEarlierSandboxAgent(ctx context.Context, a SandboxAccount, jobs []loadedLaunchAgent) ([]loadedLaunchAgent, bool) {
+	e := l.env
+	replaced := false
+	for _, job := range jobs {
+		if job.base != labelSandbox || !job.old() || job.state.State == "running" {
+			continue
+		}
+		if err := e.migrateMacOSAgent(ctx, job, jobs); err != nil {
+			l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("could not load %s for %s in place of %s, which an earlier DefenseClaw loaded and which does not run: %v; the account's next sandbox command loads it",
+				job.current, a.Name, job.domain+"/"+job.label, err))
+			continue
+		}
+		replaced = true
+		l.openshellChange("replaced %s of %s, which does not run, with %s, the label of this DefenseClaw's sandbox LaunchAgent", job.domain+"/"+job.label, a.Name, job.current)
+	}
+	if !replaced {
+		return jobs, false
+	}
+	next, err := e.loadedMacOSAgents(ctx, a)
+	if err != nil {
+		return jobs, false
+	}
+	return next, true
+}
+
 // describeMacOSAgents is read-only for status and verify. An ensure from a
 // package warns and records a failed reload for repair instead of failing the
 // package receipt solely because one user's loaded job cannot be reloaded.
@@ -424,6 +484,10 @@ func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 			if job.base == labelOpenShellGateway && job.state.State != "running" {
 				if status, err := l.env.sandboxOps().Status(ctx, a); err == nil {
 					running = status.Running
+				} else if errors.Is(err, errHomeNotAnswering) {
+					// Not inspected is reported, not read as idle (GAP-1751).
+					l.result.MarkSecurityIncomplete(codeSandboxUserState)
+					l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("the sandbox state of %s (uid %d) is not confirmed: %v", a.Name, a.UID, err))
 				}
 				break
 			}
@@ -447,7 +511,7 @@ func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 				}
 				message := fmt.Sprintf("LaunchAgent %s of %s (uid %d) in %s failed: %s; %s", job.label, a.Name, a.UID, job.domain, why, next)
 				l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox " + a.Name + " " + job.domain + "/" + job.label, Kind: sandboxRowKind, State: "failed: " + why})
-				l.result.SecurityComplete = false
+				l.result.MarkSecurityIncomplete(codeSandboxUserState)
 				if l.opts.Action == ActionEnsure && l.opts.FromPackage {
 					l.result.AddWarning(codeSandboxUserState, message)
 				} else {

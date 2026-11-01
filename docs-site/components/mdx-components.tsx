@@ -14,6 +14,7 @@ import { CommandGenerator } from '@/components/command-generator';
 import PolicyCreator from '@/components/policy-creator';
 import { RecipeCatalog } from '@/components/policy-creator/recipe-catalog';
 import { Video } from '@/components/video';
+import { VideoEmbed } from '@/components/video-embed';
 import { TerminalAnimation } from '@/components/terminal-animation';
 import { DefenseClawDemo } from '@/components/feature-demo';
 import { EditorialTab as Tab, EditorialTabs as Tabs } from '@/components/editorial-tabs';
@@ -139,6 +140,7 @@ export const mdxComponents: MDXComponents = {
   PolicyCreator,
   RecipeCatalog,
   Video,
+  VideoEmbed,
   TerminalAnimation,
   DefenseClawDemo,
   ConnectorCatalog,

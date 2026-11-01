@@ -229,3 +229,31 @@ func TestRetiredConnectorUpgradeOmitsEmptiedSandboxLists(t *testing.T) {
 		})
 	}
 }
+
+// 1.0.5: a 1.0.4 config.yaml that still has OpenHands and OmniGent enabled
+// next to Codex loads, drops them, and carries the one removal notice.
+func TestRetiredConnectorUpgradePrintsTheOneRemovalNotice(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "config_version: 9\nguardrail:\n  connector: codex\n  connectors:\n    codex:\n      mode: action\n" +
+		"    openhands:\n      mode: action\n    omnigent:\n      mode: observe\nconnector_hooks:\n  openhands: {}\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const notice = "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it."
+	var got []string
+	for _, line := range cfg.LegacyConnectorNotices {
+		if strings.Contains(line, "OpenHands") || strings.Contains(line, "OmniGent") {
+			got = append(got, line)
+		}
+	}
+	if len(got) != 1 || !strings.HasPrefix(got[0], notice) {
+		t.Fatalf("notices = %q, want one starting %q", cfg.LegacyConnectorNotices, notice)
+	}
+	if _, ok := cfg.Guardrail.Connectors["openhands"]; ok || cfg.Guardrail.Connector != "codex" {
+		t.Fatalf("connectors = %v (%q), want only codex", cfg.Guardrail.Connectors, cfg.Guardrail.Connector)
+	}
+}

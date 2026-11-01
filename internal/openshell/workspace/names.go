@@ -21,9 +21,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
@@ -67,7 +67,7 @@ func ProjectLabel(realPath string) (key, value string) {
 	return ProjectLabelKey, ProjectKey(realPath)
 }
 
-var repoNameUnsafe = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+var repoNameUnsafe = lazyregexp.New(`[^A-Za-z0-9._-]+`)
 
 // RepoName derives the /work/<repo> directory name from a host folder.
 func RepoName(realPath string) string {

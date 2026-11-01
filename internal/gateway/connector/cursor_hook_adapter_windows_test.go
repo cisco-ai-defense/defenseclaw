@@ -263,6 +263,36 @@ func TestCopilotAdapterDeniesWhenTheLauncherCrashes(t *testing.T) {
 	}
 }
 
+// GAP-0343: a released 1.0.3 adapter that the upgrade refreshed denies the
+// call when its launcher crashes without an answer.
+func TestRefreshedReleasedCopilotAdapterDeniesWhenTheLauncherCrashes(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	released, err := os.ReadFile(filepath.Join("testdata", "released-hooks", "1.0.3", "copilot-hook.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fixtureHook = `C:\Users\dc-user\AppData\Local\DefenseClaw\bin\defenseclaw-hook.exe`
+	if !strings.Contains(string(released), fixtureHook) {
+		t.Fatal("released adapter fixture does not name its launcher")
+	}
+	adapter := filepath.Join(t.TempDir(), "copilot-hook.ps1")
+	body := strings.Replace(string(released), fixtureHook, strings.ReplaceAll(executable, "'", "''"), 1)
+	if err := os.WriteFile(adapter, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := closeBakedHookFailMode(adapter, bakedAdapterFailModeOpens); err != nil || !changed {
+		t.Fatalf("refresh released adapter: changed=%v err=%v", changed, err)
+	}
+	t.Setenv(copilotAdapterHelperMode, "crash")
+	stdout, stderr, code := runCopilotAdapterTest(t, adapter, `{"source":"copilot-adapter-probe"}`)
+	if code != 0 || strings.TrimSpace(stdout) != copilotAdapterClosedDenial {
+		t.Fatalf("exit %d stdout %q, want Copilot's denial; stderr=%q", code, stdout, stderr)
+	}
+}
+
 func TestCopilotAdapterFailureFailsOpenOnlyWhenConfigured(t *testing.T) {
 	missingHook := filepath.Join(t.TempDir(), "missing-hook.exe")
 	adapter := renderCopilotAdapterForTest(t, missingHook, 10_000, "open")

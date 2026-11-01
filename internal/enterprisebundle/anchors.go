@@ -136,6 +136,40 @@ func (a *Anchors) AllowsDeviceGroup(group string) bool {
 	return false
 }
 
+// PinDeviceGroup pins decoded anchors (and the bytes they were decoded from)
+// to the one device group this device is in, for `enterprise bundle anchors
+// install --device-group` (the device_groups member names the groups this
+// device belongs to). The file may name several groups, the way a tenant-wide
+// file does, or none (any); either way it must allow group, so the pin only
+// narrows what the file trusts. A file that already names exactly that group
+// keeps its bytes. Otherwise the pinned file is the anchors re-encoded with
+// device_groups [group] and decoded again, so what is written is what a
+// device reads. The group is checked like a device_groups entry.
+func PinDeviceGroup(a *Anchors, raw []byte, group string) (*Anchors, []byte, error) {
+	if !scopeIDPattern.MatchString(group) {
+		return nil, nil, refuse(CodeAnchorInvalid, AnchorsName, "device group: want 1-128 characters of [A-Za-z0-9._-]")
+	}
+	if !a.AllowsDeviceGroup(group) {
+		return nil, nil, refuse(CodeAnchorInvalid, AnchorsName,
+			"device group %s is not one of the groups this anchor file lists (%s); a pin only narrows the file", group, strings.Join(a.DeviceGroups, ", "))
+	}
+	if len(a.DeviceGroups) == 1 {
+		return a, raw, nil
+	}
+	pinned := *a
+	pinned.DeviceGroups = []string{group}
+	out, err := json.MarshalIndent(&pinned, "", "  ")
+	if err != nil {
+		return nil, nil, refuse(CodeAnchorInvalid, AnchorsName, "cannot pin the device group: %v", err)
+	}
+	out = append(out, '\n')
+	decoded, err := DecodeAnchors(out)
+	if err != nil {
+		return nil, nil, err
+	}
+	return decoded, out, nil
+}
+
 // TrustCheck refuses an anchor path a standard user could replace or edit.
 type TrustCheck func(path string) error
 

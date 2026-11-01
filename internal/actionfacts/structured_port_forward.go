@@ -10,14 +10,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/netip"
-	"regexp"
 	"strconv"
 	"strings"
 )
 
 const structuredPortForwardDigestDomain = "defenseclaw/actionfacts/port-forward-target/v1"
 
-var portForwardDNSNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
+var portForwardDNSNamePattern = lazyMustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 
 func ExactStructuredPortForward(facts Facts) (StructuredPortForwardFact, bool) {
 	if len(facts.StructuredPortForwards) != 1 {

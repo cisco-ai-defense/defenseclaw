@@ -181,8 +181,8 @@ func openCodeManagedConfigRelocated(env map[string]string) bool {
 // process proves they name one directory: both resolve to the same existing
 // directory (a symlink, junction, bind mount, short or case alias, macOS
 // /etc -> /private/etc), or neither exists yet and both name the same entry
-// of one parent directory. A relative path, one that cannot be resolved,
-// and on Windows a network or device path or a link to one, is not proven
+// of one parent directory. A relative path, one that cannot be resolved or
+// whose lookup does not answer in time (statLaunchPath), and on Windows a network or device path or a link to one, is not proven
 // and stays reported. Unix resolves ".." after links, so a spelling with
 // ".." is compared by the directory it resolves to, never by its text.
 func sameLaunchPath(a, b string) bool {

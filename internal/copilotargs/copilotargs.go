@@ -14,6 +14,67 @@ import (
 	"strings"
 )
 
+// NativeSingleCall reads a CLI preToolUse toolCalls envelope of exactly one
+// fully named call. Unknown fields leave it unread instead of silently
+// dropping a write.
+func NativeSingleCall(value any) (string, any, bool) {
+	calls, ok := value.([]any)
+	if !ok || len(calls) != 1 {
+		return "", nil, false
+	}
+	return nativeCall(calls[0])
+}
+
+// MaxNativeCalls bounds the calls of one toolCalls envelope the gateway
+// judges; a larger envelope stays unread.
+const MaxNativeCalls = 64
+
+// NativeCall is one call of a CLI preToolUse toolCalls envelope, with the
+// arguments CLIToolArgs projects for it.
+type NativeCall struct {
+	Name string
+	Args json.RawMessage
+}
+
+// NativeCalls reads every call of a CLI preToolUse toolCalls envelope: a
+// model's parallel tool calls arrive in one hook, and the one decision covers
+// them all, so each is judged (GAP-1016). Every entry must be a fully named
+// call with exactly id, name and args whose arguments project; any other
+// entry leaves the whole envelope unread, so no write is dropped.
+func NativeCalls(value any) ([]NativeCall, bool) {
+	calls, ok := value.([]any)
+	if !ok || len(calls) == 0 || len(calls) > MaxNativeCalls {
+		return nil, false
+	}
+	out := make([]NativeCall, 0, len(calls))
+	for _, entry := range calls {
+		name, args, ok := nativeCall(entry)
+		if !ok {
+			return nil, false
+		}
+		projected := CLIToolArgs(name, args)
+		if len(projected) == 0 {
+			return nil, false
+		}
+		out = append(out, NativeCall{Name: name, Args: projected})
+	}
+	return out, true
+}
+
+func nativeCall(value any) (string, any, bool) {
+	call, ok := value.(map[string]any)
+	if !ok || !onlyKeys(call, "id", "name", "args") || len(call) != 3 {
+		return "", nil, false
+	}
+	id, idOK := call["id"].(string)
+	name, nameOK := call["name"].(string)
+	if !idOK || strings.TrimSpace(id) == "" || !nameOK || strings.TrimSpace(name) != name || name == "" {
+		return "", nil, false
+	}
+	args, present := call["args"]
+	return name, args, present
+}
+
 // CLIToolArgs returns the arguments the Copilot CLI dialect judges for the
 // toolArgs value of a call to toolName: the object, or a JSON string of one
 // (the official hook tutorial sends it so), or an apply_patch call's patch
@@ -129,6 +190,62 @@ func LocalActionTool(toolName string) string {
 		return p.action
 	}
 	return toolName
+}
+
+// LocalCall is the tool name and arguments the VS Code Local dialect judges
+// for a body's tool_name and tool_input: LocalToolArgs of the call, except
+// for an apply_patch call. The Copilot CLI runs the PascalCase hooks of the
+// Local hook file too and names its apply_patch tool Edit there, with the
+// patch text itself as tool_input (Copilot CLI 1.0.91, GAP-2497). That call
+// is the apply_patch call its own preToolUse names, so it is judged as one:
+// {"patch": text}, like the CLI dialect's (CLIToolArgs). Any other string
+// input keeps its native value and stays unread.
+//
+// The CLI names its create and edit tools Write and Edit there and sends
+// their native arguments as tool_input (Copilot CLI 1.0.91: Write
+// {"path", "file_text"}, GAP-2605). Exactly that argument set is the CLI
+// call its own preToolUse names, so it is judged as that call: create or
+// edit, the arguments unchanged. Any other object keeps LocalToolArgs.
+func LocalCall(toolName string, input any) (string, json.RawMessage) {
+	if args, ok := input.(map[string]any); ok {
+		if native, ok := cliWriteAliases[strings.TrimSpace(toolName)]; ok && cliWriteArgs(native, args) {
+			if raw, err := marshal(args); err == nil {
+				return native, raw
+			}
+		}
+	}
+	if text, ok := input.(string); ok {
+		switch strings.TrimSpace(toolName) {
+		case "Edit", "apply_patch":
+			if patch, ok := PatchText("apply_patch", []byte(text)); ok {
+				args, err := marshal(map[string]string{"patch": patch})
+				if err == nil {
+					return "apply_patch", args
+				}
+			}
+		}
+	}
+	return toolName, LocalToolArgs(toolName, input)
+}
+
+// cliWriteAliases maps the Local hook tool names the Copilot CLI gives its
+// create and edit tools onto the CLI names.
+var cliWriteAliases = map[string]string{"Write": "create", "Edit": "edit"}
+
+// cliWriteArgs reports a Copilot CLI create or edit argument object: every
+// reviewed field present as a string, and otherwise only the display-only
+// metadata field (writeMetadata).
+func cliWriteArgs(tool string, args map[string]any) bool {
+	shape, ok := writeMetadata[tool]
+	if !ok || !onlyKeys(args, append([]string{shape.metadata}, shape.reviewed...)...) {
+		return false
+	}
+	for _, key := range shape.reviewed {
+		if _, ok := args[key].(string); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // LocalToolArgs projects a known tool's arguments onto canonical names. An

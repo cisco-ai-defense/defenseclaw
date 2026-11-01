@@ -7,7 +7,7 @@
 param(
     [Parameter(Mandatory)][string]$StateRoot,
     [Parameter(Mandatory)][ValidateSet('Go', 'Python')][string]$Suite,
-    [ValidateRange(1, 8)][int]$Shard = 1
+    [ValidateRange(1, 12)][int]$Shard = 1
 )
 
 Set-StrictMode -Version Latest

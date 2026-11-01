@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +24,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winsession"
 )
@@ -45,7 +45,7 @@ var (
 	runSCMService           = svc.Run
 	terminateWindowsService = func(code uint32) { os.Exit(int(code)) }
 	windowsServiceStopWait  = 30 * time.Second
-	serviceNameRE           = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+	serviceNameRE           = lazyregexp.New(`^[A-Za-z0-9_.-]{1,128}$`)
 )
 
 type windowsServiceExecutor func(context.Context) int

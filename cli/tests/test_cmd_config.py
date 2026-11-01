@@ -49,6 +49,67 @@ def test_config_set_hilt_false_names_connector_override(monkeypatch) -> None:
     assert "guardrail hilt off" in notes[0]
 
 
+def _pack_cfg(path: str, digest: str):
+    pin = SimpleNamespace(path=path, digest=digest)
+    return SimpleNamespace(guardrail=SimpleNamespace(custom_packs={"w5team": pin}))
+
+
+def _valid_pack(files_digest: str):
+    return SimpleNamespace(valid=True, error=None, summary={"files_digest": files_digest})
+
+
+def test_config_set_custom_pack_names_a_pin_that_does_not_match(monkeypatch, tmp_path) -> None:
+    # GAP-1076: the writer stored a stale pin and printed nothing; only use-pack refused it later.
+    pack = tmp_path / "w5pack"
+    pack.mkdir()
+    lf, crlf = "a" * 64, "b" * 64
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: _pack_cfg(str(pack), f"sha256:{lf}"))
+    monkeypatch.setattr("defenseclaw.rulepack_validation.validate_rule_pack", lambda _path: _valid_pack(crlf))
+    for change in (
+        SimpleNamespace(path="guardrail.custom_packs.w5team", value={"path": str(pack), "digest": f"sha256:{lf}"}),
+        SimpleNamespace(path="guardrail.custom_packs.w5team.digest", value=f"sha256:{lf}"),
+    ):
+        notes = cmd_config._custom_pack_registration_notes([change])  # noqa: SLF001 - message regression.
+        assert len(notes) == 1
+        assert "guardrail.custom_packs.w5team is registered but will not load" in notes[0]
+        assert f"sha256:{lf}" in notes[0] and f"sha256:{crlf}" in notes[0]
+        assert f"defenseclaw config set guardrail.custom_packs.w5team.digest sha256:{crlf}" in notes[0]
+
+
+def test_config_set_custom_pack_is_quiet_for_a_matching_pin_and_other_keys(monkeypatch, tmp_path) -> None:
+    pack = tmp_path / "w5pack"
+    pack.mkdir()
+    digest = "c" * 64
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: _pack_cfg(str(pack), f"sha256:{digest}"))
+    monkeypatch.setattr("defenseclaw.rulepack_validation.validate_rule_pack", lambda _path: _valid_pack(digest))
+    change = SimpleNamespace(path="guardrail.custom_packs.w5team.digest", value=f"sha256:{digest}")
+    assert cmd_config._custom_pack_registration_notes([change]) == []  # noqa: SLF001
+    other = SimpleNamespace(path="guardrail.mode", value="observe")
+    assert cmd_config._custom_pack_registration_notes([other]) == []  # noqa: SLF001
+    unset = SimpleNamespace(path="guardrail.custom_packs.w5team", value=None, unset=True)
+    assert cmd_config._custom_pack_registration_notes([unset]) == []  # noqa: SLF001
+
+
+def test_config_set_custom_pack_names_a_missing_folder_and_an_invalid_pack(monkeypatch, tmp_path) -> None:
+    change = SimpleNamespace(path="guardrail.custom_packs.w5team", value={"path": "x", "digest": "sha256:" + "d" * 64})
+    gone = str(tmp_path / "missing")
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: _pack_cfg(gone, "sha256:" + "d" * 64))
+    notes = cmd_config._custom_pack_registration_notes([change])  # noqa: SLF001
+    assert len(notes) == 1 and "is not a folder" in notes[0] and "will not load" in notes[0]
+
+    pack = tmp_path / "bad"
+    pack.mkdir()
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: _pack_cfg(str(pack), "sha256:" + "d" * 64))
+    issue = SimpleNamespace(code="inventory_unexpected", path="default/judge/injection.yaml", reason="unexpected YAML component")
+    monkeypatch.setattr(
+        "defenseclaw.rulepack_validation.validate_rule_pack",
+        lambda _path: SimpleNamespace(valid=False, error=issue, summary={}),
+    )
+    notes = cmd_config._custom_pack_registration_notes([change])  # noqa: SLF001
+    assert len(notes) == 1 and "is invalid (inventory_unexpected at default/judge/injection.yaml" in notes[0]
+    assert "defenseclaw guardrail validate-pack" in notes[0]
+
+
 def test_token_env_change_reports_broken_config_before_writer(monkeypatch) -> None:
     app = SimpleNamespace(cfg=None, logger=None)
     change = SimpleNamespace(path="gateway.token_env", value="NEW_TOKEN_NAME")

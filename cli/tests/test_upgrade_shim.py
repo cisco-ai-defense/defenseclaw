@@ -85,6 +85,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def execs(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
     monkeypatch.setattr(upgrade_shim.os, "execv", lambda path, argv: calls.append(list(argv)))
+    # A downgrade waits for the older installer (rel-1-0-4:GAP-2503).
+    monkeypatch.setattr(upgrade_shim, "_wait_for_installer", lambda argv: calls.append(list(argv)) or 0)
     monkeypatch.setattr(upgrade_shim.os, "chdir", lambda path: None)
     monkeypatch.setattr(upgrade_shim.os, "name", "posix")
     return calls
@@ -116,6 +118,16 @@ def test_parse_accepts_the_permanent_flag_set() -> None:
 def test_parse_rejects_bad_input(args: list[str]) -> None:
     with pytest.raises(upgrade_shim.ShimError):
         upgrade_shim._parse("upgrade", args)
+
+
+@pytest.mark.parametrize("args", [["--version"], ["--version", "--yes"], ["-y", "--version"], ["--version="]])
+def test_a_version_flag_without_a_value_says_it_needs_one(args: list[str]) -> None:
+    # GAP-2258: the flag is valid, so the error must not call it unknown.
+    with pytest.raises(upgrade_shim.ShimUsageError) as excinfo:
+        upgrade_shim._parse("upgrade", args)
+    assert "unknown option" not in str(excinfo.value)
+    assert "--version needs a release number" in str(excinfo.value)
+    assert excinfo.value.exit_code == 2
 
 
 def test_rollback_does_not_take_a_version() -> None:
@@ -483,6 +495,41 @@ def test_entry_dispatches_upgrade_before_importing_the_cli(monkeypatch: pytest.M
     assert exc.value.code == 0
     assert seen == [["upgrade", "--help"]]
     assert "defenseclaw.main" not in sys.modules
+
+
+def test_entry_version_matches_click_without_importing_the_cli(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    from click.testing import CliRunner
+    from defenseclaw.main import cli
+
+    expected = CliRunner().invoke(cli, ["--version"], prog_name="defenseclaw").output
+    notices: list[list[str]] = []
+    monkeypatch.setattr(sys, "argv", ["defenseclaw", "--version"])
+    monkeypatch.setattr(entry, "_notice", lambda argv: notices.append(argv))
+    monkeypatch.delitem(sys.modules, "defenseclaw.main", raising=False)
+
+    with pytest.raises(SystemExit) as exc:
+        entry.main()
+
+    assert exc.value.code == 0
+    assert "defenseclaw.main" not in sys.modules
+    assert notices == [["--version"]]
+    assert capsys.readouterr().out == expected
+
+
+def test_entry_pin_names_match_config() -> None:
+    from defenseclaw import config
+
+    assert entry._DEPLOYMENT_PIN_ENVS == config._DEPLOYMENT_PIN_ENVS
+
+
+def test_entry_skips_the_config_import_without_a_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in entry._DEPLOYMENT_PIN_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delitem(sys.modules, "defenseclaw.config", raising=False)
+
+    entry.ignore_stray_deployment_pins()
+
+    assert "defenseclaw.config" not in sys.modules
 
 
 def test_entry_notice_survives_an_uninstall_that_removed_the_cli(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -910,6 +957,106 @@ def test_downgrade_sets_aside_the_keys_the_older_release_lacks(
         assert _set_aside(home).stat().st_mode & 0o777 == 0o600
 
 
+
+# guardrail.chains (1.0.6, root-scope chains, issue #1391): 1.0.5 and 1.0.4
+# refuse the block itself, so a downgrade sets it aside whole.
+@pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
+def test_downgrade_sets_aside_the_chains_block(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    (home / "config.yaml").write_text(
+        "config_version: 9\nguardrail:\n  mode: observe\n  chains:\n    root_scope: true\n", encoding="utf-8"
+    )
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, target)))
+
+    assert upgrade_shim.run(["upgrade", "--version", target, "--yes"]) == 0
+
+    assert len(execs) == 1
+    guardrail = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))["guardrail"]
+    assert "chains" not in guardrail
+    assert guardrail["mode"] == "observe"
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record == {"version": 1, "for": target, "keys": {"guardrail.chains": {"root_scope": True}}}
+
+
+# connectors (connectors.agent_gateway, 1.0.6): 1.0.5 and 1.0.4 refuse the
+# top-level block, so a downgrade sets it aside with guardrail.chains.
+@pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
+def test_downgrade_sets_aside_the_connectors_block(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    (home / "config.yaml").write_text(
+        "config_version: 9\nconnectors:\n  agent_gateway:\n    enabled: true\n"
+        "guardrail:\n  chains:\n    root_scope: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, target)))
+
+    assert upgrade_shim.run(["upgrade", "--version", target, "--yes"]) == 0
+
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert "connectors" not in config
+    assert "chains" not in (config.get("guardrail") or {})
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record["keys"] == {
+        "guardrail.chains": {"root_scope": True},
+        "connectors": {"agent_gateway": {"enabled": True}},
+    }
+
+
+
+def test_a_downgrade_that_would_leave_opencode_v2_unguarded_is_refused_before_anything_changes(
+    home: Path,
+    execs: list[list[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """rel-1-0-6 GAP-0128: 'upgrade --version 1.0.5' runs the check 'defenseclaw rollback' runs."""
+    from defenseclaw import migrations
+
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    monkeypatch.setattr(migrations, "_opencode_configured", lambda data_dir: seen.append(("configured", data_dir)) or True)
+    monkeypatch.setattr(migrations, "_installed_opencode", lambda _data_dir: ("opencode v2.2.5", "/u/.npm/bin/opencode"))
+    (home / "config.yaml").write_text(_DOMAINS_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.5")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.5", "--yes"]) == 1
+
+    assert execs == []
+    assert seen == [("configured", str(home))]
+    assert (home / "config.yaml").read_text(encoding="utf-8") == _DOMAINS_CONFIG
+    assert not _set_aside(home).exists()
+    err = capsys.readouterr().err
+    assert "DefenseClaw 1.0.5 guards OpenCode V1 only and the OpenCode here is V2 (opencode v2.2.5)" in err
+    assert "opencode-ai@1.18" in err and "Nothing was changed." in err
+    assert "Installing DefenseClaw" not in err
+
+    # The same OpenCode V2 and a release that guards it: no refusal.
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.7")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.6")))
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.6", "--yes"]) == 0
+    assert len(execs) == 1
+
+
+def test_a_downgrade_goes_on_when_the_check_cannot_load(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The way back from a broken install stays open (the shim runs before the rest of the CLI)."""
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    monkeypatch.setitem(sys.modules, "defenseclaw.migrations", None)
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.5")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.5", "--yes"]) == 0
+    assert len(execs) == 1
+
 @pytest.mark.parametrize(("installed", "target"), [("1.0.3", "1.0.4"), ("1.0.4", "1.0.3")])
 def test_upgrade_keeps_keys_the_target_release_has(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: str, target: str
@@ -922,6 +1069,42 @@ def test_upgrade_keeps_keys_the_target_release_has(
 
     assert len(execs) == 1
     assert (home / "config.yaml").read_text(encoding="utf-8") == _CA_CONFIG
+    assert not _set_aside(home).exists()
+
+
+# #1390: guardrail.internal_domains is new in 1.0.6; 1.0.5 and 1.0.4 refuse it.
+_DOMAINS_CONFIG = "config_version: 9\nguardrail:\n  internal_domains:\n  - corp.example.com\n"
+
+
+@pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
+def test_downgrade_below_1_0_6_sets_aside_internal_domains(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    (home / "config.yaml").write_text(_DOMAINS_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, target)))
+
+    assert upgrade_shim.run(["upgrade", "--version", target, "--yes"]) == 0
+
+    assert len(execs) == 1
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert "internal_domains" not in (config.get("guardrail") or {})
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record == {"version": 1, "for": target, "keys": {"guardrail.internal_domains": ["corp.example.com"]}}
+
+
+def test_upgrade_to_1_0_6_keeps_internal_domains(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    (home / "config.yaml").write_text(_DOMAINS_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.6")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.6", "--yes"]) == 0
+
+    assert (home / "config.yaml").read_text(encoding="utf-8") == _DOMAINS_CONFIG
     assert not _set_aside(home).exists()
 
 
@@ -947,6 +1130,97 @@ def test_downgrade_stops_with_the_unset_command_when_the_key_cannot_be_set_aside
     err = capsys.readouterr().err
     assert "defenseclaw config unset openshell.trusted_ca_bundle" in err
     assert "Nothing was changed." in err
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_a_downgrade_drops_the_hook_helper_this_release_left_and_restarts_the_gateway(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, running: bool
+) -> None:
+    # rel-1-0-4:GAP-2503: the 1.0.2 installer kept the 1.0.5 hooks/_hardening.sh
+    # (a 1.0.2 gateway keeps a helper with a newer schema line), and its
+    # native commands are not in the 1.0.2 binaries: every hook call was
+    # refused until the helper was removed and the gateway restarted. The shim
+    # waits for the older installer, then does that when the helper is the
+    # one the replaced install (previous/) has.
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.5")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.2")))
+    monkeypatch.setenv("HOME", str(home.parent))
+    monkeypatch.setattr(upgrade_shim.os, "name", "posix")
+    newer = b"#!/bin/bash\n# defenseclaw-managed-hook v10\n"
+    calls: list[list[str]] = []
+
+    def installer(argv: list[str]) -> int:
+        calls.append(list(argv))
+        for root in (home, home / "previous" / "data"):
+            (root / "hooks").mkdir(parents=True, exist_ok=True)
+            (root / "hooks" / "_hardening.sh").write_bytes(newer)
+        (home / "previous" / "VERSION").write_text("1.0.5\n", encoding="utf-8")
+        pid = os.getpid() if running else 2**22 + 7
+        (home / "gateway.pid").write_text(json.dumps({"pid": pid}), encoding="utf-8")
+        return 0
+
+    def probe(pid: int, sig: int) -> None:
+        # The liveness probe only: a real os.kill(pid, 0) on a Windows runner
+        # is CTRL_C_EVENT and interrupts the test run itself.
+        assert sig == 0
+        if pid != os.getpid():
+            raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(upgrade_shim.os, "kill", probe)
+    restarts: list[list[str]] = []
+    monkeypatch.setattr(upgrade_shim, "_wait_for_installer", installer)
+    monkeypatch.setattr(upgrade_shim.subprocess, "call", lambda argv, **kw: restarts.append(list(argv)) or 0)
+    monkeypatch.setattr(upgrade_shim.os, "execv", lambda path, argv: pytest.fail("a downgrade must wait for its installer"))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.2", "--yes"]) == 0
+
+    assert len(calls) == 1 and calls[0][-1] != "--rollback"
+    assert not (home / "hooks" / "_hardening.sh").exists()
+    assert (home / "previous" / "data" / "hooks" / "_hardening.sh").read_bytes() == newer
+    gateway = str(home.parent / ".local" / "bin" / "defenseclaw-gateway")
+    assert restarts == ([[gateway, "restart"]] if running else [])
+
+
+def test_a_downgrade_to_1_0_5_or_later_keeps_the_hook_helper(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, execs: list[list[str]]
+) -> None:
+    # rel-1-0-6:GAP-0047: 1.0.5 and 1.0.6 ship the same hooks/_hardening.sh,
+    # and a 1.0.5 gateway with only OpenCode set up never writes one: after
+    # the shim dropped it, that gateway refused to start. The installer runs
+    # as for an upgrade; nothing is dropped or restarted afterwards.
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.5")))
+    monkeypatch.setattr(upgrade_shim, "_drop_newer_hook_helper", lambda newer: pytest.fail("helper dropped"))
+    monkeypatch.setattr(upgrade_shim, "_wait_for_installer", lambda argv: pytest.fail("waited for the installer"))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.5", "--yes"]) == 0
+
+    assert len(execs) == 1 and execs[0][-1] != "--rollback"
+
+
+@pytest.mark.parametrize("case", ["other-helper", "previous-not-newer", "installer-failed"])
+def test_a_downgrade_keeps_a_hook_helper_it_did_not_leave(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.5")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.2")))
+    monkeypatch.setattr(upgrade_shim.os, "name", "posix")
+    live = b"#!/bin/bash\n# defenseclaw-managed-hook v8\n" if case == "other-helper" else b"v10\n"
+
+    def installer(argv: list[str]) -> int:
+        (home / "hooks").mkdir(parents=True, exist_ok=True)
+        (home / "hooks" / "_hardening.sh").write_bytes(live)
+        (home / "previous" / "data" / "hooks").mkdir(parents=True, exist_ok=True)
+        (home / "previous" / "data" / "hooks" / "_hardening.sh").write_bytes(b"v10\n")
+        (home / "previous" / "VERSION").write_text("1.0.4\n" if case == "previous-not-newer" else "1.0.5\n", encoding="utf-8")
+        return 1 if case == "installer-failed" else 0
+
+    monkeypatch.setattr(upgrade_shim, "_wait_for_installer", installer)
+    monkeypatch.setattr(upgrade_shim.subprocess, "call", lambda argv, **kw: pytest.fail("nothing to restart"))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.2", "--yes"]) == (1 if case == "installer-failed" else 0)
+
+    assert (home / "hooks" / "_hardening.sh").read_bytes() == live
 
 
 # ── GAP-1067: rollback runs only the saved installer the install recorded ───
@@ -1046,3 +1320,41 @@ def test_rollback_checks_a_previous_installer_only_when_it_was_recorded(home: Pa
     _record(previous / "data", saved)
     assert upgrade_shim.run(["rollback", "--yes"]) == 0
     assert len(execs) == 2
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["http://127.0.0.1:8765/defenseclaw", "ftp://mirror.example/dc", "justaname", "a/b/c", "owner/na me", "file:///tmp/dc"],
+)
+def test_a_bad_defenseclaw_repo_is_refused_with_the_https_requirement(
+    home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    """GAP-1065: DEFENSECLAW_REPO is an owner/name or an https:// URL. Anything
+    else used to be appended to github.com and ended in an HTTP 404; it is now
+    refused before any download, without echoing the value."""
+    monkeypatch.setenv(upgrade_shim.REPO_ENV, value)
+    downloads: list[str] = []
+    monkeypatch.setattr(upgrade_shim, "_download", lambda url, *_a, **_k: downloads.append(url))
+
+    assert upgrade_shim.run(["upgrade", "--yes", "--version", "1.0.8200"]) == 2
+    err = capsys.readouterr().err
+    assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in err
+    assert "Nothing was changed." in err
+    assert value not in err
+    assert downloads == [] and execs == []
+    # The update notice stays quiet about it.
+    assert update_notice._lookup_latest() == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "base"),
+    [
+        ("fork/defense.claw", "https://github.com/fork/defense.claw"),
+        ("https://mirror.example/dc/", "https://mirror.example/dc"),
+    ],
+)
+def test_a_good_defenseclaw_repo_is_still_accepted(
+    home: Path, monkeypatch: pytest.MonkeyPatch, value: str, base: str
+) -> None:
+    monkeypatch.setenv(upgrade_shim.REPO_ENV, value)
+    assert upgrade_shim.release_source() == base

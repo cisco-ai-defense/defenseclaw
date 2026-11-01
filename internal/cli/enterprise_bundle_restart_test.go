@@ -23,6 +23,17 @@ import (
 func TestPredictBundleRestart(t *testing.T) {
 	const base = "config_version: 9\nguardrail:\n  mode: observe\n  connectors:\n    claudecode:\n      enabled: true\n"
 	withConnector := func(name string) string { return base + "    " + name + ":\n      enabled: true\n" }
+	primaryOnly := func(primary string, connectors ...string) string {
+		cfg := "config_version: 9\nguardrail:\n"
+		if primary != "" {
+			cfg += "  connector: " + primary + "\n"
+		}
+		cfg += "  mode: observe\n  connectors:\n"
+		for _, name := range connectors {
+			cfg += "    " + name + ":\n      enabled: true\n"
+		}
+		return cfg
+	}
 	enrollment := func(user string) string {
 		return "config_version: 9\nenterprise:\n  enrollment:\n    exclude_users:\n      - " + user + "\n" + strings.TrimPrefix(base, "config_version: 9\n")
 	}
@@ -36,7 +47,13 @@ func TestPredictBundleRestart(t *testing.T) {
 		{"restart-required key", "linux", base, base + "  hook_self_heal: false\n", bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.hook_self_heal"}},
 		{"connector added on Linux", "linux", base, withConnector("amp"), bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.connectors.*.enabled"}},
 		{"connector added on macOS", "darwin", base, withConnector("amp"), bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.connectors.*.enabled"}},
-		{"connector added on Windows", "windows", base, withConnector("amp"), bundleRestartNotRequired, []string{}, nil},
+		{"connector added on Windows", "windows", base, withConnector("opencode"), bundleRestartNotRequired, []string{}, nil},
+		// The gateway reads its primary connector (the explicit one, else the
+		// first connectors key) only at start: a connector-set change that
+		// moves it restarts the gateway on Windows too (GAP-1498).
+		{"connector added before the primary on Windows", "windows", base, withConnector("amp"), bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.connector"}},
+		{"primary connector entry removed on Windows", "windows", withConnector("opencode"), primaryOnly("", "opencode"), bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.connector"}},
+		{"explicit primary kept on Windows", "windows", primaryOnly("opencode", "claudecode", "opencode"), primaryOnly("opencode", "opencode"), bundleRestartNotRequired, []string{}, nil},
 		{"enrollment list on Linux", "linux", enrollment("alice"), enrollment("bob"), bundleRestartRequired, []string{restartReasonSettings}, []string{"enterprise.enrollment"}},
 		{"enrollment list on Windows", "windows", enrollment("alice"), enrollment("bob"), bundleRestartNotRequired, []string{}, nil},
 		{"gateway key on Windows", "windows", base, base + "gateway:\n  port: 18971\n", bundleRestartRequired, []string{restartReasonSettings}, []string{"gateway"}},

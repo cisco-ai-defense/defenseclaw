@@ -377,10 +377,13 @@ func (e *Env) attestationProblem(ledger []byte) (problem string, torn bool) {
 // rosterProblem checks that attestation has exactly one row per target
 // manifest enables, in manifest order (the guardian writes one row per
 // enabled target), each naming that target's connector and account.
+//
+// The OpenHands/OmniGent rows an older enumerator wrote are not targets: the
+// guardian skips them until the enumerator drops them (until 1.1, GAP-2504).
 func rosterProblem(manifest enterprisehooks.Manifest, attestation enterprisehooks.CredentialAttestation) string {
 	var enabled []enterprisehooks.ManifestTarget
 	for _, target := range manifest.Targets {
-		if target.IsEnabled() {
+		if target.IsEnabled() && !connector.IsRemovedConnector(strings.ToLower(strings.TrimSpace(target.Connector))) {
 			enabled = append(enabled, target)
 		}
 	}

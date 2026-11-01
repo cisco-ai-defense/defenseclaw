@@ -191,3 +191,34 @@ func TestDefaultSkillScannerRefusesRedirectedManagedScripts(t *testing.T) {
 		t.Fatalf("junction target changed: %q, %v", data, err)
 	}
 }
+
+func TestDefaultSkillScannerPrefersJudgeCompatEntryOnWindows(t *testing.T) {
+	f := newInstalledSkillScannerFixture(t)
+	compat := filepath.Join(filepath.Dir(f.scanner), "defenseclaw-skill-scanner.exe")
+	if err := safefile.WritePrivate(compat, []byte("compat entry fixture")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"skill-scanner", "skill-scanner.exe"} {
+		if got, err := resolveDefaultSkillScanner(name, false); err != nil || got != compat {
+			t.Fatalf("resolve(%q) = %q, %v; want judge-compat entry %q", name, got, err, compat)
+		}
+	}
+	if got, err := resolveDefaultSkillScanner("skill-scanner", true); err != nil || got != "skill-scanner" {
+		t.Fatalf("Secure Client resolution = %q, %v", got, err)
+	}
+}
+
+func TestDefaultSkillScannerRefusesRedirectedJudgeCompatEntry(t *testing.T) {
+	f := newInstalledSkillScannerFixture(t)
+	compat := filepath.Join(filepath.Dir(f.scanner), "defenseclaw-skill-scanner.exe")
+	target := filepath.Join(f.root, "elsewhere.exe")
+	if err := safefile.WritePrivate(target, []byte("foreign")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, compat); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if got, err := resolveDefaultSkillScanner("skill-scanner", false); err == nil || got != "" || !strings.Contains(err.Error(), "PATH fallback refused") {
+		t.Fatalf("redirected compat entry = %q, %v; want refusal", got, err)
+	}
+}

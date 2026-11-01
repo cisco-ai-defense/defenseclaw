@@ -56,12 +56,12 @@ A sandboxed agent's hooks run inside the sandbox and reach the gateway through a
 | **Windows** | Yes; native hook runner | No: sandboxes are refused | A and B. C needs an elevated token and the Advanced Audit Policy | Not available |
 
 Hooks fail closed for every failure that is not a gateway outage, everywhere
-except Secure Client. During an outage a per-user hook follows its policy tier:
-the default and permissive policies let the call run with a warning, strict
-denies it (see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). On a managed
+except Secure Client. During an outage a per-user hook honors an explicitly
+saved mode; when it is unset, the default and permissive policies let the call
+run with a warning and strict denies it (see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). On a managed
 standalone computer, the administrator may choose `hook_fail_mode: open`, an
-outage-only exception for a gateway service that is stopped, restarting or gives
-no answer in time. With `foreign_hooks: remove`, a guarded call needs fresh,
+outage-only exception for a gateway service the hook proves is not running; a
+gateway that took the call and gives no answer in time, or is restarting, still blocks. With `foreign_hooks: remove`, a guarded call needs fresh,
 trusted records for its agent process and session to follow that outage mode.
 Windows Amp keeps its guard record locally; its managed plugin's outage result
 is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
@@ -99,12 +99,14 @@ DefenseClaw's own state, agent hook registrations, and files that run code
 
 | Computer | Sees | Enforces |
 | --- | --- | --- |
-| Linux host, open-source | Hook rules on command text and read paths (for example `PATH-SSH-KEY` and `PATH-AWS-CREDS`) | Hook rules in action mode |
+| Linux host, open-source | Hook rules on command text and read paths (for example `PATH-SSH-KEY` and `PATH-AWS-CREDS`) | Hook rules in action mode: an SSH private key read is denied, other credential reads alert (see below) |
 | Linux host, managed | The same, plus Plane C file events and the Tetragon `observe` policy | Hook rules; the kernel controls deny opens of SSH private keys by an enrolled agent's descendants when enforcement is on. Cloud credentials and provider keys are observed only, because the agent's own sign-in reads them |
 | Linux sandbox | Environment variable names in discovery | By construction: the real model key never enters the sandbox (OpenShell swaps a placeholder on the provider's endpoint), the home directory does not exist there, and `.env` files read as empty |
 | macOS host | Hook rules; managed Endpoint Security events | Hook rules |
 | macOS sandbox | Hook rules | By construction, as on Linux: the copy holds back secret files |
 | Windows | Hook rules; the Security log when audited | Hook rules |
+
+With the default rule pack, the hook rules deny a read of an SSH private key (`PATH-SSH-KEY`, for example `cat ~/.ssh/id_rsa`), also in action mode. A plain local read of another credential file, for example `cat ~/.aws/credentials` (`PATH-AWS-CREDS`), is a `MEDIUM` alert and the command goes ahead: agents and their tools read these files to sign in. The agent shows `DefenseClaw observed a MEDIUM ... finding: rule PATH-AWS-CREDS`, and the alert is in `defenseclaw alerts`.
 
 ### Persistence
 
@@ -183,7 +185,7 @@ The layers divide the work so that two of them never make the same decision:
    two controls; hooks keep everything that needs intent.
 2. **The kernel mode never exceeds the guardrail mode.** A connector in
    guardrail observe mode does not block on a policy verdict; it reports
-   "would block"; hook failures still follow the effective hook fail mode. The kernel controls do not deny for that connector either:
+   "would block"; hook failures still follow the effective hook fail mode. One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw`, is blocked in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it). The kernel controls do not deny for that connector either:
    they stay in monitor mode and status says `kernel_enforce_guardrail_observe`.
 3. **The kernel never denies what the hook path needs.** The controls cover
    SSH private keys and shell and autostart writes. They never cover the hook
@@ -206,8 +208,8 @@ The layers divide the work so that two of them never make the same decision:
 
 | Layer and failure | What happens |
 | --- | --- |
-| A hook cannot reach the gateway | On a per-user install the policy tier decides, in observe and action mode alike: default and permissive run the call with a warning and a record, strict denies a supported event. On a managed host `closed` (the default outside Secure Client) denies it and an administrator's `open` runs an outage only. Per-user Cursor registration has `failClosed: true` outside Secure Client, so a hook process that cannot answer blocks. |
-| Managed hooks on a standalone computer, every connector | Closed by default. The administrator's `open` covers a gateway outage only, and not for a connector whose foreign-hook guard checks the session with the gateway. Rate limits, refusals and unusable answers always block |
+| A hook cannot reach the gateway | The [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) gives the result per connector and install. On a per-user install an explicit saved mode wins; when unset, the policy tier decides in observe and action mode alike: default and permissive run the call with a warning and a record, strict denies a supported event. On a managed host `closed` (the default outside Secure Client) denies it and an administrator's `open` runs an outage only. Per-user Cursor registration has `failClosed: true` outside Secure Client, so a hook process that cannot answer blocks. |
+| Managed hooks on a standalone computer, every connector | Closed by default. The administrator's `open` covers a gateway outage only, and not for a connector whose foreign-hook guard checks the session with the gateway ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Rate limits, refusals and unusable answers always block |
 | Secure Client hooks | Open by default; an explicit `closed` is kept |
 | Sandbox hooks | Always closed; silence is detected and can stop the sandbox |
 | The judge is unavailable | Falls back to the local verdict |

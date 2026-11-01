@@ -130,11 +130,11 @@ func TestHookProfileForConnector(t *testing.T) {
 // Before the unified collector, the wire shape came from the
 // bespoke handler's connector-specific response struct
 // (claudeCodeHookResponse with `json:"claude_code_output"` tag, etc.).
-// It now comes from renderAgentHookResponse +
+// It now comes from renderAgentHookResponseForProfile +
 // hookOutputFieldName(connectorName). The two paths must stay
 // byte-identical for live agents to keep working — this test pins
 // the field-name mapping so a future refactor of
-// renderAgentHookResponse cannot silently rename a key and break
+// renderAgentHookResponseForProfile cannot silently rename a key and break
 // Claude Code / Codex hook traffic.
 func TestUnifiedDispatch_PreservesConnectorWireShape(t *testing.T) {
 	resp := agentHookResponse{
@@ -158,7 +158,7 @@ func TestUnifiedDispatch_PreservesConnectorWireShape(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.connector, func(t *testing.T) {
-			out := renderAgentHookResponse(tc.connector, resp)
+			out := renderAgentHookResponseForProfile(connector.HookProfile{Name: tc.connector}, resp)
 			if _, ok := out[tc.wantFieldName]; !ok {
 				t.Errorf("connector %s: expected output map under key %q, got keys=%v", tc.connector, tc.wantFieldName, jsonKeys(out))
 			}
@@ -218,7 +218,7 @@ func TestUnifiedDispatch_SurfacesEvaluationIDAndRuleIDs(t *testing.T) {
 			RuleIDs:      []string{"SEC-ANTHROPIC", "SEC-AWS-KEY"},
 		}
 		for _, connectorName := range []string{"codex", "claudecode", "hermes"} {
-			out := renderAgentHookResponse(connectorName, resp)
+			out := renderAgentHookResponseForProfile(connector.HookProfile{Name: connectorName}, resp)
 			if got, ok := out["evaluation_id"].(string); !ok || got != "eval-fixture-uuid-1234" {
 				t.Errorf("connector %s: evaluation_id = %v, want %q", connectorName, out["evaluation_id"], "eval-fixture-uuid-1234")
 			}
@@ -236,7 +236,7 @@ func TestUnifiedDispatch_SurfacesEvaluationIDAndRuleIDs(t *testing.T) {
 			Mode:       "observe",
 			WouldBlock: false,
 		}
-		out := renderAgentHookResponse("codex", resp)
+		out := renderAgentHookResponseForProfile(connector.HookProfile{Name: "codex"}, resp)
 		if _, ok := out["evaluation_id"]; ok {
 			t.Errorf("no-findings path must omit evaluation_id; got keys=%v", jsonKeys(out))
 		}

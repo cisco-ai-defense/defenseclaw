@@ -92,8 +92,13 @@ func TestClaudeCodeUpgradeRemovesNativeExporterAndLegacyHelper(t *testing.T) {
 			t.Fatalf("%s = %v, want none", key, env[key])
 		}
 	}
-	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "0" || env["DEFENSECLAW_FAIL_MODE"] != "closed" {
-		t.Fatalf("per-user telemetry or hook policy is unsafe: %v", env)
+	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "0" {
+		t.Fatalf("per-user telemetry is unsafe: %v", env)
+	}
+	// No 1.0.4 render reads a fail mode from Claude's env; a per-user setup
+	// writes none (TestClaudeCodePerUserSetupTakesBackTheFailModeCarrier).
+	if _, present := env["DEFENSECLAW_FAIL_MODE"]; present {
+		t.Fatalf("per-user setup wrote a fail-mode carrier: %v", env)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "hooks", ".otlp-claudecode.token")); !os.IsNotExist(err) {
 		t.Fatalf("legacy token remains after upgrade: %v", err)

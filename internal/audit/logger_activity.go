@@ -201,7 +201,9 @@ func (l *Logger) spooledChange(ctx context.Context, in ActivityInput) (*spooledC
 	row, stored, lookupErr := l.store.storedChangeRow(ctx, in.OccurrenceID)
 	switch {
 	case lookupErr != nil:
-		if !change.pinned && (in.ConfigChange == nil || !in.ConfigChange.FirstOffer) {
+		firstOffer := (in.ConfigChange != nil && in.ConfigChange.FirstOffer) ||
+			(in.BundleReceipt != nil && in.BundleReceipt.FirstOffer)
+		if !change.pinned && !firstOffer {
 			return nil, fmt.Errorf("audit: change %s has no record pin and the audit store cannot say whether it holds "+
 				"its record, so it is offered once the store answers: %w", in.PinKey, lookupErr)
 		}

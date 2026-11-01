@@ -137,7 +137,8 @@ def migrate_config_v9(
 
     Returns the JSON result (``migrated``, ``dry_run``, ``written`` and the
     migration-v9.json ``record``). ``ack`` marks the record as read and
-    returns ``{}``.
+    returns ``{"message": ...}``, the helper's own sentence (it also says
+    when there is no record to acknowledge, GAP-1677).
     """
 
     try:
@@ -157,7 +158,7 @@ def migrate_config_v9(
     if completed.returncode != 0:
         raise ConfigInspectError(_helper_failure(completed.stderr, "migrate"))
     if ack:
-        return {}
+        return {"message": (completed.stdout or "").strip()}
     try:
         payload = json.loads(completed.stdout)
     except (TypeError, json.JSONDecodeError) as exc:

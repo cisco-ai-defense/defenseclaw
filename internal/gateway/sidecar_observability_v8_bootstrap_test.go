@@ -1552,7 +1552,12 @@ func TestSidecarConfigManagerV8PrivateUpstreamReloadFailureIsAtomic(t *testing.T
 	}
 }
 
-func TestSidecarConfigManagerV8SamePrometheusBindingRequiresRestartBeforeReplacement(t *testing.T) {
+// GAP-2072: an edit next to a Prometheus destination that keeps its listen
+// address (here retention and the default redaction profile) reloads live;
+// before, the whole observability reload was refused as restart_required, so
+// a redaction profile the CLI reported as applied never reached the audit
+// write path until a restart.
+func TestSidecarConfigManagerV8SamePrometheusBindingReloadsLive(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1606,22 +1611,26 @@ func TestSidecarConfigManagerV8SamePrometheusBindingRequiresRestartBeforeReplace
 	fixture.sidecar.observabilityV8Mu.Unlock()
 	oldGraph := owner.runtime.Active()
 	candidateRaw := []byte(fmt.Sprintf(
-		"config_version: 8\ndata_dir: %q\nenvironment: original\nobservability:\n  local:\n    retention_days: 30\n  destinations:\n    - name: metrics\n      kind: prometheus\n      listen: %q\n      path: /metrics\n",
+		"config_version: 8\ndata_dir: %q\nenvironment: original\nobservability:\n  defaults:\n    redaction_profile: strict\n  local:\n    retention_days: 30\n  destinations:\n    - name: metrics\n      kind: prometheus\n      listen: %q\n      path: /metrics\n",
 		fixture.dataDir, listen,
 	))
 	if err := os.WriteFile(fixture.configPath, candidateRaw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	reloadErr := mgr.Reload(t.Context(), "test")
-	if sidecarV8BootstrapCode(reloadErr) != sidecarObservabilityV8BootstrapReload {
+	if reloadErr := mgr.Reload(t.Context(), "test"); reloadErr != nil {
 		t.Fatalf("same Prometheus binding reload error = %v", reloadErr)
 	}
-	if owner.runtime.Active() != oldGraph || oldGraph.Generation() != 1 ||
-		mgr.v8PlanDigest != initialDigest || mgr.gen.Load() != 0 {
+	active := owner.runtime.Active()
+	if active == oldGraph || active.Generation() != 2 ||
+		mgr.v8PlanDigest == initialDigest || mgr.v8PlanDigest != active.Digest() || mgr.gen.Load() != 1 {
 		t.Fatalf(
-			"same-binding reload mutated graph/digest/gen = %p/%p %q/%q/%d",
-			owner.runtime.Active(), oldGraph, mgr.v8PlanDigest, initialDigest, mgr.gen.Load(),
+			"same-binding reload did not publish the successor graph/digest/gen = %p/%p %q/%q/%d",
+			active, oldGraph, mgr.v8PlanDigest, initialDigest, mgr.gen.Load(),
 		)
+	}
+	profile, err := active.Plan().ResolveLocalRedactionProfile(observability.BucketComplianceActivity)
+	if err != nil || profile != "strict" {
+		t.Fatalf("local compliance.activity profile after reload = %q err=%v, want strict", profile, err)
 	}
 	assertMetricsListenerBound()
 }

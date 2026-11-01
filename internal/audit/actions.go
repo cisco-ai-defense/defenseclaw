@@ -138,11 +138,24 @@ const (
 	ActionConnectorHookTampered Action = "connector-hook-tampered"
 	ActionConnectorHookRepaired Action = "connector-hook-repaired"
 
+	// ActionProtectedFileChanged records a change to a protected file (SSH
+	// authorized keys, shell startup files, user autostart entries) that the
+	// gateway's protected-file watch saw while an agent tool call was
+	// running for that user: HIGH, with the agent session it can name, and
+	// whether the file was restored (guardrail.protected_files.on_change).
+	ActionProtectedFileChanged Action = "protected-file-changed"
+
 	// ActionEnterpriseExemptUser records that a standalone enterprise hook
 	// call came from an account enterprise.enrollment.exempt_users lists: it
 	// is allowed and inspected but not enrolled. At most one row per account
 	// and connector each ten minutes (GAP-0832).
 	ActionEnterpriseExemptUser Action = "enterprise-exempt-user"
+
+	// ActionIdentityRefreshCompleted records one `enterprise identity
+	// refresh` run of a managed gateway: how many accounts it re-read,
+	// changed, failed or skipped, its duration and the OS cache flush.
+	// It never names an account.
+	ActionIdentityRefreshCompleted Action = "identity-refresh-completed"
 
 	// Codex notify webhook (agent-turn-complete et al.). The
 	// notify-bridge.sh shim installed by the codex connector POSTs
@@ -441,7 +454,9 @@ func AllActions() []Action {
 		ActionAssetPolicy,
 		ActionConnectorHookTampered,
 		ActionConnectorHookRepaired,
+		ActionProtectedFileChanged,
 		ActionEnterpriseExemptUser,
+		ActionIdentityRefreshCompleted,
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,
 		ActionCodexNotifyMalformed,

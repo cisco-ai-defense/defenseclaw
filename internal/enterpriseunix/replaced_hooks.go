@@ -130,9 +130,10 @@ fi
 // replacedHookFolder is an enrolled account's hook folder whose
 // _hardening.sh is the replaced release's (fenced now or by an earlier run).
 type replacedHookFolder struct {
-	user string
-	uid  int
-	path string
+	user     string
+	uid      int
+	path     string
+	fencedAt time.Time
 }
 
 // fenceReplacedHooks fences the replaced release's shell hooks of every
@@ -144,11 +145,11 @@ func (l *lifecycle) fenceReplacedHooks(ctx context.Context) {
 		return
 	}
 	l.replacedHooksFenced = true
+	l.retireReplacedMachineShellHooks()
 	targets := l.replacedHookTargets(ctx)
 	if len(targets) == 0 {
 		return
 	}
-	fencedAt := env.Now()
 	fence := lifecycleFence(env.Layout.LifecycleMarkerPath)
 	var folders []replacedHookFolder
 	for _, target := range targets {
@@ -159,19 +160,70 @@ func (l *lifecycle) fenceReplacedHooks(ctx context.Context) {
 			continue
 		}
 		if replaced {
-			folders = append(folders, replacedHookFolder{user: target.user, uid: target.uid, path: target.folder()})
+			folders = append(folders, replacedHookFolder{user: target.user, uid: target.uid, path: target.folder(), fencedAt: env.Now()})
 		}
 	}
 	if len(folders) == 0 {
 		return
 	}
-	running := l.waitForReplacedHookCalls(ctx, folders, fencedAt)
+	running := l.waitForReplacedHookCalls(ctx, folders)
 	if len(running) == 0 {
 		return
 	}
 	l.result.AddWarning(codeReplacedHookCalls, fmt.Sprintf("hook calls of the replaced release were still running %s after their hooks were fenced, and the gateway was stopped: %s; "+
 		"a call such a hook sends before the new gateway answers follows the replaced release's fail mode",
 		env.ReplacedHookCallsTimeout, strings.Join(running, ", ")))
+}
+
+// codeReplacedMachineHooks names a generic shell hook set of a replaced
+// release in the managed data directory that the run could not remove.
+const codeReplacedMachineHooks = "replaced_machine_hooks_kept"
+
+// replacedMachineShellHooks are the generic shell hooks a 1.0.2 or 1.0.3
+// managed gateway rendered in its own data directory, _hardening.sh last.
+var replacedMachineShellHooks = []string{
+	"inspect-request.sh", "inspect-response.sh", "inspect-tool.sh", "inspect-tool-response.sh", hardeningFile,
+}
+
+// retireReplacedMachineShellHooks removes the generic shell hook set a
+// replaced release left in the managed data directory's hooks folder
+// (GAP-1710). No managed hook of this release runs it (they are the native
+// defenseclaw-hook commands), and nothing renders it again, so the 1.0.2
+// helpers stayed on disk after the upgrade. A set whose _hardening.sh reads
+// the lifecycle marker (1.0.4 and later) is this release's and stays; the
+// folder's sidecars and tokens are not touched.
+func (l *lifecycle) retireReplacedMachineShellHooks() {
+	env := l.env
+	if strings.TrimSpace(env.Layout.DataDir) == "" {
+		return
+	}
+	dir := env.P(filepath.Join(env.Layout.DataDir, "hooks"))
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return
+	}
+	hardening := filepath.Join(dir, hardeningFile)
+	info, err := os.Lstat(hardening)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > hardeningMaxBytes {
+		return
+	}
+	data, err := os.ReadFile(hardening)
+	if err != nil || bytes.Contains(data, []byte(lifecycleMarkerReader)) {
+		return
+	}
+	var kept []string
+	for _, name := range replacedMachineShellHooks {
+		path := filepath.Join(dir, name)
+		if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			kept = append(kept, name+" ("+err.Error()+")")
+		}
+	}
+	if len(kept) > 0 {
+		l.result.AddWarning(codeReplacedMachineHooks, "the replaced release's shell hooks in "+filepath.Join(env.Layout.DataDir, "hooks")+
+			" were not removed: "+strings.Join(kept, ", ")+"; no managed hook runs them")
+	}
 }
 
 // replacedHookTarget is one hook folder of an enrolled account, below its
@@ -367,11 +419,11 @@ func fenceHardening(home, rel string, uid int, fence string) (replaced bool, err
 // that started before the fence (a second later: ps on macOS counts whole
 // seconds). The gateway still answers them meanwhile. It returns those still
 // running, as "user (pid N)".
-func (l *lifecycle) waitForReplacedHookCalls(ctx context.Context, folders []replacedHookFolder, fencedAt time.Time) []string {
+func (l *lifecycle) waitForReplacedHookCalls(ctx context.Context, folders []replacedHookFolder) []string {
 	env := l.env
 	deadline := time.Now().Add(env.ReplacedHookCallsTimeout)
 	for {
-		running := env.replacedHookCalls(ctx, folders, fencedAt.Add(time.Second))
+		running := env.replacedHookCalls(ctx, folders)
 		if len(running) == 0 || !time.Now().Before(deadline) {
 			return running
 		}
@@ -383,16 +435,13 @@ func (l *lifecycle) waitForReplacedHookCalls(ctx context.Context, folders []repl
 	}
 }
 
-// replacedHookCalls are the processes that started before before and run a
-// hook from one of folders as its account.
-func (e *Env) replacedHookCalls(ctx context.Context, folders []replacedHookFolder, before time.Time) []string {
+// replacedHookCalls are the processes that started before their folder's
+// fence and run a hook from that folder as its account.
+func (e *Env) replacedHookCalls(ctx context.Context, folders []replacedHookFolder) []string {
 	var out []string
 	for _, process := range e.hostProcesses(ctx) {
-		if !process.Started.Before(before) {
-			continue
-		}
 		for _, folder := range folders {
-			if process.UID == folder.uid && runsFromFolder(process.Argv, folder.path) {
+			if process.Started.Before(folder.fencedAt.Add(time.Second)) && process.UID == folder.uid && runsFromFolder(process.Argv, folder.path) {
 				out = append(out, fmt.Sprintf("%s (pid %d)", folder.user, process.PID))
 				break
 			}

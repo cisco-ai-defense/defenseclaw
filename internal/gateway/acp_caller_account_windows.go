@@ -5,4 +5,11 @@
 
 package gateway
 
+import "net/http"
+
 func acpHomePrincipalUID(_, _ string) (int, bool) { return 0, false }
+
+// acpHomePrincipalPeerRefusal: the caller account is not checked on Windows.
+func acpHomePrincipalPeerRefusal(_ *http.Request, _, _ string) string {
+	return acpCallerAccountUnverifiedReason
+}

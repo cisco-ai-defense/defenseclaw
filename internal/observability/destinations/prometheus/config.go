@@ -121,13 +121,17 @@ type Options struct {
 // Factory snapshots one compiled destination and can prepare a fresh reader
 // and private HTTP server for each graph generation.
 type Factory struct {
-	destination  string
-	listen       string
-	path         string
-	selected     map[string]struct{}
-	matcher      familyMatcher
-	labels       map[string]struct{}
-	listenFunc   ListenFunc
+	destination string
+	listen      string
+	path        string
+	selected    map[string]struct{}
+	matcher     familyMatcher
+	labels      map[string]struct{}
+	listenFunc  ListenFunc
+	// shared is set for the standard listener: generations share one process
+	// socket per address (processListeners). An injected Listen binds per
+	// generation.
+	shared       bool
 	observer     *boundedObserver
 	drainTimeout time.Duration
 }
@@ -158,7 +162,8 @@ func NewFactory(destination config.ObservabilityV8EffectiveDestination, options 
 		return nil, err
 	}
 	listenFunc := options.Listen
-	if listenFunc == nil {
+	shared := listenFunc == nil
+	if shared {
 		listener := &net.ListenConfig{}
 		listenFunc = listener.Listen
 	}
@@ -171,6 +176,7 @@ func NewFactory(destination config.ObservabilityV8EffectiveDestination, options 
 		matcher:      matcher,
 		labels:       labels,
 		listenFunc:   listenFunc,
+		shared:       shared,
 		observer:     observer,
 		drainTimeout: defaultDrainTimeout,
 	}, nil

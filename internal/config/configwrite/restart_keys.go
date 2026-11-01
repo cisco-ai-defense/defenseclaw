@@ -9,13 +9,13 @@ package configwrite
 import (
 	"bytes"
 	"net"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -25,7 +25,7 @@ const MaxRestartSettingPatterns = 32
 
 // restartSettingPatternShape is what a reported setting may look like:
 // schema key names, "*" and dots.
-var restartSettingPatternShape = regexp.MustCompile(`^[a-z_*.]{1,96}$`)
+var restartSettingPatternShape = lazyregexp.New(`^[a-z_*.]{1,96}$`)
 
 // RestartSettingPatterns names the settings behind restart-required change
 // paths (ManagedRestartRequired), never the paths: a change path can carry

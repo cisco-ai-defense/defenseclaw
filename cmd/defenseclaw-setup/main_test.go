@@ -1687,6 +1687,15 @@ func TestValidateMachineVersionRequiresExactIdentityAndVersion(t *testing.T) {
 	if err := validateMachineVersion(bundle, "defenseclaw-gateway", "1.2.3-rc.1", commit); err != nil {
 		t.Fatalf("validateMachineVersion with secret_set_bundle: %v", err)
 	}
+	// A 1.0.6 gateway also reports `enterprise identity refresh`.
+	refresh := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789abcdef0123456789abcdef01234567","built":"now","management_contract":1,"secret_set_bundle":true,"identity_refresh":true}`)
+	if err := validateMachineVersion(refresh, "defenseclaw-gateway", "1.2.3-rc.1", commit); err != nil {
+		t.Fatalf("validateMachineVersion with identity_refresh: %v", err)
+	}
+	refreshType := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789abcdef0123456789abcdef01234567","identity_refresh":"true"}`)
+	if err := validateMachineVersion(refreshType, "defenseclaw-gateway", "1.2.3-rc.1", commit); err == nil {
+		t.Fatal("validateMachineVersion accepted a non-boolean identity_refresh")
+	}
 	cli := []byte(`{"schema_version":1,"name":"defenseclaw-cli","version":"1.2.3-rc.1"}`)
 	if err := validateMachineVersion(cli, "defenseclaw-cli", "1.2.3-rc.1", ""); err != nil {
 		t.Fatalf("version-only CLI identity: %v", err)

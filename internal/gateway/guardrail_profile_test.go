@@ -839,6 +839,146 @@ rules:
 	}
 }
 
+// GAP-1526: a scope the preload did not list loads its rules on first use
+// (GAP-1508), but connectorRulePack, which feeds the hook judge's
+// suppressions, read only the preloaded packs: such a request scanned with
+// the profile's rules and judged with the base pack's suppressions. Loaded
+// eagerly or lazily, judge first or rules first, or through the lazy retry,
+// a profile request applies its own pack's suppressions and not the base
+// pack's; a request with no profile keeps the base pack's.
+func TestLazyProfileScopeAppliesTheProfileJudgeSuppressions(t *testing.T) {
+	stubProfileSources(t)
+	resetConnectorRuleCategories(t)
+	withLocalPatternsRestored(t)
+	priorManaged := ManagedEnterpriseActive()
+	setManagedEnterpriseRedactionPosture(false)
+	t.Cleanup(func() { setManagedEnterpriseRedactionPosture(priorManaged) })
+	writeProfilePack := func(dir string) {
+		writeRulePackFixtureFile(t, dir, "rules/marker.yaml", `version: 1
+category: secret
+rules:
+  - id: LAZY-PROFILE-MARKER
+    pattern: "lazy_profile_marker_token"
+    title: lazy profile scope fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+		writeRulePackFixtureFile(t, dir, "suppressions.yaml", `version: 1
+pre_judge_strips: []
+finding_suppressions:
+  - id: PROFILE-ONLY-SUPPRESSION
+    finding_pattern: "LAZY-PROFILE-MARKER"
+    entity_pattern: "lazy_profile_marker_token"
+    reason: allowed in this profile
+tool_suppressions: []
+`)
+	}
+	basePack := &guardrail.RulePack{Suppressions: &guardrail.SuppressionsConfig{Version: 1,
+		FindingSupps: []guardrail.FindingSuppression{{ID: "BASE-ONLY-SUPPRESSION"}}}}
+	baseGeneration := &Generation{Config: &config.Config{}, activeRules: &compiledRulePackCategories{},
+		RulePacks: map[string]*guardrail.RulePack{"global": basePack}}
+	newAPI := func(packDir string) (*APIServer, *guardrailProfileSet) {
+		inspect := true
+		cfg := &config.Config{}
+		cfg.ApplicationProtection.Enabled = true
+		cfg.ApplicationProtection.Guardrail.Rules = &config.GuardrailRulesConfig{
+			SensitiveTools: []config.GuardrailSensitiveTool{{Name: "crm_export", ResultInspection: &inspect}},
+		}
+		cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action", RulePackDir: packDir}}
+		cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}}}
+		api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+		set := api.guardrailProfileSet()
+		if set == nil {
+			t.Fatal("profile set was not built")
+		}
+		return api, set
+	}
+	// unlist drops the scope from the preload, as for a scope it never
+	// listed (a plugin connector under application protection).
+	unlist := func(set *guardrailProfileSet, connector string) {
+		key := effectiveRulePackKey(set.profiles["strict"].Config, connector)
+		delete(set.rules, key)
+		delete(set.packs, key)
+		delete(set.missing, key)
+	}
+	request := func(api *APIServer, user, connector string) context.Context {
+		ctx := withPinnedGeneration(t.Context(), baseGeneration)
+		ctx = context.WithValue(ctx, testVerifiedSubjectKey{}, profileSubject{UserID: user})
+		return api.withGuardrailProfileDecision(ctx, connector)
+	}
+	scan := func(api *APIServer, connector string) []string {
+		return findingIDs(scanAllRulesForConnectorFor(request(api, "1001", connector), connector, "lazy_profile_marker_token", "exec"))
+	}
+	// judged is what the hook judge applies: runHookJudge's pack on a judge
+	// built with the base pack.
+	judged := func(api *APIServer, user, connector string) (*guardrail.RulePack, []string) {
+		ctx := request(api, user, connector)
+		pack := api.connectorRulePack(ctx, connector)
+		applied := (&LLMJudge{rp: basePack}).suppressionPack(withJudgeSuppressionPack(ctx, pack))
+		var ids []string
+		if applied != nil && applied.Suppressions != nil {
+			for _, s := range applied.Suppressions.FindingSupps {
+				ids = append(ids, s.ID)
+			}
+		}
+		return pack, ids
+	}
+	wantProfile := func(label string, api *APIServer, connector string) {
+		t.Helper()
+		if _, ids := judged(api, "1001", connector); !slices.Contains(ids, "PROFILE-ONLY-SUPPRESSION") || slices.Contains(ids, "BASE-ONLY-SUPPRESSION") {
+			t.Fatalf("%s: profile request judged with suppressions %v, want the profile pack's only", label, ids)
+		}
+	}
+	wantBase := func(label string, api *APIServer, connector string) {
+		t.Helper()
+		if pack, ids := judged(api, "2002", connector); pack != basePack || !slices.Contains(ids, "BASE-ONLY-SUPPRESSION") || slices.Contains(ids, "PROFILE-ONLY-SUPPRESSION") {
+			t.Fatalf("%s: request with no profile judged with suppressions %v, want the base pack's", label, ids)
+		}
+	}
+	packDir := filepath.Join(t.TempDir(), "strict")
+	writeProfilePack(packDir)
+
+	eager, _ := newAPI(packDir)
+	wantProfile("eager", eager, "claudecode")
+	wantBase("eager", eager, "claudecode")
+
+	judgeFirst, set := newAPI(packDir)
+	unlist(set, "claudecode")
+	wantProfile("lazy, judge before any rule scan", judgeFirst, "claudecode")
+	if ids := scan(judgeFirst, "claudecode"); !containsRuleID(ids, "LAZY-PROFILE-MARKER") {
+		t.Fatalf("lazy scope scanned without the profile rule: %v", ids)
+	}
+	wantBase("lazy", judgeFirst, "claudecode")
+
+	rulesFirst, set := newAPI(packDir)
+	unlist(set, "claudecode")
+	if ids := scan(rulesFirst, "claudecode"); !containsRuleID(ids, "LAZY-PROFILE-MARKER") {
+		t.Fatalf("lazy scope scanned without the profile rule: %v", ids)
+	}
+	wantProfile("lazy, rules first", rulesFirst, "claudecode")
+	wantBase("lazy, rules first", rulesFirst, "claudecode")
+
+	latePackDir := filepath.Join(t.TempDir(), "late")
+	late, set := newAPI(latePackDir)
+	unlist(set, "claudecode")
+	if pack, _ := judged(late, "1001", "claudecode"); pack != basePack {
+		t.Fatal("a lazy scope whose pack has not loaded must judge with the base pack until it loads")
+	}
+	writeProfilePack(latePackDir)
+	key := effectiveRulePackKey(set.profiles["strict"].Config, "claudecode")
+	value, ok := set.lazy.Load(key)
+	if !ok || value.(*profileLazyScope).retry == nil {
+		t.Fatal("the lazy scope kept no retry")
+	}
+	retry := value.(*profileLazyScope).retry
+	retry.mu.Lock()
+	retry.nextTry = time.Time{}
+	retry.mu.Unlock()
+	wantProfile("lazy retry", late, "claudecode")
+	wantBase("lazy retry", late, "claudecode")
+}
+
 // GAP-0094: a local account's groups count once each. macOS listed every
 // gid and then its name, so explain and identity.observed doubled the count.
 func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
@@ -924,7 +1064,7 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 	previous := currentIdentitySpoolDir()
 	t.Cleanup(func() { setIdentitySpoolDir(previous) })
 	setIdentitySpoolDir(t.TempDir())
-	if note := spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()); !strings.Contains(note, "no identity record for this account yet") {
+	if note := spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now(), false); !strings.Contains(note, "no identity record for this account yet") {
 		t.Fatalf("spool note = %q", note)
 	}
 	if !awaitingSpool(useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}) ||
@@ -939,16 +1079,18 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 	}
 	// GAP-0575: so is an Open Directory answer without the guardian's UPN or
 	// without its directory (an Active Directory account before the
-	// guardian's record, which Open Directory may list as a local node
-	// account), but not one the record named.
+	// guardian's record), but not one the record named. GAP-0532: an account
+	// the answer proves is of the local node (not a mobile copy) has no UPN
+	// to wait for.
 	if !awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory}) ||
-		!awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryLocal}) ||
+		!awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryActiveDirectory}) ||
+		awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryLocal}) ||
 		awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryActiveDirectory,
 			UPN: "alice@corp.example.com"}) {
-		t.Fatal("Open Directory facts without a UPN or a directory must await the guardian record, facts the record named must not")
+		t.Fatal("Open Directory facts without a UPN or a directory must await the guardian record; a local node account and facts the record named must not")
 	}
 	setIdentitySpoolDir("")
-	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()) != "" {
+	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now(), false) != "" {
 		t.Fatal("a gateway without a spool has no record to wait for")
 	}
 	named := &profileSubject{Groups: []string{"S-1-1-0", "Everyone", "S-1-5-21-1-2-3-9001", "S-1-5-21-1-2-3-9002"}}
@@ -1280,6 +1422,77 @@ func TestUnknownAssignmentGroupsReportsIncompleteCheck(t *testing.T) {
 	warnings := unknownAssignmentGroups(context.Background(), assignments, exists, nil, nil)
 	if checked != profileGroupCheckMax || len(warnings) != 1 || !strings.Contains(warnings[0], "not checked") {
 		t.Fatalf("checked = %d, warnings = %q; want a warning that later groups were not checked", checked, warnings)
+	}
+}
+
+// GAP-2434: a directory that does not answer in time (a slow SSSD at gateway
+// start) leaves groups unchecked; the warning names each assignment and group
+// it could not check, not just "timed out".
+func TestUnknownAssignmentGroupsNameTheGroupsATimedOutCheckSkipped(t *testing.T) {
+	assignments := []config.ProfileAssignment{
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"devs@corp.example.com"}}},
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"renamed@corp.example.com"}}},
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"gone@corp.example.com"}}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	exists := func(ctx context.Context, _ string) (bool, error) {
+		cancel() // the budget runs out during the first lookup
+		return false, ctx.Err()
+	}
+	warnings := unknownAssignmentGroups(ctx, assignments, exists, nil, nil)
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %q; want one incomplete-check note", warnings)
+	}
+	for _, want := range []string{`assignment 1: group "devs@corp.example.com"`, `assignment 2: group "renamed@corp.example.com"`,
+		`assignment 3: group "gone@corp.example.com"`, "not checked"} {
+		if !strings.Contains(warnings[0], want) {
+			t.Fatalf("warning = %q; want it to name %q", warnings[0], want)
+		}
+	}
+}
+
+// GAP-2434: a pass that ran out of time is not kept for the whole TTL: once
+// the directory answers again, the next command gets the per-group warnings
+// within profileGroupCheckRetry.
+func TestGroupCheckThatRanOutOfTimeIsRetriedSoon(t *testing.T) {
+	saved := profileGroupCheckBudget
+	profileGroupCheckBudget = 50 * time.Millisecond
+	t.Cleanup(func() { profileGroupCheckBudget = saved })
+	var slow atomic.Bool
+	slow.Store(true)
+	exists := func(ctx context.Context, name string) (bool, error) {
+		if slow.Load() {
+			<-ctx.Done()
+			return false, ctx.Err()
+		}
+		return name == "devs@corp.example.com", nil
+	}
+	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"devs@corp.example.com"}}},
+		{Profile: "open", Match: config.ProfileMatch{Groups: []string{"renamed@corp.example.com"}}},
+	}}
+	unmatched := func(context.Context, string) string { return "" }
+	health := func() identityCacheHealth { return identityCacheHealth{} }
+	first := set.unknownGroupWarningsWith(exists, nil, nil, unmatched, health, 2*time.Second)
+	if len(first) != 1 || !strings.Contains(first[0], "not checked") {
+		t.Fatalf("first pass = %q; want the incomplete-check note", first)
+	}
+	slow.Store(false)
+	set.groupCheck.mu.Lock()
+	set.groupCheck.checkedAt = set.groupCheck.checkedAt.Add(-profileGroupCheckRetry - time.Second)
+	set.groupCheck.mu.Unlock()
+	set.unknownGroupWarningsWith(exists, nil, nil, unmatched, health, 0) // starts the next pass
+	set.groupCheck.mu.Lock()
+	running := set.groupCheck.running
+	set.groupCheck.mu.Unlock()
+	if running == nil {
+		t.Fatal("an incomplete pass older than profileGroupCheckRetry must start a new pass")
+	}
+	<-running
+	got := set.unknownGroupWarningsWith(exists, nil, nil, unmatched, health, 0)
+	if len(got) != 1 || !strings.Contains(got[0], `assignment 2: group "renamed@corp.example.com" is not known to this host`) {
+		t.Fatalf("after the directory answers = %q; want the assignment 2 warning", got)
 	}
 }
 
@@ -1759,42 +1972,82 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	}
 }
 
-// A qualified-name SSSD host can have the same short account name in two
-// trusted domains. Neither account may receive a relaxed profile by that
-// short name; the administrator must use a qualified name or uid.
+// GAP-0725: on a host whose SSSD AD accounts come from more than one trusted
+// domain, a bare users entry selects the account of that name in each of
+// them. In the default and permissive policy tiers it still matches (no
+// over-tightening: 1.0.3 configs keep their meaning), and explain, status and
+// verify warn and name every account it selects with the exact replacement.
+// The strict policy tier refuses the ambiguous entry when it could change
+// the decision.
 func TestSSSDQualifiedNamesDoNotGrantBareNamesakeProfile(t *testing.T) {
 	useridentity.SetTrustedADChildDomains([]string{"dclab2.test"})
 	t.Cleanup(func() { useridentity.SetTrustedADChildDomains(nil) })
 	previous := identityFactsEnabled.Load()
 	setIdentityFactsEnabled(true)
 	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
-	cfg := &config.Config{}
-	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
-		"strict": {Mode: "action", BlockAt: "low"}, "relaxed": {Mode: "observe"},
-	}
-	cfg.Guardrail.DefaultProfile = "strict"
-	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{
-		Profile: "relaxed", Match: config.ProfileMatch{Users: []string{"dcad-r103-eng1"}},
-	}}
-	set, err := newGuardrailProfileSet(cfg, nil, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct{ uid, domain, source string }{
+	namesakes := []struct{ uid, domain, source string }{
 		{"94404135", "dclab.test", useridentity.SourceSSSD},
 		{"844201107", "dclab2.test", useridentity.SourceSSSDInfoPipe},
-	} {
-		subject := profileSubjectFromVerified(VerifiedSubject{
-			UserID: tc.uid, UserName: "dcad-r103-eng1@" + tc.domain,
-			Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
-				Source: tc.source, Domain: tc.domain, ResolvedAt: time.Now()},
-		}, true)
-		if got := set.match(&subject, profileSubjectVerified, "claudecode", ""); got.Name != "strict" || got.Refused == "" ||
-			got.Match != profileMatchDefaultLookupFailed {
-			t.Errorf("%s: bare namesake decision %+v; want strict refusal", tc.domain, got)
-		} else if warning := ambiguousShortNameUserNote(set, got, &subject); !strings.Contains(warning, "uid "+tc.uid) {
-			t.Errorf("%s: ambiguous decision did not name an exact replacement: %q", tc.domain, warning)
+	}
+	previousRecords := profileShortNameRecords
+	profileShortNameRecords = func() []enterprisehooks.IdentitySpoolRecord {
+		var records []enterprisehooks.IdentitySpoolRecord
+		for _, tc := range namesakes {
+			records = append(records, enterprisehooks.IdentitySpoolRecord{Key: tc.uid, User: "dcad-r103-eng1@" + tc.domain,
+				Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Source: tc.source,
+					Domain: tc.domain, UPN: "dcad-r103-eng1@" + tc.domain}})
+		}
+		return records
+	}
+	t.Cleanup(func() { profileShortNameRecords = previousRecords })
+	for _, tier := range []string{"", "strict"} {
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "action"
+		if tier == "strict" {
+			// A pack folder named strict is the strict policy tier.
+			cfg.Guardrail.RulePackDir = meetRulePackDir(t, t.TempDir(), "strict")
+		}
+		cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+			"strict": {Mode: "action", BlockAt: "low"}, "relaxed": {Mode: "observe"},
+		}
+		cfg.Guardrail.DefaultProfile = "strict"
+		cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{
+			Profile: "relaxed", Match: config.ProfileMatch{Users: []string{"dcad-r103-eng1"}},
+		}}
+		set, err := newGuardrailProfileSet(cfg, nil, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range namesakes {
+			subject := profileSubjectFromVerified(VerifiedSubject{
+				UserID: tc.uid, UserName: "dcad-r103-eng1@" + tc.domain,
+				Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+					Source: tc.source, Domain: tc.domain, ResolvedAt: time.Now()},
+			}, true)
+			got := set.match(&subject, profileSubjectVerified, "claudecode", "")
+			warning := ambiguousShortNameUserNote(set, got, &subject)
+			if tier == "strict" {
+				if got.Name != "strict" || got.Refused == "" || got.Match != profileMatchDefaultLookupFailed {
+					t.Errorf("strict tier, %s: bare namesake decision %+v; want the strict refusal", tc.domain, got)
+				}
+				if !strings.Contains(warning, "strict policy tier refuses") {
+					t.Errorf("strict tier, %s: warning %q does not say the tier refuses the entry", tc.domain, warning)
+				}
+			} else if got.Name != "relaxed" || got.Refused != "" || got.Match != profileMatchUser {
+				t.Errorf("default tier, %s: bare namesake decision %+v; want relaxed by user, as before", tc.domain, got)
+			}
+			for _, other := range namesakes {
+				if !strings.Contains(warning, "dcad-r103-eng1@"+other.domain) || !strings.Contains(warning, "uid "+other.uid) {
+					t.Errorf("tier %q, %s: warning %q does not name %s (uid %s)", tier, tc.domain, warning, other.domain, other.uid)
+				}
+			}
+			if note := shortNameUserNote(set, got, &subject); note != "" {
+				t.Errorf("tier %q, %s: a second short-name note %q", tier, tc.domain, note)
+			}
+		}
+		health := strings.Join(shortNameAssignmentWarnings(set.assignments, profileShortNameRecords()), "\n")
+		if strings.Count(health, "assignment 1") != 1 || !strings.Contains(health, "dcad-r103-eng1@dclab.test (uid 94404135) and dcad-r103-eng1@dclab2.test (uid 844201107)") {
+			t.Errorf("tier %q: status and verify warning %q does not name both accounts in one line", tier, health)
 		}
 	}
 }
@@ -1842,9 +2095,9 @@ func TestSingleDomainSSSDBareUserAssignmentSurvivesUpgrade(t *testing.T) {
 	}
 }
 
-// PM-13: a bare users entry never selects a local namesake. On an SSSD host
-// with qualified names it is ambiguous across trusted domains and refuses;
-// on Windows and macOS it selects the directory account. The local account
+// PM-13: a bare users entry never selects a local namesake; it selects the
+// directory account (on an SSSD host with qualified names in the default
+// tier too: only the strict tier refuses it as ambiguous, GAP-0725). The local account
 // is selected by its uid or SID, or as .\name (GAP-0305, GAP-0313, GAP-0418,
 // GAP-0725).
 func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
@@ -1903,12 +2156,7 @@ func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
 			domain := profileSubjectFromVerified(tc.domain, true)
 			local := profileSubjectFromVerified(tc.local, true)
 			got := set.match(&domain, profileSubjectVerified, "claudecode", "")
-			if tc.name == "linux" {
-				if got.Refused == "" || got.Match != profileMatchDefaultLookupFailed ||
-					!slices.Contains(got.Unproven, "account:ambiguous_short_name") {
-					t.Fatalf("qualified directory account: %+v, want ambiguous short-name refusal", got)
-				}
-			} else if got.Name != "contractors" || got.Match != profileMatchUser {
+			if got.Name != "contractors" || got.Match != profileMatchUser {
 				t.Fatalf("directory account: %+v, want contractors by user", got)
 			}
 			if got := set.match(&local, profileSubjectVerified, "claudecode", ""); got.Name != "floor" || got.Match != profileMatchDefault {
@@ -2374,5 +2622,40 @@ func TestWindowsSIDGroupAssignmentIgnoresSIDShapedNames(t *testing.T) {
 		Groups: []string{assignedSID}}
 	if got := set.match(member, profileSubjectVerified, "codex", ""); got.Name != "tooling" || got.Match != profileMatchGroup {
 		t.Fatalf("assigned SID selected %+v, want tooling group assignment", got)
+	}
+}
+
+// GAP-0495: the policy matcher compares group names without case, so an
+// assignment written DC-R102-OKTA-DEV selects the members of dc-r102-okta-dev.
+// A host whose group lookup is case-sensitive (an Okta LDAP domain in SSSD)
+// answers "no such group" for the uppercase spelling; the advisory must not
+// say the assignment selects nobody then.
+func TestUnknownAssignmentGroupsAgreeWithCaseInsensitiveMatcher(t *testing.T) {
+	previousHealth := directoryCacheHealth
+	t.Cleanup(func() { directoryCacheHealth = previousHealth })
+	directoryCacheHealth = func() identityCacheHealth { return identityCacheHealth{} }
+	assignments := []config.ProfileAssignment{
+		{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"DC-R102-OKTA-DEV"}}},
+		{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"DC-R102-GONE"}}},
+	}
+	exists := func(_ context.Context, name string) (bool, error) { return name == "dc-r102-okta-dev", nil }
+	got := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, nil, nil, "linux")
+	if len(got) != 1 || !strings.HasPrefix(got[0], `assignment 2: group "DC-R102-GONE" is not known`) {
+		t.Fatalf("warnings = %q, want only the group no spelling of which exists", got)
+	}
+}
+
+// GAP-0507: the signed-out note names the strict default as the safety net
+// only when no assignment chose the profile; a users, SID or agent assignment
+// ahead of the groups selects it without the token groups.
+func TestSignedOutNoteClaimsTheStrictDefaultOnlyWhenNoAssignmentSelected(t *testing.T) {
+	if got := spoolSignedOutNote(false); !strings.Contains(got, "a strict default profile protects this gap") ||
+		!strings.Contains(got, "group assignments cannot match") {
+		t.Fatalf("default-profile note = %q", got)
+	}
+	got := spoolSignedOutNote(true)
+	if strings.Contains(got, "strict default") || !strings.Contains(got, "group assignments cannot match") ||
+		!strings.Contains(got, "chosen by an assignment") {
+		t.Fatalf("selected-profile note = %q", got)
 	}
 }

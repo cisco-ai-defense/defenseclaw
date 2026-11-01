@@ -196,6 +196,10 @@ def sync_source(
     # at this single point keeps the rest of the pipeline content-
     # agnostic and avoids parallel filter logic in scan / promote.
     filtered = manifest.filter_by_content(source.content)
+    if not filtered and manifest.notes:
+        # GAP-1640: a fetch that yields no entries says why, and is not ok.
+        report.skip_reasons.extend(manifest.notes)
+        report.partial.extend(manifest.notes)
     manifest = Manifest(
         schema_version=manifest.schema_version,
         generated_at=manifest.generated_at,

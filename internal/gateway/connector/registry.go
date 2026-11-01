@@ -74,9 +74,9 @@ func (r *Registry) RegisterPlugin(c Connector) error {
 	if _, exists := r.builtins[c.Name()]; exists {
 		return fmt.Errorf("plugin %q collides with built-in connector name — refusing registration", c.Name())
 	}
-	// until 1.1: the names of the connectors 1.0.4 removed stay reserved. An
-	// upgraded host keeps the OpenHands hook token (removed.go keepHookToken),
-	// and a plugin under that name would let it authenticate as the plugin.
+	// until 1.1: OpenHands and OmniGent stay reserved names: their teardown
+	// runs on upgraded hosts (removed.go), and a plugin under either name
+	// would be torn down by it.
 	if IsRemovedConnector(c.Name()) {
 		return fmt.Errorf("plugin %q uses the name of a connector DefenseClaw 1.0.4 removed — refusing registration", c.Name())
 	}

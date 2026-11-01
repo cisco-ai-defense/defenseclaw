@@ -68,7 +68,6 @@ func TestR104CodexNativeExecWorkdirRefix3(t *testing.T) {
 }
 
 func TestR104ProtectedWriteRefix3(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	for _, tc := range []struct {
 		name, command string

@@ -39,11 +39,11 @@ func (l *lifecycle) warnOpenPolicyViews() {
 	}
 	if message := unprivilegedUserNamespaceWarning(read); message != "" {
 		l.result.AddWarning(codeUserNamespaces, message)
-		l.result.SecurityComplete = false
+		l.result.MarkSecurityIncomplete(codeUserNamespaces)
 	}
 	if message := unprivilegedPtraceWarning(read); message != "" {
 		l.result.AddWarning(codeUnprivilegedPtrace, message)
-		l.result.SecurityComplete = false
+		l.result.MarkSecurityIncomplete(codeUnprivilegedPtrace)
 	}
 }
 

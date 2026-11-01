@@ -3,8 +3,8 @@
 
 package main
 
-// until 1.1: what the teardown of a removed connector (OmniGent) leaves for
-// the user to remove by hand. The maintenance gateway's `connector teardown
+// until 1.1: what the teardown of OpenHands or OmniGent could not remove,
+// listed as information under the one removal notice. The maintenance gateway's `connector teardown
 // --json` lists it; Setup shows it at the end: in the wizard, in the setup
 // log and, in quiet mode, on stdout. Delete with the removed connectors.
 
@@ -18,6 +18,9 @@ import (
 	"strings"
 	"sync"
 )
+
+// removedConnectorNotice is connector.RemovedConnectorNotice.
+const removedConnectorNotice = "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it."
 
 type removedConnectorLeftover struct {
 	Path string `json:"path"`
@@ -204,14 +207,9 @@ func removedConnectorNotesText() string {
 		if len(leftovers) == 0 {
 			continue
 		}
-		label := name
-		switch name {
-		case "omnigent":
-			label = "OmniGent"
-		case "openhands":
-			label = "OpenHands"
+		if b.Len() == 0 {
+			b.WriteString(removedConnectorNotice + "\r\n")
 		}
-		fmt.Fprintf(&b, "%s support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:\r\n", label)
 		for _, item := range leftovers {
 			fmt.Fprintf(&b, "  - %s: %s. To remove: %s.\r\n", item.Path, item.What, item.Step)
 		}

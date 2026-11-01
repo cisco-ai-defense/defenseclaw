@@ -95,6 +95,47 @@ def test_refused_config_is_not_sent_back_to_init(data_dir: Path, monkeypatch: py
     assert "defenseclaw init" not in text
 
 
+def test_status_with_a_refused_config_still_shows_the_running_gateway(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GAP-0006: the gateway keeps its last good config; status names it and the rejected reload.
+    from types import SimpleNamespace
+
+    from defenseclaw import logger
+    from defenseclaw.main import cli
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    (data_dir / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    monkeypatch.setattr(dcconfig, "require_v8_config", lambda **_: None)
+
+    def refuse(**_kwargs):
+        raise ValueError("guardrail.block_at: must be one of CRITICAL, HIGH, MEDIUM, LOW (got 'BOGUS')")
+
+    monkeypatch.setattr(dcconfig, "load", refuse)
+    monkeypatch.setattr(logger, "_running_gateway_address", lambda _d: ("127.0.0.1", 19010))
+    health = {"uptime_ms": 120000, "policy": {
+        "effective_digest": "sha256:" + "7" * 64, "config_generation": 5,
+        "last_reload_error": "config_version 9: guardrail.block_at is invalid",
+    }}
+    from defenseclaw.commands import cmd_doctor
+
+    trusted = SimpleNamespace(trusted=True)
+    monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", lambda _cfg, api_port: trusted)
+    reply = MagicMock(json=lambda: health, raise_for_status=lambda: None)
+    monkeypatch.setattr("requests.Session.get", lambda _self, url, **_kw: reply)
+    result = CliRunner().invoke(cli, ["status"])
+    text = result.output + (result.stderr or "")
+    assert result.exit_code == 1, text
+    assert "Failed to load config: guardrail.block_at" in text
+    assert "running on its last good configuration (up 2m, API http://127.0.0.1:19010)" in text
+    assert "config generation 5, sha256:777777777777" in text
+    assert "config_version 9: guardrail.block_at is invalid" in text
+
+    monkeypatch.setattr("sys.argv", ["defenseclaw", "status", "--json"])  # main reads sys.argv, as for --help
+    as_json = CliRunner().invoke(cli, ["status", "--json"])
+    assert '"last_reload_error": "config_version 9: guardrail.block_at is invalid"' in as_json.output, as_json.output
+
+
 def test_unversioned_config_still_asks_for_migrate(data_dir: Path) -> None:
     path = data_dir / "config.yaml"
     path.write_text("gateway: {}\n", encoding="utf-8")

@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 )
 
 func loadTrustedEnterprisePayload() (enterprisePayload, error) {
@@ -21,6 +22,10 @@ func executeEnterpriseSetup(
 	_, _ io.Writer,
 ) (int, error) {
 	return 0, errors.New("DefenseClaw enterprise Setup is supported only on native Windows x64")
+}
+
+func enterpriseSetupProcessStarted() time.Time {
+	return enterpriseSetupInitTime
 }
 
 func runStandaloneSetupRecoveryWatchdog(string, io.Writer, io.Writer) int {

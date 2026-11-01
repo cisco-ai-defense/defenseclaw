@@ -1811,7 +1811,7 @@ def _fake_terminal(monkeypatch, app, returncode: int = 0):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             yield
 
-    def run(argv, cwd=None, check=False):
+    def run(argv, cwd=None, check=False, stderr=None):
         ran.append((argv, cwd))
         return SimpleNamespace(returncode=returncode)
 
@@ -2787,7 +2787,7 @@ async def test_new_run_can_delete_the_sandbox_holding_the_folder(fetch, monkeypa
     ran = _fake_terminal(monkeypatch, app)
     fake_run = sandbox_panel.subprocess.run
 
-    def run(argv, cwd=None, check=False):
+    def run(argv, cwd=None, check=False, stderr=None):
         result = fake_run(argv, cwd=cwd, check=check)
         if argv[1:3] == ["sandbox", "delete"]:  # the command line asked and deleted it
             fetch.sandboxes = [RUNNING]

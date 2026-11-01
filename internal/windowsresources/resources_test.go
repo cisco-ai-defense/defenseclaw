@@ -26,7 +26,7 @@ func repositoryIcon(t *testing.T) string {
 func TestCompleteWindowsExecutableInventory(t *testing.T) {
 	want := []Component{
 		"gateway", "acp-guard", "cmid-broker", "sensor-helper", "hook",
-		"launcher", "startup", "setup", "enterprise-setup",
+		"hook-guard", "launcher", "startup", "setup", "enterprise-setup",
 	}
 	if len(AllComponents) != len(want) {
 		t.Fatalf("component inventory = %v, want %v", AllComponents, want)

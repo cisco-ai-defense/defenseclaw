@@ -57,10 +57,13 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	err := ValidateServiceCanReadTree(root, "guardrail.rule_pack_dir", account)
 	// The example icacls command is copyable as is: single backslashes
 	// (GAP-1477), not Go-quoted ones. It grants the service SID derived from
-	// the name, which icacls accepts before the service exists (#1251).
+	// the name. icacls refuses that SID with error 1332 until the service
+	// exists (#1251, GAP-0087), so the message also carries the PowerShell form.
 	serviceSID := "*" + WindowsServiceSIDString("TrustedInstaller")
 	if err == nil || !strings.Contains(err.Error(), "cannot read") || !strings.Contains(err.Error(), account) ||
-		!strings.Contains(err.Error(), `icacls "`+root+`" /grant "`+serviceSID+`:(OI)(CI)RX"`) {
+		!strings.Contains(err.Error(), `icacls "`+root+`" /grant "`+serviceSID+`:(OI)(CI)RX"`) ||
+		!strings.Contains(err.Error(), "error 1332 until the service exists") ||
+		!strings.Contains(strings.Join(printedGrantScripts(t, err.Error()), "\n"), "SecurityIdentifier]::new('"+strings.TrimPrefix(serviceSID, "*")+"'), 'ReadAndExecute', 'ContainerInherit,ObjectInherit'") {
 		t.Fatalf("admin-only rule pack: %v", err)
 	}
 	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", tree...)
@@ -82,7 +85,8 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	setDACL("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x20020;;;BU)", parent)
 	err = ValidateServiceCanReadTree(root, "guardrail.rule_pack_dir", account)
 	if err == nil || !strings.Contains(err.Error(), "parent folder "+parent) ||
-		!strings.Contains(err.Error(), `icacls "`+parent+`" /grant "`+serviceSID+`:RX"`) {
+		!strings.Contains(err.Error(), `icacls "`+parent+`" /grant "`+serviceSID+`:RX"`) ||
+		!strings.Contains(strings.Join(printedGrantScripts(t, err.Error()), "\n"), "SecurityIdentifier]::new('"+strings.TrimPrefix(serviceSID, "*")+"'), 'ReadAndExecute', 'None'") {
 		t.Fatalf("pack under a locked parent: %v", err)
 	}
 	setDACL(readableParent, parent)

@@ -1343,6 +1343,12 @@ function Assert-DefenseClawBootstrapCleanupEntry {
         if (Test-DefenseClawBootstrapMissingPathError -Exception $_.Exception) {
             return $null
         }
+        if (Test-DefenseClawBootstrapRetiredCompilerScratch `
+                -Path $full `
+                -Root $rootFull `
+                -Exception $_.Exception) {
+            return $null
+        }
         throw
     }
 }
@@ -1360,6 +1366,71 @@ function Test-DefenseClawBootstrapMissingPathError {
         $current = $current.InnerException
     }
     return $false
+}
+
+function Test-DefenseClawBootstrapAccessDeniedError {
+    # A .NET method failure reaches PowerShell wrapped in a
+    # MethodInvocationException, so match on the inner chain, not the outer type.
+    param([Parameter(Mandatory)]$Exception)
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [UnauthorizedAccessException]) {
+            return $true
+        }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
+function Complete-DefenseClawBootstrapCompilerScratch {
+    # Windows PowerShell 5.1 Add-Type compiles through CodeDom into a randomly
+    # named scratch folder under TEMP, which is pinned to the one-shot root,
+    # and retires that folder only from a finalizer. A finalizer that retired
+    # the folder in the middle of the exact cleanup walk failed the cleanup
+    # with Access denied on that folder (Windows Native CI, Python shard 8,
+    # 5.1 race worker). A collection queues those finalizers now. It never
+    # waits for them: GC.WaitForPendingFinalizers can block for good in
+    # PowerShell when a pending finalizer needs the pipeline thread.
+    [GC]::Collect()
+}
+
+function Test-DefenseClawBootstrapRetiredCompilerScratch {
+    # True only when an entry below the root that answered Access denied is
+    # gone within a bounded wait (it was the compiler scratch retiring
+    # through its finalizer). An entry that is still there when the wait ends
+    # keeps the fail-closed refusal of the caller.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)]$Exception
+    )
+    if ([string]::Equals(
+            [IO.Path]::GetFullPath($Path).TrimEnd('\'),
+            [IO.Path]::GetFullPath($Root).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not (Test-DefenseClawBootstrapAccessDeniedError -Exception $Exception)) {
+        return $false
+    }
+    $wait = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        Complete-DefenseClawBootstrapCompilerScratch
+        try {
+            [void][IO.File]::GetAttributes($Path)
+        }
+        catch {
+            if (Test-DefenseClawBootstrapMissingPathError -Exception $_.Exception) {
+                return $true
+            }
+            if (-not (Test-DefenseClawBootstrapAccessDeniedError -Exception $_.Exception)) {
+                return $false
+            }
+        }
+        if ($wait.ElapsedMilliseconds -ge 3000) {
+            return $false
+        }
+        [Threading.Thread]::Sleep(50)
+    }
 }
 
 function Get-DefenseClawBootstrapEntryAttributes {
@@ -1383,6 +1454,7 @@ function Remove-DefenseClawBootstrapEnvironment {
         -Path ([string]$Context.Path) `
         -ExpectedSecurity $Context.Security `
         -ExpectedParent ([string]$Context.BootstrapParent)
+    Complete-DefenseClawBootstrapCompilerScratch
     $directories = [Collections.Generic.List[string]]::new()
     $files = [Collections.Generic.List[string]]::new()
     $pending = [Collections.Generic.Stack[string]]::new()
@@ -1434,6 +1506,10 @@ function Remove-DefenseClawBootstrapEnvironment {
         }
         catch {
             if (-not (Test-DefenseClawBootstrapMissingPathError `
+                    -Exception $_.Exception) -and
+                -not (Test-DefenseClawBootstrapRetiredCompilerScratch `
+                    -Path $directory `
+                    -Root $root `
                     -Exception $_.Exception)) {
                 throw
             }
@@ -1827,11 +1903,16 @@ function Get-DefenseClawBootstrapRecordedModulePin {
         no-reparse, administrator-owned chain as the module itself, and the
         running installer must be byte-identical to the one the deployment
         recorded, so the pin admits only the payload already installed.
+        A trusted record that does not parse (or is too large to be one)
+        leaves its path and reason in
+        $script:DefenseClawBootstrapUnreadableRecord, so the caller names
+        the damaged record instead of the module signature (GAP-0164).
     #>
     param(
         [Parameter(Mandatory)][string]$MetadataPath,
         [Parameter(Mandatory)][string]$InstallerPath
     )
+    $script:DefenseClawBootstrapUnreadableRecord = ''
     try {
         if (-not [IO.File]::Exists($MetadataPath)) {
             return ''
@@ -1841,11 +1922,26 @@ function Get-DefenseClawBootstrapRecordedModulePin {
             -AllowUnsignedModule
         $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $metadataFull -Force
         if ([int64]$item.Length -gt 1048576) {
+            $script:DefenseClawBootstrapUnreadableRecord = "$metadataFull (it is larger than 1 MiB)"
             return ''
         }
-        $metadata = Microsoft.PowerShell.Management\Get-Content `
+        $text = Microsoft.PowerShell.Management\Get-Content `
             -LiteralPath $metadataFull `
-            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+            -Raw
+        $metadata = $null
+        $reason = 'it is not a JSON object'
+        try {
+            $metadata = $text | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        }
+        catch {
+            $reason = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+        }
+        # [pscustomobject] is [psobject], which also matches $null and a
+        # wrapped number: test the parsed object's own type.
+        if ($metadata -isnot [Management.Automation.PSCustomObject]) {
+            $script:DefenseClawBootstrapUnreadableRecord = "$metadataFull ($reason)"
+            return ''
+        }
         $trust = $metadata.PSObject.Properties['trust_mode']
         $recordedProfile = $metadata.PSObject.Properties['profile']
         $hashes = $metadata.PSObject.Properties['hashes']
@@ -3519,6 +3615,7 @@ try {
         $Manifest = $renderedManifestPath
     }
     $bootstrapPinnedModuleSHA256 = ''
+    $script:DefenseClawBootstrapUnreadableRecord = ''
     if ($EnterpriseProfile -ceq 'Standalone' -and $TrustMode -ceq 'HashPinned') {
         if ([string]::IsNullOrWhiteSpace($PayloadManifest)) {
             throw '-TrustMode HashPinned requires -PayloadManifest'
@@ -3575,7 +3672,20 @@ try {
             -AllowedSignerSHA256 $bootstrapAllowedSigners
     }
     catch {
-        throw "DefenseClaw enterprise installer rejected its module before import: $($_.Exception.Message)"
+        $rejection = [string]$_.Exception.Message
+        if (-not [string]::IsNullOrEmpty($script:DefenseClawBootstrapUnreadableRecord) -and
+            $rejection.Contains('Authenticode signature is not valid')) {
+            # The module of a hash-pinned deployment is unsigned: only the
+            # digest in its deployment record admits it. A damaged record is
+            # the cause, not the signature, and Setup /repair rebuilds it from
+            # its own payload (GAP-0164), as the module says for ensure.
+            throw ("DefenseClaw enterprise installer rejected its module before import: " +
+                "could not read the installed deployment metadata $($script:DefenseClawBootstrapUnreadableRecord), " +
+                'which holds the digest this deployment admits its installed module by; nothing was changed. ' +
+                'Run Setup /repair to rebuild it: the installed release''s DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1, ' +
+                'as LocalSystem or from an elevated prompt')
+        }
+        throw "DefenseClaw enterprise installer rejected its module before import: $rejection"
     }
     # This is the last path-identity check before PowerShell opens the module.
     $importRoot = [IO.Path]::GetPathRoot($modulePath)
@@ -3653,6 +3763,20 @@ try {
         }
     }
     $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle @arguments
+    # A kit rotation journal the uninstall kept or left is named in the
+    # result, so the Setup and CLI JSON carry it (GAP-1913).
+    if ($Action -eq 'Uninstall' -and $null -ne $result -and
+        $null -ne (Microsoft.PowerShell.Core\Get-Command -Name 'DefenseClawEnterprise\Get-DefenseClawMdmRotationJournalKept' -ErrorAction SilentlyContinue)) {
+        $journalKept = [string](DefenseClawEnterprise\Get-DefenseClawMdmRotationJournalKept)
+        if (-not [string]::IsNullOrWhiteSpace($journalKept)) {
+            $result |
+                Microsoft.PowerShell.Utility\Add-Member `
+                    -MemberType NoteProperty `
+                    -Name mdm_rotation_journal_kept `
+                    -Value $journalKept `
+                    -Force
+        }
+    }
     if ($null -ne $result.PSObject.Properties['ok'] -and -not [bool]$result.ok) {
         $exitCode = 1
     }

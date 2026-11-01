@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -223,6 +224,58 @@ func TestUnenrolledRefusalWritesACoalescedBlockRowForTheAccount(t *testing.T) {
 	if block.Structured[auditUserIDKey] != sid || block.Structured["action"] != "block" ||
 		block.Structured["reason"] != refusalpipe.ReasonSIDUnregistered || extra["tool"] != "Bash" || extra["attempts"] != "49" {
 		t.Fatalf("connector-hook row connector=%q structured=%v", block.Connector, block.Structured)
+	}
+}
+
+// GAP-2639: a command the managed Windows CLI refused an account becomes the
+// Unix refused-command row, attributed to the SID the pipe token named and
+// coalesced per account and command.
+func TestManagedCommandRefusalReportIsAnAttributedRefusedRow(t *testing.T) {
+	sid := "S-1-5-21-1111-2222-3333-1017"
+	restoreName := userScopedIdentityName
+	t.Cleanup(func() { userScopedIdentityName = restoreName })
+	userScopedIdentityName = func(string) string { return `HOST\dcw-std1` }
+	var rows []unenrolledRefusalRow
+	auditor := newUnenrolledRefusalAuditor(func(row unenrolledRefusalRow) { rows = append(rows, row) })
+	disable := refusalpipe.Report{Command: "guardrail disable", Reason: refusalpipe.ReasonManagedDevice}
+	repair := refusalpipe.Report{Command: "enterprise windows repair", Reason: refusalpipe.ReasonElevationRequired}
+	auditor.record(sid, disable)
+	auditor.record(sid, disable)
+	auditor.record(sid, repair)
+	if len(rows) != 2 || rows[0].Report != disable || rows[1].Report != repair {
+		t.Fatalf("rows = %+v, want one per command", rows)
+	}
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	api := &APIServer{store: fixture.store, logger: fixture.logger}
+	fixture.sidecar.setAPIServer(api)
+	if bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, fixture.raw); err != nil || !bound {
+		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
+	}
+	for _, row := range rows {
+		api.auditUnenrolledRefusal(context.Background(), row)
+	}
+	found := map[string]string{}
+	for wait := time.Now().Add(5 * time.Second); len(found) < 2 && time.Now().Before(wait); time.Sleep(10 * time.Millisecond) {
+		events, err := fixture.store.ListEvents(50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			if event.Action == "action" {
+				found[event.Target] = event.Details
+			}
+			if event.Action == "hook_decision" || event.Action == string(audit.ActionConnectorHook) {
+				t.Fatalf("a command report wrote a hook row: %+v", event)
+			}
+		}
+	}
+	for command, reason := range map[string]string{"guardrail disable": "managed_device", "enterprise windows repair": "elevation_required"} {
+		details := found[command]
+		for _, want := range []string{"outcome=refused", "reason=" + reason, "actor=sid:" + sid, `user=HOST\dcw-std1`, "command=" + command} {
+			if !strings.Contains(details, want) {
+				t.Fatalf("%s row %q lacks %q", command, details, want)
+			}
+		}
 	}
 }
 

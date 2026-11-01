@@ -28,7 +28,7 @@ import (
 const (
 	claudeRealpath         = "/opt/defenseclaw-harness/claudecode/bin/claude"
 	codexRealpath          = "/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex"
-	openCodeRealpath       = "/opt/defenseclaw-harness/opencode/lib/node_modules/opencode-ai/bin/opencode.exe"
+	openCodeRealpath       = "/opt/defenseclaw-harness/opencode/lib/node_modules/@opencode/cli/node_modules/@opencode/cli-linux-arm64/bin/opencode"
 	copilotRealpath        = "/opt/defenseclaw-harness/copilot/lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-arm64/copilot"
 	copilotRuntimeRealpath = "/opt/defenseclaw-harness/copilot/cache/pkg/linux-arm64/1.0.88/prebuilds/linux-arm64/copilot-runtime"
 	ampRealpath            = "/opt/defenseclaw-harness/amp/lib/node_modules/@ampcode/cli/bin/amp.exe"

@@ -92,7 +92,24 @@ func resolveDefaultSkillScanner(binary string, secureClient bool) (string, error
 	if err := safefile.ValidatePrivateFileOwnershipAllowingAdministrators(installed); err != nil {
 		return "", installedSkillScannerError(err)
 	}
-	return installed, nil
+	// The CLI wheel installs defenseclaw-skill-scanner.exe beside it: the same
+	// scanner run through the fix that accepts a well-formed judge answer from
+	// any supported model (GAP-2609). An older wheel has no such entry point
+	// and keeps skill-scanner.exe; a present but redirected or foreign-owned
+	// entry point is refused like the scanner itself.
+	compat := filepath.Join(scriptsDir, judgeCompatSkillScanner+".exe")
+	if _, err := os.Lstat(compat); errors.Is(err, os.ErrNotExist) {
+		return installed, nil
+	} else if err != nil {
+		return "", installedSkillScannerError(err)
+	}
+	if err := skillScannerPathHasNoReparsePoints(compat); err != nil {
+		return "", installedSkillScannerError(err)
+	}
+	if err := safefile.ValidatePrivateFileOwnershipAllowingAdministrators(compat); err != nil {
+		return "", installedSkillScannerError(err)
+	}
+	return compat, nil
 }
 
 func installedSkillScannerError(err error) error {

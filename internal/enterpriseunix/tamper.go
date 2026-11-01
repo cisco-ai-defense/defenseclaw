@@ -251,6 +251,7 @@ func (e *Env) restoreHookBinary(record *Deployment, damage *hookBinaryDamage) (b
 // root, so SELinux-confined agents can still run it.
 func (l *lifecycle) restoreTamperedHookBinary(ctx context.Context, record *Deployment) bool {
 	env := l.env
+	l.restoreBinaryExecuteBits(record)
 	damage := env.inspectHookBinary(record)
 	if damage != nil && l.opts.Reason == "package" && !env.gatewayIsRecorded(record) {
 		// The package's own install run applies the binaries it placed. One
@@ -379,4 +380,44 @@ func (e *Env) RequestTamperRestore(ctx context.Context) error {
 // RepairCommand is the lifecycle repair command line of this host.
 func (e *Env) RepairCommand() string {
 	return e.lifecycleCommand(ActionRepair)
+}
+
+// restoreBinaryExecuteBits makes a recorded binary other than the hook binary
+// executable again when only its mode changed (GAP-0482). The file must be a
+// root-owned regular file that is not writable by group or other and whose
+// bytes, hashed through the open file, are the recorded ones, so a repair
+// never makes other bytes runnable. Anything else is left for the payload
+// check to refuse.
+func (l *lifecycle) restoreBinaryExecuteBits(record *Deployment) {
+	env := l.env
+	if record == nil {
+		return
+	}
+	for _, name := range append(append([]string{}, requiredBinaries...), optionalBinaries...) {
+		if name == binHook {
+			continue
+		}
+		rel := filepath.Join(env.Layout.BinDir, name)
+		want := record.Files[rel]
+		if want == "" {
+			continue
+		}
+		f, err := os.OpenFile(env.P(rel), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		if err != nil {
+			continue
+		}
+		info, err := f.Stat()
+		if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0o111 && info.Mode().Perm()&0o022 == 0 {
+			if uid, _, oerr := env.OwnerOf(env.P(rel)); oerr == nil && uid == 0 {
+				hash := sha256.New()
+				if _, cerr := io.Copy(hash, io.LimitReader(f, maxSealedBinaryBytes+1)); cerr == nil && hex.EncodeToString(hash.Sum(nil)) == want {
+					before := info.Mode().Perm()
+					if f.Chmod(0o755) == nil {
+						l.result.Changes = append(l.result.Changes, fmt.Sprintf("restored the execute bits of %s (mode %04o to 0755); its bytes are the recorded ones", rel, before))
+					}
+				}
+			}
+		}
+		_ = f.Close()
+	}
 }

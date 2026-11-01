@@ -11,9 +11,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// foreignHookRemovalsReadBusy reports a ledger read that met the guardian's
-// replacement of the ledger: Windows answers with a sharing or lock
-// violation for that moment.
-func foreignHookRemovalsReadBusy(err error) bool {
+// guardianRecordReplaceBusy reports a guardian record read that met the
+// guardian's replacement of the record (or of its ACL): Windows answers with
+// a sharing or lock violation for that moment.
+func guardianRecordReplaceBusy(err error) bool {
 	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION)
 }

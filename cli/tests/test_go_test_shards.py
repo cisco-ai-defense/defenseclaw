@@ -9,6 +9,7 @@ import pytest
 from scripts.go_test_shards import (
     check_exact_cover,
     discover_test_files,
+    match_test_files,
     partition_packages,
     partition_test_files,
     regex_names,
@@ -127,3 +128,67 @@ def test_package_mode_splits_a_slow_package_and_covers_every_package_once(tmp_pa
         "TestLightB",
         "TestUnrecorded",
     ]
+
+
+OPERATOR_COLLECTOR_PARTS = tuple(
+    f"TestClaudeMarkedOperatorCollectorKeepsBytes{goos}" for goos in ("Linux", "Darwin", "Windows")
+)
+
+
+def test_windows_connector_shards_count_the_operator_collector_matrix() -> None:
+    # GAP-2199: the operator collector matrix runs 126 full Claude
+    # Setup/Teardown subtests (231 s on a native Windows preflight host).
+    # Unrecorded, it weighed the 0.18 s "*" default, so the balancer put it
+    # beside a full 288 s shard and the connector package hit its 660 s Go
+    # timeout on the hosted runner (a slow run, not a blocked write).
+    import json
+    import statistics
+
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))
+    tests = timings["tests"]["internal/gateway/connector"]
+    files = discover_test_files(root / "internal/gateway/connector")
+    shards = partition_test_files(files, 16, tests)
+    measured = dict(tests, **{name: 231.3 / len(OPERATOR_COLLECTOR_PARTS) for name in OPERATOR_COLLECTOR_PARTS})
+    default = tests["*"]
+    weights = [sum(float(measured.get(name, default)) for name in shard) for shard in shards]
+    for part in OPERATOR_COLLECTOR_PARTS:
+        holder = next(i for i, shard in enumerate(shards) if part in shard)
+        assert weights[holder] <= 1.25 * statistics.median(weights), (part, holder, weights)
+
+
+def test_windows_operator_collector_matrix_fits_one_shard_timeout() -> None:
+    # GAP-2645: alone in its shard, the one 126-subtest test still ran past
+    # the 660 s connector -timeout on a hosted runner about 1.9 times slower
+    # than the recorded 427.7 s. Split per fixture GOOS, each part has a
+    # recorded time and stays under half that timeout.
+    import json
+
+    root = Path(__file__).resolve().parents[2]
+    tests = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))["tests"][
+        "internal/gateway/connector"
+    ]
+    names = {name for _, file_names in discover_test_files(root / "internal/gateway/connector") for name in file_names}
+    assert "TestClaudeMarkedOperatorCollectorKeepsBytes" not in names | set(tests)
+    for part in OPERATOR_COLLECTOR_PARTS:
+        assert part in names, part
+        assert 0 < float(tests[part]) <= 330, (part, tests.get(part))
+
+
+def test_match_keeps_the_tests_a_run_pattern_selects_and_still_covers_them(tmp_path: Path) -> None:
+    # The CI connector matrix shards only the connector tests its -run
+    # pattern selects; every selected test is in exactly one part.
+    (tmp_path / "a_test.go").write_text(
+        "package sample\nfunc TestHookOne(t *testing.T) {}\nfunc TestPlain(t *testing.T) {}\n", encoding="utf-8"
+    )
+    (tmp_path / "b_test.go").write_text("package sample\nfunc TestOther(t *testing.T) {}\n", encoding="utf-8")
+    (tmp_path / "c_test.go").write_text(
+        "package sample\nfunc TestSetupTwo(t *testing.T) {}\nfunc TestModeThree(t *testing.T) {}\n", encoding="utf-8"
+    )
+
+    files = match_test_files(discover_test_files(tmp_path), "Hook|Setup|Mode")
+    assert [names for _, names in files] == [("TestHookOne",), ("TestModeThree", "TestSetupTwo")]
+    shards = partition_test_files(files, 2)
+    assert check_exact_cover(shards, ["TestHookOne", "TestModeThree", "TestSetupTwo"]) == []
+    with pytest.raises(ValueError):
+        match_test_files(files, "Hook/sub")

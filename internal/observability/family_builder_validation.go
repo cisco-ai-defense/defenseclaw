@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -302,7 +303,7 @@ func validateFamilyFieldConstraintDescriptor(descriptor familyFieldDescriptor) e
 		return familyBuildFailure(FamilyBuildInvalidDescriptor)
 	}
 	if constraints.pattern != "" {
-		if _, err := regexp.Compile(constraints.pattern); err != nil {
+		if _, err := compileFamilyPattern(constraints.pattern); err != nil {
 			return familyBuildFailure(FamilyBuildInvalidDescriptor)
 		}
 	}
@@ -369,8 +370,8 @@ func validateFamilyFieldConstraintDescriptor(descriptor familyFieldDescriptor) e
 			return familyBuildFailure(FamilyBuildInvalidDescriptor)
 		}
 		if constraints.pattern != "" {
-			pattern, _ := regexp.Compile(constraints.pattern)
-			if !pattern.MatchString(candidate) {
+			pattern, err := compileFamilyPattern(constraints.pattern)
+			if err != nil || !pattern.MatchString(candidate) {
 				return familyBuildFailure(FamilyBuildInvalidDescriptor)
 			}
 		}
@@ -673,7 +674,7 @@ func validateFamilyString(value string, constraints familyFieldConstraints) erro
 		return familyBuildFailure(FamilyBuildConstraint)
 	}
 	if constraints.pattern != "" {
-		pattern, err := regexp.Compile(constraints.pattern)
+		pattern, err := compileFamilyPattern(constraints.pattern)
 		if err != nil || !pattern.MatchString(value) {
 			return familyBuildFailure(FamilyBuildConstraint)
 		}
@@ -1012,3 +1013,41 @@ func containsOutcome(values []Outcome, expected Outcome) bool {
 }
 
 func isFinite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }
+
+// familyPatternCacheLimit bounds familyPatterns. Field patterns come from the
+// generated family descriptors and the inbound catalog, a few hundred at
+// most; a pattern past the limit is compiled for its call and not kept.
+const familyPatternCacheLimit = 4096
+
+// familyPatterns holds every field pattern compiled so far (*regexp.Regexp
+// or the compile error), keyed by its source. Every family built for a log
+// or trace validated its descriptors and compiled each field pattern again:
+// about 3 MB of allocations and a third of the gateway's CPU per hook call
+// (r106 performance audit). A compiled Regexp is safe for concurrent use.
+var (
+	familyPatterns     sync.Map
+	familyPatternCount int64
+	familyPatternMu    sync.Mutex
+)
+
+type familyPatternEntry struct {
+	re  *regexp.Regexp
+	err error
+}
+
+// compileFamilyPattern is regexp.Compile(pattern), compiled once per pattern.
+func compileFamilyPattern(pattern string) (*regexp.Regexp, error) {
+	if cached, ok := familyPatterns.Load(pattern); ok {
+		entry := cached.(familyPatternEntry)
+		return entry.re, entry.err
+	}
+	re, err := regexp.Compile(pattern)
+	familyPatternMu.Lock()
+	if familyPatternCount < familyPatternCacheLimit {
+		if _, loaded := familyPatterns.LoadOrStore(pattern, familyPatternEntry{re: re, err: err}); !loaded {
+			familyPatternCount++
+		}
+	}
+	familyPatternMu.Unlock()
+	return re, err
+}

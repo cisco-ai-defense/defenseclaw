@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // GAP-1989: a malformed typed flag value names what the flag takes, not
@@ -108,6 +109,73 @@ func TestInvokedGatewayPathResolvesARelativeInvocation(t *testing.T) {
 		os.Args = []string{arg0}
 		if got := invokedGatewayPath("defenseclaw-gateway"); got != expect {
 			t.Errorf("os.Args[0] = %q: invoked path %q, want %q", arg0, got, expect)
+		}
+	}
+}
+
+// W4b2 review: a raw-argument scan for a flag cobra did not reach reads the
+// arguments with pflag's arity. "--config --trust-anchors --unknown" sets
+// --config to "--trust-anchors"; before, the scan counted it as an anchor
+// request and audited a refused trust-anchor change. Where pflag parses the
+// line, its own Changed is the oracle.
+func TestArgsSetLongFlagReadsFlagArity(t *testing.T) {
+	newSet := func() *pflag.FlagSet {
+		fs := pflag.NewFlagSet("ensure", pflag.ContinueOnError)
+		fs.SetOutput(&strings.Builder{})
+		for _, name := range []string{"config", "bundle", "profile"} {
+			fs.String(name, "", "")
+		}
+		fs.StringP("trust-anchors", "t", "", "")
+		fs.StringP("output", "o", "", "")
+		fs.BoolP("verbose", "v", false, "")
+		fs.Bool("json", false, "")
+		fs.StringArray("allowed-signer", nil, "")
+		fs.String("color", "", "")
+		fs.Lookup("color").NoOptDefVal = "auto"
+		return fs
+	}
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"--trust-anchors", "a.json"}, true},
+		{[]string{"--trust-anchors=a.json"}, true},
+		{[]string{"--trust-anchors=a.json", "extra"}, true},
+		{[]string{"--config", "--trust-anchors"}, false},
+		{[]string{"--config", "--trust-anchors", "--json"}, false},
+		{[]string{"--bundle", "--trust-anchors", "extra"}, false},
+		{[]string{"--allowed-signer", "--trust-anchors"}, false},
+		{[]string{"enterprise", "windows", "ensure", "--profile", "standalone", "--config", "--trust-anchors"}, false},
+		{[]string{"--config=c.yaml", "--trust-anchors", "a.json"}, true},
+		{[]string{"--json", "--trust-anchors", "a.json"}, true},
+		{[]string{"--color", "--trust-anchors", "a.json"}, true},
+		{[]string{"--config", "--", "--trust-anchors", "a.json"}, true},
+		{[]string{"--", "--trust-anchors", "a.json"}, false},
+		{[]string{"-", "--trust-anchors", "a.json"}, true},
+		{[]string{"-o", "--trust-anchors"}, false},
+		{[]string{"-vo", "--trust-anchors"}, false},
+		{[]string{"-ovalue", "--trust-anchors", "a.json"}, true},
+		{[]string{"-o=x", "--trust-anchors", "a.json"}, true},
+		{[]string{"-vt", "a.json"}, true},
+		{[]string{"-ot", "a.json"}, false},
+		// pflag rejects these; the scan reads past the error.
+		{[]string{"--profile", "standalone", "--config", "--trust-anchors", "--unknown"}, false},
+		{[]string{"--unknown", "--config", "--trust-anchors", "--unknown"}, false},
+		{[]string{"--unknown", "--trust-anchors=a.json"}, true},
+		{[]string{"--unknown", "--config", "--", "--trust-anchors=a.json"}, true},
+		{[]string{"--unknown", "--", "--trust-anchors", "a.json"}, false},
+		{[]string{"-x", "--trust-anchors", "a.json"}, true},
+		{[]string{"--=x", "--trust-anchors", "a.json"}, true},
+		{[]string{"---trust-anchors", "a.json"}, false},
+		{[]string{"--trust-anchors"}, true},
+		{[]string{"--config"}, false},
+	} {
+		if got := argsSetLongFlag(newSet(), tc.args, "trust-anchors"); got != tc.want {
+			t.Errorf("argsSetLongFlag(%q) = %v, want %v", tc.args, got, tc.want)
+		}
+		fs := newSet()
+		if fs.Parse(tc.args) == nil && fs.Changed("trust-anchors") != tc.want {
+			t.Errorf("pflag sets --trust-anchors from %q: %v, case says %v", tc.args, fs.Changed("trust-anchors"), tc.want)
 		}
 	}
 }

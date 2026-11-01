@@ -76,13 +76,16 @@ func shellExtraKeyHook(t *testing.T, connectorName, tool string, args json.RawMe
 func TestShellToolCallWithExtraArgumentKeys(t *testing.T) {
 	const rm = `"rm -rf ~/"`
 	for _, shell := range []struct{ connector, tool, workdir string }{
-		{"opencode", "bash", "workdir"},
+		{"opencode", "shell", "workdir"},
 		{"claudecode", "Bash", "workdir"},
 		{"devin", "exec", "workdir"},
 		{"kiro", "execute_bash", "working_dir"},
 		{"kiro", "shell", "working_dir"},
 		{"hermes", "terminal", "workdir"},
 		{"codex", "Bash", "workdir"},
+		// A bash tool no projection lists (GAP-0694).
+		{"opencode", "bash", "workdir"},
+		{"devin", "bash", "workdir"},
 	} {
 		upper := strings.ToUpper(shell.workdir[:1]) + shell.workdir[1:]
 		for _, row := range []struct {

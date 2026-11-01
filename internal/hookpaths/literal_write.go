@@ -4,26 +4,34 @@
 package hookpaths
 
 import (
-	"os"
+	"maps"
 	"path/filepath"
-	"regexp"
+	"slices"
 	"strings"
 
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 var (
-	literalOpenCall         = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync|os\.open|(?:io\.)?FileIO)\s*\(`)
-	literalWriteCall        = regexp.MustCompile(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
-	literalNodeStream       = regexp.MustCompile(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
-	literalPathWrite        = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
-	literalPathOpen         = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
-	literalPythonPathCall   = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(`)
-	literalPerlOpen         = regexp.MustCompile(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
-	literalCopyCall         = regexp.MustCompile(`\b(?:shutil\.(?:copyfile|copy|copy2)|copyFileSync|copyFile|copyfile|copy2|(?:File::Copy::)?copy)\s*\(`)
-	literalPythonCopyImport = regexp.MustCompile(`\bfrom\s+shutil\s+import\s+copyfile\b`)
-	literalPerlCopy         = regexp.MustCompile(`\b(?:File::Copy::)?copy\s+['"][^'"]+['"]\s*,\s*(['"][^'"]+['"])`)
-	literalPerlImport       = regexp.MustCompile(`\buse\s+File::Copy\b`)
+	literalOpenCall = lazyregexp.New(`\b(?:open|File\.open|fs\.openSync|os\.open|(?:io\.)?FileIO)\s*\(`)
+	// The writer APIs whose first argument is the file they write. writeFile
+	// and appendFile are Node's callback and fs.promises forms (GAP-0366).
+	literalWriteCall      = lazyregexp.New(`\b(?:appendFileSync|writeFileSync|appendFile|writeFile|File\.write|File\.binwrite)\s*\(`)
+	literalNodeStream     = lazyregexp.New(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
+	literalPathWrite      = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
+	literalPathOpen       = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
+	literalPythonPathCall = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(`)
+	literalPerlOpen       = lazyregexp.New(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
+	// The copy and move APIs whose second argument is the file they write;
+	// literalCopyAPI says which names each language really has
+	// (rel-1-0-2:GAP-0429).
+	literalCopyCall         = lazyregexp.New(`\b(?:shutil\.(?:copyfile|copy2|copy|move)|copyFileSync|copyFile|cpSync|copyfile|copy2|FileUtils\.(?:copy_file|copy|cp|install|move|mv)|IO\.copy_stream|(?:File::Copy::)?(?:copy|cp|move|mv))\s*\(`)
+	literalPythonCopyImport = lazyregexp.New(`\bfrom\s+shutil\s+import\s+copyfile\b`)
+	literalPerlCopy         = lazyregexp.New(`\b((?:File::Copy::)?(?:copy|cp|move|mv))\s+['"][^'"]+['"]\s*,\s*(['"][^'"]+['"])`)
+	literalPerlImport       = lazyregexp.New(`\buse\s+File::Copy\b`)
 )
 
 // LiteralWriteOperands lists fixed write paths inside a directly invoked
@@ -33,24 +41,55 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 	return literalWriteOperandsDepth(command, cwd, home, 0)
 }
 
-func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands []string) {
+// LiteralWriteOperandsWithCopies is LiteralWriteOperands that also lists,
+// once for each call, the operands a plain cp call of the command names as
+// its own destination. Only that write of the cp may skip the own copy
+// scope of the cp, as the path facts of the same call do (GAP-2582).
+func LiteralWriteOperandsWithCopies(command, cwd, home string) (operands, copies []string) {
+	return literalWriteOperandsWithCopies(command, cwd, home, 0)
+}
+
+func literalWriteOperandsDepth(command, cwd, home string, depth int) []string {
+	operands, _ := literalWriteOperandsWithCopies(command, cwd, home, depth)
+	return operands
+}
+
+func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (operands, copies []string) {
 	if depth > 4 {
-		return nil
+		return nil, nil
 	}
 	file, ok := parseShell(command)
 	if !ok {
-		return nil
+		return nil, nil
 	}
-	add := func(name string) {
+	add := func(name string) bool {
 		if name == "" || strings.ContainsAny(name, "\x00\r\n") {
-			return
+			return false
 		}
 		if !filepath.IsAbs(name) && !filepath.IsAbs(cwd) {
-			return
+			return false
 		}
 		operands = append(operands, OperandPath(name, cwd))
+		return true
 	}
 	boundName, boundValue := boundedProgramAssignment(file, home)
+	// The values the command assigns before each top-level statement, so an
+	// awk word built from them is read as the shell expands it (GAP-2197,
+	// GAP-0509): out=alias; awk "BEGIN {print 1 >> \"$out\"}".
+	before := make([]actionValues, len(file.Stmts))
+	values := actionValues{"HOME": home, "PWD": cwd}
+	for i, stmt := range file.Stmts {
+		before[i] = maps.Clone(values)
+		actionUpdateValues(stmt, values, cwd, home)
+	}
+	valuesAt := func(node syntax.Node) actionValues {
+		for i, stmt := range file.Stmts {
+			if node.Pos().Offset() >= stmt.Pos().Offset() && node.End().Offset() <= stmt.End().Offset() {
+				return before[i]
+			}
+		}
+		return nil
+	}
 	// A definition runs nothing. A body is read once, where it is defined,
 	// when the command may call it, so an uncalled body stays inert.
 	called := calledFunctions(file, home)
@@ -67,11 +106,41 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 			return true
 		}
 		words := make([]string, len(call.Args))
+		// The brace words of a plain cp call, or of another writer, are
+		// the fixed words bash makes of them, so its real targets are
+		// listed (rel-1-0-6 GAP-0202, GAP-0228): the hook client resolves
+		// them like any operand. tee ~/.ssh/authorized_key{s,x} writes the
+		// keys file; a managed gateway that cannot search the home only
+		// sees the targets the client lists.
+		var braces map[int][]string
+		var argStatic []bool
+		if first, ok := StaticWord(call.Args[0], home); ok && slices.Contains(braceOperandPrograms, programBase(first)) {
+			argStatic = make([]bool, len(call.Args))
+			for i, arg := range call.Args {
+				_, argStatic[i] = StaticWord(arg, home)
+			}
+			braces = copyBraceWordFields(call.Args, argStatic, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")))
+		}
 		for i, arg := range call.Args {
 			var static bool
 			words[i], static = StaticWord(arg, home)
+			if braces[i] != nil {
+				continue
+			}
 			if i == 0 && !static && simpleShellParameter(arg) == boundName {
 				words[i], static = boundValue, true
+			}
+			if !static && i > 0 && (awkProgramName(words[0]) || programBase(words[0]) == "tee" && wordExpandsParameter(arg)) {
+				// An awk word the command assigned (GAP-2197), or a tee
+				// operand named by an assigned variable or a ${f:-default}
+				// the shell expands to its default (GAP-2514). A generated
+				// basename has no fixed spelling and stays dynamic.
+				if known := valuesAt(stmt); known != nil {
+					if value, fixed := actionWordValue(shellUnescapedWord(arg), known, cwd, home); fixed &&
+						!strings.Contains(value, actionGeneratedMarker) {
+						words[i], static = value, true
+					}
+				}
 			}
 			if !static {
 				// Interpreter arguments after fixed code do not change that
@@ -80,18 +149,47 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 					for _, name := range literalProgramOperands(words[:i], stmt, cwd, home, depth, len(file.Stmts) == 1) {
 						add(name)
 					}
+				} else if i > 0 && awkProgramName(words[0]) {
+					// A double-quoted awk program with an expansion: its
+					// literal print targets stay targets (GAP-2197).
+					if text, rendered := awkRenderedProgram(arg); rendered {
+						prefix := append(append([]string(nil), words[:i]...), text)
+						for _, name := range literalProgramOperands(prefix, stmt, cwd, home, depth, len(file.Stmts) == 1) {
+							add(name)
+						}
+					}
 				}
 				return true
 			}
 		}
-		for _, name := range literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1) {
-			add(name)
+		_, words, _ = spliceCopyBraceWords(call.Args, words, argStatic, braces)
+		names := literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1)
+		// A plain cp call lists only its own destination; a literal shell
+		// body (sh -c BODY) lists the own destinations of its cp calls.
+		var own []string
+		switch program := programBase(words[0]); program {
+		case "cp", "gcp":
+			own = names
+		case "sh", "bash", "dash", "ash", "zsh", "ksh":
+			if body, ok := shellCommandBodyIndex(words); ok {
+				_, own = literalWriteOperandsWithCopies(words[body], cwd, home, depth+1)
+			}
+		}
+		credit := make(map[string]int, len(own))
+		for _, name := range own {
+			credit[OperandPath(name, cwd)]++
+		}
+		for _, name := range names {
+			if add(name) && credit[operands[len(operands)-1]] > 0 {
+				credit[operands[len(operands)-1]]--
+				copies = append(copies, operands[len(operands)-1])
+			}
 		}
 		return true
 	})
 	operands = append(operands, literalPipelineOperands(file, called, cwd, home, depth)...)
 	operands = append(operands, literalGeneratedScriptOperands(file, cwd, home, depth)...)
-	return operands
+	return operands, copies
 }
 
 // SedReplacedOperands names sed -i operands whose directory entry is
@@ -173,33 +271,201 @@ func rawParent(path string) string {
 
 func sedFollowsInPlaceLinks(words []string) bool {
 	for _, word := range words[1:] {
-		if word == "--follow-symlinks" {
+		if word == "--" {
+			break
+		}
+		if sedLongOption(word) == "follow-symlinks" {
 			return true
 		}
 	}
 	return false
 }
 
-func sedInPlaceFiles(words []string) []string {
+// sedLongOptions are the GNU sed long options; getopt_long takes any
+// unambiguous prefix of one (--fo is --follow-symlinks, --f is ambiguous).
+var sedLongOptions = []string{
+	"binary", "debug", "expression", "file", "follow-symlinks", "help", "in-place",
+	"line-length", "null-data", "posix", "quiet", "regexp-extended", "sandbox",
+	"separate", "silent", "unbuffered", "version", "zero-terminated",
+}
+
+// sedLongOption names the long option a --word spells, exactly or as an
+// unambiguous prefix, and "" for anything else (GAP-2529).
+func sedLongOption(word string) string {
+	if !strings.HasPrefix(word, "--") || len(word) < 3 {
+		return ""
+	}
+	name, _, _ := strings.Cut(word[2:], "=")
+	match := ""
+	for _, option := range sedLongOptions {
+		if option == name {
+			return option
+		}
+		if strings.HasPrefix(option, name) {
+			if match != "" {
+				return ""
+			}
+			match = option
+		}
+	}
+	return match
+}
+
+// InPlaceEditOperands lists the files a sed -i or perl -i call of the
+// command edits in place, as absolute paths read in cwd, whatever their
+// parent directory. The editor replaces the directory entry; a caller that
+// follows the name through a link the same command makes to a directory
+// reads the file the edit replaces (GAP-2522).
+func InPlaceEditOperands(command, cwd, home string) []string {
+	return inPlaceEditOperands(command, cwd, home, false)
+}
+
+// FollowedInPlaceEditOperands lists the files a sed -i --follow-symlinks
+// (or gsed) call of the command edits, as absolute paths read in cwd. GNU
+// sed then rewrites the file a link names instead of replacing the link,
+// so a caller follows the operand name itself (GAP-2529).
+func FollowedInPlaceEditOperands(command, cwd, home string) []string {
+	return inPlaceEditOperands(command, cwd, home, true)
+}
+
+func inPlaceEditOperands(command, cwd, home string, followedOnly bool) (operands []string) {
+	file, ok := parseShell(command)
+	if !ok || !filepath.IsAbs(cwd) {
+		return nil
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		words := make([]string, len(call.Args))
+		static := make([]bool, len(call.Args))
+		for i, arg := range call.Args {
+			words[i], static[i] = StaticWord(arg, home)
+		}
+		if index, wrapped := plainWrappedChild(words, static); wrapped {
+			words, static = words[index:], static[index:]
+		}
+		if slices.Contains(static, false) {
+			return true
+		}
+		var files []string
+		switch programBase(words[0]) {
+		case "sed", "gsed":
+			if !followedOnly || sedFollowsInPlaceLinks(words) {
+				files = sedInPlaceFiles(words)
+			}
+		case "perl":
+			if !followedOnly {
+				files = perlInPlaceFiles(words)
+			}
+		}
+		for _, name := range files {
+			if name != "" && !strings.ContainsAny(name, "\x00\r\n") {
+				operands = append(operands, OperandPath(name, cwd))
+			}
+		}
+		return true
+	})
+	return operands
+}
+
+// perlInPlaceFiles lists the file operands of perl -i (-pi -e CODE FILE,
+// -i.bak -ne CODE FILE). Without -e the first operand is the script.
+func perlInPlaceFiles(words []string) []string {
 	inPlace, script := false, false
 	var files []string
 	for i := 1; i < len(words); i++ {
 		word := words[i]
 		switch {
-		case word == "-i" || word == "--in-place" || strings.HasPrefix(word, "--in-place=") ||
-			strings.HasPrefix(word, "-i") && len(word) > 2:
-			inPlace = true
-		case word == "-e" || word == "--expression":
-			i++
-			script = true
-		case strings.HasPrefix(word, "-e") && len(word) > 2 || strings.HasPrefix(word, "--expression="):
-			script = true
+		case word == "--":
+			files = append(files, words[i+1:]...)
+			i = len(words)
+		case strings.HasPrefix(word, "-") && len(word) > 1 && !strings.HasPrefix(word, "--"):
+			cluster := word[1:]
+			for j := 0; j < len(cluster); j++ {
+				switch string(cluster[j]) {
+				case "i":
+					inPlace = true
+					j = len(cluster) // the rest is the backup suffix
+				case "e", "E":
+					script = true
+					if j == len(cluster)-1 {
+						i++
+					}
+					j = len(cluster)
+				case "I", "M", "m", "x", "C", "d", "D", "F", "0":
+					j = len(cluster) // takes the rest of the word
+				}
+			}
 		case strings.HasPrefix(word, "-"):
 			continue
 		case !script:
 			script = true
 		default:
 			files = append(files, word)
+		}
+	}
+	if !inPlace {
+		return nil
+	}
+	return files
+}
+
+func sedInPlaceFiles(words []string) []string {
+	inPlace, script, options := false, false, true
+	var files []string
+	operand := func(word string) {
+		if !script {
+			script = true
+			return
+		}
+		files = append(files, word)
+	}
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case !options || !strings.HasPrefix(word, "-"):
+			operand(word)
+		case word == "-":
+			continue
+		case word == "--":
+			options = false
+		case strings.HasPrefix(word, "--"):
+			_, _, valued := strings.Cut(word, "=")
+			switch sedLongOption(word) {
+			case "in-place":
+				inPlace = true
+			case "expression", "file":
+				script = true
+				if !valued {
+					i++
+				}
+			case "line-length":
+				if !valued {
+					i++
+				}
+			}
+		default:
+			// A short option cluster (-si, -Ei, -ni): -i takes the rest of
+			// the word as its backup suffix; -e, -f and -l take the rest or
+			// the next word as their value (GAP-2529, GAP-2531).
+		cluster:
+			for j := 1; j < len(word); j++ {
+				switch word[j] {
+				case 'i':
+					inPlace = true
+					break cluster
+				case 'e', 'f', 'l':
+					if word[j] != 'l' {
+						script = true
+					}
+					if j == len(word)-1 {
+						i++
+					}
+					break cluster
+				}
+			}
 		}
 	}
 	if !inPlace {
@@ -266,6 +532,9 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 		if !literalCodePosition(code, loc[0], language) {
 			continue
 		}
+		if name := strings.TrimSpace(code[loc[0] : loc[1]-1]); (name == "writeFile" || name == "appendFile") && language != "node" {
+			continue
+		}
 		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
 			args := literalCallArgs(call)
 			if len(args) > 0 {
@@ -324,10 +593,10 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 				}
 				if path, ok := pathString(destination); ok {
 					paths = append(paths, path)
-					if language == "python" && (name == "shutil.copy" || name == "shutil.copy2") {
+					if language == "python" && (name == "shutil.copy" || name == "shutil.copy2" || name == "shutil.move") {
 						source := literalCallArgument(args, 0, "src")
 						if sourcePath, fixed := pathString(source); fixed {
-							if info, err := os.Stat(OperandPath(path, cwd)); err == nil && info.IsDir() {
+							if info, err := pathStat(OperandPath(path, cwd)); err == nil && info.IsDir() {
 								paths = append(paths, filepath.Join(path, filepath.Base(sourcePath)))
 							}
 						}
@@ -338,13 +607,9 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 	}
 	if language == "perl" {
 		for _, match := range literalPerlCopy.FindAllStringSubmatchIndex(code, -1) {
-			name := "copy"
-			if strings.HasPrefix(code[match[0]:match[1]], "File::Copy::copy") {
-				name = "File::Copy::copy"
-			}
 			if literalCodePosition(code, match[0], language) &&
-				literalCopyAPI(language, name, perlCopyImported) {
-				if path, ok := pathString(code[match[2]:match[3]]); ok {
+				literalCopyAPI(language, code[match[2]:match[3]], perlCopyImported) {
+				if path, ok := pathString(code[match[4]:match[5]]); ok {
 					paths = append(paths, path)
 				}
 			}
@@ -452,14 +717,24 @@ func literalCallArgument(args []string, position int, keyword string) string {
 	return ""
 }
 
+// literalCopyAPI reports the copy and move APIs of a language that write
+// their second argument: Python shutil, Node fs copies, Perl File::Copy
+// (copy and move are exported, cp and mv on request) and Ruby FileUtils.
+// A move renames when it can and copies through a link across file systems,
+// so it is a write of its destination (rel-1-0-2:GAP-0429).
 func literalCopyAPI(language, name string, perlImported bool) bool {
 	switch language {
 	case "python":
 		return strings.HasPrefix(name, "shutil.")
 	case "node":
-		return name == "copyFileSync" || name == "copyFile"
+		return name == "copyFileSync" || name == "copyFile" || name == "cpSync" || name == "cp"
 	case "perl":
-		return name == "File::Copy::copy" || name == "copy" && perlImported
+		if base, qualified := strings.CutPrefix(name, "File::Copy::"); qualified {
+			name, perlImported = base, true
+		}
+		return perlImported && (name == "copy" || name == "cp" || name == "move" || name == "mv")
+	case "ruby":
+		return strings.HasPrefix(name, "FileUtils.") || name == "IO.copy_stream"
 	}
 	return false
 }
@@ -683,4 +958,72 @@ func literalCommentStart(code string, i int, language string) bool {
 		// JavaScript uses # in private names, not for comments.
 		return false
 	}
+}
+
+// shellUnescapedWord is word with the backslashes the shell removes taken
+// out of its literal parts: any escaped byte outside quotes, and an escaped
+// $, `, ", \ or newline inside double quotes. Single-quoted text is kept.
+// The word itself is not changed.
+func shellUnescapedWord(word *syntax.Word) *syntax.Word {
+	if word == nil {
+		return nil
+	}
+	var convert func(parts []syntax.WordPart, quoted bool) []syntax.WordPart
+	convert = func(parts []syntax.WordPart, quoted bool) []syntax.WordPart {
+		out := make([]syntax.WordPart, 0, len(parts))
+		for _, part := range parts {
+			switch part := part.(type) {
+			case *syntax.Lit:
+				if !strings.Contains(part.Value, "\\") {
+					out = append(out, part)
+					continue
+				}
+				var value strings.Builder
+				for i := 0; i < len(part.Value); i++ {
+					c := part.Value[i]
+					if c == '\\' && i+1 < len(part.Value) && (!quoted || strings.IndexByte("$`\"\\\n", part.Value[i+1]) >= 0) {
+						i++
+						if part.Value[i] == '\n' {
+							continue // a line continuation
+						}
+						c = part.Value[i]
+					}
+					value.WriteByte(c)
+				}
+				copied := *part
+				copied.Value = value.String()
+				out = append(out, &copied)
+			case *syntax.DblQuoted:
+				copied := *part
+				copied.Parts = convert(part.Parts, true)
+				out = append(out, &copied)
+			default:
+				out = append(out, part)
+			}
+		}
+		return out
+	}
+	copied := *word
+	copied.Parts = convert(word.Parts, false)
+	return &copied
+}
+
+func awkProgramName(word string) bool {
+	switch programBase(word) {
+	case "awk", "gawk", "mawk", "nawk":
+		return true
+	}
+	return false
+}
+
+// wordExpandsParameter reports a word that contains a parameter expansion.
+func wordExpandsParameter(word *syntax.Word) bool {
+	found := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if _, ok := node.(*syntax.ParamExp); ok {
+			found = true
+		}
+		return !found
+	})
+	return found
 }

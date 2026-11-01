@@ -22,16 +22,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
-// #1299: the purge names the backup it made of an account's own per-user
-// install from before the managed deployment.
-func TestUninstallPurgeNamesTheBackupOfAPerUserInstall(t *testing.T) {
+// GAP-0727: the purge names the account whose own per-user install from
+// before the managed deployment it kept as it is; nothing was moved.
+func TestUninstallPurgeNamesTheKeptPerUserInstall(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
 				return CommandResult{Stdout: []byte(`{"ok":true,"purged":["alice","bob"],` +
-					`"purged_detail":{"alice":{"data":true,"backup":true,"binaries":true},"bob":{"data":true}}}`)}, nil
+					`"purged_detail":{"alice":{"kept":true},"bob":{"data":true}}}`)}, nil
 			}}
 			done := h.run(Options{Action: ActionUninstall, Purge: true})
 			requireOK(t, done)
@@ -44,11 +44,12 @@ func TestUninstallPurgeNamesTheBackupOfAPerUserInstall(t *testing.T) {
 					bob = change
 				}
 			}
-			if !strings.Contains(alice, "was moved to ~/.defenseclaw-backup-<UTC time> in its home first") {
-				t.Fatalf("the purge does not name alice's backup: %q", alice)
+			if !strings.HasPrefix(alice, "kept the DefenseClaw per-user data of user alice (~/.defenseclaw) as it is") ||
+				strings.Contains(alice, "backup") || strings.Contains(alice, "moved to") {
+				t.Fatalf("the purge does not name alice's kept install: %q", alice)
 			}
-			if bob == "" || strings.Contains(bob, "backup-") {
-				t.Fatalf("bob had no per-user install to back up: %q", bob)
+			if !strings.HasPrefix(bob, "removed ") {
+				t.Fatalf("bob's managed-only data was not removed: %q", bob)
 			}
 		})
 	}
@@ -92,6 +93,31 @@ func TestUnixPurgeReportsAnEnrolledOSSInstallItLeavesBehind(t *testing.T) {
 				t.Fatalf("purge omitted retained OSS data from its result: %q", got)
 			}
 		})
+	}
+}
+
+// GAP-1654: a purge names, on a kept: line, the accounts the deployment never
+// enrolled whose home still holds DefenseClaw files, and leaves those files.
+func TestUnixPurgeNamesUnenrolledAccountsWithDefenseClawFiles(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.3")}))
+	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath), fmt.Sprintf(
+		`{"accounts":[{"user":"std1","uid":%d,"home":"/Users/std1"}]}`, os.Getuid()))
+	hook := "/Users/eng1/.defenseclaw/hooks/kiro-hook.sh"
+	writeHostFile(t, h, hook, "#!/bin/sh\n")
+	writeHostFile(t, h, "/Users/Shared/.defenseclaw/x", "shared")
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true,"removed":0}`)}, nil
+	}}
+	done := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, done)
+	got := messagesOf(done.Warnings, codePerUserState)
+	if !strings.Contains(got, "kept: the DefenseClaw per-user data (~/.defenseclaw) of eng1") ||
+		!strings.Contains(got, "did not enroll") || strings.Contains(got, "of std1") || strings.Contains(got, "Shared") {
+		t.Fatalf("the purge does not name the unenrolled account's files: %q", got)
+	}
+	if h.read(hook) != "#!/bin/sh\n" {
+		t.Fatal("the purge changed an unenrolled account's files")
 	}
 }
 
@@ -145,6 +171,43 @@ func TestUninstallPurgeGoesOnForAnAccountWhoseHomeIsGone(t *testing.T) {
 			}
 			if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || exists(h.env.deploymentPath()) {
 				t.Fatal("the purge did not remove the binaries and the deployment record")
+			}
+		})
+	}
+}
+
+// rel-1-0-6 GAP-0178: a purge keeps the session-facts cache of an enrolled
+// account whose ~/.defenseclaw holds its own per-user install (its hooks
+// write and read the cache); an account with only the managed hook's cache
+// loses it, as before (GAP-1186).
+func TestUninstallPurgeKeepsTheSessionCacheOfAnAccountWithItsOwnInstall(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			uid := os.Getuid()
+			root := "/home"
+			if goos == "darwin" {
+				root = "/Users"
+			}
+			writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath), fmt.Sprintf(
+				`{"accounts":[{"user":"alice","uid":%d,"home":"%s/alice"},{"user":"own","uid":%d,"home":"%s/own"}]}`, uid, root, uid, root))
+			writeHostFile(t, h, root+"/alice/.defenseclaw/session-facts.json", "{}")
+			writeHostFile(t, h, root+"/own/.defenseclaw/session-facts.json", `{"own":true}`)
+			writeHostFile(t, h, root+"/own/.defenseclaw/config.yaml", "data_dir: ~/.defenseclaw\n")
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+				return CommandResult{Stdout: []byte(`{"ok":true,"removed":0}`)}, nil
+			}}
+			done := h.run(Options{Action: ActionUninstall, Purge: true})
+			requireOK(t, done)
+			if exists(h.env.P(root + "/alice/.defenseclaw/session-facts.json")) {
+				t.Fatalf("the purge left the managed hook's session cache; changes %v", done.Changes)
+			}
+			if h.read(root+"/own/.defenseclaw/session-facts.json") != `{"own":true}` {
+				t.Fatalf("the purge changed the session cache of an account's own per-user install; changes %v", done.Changes)
+			}
+			if strings.Contains(strings.Join(done.Changes, "\n"), "session cache of user own") {
+				t.Fatalf("the purge reports removing the own install's cache: %v", done.Changes)
 			}
 		})
 	}

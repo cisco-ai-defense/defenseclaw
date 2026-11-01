@@ -112,7 +112,7 @@ func TestStore_PragmasAppliedAcrossPool(t *testing.T) {
 		pragma string
 		want   int64
 	}{
-		{"busy_timeout", 5000},
+		{"busy_timeout", auditBusyTimeoutMillis},
 		// Checkpoints are owned by serialized health/retention maintenance,
 		// never by SQLite's commit hook on a concurrent sidecar lifecycle.
 		{"wal_autocheckpoint", 0},

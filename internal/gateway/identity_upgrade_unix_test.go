@@ -83,6 +83,114 @@ func TestUpgradeKeepsAgentsAssignmentWithLargeMigrationMap(t *testing.T) {
 	}
 }
 
+// Review of r104 Q-identity (continuation 2, loop round 2): an automounted
+// home gets another device number when it is mounted again, while its inode
+// and creation time stay. The migration map's token
+// (home:<device>:<inode>[:<creation time>]) was compared exactly, so after
+// a remount alice's 1.0.x agents entry was refused. A home created again
+// (another inode, or the freed inode with another creation time) is still
+// another account's.
+func TestUpgradeKeepsAgentsAssignmentAfterHomeRemount(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		recorded string
+		now      string
+		bound    bool
+	}{
+		{"remounted on another device", "home:2049:131073:1700000000123456789", "home:47:131073:1700000000123456789", true},
+		{"remounted, no creation time", "home:2049:131073", "home:47:131073", true},
+		{"no creation time recorded", "home:2049:131073", "home:47:131073:1700000000123456789", true},
+		{"same home", "home:2049:131073:1700000000123456789", "home:2049:131073:1700000000123456789", true},
+		{"same SID", "sid:S-1-5-21-1-2-3-1105", "sid:S-1-5-21-1-2-3-1105", true},
+		{"home created again, another inode", "home:2049:131073:1700000000123456789", "home:47:131074:1700000000123456789", false},
+		{"home created again on the freed inode", "home:2049:131073:1700000000123456789", "home:2049:131073:1800000000000000000", false},
+		{"creation time recorded, none now", "home:2049:131073:1700000000123456789", "home:47:131073", false},
+		{"another SID", "sid:S-1-5-21-1-2-3-1105", "sid:S-1-5-21-1-2-3-1106", false},
+		{"SID recorded, home now", "sid:S-1-5-21-1-2-3-1105", "home:2049:131073", false},
+		{"home recorded, SID now", "home:2049:131073", "sid:S-1-5-21-1-2-3-1105", false},
+		{"no token now", "home:2049:131073", "", false},
+		{"malformed token now", "home:2049:131073", "home:x:131073", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newUpgradeBridge(t, "alice")
+			legacy := agentidentity.LegacyAgentID(b.inputs(70001, "alice"))
+			b.peer(70001)
+			if _, err := enterprisehooks.WriteLegacyAgentOwners(b.dir, map[int]enterprisehooks.LegacyAgentOwner{70001: {User: "alice", Token: tc.recorded}},
+				time.Now(), nil); err != nil {
+				t.Fatal(err)
+			}
+			legacyAgentOwners = &legacyAgentOwnerCache{}
+			previous := legacyAgentOwnerTokenNow
+			t.Cleanup(func() { legacyAgentOwnerTokenNow = previous })
+			legacyAgentOwnerTokenNow = func(int, string) string { return tc.now }
+			if got := legacyAgentOwnerBound("70001", "alice"); got != tc.bound {
+				t.Fatalf("recorded %q, now %q: bound=%t, want %t", tc.recorded, tc.now, got, tc.bound)
+			}
+			got, mode := b.hook(legacyConfig(legacy, upgradeProfiles), 70001, profileSubject{UserID: "70001", UserName: "alice"})
+			if tc.bound && (got.Name != "relaxed" || got.Match != profileMatchAgent || mode != "observe" || got.Refused != "") {
+				t.Fatalf("%+v, mode %q; want the prior agents assignment", got, mode)
+			}
+			if !tc.bound && (got.Match != profileMatchDefaultLookupFailed || got.Refused == "") {
+				t.Fatalf("%+v, mode %q; want the unbound entry refused", got, mode)
+			}
+		})
+	}
+}
+
+// Review of r104 Q-identity (continuation 2, loop round 2): alice's home was
+// not there at the guardian's first pass after the upgrade, so the map lists
+// her as pending. Her 1.0.x agents entry is refused, naming the unproven
+// ownership, until the guardian proves her; the gateway then reads the
+// changed map within legacyAgentOwnersRetry and the entry applies again.
+func TestUpgradeBindsAPendingAccountOnceProven(t *testing.T) {
+	b := newUpgradeBridge(t, "alice")
+	legacy := agentidentity.LegacyAgentID(b.inputs(70001, "alice"))
+	b.peer(70001)
+	if _, err := enterprisehooks.WriteLegacyAgentOwners(b.dir, map[int]enterprisehooks.LegacyAgentOwner{
+		70001: {User: "alice"}, 70002: {User: "bob", Token: "home:1:2"}}, time.Now(), nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg := legacyConfig(legacy, upgradeProfiles)
+	subject := profileSubject{UserID: "70001", UserName: "alice"}
+	if got, _ := b.hook(cfg, 70001, subject); got.Match != profileMatchDefaultLookupFailed || got.Refused == "" {
+		t.Fatalf("pending alice: %+v; want the entry refused until she is proven", got)
+	}
+	if written, err := enterprisehooks.WriteLegacyAgentOwners(b.dir, map[int]enterprisehooks.LegacyAgentOwner{
+		70001: {User: "alice", Token: enterprisehooks.LegacyAgentOwnerToken("files", b.homes[70001])}}, time.Now(), nil); err != nil || !written {
+		t.Fatalf("prove alice: written=%t err=%v", written, err)
+	}
+	legacyAgentOwners.mu.Lock()
+	legacyAgentOwners.nextTry = time.Time{} // legacyAgentOwnersRetry has passed
+	legacyAgentOwners.mu.Unlock()
+	got, mode := b.hook(cfg, 70001, subject)
+	if got.Name != "relaxed" || got.Match != profileMatchAgent || mode != "observe" || got.Refused != "" {
+		t.Fatalf("proven alice: %+v, mode %q; want the prior agents assignment", got, mode)
+	}
+}
+
+// More accounts than one file of the map holds: alice's owner is in a shard,
+// and her 1.0.x agents entry still applies.
+func TestUpgradeKeepsAgentsAssignmentInAMigrationMapShard(t *testing.T) {
+	b := newUpgradeBridge(t, "alice")
+	legacy := agentidentity.LegacyAgentID(b.inputs(70001, "alice"))
+	b.peer(70001)
+	owners := map[int]enterprisehooks.LegacyAgentOwner{70001: {User: "alice", Token: enterprisehooks.LegacyAgentOwnerToken("files", b.homes[70001])}}
+	for uid := 1; uid <= 65536; uid++ { // every one sorts before alice
+		owners[uid] = enterprisehooks.LegacyAgentOwner{User: fmt.Sprintf("user%d", uid), Token: fmt.Sprintf("home:1:%d", uid)}
+	}
+	if written, err := enterprisehooks.WriteLegacyAgentOwners(b.dir, owners, time.Now(), nil); err != nil || !written {
+		t.Fatalf("write: written=%t err=%v", written, err)
+	}
+	if _, err := os.Stat(filepath.Join(b.dir, "legacy-agent-owners-1.map")); err != nil {
+		t.Fatalf("no shard: %v", err)
+	}
+	legacyAgentOwners = &legacyAgentOwnerCache{}
+	got, mode := b.hook(legacyConfig(legacy, upgradeProfiles), 70001, profileSubject{UserID: "70001", UserName: "alice"})
+	if got.Name != "relaxed" || got.Match != profileMatchAgent || mode != "observe" || got.Refused != "" {
+		t.Fatalf("%+v, mode %q; want the prior agents assignment", got, mode)
+	}
+}
+
 func newUpgradeBridge(t *testing.T, account string) *upgradeBridge {
 	t.Helper()
 	b := &upgradeBridge{strictBridge: newStrictBridge(t, account), dir: t.TempDir()}
@@ -221,5 +329,58 @@ func TestLegacyAgentOwnerBound(t *testing.T) {
 		if got := legacyAgentOwnerBound(tc.id, tc.account); got != tc.want {
 			t.Errorf("legacyAgentOwnerBound(%s, %s) = %v, want %v", tc.id, tc.account, got, tc.want)
 		}
+	}
+}
+
+// Review of r104 Q-identity (continuation 3, loop round 2): a migration map
+// the 1.0.4 builds before the GAP-0939 fix wrote holds, for a symlinked
+// home, the symlink's own creation time. Without a current guardian record
+// (a managed Mac whose guardian has not rewritten it), the gateway reads
+// the home itself, and this build's token named the directory's creation
+// time, so the account's 1.0.x agents entry was refused. The gateway now
+// takes the earlier proof of this same home, unless the directory behind
+// the symlink was created after the map.
+func TestUpgradeFromAMapWithTheSymlinkProofBeforeTheFix(t *testing.T) {
+	for _, after := range []bool{false, true} {
+		t.Run(fmt.Sprintf("directory created after the map=%t", after), func(t *testing.T) {
+			b := newUpgradeBridge(t, "alice")
+			root := t.TempDir()
+			at := time.Now()
+			if after {
+				time.Sleep(50 * time.Millisecond)
+			}
+			target, link := filepath.Join(root, "real-alice"), filepath.Join(root, "alice")
+			if err := os.Mkdir(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(20 * time.Millisecond)
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			if !after {
+				at = time.Now()
+			}
+			b.homes[70001] = link
+			before := ownerTokenBeforeSymlinkFix(t, link)
+			if now := enterprisehooks.LegacyAgentOwnerToken("files", link); strings.Count(before, ":") < 3 || before == now {
+				t.Skipf("the file system of %s keeps no creation time (tokens %q, %q)", root, before, now)
+			}
+			legacy := agentidentity.LegacyAgentID(b.inputs(70001, "alice"))
+			if _, err := enterprisehooks.WriteLegacyAgentOwners(b.dir, map[int]enterprisehooks.LegacyAgentOwner{70001: {User: "alice", Token: before}},
+				at, nil); err != nil {
+				t.Fatal(err)
+			}
+			legacyAgentOwners = &legacyAgentOwnerCache{}
+			if got := legacyAgentOwnerBound("70001", "alice"); got == after {
+				t.Fatalf("bound=%t; want %t", got, !after)
+			}
+			got, mode := b.hook(legacyConfig(legacy, upgradeProfiles), 70001, profileSubject{UserID: "70001", UserName: "alice"})
+			if !after && (got.Name != "relaxed" || got.Match != profileMatchAgent || mode != "observe" || got.Refused != "") {
+				t.Fatalf("%+v, mode %q; want the prior agents assignment", got, mode)
+			}
+			if after && (got.Match != profileMatchDefaultLookupFailed || got.Refused == "") {
+				t.Fatalf("%+v, mode %q; want the unbound entry refused", got, mode)
+			}
+		})
 	}
 }

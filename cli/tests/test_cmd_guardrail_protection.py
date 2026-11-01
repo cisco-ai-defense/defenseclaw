@@ -97,7 +97,11 @@ def test_protection_enable_and_disable_write_rules_keys(env) -> None:
     app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(rules=GuardrailRulesConfig(protections=[K8S]))}
     result = _run(app, "protection", "disable", K8S, "--connector", "codex")
     assert result.exit_code == 0, result.output
-    assert writes[-1][0] == [config_writer.Change("guardrail.connectors.codex.rules.protections", unset=True, prune_empty_to="guardrail.connectors.codex")]
+    # guardrail.connector already puts codex on the roster, so an entry its
+    # last override leaves empty goes too (GAP-1894).
+    assert writes[-1][0] == [
+        config_writer.Change("guardrail.connectors.codex.rules.protections", unset=True, prune_empty_to="guardrail")
+    ]
     assert "next reload" in result.output or "isn't running" in result.output
 
 
@@ -166,6 +170,28 @@ def test_rule_and_suppress_wrappers(env) -> None:
     )
     assert _run(app, "rule", "disable", "SEC-AWS-KEY").exit_code == 0
     assert writes[-1][0] == [config_writer.Change("guardrail.rules.disable", ["OTHER-RULE", "SEC-AWS-KEY"])]
+
+
+def test_suppress_add_warns_when_the_finding_is_a_rule_of_the_active_pack(env) -> None:
+    # p0-round GAP-1018: suppressions drop LLM judge findings only; a pattern that is exactly a
+    # regex or CEL rule ID of the pack used to print only the success line.
+    app, root, writes = env
+    rule_id = sorted(pc.pack_rule_defaults(str(root / "default")))[0]
+    result = _run(app, "suppress", "add", "SUPP-RULE", "--finding", rule_id.lower(), "--reason", "test")
+    assert result.exit_code == 0, result.output
+    assert len(writes) == 1  # still stored: no behaviour change
+    assert f"{rule_id} is a rule of the active pack" in result.output
+    assert "suppressions never silence a regex or CEL rule" in result.output
+    assert f"guardrail rule disable {rule_id}" in result.output
+
+    result = _run(app, "suppress", "add", "SUPP-RULE-J", "--finding", rule_id, "--reason", "test", "--json")
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True and rule_id in payload["warning"]
+
+    quiet = _run(app, "suppress", "add", "SUPP-JUDGE", "--finding", "JUDGE-PII-IP", "--reason", "test")
+    assert quiet.exit_code == 0 and "never silence" not in quiet.output
+    assert "warning" not in json.loads(_run(app, "suppress", "add", "SUPP-J2", "--finding", "JUDGE-PII-IP",
+                                           "--reason", "t", "--json").stdout)
 
 
 def test_rule_severity_default_restores_profile_config_and_digest(env, monkeypatch) -> None:

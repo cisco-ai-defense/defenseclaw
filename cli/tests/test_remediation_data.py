@@ -370,14 +370,23 @@ def test_f0604_connector_token_escaped() -> None:
 # --------------------------------------------------------------------------- #
 def test_f0608_run_session_tokens_escaped() -> None:
     macros = _read(MACROS)
-    # macro definitions no longer wrap the substituted token in quotes
-    assert "run_id=$run_filter$" in macros
+    # Splunk 10.2 strips the quotes (and one level of backslashes) of a macro
+    # argument, so a |s token reaches the macro as bare text and a quote in it
+    # ends the string literal. The views therefore hand the macro a
+    # URL-encoded token, "$tok|u$" (no quote, backslash, backtick or space can
+    # survive the encoding), and the macro compares urldecode("$arg$"), a
+    # string literal that the token cannot leave (GAP-0207).
+    assert 'run_id=urldecode("$run_filter$")' in macros
+    assert 'session_id=urldecode("$session_filter$")' in macros
+    assert "run_id=$run_filter$" not in macros
     assert 'run_id="$run_filter$"' not in macros
     assert 'session_id="$session_filter$"' not in macros
     for view in (RUNS_VIEW, SEARCH_VIEW):
         text = _read(view)
-        assert "$run_id|s$" in text
-        assert "$session_id|s$" in text
+        assert '"$run_id|u$"' in text
+        assert '"$session_id|u$"' in text
+        # no run or session token reaches a macro call as |s text
+        assert not re.search(r"`dcso_\w+\([^`\"]*\$(run_id|session_id)\|s\$", text)
 
 
 # --------------------------------------------------------------------------- #
@@ -404,10 +413,12 @@ def test_f0623_readme_uses_env_var_not_cli_token() -> None:
 # --------------------------------------------------------------------------- #
 # F-0641 — conditional tomli dependency for Python < 3.11
 # --------------------------------------------------------------------------- #
-def test_f0641_tomli_conditional_dependency() -> None:
+def test_f0641_no_tomli_backport_once_python_3_10_is_dropped() -> None:
+    # The wheel requires Python 3.11 (GAP-1715), whose stdlib has tomllib.
     data = _load_toml(PYPROJECT)
     deps = data["project"]["dependencies"]
-    assert any(d.startswith("tomli") and "python_version" in d and "3.11" in d for d in deps)
+    assert data["project"]["requires-python"].startswith(">=3.11")
+    assert not any(d.startswith("tomli") for d in deps)
 
 
 # --------------------------------------------------------------------------- #

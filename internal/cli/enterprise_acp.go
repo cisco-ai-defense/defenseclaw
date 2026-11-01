@@ -13,7 +13,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -21,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/spf13/cobra"
@@ -309,7 +309,7 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 
 // enterpriseACPProfileNameRE is the form of a profile name an enrollment
 // accepts when acp.profiles does not define it.
-var enterpriseACPProfileNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var enterpriseACPProfileNameRE = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // enterpriseACPShortName bounds a name echoed in a refusal.
 func enterpriseACPShortName(name string) string {
@@ -589,6 +589,19 @@ func enterpriseACPCentralNote(client, agent, profile string) string {
 		return fmt.Sprintf("central ACP policy now binds %s/%s to profile %s, so the guard refuses this %s enrollment; "+
 			"enroll the user again with --profile %s", client, agent, resolved, profile, resolved)
 	}
+	// The gateway's next checks: the pins of the pair, then the profile's
+	// allow-lists. A binding the profile no longer allows verified green
+	// while the guard was refused (GAP-1155).
+	if refusals := cfg.ACP.ACPPairBindingRefusals(client, agent, profile); len(refusals) > 0 {
+		return fmt.Sprintf("central ACP policy no longer binds %s/%s to profile %s (%s), so the guard refuses it",
+			client, agent, profile, strings.Join(refusals, "; "))
+	}
+	if settings, ok := cfg.ACP.Profiles[profile]; ok {
+		if refusals := settings.AllowListRefusals(profile, client, agent); len(refusals) > 0 {
+			return fmt.Sprintf("central ACP policy no longer allows %s/%s in profile %s (%s), so the guard refuses it",
+				client, agent, profile, strings.Join(refusals, "; "))
+		}
+	}
 	return ""
 }
 
@@ -653,6 +666,7 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
+	enterpriseACPUseRecordedDataDir(&enrollment, credential.UserDataDir)
 	if enrollment.accountGone {
 		what, selector := enterpriseACPGoneAccount(enrollment)
 		return enterpriseACPResult(cmd, nil, fmt.Errorf(
@@ -738,12 +752,17 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	}
 	// Revoke centrally first. From this point a copied or cached bearer has no
 	// authority even if user-side cleanup is interrupted.
-	found := true
+	found, recordedDataDir := true, ""
 	if err := withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
 		if !cfg.SecureClientIntegration() {
 			// A revoke of an enrollment that never existed said "revoked"
 			// (GAP-0355).
 			found = enterpriseACPRecordExists(cfg.DataDir, enrollment)
+			if credential, loadErr := acp.LoadEnterpriseCredential(
+				cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
+			); loadErr == nil {
+				recordedDataDir = credential.UserDataDir
+			}
 		}
 		return acp.RemoveEnterpriseCredential(
 			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
@@ -756,6 +775,7 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 		notFound = fmt.Sprintf("no ACP enrollment for %s %s/%s in profile %s was found; nothing was revoked",
 			enterpriseACPWho(enrollment), enrollment.client, enrollment.agent, enrollment.profile)
 	}
+	enterpriseACPUseRecordedDataDir(&enrollment, recordedDataDir)
 	if enrollment.accountGone {
 		// No account, so no home to clean.
 		what, _ := enterpriseACPGoneAccount(enrollment)
@@ -809,6 +829,28 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 		payload["note"] = note
 	}
 	return enterpriseACPResult(cmd, enterpriseACPRevokePayload(payload, notFound), err)
+}
+
+// enterpriseACPUseRecordedDataDir points an enrollment whose command named no
+// --data-dir at the user data dir its service record holds, when that dir is
+// inside the target home. Verify and revoke used <home>/.defenseclaw: verify
+// called the copy in the recorded dir missing, and revoke removed the service
+// record but left that copy and named the wrong token_file, while list already
+// read the recorded dir (GAP-2431 pod review). Secure Client keeps main.
+func enterpriseACPUseRecordedDataDir(enrollment *enterpriseACPEnrollment, recorded string) {
+	if cfg == nil || cfg.SecureClientIntegration() || strings.TrimSpace(enterpriseACPUserDataDir) != "" ||
+		recorded == "" || enrollment.target.home == "" {
+		return
+	}
+	home, err := filepath.Abs(enrollment.target.home)
+	if err != nil {
+		return
+	}
+	relative, err := filepath.Rel(home, recorded)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return
+	}
+	enrollment.dataDir = recorded
 }
 
 // enterpriseACPCheck is the success mark: ASCII when Windows output goes to

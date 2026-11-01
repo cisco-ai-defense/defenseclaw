@@ -129,7 +129,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err := m.sandboxReleaseRefusal(gw); err != nil {
 		return nil, err
 	}
-	if err := m.legacyRunRefusal(""); err != nil {
+	if err := m.legacyRunRefusal(ctx, ""); err != nil {
 		return nil, err
 	}
 	// On a managed host the daemon chose the driver at sandbox start (its
@@ -590,8 +590,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	// session's tool-call ledger is complete.
 	m.toolCalls.Begin(rec.BindingID)
 	// Not while DefenseClaw restarts or upgrades the gateway, whose check
-	// of its sandboxes came before this one (lockStart).
-	unlockStart, err := m.lockStart()
+	// of its sandboxes came before this one, nor beside a guest contained
+	// since the run check of Create (lockRun).
+	unlockRun, err := m.lockRun("")
 	if err != nil {
 		return nil, err
 	}
@@ -603,7 +604,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	// mount and providers with no record.
 	rb.add("delete sandbox", func(ctx context.Context) error { return m.deleteCreated(ctx, gw, name) })
 	_, err = gw.Client.CreateSandbox(ctx, name, sbSpec, openshell.CreateSandboxOptions{Labels: labels})
-	unlockStart()
+	unlockRun()
 	if err != nil {
 		m.dropGateway(gw, err)
 		if tmpl.DriverConfig != nil && openshell.IsConflict(err) && strings.Contains(err.Error(), "driver config") {

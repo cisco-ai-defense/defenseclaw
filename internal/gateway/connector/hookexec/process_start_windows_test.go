@@ -35,6 +35,10 @@ func TestCallStartCountsTheWrappersThatLaunchedTheHook(t *testing.T) {
 			{`C:\Users\u\.local\bin\defenseclaw-hook.exe`, at(800 * time.Millisecond)},
 			{powerShell, at(1500 * time.Millisecond)},
 		}, at(1500 * time.Millisecond)},
+		// GAP-1908: the direct Codex registration starts the launcher through
+		// the system cmd.exe, as the per-user Claude Code command does; like
+		// the agent's own shell it is not a wrapper the budgets count.
+		{"system cmd.exe of a direct registration", []hookWrapperProcess{{`C:\Windows\System32\cmd.exe`, at(300 * time.Millisecond)}}, created},
 		{"launcher under the agent", []hookWrapperProcess{
 			{`C:\Users\u\.local\bin\defenseclaw-hook.exe`, at(800 * time.Millisecond)},
 			{`C:\Users\u\AppData\Local\claude\claude.exe`, at(time.Hour)},

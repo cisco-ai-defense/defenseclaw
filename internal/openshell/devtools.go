@@ -22,11 +22,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -170,7 +170,7 @@ func majorVersion(v string) int {
 }
 
 // xcodeVersionKey finds CFBundleShortVersionString in an XML property list.
-var xcodeVersionKey = regexp.MustCompile(`<key>CFBundleShortVersionString</key>\s*<string>([^<]*)</string>`)
+var xcodeVersionKey = lazyregexp.New(`<key>CFBundleShortVersionString</key>\s*<string>([^<]*)</string>`)
 
 // probeDeveloperTools asks sw_vers, xcode-select and pkgutil, which change
 // nothing, and reads the version of the Xcode.app at app. What cannot be

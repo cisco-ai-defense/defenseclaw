@@ -178,7 +178,7 @@ func seedOpenCodeSelectionForTestAt(t *testing.T, dataDir string, now time.Time)
 		t.Fatalf("create OpenCode selection fixture folder: %v", err)
 	}
 	executable := filepath.Join(packageDir, "opencode.exe")
-	body := []byte("MZ OpenCode 1.18.19 CLI reconcile fixture")
+	body := []byte("MZ OpenCode 2.1.4 CLI reconcile fixture")
 	if err := os.WriteFile(executable, body, 0o700); err != nil {
 		t.Fatalf("write OpenCode selection fixture: %v", err)
 	}
@@ -191,8 +191,8 @@ func seedOpenCodeSelectionForTestAt(t *testing.T, dataDir string, now time.Time)
 				"connector":          "opencode",
 				"source":             "setup-selected",
 				"executable":         executable,
-				"raw_version":        "1.18.19",
-				"normalized_version": "1.18.19",
+				"raw_version":        "2.1.4",
+				"normalized_version": "2.1.4",
 				"sha256":             fmt.Sprintf("%x", digest[:]),
 				"selected_at":        now.Format(time.RFC3339),
 				"expires_at":         now.Add(15 * time.Minute).Format(time.RFC3339),
@@ -524,9 +524,9 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	}
 	stdout, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
 	assertConnectorReconcileStderr(t, "codex", stderr)
-	// A per-user outage mode follows the policy tier (default: open), not
-	// the saved hook_fail_mode (oss-outage-open).
-	if !strings.Contains(stdout, `"fail_mode":"open"`) {
+	// An explicit saved hook_fail_mode wins over the policy tier (owner
+	// decision 2026-10-23): Codex's saved closed.
+	if !strings.Contains(stdout, `"fail_mode":"closed"`) {
 		t.Fatalf("reconcile output = %s", stdout)
 	}
 	if _, err := os.Stat(codexPath); err != nil {
@@ -560,10 +560,10 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	if !bytes.Equal(claudeAfter, claudeBefore) {
 		t.Fatalf("peer Claude registration changed: %s", claudeAfter)
 	}
-	// The lock records the outage mode: the default tier's open.
+	// The lock records the outage mode: Codex's saved closed wins.
 	lock := connector.LoadHookContractLockEntry(dataDir, "codex")
-	if lock.HookFailMode != "open" {
-		t.Fatalf("lock fail mode = %q, want open", lock.HookFailMode)
+	if lock.HookFailMode != "closed" {
+		t.Fatalf("lock fail mode = %q, want closed", lock.HookFailMode)
 	}
 }
 
@@ -793,7 +793,7 @@ func TestConnectorReconcileOpenCodePublishesCompleteActivation(t *testing.T) {
 		t.Fatalf("OpenCode custody receipt missing after reconcile: %v", err)
 	}
 	lock := connector.LoadHookContractLockEntry(dataDir, "opencode")
-	if lock.Connector != "opencode" || lock.ContractID != "opencode-hooks-v1" {
+	if lock.Connector != "opencode" || lock.ContractID != "opencode-hooks-v2" {
 		t.Fatalf("OpenCode contract lock = %+v", lock)
 	}
 	if got := connector.LoadActiveConnector(dataDir); got != "opencode" {
@@ -1173,9 +1173,9 @@ func TestConnectorReconcileLegacyOpenEditsKeepBothClosedContractsCurrent(t *test
 	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
 	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	closed := assertMixedHookContractsCurrent(t, dataDir, home)
-	// The saved value does not move a per-user outage mode: both stay in
-	// the default tier's open (oss-outage-open).
-	if closed.Connectors["claudecode"].HookFailMode != "open" || closed.Connectors["codex"].HookFailMode != "open" {
+	// The saved value wins over the tier (owner decision 2026-10-23):
+	// Claude's new saved closed, Codex's saved open.
+	if closed.Connectors["claudecode"].HookFailMode != "closed" || closed.Connectors["codex"].HookFailMode != "open" {
 		t.Fatalf("per-user lock modes are wrong: Claude=%q Codex=%q", closed.Connectors["claudecode"].HookFailMode, closed.Connectors["codex"].HookFailMode)
 	}
 	codexAfter, err := os.ReadFile(codexPath)
@@ -1225,8 +1225,8 @@ func TestConnectorReconcileLegacyOpenEditsKeepBothClosedContractsCurrent(t *test
 	assertMixedHookContractsCurrent(t, dataDir, home)
 
 	// Repeatedly edit saved values on one connector. Every resulting lock
-	// must still validate both registrations with the default tier's outage
-	// mode, which no saved value moves (oss-outage-open).
+	// must still validate both registrations, each with its own saved
+	// outage mode (owner decision 2026-10-23: a saved value wins).
 	claudeMode = cfg.Guardrail.Connectors["claudecode"]
 	claudeMode.HookFailMode = "open"
 	cfg.Guardrail.Connectors["claudecode"] = claudeMode
@@ -1238,8 +1238,9 @@ func TestConnectorReconcileLegacyOpenEditsKeepBothClosedContractsCurrent(t *test
 	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
 	assertConnectorReconcileStderr(t, "codex", stderr)
 	reverse := assertMixedHookContractsCurrent(t, dataDir, home)
-	if reverse.Connectors["claudecode"].HookFailMode != "open" || reverse.Connectors["codex"].HookFailMode != "open" {
-		t.Fatalf("a saved value moved the per-user outage mode: %+v", reverse.Connectors)
+	if reverse.Connectors["claudecode"].HookFailMode != "open" || reverse.Connectors["codex"].HookFailMode != "closed" {
+		t.Fatalf("the saved per-user outage modes were not recorded: Claude=%q Codex=%q",
+			reverse.Connectors["claudecode"].HookFailMode, reverse.Connectors["codex"].HookFailMode)
 	}
 	for _, mode := range []string{"closed", "open", "closed", "open"} {
 		claudeMode = cfg.Guardrail.Connectors["claudecode"]

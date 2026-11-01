@@ -20,12 +20,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/tc-hib/winres"
 	"github.com/tc-hib/winres/version"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -39,7 +40,7 @@ const (
 	IconSource = "macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
 )
 
-var semanticVersionPattern = regexp.MustCompile(`^(?:v)?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?(?:\+[0-9A-Za-z][0-9A-Za-z.-]*)?$`)
+var semanticVersionPattern = lazyregexp.New(`^(?:v)?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?(?:\+[0-9A-Za-z][0-9A-Za-z.-]*)?$`)
 
 // Component identifies a project-built executable resource contract.
 type Component string
@@ -53,9 +54,12 @@ const (
 	// privilege the runtime planes need; see internal/sensor/acquire.
 	ComponentSensorHelper Component = "sensor-helper"
 	ComponentHook         Component = "hook"
-	ComponentLauncher     Component = "launcher"
-	ComponentStartup      Component = "startup"
-	ComponentSetup        Component = "setup"
+	// ComponentHookGuard is the one-line install's Claude Code PreToolUse
+	// guard, cmd/defenseclaw-hook-guard (GAP-2467).
+	ComponentHookGuard Component = "hook-guard"
+	ComponentLauncher  Component = "launcher"
+	ComponentStartup   Component = "startup"
+	ComponentSetup     Component = "setup"
 	// ComponentEnterpriseSetup is deliberately distinct from ComponentSetup.
 	// The ordinary Setup is a per-user, asInvoker application; the enterprise
 	// bootstrap owns machine-wide services and ACLs and must therefore run only
@@ -73,6 +77,7 @@ var AllComponents = []Component{
 	ComponentCMIDBroker,
 	ComponentSensorHelper,
 	ComponentHook,
+	ComponentHookGuard,
 	ComponentLauncher,
 	ComponentStartup,
 	ComponentSetup,
@@ -164,6 +169,13 @@ var componentMetadataByName = map[Component]componentMetadata{
 		FileDescription:  "DefenseClaw Agent Hook",
 		InternalName:     "defenseclaw-hook",
 		OriginalFilename: "defenseclaw-hook.exe",
+	},
+	ComponentHookGuard: {
+		AssemblyName:     "Cisco.DefenseClaw.HookGuard",
+		Description:      "DefenseClaw no-console Claude Code hook guard",
+		FileDescription:  "DefenseClaw Hook Guard",
+		InternalName:     "defenseclaw-hook-guard",
+		OriginalFilename: "defenseclaw-hook-guard.exe",
 	},
 	ComponentLauncher: {
 		AssemblyName:     "Cisco.DefenseClaw.CommandLauncher",

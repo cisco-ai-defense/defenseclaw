@@ -236,3 +236,43 @@ func TestCommandOpsMacOSStopsEveryLabel(t *testing.T) {
 		}
 	}
 }
+
+// The macOS stop sync runs as the account, the sync the Linux unit's second
+// ExecStop runs (GAP-0380); a gateway agent that does not run is not asked.
+func TestCommandOpsMacOSSyncsTheMicroVMsOfARunningGateway(t *testing.T) {
+	running := true
+	ops, runner, alice := opsHost(t, "darwin", func(line string) (CommandResult, error) {
+		switch line {
+		case "launchctl print gui/1001":
+			return CommandResult{}, os.ErrNotExist
+		case "launchctl print user/1001":
+			return CommandResult{Stdout: []byte("user/1001 = {\n\tservices = {\n\t\t812 -\t" + labelOpenShellGateway + "\n\t}\n}\n")}, nil
+		case "launchctl print user/1001/" + labelOpenShellGateway:
+			if running {
+				return CommandResult{Stdout: []byte(labelOpenShellGateway + " = {\n\tstate = running\n}\n")}, nil
+			}
+			return CommandResult{Stdout: []byte(labelOpenShellGateway + " = {\n\tstate = not running\n}\n")}, nil
+		}
+		return CommandResult{}, nil
+	})
+	const syncCall = "sandbox-daemon sync-sandboxes --managed"
+	ops.syncBeforeGatewayStop(context.Background(), alice)
+	found := false
+	for _, c := range runner.calls {
+		if strings.HasSuffix(c, syncCall) {
+			found = true
+			if !strings.HasPrefix(c, "sudo -n -u alice -H /usr/bin/env HOME=/Users/alice ") {
+				t.Fatalf("the sync does not run as the account: %q", c)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no sync: %v", runner.calls)
+	}
+	running = false
+	runner.calls = nil
+	ops.syncBeforeGatewayStop(context.Background(), alice)
+	if runner.called(syncCall) {
+		t.Fatalf("a gateway that does not run was synced: %v", runner.calls)
+	}
+}

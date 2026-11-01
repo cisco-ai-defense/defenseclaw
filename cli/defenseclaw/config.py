@@ -35,6 +35,7 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import urllib.parse
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -79,6 +80,7 @@ from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     dotenv_key_is_process_control,
     dotenv_key_is_valid,
+    namespace_hides_owner,
     read_regular_file_no_follow,
     tracked_host_owner_uid,
 )
@@ -604,7 +606,9 @@ def detect_environment() -> str:
         )
         if "DGX" in out:
             return "dgx-spark"
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError):
+        # No nvidia-smi on PATH, or a PATH folder this account cannot read
+        # (PermissionError): the same answer, a plain Linux host (GAP-0049).
         pass
     return "linux"
 
@@ -769,6 +773,12 @@ def _managed_config_trust_problem(path: str) -> str | None:
         owner_uid = tracked_host_owner_uid(current, info) if hasattr(info, "st_uid") else None
         if owner_uid is None:
             return f"{current}: cannot inspect path owner"
+        if owner_uid == -1 and namespace_hides_owner(info):
+            # Unknown, not another account: a sandbox hides it (GAP-1395).
+            return (
+                f"{current}: its owner cannot be checked inside this sandbox (a user namespace hides it); "
+                "run the command outside the sandbox"
+            )
         if owner_uid != 0:
             return f"{current}: owner uid {owner_uid} is not trusted; expected root/admin uid 0"
 
@@ -958,6 +968,26 @@ DEFENSECLAW_LLM_MODEL_ENV = "DEFENSECLAW_LLM_MODEL"
 _DEFAULT_LLM_TIMEOUT = 30
 _DEFAULT_LLM_MAX_RETRIES = 2
 
+# Amazon Bedrock model ids and cross-region inference profile ids:
+# "<vendor>.<model>" or "<geo>.<vendor>.<model>" ("us.anthropic.claude-haiku-
+# 4-5-20251001-v1:0", "us.openai.gpt-5.6-luna", "amazon.nova-pro-v1:0"). Ids
+# of the other providers never start with a vendor name and a dot. Mirrors
+# bedrockModelIDPattern in internal/config/config.go.
+BEDROCK_MODEL_ID_RE = re.compile(
+    r"^(?:(?:us|eu|apac|jp|au|ca|global|us-gov)\.)?"
+    r"(?:anthropic|amazon|meta|mistral|cohere|ai21|openai|deepseek|qwen|writer|twelvelabs|stability|luma|google|nvidia|minimax|moonshot|moonshotai)"
+    r"\.[a-z0-9]"
+)
+
+
+def is_bedrock_model_id(model: str) -> bool:
+    """Whether ``model``, written without a provider prefix, is a Bedrock id.
+
+    An unprefixed Bedrock id then resolves to the bedrock provider for the
+    scanners and for key injection, as the gateway does (GAP-2640).
+    """
+    return bool(BEDROCK_MODEL_ID_RE.match((model or "").strip().lower()))
+
 # Recognized "provider/" prefixes understood by both the Go gateway
 # (Bifrost routes by the provider prefix) and by the Python scanners
 # (LiteLLM accepts the same "provider/model" shape). Anything outside
@@ -1003,9 +1033,15 @@ _OPENAI_STYLE_LLM_PROVIDERS = frozenset(
 _warned_llm_prefixes: set[tuple[str, str]] = set()
 
 
-def _maybe_warn_unknown_provider(prefix: str, component_path: str) -> None:
+def _maybe_warn_unknown_provider(prefix: str, component_path: str, instance_name: str = "") -> None:
     if not prefix or prefix in _RECOGNIZED_LLM_PROVIDERS:
         return
+    # ``provider: custom`` with a bound instance routes through its
+    # llm_providers.custom entry, so it is not an unknown prefix (GAP-2234).
+    # Without an instance it still warns: nothing tells the gateway where to go.
+    if prefix == "custom" and (instance_name or "").strip():
+        return
+    component_path = component_path or "llm"
     key = (component_path, prefix)
     if key in _warned_llm_prefixes:
         return
@@ -1193,6 +1229,8 @@ class LLMConfig:
             return self.provider.strip().lower()
         if "/" in self.model:
             return self.model.split("/", 1)[0].strip().lower()
+        if is_bedrock_model_id(self.model):
+            return "bedrock"
         return ""
 
     def keyless_auth_mode(self) -> str:
@@ -1430,6 +1468,144 @@ class UpdateConfig:
     check: bool | None = None
     channel: str = ""
     source: str = ""
+
+
+DECISION_MODEL_KEY_ENV = "DEFENSECLAW_DECISION_MODEL_KEY"
+DECISION_MODEL_DEFAULT_ALLOW_THRESHOLD = 0.30
+DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD = 0.75
+DECISION_MODEL_DEFAULT_TIMEOUT = 1.0
+DECISION_MODEL_ON_CONFIDENT_BLOCK = ("escalate", "decide")
+
+
+@dataclass
+class DecisionModelConfig:
+    """``decision_model:``, the unified decision model.
+
+    A small, fast model that speaks the System One protocol (``POST
+    {model, state, questions}``; answers carry calibrated probabilities).
+    The guardrail runs it in front of the LLM judge on tool calls and the
+    skill scanner records its advisory score. Off by default.
+
+    Shaped like the unified ``llm:`` block: ``api_key_env`` names the
+    variable holding the bearer token (``DEFENSECLAW_DECISION_MODEL_KEY``
+    when empty) and the value lives in the environment or
+    ``~/.defenseclaw/.env``, never in config.yaml. ``credential`` names the
+    protected credential a standalone managed host reads instead. Mirrors
+    internal/config/decision_model.go::DecisionModelConfig.
+    """
+
+    enabled: bool = False
+    model: str = ""
+    base_url: str = ""
+    api_key_env: str = ""
+    credential: str = ""
+    timeout: float = 0.0
+    allow_threshold: float = 0.0
+    block_threshold: float = 0.0
+    on_confident_block: str = ""
+
+    def active(self) -> bool:
+        return bool(self.enabled and self.base_url.strip() and self.model.strip())
+
+    def effective_api_key_env(self) -> str:
+        return self.api_key_env.strip() or DECISION_MODEL_KEY_ENV
+
+    def effective_timeout(self) -> float:
+        return self.timeout if self.timeout > 0 else DECISION_MODEL_DEFAULT_TIMEOUT
+
+    def effective_allow_threshold(self) -> float:
+        return self.allow_threshold if self.allow_threshold > 0 else DECISION_MODEL_DEFAULT_ALLOW_THRESHOLD
+
+    def effective_block_threshold(self) -> float:
+        return self.block_threshold if self.block_threshold > 0 else DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD
+
+    def effective_on_confident_block(self) -> str:
+        return (self.on_confident_block or "").strip().lower() or "escalate"
+
+    def resolved_api_key(self, data_dir: str) -> str:
+        """The bearer token from the environment, then ``<data_dir>/.env``
+        (the shared credential resolver); "" when unset."""
+        from defenseclaw import credentials
+
+        return credentials.resolve(self.effective_api_key_env(), data_dir).value.strip()
+
+    def validation_error(self) -> str:
+        """Return "" when the block is valid, else the first problem.
+        Mirrors DecisionModelConfig.Validate in Go."""
+        for name, value in (("allow_threshold", self.allow_threshold), ("block_threshold", self.block_threshold)):
+            if not 0 <= value <= 1:
+                return f"{name} must be between 0 and 1, got {value}"
+        if self.effective_allow_threshold() >= self.effective_block_threshold():
+            return (
+                f"allow_threshold ({self.effective_allow_threshold()}) must be lower than "
+                f"block_threshold ({self.effective_block_threshold()})"
+            )
+        if not 0 <= self.timeout <= 30:
+            return f"timeout must be between 0 and 30 seconds, got {self.timeout}"
+        if self.effective_on_confident_block() not in DECISION_MODEL_ON_CONFIDENT_BLOCK:
+            return f"on_confident_block must be escalate or decide, got {self.on_confident_block!r}"
+        if self.base_url.strip():
+            err = decision_model_url_error(self.base_url)
+            if err:
+                return err
+        if self.enabled:
+            if not self.base_url.strip():
+                return "enabled needs base_url (the decision model endpoint, e.g. http://127.0.0.1:8791/v1/systemone)"
+            if not self.model.strip():
+                return "enabled needs model (the model name the endpoint serves)"
+        return ""
+
+
+def decision_model_url_error(raw: str) -> str:
+    """https anywhere, plain http only to loopback, no credentials in the URL.
+    Mirrors config.ValidateDecisionModelURL in Go."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    try:
+        parsed = urlsplit(raw.strip())
+    except ValueError:
+        return "base_url must be an absolute http(s) URL"
+    if not parsed.netloc or not parsed.hostname:
+        return "base_url must be an absolute http(s) URL"
+    if parsed.username or parsed.password:
+        return f"base_url must not carry credentials; put the token in {DECISION_MODEL_KEY_ENV}"
+    scheme = parsed.scheme.lower()
+    if scheme == "https":
+        return ""
+    if scheme != "http":
+        return f"base_url must use http or https, not {parsed.scheme!r}"
+    host = parsed.hostname
+    if host.lower() == "localhost":
+        return ""
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return ""
+    except ValueError:
+        pass
+    return "base_url must use https, or plain http only to a loopback host (127.0.0.1, ::1, localhost)"
+
+
+def _merge_decision_model(raw: Any) -> DecisionModelConfig:
+    raw = raw if isinstance(raw, dict) else {}
+
+    def _num(key: str) -> float:
+        try:
+            return float(raw.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return DecisionModelConfig(
+        enabled=raw.get("enabled") is True or str(raw.get("enabled", "")).strip().lower() == "true",
+        model=str(raw.get("model", "") or ""),
+        base_url=str(raw.get("base_url", "") or ""),
+        api_key_env=str(raw.get("api_key_env", "") or ""),
+        credential=str(raw.get("credential", "") or ""),
+        timeout=_num("timeout"),
+        allow_threshold=_num("allow_threshold"),
+        block_threshold=_num("block_threshold"),
+        on_confident_block=str(raw.get("on_confident_block", "") or ""),
+    )
 
 
 @dataclass
@@ -1704,21 +1880,17 @@ _OPENSHELL_ADMIN_FLOOR_KEYS = (
 
 @dataclass
 class EnterpriseOpenShellConfig:
-    """``enterprise.openshell``: how the lifecycle provides and pins OpenShell.
+    """``enterprise.openshell`` as far as Python reads it: the compute driver.
 
-    Mirrors ``EnterpriseOpenShellConfig`` in internal/config/enterprise.go.
-    Every key is lifecycle (restart-required); DefenseClaw never ships
-    OpenShell.
+    The other keys (``install``, ``driver_fallback``, ``version``,
+    ``gateway_port``, ``e2fsprogs_dir``) are the administrator's and the
+    lifecycle's (internal/config/enterprise.go); Python never reads them, so
+    it does not model them. They are not per-user ``openshell.*`` keys: a
+    per-user config.yaml that carries one under ``openshell:`` is refused by
+    the schema, and the per-user OpenShell gateway port is fixed (17670).
     """
 
-    install: str = ""  # prerequisite | setup ("" = prerequisite)
     driver: str = ""  # docker | vm | auto ("" = vm on macOS, docker on Linux)
-    # Linux, driver vm or auto, KVM not available for the user: docker
-    # (the default) or none (refuse the sandbox).
-    driver_fallback: str = ""  # docker | none ("" = docker)
-    version: str = ""  # "0.1.3" or a range such as ">=0.1.1 <0.2.0"
-    gateway_port: int = 0  # 0 = 17670
-    e2fsprogs_dir: str = ""  # macOS only; absolute, root-owned chain
 
 
 @dataclass
@@ -2237,10 +2409,14 @@ class JudgeConfig:
     # (the proxy lane is unaffected); ``"*"`` enables every connector.
     hook_connectors: list[str] = field(default_factory=list)
     # Hook-lane judge timeout in seconds (Go ``JudgeConfig.HookTimeout``).
-    # 0 means the gateway default (5s, sized under the hook scripts'
+    # 0 means the gateway default (8s, sized under the hook scripts'
     # ``curl --max-time 10`` budget — the proxy lane's 30s would let the
     # client hang up before a verdict lands).
     hook_timeout: float = 0.0
+    # Most judge calls sent to the judge model at once (Go
+    # ``JudgeConfig.MaxParallel``); 0 = no limit. With a limit, tool-call
+    # judging goes ahead of prompt judging (#1395).
+    max_parallel: int = 0
     # Log judge prompts and responses (was DEFENSECLAW_JUDGE_TRACE).
     trace: bool = False
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
@@ -2520,6 +2696,10 @@ class GuardrailConfig:
     custom_packs: dict[str, CustomRulePack] = field(default_factory=dict)
     rules: GuardrailRulesConfig = field(default_factory=GuardrailRulesConfig)
     cisco_trust_level: str = ""  # full | advisory | none ("" = full)
+    # The organization's own domains: a download from a host equal to or
+    # under one does not start the download-then-execute alert (#1390).
+    # Mirrors ``GuardrailConfig.InternalDomains`` in internal/config/config.go.
+    internal_domains: list[str] = field(default_factory=list)
     # Lowest severity a tool call is blocked / alerted at (``CRITICAL``
     # | ``HIGH`` | ``MEDIUM`` | ``LOW``). Empty keeps the rule pack's
     # profile levels (strict: MEDIUM / LOW, permissive: CRITICAL / HIGH,
@@ -2561,7 +2741,9 @@ class GuardrailConfig:
     # ``DEFENSECLAW_STRICT_AVAILABILITY=1`` additionally forces transport and
     # missing-token failures closed. Mirrors ``GuardrailConfig.HookFailMode``
     # in internal/config/config.go.
-    hook_fail_mode: str = "closed"
+    # An empty constructor value means no operator choice. __post_init__ keeps
+    # the historical public value while recording whether a choice was made.
+    hook_fail_mode: str = ""
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
     # LLM be used only as a judge, or also as the agent's upstream?".
     # One of:
@@ -2651,6 +2833,18 @@ class GuardrailConfig:
             return pc.hilt
         return self.hilt
 
+    def __post_init__(self) -> None:
+        supplied = bool(self.hook_fail_mode.strip())
+        if not supplied:
+            object.__setattr__(self, "hook_fail_mode", "closed")
+        object.__setattr__(self, "_hook_fail_mode_saved", supplied)
+        object.__setattr__(self, "_hook_fail_mode_track", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name == "hook_fail_mode" and getattr(self, "_hook_fail_mode_track", False):
+            object.__setattr__(self, "_hook_fail_mode_saved", bool(str(value or "").strip()))
+
     def effective_hook_fail_mode(self, connector: str = "") -> str:
         """Resolve hook failure behavior for this deployment profile.
 
@@ -2663,11 +2857,10 @@ class GuardrailConfig:
           mode; an explicit value always wins (the administrator's config
           sets it), and an unset one is open under Secure Client (#1163) and
           closed on the standalone profile;
-        - a per-user host reports its gateway-outage mode, which follows the
-          connector's policy tier (Go ``config.HookOutageFailMode``, owner
-          decision 2026-10-23): ``closed`` for a strict rule pack, ``open``
-          for default (balanced) and permissive. A saved per-user
-          ``hook_fail_mode`` does not change it, and every failure that is
+        - a per-user host reports its gateway-outage mode: an explicitly saved
+          ``hook_fail_mode`` wins; otherwise the connector's policy tier
+          (Go ``config.HookOutageFailMode``, owner decision 2026-10-23) is
+          ``closed`` for strict and ``open`` for default and permissive. Every failure that is
           not an outage (an answer the gateway gave, a malformed or partial
           one, a missing token, the install window) blocks in every tier.
         """
@@ -2675,21 +2868,33 @@ class GuardrailConfig:
         cfg = owner() if callable(owner) else None
         owned = cfg is not None and getattr(cfg, "guardrail", None) is self
         standalone = owned and cfg.managed_outside_secure_client()
+        if owned:
+            application = cfg.application_protection
+            if application.enabled and connector_paths.normalize(connector) not in cfg.active_connectors():
+                override = application._connector_override(connector)
+                overlay = override.guardrail if override is not None else application.guardrail
+                if overlay.hook_fail_mode.strip():
+                    return _normalize_hook_fail_mode(overlay.hook_fail_mode)
+        pc = self._connector_override(connector)
+        if pc is not None and pc.hook_fail_mode.strip():
+            return _normalize_hook_fail_mode(pc.hook_fail_mode)
+        if getattr(self, "_hook_fail_mode_saved", False) and self.hook_fail_mode.strip():
+            return _normalize_hook_fail_mode(self.hook_fail_mode)
         if standalone or self.secure_client_hook_fail_modes():
-            if owned:
-                application = cfg.application_protection
-                if application.enabled and connector_paths.normalize(connector) not in cfg.active_connectors():
-                    override = application._connector_override(connector)
-                    overlay = override.guardrail if override is not None else application.guardrail
-                    if overlay.hook_fail_mode.strip():
-                        return _normalize_hook_fail_mode(overlay.hook_fail_mode)
-            pc = self._connector_override(connector)
-            if pc is not None and pc.hook_fail_mode.strip():
-                return _normalize_hook_fail_mode(pc.hook_fail_mode)
-            if self.hook_fail_mode.strip():
-                return _normalize_hook_fail_mode(self.hook_fail_mode)
             return "closed" if standalone else "open"
         return "closed" if self.hook_policy_tier(connector) == "strict" else "open"
+
+    def effective_hook_outage_fail_mode(self, connector: str = "") -> str:
+        """What ``connector``'s hooks do while the gateway is down.
+
+        Mirrors Go ``Config.EffectiveHookOutageFailModeForConnector``: the
+        mode the current hooks, the OpenCode/Amp plugins and the shell helper
+        decide at call time, and the one Doctor, Status and the fail-mode
+        setter's runtime check read for them (GAP-1354, GAP-1730).
+        :meth:`effective_hook_fail_mode` already resolves it (a managed mode,
+        an explicit saved mode, else the connector's policy tier).
+        """
+        return self.effective_hook_fail_mode(connector)
 
     def hook_policy_tier(self, connector: str = "") -> str:
         """The connector's policy tier: its rule pack's posture (strict, default or permissive).
@@ -2950,7 +3155,8 @@ def _go_quote(value: Any) -> str:
 
 
 def _sandbox_enum_error(field_name: str, value: Any, *allowed: str) -> str | None:
-    if value in (None, "") or value in allowed:
+    # Any letter case, as the Go loader folds it (GAP-0691, #1226).
+    if value in (None, "") or (isinstance(value, str) and value.lower() in allowed):
         return None
     return f"{field_name} {_go_quote(value)} must be one of {', '.join(allowed)}"
 
@@ -4037,6 +4243,8 @@ class Config:
     fleet: FleetConfig = field(default_factory=FleetConfig)
     llm_providers: LLMProvidersConfig = field(default_factory=LLMProvidersConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
+    # The unified decision model (decision_model:); off by default.
+    decision_model: DecisionModelConfig = field(default_factory=DecisionModelConfig)
     # enterprise.openshell as loaded. Load only: Python never writes the
     # enterprise block (the lifecycle owns it), so saves leave it alone.
     enterprise_openshell: EnterpriseOpenShellConfig = field(
@@ -4343,6 +4551,16 @@ class Config:
         if override.model:
             out.model = override.model
         if override.provider:
+            # A role naming another provider and no instance of its own does
+            # not inherit the custom instance binding (GAP-2379); Go ResolveLLM
+            # applies the same rule.
+            role_provider = override.provider.strip().lower()
+            if (
+                not override.instance_name
+                and role_provider != "custom"
+                and role_provider != (out.provider or "").strip().lower()
+            ):
+                out.instance_name = ""
             out.provider = override.provider
         if override.api_key:
             out.api_key = override.api_key
@@ -4396,7 +4614,7 @@ class Config:
                     out.instance_name,
                 )
 
-        _maybe_warn_unknown_provider(out.provider_prefix(), path)
+        _maybe_warn_unknown_provider(out.provider_prefix(), path, out.instance_name)
         return out
 
     def resolved_default_llm_api_key(self) -> str:
@@ -4441,6 +4659,17 @@ class Config:
         except FileNotFoundError:
             return
         _existing_document_for_save(path, current)
+
+    def decide(self, *paths: str) -> None:
+        """Name config keys the next :meth:`save` writes as the caller's
+        decision, also when the value written equals the one on disk.
+
+        A save over the pre-1.0.4 default preset keeps its balanced MCP
+        compatibility only for the MCP severities no decided or changed key
+        covers (GAP-1488, ``config_writer._keep_chosen_admission``), so an
+        explicit quarantine is never compiled as a warning.
+        """
+        self.__dict__.setdefault("_decided_paths", []).extend(paths)
 
     def save(self, *, actor: str | None = None, reason: str = "") -> Any:
         """Persist this :class:`Config` through the single config writer.
@@ -4498,6 +4727,7 @@ class Config:
         from defenseclaw import config_writer
 
         dataclass_data = _config_to_dict(self)
+        decided = self.__dict__.pop("_decided_paths", [])
 
         def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
             merged = self._merged_document(path, dataclass_data, current)
@@ -4514,7 +4744,14 @@ class Config:
             reason or "config save",
             path=path,
             verify=verify,
+            decided=decided,
         )
+        # The admission pins the writer added (GAP-1488) go into this Config
+        # too, so it reads as the file it wrote.
+        for parts, value in result.pins.items():
+            self.admission.mcp.actions[parts[-1]] = value
+            written = dataclass_data.setdefault("admission", {}).setdefault("mcp", {}).setdefault("actions", {})
+            written[parts[-1]] = value
         if self._source_config_version == 0:
             self._source_config_version = CURRENT_CONFIG_VERSION
         self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
@@ -4557,7 +4794,7 @@ class Config:
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
-        _drop_retired_connector_settings(existing)
+        _drop_retired_connector_settings(existing, path)
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
@@ -4802,6 +5039,11 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         scanners.get("skill_scanner", {}).pop("virustotal_api_key", None)
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
+    # The public in-memory default remains "closed" for existing callers,
+    # but an unset document must stay unset in the modeled save baseline.
+    # Otherwise choosing "closed" in setup looks unchanged and is omitted.
+    if isinstance(guardrail, dict) and not getattr(cfg.guardrail, "_hook_fail_mode_saved", False):
+        guardrail.pop("hook_fail_mode", None)
     if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
         guardrail.pop("allow_private_upstreams", None)
     _strip_unset_levels(guardrail)
@@ -4817,6 +5059,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             judge.pop("hook_connectors", None)
         if not judge.get("hook_timeout"):
             judge.pop("hook_timeout", None)
+        if not judge.get("max_parallel"):
+            judge.pop("max_parallel", None)
     # Mirror Go's ``yaml:"connectors,omitempty"`` — drop the empty
     # per-connector overrides map so existing single-connector configs
     # stay byte-identical after a load/save round-trip. The block
@@ -4885,6 +5129,9 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         _prune_asset_policy_rules(d["asset_policy"])
     for key in ("admission", "llm_providers", "update"):
         _prune_v9_block(d, key)
+    # An untouched decision_model block (off, nothing set) is omitted so
+    # configs from earlier releases stay byte-identical on a round trip.
+    _prune_v9_block(d, "decision_model", drop_false=True)
     # Per-connector observability (D5b): drop the empty block (omitempty),
     # or serialize it with inherited (None) dimensions + webhook omitempty
     # stripped. Mirrors the asset_policy.connectors handling.
@@ -4955,6 +5202,8 @@ def _serialize_v9_guardrail_keys(guardrail: Any) -> None:
     _prune_v9_block(guardrail, "custom_packs")
     if not guardrail.get("cisco_trust_level"):
         guardrail.pop("cisco_trust_level", None)
+    if not guardrail.get("internal_domains"):
+        guardrail.pop("internal_domains", None)
     judge = guardrail.get("judge")
     if isinstance(judge, dict) and not judge.get("trace"):
         judge.pop("trace", None)
@@ -5263,6 +5512,8 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "guardrail.judge.hook_connectors",
         # Hook-lane judge timeout: 0 = gateway default, stripped on save.
         "guardrail.judge.hook_timeout",
+        # Judge call bound: 0 = no limit, stripped on save.
+        "guardrail.judge.max_parallel",
         # Identity-based guardrail profile selection: empty = no profiles.
         "guardrail.profile_assignments",
         "guardrail.default_profile",
@@ -6160,6 +6411,16 @@ def _merge_cisco_ai_defense(raw: dict[str, Any] | None) -> CiscoAIDefenseConfig:
     )
 
 
+def _judge_max_parallel(value: Any) -> int:
+    """guardrail.judge.max_parallel as an int (0 = no limit), as Go reads it."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
     if not raw:
         return JudgeConfig()
@@ -6174,6 +6435,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         timeout=raw.get("timeout", 30.0),
         hook_connectors=raw.get("hook_connectors", []),
         hook_timeout=raw.get("hook_timeout", 0.0),
+        max_parallel=_judge_max_parallel(raw.get("max_parallel", 0)),
         trace=raw.get("trace", False) is True,
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
@@ -6194,7 +6456,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         if isinstance(private_upstreams_raw, list | tuple)
         else []
     )
-    return GuardrailConfig(
+    merged = GuardrailConfig(
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
         scanner_mode=raw.get("scanner_mode", "both"),
@@ -6218,6 +6480,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
         rules=_merge_guardrail_rules(raw.get("rules")) or GuardrailRulesConfig(),
         cisco_trust_level=str(raw.get("cisco_trust_level", "") or ""),
+        internal_domains=_string_list(raw.get("internal_domains")),
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
         connector=raw.get("connector", ""),
@@ -6229,6 +6492,10 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         profile_assignments=_merge_guardrail_profile_assignments(raw.get("profile_assignments")),
         default_profile=str(raw.get("default_profile", "") or "").strip(),
     )
+    # The historical raw default is "closed"; keep presence for the OSS
+    # outage resolver without changing that public config value.
+    merged._hook_fail_mode_saved = bool(str(raw.get("hook_fail_mode", "") or "").strip())
+    return merged
 
 
 def _merge_guardrail_connectors(
@@ -6982,14 +7249,7 @@ def _merge_openshell_admin(raw: Any) -> OpenShellAdminConfig:
 def _merge_enterprise_openshell(raw: Any) -> EnterpriseOpenShellConfig:
     """Parse ``enterprise.openshell`` (load only; Go validates it)."""
     section = _openshell_mapping(_openshell_mapping(raw).get("openshell"))
-    return EnterpriseOpenShellConfig(
-        install=_openshell_str(section.get("install")),
-        driver=_openshell_str(section.get("driver")),
-        version=_openshell_str(section.get("version")),
-        gateway_port=_openshell_int(section.get("gateway_port")),
-        e2fsprogs_dir=_openshell_str(section.get("e2fsprogs_dir")),
-        driver_fallback=_openshell_str(section.get("driver_fallback")),
-    )
+    return EnterpriseOpenShellConfig(driver=_openshell_str(section.get("driver")))
 
 
 def _serialize_openshell(d: dict[str, Any]) -> None:
@@ -7106,7 +7366,9 @@ def _apply_instance_overlay(out: LLMConfig, data_dir: str, providers: list[dict[
             break
     if entry is None:
         return
-    if not out.provider:
+    # provider "custom" is what ``setup llm --provider custom --instance-name``
+    # saves: the bound instance's base_provider_type is the family (GAP-2393).
+    if not out.provider or out.provider.strip().lower() == "custom":
         bp = entry.get("base_provider_type") or entry.get("provider") or ""
         if isinstance(bp, str) and bp:
             out.provider = bp.strip().lower()
@@ -7289,7 +7551,13 @@ def _is_retired_connector_name(name: Any) -> bool:
     return isinstance(name, str) and name.strip().lower() in _RETIRED_CONNECTOR_NAMES
 
 
-def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
+# Set once _drop_retired_connector_settings has warned in this process.
+_retired_settings_warned = threading.Event()
+
+
+def _drop_retired_connector_settings(
+    raw: dict[str, Any], source: str | os.PathLike[str] | None = None, *, emit_warning: bool = True
+) -> None:
     """Until 1.1, accept old rosters and discard removed connector settings.
 
     Only connector fields are touched (mirrors ``dropRetiredConnectorSettings``
@@ -7401,10 +7669,16 @@ def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
     if isinstance(claw, dict) and _is_retired_connector_name(claw.get("mode")):
         claw["mode"] = ""
         changed = True
-    if changed:
-        logging.warning(
-            "until 1.1: removed OpenHands/OmniGent connector settings from loaded config; "
-            "run defenseclaw migrate"
+    if changed and emit_warning and not _retired_settings_warned.is_set():
+        # Once per process, through this module's logger: the root logger's
+        # implicit basicConfig printed a raw "WARNING:root:" line into the
+        # installer's output, and that line repeated the installers' one
+        # removal notice (GAP-2043). It names the file, which is what to fix.
+        _retired_settings_warned.set()
+        _log.warning(
+            "%s still names OpenHands/OmniGent, which DefenseClaw no longer supports; "
+            "they are ignored. Delete them from that file.",
+            os.fspath(source) if source else "config.yaml",
         )
 
 
@@ -7450,7 +7724,7 @@ def load(
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
-    _drop_retired_connector_settings(raw)
+    _drop_retired_connector_settings(raw, cfg_file)
     if without_guardrail_profiles:
         raw = _without_guardrail_profiles(raw)
 
@@ -7458,6 +7732,11 @@ def load(
     ss_raw = scanners_raw.get("skill_scanner", {})
     gw_raw = raw.get("gateway", {})
     source_config_version = _exact_config_version(raw.get("config_version"))
+    # config.yaml stays in the install home; the stores and folders the file
+    # leaves out are under the data_dir it names, as the gateway resolves them
+    # (GAP-2126: the CLI seeded and read <home>/policies after config set
+    # data_dir while the gateway read <data_dir>/policies).
+    data_dir = _configured_data_dir(raw, data_dir)
     audit_db = _audit_database_path(raw, data_dir)
 
     cfg = Config(
@@ -7551,6 +7830,7 @@ def load(
         admission=_merge_admission(raw.get("admission")),
         llm_providers=_merge_llm_providers(raw.get("llm_providers")),
         update=_merge_update(raw.get("update")),
+        decision_model=_merge_decision_model(raw.get("decision_model")),
         enterprise_openshell=_merge_enterprise_openshell(raw.get("enterprise")),
         enterprise_profile=str((raw.get("enterprise") or {}).get("profile") or "")
         if isinstance(raw.get("enterprise"), dict)
@@ -7628,6 +7908,15 @@ def _exact_config_version(value: Any) -> int:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return 0
+
+
+def _configured_data_dir(raw: dict[str, Any], home: str) -> str:
+    """The data_dir config.yaml sets (``~/`` expanded, made absolute like the
+    Go compiler), else ``home``: the folder the omitted paths are under."""
+    configured = raw.get("data_dir")
+    if not isinstance(configured, str) or not configured.strip():
+        return home
+    return os.path.abspath(os.path.normpath(_expand_store_home(configured.strip())))
 
 
 def _audit_database_path(raw: dict[str, Any], data_dir: str) -> str:
@@ -7949,3 +8238,35 @@ def prepare_fresh_v8_config(cfg: Config) -> Config:
     cfg._source_config_version = CURRENT_CONFIG_VERSION
     cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
+
+
+def saved_hook_fail_mode_scope(guardrail: Any, connector: str = "") -> str:
+    """Where an explicitly saved ``hook_fail_mode`` that decides ``connector`` lives.
+
+    ``"connector"`` for the connector's own saved mode, ``"global"`` for a
+    saved top-level one, ``""`` when none is saved and the policy tier decides
+    (:meth:`GuardrailConfig.effective_hook_fail_mode`). A saved mode wins over
+    ``guardrail use-pack strict``, so a hint to close an outage names
+    ``guardrail fail-mode closed`` then (GAP-0039).
+    """
+    override = (getattr(guardrail, "connectors", None) or {}).get(connector)
+    if override is not None and str(getattr(override, "hook_fail_mode", "") or "").strip():
+        return "connector"
+    value = str(getattr(guardrail, "hook_fail_mode", "") or "").strip()
+    if value and getattr(guardrail, "_hook_fail_mode_saved", True):
+        return "global"
+    return ""
+
+
+def outage_block_hint(guardrail: Any, connector: str = "") -> str:
+    """The command that makes a per-user ``connector``'s hooks block while the gateway is down.
+
+    ``guardrail fail-mode closed`` (``--connector NAME`` for the connector's
+    own save) when a saved open decides it, else the strict policy (GAP-0039).
+    """
+    scope = saved_hook_fail_mode_scope(guardrail, connector)
+    if scope == "connector":
+        return f"defenseclaw guardrail fail-mode closed --connector {connector}"
+    if scope == "global":
+        return "defenseclaw guardrail fail-mode closed"
+    return "defenseclaw guardrail use-pack strict"

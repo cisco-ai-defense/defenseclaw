@@ -56,7 +56,7 @@ var sandboxGoldenTargets = []struct {
 	{"cursor", NewCursorConnector(), "2026.07.23-e383d2b"},
 	{"devin", NewDevinConnector(), "3000.4.25"},
 	{"kiro", NewKiroConnector(), "2.24.1"},
-	{"opencode", NewOpenCodeConnector(), "1.18.31"},
+	{"opencode", NewOpenCodeConnector(), "2.1.4"},
 	{"antigravity", NewAntigravityConnector(), "1.2.12"},
 	{"hermes", NewHermesConnector(), "0.19.0"},
 }

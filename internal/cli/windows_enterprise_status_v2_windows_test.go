@@ -80,7 +80,7 @@ func TestWindowsStatusV2Blocks(t *testing.T) {
 		}
 	}
 	for name, state := range result.Connectors {
-		if want := enterprisehooks.ManagedHookFailMode(cfg, name); state.EffectiveHookFailMode != want {
+		if want := enterprisehooks.ManagedStatusHookFailMode(cfg, name, "windows", state.ManagedHook != nil && *state.ManagedHook); state.EffectiveHookFailMode != want {
 			t.Fatalf("%s: effective_hook_fail_mode %q, the Windows renderer writes %q", name, state.EffectiveHookFailMode, want)
 		}
 	}
@@ -115,8 +115,9 @@ func TestWindowsStatusV2Blocks(t *testing.T) {
 
 // GAP-1433: the unobservable session-only home is reported NOT COVERED, never
 // certified, and never a verify failure: lifecycle verify exits 0 with
-// coverage and security incomplete, as on Linux and macOS. Public hooks
-// verify still refuses to attest the home (GAP-0766).
+// security incomplete, as on Linux and macOS. Public hooks verify still
+// refuses to attest the home (GAP-0766). GAP-1593: the installed hooks keep
+// coverage_complete true; the platform limit is a warning.
 func TestWindowsVerifyV2ReportsUnobservableHermesSessionHomeNotCovered(t *testing.T) {
 	previousAudit := windowsManagedHermesCoverageAudit
 	checks := 0
@@ -135,7 +136,7 @@ func TestWindowsVerifyV2ReportsUnobservableHermesSessionHomeNotCovered(t *testin
 	result.Installed, result.CoverageComplete, result.SecurityComplete = true, true, true
 	applyWindowsEnterpriseStatusV2(result)
 	if code := result.Finish("windows", 0); code != 0 || !result.OK || len(result.Errors) != 0 ||
-		result.SecurityComplete || result.CoverageComplete {
+		result.SecurityComplete || !result.CoverageComplete {
 		t.Fatalf("unverified Hermes verify result: code=%d ok=%v errors=%+v security=%v coverage=%v", code, result.OK, result.Errors, result.SecurityComplete, result.CoverageComplete)
 	}
 	if message := strings.Join(messagesOfCode(result.Warnings, enterprisestatus.CodeStatusDetailUnavailable), "\n"); !strings.Contains(message, "session-only HERMES_HOME") ||
@@ -160,7 +161,7 @@ func TestWindowsVerifyV2ReportsUnobservableHermesSessionHomeNotCovered(t *testin
 	ensure.Installed, ensure.CoverageComplete, ensure.SecurityComplete = true, true, true
 	ensure.Readiness.Gateway = true
 	applyWindowsEnterpriseStatusV2(ensure)
-	if code := ensure.Finish("windows", 0); code != 0 || ensure.SecurityComplete || ensure.CoverageComplete || ensure.Connectors != nil ||
+	if code := ensure.Finish("windows", 0); code != 0 || ensure.SecurityComplete || !ensure.CoverageComplete || ensure.Connectors != nil ||
 		messagesWithCode(ensure.Warnings, enterprisestatus.CodeStatusDetailUnavailable) != 1 {
 		t.Fatalf("ensure with unverified Hermes: code=%d security=%v coverage=%v connectors=%v warnings=%+v",
 			code, ensure.SecurityComplete, ensure.CoverageComplete, ensure.Connectors, ensure.Warnings)

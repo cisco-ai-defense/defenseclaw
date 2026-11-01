@@ -199,6 +199,85 @@ def normalize_site_packages(root: Path) -> dict[str, int]:
     }
 
 
+#: Windows PE machine type of the only architecture Setup installs.
+IMAGE_FILE_MACHINE_AMD64 = 0x8664
+
+#: Non-x64 portable executables a pinned wheel ships that the Windows x64
+#: runtime never runs, removed on purpose (Setup refuses any non-x64 PE in its
+#: payload). pip, which MCP Scanner 4.8 pulls in through pip-audit, vendors
+#: distlib's script launchers for every Windows architecture; on x64 CPython
+#: distlib only uses t64.exe and w64.exe, which stay. Any other non-x64 PE
+#: fails the build here instead of failing Setup on a user's machine.
+FOREIGN_PE_REMOVALS = frozenset(
+    {
+        "pip/_vendor/distlib/t32.exe",
+        "pip/_vendor/distlib/t64-arm.exe",
+        "pip/_vendor/distlib/w32.exe",
+        "pip/_vendor/distlib/w64-arm.exe",
+    }
+)
+
+
+def _pe_machine(path: Path) -> int | None:
+    """The PE header's machine type, or ``None`` when *path* is not a PE."""
+
+    with path.open("rb") as stream:
+        header = stream.read(64)
+        if len(header) < 64 or header[:2] != b"MZ":
+            return None
+        offset = int.from_bytes(header[0x3C:0x40], "little", signed=True)
+        if offset < 0:
+            return None
+        stream.seek(offset)
+        signature = stream.read(6)
+    if len(signature) < 6 or signature[:4] != b"PE\0\0":
+        return None
+    return int.from_bytes(signature[4:6], "little")
+
+
+def prune_foreign_portable_executables(root: Path) -> dict[str, object]:
+    """Remove the listed non-x64 PEs from site-packages and repair RECORD.
+
+    Raises ``ArtifactError`` for a non-x64 PE that is not listed, so a new
+    one is a reviewed decision rather than a Setup failure.
+    """
+
+    root = root.resolve(strict=True)
+    if not root.is_dir():
+        raise ArtifactError(f"site-packages root is not a directory: {root}")
+    removed: list[str] = []
+    unexpected: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        machine = _pe_machine(path)
+        if machine is None or machine == IMAGE_FILE_MACHINE_AMD64:
+            continue
+        relative = path.relative_to(root).as_posix()
+        if relative in FOREIGN_PE_REMOVALS:
+            path.unlink()
+            removed.append(relative)
+        else:
+            unexpected.append(f"{relative} (machine 0x{machine:04x})")
+    if unexpected:
+        raise ArtifactError(
+            "non-x64 portable executables in the Windows x64 runtime (Setup refuses them): "
+            + ", ".join(unexpected)
+        )
+    removed_set = set(removed)
+    rewritten_records = 0
+    for record in sorted(root.glob("*.dist-info/RECORD")):
+        rows = list(csv.reader(io.StringIO(record.read_text(encoding="utf-8-sig"))))
+        retained = [row for row in rows if not (row and row[0].replace("\\", "/") in removed_set)]
+        if len(retained) == len(rows):
+            continue
+        output = io.StringIO(newline="")
+        csv.writer(output, lineterminator="\n").writerows(retained)
+        record.write_text(output.getvalue(), encoding="utf-8", newline="\n")
+        rewritten_records += 1
+    return {"removed_foreign_pe": removed, "rewritten_records": rewritten_records}
+
+
 def _parse_go_build_info(output: str) -> dict:
     lines = output.splitlines()
     if not lines:
@@ -1230,6 +1309,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     normalize_parser.add_argument("--root", type=Path, required=True)
 
+    prune_parser = subparsers.add_parser(
+        "prune-foreign-pe", help="remove the listed non-x64 PEs from site-packages; refuse any other"
+    )
+    prune_parser.add_argument("--root", type=Path, required=True)
+
     go_parser = subparsers.add_parser("go-inventory", help="inventory Go modules in exact payload binaries")
     go_parser.add_argument("--go", type=Path, required=True)
     go_parser.add_argument("--output", type=Path, required=True)
@@ -1258,6 +1342,8 @@ def main() -> int:
             result = {"output": str(args.output.resolve()), "sha256": _file_digests(args.output)[0]}
         elif args.command == "normalize-site":
             result = normalize_site_packages(args.root)
+        elif args.command == "prune-foreign-pe":
+            result = prune_foreign_portable_executables(args.root)
         elif args.command == "go-inventory":
             result = create_go_inventory(args.go, args.output, args.component)
         else:

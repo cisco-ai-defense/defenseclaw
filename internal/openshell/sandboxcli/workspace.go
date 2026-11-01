@@ -684,9 +684,16 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 			if err != nil {
 				return
 			}
-			if now.Phase == "ready" {
+			switch now.Phase {
+			case "ready", "starting", "provisioning":
+				// A session started it during this pull. The line says so
+				// whether or not its terminal has attached yet: a connect
+				// 0.3 s after the pull is still starting the sandbox when
+				// the pull ends (GAP-0756).
 				if n, err := a.attachedSessions(o.Name); err == nil && n > 0 {
 					a.note(o.Name + " keeps running: " + attachedText(o.Name, n) + " → stop it once " + map[bool]string{true: "it ends", false: "they end"}[n == 1] + ": " + CommandName + " stop " + o.Name)
+				} else {
+					a.note(o.Name + " keeps running: another command started it during this pull → stop it once you are done with it: " + CommandName + " stop " + o.Name)
 				}
 				return
 			}
@@ -986,6 +993,13 @@ func (a *App) reusePull(ctx context.Context, sb *sandboxapi.Sandbox) (*workspace
 
 // pull captures the sandbox's work, saying so when announce is set.
 func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxapi.Sandbox, announce bool) (*workspace.PullResult, error) {
+	// One pull of a sandbox at a time: two ran git in its copy at once,
+	// and the second failed on git's lock (GAP-1856).
+	release, err := a.lockPull(ctx, sb.Name)
+	if err != nil {
+		return nil, fmt.Errorf("pull %s: %w", sb.Name, err)
+	}
+	defer release()
 	if announce {
 		a.note("Pulling " + sb.Name + "'s work…")
 	}

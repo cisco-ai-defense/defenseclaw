@@ -14,6 +14,9 @@ import (
 // short alias yet, so use the nearest existing parent and keep its suffix.
 func actionWindowsExpandShortPath(value string) (string, bool) {
 	full := strings.ReplaceAll(value, "/", `\`)
+	if networkPathUnanswered(full) {
+		return "", false
+	}
 	for prefix := full; ; {
 		name, err := windows.UTF16PtrFromString(prefix)
 		if err != nil {

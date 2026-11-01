@@ -19,6 +19,14 @@ func TestWindowsClaudeManagedRuntimeVersionReportAcceptsManagementContract(t *te
 	if err := checkWindowsClaudeManagedRuntimeVersionReport(bundle, "1.2.3"); err != nil {
 		t.Fatalf("report with secret_set_bundle: %v", err)
 	}
+	refresh := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3","commit":"abc","built":"now","management_contract":1,"secret_set_bundle":true,"identity_refresh":true}` + "\n")
+	if err := checkWindowsClaudeManagedRuntimeVersionReport(refresh, "1.2.3"); err != nil {
+		t.Fatalf("report with identity_refresh: %v", err)
+	}
+	refreshType := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3","identity_refresh":1}`)
+	if err := checkWindowsClaudeManagedRuntimeVersionReport(refreshType, "1.2.3"); err == nil {
+		t.Fatal("report with a non-boolean identity_refresh was accepted")
+	}
 	wrongType := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3","secret_set_bundle":"true"}`)
 	if err := checkWindowsClaudeManagedRuntimeVersionReport(wrongType, "1.2.3"); err == nil {
 		t.Fatal("report with a non-boolean capability was accepted")

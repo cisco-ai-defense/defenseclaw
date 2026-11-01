@@ -714,6 +714,128 @@ private final class GatewayAdminLifetime {
     }
 }
 
+/// Vendor machine-policy folders agents read administrator policy from on
+/// macOS (the DefenseClaw runtime's own machine-policy locations). The
+/// runtime's install watcher used to create a missing watch root with mode
+/// 0700, so a gateway running as root left `/etc/codex` root-owned and
+/// unreadable; Codex treats an existing `/etc/codex` as an administrator
+/// policy layer and pauses with "Organization settings could not be loaded"
+/// when it cannot read it. After every administrator gateway action the
+/// helper repairs such folders: an unreadable, root-owned folder tree that
+/// holds nothing but empty folders is removed (`rmdir` only, deepest first);
+/// one with content is left private for an administrator to review. Readable
+/// folders, files, symlinks and folders owned by anyone else are never touched.
+/// Only this fixed list is inspected; no client path is ever used.
+enum GatewayAdminVendorPolicyGuard {
+    static let vendorPolicyDirectories = [
+        "/etc/codex",
+        "/etc/cursor",
+        "/etc/github-copilot",
+        "/Library/Application Support/ClaudeCode",
+        "/Library/Application Support/opencode",
+    ]
+    /// The watcher creates its roots shortly after the gateway daemonizes,
+    /// so a start keeps checking for a short settle window.
+    static let settleWindow: Duration = .seconds(8)
+    static let settleInterval: Duration = .milliseconds(500)
+    private static let maximumTreeDepth = 16
+    private static let maximumTreeEntries = 512
+
+    struct Outcome {
+        var removed: [String] = []
+        var preserved: [String] = []
+        var notes: [String] = []
+    }
+
+    /// Repairs after `action`; returns text for the Activity record (empty
+    /// when nothing needed repair).
+    static func settle(after action: GatewayAdminAction, owner: uid_t = 0,
+                       directories: [String] = vendorPolicyDirectories,
+                       window: Duration = settleWindow) -> String {
+        var notes: [String] = []
+        var seen = Set<String>()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: action == .stop ? .zero : window)
+        while true {
+            for note in sweep(directories: directories, owner: owner).notes where seen.insert(note).inserted {
+                notes.append(note)
+            }
+            if clock.now >= deadline { break }
+            usleep(UInt32(settleInterval.components.attoseconds / 1_000_000_000_000) + UInt32(settleInterval.components.seconds * 1_000_000))
+        }
+        return notes.isEmpty ? "" : "\n" + notes.joined(separator: "\n") + "\n"
+    }
+
+    /// One pass over `directories`: removes empty watcher artifacts and leaves
+    /// populated private policy directories unchanged.
+    static func sweep(directories: [String], owner: uid_t) -> Outcome {
+        var outcome = Outcome()
+        for directory in directories {
+            guard isRealDirectoryChain(directory),
+                  let status = lstatStatus(directory),
+                  status.st_uid == owner,
+                  status.st_mode & S_IXOTH == 0
+            else { continue }
+            if let tree = emptyDirectoryTree(directory, depth: 0, counted: 0)?.0 {
+                var removedAll = true
+                for path in tree.reversed() where rmdir(path) != 0 {
+                    removedAll = false
+                    break
+                }
+                if removedAll {
+                    outcome.removed.append(directory)
+                    outcome.notes.append("Removed \(directory): a root-owned, unreadable folder holding only empty folders (created by the gateway's install watcher). Agents treat its presence as administrator policy.")
+                    continue
+                }
+            }
+            outcome.preserved.append(directory)
+            outcome.notes.append("Left \(directory) private: it contains policy content or could not be safely inspected. An administrator must review its permissions; no access was broadened.")
+        }
+        return outcome
+    }
+
+    private static func lstatStatus(_ path: String) -> stat? {
+        var status = stat()
+        guard lstat(path, &status) == 0 else { return nil }
+        return status
+    }
+
+    private static func isRealDirectory(_ status: stat) -> Bool {
+        status.st_mode & S_IFMT == S_IFDIR
+    }
+
+    /// Every component from the root down must be a real directory — a
+    /// symlinked ancestor could redirect the repair elsewhere.
+    private static func isRealDirectoryChain(_ directory: String) -> Bool {
+        guard directory.hasPrefix("/") else { return false }
+        var current = "/"
+        for component in directory.split(separator: "/") where !component.isEmpty {
+            current = (current as NSString).appendingPathComponent(String(component))
+            guard let status = lstatStatus(current), isRealDirectory(status) else { return false }
+        }
+        return true
+    }
+
+    /// The directories of a tree that holds nothing but directories, parents
+    /// first; nil when a file, link or anything else is present, or the
+    /// tree is too deep or wide to judge.
+    private static func emptyDirectoryTree(_ directory: String, depth: Int, counted: Int) -> ([String], Int)? {
+        guard depth <= maximumTreeDepth else { return nil }
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: directory) else { return nil }
+        var tree = [directory]
+        var count = counted + entries.count
+        guard count <= maximumTreeEntries else { return nil }
+        for entry in entries {
+            let child = (directory as NSString).appendingPathComponent(entry)
+            guard let status = lstatStatus(child), isRealDirectory(status) else { return nil }
+            guard let (subtree, subcount) = emptyDirectoryTree(child, depth: depth + 1, counted: count) else { return nil }
+            tree += subtree
+            count = subcount
+        }
+        return (tree, count)
+    }
+}
+
 private final class GatewayAdminSession: NSObject, GatewayAdminProtocol {
     private let uid: uid_t
     private let queue: DispatchQueue
@@ -756,7 +878,11 @@ private final class GatewayAdminSession: NSObject, GatewayAdminProtocol {
                         }
                     )
                 }
-                reply(outcome.0, outcome.1)
+                // Repair vendor policy folders a root gateway may have left
+                // unreadable, after the action and outside the authorization
+                // scope: only empty watcher-created trees may be removed.
+                let repair = GatewayAdminVendorPolicyGuard.settle(after: operation)
+                reply(outcome.0, outcome.1 + repair)
             } catch let error as GatewayAdminFailure {
                 reply(error.exitCode, error.localizedDescription)
             } catch {

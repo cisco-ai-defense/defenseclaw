@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from typing import TYPE_CHECKING
 
@@ -175,6 +176,48 @@ def inject_llm_env(llm: LLMConfig, *, overwrite: bool = False) -> list[str]:
     return touched
 
 
+def drop_unsupported_litellm_params() -> None:
+    """Let LiteLLM drop a request parameter the judge model does not take (GAP-2612).
+
+    The scanner SDKs send fixed sampling settings: skill-scanner asks for
+    ``temperature=0.0`` and the mcp-scanner readiness judge for 0.1, which
+    GPT-5.6 Luna on Bedrock refuses (only 1 is supported), so LiteLLM raised
+    UnsupportedParamsError before the request and the LLM analyzer was
+    skipped. With ``drop_params`` LiteLLM leaves out such a parameter and the
+    model answers with its own default, as DefenseClaw does for its own calls
+    (``defenseclaw.llm``) and skill-scanner does for each of its calls.
+    Process-wide on purpose: a scan may run in worker threads, and no scanner
+    needs a refused parameter to fail the call. LiteLLM keeps a temperature
+    of 1 for these models, which Bedrock still refuses; see
+    :func:`model_refuses_temperature`.
+    """
+    try:
+        import litellm
+    except ImportError:
+        return
+    litellm.drop_params = True
+
+
+# OpenAI's reasoning models (GPT-5 and the o-series) under any provider prefix
+# or Bedrock profile: "openai/gpt-5.5", "bedrock/us.openai.gpt-5.6-luna",
+# "o3-mini". Same pattern as openAIReasoningModelPattern in
+# internal/gateway/provider_bedrock_route.go.
+_OPENAI_REASONING_MODEL = re.compile(r"(?:^|[/.])(?:gpt-5|o[1-9](?:-|$))")
+
+
+def model_refuses_temperature(model: str) -> bool:
+    """Whether *model* takes only its default sampling temperature.
+
+    OpenAI answers 400 to any value but 1 for these models, and Bedrock
+    refuses the field for them outright ("This model doesn't support the
+    temperature field"), even the 1 LiteLLM's ``drop_params`` lets through.
+    Leaving the field out is the same request everywhere, because 1 is their
+    default. The gateway judge already sends no temperature for them
+    (``modelRefusesTemperature``, GAP-2639).
+    """
+    return bool(_OPENAI_REASONING_MODEL.search((model or "").strip().lower()))
+
+
 def litellm_model(llm: LLMConfig) -> str:
     """Return the model string shaped for LiteLLM.
 
@@ -185,9 +228,32 @@ def litellm_model(llm: LLMConfig) -> str:
     passed through unchanged (the caller should handle that).
     """
     model = llm.model or ""
-    if model and llm.provider and "/" not in model:
-        return f"{llm.provider}/{model}"
-    return model
+    if model and "/" not in model:
+        # provider_prefix() is llm.provider, or "bedrock" for an unprefixed
+        # Bedrock id, which LiteLLM then signs for Bedrock instead of failing
+        # with "Authentication failed" (GAP-2640).
+        provider = llm.provider_prefix()
+        if provider:
+            model = f"{provider}/{model}"
+    return _with_bedrock_inference_profile(llm, model)
+
+
+def _with_bedrock_inference_profile(llm: LLMConfig, model: str) -> str:
+    """Put ``llm.bedrock.inference_profile`` (e.g. ``us.``) before a Bedrock id.
+
+    The gateway provider does this before dispatch; models such as Claude
+    Haiku 4.5 are served only through a cross-region inference profile, so
+    the scanner judge sent the bare id and failed (GAP-2396). Mirrors
+    ``withBedrockInferenceProfile`` in internal/scanner/skill.go.
+    """
+    bedrock = getattr(llm, "bedrock", None)
+    profile = (getattr(bedrock, "inference_profile", "") or "").strip() if bedrock else ""
+    if not profile:
+        return model
+    prefix, sep, model_id = model.partition("/")
+    if not sep or prefix.lower() != "bedrock" or "/" in model_id or model_id.startswith(("arn:", profile)):
+        return model
+    return f"{prefix}/{profile}{model_id}"
 
 
 def llm_analyzer_ready(

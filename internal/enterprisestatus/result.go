@@ -178,6 +178,14 @@ type Result struct {
 	SecurityComplete   bool                          `json:"security_complete"`
 	Errors             []Message                     `json:"errors"`
 	Warnings           []Message                     `json:"warnings,omitempty"`
+	// PendingApply marks a Linux or macOS status that found another
+	// lifecycle run applying a change (the apply trigger applying a pushed
+	// config.yaml, secret or policy file, or an ensure, repair or upgrade
+	// that holds the lifecycle lock). Such a status checked nothing but the
+	// installed version, which is not a failure: it is ok, names the run in
+	// a lifecycle_busy warning and still exits 75, so a management agent
+	// asks again (GAP-0129). Omitted otherwise.
+	PendingApply bool `json:"pending_apply,omitempty"`
 	// Changes lists, in plain words, what a Linux or macOS repair or ensure
 	// changed on a deployment that was already installed (files rewritten,
 	// services started, per-account hooks rewritten), which key a
@@ -194,6 +202,10 @@ type Result struct {
 	// enforces; nil (omitted) when neither exists.
 	Bundle      *BundleState   `json:"bundle,omitempty"`
 	LastRefusal *BundleRefusal `json:"last_refusal,omitempty"`
+	// EnforcementPending counts the running agent sessions this result
+	// names as not enforced until they restart, with their connector names;
+	// omitted when there are none (enforcement_pending.go).
+	EnforcementPending *EnforcementPending `json:"enforcement_pending,omitempty"`
 	// Scanners is the standalone Windows scanner runtime (skill, MCP and
 	// plugin scanners); nil (omitted) everywhere else.
 	Scanners *ScannerRuntime `json:"scanners,omitempty"`
@@ -201,6 +213,10 @@ type Result struct {
 	// installed config.yaml with their effective redaction profiles, from the
 	// compiler `defenseclaw observability plan` uses (GAP-1105).
 	Destinations []Destination `json:"destinations,omitempty"`
+	// AuditStore is, for Linux and macOS status, the local audit store of
+	// the installed config.yaml: retention, size cap and size on disk; nil
+	// when the config does not compile (GAP-0141).
+	AuditStore *AuditStore `json:"audit_store,omitempty"`
 	// Connectors, OpenShell and Identity are the status v2 blocks of status
 	// and verify on the standalone profile (connector_block.go,
 	// openshell_block.go, identity_block.go); nil (omitted) elsewhere.
@@ -216,6 +232,84 @@ type Result struct {
 	// PreserveNotRootDeploymentState retains the pre-1.0 Secure Client JSON
 	// shape for an unelevated macOS lifecycle command.
 	PreserveNotRootDeploymentState bool `json:"-"`
+
+	// securityBy and coverageBy are why security_complete and
+	// coverage_complete are false (MarkSecurityIncomplete,
+	// MarkCoverageIncomplete); Finish names them on Linux and macOS.
+	securityBy, coverageBy []string
+	// pendingSessions are the sessions NotePendingSession recorded, by
+	// process id.
+	pendingSessions map[int]string
+}
+
+// CodeSecurityIncomplete is the warning that names why security_complete
+// (and coverage_complete) is false. Windows Setup uses it when no other
+// warning explains an incomplete result; Linux and macOS status, verify and
+// the package result list the warning codes behind each field, so an upgrade
+// that turns a field false says which check did (GAP-1861, GAP-1863).
+const CodeSecurityIncomplete = "security_incomplete"
+
+// MarkSecurityIncomplete sets security_complete false for reason: the code of
+// the warning or error that says why, or a short phrase when no warning does.
+func (r *Result) MarkSecurityIncomplete(reason string) {
+	r.SecurityComplete = false
+	r.securityBy = appendReason(r.securityBy, reason)
+}
+
+// MarkCoverageIncomplete sets coverage_complete and security_complete false
+// for reason (see MarkSecurityIncomplete).
+func (r *Result) MarkCoverageIncomplete(reason string) {
+	r.CoverageComplete = false
+	r.coverageBy = appendReason(r.coverageBy, reason)
+	r.MarkSecurityIncomplete(reason)
+}
+
+// ResetCompleteness starts the completeness verdict again: both fields true,
+// no reason. The Linux and macOS describe pass computes them from scratch.
+func (r *Result) ResetCompleteness() {
+	r.CoverageComplete, r.SecurityComplete = true, true
+	r.securityBy, r.coverageBy = nil, nil
+}
+
+func appendReason(reasons []string, reason string) []string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || slices.Contains(reasons, reason) {
+		return reasons
+	}
+	return append(reasons, reason)
+}
+
+// nameIncompleteFields replaces the security_incomplete warning with one that
+// lists why each false field is false. A field that ended true drops its
+// reasons (a later pass recomputed it); a result whose only reasons are its
+// errors gets no warning, the errors say it.
+func (r *Result) nameIncompleteFields() {
+	if r.CoverageComplete {
+		r.coverageBy = nil
+	}
+	if r.SecurityComplete {
+		r.securityBy = nil
+	}
+	warnings := make([]Message, 0, len(r.Warnings)+1)
+	for _, warning := range r.Warnings {
+		if warning.Code != CodeSecurityIncomplete {
+			warnings = append(warnings, warning)
+		}
+	}
+	r.Warnings = warnings
+	if r.SecurityComplete || len(r.securityBy) == 0 {
+		return
+	}
+	message := "security_complete is false because of: " + strings.Join(r.securityBy, ", ")
+	if len(r.Errors) > 0 {
+		message += " and the errors above"
+	}
+	if r.CoverageComplete {
+		message += "; coverage_complete is true"
+	} else if len(r.coverageBy) > 0 {
+		message += "; coverage_complete is false because of: " + strings.Join(r.coverageBy, ", ")
+	}
+	r.Warnings = append(r.Warnings, Message{Code: CodeSecurityIncomplete, Message: message + "; each warning above says what to do"})
 }
 
 // ScannerRuntime reports the scanners a standalone Windows deployment runs.
@@ -431,14 +525,29 @@ func (r *Result) AddWarning(code, message string) {
 // not verify an enrolled target's hooks, so a script that read the flag
 // was told the host was protected (GAP-0664).
 func (r *Result) Finish(goos string, failureCode int) int {
+	var scan *SessionRestartStatus
 	if r.Bundle != nil && r.Bundle.SessionsRestartRequired != nil && r.Bundle.SessionsRestartRequired.Count > 0 {
-		r.CoverageComplete, r.SecurityComplete = false, false
+		scan = r.Bundle.SessionsRestartRequired
+		code, _ := SessionWarning(*scan)
+		r.MarkCoverageIncomplete(code)
+	}
+	// A result read back from another process keeps the summary it carried.
+	if pending := summarizePending(r.pendingSessions, scan); pending != nil {
+		r.EnforcementPending = pending
 	}
 	r.OK = len(r.Errors) == 0
 	if !r.OK {
 		r.SecurityComplete = false
 	}
+	if goos != "windows" {
+		r.nameIncompleteFields()
+	}
 	switch {
+	case r.OK && r.PendingApply:
+		// A status that found a change being applied is not a failure, but
+		// its caller asks again for the full state: 75, as before
+		// pending_apply existed.
+		r.ExitCode = BusyExitCode(goos)
 	case r.OK:
 		r.ExitCode = ExitOK
 	case failureCode != 0:

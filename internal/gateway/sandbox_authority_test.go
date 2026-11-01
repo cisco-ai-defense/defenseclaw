@@ -308,6 +308,18 @@ func TestSandboxAuthorityTwoAccounts(t *testing.T) {
 
 // Revocation and a restarted gateway: the store persists, a tombstone
 // stays revoked, and policy/current reports it.
+// A managed sandbox route without the CSRF client header is refused like
+// every other CSRF refusal: 403 with a JSON body and Content-Type
+// application/json (GAP-2540).
+func TestSandboxAuthorityMissingClientHeaderIsAJSONRefusal(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(), map[string]string{sandboxrelay.ClientHeader: "", sandboxrelay.ConnectorHeader: "claudecode"})
+	if rec.Code != http.StatusForbidden || rec.Header().Get("Content-Type") != "application/json" ||
+		rec.Body.String() != "{\"error\":\"missing X-DefenseClaw-Client header\"}\n" {
+		t.Fatalf("missing client header: status %d Content-Type %q body %q", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+}
+
 func TestSandboxAuthorityRevokedAndRestart(t *testing.T) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
 	f.setGroups(sbxAlice, "dc-sbx-contractors")
@@ -404,6 +416,12 @@ func TestSandboxAuthorityRegistrationFollowsTheSandbox(t *testing.T) {
 	if rec := decide(sandboxrelay.DecisionEgressBlock, sandboxrelay.DecisionScopeAlways); rec.Code != http.StatusOK {
 		t.Fatalf("saved decision of a stopped sandbox: %d %s", rec.Code, rec.Body.String())
 	}
+	// A report only moves it toward stopped; a start registers it again
+	// (GAP-0673).
+	if code, _ := f.report(sbxBob, id, true); code != http.StatusForbidden {
+		t.Fatalf("running report after a reported stop: %d", code)
+	}
+	id = restartedRegistration(t, f, sbxBob, id)
 	if code, _ := f.report(sbxBob, id, true); code != http.StatusOK {
 		t.Fatalf("running report: %d", code)
 	}

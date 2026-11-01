@@ -364,6 +364,28 @@ func windowsNamespacePurgeCanonicalDescriptors(
 	if err != nil {
 		return nil, err
 	}
+	// A LocalSystem writer (transaction recovery, the hook guardian's
+	// restore) leaves an installed file owned by SYSTEM with the same
+	// protected DACL. SYSTEM is as trusted an owner as Administrators, and
+	// the forced uninstall refused such a hook binary as foreign
+	// (GAP-1902); only the owner and group may differ.
+	systemInstallFile, err := build(
+		"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)",
+		"SystemInstallFile",
+	)
+	if err != nil {
+		return nil, err
+	}
+	systemServiceInstallFile, err := build(
+		fmt.Sprintf(
+			"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)(A;;0x1200a9;;;%s)",
+			gatewaySID,
+		),
+		"SystemServiceInstallFile",
+	)
+	if err != nil {
+		return nil, err
+	}
 	return &windowsNamespacePurgeDescriptorSet{
 		directories: []*windows.SECURITY_DESCRIPTOR{
 			adminDirectory,
@@ -374,6 +396,8 @@ func windowsNamespacePurgeCanonicalDescriptors(
 			adminFile,
 			installFile,
 			serviceInstallFile,
+			systemInstallFile,
+			systemServiceInstallFile,
 		},
 		quarantine: adminDirectory,
 		adminFile:  adminFile,

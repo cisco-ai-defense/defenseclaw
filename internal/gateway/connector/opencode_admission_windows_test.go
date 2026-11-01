@@ -17,7 +17,27 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
-const openCodeAdmissionTestRawVersion = "1.18.19"
+const openCodeAdmissionTestRawVersion = "2.1.4"
+
+func TestOpenCodeV2WindowsPackageIdentity(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	plugin := filepath.Join(root, "node_modules", "@opencode", "cli", "bin", "opencode.exe")
+	if err := os.MkdirAll(filepath.Dir(plugin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{{"opencode-ai", false}, {"@opencode/lookalike", false}, {"@opencode/cli", true}} {
+		data, _ := json.Marshal(map[string]string{"name": tc.name})
+		if err := os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(plugin)), "package.json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := OpenCodeWindowsPackageIdentityVerified(plugin); got != tc.want {
+			t.Fatalf("package %s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
 
 func TestOpenCodeProtectedLockPersistsExactAuthorityAfterReceiptRemoval(t *testing.T) {
 	opts := prepareOpenCodeSetupAdmissionFixture(t)
@@ -138,7 +158,7 @@ func prepareOpenCodeSetupOptsForTest(t *testing.T, opts SetupOpts) SetupOpts {
 		openCodeWindowsPackageDirectory,
 		"opencode.exe",
 	)
-	if err := atomicWriteFile(executable, []byte("MZ OpenCode 1.18.19 admission fixture"), 0o700); err != nil {
+	if err := atomicWriteFile(executable, []byte("MZ OpenCode 2.1.4 admission fixture"), 0o700); err != nil {
 		t.Fatalf("write OpenCode admission executable: %v", err)
 	}
 	stablePath, digest, ok := setupSelectedAgentExecutableEvidence(executable)
@@ -155,7 +175,7 @@ func prepareOpenCodeSetupOptsForTest(t *testing.T, opts SetupOpts) SetupOpts {
 				Source:            "setup-selected",
 				Executable:        stablePath,
 				RawVersion:        openCodeAdmissionTestRawVersion,
-				NormalizedVersion: "1.18.19",
+				NormalizedVersion: "2.1.4",
 				SHA256:            digest,
 				SelectedAt:        now.Add(-time.Second).Format(time.RFC3339),
 				ExpiresAt:         now.Add(10 * time.Minute).Format(time.RFC3339),
@@ -178,6 +198,6 @@ func prepareOpenCodeSetupOptsForTest(t *testing.T, opts SetupOpts) SetupOpts {
 	opts.DataDir = dataDir
 	opts.AgentVersion = openCodeAdmissionTestRawVersion
 	opts.AgentExecutable = stablePath
-	opts.HookContractID = "opencode-hooks-v1"
+	opts.HookContractID = "opencode-hooks-v2"
 	return opts
 }

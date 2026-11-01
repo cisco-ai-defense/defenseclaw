@@ -22,12 +22,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
@@ -44,7 +44,7 @@ const (
 )
 
 // idempotencyKeyPattern admits UUIDs, ULIDs and similar opaque keys.
-var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
+var idempotencyKeyPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
 
 // idempotencyFingerprintHeaders are the request headers that change how a
 // hook is evaluated. They are part of the fingerprint so a key can only

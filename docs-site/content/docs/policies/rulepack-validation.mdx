@@ -22,10 +22,10 @@ On a managed computer, `defenseclaw` runs only `sandbox` commands. Use `defensec
 
    ```text
    Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/default"
-     rules: 239/243 enabled across 7 files
+     rules: 242/246 enabled across 7 files
      components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
-     digest: c551079cd1df686fe82d2f87db8c7cdac88667c779266096fc81d70e863fbd75
-     files digest: a80ff5bf86ba3f42af9d64161aec3732a752c7774d31c94936f6e73d5badc5ef (the guardrail.custom_packs pin)
+     digest: 509357919e9524aa2795bbcbf6ec19146ea7671b9af1124fa15e43154adf96bc
+     files digest: 26f95a2b6c5440db366c42db48202352541916a5dba1a7d0d46edb87ed08da36 (the guardrail.custom_packs pin)
    ```
 
    `judges=4` counts the compiled-in exfil judge and the three judge files. The full digest includes compiled defaults and can change between builds even when the files digest stays the same. Use your own run's `files digest` to pin a custom pack. You can pass a pack name instead of a path.
@@ -37,18 +37,18 @@ On a managed computer, `defenseclaw` runs only `sandbox` commands. Use `defensec
    ```
 
    ```json
-   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"c551079c…","enabled_rule_count":239,"files_digest":"a80ff5bf…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":243,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
+   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"50935791…","enabled_rule_count":242,"files_digest":"26f95a2b…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":246,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
    ```
 
-3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`:
+3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`. The reason names the file, or the folder when a whole copy of another pack sits inside this one (for example `default/judge/injection.yaml` names `default`), and says to move it out or remove it:
 
    ```text
    Rule pack invalid: "/home/alice/.defenseclaw/policies/guardrail/bad"
-     inventory_unexpected at correlation-patterns.yaml: unexpected YAML component
+     inventory_unexpected at correlation-patterns.yaml: unexpected YAML component: move correlation-patterns.yaml out of the rule-pack folder or remove it, then run the command or installer again
    ```
 
    ```json
-   {"error":{"code":"inventory_unexpected","path":"correlation-patterns.yaml","reason":"unexpected YAML component"},"kind":"validation_error","valid":false,"wire_version":1}
+   {"error":{"code":"inventory_unexpected","path":"correlation-patterns.yaml","reason":"unexpected YAML component: move correlation-patterns.yaml out of the rule-pack folder or remove it, then run the command or installer again"},"kind":"validation_error","valid":false,"wire_version":1}
    ```
 
 | Exit | Meaning |
@@ -74,16 +74,18 @@ A non-empty pack directory is an overlay on the compiled baseline. Missing `supp
 ```bash
 defenseclaw doctor
 ```
+The pack also sets what a gateway outage does when you saved no fail mode: with `strict` a call is blocked while the gateway is not running, and `default` lets it run with a warning again ([Fail modes](/docs/reference/fail-modes)).
+
 
 ```text
-  [PASS] Rule pack [codex]  -  configured rule pack "default" "/home/alice/.defenseclaw/policies/guardrail/default": 239/243 rules enabled; digest=c551079c…
+  [PASS] Rule pack [codex]  -  configured rule pack "default" "/home/alice/.defenseclaw/policies/guardrail/default": 239/243 rules enabled; digest=36bc8fb6…
 ```
 
 Doctor validates the pack every connector uses. It shows `FAIL` for an invalid pack and `WARN` when the validator is missing.
 
 ## Apply a validated pack
 
-The pinned digest also covers the optional `defenseclaw-pack.json` posture file.
+The pinned digest also covers the optional `defenseclaw-pack.json` posture file. Adding or editing that file changes the digest, so validate the pack again and pin the new digest, as for a rule file ([Thresholds](/docs/policies/thresholds#rule-pack-default-posture), [custom rule packs](/docs/enterprise/configuration#custom-rule-packs)).
 
 DefenseClaw ships three rule packs: `permissive`, `default` and `strict`. A pack changes which rules run and the default block and alert levels.
 
@@ -139,6 +141,7 @@ defenseclaw policy activate strict
 ```bash
 defenseclaw guardrail use-pack default
 defenseclaw guardrail use-pack --clear --connector codex
+defenseclaw policy activate default   # admission back to the default preset; also undoes the plugin edit
 ```
 
 Next: [tune the judge](/docs/policies/suppression-cookbook), [what happens when an edit fails](/docs/policies/rules#when-something-is-wrong), [change the levels](/docs/policies/thresholds), [what each pack ships](/docs/policies/defaults).

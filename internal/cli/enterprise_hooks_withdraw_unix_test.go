@@ -20,6 +20,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"testing"
@@ -349,8 +350,22 @@ func TestExclusionWithdrawsAnOmittedRecordWhateverTheSpoolSize(t *testing.T) {
 	if _, after, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{}); slices.Equal(after, before) {
 		t.Fatal("removing an exclude_users entry left the keys as they were")
 	}
+	// xia is exempt: her record is listed for refresh whatever its place in
+	// the spool (GAP-0964). This resolver has no account for her uid, so her
+	// lookup fails, the pass reports it, and her record stays.
+	if !slices.ContainsFunc(accounts, func(a enterprisehooks.IdentitySpoolAccount) bool { return a.UID == xiaUID && !a.Left }) {
+		t.Fatalf("accounts %d listed; the record of xia, exempt and beyond the first 4096, is not refreshed", len(accounts))
+	}
 	settings([]string{"zed@corp.example"}, []string{"xia@corp.example"})
-	if err := enterprisehooks.WriteIdentitySpool(context.Background(), dir, accounts, nil, nil, withdraw); err != nil {
+	// The pass reports xia's failed lookup in the collector's own words: the
+	// Linux collector asks the resolver by uid (not found), the macOS one
+	// needs the account name the resolver did not give (GAP-2324).
+	wantLookup := "uid 999997: " + unixidentity.ErrNotFound.Error()
+	if runtime.GOOS == "darwin" {
+		wantLookup = "uid 999997: account has no usable name"
+	}
+	if err := enterprisehooks.WriteIdentitySpool(context.Background(), dir, accounts, nil, nil, withdraw); err != nil &&
+		err.Error() != wantLookup {
 		t.Fatal(err)
 	}
 	if withdrawTestRecordExists(t, dir, zedUID) {

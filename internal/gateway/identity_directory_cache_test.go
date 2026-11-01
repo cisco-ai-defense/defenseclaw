@@ -79,7 +79,10 @@ func TestIdentityDirectoryCacheRefreshesIncompleteFacts(t *testing.T) {
 
 // TestMacOSGuardianUPNRecoveryRefreshesCachedLocalFacts pins the managed Mac
 // case: Open Directory groups are available before the guardian record, but
-// its UPN must be picked up after the short incomplete lifetime.
+// its UPN must be picked up after the short incomplete lifetime. Open
+// Directory answers a directory account without a directory until the
+// guardian's record (resolvePeerDirectoryFacts calls only a local node
+// account local); a local node account has no UPN to wait for (GAP-0532).
 func TestMacOSGuardianUPNRecoveryRefreshesCachedLocalFacts(t *testing.T) {
 	previousDir := currentIdentitySpoolDir()
 	setIdentitySpoolDir(t.TempDir())
@@ -91,8 +94,7 @@ func TestMacOSGuardianUPNRecoveryRefreshesCachedLocalFacts(t *testing.T) {
 	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
 		calls++
 		facts := useridentity.DirectoryFacts{
-			Directory: useridentity.DirectoryLocal, Source: useridentity.SourceMacOSOpenDirectory,
-			Groups: []string{"staff"}, ResolvedAt: now,
+			Source: useridentity.SourceMacOSOpenDirectory, Groups: []string{"staff"}, ResolvedAt: now,
 		}
 		if recovered {
 			facts.Directory = useridentity.DirectoryActiveDirectory
@@ -109,6 +111,10 @@ func TestMacOSGuardianUPNRecoveryRefreshesCachedLocalFacts(t *testing.T) {
 	now = now.Add(identityDirectoryIncompleteTTL)
 	if facts, ok := cache.get("501", true); !ok || facts.UPN != "alice@corp.example.com" || calls != 2 {
 		t.Fatalf("recovered facts = %+v, ok = %v, calls = %d; want guardian UPN after short TTL", facts, ok, calls)
+	}
+	if awaitingSpoolUPN(useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, Source: useridentity.SourceMacOSOpenDirectory,
+		Groups: []string{"staff"}, ResolvedAt: now}) {
+		t.Fatal("a local node account's complete facts were marked as waiting for a UPN")
 	}
 }
 
@@ -272,7 +278,7 @@ func TestIdentityDirectoryFailureMessagesDescribeRefusal(t *testing.T) {
 		{name: "cached facts", entry: identityCacheEntry[useridentity.DirectoryFacts]{ok: true, fetchedAt: now}, want: "keeps its last facts for at most 1h0m0s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			message := cache.noteResultLocked("1201", &tc.entry, errors.New("directory unavailable"), now)
+			message := cache.noteResultLocked("1201", &tc.entry, errors.New("directory unavailable"), false, now)
 			for _, want := range []string{"directory lookup for 1201 failed", tc.want,
 				"requests whose assignments need missing identity facts are refused",
 				"refusal names the missing fact"} {
@@ -581,5 +587,101 @@ func TestSpoolGroupChangeDropsCachedFacts(t *testing.T) {
 	forgetOnSpoolGroupChange(cache, key, time.Now())
 	if facts, ok := cache.get(key, true); ok && len(facts.Groups) != 0 {
 		t.Fatalf("withdrawn record left old token groups in the cache: %+v", facts)
+	}
+}
+
+// GAP-2535: on an SSSD-joined host the first hook of a new local account
+// runs before the hook guardian records the root-only proof that SSSD holds
+// no other account of the uid, so its lookup fails. Once the guardian has
+// recorded the proof that failure is no directory outage: health does not
+// count it, and the account is looked up again without waiting for a hook
+// call. Any other failure is still counted.
+func TestIdentityHealthDoesNotCountALookupThatWaitedOnlyForTheGuardianRecordedProof(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	needsRoot := errors.New("only root can ask SSSD whether its domains are online")
+	var recorded atomic.Bool
+	cache := newIdentityCache(func(string) (useridentity.DirectoryFacts, error) {
+		if !recorded.Load() {
+			return useridentity.DirectoryFacts{}, needsRoot
+		}
+		return useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, ResolvedAt: now}, nil
+	})
+	cache.awaitsRootProof = func(err error) bool { return errors.Is(err, needsRoot) }
+	cache.rootProofRecorded = func(string) bool { return recorded.Load() }
+	cache.now = func() time.Time { return now }
+	cache.logf = func(string, ...any) {}
+	if _, ok := cache.get("1006", true); ok {
+		t.Fatal("facts served before the guardian recorded the proof")
+	}
+	if h := cache.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "1006" {
+		t.Fatalf("before the guardian recorded the proof: %+v, want uid 1006 failing", h)
+	}
+	recorded.Store(true)
+	if h := cache.health(); h.Failing != 0 {
+		t.Fatalf("after the guardian recorded the proof: %+v, want nothing failing", h)
+	}
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, _, ok := cache.peek("1006"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the account was not looked up again once the guardian recorded the proof")
+		}
+	}
+	if h := cache.health(); h.Failing != 0 {
+		t.Fatalf("after the lookup took the proof: %+v, want nothing failing", h)
+	}
+
+	offline := errors.New("sssd offline")
+	other := newIdentityCache(func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{}, offline
+	})
+	other.awaitsRootProof = func(err error) bool { return errors.Is(err, needsRoot) }
+	other.rootProofRecorded = func(string) bool { return true }
+	other.now = func() time.Time { return now }
+	other.logf = func(string, ...any) {}
+	other.get("1007", true)
+	if h := other.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "1007" {
+		t.Fatalf("a directory outage with a guardian record: %+v, want uid 1007 failing", h)
+	}
+}
+
+// GAP-2595: a served local account deleted after its first hook, whose lookup
+// waited for the guardian's root-only proof, kept status and verify warning
+// directory_lookups_failing for the TTL although the guardian removed its
+// record. Once no account holds the uid that failure is not counted; a
+// directory outage for an account that still exists is.
+func TestIdentityHealthDoesNotCountAProofWaitForAnAccountThatIsGone(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	needsRoot := errors.New("only root can ask SSSD whether its domains are online")
+	var deleted atomic.Bool
+	cache := newIdentityCache(func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{}, needsRoot
+	})
+	cache.awaitsRootProof = func(err error) bool { return errors.Is(err, needsRoot) }
+	cache.rootProofRecorded = func(string) bool { return false }
+	cache.rootProofAccountGone = func(string) bool { return deleted.Load() }
+	cache.now = func() time.Time { return now }
+	cache.logf = func(string, ...any) {}
+	cache.get("1006", true)
+	if h := cache.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "1006" {
+		t.Fatalf("while the account exists: %+v, want uid 1006 failing", h)
+	}
+	deleted.Store(true)
+	if h := cache.health(); h.Failing != 0 {
+		t.Fatalf("after the account was deleted: %+v, want nothing failing", h)
+	}
+
+	offline := errors.New("sssd offline")
+	other := newIdentityCache(func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{}, offline
+	})
+	other.awaitsRootProof = func(err error) bool { return errors.Is(err, needsRoot) }
+	other.rootProofAccountGone = func(string) bool { return true }
+	other.now = func() time.Time { return now }
+	other.logf = func(string, ...any) {}
+	other.get("1007", true)
+	if h := other.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "1007" {
+		t.Fatalf("a directory outage: %+v, want uid 1007 failing", h)
 	}
 }

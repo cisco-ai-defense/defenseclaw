@@ -94,10 +94,11 @@ func TestConnectorReconcileEveryPutsEachGuardedConnectorOnItsCurrentHook(t *test
 		if !strings.Contains(stdout, name+" is on its current hook") {
 			t.Fatalf("stdout does not report %s on its current hook:\n%s", name, stdout)
 		}
-		if lock := connector.LoadHookContractLockEntry(dataDir, name); lock.Connector != name || lock.HookFailMode != "open" {
-			// The lock records the per-user outage mode, which follows the
-			// default tier (owner decision 2026-10-23).
-			t.Fatalf("%s lock = %+v, want an entry of this release with the default tier outage mode open", name, lock)
+		if lock := connector.LoadHookContractLockEntry(dataDir, name); lock.Connector != name || lock.HookFailMode != "closed" {
+			// The lock records the per-user outage mode: the fixture's
+			// saved hook_fail_mode closed wins over the tier (owner
+			// decision 2026-10-23).
+			t.Fatalf("%s lock = %+v, want an entry of this release with the saved outage mode closed", name, lock)
 		}
 	}
 	if strings.Contains(stdout, "cursor") {

@@ -8,7 +8,7 @@
   ✓ Bootstrap  ~/.defenseclaw
   ✓ Skill scanner  ~/.local/bin/skill-scanner
   ✓ MCP scanner  ~/.local/bin/mcp-scanner
-  ✓ Guardrail  claudecode, mode=observe, fail mode=closed
+  ✓ Guardrail  claudecode, mode=observe, fail mode=open
   - Sidecar  not started (--skip-gateway)
 
   Readiness
@@ -28,6 +28,7 @@
   defenseclaw doctor
   defenseclaw keys list
   Adding another agent later: defenseclaw setup <connector>
+  While the gateway is not running, hooks let calls run with a warning (strict policy blocks them: defenseclaw guardrail use-pack strict).
   After a reboot, agent hooks start the gateway on their next call; after defenseclaw-gateway stop, run: defenseclaw-gateway start
   Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup
 ```

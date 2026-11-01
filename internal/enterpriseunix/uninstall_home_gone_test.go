@@ -18,11 +18,13 @@ import (
 	"testing"
 )
 
-// GAP-0553: when remove-all reports a user's registrations as pending (the
-// user's home is not available, or is gone with a removed AD mobile
-// account), a managed uninstall without --purge warns per_user_hooks_remaining
-// for that user and agent and goes on: the binaries and the deployment go.
-func TestUninstallWarnsAndGoesOnForAPerUserHomeThatIsNotAvailable(t *testing.T) {
+// GAP-0443 (was GAP-0553's warn-and-go-on rule): when remove-all reports a
+// user's registrations as pending because that live account's home is not
+// available, a managed uninstall without --purge stops before the binaries
+// and the deployment go (uninstall_incomplete) and names the next step; a
+// removed account's pending entry, which carries its reason, still warns
+// and goes on (below).
+func TestUninstallKeepsTheDeploymentForAPerUserHomeThatIsNotAvailable(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
@@ -31,18 +33,104 @@ func TestUninstallWarnsAndGoesOnForAPerUserHomeThatIsNotAvailable(t *testing.T) 
 				return CommandResult{Stdout: []byte(`{"ok":true,"removed":0,"pending":["sample-user/hermes"]}`)}, nil
 			}}
 			done := h.run(Options{Action: ActionUninstall})
-			requireOK(t, done)
-			got := messagesOf(done.Warnings, codePerUserHooks)
-			if !strings.Contains(got, "hermes hooks for user sample-user were not removed because that account's home is not available") {
-				t.Fatalf("the uninstall does not warn for the user whose home is not available: %q", got)
+			// GAP-0443: the registrations in a home that is not available
+			// (an unmounted volume) are kept as registrations: they would
+			// call a deleted hook binary when the home returns. The
+			// binaries and the deployment record stay so a rerun finishes.
+			got := messagesOf(done.Errors, codePerUserHooks)
+			if !strings.Contains(got, "hermes hooks for user sample-user were not removed because that account's home is not available, so a DefenseClaw registration may remain in it") ||
+				!strings.Contains(got, "make that home available (mount its volume, or move its folder back to the recorded home if it was moved aside) and rerun") {
+				t.Fatalf("the uninstall does not name the registration that may remain and the next step: %q", got)
 			}
-			if messagesOf(done.Errors, codePerUserHooks) != "" || messagesOf(done.Errors, codeUninstallIncomplete) != "" {
-				t.Fatalf("a home that is not available must not stop the uninstall: %+v", done.Errors)
+			// GAP-2134: an empty parent is also a deleted home of a
+			// per-domain layout; recreating the folder is the step that
+			// works. Removing the account does not: a targets.yaml row of
+			// a removed account still stops the uninstall.
+			if !strings.Contains(got, "if that home folder was deleted, recreate it as a folder the account owns and rerun") ||
+				strings.Contains(got, "remove the account") {
+				t.Fatalf("the uninstall offers a step that does not finish it, or not the one that does: %q", got)
 			}
+			if messagesOf(done.Errors, codeUninstallIncomplete) == "" {
+				t.Fatalf("an uninstall that keeps the deployment must say it stopped: %+v", done.Errors)
+			}
+			if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || !exists(h.env.deploymentPath()) {
+				t.Fatal("the uninstall removed the binaries or the deployment record while a home was not available")
+			}
+			// Once the home is back, the rerun removes the rest.
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+				return CommandResult{Stdout: []byte(`{"ok":true,"removed":1}`)}, nil
+			}}
+			rerun := h.run(Options{Action: ActionUninstall})
+			requireOK(t, rerun)
 			if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || exists(h.env.deploymentPath()) {
-				t.Fatal("the uninstall did not remove the binaries and the deployment record")
+				t.Fatal("the rerun did not remove the binaries and the deployment record")
 			}
 		})
+	}
+}
+
+// GAP-2358: the hook-removal precheck already names a live account whose
+// home is not available. The uninstall refused only after remove-all had
+// run, so the Claude Code blockers and hooks of every other user were gone
+// and the services had stopped. It now refuses before anything changes; a
+// pending entry with a reason (a home that is gone) does not refuse.
+func TestUninstallRefusesBeforeAnyChangeForAPerUserHomeThatIsNotAvailable(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			gone := "gone-user/codex: its home /home/gone-user no longer exists, so no DefenseClaw hook registration is left there; if that home is restored, remove DefenseClaw's entries from the codex config in it"
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+				t.Fatal("remove-all ran (and removed the other users' hooks and blockers) after its precheck named a home that is not available")
+				return CommandResult{}, nil
+			}, check: func() (CommandResult, error) {
+				return CommandResult{Stdout: []byte(`{"ok":true,"removed":0,"pending":["` + gone + `","sample-user/hermes"]}`)}, nil
+			}}
+			h.env.MachinePolicy = observingPolicy{MachinePolicyManager: h.env.MachinePolicy, observe: func() {
+				t.Fatal("the machine policy was removed after the precheck named a home that is not available")
+			}}
+			before := len(h.services.calls)
+			refused := h.run(Options{Action: ActionUninstall})
+			requireError(t, refused, codeUninstallPrecheck)
+			got := messagesOf(refused.Errors, codePerUserHooks)
+			if !strings.Contains(got, "hermes hooks for user sample-user were not removed because that account's home is not available, so a DefenseClaw registration may remain in it") ||
+				!strings.Contains(got, "make that home available (mount its volume, or move its folder back to the recorded home if it was moved aside) and rerun") {
+				t.Fatalf("the refusal does not name the home that is not available and the next step: %q", got)
+			}
+			if strings.Contains(got, "gone-user") {
+				t.Fatalf("a home that is gone must not refuse the uninstall: %q", got)
+			}
+			if len(refused.Changes) != 0 {
+				t.Fatalf("the refused uninstall reports changes: %q", refused.Changes)
+			}
+			for _, call := range h.services.calls[before:] {
+				if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "disable ") {
+					t.Fatalf("the refused uninstall ran %q", call)
+				}
+			}
+			if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || !exists(h.env.deploymentPath()) {
+				t.Fatal("the refused uninstall removed the binaries or the deployment record")
+			}
+		})
+	}
+}
+
+// A precheck whose only pending entry carries a reason (a home that is gone)
+// does not refuse: the uninstall warns for it and completes (GAP-2358 keeps
+// GAP-0553's rule).
+func TestUninstallPrecheckDoesNotRefuseAHomeThatIsGone(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	gone := "gone-user/codex: its home /home/gone-user no longer exists, so no DefenseClaw hook registration is left there; if that home is restored, remove DefenseClaw's entries from the codex config in it"
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true,"removed":0,"pending":["` + gone + `"]}`)}, nil
+	}, check: func() (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true,"removed":0,"pending":["` + gone + `"]}`)}, nil
+	}}
+	done := h.run(Options{Action: ActionUninstall})
+	requireOK(t, done)
+	if exists(h.env.deploymentPath()) {
+		t.Fatal("the uninstall did not complete for a home that is gone")
 	}
 }
 

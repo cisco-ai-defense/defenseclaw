@@ -7,11 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"math"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -667,7 +667,7 @@ func hookModelV8StableToken(value string) string {
 	return value
 }
 
-var hookModelV8IdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+var hookModelV8IdentifierPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
 func hookModelV8Identifier(value string) bool {
 	return value != "" && len(value) <= 256 && hookModelV8IdentifierPattern.MatchString(value)

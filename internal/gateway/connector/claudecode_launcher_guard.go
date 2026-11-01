@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
@@ -43,9 +44,32 @@ import (
 // turn that began before the launcher went missing is not let through. Started
 // by Cursor without arguments it gives no answer. The launcher delegates every
 // call to that same installed hook, so its absence already leaves no hook to
-// run; the guard adds no file a call depends on. A launcher with no separate
-// installed hook (a repository build) keeps the cmd.exe guard on PreToolUse
-// too, so a missing launcher blocks there as well.
+// run; the guard adds no file a call depends on.
+//
+// The one-line install has no separate installed hook: its launcher is
+// ~/.local/bin\defenseclaw-hook.exe. Its PreToolUse handler starts the
+// defenseclaw-hook-guard.exe beside that launcher (cmd/defenseclaw-hook-guard,
+// a small GUI-subsystem program) as the same guard, with the same argv:
+//
+//	<bin>\defenseclaw-hook-guard.exe launcher-guard <launcher> hook --connector claudecode
+//
+// so a launcher removed in the middle of a turn still blocks the next tool
+// call; a direct start of the missing launcher was a non-blocking error that
+// let the call run uninspected. The guard is its own file, built apart from
+// the launcher, so whatever removes the launcher leaves it. It must not be a
+// console program: Claude Code started defenseclaw-gateway.exe, the guard
+// until GAP-2467, without a console when a session ended, Windows gave it a
+// new console, and Windows Terminal (the default terminal) opened a window
+// that stayed with error 0x800700e8. A one-line install without the guard file
+// (a repository build) still runs the gateway beside the launcher as the
+// guard; it answers the same argv. Started by Cursor without arguments and a
+// Cursor event on stdin, neither guard gives an answer. Only a launcher
+// with no guard program beside it keeps the exec form
+// (command = launcher, args = hook --connector claudecode) on PreToolUse. The
+// cmd.exe guard is never the PreToolUse command: Cursor starts cmd.exe with no
+// arguments and the tool call event on stdin, so cmd.exe printed its banner
+// instead of JSON and read that event as commands; every Cursor tool call was
+// blocked (GAP-1011).
 //
 // Hook-shape compatibility rule (GAP-1284): a hook entry that release N
 // writes must keep a shape that every earlier 1.x teardown recognises, or
@@ -61,34 +85,31 @@ import (
 
 // claudeCodeLauncherGuardWords is the guard sentence, one argument per word
 // so no argument needs quoting; it holds no cmd.exe metacharacter.
-var claudeCodeLauncherGuardWords = strings.Fields(
-	"DefenseClaw blocked this: its Claude Code hook launcher is missing. " +
-		"Run the DefenseClaw installer again to repair it.",
-)
+var claudeCodeLauncherGuardWords = strings.Fields(hookguard.MissingMessage)
 
 // ClaudeCodeLauncherMissingMessage is the guard sentence on one line, which
-// the PreToolUse guard (defenseclaw-hook launcher-guard) prints.
-var ClaudeCodeLauncherMissingMessage = strings.Join(claudeCodeLauncherGuardWords, " ")
+// the PreToolUse guard (internal/hookguard) prints.
+const ClaudeCodeLauncherMissingMessage = hookguard.MissingMessage
 
 // ClaudeCodeLauncherGuardSubcommand is the first argument of the PreToolUse
 // guard handler.
-const ClaudeCodeLauncherGuardSubcommand = "launcher-guard"
+const ClaudeCodeLauncherGuardSubcommand = hookguard.Subcommand
 
-// claudeCodeWindowsCommandProcessor is the system cmd.exe the guard runs.
+// claudeCodeWindowsCommandProcessor is the system cmd.exe the guard runs: the
+// one in the system directory the Windows API reports (windowsSystemCmdExe),
+// never one named by SystemRoot in the environment of whoever runs Setup. The
+// writer and the recognizer (claudeCodeCmdGuardParts) use the same one, so a
+// Setup run with SystemRoot unset or changed still recognizes the guard it
+// wrote (GAP-1851).
 func claudeCodeWindowsCommandProcessor() string {
-	root := strings.TrimSpace(os.Getenv("SystemRoot"))
-	if root == "" || !filepath.IsAbs(root) {
-		root = `C:\Windows`
-	}
-	return filepath.Join(root, "System32", "cmd.exe")
+	return windowsSystemCmdExe()
 }
 
 // claudeCodeLauncherGuardable reports whether cmd.exe reads the launcher path
 // literally inside double quotes: it must not contain a quote, a variable
 // sign or a line break. Other paths keep the exec form.
 func claudeCodeLauncherGuardable(launcher string) bool {
-	return strings.TrimSpace(launcher) == launcher && launcher != "" &&
-		!strings.ContainsAny(launcher, "\"%!\r\n")
+	return hookguard.Guardable(launcher)
 }
 
 // claudeCodeLauncherGuardArgs is the cmd.exe argv that runs launcher with
@@ -112,7 +133,9 @@ func claudeCodeLauncherGuardParts(hook map[string]interface{}) (string, []string
 }
 
 // claudeCodeCmdGuardParts returns the launcher and hook argv of an exact
-// generated cmd.exe guard.
+// generated cmd.exe guard. cmd.exe is the one in the system directory the
+// Windows API reports, never one named by SystemRoot in the environment of
+// the agent or hook that asks.
 func claudeCodeCmdGuardParts(hook map[string]interface{}) (string, []string, bool) {
 	command, _ := hook["command"].(string)
 	if command == "" || normalizeWindowsHookExecutable(command) !=
@@ -157,33 +180,35 @@ func claudeCodePreToolGuardArgs(launcher string, hookArgs []string) []string {
 // an absolute defenseclaw-hook.exe launcher with the per-user Claude Code hook
 // argv is accepted, so the guard starts nothing but DefenseClaw's launcher.
 func ClaudeCodeLauncherGuardArgv(args []string) (launcher string, hookArgs []string, ok bool) {
-	want := []string{"hook", "--connector", "claudecode"}
-	if len(args) != 2+len(want) || args[0] != ClaudeCodeLauncherGuardSubcommand ||
-		!claudeCodeLauncherGuardable(args[1]) || !claudeCodeAbsoluteHookExecutable(args[1]) {
-		return "", nil, false
-	}
-	for i, arg := range want {
-		if args[2+i] != arg {
-			return "", nil, false
-		}
-	}
-	return args[1], append([]string(nil), want...), true
+	return hookguard.Argv(args)
 }
 
 // claudeCodeAbsoluteHookExecutable reports an absolute path whose file name is
 // defenseclaw-hook.exe.
 func claudeCodeAbsoluteHookExecutable(path string) bool {
-	if !isWindowsAbsolutePath(path) && !filepath.IsAbs(path) {
+	return hookguard.AbsoluteHookExecutable(path)
+}
+
+// claudeCodePreToolGuardProgram reports a program that can run as the
+// PreToolUse guard: an absolute defenseclaw-hook.exe (the installed full hook
+// of a packaged install), defenseclaw-hook-guard.exe (the one-line install's
+// guard beside its launcher) or defenseclaw-gateway.exe (the one-line guard
+// of a repository build and of 1.0.5 release candidates), all of which answer
+// the launcher-guard argv.
+func claudeCodePreToolGuardProgram(path string) bool {
+	if !claudeCodeLauncherGuardable(path) || (!isWindowsAbsolutePath(path) && !filepath.IsAbs(path)) {
 		return false
 	}
-	return strings.EqualFold(path[strings.LastIndexAny(path, `\/`)+1:], windowsHookBinaryName)
+	name := path[strings.LastIndexAny(path, `\/`)+1:]
+	return strings.EqualFold(name, windowsHookBinaryName) || strings.EqualFold(name, windowsHookGuardBinaryName) ||
+		strings.EqualFold(name, windowsGatewayBinaryName)
 }
 
 // claudeCodePreToolGuardParts returns the launcher and hook argv of an exact
 // generated PreToolUse guard handler.
 func claudeCodePreToolGuardParts(hook map[string]interface{}) (string, []string, bool) {
 	command, _ := hook["command"].(string)
-	if !claudeCodeLauncherGuardable(command) || !claudeCodeAbsoluteHookExecutable(command) {
+	if !claudeCodePreToolGuardProgram(command) {
 		return "", nil, false
 	}
 	args, ok := claudeCodeNativeExecArguments(hook)
@@ -198,10 +223,36 @@ func claudeCodePreToolGuardParts(hook map[string]interface{}) (string, []string,
 }
 
 // claudeCodePreToolGuardExecutable returns the program the PreToolUse
-// handler starts for launcher, or "" to keep the cmd.exe guard. Tests
-// replace it.
+// handler starts for launcher, or "" when there is none and PreToolUse runs
+// the launcher in the exec form. Tests replace it.
 var claudeCodePreToolGuardExecutable = func(launcher string) string {
-	return claudeCodePreToolGuardFor(launcher, canonicalNativeWindowsHookBinary(), canonicalNativeWindowsInstalledHookBinary())
+	if guard := claudeCodePreToolGuardFor(launcher, canonicalNativeWindowsHookBinary(), canonicalNativeWindowsInstalledHookBinary()); guard != "" {
+		return guard
+	}
+	return claudeCodeOneLinePreToolGuardFor(launcher)
+}
+
+// claudeCodeOneLinePreToolGuardFor returns the guard program beside launcher
+// in the one-line install's ~/.local/bin layout: defenseclaw-hook-guard.exe
+// when it is a regular file, else defenseclaw-gateway.exe when that is one (a
+// repository build ships no guard file); otherwise "". The guard file comes
+// first because it has the GUI subsystem: the console gateway got a console
+// window of its own when Claude Code started it without one (GAP-2467).
+func claudeCodeOneLinePreToolGuardFor(launcher string) string {
+	if !claudeCodeAbsoluteHookExecutable(launcher) || !claudeCodeLauncherGuardable(launcher) {
+		return ""
+	}
+	dir := launcher[:strings.LastIndexAny(launcher, `\/`)+1]
+	for _, name := range []string{windowsHookGuardBinaryName, windowsGatewayBinaryName} {
+		guard := dir + name
+		if !claudeCodePreToolGuardProgram(guard) {
+			continue
+		}
+		if info, err := os.Lstat(guard); err == nil && info.Mode().IsRegular() {
+			return guard
+		}
+	}
+	return ""
 }
 
 // claudeCodePreToolGuardFor returns installed, the installed full hook, when
@@ -283,10 +334,10 @@ func claudeCodeWindowsHookInvocation(opts SetupOpts, executable string) (string,
 // so that handler runs the PreToolUse guard instead (see the top of this
 // file): started by Cursor with no arguments it gives no answer, and started
 // by Claude Code it blocks when the launcher is missing, also in a turn that
-// began before the launcher went missing. Every other event keeps the cmd.exe
-// guard (GAP-1091), and so does PreToolUse when there is no separate installed
-// hook to run as its guard: a missing launcher must block, never let a tool
-// call through.
+// began before the launcher went missing. The one-line install runs its
+// gateway as that guard; only a launcher with neither guard program runs in
+// the exec form on PreToolUse (see the top of this file). Every other event
+// keeps the cmd.exe guard (GAP-1091).
 func claudeCodeHandlerInvocation(eventType, command string, args []string) (string, []string) {
 	if eventType != "PreToolUse" {
 		return command, args
@@ -302,7 +353,7 @@ func claudeCodeHandlerInvocation(eventType, command string, args []string) (stri
 			return guard, guardArgs
 		}
 	}
-	return command, args
+	return launcher, hookArgs
 }
 
 // claudeCodeRollbackBackupName is the copy of settings.json taken before

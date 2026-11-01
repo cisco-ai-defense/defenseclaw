@@ -13,10 +13,14 @@ package connector
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // An enterprise install renders a VS Code Local hook file
@@ -161,4 +165,92 @@ func removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts SetupOpts) {
 		return
 	}
 	_, _ = RemoveOrphanedCopilotVSCodeLocalRenders(userHomeDir())
+	if !copilotManagedHost() {
+		removeLeftoverCopilotManagedPluginKey(copilotMachineManagedSettingsPath(), os.Stderr)
+	}
+}
+
+// A managed install adds enabledPlugins["defenseclaw@defenseclaw"] = true to
+// Copilot's machine managed-settings file while it deploys its per-user
+// plugin, and its uninstall removes it (GAP-1245). An uninstall before that
+// fix left the key behind. On a computer without a managed install the key
+// only names a plugin no marketplace has, so the Copilot CLI warns at every
+// start that its organization admin requires defenseclaw@defenseclaw and
+// that the marketplace "defenseclaw" is not found (GAP-1254). A per-user
+// Copilot setup or teardown therefore removes that one key when it holds
+// true (the file itself when nothing else is left in it), and leaves every
+// other setting, the key with any other value, and the file of a managed
+// computer alone. Only an administrator can write the file: a setup that
+// cannot says which file and key to remove.
+const copilotManagedPluginKey = "defenseclaw@defenseclaw"
+
+// copilotMachineManagedSettingsPath is Copilot's machine managed-settings
+// file ("" on macOS, where DefenseClaw never writes it). Tests replace it.
+var copilotMachineManagedSettingsPath = func() string {
+	switch runtime.GOOS {
+	case "windows":
+		programFiles := strings.TrimSpace(os.Getenv("ProgramFiles"))
+		if programFiles == "" || !filepath.IsAbs(programFiles) {
+			programFiles = `C:\Program Files`
+		}
+		return filepath.Join(programFiles, "GitHubCopilot", "managed-settings.json")
+	case "linux":
+		return "/etc/github-copilot/managed-settings.json"
+	}
+	return ""
+}
+
+// copilotManagedHost reports a computer with a managed DefenseClaw install,
+// whose lifecycle owns the key. Tests replace it.
+var copilotManagedHost = managed.IsStandaloneManagedHost
+
+// removeLeftoverCopilotManagedPluginKey removes the leftover key from the
+// managed-settings file at path, best effort. It reports whether it did.
+func removeLeftoverCopilotManagedPluginKey(path string, warn io.Writer) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	data, ok := ReadStableInventoryFile(path, copilotSettingsMaxBytes)
+	if !ok {
+		return false
+	}
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(data, &doc) != nil || doc == nil {
+		return false
+	}
+	var plugins map[string]json.RawMessage
+	if json.Unmarshal(doc["enabledPlugins"], &plugins) != nil {
+		return false
+	}
+	var enabled bool
+	if json.Unmarshal(plugins[copilotManagedPluginKey], &enabled) != nil || !enabled {
+		return false
+	}
+	delete(plugins, copilotManagedPluginKey)
+	if len(plugins) == 0 {
+		delete(doc, "enabledPlugins")
+	} else {
+		doc["enabledPlugins"], _ = json.Marshal(plugins)
+	}
+	if len(doc) == 0 {
+		err = os.Remove(path)
+	} else {
+		var out []byte
+		if out, err = json.MarshalIndent(doc, "", "  "); err == nil {
+			err = atomicWriteFile(path, append(out, '\n'), info.Mode().Perm())
+		}
+	}
+	if err != nil {
+		if warn != nil {
+			fmt.Fprintf(warn, "defenseclaw: %s still sets enabledPlugins %q to true, left by an earlier managed DefenseClaw install; "+
+				"the Copilot CLI warns at every start that the marketplace \"defenseclaw\" is not found. "+
+				"An administrator can delete that entry from the file (this account cannot: %v).\n", path, copilotManagedPluginKey, err)
+		}
+		return false
+	}
+	return true
 }

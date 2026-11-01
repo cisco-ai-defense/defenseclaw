@@ -18,14 +18,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"runtime"
 	"sort"
-	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -228,19 +226,11 @@ func (s *managedHookPeerAccountsSource) listInto(seq uint64, done chan struct{})
 	}
 }
 
-// statLocalAccountsStamp is the stamp of /etc/passwd, which useradd,
-// userdel and usermod replace. "" when it cannot be read.
-func statLocalAccountsStamp() string {
-	info, err := os.Stat("/etc/passwd")
-	if err != nil {
-		return ""
-	}
-	stamp := strconv.FormatInt(info.ModTime().UnixNano(), 10) + "/" + strconv.FormatInt(info.Size(), 10)
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		stamp += "/" + strconv.FormatUint(uint64(st.Ino), 10)
-	}
-	return stamp
-}
+// statLocalAccountsStamp is the stamp of the local account databases
+// (enterprisehooks.LocalAccountsStamp): useradd, userdel and usermod replace
+// /etc/passwd, and a userdb or altfiles account changes its own database
+// (GAP-2028). "" when /etc/passwd cannot be read.
+func statLocalAccountsStamp() string { return enterprisehooks.LocalAccountsStamp() }
 
 // listLocalAccountsStamp lists the local accounts with their records
 // (dscl on macOS).

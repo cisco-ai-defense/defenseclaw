@@ -25,16 +25,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+// judgeCompatSkillScanner is the entry point the DefenseClaw CLI wheel
+// installs beside skill-scanner. It runs skill-scanner with the fix that
+// accepts a well-formed judge answer from any supported model (GAP-2609).
+const judgeCompatSkillScanner = "defenseclaw-skill-scanner"
+
+var ansiRe = lazyregexp.New(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // liteLLMModel returns the model string shaped for LiteLLM /
 // provider-native routers. LiteLLM accepts “"provider/model-id"“
@@ -44,10 +49,32 @@ var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 // (the caller should handle that case).
 func liteLLMModel(llm config.LLMConfig) string {
 	model := llm.Model
-	if model != "" && llm.Provider != "" && !strings.Contains(model, "/") {
-		return llm.Provider + "/" + model
+	if model != "" && !strings.Contains(model, "/") {
+		// ProviderPrefix is llm.Provider, or bedrock for an unprefixed
+		// Bedrock id: LiteLLM then signs for Bedrock instead of failing
+		// with "Authentication failed" (GAP-2640).
+		if provider := llm.ProviderPrefix(); provider != "" {
+			model = provider + "/" + model
+		}
 	}
-	return model
+	return withBedrockInferenceProfile(llm, model)
+}
+
+// withBedrockInferenceProfile puts llm.bedrock.inference_profile (for
+// example "us.") in front of a Bedrock model id, as the gateway provider
+// does before dispatch: models such as Claude Haiku 4.5 are served only
+// through a cross-region inference profile, so the scanner judge sent
+// the bare id and failed where the gateway judge worked (GAP-2396).
+func withBedrockInferenceProfile(llm config.LLMConfig, model string) string {
+	if llm.Bedrock == nil {
+		return model
+	}
+	profile := strings.TrimSpace(llm.Bedrock.InferenceProfile)
+	prefix, id, ok := strings.Cut(model, "/")
+	if profile == "" || !ok || !strings.EqualFold(prefix, "bedrock") || strings.Contains(id, "/") || strings.HasPrefix(id, "arn:") || strings.HasPrefix(id, profile) {
+		return model
+	}
+	return prefix + "/" + profile + id
 }
 
 // extractJSON finds the first top-level JSON object in data.
@@ -437,7 +464,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		return result, err
 	}
 
-	scanPath, unstage, err := stageUTF16Skill(target)
+	scanPath, metadata, unstage, err := stageSkill(target)
 	defer unstage()
 	if err != nil {
 		result.Duration = time.Since(start)
@@ -490,7 +517,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 			scanErr = fmt.Errorf("scanner: failed to parse %s output: %w (stderr=%s)", s.Name(), parseErr, stderrStr)
 			return nil, scanErr
 		}
-		result.Findings = findings
+		result.Findings = append(findings, metadataFindings(metadata)...)
 	}
 
 	// Fail closed on any non-zero exit even when stdout parsed: exit 2 is

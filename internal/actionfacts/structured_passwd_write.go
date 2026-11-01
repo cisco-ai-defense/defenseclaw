@@ -4,14 +4,13 @@
 package actionfacts
 
 import (
-	"regexp"
 	"strconv"
 	"strings"
 )
 
 const posixPasswdPath = "/etc/passwd"
 
-var posixPasswdUserName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*[$]?$`)
+var posixPasswdUserName = lazyMustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*[$]?$`)
 
 // POSIXNonRootUIDZeroAccountWriteFact is a value-free proof that one closed
 // structured write replaces /etc/passwd with complete records containing a

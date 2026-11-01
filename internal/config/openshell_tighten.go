@@ -27,7 +27,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -37,6 +36,7 @@ import (
 	"unicode/utf8"
 
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	sandboxpolicies "github.com/defenseclaw/defenseclaw/policies/sandbox"
 )
@@ -64,11 +64,11 @@ const (
 )
 
 var (
-	openShellCredentialName = regexp.MustCompile(`^(none|[a-z0-9][a-z0-9_-]{0,63})$`)
-	openShellDaysDuration   = regexp.MustCompile(`^([0-9]{1,6})d$`)
+	openShellCredentialName = lazyregexp.New(`^(none|[a-z0-9][a-z0-9_-]{0,63})$`)
+	openShellDaysDuration   = lazyregexp.New(`^([0-9]{1,6})d$`)
 	// sandboxPackNamePattern is a custom pack name (the packs loader's
 	// packNamePattern): <pack_dir>/<name>/pack.yaml.
-	sandboxPackNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	sandboxPackNamePattern = lazyregexp.New(`^[a-z0-9][a-z0-9-]{0,62}$`)
 )
 
 // SandboxProfilePackCheck, when set, refuses a profile floor's required_pack

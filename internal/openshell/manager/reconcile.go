@@ -89,6 +89,9 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 func (m *Manager) reconcile(ctx context.Context, startup bool) (err error) {
 	m.reconcileMu.Lock()
 	defer m.reconcileMu.Unlock()
+	// A gateway restart while this daemon ran may have ended a MicroVM it
+	// could not sync (GAP-2081).
+	m.publishUnsyncedStops()
 	managedDaemon := m.authority() != nil
 	if managedDaemon {
 		defer func() {
@@ -111,13 +114,23 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) (err error) {
 		m.dropGateway(gw, err)
 		return err
 	}
+	// A sandbox under the name of a box whose recorded identity is another
+	// (a guest of another gateway, or one gone and replaced) is not that
+	// box's: it is neither adopted for it, which would take its phase and
+	// move its record here, hiding the guest where it lives, nor counted
+	// live for it (otherIdentity). The pass below asks after the box.
 	live := map[string]*openshell.Sandbox{}
 	for _, sb := range sbs {
-		live[sb.Name] = sb
+		if !m.otherIdentity(sb) {
+			live[sb.Name] = sb
+		}
 	}
 
 	// Sandboxes OpenShell has.
 	for _, sb := range sbs {
+		if live[sb.Name] != sb {
+			continue
+		}
 		b := m.adopt(sb, gw.Driver)
 		if b == nil {
 			continue
@@ -222,6 +235,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) (err error) {
 	}
 	m.deleteExpired(ctx)
 	m.pruneApprovals()
+	m.proveGuests(ctx)
 	m.mu.Lock()
 	m.lastReconcile = m.now()
 	m.mu.Unlock()
@@ -732,43 +746,76 @@ func (m *Manager) reconcileOne(ctx context.Context, name string) {
 	}
 }
 
-// gatewayElsewhere reports a sandbox created on another gateway
-// registration, endpoint or workspace than gw's: DefenseClaw followed the
-// CLI's active gateway to another one, say, or openshell.gateway changed.
-// Not finding it on gw proves nothing then, and releasing it would revoke
-// the binding and drop the snapshot of a sandbox that may still run. It is
-// marked missing and reported (once per place) instead. So is a sandbox
-// created on another compute driver than gw runs now: the gateway was
-// switched (docker to vm, say), and releasing it would also drop its staged
-// copy, while its unpulled work is still in the sandbox the other driver
-// keeps.
+// gatewayElsewhere marks b missing from gw, which has nothing of it (it
+// is not found there, or another sandbox has its name), and reports a
+// sandbox created on another gateway registration, endpoint or workspace
+// than gw's: DefenseClaw followed the CLI's active gateway to another one,
+// say, or openshell.gateway changed. Not finding it on gw proves nothing
+// then, and releasing it would revoke the binding and drop the snapshot of
+// a sandbox that may still run. It is reported (once per place) instead.
+// So is a sandbox created on another compute driver than gw runs now: the
+// gateway was switched (docker to vm, say), and releasing it would also
+// drop its staged copy, while its unpulled work is still in the sandbox
+// the other driver keeps.
 func (m *Manager) gatewayElsewhere(ctx context.Context, gw *Gateway, b *box) bool {
 	m.mu.Lock()
-	rec := b.rec
+	report := m.missingFromLocked(gw, b)
+	elsewhere := b.elsewhere != ""
 	m.mu.Unlock()
+	report(ctx)
+	return elsewhere
+}
+
+// missingFromLocked marks b missing from gw, whose lookup has nothing of it
+// (not found, or another sandbox under its name), and sets where it was
+// created (elsewhere, otherDriver) in the same step. Whether a missing
+// sandbox is released depends on that (unprotectedKind): a lookup on
+// another gateway than its own must not release a guest that may still
+// run there, and one on its own gateway must not keep it on a place an
+// earlier lookup elsewhere left. Every lookup that finds a sandbox missing
+// comes here; one that finds it comes to foundOnLocked. It returns the
+// report of a new place (gatewayElsewhere), to make once m.mu is released.
+// The caller holds m.mu.
+func (m *Manager) missingFromLocked(gw *Gateway, b *box) func(context.Context) {
+	rec := b.rec
 	where := gatewayMismatch(rec, gw)
 	otherDriver := where != "" && samePlace(rec, gw)
-	m.mu.Lock()
 	changed := b.elsewhere != where
-	b.elsewhere, b.otherDriver = where, otherDriver
-	if where != "" {
-		b.missing = true
+	b.missing, b.elsewhere, b.otherDriver = true, where, otherDriver
+	if where == "" {
+		b.word++ // its own place says it is gone
+		b.gone = true
+	}
+	if where == "" || !changed {
+		return func(context.Context) {}
 	}
 	id := b.identity()
-	m.mu.Unlock()
-	if where == "" || !changed {
-		return where != ""
-	}
 	msg := "sandbox " + rec.Name + " was created on " + where + ", but DefenseClaw is connected to " +
 		gatewayPlace(gw.Name, gw.Endpoint, gw.Client.Workspace()) + "; it is not released while DefenseClaw is connected elsewhere"
 	if otherDriver {
 		msg = "sandbox " + rec.Name + " was created on " + where + "; it runs " + string(gw.Driver.Name) +
 			" now, and one gateway runs one driver: the sandbox is not released while the gateway runs another driver"
 	}
-	m.logf("%s: %s", gatewaylog.ErrCodeOpenShellUnavailable, msg)
-	m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
-		ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellUnavailable), ErrorSummary: truncate(msg, 512), Timestamp: m.now()})
-	return true
+	return func(ctx context.Context) {
+		m.logf("%s: %s", gatewaylog.ErrCodeOpenShellUnavailable, msg)
+		m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+			ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellUnavailable), ErrorSummary: truncate(msg, 512), Timestamp: m.now()})
+	}
+}
+
+// foundOnLocked records sb, which a lookup on gw found as b's sandbox
+// (sameSandboxLocked): b is not missing, and it lives on gw's place, so
+// only a compute driver gw no longer runs is still reported (elsewhere,
+// otherDriver). A lookup of the place b's record names is that place's
+// newest read of it (provenPhase). The caller holds m.mu.
+func foundOnLocked(b *box, gw *Gateway, sb *openshell.Sandbox) {
+	b.sb, b.missing, b.gone = sb, false, false
+	b.elsewhere = gatewayMismatch(record{Driver: b.rec.Driver}, gw)
+	b.otherDriver = b.elsewhere != ""
+	if place := recordPlace(b.rec); sb != nil && b.read.place == place && gatewayMismatch(b.rec, gw) == "" {
+		b.word++
+		b.read = guestRead{place: place, at: b.read.at, phase: auditPhase(sb.Status.Phase), word: b.word}
+	}
 }
 
 // gatewayMismatch describes where rec's sandbox was created when that is
@@ -816,13 +863,21 @@ func (m *Manager) noteGateway(b *box, gw *Gateway) bool {
 	ws := gw.Client.Workspace()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	b.elsewhere = gatewayMismatch(record{Driver: b.rec.Driver}, gw)
-	b.otherDriver = b.elsewhere != ""
+	foundOnLocked(b, gw, b.sb)
 	if b.rec.Gateway == gw.Name && b.rec.GatewayEndpoint == gw.Endpoint && b.rec.GatewayWorkspace == ws {
 		return false
 	}
 	b.rec.Gateway, b.rec.GatewayEndpoint, b.rec.GatewayWorkspace = gw.Name, gw.Endpoint, ws
 	return true
+}
+
+// otherIdentity reports a sandbox listed under the name of a settled box
+// that recorded another sandbox's ID: not that box's sandbox.
+func (m *Manager) otherIdentity(sb *openshell.Sandbox) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b := m.boxes[sb.Name]
+	return b != nil && !b.creating && !b.retained && b.rec.ID != "" && sb.ID != "" && sb.ID != b.rec.ID
 }
 
 // current reports whether b is still the live, settled box for its name.

@@ -425,18 +425,6 @@
       "description": "Current depth of the async judge-persistence queue"
     },
     {
-      "name": "defenseclaw.judge.semaphore.depth",
-      "type": "updowncounter",
-      "unit": "{slot}",
-      "description": "Judge concurrency semaphore: slots currently held"
-    },
-    {
-      "name": "defenseclaw.judge.semaphore.drops",
-      "type": "counter",
-      "unit": "{drop}",
-      "description": "Judge semaphore drops (queue full)"
-    },
-    {
       "name": "defenseclaw.llm_bridge.latency",
       "type": "histogram",
       "unit": "ms",

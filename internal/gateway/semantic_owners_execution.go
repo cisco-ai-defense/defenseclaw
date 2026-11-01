@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"path"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -29,6 +30,7 @@ const (
 	// ceiling, matching the other command-specific semantic owners.
 	semanticCurlDownloadExecExpression                    = `f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))`
 	semanticWgetDownloadExecExpression                    = `f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))`
+	semanticPythonSocketConnectExpression                 = `f.commands.exists(c, c.program in ['python', 'python2', 'python3'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations)`
 	semanticBase64DecodeExecExpression                    = `f.commands.exists(c, c.argv_complete && c.program in ['base64', 'base64.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DECODE in c.operations)`
 	semanticRemoteIPStagedExecExpression                  = `f.commands.exists(c, c.argv_complete && c.program in ['curl', 'wget'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations)`
 	semanticCompromisedCredentialAuthenticationExpression = `f.tool in ['add_compromised_account', 'update_compromised_account'] || f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'])`
@@ -38,47 +40,77 @@ const (
 )
 
 func curlDownloadExecPrerequisite(facts actionfacts.Facts) bool {
+	if !actionfacts.IsImmediateShellExecutionTool(facts.Tool) {
+		return false
+	}
 	if powerShellDownloadExecPrerequisite(facts) {
 		return true
 	}
-	for _, command := range facts.Commands {
-		if command.PipelineID == 0 || !oneOfFold(command.Program, "curl", "curl.exe") ||
-			!hasExternalNetworkAction(facts, command.ID, actionfacts.NetworkDownload, actionfacts.NetworkUpload) ||
-			!actionfacts.ProvesPOSIXPipelineInterpreterSource(command) {
-			continue
-		}
-		for _, sink := range facts.Commands {
-			if sink.PipelineID == command.PipelineID &&
-				provesPOSIXCurlShellSink(sink) &&
-				hasCommandDataFlow(facts, command.ID, sink.ID, actionfacts.DataStdout, actionfacts.DataStdin) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func provesPOSIXCurlShellSink(sink actionfacts.CommandFact) bool {
-	if actionfacts.ProvesPOSIXStdinInterpreter(sink) {
-		return true
-	}
-	if sink.Program != "sudo" || len(sink.Argv) != 2 || len(sink.Redirects) != 0 ||
-		len(sink.Wrappers) != 0 || sink.Argv[0] != "sudo" {
-		return false
-	}
-	inner := sink
-	inner.Program = sink.Argv[1]
-	inner.Argv = sink.Argv[1:]
-	return actionfacts.ProvesPOSIXStdinInterpreter(inner)
+	// Same proof as CMD-PIPE-WGET: any parsed curl download (or upload
+	// response) whose stdout feeds a stdin interpreter, whatever the URL host,
+	// so a private or documentation-range IP literal alerts like wget does
+	// (rel-1-0-6 GAP-0221). The owner is alert-only.
+	return stdinInterpreterPipelineFallbackProof(
+		facts,
+		actionfacts.OperationFetch,
+		"curl",
+		"curl.exe",
+	)
 }
 
 func wgetDownloadExecPrerequisite(facts actionfacts.Facts) bool {
+	if !actionfacts.IsImmediateShellExecutionTool(facts.Tool) {
+		return false
+	}
 	return stdinInterpreterPipelineFallbackProof(
 		facts,
 		actionfacts.OperationFetch,
 		"wget",
 		"wget.exe",
 	)
+}
+
+func wrappedDownloadExecProof(facts actionfacts.Facts) bool {
+	if !actionfacts.IsImmediateShellExecutionTool(facts.Tool) || !facts.Authoritative() {
+		return false
+	}
+	for _, source := range facts.Commands {
+		if source.PipelineID == 0 ||
+			!oneOfFold(source.Program, "curl", "curl.exe", "wget", "wget.exe") ||
+			!actionfacts.ProvesPOSIXPipelineInterpreterSource(source) ||
+			!hasExternalNetworkAction(facts, source.ID, actionfacts.NetworkDownload, actionfacts.NetworkUpload) {
+			continue
+		}
+		for _, sink := range facts.Commands {
+			if sink.PipelineID != source.PipelineID ||
+				!oneOfFold(sink.Program, "sudo", "doas") ||
+				!provesPOSIXWrappedShellSink(sink) ||
+				!hasCommandDataFlow(facts, source.ID, sink.ID, actionfacts.DataStdout, actionfacts.DataStdin) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func provesPOSIXWrappedShellSink(sink actionfacts.CommandFact) bool {
+	if sink.Dialect != actionfacts.DialectPOSIX || sink.Effect != actionfacts.EffectExecute ||
+		!sink.ArgvComplete || len(sink.Redirects) != 0 || len(sink.Wrappers) != 0 ||
+		len(sink.Argv) < 2 {
+		return false
+	}
+	index := 1
+	for index < len(sink.Argv) && oneOfFold(sink.Argv[index], "-n", "-E", "--") {
+		index++
+	}
+	if index >= len(sink.Argv) {
+		return false
+	}
+	inner := sink
+	inner.Program = path.Base(sink.Argv[index])
+	inner.Argv = sink.Argv[index:]
+	return actionfacts.ProvesPOSIXStdinInterpreter(inner)
 }
 
 func base64DecodeExecPrerequisite(facts actionfacts.Facts) bool {

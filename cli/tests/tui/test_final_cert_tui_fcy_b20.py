@@ -105,5 +105,6 @@ def test_overview_runtime_notice_keeps_its_key_hint_at_80x24(tmp_path, monkeypat
     message = notice_lines[0].strip().removeprefix("[>] ")
     expected = next(n.message for n in app.overview_model.build_notices() if n.message.startswith("Runtime "))
     assert message == expected
-    assert message == "Runtime DEGRADED · N for details: shadow egress partially covered"
+    # GAP-1274: a stated coverage limit is a note, not DEGRADED.
+    assert message == "Runtime WATCHING · N for details: shadow egress partially covered"
     assert len(notice_lines[0]) <= 80

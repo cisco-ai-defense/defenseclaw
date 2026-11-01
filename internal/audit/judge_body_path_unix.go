@@ -66,12 +66,14 @@ func validateJudgeBodyPlatformTrust(path string, info os.FileInfo, directory, st
 	return nil
 }
 
+// trustedJudgeBodySystemDirectoryAlias is trustedAuditDBSystemDirectoryAlias
+// for the judge body store (GAP-2078).
 func trustedJudgeBodySystemDirectoryAlias(path string, info os.FileInfo) bool {
-	if filepath.Dir(path) != string(os.PathSeparator) {
-		return false
-	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != 0 {
+		return false
+	}
+	if parent := filepath.Dir(path); parent != string(os.PathSeparator) && !rootOnlyDirectory(parent) {
 		return false
 	}
 	resolved, err := filepath.EvalSymlinks(path)

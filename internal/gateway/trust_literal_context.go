@@ -5,9 +5,10 @@
 package gateway
 
 import (
-	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const trustedPromptLiteralCategory = "trust-exploit"
@@ -47,7 +48,7 @@ var trustedPromptLiteralDetectionOnly = map[string]trustedPromptLiteralDetection
 // protected control text from ordinary developer requests to show project
 // instructions, rules, or guidelines. The broad catalog regex still records
 // the latter, but they remain LOW detection-only telemetry.
-var protectedPromptExtractionPattern = regexp.MustCompile(
+var protectedPromptExtractionPattern = lazyregexp.New(
 	`(?i)\b(?:show|reveal|print|output|display|repeat|tell\s+me)\s+` +
 		`(?:me\s+)?(?:` +
 		`your\s+(?:(?:system|initial|hidden|private|internal)\s+)?(?:prompt|instructions?|rules?|guidelines?)` +
@@ -56,7 +57,7 @@ var protectedPromptExtractionPattern = regexp.MustCompile(
 		`)\b`,
 )
 
-var fictionalFramingPattern = regexp.MustCompile(
+var fictionalFramingPattern = lazyregexp.New(
 	`(?i)(?:hypothetically|in\s+a\s+fictional\s+(?:scenario|world|story)|` +
 		`for\s+(?:educational|research|academic)\s+purposes?\s+only|` +
 		`this\s+is\s+just\s+a\s+(?:test|experiment|hypothetical))`,
@@ -66,7 +67,7 @@ var fictionalFramingPattern = regexp.MustCompile(
 // assistant-control language. A fictional premise near an ordinary coding,
 // writing, or research question is not itself an attack. Harmful-domain
 // classification remains owned by the configured judge/AID lanes.
-var fictionalAdversarialControlPattern = regexp.MustCompile(
+var fictionalAdversarialControlPattern = lazyregexp.New(
 	`(?im)(?:^|[.!?;,:]\s*|^\s*[-*>]\s*)` +
 		`(?:(?:please|now|next)\s+)?(?:` +
 		`(?:ignore|disregard)\s+(?:all\s+)?(?:(?:previous|prior|above|earlier)\s+` +
@@ -83,7 +84,7 @@ var fictionalAdversarialControlPattern = regexp.MustCompile(
 		`)\b`,
 )
 
-var delimiterControlTokenPattern = regexp.MustCompile(
+var delimiterControlTokenPattern = lazyregexp.New(
 	`(?i)(?:system\s+override|end\s+system\s+prompt|</system>|<\|im_start\|>|<\|im_end\|>|` +
 		`<\|endoftext\|>|<<\s*SYS\s*>>|\[INST\]|\[/INST\])`,
 )
@@ -93,7 +94,7 @@ var delimiterControlTokenPattern = regexp.MustCompile(
 // "delimiter ... reveal") with explicit control objects and imperative
 // grammar. This keeps parser/test prose observable without making it a
 // universal CRITICAL action.
-var delimiterAttackPayloadPattern = regexp.MustCompile(
+var delimiterAttackPayloadPattern = lazyregexp.New(
 	`(?is)^\s*(?:(?:[.:;,-]\s*)|(?:<\|im_start\|>\s*)|` +
 		`(?:system(?:(?:\s*:)|(?:\\n)|(?:\\r\\n)|(?:\r?\n))?\s*)){0,4}` +
 		`(?:(?:please\s+|now\s+|next\s+)?(?:` +

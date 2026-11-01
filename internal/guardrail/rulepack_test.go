@@ -241,6 +241,46 @@ func TestLoadRulePackDirectoryAndInventoryFailures(t *testing.T) {
 	}
 }
 
+// GAP-1566: the refusal for a YAML file the pack does not recognize says which
+// folder or file to move out, relative to the pack root, on every path style.
+func TestUnexpectedYAMLReasonNamesWhatToRemove(t *testing.T) {
+	for _, tc := range []struct{ name, rel, want string }{
+		{"nested copy of the default pack (posix and macOS paths)", "default/judge/injection.yaml", "move default out of the rule-pack folder or remove it"},
+		{"nested copy of the pack itself", "mypack/rules/x.yaml", "move mypack out of the rule-pack folder or remove it"},
+		{"nested copy, upper case folder (Windows case-insensitive names)", "Default/suppressions.yaml", "the folder Default does not belong in a rule pack"},
+		{"stray file at the root", "correlation-patterns.yaml", "move correlation-patterns.yaml out of the rule-pack folder or remove it"},
+		{"stray judge file", "judge/custom.yaml", "move judge/custom.yaml out of the rule-pack folder or remove it"},
+		{"stray rules subfolder file", "rules/nested/custom.yaml", "move rules/nested/custom.yaml out of the rule-pack folder or remove it"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := unexpectedYAMLReason(tc.rel)
+			if !strings.HasPrefix(got, "unexpected YAML component: ") || !strings.Contains(got, tc.want) ||
+				!strings.HasSuffix(got, "then run the command or installer again") {
+				t.Fatalf("reason = %q, want it to hold %q", got, tc.want)
+			}
+			if strings.Contains(got, `\`) {
+				t.Fatalf("reason = %q carries a Windows path", got)
+			}
+		})
+	}
+	if got := unexpectedYAMLReason("."); got != "unexpected YAML component" {
+		t.Fatalf("an unsafe name = %q, want the bare reason", got)
+	}
+}
+
+func TestLoadRulePackNestedPackCopyNamesTheFolder(t *testing.T) {
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "suppressions.yaml", "version: 1\n")
+	writeRulePackFile(t, dir, "default/judge/injection.yaml", "version: 1\n")
+	_, err := LoadRulePack(dir)
+	packErr := requireRulePackError(t, err, "inventory_unexpected")
+	if packErr.Path != "default/judge/injection.yaml" ||
+		!strings.Contains(packErr.Reason, "move default out of the rule-pack folder or remove it") ||
+		strings.Contains(packErr.Reason, dir) {
+		t.Fatalf("error = %+v, want the folder to move named relative to the pack", packErr)
+	}
+}
+
 func TestReadRulePackFileRejectsSymlinkReplacement(t *testing.T) {
 	dir := t.TempDir()
 	const rel = "suppressions.yaml"
@@ -931,6 +971,18 @@ func TestLoadRulePackExplainsTheSemanticCostLimits(t *testing.T) {
 	if !strings.Contains(packErr.Reason, strconv.FormatUint(semanticRuleStaticCostLimit, 10)) {
 		t.Errorf("reason = %q, want the per-rule limit", packErr.Reason)
 	}
+	// GAP-0049: the surface check refuses map(), filter() and exists_one()
+	// before the cost estimate runs, so a cost refusal only ever involves
+	// exists() and all(); the reason names only those (as GAP-0036 does for
+	// the depth refusal).
+	if !strings.Contains(packErr.Reason, "exists() or all()") {
+		t.Errorf("reason = %q, want it to name exists() and all()", packErr.Reason)
+	}
+	for _, refusedMacro := range []string{"map", "filter", "exists_one"} {
+		if strings.Contains(packErr.Reason, refusedMacro) {
+			t.Errorf("reason = %q names %s, which the surface check refuses at any depth", packErr.Reason, refusedMacro)
+		}
+	}
 
 	var rules strings.Builder
 	rules.WriteString("version: 1\ncategory: custom\nrules:\n")
@@ -989,6 +1041,55 @@ func TestLoadRulePackNamesTheInvalidSemanticRule(t *testing.T) {
 	if !strings.HasPrefix(packErr.Reason, "rule R4-MARKER-BLOCK (entry 1) expression is invalid: it does not type-check") ||
 		!strings.Contains(packErr.Reason, "quote string literals") || strings.Contains(packErr.Reason, "dccert") {
 		t.Fatalf("reason = %q", packErr.Reason)
+	}
+}
+
+// GAP-0036: the comprehension-depth refusal names only the list macros a
+// rule-pack expression admits. map(), filter() and exists_one() are refused by
+// the surface check, so naming them here told authors they were allowed at a
+// lower depth.
+func TestComprehensionDepthRefusalNamesOnlyAdmittedMacros(t *testing.T) {
+	load := func(expression string) *RulePackError {
+		t.Helper()
+		dir := t.TempDir()
+		body := strings.Replace(validRulesYAML("custom", "R-DEPTH"), "    title:",
+			"    tool_call_only: true\n    expression: '"+expression+"'\n    title:", 1)
+		writeRulePackFile(t, dir, "rules/custom.yaml", body)
+		_, err := LoadRulePack(dir)
+		if err == nil {
+			return nil
+		}
+		return requireRulePackError(t, err, "")
+	}
+	for _, admitted := range []string{
+		"f.commands.exists(c, c.argv_complete)",
+		"f.commands.all(c, c.argv_complete)",
+		"f.commands.exists(c, c.argv.all(a, a != \"x\"))",
+	} {
+		if packErr := load(admitted); packErr != nil {
+			t.Fatalf("%s refused: %v", admitted, packErr)
+		}
+	}
+	for _, refused := range []string{
+		"f.commands.map(c, c.argv_complete).exists(b, b)",
+		"f.commands.filter(c, c.argv_complete).exists(b, b.argv_complete)",
+		"f.commands.exists_one(c, c.argv_complete)",
+	} {
+		if packErr := load(refused); packErr == nil || packErr.Code != "semantic_surface" {
+			t.Fatalf("%s: refusal = %v, want semantic_surface", refused, packErr)
+		}
+	}
+	packErr := load("f.commands.exists(c, c.argv.exists(a, f.commands.exists(d, d.argv_complete)))")
+	if packErr == nil || packErr.Code != "semantic_comprehension_depth" {
+		t.Fatalf("three nested exists(): refusal = %v, want semantic_comprehension_depth", packErr)
+	}
+	if !strings.Contains(packErr.Reason, "exists() and all()") {
+		t.Errorf("reason = %q, want it to name exists() and all()", packErr.Reason)
+	}
+	for _, refusedMacro := range []string{"map", "filter", "exists_one"} {
+		if strings.Contains(packErr.Reason, refusedMacro) {
+			t.Errorf("reason = %q names %s, which the surface check refuses at any depth", packErr.Reason, refusedMacro)
+		}
 	}
 }
 

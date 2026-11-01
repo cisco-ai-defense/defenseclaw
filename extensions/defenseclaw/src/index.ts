@@ -178,6 +178,21 @@ function approvalTimeoutMs(verdict: InspectVerdict): number | undefined {
     : undefined;
 }
 
+// OpenClaw shows a plugin approval only in its Control UI and on chat
+// channels that forward /approve. openclaw tui and local openclaw chat do not
+// show it, so the request runs out and OpenClaw denies the call with a bare
+// "Approval timed out" (GAP-1958). Say where it could have been answered.
+export const APPROVAL_SURFACES_HINT =
+  "answer DefenseClaw approvals in the OpenClaw Control UI (openclaw dashboard) or on a chat channel that forwards /approve; openclaw tui and local openclaw chat do not show them";
+
+export function approvalResolutionLines(toolName: string, severity: string, decision: string): string[] {
+  const lines = [`[defenseclaw] approval:${decision} tool:${toolName} severity:${severity}`];
+  if (decision === "timeout" || decision === "cancelled") {
+    lines.push(`[defenseclaw] ${toolName} was denied: nobody answered its approval request (${decision}); ${APPROVAL_SURFACES_HINT}`);
+  }
+  return lines;
+}
+
 function buildApprovalRequest(toolName: string, verdict: InspectVerdict) {
   return {
     requireApproval: {
@@ -187,7 +202,9 @@ function buildApprovalRequest(toolName: string, verdict: InspectVerdict) {
       timeoutMs: approvalTimeoutMs(verdict),
       timeoutBehavior: "deny" as const,
       onResolution: (decision: string) => {
-        console.log(`[defenseclaw] approval:${decision} tool:${toolName} severity:${verdict.severity}`);
+        const [line, hint] = approvalResolutionLines(toolName, verdict.severity, decision);
+        console.log(line);
+        if (hint) console.warn(hint);
       },
     },
   };

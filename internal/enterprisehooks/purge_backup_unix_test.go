@@ -16,10 +16,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -34,88 +32,60 @@ func writePurgeTestFile(t *testing.T, path, body string) {
 	}
 }
 
-func purgeTestBackups(t *testing.T, home string) []string {
-	t.Helper()
-	entries, err := os.ReadDir(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var backups []string
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), perUserBackupPrefix) {
-			backups = append(backups, filepath.Join(home, entry.Name()))
-		}
-	}
-	sort.Strings(backups)
-	return backups
-}
-
-// #1299: a managed uninstall --purge deleted the ~/.defenseclaw of an
-// account that had its own per-user install before the managed deployment
-// enrolled it, with no backup. The purge now moves that install's data to a
-// ~/.defenseclaw-backup-<UTC time> folder first and still removes
-// ~/.defenseclaw; what the enrollment wrote and the install's runtime are
-// not kept.
-func TestPurgeUserStateBacksUpAPerUserInstallFromBeforeTheEnrollment(t *testing.T) {
+// GAP-0727 (owner 2026-10-23): a machine uninstall never deletes or moves an
+// account's own data. When ~/.defenseclaw holds the account's own per-user
+// install from before the managed deployment enrolled it, the purge leaves
+// the folder and the install's binaries exactly as they are, makes no
+// ~/.defenseclaw-backup-* folder (#1299 moved the data there), and reports
+// it as kept.
+func TestPurgeUserStateKeepsAPerUserInstallFromBeforeTheEnrollment(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)
 	dataDir := filepath.Join(home, ".defenseclaw")
-	kept := map[string]string{
-		"config.yaml":                 "gateway: {}\n",
-		".env":                        "SAMPLE_KEY=placeholder\n",
-		"audit.db":                    "sqlite",
-		"policies/custom.rego":        "package custom\n",
-		"previous/data/audit.db":      "old",
-		"foreign-hooks-backup/a.json": "{}",
+	files := map[string]string{
+		"config.yaml":               "gateway: {}\n",
+		".env":                      "SAMPLE_KEY=placeholder\n",
+		"audit.db":                  "sqlite",
+		"policies/custom.yaml":      "rules: []\n",
+		"hooks/claude-code-hook.sh": "managed",
+		"session-facts.json":        "{}",
 	}
-	for rel, body := range kept {
+	for rel, body := range files {
 		writePurgeTestFile(t, filepath.Join(dataDir, rel), body)
 	}
-	dropped := []string{"hooks/claude-code-hook.sh", "hooks/.token-claudecode", ".venv/bin/defenseclaw", ".uv/cache/x", "session-facts.json", "watcher-created-dirs.json", "hook_contract_lock.json"}
-	for _, rel := range dropped {
-		writePurgeTestFile(t, filepath.Join(dataDir, rel), "managed")
-	}
+	launcher := filepath.Join(home, ".local", "bin", "defenseclaw")
+	writePurgeTestFile(t, launcher, "#!/bin/sh\n")
 	summary, err := PurgeUserState(context.Background(), InstallOptions{
 		UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(), Registry: connector.NewDefaultRegistry(),
 	})
 	if err != nil {
 		t.Fatalf("PurgeUserState: %v", err)
 	}
-	if !summary.Data || !summary.Backup {
-		t.Fatalf("summary = %+v, want the data purged and backed up", summary)
+	if !summary.Kept || summary.Data || summary.Binaries {
+		t.Fatalf("summary = %+v, want the account's own install kept", summary)
 	}
-	if _, err := os.Lstat(dataDir); !os.IsNotExist(err) {
-		t.Fatalf("~/.defenseclaw stayed: %v", err)
-	}
-	backups := purgeTestBackups(t, home)
-	if len(backups) != 1 {
-		t.Fatalf("backups = %v, want one", backups)
-	}
-	backup := backups[0]
-	if info, err := os.Stat(backup); err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("backup folder %s: %v %v", backup, info, err)
-	}
-	for rel, body := range kept {
-		got, err := os.ReadFile(filepath.Join(backup, rel))
-		if err != nil || string(got) != body {
-			t.Fatalf("backup lost %s: %q %v", rel, got, err)
+	for rel, body := range files {
+		if got, err := os.ReadFile(filepath.Join(dataDir, rel)); err != nil || string(got) != body {
+			t.Fatalf("the purge changed %s: %q %v", rel, got, err)
 		}
 	}
-	for _, rel := range dropped {
-		top := strings.SplitN(rel, "/", 2)[0]
-		if _, err := os.Lstat(filepath.Join(backup, top)); !os.IsNotExist(err) {
-			t.Fatalf("backup kept %s, which the purge removes: %v", top, err)
-		}
+	if _, err := os.Lstat(launcher); err != nil {
+		t.Fatalf("the purge removed the account's own launcher: %v", err)
 	}
-	note, err := os.ReadFile(filepath.Join(backup, perUserBackupNote))
-	if err != nil || !strings.Contains(string(note), "move\nthese files back into ~/.defenseclaw") {
-		t.Fatalf("backup note: %q %v", note, err)
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".defenseclaw-backup-") {
+			t.Fatalf("the purge moved data to %s", entry.Name())
+		}
 	}
 }
 
 // A home with only what the managed enrollment wrote (no per-user install)
-// gets no backup folder: the purge removes it all, as before.
-func TestPurgeUserStateKeepsNoBackupOfManagedOnlyState(t *testing.T) {
+// is purged as before.
+func TestPurgeUserStateRemovesManagedOnlyState(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -128,46 +98,10 @@ func TestPurgeUserStateKeepsNoBackupOfManagedOnlyState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PurgeUserState: %v", err)
 	}
-	if !summary.Data || summary.Backup {
-		t.Fatalf("summary = %+v, want the data purged without a backup", summary)
-	}
-	if backups := purgeTestBackups(t, home); len(backups) != 0 {
-		t.Fatalf("a managed-only state got a backup: %v", backups)
+	if !summary.Data || summary.Kept {
+		t.Fatalf("summary = %+v, want the managed state purged", summary)
 	}
 	if _, err := os.Lstat(dataDir); !os.IsNotExist(err) {
 		t.Fatalf("~/.defenseclaw stayed: %v", err)
-	}
-}
-
-// Two purges in the same second get two backup folders, and a moved file
-// named like the note is never replaced by it.
-func TestBackupPerUserInstallNeverReplacesAnEarlierBackupOrAMovedFile(t *testing.T) {
-	skipIfRoot(t)
-	home := newTestHome(t)
-	dataDir := filepath.Join(home, ".defenseclaw")
-	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
-	for round, body := range []string{"first", "second"} {
-		writePurgeTestFile(t, filepath.Join(dataDir, "config.yaml"), body)
-		writePurgeTestFile(t, filepath.Join(dataDir, perUserBackupNote), "the user's own "+body)
-		backedUp, err := backupPerUserInstall(home, dataDir, now)
-		if err != nil || !backedUp {
-			t.Fatalf("round %d: backedUp=%v err=%v", round, backedUp, err)
-		}
-	}
-	backups := purgeTestBackups(t, home)
-	want := []string{
-		filepath.Join(home, perUserBackupPrefix+"20261017T120000Z"),
-		filepath.Join(home, perUserBackupPrefix+"20261017T120000Z-2"),
-	}
-	if strings.Join(backups, ",") != strings.Join(want, ",") {
-		t.Fatalf("backups = %v, want %v", backups, want)
-	}
-	for i, body := range []string{"first", "second"} {
-		if got, _ := os.ReadFile(filepath.Join(backups[i], "config.yaml")); string(got) != body {
-			t.Fatalf("%s holds %q, want %q", backups[i], got, body)
-		}
-		if got, _ := os.ReadFile(filepath.Join(backups[i], perUserBackupNote)); string(got) != "the user's own "+body {
-			t.Fatalf("the note replaced the moved file in %s: %q", backups[i], got)
-		}
 	}
 }

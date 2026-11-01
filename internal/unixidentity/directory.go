@@ -145,7 +145,7 @@ func (r *NSSResolver) DirectoryFactsForRecordedUnsharedUID(uid int, now time.Tim
 // groups: names in the order of ids (a gid no service names stays a number),
 // and the gids among them whose lack of a name is not proved.
 func (r *NSSResolver) GroupNames(ids []int) (names, unconfirmed []string, err error) {
-	return r.groupNames(ids)
+	return r.groupNames(ids, false)
 }
 
 // provenFactsForUID resolves uid's facts with every proof that no directory
@@ -250,7 +250,7 @@ func (r *NSSResolver) provenFactsForUID(uid int, now time.Time, includeGroups, u
 			// and from the member lists of a directory that holds no account
 			// of that name (localAccountGroupsWithDirectory). A name-only
 			// NSS lookup can combine groups of distinct accounts.
-			_, facts.Groups, facts.UnconfirmedGroups, err = r.localAccountGroupsWithDirectory(account)
+			_, facts.Groups, facts.UnconfirmedGroups, err = r.localAccountGroupsWithDirectory(account, unsharedRecorded)
 		} else {
 			var ids []int
 			var qualified bool
@@ -259,7 +259,7 @@ func (r *NSSResolver) provenFactsForUID(uid int, now time.Time, includeGroups, u
 				ids, err = r.sssdGroupsOfDomain(sssd, ids, account, sidDomain(sid))
 			}
 			if err == nil {
-				facts.Groups, facts.UnconfirmedGroups, err = r.groupNames(ids)
+				facts.Groups, facts.UnconfirmedGroups, err = r.groupNames(ids, unsharedRecorded)
 			}
 			if err == nil && sssd != nil {
 				facts.OnlyPrimaryGroup, err = sssdListsOnlyPrimaryGroup(sssd, ids, account)
@@ -901,8 +901,10 @@ var memberListServices = map[string]bool{"ldap": true, "nis": true, "nisplus": t
 // name in no group and cannot show that it answers at all, which is how
 // getent reports an nslcd that cannot reach LDAP (memberListGroupsOf).
 // unconfirmed lists the gids among names that stay numbers although no NSS
-// group service proved they have no name (groupNames).
-func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) (ids []int, names, unconfirmed []string, err error) {
+// group service proved they have no name (groupNames). sssdMissRecorded
+// takes the guardian's recorded root-only proof that SSSD answers for this
+// account (DirectoryFactsForRecordedUnsharedUID) for its group misses too.
+func (r *NSSResolver) localAccountGroupsWithDirectory(account Account, sssdMissRecorded bool) (ids []int, names, unconfirmed []string, err error) {
 	ids, names, err = localAccountGroups(account)
 	if err != nil {
 		return nil, nil, nil, err
@@ -949,7 +951,7 @@ func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) (ids []in
 		}
 	}
 	if len(unnamed) > 0 && slices.ContainsFunc(services, func(service string) bool { return service != "files" }) {
-		resolved, unconfirmedNames, nameErr := r.groupNames(unnamed)
+		resolved, unconfirmedNames, nameErr := r.groupNames(unnamed, sssdMissRecorded)
 		if nameErr != nil {
 			return nil, nil, nil, nameErr
 		}
@@ -1082,7 +1084,7 @@ func localGroupsListing(name string) ([]int, error) {
 // that it has no group of that id; unconfirmed lists the ids, as numbers,
 // whose lack of a name is not proved (unconfirmedGroupIDs). Their
 // membership is still proved, by initgroups; their name is unknown.
-func (r *NSSResolver) groupNames(ids []int) (names, unconfirmed []string, err error) {
+func (r *NSSResolver) groupNames(ids []int, sssdMissRecorded bool) (names, unconfirmed []string, err error) {
 	if len(ids) > maxDirectoryGroups {
 		return nil, nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
 	}
@@ -1101,7 +1103,7 @@ func (r *NSSResolver) groupNames(ids []int) (names, unconfirmed []string, err er
 		}
 		maps.Copy(byID, found)
 	}
-	for _, id := range r.unconfirmedGroupIDs(unnamed) {
+	for _, id := range r.unconfirmedGroupIDs(unnamed, sssdMissRecorded) {
 		unconfirmed = append(unconfirmed, strconv.Itoa(id))
 	}
 	names = make([]string, 0, len(ids))
@@ -1130,7 +1132,9 @@ func (r *NSSResolver) groupNames(ids []int) (names, unconfirmed []string, err er
 // the service, or the service failed during the composite lookup), and two
 // services may name one gid differently, so no name is taken from such an
 // answer. An nsswitch.conf that cannot be read leaves every id unconfirmed.
-func (r *NSSResolver) unconfirmedGroupIDs(ids []int) []int {
+// sssdMissRecorded takes an SSSD miss as definitive when only root could
+// show it, as the guardian recorded for the account (groupMissDefinitive).
+func (r *NSSResolver) unconfirmedGroupIDs(ids []int, sssdMissRecorded bool) []int {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -1147,7 +1151,7 @@ func (r *NSSResolver) unconfirmedGroupIDs(ids []int) []int {
 			break
 		}
 		if service != "files" {
-			named, definitive := r.serviceGroupMisses(service, pending)
+			named, definitive := r.serviceGroupMisses(service, pending, sssdMissRecorded)
 			next := make([]int, 0, len(pending))
 			for _, id := range pending {
 				if named[id] || !definitive {
@@ -1170,7 +1174,7 @@ func (r *NSSResolver) unconfirmedGroupIDs(ids []int) []int {
 // holds the ids it names; definitive says that its miss of the others is a
 // fact (passwdServiceAnswers). A service that cannot be asked, fails or
 // gives an answer that does not parse names nothing definitively.
-func (r *NSSResolver) serviceGroupMisses(service string, ids []int) (named map[int]bool, definitive bool) {
+func (r *NSSResolver) serviceGroupMisses(service string, ids []int, sssdMissRecorded bool) (named map[int]bool, definitive bool) {
 	if !validServiceName(service) {
 		return nil, false
 	}
@@ -1194,7 +1198,7 @@ func (r *NSSResolver) serviceGroupMisses(service string, ids []int) (named map[i
 		}
 	}
 	for _, id := range ids {
-		if !named[id] && !r.groupMissDefinitive(service, id) {
+		if !named[id] && !r.groupMissDefinitive(service, id, sssdMissRecorded) {
 			return named, false
 		}
 	}
@@ -1205,8 +1209,13 @@ func (r *NSSResolver) serviceGroupMisses(service string, ids []int) (named map[i
 // nslcd completes the search for the gid and finds none (LDAP), or the
 // service passes passwdAbsent for it (local files, an unconfigured
 // directory, an SSSD or winbind whose domains answer). NIS, and a service
-// DefenseClaw has no check for, never show it.
-func (r *NSSResolver) groupMissDefinitive(service string, gid int) bool {
+// DefenseClaw has no check for, never show it. sssdMissRecorded takes the
+// guardian's recorded root-only proof that SSSD's domains answer, which the
+// gateway (not root) cannot show itself: the same proof its account lookup
+// already takes for the uid (uidPasswdAbsent). Without it a local account's
+// unnamed gid stayed unconfirmed on every sss-first host, so an assignment
+// by that gid refused the account's hooks while explain placed it (GAP-0677).
+func (r *NSSResolver) groupMissDefinitive(service string, gid int, sssdMissRecorded bool) bool {
 	if service == "ldap" {
 		_, found, err := nslcdGroupByGID(r.context(), gid)
 		return err == nil && !found
@@ -1214,7 +1223,8 @@ func (r *NSSResolver) groupMissDefinitive(service string, gid int) bool {
 	// passwdAbsent requires SSSD and winbind to answer with every domain
 	// online: a live NSS socket returns not-found for an uncached gid
 	// while its domain is offline (GAP-0385).
-	return r.passwdAbsent(service, strconv.Itoa(gid), true) == nil
+	err := r.passwdAbsent(service, strconv.Itoa(gid), true)
+	return err == nil || sssdMissRecorded && service == "sss" && errors.Is(err, errSSSDOnlineNeedsRoot)
 }
 
 // nssStopsAtNotFound lists the services of database's nsswitch.conf line

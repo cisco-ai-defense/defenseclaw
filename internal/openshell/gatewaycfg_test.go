@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,6 +126,9 @@ func newGatewayFixture(t *testing.T) *gatewayFixture {
 		// The tests' preflight answers to the bare name, whatever this
 		// machine's PATH holds.
 		LookPath: func(string) (string, error) { return "", exec.ErrNotFound },
+		// No gateway answers the fixture's registration: nothing to sync
+		// before a restart.
+		SyncSandboxes: func(context.Context, io.Writer) error { return nil },
 	}
 	return f
 }

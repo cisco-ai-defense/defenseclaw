@@ -34,7 +34,6 @@ import (
 	"fmt"
 	"os"
 	"os/user"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -244,6 +244,12 @@ type Options struct {
 	// or reports what they run as foreign sandboxes (GAP-0678). The caller
 	// closes each. nil connects to none.
 	OtherGateways func(ctx context.Context, managed *Gateway) []*Gateway
+	// GatewayAt connects to the account's gateway registration name in
+	// workspace (RegistrationGateway), which a record names as the place
+	// its sandbox lives when that is not the connected gateway: the guest
+	// inventory reads the sandbox there (proveGuests). The caller closes
+	// it. nil connects to none, and such a guest is not proven.
+	GatewayAt func(ctx context.Context, name, workspace string) (*Gateway, error)
 }
 
 // Manager implements the gateway's SandboxController.
@@ -304,6 +310,20 @@ type Manager struct {
 	// gwCheckedAt is when the connected gateway last said which driver it
 	// runs (UnixNano; recheckDriver).
 	gwCheckedAt atomic.Int64
+	// lastGw is the gateway DefenseClaw is connected to, or was last (nil
+	// before any): the place the guest inventory counts a box at when its
+	// record names it (unprotectedKind). proveMu serializes the reads of
+	// guests' places (proveGuests).
+	lastGw  atomic.Pointer[Gateway]
+	proveMu sync.Mutex
+	// runGate orders the last run check of a create or a start and its
+	// gateway call (lockRun, shared) against a guest recorded contained
+	// (containUnsynced, exclusive). Taken after the start lock, before mu.
+	runGate sync.RWMutex
+	// refreshMu orders overlapping policy refreshes (refreshEgress): a
+	// configuration check and an explicit adoption that arrive together
+	// re-register the proxy credentials and the default decider in order.
+	refreshMu sync.Mutex
 
 	mu    sync.Mutex
 	boxes map[string]*box
@@ -455,6 +475,7 @@ func New(opts Options) (*Manager, error) {
 	if err := m.loadRecords(); err != nil {
 		return nil, err
 	}
+	m.publishUnsyncedStops()
 	return m, nil
 }
 
@@ -665,6 +686,7 @@ func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, er
 		m.opts.OnGateway(nil)
 	}
 	m.gwPort.Store(int64(gw.Port))
+	m.lastGw.Store(gw)
 	driver := gw.Driver
 	m.gwDriver.Store(&driver)
 	m.gwCheckedAt.Store(m.now().UnixNano())
@@ -836,7 +858,7 @@ func gatewayUnavailableError(err error) error {
 
 // dialAddress is the address a gRPC "Error while dialing: dial tcp ADDR:"
 // failure names.
-var dialAddress = regexp.MustCompile(`dial tcp ([^\s"]+?):\s`)
+var dialAddress = lazyregexp.New(`dial tcp ([^\s"]+?):\s`)
 
 // gatewayUnavailableText says in words why the OpenShell gateway does not
 // answer; known is false for a failure it cannot name.

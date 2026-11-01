@@ -29,11 +29,39 @@ struct AIDiscoveryModelTests {
         searchesModelLineageMetadata()
         appliesFocusedAndExplicitModelFilters()
         rendersCanonicalDevinConnectorName()
+        sandboxSignalsStayTheirOwnRows()
         guard failureCount == 0 else {
             fputs("AI discovery model provenance tests failed: \(failureCount)\n", stderr)
             exit(1)
         }
         print("AI discovery model provenance tests passed")
+    }
+
+    /// ai_discovery_state: a signal a sandbox scan found is its own row,
+    /// labelled "(sandbox NAME)", never folded into the same product on this
+    /// machine; its runtime uptime counts from started_at (GAP-0392).
+    private static func sandboxSignalsStayTheirOwnRows() {
+        let host = AISignalDecoding.decode([
+            "state": "active", "product": "Claude Code", "vendor": "Anthropic", "detector": "process", "source": "host",
+            "runtime": ["pid": 41, "uptime_sec": 120, "started_at": "2026-10-22T10:00:00Z"],
+        ])
+        let boxed = AISignalDecoding.decode([
+            "state": "active", "product": "Claude Code", "vendor": "Anthropic", "detector": "process", "source": "sandbox",
+            "sandbox_name": "myapp-claude-7f3a",
+            "runtime": ["pid": 7, "uptime_sec": 5, "started_at": "2026-10-22T10:00:00Z"],
+        ])
+        let nameless = AISignalDecoding.decode(["state": "seen", "source": "sandbox", "sandbox_name": "docs"])
+        expect(host.sandboxName.isEmpty && boxed.sandboxName == "myapp-claude-7f3a", "sandbox_name decodes")
+        expect(host.displayProduct == "Claude Code" && boxed.displayProduct == "Claude Code (sandbox myapp-claude-7f3a)"
+               && nameless.displayProduct == "(sandbox docs)", "display product tags the sandbox: \(boxed.displayProduct)")
+        let rows = AIDiscoveryGrouping.rows(from: [host, boxed])
+        expect(rows.count == 2 && Set(rows.map(\.product)) == ["Claude Code", "Claude Code (sandbox myapp-claude-7f3a)"],
+               "a sandbox's signal is its own row: \(rows.map(\.product))")
+        expect(rows.allSatisfy { $0.count == 1 }, "counts are not inflated by the fold")
+        let now = DCDates.parse("2026-10-22T10:30:00Z")!
+        expect(AIDiscoveryGrouping.runtimeDetail(host.runtime!, sandboxName: "", now: now) == "runtime: pid=41 up=2m", "host uptime is the gateway's: \(AIDiscoveryGrouping.runtimeDetail(host.runtime!, sandboxName: "", now: now))")
+        expect(AIDiscoveryGrouping.runtimeDetail(boxed.runtime!, sandboxName: boxed.sandboxName, now: now) == "runtime: pid=7 up=30m",
+               "a sandbox runtime counts from its start: \(AIDiscoveryGrouping.runtimeDetail(boxed.runtime!, sandboxName: boxed.sandboxName, now: now))")
     }
 
     private static func parsesCanonicalModelProvenance() {

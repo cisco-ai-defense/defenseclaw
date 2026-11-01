@@ -414,6 +414,25 @@ func TestPolicyValidateRejectsDeletedConfiguredDirectory(t *testing.T) {
 	}
 }
 
+// A Windows managed install clears policy_dir (the gateway loads no Rego)
+// and ships no data_dir policies folder: validate and test say so and exit
+// 0 instead of failing on the absent folder (GAP-2292).
+func TestPolicyValidateAndTestWithoutPolicyDirAreConfigOnly(t *testing.T) {
+	setPolicyPathTestConfig(t, &config.Config{DataDir: t.TempDir()})
+	setPolicyPathTestFlags(t)
+	output, err := capturePolicyPathTestOutput(t, func() error { return policyValidateCmd.RunE(policyValidateCmd, nil) })
+	if err != nil || !strings.Contains(output, "No policy_dir is set") || !strings.Contains(output, "admission.skill: actions from") {
+		t.Fatalf("validate without policy_dir = %q, error = %v", output, err)
+	}
+	var tests strings.Builder
+	previous := policyTestCmd.OutOrStdout()
+	policyTestCmd.SetOut(&tests)
+	t.Cleanup(func() { policyTestCmd.SetOut(previous) })
+	if err := policyTestCmd.RunE(policyTestCmd, nil); err != nil || !strings.Contains(tests.String(), "nothing to run") {
+		t.Fatalf("test without policy_dir = %q, error = %v", tests.String(), err)
+	}
+}
+
 func TestPolicyTestWithoutRegoDistinguishesAnExistingRootFromAMissingRoot(t *testing.T) {
 	for _, layout := range []string{"no rego directory", "empty rego directory", "missing policy root"} {
 		t.Run(layout, func(t *testing.T) {
@@ -498,6 +517,11 @@ func TestSecureClientPolicyReloadKeepsTheOutputOfMain(t *testing.T) {
 	managedGatewayClientFactory = func(time.Duration, string, string) (*http.Client, error) { return &http.Client{}, nil }
 	t.Cleanup(func() { managedGatewayClientFactory = previousFactory })
 	ownGatewayListener(t)
+	// A Secure Client host is one with the trusted Secure Client install; a
+	// secure_client profile alone gets the managed listener check (GAP-0962).
+	previousSecureClient := secureClientHost
+	t.Cleanup(func() { secureClientHost = previousSecureClient })
+	secureClientHost = func() bool { return true }
 	const token = "reload-fixture-value"
 	const body = `{"error":"reload failed: policy: read data.json: open /p/data.json: no such file or directory","status":"failed"}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

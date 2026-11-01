@@ -115,7 +115,9 @@ def inspect_doctor_config_load_failure(load_error: BaseException) -> DoctorStart
     for warning in list(getattr(validation, "warnings", ()) or ())[:_MAX_DIAGNOSTICS]:
         checks.append(DoctorStartupCheck("warn", "Config validation", _bounded_detail(warning)))
 
-    if bool(getattr(validation, "ok", False)):
+    if not_checked := _bounded_detail(getattr(validation, "not_checked", "") or ""):
+        checks.append(DoctorStartupCheck("warn", "Config validation", f"not run: {not_checked}"))
+    elif bool(getattr(validation, "ok", False)):
         detail = (
             f"config validate passes, but config.yaml still could not be loaded "
             f"({loader_detail}); nothing was changed. {remediation}"
@@ -134,8 +136,10 @@ def inspect_doctor_config_load_failure(load_error: BaseException) -> DoctorStart
             )
         )
         return DoctorStartupDiagnostics(tuple(checks), "Fix the config problem above, then rerun 'defenseclaw doctor'.")
+    # The loader's own reason: in an agent sandbox the config check did not
+    # run, so it is the only one that says why config.yaml failed (GAP-1562).
     detail = (
-        "config.yaml could not be loaded, so doctor stopped at the config "
+        f"config.yaml could not be loaded ({loader_detail}), so doctor stopped at the config "
         f"checks; nothing was changed or repaired. {remediation}"
     )
     checks.append(DoctorStartupCheck("fail", "Config load", detail))

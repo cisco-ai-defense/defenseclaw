@@ -18,10 +18,11 @@ package harness
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // tarballPin pins one vendor-hosted release archive per Linux architecture:
@@ -49,8 +50,8 @@ type tarballArchive struct {
 }
 
 var (
-	tarballURLRE     = regexp.MustCompile(`^https://[a-z0-9.-]+/[A-Za-z0-9._/%-]+\.tar\.gz$`)
-	tarballVersionRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$`)
+	tarballURLRE     = lazyregexp.New(`^https://[a-z0-9.-]+/[A-Za-z0-9._/%-]+\.tar\.gz$`)
+	tarballVersionRE = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$`)
 )
 
 // validate refuses a pin that could not be rendered safely.

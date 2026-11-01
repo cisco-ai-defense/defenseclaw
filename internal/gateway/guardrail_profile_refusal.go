@@ -10,6 +10,7 @@ import (
 	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
 // A profile decision that depends on an unproven identity fact is refused
@@ -31,9 +32,16 @@ func (a *APIServer) profileRefused(ctx context.Context) string {
 	return ""
 }
 
-// refuseProfileHook answers a hook whose profile decision is Refused with a
-// block, rendered for the agent. Whether a connector honours a block for
-// that event is reported separately as WouldBlock.
+// refuseProfileHook answers a hook whose profile decision is Refused. The
+// refusal is a closed answer in the event's native control, chosen as a
+// failed check's closed answer is (failedCheckNativeAction): a block where
+// the connector's native hook can deny the event, Claude Code PostToolBatch
+// included, else the advisory allow with
+// would_block, audited as not enforced (Antigravity PostToolUse answers {},
+// Cursor's after* events only observe). A stop, session-end or idle event
+// gets the connector's neutral allow without follow-up context: a denial
+// there keeps the agent running and repeats the hook, and Cursor submits a
+// stop message as the next prompt. A refusal never fails open.
 func (a *APIServer) refuseProfileHook(
 	ctx context.Context,
 	profile connector.HookProfile,
@@ -46,15 +54,27 @@ func (a *APIServer) refuseProfileHook(
 	if reason == "" {
 		return agentHookResponse{}, false
 	}
-	_, wouldBlock := mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, payload)
-	resp = agentHookResponse{
-		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
-		WouldBlock: wouldBlock, Reason: reason,
+	if req.ConnectorName == "" {
+		req.ConnectorName = connectorName
 	}
+	if req.Payload == nil {
+		req.Payload = payload
+	}
+	resp = agentHookResponse{
+		Action: "allow", RawAction: "block", Severity: "HIGH", Mode: "action",
+		WouldBlock: true, Reason: reason, SourceReason: reason,
+	}
+	if hookexec.LifecycleEvent(connectorName, req.HookEventName) {
+		resp.HookOutput = neutralLifecycleHookOutput(ctx, profile, req, rawBody, payload, resp)
+		return resp, true
+	}
+	resp.Action, resp.WouldBlock = failedCheckNativeAction(ctx, profile, connectorName, req, true)
 	refused = true
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			// resp stays the bare block.
+			// resp keeps its answer, with the callback-free native output.
+			resp.Reason = reason
+			resp.HookOutput = nativeFallbackOutput(profile, connectorName, req, resp.Action, reason)
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("profile refusal render panic: %v", recovered))
 		}
 	}()

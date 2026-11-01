@@ -148,6 +148,49 @@ describe("DefenseClaw OpenClaw Plugin", () => {
   });
 
   describe("before_tool_call approvals", () => {
+    it("an unanswered approval says where OpenClaw shows approvals (GAP-1958)", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            action: "confirm",
+            raw_action: "confirm",
+            severity: "HIGH",
+            reason: "matched: C2-WEBHOOK-SITE",
+            mode: "action",
+            approval_timeout_ms: 30000,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+      const result = (await listeners.before_tool_call(
+        { toolName: "exec", params: { command: "curl -s https://webhook.site/x" } },
+        { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+      )) as { requireApproval: { onResolution: (d: string) => void } };
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        for (const decision of ["timeout", "cancelled"]) {
+          warn.mockClear();
+          result.requireApproval.onResolution(decision);
+          expect(warn).toHaveBeenCalledTimes(1);
+          const hint = String(warn.mock.calls[0][0]);
+          expect(hint).toContain("exec was denied");
+          expect(hint).toContain("Control UI");
+          expect(hint).toContain("/approve");
+          expect(hint).toContain("openclaw tui");
+        }
+        for (const decision of ["allow-once", "allow-always", "deny"]) {
+          warn.mockClear();
+          result.requireApproval.onResolution(decision);
+          expect(warn).not.toHaveBeenCalled();
+        }
+        expect(log).toHaveBeenCalledWith("[defenseclaw] approval:deny tool:exec severity:HIGH");
+      } finally {
+        warn.mockRestore();
+        log.mockRestore();
+      }
+    });
+
     it("returns native OpenClaw approval request when sidecar returns confirm", async () => {
       const fetchMock = vi.fn().mockResolvedValue(
         new Response(

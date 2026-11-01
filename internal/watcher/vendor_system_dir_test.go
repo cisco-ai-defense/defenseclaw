@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // The watcher must not create a vendor system folder such as /etc/codex/skills:
@@ -105,7 +106,7 @@ func TestUnderVendorSystemRoot(t *testing.T) {
 		t.Skip("unix path layout")
 	}
 	previous := vendorSystemRoots
-	vendorSystemRoots = defaultVendorSystemRoots()
+	vendorSystemRoots = gatewayconnector.DefaultVendorSystemRoots()
 	t.Cleanup(func() { vendorSystemRoots = previous })
 
 	for _, path := range []string{

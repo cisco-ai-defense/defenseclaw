@@ -69,7 +69,11 @@ def test_macos_detection_documents_busy_and_unknown() -> None:
     mdm = page("enterprise/mdm/index.mdx")
     assert "`unknown` (not run as root) or `busy`" in mdm
     assert "`busy`" in page("enterprise/mdm/jamf.mdx")
-    assert "about 92 KB" in page("enterprise/mdm/intune-macos.mdx")
+    # GAP-1536: the upload row names the edited wrapper, not a size that goes stale.
+    intune = page("enterprise/mdm/intune-macos.mdx")
+    assert "| Upload script | Your edited copy of `defenseclaw-enterprise.sh`, with the config added |" in intune
+    assert "the wrapper is about" not in intune
+    assert " KB " not in intune
 
 
 def test_configmgr_config_change_checks_the_config_hash() -> None:

@@ -287,7 +287,8 @@ actor AuditStore {
             }
         }
         if !conds.isEmpty { sql += " WHERE " + conds.joined(separator: " AND ") }
-        sql += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        // db.py: rowid breaks timestamp ties so pages neither skip nor repeat a row.
+        sql += " ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?"
         binds.append(contentsOf: [limit, offset])
         return query(sql, binds: binds).map(decodeAuditEvent)
     }
@@ -311,7 +312,7 @@ actor AuditStore {
         guard !conditions.isEmpty else { return [] }
         binds.append(limit)
         return query(
-            "SELECT * FROM audit_events WHERE \(conditions.joined(separator: " AND ")) ORDER BY timestamp DESC LIMIT ?",
+            "SELECT * FROM audit_events WHERE \(conditions.joined(separator: " AND ")) ORDER BY timestamp DESC, rowid DESC LIMIT ?",
             binds: binds
         ).map(decodeAuditEvent)
     }
@@ -339,7 +340,7 @@ actor AuditStore {
         }
         binds.append(limit)
         let rows = query(
-            "SELECT * FROM scan_results WHERE \(conditions.joined(separator: " AND ")) ORDER BY timestamp DESC LIMIT ?",
+            "SELECT * FROM scan_results WHERE \(conditions.joined(separator: " AND ")) ORDER BY timestamp DESC, rowid DESC LIMIT ?",
             binds: binds
         )
         return rows.flatMap { row -> [ScanFindingEvent] in
@@ -404,24 +405,86 @@ actor AuditStore {
             .filter { $0.severity != .info }
     }
 
-    /// db.py::get_counts — Overview ENFORCEMENT summary.
-    func enforcementSummary() -> (blockedSkills: Int, allowedSkills: Int, blockedMCPs: Int, allowedMCPs: Int, totalScans: Int, activeAlerts: Int) {
+    /// db.py::get_enforcement_counts(cfg=) — Overview ENFORCEMENT summary.
+    ///
+    /// The skill/MCP block and allow counts are the journal rows with the
+    /// operator decisions of config.yaml `asset_policy` folded in
+    /// (asset_lists.install_counts): on runtime 1.0.x `skill block` and
+    /// `mcp allow` write config.yaml, not audit.db, so the actions table
+    /// alone shows 0 after every operator decision. Pass `nil` (or a Secure
+    /// Client snapshot) to count the journal only, as the runtime does there.
+    func enforcementSummary(
+        operatorLists: OperatorAssetLists? = nil
+    ) -> (blockedSkills: Int, allowedSkills: Int, blockedMCPs: Int, allowedMCPs: Int, totalScans: Int, activeAlerts: Int) {
         func count(_ sql: String) -> Int {
             (query(sql).first?["n"] as? Int) ?? 0
         }
-        let qSkill = "SELECT COUNT(*) AS n FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
-        let qMCP = "SELECT COUNT(*) AS n FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
         let hasActions = tableExists("actions")
         let hasScans = tableExists("scan_results")
         let hasAudit = tableExists("audit_events")
+        let skills = hasActions ? installJournalRows(targetType: "skill") : []
+        let mcps = hasActions ? installJournalRows(targetType: "mcp") : []
+        let lists = operatorLists ?? OperatorAssetLists(secureClient: true, allowed: [:], denied: [:])
+        let installs = lists.installCounts(skills: skills, mcps: mcps)
         return (
-            blockedSkills: hasActions ? count(qSkill + "'block'") : 0,
-            allowedSkills: hasActions ? count(qSkill + "'allow'") : 0,
-            blockedMCPs: hasActions ? count(qMCP + "'block'") : 0,
-            allowedMCPs: hasActions ? count(qMCP + "'allow'") : 0,
+            blockedSkills: installs.blockedSkills,
+            allowedSkills: installs.allowedSkills,
+            blockedMCPs: installs.blockedMCPs,
+            allowedMCPs: installs.allowedMCPs,
             totalScans: hasScans ? count("SELECT COUNT(*) AS n FROM scan_results") : 0,
             activeAlerts: hasAudit ? count("SELECT COUNT(*) AS n FROM audit_events WHERE UPPER(severity) IN ('CRITICAL','HIGH','MEDIUM','LOW')") : 0
         )
+    }
+
+    /// db.py::count_detection_only_findings: the findings tagged
+    /// detection-only (a rule matched but could not decide the call) recorded
+    /// at or after `since`. Alerts leave them out, so the Alerts panel says
+    /// how many there are and where to read them (GAP-0176, GAP-0314).
+    /// Needs the payload_json column; 0 on older schemas.
+    func countDetectionOnlyFindings(since: Date) -> Int {
+        guard tableExists("audit_events"), columnNames(in: "audit_events").contains("payload_json") else { return 0 }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        let tags = "$.\"defenseclaw.finding.tags\""
+        let safeTextTags = "CASE WHEN json_valid(COALESCE(payload_json, '')) THEN json_extract(payload_json, '\(tags)') END"
+        let rows = query("""
+            SELECT COUNT(*) AS n FROM audit_events
+            WHERE timestamp >= ?
+              AND COALESCE(payload_json, '') LIKE '%detection-only%'
+              AND (
+                EXISTS (
+                    SELECT 1 FROM json_each(
+                        CASE WHEN json_valid(COALESCE(payload_json, ''))
+                              AND json_type(payload_json, '\(tags)') = 'array'
+                             THEN json_extract(payload_json, '\(tags)')
+                             ELSE '[]' END
+                    ) AS finding_tag
+                    WHERE LOWER(TRIM(CAST(finding_tag.value AS TEXT), CHAR(9, 10, 11, 12, 13, 32))) = 'detection-only'
+                )
+                OR LOWER(TRIM(COALESCE(\(safeTextTags), ''), CHAR(9, 10, 11, 12, 13, 32))) = 'detection-only'
+              )
+            """, binds: [formatter.string(from: since)])
+        return (rows.first?["n"] as? Int) ?? 0
+    }
+
+    /// db.py::list_actions_by_type reduced to the install decision: every
+    /// `actions` row of one target type with its connector ("" = global on
+    /// schemas before the connector column) and `actions_json.install`.
+    func installJournalRows(targetType: String) -> [InstallJournalRow] {
+        guard tableExists("actions") else { return [] }
+        let hasConnector = columnNames(in: "actions").contains("connector")
+        let rows = query("""
+            SELECT target_name, \(hasConnector ? "connector" : "'' AS connector"),
+                   json_extract(actions_json, '$.install') AS install
+            FROM actions WHERE target_type = ? ORDER BY updated_at DESC
+            """, binds: [targetType])
+        return rows.compactMap { row in
+            guard let name = row["target_name"] as? String else { return nil }
+            let install = ((row["install"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return InstallJournalRow(name: name, connector: (row["connector"] as? String) ?? "", install: install)
+        }
     }
 
     /// db.py::connector_hook_event_stats — ALL-TIME per-connector totals for
@@ -628,7 +691,7 @@ actor AuditStore {
 
     func activityEvents(limit: Int) -> [ActivityMutation] {
         guard tableExists("activity_events") else { return [] }
-        return query("SELECT * FROM activity_events ORDER BY timestamp DESC LIMIT ?", binds: [limit]).map { r in
+        return query("SELECT * FROM activity_events ORDER BY timestamp DESC, rowid DESC LIMIT ?", binds: [limit]).map { r in
             ActivityMutation(
                 id: (r["id"] as? String) ?? String(describing: r["id"] ?? UUID().uuidString),
                 timestamp: DCDates.parse(r["timestamp"]) ?? Date(timeIntervalSince1970: 0),
@@ -648,7 +711,7 @@ actor AuditStore {
 
     func egressEvents(limit: Int) -> [EgressEvent] {
         guard tableExists("network_egress_events") else { return [] }
-        return query("SELECT * FROM network_egress_events ORDER BY timestamp DESC LIMIT ?", binds: [limit]).map { r in
+        return query("SELECT * FROM network_egress_events ORDER BY timestamp DESC, rowid DESC LIMIT ?", binds: [limit]).map { r in
             let blocked = ((r["blocked"] as? Int) ?? 0) == 1
             return EgressEvent(
                 id: (r["id"] as? String) ?? String(describing: r["id"] ?? UUID().uuidString),
@@ -729,7 +792,7 @@ actor AuditStore {
         let rows = query("""
             SELECT timestamp FROM audit_events
             WHERE action LIKE '%block%' OR action LIKE '%reject%'
-            ORDER BY timestamp DESC LIMIT 1
+            ORDER BY timestamp DESC, rowid DESC LIMIT 1
             """)
         return DCDates.parse(rows.first?["timestamp"])
     }

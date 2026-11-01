@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -39,6 +40,16 @@ type simpleShellState struct {
 	cwdUnknown bool
 	dirStack   []string
 	vars       map[string]string
+	// homeLocals holds, innermost last, the HOME of the caller of each
+	// function body that made HOME local; the body end restores it.
+	homeLocals []simpleHomeLocal
+}
+
+// simpleHomeLocal is the caller HOME saved by a local HOME in the function
+// body of scope.
+type simpleHomeLocal struct {
+	scope, home string
+	known       bool
 }
 
 const (
@@ -48,7 +59,8 @@ const (
 
 func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
-		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars))}
+		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars)),
+		homeLocals: slices.Clone(s.homeLocals)}
 	for name, value := range s.vars {
 		copy.vars[name] = value
 	}
@@ -142,31 +154,28 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 				return []SimpleCommand{{EvaluationFailure: "parse"}}
 			}
 			parent := previousScope[:index]
-			if previousScope[index+1] == 'c' {
-				states[parent] = uniqueSimpleStates(append(states[parent], states[previousScope]...))
-				if len(states[parent]) > maxSimpleStates {
-					return []SimpleCommand{{EvaluationFailure: "limit"}}
+			body, ran := states[previousScope]
+			switch previousScope[index+1] {
+			case 'c':
+				if ran {
+					states[parent] = uniqueSimpleStates(append(simpleScopeStates(states, parent), body...))
 				}
+			case 'f':
+				// A called function body always runs; its local HOME ends
+				// with it (GAP-2476, RV-pod2-2).
+				if ran {
+					states[parent] = uniqueSimpleStates(simpleEndFunctionBody(body, previousScope))
+				}
+			}
+			if len(states[parent]) > maxSimpleStates {
+				return []SimpleCommand{{EvaluationFailure: "limit"}}
 			}
 			previousScope = parent
 		}
 		previousScope = part.scope
-		variants, present := states[part.scope]
-		if !present {
-			parent := part.scope
-			for {
-				index := strings.LastIndexByte(parent, '/')
-				if index < 0 {
-					return []SimpleCommand{{EvaluationFailure: "parse"}}
-				}
-				parent = parent[:index]
-				if inherited, ok := states[parent]; ok {
-					for _, state := range inherited {
-						variants = append(variants, state.clone())
-					}
-					break
-				}
-			}
+		variants := simpleScopeStates(states, part.scope)
+		if variants == nil {
+			return []SimpleCommand{{EvaluationFailure: "parse"}}
 		}
 		file, parsed := shellparse.Parse(part.text)
 		if !parsed || len(file.Stmts) != 1 {
@@ -185,30 +194,51 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			}
 			text := part.text
 			effective := state.vars
+			// unprefixed is the call without prefix assignments that can
+			// change which program runs (PATH=/x aws ...). The policy facts
+			// are the command's argv, so the call is also judged without
+			// them (GAP-1200, #1189): such a prefix can only pick another
+			// program of the same name, and a rule that matches the argv
+			// then over-blocks at worst, never hides a match. The call with
+			// its prefixes is still judged too: dropping PATH alone from
+			// `PATH=/missing $'rm' -rf /` would invent a runnable rm for
+			// rules that read the prefix.
+			unprefixed := ""
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Assigns) != 0 && len(call.Args) != 0 {
 				effective = state.clone().vars
 				updateSimpleVariables(effective, call.Assigns)
-				// The policy facts are the command's argv. Keep prefixes
-				// that can change executable resolution: dropping PATH from
-				// `PATH=/missing $'rm' -rf /` would invent a runnable rm.
-				if !simplePrefixChangesResolution(call.Assigns) {
-					start := int(call.Args[0].Pos().Offset())
-					end := int(call.Pos().Offset())
-					if start <= end || start > len(text) {
-						return []SimpleCommand{{EvaluationFailure: "parse"}}
-					}
+				start := int(call.Args[0].Pos().Offset())
+				end := int(call.Pos().Offset())
+				if start <= end || start > len(text) {
+					return []SimpleCommand{{EvaluationFailure: "parse"}}
+				}
+				if simplePrefixChangesResolution(call.Assigns) {
+					unprefixed = text[start:]
+				} else {
 					text = text[start:]
 					changed = true
 				}
 			}
-			if resolved, ok := simpleResolvedVariables(text, effective); ok {
-				text = resolved
-				changed = true
+			// The shell expands the words of the command, ~ included, before
+			// it applies the prefix assignments, so HOME=/tmp cp a ~/f
+			// writes the previous ~/f (GAP-2476). The prefixes set only the
+			// environment of the program (effective, used for nested scripts).
+			resolve := func(text string) string {
+				if resolved, ok := simpleResolvedVariables(text, state.vars); ok {
+					text = resolved
+					changed = true
+				}
+				if resolved, ok := simpleResolvedDirectoryStackTildes(text, &state); ok {
+					text = resolved
+					changed = true
+				}
+				if stripped, ok := withoutDescriptorDuplications(text); ok {
+					text = stripped
+					changed = true
+				}
+				return text
 			}
-			if stripped, ok := withoutDescriptorDuplications(text); ok {
-				text = stripped
-				changed = true
-			}
+			text = resolve(text)
 			if strings.TrimSpace(text) == "" {
 				return []SimpleCommand{{EvaluationFailure: "parse"}}
 			}
@@ -224,6 +254,21 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 				emitted[command] = true
 				if len(result) > maxSimpleEvaluations {
 					return []SimpleCommand{{EvaluationFailure: "limit"}}
+				}
+			}
+			if unprefixed != "" {
+				if reading := resolve(unprefixed); strings.TrimSpace(reading) != "" {
+					alone := SimpleCommand{Text: reading, CWD: state.cwd,
+						ZshHistoryBuiltin:       command.ZshHistoryBuiltin,
+						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound)}
+					if !emitted[alone] {
+						result = append(result, alone)
+						emitted[alone] = true
+						changed = true
+						if len(result) > maxSimpleEvaluations {
+							return []SimpleCommand{{EvaluationFailure: "limit"}}
+						}
+					}
 				}
 			}
 			if call != nil {
@@ -282,6 +327,11 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 						}
 					}
 				}
+			}
+			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok {
+				// export HOME=v sets HOME for the commands after it, as
+				// HOME=v; export HOME does (GAP-2476).
+				updateSimpleDeclVariables(&state, decl, part.scope)
 			}
 			nextCWD, changedDirectory := simpleCommandNextCWD(text, &state, effective)
 			if !changedDirectory {
@@ -637,12 +687,157 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 	for _, state := range states {
 		if !slices.ContainsFunc(result, func(previous simpleShellState) bool {
 			return previous.cwd == state.cwd && previous.cwdUnknown == state.cwdUnknown &&
-				slices.Equal(previous.dirStack, state.dirStack) && maps.Equal(previous.vars, state.vars)
+				slices.Equal(previous.dirStack, state.dirStack) && maps.Equal(previous.vars, state.vars) &&
+				slices.Equal(previous.homeLocals, state.homeLocals)
 		}) {
 			result = append(result, state)
 		}
 	}
 	return result
+}
+
+// updateSimpleDeclVariables applies a HOME=value word of an export,
+// readonly, declare, typeset or local statement to vars, as
+// updateSimpleVariables applies a bare HOME=value: every later ~ and $HOME
+// then names value. HOME with no value keeps its value. An option other
+// than -x, -r and -g (export -n also assigns) can change what the value
+// means (a reference, an integer, a case or an array attribute): HOME then
+// keeps its previous value, so a later ~ or $HOME write is still judged
+// against a home the call can reach (GAP-2476, RV-pc11-1). Other names
+// keep the bound-variable reading the action-level resolver judges.
+//
+// local HOME=v counts only in a function body, until the body ends: bash
+// refuses local outside a function (HOME is unchanged), and the caller
+// HOME is back once the function returns (RV-pod2-2). declare and typeset
+// without -g in a function body are local too; export, readonly and
+// declare -g there set the caller HOME (checker p3i3 D01-D21).
+func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause, scope string) {
+	if decl == nil || decl.Variant == nil {
+		return
+	}
+	vars := state.vars
+	local := false
+	switch decl.Variant.Value {
+	case "export", "readonly":
+	case "declare", "typeset":
+		// In a function body declare and typeset make the name local
+		// unless -g is given (bash, ksh); at the top level they set it.
+		local = simpleFunctionBodyScope(scope) != "" && !simpleDeclGlobal(decl)
+	case "local":
+		if simpleFunctionBodyScope(scope) == "" {
+			return
+		}
+		local = true
+	default:
+		return
+	}
+	if local {
+		body := simpleFunctionBodyScope(scope)
+		declaresHome := slices.ContainsFunc(decl.Args, func(assign *syntax.Assign) bool {
+			return assign != nil && assign.Name != nil && assign.Name.Value == "HOME"
+		})
+		if declaresHome && (len(state.homeLocals) == 0 || state.homeLocals[len(state.homeLocals)-1].scope != body) {
+			home, known := vars["HOME"]
+			state.homeLocals = append(state.homeLocals, simpleHomeLocal{scope: body, home: home, known: known})
+		}
+	}
+	known := true
+	for _, assign := range decl.Args {
+		if assign == nil || assign.Name != nil {
+			continue
+		}
+		if assign.Value == nil {
+			known = false
+			continue
+		}
+		option := projectPOSIXWord(assign.Value)
+		if decl.Variant.Value == "export" && !option.Expands && option.Value == "-n" {
+			continue
+		}
+		if !homeDeclOption(option) {
+			known = false
+		}
+	}
+	for _, assign := range decl.Args {
+		if assign == nil || assign.Name == nil || assign.Naked || assign.Name.Value != "HOME" {
+			continue
+		}
+		if !known || assign.Index != nil || assign.Array != nil {
+			continue
+		}
+		updateSimpleVariables(vars, []*syntax.Assign{assign})
+	}
+}
+
+// simpleDeclGlobal reports a static -g option word of a declaration.
+func simpleDeclGlobal(decl *syntax.DeclClause) bool {
+	for _, assign := range decl.Args {
+		if assign == nil || assign.Name != nil || assign.Value == nil {
+			continue
+		}
+		option := projectPOSIXWord(assign.Value)
+		if !option.Expands && strings.HasPrefix(option.Value, "-") && strings.ContainsRune(option.Value[1:], 103) {
+			return true
+		}
+	}
+	return false
+}
+
+// simpleScopeStates returns the states of scope: its own, or copies of
+// those of the nearest scope around it that has states. nil means none.
+func simpleScopeStates(states map[string][]simpleShellState, scope string) []simpleShellState {
+	if own, present := states[scope]; present {
+		return own
+	}
+	for {
+		index := strings.LastIndexByte(scope, '/')
+		if index < 0 {
+			return nil
+		}
+		scope = scope[:index]
+		if inherited, ok := states[scope]; ok {
+			copies := make([]simpleShellState, 0, len(inherited))
+			for _, state := range inherited {
+				copies = append(copies, state.clone())
+			}
+			return copies
+		}
+	}
+}
+
+// simpleFunctionBodyScope returns the innermost function body scope (kind
+// f or e) that holds scope, or "" at the top level of the action.
+func simpleFunctionBodyScope(scope string) string {
+	for {
+		index := strings.LastIndexByte(scope, '/')
+		if index < 0 {
+			return ""
+		}
+		if kind := scope[index+1]; kind == 'f' || kind == 'e' {
+			return scope
+		}
+		scope = scope[:index]
+	}
+}
+
+// simpleEndFunctionBody restores the caller HOME that a local HOME of the
+// function body of scope saved.
+func simpleEndFunctionBody(states []simpleShellState, scope string) []simpleShellState {
+	ended := make([]simpleShellState, 0, len(states))
+	for _, state := range states {
+		state = state.clone()
+		if last := len(state.homeLocals) - 1; last >= 0 && state.homeLocals[last].scope == scope {
+			saved := state.homeLocals[last]
+			state.homeLocals = state.homeLocals[:last]
+			if saved.known {
+				state.vars["HOME"] = saved.home
+			} else {
+				delete(state.vars, "HOME")
+			}
+		}
+		ended = append(ended, state)
+	}
+	return ended
 }
 
 func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) {
@@ -655,9 +850,13 @@ func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) {
 			vars[name] = ""
 		} else if value, known := simpleStaticWord(assign.Value, vars); known {
 			vars[name] = value
-		} else {
+		} else if name != "HOME" {
 			delete(vars, name)
 		}
+		// A HOME value the walk cannot read (HOME=$(echo $HOME), HOME=$X)
+		// keeps the previous HOME: an unknown HOME dropped every later ~
+		// write (GAP-2476). A home that a run-time value really moves to is
+		// outside what the static check can follow.
 	}
 }
 
@@ -884,6 +1083,98 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 	return source, true
 }
 
+// simpleResolvedDirectoryStackTildes writes the bash directory-stack
+// tildes of source (~+, ~-, ~N, ~+N and ~-N at a word start, alone or
+// before a slash) as the directories they name in state: ~+ is PWD, ~- is
+// OLDPWD and ~N / ~+N / ~-N index the dirs list (the current directory,
+// then the pushed directories, last pushed first). After pushd ~/.ssh;
+// pushd /tmp the word ~1 is ~/.ssh, and grep -r . ~1 read the keys while
+// the reading saw a literal ~1 (GAP-2480). A tilde whose directory is not
+// known, or whose index is outside the list (bash keeps it literal), is
+// left as written.
+func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState) (string, bool) {
+	if !strings.Contains(source, "~") {
+		return "", false
+	}
+	file, parsed := shellparse.Parse(source)
+	if !parsed {
+		return "", false
+	}
+	directory := func(prefix string) (string, bool) {
+		switch prefix {
+		case "~+":
+			dir, known := state.vars["PWD"]
+			return dir, known && dir != ""
+		case "~-":
+			dir, known := state.vars["OLDPWD"]
+			return dir, known && dir != ""
+		}
+		digits := strings.TrimLeft(prefix[1:], "+-")
+		if digits == "" || len(digits) > 3 || strings.Trim(digits, "0123456789") != "" ||
+			len(prefix)-1-len(digits) > 1 || state.cwd == "" || state.cwdUnknown {
+			return "", false
+		}
+		index, err := strconv.Atoi(digits)
+		if err != nil {
+			return "", false
+		}
+		list := []string{state.cwd}
+		for at := len(state.dirStack) - 1; at >= 0; at-- {
+			list = append(list, state.dirStack[at])
+		}
+		if strings.HasPrefix(prefix, "~-") {
+			index = len(list) - 1 - index
+		}
+		if index < 0 || index >= len(list) || list[index] == "" {
+			return "", false
+		}
+		return list[index], true
+	}
+	type replacement struct {
+		start, end int
+		text       string
+	}
+	var replacements []replacement
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if redirect, ok := node.(*syntax.Redirect); ok &&
+			(redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc) {
+			return false
+		}
+		word, ok := node.(*syntax.Word)
+		if !ok || len(word.Parts) == 0 {
+			return true
+		}
+		lit, ok := word.Parts[0].(*syntax.Lit)
+		if !ok || !strings.HasPrefix(lit.Value, "~") || len(lit.Value) < 2 {
+			return false
+		}
+		prefix, _, slash := strings.Cut(lit.Value, "/")
+		if !slash && len(word.Parts) > 1 {
+			// A quoted part inside the tilde-prefix stops the expansion.
+			return false
+		}
+		dir, known := directory(prefix)
+		if !known {
+			return false
+		}
+		start := int(word.Pos().Offset())
+		end := start + len(prefix)
+		if start >= 0 && end <= len(source) && source[start:end] == prefix {
+			replacements = append(replacements, replacement{start, end,
+				"'" + strings.ReplaceAll(dir, "'", "'\\''") + "'"})
+		}
+		return false
+	})
+	if len(replacements) == 0 {
+		return "", false
+	}
+	for i := len(replacements) - 1; i >= 0; i-- {
+		r := replacements[i]
+		source = source[:r.start] + r.text + source[r.end:]
+	}
+	return source, true
+}
+
 // simpleNestedScript returns a static shell -c or eval body. eval shares the
 // caller's variables and directory; a -c shell starts a child shell.
 func simpleNestedScript(call *syntax.CallExpr, vars map[string]string, cwdUnknown *bool, interpreter *string) (script string, shared, nested, static bool) {
@@ -960,6 +1251,9 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		case "timeout":
 			childIndex = simpleTimeoutChildIndex(argv)
 		case "env":
+			if split, ok := simpleEnvSplitString(argv); ok {
+				return split, false, true, true
+			}
 			childIndex = simpleEnvChildIndex(argv)
 		default:
 			child, found, uncertain := staticPOSIXWrapperArgv(argv, wrapper)
@@ -976,6 +1270,9 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		}
 		if childIndex <= 0 || childIndex >= len(args) {
 			return "", false, true, false
+		}
+		if program, ok := simpleWrappedProgram(wrapper, argv, childIndex); ok {
+			return program, false, true, true
 		}
 		return simpleNestedScriptArgs(args[childIndex:], vars, depth+1, cwdUnknown, interpreter)
 	}
@@ -1091,6 +1388,113 @@ func simpleEnvChildIndex(argv []string) int {
 		}
 	}
 	return -1
+}
+
+// simpleEnvSplitString returns the command that env -S STRING (or
+// --split-string) runs: STRING split into words, then the arguments after
+// it. Analyze reads -S as uncertain, so a rule about that command never ran
+// (GAP-1200). The STRING is read as shell words, which may find more
+// commands than env would start (env does not split on ;), so the reading
+// can only over-block.
+func simpleEnvSplitString(argv []string) (string, bool) {
+	for index := 1; index < len(argv); index++ {
+		arg := argv[index]
+		split, found := "", false
+		switch {
+		case arg == "-S" || arg == "--split-string":
+			if index+1 >= len(argv) {
+				return "", false
+			}
+			index++
+			split, found = argv[index], true
+		case strings.HasPrefix(arg, "--split-string="):
+			split, found = strings.TrimPrefix(arg, "--split-string="), true
+		case strings.HasPrefix(arg, "-S"):
+			split, found = arg[2:], true
+		case arg == "-i" || arg == "--ignore-environment" ||
+			arg == "-0" || arg == "--null" || arg == "-v" || arg == "--debug" ||
+			strings.HasPrefix(arg, "--unset="):
+			continue
+		case arg == "-u" || arg == "--unset":
+			index++
+			continue
+		default:
+			return "", false
+		}
+		if !found || strings.TrimSpace(split) == "" {
+			return "", false
+		}
+		rest, ok := simpleQuotedArgv(argv[index+1:])
+		if !ok {
+			return "", false
+		}
+		if rest != "" {
+			split += " " + rest
+		}
+		return split, true
+	}
+	return "", false
+}
+
+// simpleWrappedProgram returns the program call that a static wrapper runs
+// when Analyze does not read it as a command of the action: env with a
+// NAME=value (PATH may change which program runs), nohup and timeout. A
+// shell or another wrapper as the program is read as a nested script
+// instead. The argv is static, so the call is judged as a simple command,
+// where a match can only over-block (GAP-1200, #1189). env NAME=value prog
+// is written as NAME=value prog, so the assignments are judged as the same
+// prefix assignments are.
+func simpleWrappedProgram(wrapper string, argv []string, childIndex int) (string, bool) {
+	if childIndex <= 0 || childIndex >= len(argv) {
+		return "", false
+	}
+	var assignments []string
+	switch wrapper {
+	case "nohup", "timeout":
+	case "env":
+		for _, arg := range argv[1:childIndex] {
+			name, value, found := strings.Cut(arg, "=")
+			if !found || !simpleVariableName(name) {
+				continue
+			}
+			quoted, err := syntax.Quote(value, syntax.LangBash)
+			if err != nil {
+				return "", false
+			}
+			assignments = append(assignments, name+"="+quoted)
+		}
+		if len(assignments) == 0 {
+			return "", false
+		}
+	default:
+		return "", false
+	}
+	program := filepath.Base(argv[childIndex])
+	if simpleNestedWrapper(program) {
+		return "", false
+	}
+	switch program {
+	case "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash":
+		return "", false
+	}
+	call, ok := simpleQuotedArgv(argv[childIndex:])
+	if !ok {
+		return "", false
+	}
+	return strings.Join(append(assignments, call), " "), true
+}
+
+// simpleQuotedArgv writes argv as one shell command line.
+func simpleQuotedArgv(argv []string) (string, bool) {
+	words := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		quoted, err := syntax.Quote(arg, syntax.LangBash)
+		if err != nil {
+			return "", false
+		}
+		words = append(words, quoted)
+	}
+	return strings.Join(words, " "), true
 }
 
 func simplePotentialShellScript(args []*syntax.Word) bool {

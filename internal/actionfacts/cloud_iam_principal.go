@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -22,8 +21,8 @@ const (
 )
 
 var (
-	awsIAMPrincipalNamePattern = regexp.MustCompile(`^[A-Za-z0-9_+=,.@-]{1,64}$`)
-	awsIAMPrincipalARNPattern  = regexp.MustCompile(`^arn:aws:iam::[0-9]{12}:(?:user|role)/[A-Za-z0-9_+=,.@/-]{1,512}$`)
+	awsIAMPrincipalNamePattern = lazyMustCompile(`^[A-Za-z0-9_+=,.@-]{1,64}$`)
+	awsIAMPrincipalARNPattern  = lazyMustCompile(`^arn:aws:iam::[0-9]{12}:(?:user|role)/[A-Za-z0-9_+=,.@/-]{1,512}$`)
 )
 
 // ExactCloudIAMPrincipalOperation returns one value-free AWS IAM operation

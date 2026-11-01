@@ -25,11 +25,11 @@ Guided example with synthetic data. In the demo, an on-demand sync checks the so
   type={{
     'clawhub': {
       type: 'kind',
-      description: 'OpenClaw plugin catalog. Reads the openclaw npm package metadata from registry.npmjs.org and lists its bundled plugins; no URL needed.',
+      description: 'OpenClaw plugin catalog. Reads the openclaw npm package metadata from registry.npmjs.org and lists its bundled plugins; no URL needed. Fails while the upstream package has no plugins map (see Common gotchas).',
     },
     'smithery': {
       type: 'kind',
-      description: 'smithery.ai public MCP catalog. URL optional; --content typically mcp.',
+      description: 'smithery.ai public MCP catalog. URL optional; --content typically mcp. Hosted servers become streamable-http entries (at most 25 server records per sync). A fetch with no usable entries warns, and the sync is partial with the skip reasons.',
     },
     'http_yaml': {
       type: 'kind',
@@ -49,7 +49,7 @@ Guided example with synthetic data. In the demo, an on-demand sync checks the so
     },
     'skills_sh': {
       type: 'kind',
-      description: 'Curated skills.sh view. URL optional; --content typically skill.',
+      description: 'Curated skills.sh view. URL optional; --content typically skill. Needs a skills.sh API key (--auth-env); without one the fetch fails with 401.',
     },
   }}
 />
@@ -329,19 +329,24 @@ The catalog publisher needs to compute and include the SHA-256 in their manifest
 
 </Accordion>
 
+<Accordion title="`clawhub` or `skills_sh` sync fails">
+
+`clawhub` fails with `openclaw package metadata is missing the plugins map` while the upstream openclaw npm package has no plugins map. `skills_sh` needs a skills.sh API key: without one the fetch fails with `401 Client Error: Unauthorized`; pass the name of a variable that holds the key with `--auth-env`. Both are upstream changes, not DefenseClaw errors. Use another kind, or an `http_yaml` or `http_json` registry with your own catalog.
+
+</Accordion>
+
 <Accordion title="My MCP scanner / skill scanner is not installed">
 
 The skill scanner is an unconditional runtime dependency. If it is missing,
 affected skill scans fail and those entries are marked `error`. The MCP scanner
-is declared only on Python 3.11 and newer; any Python 3.10 runtime, including a
-managed POSIX install that selected 3.10, legitimately omits it. When the MCP
-SDK is unavailable, MCP entries are fetched but remain `pending` because no
-verdict is computed.
+is a runtime dependency too: DefenseClaw needs Python 3.11 to 3.13, so every
+supported runtime includes it. When the MCP SDK is unavailable, MCP entries are
+fetched but remain `pending` because no verdict is computed.
 
 Do not repair a packaged runtime with `pip`. Use the
 [supported install or repair path](/docs/get-started/download), then rerun
 `defenseclaw registry sync --all`. Source contributors should run `uv sync`
-from the checkout. Use Python 3.11 or newer when MCP scanning is required.
+from the checkout.
 
 </Accordion>
 

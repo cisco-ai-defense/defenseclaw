@@ -88,6 +88,7 @@ SERVICE_CONTAINERS: dict[str, str] = {
     "defenseclaw-grafana": "grafana",
 }
 SERVICES = frozenset(SERVICE_CONTAINERS.values())
+GRAFANA_CONTAINER = "defenseclaw-grafana"
 PROJECT_VOLUMES = frozenset({"prometheus-data", "loki-data", "tempo-data", "grafana-data"})
 
 HTTP_PROBES: tuple[tuple[str, str], ...] = (
@@ -100,6 +101,29 @@ TCP_PROBES: tuple[tuple[str, str, int], ...] = (
     ("otlp-grpc", "127.0.0.1", 4317),
     ("otlp-http", "127.0.0.1", 4318),
 )
+# The Compose service that answers each readiness probe. A listener counts as
+# ready only while this stack's own container for it runs (GAP-2073).
+PROBE_SERVICES: dict[str, str] = {
+    "otlp-grpc": "otel-collector",
+    "otlp-http": "otel-collector",
+    "grafana": "grafana",
+    "prometheus": "prometheus",
+    "tempo": "tempo",
+    "loki": "loki",
+}
+# Every loopback port docker-compose.yml publishes, with its service.
+PUBLISHED_PORTS: tuple[tuple[str, int], ...] = (
+    ("otel-collector", 4317),
+    ("otel-collector", 4318),
+    ("otel-collector", 8888),
+    ("otel-collector", 13133),
+    ("prometheus", 9090),
+    ("loki", 3100),
+    ("tempo", 3200),
+    ("tempo", 9095),
+    ("grafana", 3000),
+)
+PORT_HELD_NOTE = "not running (port held by another process)"
 
 
 class LocalStackError(RuntimeError):
@@ -243,6 +267,7 @@ class ProbeResult:
     label: str
     target: str
     ready: bool
+    note: str = ""
 
 
 class _BoundedCapture:
@@ -871,10 +896,74 @@ class LocalStackController:
     def _checked(result: CommandResult, description: str) -> CommandResult:
         if result.returncode == 0:
             return result
-        detail = (result.stderr or result.stdout).strip()
-        if detail:
-            detail = ": " + detail.splitlines()[0]
+        lines = [line.strip() for line in (result.stderr or result.stdout).splitlines() if line.strip()]
+        # Compose prints progress ("Container ... Creating") before the
+        # failure itself; name the error line, not the first progress line
+        # (GAP-2074).
+        errors = [line for line in lines if "error" in line.lower()]
+        detail = ": " + (errors[-1] if errors else lines[0]) if lines else ""
         raise LocalStackError(f"{description} failed with exit code {result.returncode}{detail}")
+
+    def running_services(self) -> set[str] | None:
+        """This stack copy's Compose services with a running container, or None if unknown.
+
+        A container of another copy of the stack (same project, started from
+        another directory) is another process for this account.
+        """
+        result = self.runner.run(
+            [
+                self.docker_path,
+                "ps",
+                "--filter",
+                f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+                "--filter",
+                "status=running",
+                "--filter",
+                "status=restarting",
+                "--format",
+                '{{.Names}}\t{{.Label "com.docker.compose.project.working_dir"}}',
+            ],
+            timeout=8,
+            env=self.environment,
+        )
+        if result.returncode != 0:
+            return None
+        running: set[str] = set()
+        for line in result.stdout.splitlines():
+            name, _, working_dir = line.strip().partition("\t")
+            if name in SERVICE_CONTAINERS and self._paths_equal(working_dir.strip(), self.stack_dir):
+                running.add(SERVICE_CONTAINERS[name])
+        return running
+
+    @staticmethod
+    def _port_in_use(port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as stream:
+            stream.settimeout(0.5)
+            return stream.connect_ex(("127.0.0.1", port)) == 0
+
+    def verify_ports_free(self) -> None:
+        """Refuse to start when another process holds a port of a stopped service.
+
+        Compose would create the containers and then fail with a progress line
+        only; nothing is started and no Grafana credential is sent (GAP-2074).
+        """
+        running = self.running_services()
+        if running is None:
+            return
+        held = [
+            (service, port) for service, port in PUBLISHED_PORTS if service not in running and self._port_in_use(port)
+        ]
+        if not held:
+            return
+        names = ", ".join(f"{port} ({service})" for service, port in held)
+        credential = (
+            " The Grafana admin credential was not sent." if any(service == "grafana" for service, _ in held) else ""
+        )
+        raise LocalStackError(
+            f"{'ports' if len(held) > 1 else 'port'} {names} {'are' if len(held) > 1 else 'is'} in use by another "
+            "process, so this stack cannot start; nothing was started."
+            f"{credential} Free the port, then run `defenseclaw setup local-observability up` again."
+        )
 
     def verify_container_ownership(self) -> set[str]:
         """Fail on same-name containers whose exact Compose identity is unproven."""
@@ -1196,9 +1285,30 @@ class LocalStackController:
         if not secure_publish:
             raise LocalStackError("effective Grafana Compose config is unsafe: loopback port 3000 publish is missing")
 
+    def _require_owned_grafana_listener(self) -> None:
+        """Refuse to send the admin credential unless this stack's Grafana runs.
+
+        GAP-0981: while this Compose project's own Grafana container runs,
+        Docker holds 127.0.0.1:3000 for it. Before that (a stopped stack, or a
+        container that is restarting) another account can listen on the port
+        and would receive the Basic credential. The check refuses to send; it
+        is a retryable LocalStackError, never a block of anything else.
+        """
+
+        if GRAFANA_CONTAINER not in self.verify_container_ownership():
+            raise LocalStackError("this stack's Grafana container does not exist; the admin credential was not sent")
+        result = self.runner.run(
+            [self.docker_path, "inspect", "--format", "{{.State.Status}}", GRAFANA_CONTAINER],
+            timeout=8,
+            env=self.environment,
+        )
+        if result.returncode != 0 or result.stdout.strip() != "running":
+            raise LocalStackError("this stack's Grafana container is not running; the admin credential was not sent")
+
     def _verify_grafana_authentication(self, password: str) -> None:
         """Prove anonymous access is denied and the managed login works."""
 
+        self._require_owned_grafana_listener()
         url = "http://127.0.0.1:3000/api/search?type=dash-db"
         anonymous = urllib.request.Request(url, method="GET")
         try:
@@ -1288,6 +1398,7 @@ class LocalStackController:
         self.preflight()
         owned_containers = self.verify_container_ownership()
         existing_volumes = self._verify_volume_ownership(refusal="Grafana startup refused")
+        self.verify_ports_free()
         mode = self._resolve_grafana_access_mode(
             grafana_access_mode,
             owned_containers=owned_containers,
@@ -1399,7 +1510,8 @@ class LocalStackController:
         probes = self.probe_all()
         for probe in probes:
             state = "ready" if probe.ready else "fail"
-            lines.append(f"  {probe.label:<10} {state:<7} {probe.target}")
+            note = f"  {probe.note}" if probe.note else ""
+            lines.append(f"  {probe.label:<10} {state:<7} {probe.target}{note}")
         self.status_ready = bool(probes) and all(probe.ready for probe in probes)
         # GAP-1335: say when the containers listed belong to another copy.
         try:
@@ -1437,16 +1549,24 @@ class LocalStackController:
         raise LocalStackError(f"readiness timeout after {timeout}s: {states}")
 
     def probe_all(self, *, deadline: float | None = None) -> list[ProbeResult]:
+        running = self.running_services()
         results: list[ProbeResult] = []
         for label, host, port in TCP_PROBES:
             timeout = self._remaining_probe_timeout(deadline, 0.75)
             ready = timeout > 0 and self._tcp_probe(host, port, timeout=timeout)
-            results.append(ProbeResult(label, f"{host}:{port}", ready))
+            results.append(self._owned_probe(ProbeResult(label, f"{host}:{port}", ready), running))
         for label, url in HTTP_PROBES:
             timeout = self._remaining_probe_timeout(deadline, 1.25)
             ready = timeout > 0 and self._http_probe(url, timeout=timeout)
-            results.append(ProbeResult(label, url, ready))
+            results.append(self._owned_probe(ProbeResult(label, url, ready), running))
         return results
+
+    @staticmethod
+    def _owned_probe(probe: ProbeResult, running: set[str] | None) -> ProbeResult:
+        """A probe answered while this stack's container is stopped is another process (GAP-2073)."""
+        if running is None or PROBE_SERVICES[probe.label] in running:
+            return probe
+        return ProbeResult(probe.label, probe.target, False, PORT_HELD_NOTE if probe.ready else "not running")
 
     @staticmethod
     def _remaining_probe_timeout(deadline: float | None, maximum: float) -> float:

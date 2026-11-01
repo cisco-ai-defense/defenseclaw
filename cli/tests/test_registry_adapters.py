@@ -385,6 +385,52 @@ class TestSmitheryAdapter(unittest.TestCase):
         manifest, _, _ = self._post(body)
         self.assertEqual([e.name for e in manifest.entries], ["bare-array-form"])
 
+    def test_current_catalog_shape_reads_hosted_server_urls(self):
+        # GAP-1640: today's catalog rows carry qualifiedName and remote=true
+        # but no deployment block, so every row was dropped and the dry run
+        # said "Entries: 0 ... successful". A hosted server's URL is in its
+        # own record (deploymentUrl), which the adapter now reads.
+        listing = json.dumps({
+            "servers": [
+                {"qualifiedName": "brave", "remote": True, "isDeployed": True, "displayName": "Brave Search"},
+                {"qualifiedName": "@acme/notes", "remote": True, "isDeployed": True},
+            ],
+            "pagination": {"currentPage": 1, "pageSize": 2, "totalPages": 1},
+        }).encode("utf-8")
+        routes = {
+            "https://registry.smithery.ai/servers": _FakeResp(listing),
+            "https://registry.smithery.ai/servers/brave": _FakeResp(json.dumps({
+                "qualifiedName": "brave", "remote": True,
+                "deploymentUrl": "https://server.example.com/brave",
+                "connections": [{"type": "http", "deploymentUrl": "https://server.example.com/brave"}],
+            }).encode("utf-8")),
+            "https://registry.smithery.ai/servers/@acme/notes": _FakeResp(json.dumps({
+                "qualifiedName": "@acme/notes", "remote": True,
+                "connections": [{"type": "http", "deploymentUrl": "https://server.example.com/notes"}],
+            }).encode("utf-8")),
+        }
+        transport = _MockTransport(routes=routes)
+        with patch.object(adapter_base.requests, "get", transport):
+            manifest, _ = fetch_smithery(self._src(), resolver=_stub_resolver())
+        self.assertEqual(
+            [(e.name, e.transport, e.url) for e in manifest.entries],
+            [("brave", "streamable-http", "https://server.example.com/brave"),
+             ("acme-notes", "streamable-http", "https://server.example.com/notes")],
+        )
+        self.assertEqual(manifest.notes, [])
+
+    def test_zero_usable_rows_say_why(self):
+        listing = json.dumps({"servers": [{"qualifiedName": "ghost", "remote": True}]}).encode("utf-8")
+        routes = {
+            "https://registry.smithery.ai/servers": _FakeResp(listing),
+            "https://registry.smithery.ai/servers/ghost": _FakeResp(b'{"qualifiedName": "ghost", "remote": true}'),
+        }
+        transport = _MockTransport(routes=routes)
+        with patch.object(adapter_base.requests, "get", transport):
+            manifest, _ = fetch_smithery(self._src(), resolver=_stub_resolver())
+        self.assertEqual(manifest.entries, [])
+        self.assertEqual(manifest.notes, ["1 hosted server(s) have no deployment URL in their record"])
+
     def test_unknown_envelope_raises(self):
         body = b'{"foo":"bar"}'
         transport = _MockTransport(responses=[_FakeResp(body)])

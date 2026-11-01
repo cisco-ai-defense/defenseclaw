@@ -154,7 +154,7 @@ func TestJudgeBodyStore_AppliesPragmasAndPoolCap(t *testing.T) {
 		pragma string
 		want   int64
 	}{
-		{"busy_timeout", 5000},
+		{"busy_timeout", auditBusyTimeoutMillis},
 		{"synchronous", 1},
 		{"foreign_keys", 1},
 	}

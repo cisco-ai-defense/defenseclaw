@@ -2096,7 +2096,11 @@ func TestMigrateV9ReadsAuditDBUnderAnAwkwardPath(t *testing.T) {
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("rows = %d, err = %v", len(rows), err)
 	}
-	if err := clearV9ActionRows(auditDB, rows); err != nil {
+	cleanup := MigrationAuditCleanup{Path: auditDB}
+	for _, row := range rows {
+		cleanup.Rows = append(cleanup.Rows, MigrationAuditCleanupRow{ID: row.id, Fingerprint: v9ActionRowFingerprint(row)})
+	}
+	if err := resumeV9ActionCleanup(context.Background(), cleanup); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 	if rows, err = readV9ActionRows(auditDB); err != nil || len(rows) != 0 {

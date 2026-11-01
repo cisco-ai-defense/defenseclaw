@@ -118,7 +118,7 @@ func TestEvaluateRuntimeSkillAssetPolicyRespectsRuntimeDetectionDisabled(t *test
 		{SkillName: "epa-deny", ToolName: "Skill", Surface: "hook", Matched: true},
 		{TargetType: "plugin", SkillName: "epa-plug-deny", Surface: "prompt_expansion", Matched: true},
 	} {
-		decision, matched := api.runtimeSkillAssetPolicyDecision("claudecode", probe)
+		decision, matched := api.runtimeSkillAssetPolicyDecision(context.Background(), "claudecode", probe)
 		if !matched || decision.Action != "block" || decision.Source != "admin-deny" {
 			t.Fatalf("%s %s: matched=%v decision=%+v, want an admin-deny block", probe.TargetType, probe.SkillName, matched, decision)
 		}
@@ -871,6 +871,39 @@ func TestUnprovenMCPDefinitionIgnoresUnrelatedPinnedDeny(t *testing.T) {
 	})
 	if !matched || decision.Action != "block" {
 		t.Fatalf("matching endpoint deny did not fail closed: matched=%v decision=%+v", matched, decision)
+	}
+}
+
+func TestUnprovenMCPDefinitionRespectsRuntimeDetectionSwitch(t *testing.T) {
+	for _, kind := range []string{"registry", "allow", "deny"} {
+		t.Run(kind, func(t *testing.T) {
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+			cfg.AssetPolicy.Enabled = true
+			cfg.AssetPolicy.Mode = config.AssetPolicyModeAction
+			cfg.AssetPolicy.MCP.RuntimeDetection.Enabled = false
+			cfg.AssetPolicy.MCP.RegistryRequired = true
+			rule := config.AssetPolicyRule{Name: "docs", URL: "https://mcp.example.invalid"}
+			switch kind {
+			case "registry":
+				cfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{rule}
+			case "allow":
+				cfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{rule}
+			case "deny":
+				cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{rule}
+			}
+			api := &APIServer{scannerCfg: cfg}
+			ctx := context.WithValue(context.Background(), claimedAssetFactsContextKey{}, assetfacts.Facts{MCPUnproven: "docs"})
+			decision, matched := api.evaluateRuntimeMCPAssetPolicy(ctx, "claudecode", "PreToolUse", mcpRuntimeProbe{
+				Matched: true, Surface: "hook", ServerName: "docs",
+			})
+			if kind == "deny" {
+				if !matched || decision.Action != "block" {
+					t.Fatalf("explicit endpoint deny must still block: %+v matched=%v", decision, matched)
+				}
+			} else if matched {
+				t.Fatalf("runtime detection is off but %s blocked: %+v", kind, decision)
+			}
+		})
 	}
 }
 

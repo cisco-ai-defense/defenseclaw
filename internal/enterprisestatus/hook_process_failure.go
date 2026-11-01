@@ -50,7 +50,7 @@ func (r *Result) AddHookProcessFailureWarnings(connectors map[string]ConnectorSt
 		}
 		r.AddWarning(CodeHookProcessFailOpen, name+": "+behavior+
 			"; the tool may run without a DefenseClaw decision or pre-tool audit row if the hook never reaches the gateway. Protect the hook process from user signals with application control or EDR; see the managed connector limits")
-		r.SecurityComplete = false
+		r.MarkSecurityIncomplete(CodeHookProcessFailOpen)
 	}
 }
 

@@ -228,11 +228,28 @@ type Store struct {
 	// (WithSecureClientSchema).
 	secureClientSchema bool
 
+	// fieldClassSets: rows name their field class set (field_class_sets.go);
+	// fieldClassSetCount is the number of sets, for the table bound.
+	fieldClassSets     atomic.Bool
+	fieldClassSetCount atomic.Int64
+
+	// prepared holds the repeated hook-call inserts, prepared once the store
+	// is ready (prepareStatements).
+	prepared atomic.Pointer[map[string]*sql.Stmt]
+
 	// lifecycleMu serializes initialization/close and lets mandatory v8
 	// event-history transactions pin a ready store until commit or rollback.
 	lifecycleMu sync.RWMutex
 	ready       atomic.Bool
 	closed      bool
+	// toolChainRootTablesReady is set once the root-scope chain tables exist
+	// (tool_chain_root.go); they are created on first use, not by a migration.
+	toolChainRootTablesReady atomic.Bool
+	// findingsRetentionInstant is set once scan_findings has its
+	// retention_timestamp_unix_nano column (the retention migration only adds
+	// it), so a hook's correlation read stops asking the schema for it on the
+	// store's one connection on every call (rel-1-0-6 GAP-0152).
+	findingsRetentionInstant atomic.Bool
 
 	// checkpointDB is a second connection used only for PASSIVE WAL
 	// checkpoints. It is opened on first use and closed with the store.
@@ -258,9 +275,24 @@ type Store struct {
 	// plannerStatsRows is the history size at the last ANALYZE
 	// (RefreshPlannerStatistics).
 	plannerStatsRows atomic.Int64
+	// plannerStatsComplete is set once this process has checked that every
+	// planner statistics target of the history has its statistics.
+	plannerStatsComplete atomic.Bool
+	// plannerStatsNext is the target a full ANALYZE pass that yielded to
+	// the hooks goes on from (RefreshPlannerStatistics).
+	plannerStatsNext atomic.Int64
+	// observationGroup groups concurrent correlation observation writes
+	// into one transaction (CorrelationRepository.RecordObservations).
+	observationGroup writeGroup
+	// callGroup groups the flushes of concurrent hook calls' write batches
+	// into one transaction (CallWriteBatch).
+	callGroup writeGroup
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
+	// lockWait stops the waits on a write lock another process holds
+	// (GAP-1021).
+	lockWait writeLockWait
 
 	// progress receives the one-line notes Init writes while it applies
 	// migrations. nil means os.Stderr, which is gateway.log in the daemon.
@@ -316,6 +348,26 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 	s.sqliteBusyMu.RLock()
 	observer := s.sqliteBusyObserver
 	s.sqliteBusyMu.RUnlock()
+	if observer == nil {
+		return nil
+	}
+	return storeBusyObserver{store: s, inner: observer}
+}
+
+// groupedTxBusyObservabilityV8 is the busy observer of a grouped transaction
+// (runGroupedTx). Its caller leads a writeGroup until the batch is handed
+// on, and the busy metric records correlation observations and event-history
+// rows through the same groups: reported in line, the report joined the
+// group its own caller leads and waited for itself, every later audit write
+// queued behind it, and a managed gateway answered no hook until a restart
+// (rel-1-0-5 GAP-0027). It reports in the background, bounded, as a busy
+// statement of an open transaction does.
+func (s *Store) groupedTxBusyObservabilityV8() SQLiteBusyObservabilityV8 {
+	observer, ok := s.sqliteBusyObservabilityV8().(storeBusyObserver)
+	if !ok {
+		return nil
+	}
+	observer.detached = true
 	return observer
 }
 
@@ -331,9 +383,10 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 // Settings explained:
 //   - journal_mode=WAL          enables write-ahead logging so readers
 //     and writers do not block each other.
-//   - busy_timeout=5000         SQLite waits up to 5 seconds before
+//   - busy_timeout=750          SQLite waits up to 0.75 seconds before
 //     returning SQLITE_BUSY, absorbing the
-//     vast majority of write contention.
+//     vast majority of write contention
+//     (auditBusyTimeoutMillis, writeLockWait).
 //   - wal_autocheckpoint=0      disables SQLite's connection-local commit
 //     hook. DefenseClaw copies the log on a dedicated checkpoint connection
 //     (the WAL guard, health and retention maintenance); running a checkpoint from
@@ -518,7 +571,12 @@ func isSQLiteBusy(err error) bool {
 
 // IsSQLiteBusy reports transient SQLite contention to callers that must
 // retry an entire transaction after a stale read snapshot.
-func IsSQLiteBusy(err error) bool { return isSQLiteBusy(err) }
+//
+// A busy error met while another process holds the write lock is not
+// transient (writeLockWait): retrying would only hold the caller's answer.
+func IsSQLiteBusy(err error) bool {
+	return isSQLiteBusy(err) && !errors.Is(err, errAuditWriteLockHeld)
+}
 
 // SQLite BUSY retry policy. Even with busy_timeout=5000 some bursts
 // outpace SQLite's internal waiter — we layer an application-level
@@ -549,14 +607,23 @@ func retryBusyObserved(
 	fn func() error,
 ) error {
 	delay := time.Duration(sqliteRetryBaseMs) * time.Millisecond
+	store := busyObserverStore(observer)
 	var err error
 	for attempt := 0; attempt < sqliteRetryAttempts; attempt++ {
+		started := time.Now()
 		err = fn()
+		store.noteWriteAttempt(started, err, false)
 		if !isSQLiteBusy(err) {
 			return err
 		}
 		if observer != nil {
 			_ = observer.RecordSQLiteBusyMetric(ctx, op)
+		}
+		// Another process holds the write lock: stop waiting on it and fail
+		// now (writeLockWait). fn has given the connection back.
+		if store.writeLockHeld() {
+			store.applyWriteLockWait(writeLockApplyWait)
+			return store.markHeldLockError(err)
 		}
 		if attempt == sqliteRetryAttempts-1 {
 			break
@@ -575,7 +642,9 @@ func (s *Store) execDB(ctx context.Context, op string, query string, args ...any
 	var res sql.Result
 	err := retryBusyObserved(ctx, op, s.sqliteBusyObservabilityV8(), func() error {
 		var execErr error
+		started := time.Now()
 		res, execErr = s.db.ExecContext(ctx, query, args...)
+		s.noteWriteAttempt(started, execErr, true)
 		return execErr
 	})
 	return res, err
@@ -613,11 +682,14 @@ func txExecContextObserved(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	started := time.Now()
 	res, err := tx.ExecContext(ctx, query, args...)
+	store := busyObserverStore(observer)
+	store.noteWriteAttempt(started, err, true)
 	if isSQLiteBusy(err) && observer != nil {
 		reportSQLiteBusyDetached(ctx, observer, op)
 	}
-	return res, err
+	return res, store.markHeldLockError(err)
 }
 
 // sqliteBusyDetachedReports bounds the BUSY reports of open transactions
@@ -1927,6 +1999,10 @@ var migrations = []migration{
 		description: configChangeRecordDigestMigrationDescription,
 		apply:       migrateAuditEventRecordDigest,
 	},
+	{
+		description: sparseKeyIndexesMigrationDescription,
+		apply:       migrateSparseKeyIndexes,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1995,6 +2071,48 @@ func (s *Store) trimUnreadAuditIndexes() error {
 			return fmt.Errorf("audit: index %s: %w", index.name, err)
 		}
 	}
+	return s.indexRetentionCandidates()
+}
+
+// retentionCandidateIndexes serve a retention batch that otherwise read its
+// whole table. The pending-operation batch looks for operations that ended
+// (status other than active) before the cutoff; no index leads with status or
+// the update time, so each batch scanned correlation_pending_operations. A
+// session's open operations stay active, so a store of a busy host holds tens
+// of thousands of them: on a managed RHEL store with 70,000 active operations
+// and a cold page cache the scan took 3.6 s inside the retention transaction,
+// which holds the store's writer, and the hooks queued behind the gateway's
+// first retention run after a start were closed as a gateway no-answer
+// (GAP-1790). The partial index holds only the ended operations, in the
+// batch's order, so the batch reads at most its own rows.
+//
+// Like the unread indexes, this is applied after the migrations without
+// moving the schema version: an older binary opened on the store after a
+// rollback keeps maintaining the index and does not read it. A Secure Client
+// store keeps main's schema, so the index is dropped there.
+var retentionCandidateIndexes = []struct{ name, table, create string }{
+	{"idx_correlation_pending_retention", "correlation_pending_operations", `CREATE INDEX IF NOT EXISTS idx_correlation_pending_retention
+		ON correlation_pending_operations(updated_time_unix_nano, connector_instance_id, operation_id, operation_type)
+		WHERE status<>'active'`},
+}
+
+func (s *Store) indexRetentionCandidates() error {
+	for _, index := range retentionCandidateIndexes {
+		// A partial schema without the table: the later readiness checks
+		// report what is missing.
+		if present, err := tableExists(s.db, index.table); err != nil {
+			return err
+		} else if !present {
+			continue
+		}
+		statement := index.create
+		if s.secureClientSchema {
+			statement = "DROP INDEX IF EXISTS " + index.name
+		}
+		if _, err := s.db.Exec(statement); err != nil {
+			return fmt.Errorf("audit: index %s: %w", index.name, err)
+		}
+	}
 	return nil
 }
 
@@ -2048,6 +2166,12 @@ func (s *Store) Init() error {
 	// Before the reclaim below, so the dropped indexes' pages are reclaimed
 	// with the purged history.
 	if err := s.trimUnreadAuditIndexes(); err != nil {
+		return err
+	}
+	if err := s.keepSecureClientSparseKeyIndexes(); err != nil {
+		return err
+	}
+	if err := s.ensureFieldClassSets(); err != nil {
 		return err
 	}
 	if purgedHistory {
@@ -2138,6 +2262,7 @@ func (s *Store) Init() error {
 		return fmt.Errorf("audit: revalidate database paths after initialization: %w", err)
 	}
 
+	s.prepareStatements(context.Background())
 	s.ready.Store(true)
 	return nil
 }
@@ -2262,7 +2387,7 @@ func (s *Store) verifyMandatoryPragmas(ctx context.Context) error {
 		if err := s.scanRow(ctx, "audit_pragma_"+pragma.name, row, &got); err != nil {
 			return fmt.Errorf("audit: verify SQLite %s pragma: %w", pragma.name, err)
 		}
-		if got != pragma.want {
+		if got != pragma.want && (pragma.name != "busy_timeout" || got != 0 || !s.writeLockHeld()) {
 			return fmt.Errorf("audit: SQLite %s pragma is %d, want %d", pragma.name, got, pragma.want)
 		}
 	}
@@ -3984,6 +4109,18 @@ func (s *Store) SelectAlertAcknowledgementTargets(
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}
+	// A block that a rule finding explains is one alert: the finding row.
+	// `defenseclaw alerts` does not list the connector-hook row of the same
+	// request, so a selector must not match it either (GAP-0166).
+	query += ` AND NOT (
+			LOWER(COALESCE(event.action,'')) = 'connector-hook'
+			AND COALESCE(event.request_id,'') <> ''
+			AND EXISTS (
+				SELECT 1 FROM audit_events AS finding
+				WHERE finding.request_id = event.request_id
+				  AND finding.action = 'scan-finding'
+			)
+		)`
 	// An empty or "all" severity needs no extra predicate: eligibility already
 	// excludes clean lifecycle telemetry and accepts promoted INFO non-allow
 	// outcomes plus ERROR health records.
@@ -4647,6 +4784,32 @@ func (s *Store) GetTargetSnapshot(targetType, targetPath string) (*SnapshotRow, 
 		r.CapturedAt, _ = time.Parse("2006-01-02 15:04:05", ts)
 	}
 	return &r, nil
+}
+
+// ReleaseMemory has SQLite free the page cache of every connection the store
+// holds (PRAGMA shrink_memory). Each connection keeps up to cache_size of
+// pages in memory outside the Go heap; a hook flood fills them and nothing
+// gave them back while the gateway sat idle (rel-1-0-3 GAP-0244). The gateway
+// calls it once the calls stop; the next reads load their pages again.
+func (s *Store) ReleaseMemory(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.closed {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, "PRAGMA shrink_memory")
+	s.checkpointMu.Lock()
+	defer s.checkpointMu.Unlock()
+	for _, db := range []*sql.DB{s.checkpointDB, s.durableDB} {
+		if db != nil {
+			_, shrinkErr := db.ExecContext(ctx, "PRAGMA shrink_memory")
+			err = errors.Join(err, shrinkErr)
+		}
+	}
+	return err
 }
 
 func (s *Store) Close() error {

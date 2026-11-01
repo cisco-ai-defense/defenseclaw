@@ -330,6 +330,7 @@ func runEnterpriseHooksEnumerateCycle(
 		SessionUIDs:             enterpriseHookSessionUIDs,
 		DiscoverSurfaces:        enterpriseHooksEnumerateDiscoverSurfaces,
 		DiscoverStaticSurfaces:  enterpriseHooksEnumerateDiscoverStaticSurfaces,
+		DiscoveryBudget:         enterpriseHooksEnumerateDiscoveryBudget(opts.interval),
 		PreviousRefusedSurfaces: readEnterpriseHookRefusedSurfaces(current.DataDir, stderr),
 		MachineVersion:          enterprisehooks.DiscoverUnixMachineAgentVersion,
 		OutsideDiscovery:        enterprisehooks.UnixAgentOutsideDiscovery,
@@ -383,6 +384,24 @@ func runEnterpriseHooksEnumerateCycle(
 	return report, nil
 }
 
+// enterpriseHooksEnumerateCycleReserve is the part of the unprotected-agents
+// record's freshness window (enterprisehooks.UnprotectedAgentsMaxAge) a cycle
+// keeps for its work outside the per-account discovery workers: the account
+// and home checks, the directory lookups and the record writes.
+const enterpriseHooksEnumerateCycleReserve = 3 * time.Minute
+
+// enterpriseHooksEnumerateDiscoveryBudget bounds a cycle's discovery workers,
+// all accounts together. The record is written at the end of each cycle and
+// the next cycle starts interval later, so the next record lands within the
+// freshness window however many accounts stall.
+func enterpriseHooksEnumerateDiscoveryBudget(interval time.Duration) time.Duration {
+	budget := enterprisehooks.UnprotectedAgentsMaxAge - interval - enterpriseHooksEnumerateCycleReserve
+	if budget < enterpriseHookWorkerTimeout {
+		budget = enterpriseHookWorkerTimeout
+	}
+	return budget
+}
+
 // The cycle's root-only publications; tests replace them, since only root
 // can satisfy their root-owned directory chain.
 var (
@@ -424,6 +443,26 @@ func enterpriseHooksEnumerateMachinePolicyConnectors(descriptorPath string) ([]s
 	return append([]string{}, descriptor.MachinePolicyConnectors...), nil
 }
 
+// enterpriseHooksDiscoverTimeoutSeconds is the worker timeout of a discovery
+// whose context ends before enterpriseHookWorkerTimeout (the cycle's
+// discovery budget): the worker then answers with what it found before the
+// budget ends, instead of being killed at it with nothing (GAP-1586). Zero
+// keeps the default timeout.
+func enterpriseHooksDiscoverTimeoutSeconds(ctx context.Context) int {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	remaining := time.Until(deadline)
+	if remaining >= enterpriseHookWorkerTimeout {
+		return 0
+	}
+	if remaining < time.Second {
+		return 1
+	}
+	return int(remaining / time.Second)
+}
+
 // enterpriseHooksEnumerateDiscover asks the target user's worker for the
 // installed agent versions. The worker's answer is user-influenced, so
 // every version is re-validated here.
@@ -454,7 +493,8 @@ func enterpriseHooksEnumerateDiscoverAll(ctx context.Context, account unixidenti
 		GID:  account.GID,
 		User: account.Name,
 		Home: filepath.Clean(account.Home),
-	}, enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpDiscover, Standalone: true, Connectors: connectors, StaticDiscovery: static})
+	}, enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpDiscover, Standalone: true, Connectors: connectors, StaticDiscovery: static,
+		TimeoutSeconds: enterpriseHooksDiscoverTimeoutSeconds(ctx)})
 	if err != nil {
 		return enterprisehooks.UnixDiscovery{}, err
 	}

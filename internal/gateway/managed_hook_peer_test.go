@@ -78,6 +78,23 @@ func TestManagedHookAuthorizerMatrix(t *testing.T) {
 		{name: "refuse denies a per-user refusal row", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: erin, connector: "antigravity", reason: managedHookReasonSurfaceUnverified},
 		{name: "ledger failure fails closed", loader: func() (managedHookLedger, error) { return managedHookLedger{}, errors.New("untrusted") }, peer: alice, connector: "claudecode", reason: managedHookReasonLedgerUnavailable},
 	}
+	// An unenrolled caller exclude_users names by account name or uid is
+	// refused with the excluded mark; others are not marked
+	// (identity-round GAP-1181).
+	for _, excluded := range []struct {
+		entries []string
+		peer    managedHookPeer
+		want    bool
+	}{{[]string{"carol"}, carol, true}, {[]string{" 3001 "}, carol, true}, {[]string{"dave"}, carol, false}, {nil, carol, false}} {
+		authorizer := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{ExcludeUsers: excluded.entries, UnenrolledUsers: "deny"},
+			[]string{"codex"}, load)
+		for _, connectorName := range []string{"codex", "claudecode"} {
+			decision := authorizer.decide(excluded.peer, connectorName, "")
+			if decision.Allow || decision.Reason != managedHookReasonUIDUnregistered || decision.Excluded != excluded.want {
+				t.Fatalf("exclude_users %v, %s: decision = %+v, want refused with excluded=%v", excluded.entries, connectorName, decision, excluded.want)
+			}
+		}
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			loader := tc.loader

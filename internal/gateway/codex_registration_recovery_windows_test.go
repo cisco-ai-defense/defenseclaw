@@ -218,9 +218,6 @@ func TestWindowsCodexFailModePolicyRefreshIsNotTampering(t *testing.T) {
 }
 
 func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndRestart(t *testing.T) {
-	// The stale teardown now revokes the per-user hook token (58ed56d79d) that
-	// the re-added hooks send, so the recovering SessionStart gets 401.
-	t.Skip("GAP-1728: known 1.0.4 issue, fixed in 1.0.5")
 	root := testenv.PrivateTempDir(t)
 	dataDir := filepath.Join(root, "defenseclaw-home")
 	codexHome := filepath.Join(root, "codex-home")
@@ -320,6 +317,13 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	// fresh protected selection receipt before the gateway applies connector
 	// Setup. Model that authority boundary after the full teardown cleared the
 	// prior connector lock/runtime record.
+	// The teardown revoked the first credential, so the re-add issues a new
+	// one; the late stale teardown below still carries the first (GAP-1728).
+	staleOpts := opts
+	if hookToken, err = connector.EnsureHookAPIToken(dataDir, "codex"); err != nil {
+		t.Fatalf("re-issue scoped Codex hook token: %v", err)
+	}
+	opts.APIToken, opts.HookAPIToken = hookToken, hookToken
 	publishCodexSetupSelectionFixture(t, dataDir, opts)
 	if err := setupSidecar.setupOneConnector(
 		context.Background(), conn, opts, gatewayToken, guardrail.NewRulePackCache(),
@@ -340,7 +344,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	// connector-flat runtime record models the captured partial teardown state:
 	// status still resolves windows-sidecar=open from the shared JSON, but the
 	// real managed hook matrix is registration-missing.
-	if err := conn.Teardown(context.Background(), opts); err != nil {
+	if err := conn.Teardown(context.Background(), staleOpts); err != nil {
 		t.Fatalf("late stale Codex teardown: %v", err)
 	}
 	if err := os.WriteFile(

@@ -227,7 +227,8 @@ def test_multi_connector_action_uses_canonical_identity_everywhere(scan, app_con
     assert result.exit_code != 0
     assert os.path.isdir(source)
     for connector, root in (("one", first), ("two", second)):
-        assert os.listdir(root) == []
+        # The staged copy is quarantined; the installed alias is untouched.
+        assert os.listdir(root) == [f"old-{connector}"]
         quarantine_path = os.path.join(app.cfg.quarantine_dir, "plugins", connector, "shared")
         assert os.path.isfile(os.path.join(quarantine_path, "payload.txt"))
         entry = app.store.get_action("plugin", "shared", connector)

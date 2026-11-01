@@ -10,7 +10,11 @@
 
 package enterprisehooks
 
-import "github.com/defenseclaw/defenseclaw/internal/config"
+import (
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
 
 // ManagedHookFailMode is the fail mode the managed hook renderer writes into
 // connector's hooks for cfg, on every OS: the mode cfg resolves
@@ -23,4 +27,21 @@ import "github.com/defenseclaw/defenseclaw/internal/config"
 // caller's process pin (GAP-0014).
 func ManagedHookFailMode(cfg *config.Config, connector string) string {
 	return renderedHookFailModeFor(cfg, connector, cfg.EffectiveHookFailModeForConnector(connector))
+}
+
+// ManagedStatusHookFailMode is the effective_hook_fail_mode status and verify
+// report for connector on goos: ManagedHookFailMode, except that a connector
+// DefenseClaw reaches through the per-user route (not vendor machine policy)
+// of a standalone install whose hook or plugin there blocks a gateway outage
+// whatever the administrator set reads closed, the mode it operates in
+// (connector.ManagedPerUserRouteOutageClosed). Without that, the managed Amp
+// plugin, and OpenCode or Copilot with their machine policy off, reported the
+// administrator's open while blocking every outage (GAP-0465).
+func ManagedStatusHookFailMode(cfg *config.Config, name, goos string, machinePolicy bool) string {
+	mode := ManagedHookFailMode(cfg, name)
+	if mode == "open" && !machinePolicy && managed.IsManagedEnterprise(cfg.DeploymentMode) && !cfg.SecureClientIntegration() &&
+		connector.ManagedPerUserRouteOutageClosed(name, goos) {
+		return "closed"
+	}
+	return mode
 }

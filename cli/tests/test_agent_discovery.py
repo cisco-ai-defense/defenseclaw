@@ -24,6 +24,7 @@ import plistlib
 import stat
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1712,7 +1713,7 @@ def test_windows_package_manager_probe_discovers_user_npmrc_prefix_without_ambie
         assert "NODE_OPTIONS" not in environment
         return subprocess.CompletedProcess(command, 0, stdout=str(custom_prefix).encode(), stderr=b"")
 
-    monkeypatch.setattr(ad.subprocess, "run", run)
+    monkeypatch.setattr(ad, "_run_probe", run)
 
     prefixes = ad._probe_windows_configured_package_manager_bin_prefixes()
 
@@ -1748,7 +1749,7 @@ def test_windows_package_manager_probe_discovers_pnpm_global_bin_dir(
         calls.append(command)
         return subprocess.CompletedProcess(command, 0, stdout=str(configured).encode(), stderr=b"")
 
-    monkeypatch.setattr(ad.subprocess, "run", run)
+    monkeypatch.setattr(ad, "_run_probe", run)
 
     assert ad._probe_windows_configured_package_manager_bin_prefixes() == (str(configured),)
     assert calls == [[str(pnpm), "config", "get", "global-bin-dir", "--location=user"]]
@@ -1889,7 +1890,7 @@ def test_windows_package_manager_probe_keeps_npm_prefix_when_pnpm_fails(
             stderr=b"global bin directory is not on PATH",
         )
 
-    monkeypatch.setattr(ad.subprocess, "run", run)
+    monkeypatch.setattr(ad, "_run_probe", run)
 
     assert ad._probe_windows_configured_package_manager_bin_prefixes() == (str(npm_prefix),)
 
@@ -2083,7 +2084,7 @@ def test_windows_copilot_npm_shims_select_cmd_and_use_documented_probe(
             stderr=b"",
         )
 
-    monkeypatch.setattr(ad.subprocess, "run", run)
+    monkeypatch.setattr(ad, "_run_probe", run)
 
     candidates = ad._binary_candidates_for_agent("copilot", ad._SPECS["copilot"])
     signal = ad._scan_agent("copilot", require_trusted_binary_paths=True)
@@ -2261,7 +2262,7 @@ def test_timeout_keeps_a_slow_agent_installed_with_an_unknown_version(monkeypatc
     def timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
 
-    monkeypatch.setattr(ad.subprocess, "run", timeout)
+    monkeypatch.setattr(ad, "_run_probe", timeout)
 
     signal = ad._scan_agent("codex")
 
@@ -2284,7 +2285,7 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
         calls.append((args, kwargs))
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="codex 1.2.3\n", stderr="")
 
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.setattr(ad, "_run_probe", fake_run)
 
     signal = ad._scan_agent("codex")
 
@@ -2316,7 +2317,7 @@ def test_cold_start_probe_timeout_is_retried_once_and_shown_short(monkeypatch, t
             raise answer
         return subprocess.CompletedProcess(args=args, returncode=0, stdout=answer, stderr="")
 
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.setattr(ad, "_run_probe", fake_run)
     assert ad._scan_agent("codex").version == "codex 1.2.3"
 
     slow = ad.AgentSignal(
@@ -2342,7 +2343,7 @@ def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
             stderr="",
         )
 
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.setattr(ad, "_run_probe", fake_run)
 
     version, error = ad._version_for_agent_binary("hermes", "/opt/bin/hermes", ("--version",))
 
@@ -2379,7 +2380,7 @@ def test_slow_windows_agent_version_probes_get_only_the_named_startup_budget(
             stderr="",
         )
 
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.setattr(ad, "_run_probe", fake_run)
 
     version, error = ad._version_for_agent_binary(
         "codex",
@@ -2405,7 +2406,7 @@ def test_unrelated_logical_and_binary_names_keep_generic_version_probe_budget(mo
             stderr="",
         )
 
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.setattr(ad, "_run_probe", fake_run)
 
     version, error = ad._version_for_agent_binary(
         "codex",
@@ -2458,7 +2459,7 @@ def test_claude_version_probe_gets_longer_timeout_with_exe_suffix(monkeypatch):
         calls.append((args, kwargs))
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="2.1.196 (Claude Code)\n", stderr="")
 
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.setattr(ad, "_run_probe", fake_run)
 
     version, error = ad._version_for_binary(r"C:\Tools\claude.EXE", ("--version",))
 
@@ -2475,7 +2476,7 @@ def test_opencode_version_probe_allows_bounded_packaged_binary_startup(monkeypat
         calls.append((args, kwargs))
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="1.18.19\n", stderr="")
 
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.setattr(ad, "_run_probe", fake_run)
 
     version, error = ad._version_for_binary(r"C:\Tools\opencode.EXE", ("--version",))
 
@@ -2550,7 +2551,7 @@ def test_version_probe_probes_untrusted_prefix_by_default(monkeypatch, tmp_path)
         called.append((args, kwargs))
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="codex 0.0\n", stderr="")
 
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.setattr(ad, "_run_probe", fake_run)
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
 
     signal = ad._scan_agent("codex")
@@ -2574,7 +2575,7 @@ def test_version_probe_refuses_binary_outside_trusted_prefix_when_enabled(monkey
         called.append((args, kwargs))
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="pwned 0.0\n", stderr="")
 
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.setattr(ad, "_run_probe", fake_run)
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
 
     signal = ad._scan_agent("codex", require_trusted_binary_paths=True)
@@ -2653,7 +2654,7 @@ def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
     def fake_run(args, **kwargs):
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="codex 1.2.3\n", stderr="")
 
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.setattr(ad, "_run_probe", fake_run)
     signal = ad._scan_agent(
         "codex",
         data_dir=data_dir,
@@ -3179,7 +3180,7 @@ def test_version_probe_never_reads_the_terminal(monkeypatch, tmp_path):
         seen.update(kwargs)
         return subprocess.CompletedProcess(argv, 0, b"tool 1.2.3\n", b"")
 
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.setattr(ad, "_run_probe", fake_run)
     binary = tmp_path / "tool"
     binary.write_text("#!/bin/sh\n")
     binary.chmod(0o755)
@@ -3283,3 +3284,23 @@ def test_kiro_without_a_protected_form_caches_the_cli_version_setup_refuses(monk
         "hook_fail_mode": "closed",
     }
     assert connector_lock_contract_invariant("kiro", lock) != ""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a Windows process tree that holds the probe's pipes")
+def test_windows_probe_timeout_ends_the_tree_that_holds_its_pipes():
+    # rel-1-0-6:GAP-0059: on a timeout subprocess.run killed npm.cmd's
+    # cmd.exe, then waited for the pipes its node.exe still held, and
+    # `defenseclaw setup claude-code` hung past its whole budget.
+    from defenseclaw.process_liveness import pid_alive
+
+    script = (
+        "import subprocess, sys, time; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']); "
+        "print(child.pid, flush=True); time.sleep(120)"
+    )
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        ad._run_probe([sys.executable, "-c", script], timeout=15, capture_output=True, stdin=subprocess.DEVNULL)
+    assert time.monotonic() - started < 45
+    child = int((caught.value.stdout or b"").split()[0])
+    assert not pid_alive(child)

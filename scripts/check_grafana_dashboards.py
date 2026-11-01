@@ -1290,7 +1290,10 @@ def live_audit(
                             raise AuditError(str(result))
                     elif datasource == "loki" and expression:
                         query = interpolate(expression).replace("[1h]", "[5m]").replace("[24h]", "[5m]")
-                        if panel.get("type") == "logs":
+                        # Loki serves log lines only through query_range: a logs panel,
+                        # or a table that lists log lines (maxLines), is not an
+                        # instant query (GAP-1028).
+                        if panel.get("type") == "logs" or "maxLines" in target:
                             params = {
                                 "query": query,
                                 "start": str(start_ns),

@@ -31,9 +31,11 @@ type remoteDeliveryKey struct{}
 // destination that acknowledged an earlier attempt or still has one in
 // flight is not sent the occurrence again, and the occurrence is delivered
 // once an attempt ends with nothing in flight and no destination left that
-// failed. The state is in memory only: after a restart the spooled
-// occurrence is offered to every destination again under the same record
-// id.
+// failed. A sender that keeps the acknowledgements on disk
+// (NewRecordedRemoteDelivery) does not send the occurrence again, after a
+// restart, to a destination that already has it (GAP-0526); otherwise the
+// state is in memory only and a restart offers the spooled occurrence to
+// every destination again under the same record id.
 type RemoteDelivery struct {
 	mu   sync.Mutex
 	open bool
@@ -44,11 +46,28 @@ type RemoteDelivery struct {
 	// current attempt began.
 	failed    bool
 	delivered map[string]bool
+	// record, when set, keeps a destination's acknowledgement on disk.
+	record func(destination string)
 }
 
 // NewRemoteDelivery returns the delivery state of one occurrence.
 func NewRemoteDelivery() *RemoteDelivery {
 	return &RemoteDelivery{inFlight: make(map[string]int), delivered: make(map[string]bool)}
+}
+
+// NewRecordedRemoteDelivery returns the delivery state of one occurrence
+// whose acknowledged destinations an earlier gateway process recorded.
+// record is called with each destination that acknowledges the occurrence,
+// before the acknowledgement counts, so a restart between that
+// acknowledgement and the sender's next offer does not send the occurrence
+// to the destination again.
+func NewRecordedRemoteDelivery(acknowledged []string, record func(destination string)) *RemoteDelivery {
+	delivery := NewRemoteDelivery()
+	for _, destination := range acknowledged {
+		delivery.delivered[destination] = true
+	}
+	delivery.record = record
+	return delivery
 }
 
 // WithRemoteDelivery attaches delivery to ctx, so the runtime reports every
@@ -145,6 +164,9 @@ func (delivery *RemoteDelivery) Track(destination string) func(delivered bool) {
 	var once sync.Once
 	return func(delivered bool) {
 		once.Do(func() {
+			if delivered && delivery.record != nil {
+				delivery.record(destination)
+			}
 			delivery.mu.Lock()
 			defer delivery.mu.Unlock()
 			if delivery.inFlight[destination]--; delivery.inFlight[destination] <= 0 {

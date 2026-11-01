@@ -35,6 +35,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
 from defenseclaw import __version__
@@ -637,7 +638,7 @@ class _OverviewRenderSnapshot:
     hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
     last_good_hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
     # The terminal size the body was laid out for (_overview_layout_key).
-    layout: tuple[int]
+    layout: tuple[int, int]
 
 
 @dataclass(frozen=True)
@@ -1107,7 +1108,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     }
 
     #command-palette {
-        height: 14;
+        height: 14fr;
+        max-height: 14;
         margin: 0 1 1 1;
         border: round TOKEN_BORDER_ACTIVE;
         background: TOKEN_SURFACE_PANEL;
@@ -3081,7 +3083,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except NoMatches:
             return
 
-        activity.set_class(panel != "activity" or self.activity_model.shows_finished_output, "hidden")
+        self._set_widget_hidden(activity, panel != "activity" or self.activity_model.shows_finished_output)
         overview_visible = panel == "overview"
         scroller.set_class(overview_visible or self.help_open, "overview-scroll")
         # The acknowledgement frame is intentionally cheap, but any control
@@ -3125,10 +3127,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # generation is preparing. If the retained table already belongs to
         # this panel, reveal it immediately without clear/add_row churn.
         if cached_panel is not None and expected_table_panel == panel and cached_panel.table_columns:
-            table.remove_class("hidden")
+            self._set_widget_hidden(table, False)
         else:
-            table.add_class("hidden")
-        detail.add_class("hidden")
+            self._set_widget_hidden(table, True)
+        self._set_widget_hidden(detail, True)
         self._hide_panel_split_parts(panel)
 
         if not overview_visible:
@@ -3259,7 +3261,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except asyncio.CancelledError:
             return
         except Exception as exc:  # noqa: BLE001 - a panel must degrade, never WorkerFailed.
-            if generation == self._panel_render_generation and panel == self.active_panel:
+            if (
+                generation == self._panel_render_generation
+                and panel == self.active_panel
+                and not self._refresh_error_is_teardown(exc)
+            ):
                 self._set_status(f"{panel.title()} refresh deferred after transient error: {exc}")
         finally:
             self._panel_render_running.discard(panel)
@@ -3659,12 +3665,23 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         finally:
             self._applying_panel_snapshot = False
 
+    def _set_widget_hidden(self, widget: Widget, hidden: bool) -> None:
+        """Apply the node-only hidden rules without restyling its children."""
+
+        if widget.has_class("hidden") == hidden:
+            return
+        # Our hidden selectors affect only the node's display. Textual's
+        # default class update also matches every descendant, repeating the
+        # work for whole metric tiles and control bars during a tab switch.
+        widget.set_class(hidden, "hidden", update=False)
+        self.stylesheet.update_nodes([widget], animate=False)
+
     def _set_overview_metrics_visible(self, visible: bool) -> None:
         try:
             metrics = self.query_one("#overview-metrics", OverviewMetrics)
         except NoMatches:
             return
-        metrics.set_class(not visible, "hidden")
+        self._set_widget_hidden(metrics, not visible)
 
     def _apply_overview_metric_snapshot(self, metrics_data: tuple[MetricDatum, ...]) -> None:
         try:
@@ -3682,7 +3699,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except NoMatches:
             return
         visible = self.active_panel == "overview" and not self.help_open and bool(text)
-        scope.set_class(not visible, "hidden")
+        self._set_widget_hidden(scope, not visible)
         if visible:
             scope.update(self._safe_body_renderable(text))
 
@@ -3759,6 +3776,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # entry. Idle = strip is hidden, exactly what we want here.
         self._strip_clear()
         self._set_status("Command palette. Type or pick.")
+        self._refresh_hint()
 
     def action_open_panel_jumper(self) -> None:
         """Open the Ctrl+P fuzzy panel jumper modal.
@@ -3983,11 +4001,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         palette.clear(columns=True)
         self._command_palette_values = []
         self.set_focus(None)
-        # Closing the palette by running a row left its open hint
-        # in the status bar (GAP-1213). Callers that report something else
-        # set their own status after this.
-        if self.status_text == "Command palette. Type or pick.":
-            self._set_status(self._status_text())
+        self._refresh_hint()
 
     def _handle_command_palette_key(self, event: events.Key) -> bool:
         palette = self.query_one("#command-palette", DataTable)
@@ -5289,7 +5303,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             model = self.catalog_models[self.active_panel]
             self._sync_catalog_connector_filters()
             self._table_columns = model.data_table_columns()
-            self._table_rows = model.data_table_rows()
+            # The table spans the body less its borders, padding and the
+            # vertical scrollbar a long list shows (9 columns, GAP-2624).
+            width = int(getattr(self.size, "width", 0) or 0)
+            self._table_rows = model.data_table_rows(max(0, width - 9))
             detail = catalog_detail_text(model.selected()) if model.detail_open else ""
             message = model.message or model.empty_state()
             suffix = f"\n\n{rich_escape(message)}" if message and not detail and not model.filtered else ""
@@ -5334,6 +5351,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "off": TOKENS.text_muted,
             "waiting": TOKENS.accent_blue,
             "degraded": TOKENS.accent_amber,
+            "partial": TOKENS.accent_cyan,
             "healthy": TOKENS.accent_green,
         }[state]
         badge_color = {
@@ -5558,47 +5576,47 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         mcps = self.query_one("#mcps-controls", Horizontal)
         plugins = self.query_one("#plugins-controls", Horizontal)
         tools = self.query_one("#tools-controls", Horizontal)
-        overview.set_class(self.active_panel != "overview" or self.help_open, "hidden")
-        alerts.set_class(self.active_panel != "alerts" or self.help_open, "hidden")
-        audit.set_class(self.active_panel != "audit" or self.help_open, "hidden")
-        inventory.set_class(self.active_panel != "inventory" or self.help_open, "hidden")
-        inventory_filters.set_class(
+        self._set_widget_hidden(overview, self.active_panel != "overview" or self.help_open)
+        self._set_widget_hidden(alerts, self.active_panel != "alerts" or self.help_open)
+        self._set_widget_hidden(audit, self.active_panel != "audit" or self.help_open)
+        self._set_widget_hidden(inventory, self.active_panel != "inventory" or self.help_open)
+        self._set_widget_hidden(
+            inventory_filters,
             self.active_panel != "inventory"
             or self.help_open
             or self.inventory_model.active_sub not in {"skills", "plugins"}
             or self._inventory_detail_short(),
-            "hidden",
         )
-        logs.set_class(self.active_panel != "logs" or self.help_open, "hidden")
-        logs_filters.set_class(self.active_panel != "logs" or self.help_open, "hidden")
-        registries.set_class(self.active_panel != "registries" or self.help_open, "hidden")
+        self._set_widget_hidden(logs, self.active_panel != "logs" or self.help_open)
+        self._set_widget_hidden(logs_filters, self.active_panel != "logs" or self.help_open)
+        self._set_widget_hidden(registries, self.active_panel != "registries" or self.help_open)
         # Each Setup bar shows only when the current Setup view uses one of
         # its buttons (first-run and the goal menu use none).
         setup_buttons = (
             self._setup_visible_buttons() if self.active_panel == "setup" and not self.help_open else frozenset()
         )
-        setup.set_class(not setup_buttons.intersection(setup_keys.SETUP_BUTTON_IDS), "hidden")
-        setup_wizard.set_class(not setup_buttons.intersection(setup_keys.SETUP_WIZARD_BUTTON_IDS), "hidden")
-        activity.set_class(self.active_panel != "activity" or self.help_open, "hidden")
-        ai.set_class(self.active_panel != "ai" or self.help_open, "hidden")
-        runtime.set_class(self.active_panel != "runtime" or self.help_open, "hidden")
+        self._set_widget_hidden(setup, not setup_buttons.intersection(setup_keys.SETUP_BUTTON_IDS))
+        self._set_widget_hidden(setup_wizard, not setup_buttons.intersection(setup_keys.SETUP_WIZARD_BUTTON_IDS))
+        self._set_widget_hidden(activity, self.active_panel != "activity" or self.help_open)
+        self._set_widget_hidden(ai, self.active_panel != "ai" or self.help_open)
+        self._set_widget_hidden(runtime, self.active_panel != "runtime" or self.help_open)
         # Under 100 columns the KEYS line carries the Sandboxes keys and the
         # rows get the bar's rows.
-        sandboxes.set_class(
+        self._set_widget_hidden(
+            sandboxes,
             self.active_panel != "sandboxes"
             or self.help_open
             or self._sandbox_button_bar_collapsed()
             or not self._sandbox_supported(),
-            "hidden",
         )
-        policies.set_class(self.active_panel != "policies" or self.help_open, "hidden")
-        skills.set_class(self.active_panel != "skills" or self.help_open, "hidden")
-        mcps.set_class(self.active_panel != "mcps" or self.help_open, "hidden")
+        self._set_widget_hidden(policies, self.active_panel != "policies" or self.help_open)
+        self._set_widget_hidden(skills, self.active_panel != "skills" or self.help_open)
+        self._set_widget_hidden(mcps, self.active_panel != "mcps" or self.help_open)
         # Keep the plugins bar panel-scoped. When a connector cannot
         # load plugins, the body renders an explanatory notice and the
         # buttons naturally disable because no row is selected.
-        plugins.set_class(self.active_panel != "plugins" or self.help_open, "hidden")
-        tools.set_class(self.active_panel != "tools" or self.help_open, "hidden")
+        self._set_widget_hidden(plugins, self.active_panel != "plugins" or self.help_open)
+        self._set_widget_hidden(tools, self.active_panel != "tools" or self.help_open)
 
     def _render_panel_controls(self) -> None:
         self._render_panel_control_visibility()
@@ -5906,7 +5924,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         enabled = bool(model.snapshot.enabled)
         self._set_button_visible("#runtime-enable", model.needs_enable())
         self._set_button_visible("#runtime-scan", enabled)
-        self._set_button_visible("#runtime-permissions", model.health_state() == "degraded")
+        self._set_button_visible("#runtime-permissions", model.health_state() in ("degraded", "partial"))
         refresh.disabled = False
         detail.disabled = model.selected() is None
 
@@ -6865,6 +6883,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 extras.append(f"[{TOKENS.accent_blue}]judge[/]")
             if extras:
                 guardrail_bits.append("·".join(extras))
+            if fallbacks := self.overview_model.judge_fallbacks():
+                # First, so the 80x24 card (14 cells) shows it whole
+                # ("fallbacks 44 …"; 1000+ is written short, GAP-0341): the
+                # SERVICES box is below the fold there (GAP-0180).
+                guardrail_bits.insert(0, f"[{TOKENS.accent_amber}]fallbacks {fallbacks}[/]")
             guardrail_detail = " · ".join(guardrail_bits)
         else:
             guardrail_detail = f"[{TOKENS.accent_amber}]press g to enable[/]"
@@ -6943,7 +6966,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             elif not gateway_online:
                 call_detail_parts.append(f"[{TOKENS.accent_amber}]{gateway_unavailable_label}[/]")
             elif requests == 0:
-                call_detail_parts.append("waiting for tool calls")
+                # 12 cells: the 80x24 card caption holds 13 (GAP-0341).
+                call_detail_parts.append("no calls yet")
             else:
                 call_detail_parts.append("agent active")
                 if selected_connector:
@@ -9775,7 +9799,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return Group(
             banner,
             tagline,
-            Text(""),
+            # At 24 rows, two notices need the line otherwise used by
+            # this spacer (Doctor recovery plus Runtime details).
+            *([] if self.size.height <= 24 and len(notice_block) > 1 else [Text("")]),
             *notice_block,
             Text(""),
             columns,
@@ -9796,14 +9822,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
         return ("overview", self.help_open, *self._overview_layout_key(), stable_text)
 
-    def _overview_layout_key(self) -> tuple[int]:
+    def _overview_layout_key(self) -> tuple[int, int]:
         """The part of the terminal size the Overview layout depends on."""
 
         # The CONFIGURATION card is laid out for the width at render time, so
         # a new width is new content: after a resize it kept the old width's
         # wrapping until the next data change (GAP-2509).
         width = int(getattr(self.size, "width", 0) or 0)
-        return (width,)
+        # Multiple notices use compact spacing at 24 rows. A height-only
+        # resize must invalidate a render prepared for the other layout.
+        height = int(getattr(self.size, "height", 0) or 0)
+        return (width, int(height <= 24))
 
     def _runtime_sample_time(self) -> str:
         """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".
@@ -10725,14 +10754,33 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             width=width - 2 - _status_text_cells(text) - 5 if width > 0 else None,
         )
         rendered = f"{text}  [#444444]│[/]  {strip}" if strip else text
-        if not _is_command_result(text) and any(
+        shortened = False
+        if any(
             service.label not in strip
             for service in (status_model.gateway, status_model.watchdog, status_model.guardrail)
         ):
-            rendered = render_status_with_hint(status_model, text, max(0, width - 2))
+            # The 80-column footer keeps Gateway, Watchdog and Guardrail and
+            # lets the digest, then "gen N", give way. A command result
+            # ("Command cancelled.", "Done: ...") goes through it too while
+            # it stays whole; it kept gen and digest and dropped Watchdog
+            # and Guardrail (GAP-0524).
+            narrow = render_status_with_hint(status_model, text, max(0, width - 2))
+            if not _is_command_result(text) or _keeps_whole_text(narrow, text):
+                rendered = narrow
+            else:
+                # A failed command's "<command> failed (exit 2). Activity
+                # shows the output." filled the 80-column line, so Gateway,
+                # Watchdog and Guardrail went (GAP-0524). Say the same thing
+                # shorter until it fits whole beside them.
+                for shorter in _shorter_command_results(text):
+                    narrow = render_status_with_hint(status_model, shorter, max(0, width - 2))
+                    if _keeps_whole_text(narrow, shorter):
+                        rendered = narrow
+                        shortened = True
+                        break
         if self._config_error:
             rendered = f"[bold {TOKENS.accent_red}]{rich_escape(self._config_error)}[/]"
-        elif _is_command_result(text) and _status_text_fills_line(text, self.size.width):
+        elif not shortened and _is_command_result(text) and _status_text_fills_line(text, self.size.width):
             # A "Done: ..." fitted to the line lost its last cell to the "…"
             # of the cut-off health strip ("press i for readines…", GAP-2133).
             rendered = text
@@ -10943,6 +10991,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             not_configured=self.config is None,
             connector_filter=friendly_connector_name(connector_filter) if connector_filter else "",
             hidden_critical_alerts=hidden_critical,
+            palette_open=self.query_one("#command-input", Input).has_class("open"),
         )
         hint.refresh_hint(hint_state, self._hint_status_model())
         self.hint_text = str(getattr(hint, "content", ""))
@@ -11085,10 +11134,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         terminal, cutting off a longer task name.
         """
 
-        if self.active_panel == "registries":
+        if self.active_panel == "registries" or self.active_panel in self.catalog_models:
             # Auto-width columns never shrink when rows are patched, so a
             # status that got shorter after a good sync kept its wide column
-            # until a restart (GAP-2347). The widest cell per column decides.
+            # until a restart (GAP-2347), and a Skills refresh after the data
+            # changed kept the old rows' widths beside the new fitted cells,
+            # 4 cells wider than the body with Details cut (GAP-2642). The
+            # widest cell per column decides.
             return tuple(max((len(cell) for cell in column), default=0) for column in zip(*self._table_rows))
         if self.active_panel != "setup":
             return False
@@ -11221,7 +11273,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             columns,
             rows,
             cursor_row,
-            False,
+            self._panel_table_shape(),
         )
         previous = self._last_table_signature
         if signature == previous:
@@ -11576,11 +11628,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             detail = self.query_one("#detail-panel", VerticalScroll)
         except NoMatches:
             return
-        split.set_class(panel == "overview" or self.help_open, "hidden")
-        split.remove_class("with-nav", "aside-below", "narrow-aside")
-        nav.add_class("hidden")
+        split.update_classes(
+            {
+                "hidden": panel == "overview" or self.help_open,
+                "with-nav": False,
+                "aside-below": False,
+                "narrow-aside": False,
+            },
+            animate=False,
+        )
+        self._set_widget_hidden(nav, True)
         nav.clear_items()
-        aside_widget.add_class("hidden")
+        self._set_widget_hidden(aside_widget, True)
         aside_widget.border_title = None
         table.border_title = None
         detail.border_title = None
@@ -12525,10 +12584,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _setup_table(self) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
         if self.first_run_model.active:
-            return (
-                ("Field", "Value", "Hint"),
-                tuple((field.label, field.display_value, field.hint) for field in self.first_run_model.fields),
-            )
+            columns = ("Field", "Value", "Hint")
+            rows = tuple((field.label, field.display_value, field.hint) for field in self.first_run_model.fields)
+            return columns, self._wrap_last_table_column(columns, rows)
         if self.setup_model.goal_active:
             columns = ("Goal", "What it does")
             labels = [goal.label for goal in self.setup_model.goals]
@@ -12780,7 +12838,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         if model.goal_active:
             label = setup_catalog.wizard_label(model.active_wizard)
-            summary = wizard_state_summary(model.active_wizard, model.config)
+            summary = wizard_state_summary(model.active_wizard, model.config, model.observability_status)
             head = f"[bold #22D3EE]Setup[/] · [bold]{rich_escape(label)}[/] · What do you want to do?"
             return head + (f"\n{self._setup_line(summary, style=TOKENS.text_secondary)}" if summary else "")
         if model.form_active:
@@ -14967,6 +15025,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         self._panel_render_workers["__signals__"] = worker
 
+    def _refresh_error_is_teardown(self, exc: BaseException) -> bool:
+        """True when a background refresh failed because the screen is going away.
+
+        The app sets ``_app_shutting_down`` in ``on_unmount``, after its
+        widgets are already gone, so a refresh that finishes in between hits
+        ``NoMatches`` ("No nodes match '#hint'"). That is not a transient data
+        error and must not replace the status line (the sandbox panel test
+        saw it overwrite a command result).
+        """
+
+        return getattr(self, "_app_shutting_down", False) or isinstance(exc, NoMatches)
+
     async def _run_signal_data_refresh(
         self,
         detached: DefenseClawTUI,
@@ -14978,7 +15048,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except asyncio.CancelledError:
             return
         except Exception as exc:  # noqa: BLE001 - cached data remains visible.
-            if not getattr(self, "_app_shutting_down", False):
+            if not self._refresh_error_is_teardown(exc):
                 self._set_status(f"Signal refresh deferred after transient error: {exc}")
         finally:
             self._signal_refresh_running = False
@@ -15119,7 +15189,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except asyncio.CancelledError:
             return
         except Exception as exc:  # noqa: BLE001 - cached Overview data remains visible.
-            if not getattr(self, "_app_shutting_down", False):
+            if not self._refresh_error_is_teardown(exc):
                 self._set_status(f"Overview refresh deferred after transient error: {exc}")
         finally:
             self._overview_disk_refresh_running = False
@@ -17069,6 +17139,40 @@ _COMMAND_RESULT_FOLLOW_S = 15.0
 
 def _is_command_result(text: object) -> bool:
     return bool(_COMMAND_RESULT_RE.match(str(text or "")))
+
+
+_FAILED_RESULT_RE = re.compile(r"^(?P<name>.+) failed \(exit (?P<code>\d+)\)\. Activity shows the output\.$")
+
+
+def _shorter_command_results(text: str) -> list[str]:
+    """Shorter ways to say a failed command result, longest first (GAP-0524).
+
+    "failed (exit N)" always stays; the pointer to Activity goes first, then
+    the end of a long command name.
+    """
+
+    match = _FAILED_RESULT_RE.match(text)
+    if not match:
+        return []
+    name, code = match["name"], match["code"]
+    tail = f" failed (exit {code})."
+    shorter = [f"{name} failed (exit {code}). See Activity.", f"{name}{tail}"]
+    shorter.extend(f"{name[:keep].rstrip()}…{tail}" for keep in range(len(name) - 1, 7, -1))
+    return shorter
+
+
+def _keeps_whole_text(rendered: str, text: str) -> bool:
+    """Whether the footer ``rendered`` starts with all of ``text``."""
+    from rich.text import Text
+
+    try:
+        plain = Text.from_markup(text).plain
+    except Exception:  # noqa: BLE001 - malformed operator text stays literal
+        plain = text
+    try:
+        return Text.from_markup(rendered).plain.startswith(plain)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _service_reported(state: str) -> bool:

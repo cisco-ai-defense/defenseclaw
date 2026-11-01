@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -18,7 +19,6 @@ import (
 // Parse uncertainty describes coverage. It does not prove a persistence
 // target. These rows exercise both the gateway-only and client-header routes.
 func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "disklink")); err != nil {
 		t.Fatal(err)
@@ -41,6 +41,8 @@ func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
 		"echo \"$(id)\" > report.txt", "for f in regular.txt; do cp \"$f\" copy/; done; echo ok > second-report.txt",
 		"git -C sub pull --ff-only && echo benign > notes.txt",
 		"cat ~/.ssh/authorized_keys", "grep marker report.txt",
+		// A plain read stays allowed in action (owner decision 2, GAP-2168).
+		"grep marker ~/.ssh/authorized_keys",
 		"cd ~/.ssh", "pushd ~/.ssh", "ls ~/.ssh", "stat ~/.ssh", "cd ~/.ssh && cat authorized_keys",
 		"f=report.txt; echo marker >> \"${f:-alias}\"",
 		"out=report-0509.txt; awk \"BEGIN {print \\\"marker\\\" >> \\\"$out\\\"}\"",
@@ -57,7 +59,7 @@ func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, command := range []string{
-		"grep marker ~/.ssh/authorized_keys",
+		"grep marker report.txt >> ~/.ssh/authorized_keys",
 		"echo " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
 		"printf '%s\\n' " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
 		"cat " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
@@ -166,6 +168,47 @@ func TestBalancedActionWindowsOrdinaryCommands(t *testing.T) {
 	}
 }
 
+func TestR104WindowsHomeHonorsExplicitPOSIXDialect(t *testing.T) {
+	input := actionfacts.Input{Tool: "exec_command", CWD: `C:\Users\alice\project`,
+		ActiveHome: `C:\Users\alice`, DialectHint: actionfacts.DialectPOSIX}
+	for _, tc := range []struct {
+		command string
+		blocked bool
+	}{
+		{`echo \$HOME/.ssh/authorized_keys`, false},
+		{`echo $HOME/.ssh/authorized_keys`, true},
+		{`echo marker > ~/.ssh/authorized_keys`, true},
+	} {
+		input.Command = tc.command
+		if got := trustedWindowsLocationAuthorizedKeysWrite(input); got != tc.blocked {
+			t.Errorf("%q: protected target = %t, want %t", tc.command, got, tc.blocked)
+		}
+	}
+}
+
+func TestR104WindowsPowerShellLiteralTargets(t *testing.T) {
+	input := actionfacts.Input{Tool: "exec_command", CWD: `C:\Users\alice\project`,
+		ActiveHome: `C:\Users\alice`, DialectHint: actionfacts.DialectPowerShell}
+	for _, tc := range []struct {
+		name, command string
+		blocked       bool
+	}{
+		{"escaped dollar", "Write-Output \"`$HOME/.ssh/authorized_keys\"", false},
+		{"line comment", `Write-Output ok # $HOME/.ssh/authorized_keys`, false},
+		{"block comment", `Write-Output ok <# $HOME/.ssh/authorized_keys #>`, false},
+		{"expanded dollar", `Write-Output $HOME/.ssh/authorized_keys`, true},
+		{"after block comment", `Write-Output ok <# $HOME/.ssh/authorized_keys #>; Write-Output $HOME/.ssh/authorized_keys`, true},
+		{"outer escape reaches nested PowerShell", "pwsh -Command \"Write-Output `$HOME/.ssh/authorized_keys\"", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input.Command = tc.command
+			if got := trustedWindowsLocationAuthorizedKeysWrite(input); got != tc.blocked {
+				t.Fatalf("protected target = %t, want %t", got, tc.blocked)
+			}
+		})
+	}
+}
+
 func TestBalancedActionWindowsUnboundRedirectIsAuditOnly(t *testing.T) {
 	for _, command := range []string{
 		"git status --short --branch 2>$null",
@@ -258,7 +301,19 @@ func TestBalancedActionSelectedMakeRecipes(t *testing.T) {
 		{"include", "include ../writer.mk\n", "make write-key", true},
 		{"MAKEFLAGS", "safe:\n\tprintf ok > report.txt\n", "MAKEFLAGS=-f../writer.mk make write-key", true},
 		{"eval", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys' x", true},
-		{"unselected eval", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", true},
+		// An --eval text that only defines a rule the call does not select
+		// is parsed and never run (GAP-2169); any other --eval text is read.
+		// A Windows home also reads the call with the Windows grammars,
+		// which do not read make, so the text stays a mention there.
+		{"unselected eval", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", runtime.GOOS == "windows"},
+		{"unselected eval word", "safe:\n\tprintf ok > report.txt\n", "make --eval 'unused: ; printf ok >> ~/.ssh/authorized_keys' safe", runtime.GOOS == "windows"},
+		{"eval prerequisite of the goal", "safe:\n\tprintf ok > report.txt\n", "make --eval='safe: x' --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", true},
+		{"eval default goal", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys'", true},
+		{"eval function", "safe:\n\tprintf ok > report.txt\n", "make --eval='$(shell printf marker >> ~/.ssh/authorized_keys)' safe", true},
+		{"eval special target", "safe:\n\tprintf ok > report.txt\n", "make --eval='.DEFAULT: ; printf marker >> ~/.ssh/authorized_keys' other", true},
+		{"eval pattern", "safe:\n\tprintf ok > report.txt\n", "make --eval='%.k: ; printf marker >> ~/.ssh/authorized_keys' a.k", true},
+		{"eval assignment", "safe:\n\tprintf ok > report.txt\n", "make --eval='SHELL := /bin/sh' --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", true},
+		{"eval double colon", "safe:\n\tprintf ok > report.txt\n", "make --eval='safe:: ; printf marker >> ~/.ssh/authorized_keys' safe", true},
 		{"pattern", "%.key:\n\tprintf marker >> ~/.ssh/authorized_keys\n", "make token.key", true},
 		{"pattern prerequisite", "%.key: %.prep\n\t@true\na.prep:\n\t@true\nb.prep:\n\tprintf marker >> ~/.ssh/authorized_keys\n", "make a.key b.key", true},
 		{"stdin", "safe:\n\tprintf ok > report.txt\n", "make -f - safe <<'EOF'\nsafe:\n\tprintf marker >> ~/.ssh/authorized_keys\nEOF", true},

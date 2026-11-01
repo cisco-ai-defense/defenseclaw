@@ -192,6 +192,10 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 			}
 		}
 	}
+	// Status and verify read no settings below a home that does not answer
+	// (GAP-1751); describeUnansweredHomes names it.
+	scoped = slices.DeleteFunc(scoped, func(home string) bool { return !env.homeAnswers(home) })
+	outOfScope = slices.DeleteFunc(outOfScope, func(home string) bool { return !env.homeAnswers(home) })
 	return scoped, outOfScope, nil
 }
 
@@ -848,7 +852,7 @@ func (l *lifecycle) warnNoConnectorsEnabled(validated *validatedConfig) {
 	r.AddWarning(codeNoConnectorsEnabled, fmt.Sprintf(
 		"the enumerator found %d eligible %s, but config.yaml enables no connector the managed deployment protects in guardrail.connector or guardrail.connectors%s, so DefenseClaw protects no agent; enable the connectors to protect (for example guardrail.connectors.claudecode: {}) and run `%s`",
 		len(record.Accounts), users, ignored, env.lifecycleCommand("ensure")))
-	r.SecurityComplete = false
+	r.MarkSecurityIncomplete(codeNoConnectorsEnabled)
 }
 
 // codeAssetPolicyNotEnforced names an asset_policy default deny or

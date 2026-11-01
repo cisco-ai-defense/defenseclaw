@@ -45,6 +45,48 @@ func degradedAlerts(t *testing.T, store *audit.Store) []audit.Event {
 	return out
 }
 
+func TestRecoveryAuditKeepsEachUncheckedCallAndSession(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	logDir := filepath.Join(t.TempDir(), "logs")
+	now := time.Date(2026, 10, 24, 16, 0, 0, 0, time.UTC)
+	appendHookFailures(t, logDir,
+		`{"ts":"2026-10-24T15:59:01Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_open","session_id":"session-a","call_id":"call-a"}`+"\n",
+		`{"ts":"2026-10-24T15:59:02Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_open","session_id":"session-b","call_id":"call-b"}`+"\n",
+	)
+	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]string{}
+	for _, row := range rows {
+		if row.Action == string(audit.ActionGuardrailWarn) && strings.Contains(row.Details, "unchecked hook call") {
+			seen[row.SessionID] = row.RequestID
+		}
+	}
+	if len(seen) != 2 || seen["session-a"] != "call-a" || seen["session-b"] != "call-b" {
+		t.Fatalf("recovery audit lost per-call correlation: %+v", seen)
+	}
+	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, row := range rows {
+		if row.Action == string(audit.ActionGuardrailWarn) && strings.Contains(row.Details, "unchecked hook call") {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("recovery duplicated per-call audit rows: %d", count)
+	}
+}
+
 // TestReportHookFailOpenCalls pins GAP-0414: Hermes and Copilot calls that
 // ran fail-open while the gateway was stopped left only lines in
 // hook-failures.jsonl, and no alert or audit row. The gateway now reports

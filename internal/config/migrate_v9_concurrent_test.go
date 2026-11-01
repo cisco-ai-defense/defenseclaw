@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
 
 // GAP-0995: a second in-memory load of a v8 file with a rotated inline key
@@ -137,5 +138,40 @@ func TestMigrateV9PutsTheV8ConfigBackWhenDataJSONChangesDuringTheCommit(t *testi
 	}
 	if got, err := os.ReadFile(dataJSON + DataJSONMigratedSuffix); err != nil || string(got) != string(edited) {
 		t.Fatalf("the next run did not migrate the edited data.json: %v", err)
+	}
+}
+
+// GAP-0995: the daemon of `defenseclaw-gateway start` inherited the inline v8
+// scanner key that the starting command's own config load exported, and read
+// it as a value set outside its process, so a rotated inline key never
+// applied on its reload, only after a restart. The daemon's environment
+// leaves it out; a value the operator set stays.
+func TestTheGatewayDaemonDoesNotInheritAnExportedInlineKey(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	t.Setenv("VIRUSTOTAL_API_KEY", "")
+	dir := t.TempDir()
+	raw := []byte("config_version: 8\ndata_dir: " + dir + "\nscanners:\n  skill_scanner:\n    use_virustotal: true\n" +
+		"    virustotal_api_key: vt-inline-first\nobservability: {}\n")
+	if _, err := MigrateV8InMemory(filepath.Join(dir, "config.yaml"), raw, nil); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv("VIRUSTOTAL_API_KEY") != "vt-inline-first" {
+		t.Fatal("the in-memory load did not export the inline key")
+	}
+	inherited := func() (string, bool) {
+		for _, kv := range daemon.ParentEnvFilter(os.Environ()) {
+			if name, value, ok := strings.Cut(kv, "="); ok && name == "VIRUSTOTAL_API_KEY" {
+				return value, true
+			}
+		}
+		return "", false
+	}
+	if _, ok := inherited(); ok {
+		t.Fatal("the daemon inherits the exported inline key")
+	}
+	t.Setenv("VIRUSTOTAL_API_KEY", "vt-set-by-the-operator")
+	if got, _ := inherited(); got != "vt-set-by-the-operator" {
+		t.Fatal("the daemon lost a key set outside the starting command")
 	}
 }

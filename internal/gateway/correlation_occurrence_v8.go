@@ -44,6 +44,13 @@ func (a *APIServer) correlateHookOccurrence(
 	req agentHookRequest,
 	rawBody []byte,
 ) (context.Context, agentHookRequest, error) {
+	// The correlation ledger reads and writes audit.db on the store's one
+	// connection. Waiting for it (cold index pages after a start, another
+	// writer's commit) uses no gateway CPU, so it must not hold the caller's
+	// run slot: with one slot a caller's next hooks queued behind this
+	// call's store wait and passed their answer budget (GAP-1790).
+	resume := waitWithoutHookRunSlot(ctx)
+	defer resume()
 	for attempt := 1; ; attempt++ {
 		outCtx, out, err := a.correlateHookOccurrenceOnce(ctx, profile, cloneHookCorrelationState(req), rawBody)
 		if err == nil || attempt >= hookCorrelationAttempts || ctx.Err() != nil {

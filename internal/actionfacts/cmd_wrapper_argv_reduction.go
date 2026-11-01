@@ -9,10 +9,11 @@ import (
 )
 
 // OpaqueCMDWrapperArgvReduction keeps the static argv of cmd.exe calls inside
-// a PowerShell list. A single quoted /c or /r body is also parsed recursively
-// as CMD, so a rule on the child's argv can match it. CMD AutoRun and later
-// PowerShell statements may do more; only a positive monotone match on this
-// view can authorize enforcement.
+// a PowerShell list, or of a cmd.exe call read in the CMD grammar itself (a
+// Windows shell call whose first word is cmd.exe, GAP-1727). A single quoted
+// /c or /r body is also parsed recursively as CMD, so a rule on the argv of
+// the child can match it. CMD AutoRun and later statements may do more; only
+// a positive monotone match on this view can authorize enforcement.
 func OpaqueCMDWrapperArgvReduction(input Input, facts Facts) (Facts, bool) {
 	// PowerShell permits a call operator before a bare executable, but the
 	// general parser treats that form as an opaque expression. Reparse only
@@ -36,18 +37,26 @@ func OpaqueCMDWrapperArgvReduction(input Input, facts Facts) (Facts, bool) {
 		input.Args = nil
 		facts = Analyze(input)
 	}
-	if facts.Parse.Status != StatusPartial || facts.Parse.Dialect != DialectPowerShell ||
+	// The outer grammar: PowerShell; CMD when the call itself was read as
+	// CMD; or POSIX (Git Bash, or a generic Windows shell call read as POSIX)
+	// under a Windows home. In CMD and POSIX, cmd.exe /c without /d stays
+	// partial for AutoRun, so even a sole quoted body has no ordinary
+	// projection of its child.
+	outer := facts.Parse.Dialect
+	outerOK := outer == DialectPowerShell || outer == DialectCMD ||
+		outer == DialectPOSIX && trustedWindowsHomeLiteral.MatchString(strings.ReplaceAll(facts.ActiveHome, `\`, "/"))
+	if facts.Parse.Status != StatusPartial || !outerOK ||
 		len(facts.Parse.Issues) != 1 || facts.Parse.Issues[0] != IssueUnsupportedConstruct ||
 		len(facts.Commands) == 0 || callOperator && len(facts.Commands) != 1 {
 		return Facts{}, false
 	}
 	view := Facts{
 		Tool: facts.Tool, CWD: facts.CWD, ActiveHome: facts.ActiveHome,
-		Parse: ParseResult{Status: StatusComplete, Dialect: DialectPowerShell},
+		Parse: ParseResult{Status: StatusComplete, Dialect: outer},
 	}
 	wrapped := false
 	for _, command := range facts.Commands {
-		if command.ParentCommandID != 0 || command.Dialect != DialectPowerShell ||
+		if command.ParentCommandID != 0 || command.Dialect != outer ||
 			command.Background || command.ControlFlowUncertain || !command.ArgvComplete ||
 			len(command.Arguments) != len(command.Argv) || len(command.Argv) == 0 {
 			return Facts{}, false
@@ -57,7 +66,7 @@ func OpaqueCMDWrapperArgvReduction(input Input, facts Facts) (Facts, bool) {
 				return Facts{}, false
 			}
 		}
-		if command.Program != "cmd" ||
+		if (command.Program != "cmd" && command.Program != "cmd.exe") ||
 			(command.Executable != "cmd" && command.Executable != "cmd.exe") {
 			command.Operations, command.Redirects, command.Wrappers = nil, nil, nil
 			command.ID = int64(len(view.Commands) + 1)
@@ -79,7 +88,7 @@ func OpaqueCMDWrapperArgvReduction(input Input, facts Facts) (Facts, bool) {
 				CWD: facts.CWD, ActiveHome: facts.ActiveHome, DialectHint: DialectCMD,
 			}
 			inner = Analyze(innerInput)
-			if len(facts.Commands) == 1 && inner.EnforcementEligible() {
+			if outer == DialectPowerShell && len(facts.Commands) == 1 && inner.EnforcementEligible() {
 				return Facts{}, false
 			}
 		}

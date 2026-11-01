@@ -245,14 +245,15 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	var redirects []string
 	scope := "0"
 	nextScope := 0
-	childScope := func(sharedShell bool, walk func() bool) bool {
+	// childScope walks statements in a child scope of a kind: s a subshell
+	// (its state is dropped), c a conditional or loop body of the same
+	// shell (its state joins the path that skipped it), f a function body
+	// run by this shell (its state replaces the caller state, less its
+	// local variables), e a function body run by a child shell.
+	childScope := func(kind byte, walk func() bool) bool {
 		parent := scope
 		nextScope++
-		kind := "s"
-		if sharedShell {
-			kind = "c"
-		}
-		scope = parent + "/" + kind + strconv.Itoa(nextScope)
+		scope = parent + "/" + string(kind) + strconv.Itoa(nextScope)
 		defer func() { scope = parent }()
 		return walk()
 	}
@@ -280,6 +281,28 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	subshells := 0
 	functions := make(map[string]*syntax.Stmt)
 	functionDepth := 0
+	// assigned holds the static values the walk has seen assigned to each
+	// variable, so a program word such as $x can name the function it
+	// calls (GAP-0934); unbound holds the variables the action may also
+	// bind in a way the walk cannot read.
+	assigned := make(map[string][]string)
+	unbound := simpleUnreadBindings(file)
+	record := func(assign *syntax.Assign) {
+		if assign == nil || assign.Name == nil || assign.Naked {
+			return
+		}
+		value := ""
+		if assign.Value != nil {
+			static, ok := simpleStaticWord(assign.Value, nil)
+			if !ok {
+				return
+			}
+			value = static
+		}
+		if !slices.Contains(assigned[assign.Name.Value], value) {
+			assigned[assign.Name.Value] = append(assigned[assign.Name.Value], value)
+		}
+	}
 	// exported are the functions this action exported. A child shell imports
 	// them, so each body is judged once, at the first later command that may
 	// start one; an export alone runs nothing.
@@ -309,7 +332,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		})
 		for _, stmts := range nested {
 			subshells++
-			ok := childScope(false, func() bool { return flattenAll(stmts) })
+			ok := childScope('s', func() bool { return flattenAll(stmts) })
 			subshells--
 			if !ok {
 				return false
@@ -329,8 +352,8 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				return false, false
 			}
 			if allSimple && (typed.Op == syntax.Pipe || typed.Op == syntax.PipeAll) {
-				return true, childScope(false, func() bool { return flatten(typed.X) }) &&
-					childScope(false, func() bool { return flatten(typed.Y) })
+				return true, childScope('s', func() bool { return flatten(typed.X) }) &&
+					childScope('s', func() bool { return flatten(typed.Y) })
 			}
 			return true, flatten(typed.X) && flatten(typed.Y)
 		}
@@ -347,7 +370,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		case *syntax.Subshell:
 			subshells++
 			defer func() { subshells-- }()
-			return true, childScope(false, func() bool { return flattenAll(typed.Stmts) })
+			return true, childScope('s', func() bool { return flattenAll(typed.Stmts) })
 		case *syntax.Block:
 			return true, flattenAll(typed.Stmts)
 		case *syntax.TimeClause:
@@ -357,14 +380,14 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			return true, flatten(typed.Stmt)
 		case *syntax.IfClause:
 			for clause := typed; clause != nil; clause = clause.Else {
-				if !flattenAll(clause.Cond) || !childScope(true, func() bool { return flattenAll(clause.Then) }) {
+				if !flattenAll(clause.Cond) || !childScope('c', func() bool { return flattenAll(clause.Then) }) {
 					return true, false
 				}
 			}
 			return true, true
 		case *syntax.WhileClause:
 			return true, flattenAll(typed.Cond) &&
-				childScope(true, func() bool { return flattenAll(typed.Do) })
+				childScope('c', func() bool { return flattenAll(typed.Do) })
 		case *syntax.ForClause:
 			switch iteration := typed.Loop.(type) {
 			case *syntax.WordIter:
@@ -381,7 +404,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			default:
 				return true, false
 			}
-			return true, childScope(true, func() bool { return flattenAll(typed.Do) })
+			return true, childScope('c', func() bool { return flattenAll(typed.Do) })
 		case *syntax.CaseClause:
 			if !allSimple && !inertPOSIXWords(typed.Word) ||
 				allSimple && !flattenSubstitutions(typed.Word) {
@@ -398,7 +421,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 						}
 					}
 				}
-				if !childScope(true, func() bool { return flattenAll(item.Stmts) }) {
+				if !childScope('c', func() bool { return flattenAll(item.Stmts) }) {
 					return true, false
 				}
 			}
@@ -474,16 +497,38 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 					}
 				}
 			}
+			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 {
+				for _, assign := range call.Assigns {
+					record(assign)
+				}
+			}
+			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok {
+				for _, assign := range decl.Args {
+					record(assign)
+				}
+			}
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
 				name, known := simpleFunctionCallName(call)
+				var bound []string
 				if !known && len(functions) != 0 {
 					// A runtime program word may name any function defined in
-					// this action. No complete per-command view exists.
-					return false
+					// this action. It is read only when it is one variable
+					// that the action binds to static values alone: each
+					// value is a call the action may make.
+					names, ok := simpleAssignedProgramNames(call.Args[0], assigned, unbound)
+					if !ok {
+						return false
+					}
+					bound = names
 				}
 				var bodies []*syntax.Stmt
 				if body, found := functions[name]; found {
 					bodies = append(bodies, body)
+				}
+				for _, boundName := range bound {
+					if body, found := functions[boundName]; found && !slices.Contains(bodies, body) {
+						bodies = append(bodies, body)
+					}
 				}
 				program, _ := simpleStaticWord(call.Args[0], nil)
 				_, _, trapAction, _ := simpleNestedScript(call, nil, nil, nil)
@@ -517,7 +562,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 							return false
 						}
 						functionDepth++
-						ok := flatten(body)
+						ok := childScope('f', func() bool { return flatten(body) })
 						functionDepth--
 						if !ok {
 							return false
@@ -565,7 +610,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			// variables stay there.
 			functionDepth++
 			subshells++
-			ok := childScope(false, func() bool { return flatten(body) })
+			ok := childScope('e', func() bool { return flatten(body) })
 			subshells--
 			functionDepth--
 			if !ok {
@@ -578,6 +623,104 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		return nil, false, false
 	}
 	return statements, reduced, true
+}
+
+// simpleAssignedProgramNames returns the program names that word, one
+// plain $x or ${x} (quoted or not), can expand to when the action assigns x
+// only static values (x=f; $x calls the function f, GAP-0934). It is false
+// for any other word, for an x the action never assigns (its value comes
+// from the environment) and for an x it may bind in another way.
+func simpleAssignedProgramNames(word *syntax.Word, assigned map[string][]string, unbound map[string]bool) ([]string, bool) {
+	if word == nil {
+		return nil, false
+	}
+	name := ""
+	plain := true
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if param, ok := node.(*syntax.ParamExp); ok {
+			if name != "" || param.Param == nil {
+				plain = false
+			} else {
+				name = param.Param.Value
+			}
+			return false
+		}
+		return plain
+	})
+	values := assigned[name]
+	if !plain || name == "" || unbound[name] || len(values) == 0 {
+		return nil, false
+	}
+	names := make([]string, 0, len(values))
+	for _, value := range values {
+		resolved, ok := simpleStaticWord(word, map[string]string{name: value})
+		if !ok {
+			return nil, false
+		}
+		if resolved != "" && !slices.Contains(names, resolved) {
+			names = append(names, resolved)
+		}
+	}
+	return names, true
+}
+
+// simpleUnreadBindings returns the variables that file may bind other than
+// by a static NAME=value assignment: a dynamic, appended or array value, a
+// declaration option (a nameref or an attribute), a for loop, arithmetic,
+// or a builtin that writes a named variable (read, printf -v, unset, ...).
+func simpleUnreadBindings(file *syntax.File) map[string]bool {
+	unbound := make(map[string]bool)
+	mark := func(name string) {
+		if simpleVariableName(name) {
+			unbound[name] = true
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.Assign:
+			if typed.Name == nil {
+				break
+			}
+			_, static := simpleStaticWord(typed.Value, nil)
+			if typed.Append || typed.Index != nil || typed.Array != nil || typed.Value != nil && !static {
+				mark(typed.Name.Value)
+			}
+		case *syntax.DeclClause:
+			for _, assign := range typed.Args {
+				if assign != nil && assign.Naked && assign.Name == nil {
+					// An option such as -n or -i changes what every name means.
+					for _, other := range typed.Args {
+						if other != nil && other.Name != nil {
+							mark(other.Name.Value)
+						}
+					}
+				}
+			}
+		case *syntax.ForClause:
+			if iteration, ok := typed.Loop.(*syntax.WordIter); ok && iteration.Name != nil {
+				mark(iteration.Name.Value)
+			}
+		case *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause:
+			syntax.Walk(node, func(inner syntax.Node) bool {
+				if literal, ok := inner.(*syntax.Lit); ok {
+					mark(literal.Value)
+				}
+				return true
+			})
+			return false
+		case *syntax.CallExpr:
+			// Any literal argument that is a name or starts NAME= (read x,
+			// printf -v x, unset x, eval x=g) may bind that name.
+			for _, arg := range typed.Args[min(1, len(typed.Args)):] {
+				if literal := arg.Lit(); literal != "" {
+					name, _, _ := strings.Cut(literal, "=")
+					mark(name)
+				}
+			}
+		}
+		return true
+	})
+	return unbound
 }
 
 // eval parses its static script in the caller's shell. Function definitions
@@ -628,6 +771,11 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 			values = append(values, arg.Name.Value)
 			continue
 		}
+		if arg.Name != nil {
+			// NAME=value sets a variable; it exports no function (export
+			// HOME=v in a function body, GAP-2476).
+			continue
+		}
 		if arg.Name == nil && arg.Value != nil {
 			value, known := simpleStaticWord(arg.Value, nil)
 			if !known {
@@ -652,15 +800,15 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 			break
 		}
 		for _, flag := range option[1:] {
-			if flag == 'f' {
+			switch flag {
+			case 'f':
 				exportFunctions = true
-			} else if flag == 'x' {
+			case 'x':
 				exportAttribute = true
-			} else if flag == 'n' {
+			case 'n':
 				unexport = true
-			} else if !strings.ContainsRune("np", flag) {
-				return nil, false
 			}
+			// Another attribute (-g, -r, -p, ...) exports no function.
 		}
 		index++
 	}
@@ -780,6 +928,17 @@ func simpleMayImportExportedFunctions(call *syntax.CallExpr, source string, expo
 		func(dir string) bool { return strings.HasPrefix(program, dir) }) {
 		return true
 	}
+	// Only a shell runs an exported function by name. A name in the argv
+	// of an ordinary program (ls f, nice ls f, time grep f x) is data; it
+	// counts when the program word itself is the name, or a runner that
+	// hands its words to a shell (watch, parallel ...) is present
+	// (GAP-1094).
+	shellText := known && slices.Contains(exported, program)
+	for _, arg := range call.Args {
+		if word, static := simpleStaticWord(arg, nil); static && simpleShellTextRunner(path.Base(word)) {
+			shellText = true
+		}
+	}
 	for _, arg := range call.Args {
 		start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
 		if start < 0 || end <= start || end > len(source) {
@@ -797,12 +956,26 @@ func simpleMayImportExportedFunctions(call *syntax.CallExpr, source string, expo
 				return true
 			}
 			if strings.HasSuffix(token, ".sh") || strings.HasSuffix(token, ".bash") ||
-				slices.Contains(exported, token) {
+				shellText && slices.Contains(exported, token) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// simpleShellTextRunner reports a program that runs its argument words as
+// shell text (watch joins them for sh -c; parallel, script and flock take
+// a command string) or an interpreter whose code can start a
+// shell (os.system, system(), backticks), so a word naming an exported
+// function may call it.
+func simpleShellTextRunner(program string) bool {
+	switch program {
+	case "watch", "parallel", "script", "flock",
+		"perl", "ruby", "node", "nodejs", "deno", "bun", "php", "lua", "tclsh", "awk", "gawk", "mawk", "nawk":
+		return true
+	}
+	return strings.HasPrefix(program, "python") || strings.HasPrefix(program, "pypy")
 }
 
 // simpleNotWordTokenRune separates the program-name and path tokens of an

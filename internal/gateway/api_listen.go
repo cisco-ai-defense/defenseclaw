@@ -11,10 +11,14 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -41,10 +45,12 @@ var apiListenTCP = func(ctx context.Context, addr string) (net.Listener, error) 
 }
 
 // acquireAPIListener returns the API listener: the socket-activated "api"
-// descriptor when systemd passed one, otherwise a bound listener. An
-// inherited socket must be exactly the configured api_bind:api_port — a
-// mismatch fails closed rather than silently serving the API somewhere the
-// managed config did not name.
+// descriptor when systemd or launchd passed one, otherwise a bound listener.
+// An inherited socket must be exactly the configured api_bind:api_port — on
+// Linux a mismatch fails closed rather than silently serving the API
+// somewhere the managed config did not name. The macOS plist declares the
+// default address only. A standalone managed gateway must adopt that socket;
+// only other profiles may bind a configured address in its place.
 func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error) {
 	listener, inherited, err := inheritedAPIListener()
 	if err != nil {
@@ -53,12 +59,78 @@ func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error
 	if inherited {
 		if err := inheritedAddrMatches(listener.Addr(), a.addr); err != nil {
 			_ = listener.Close()
-			return nil, err
+			if !apiInheritedMismatchBinds || a.scannerCfg != nil && a.scannerCfg.StandaloneEnterprise() {
+				return nil, err
+			}
+			fmt.Fprintf(os.Stderr, "[sidecar-api] %v; binding the configured address instead\n", err)
+			return listenWithRetry(ctx, a.addr, apiListenRetryBudget)
 		}
 		return listener, nil
 	}
+	if apiInheritedMismatchBinds && a.scannerCfg != nil && a.scannerCfg.StandaloneEnterprise() {
+		// A rolled-back package upgrade (GAP-2144): the lifecycle put the
+		// previous release's job definition back, which declares no API
+		// socket, while the package left this build's binaries in place.
+		// The job is then the one its definition describes, and the
+		// gateway binds the port itself as that release did, until the next
+		// ensure installs this build's definition.
+		if declares, known := apiLaunchdDefinitionDeclaresSocket(); known && !declares {
+			fmt.Fprintln(os.Stderr, "[sidecar-api] the installed launchd job definition declares no API socket "+
+				"(a rolled-back upgrade); binding the API port until the next ensure installs this build's definition")
+			return listenWithRetry(ctx, a.addr, apiListenRetryBudget)
+		}
+		// GAP-1086: launchd holds the managed API port across restarts only
+		// while its job declares the socket. Under an older job the gateway
+		// would bind the port itself, and every restart would free it for
+		// another account while native exporters keep sending to it.
+		return nil, errors.New("api: the managed gateway's launchd job holds no API socket, so the port " +
+			"would be free while the gateway restarts; reload the job: launchctl bootout " +
+			"system/com.cisco.defenseclaw.gateway, then launchctl bootstrap system " +
+			"/Library/LaunchDaemons/com.cisco.defenseclaw.gateway.plist")
+	}
 	return listenWithRetry(ctx, a.addr, apiListenRetryBudget)
 }
+
+// apiLaunchdGatewayDefinition is the managed gateway's launchd job
+// definition. Replaceable in tests.
+var apiLaunchdGatewayDefinition = "/Library/LaunchDaemons/com.cisco.defenseclaw.gateway.plist"
+
+// apiLaunchdDefinitionMaxBytes bounds the read of that definition.
+const apiLaunchdDefinitionMaxBytes = 1 << 20
+
+// apiLaunchdDefinitionDeclaresSocket reports whether the installed gateway
+// job definition declares launchd sockets. known is false unless the file is
+// a root-owned regular XML plist that only root can write, so any other
+// state keeps the GAP-1086 refusal. Replaceable in tests.
+var apiLaunchdDefinitionDeclaresSocket = func() (declares, known bool) {
+	return launchdDefinitionDeclaresSocket(apiLaunchdGatewayDefinition)
+}
+
+func launchdDefinitionDeclaresSocket(path string) (declares, known bool) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || !fileOwnedByRoot(info) {
+		return false, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false, false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, apiLaunchdDefinitionMaxBytes+1))
+	if err != nil || len(data) > apiLaunchdDefinitionMaxBytes {
+		return false, false
+	}
+	text := bytes.TrimSpace(data)
+	if !bytes.HasPrefix(text, []byte("<?xml")) || !bytes.Contains(text, []byte("<plist")) {
+		return false, false
+	}
+	return bytes.Contains(text, []byte("<key>Sockets</key>")), true
+}
+
+// apiInheritedMismatchBinds is true where the inherited API socket's address
+// is fixed by the installed service definition rather than the config
+// (launchd). Replaceable in tests.
+var apiInheritedMismatchBinds = runtime.GOOS == "darwin"
 
 // retryAPIListenerBind keeps trying to bind the API address after the first
 // bind found it held, and hands the listener to Run through bound. It stops

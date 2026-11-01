@@ -85,6 +85,8 @@ func TestWindowsEnterpriseFailureCodesAreInTheExitCodeTable(t *testing.T) {
 	for code, want := range map[string]int{
 		"elevation_required":              enterprisestatus.WindowsExitAccessDenied,
 		"lifecycle_busy":                  enterprisestatus.WindowsExitBusy,
+		"hook_calls_running":              enterprisestatus.WindowsExitBusy,
+		"hook_in_use":                     enterprisestatus.WindowsExitBusy,
 		"bundle_apply_failed":             enterprisestatus.WindowsExitBusy,
 		"invalid_arguments":               enterprisestatus.WindowsExitInvalidArgs,
 		"bundle_config_validation_failed": enterprisestatus.WindowsExitFailure,

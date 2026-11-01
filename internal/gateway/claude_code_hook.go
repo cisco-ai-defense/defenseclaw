@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -36,6 +37,10 @@ import (
 )
 
 type claudeCodeHookRequest struct {
+	watchHome            string
+	managedWatch         bool
+	reportedCWD          string                 // cwd as sent, before hookCWDForContext; names watch paths only (GAP-0066)
+	reportedNewCWD       string                 // new_cwd as sent, same use
 	HookEventName        string                 `json:"hook_event_name"`
 	SessionID            string                 `json:"session_id,omitempty"`
 	TurnID               string                 `json:"turn_id,omitempty"`
@@ -108,7 +113,7 @@ type claudeCodeHookResponse struct {
 	RuleIDs []string `json:"rule_ids,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive back through the unified dispatch so
-	// finalizeAgentHook can honor it on the hook_decision event +
+	// finalizeAgentHookAnswer can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled     *bool  `json:"-"`
 	SourceReason         string `json:"-"`
@@ -133,9 +138,11 @@ type claudeCodeHookResponse struct {
 // value so downstream tooling and the audit envelope receive them.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
+	req = req.withWatchHome(ctx)
 	// Keep authenticated lifecycle state current even while inspection is
 	// disabled so a live same-session re-enable cannot lose active-file authority.
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
+	ctx = a.withInstructionStartup(ctx, "claudecode", req.SessionID, activeAgentContext)
 	mode := sandboxHookMode(ctx, "claudecode", a.claudeCodeMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "claudecode") && !a.claudeCodeEnabled() {
@@ -163,6 +170,17 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			}
 		}
 	case "UserPromptSubmit", "UserPromptExpansion":
+		// The user's typed prompt is the task the tool judge weighs later
+		// tool calls against (SESSION_USER_INTENT). Only the turn-start
+		// event seeds it, as on the generic and Codex paths: an expansion
+		// carries command text the user did not type, so it must not
+		// replace the task. Secure Client keeps the judge input of main.
+		if isToolJudgeIntentEvent(req.HookEventName) && !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
+			if judge := a.judgeFor(ctx); judge != nil {
+				judge.ObserveSessionPrompt(ctx, req.Prompt)
+			}
+			a.observeUserDownloadRequest(ctx, req.Prompt)
+		}
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodePromptContent(req), "prompt",
 		))
@@ -185,24 +203,29 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			callerCWD:     req.CWD,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, toolName, actionTool, toolArgs)
+		actionInput := actionfacts.Input{
+			Tool:                                     actionTool,
+			Args:                                     toolArgs,
+			CWD:                                      req.CWD,
+			ActiveHome:                               hookActiveHome(ctx),
+			ToolResourceIdentity:                     resourceIdentity,
+			CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
+			ActiveAgentFiles:                         activeAgentContext.files,
+			ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
+			ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
+			ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
+		}
+		if a.agentHookWindowsDialectHint(ctx) {
+			actionInput.DialectHint = claudeCodeWindowsShellDialect(actionInput)
+		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input: actionfacts.Input{
-				Tool:                                     actionTool,
-				Args:                                     toolArgs,
-				CWD:                                      req.CWD,
-				ActiveHome:                               hookActiveHome(ctx),
-				ToolResourceIdentity:                     resourceIdentity,
-				CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
-				ActiveAgentFiles:                         activeAgentContext.files,
-				ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
-				ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
-				ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
-			},
+			Input:                         actionInput,
 			LegacyText:                    string(toolArgs),
 			Connector:                     "claudecode",
 			EnforcementCapable:            true,
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionfacts.Input{Tool: actionTool, Args: toolArgs}),
+			ActiveAgentFileIdentities:     activeAgentContext.identities,
 			SandboxGuestCWD:               req.guestCWD,
 			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
@@ -240,9 +263,13 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "InstructionsLoaded", "ConfigChange", "FileChanged":
 		verdict = a.scanClaudeCodeEventFile(ctx, req)
 		if verdict == nil {
-			verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
-				claudeCodeEventContent(req), "prompt",
-			))
+			inspectReq := claudeCodeContentInspectRequest(claudeCodeEventContent(req), "prompt")
+			// A FileChanged note on a state or settings file Claude Code keeps
+			// for itself is housekeeping: the path is the only text, the event
+			// cannot block, and the judge read it as sensitive file access
+			// (GAP-2623). Rules and AID still scan it; the event is recorded.
+			inspectReq.skipJudge = req.HookEventName == "FileChanged" && claudeCodeOwnStateFile(req.FilePath)
+			verdict = a.inspectMessageContent(ctx, inspectReq)
 		}
 	case "SubagentStart", "CwdChanged", "DirectoryAdded", "WorktreeRemove",
 		"TaskCreated", "TaskCompleted", "TeammateIdle",
@@ -260,11 +287,12 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	wouldBlock := rawAction == "block" && mode != "action"
+	stateMutation := a.provenActiveStateMutation(ctx, verdict) && claudeCodeCanEnforce(req)
+	wouldBlock := rawAction == "block" && mode != "action" && !stateMutation
 	if rawAction == "block" && !claudeCodeCanEnforce(req) {
 		action = "allow"
 		wouldBlock = true
-	} else if mode != "action" && rawAction == "block" {
+	} else if mode != "action" && rawAction == "block" && !stateMutation {
 		action = "allow"
 	}
 	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {
@@ -311,6 +339,15 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		action = "block"
 	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	// The alert-only SQL rule says so in the chat, as on the Codex and generic
+	// hook paths, so block_at is not read as a way to turn it into a block
+	// (GAP-0914). Secure Client keeps the plain finding line.
+	if action == "alert" && hasAlertOnlySQLFinding(verdict.Findings) {
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			resp.AdditionalContext = strings.TrimSpace(resp.AdditionalContext + sqlAlertOnlyHookNotice)
+			resp.ClaudeCodeOutput = claudeCodeOutput(req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext)
+		}
+	}
 	resp.SourceReason = verdict.Reason
 	// Stamp the unified-pipeline correlation keys so the agent-hook
 	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
@@ -323,6 +360,46 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
 	resp.laneVerdict = verdict.laneVerdict
 	return resp
+}
+
+func (req claudeCodeHookRequest) withWatchHome(ctx context.Context) claudeCodeHookRequest {
+	if managedCallerWatchContext(ctx) {
+		req.watchHome = trustedActiveHome(ctx)
+		req.managedWatch = true
+	}
+	return req
+}
+
+// managedWatchRoot is the project a managed caller's Claude Code watches when
+// the gateway service account cannot resolve it (sanitizeHookCWD returns ""
+// for a directory in another user's home on Linux and macOS). The reported
+// directory is kept lexically only inside the verified caller's home, as the
+// unified pipeline's managedWatchCWD does. It names watch paths only; policy
+// reads still use the resolved CWD (GAP-0066).
+func (req claudeCodeHookRequest) managedWatchRoot() string {
+	if !req.managedWatch || req.sandboxView != nil || req.watchHome == "" || req.watchHome == unresolvedCallerHome {
+		return ""
+	}
+	cwd := req.reportedNewCWD
+	if cwd == "" {
+		cwd = req.reportedCWD
+	}
+	if !insideHome(req.watchHome, cwd) {
+		return ""
+	}
+	return filepath.Clean(cwd)
+}
+
+// managedCallerWatchContext reports a request served on behalf of another
+// account: a call on the managed hook socket (the verified peer; that
+// server's base context carries no service-account mark) or a call to a
+// service-account gateway's TCP API. Its watch paths come from the verified
+// caller, never from the gateway's own environment (GAP-0066).
+func managedCallerWatchContext(ctx context.Context) bool {
+	if _, ok := managedHookPeerFromContext(ctx); ok {
+		return true
+	}
+	return serviceAccountGatewayFromContext(ctx)
 }
 
 // dispatchClaudeCodeHookNotification fires a user-session OS toast
@@ -430,7 +507,7 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	if cfg.Guardrail.HasConnector("claudecode") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "claudecode")
+	return cfg.Guardrail.NamesConnector("claudecode")
 }
 
 func (a *APIServer) claudeCodeMode(ctx context.Context) string {
@@ -552,8 +629,13 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 		}
 	}
 	watchRoot := strings.TrimSpace(req.NewCWD)
-	if watchRoot == "" {
+	// A managed caller's new_cwd the service cannot resolve still names
+	// the new project; it does not fall back to the old one (GAP-0066).
+	if watchRoot == "" && (!req.managedWatch || req.reportedNewCWD == "") {
 		watchRoot = req.CWD
+	}
+	if watchRoot == "" {
+		watchRoot = req.managedWatchRoot()
 	}
 	if event == "SessionStart" {
 		output := map[string]interface{}{
@@ -566,7 +648,12 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 		return map[string]interface{}{"hookSpecificOutput": output}
 	}
 	if event == "CwdChanged" || event == "FileChanged" {
-		out := map[string]interface{}{"watchPaths": claudeCodeWatchPathsForRequest(req, watchRoot)}
+		// Claude Code reads watchPaths of these events only inside
+		// hookSpecificOutput; a top-level key is ignored (GAP-2288).
+		out := map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
+			"hookEventName": event,
+			"watchPaths":    claudeCodeWatchPathsForRequest(req, watchRoot),
+		}}
 		if additional != "" {
 			out["systemMessage"] = additional
 		}
@@ -582,8 +669,6 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 			"hookEventName":     event,
 			"additionalContext": additional,
 		}}
-	case "CwdChanged":
-		return map[string]interface{}{"watchPaths": []string{}}
 	default:
 		return map[string]interface{}{"systemMessage": additional}
 	}
@@ -846,6 +931,27 @@ func claudeCodePromptContent(req claudeCodeHookRequest) string {
 func claudeCodeToolOutput(req claudeCodeHookRequest) string {
 	parts := []string{claudeCodeString(req.ToolResponse), claudeCodeString(req.ToolCalls), req.Error, req.ErrorDetails}
 	return strings.Join(nonEmptyStrings(parts...), "\n")
+}
+
+// claudeCodeOwnStateFile reports whether path is a file Claude Code keeps
+// for itself: ~/.claude.json (and its backups) or a file under a .claude
+// folder (settings, sessions, todos). It looks at the name only; nothing
+// here trusts the file contents.
+func claudeCodeOwnStateFile(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	clean := filepath.ToSlash(filepath.Clean(path))
+	if strings.HasPrefix(strings.ToLower(filepath.Base(clean)), ".claude.json") {
+		return true
+	}
+	for _, part := range strings.Split(filepath.ToSlash(filepath.Dir(clean)), "/") {
+		if strings.EqualFold(part, ".claude") {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeCodeEventContent(req claudeCodeHookRequest) string {
@@ -1303,4 +1409,28 @@ func (a *APIServer) scanClaudeCodeComponent(ctx context.Context, component, targ
 		_ = a.logger.LogScanWithCorrelation(ctx, result, "", ScanCorrelationFromContext(ctx))
 	}
 	return true
+}
+
+// claudeCodeWindowsShellDialect is the shell Claude Code runs a Windows tool
+// call in, where the call leaves no doubt (GAP-0147, GAP-1717): its
+// PowerShell tool runs PowerShell, and its Bash tool runs Git Bash, so a Bash
+// call whose text the POSIX grammar reads alone (no Windows or PowerShell
+// spelling, hookpaths.GitBashReadsAlone) is read as POSIX. Any other Bash
+// call keeps no hint and every reading counts, as before: PowerShell or cmd
+// text sent to the Bash tool, an MSYS drive path
+// (TestWindowsConnectorContractCompoundRegistryPersistencePerDialect,
+// TestR105GAP0768WindowsGitBashWriteToLoadedClaudeMD).
+func claudeCodeWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
+	switch input.Tool {
+	case "PowerShell":
+		return actionfacts.DialectPowerShell
+	case "Bash":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal(input.Args, &args) == nil && hookpaths.GitBashReadsAlone(args.Command, input.ActiveHome) {
+			return actionfacts.DialectPOSIX
+		}
+	}
+	return ""
 }

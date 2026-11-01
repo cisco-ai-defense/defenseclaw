@@ -2,7 +2,8 @@
 
 This module is packaged only in DefenseClaw's native Windows runtime.
 It deliberately implements the exact surface used by cisco-ai-mcp-scanner
-4.3.0 instead of claiming general yara-python compatibility.
+4.3.0 through 4.8.x (compile(sources=), Error, Rules.match(data=) and the
+match rule/namespace/tags/meta fields) instead of claiming general yara-python compatibility.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ class Error(Exception):
 
 @dataclass(frozen=True, slots=True)
 class Match:
-    """The match fields consumed by MCP Scanner 4.3.0."""
+    """The match fields consumed by MCP Scanner 4.3.0 through 4.8.x."""
 
     rule: str
     namespace: str

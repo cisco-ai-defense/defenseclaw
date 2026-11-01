@@ -107,6 +107,9 @@ for target in "${TARGETS[@]}"; do
     if [[ "${goos}" == windows ]]; then
         GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags} -H=windowsgui" \
             -o "${stage}/defenseclaw-hook.exe" ./cmd/defenseclaw-hook
+        # The one-line install's GUI-subsystem Claude Code PreToolUse guard (GAP-2467).
+        GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags} -H=windowsgui" \
+            -o "${stage}/defenseclaw-hook-guard.exe" ./cmd/defenseclaw-hook-guard
         (cd "${stage}" && rm -f "${OUT}/defenseclaw-${VERSION}-${goos}-${goarch}.zip" \
             && zip -qr "${OUT}/defenseclaw-${VERSION}-${goos}-${goarch}.zip" ./*)
     else

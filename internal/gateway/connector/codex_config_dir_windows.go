@@ -19,7 +19,11 @@
 package connector
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -41,4 +45,29 @@ func ensureCodexConfigDir(path string) error {
 		return fmt.Errorf("validate %s Codex configuration directory: %w", state, err)
 	}
 	return nil
+}
+
+// codexHomeLinkRefusal refuses, before Setup changes anything, a per-user
+// Codex home that goes through a symbolic link or junction. The config writer
+// (ensureCodexConfigDir) refuses the same path, but only after Setup has moved
+// the hooks from an earlier home, so the rollback was incomplete and the error
+// told the user to close the agent and run defenseclaw upgrade, which does not
+// help (GAP-2339). Any other error is left to the writer, as before.
+func codexHomeLinkRefusal(home string) error {
+	err := safefile.RejectReparseChain(home)
+	if err == nil || !errors.Is(err, safefile.ErrReparsePoint) {
+		return nil
+	}
+	// defenseclaw setup passes the default home as CODEX_HOME too, so only a
+	// CODEX_HOME that names another folder is the user's own choice to undo;
+	// for the default home "unset it" would point at the same link (GAP-2402).
+	fix := "make " + home + " a real folder"
+	defaultHome := filepath.Join(userHomeDir(), ".codex")
+	if env := strings.TrimSpace(os.Getenv("CODEX_HOME")); env != "" && !strings.EqualFold(filepath.Clean(env), filepath.Clean(defaultHome)) {
+		fix = "set CODEX_HOME to the real folder, or unset it to use " + defaultHome
+	}
+	return refuseForAgentConfig(fmt.Errorf( //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+		"Codex home %s goes through a symbolic link or junction (%v), and DefenseClaw does not write Codex settings through one on Windows; %s, then run: defenseclaw setup codex",
+		home, err, fix,
+	))
 }

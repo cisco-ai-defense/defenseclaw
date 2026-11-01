@@ -56,12 +56,20 @@ func claudeHandlersOf(t *testing.T, hooks map[string]interface{}, event string) 
 	return handlers
 }
 
-// A launcher with no separate installed hook (a repository build) has no
-// PreToolUse guard to run, so PreToolUse keeps the cmd.exe guard like every
-// other event: a missing launcher blocks, it never lets a tool call through. A
-// packaged install runs the PreToolUse guard instead, which suits Cursor's
-// import (TestWindowsClaudeCodePreToolUseGuardBlocksAMissingLauncherAndSuitsCursor).
-func TestWindowsClaudeCodeWithoutAnInstalledHookKeepsTheCmdGuardOnEveryEvent(t *testing.T) {
+// A launcher with no guard program beside it (a repository build: no
+// separate installed hook and no defenseclaw-gateway.exe) has no PreToolUse
+// guard to run. Its
+// PreToolUse handler kept the cmd.exe guard, which Cursor imports from
+// ~/.claude/settings.json and starts without arguments: cmd.exe answered with
+// its banner instead of JSON and Cursor blocked every tool call, also with no
+// Cursor hooks set up (GAP-1011, T11 TST-28456 and T12 TST-29761 on dc-win2).
+// PreToolUse now runs the launcher in the exec form, which a start without
+// arguments leaves without an answer; every other event keeps the cmd.exe
+// guard, so a missing launcher still blocks the next prompt (GAP-1091). The
+// cmd.exe guard of 1.0.1 to rc.10 on PreToolUse fails verification, so the
+// upgraded gateway's Setup rewrites it, and a rollback gives earlier releases
+// the exec form they own on every event.
+func TestWindowsClaudeCodeWithoutAnInstalledHookRunsTheLauncherOnPreToolUse(t *testing.T) {
 	for _, launcher := range []string{
 		`C:\Users\dcw-std1\.local\bin\defenseclaw-hook.exe`,
 		`C:\Users\Jane Doe\.local\bin\defenseclaw-hook.exe`,
@@ -75,6 +83,17 @@ func TestWindowsClaudeCodeWithoutAnInstalledHookKeepsTheCmdGuardOnEveryEvent(t *
 				if len(handlers) != 1 {
 					t.Fatalf("%s has %d handlers, want 1", group.eventType, len(handlers))
 				}
+				command, _ := handlers[0]["command"].(string)
+				args, _ := claudeCodeNativeExecArguments(handlers[0])
+				if cursorPreToolChecks[group.eventType] {
+					if normalizeWindowsHookExecutable(command) == normalizeWindowsHookExecutable(guardCommand) {
+						t.Fatalf("%s runs cmd.exe; Cursor starts it without args and blocks every tool call", group.eventType)
+					}
+					if command != launcher || !reflect.DeepEqual(args, hookArgs) {
+						t.Fatalf("%s handler = %q %q, want the launcher %q %q", group.eventType, command, args, launcher, hookArgs)
+					}
+					continue
+				}
 				gotLauncher, gotArgs, isGuard := claudeCodeCmdGuardParts(handlers[0])
 				if !isGuard || gotLauncher != launcher || !reflect.DeepEqual(gotArgs, hookArgs) {
 					t.Fatalf("%s handler lost the missing-launcher guard: %#v", group.eventType, handlers[0])
@@ -83,15 +102,28 @@ func TestWindowsClaudeCodeWithoutAnInstalledHookKeepsTheCmdGuardOnEveryEvent(t *
 			if err := verifyClaudeCodeHookGroups(hooks, guardCommand, guardArgs, "", hookGroups); err != nil {
 				t.Fatalf("Setup's own hooks fail its verification: %v", err)
 			}
-			// A PreToolUse handler that starts the launcher itself fails
-			// verification, so Setup rewrites it.
-			direct := map[string]interface{}{}
-			appendClaudeCodeHookGroups(direct, guardCommand, guardArgs, hookGroups)
-			handler := claudeHandlersOf(t, direct, "PreToolUse")[0]
-			handler["command"], handler["args"] = launcher, hookArgs
-			if err := verifyClaudeCodeHookGroups(direct, guardCommand, guardArgs, "", hookGroups); err == nil ||
+			// The cmd.exe guard an earlier release wrote on PreToolUse fails
+			// verification, so Setup rewrites it on upgrade.
+			old := map[string]interface{}{}
+			appendClaudeCodeHookGroups(old, guardCommand, guardArgs, hookGroups)
+			handler := claudeHandlersOf(t, old, "PreToolUse")[0]
+			handler["command"], handler["args"] = guardCommand, guardArgs
+			if err := verifyClaudeCodeHookGroups(old, guardCommand, guardArgs, "", hookGroups); err == nil ||
 				!strings.Contains(err.Error(), "PreToolUse") {
-				t.Fatalf("a direct-launcher PreToolUse handler passed verification (err %v)", err)
+				t.Fatalf("a cmd.exe PreToolUse handler passed verification (err %v)", err)
+			}
+			// Rollback converts the other events; PreToolUse is already the
+			// exec form 1.0.0 owns.
+			settings := map[string]interface{}{"hooks": hooks}
+			owned := func(path string) bool { return path == launcher }
+			if changed := claudeCodeHooksInEarlierReleaseForm(settings, "windows", "", owned); changed != len(hookGroups)-1 {
+				t.Fatalf("rollback converted %d handlers, want %d", changed, len(hookGroups)-1)
+			}
+			for _, group := range hookGroups {
+				handler := claudeHandlersOf(t, hooks, group.eventType)[0]
+				if handler["command"] != launcher || !codexValueMatches(handler["args"], hookArgs) {
+					t.Fatalf("%s after rollback = %#v, want the exec form", group.eventType, handler)
+				}
 			}
 		})
 	}
@@ -111,7 +143,7 @@ func TestClaudeCodeHandlerInvocationChangesOnlyAGeneratedGuardOnPreToolUse(t *te
 		wantCommand          string
 		wantArgs             []string
 	}{
-		{"guard on PreToolUse", "PreToolUse", guardCommand, guardArgs, guardCommand, guardArgs},
+		{"guard on PreToolUse", "PreToolUse", guardCommand, guardArgs, launcher, hookArgs},
 		{"guard on UserPromptSubmit", "UserPromptSubmit", guardCommand, guardArgs, guardCommand, guardArgs},
 		{"managed exec form", "PreToolUse", launcher, managedArgs, launcher, managedArgs},
 		{"unix script", "PreToolUse", "'/home/u/.defenseclaw/hooks/claude-code-hook.sh'", nil, "'/home/u/.defenseclaw/hooks/claude-code-hook.sh'", nil},

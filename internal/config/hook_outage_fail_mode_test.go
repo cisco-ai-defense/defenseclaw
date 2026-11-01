@@ -16,8 +16,8 @@ import (
 // fails open for an outage in the default and permissive tiers and closed in
 // strict; every managed or enterprise install keeps its administrator's mode
 // (closed by default), whatever the tier, and Secure Client keeps its open
-// default. A per-user configured hook_fail_mode, open or closed, and the
-// guardrail mode change nothing.
+// default. A saved per-user hook_fail_mode wins over the tier; the
+// unrelated guardrail enforcement mode does not change the outage mode.
 func TestHookOutageFailModeDecision(t *testing.T) {
 	standalone := func(c *Config) {
 		c.DeploymentMode = managed.DeploymentModeManagedEnterprise
@@ -39,12 +39,12 @@ func TestHookOutageFailModeDecision(t *testing.T) {
 			c.Guardrail.RulePack = "strict"
 			c.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {RulePack: "permissive"}}
 		}, "open"},
-		{"OSS default, saved closed", func(c *Config) { c.Guardrail.HookFailMode = "closed" }, "open"},
+		{"OSS default, saved closed", func(c *Config) { c.Guardrail.HookFailMode = "closed" }, "closed"},
 		{"OSS strict, saved open", func(c *Config) {
 			c.Guardrail.RulePack = "strict"
 			c.Guardrail.HookFailMode = "open"
 			c.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {HookFailMode: "open"}}
-		}, "closed"},
+		}, "open"},
 		{"OSS default, action mode", func(c *Config) { c.Guardrail.Mode = "action" }, "open"},
 		{"OSS strict, observe mode", func(c *Config) { c.Guardrail.Mode = "observe"; c.Guardrail.RulePack = "strict" }, "closed"},
 		{"managed default", standalone, "closed"},
@@ -82,7 +82,8 @@ func TestHookOutageFailModeDecision(t *testing.T) {
 		want           string
 	}{
 		{false, "", "default", "open"}, {false, "", "permissive", "open"}, {false, "", "strict", "closed"},
-		{false, "", "", "open"}, {false, "", "STRICT", "closed"}, {false, "closed", "default", "open"},
+		{false, "", "", "open"}, {false, "", "STRICT", "closed"}, {false, "closed", "default", "closed"},
+		{false, "open", "strict", "open"},
 		{true, "", "default", "closed"}, {true, "closed", "permissive", "closed"}, {true, "open", "strict", "open"},
 		{true, "OPEN", "default", "open"}, {true, "bogus", "default", "closed"},
 	} {

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -90,5 +91,35 @@ func TestConfirmedProductFloorSurvivesDamagedBundleConfigButNotManifest(t *testi
 	}
 	if floor, err := s.ConfirmedProductFloor(); err == nil || floor != "" {
 		t.Fatalf("changed manifest: floor %q, %v; want refusal", floor, err)
+	}
+}
+
+func TestReleaseFloorRefusalAndBelowFloorWarning(t *testing.T) {
+	for _, tc := range []struct {
+		version, floor string
+		refused        bool
+	}{
+		{"1.0.4", "", false}, {"dev", "", false},
+		{"1.0.6", "1.0.7", true}, {"1.0.7", "1.0.7", false}, {"v1.0.8", "1.0.7", false},
+		{"dev", "1.0.4", true}, {"", "1.0.4", true}, {"1.0.x", "1.0.4", true},
+	} {
+		if err := ReleaseFloorRefusal(tc.version, tc.floor); (err != nil) != tc.refused {
+			t.Fatalf("ReleaseFloorRefusal(%q, %q) = %v, want refused %t", tc.version, tc.floor, err, tc.refused)
+		}
+	}
+
+	s := testStore(t)
+	if w := s.ProductBelowFloorWarning("1.0.4"); w != nil {
+		t.Fatalf("no bundle: %+v", w)
+	}
+	confirmFloorBundle(t, s, 1, 1, "1.0.7")
+	for _, tc := range []struct {
+		version string
+		warned  bool
+	}{{"1.0.6", true}, {"1.0.7", false}, {"1.1.0", false}, {"dev", false}} {
+		w := s.ProductBelowFloorWarning(tc.version)
+		if (w != nil) != tc.warned || (w != nil && (w.Code != WarnProductBelowFloor || !strings.Contains(w.Message, "1.0.7"))) {
+			t.Fatalf("running %s under floor 1.0.7: %+v, want warned %t", tc.version, w, tc.warned)
+		}
 	}
 }

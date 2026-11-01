@@ -173,3 +173,28 @@ class TestReleaseInvariants(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+
+def test_gap2105_litellm_retries_have_their_runtime_dependency():
+    """LiteLLM imports tenacity only when a call fails and num_retries is set
+    (every DefenseClaw judge and scanner call sets it), so a missing package
+    showed up only as "tenacity import failed" after the first failure. It
+    must be a declared runtime dependency, present in the locked set the
+    installer exports, and importable here."""
+    import importlib
+    import re
+    from pathlib import Path
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib
+
+    root = Path(__file__).resolve().parents[2]
+    deps = tomllib.loads((root / "pyproject.toml").read_text())["project"]["dependencies"]
+    assert any(re.match(r"tenacity\b", d) for d in deps), deps
+    lock = tomllib.loads((root / "uv.lock").read_text())
+    project = next(p for p in lock["package"] if p["name"] == "defenseclaw")
+    assert "tenacity" in {d["name"] for d in project.get("dependencies", [])}
+    importlib.import_module("tenacity")

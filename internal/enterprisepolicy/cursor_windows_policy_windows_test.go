@@ -79,6 +79,43 @@ func TestWindowsPolicyVerifyReportsMissingConfiguredMachineHooks(t *testing.T) {
 	}
 }
 
+// GAP-1857: the per-target adapter the managed runtime publishes for enrolled
+// Cursor accounts is DefenseClaw's canonical adapter for policy verify too;
+// any other content still conflicts.
+func TestWindowsCursorPolicyVerifyAcceptsThePerTargetAdapter(t *testing.T) {
+	opts := windowsTestOptions(t)
+	if _, err := (cursorTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	_, adapterPath, err := windowsCursorPaths(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapped, err := connector.RenderWindowsCursorEnterpriseAdapterForTargets(opts.HookBinary, map[string]string{"S-1-5-21-1-2-3-1001": "closed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writePolicyFile(opts, adapterPath, mapped); err != nil {
+		t.Fatal(err)
+	}
+	adapterConflict := func() bool {
+		result, err := VerifyAll(opts, []string{ConnectorCursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Contains(strings.Join(result.States[0].Conflicts, " "), "differs from the canonical DefenseClaw adapter")
+	}
+	if adapterConflict() {
+		t.Fatal("policy verify called the managed per-target adapter missing or foreign")
+	}
+	if _, err := writePolicyFile(opts, adapterPath, append(mapped, []byte("\n# edited\n")...)); err != nil {
+		t.Fatal(err)
+	}
+	if !adapterConflict() {
+		t.Fatal("policy verify accepted an edited adapter")
+	}
+}
+
 // A hooks.json an earlier release published registers afterAgentThought. It
 // still counts as DefenseClaw's registration (presence, no flap conflict) and
 // the next reconcile rewrites it without that event; removal strips it too.

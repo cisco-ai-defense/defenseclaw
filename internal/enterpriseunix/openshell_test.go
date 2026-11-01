@@ -101,6 +101,12 @@ func (f *fakeSandboxOps) Stop(_ context.Context, a SandboxAccount, scope StopSco
 	return f.stopErr
 }
 
+func (f *fakeSandboxOps) syncBeforeGatewayStop(_ context.Context, a SandboxAccount) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.order = append(f.order, "sync "+a.Name)
+}
+
 func (f *fakeSandboxOps) Drain(_ context.Context, a SandboxAccount) (func() error, error) {
 	f.op(a, "drain")
 	f.mu.Lock()

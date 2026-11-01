@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -218,7 +219,11 @@ func TestPrepareLauncherRootKeepsOnlyTheSandboxTree(t *testing.T) {
 	prepareLauncherRoot(root)
 	var names []string
 	for _, command := range root.Commands() {
-		names = append(names, command.Name())
+		// The hidden guardrail tree holds only the user's own profile
+		// explain (GAP-0431, GAP-0422).
+		if !command.Hidden {
+			names = append(names, command.Name())
+		}
 	}
 	if !reflect.DeepEqual(names, []string{"sandbox"}) {
 		t.Fatalf("commands = %v, want [sandbox]", names)
@@ -497,6 +502,9 @@ func TestLauncherReportsOnlyNamedManagedRefusals(t *testing.T) {
 		{"guardrail", "status"}, {"config", "set", "token=untrusted"},
 		{"config", "show"}, {"guardrail", "protection", "list"}, {"guardrail", "block-at", "LOW"},
 		{"policy", "edit", "x"}, {"policy", "show"}, {"config"},
+		// rel-1-0-6 GAP-0104: a help request is no refused write and costs no report.
+		{"upgrade", "--help"}, {"setup", "-h"}, {"guardrail", "disable", "--help"},
+		{"upgrade"}, {"rollback"},
 	} {
 		root := &cobra.Command{Use: "defenseclaw"}
 		root.SetErr(&bytes.Buffer{})
@@ -504,7 +512,77 @@ func TestLauncherReportsOnlyNamedManagedRefusals(t *testing.T) {
 			t.Fatalf("%v: exit %d, want refusal", args, code)
 		}
 	}
-	if got, want := strings.Join(reported, ","), "guardrail disable:,uninstall:,config set:,guardrail block-at:,policy edit:"; got != want {
+	if got, want := strings.Join(reported, ","), "guardrail disable:,uninstall:,config set:,guardrail block-at:,policy edit:,upgrade:,rollback:"; got != want {
 		t.Fatalf("reported %q, want %q", got, want)
+	}
+}
+
+// GAP-0534: on a managed computer the sandbox pre-run probes the account's
+// daemon socket, which starts the daemon. For a `sandbox run` of an account
+// the organization does not allow sandboxes (the managed gateway's settled
+// view) it probes nothing, and the run refuses in the daemon's ready words;
+// an allowed, provisional or unanswered view probes the daemon as before.
+func TestLauncherStartsNoSandboxDaemonForAForbiddenRun(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("the launcher is a Linux and macOS command")
+	}
+	var probes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probes.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"enabled":true,"available":true}`))
+	}))
+	t.Cleanup(server.Close)
+	client := sandboxapi.NewClient(server.URL, "")
+	restoreClient, restorePolicy, restoreRun, restoreCfg := launcherManagedClient, launcherAccountPolicy, launcherRun, cfg
+	launcherManagedClient = func(string) (*sandboxapi.Client, error) { return client, nil }
+	launcherRun = func(context.Context, string, ...string) (string, error) {
+		t.Error("the sandbox daemon was started")
+		return "", nil
+	}
+	t.Cleanup(func() {
+		launcherManagedClient, launcherAccountPolicy, launcherRun, launcherClient, cfg = restoreClient, restorePolicy, restoreRun, nil, restoreCfg
+	})
+	run := &cobra.Command{Use: "run"}
+	(&cobra.Command{Use: "sandbox"}).AddCommand(run)
+	for _, tc := range []struct {
+		name   string
+		view   *sandboxapi.ManagedExplain
+		err    error
+		probed bool
+	}{
+		{"forbidden", &sandboxapi.ManagedExplain{Profile: "prep-runtime-off", Allowed: false}, nil, false},
+		{"allowed", &sandboxapi.ManagedExplain{Profile: "fx", Allowed: true}, nil, true},
+		{"provisional", &sandboxapi.ManagedExplain{Profile: "fx", Allowed: false, Provisional: true}, nil, true},
+		{"gateway does not answer", nil, errors.New("hook socket refused"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []string
+			launcherAccountPolicy = func(_ context.Context, harness string) (*sandboxapi.ManagedExplain, error) {
+				asked = append(asked, harness)
+				return tc.view, tc.err
+			}
+			before := probes.Load()
+			if err := launcherSandboxPreRun(run, []string{"claude"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := probes.Load() > before; got != tc.probed {
+				t.Fatalf("daemon probed = %v, want %v", got, tc.probed)
+			}
+			if len(asked) != 1 || asked[0] != "claudecode" {
+				t.Fatalf("policy asked for %q", asked)
+			}
+		})
+	}
+	// Other sandbox commands probe the daemon without asking.
+	launcherAccountPolicy = func(context.Context, string) (*sandboxapi.ManagedExplain, error) {
+		t.Error("a list asked the account policy")
+		return nil, nil
+	}
+	list := &cobra.Command{Use: "list"}
+	(&cobra.Command{Use: "sandbox"}).AddCommand(list)
+	before := probes.Load()
+	if err := launcherSandboxPreRun(list, nil); err != nil || probes.Load() == before {
+		t.Fatalf("list pre-run = %v, probed %v", err, probes.Load() > before)
 	}
 }

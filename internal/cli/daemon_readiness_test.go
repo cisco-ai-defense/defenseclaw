@@ -196,8 +196,9 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	expected := rotationConnectorState{
 		Version: 1,
 		Connectors: []rotationConnectorPolicy{
-			{Name: "claudecode", Mode: "action", HookFailMode: "open", Enabled: true}, // the default tier outage mode
-			{Name: "codex", Mode: "action", HookFailMode: "open", Enabled: true},      // the default tier outage mode
+			// The saved closed of each wins over the tier (owner decision 2026-10-23).
+			{Name: "claudecode", Mode: "action", HookFailMode: "closed", Enabled: true},
+			{Name: "codex", Mode: "action", HookFailMode: "closed", Enabled: true},
 		},
 	}
 	fallback := config.DefaultConfig()

@@ -296,6 +296,9 @@ func managedProfileIdentity(m *sandboxapi.ManagedExplain) string {
 	profile := sandboxapi.DisplayText(m.Profile)
 	if profile == "" {
 		profile = "(your organization's floor)"
+	} else {
+		// The profile the sandbox's floor is still pinned to (GAP-0285).
+		profile = sandboxapi.PinnedProfileLabel(sandboxapi.DisplayText(m.PinnedProfile), profile)
 	}
 	text := profile + "   matched: " + matchText(m)
 	if m.Provisional {
@@ -935,11 +938,23 @@ func (a *App) managedPolicyCheck(ctx context.Context, m *sandboxapi.ManagedStatu
 			return c
 		}
 	}
+	if !allowed && len(denied) == 0 && m.PolicyLimited {
+		// The account's request limit refused the policy read in a burst of
+		// sandbox commands: no policy verdict, and it passes on its own
+		// (GAP-2203, the GAP-1693 words).
+		c.Status = openshell.StatusWarn
+		c.Detail += ": not read just now: " + callerLimitText
+		c.Fix = &openshell.Fix{Summary: "wait a few seconds, then run " + CommandName + " doctor again"}
+		return c
+	}
 	if !allowed {
 		c.Status = openshell.StatusFail
-		if len(denied) > 0 {
+		switch {
+		case len(denied) > 0:
 			c.Detail += ": your organization doesn't allow sandboxes for " + strings.Join(sandboxapi.DisplayTexts(denied), ", ")
-		} else {
+		case strings.TrimSpace(m.PolicyUnread) != "":
+			c.Detail += ": sandbox authorization could not be confirmed for your account: " + sandboxapi.DisplayText(m.PolicyUnread)
+		default:
 			c.Detail += ": sandbox authorization could not be confirmed for your account"
 		}
 		c.Fix = &openshell.Fix{Summary: sandboxapi.AccessContact(m.RequestAccess)}
@@ -1213,17 +1228,27 @@ func (a *App) withRenderedVMDriver(c *openshell.Check, m *sandboxapi.ManagedStat
 // managedDockerCheck is the doctor's Docker row on a managed Mac. The
 // MicroVM driver boots the agent images that DefenseClaw builds in the
 // account's Docker, so if Docker does not answer for the account, every
-// first run stops (GAP-0443).
-func (a *App) managedDockerCheck(ctx context.Context, m *sandboxapi.ManagedStatus) openshell.Check {
+// first run stops (GAP-0443). While another account uses this computer's
+// sandboxes (elsewhere), this account runs none whatever its Docker does,
+// and Docker Desktop answers only an account signed in to the Mac's desktop:
+// starting it or building images is no fix then, and the row says so
+// instead of failing (GAP-0515); the DefenseClaw daemon row names the wait.
+func (a *App) managedDockerCheck(ctx context.Context, m *sandboxapi.ManagedStatus, elsewhere bool) openshell.Check {
 	c := openshell.Check{ID: "managed-docker", Title: "Docker", Status: openshell.StatusPass}
 	engine, err := a.DockerEngine(ctx)
+	if err != nil && elsewhere {
+		c.Status = openshell.StatusSkip
+		c.Detail = "not needed now: another account is using sandboxes on this computer (one account at a time, see DefenseClaw daemon); " +
+			"Docker Desktop answers only the account signed in to this Mac's desktop"
+		return c
+	}
 	if err != nil {
 		c.Status, c.Detail = openshell.StatusFail, "Docker does not answer for your account, and your agent's sandbox image is built in it"
 		contact := sandboxapi.RequestAccessText(m.RequestAccess)
 		if contact != sandboxapi.RequestAccessFallback {
 			contact = "contact " + contact
 		}
-		c.Fix = &openshell.Fix{Summary: "start Docker Desktop and run this again; if you have no Docker, " + contact}
+		c.Fix = &openshell.Fix{Summary: "sign in to this Mac's desktop as yourself, start Docker Desktop and run this again; if you have no Docker, " + contact}
 		return c
 	}
 	c.Detail = firstNonEmpty(engine, "running") + "; your agent images are built in it"

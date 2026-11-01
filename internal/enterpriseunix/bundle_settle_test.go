@@ -218,8 +218,9 @@ func TestPendingBundleWithMissingAnchorsKeepsSignedConfig(t *testing.T) {
 // Without trust anchors the device is not in bundle mode: the base config
 // an administrator delivers with --config (the management contract's anchor
 // removal after a failed first apply) is applied, never refused because a
-// receipt is pending. The receipt it replaced is failed with a truthful
-// message: no transaction was rolled back.
+// receipt is pending. The receipt it replaced is failed(superseded) with a
+// truthful message: no transaction was rolled back, so it is never
+// rolled_back (GAP-1166).
 func TestPendingBundleWithMissingAnchorsTakesTheDeliveredConfig(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		for _, action := range []string{ActionEnsure, ActionRepair} {
@@ -235,7 +236,8 @@ func TestPendingBundleWithMissingAnchorsTakesTheDeliveredConfig(t *testing.T) {
 					t.Fatalf("the delivered config was not applied without anchors")
 				}
 				got := b.receipt(bundleID(2))
-				if got.State != enterprisebundle.StateFailed || !got.RolledBack || strings.Contains(got.ErrorMessage, "the transaction was rolled back") {
+				if got.State != enterprisebundle.StateFailed || got.RolledBack || got.ErrorCode != enterprisebundle.CodeSuperseded ||
+					strings.Contains(got.ErrorMessage, "the transaction was rolled back") {
 					t.Fatalf("replaced receipt = %+v", got)
 				}
 				if hasWarning(result, enterprisebundle.WarnBundlePending) {

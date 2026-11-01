@@ -9,7 +9,6 @@ import (
 	"os"
 	osuser "os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -113,6 +113,10 @@ type agentIdentityUser struct {
 	Sandbox  string
 	Self     bool // the account this per-user gateway runs as
 	Verified bool
+	// Connector is "<name>:<account id>" of the trusted connector that acts
+	// for this person (trusted_connector.go); its agent identity is keyed on
+	// it, so two connectors acting for one person get two identities.
+	Connector string
 }
 
 // resolveHookAgentIdentity derives the agent identity of an authenticated
@@ -301,6 +305,19 @@ func unixSpoolUPNState(userID string, facts useridentity.DirectoryFacts, now tim
 // reached without a verified caller, falls back to the claimed identity
 // headers, and it is never marked verified.
 func hookAgentIdentityUser(ctx context.Context) agentIdentityUser {
+	if af, ok := actingForFromContext(ctx); ok {
+		// The person a trusted connector acts for. The tools run as the
+		// connector's account, so its home (never the person's) is the
+		// home; the install fingerprint names the connector.
+		user := agentIdentityUser{
+			ID: af.Person.UserID, Name: af.Person.UserName, Verified: true,
+			Connector: af.Connector + ":" + af.ConnectorAccountID,
+		}
+		if peer, ok := managedHookPeerFromContext(ctx); ok {
+			user.Home = peer.Home
+		}
+		return user
+	}
 	if binding, ok := sandboxauth.FromContext(ctx); ok {
 		uid, _, name := sandboxBindingUser(binding)
 		return agentIdentityUser{
@@ -406,6 +423,9 @@ func gatewaySelfUser() agentIdentityUser {
 func agentIdentityInstallFP(connectorName string, user agentIdentityUser) string {
 	if user.Sandbox != "" {
 		return "openshell-sandbox:" + user.Sandbox
+	}
+	if user.Connector != "" {
+		return "trusted-connector:" + user.Connector
 	}
 	cfg := agentIdentityConfig.Load()
 	if user.Self {
@@ -555,7 +575,7 @@ func payloadNamesSubagent(source, agentID string, payload map[string]interface{}
 	return strings.TrimSpace(reported) == agentID
 }
 
-var agentIdentityIDPattern = regexp.MustCompile(`^agt-[0-9a-f]{16}$`)
+var agentIdentityIDPattern = lazyregexp.New(`^agt-[0-9a-f]{16}$`)
 
 // agentIdentityV8 is defenseclaw.agent.identity.id for a generated record,
 // absent unless id has the registered shape.

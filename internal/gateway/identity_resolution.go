@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"fmt"
 	"reflect"
 	"runtime"
 	"slices"
@@ -238,7 +239,12 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 					userState = matchYes
 				}
 			case res.Account == proofProven:
-				if ambiguousBareUserEntry(subject, entry) {
+				if ambiguousBareUserEntry(subject, entry) && set.refusesAmbiguousShortNames(connectorName) {
+					// Only the strict policy tier refuses a bare entry that
+					// may name accounts in more than one trusted domain; the
+					// default and permissive tiers match it as before, and
+					// explain, status and verify warn and name the accounts
+					// (GAP-0725).
 					userState, userNeed = max(userState, matchMaybe), "account:ambiguous_short_name"
 				} else if userEntryMatches(subject, entry) {
 					userState = matchYes
@@ -290,6 +296,15 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 		return state, "", "", needs
 	}
 	return matchYes, reason, group, nil
+}
+
+// refusesAmbiguousShortNames reports whether connectorName's guardrail rule
+// pack in the base configuration is the strict policy tier
+// (config.HookPolicyTierForConnector), the only tier in which a bare users
+// entry that may name accounts of more than one trusted domain is refused
+// instead of matched (GAP-0725). It is asked only for such an entry.
+func (set *guardrailProfileSet) refusesAmbiguousShortNames(connectorName string) bool {
+	return set != nil && set.base != nil && set.base.HookPolicyTierForConnector(connectorName) == config.HookPolicyTierStrict
 }
 
 // factAssignmentGroupSID is the unproven fact of an assignment group name
@@ -521,22 +536,87 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "` to inspect the identity decision"
 }
 
+// explainOnRequestPaths is explain's decision for connectorName's requests:
+// decide on any path, and, when that refuses, on the hook and inspect paths
+// a connector's requests are decided on. A request decides on its own path,
+// where an unproven assignment whose profile enforces there as the proven
+// one does changes nothing (selectProfile), so the pathless answer refused
+// accounts whose hook calls were allowed (GAP-1685). No path refusing gives
+// the hook path's decision; one path refusing keeps the refusal and names
+// that path. Without a connector explain keeps the pathless answer.
+// sandboxRefused is the pathless refusal when no request path refuses: a
+// sandbox run decides on any path (sandboxMatchPeer), so it is still
+// refused, and explain names that refusal beside the hook decision
+// (GAP-1789).
+func (set *guardrailProfileSet) explainOnRequestPaths(connectorName string, decide func(profilePath) profileDecision) (decision profileDecision, refusedOn []string, sandboxRefused string) {
+	decision = decide(profilePathAny)
+	if decision.Refused == "" || connectorName == "" {
+		return decision, nil, ""
+	}
+	hook, inspect := decide(profilePathHook), decide(profilePathInspect)
+	if hook.Refused != "" {
+		refusedOn = append(refusedOn, "hook")
+	}
+	if inspect.Refused != "" {
+		refusedOn = append(refusedOn, "inspect")
+	}
+	switch len(refusedOn) {
+	case 0:
+		return hook, nil, decision.Refused
+	case 1:
+		return decision, refusedOn, ""
+	}
+	return decision, nil, ""
+}
+
+// explainLiveDecision is what subject's requests on connectorName get from
+// the facts the gateway cached for it, decided as explain decides
+// (explainOnRequestPaths), and the refusal a sandbox run still gets. A
+// 1.0.3 claim of agent (explainAgent) is decided with its binding, as the
+// hook decides it (GAP-0019).
+func (set *guardrailProfileSet) explainLiveDecision(subject *profileSubject, connectorName, agent string, legacy profileAgentLegacy) (profileDecision, string) {
+	live, _, sandboxRefused := set.explainOnRequestPaths(connectorName, func(path profilePath) profileDecision {
+		if legacy != nil {
+			return set.matchAgent(subject, profileSubjectLookup, connectorName, nil, path, agent, legacy)
+		}
+		return set.matchResolved(subject, resolveIdentity(subject, nil), profileSubjectLookup, connectorName, nil, path, agent)
+	})
+	return live, sandboxRefused
+}
+
+// sandboxRefusedWarning names the refusal a sandbox run of the account gets
+// while its hook and inspect requests are not refused (GAP-1789).
+func sandboxRefusedWarning(connectorName, reason string) string {
+	return fmt.Sprintf("a sandbox run of this account for %s is refused (%s); its hook and inspect requests are not", connectorName, reason)
+}
+
 // profileExplainCommand names the installed administrator command for the
 // verified ID. A missing agent ownership fact includes the current verified
 // agent ID so explain checks the same assignment as the refused hook.
+// Without a verified ID a managed host still gets its own explain command,
+// with a placeholder for the account: the per-user `defenseclaw guardrail`
+// commands do not run there (GAP-1692).
 func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName, agent string, agentNeeded bool) string {
-	if subject == nil || subject.UserID != strings.TrimSpace(subject.UserID) || useridentity.KindForID(subject.UserID) == "" {
-		return "defenseclaw guardrail profile list"
+	user := ""
+	if subject != nil && subject.UserID == strings.TrimSpace(subject.UserID) && useridentity.KindForID(subject.UserID) != "" {
+		user = subject.UserID
 	}
-	command := "defenseclaw guardrail profile explain --user " + subject.UserID
-	if set.base != nil && set.base.StandaloneEnterprise() {
+	managed := set.base != nil && set.base.StandaloneEnterprise()
+	if user == "" {
+		if !managed {
+			return "defenseclaw guardrail profile list"
+		}
+		user = "<user>"
+	}
+	command := "defenseclaw guardrail profile explain --user " + user
+	if managed {
 		switch runtime.GOOS {
 		case "linux":
-			command = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user " + subject.UserID
+			command = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user " + user
 		case "darwin":
-			command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + subject.UserID
+			command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + user
 		case "windows":
-			command = `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user ` + subject.UserID
+			command = `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user ` + user
 		}
 	}
 	if profileCommandToken(connectorName) {

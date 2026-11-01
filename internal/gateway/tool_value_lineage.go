@@ -236,7 +236,7 @@ func toolValueLineageStructuredRequestKind(tool string) (toolValueLineageRequest
 }
 
 func toolValueLineageCurlHasUnsupportedMode(command actionfacts.CommandFact) bool {
-	for _, argument := range command.Argv[1:] {
+	for _, argument := range argvOperands(command.Argv) {
 		lower := strings.ToLower(argument)
 		switch {
 		case lower == "--get", strings.HasPrefix(lower, "--get="),

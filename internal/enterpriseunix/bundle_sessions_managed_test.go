@@ -34,13 +34,12 @@ func TestBundleSessionsCountOnlyEnabledConnectors(t *testing.T) {
 	applied := time.Now().UTC().Add(-time.Hour)
 	state, _ := json.Marshal(enterprisestatus.PolicyStateRecord{AppliedAt: applied.Format(time.RFC3339Nano)})
 	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, enterprisestatus.PolicyStateFileName), string(state))
-	started := time.Now().Add(-48 * time.Hour).Format("Mon Jan 2 15:04:05 2006")
 	ps := ""
 	for pid := 501; pid <= 508; pid++ {
-		ps += strings.Join([]string{strconv.Itoa(pid), "dcw-std1", started, "/usr/local/bin/claude"}, " ") + "\n"
+		ps += strings.Join([]string{strconv.Itoa(pid), "502", "2-00:00:00", "/usr/local/bin/claude"}, " ") + "\n"
 	}
-	ps += strings.Join([]string{"601", "dcw-std1", started, "/opt/homebrew/bin/codex"}, " ") + "\n"
-	h.runner.replies = map[string]fakeReply{"ps -axww -o pid=,user=,lstart=,comm=": {result: CommandResult{Stdout: []byte(ps)}}}
+	ps += strings.Join([]string{"601", "502", "2-00:00:00", "/opt/homebrew/bin/codex"}, " ") + "\n"
+	h.runner.replies = map[string]fakeReply{"ps -axww -o pid=,uid=,etime=,args=": {result: CommandResult{Stdout: []byte(ps)}}}
 
 	status := h.env.UnprotectedSessions(context.Background())
 	if status.State != "known" || status.Count != 1 || len(status.Entries) != 1 || status.Entries[0].Agent != "codex" {

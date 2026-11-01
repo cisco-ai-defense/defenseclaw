@@ -47,10 +47,10 @@ func TestCopilotHookDedupe(t *testing.T) {
 	verdict := agentHookResponse{Action: "block", Severity: "HIGH", EvaluationID: "e1"}
 
 	var d copilotHookDedupe
-	if _, hit, _ := d.begin(ctx, "claudecode", snake("t1", "ls")); hit {
+	if _, hit, _ := d.begin(ctx, "claudecode", snake("t1", "ls"), ""); hit {
 		t.Fatal("non-Copilot request deduplicated")
 	}
-	_, hit, first := d.begin(ctx, "copilot", snake("t1", "ls"))
+	_, hit, first := d.begin(ctx, "copilot", snake("t1", "ls"), "")
 	if hit {
 		t.Fatal("first delivery hit")
 	}
@@ -58,27 +58,27 @@ func TestCopilotHookDedupe(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		first.complete(verdict)
 	}()
-	if got, hit, _ := d.begin(ctx, "copilot", snake("t1", "ls")); !hit || got.EvaluationID != "e1" {
+	if got, hit, _ := d.begin(ctx, "copilot", snake("t1", "ls"), ""); !hit || got.EvaluationID != "e1" {
 		t.Fatalf("same tool_use_id did not wait for the verdict: hit=%v got=%+v", hit, got)
 	}
-	if _, hit, _ := d.begin(ctx, "copilot", snake("t1", "rm -rf /")); hit {
+	if _, hit, _ := d.begin(ctx, "copilot", snake("t1", "rm -rf /"), ""); hit {
 		t.Fatal("same tool_use_id with other arguments reused the verdict")
 	}
 
 	var cli copilotHookDedupe
-	_, _, policy := cli.begin(ctx, "copilot", camel("ls"))
+	_, _, policy := cli.begin(ctx, "copilot", camel("ls"), "")
 	policy.complete(verdict)
-	if _, hit, _ := cli.begin(ctx, "copilot", camel("ls")); hit {
+	if _, hit, _ := cli.begin(ctx, "copilot", camel("ls"), ""); hit {
 		t.Fatal("same-dialect repeat reused the verdict")
 	}
-	if got, hit, _ := cli.begin(ctx, "copilot", snake("", "ls")); !hit || got.Action != "block" {
+	if got, hit, _ := cli.begin(ctx, "copilot", snake("", "ls"), ""); !hit || got.Action != "block" {
 		t.Fatalf("CLI hook-file delivery did not reuse the policy verdict: hit=%v", hit)
 	}
 
 	var released copilotHookDedupe
-	_, _, abandoned := released.begin(ctx, "copilot", snake("t2", "ls"))
+	_, _, abandoned := released.begin(ctx, "copilot", snake("t2", "ls"), "")
 	abandoned.release()
-	if _, hit, _ := released.begin(ctx, "copilot", snake("t2", "ls")); hit {
+	if _, hit, _ := released.begin(ctx, "copilot", snake("t2", "ls"), ""); hit {
 		t.Fatal("a delivery that ended without a verdict answered the next one")
 	}
 }
@@ -97,48 +97,48 @@ func TestCopilotHookDedupeTargetAndBlockInvalidation(t *testing.T) {
 	allow := agentHookResponse{Action: "allow", EvaluationID: "allowed"}
 	block := agentHookResponse{Action: "block", EvaluationID: "blocked"}
 	var d copilotHookDedupe
-	_, _, first := d.begin(ctx, "copilot", request("one", "/safe", "notes.txt"))
+	_, _, first := d.begin(ctx, "copilot", request("one", "/safe", "notes.txt"), "")
 	first.complete(allow)
-	if got, hit, _ := d.begin(ctx, "copilot", request("one", "/protected", "notes.txt")); hit && got.Action == "allow" {
+	if got, hit, _ := d.begin(ctx, "copilot", request("one", "/protected", "notes.txt"), ""); hit && got.Action == "allow" {
 		t.Fatal("cached allow crossed to a different resolved target")
 	}
-	if got, hit, _ := d.begin(ctx, "copilot", request("one", "/safe", "notes.txt")); !hit || got.Action != "allow" {
+	if got, hit, _ := d.begin(ctx, "copilot", request("one", "/safe", "notes.txt"), ""); !hit || got.Action != "allow" {
 		t.Fatalf("same target was not cached before a block: hit=%v action=%s", hit, got.Action)
 	}
 	from := context.WithValue(ctx, resolvedWritesContextKey{}, map[string]string{"/safe/notes.txt": "/safe/notes.txt"})
 	to := context.WithValue(ctx, resolvedWritesContextKey{}, map[string]string{"/safe/notes.txt": "/protected/notes.txt"})
-	_, _, evidenced := d.begin(from, "copilot", request("evidence", "/safe", "notes.txt"))
+	_, _, evidenced := d.begin(from, "copilot", request("evidence", "/safe", "notes.txt"), "")
 	evidenced.complete(allow)
-	if got, hit, _ := d.begin(to, "copilot", request("evidence", "/safe", "notes.txt")); hit && got.Action == "allow" {
+	if got, hit, _ := d.begin(to, "copilot", request("evidence", "/safe", "notes.txt"), ""); hit && got.Action == "allow" {
 		t.Fatal("cached allow crossed to a different resolved write target")
 	}
-	_, _, changed := d.begin(ctx, "copilot", request("one", "/safe", "protected.txt"))
+	_, _, changed := d.begin(ctx, "copilot", request("one", "/safe", "protected.txt"), "")
 	changed.complete(block)
-	if got, hit, _ := d.begin(ctx, "copilot", request("one", "/safe", "notes.txt")); hit && got.Action == "allow" {
+	if got, hit, _ := d.begin(ctx, "copilot", request("one", "/safe", "notes.txt"), ""); hit && got.Action == "allow" {
 		t.Fatal("a live block left the earlier allow cached for its request ID")
 	}
 
 	var pending copilotHookDedupe
-	_, _, old := pending.begin(ctx, "copilot", request("two", "/safe", "notes.txt"))
-	_, _, denied := pending.begin(ctx, "copilot", request("two", "/safe", "protected.txt"))
+	_, _, old := pending.begin(ctx, "copilot", request("two", "/safe", "notes.txt"), "")
+	_, _, denied := pending.begin(ctx, "copilot", request("two", "/safe", "protected.txt"), "")
 	denied.complete(block)
 	old.complete(allow)
-	if got, hit, _ := pending.begin(ctx, "copilot", request("two", "/safe", "notes.txt")); hit && got.Action == "allow" {
+	if got, hit, _ := pending.begin(ctx, "copilot", request("two", "/safe", "notes.txt"), ""); hit && got.Action == "allow" {
 		t.Fatal("an in-flight allow replaced the later block")
 	}
 
 	var full copilotHookDedupe
-	_, _, cached := full.begin(ctx, "copilot", request("three", "/safe", "notes.txt"))
+	_, _, cached := full.begin(ctx, "copilot", request("three", "/safe", "notes.txt"), "")
 	cached.complete(allow)
 	for index := len(full.entries); index < copilotDedupeMaxEntries; index++ {
 		full.entries["other-"+strconv.Itoa(index)] = &copilotDedupeEntry{expires: time.Now().Add(time.Minute)}
 	}
-	_, hit, uncached := full.begin(ctx, "copilot", request("three", "/safe", "protected.txt"))
+	_, hit, uncached := full.begin(ctx, "copilot", request("three", "/safe", "protected.txt"), "")
 	if hit || len(uncached.entries) != 0 {
 		t.Fatal("full cache unexpectedly claimed the changed call")
 	}
 	uncached.complete(block)
-	if got, hit, _ := full.begin(ctx, "copilot", request("three", "/safe", "notes.txt")); hit && got.Action == "allow" {
+	if got, hit, _ := full.begin(ctx, "copilot", request("three", "/safe", "notes.txt"), ""); hit && got.Action == "allow" {
 		t.Fatal("a live block at cache capacity left the old allow reusable")
 	}
 }

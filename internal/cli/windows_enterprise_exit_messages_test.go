@@ -27,8 +27,9 @@ func TestWindowsEnterpriseInstallerExitFailureNamesAKilledEngine(t *testing.T) {
 // tell a LocalSystem run to run as LocalSystem, and says what a missing
 // profile folder means.
 func TestWindowsEnterpriseUserStateRemainingMessageForALocalSystemRun(t *testing.T) {
-	got := windowsEnterpriseUserStateRemainingMessage(2, "alice, bob")
+	got := windowsEnterpriseUserStateRemainingMessage(2, "alice, bob", true)
 	if strings.Contains(got, "remove what stays as LocalSystem") || !strings.Contains(got, "ran as LocalSystem") ||
+		!strings.Contains(got, "then run /uninstall PURGE=1 again as LocalSystem") ||
 		!strings.Contains(got, "no longer exists has nothing left to remove") || !strings.HasSuffix(got, "Accounts: alice, bob") {
 		t.Fatalf("message = %q", got)
 	}

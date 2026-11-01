@@ -35,6 +35,7 @@ from defenseclaw.config import (
 )
 from defenseclaw.enforce.admission import (
     CompiledAdmission,
+    action_blocks,
     compile_admission,
     effective_action_for,
     evaluate_admission,
@@ -1196,3 +1197,43 @@ def test_secure_client_observe_denied_skill_keeps_would_block(tmp_path, monkeypa
     finally:
         store.close()
         os.unlink(db_path)
+
+
+class TestQuarantineOrBlockNeverWarns(_StoreTestBase):
+    """GAP-1442: an action that refuses (a file quarantine, a runtime
+    disable or an install block, alone or together) rejects in Python as in
+    Go ``CompiledAction.blocks`` and admission.rego ``_should_reject``, for
+    every asset type and severity. Only a warn triple warns."""
+
+    def _scan(self, severity):
+        return SimpleNamespace(findings=[{"severity": severity}], max_severity=lambda: severity)
+
+    def test_every_refusing_action_rejects(self):
+        refusing = (
+            {"install": "none", "file": "quarantine", "runtime": "enable"},
+            {"install": "none", "file": "none", "runtime": "disable"},
+            {"install": "block", "file": "none", "runtime": "enable"},
+            "quarantine",
+            "block",
+        )
+        for target in ("skill", "plugin", "mcp"):
+            for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+                for action in refusing:
+                    with self.subTest(target=target, severity=severity, action=action):
+                        cfg = _FakeConfig()
+                        getattr(cfg.admission, target).actions[severity.lower()] = action
+                        d = evaluate_admission(
+                            PolicyEngine(self.store, cfg), target_type=target, name="t",
+                            scan_result=self._scan(severity),
+                        )
+                        self.assertEqual((d.verdict, d.source), ("rejected", "scan-rejected"), d)
+                        self.assertTrue(action_blocks(d.action))
+
+    def test_a_warn_triple_still_warns(self):
+        cfg = _FakeConfig()
+        cfg.admission.plugin.actions["medium"] = {"install": "none", "file": "none", "runtime": "enable"}
+        d = evaluate_admission(
+            PolicyEngine(self.store, cfg), target_type="plugin", name="t", scan_result=self._scan("MEDIUM"),
+        )
+        self.assertEqual(d.verdict, "warning")
+        self.assertFalse(action_blocks(d.action))

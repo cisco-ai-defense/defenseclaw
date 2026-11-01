@@ -8,6 +8,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -415,7 +416,9 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"read redirect", `hostname < ~/.ssh/authorized_keys`, "", "", true},
 		{"error log redirect", `hostname 2> /tmp/err`, "", "", false},
 		{"known hosts redirect", `hostname > ~/.ssh/known_hosts`, "", "", false},
-		{"ssh config redirect", `hostname > ~/.ssh/config`, "", "", false},
+		// ~/.ssh/config is protected like the keys (lead ruling 10-31,
+		// rel-1-0-4:GAP-2586); other new files under ~/.ssh are not.
+		{"ssh config redirect", `hostname > ~/.ssh/config`, "", "", true},
 		{"other ssh file redirect", `hostname 2> ~/.ssh/other`, "", "", false},
 		{"other home file redirect", `hostname > /home/alice/notes.txt`, "", "", false},
 		{"structured Write", `{"file_path":"/home/alice/.ssh/authorized_keys","content":"key"}`, "", "", true},
@@ -445,10 +448,17 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"ruby read", `ruby -e 'File.open("~/.ssh/authorized_keys", "r") { |f| puts f.read }'`, "", "", true},
 		{"node read", `node -e 'require("fs").readFileSync("/home/alice/.ssh/authorized_keys")'`, "", "", true},
 		{"symlink read", `ln -s ~/.ssh/authorized_keys ./reader.link && cat ./reader.link`, "", "", true},
-		{"count", `grep -c ssh-ed25519 ~/.ssh/authorized_keys`, "", "", true},
+		// A plain read with no redirect, pipe into a writer or in-place flag
+		// stays allowed in action (owner decision 2, TGT-0194; GAP-2168); its
+		// write twin still blocks.
+		{"count", `grep -c ssh-ed25519 ~/.ssh/authorized_keys`, "", "", false},
+		{"count to keys file", `grep -c ssh-ed25519 marker.pub >> ~/.ssh/authorized_keys`, "", "", true},
+		{"fingerprint list", `ssh-keygen -l -f ~/.ssh/authorized_keys`, "", "", false},
+		{"fingerprint remove", `ssh-keygen -R host -f ~/.ssh/authorized_keys`, "", "", true},
 		{"metadata", `ls -l ~/.ssh/authorized_keys`, "", "", false},
 		{"diff", `diff ~/.ssh/authorized_keys marker.pub | head -5`, "", "", true},
-		{"line count", `wc -l ~/.ssh/authorized_keys`, "", "", true},
+		{"line count", `wc -l ~/.ssh/authorized_keys`, "", "", false},
+		{"line count to keys file", `wc -l marker.pub > ~/.ssh/authorized_keys2`, "", "", true},
 		{"ordinary count", `grep -c ssh-ed25519 report.txt`, "", "", false},
 		{"ordinary diff", `diff report.txt marker.pub | head -5`, "", "", false},
 		{"ordinary line count", `wc -l report.txt`, "", "", false},
@@ -466,6 +476,14 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		}
 		if home == "" {
 			home = "/home/alice"
+			if runtime.GOOS == "windows" && test.name == "ssh config redirect" {
+				// A Windows account's home is a drive path; the
+				// authorized-keys rows also match by name, but
+				// ~/.ssh/config is judged by its resolved path, which a
+				// POSIX home does not give on Windows. The same write
+				// under the real Windows home must block (GAP-2586).
+				home = `C:\Users\alice`
+			}
 		}
 		args := []byte(`{"command":` + strconv.Quote(test.command) + `}`)
 		tool := "Bash"

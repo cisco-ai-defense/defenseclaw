@@ -30,19 +30,17 @@ const (
 //   - A managed install keeps managedMode: closed unless its administrator
 //     chose open, which outside Secure Client covers a classified outage only.
 //     The tier never opens a managed hook.
-//   - A per-user (OSS) install in the strict tier fails closed.
-//   - A per-user install in the default (balanced) or permissive tier fails
-//     open for an outage: the gateway is not running, has stopped or does not
-//     take the call in time. The hook warns, names the fix and records the
-//     call in hook-failures.jsonl.
+//   - A per-user (OSS) install without a saved mode fails closed in the
+//     strict tier and opens on a classified outage in the default (balanced)
+//     or permissive tier. The hook warns, names the fix and records the call
+//     in hook-failures.jsonl.
 //
-// Only an outage can open: an answer the gateway gave (an error status, a
-// malformed, partial or oversized answer), a refusal, a missing credential,
-// another program on the gateway port and the install window stay closed in
-// every tier. A configured per-user guardrail.hook_fail_mode does not change
-// the per-user answer: tier selects it.
+// An explicit saved mode wins over the tier on every install. Only an outage
+// can open: an answer the gateway gave (an error status, a malformed, partial
+// or oversized answer), an authentication refusal, a missing credential, another program on
+// the gateway port and the install window stay closed in every tier.
 func HookOutageFailMode(managedInstall bool, managedMode, tier string) string {
-	if managedInstall {
+	if managedInstall || strings.TrimSpace(managedMode) != "" {
 		return explicitHookFailMode(managedMode)
 	}
 	if normalizeHookPolicyTier(tier) == HookPolicyTierStrict {
@@ -64,7 +62,7 @@ func (c *Config) EffectiveHookOutageFailModeForConnector(connector string) strin
 	if managedInstall {
 		return HookOutageFailMode(true, c.EffectiveHookFailModeForConnector(connector), "")
 	}
-	return HookOutageFailMode(false, "", c.HookPolicyTierForConnector(connector))
+	return HookOutageFailMode(false, c.configuredHookFailModeForConnector(connector), c.HookPolicyTierForConnector(connector))
 }
 
 // HookPolicyTierForConnector is the policy tier of connector's guardrail rule

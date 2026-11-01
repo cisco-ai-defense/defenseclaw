@@ -32,6 +32,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-native-paths.ps1')
+# pip check with the one reviewed LiteLLM override allowance (GAP-0020).
+$DependencyMetadataChecker = Join-Path $PSScriptRoot 'check_python_dependency_metadata.py'
 
 $windowsResourceVerifierName = 'DefenseClawWindowsResourceVerifier-x64.exe'
 $windowsResourceIconName = 'DefenseClawWindowsResourceIcon.png'
@@ -152,7 +154,7 @@ function Get-WorkspacePackageVersion {
 
 function Assert-WindowsExecutableResource(
     [string]$Path,
-    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup', 'acp-guard')][string]$Component,
+    [ValidateSet('gateway', 'hook', 'hook-guard', 'launcher', 'startup', 'setup', 'acp-guard')][string]$Component,
     [string]$Version,
     [switch]$Apply
 ) {
@@ -1734,7 +1736,8 @@ function Invoke-BuildArtifacts {
         foreach ($binary in @(
             @('defenseclaw-gateway.exe', './cmd/defenseclaw', "-s -w -buildid=defenseclaw-gateway-$sourceCommit -X main.version=$packageVersion -X main.commit=$sourceCommit", 'gateway'),
             @('defenseclaw-acp.exe', './cmd/defenseclaw-acp', "-s -w -buildid=defenseclaw-acp-$sourceCommit -X main.version=$packageVersion -X main.commit=$sourceCommit", 'acp-guard'),
-            @('defenseclaw-hook.exe', './cmd/defenseclaw-hook', "-s -w -buildid=defenseclaw-hook-$sourceCommit -H=windowsgui -X main.version=$packageVersion -X main.commit=$sourceCommit", 'hook')
+            @('defenseclaw-hook.exe', './cmd/defenseclaw-hook', "-s -w -buildid=defenseclaw-hook-$sourceCommit -H=windowsgui -X main.version=$packageVersion -X main.commit=$sourceCommit", 'hook'),
+            @('defenseclaw-hook-guard.exe', './cmd/defenseclaw-hook-guard', "-s -w -buildid=defenseclaw-hook-guard-$sourceCommit -H=windowsgui -X main.version=$packageVersion -X main.commit=$sourceCommit", 'hook-guard')
         )) {
             foreach ($targetRoot in @($gatewayVerificationStage, $stage)) {
                 $target = Join-Path $targetRoot $binary[0]
@@ -3615,6 +3618,7 @@ function New-RollbackArtifactFixture([string]$Artifacts, [string]$Root) {
     $gateway = Join-Path $expanded 'defenseclaw-gateway.exe'
     $acp = Join-Path $expanded 'defenseclaw-acp.exe'
     $hook = Join-Path $expanded 'defenseclaw-hook.exe'
+    $hookGuard = Join-Path $expanded 'defenseclaw-hook-guard.exe'
     $stream = [IO.File]::Open(
         $gateway, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read
     )
@@ -3622,7 +3626,7 @@ function New-RollbackArtifactFixture([string]$Artifacts, [string]$Root) {
     $mutatedHash = (Get-FileHash -LiteralPath $gateway -Algorithm SHA256).Hash
     Invoke-WindowsNativeProcess $gateway @('--version') -TimeoutSeconds 30 | Out-Null
     Remove-Item -LiteralPath $zip[0].FullName -Force
-    Compress-Archive -LiteralPath $gateway, $acp, $hook -DestinationPath $zip[0].FullName
+    Compress-Archive -LiteralPath $gateway, $acp, $hook, $hookGuard -DestinationPath $zip[0].FullName
     Remove-SafeDisposableTree -Path $expanded -Root $fixtureRoot
     return [pscustomobject]@{ Root = $fixtureRoot; MutatedGatewayHash = $mutatedHash }
 }
@@ -3644,8 +3648,7 @@ function Assert-PackagedRepairAcceptance(
     }
     $python = Join-Path $Profile.VenvScripts 'python.exe'
     $venvRoot = Split-Path -Parent $Profile.VenvScripts
-    $uv = Join-Path $Root 'tools\uv.exe'
-    Invoke-Installed $uv @('pip', 'check', '--python', $python) -Timeout 300 `
+    Invoke-Installed $python @('-I', $DependencyMetadataChecker) -Timeout 300 `
         -Log (Join-Path $Logs 'damaged-venv-repair-pip-check.log') | Out-Null
     Assert-ManagedDistributionIntegrity $python $venvRoot
     Assert-ManagedImports $python $venvRoot
@@ -3674,8 +3677,7 @@ function Assert-RunningReinstallAcceptance(
         -Log (Join-Path $Logs 'running-reinstall-status.log') | Out-Null
     $python = Join-Path $Profile.VenvScripts 'python.exe'
     $venvRoot = Split-Path -Parent $Profile.VenvScripts
-    $uv = Join-Path $Root 'tools\uv.exe'
-    Invoke-Installed $uv @('pip', 'check', '--python', $python) -Timeout 300 `
+    Invoke-Installed $python @('-I', $DependencyMetadataChecker) -Timeout 300 `
         -Log (Join-Path $Logs 'running-reinstall-pip-check.log') | Out-Null
     Assert-ManagedDistributionIntegrity $python $venvRoot
     Assert-ManagedImports $python $venvRoot
@@ -3785,7 +3787,6 @@ function Invoke-InstallerAcceptance([string]$Root, [string]$Artifacts) {
     $gateway = Join-Path $profile.Bin 'defenseclaw-gateway.exe'
     $python = Join-Path $profile.VenvScripts 'python.exe'
     $venvRoot = Split-Path -Parent $profile.VenvScripts
-    $uv = Join-Path $root 'tools\uv.exe'
     $logs = Join-Path $root 'logs'
 
     if (Test-Path -LiteralPath (Join-Path $profile.Bin 'defenseclaw.exe')) {
@@ -3802,7 +3803,7 @@ function Invoke-InstallerAcceptance([string]$Root, [string]$Artifacts) {
         Invoke-Installed $cliShim @('--version') -Log (Join-Path $logs 'version.log') `
             -WorkingDirectory $WorkspaceRoot | Out-Null
     } finally { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue }
-    Invoke-Installed $uv @('pip', 'check', '--python', $python) -Timeout 300 -Log (Join-Path $logs 'uv-pip-check.log') | Out-Null
+    Invoke-Installed $python @('-I', $DependencyMetadataChecker) -Timeout 300 -Log (Join-Path $logs 'uv-pip-check.log') | Out-Null
     Assert-ManagedImports $python $venvRoot
     Assert-ManagedDistributionIntegrity $python $venvRoot
     Assert-PackagedDaclAcceptance $python $root
@@ -4099,14 +4100,14 @@ package main
 import "fmt"
 
 func main() {
-	fmt.Println("opencode 1.18.11")
+	fmt.Println("opencode 2.1.4")
 }
 "@
             } else { @"
 using System;
 public static class OpenCodeVersionFixture {
     public static int Main(string[] arguments) {
-        Console.WriteLine("opencode 1.18.11");
+        Console.WriteLine("opencode 2.1.4");
         return 0;
     }
 }
@@ -4168,7 +4169,7 @@ public static class OpenCodeVersionFixture {
         # starts slowly under on-access scanning), so a tighter fixture-side
         # deadline would assert a start-up speed the product never requires.
         $openCodeVersion = Invoke-WindowsNativeProcess $openCodePath @('--version') -TimeoutSeconds 30
-        if ($openCodeVersion.StdOut.Trim() -ne 'opencode 1.18.11') {
+        if ($openCodeVersion.StdOut.Trim() -ne 'opencode 2.1.4') {
             throw "OpenCode fixture returned an unexpected version: $($openCodeVersion.StdOut)"
         }
         Assert-WizardCodexPolicyFixture $codexPath
@@ -4744,6 +4745,27 @@ function Assert-NoGatewayAutoStart {
     }
 }
 
+# Get-DirectCodexHookCommand parses the direct Codex hook command Setup writes
+# for a launcher path neither shell can expand (windowsCmdDirectHookCommand,
+# GAP-1908): <system>\cmd.exe /d /v:off /c "<launcher>" <arguments>. It returns
+# the launcher and its arguments, or $null when the command is not exactly that
+# form with the system cmd.exe.
+function Get-DirectCodexHookCommand([string]$Command) {
+    $match = [regex]::Match(
+        $Command,
+        '^(?<cmd>[A-Za-z]:\\[A-Za-z0-9\\._~-]+) /d /v:off /c "(?<file>[A-Za-z]:\\[\p{L}\p{Nd} \\._~-]+)"(?<arguments>(?: [A-Za-z0-9._-]+)+)$'
+    )
+    if (-not $match.Success) { return $null }
+    $systemCmd = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+    if (-not [string]::Equals($match.Groups['cmd'].Value, $systemCmd, [StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    return [pscustomobject]@{
+        File = $match.Groups['file'].Value
+        Arguments = [string[]]@($match.Groups['arguments'].Value.Substring(1).Split(' '))
+    }
+}
+
 # Get-AwaitedHookBridge parses a decoded hook bridge script: the launcher is
 # started with Process.Start, which keeps the handle CreateProcess returned so
 # a launcher that exits at once still returns its status, and with the call
@@ -4787,9 +4809,25 @@ function Get-ClaudeCodeLauncherGuardExecView([object]$Handler) {
         return $Handler
     }
     $guardArgs = @($argsProperty.Value)
-    if ($guardArgs.Count -lt 8 -or @($guardArgs | Where-Object { $_ -isnot [string] }).Count -gt 0) {
+    if (@($guardArgs | Where-Object { $_ -isnot [string] }).Count -gt 0) { return $Handler }
+    # The PreToolUse guard (GAP-1011): the installed full hook of a packaged
+    # install, or the one-line install's GUI-subsystem guard (GAP-2467) or, in
+    # a repository build, its gateway, started with launcher-guard.
+    if ($guardArgs.Count -eq 5 -and $guardArgs[0] -ceq 'launcher-guard' -and $guardArgs[2] -ceq 'hook' -and
+        $guardArgs[3] -ceq '--connector' -and $guardArgs[4] -ceq 'claudecode') {
+        $program = [string]$commandProperty.Value
+        $launcher = [string]$guardArgs[1]
+        $programName = [IO.Path]::GetFileName($program)
+        if ([IO.Path]::IsPathRooted($program) -and [IO.Path]::IsPathRooted($launcher) -and
+            ($programName -ieq 'defenseclaw-hook.exe' -or $programName -ieq 'defenseclaw-hook-guard.exe' -or
+                $programName -ieq 'defenseclaw-gateway.exe') -and
+            [IO.Path]::GetFileName($launcher) -ieq 'defenseclaw-hook.exe' -and
+            -not [string]::Equals($program, $launcher, [StringComparison]::OrdinalIgnoreCase)) {
+            return [pscustomobject]@{ command = $launcher; args = @('hook', '--connector', 'claudecode') }
+        }
         return $Handler
     }
+    if ($guardArgs.Count -lt 8) { return $Handler }
     $systemRoot = [string]$env:SystemRoot
     if ([string]::IsNullOrWhiteSpace($systemRoot) -or -not [IO.Path]::IsPathRooted($systemRoot)) {
         $systemRoot = 'C:\Windows'
@@ -4875,11 +4913,18 @@ function Assert-WizardHookRegistration(
                 try { $command = $literal | ConvertFrom-Json -ErrorAction Stop }
                 catch { throw "wizard-selected Codex command_windows is malformed: $($_.Exception.Message)" }
             }
-            $encoded = [regex]::Match($command, '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)')
-            if (-not $encoded.Success) { throw 'wizard-selected Codex registration does not use EncodedCommand' }
-            try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
-            catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
-            $bridge = Get-AwaitedHookBridge $script
+            # Setup writes the direct cmd.exe command (GAP-1908), or the encoded
+            # PowerShell bridge for a launcher path that form cannot carry.
+            $bridge = Get-DirectCodexHookCommand $command
+            if ($null -eq $bridge) {
+                $encoded = [regex]::Match($command, '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)')
+                if (-not $encoded.Success) {
+                    throw 'wizard-selected Codex registration uses neither the direct cmd.exe command nor EncodedCommand'
+                }
+                try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
+                catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
+                $bridge = Get-AwaitedHookBridge $script
+            }
             $arguments = @(if ($null -ne $bridge) { $bridge.Arguments })
             $file = if ($null -ne $bridge) { $bridge.File } else { '' }
             $boundEvent = if ($arguments.Count -eq 7) { $arguments[4] } else { '' }
@@ -5217,18 +5262,35 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
     if ($Specification.Connector -ne 'codex') { return }
 
     $registration = [IO.File]::ReadAllText($Specification.ConfigPath)
-    $encodedMatches = [regex]::Matches(
+    $tomlString = [regex]::Match(
         $registration,
-        '(?i)-EncodedCommand\s+(?<encoded>[A-Za-z0-9+/=]+)'
+        '(?m)^\s*command_windows\s*=\s*(?<literal>"(?:\\.|[^"\\])*"|''[^'']*'')\s*$'
     )
-    if ($encodedMatches.Count -eq 0) {
-        throw 'cannot stage legacy Codex hook: registration has no EncodedCommand'
+    if (-not $tomlString.Success) {
+        throw 'cannot stage legacy Codex hook: registration has no command_windows hook'
     }
-    $currentEncoded = $encodedMatches[0].Groups['encoded'].Value
-    try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($currentEncoded)) }
-    catch { throw "cannot stage legacy Codex hook: invalid encoded command: $($_.Exception.Message)" }
-
-    $bridge = Get-AwaitedHookBridge $script
+    $literal = $tomlString.Groups['literal'].Value
+    if ($literal.StartsWith("'", [StringComparison]::Ordinal)) {
+        $command = $literal.Substring(1, $literal.Length - 2)
+    } else {
+        try { $command = $literal | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "cannot stage legacy Codex hook: command_windows is malformed: $($_.Exception.Message)" }
+    }
+    # The current registration is the direct cmd.exe command (GAP-1908) or,
+    # for a launcher path that form cannot carry, the encoded bridge.
+    $currentEncoded = ''
+    $script = ''
+    $bridge = Get-DirectCodexHookCommand $command
+    if ($null -eq $bridge) {
+        $encoded = [regex]::Match($command, '(?i)-EncodedCommand\s+(?<encoded>[A-Za-z0-9+/=]+)')
+        if (-not $encoded.Success) {
+            throw 'cannot stage legacy Codex hook: registration is neither the direct cmd.exe command nor EncodedCommand'
+        }
+        $currentEncoded = $encoded.Groups['encoded'].Value
+        try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($currentEncoded)) }
+        catch { throw "cannot stage legacy Codex hook: invalid encoded command: $($_.Exception.Message)" }
+        $bridge = Get-AwaitedHookBridge $script
+    }
     if ($null -eq $bridge -or
         [IO.Path]::GetFileName($bridge.File) -cne 'defenseclaw-hook.exe' -or
         @($bridge.Arguments).Count -lt 3 -or
@@ -5244,7 +5306,14 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
         throw 'cannot stage legacy Codex hook: generated command did not change'
     }
     $legacyEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($legacyScript))
-    $updated = $registration.Replace($currentEncoded, $legacyEncoded)
+    if ($currentEncoded) {
+        $updated = $registration.Replace($currentEncoded, $legacyEncoded)
+    } else {
+        # The direct command has no script to swap: put the 0.8.x bridge in its place.
+        $powershell = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
+        $legacyCommand = "$powershell -NoLogo -NoProfile -NonInteractive -EncodedCommand $legacyEncoded"
+        $updated = $registration.Replace($literal, "'" + $legacyCommand + "'")
+    }
     if ($updated -ceq $registration) {
         throw 'cannot stage legacy Codex hook: registration bytes did not change'
     }
@@ -6528,9 +6597,9 @@ function Get-WindowsReleaseClientSpecifications {
         },
         [pscustomobject]@{
             Connector = 'opencode'
-            Version = '1.18.11'
-            Package = 'opencode-ai'
-            Manifest = 'node_modules\opencode-ai\package.json'
+            Version = '2.1.4'
+            Package = '@opencode/cli'
+            Manifest = 'node_modules\@opencode\cli\package.json'
             Command = 'opencode.cmd'
         }
     )

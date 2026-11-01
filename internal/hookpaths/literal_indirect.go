@@ -71,7 +71,7 @@ func literalMakeRecipeOperands(words []string, cwd, home string, depth int) []st
 	}
 	// GNU make prefers GNUmakefile over Makefile; a different file may give
 	// the same target a different recipe.
-	if _, err := os.Lstat(filepath.Join(cwd, "GNUmakefile")); err == nil {
+	if _, err := pathLstat(filepath.Join(cwd, "GNUmakefile")); err == nil {
 		return nil
 	}
 	content, ok := readIndirectSource("Makefile", cwd)
@@ -110,7 +110,7 @@ func literalMakeRecipeOperands(words []string, cwd, home string, depth int) []st
 	if matches != 1 || recipe == "" || strings.ContainsAny(recipe, "$\\\r\n") {
 		return nil
 	}
-	if _, err := os.Lstat(filepath.Join(cwd, words[1])); err == nil && !phony {
+	if _, err := pathLstat(filepath.Join(cwd, words[1])); err == nil && !phony {
 		return nil
 	}
 	return literalSimpleScriptOperands(recipe, cwd, home, depth+1)

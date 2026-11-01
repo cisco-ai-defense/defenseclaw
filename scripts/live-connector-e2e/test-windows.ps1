@@ -2828,7 +2828,7 @@ threading.Event().wait()
         $invokeHookFunction -notmatch 'Start-Sleep -Milliseconds 800') `
         'hook evidence uses session, event, and tool-scoped bounded polling instead of a fixed 800ms delay'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
-    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'package-verify', 'packaged-acceptance', 'connector-contract')) {
+    foreach ($job in @('windows-go', 'windows-python', 'windows-telemetry-registry', 'powershell-static', 'package-artifact', 'package-verify', 'packaged-acceptance', 'connector-contract')) {
         Assert-True ($nativeWorkflowText -match "(?m)^\s{6}- $([regex]::Escape($job))\s*$") "aggregate depends on $job"
         $requiredJob = [regex]::Match(
             $nativeWorkflowText,
@@ -2842,10 +2842,11 @@ threading.Event().wait()
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
         '(?m)^\s*run: \./scripts/initialize-windows-native-ci-paths\.ps1 '
-    ).Count -eq 7) 'every native Windows job uses the shared isolated-path initializer'
+    ).Count -eq 8) 'every native Windows job uses the shared isolated-path initializer'
     foreach ($leafContract in @(
         '-Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}"',
         "-Leaf ('py-' + `$env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + `$env:PYTHON_SHARD)",
+        "-Leaf ('tr-' + `$env:TELEMETRY_SUITE) -DiagnosticsLeaf ('windows-native-diagnostics-telemetry-' + `$env:TELEMETRY_SUITE)",
         '-Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell',
         '-Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist',
         '-Leaf pkv -DiagnosticsLeaf windows-native-diagnostics-package-verify -ArtifactLeaf windows-native-dist',
@@ -2993,7 +2994,7 @@ threading.Event().wait()
         $nativeWorkflowText -notmatch 'test_app_shell') `
         'Windows Python suite balances every test file, the TUI suite included, across twelve time-weighted shards'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Local Splunk certification regressions') 'native Windows workflow has a required Local Splunk regression step'
-    Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
+    Assert-True ($nativeHarnessText -match 'check_python_dependency_metadata\.py' -and $nativeHarnessText -match '\$DependencyMetadataChecker\) -Timeout') 'managed environment runs the explicit dependency metadata check'
     Assert-True ($nativeHarnessText -match 'function Initialize-WindowsNativeTestEnvironment' -and
         $nativeHarnessText -match '\$env:TEMP = \$temp') `
         'native test harness provides a private current-user-owned temp root'
@@ -3597,7 +3598,7 @@ threading.Event().wait()
         '\$openCodeBin = Join-Path \$localAppData ''Microsoft\\WinGet\\Packages\\SST\.opencode_Microsoft\.Winget\.Source_8wekyb3d8bbwe''' -and
         '\$openCodePath = Join-Path \$openCodeBin ''opencode\.exe''' -and
         $agentFixtureFunction -match 'OpenCodeVersionFixture' -and
-        $agentFixtureFunction -match 'opencode 1\.18\.11' -and
+        $agentFixtureFunction -match 'opencode 2\.1\.4' -and
         $agentFixtureFunction -match "\`$openCodePath @\('--version'\) -TimeoutSeconds 30" -and
         $agentFixtureFunction -notmatch "\`$openCodePath @\('--version'\) -TimeoutSeconds [0-9]\b" -and
         $agentFixtureFunction -match 'OpenCodePath = \$openCodePath' -and
@@ -4963,21 +4964,26 @@ threading.Event().wait()
         'Cursor contract requires the mode, the per-user failClosed registration and the default-tier open outage mode without unsupported claims'
     Assert-True ($doctorContract -match "'cursor' \{ 'configured file has no DefenseClaw Cursor command entries' \}") `
         'Cursor tamper contract expects exact zero-managed-entry rejection after lock-bound ownership filtering'
-    Assert-True ([IO.File]::ReadAllText($openCodeAssertion) -match 'await hooks\.config') `
-        'OpenCode contract runs the official config hook before tool hooks'
+    Assert-True ($openCodeAssertionText.Contains('await module.default.setup(') -and
+        $openCodeAssertionText.Contains('await hooks.get("execute.before")') -and
+        $openCodeAssertionText -notmatch 'await hooks\.config') `
+        'OpenCode V2 contract initializes setup and awaits native tool callbacks without a V1 config hook'
     Assert-True ($openCodeAssertionText -match '\["allow", "block", "lifecycle", "load"\]' -and
-        $openCodeAssertionText -match '(?s)await hooks\.config.*?if \(expected === "load"\).*?else if \(expected === "lifecycle"\)') `
-        'OpenCode setup load probe stops after the authenticated config hook'
+        $openCodeAssertionText -match '(?s)await module\.default\.setup.*?if \(expected === "load"\).*?else if \(expected === "lifecycle"\)') `
+        'OpenCode setup load probe stops after the authenticated V2 setup heartbeat'
     $synchronousCodexHookContract = [regex]::Match(
         $harnessText,
         '(?s)function Assert-CodexSynchronousWindowsHookCommand\b.*?\n\}'
     ).Value
     Assert-True ($doctorContract -match 'Assert-CodexSynchronousWindowsHookCommand' -and
         $doctorSetupContract -match 'Assert-CodexSynchronousWindowsHookCommand' -and
-        $synchronousCodexHookContract.Contains('Get-AwaitedHookBridge $CodexCommand.Script') -and
+        $synchronousCodexHookContract.Contains('$bridge = $CodexCommand.Bridge') -and
+        $harnessText.Contains('Bridge = Get-AwaitedHookBridge $script') -and
+        $harnessText.Contains('$direct = Get-DirectCodexHookCommand $command') -and
+        $harnessText.Contains('function Get-DirectCodexHookCommand') -and
         $harnessText.Contains('function Get-AwaitedHookBridge') -and
         $harnessText.Contains('\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\)')) `
-        'Codex Doctor contracts require the awaited native launcher bridge'
+        'Codex Doctor contracts require the direct cmd.exe command (GAP-1908) or the awaited native launcher bridge'
     $doctorRegistration = $doctorContract.IndexOf("Write-Result 'doctor:windows-hook-registration'", [StringComparison]::Ordinal)
     $doctorAmpSelfHeal = $doctorContract.IndexOf('Assert-AmpPluginSelfHeal $configPath $originalConfig', [StringComparison]::Ordinal)
     $doctorStop = $doctorContract.IndexOf("Invoke-Tool 'defenseclaw-gateway' @('stop')", [StringComparison]::Ordinal)

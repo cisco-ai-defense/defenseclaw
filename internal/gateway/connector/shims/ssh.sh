@@ -37,10 +37,12 @@ _DC_SHIM_BODY="$(jq -cn --arg tool "ssh" --args \
   '{tool: $tool, args: {argv: ([$tool] + $ARGS.positional)}}' \
   -- "$@")" || _DC_SHIM_BODY=""
 
-_DC_SHIM_RESPONSE=$(_dc_shim_post "ssh" 2>/dev/null) || {
-  echo "DefenseClaw: gateway peer is unverified or unavailable — refusing to exec ssh" >&2
+if [ -z "$_DC_SHIM_BODY" ]; then
+  echo "DefenseClaw: shim could not encode ssh request — refusing to exec ssh" >&2
   exit 1
-}
+fi
+
+_DC_SHIM_RESPONSE=$(_dc_shim_post "ssh" 2>/dev/null) || _dc_shim_transport_failure "$?" "ssh" "$@"
 
 _DC_SHIM_CODE=$(echo "$_DC_SHIM_RESPONSE" | tail -1)
 _DC_SHIM_RESULT=$(echo "$_DC_SHIM_RESPONSE" | sed '$d')

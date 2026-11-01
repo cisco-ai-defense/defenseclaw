@@ -212,6 +212,19 @@ func (e *Env) RemoveSecret(name string) error {
 	return removeFile(filepath.Join(e.P(e.Layout.SecretsDir), name))
 }
 
+// RemoveRotatedSecret removes credential name although the installed config
+// references it: only for the put-back of a failed rotation on the very
+// config installed before it (secret remove --undo-rotation --undo-config),
+// which referenced the credential with no value stored, so removing it
+// restores the state from before the rotation (GAP-1173).
+func (e *Env) RemoveRotatedSecret(name string) error {
+	e.fillDefaults()
+	if !config.ValidEnterpriseCredentialName(name) {
+		return fmt.Errorf("credential name %q is not valid", name)
+	}
+	return removeFile(filepath.Join(e.P(e.Layout.SecretsDir), name))
+}
+
 // settleSecretModes gives every stored credential the mode and owner the
 // gateway reads it with; one staged before the first install is root-only
 // until then.

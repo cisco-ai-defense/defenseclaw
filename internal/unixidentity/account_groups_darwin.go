@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"os/user"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -63,12 +64,16 @@ func platformAccountGroupIDs(ctx context.Context, runner commandRunner, account 
 			return nil, errors.Join(listErr, err)
 		}
 	}
-	extra, err := namedGroupIDs(ctx, named, lookupNamedGroupGID)
+	extra, err := namedGroupIDs(ctx, named, darwinNamedGroups.lookup(lookupNamedGroupGID))
 	if err != nil {
 		return nil, err
 	}
 	return uidVerifiedGroupIDs(ctx, runner, account, ids, extra)
 }
+
+// darwinNamedGroups keeps the gids of assignment groups Open Directory named
+// before, for a partial directory outage (GAP-0592).
+var darwinNamedGroups = &namedGroupMemory{now: time.Now}
 
 // lookupNamedGroupGID resolves a group name through Open Directory; ok is
 // false when no group has the name. Tests replace it.
@@ -202,4 +207,32 @@ func parseIDGroupList(output string) ([]string, error) {
 		return nil, errors.New("unixidentity: id listed no groups")
 	}
 	return ids, nil
+}
+
+// accountInGroup is AccountInGroup with the candidate list and the runner
+// given: it confirms gid alone, so one dsmemberutil run answers it, as the
+// full list would (a candidate Open Directory confirms by uid, or the
+// primary group). A list os/user could not give, or one that may be cut at
+// its buffer, takes the full path.
+func accountInGroup(ctx context.Context, runner commandRunner, account *user.User, ids []string, listErr error, gid int) (bool, error) {
+	want := strconv.Itoa(gid)
+	if account.Gid == want {
+		return true, nil
+	}
+	if listErr == nil && len(ids) < osUserGroupBuffer {
+		if !slices.Contains(ids, want) {
+			return false, nil
+		}
+		ids = []string{want}
+	}
+	verified, err := platformAccountGroupIDs(ctx, runner, account, ids, listErr, nil)
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(verified, want), nil
+}
+
+func platformAccountInGroup(ctx context.Context, account *user.User, gid int) (bool, error) {
+	ids, err := account.GroupIds()
+	return accountInGroup(ctx, runTrustedCommand, account, ids, err, gid)
 }

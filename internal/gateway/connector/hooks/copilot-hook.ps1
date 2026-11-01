@@ -87,20 +87,49 @@ $deadline = [System.Diagnostics.Stopwatch]::StartNew()
         catch { return $true }
     }
     foreach ($root in $roots) {
-        try {
-            [void][System.IO.File]::GetAttributes((Join-Path $root '.install.lock'))
-            return $true
-        }
-        catch {
-            $missing = $false
-            for ($cause = $_.Exception; $null -ne $cause; $cause = $cause.InnerException) {
-                if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) { $missing = $true; break }
-            }
-            if (-not $missing) { return $true }
-        }
+        if (Test-DefenseClawInstallLockCurrent (Join-Path $root '.install.lock')) { return $true }
     }
     return $false
 }
+
+function Test-DefenseClawInstallLockCurrent([string]$lock) {
+    try { [void][System.IO.File]::GetAttributes($lock) }
+    catch {
+        $missing = $false
+        for ($cause = $_.Exception; $null -ne $cause; $cause = $cause.InnerException) {
+            if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) { $missing = $true; break }
+        }
+        return (-not $missing)
+    }
+    try { $item = Get-Item -LiteralPath $lock -Force -ErrorAction Stop }
+    catch { return $true }
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $true }
+    $pidPath = Join-Path $lock 'pid'
+    try {
+        $pidFile = Get-Item -LiteralPath $pidPath -Force -ErrorAction Stop
+        if ($pidFile.PSIsContainer -or ($pidFile.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or $pidFile.Length -gt 64) { return $true }
+        $holder = [System.IO.File]::ReadAllText($pidPath).Trim()
+        [int]$holderId = 0
+        if ($holder -notmatch '^[1-9][0-9]*$' -or -not [int]::TryParse($holder, [ref]$holderId)) { return $true }
+        # The one stale-lock rule (hookexec installLockStale): no clock is
+        # read for a lock with an identity record; a 1.0.2/1.0.3 lock without
+        # one is stale when its pid's process started after the lock
+        # (GAP-1025, GAP-1465).
+        try { $holderProcess = [System.Diagnostics.Process]::GetProcessById($holderId) }
+        catch [System.ArgumentException] { return $false }
+        catch { return $true }
+        if ($holderProcess.HasExited) { return $false }
+        try { $started = $holderProcess.StartTime.ToUniversalTime() } catch { return $true }
+        $recordPath = Join-Path $lock 'proc-start'
+        if (Test-Path -LiteralPath $recordPath) {
+            try { $recorded = [System.IO.File]::ReadAllText($recordPath).Trim() } catch { return $true }
+            return ($recorded -eq [string]$started.ToFileTimeUtc())
+        }
+        return ($started -le $item.LastWriteTimeUtc.AddSeconds(2))
+    }
+    catch { return $true }
+}
+$installGuard = $false
 {{end}}try {
     if (-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
         throw "DefenseClaw hook launcher is missing: $hook"
@@ -167,12 +196,14 @@ $deadline = [System.Diagnostics.Stopwatch]::StartNew()
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
     # The native hook answers a tool boundary on stdout with exit 0, a failed
-    # check too; a launcher that exits non-zero without an answer crashed.
-    if ($stdout.Length -eq 0 -and $process.ExitCode -ne 0) {
+    # check too; a launcher that exits non-zero crashed. Its output reaches
+    # Copilot only when it is one whole native deny, so a crash never turns
+    # a deny into an allow and a partial answer is never forwarded (GAP-0364).
+    if ($process.ExitCode -ne 0 -and -not ($stdout -cmatch '^\{"(permissionDecision":"deny","permissionDecisionReason|behavior":"deny","message)":"(?:[^"\\\r\n]|\\.)*"\}\r?\n?$')) {
         if ($stderr.Length -gt 0) {
             [Console]::Error.Write($stderr)
         }
-        throw "DefenseClaw hook launcher exited $($process.ExitCode) without an answer"
+        throw "DefenseClaw hook launcher exited $($process.ExitCode) without a complete answer"
     }
     if ($stdout.Length -gt 0) {
         [Console]::Out.Write($stdout)

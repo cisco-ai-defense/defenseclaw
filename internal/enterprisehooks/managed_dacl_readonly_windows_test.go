@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
@@ -228,5 +229,71 @@ func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
 	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
 		!strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
 		t.Fatalf("install plan over a write grant = %v, want the refusal", err)
+	}
+}
+
+// GAP-1334: a guardian stopped in the middle of a Hermes setup (or a
+// rolled-back lifecycle that stopped it) leaves the user's .defenseclaw in
+// the setup shape. The Upgrade/Repair plan refused it as a noncanonical
+// baseline before the generation GC that recovers it ran, so the SYSTEM
+// /repair failed 1603. The plan now recovers that stale shape; a relax a
+// running setup holds and any other DACL stay refused and unchanged.
+func TestWindowsManagedRuntimeRepairPlanRecoversAStaleGuardianSetupRelax(t *testing.T) {
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	previousWait, previousStale := windowsManagedRuntimeSetupRelaxWait, windowsSetupRelaxIsStale
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneProcess = previousStandalone
+		windowsManagedRuntimeSetupRelaxWait, windowsSetupRelaxIsStale = previousWait, previousStale
+	})
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	windowsManagedRuntimeSetupRelaxWait = 50 * time.Millisecond
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	target := currentWindowsTestSID(t)
+	home := newWindowsTargetOwnedTestHome(t, target)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, filepath.Join(dataDir, "hooks"), target); err != nil {
+		t.Fatal(err)
+	}
+	setDACL := func(sddl string) {
+		t.Helper()
+		sd, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(dataDir, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := windowsManagedRuntimeTestManifest(home, target)
+	manifestPath, digest := `C:\ProgramData\DefenseClaw\etc\targets.yaml`, strings.Repeat("7", 64)
+	plan := func() error {
+		_, err := PlanWindowsManagedRuntimeRootsForValidation(manifest, manifestPath, digest)
+		return err
+	}
+
+	setDACL(windowsSetupRelaxedDirectorySDDL)
+	windowsSetupRelaxIsStale = func(string, *windows.SID) bool { return false }
+	if err := plan(); err == nil || !strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
+		t.Fatalf("plan over a running setup's relax = %v, want the refusal", err)
+	}
+	if !windowsManagedRuntimeDirSetupRelaxed(dataDir, target) {
+		t.Fatal("a running setup's relax was changed")
+	}
+
+	windowsSetupRelaxIsStale = func(string, *windows.SID) bool { return true }
+	if err := plan(); err != nil {
+		t.Fatalf("repair plan over a stale guardian setup relax: %v", err)
+	}
+	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
+
+	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	if err := plan(); err == nil || !strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
+		t.Fatalf("plan over a foreign DACL = %v, want the refusal", err)
 	}
 }

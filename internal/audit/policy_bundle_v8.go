@@ -20,11 +20,11 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -68,6 +68,13 @@ type PolicyBundleReceipt struct {
 	EnforcingVersion uint64
 	WarningCodes     []string
 	DisabledByBundle []string
+	// FinishedAt is the time of the terminal transition (RFC 3339), the
+	// time of the receipt's record when the receipt is offered from the
+	// receipt spool (LogPolicyBundleReceipt with record pins).
+	FinishedAt string
+	// FirstOffer says no gateway process can have offered this receipt
+	// before (audit.ConfigChange.FirstOffer has the same meaning).
+	FirstOffer bool
 }
 
 // Terminal receipt states (defenseclaw.policy.bundle.state).
@@ -82,14 +89,14 @@ const (
 )
 
 var (
-	policyBundleIDPattern        = regexp.MustCompile(`^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
-	policyBundleReceiptIDPattern = regexp.MustCompile(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	policyBundleIDPattern        = lazyregexp.New(`^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	policyBundleReceiptIDPattern = lazyregexp.New(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
 	// policyBundleDeliveryIDPattern is the --delivery-id of bundle apply
 	// (enterprisestatus.CheckDeliveryID).
-	policyBundleDeliveryIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
-	policyBundleKeyIDPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	policyBundleCodePattern       = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
-	policyBundleDigestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	policyBundleDeliveryIDPattern = lazyregexp.New(`^[A-Za-z0-9._:-]{1,128}$`)
+	policyBundleKeyIDPattern      = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	policyBundleCodePattern       = lazyregexp.New(`^[a-z][a-z0-9_]{0,63}$`)
+	policyBundleDigestPattern     = lazyregexp.New(`^sha256:[0-9a-f]{64}$`)
 )
 
 // policyBundleV8Fields are the typed bundle attributes of a record.
@@ -177,7 +184,20 @@ func policyBundleReceiptV8FieldsFor(r *PolicyBundleReceipt) (policyBundleReceipt
 // bundle principal the receipt names (control-plane:<tenant>/<admin> or
 // operator:<os-admin>), "" when the manifest could not be read. It reports
 // only; nothing here changes what is enforced.
-func (l *Logger) LogPolicyBundleReceipt(principal string, bundle PolicyBundle, receipt PolicyBundleReceipt) error {
+//
+// With pins, the receipt is a spooled occurrence, as a change is
+// (LogConfigChange): its record id is stable (the receipt id), its record
+// is built from the receipt and its pin, so every offer is the same record,
+// the audit store keeps it once, and delivery, kept by the caller across
+// offers, sends it only to the remote destinations that do not have it. A
+// store that cannot write the row fails the call, so the caller offers the
+// receipt again, but a remote destination that has it does not get it
+// again. Without pins (or a FinishedAt that does not parse) the receipt is
+// one record under a new id.
+func (l *Logger) LogPolicyBundleReceipt(
+	principal string, bundle PolicyBundle, receipt PolicyBundleReceipt,
+	delivery *observability.RemoteDelivery, pins *ConfigChangePins,
+) error {
 	if l == nil {
 		return nil
 	}
@@ -222,11 +242,17 @@ func (l *Logger) LogPolicyBundleReceipt(principal string, bundle PolicyBundle, r
 	if actor == "" {
 		actor = strings.TrimSpace(principal)
 	}
-	return l.logActivityImpl(ActivityInput{
+	in := ActivityInput{
 		Actor: actor, Principal: strings.TrimSpace(principal), Action: ActionConfigBundleReceipt,
 		TargetType: "policy_bundle", TargetID: receipt.ReceiptID, Reason: reason,
 		After: after, Severity: severity, Bundle: &bundle, BundleReceipt: &receipt,
-	})
+	}
+	if finishedAt, err := time.Parse(time.RFC3339Nano, receipt.FinishedAt); err == nil && pins != nil {
+		in.OccurrenceID = stableOccurrenceID(string(ActionConfigBundleReceipt), receipt.ReceiptID)
+		in.OccurredAt, in.RemoteDelivery = finishedAt, delivery
+		in.Pins, in.PinKey = pins, receipt.ReceiptID
+	}
+	return l.logActivityImpl(in)
 }
 
 // RecordPolicyBundleVersion records the defenseclaw.policy.bundle.version

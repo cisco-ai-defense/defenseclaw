@@ -62,7 +62,13 @@ const (
 	// answer. A later hook starts another lookup so removal is seen soon.
 	identityDirectoryFreshCoalesce = 100 * time.Millisecond
 	identityDirectoryRetry         = 15 * time.Second
-	identityDirectoryMax           = 4096
+	// identityLookupStalledAfter is how long a lookup may go unanswered
+	// before health counts its account as failing: Open Directory holds a
+	// lookup while the domain controllers do not answer (a minute and more),
+	// and nothing was counted until it ended, after the outage (status-v2
+	// GAP-0011). A cold batch of a healthy directory took about 34 s.
+	identityLookupStalledAfter = time.Minute
+	identityDirectoryMax       = 4096
 	// identityDirectoryIncompleteTTL is how long an incomplete answer lasts.
 	identityDirectoryIncompleteTTL = 2 * time.Minute
 	// identityDirectoryMaxAge is the age past which directory facts are no
@@ -104,6 +110,25 @@ type identityCache[T any] struct {
 	// that the account does not exist.
 	gone        func(error) bool
 	confirmGone bool
+	// directoryAway, when set, reports a directory that does not answer now
+	// (key, the lookup that failed started at the time given): its "no such
+	// account" is then not definitive, and the failure counts in health as
+	// any other (status-v2 GAP-0011).
+	directoryAway func(key string, started time.Time) bool
+	// awaitsRootProof, when set, marks a lookup error that only a proof
+	// recorded by root can settle: a non-root gateway cannot show that SSSD
+	// holds no other account of a local uid (GAP-0653), and takes the proof
+	// the hook guardian records instead. rootProofRecorded reports whether
+	// the guardian has recorded that proof for the account that holds key
+	// now. Such a failure is the wait for the first guardian pass, not a
+	// directory outage (GAP-2535).
+	awaitsRootProof   func(error) bool
+	rootProofRecorded func(key string) bool
+	// rootProofAccountGone reports whether the account database no longer
+	// holds an account of key: the local account whose lookup waited for
+	// the guardian's proof was deleted, and the guardian removed its record
+	// (GAP-1864), so nothing waits for the proof any more (GAP-2595).
+	rootProofAccountGone func(key string) bool
 	// trustedUntil, when set, is when the inputs of a lookup of key started
 	// at now stop being trusted (zero: no bound beyond maxAge): the
 	// guardian's identity record, trusted identitySpoolMaxAge from when it
@@ -131,6 +156,14 @@ type identityCacheEntry[T any] struct {
 	ok         bool
 	usedByHook bool
 	fetchedAt  time.Time
+	// lookupStartedAt is when the lookup that fetched facts started. A
+	// lookup already in flight when an invalidation lands may have read the
+	// directory before the change the invalidation stands for (a UPN
+	// removed, a profile assignment pushed), so its answer does not count
+	// as one from after the invalidation (invalidatedLocked).
+	lookupStartedAt time.Time
+	// inflightSince is when the lookup in flight (inflight) started.
+	inflightSince time.Time
 	// generation identifies a successful current lookup. A fresh read that
 	// timed out may use its completion shortly after it finishes, and nearby
 	// reads within one hook interval share that answer.
@@ -147,6 +180,9 @@ type identityCacheEntry[T any] struct {
 	lastFailedAt time.Time
 	// gone is set when the last failure said the account does not exist.
 	gone bool
+	// awaitsRootProof is set when the last failure waits only for a proof
+	// root records (identityCache.awaitsRootProof).
+	awaitsRootProof bool
 	// trustedUntil is when the inputs of the served facts stop being
 	// trusted (identityCache.trustedUntil); zero for no bound.
 	trustedUntil time.Time
@@ -159,6 +195,7 @@ func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts
 	cache := newIdentityCache(resolve)
 	cache.maxAge = identityDirectoryMaxAge
 	cache.gone = definitiveMissingAccount
+	cache.directoryAway = missingAccountDirectoryAway
 	cache.confirmGone = reliableMissingAccountConfirmation()
 	cache.trustedUntil = identitySpoolTrustedUntil
 	cache.describe = func(facts useridentity.DirectoryFacts) (string, string) { return facts.Source, string(facts.Directory) }
@@ -199,24 +236,7 @@ func (c *identityCache[T]) getWithColdWait(key string, block, waitCold bool) (T,
 		return zero, false
 	}
 	c.mu.Lock()
-	now := c.now()
-	entry := c.entries[key]
-	first := entry == nil
-	if first {
-		if len(c.entries) >= identityDirectoryMax {
-			c.evictLocked()
-		}
-		entry = &identityCacheEntry[T]{}
-		c.entries[key] = entry
-	}
-	entry.usedByHook = true
-	c.dropAgedLocked(key, entry, now)
-	age := now.Sub(entry.fetchedAt)
-	invalidated := entry.ok && (entry.fetchedAt.Before(c.staleBefore) || entry.fetchedAt.Before(entry.staleBefore))
-	expired := age >= c.lifetime(entry.facts) || invalidated
-	if (!entry.ok || expired) && entry.inflight == nil && !now.Before(entry.nextAttempt) {
-		c.refreshLocked(key, entry)
-	}
+	entry, first, expired, invalidated := c.serveLocked(key)
 	if entry.ok {
 		facts, wait, fetchedAt := entry.facts, entry.inflight, entry.fetchedAt
 		// An incomplete answer past its lifetime (a group no name answered
@@ -276,6 +296,32 @@ func (c *identityCache[T]) getWithColdWait(key string, block, waitCold bool) (T,
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return entry.facts, entry.ok
+}
+
+// serveLocked is the start of every read that serves cached facts: it finds
+// or creates key's entry, drops facts no longer served (dropAgedLocked), and
+// starts the refresh that an unresolved, expired or invalidated entry is due.
+// expired covers facts past their lifetime and invalidated ones
+// (invalidatedLocked).
+func (c *identityCache[T]) serveLocked(key string) (entry *identityCacheEntry[T], first, expired, invalidated bool) {
+	now := c.now()
+	entry = c.entries[key]
+	first = entry == nil
+	if first {
+		if len(c.entries) >= identityDirectoryMax {
+			c.evictLocked()
+		}
+		entry = &identityCacheEntry[T]{}
+		c.entries[key] = entry
+	}
+	entry.usedByHook = true
+	c.dropAgedLocked(key, entry, now)
+	invalidated = c.invalidatedLocked(entry)
+	expired = now.Sub(entry.fetchedAt) >= c.lifetime(entry.facts) || invalidated
+	if (!entry.ok || expired) && entry.inflight == nil && !now.Before(entry.nextAttempt) {
+		c.refreshLocked(key, entry)
+	}
+	return entry, first, expired, invalidated
 }
 
 // dropAgedLocked stops serving entry's facts once they are maxAge old, or
@@ -400,6 +446,54 @@ func (c *identityCache[T]) explain(key string, wait time.Duration) identityExpla
 	return answer
 }
 
+// reread looks key up again with a lookup that starts after the call, once
+// any lookup of it already running has finished, and waits at most wait for
+// it. `enterprise identity refresh` re-reads an account the directory has
+// just changed: explain reuses a lookup from the last identityExplainFresh,
+// and one that started before the change answers with the facts from before
+// it, so a refresh run seconds after a group change reported the account
+// unchanged and its hooks kept the old profile (rel-1-0-6 GAP-0143). The
+// explain lookup that follows reuses this answer. A key the cache holds
+// nothing for is left alone: nothing older can be reused for it, and a
+// lookup started for an account no hook has used would only add it to the
+// directory health report.
+func (c *identityCache[T]) reread(key string, wait time.Duration) {
+	if c == nil || key == "" || c.resolve == nil {
+		return
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	c.mu.Lock()
+	entry := c.entries[key]
+	if entry == nil {
+		c.mu.Unlock()
+		return
+	}
+	earlier := entry.inflight
+	c.mu.Unlock()
+	if earlier != nil {
+		select {
+		case <-earlier:
+		case <-timer.C:
+			return
+		}
+	}
+	c.mu.Lock()
+	if entry = c.entries[key]; entry == nil {
+		c.mu.Unlock()
+		return
+	}
+	if entry.inflight == nil {
+		c.refreshLocked(key, entry)
+	}
+	done := entry.inflight
+	c.mu.Unlock()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
+}
+
 // explainDirectoryFacts returns the directory facts a hook call of key gets
 // after explain's lookup (identityCache.explain), or why it gets none.
 func explainDirectoryFacts(cache *identityDirectoryCache, key string) (useridentity.DirectoryFacts, error) {
@@ -438,6 +532,26 @@ func (c *identityCache[T]) refreshFailing(key string) (since time.Time, reason s
 func (c *identityCache[T]) unsettled(facts T) bool {
 	return c.partial != nil && c.partial(facts) || c.settling != nil && c.settling(facts) ||
 		c.incomplete != nil && c.incomplete(facts)
+}
+
+// invalidatedLocked reports facts fetched before an invalidation (invalidate
+// for every key, refreshSoon for one) that no lookup started after it has
+// answered since. They are served as expired facts are, and are never
+// current: a decision that needs current facts waits for the refresh. The
+// facts count from when their lookup started, not when it finished: a
+// lookup in flight when the invalidation landed answered with what the
+// directory gave before it, and that answer cleared the invalidation, so an
+// exempt_users UPN the directory had just dropped still exempted the caller
+// (review of r104 Q-identity, continuation 3, loop round 1).
+func (c *identityCache[T]) invalidatedLocked(entry *identityCacheEntry[T]) bool {
+	if !entry.ok {
+		return false
+	}
+	answered := entry.fetchedAt
+	if !entry.lookupStartedAt.IsZero() && entry.lookupStartedAt.Before(answered) {
+		answered = entry.lookupStartedAt
+	}
+	return answered.Before(c.staleBefore) || answered.Before(entry.staleBefore)
 }
 
 // lifetime is how long facts are served before a refresh: the full TTL,
@@ -562,6 +676,29 @@ func (c *identityCache[T]) refreshSoon(key string) {
 	}
 }
 
+// accounts returns the keys (uid or SID) of the accounts the cache holds
+// facts for or whose lookups failed, sorted, at most limit of them (no limit
+// when limit is 0), and how many it left out. `enterprise identity refresh`
+// re-reads these accounts.
+func (c *identityCache[T]) accounts(limit int) (keys []string, skipped int) {
+	if c == nil {
+		return nil, 0
+	}
+	c.mu.Lock()
+	for key, entry := range c.entries {
+		if entry.ok || !entry.failedSince.IsZero() {
+			keys = append(keys, key)
+		}
+	}
+	c.mu.Unlock()
+	sort.Strings(keys)
+	if limit > 0 && len(keys) > limit {
+		skipped = len(keys) - limit
+		keys = keys[:limit]
+	}
+	return keys, skipped
+}
+
 // forget drops key's entry, so the next get resolves it afresh. A lookup in
 // flight finishes on the dropped entry.
 func (c *identityCache[T]) forget(key string) {
@@ -598,18 +735,23 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 	entry.inflight = done
 	trustedUntil := c.trustedUntil
 	started := c.now()
+	entry.inflightSince = started
 	go func() {
 		var until time.Time
 		if trustedUntil != nil {
 			until = trustedUntil(key, started)
 		}
 		facts, err := c.resolve(key)
+		// Read without the lock: the checks read the identity spool and ask
+		// Open Directory.
+		gone := err != nil && c.gone != nil && c.gone(err) && (c.directoryAway == nil || !c.directoryAway(key, started))
 		c.mu.Lock()
 		now := c.now()
 		var unconfirmed *identityFactsUnconfirmedError
 		switch {
 		case err == nil:
 			entry.facts, entry.ok, entry.fetchedAt, entry.trustedUntil = facts, true, now, until
+			entry.lookupStartedAt = started
 			entry.generation++
 			if !entry.pendingFresh {
 				// An ordinary cache refresh has no timed-out fresh reader
@@ -626,8 +768,13 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 			entry.freshUntil = time.Time{}
 		}
 		entry.nextAttempt = now.Add(identityDirectoryRetry)
-		entry.inflight = nil
-		note := c.noteResultLocked(key, entry, err, now)
+		if err == nil && c.invalidatedLocked(entry) {
+			// An invalidation landed during the lookup: the refresh it
+			// needs may start at once.
+			entry.nextAttempt = time.Time{}
+		}
+		entry.inflight, entry.inflightSince = nil, time.Time{}
+		note := c.noteResultLocked(key, entry, err, gone, now)
 		c.mu.Unlock()
 		if note != "" && c.logf != nil {
 			c.logf("%s", note)
@@ -639,11 +786,12 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 // noteResultLocked records a lookup's outcome on entry and returns the line to
 // log: the first failure of the key (or a failure with another reason), and
 // its recovery. A key that keeps failing for the same reason logs nothing more.
-func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntry[T], err error, now time.Time) string {
+func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntry[T], err error, gone bool, now time.Time) string {
 	if err == nil {
 		c.answeredAt = now
 		c.noteAnsweredLocked(entry.facts, now)
 		entry.gone = false
+		entry.awaitsRootProof = false
 		if entry.failedSince.IsZero() {
 			return ""
 		}
@@ -652,7 +800,8 @@ func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntr
 		return fmt.Sprintf("directory lookup for %s works again after %s", key, down)
 	}
 	entry.lastFailedAt = now
-	entry.gone = c.gone != nil && c.gone(err)
+	entry.gone = gone
+	entry.awaitsRootProof = c.awaitsRootProof != nil && c.awaitsRootProof(err)
 	reason := err.Error()
 	if len(reason) > 300 {
 		reason = reason[:300] + "..."
@@ -710,16 +859,58 @@ const identityHealthMaxAccounts = 10
 
 // health reports the failing accounts. An idle account whose last failure is
 // older than the TTL is not counted: nothing retries it until it is used.
+//
+// A failure that waited only for the root-recorded proof of the hook
+// guardian (awaitsRootProof) is not counted once the guardian has recorded
+// it: the directory answered, and the next lookup takes the proof. The first
+// hook of a new local account on an SSSD-joined host runs before the first
+// guardian pass, and status and verify then warned directory_lookups_failing
+// for the full TTL when the account made no further call (GAP-2535). Such an
+// entry is looked up again at once, so its facts settle without a hook call;
+// a lookup that then fails for another reason is counted again. Nor is such
+// a failure counted once no account holds the uid: a served local account
+// deleted after that first hook kept the host failing for the TTL although
+// the guardian removed its record (GAP-2595).
 func (c *identityCache[T]) health() identityCacheHealth {
 	var h identityCacheHealth
 	if c == nil {
 		return h
 	}
+	proven, gone := c.rootProofsRecorded()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
 	for key, entry := range c.entries {
+		if entry.inflight != nil && !entry.inflightSince.IsZero() && now.Sub(entry.inflightSince) >= identityLookupStalledAfter {
+			// A lookup the directory has not answered for a minute: the
+			// account fails now, not when the lookup ends (status-v2
+			// GAP-0011).
+			since := entry.inflightSince
+			if !entry.failedSince.IsZero() && entry.failedSince.Before(since) {
+				since = entry.failedSince
+			}
+			h.Failing++
+			h.Accounts = append(h.Accounts, key)
+			if h.Since.IsZero() || since.Before(h.Since) {
+				h.Since = since
+				h.LastError = fmt.Sprintf("the directory has not answered the lookup of %s for %s", key, now.Sub(entry.inflightSince).Round(time.Second))
+			}
+			if age := now.Sub(entry.fetchedAt); entry.ok && age >= identityDirectoryTTL {
+				h.Stale++
+				h.OldestAge = max(h.OldestAge, age)
+			}
+			continue
+		}
 		if entry.failedSince.IsZero() || now.Sub(entry.lastFailedAt) >= identityDirectoryTTL {
+			continue
+		}
+		if entry.awaitsRootProof && proven[key] {
+			if entry.inflight == nil {
+				c.refreshLocked(key, entry)
+			}
+			continue
+		}
+		if entry.awaitsRootProof && gone[key] {
 			continue
 		}
 		if entry.gone && entry.fetchedAt.IsZero() && !entry.usedByHook {
@@ -748,4 +939,33 @@ func (c *identityCache[T]) health() identityCacheHealth {
 		h.Accounts = h.Accounts[:identityHealthMaxAccounts]
 	}
 	return h
+}
+
+// rootProofsRecorded reports, for each key whose last lookup failure waits
+// for a proof root records, whether the guardian has recorded it (proven) or
+// the account database no longer holds an account of the key (gone). The
+// checks read the account database and the guardian record, so they run
+// without the lock.
+func (c *identityCache[T]) rootProofsRecorded() (proven, gone map[string]bool) {
+	if c.rootProofRecorded == nil && c.rootProofAccountGone == nil {
+		return nil, nil
+	}
+	c.mu.Lock()
+	var keys []string
+	for key, entry := range c.entries {
+		if entry.awaitsRootProof && !entry.failedSince.IsZero() {
+			keys = append(keys, key)
+		}
+	}
+	c.mu.Unlock()
+	proven = make(map[string]bool, len(keys))
+	gone = make(map[string]bool)
+	for _, key := range keys {
+		if c.rootProofRecorded != nil && c.rootProofRecorded(key) {
+			proven[key] = true
+		} else if c.rootProofAccountGone != nil && c.rootProofAccountGone(key) {
+			gone[key] = true
+		}
+	}
+	return proven, gone
 }

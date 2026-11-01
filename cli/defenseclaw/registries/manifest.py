@@ -166,6 +166,9 @@ class Manifest:
     publisher: str = ""
     default_connector: str = ""
     entries: list[ManifestEntry] = field(default_factory=list)
+    # Why catalog rows were not turned into entries (adapter-side), for the
+    # dry run and the sync report. Not part of the manifest document.
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"schema_version": self.schema_version}

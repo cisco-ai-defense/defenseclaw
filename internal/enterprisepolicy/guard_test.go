@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -602,6 +603,92 @@ func TestGuardApprovalCoversPluginDirectoryContent(t *testing.T) {
 	writeFile(t, filepath.Join(plugin, "lib", "rewrite.ts"), "export const x = 1")
 	if decision := EvaluateForeignHooks(req); !decision.Deny {
 		t.Fatalf("a changed plugin directory must deny: %+v", decision)
+	}
+}
+
+func TestGuardApprovalCoversConfiguredPluginDirectoryContent(t *testing.T) {
+	for _, form := range []string{"relative", "absolute", "file URL", "package options"} {
+		t.Run(form, func(t *testing.T) {
+			req := guardRequest(t, "opencode", config.ForeignHooksRemove)
+			configDir := filepath.Join(req.Home, ".config", "opencode")
+			plugin := filepath.Join(configDir, "local-helper")
+			writeFile(t, filepath.Join(plugin, "index.js"), "export default { id: 'fixture' }")
+			var spec any = "./local-helper"
+			switch form {
+			case "absolute":
+				spec = plugin
+			case "file URL":
+				spec = "file://" + filepath.ToSlash(plugin)
+			case "package options":
+				spec = map[string]any{"package": "./local-helper", "options": map[string]any{"strict": true}}
+			}
+			doc, err := json.Marshal(map[string]any{"plugins": []any{spec}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(configDir, "opencode.json"), string(doc))
+			first := EvaluateForeignHooks(req)
+			if !first.Deny || len(first.Findings) != 1 {
+				t.Fatalf("configured plugin needs approval: %+v", first)
+			}
+			req.Policy.AllowedHooks = []string{first.Findings[0].Digest}
+			if again := EvaluateForeignHooks(req); again.Deny {
+				t.Fatalf("unchanged configured plugin must retain approval: %+v", again)
+			}
+			writeFile(t, filepath.Join(plugin, "index.js"), "export default { id: 'changed' }")
+			if again := EvaluateForeignHooks(req); !again.Deny {
+				t.Fatalf("changed index.js must invalidate approval: %+v", again)
+			}
+			writeFile(t, filepath.Join(plugin, "index.js"), "export default { id: 'fixture' }")
+			writeFile(t, filepath.Join(plugin, "lib", "nested.js"), "export const fixture = true")
+			if again := EvaluateForeignHooks(req); !again.Deny {
+				t.Fatalf("nested module changes must invalidate approval: %+v", again)
+			}
+		})
+	}
+}
+
+func TestGuardUnverifiableConfiguredPluginDirectoryCannotBeApproved(t *testing.T) {
+	req := guardRequest(t, "opencode", config.ForeignHooksRemove)
+	root := filepath.Join(req.Home, ".config", "opencode")
+	plugin := filepath.Join(root, "local-helper")
+	writeFile(t, filepath.Join(plugin, "index.js"), "fixture")
+	if err := os.Truncate(filepath.Join(plugin, "index.js"), guardReferencedFileLimit+1); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "opencode.json"), `{"plugins":["./local-helper"]}`)
+	first := EvaluateForeignHooks(req)
+	if len(first.Findings) != 1 {
+		t.Fatalf("unverifiable configured plugin must be reported: %+v", first)
+	}
+	req.Policy.AllowedHooks = []string{first.Findings[0].Digest}
+	if again := EvaluateForeignHooks(req); !again.Deny || again.Findings[0].Allowed {
+		t.Fatalf("a configured tree beyond the verification limits cannot be approved: %+v", again)
+	}
+}
+
+func TestCleanupPreservesUnrelatedPluginFields(t *testing.T) {
+	for _, value := range []any{"unchanged", true, nil, map[string]any{"options": "unchanged"}} {
+		t.Run(fmt.Sprint(value), func(t *testing.T) {
+			req := guardRequest(t, "opencode", config.ForeignHooksRemove)
+			req.AccountHome = req.Home
+			path := filepath.Join(req.Home, ".config", "opencode", "opencode.json")
+			doc, err := json.Marshal(map[string]any{"plugin": []any{"foreign-fixture"}, "plugins": value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, path, string(doc))
+			if result, err := CleanUserForeignHooks(req, time.Now()); err != nil || len(result.Removed) != 1 {
+				t.Fatalf("cleanup must remove only the selected plugin: %+v, %v", result, err)
+			}
+			var actual map[string]any
+			if err := json.Unmarshal([]byte(readFile(t, path)), &actual); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(actual["plugins"], value) {
+				t.Fatalf("cleanup changed an unrelated plugin value: %#v, want %#v", actual["plugins"], value)
+			}
+		})
 	}
 }
 

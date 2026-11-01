@@ -201,16 +201,16 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
 		return
 	}
-	result := a.finalizeAgentHook(ctx, connectorName, req, resp, p.RawEventIDs,
-		nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra)
+	result := a.finalizeAgentHookAnswer(ctx, connectorName, req, resp, p.RawEventIDs,
+		nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra, false)
 	if !result.AuditPersisted {
 		// A write can return an error after it committed. Confirm its exact
 		// verdict before telling the hook to use the proposed answer.
 		stored, recorded, err = a.store.StoredHookVerdict(ctx, p.ID)
 		if err != nil || !recorded || !p.sandboxReceiptMatches(stored) {
 			if err == nil && !recorded {
-				closedResult := a.finalizeAgentHook(ctx, connectorName, req, closed, p.RawEventIDs,
-					nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra)
+				closedResult := a.finalizeAgentHookAnswer(ctx, connectorName, req, closed, p.RawEventIDs,
+					nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra, false)
 				a.markSandboxHookReceiptSettled(ctx, &p, closedResult)
 				if closedResult.AuditPersisted {
 					a.dispatchFinalizedAgentHookNotification(ctx, req, closed, closedResult)

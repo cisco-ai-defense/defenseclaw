@@ -17,7 +17,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +26,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 var (
@@ -204,7 +205,7 @@ const (
 	windowsEventBeforeRecords      = "before_records"
 )
 
-var windowsEnterpriseEventRecordSuffix = regexp.MustCompile(`\r\nrecord ([0-9a-f]{32})$`)
+var windowsEnterpriseEventRecordSuffix = lazyregexp.New(`\r\nrecord ([0-9a-f]{32})$`)
 
 // windowsApplicationLogEntry is one DefenseClaw event-log or Application-log
 // entry, as the event log returns it.

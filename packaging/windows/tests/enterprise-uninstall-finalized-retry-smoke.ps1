@@ -66,12 +66,17 @@ function Get-DefenseClawManagedServiceNames {
     return @()
 }
 function Assert-DefenseClawInstallTreeRetirementState {
-    param([hashtable]$Layout, [switch]$NativeSealed)
+    param([hashtable]$Layout, [switch]$NativeSealed, [switch]$AllowUnretiredAcls)
 }
 function Assert-DefenseClawRecordedArtifactHashes {
-    param($Metadata, [hashtable]$Layout, [string]$Action)
+    param($Metadata, [hashtable]$Layout, [string]$Action, [switch]$AllowRetiredArtifacts)
     $script:hashChecks++
+    # The standalone case below: the earlier run already removed the gateway.
+    if ($script:gatewayRetired -and -not $AllowRetiredArtifacts) {
+        throw 'recorded managed artifact is missing before lifecycle mutation: gateway'
+    }
 }
+$script:gatewayRetired = $false
 function Get-DefenseClawManagedHooksTeardownJournalPhase {
     param(
         [hashtable]$Layout,
@@ -170,6 +175,65 @@ catch {
 }
 if ($script:goCalls -ne 0) {
     throw 'non-finalizable journal invoked Go finalizer'
+}
+
+# GAP-1375: a standalone retry after a finalized teardown whose InstallRoot
+# removal already retired the gateway finishes; it runs no Go finalizer, and
+# the hash gate admits the retired artifact. A purge retry that still needs
+# the Go finalizer keeps the strict gate.
+function Test-DefenseClawStandaloneProfile { return $true }
+function Get-DefenseClawTombstonePurgeUserStateRequested { param($Metadata) return $false }
+function Test-DefenseClawManagedHooksCommittedTeardownSupported {
+    param([hashtable]$Layout, [string]$GatewayServiceName)
+    return $true
+}
+$layout.ManagedHooksTeardownJournalPath = Microsoft.PowerShell.Management\Join-Path `
+    ([IO.Path]::GetTempPath()) `
+    ('defenseclaw-finalized-retry-journal-' + [Guid]::NewGuid().ToString('N'))
+Microsoft.PowerShell.Management\Set-Content -LiteralPath $layout.ManagedHooksTeardownJournalPath -Value '{}'
+try {
+    $script:gatewayRetired = $true
+    foreach ($case in @(
+            @{ Receipt = 'prepared'; Purge = $false },
+            @{ Receipt = 'finalized'; Purge = $true }
+        )) {
+        $script:phase = 'finalized'
+        $script:receiptPhase = $case.Receipt
+        $script:goCalls = 0
+        $script:hashChecks = 0
+        [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+            -Layout $layout `
+            -GatewayServiceName 'DefenseClawGateway' `
+            -GuardianServiceName 'DefenseClawHookGuardian' `
+            -Purge:$case.Purge)
+        if ($script:goCalls -ne 0 -or $script:hashChecks -ne 2) {
+            throw "standalone finalized retry purge=$($case.Purge): Go calls=$($script:goCalls) hash checks=$($script:hashChecks); wanted 0 and 2"
+        }
+    }
+    $script:phase = 'finalized'
+    $script:receiptPhase = 'prepared'
+    $script:goCalls = 0
+    try {
+        [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+            -Layout $layout `
+            -GatewayServiceName 'DefenseClawGateway' `
+            -GuardianServiceName 'DefenseClawHookGuardian' `
+            -Purge)
+        throw 'a purge retry that needs the Go finalizer admitted a retired gateway'
+    }
+    catch {
+        if ($_.Exception.Message -cne
+            'recorded managed artifact is missing before lifecycle mutation: gateway') {
+            throw
+        }
+    }
+    if ($script:goCalls -ne 0) {
+        throw 'a refused purge retry invoked the Go finalizer'
+    }
+}
+finally {
+    $script:gatewayRetired = $false
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $layout.ManagedHooksTeardownJournalPath -Force -ErrorAction SilentlyContinue
 }
 
 'enterprise-uninstall-finalized-retry-smoke: PASS'

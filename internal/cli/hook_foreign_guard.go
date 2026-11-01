@@ -142,7 +142,7 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	if event == "" {
 		event = facts.event
 	}
-	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, event, startedAt, deadline)
+	decision, accountHome, _ := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, event, startedAt, deadline)
 	if decision.Deny {
 		if name == "devin" {
 			host := opts.AgentHost
@@ -261,6 +261,12 @@ type foreignHookCheckResult struct {
 	Deny     bool     `json:"deny"`
 	Reason   string   `json:"reason,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+	// Retryable is set on a deny only because the gateway could not answer
+	// for the agent session and this scan found no unapproved hook
+	// (evaluateHookForeignGuard). A plugin retries its load-time check only
+	// then; a confirmed denial holds for the agent process, whatever its
+	// reason text says.
+	Retryable bool `json:"retryable,omitempty"`
 	// HookOutput is the Hermes block object hermes-hook.sh prints for a
 	// denied tool call (Hermes shows its message). Hermes only.
 	HookOutput *hermesForeignHookBlock `json:"hook_output,omitempty"`
@@ -327,10 +333,10 @@ func runForeignHookCheck(connectorName string, stdin io.Reader, stdout io.Writer
 	}
 	opts := hookexec.Options{Connector: name, Stdin: stdin}
 	facts := captureHookPayloadFacts(&opts)
-	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, facts.event, startedAt, startedAt.Add(hookForeignGuardMaxScan))
+	decision, accountHome, unavailable := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, facts.event, startedAt, startedAt.Add(hookForeignGuardMaxScan))
 	if decision.Deny {
 		_ = hookForeignGuardRecord(accountHome, name, facts.event, decision, time.Now())
-		result = foreignHookCheckResult{Deny: true, Reason: decision.Reason}
+		result = foreignHookCheckResult{Deny: true, Reason: decision.Reason, Retryable: unavailable}
 		// The plugin shows the reason as is: a stopped gateway or a held
 		// port gets the sentence the native hooks print, not its code.
 		if text, ok := hookexec.ManagedTransportFailureText(facts.event, decision.Reason); ok {
@@ -371,8 +377,12 @@ func hookForeignGuardScanBudget(connector, event string) time.Duration {
 // with the session's state in the gateway (a session that started with an
 // unapproved hook stays denied until the agent restarts), and the agent's config-location environment is
 // recorded for the guardian's cleanup.
-func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.PublicConnectorPolicy, facts hookPayloadFacts, event string, startedAt, deadline time.Time) (enterprisepolicy.GuardDecision, string) {
-	accountHome := hookForeignGuardAccountHome()
+//
+// unavailable reports a deny made only because the gateway could not answer
+// for the session while this scan found no unapproved hook: an availability
+// failure a later check may retry, never a confirmed finding.
+func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.PublicConnectorPolicy, facts hookPayloadFacts, event string, startedAt, deadline time.Time) (decision enterprisepolicy.GuardDecision, accountHome string, unavailable bool) {
+	accountHome = hookForeignGuardAccountHome()
 	owned := []string{}
 	if accountHome != "" {
 		owned = perUserOwnedHookCommandsForBinary(name, accountHome, "", hookBinary)
@@ -382,7 +392,7 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		return enterprisepolicy.GuardDecision{
 			Deny:   true,
 			Reason: hookexec.ForeignHookBlockedReasonPrefix + " your organization blocks " + name + " hooks it has not approved, and DefenseClaw cannot determine your home directory to check for them.",
-		}, ""
+		}, "", false
 	}
 	sessionStart := hookForeignGuardSessionStart(event)
 	request := enterprisepolicy.GuardRequest{
@@ -402,9 +412,9 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		request.WorkingDir = facts.workingDirs[0]
 		request.WorkingDirs = facts.workingDirs[1:]
 	}
-	decision := enterprisepolicy.EvaluateForeignHooks(request)
+	decision = enterprisepolicy.EvaluateForeignHooks(request)
 	if policy.ForeignHooks != config.ForeignHooksRemove {
-		return decision, accountHome
+		return decision, accountHome, false
 	}
 	now := time.Now()
 	if accountHome != "" {
@@ -430,9 +440,10 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 			Decision:     decision,
 			Now:          now,
 		})
-		return decision, accountHome
+		return decision, accountHome, false
 	}
 	decision, err := hookForeignGuardExchange(name, event, startedAt, deadline, update)
+	unavailable = err != nil && !update.Decision.Deny
 	// Bounded review P1: the gateway holds the session record, in its
 	// protected data directory. No copy the hook can read is one the user
 	// cannot write (the account-home mirror of 6c2aea5449 could be deleted or
@@ -462,6 +473,11 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 			// The gateway took the exchange of a tool call but gave no
 			// answer within the hook's answer budget.
 			reason = hookexec.ManagedGatewayNoAnswerReason
+		} else if hookexec.ManagedHookSocketDirectoryUntrusted(err) {
+			// The hook socket directory is not owned by root or the
+			// gateway account: name it, as the managed shell hooks do
+			// (GAP-2405), not that the session record is unavailable.
+			reason = hookexec.ManagedHookSocketDirectoryUntrustedReason
 		} else if hookexec.ManagedGatewayPortHeld(err) {
 			// The gateway service runs but another process answers on its
 			// port: say so, not that the session record is unavailable
@@ -474,7 +490,7 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 			Findings: update.Decision.Findings,
 		}
 	}
-	return decision, accountHome
+	return decision, accountHome, unavailable
 }
 
 // hookForeignGuardGOOS is runtime.GOOS (replaceable in tests).
@@ -566,6 +582,9 @@ func captureHookPayloadFacts(opts *hookexec.Options) hookPayloadFacts {
 		source = os.Stdin
 	}
 	buffered, err := io.ReadAll(io.LimitReader(source, hookForeignGuardPayloadLimit))
+	// The facts and the hook read the payload without a UTF-8 byte order
+	// mark a Windows PowerShell wrapper put ahead of it (GAP-2449).
+	buffered = hookexec.TrimUTF8BOM(buffered)
 	opts.Stdin = io.MultiReader(bytes.NewReader(buffered), source)
 	if err != nil {
 		return facts

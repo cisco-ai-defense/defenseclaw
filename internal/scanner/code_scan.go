@@ -6,12 +6,14 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // NewCodeScanners returns the built-in scanners that make up a public
@@ -28,11 +30,37 @@ func NewCodeScanners(rulesDir string) []Scanner {
 	}
 }
 
-// ScanCode runs the public source-code scan suite over target.
+// ErrIncompleteScan means a code scan could not list a directory or read a
+// file under its target, so its findings do not cover the whole target.
+var ErrIncompleteScan = errors.New("incomplete scan")
+
+type completeScanKey struct{}
+
+// requireCompleteScan makes the code scanners fail with ErrIncompleteScan on
+// a directory or file they cannot read instead of skipping it. ScanCode sets
+// it: `scan code` must never report "clean" for content it did not read
+// (for example a root-squashed NFS skill directory). The gateway's
+// hook-time scans keep the best-effort skip.
+func requireCompleteScan(ctx context.Context) context.Context {
+	return context.WithValue(ctx, completeScanKey{}, true)
+}
+
+func completeScanRequired(ctx context.Context) bool {
+	required, _ := ctx.Value(completeScanKey{}).(bool)
+	return required
+}
+
+func incompleteScan(path string, err error) error {
+	return fmt.Errorf("%w: cannot read %s: %w", ErrIncompleteScan, path, err)
+}
+
+// ScanCode runs the public source-code scan suite over target. It fails with
+// ErrIncompleteScan when any part of target cannot be read.
 func ScanCode(ctx context.Context, target, rulesDir string) (*ScanResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = requireCompleteScan(ctx)
 	start := time.Now()
 
 	info, err := os.Lstat(target)
@@ -77,7 +105,7 @@ func ScanCode(ctx context.Context, target, rulesDir string) (*ScanResult, error)
 
 // cgExecNonEval is CG-EXEC-001's pattern without eval(), which the vuln
 // scanner already reports as CS-VLN-CODE-EVAL.
-var cgExecNonEval = regexp.MustCompile(`(?i)(os\.system|subprocess\.call|exec\(|child_process\.exec|system\()`)
+var cgExecNonEval = lazyregexp.New(`(?i)(os\.system|subprocess\.call|exec\(|child_process\.exec|system\()`)
 
 // dropEvalOnlyExecFindings removes a CodeGuard CG-EXEC-001 finding whose line
 // matched only because of eval() when CS-VLN-CODE-EVAL reports the same line

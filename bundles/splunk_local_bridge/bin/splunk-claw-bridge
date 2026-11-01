@@ -364,18 +364,24 @@ readiness_probe_limit() {
   echo $(( remaining < 5 ? remaining : 5 ))
 }
 
+# hec_health_url prints HEC's health endpoint on the host and port of
+# DEFENSECLAW_HEC_URL. It answers without a token.
+hec_health_url() {
+  printf '%s/services/collector/health' "$(printf '%s' "${DEFENSECLAW_HEC_URL}" | sed -E 's#^([a-z]+://[^/]+).*#\1#')"
+}
+
 # wait_for_hec_ready <seconds> waits until HEC, the installed DefenseClaw app
-# and Web UI all answer, and fails when the seconds run out.
+# and Web UI all answer, and fails when the seconds run out. The HEC probe
+# carries no token: it does not verify the listener's certificate, and
+# another account can take the port while the stack starts or after it
+# stopped (GAP-1172). The app probe inside the container proves the stack.
 wait_for_hec_ready() {
   local deadline limit status web_status restarts last_logs
   deadline=$((SECONDS + $1))
   while limit="$(readiness_probe_limit "${deadline}")"; do
     status="$(
       curl -sk --connect-timeout 2 --max-time "${limit}" -o /dev/null -w '%{http_code}' \
-        -H "Authorization: Splunk ${DEFENSECLAW_HEC_TOKEN}" \
-        -H 'Content-Type: application/json' \
-        "${DEFENSECLAW_HEC_URL}" \
-        -d '{"event":"bridge-ready-check"}' || true
+        "$(hec_health_url)" || true
     )"
     # HEC can answer while app installation is still failing. Require the
     # installed app (not its bind-mounted source) and Web UI before ready.

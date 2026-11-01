@@ -32,6 +32,44 @@ func TestV9SchemaErrorDoesNotPointToV8(t *testing.T) {
 	}
 }
 
+// A top-level audit_db or judge_bodies_db (the 0.8.x store paths that
+// config_version 8 moved under observability.local) is still refused, and
+// the refusal names the key that replaced it. A nested key of the same name
+// keeps the plain unknown-field answer.
+func TestV9SchemaRefusalNamesMovedStorePathKey(t *testing.T) {
+	for key, home := range map[string]string{
+		"audit_db":        "observability.local.path",
+		"judge_bodies_db": "observability.local.judge_bodies_path",
+	} {
+		err := ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\n"+key+": /tmp/store.db\n"))
+		var schemaErr *V8SchemaError
+		if !errors.As(err, &schemaErr) || schemaErr.Path != "$."+key || schemaErr.Suggestion != home ||
+			!strings.Contains(err.Error(), "config_version 9: "+key+" is invalid") ||
+			!strings.Contains(err.Error(), "did you mean "+home+"?") {
+			t.Errorf("top-level %s = %v (%+v)", key, err, schemaErr)
+		}
+		// The managed ensure and validate refusals add the same key (GAP-0188).
+		if hint, ok := schemaErr.MovedKeyHint(); !ok || hint != "it moved to "+home {
+			t.Errorf("top-level %s hint = %q, %t", key, hint, ok)
+		}
+	}
+	err := ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\nguardrail:\n  audit_db: /tmp/store.db\n"))
+	var schemaErr *V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Suggestion == "observability.local.path" {
+		t.Errorf("nested audit_db = %v (%+v)", err, schemaErr)
+	}
+	if hint, ok := schemaErr.MovedKeyHint(); ok {
+		t.Errorf("nested audit_db hint = %q", hint)
+	}
+	err = ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\naudit_dbx: /tmp/store.db\n"))
+	if !errors.As(err, &schemaErr) {
+		t.Fatalf("typo = %v", err)
+	}
+	if hint, ok := schemaErr.MovedKeyHint(); ok {
+		t.Errorf("audit_dbx hint = %q", hint)
+	}
+}
+
 // GAP-0940: an http_jsonl destination with bearer_env and bearer_credential
 // is reported as those two fields, not as the kind of another destination
 // type ("kind must be the literal jsonl").

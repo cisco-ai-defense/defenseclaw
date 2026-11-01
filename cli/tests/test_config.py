@@ -499,6 +499,32 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         self.assertEqual(reloaded.guardrail.judge.hook_timeout, 7.0)
         self.assertEqual(reloaded.gateway.port, 19999)
 
+    def test_agent_gateway_and_root_scope_survive_a_cli_save(self):
+        # connectors.agent_gateway and guardrail.chains (1.0.6) are gateway
+        # settings the CLI does not model: an unrelated CLI save keeps them.
+        fresh = self._fresh_config()
+        data_dir = fresh.data_dir
+        fresh.save()
+        cfg_path = os.path.join(data_dir, "config.yaml")
+        import yaml as _yaml
+
+        with open(cfg_path) as f:
+            raw = _yaml.safe_load(f)
+        raw["connectors"] = {"agent_gateway": {"enabled": True, "instance_name": "gas"}}
+        raw.setdefault("guardrail", {})["chains"] = {"root_scope": True}
+        with open(cfg_path, "w") as f:
+            _yaml.safe_dump(raw, f, sort_keys=False)
+
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            cfg = config_mod.load()
+            cfg.gateway.port = 19998
+            cfg.save()
+        with open(cfg_path) as f:
+            saved = _yaml.safe_load(f)
+        self.assertEqual(saved["connectors"], {"agent_gateway": {"enabled": True, "instance_name": "gas"}})
+        self.assertEqual(saved["guardrail"]["chains"], {"root_scope": True})
+        self.assertEqual(saved["gateway"]["port"], 19998)
+
     def test_dotted_literal_unknown_key_is_rejected_by_v8_schema(self):
         # v8 is closed-world: a dotted literal is not an extension escape
         # hatch and must not be confused with the modeled nested path.
@@ -1788,6 +1814,12 @@ class TestGuardrailHostField(unittest.TestCase):
             "/tmp",
         )
         self.assertEqual(gc.allow_private_upstreams, ["10.50.2.100", "172.16.0.5"])
+
+    def test_merge_guardrail_internal_domains(self):
+        gc = _merge_guardrail({"internal_domains": ["corp.example.com", " "]}, "/tmp")
+        self.assertEqual(gc.internal_domains, ["corp.example.com"])
+        self.assertEqual(_merge_guardrail({}, "/tmp").internal_domains, [])
+        self.assertEqual(_merge_guardrail({"internal_domains": "corp.example.com"}, "/tmp").internal_domains, [])
 
     def test_merge_guardrail_hilt_defaults_and_values(self):
         default_gc = _merge_guardrail({}, "/tmp")

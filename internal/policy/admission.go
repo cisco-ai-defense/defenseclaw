@@ -267,7 +267,7 @@ func legacyBalancedDefaultMCP(adm config.AdmissionConfig) bool {
 
 // WarnJudgeOnlyPluginHigh is the GAP-1389 pre-step before the admission
 // decision: with the built-in plugin HIGH action on the default or permissive
-// tier, a plugin whose only HIGHs are judge findings (LLM-OB-*, META-LLM-001)
+// tier, a plugin whose only HIGHs are judge findings (LLM-OB-*, META-LLM-<N>)
 // and that has no static concrete threat (a static MEDIUM or above other than
 // SCAN-LLM-NO-SOURCE) warns at HIGH. Findings keep their severity; explicit
 // actions, scanner overrides, a blocking MEDIUM, strict and Secure Client hold.
@@ -286,7 +286,7 @@ func WarnJudgeOnlyPluginHigh(cfg *config.Config, connector string, input *Admiss
 		rank, id := severityRank(f.Severity), f.RuleID
 		judge := (strings.HasPrefix(id, "LLM-") && id != "LLM-SCAN-ERROR") || strings.HasPrefix(id, "META-LLM-")
 		switch {
-		case rank == 4 && (strings.HasPrefix(id, "LLM-OB-") || id == "META-LLM-001"):
+		case rank == 4 && (strings.HasPrefix(id, "LLM-OB-") || metaJudgeMissedThreat(id)):
 			judgeHigh = true
 		case rank == 0 || rank >= 4 || (rank == 3 && !judge && id != "SCAN-LLM-NO-SOURCE"):
 			return
@@ -299,6 +299,17 @@ func WarnJudgeOnlyPluginHigh(cfg *config.Config, connector string, input *Admiss
 	warned.Actions = maps.Clone(adm.Actions)
 	warned.Actions["HIGH"] = actionWarn
 	input.Admission = &warned
+}
+
+// metaJudgeMissedThreat: a meta-judge missed threat (META-LLM-<N>). The
+// number is the model's own count, so every missed threat counts, not only
+// META-LLM-001 (GAP-2107); the ids the scanner writes itself do not.
+func metaJudgeMissedThreat(id string) bool {
+	switch id {
+	case "META-LLM-CORR", "META-LLM-FP-ADVISORY", "META-LLM-UNKNOWN":
+		return false
+	}
+	return strings.HasPrefix(id, "META-LLM-")
 }
 
 func compileAssetType(assetType string, own, defaults config.AdmissionAssetType, derived map[string]CompiledAction, legacyStrict bool) CompiledAdmission {

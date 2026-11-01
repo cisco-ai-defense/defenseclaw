@@ -61,6 +61,71 @@ _WRITE_TOOL_NAMES = frozenset(
 )
 
 
+def _echo_gateway_enforcement(app: AppContext, *, wait_s: float = 5.0) -> None:
+    """Say whether the running gateway enforces the list change (GAP-1879).
+
+    The tool lists live in config.yaml and the gateway reloads them a moment
+    after the write, so a hook call right after this command could still get
+    the previous verdict. Wait briefly for the gateway to apply the policy
+    digest config.yaml now computes to, then say it enforces the change or
+    that it is pending. Nothing is said when no gateway of this account can
+    be asked; a notice never fails the command.
+    """
+    try:
+        _echo_gateway_enforcement_checked(app, wait_s)
+    except Exception:  # noqa: BLE001 - a notice never fails the command.
+        return
+
+
+def _echo_gateway_enforcement_checked(app: AppContext, wait_s: float) -> None:
+    import time
+
+    from defenseclaw.gateway import (
+        OrchestratorClient,
+        foreign_loopback_listener,
+        gateway_api_client_host,
+        local_policy_digest,
+    )
+
+    cfg = app.cfg
+    port = getattr(getattr(cfg, "gateway", None), "api_port", 0)
+    if cfg is None or not port or asset_lists.is_secure_client(cfg):
+        return
+    host = gateway_api_client_host(cfg)
+    if foreign_loopback_listener(host, int(port)):
+        return
+    client = OrchestratorClient(host=host, port=port, timeout=2)
+    try:
+        want = ""
+        deadline = time.monotonic() + wait_s
+        while True:
+            try:
+                health = client.health()
+            except Exception:  # noqa: BLE001 - no gateway to ask.
+                return
+            policy = health.get("policy") if isinstance(health, dict) else None
+            applied = str(policy.get("effective_digest") or "") if isinstance(policy, dict) else ""
+            if not applied:
+                return
+            if not want:
+                local = local_policy_digest(cfg, timeout=10)
+                want = str((local or {}).get("effective_digest") or "")
+                if not want:
+                    return
+            if applied == want:
+                click.echo(f"The running gateway enforces it now (policy digest {want[:12]}).")
+                return
+            if time.monotonic() >= deadline:
+                click.echo(
+                    "Pending: the running gateway has not applied it yet. Hook calls keep the previous "
+                    "verdict until it reloads config.yaml, usually within a few seconds."
+                )
+                return
+            time.sleep(0.25)
+    finally:
+        client.close()
+
+
 def _target_name(name: str, source: str) -> str:
     """Build a source-scoped target: 'source/name' if source given, else 'name'."""
     return f"{source}/{name}" if source else name
@@ -331,6 +396,7 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
             f"reason={reason} effective_target={log_scope} "
             f"requested_scope={connector or source or 'unscoped'}",
         )
+    _echo_gateway_enforcement(app)
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +471,7 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
     )
     if not connector and not source:
         _echo_cleared_connector_overrides(cleared_connectors)
+    _echo_gateway_enforcement(app)
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +531,7 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
             f"{ux.dim('[tool]')} {name!r}{scope_note} removed from block/allow list"
         )
         _echo_cleared_connector_overrides(cleared_connectors)
+        _echo_gateway_enforcement(app)
         return
     elif not asset_lists.is_secure_client(app.cfg):
         # Nothing is stored per source: a --source block is the unscoped block.
@@ -481,6 +549,7 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
     click.echo(
         f"{ux.dim('[tool]')} {name!r}{scope_note} removed from block/allow list"
     )
+    _echo_gateway_enforcement(app)
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +631,7 @@ def list_tools(
             effective_connector=connector,
             title=f"Tools (connector={connector})",
         )
+        _echo_untimed_note(decorated)
         return
 
     audit_rows = _tool_source_audit_rows(entries)
@@ -589,6 +659,7 @@ def list_tools(
 
     label = "blocked " if filter_blocked else "allowed " if filter_allowed else ""
     shown_any = False
+    shown: list[tuple[object, str, str, str]] = []
     for c in connectors:
         rows = _tool_rows_for_connector(entries, c)
         title = f"Tools (connector={c})"
@@ -596,6 +667,7 @@ def list_tools(
             click.echo(f"{title}: No {label}tools in the block/allow list.")
             continue
         _print_tool_rows(rows, effective_connector=c, title=title)
+        shown.extend(rows)
         shown_any = True
 
     if audit_rows:
@@ -603,7 +675,9 @@ def list_tools(
             audit_rows,
             title="Tool audit rows (source-scoped; not runtime-enforced)",
         )
+        shown.extend(audit_rows)
         shown_any = True
+    _echo_untimed_note(shown)
 
     if not shown_any and not connectors:
         click.echo(f"No {label}tools in the block/allow list.")
@@ -701,6 +775,15 @@ def _print_tool_rows(
             click.echo(ux._style(line_core, fg=color))
         else:
             click.echo(line_core)
+
+
+def _echo_untimed_note(rows: list[tuple[object, str, str, str]]) -> None:
+    """Say once what a "-" in UPDATED means. config.yaml stores no time for a
+    rule, so a block made on 1.0 or moved there by the 0.8.x upgrade shows "-"
+    before and after every upgrade (GAP-0309, GAP-1343)."""
+    if any(e.updated_at is None for (e, _conn, _disp, _scope) in rows):
+        click.echo(ux.dim("UPDATED -: config.yaml records no time for a block or allow entry; "
+                          "none is kept on upgrade."))
 
 
 # ---------------------------------------------------------------------------

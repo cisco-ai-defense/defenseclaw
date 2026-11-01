@@ -184,6 +184,16 @@ func snapshotHookDir(t *testing.T, dir string) map[string]hostHookGoldenFile {
 		if err != nil {
 			return err
 		}
+		// A per-user shell hook names the data directory it was written
+		// into (HookHomeSH); the test's temporary folder stands for the
+		// golden one.
+		data = bytes.ReplaceAll(data, []byte(shellSingleQuote(filepath.Dir(dir))), []byte("'/home/golden/.defenseclaw'"))
+		// The per-user .gateway-helper record names the gateway under the
+		// home of the account that runs the test; /home/golden stands for
+		// it, so the golden does not depend on that account.
+		if home := userHomeDir(); filepath.IsAbs(home) {
+			data = bytes.ReplaceAll(data, []byte(filepath.Join(home, ".local", "bin")+"/"), []byte("/home/golden/.local/bin/"))
+		}
 		sum := sha256.Sum256(data)
 		out[filepath.ToSlash(rel)] = hostHookGoldenFile{
 			Mode:   info.Mode().Perm().String(),
@@ -295,7 +305,7 @@ const bridgeHostTemplateDir = "testdata/bridge_host"
 // bridge; the host template keeps each as its {{.Field}} placeholder.
 var bridgeHostTemplateFields = []string{
 	"APIAddr", "TokenFileJS", "FailMode", "HookSocketJS", "ServiceUID",
-	"ForeignHookGuardJS", "InstallMarkerJS", "ListenerProofJS", "OutageFailMode",
+	"ForeignHookGuardJS", "InstallMarkerJS", "ListenerProofJS", "WindowsPowerShellJS",
 	"LifecycleMarkerJS", "GatewayBinaryJS",
 }
 

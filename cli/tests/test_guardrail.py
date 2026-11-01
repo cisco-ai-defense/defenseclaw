@@ -406,58 +406,6 @@ class TestPatchOpenclawConfig(unittest.TestCase):
             # Should succeed without error regardless of empty model_name
             self.assertIsNotNone(result)
 
-    def test_enables_plugin_approvals_when_requested(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = self._make_openclaw_json(tmpdir)
-
-            patch_openclaw_config(
-                path,
-                "claude-opus",
-                4000,
-                "sk-dc-test",
-                "",
-                enable_plugin_approvals=True,
-            )
-
-            with open(path) as f:
-                cfg = json.load(f)
-
-            self.assertTrue(cfg["approvals"]["plugin"]["enabled"])
-            self.assertEqual(cfg["approvals"]["plugin"]["mode"], "session")
-
-    def test_preserves_existing_plugin_approval_routing(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = self._make_openclaw_json(tmpdir)
-            with open(path) as f:
-                cfg = json.load(f)
-            cfg["approvals"] = {
-                "plugin": {
-                    "mode": "both",
-                    "targets": [{"channel": "slack", "to": "#secops"}],
-                }
-            }
-            with open(path, "w") as f:
-                json.dump(cfg, f)
-
-            patch_openclaw_config(
-                path,
-                "claude-opus",
-                4000,
-                "sk-dc-test",
-                "",
-                enable_plugin_approvals=True,
-            )
-
-            with open(path) as f:
-                cfg = json.load(f)
-
-            self.assertTrue(cfg["approvals"]["plugin"]["enabled"])
-            self.assertEqual(cfg["approvals"]["plugin"]["mode"], "both")
-            self.assertEqual(
-                cfg["approvals"]["plugin"]["targets"],
-                [{"channel": "slack", "to": "#secops"}],
-            )
-
 
 class TestRestoreOpenclawConfig(unittest.TestCase):
     def test_removes_plugin_and_legacy_providers(self):
@@ -2500,7 +2448,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 elif name == "opencode":
                     value.update(
                         {
-                            "contract_id": "opencode-hooks-v1",
+                            "contract_id": "opencode-hooks-v2",
                             "compatibility_status": "known",
                             "hook_script_version": "v7",
                             "locations": {"hook_config_paths": [plugin_path]},
@@ -2687,7 +2635,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             elif name == "opencode":
                 value.update(
                     {
-                        "contract_id": "opencode-hooks-v1",
+                        "contract_id": "opencode-hooks-v2",
                         "compatibility_status": "known",
                         "hook_script_version": "v7",
                         "locations": {"hook_config_paths": ["unused-opencode.js"]},
@@ -2898,7 +2846,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
     def test_wait_for_connector_runtime_requires_fresh_matching_state(self):
         from defenseclaw.commands.cmd_setup import (
             _active_connector_state_marker,
-            _hook_contract_lock_marker,
+            _regular_file_marker,
             _wait_for_connector_runtime,
         )
 
@@ -2913,7 +2861,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                     lock_file,
                 )
             state_marker = _active_connector_state_marker(tmpdir)
-            lock_marker = _hook_contract_lock_marker(tmpdir)
+            lock_marker = _regular_file_marker(lock_path)
             self.assertIsNotNone(state_marker)
             self.assertIsNotNone(lock_marker)
 
@@ -3181,9 +3129,9 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 "connectors": {
                     "opencode": {
                         "connector": "opencode",
-                        "raw_agent_version": "1.18.10",
-                        "normalized_agent_version": "1.18.10",
-                        "contract_id": "opencode-hooks-v1",
+                        "raw_agent_version": "2.1.4",
+                        "normalized_agent_version": "2.1.4",
+                        "contract_id": "opencode-hooks-v2",
                         "compatibility_status": "known",
                         "hook_script_version": "v7",
                         "hook_fail_mode": "open",
@@ -3901,15 +3849,26 @@ class BalancedPermissiveNoisePosture(unittest.TestCase):
                 commands = _load_profile_rules(profile, "commands.yaml")
                 paths = _load_profile_rules(profile, "sensitive-paths.yaml")
 
-                # Owner decision for 1.0 (GAP-0893): curl piped to a shell stays off outside strict.
-                self.assertEqual(commands["CMD-PIPE-CURL"]["expression"], "false")
-                self.assertEqual(commands["CMD-PIPE-CURL"]["pattern"], "a^")
-                self.assertEqual(commands["CMD-PIPE-CURL"]["severity"], "HIGH")
+                # Generic installer pipelines: permissive keeps them off;
+                # default detects them at HIGH with the strict rule body. The
+                # gateway owner is alert-only, so the call runs (GAP-0081).
+                strict = _load_profile_rules("strict", "commands.yaml")
+                for rule_id in ("CMD-PIPE-CURL", "CMD-PIPE-WGET"):
+                    self.assertEqual(commands[rule_id]["severity"], "HIGH")
+                    if profile == "permissive":
+                        self.assertEqual(commands[rule_id]["expression"], "false")
+                        self.assertEqual(commands[rule_id]["pattern"], "a^")
+                    else:
+                        self.assertNotEqual(commands[rule_id]["expression"], "false")
+                        self.assertNotEqual(commands[rule_id]["pattern"], "a^")
+                        self.assertIn(rule_id.rsplit("-", 1)[1].lower(), commands[rule_id]["expression"])
+                        # POSIX only: PowerShell web cmdlets keep CMD-WIN-IWR-IEX.
+                        self.assertNotIn("invoke-webrequest", commands[rule_id]["expression"])
+                        self.assertIn(commands[rule_id]["pattern"].replace("(?i)", ""), strict[rule_id]["pattern"])
                 self.assertEqual(paths["PATH-ENV-FILE"]["expression"], "false")
                 self.assertEqual(paths["PATH-ENV-FILE"]["pattern"], "a^")
 
-                for rule_id in ("CMD-PIPE-WGET", "CMD-PIPE-BASE64"):
-                    self.assertEqual(commands[rule_id]["severity"], "HIGH")
+                self.assertEqual(commands["CMD-PIPE-BASE64"]["severity"], "HIGH")
 
 
 if __name__ == "__main__":

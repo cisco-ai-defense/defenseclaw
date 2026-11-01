@@ -1,5 +1,6 @@
 import matrix from '@/data/capability-matrix.json';
 import type { OsId } from '@/data/downloads';
+import { connectorById } from '@/data/support-matrix';
 
 /**
  * Landing-page connector facts, derived from data/capability-matrix.json so
@@ -27,10 +28,10 @@ const ORDER = [
 
 const SHORT: Record<string, string> = { copilot: 'Copilot' };
 
-function windowsStatus(value: string): OsStatus {
+function displayedStatus(value: string): OsStatus {
   if (value === 'supported') return 'supported';
   if (value === 'unsupported') return 'unsupported';
-  // "degraded": the code allows it, but it is not certified on Windows.
+  // A preview or an unlisted cell does not claim live certification.
   return 'preview';
 }
 
@@ -42,15 +43,20 @@ const rank = (id: string) => {
 export const HOME_CONNECTORS: HomeConnector[] = matrix.connectors
   .filter((connector) => connector.family !== 'proxy')
   .sort((a, b) => rank(a.id) - rank(b.id))
-  .map((connector) => ({
-    id: connector.id,
-    label: connector.label,
-    short: SHORT[connector.id] ?? connector.label,
-    // Every hook connector runs on Linux and macOS; Windows comes from the
-    // matrix's windowsSupport (platform_support.go).
-    os: { linux: 'supported', macos: 'supported', windows: windowsStatus(connector.windowsSupport) },
-    windowsNote: connector.windowsNote,
-  }));
+  .map((connector) => {
+    const support = connectorById(connector.id);
+    return {
+      id: connector.id,
+      label: connector.label,
+      short: SHORT[connector.id] ?? connector.label,
+      os: {
+        linux: displayedStatus(support?.oss.linux.status ?? 'preview'),
+        macos: displayedStatus(support?.oss.macos.status ?? 'preview'),
+        windows: displayedStatus(support?.oss.windows.status ?? connector.windowsSupport),
+      },
+      windowsNote: connector.windowsNote,
+    };
+  });
 
 export const AGENT_COUNT = HOME_CONNECTORS.length;
 

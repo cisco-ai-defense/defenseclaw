@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -48,6 +49,64 @@ func checkCandidateAssets(cfg *config.Config) error {
 		return err
 	}
 	return checkCandidateWebhooks(cfg)
+}
+
+// UnselectedCustomPackProblems names each guardrail.custom_packs entry that
+// no setting selects and that the gateway would refuse once a setting did:
+// its folder is missing, the pack fails validation, or its digest pin does
+// not match the pack's files. CheckRulePacks loads only the selected packs,
+// so a managed lifecycle applied such an entry with no notice, while config
+// set says it is registered but will not load (GAP-1076). The digest check
+// is unchanged: these entries are reported, not loaded.
+func UnselectedCustomPackProblems(cfg *config.Config) []string {
+	if cfg == nil || cfg.SecureClientIntegration() || len(cfg.Guardrail.CustomPacks) == 0 {
+		return nil
+	}
+	configs := []*config.Config{cfg}
+	if cfg.Guardrail.HasProfiles() {
+		if derived, err := cfg.DeriveGuardrailProfiles(); err == nil {
+			for _, profile := range derived {
+				configs = append(configs, profile.Config)
+			}
+		}
+	}
+	selected := map[string]bool{}
+	tuned := profileConnectorNames(cfg)
+	for _, c := range configs {
+		for _, scope := range profileRulePackScopes(c, tuned) {
+			if scope.ref.Name != "" {
+				selected[scope.ref.Name] = true
+			}
+		}
+	}
+	names := make([]string, 0, len(cfg.Guardrail.CustomPacks))
+	for name := range cfg.Guardrail.CustomPacks {
+		if !selected[name] {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	cache := guardrail.NewRulePackCache()
+	var problems []string
+	for _, name := range names {
+		pack := cfg.Guardrail.CustomPacks[name]
+		head := fmt.Sprintf("guardrail.custom_packs.%s is registered but will not load", name)
+		dir := strings.TrimSpace(pack.Path)
+		if info, err := os.Stat(dir); dir == "" || err != nil || !info.IsDir() {
+			problems = append(problems, fmt.Sprintf("%s: %q is not a folder", head, dir))
+			continue
+		}
+		loaded, err := loadValidatedRulePack(cache, dir, "guardrail.custom_packs."+name)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", head, err))
+			continue
+		}
+		if got := "sha256:" + loaded.FilesDigest(); !strings.EqualFold(strings.TrimSpace(pack.Digest), got) {
+			problems = append(problems, fmt.Sprintf("%s: the files at %s have digest %s, which does not match guardrail.custom_packs.%s.digest; "+
+				"review the pack, then pin that digest in the key", head, dir, got, name))
+		}
+	}
+	return problems
 }
 
 // CheckRulePacks builds every rule pack cfg selects (globally, per connector

@@ -121,8 +121,8 @@ func TestWindowsCursorTargetModeVerificationRejectsMismatch(t *testing.T) {
 }
 
 func TestDeferredWindowsCursorModeUsesConfiguredPolicyAndVersionFallback(t *testing.T) {
-	// The Secure Client profile of a verified install (GAP-0606).
-	setStandaloneProfileForTest(t, false)
+	// The version fallback and the open default are Secure Client's (#1163).
+	useWindowsSecureClientForTest(t)
 	for _, tc := range []struct{ version, configured, want string }{
 		{"3.21.16", "", "open"}, {"3.21.16", "open", "open"}, {"3.21.16", "closed", "closed"},
 		{"", "closed", "open"}, {"not-a-version", "closed", "open"}, {"0.0.1", "closed", "open"},

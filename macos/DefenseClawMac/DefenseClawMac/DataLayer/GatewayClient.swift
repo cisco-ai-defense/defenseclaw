@@ -17,7 +17,93 @@
 // Async REST client for the DefenseClaw Go gateway sidecar (localhost only).
 // Endpoint set and timeouts mirror the Python TUI's OrchestratorClient.
 
+import Darwin
 import Foundation
+
+/// Loopback TCP does not authenticate the process on the other end. Refuse to
+/// send gateway credentials, or trust health, unless the listening socket is
+/// owned by this login account or by root (administrator gateway mode) and the
+/// process executable is a gateway binary. This narrows the port-race window;
+/// a future Unix socket with peer credentials would provide stronger binding.
+enum GatewayListenerTrust {
+    static func isTrusted(_ url: URL, accountUID: uid_t = getuid()) -> Bool {
+        guard let port = url.port, port > 0 && port <= 65_535 else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        process.arguments = ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpun"]
+        process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return false }
+        let timeout = DispatchWorkItem {
+            if process.isRunning { process.terminate() }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: timeout)
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        timeout.cancel()
+        guard process.terminationStatus == 0, let listing = String(data: data, encoding: .utf8) else {
+            return false
+        }
+        return isTrusted(url, listing: listing, accountUID: accountUID)
+    }
+
+    static func executablePath(pid: pid_t) -> String? {
+        var buffer = [CChar](repeating: 0, count: 4_096)
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    static func isTrusted(
+        _ url: URL,
+        listing: String,
+        accountUID: uid_t,
+        executablePath: (pid_t) -> String? = { GatewayListenerTrust.executablePath(pid: $0) }
+    ) -> Bool {
+        guard let host = url.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")),
+              let port = url.port else { return false }
+        var owner: uid_t?
+        var pid: pid_t?
+        var matched = false
+        for field in listing.split(separator: "\n") {
+            guard let kind = field.first else { continue }
+            let value = field.dropFirst()
+            switch kind {
+            case "p":
+                pid = pid_t(value)
+                owner = nil
+            case "u": owner = uid_t(value)
+            case "n":
+                guard let separator = value.lastIndex(of: ":"),
+                      Int(value[value.index(after: separator)...]) == port else { continue }
+                let boundHost = String(value[..<separator]).lowercased()
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                let addresses = host == "localhost" ? ["127.0.0.1", "::1"] : [host]
+                guard addresses.contains(boundHost) || ["*", "0.0.0.0", "::"].contains(boundHost) else {
+                    continue
+                }
+                guard let owner, owner == 0 || owner == accountUID,
+                      let pid, let path = executablePath(pid),
+                      URL(fileURLWithPath: path).lastPathComponent == "defenseclaw-gateway" else {
+                    return false
+                }
+                matched = true
+            default: break
+            }
+        }
+        return matched
+    }
+}
+
+private final class GatewayRedirectGuard: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
 
 private struct GatewayMutationDenied: LocalizedError {
     let reason: String
@@ -31,6 +117,8 @@ actor GatewayClient {
     private var mutationDenialReason: String
     private let session: URLSession
     private let responseByteLimit: Int
+    private let listenerTrust: @Sendable (URL) -> Bool
+    private let redirectGuard = GatewayRedirectGuard()
 
     static let defaultTimeout: TimeInterval = 5
     static let scanTimeout: TimeInterval = 120
@@ -43,13 +131,15 @@ actor GatewayClient {
         mutationsAllowed: Bool = false,
         mutationDenialReason: String = "This installation is read only.",
         maximumResponseBytes: Int = GatewayClient.maximumResponseBytes,
-        session: URLSession? = nil
+        session: URLSession? = nil,
+        listenerTrust: @escaping @Sendable (URL) -> Bool = { GatewayListenerTrust.isTrusted($0) }
     ) {
         self.baseURL = config.baseURL
         self.token = config.gatewayToken
         self.mutationsAllowed = mutationsAllowed
         self.mutationDenialReason = mutationDenialReason
         self.responseByteLimit = max(1, maximumResponseBytes)
+        self.listenerTrust = listenerTrust
         let conf = URLSessionConfiguration.ephemeral
         conf.timeoutIntervalForRequest = Self.defaultTimeout
         conf.waitsForConnectivity = false
@@ -89,6 +179,9 @@ actor GatewayClient {
         guard let url = components.url, Self.isLoopback(url) else {
             throw GatewayError.badResponse("refusing non-loopback request URL")
         }
+        guard listenerTrust(url) else {
+            throw GatewayError.badResponse("refusing an untrusted gateway listener on the configured loopback port")
+        }
         var req = URLRequest(url: url, timeoutInterval: timeout)
         req.httpMethod = method
         req.setValue("macos-app", forHTTPHeaderField: "X-DefenseClaw-Client")
@@ -97,12 +190,12 @@ actor GatewayClient {
             if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONSerialization.data(withJSONObject: body ?? [:])
-        } else if let token {
+        } else if path != "/health", let token {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
         do {
-            let (bytes, response) = try await session.bytes(for: req)
+            let (bytes, response) = try await session.bytes(for: req, delegate: redirectGuard)
             guard let http = response as? HTTPURLResponse else {
                 throw GatewayError.badResponse("non-HTTP response")
             }
@@ -599,6 +692,30 @@ actor GatewayClient {
             throw GatewayError.badResponse("/api/v1/sandbox/approvals has no approvals list")
         }
         return SandboxDecoding.approvals(from: json)
+    }
+
+    /// GET /sandboxes/{name}/processes: a sandbox's process tree while its
+    /// process tree is on (observe.process_tree); the raw payload, rendered
+    /// by SandboxProcessTree.
+    func sandboxProcesses(name: String) async throws -> Any {
+        let segment = try encodedPathSegment(name)
+        return try await getJSON("/api/v1/sandbox/sandboxes/\(segment)/processes")
+    }
+
+    /// GET /sandboxes/{name}/logs?lines=1: how the sandbox's latest detached
+    /// run ended, from the log the daemon kept when it last stopped it; nil
+    /// when no log was kept (404 not_found).
+    func sandboxRunLog(name: String) async throws -> SandboxRunLog? {
+        let segment = try encodedPathSegment(name)
+        do {
+            let data = try await request(
+                "GET", "/api/v1/sandbox/sandboxes/\(segment)/logs",
+                queryItems: [URLQueryItem(name: "lines", value: "1")]
+            )
+            return SandboxRunLog.decode(try JSONSerialization.jsonObject(with: data))
+        } catch GatewayError.degraded(let status, _) where status == 404 {
+            return nil
+        }
     }
 
     /// Buffered activity after `since` (the app polls; the TUI streams).

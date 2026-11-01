@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -532,6 +533,24 @@ def test_only_a_0x_import_selects_the_windows_agents(data_dir: Path, recorded: l
     assert calls == [str(data_dir)]
 
 
+def test_every_upgrade_seals_the_windows_hook_credentials(data_dir: Path, recorded: list[str], monkeypatch) -> None:
+    # GAP-2207: 1.0.2 left .hook-amp/.hook-opencode/... tokens with an
+    # inherited DACL; after a 1.0.2 -> 1.0.5 upgrade setup rotate-token
+    # refused them, because only a 0.x import sealed them. A check changes
+    # nothing.
+    calls: list[str] = []
+    monkeypatch.setattr(migrations, "_seal_windows_hook_credentials", calls.append)
+    _write_config(data_dir, f"config_version: {migrations._FIRST_V8_CONFIG_VERSION}\n")
+
+    migrate(str(data_dir), from_version="1.0.2", check=True)
+    assert calls == []
+    migrate(str(data_dir), from_version="1.0.2")
+    migrate(str(data_dir), from_version="1.0.4")
+    migrate(str(data_dir))
+
+    assert calls == [str(data_dir)] * 3
+
+
 def test_a_0x_import_with_a_v8_config_selects_the_windows_agents(
     data_dir: Path, recorded: list[str], monkeypatch
 ) -> None:
@@ -710,6 +729,24 @@ def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path, v8_tar
     assert ok.exit_code == 0, ok.output
 
 
+def test_cli_check_omits_unchanged_version_range(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        migrations,
+        "migrate",
+        lambda *_args, **_kwargs: migrations.MigrateResult(
+            from_config_version=9,
+            to_config_version=9,
+            applied=["update renamed and removed connectors"],
+            changed=True,
+        ),
+    )
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check"])
+    assert result.exit_code == 0, result.output
+    assert "1 migration step(s) pending (config_version 9):" in result.output
+    assert "9 -> 9" not in result.output
+    assert "update renamed and removed connectors" in result.output
+
+
 # GAP-0163: a legacy custom-providers.json next to a config_version 9 file.
 
 
@@ -837,6 +874,39 @@ def test_migrate_puts_back_the_keys_a_downgrade_set_aside(data_dir: Path, monkey
     assert not record.exists()
 
 
+def test_migrate_puts_back_the_1_0_6_blocks_a_downgrade_set_aside(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    for name in ("_refresh_local_observability_bundle", "_refresh_guardrail_profiles", "_refresh_rego_policies"):
+        monkeypatch.setattr(migrations, name, lambda *_args: None)
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(
+        data_dir, {"guardrail.chains": {"root_scope": True}, "connectors": {"agent_gateway": {"enabled": True}}}
+    )
+
+    migrate(str(data_dir))
+
+    restored = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert restored["guardrail"]["chains"] == {"root_scope": True}
+    assert restored["connectors"] == {"agent_gateway": {"enabled": True}}
+    assert not record.exists()
+
+
+def test_set_aside_internal_domains_is_put_back(data_dir: Path) -> None:
+    """#1390: a downgrade below 1.0.6 set guardrail.internal_domains aside."""
+    import yaml
+
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(data_dir, {"guardrail.internal_domains": ["corp.example.com"]})
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["guardrail"]["internal_domains"] == ["corp.example.com"]
+    assert not record.exists()
+
+
 def test_set_aside_keys_keep_a_value_set_again_and_a_later_release_key(data_dir: Path) -> None:
     import yaml
 
@@ -863,3 +933,152 @@ def test_set_aside_key_that_cannot_be_put_back_is_named_with_its_command(
     assert record.exists()
     captured = capsys.readouterr()
     assert "defenseclaw config set openshell.trusted_ca_bundle relative.pem" in captured.out + captured.err
+
+
+def _sealed_codex_lock(data_dir: Path, exe: Path, digest: str) -> None:
+    lock = {
+        "version": 1,
+        "connectors": {
+            "codex": {
+                "connector": "codex",
+                "agent_executable_source": "setup-selected",
+                "agent_executable": str(exe),
+                "agent_executable_sha256": digest,
+                "raw_agent_version": "codex-cli 0.160.0",
+            }
+        },
+    }
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
+
+
+def _reselect_fixture(data_dir: Path, monkeypatch, *, mode: str = ""):
+    from types import SimpleNamespace
+
+    from defenseclaw import agent_selection, config
+
+    exe = data_dir / "codex.exe"
+    exe.write_bytes(b"codex 0.160.0")
+    _sealed_codex_lock(data_dir, exe, hashlib.sha256(b"codex 0.160.0").hexdigest())
+    monkeypatch.setattr(
+        config,
+        "load",
+        lambda **_kwargs: SimpleNamespace(active_connectors=lambda: ["codex", "claudecode"], deployment_mode=mode),
+    )
+    monkeypatch.delenv(config.DEPLOYMENT_MODE_ENV, raising=False)
+
+    def digest(path: str) -> str:
+        # Plain open: pathlib refuses a Path once os.name says nt.
+        with open(path, "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()
+
+    monkeypatch.setattr(agent_selection, "stable_executable_sha256", digest)
+    requests: list[list[str]] = []
+
+    def record(_data_dir, connectors):
+        requests.append(list(connectors))
+        return {"codex": SimpleNamespace(executable=str(exe), raw_version="codex-cli 0.165.0")}, {}
+
+    monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
+    monkeypatch.setattr(os, "name", "nt")
+    return exe, requests
+
+
+def test_an_upgrade_selects_again_a_windows_agent_that_updated_itself(data_dir: Path, monkeypatch, capsys) -> None:
+    # GAP-2513: Codex updated itself (npm 0.159.3 -> 0.165.0) after setup, so
+    # its sealed SHA-256 no longer matched and the upgrade restored the old
+    # install with the gateway stopped. The upgrade now records the selection
+    # setup codex records, for the changed agent only.
+    exe, requests = _reselect_fixture(data_dir, monkeypatch)
+    exe.write_bytes(b"codex 0.165.0")
+
+    migrations.reselect_updated_windows_agents(str(data_dir))
+
+    assert requests == [["codex"]]
+    out = capsys.readouterr().out
+    assert "codex changed since DefenseClaw set it up" in out
+    assert f"selected {exe} (codex-cli 0.165.0) for the codex connector" in out
+
+
+def test_an_upgrade_keeps_the_sealed_lock_of_an_unchanged_windows_agent(data_dir: Path, monkeypatch) -> None:
+    _exe, requests = _reselect_fixture(data_dir, monkeypatch)
+
+    migrations.reselect_updated_windows_agents(str(data_dir))
+
+    assert requests == []
+
+
+def test_a_managed_upgrade_does_not_select_an_updated_windows_agent(data_dir: Path, monkeypatch) -> None:
+    exe, requests = _reselect_fixture(data_dir, monkeypatch, mode="managed_enterprise")
+    exe.write_bytes(b"codex 0.165.0")
+
+    migrations.reselect_updated_windows_agents(str(data_dir))
+
+    assert requests == []
+
+
+def test_every_upgrade_checks_the_windows_agents_setup_selected(
+    data_dir: Path, recorded: list[str], monkeypatch
+) -> None:
+    reselected: list[str] = []
+    selected: list[str] = []
+    monkeypatch.setattr(migrations, "reselect_updated_windows_agents", reselected.append)
+    monkeypatch.setattr(migrations, "_select_windows_agents", selected.append)
+    _write_config(data_dir, "config_version: 7\n")
+
+    migrate(str(data_dir), from_version="0.8.4")
+    migrate(str(data_dir), from_version="1.0.4")
+
+    assert selected == [str(data_dir)]
+    assert reselected == [str(data_dir), str(data_dir)]
+
+
+def test_the_rollback_reselect_entry_prints_its_warning_on_a_cp1252_console(data_dir: Path, monkeypatch) -> None:
+    # GAP-2513 review: install.ps1 -Rollback ran the reselect through
+    # 'python -c', which skips the CLI's console stream setup, so its
+    # warning glyph raised UnicodeEncodeError on a cp1252 stream and a
+    # traceback printed in the middle of a successful rollback. The installer
+    # now runs 'defenseclaw migrate --reselect-updated-agents'.
+    import io
+    import sys
+
+    from defenseclaw import main as main_module
+    from defenseclaw import ux
+
+    seen: list[str] = []
+
+    def reselect(path: str) -> None:
+        seen.append(path)
+        ux.warn("codex changed since DefenseClaw set it up (an agent update does this)", indent="    ")
+
+    monkeypatch.setattr(migrations, "reselect_updated_windows_agents", reselect)
+    monkeypatch.setattr(ux, "_configured_unicode_output", None)
+    monkeypatch.setattr(ux, "_configured_unicode_error_output", None)
+    monkeypatch.setenv("COLUMNS", "120")
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    err = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    monkeypatch.setattr(
+        sys, "argv", ["defenseclaw", "migrate", "--reselect-updated-agents", "--data-dir", str(data_dir)]
+    )
+
+    with pytest.raises(SystemExit) as exited:
+        main_module.main()
+
+    out.flush()
+    err.flush()
+    printed = out.buffer.getvalue().decode("utf-8") + err.buffer.getvalue().decode("utf-8")
+    assert exited.value.code in (0, None), printed
+    assert seen == [str(data_dir)]
+    assert "codex changed since DefenseClaw set it up" in printed
+    assert "Traceback" not in printed
+    assert not (data_dir / "config.yaml").exists()
+
+
+def test_the_rollback_selects_updated_agents_through_the_cli_entry() -> None:
+    # GAP-2513 review: not 'python -c', which has no console stream setup.
+    script = (Path(__file__).resolve().parents[2] / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    body = script[script.index("function Select-UpdatedAgents") :]
+    body = body[: body.index("\n}\n")]
+    assert '@("migrate", "--reselect-updated-agents", "--data-dir", $Data)' in body
+    assert '"-c"' not in body

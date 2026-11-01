@@ -25,9 +25,10 @@ import (
 )
 
 type bundleAnchorsOptions struct {
-	file     string
-	lockWait time.Duration
-	json     bool
+	file        string
+	deviceGroup string
+	lockWait    time.Duration
+	json        bool
 }
 
 // bundleAnchorsResult is the anchors install --json document
@@ -42,6 +43,7 @@ type bundleAnchorsResult struct {
 	SHA256         string                     `json:"sha256,omitempty"`
 	PreviousSHA256 string                     `json:"previous_sha256,omitempty"`
 	TenantID       string                     `json:"tenant_id,omitempty"`
+	DeviceGroups   []string                   `json:"device_groups,omitempty"`
 	KeyIDs         []string                   `json:"key_ids,omitempty"`
 	Warnings       []enterprisebundle.Warning `json:"warnings"`
 	Errors         []bundleError              `json:"errors"`
@@ -70,11 +72,17 @@ device, for a management agent that runs without the MDM kit. The file named
 by --file must be a valid anchor file and, like the installed file, owned by
 root with neither it nor any folder above it writable by another account or a
 link; it is read once and exactly those bytes are written, under the lifecycle
-lock, root-owned with mode 0644. A byte-identical file writes nothing. When the
+lock, root-owned with mode 0644. --device-group G pins the device to that one
+group: the file must list G or no group, and the installed file lists G alone
+(its device_groups names the groups this device is in, and a bundle for another
+group is refused target_mismatch); the file is then the checked file with that
+one change. A byte-identical file writes nothing. When the
 installed file fails its check after the write, the previous file is put back.
 key_unknown and key_revoked warn when the new anchors no longer trust the
 signer of the confirmed bundle; that bundle keeps enforcing, and the next
-bundle must be signed by an active key. Every install that changes the
+bundle must be signed by an active key. To install anchors and apply the first
+bundle as one step that puts the previous file back when the bundle fails, use
+enterprise bundle apply --bundle <file> --trust-anchors <file>. Every install that changes the
 file, is refused or fails is recorded as a config.trust_anchors.changed audit
 event (hashes and key ids only), reported by the gateway when it runs; an
 install that cannot be recorded is refused (state_invalid) before the file is
@@ -82,7 +90,6 @@ written. The result also carries sha256, previous_sha256 and key_ids. Exit codes
 (errors[].code names the refusal), 2 usage, 75 busy. On Windows, use enterprise windows ensure --profile standalone
 --trust-anchors <file>.`,
 		Example:      `  defenseclaw-gateway enterprise bundle anchors install --file /var/lib/acme-agent/trust/bundle-anchors.json --lock-wait 10m --json`,
-		Args:         bundleNoArgs,
 		SilenceUsage: true,
 		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -91,9 +98,22 @@ written. The result also carries sha256, previous_sha256 and key_ids. Exit codes
 	}
 	f := install.Flags()
 	f.StringVar(&opts.file, "file", "", "the bundle-anchors.json to install, in a root-only folder")
+	f.StringVar(&opts.deviceGroup, "device-group", "", "pin this device to one device group: the file must list it or no group, and the installed file lists it alone")
 	addLockWaitFlag(f, &opts.lockWait)
 	f.BoolVar(&opts.json, "json", false, "print the result as JSON")
-	install.SetFlagErrorFunc(lifecycleFlagError)
+	flagError := func(c *cobra.Command, err error) error {
+		if ev, ok := anchorsFailureEvent("invalid_arguments", false, nil); ok {
+			recordUnixChangeRefusal(c, ev)
+		}
+		return lifecycleFlagError(c, err)
+	}
+	install.SetFlagErrorFunc(flagError)
+	install.Args = func(c *cobra.Command, args []string) error {
+		if err := strayArgumentError(c, args); err != nil {
+			return flagError(c, err)
+		}
+		return nil
+	}
 	group.AddCommand(install)
 	return group
 }
@@ -133,23 +153,37 @@ func bundleAnchorsInstall(ctx context.Context, cmd *cobra.Command, opts *bundleA
 		return &enterprisebundle.Error{Code: enterprisebundle.CodeNotManaged,
 			Detail: "this computer is not a standalone managed device; install the enterprise profile first"}
 	}
+	refuse := func(err error) error {
+		code := string(enterprisebundle.CodeStateInvalid)
+		if commandExitCode(err) == enterprisestatus.UnixExitInvalidArgs {
+			code = "invalid_arguments"
+		}
+		if ev, ok := anchorsFailureEvent(code, false, nil); ok {
+			recordUnixChangeRefusal(cmd, ev)
+		}
+		return err
+	}
 	if opts.file == "" {
-		return bundleUsage("--file is required")
+		return refuse(bundleUsage("--file is required"))
+	}
+	if cmd.Flags().Changed("device-group") && !enterprisebundle.ValidDeviceGroup(opts.deviceGroup) {
+		return refuse(bundleUsage("--device-group: want 1-128 characters of [A-Za-z0-9._-]"))
 	}
 	if err := checkLockWait(cmd, opts.lockWait); err != nil {
-		return err
+		return refuse(err)
 	}
 	src, err := filepath.Abs(opts.file)
 	if err != nil {
-		return bundleUsage("--file: %v", err)
+		return refuse(bundleUsage("--file: %v", err))
 	}
 	env, err := newUnixLifecycleEnv(runtime.GOOS)
 	if err != nil {
-		return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+		return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()})
 	}
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait
 	}
+	env.AnchorsDeviceGroup = opts.deviceGroup
 	out, err := env.InstallBundleAnchors(ctx, src)
 	if out != nil {
 		res.Anchors, res.SHA256 = out.Path, out.SHA256
@@ -164,6 +198,7 @@ func bundleAnchorsInstall(ctx context.Context, cmd *cobra.Command, opts *bundleA
 		return err
 	}
 	res.Result, res.PreviousSHA256, res.TenantID = out.Result, out.PreviousSHA256, out.Anchors.TenantID
+	res.DeviceGroups = out.Anchors.DeviceGroups
 	for _, key := range out.Anchors.Keys {
 		res.KeyIDs = append(res.KeyIDs, key.KeyID)
 	}

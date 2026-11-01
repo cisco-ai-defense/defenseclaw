@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,16 +34,16 @@ import (
 // metadata, refuses reparse chains, bounds every read, and executes
 // nothing. Every read of a user-writable location (the profile's extension
 // folders, app data and package folders, and a relocated VSCODE_EXTENSIONS
-// folder) runs under the profile owner's active-session token
-// (windowsSurfaceReadAs), so it can reach nothing the user could not; only
-// administrator-protected sources (WindowsApps) are read as LocalSystem. A
-// signed-out user has no token, so their surfaces are discovered after
-// they sign in. Layouts vendors do not document are marked "live check".
+// folder) runs under the token of the profile owner's session, active or
+// disconnected (windowsSurfaceReadAs), so it can reach nothing the user
+// could not; only administrator-protected sources (WindowsApps) are read as
+// LocalSystem. A signed-out user has no token, so their surfaces are
+// discovered after they sign in. Layouts vendors do not document are marked "live check".
 
 // windowsSurfaceReadAs runs fn under the token of the profile owner sid
 // (replaceable in tests).
 var windowsSurfaceReadAs = func(sid, profileHome string, fn func() error) error {
-	return runAsTarget(TargetCredentials{UserHome: profileHome, SID: sid}, fn)
+	return runAsTarget(TargetCredentials{UserHome: profileHome, SID: sid, AllowDisconnected: true}, fn)
 }
 
 // windowsUserEnvironment reads a value of the user's persistent
@@ -231,16 +233,18 @@ func discoverWindowsClaudeDesktop(profileHome string) (connector.AgentSurface, b
 // host version from the package folder name under WindowsApps.
 func discoverWindowsCodexApp(profileHome string) (connector.AgentSurface, bool, error) {
 	packages, _ := filepath.Glob(filepath.Join(profileHome, "AppData", "Local", "Packages", "OpenAI.Codex_*"))
+	var scanErr error
 	for _, pkg := range packages {
-		if winpath.RejectReparseChain(pkg) != nil {
+		if err := winpath.RejectReparseChain(pkg); err != nil {
+			scanErr = errors.Join(scanErr, fmt.Errorf("the Codex app folder %s was not inspected: %w", pkg, err))
 			continue
 		}
 		if info, err := os.Lstat(pkg); err != nil || !info.IsDir() {
 			continue
 		}
-		return connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "codex-app", Path: pkg}, true, nil
+		return connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "codex-app", Path: pkg}, true, scanErr
 	}
-	return connector.AgentSurface{}, false, nil
+	return connector.AgentSurface{}, false, scanErr
 }
 
 // discoverWindowsDevinDesktop finds Devin Desktop's per-user install
@@ -252,8 +256,10 @@ func discoverWindowsDevinDesktop(profileHome string) (connector.AgentSurface, bo
 	if programFiles, err := winpath.TrustedProgramFiles(); err == nil {
 		dirs = append(dirs, filepath.Join(programFiles, "Devin"))
 	}
+	var scanErr error
 	for _, dir := range dirs {
-		if winpath.RejectReparseChain(dir) != nil {
+		if err := winpath.RejectReparseChain(dir); err != nil {
+			scanErr = errors.Join(scanErr, fmt.Errorf("the Devin Desktop folder %s was not inspected: %w", dir, err))
 			continue
 		}
 		if info, err := os.Lstat(filepath.Join(dir, "Devin.exe")); err != nil || !info.Mode().IsRegular() {
@@ -265,16 +271,19 @@ func discoverWindowsDevinDesktop(profileHome string) (connector.AgentSurface, bo
 				surface.EngineVersion = version
 			}
 		}
-		return surface, true, nil
+		return surface, true, scanErr
 	}
-	return connector.AgentSurface{}, false, nil
+	return connector.AgentSurface{}, false, scanErr
 }
 
 // newestWindowsExtensionDir returns the newest "<id>-<version>[-<platform>]"
 // folder of extension id under root and its version, leaving out folders
 // the editor marked obsolete (.obsolete format is a live check).
 func newestWindowsExtensionDir(root, id string) (string, string, error) {
-	entries, overflow := readWindowsDirBounded(root)
+	entries, overflow, err := readWindowsDirBounded(root)
+	if err != nil {
+		return "", "", err
+	}
 	obsolete := map[string]bool{}
 	if data, err := readBoundedWindowsAgentPackageJSON(filepath.Join(root, ".obsolete")); err == nil {
 		_ = json.Unmarshal(data, &obsolete)
@@ -307,7 +316,10 @@ func newestWindowsExtensionDir(root, id string) (string, string, error) {
 // under dir.
 func newestWindowsVersionDir(dir string) (string, error) {
 	best := ""
-	entries, overflow := readWindowsDirBounded(dir)
+	entries, overflow, err := readWindowsDirBounded(dir)
+	if err != nil {
+		return "", err
+	}
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() && windowsNativeClaudeVersionName(name) && (best == "" || compareWindowsEnterpriseVersion(name, best) > 0) {
@@ -324,7 +336,10 @@ func newestWindowsVersionDir(dir string) (string, error) {
 // package folder names.
 func newestWindowsPackageVersion(dir, prefix string) (string, error) {
 	best := ""
-	entries, overflow := readWindowsDirBounded(dir)
+	entries, overflow, err := readWindowsDirBounded(dir)
+	if err != nil {
+		return "", err
+	}
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() || !strings.HasPrefix(name, prefix) {
@@ -341,31 +356,43 @@ func newestWindowsPackageVersion(dir, prefix string) (string, error) {
 	return best, nil
 }
 
-func readWindowsDirBounded(dir string) ([]os.DirEntry, bool) {
-	if winpath.RejectReparseChain(dir) != nil {
-		return nil, false
+// readWindowsDirBounded lists at most windowsSurfaceMaxEntries entries of
+// dir; overflow reports more. An absent dir is an empty listing. A dir that
+// exists but was not listed (a reparse point on its path, a refused or
+// failed open or listing) is an error, so the inventory is reported
+// incomplete instead of silently empty (GAP-1390).
+func readWindowsDirBounded(dir string) ([]os.DirEntry, bool, error) {
+	if err := winpath.RejectReparseChain(dir); err != nil {
+		return nil, false, fmt.Errorf("folder %s was not inspected: %w", dir, err)
 	}
 	file, err := os.Open(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
 	if err != nil {
-		return nil, false
+		return nil, false, fmt.Errorf("folder %s could not be opened: %w", dir, err)
 	}
 	defer file.Close()
-	entries, _ := file.ReadDir(windowsSurfaceMaxEntries + 1)
-	if len(entries) > windowsSurfaceMaxEntries {
-		return entries[:windowsSurfaceMaxEntries], true
+	entries, err := file.ReadDir(windowsSurfaceMaxEntries + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, false, fmt.Errorf("folder %s could not be listed: %w", dir, err)
 	}
-	return entries, false
+	if len(entries) > windowsSurfaceMaxEntries {
+		return entries[:windowsSurfaceMaxEntries], true, nil
+	}
+	return entries, false, nil
 }
 
 // windowsStandaloneSurfaces is the admission of the profile's app and
 // extension surfaces, or false while the owner is signed out (discovery
-// needs the owner's token; the sign-in cycle discovers them).
+// needs the token of the owner's session, active or disconnected; the
+// sign-in cycle discovers them).
 func windowsStandaloneSurfaces(row *ManifestTarget, logf EnumerationLogger, rowContext windowsStandaloneRowContext) (surfaceAdmission, bool) {
 	name := strings.ToLower(strings.TrimSpace(row.Connector))
 	if _, ok := windowsSurfaceExtensions[name]; !ok {
 		return surfaceAdmission{}, false
 	}
-	if !rowContext.sessionActive {
+	if !rowContext.surfacesReadable() {
 		logfSafely(logf, row.SID, "(SID, "+name+") app and extension discovery waits until the user signs in")
 		return surfaceAdmission{}, false
 	}
@@ -396,8 +423,11 @@ func windowsStandaloneSurfaces(row *ManifestTarget, logf EnumerationLogger, rowC
 // extension surfaces, or "". While the owner is signed out it is
 // cliVersion. Refused and explicitly below-contract surfaces are reported
 // beside a CLI; an unversioned surface beside a CLI remains a known limit.
+// In a disconnected session the surfaces are read and reported only: the
+// result is cliVersion, so a row follows or is enrolled from a surface
+// only in an active session.
 func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger, rowContext windowsStandaloneRowContext, cliVersion string) string {
-	if cliVersion != "" && !rowContext.sessionActive {
+	if cliVersion != "" && !rowContext.surfacesReadable() {
 		// The CLI enrolls the row; its surfaces are read in the owner's
 		// next signed-in cycle.
 		return cliVersion
@@ -407,7 +437,7 @@ func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger
 	if !ok {
 		return cliVersion
 	}
-	enrolled := cliVersion != "" || len(admission.admitted) != 0
+	enrolled := cliVersion != "" || (rowContext.sessionActive && len(admission.admitted) != 0)
 	for _, rejected := range admission.rejected {
 		consequence, refusal := "", RefusalMissing
 		switch {
@@ -425,6 +455,9 @@ func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger
 		if rowContext.report != nil {
 			rowContext.report(rejected.unprotected(rowContext.user, canonicalManifestTargetSID(row.SID), nil, name, consequence, refusal))
 		}
+	}
+	if !rowContext.sessionActive {
+		return cliVersion
 	}
 	version := admission.rowVersion(cliVersion)
 	if version != cliVersion {

@@ -25,7 +25,11 @@ const linuxClockTicks = 100
 const processStartTimeKnown = true
 
 func processStartTime(now time.Time) (time.Time, bool) {
-	data, err := os.ReadFile("/proc/self/stat")
+	return procStatStartTime("/proc/self/stat", now)
+}
+
+func procStatStartTime(path string, now time.Time) (time.Time, bool) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return time.Time{}, false
 	}

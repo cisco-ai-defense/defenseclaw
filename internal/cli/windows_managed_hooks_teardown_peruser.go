@@ -441,12 +441,16 @@ func removeWindowsManagedHooksStandalonePerUserRegistrations(
 	result := enterpriseHookUserCleanupResult{Failed: problems}
 	// Claude's current enrollment is machine policy, but older native hook
 	// registrations can remain in user settings. Remove only this profile's
-	// exact launcher path before a purge deletes the launcher.
+	// exact launcher path before a purge deletes the launcher. Every enrolled
+	// account is cleaned, not only those enrolled for Claude Code now: an
+	// account enrolled for another connector kept a DefenseClaw Claude hook
+	// that named a launcher the purge removed, and no result named it
+	// (mgmt-p1:GAP-0089).
 	identityErr := enterpriseHookWindowsUserCleanupIdentity()
 	seen := map[string]bool{}
 	blockedClaude := false
 	for _, target := range manifest.Targets {
-		if target.Connector != "claudecode" || target.UserHome == "" || target.SID == "" || seen[target.SID] {
+		if target.UserHome == "" || target.SID == "" || seen[target.SID] {
 			continue
 		}
 		seen[target.SID] = true

@@ -40,6 +40,7 @@ actor is :data:`ACTOR_LIFECYCLE` or :data:`ACTOR_MIGRATION`
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -49,7 +50,7 @@ import stat
 import sys
 import tempfile
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -111,6 +112,7 @@ RESTART_KEYS = (
     "guardrail.retain_judge_bodies",
     "guardrail.hook_self_heal",
     "guardrail.hook_self_heal_debounce_ms",
+    "guardrail.protected_files",
     "claw",
     "agent",
     "routing",
@@ -168,7 +170,13 @@ class Change:
     unset: bool = False
     # For a rule override removal, discard empty parent maps up to this path.
     # Global connector entries stop at rules: an empty entry means enabled.
+    # PRUNE_TO_TOP also removes a top-level section the unset leaves empty.
     prune_empty_to: str = ""
+
+
+# ``Change.prune_empty_to`` that stops at the document: an empty top-level
+# section goes too (GAP-0967).
+PRUNE_TO_TOP = "<top>"
 
 
 @dataclass(frozen=True)
@@ -179,6 +187,9 @@ class WriteResult:
     sha256: str
     changed: list[str] = field(default_factory=list)
     restart_required: list[str] = field(default_factory=list)
+    #: The ``admission.mcp.actions`` the write added so what it chose
+    #: compiles as written (:func:`_keep_chosen_admission`).
+    pins: dict[tuple, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -276,7 +287,8 @@ def apply(
     def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
         return _patch(current, changes, source_name)
 
-    return write_with(mutate, actor, reason, expect_sha256, path=path, timeout_s=timeout_s)
+    decided = [change.path for change in changes]
+    return write_with(mutate, actor, reason, expect_sha256, path=path, timeout_s=timeout_s, decided=decided)
 
 
 def replace_document(
@@ -295,7 +307,9 @@ def replace_document(
     def mutate(current: bytes, _source_name: str) -> tuple[bytes, list[str]]:
         return candidate, diff_documents(current, candidate)
 
-    return write_with(mutate, actor, reason, expect_sha256, path=path, timeout_s=timeout_s)
+    # A migration or a restore writes the bytes it was given: it chooses no
+    # admission block, so an untouched 1.0.0-1.0.3 preset stays one.
+    return write_with(mutate, actor, reason, expect_sha256, path=path, timeout_s=timeout_s, as_is=True)
 
 
 Mutator = Callable[[bytes, str], "tuple[bytes, list[str]]"]
@@ -310,19 +324,23 @@ def write_with(
     path: str | os.PathLike[str] | None = None,
     timeout_s: float = DEFAULT_LOCK_TIMEOUT_S,
     verify: Callable[[str], None] | None = None,
+    decided: Iterable[str] = (),
+    as_is: bool = False,
 ) -> WriteResult:
     """Run one writer transaction: ``mutate(current_bytes, path)`` returns
     the candidate bytes and the changed paths. ``Config.save`` uses it to
     merge its modeled values inside the lock. ``verify(path)`` runs after the
     commit, still under the lock; when it raises, the previous bytes are
-    restored (as a new generation) and the error re-raised."""
+    restored (as a new generation) and the error re-raised. *decided* names
+    the config keys the caller chose, also with an unchanged value; unless
+    *as_is*, the candidate passes :func:`_keep_chosen_admission`."""
 
     if not str(actor or "").strip():
         raise ConfigWriteError("a config writer actor is required")
     target = _resolve(path)
     refuse_when_managed(target, actor)
     with hold_lock(target, timeout_s=timeout_s):
-        return _transact(target, mutate, actor, reason, expect_sha256, verify)
+        return _transact(target, mutate, actor, reason, expect_sha256, verify, None if as_is else list(decided))
 
 
 _held = threading.local()
@@ -371,6 +389,7 @@ def _transact(
     reason: str,
     expect_sha256: str | None,
     verify: Callable[[str], None] | None,
+    decided: list[str] | None,
 ) -> WriteResult:
     current, mode, exists = _read_current(target)
     digest = hashlib.sha256(current).hexdigest()
@@ -379,6 +398,10 @@ def _transact(
     if managed_refuses(current, actor):
         raise ManagedConfigWriteError(MANAGED_REFUSAL)
     candidate, changed = mutate(current, target)
+    pins: dict[tuple, Any] = {}
+    if decided is not None:
+        candidate, pins = _keep_chosen_admission(current, candidate, decided, target)
+        changed = [*changed, *(p for p in map(format_path, pins) if p not in changed)]
     if exists and candidate == current:
         if verify is not None:
             verify(target)
@@ -406,7 +429,45 @@ def _transact(
                 os.unlink(target)
             raise
     _refresh_derived_files(target, candidate)
-    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed))
+    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed), pins)
+
+
+def _keep_chosen_admission(
+    current: bytes, candidate: bytes, decided: list[str], source_name: str,
+) -> tuple[bytes, dict[tuple, Any]]:
+    """GAP-1488: the one step every policy source passes before a verdict
+    table is built. Go and Python compile admission only from config.yaml,
+    and every DefenseClaw write of it commits here: config set and unset,
+    guardrail apply, policy activate, load and the delete fallback, policy
+    edit, TUI Setup and the whole-document setup writers.
+
+    Both compilers read the pre-1.0.4 default preset's MCP shape as the
+    untouched 1.0.0-1.0.3 preset and compile MCP HIGH, MEDIUM and LOW as
+    warn. A write that chooses admission (a *decided* key, or a changed key
+    that rule reads) gets the pins of
+    :func:`~defenseclaw.enforce.admission.legacy_default_mcp_pins`, so what
+    it chose compiles as written and an explicit quarantine is never
+    compiled as a warning. A write that leaves admission as it was changes
+    nothing. Migrations and restores (``as_is``) skip this step."""
+    from defenseclaw.enforce.admission import legacy_default_mcp_pins
+    from defenseclaw.observability.v8_yaml import V8YAMLMutation, prepare_v8_yaml_write
+
+    try:
+        before = _parse_config_document(current) if current.strip() else None
+        after = _parse_config_document(candidate) if candidate.strip() else None
+        paths = []
+        for path in decided:
+            try:
+                paths.append(parse_path(path))
+            except ValueError:
+                continue
+        pins = legacy_default_mcp_pins(before, after, paths)
+    except (ValueError, yaml.YAMLError):
+        return candidate, {}  # the validator refuses what does not parse
+    if not pins:
+        return candidate, {}
+    mutations = _ordered_mutations([V8YAMLMutation.set(parts, value) for parts, value in pins.items()])
+    return prepare_v8_yaml_write(candidate, mutations, source_name=source_name, any_path=True).candidate, pins
 
 
 def _undo_failed_commit(target: str, candidate: bytes, previous: bytes, mode: int, existed: bool) -> None:
@@ -774,11 +835,39 @@ def validate_candidate(target: str, candidate: bytes) -> None:
 
 
 _REASON_CODE = re.compile(r"^\[(?P<code>[A-Za-z0-9_-]+)\]\s*(?P<text>.*)$", re.S)
-_RULE_PACK_PREFIX = re.compile(r'^config rule pack (?:"[^"]*"|\S+): ')
+_RULE_PACK_PREFIX = re.compile(r'^config rule pack (?P<dir>"[^"]*"|\S+): ')
+# The loader's reason for a YAML file below a folder that is neither rules nor
+# judge (a copy of another pack placed inside this one): the folder, relative.
+_STRAY_PACK_FOLDER = re.compile(r"^rule pack inventory_unexpected at (?P<first>[^/\\:]+)/")
 _SCHEMA_WORDS = (
     ("correct the field using the configuration schema and reference", "check the value and its documented format"),
     ("use the value type documented by the configuration schema", "use the value type the reference documents"),
 )
+
+
+def _stray_pack_folder(reason: str) -> tuple[str, str] | None:
+    """The pack folder and the full path of the stray folder in it, from a loader reason.
+
+    The reason names the stray folder relative to the pack (``default/judge/x.yaml``)
+    after a ``config rule pack "<dir>": `` prefix; None when it names no such folder.
+    """
+    prefix = _RULE_PACK_PREFIX.match(reason)
+    if not prefix:
+        return None
+    stray = _STRAY_PACK_FOLDER.match(reason[prefix.end() :])
+    if not stray or stray.group("first") in {"rules", "judge", ".", ".."}:
+        return None
+    pack = prefix.group("dir")
+    if pack.startswith('"'):
+        try:
+            pack = json.loads(pack)
+        except ValueError:
+            pack = pack.strip('"')
+    pack = pack.rstrip("/\\")
+    if not pack:
+        return None
+    separator = "\\" if "\\" in pack else "/"
+    return pack, pack + separator + stray.group("first")
 
 
 def pack_pin_repair(message: str, *, files_digest: str = "<files digest>") -> str:
@@ -836,6 +925,14 @@ def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -
         return f"{name} is {bound} (it has {len(value)})"
     parts = [part.strip() for part in text.split("; ") if part.strip()]
     if code == "config_semantic_invalid" and parts:
+        stray = _stray_pack_folder(parts[0])
+        if stray:
+            # GAP-1566: lead with the folder to move or remove, by its full path, not the check name.
+            return (
+                f"{name}: the rule pack {stray[0]} holds the folder {stray[1]}, which does not belong in a rule pack "
+                f"(a copy of another pack placed inside this one?). Move {stray[1]} out of the rule-pack folder "
+                "or remove it, then run the command or installer again."
+            )
         detail = _RULE_PACK_PREFIX.sub("", parts[0])
         sentence = detail if detail.startswith(name) else f"{name}: {detail}"
         actions = [part for part in parts[1:] if not part.startswith("expected ")]
@@ -850,6 +947,12 @@ def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -
     if code == "pattern":
         if name == "openshell.trusted_ca_bundle":
             return f"{name} must be an absolute path or start with ~/ (for example, ~/proxy-root-ca.pem)."
+        if name == "update.source":
+            # http:// is refused on purpose: release files come over TLS only (GAP-1065).
+            return (
+                f"{name} must be an https:// URL (for example, https://mirror.example.com/defenseclaw), "
+                "or empty for the official releases."
+            )
         hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
         # A pattern of plain words (block_at) names them in the corrective action.
         allowed = text if text.startswith("use one of ") else ""
@@ -958,6 +1061,47 @@ def _check_destination_index(document: Any, path: str, parts: tuple[str | int, .
         )
 
 
+def _check_scalar_parent(document: Any, path: str, parts: tuple[str | int, ...], value: Any) -> None:
+    """Refuse a field under a key that config.yaml stores as one value.
+
+    ``admission.skill.actions.high: block`` is a shorthand, not a set of
+    fields, so ``admission.skill.actions.high.install`` has nowhere to go.
+    The YAML patcher refused it with unreachable_mutation_path and named
+    neither the stored value nor the form that works (GAP-0943): setting the
+    whole key with --json.
+    """
+    current = document
+    for depth, part in enumerate(parts[:-1]):
+        if isinstance(part, int):
+            if not isinstance(current, list) or part >= len(current):
+                return
+        elif not isinstance(current, dict) or part not in current:
+            return
+        current = current[part]
+        if isinstance(current, (dict, list)):
+            continue
+        parent = format_path(parts[: depth + 1])
+        rest = parts[depth + 1 :]
+        from defenseclaw.enforce.admission import shorthand_fields
+
+        fields = shorthand_fields(current) if len(rest) == 1 else None
+        if fields is not None and rest[0] in fields:
+            # The shorthand's own install/file/runtime, with this one changed.
+            example: Any = {**fields, rest[0]: value}
+            leftover = ""
+        else:
+            example = value
+            for item in reversed(rest):
+                example = {item: example} if isinstance(item, str) else [example]
+            leftover = " (the fields you leave out take their defaults)"
+        stored = "an empty value" if current is None else f"the single value {json.dumps(current)}"
+        raise ConfigWriteError(
+            f"{parent} is stored as {stored}, not as separate fields, so {path} cannot be set on its own. "
+            f"Set the whole {parent} instead{leftover}: "
+            f"defenseclaw config set --json {parent} '{json.dumps(example)}'"
+        )
+
+
 def _same_config_value(before: Any, after: Any) -> bool:
     """Treat a value as unchanged only when its types match throughout."""
     if type(before) is not type(after):
@@ -987,6 +1131,22 @@ def _ordered_mutations(mutations: list[Any]) -> list[Any]:
     )
 
 
+def _set_in_document(document: Any, parts: tuple[str | int, ...], value: Any) -> None:
+    """Write ``value`` at ``parts`` of the parsed document, creating maps on
+    the way; a path through a list or a non-map value is left alone."""
+    if not isinstance(document, dict) or not parts or any(not isinstance(part, str) for part in parts):
+        return
+    node = document
+    for part in parts[:-1]:
+        child = node.get(part)
+        if child is None:
+            child = node[part] = {}
+        if not isinstance(child, dict):
+            return
+        node = child
+    node[parts[-1]] = copy.deepcopy(value)
+
+
 def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[bytes, list[str]]:
     from defenseclaw.observability.v8_yaml import V8YAMLMutation, prepare_v8_yaml_write
 
@@ -1000,7 +1160,7 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
             if before is _MISSING:
                 continue
             if change.prune_empty_to:
-                stop = parse_path(change.prune_empty_to)
+                stop = () if change.prune_empty_to == PRUNE_TO_TOP else parse_path(change.prune_empty_to)
                 # Delete an empty child of the stop scope, never the scope itself.
                 # An assigned guardrail profile remains valid even when it is {}.
                 while len(parts) > len(stop) + 1 and parts[: len(stop)] == stop:
@@ -1009,11 +1169,23 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
                         break
                     parts = parts[:-1]
             mutations.append(V8YAMLMutation.delete(parts))
+            # The next unset of this batch prunes against the document as
+            # this one leaves it: unsetting the last two profiles together
+            # left profiles: {} (GAP-1746).
+            parent = _lookup(document, parts[:-1]) if len(parts) > 1 else document
+            if isinstance(parent, dict) and isinstance(parts[-1], str):
+                parent.pop(parts[-1], None)
         else:
             if before is not _MISSING and _same_config_value(before, change.value):
                 continue
             _check_destination_index(document, change.path, parts)
+            _check_scalar_parent(document, change.path, parts, change.value)
             mutations.append(V8YAMLMutation.set(parts, change.value))
+            # A later unset of this batch prunes against the document as this
+            # set leaves it: 'guardrail rule enable R' sets rules.enable and
+            # unsets rules.disable, and pruning against the old document
+            # dropped the new enable with its parent (GAP-1893).
+            _set_in_document(document, parts, change.value)
         changed.append(change.path)
     if not mutations:
         return current, []

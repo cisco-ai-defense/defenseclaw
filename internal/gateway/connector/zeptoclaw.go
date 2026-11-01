@@ -146,7 +146,7 @@ func (c *ZeptoClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 
 	// Surface 3: Plugin subprocess enforcement
 	policy := ResolveSubprocessPolicy(SubprocessShims)
-	if err := SetupSubprocessEnforcement(policy, opts); err != nil {
+	if err := SetupSubprocessEnforcement(policy, opts, c.Name()); err != nil {
 		return fmt.Errorf("zeptoclaw subprocess enforcement: %w", err)
 	}
 

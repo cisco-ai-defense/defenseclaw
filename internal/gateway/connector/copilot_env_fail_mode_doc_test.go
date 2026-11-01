@@ -12,14 +12,9 @@ import (
 	"testing"
 )
 
-// 1.0.4 lead directive with the train's per-user Copilot native deny
-// (w3-g3-hooks): the per-user GitHub Copilot CLI hook takes its fail mode
-// from the installed render alone. DEFENSECLAW_FAIL_MODE in the agent's
-// environment neither closes an open hook nor opens a closed one; strict
-// availability closes it. A closed hook answers a gateway outage with
-// Copilot's native deny. T5 integration: the g-hooks-upg branch asserted the
-// pre-w3-g3-hooks behaviour (an outage always allowed); the train keeps the
-// deny and the docs say what runs.
+// The per-user Copilot CLI hook reads its outage mode from current config.
+// DEFENSECLAW_FAIL_MODE in the agent's environment and the installed render
+// cannot change that decision. Strict availability also closes an outage.
 func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hooks")
@@ -29,13 +24,14 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 		t.Fatalf("HookOutage does not say what the per-user Copilot hook does (closed denies, strict availability read): %+v", outage)
 	}
 	for _, tc := range []struct {
-		installed, env, strict string
-		deny                   bool
+		installed, env, strict, tier string
+		deny                         bool
 	}{
-		{installed: "closed", env: "open", deny: true},
-		{installed: "closed", env: "", deny: true},
-		{installed: "open", env: "closed", deny: false}, // the outage-open tier: the environment cannot close it
-		{installed: "open", env: "", strict: "1", deny: true},
+		{installed: "closed", env: "open", tier: "strict", deny: true},
+		{installed: "closed", env: "", tier: "strict", deny: true},
+		{installed: "open", env: "closed", tier: "default", deny: false},
+		{installed: "closed", env: "", tier: "default", deny: false},
+		{installed: "open", env: "", strict: "1", tier: "default", deny: true},
 	} {
 		t.Run("installed="+tc.installed+"/env="+tc.env+"/strict="+tc.strict, func(t *testing.T) {
 			home := t.TempDir()
@@ -43,6 +39,11 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 			opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: tc.installed}
 			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewCopilotConnector()); err != nil {
 				t.Fatal(err)
+			}
+			// The config the outage-open hook reads gives the open tier.
+			installOutageOpenRuntimeForHookTest(t, home, home)
+			if tc.tier == "strict" {
+				writeOutageTierConfig(t, home, outageStrictTierConfig)
 			}
 			cmd := exec.Command("bash", filepath.Join(hookDir, "copilot-hook.sh"), "--event", "preToolUse")
 			cmd.Stdin = strings.NewReader(`{"cwd":"/tmp","toolName":"bash","toolArgs":"{\"command\":\"ls\"}"}`)

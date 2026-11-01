@@ -16,6 +16,13 @@ import (
 
 func hookColdStartSupported() bool { return true }
 
+// hookColdStartLockWait is how long a hook cold start waits for a start or
+// restart that holds the start lock (GAP-0143). It stays below the 120 s
+// after which the hooks treat their .cold-start.lock as a start that died
+// (_dc_cold_start_lock in hooks/_hardening.sh), so a waiting start keeps
+// the other hooks from launching one.
+const hookColdStartLockWait = 90 * time.Second
+
 // acquireGatewayStartLock takes the per-data-directory start lock so a hook
 // cold start, a manual start and a restart cannot launch two gateways at
 // once. The loser waits, then finds the winner's gateway already running. A

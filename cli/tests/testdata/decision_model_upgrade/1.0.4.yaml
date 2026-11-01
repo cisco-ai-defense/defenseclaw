@@ -1,0 +1,21 @@
+# config.yaml that DefenseClaw 1.0.4's default_config(), with the LLM judge on, saves (generated from git ref 1.0.4;
+# home paths replaced by /home/alice).
+guardrail:
+  enabled: true
+  judge:
+    enabled: true
+    hook_connectors:
+    - claudecode
+  mode: action
+llm:
+  model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
+  provider: bedrock
+  api_key: ''
+  api_key_env: DEFENSECLAW_LLM_KEY
+  base_url: ''
+  timeout: 0
+  max_retries: 0
+  region: ''
+  instance_name: ''
+config_version: 9
+observability: {}

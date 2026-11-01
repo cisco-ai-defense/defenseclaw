@@ -19,6 +19,7 @@ import (
 // A copy of this test binary named defenseclaw-hook.exe stands in for the
 // stable launcher: it reports its argv and stdin and exits with a fixed code.
 func TestMain(m *testing.M) {
+	recordInitGC()
 	if strings.EqualFold(filepath.Base(os.Args[0]), "defenseclaw-hook.exe") {
 		stdin, _ := io.ReadAll(os.Stdin)
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{"args": os.Args[1:], "stdin": string(stdin)})

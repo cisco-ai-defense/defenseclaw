@@ -78,6 +78,7 @@ func TestWindowsSecureClientPerUserRuntimeDirectory(t *testing.T) {
 // explicit mode too, unset closed (owner decision 2026-10-20).
 func TestWindowsSecureClientCopilotFailMode(t *testing.T) {
 	pinWindowsPerUserRuntimeStandaloneForTest(t, false)
+	useSecureClientHookDelivery(t)
 	for configured, want := range map[string]string{"": "open", "open": "open", "closed": "closed", "bogus": "closed"} {
 		if got := canonicalHookFailMode(configured); got != want {
 			t.Fatalf("Secure Client copilot fail mode for %q = %q, want %q", configured, got, want)

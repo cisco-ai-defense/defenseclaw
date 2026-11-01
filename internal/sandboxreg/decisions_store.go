@@ -22,13 +22,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -42,7 +42,7 @@ const MaxDecisionsPerUID = 1024
 // maxDecisionHostBytes bounds a decision's host.
 const maxDecisionHostBytes = 253
 
-var decisionHostPattern = regexp.MustCompile(`^[A-Za-z0-9*][A-Za-z0-9.*:_\[\]-]*$`)
+var decisionHostPattern = lazyregexp.New(`^[A-Za-z0-9*][A-Za-z0-9.*:_\[\]-]*$`)
 
 // DecisionsDir is the decision store under the gateway's data directory:
 // <DataDir>/sandbox/decisions.

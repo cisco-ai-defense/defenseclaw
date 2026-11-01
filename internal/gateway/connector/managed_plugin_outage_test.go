@@ -163,7 +163,7 @@ const managedOpenCodeOutageHarness = `
 import { pathToFileURL } from "node:url";
 const href = pathToFileURL(process.argv[1]).href;
 const loaded = await import(href);
-const plugin = await loaded.DefenseClaw({ directory: "", client: {} });
+const plugin = await fixtureBridge(loaded, { directory: "", client: {} });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 try {
   await plugin["tool.execute.before"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C1" }, { args: { command: "echo marker" } });

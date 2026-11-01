@@ -37,38 +37,78 @@ func standalonePerUserRepair(uid int) bool {
 	return runtime.GOOS != "windows" && standaloneProfileProcess() && uid > 0 && os.Geteuid() == uid
 }
 
+// ownedDataDirs are the user's DefenseClaw data directory and its hooks
+// directory, the two directories Install leaves owner-only (0700).
+func ownedDataDirs(dataDir string) []string {
+	return []string{filepath.Clean(dataDir), filepath.Join(filepath.Clean(dataDir), "hooks")}
+}
+
+// ownedDataDirMode returns the mode of dir when the standalone per-user
+// worker may put it right: a real directory inside the home that the user
+// owns. A link, a non-directory, a missing directory or a directory someone
+// else owns is left for the validation that follows to refuse and report.
+func ownedDataDirMode(home, dir string, uid int) (os.FileMode, bool) {
+	if dir == home || !pathInside(home, dir) {
+		return 0, false
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return 0, false
+	}
+	if owned, _ := fileOwnerMatches(dir, uid); !owned {
+		return 0, false
+	}
+	return info.Mode().Perm(), true
+}
+
 // restoreOwnedDataDirModes gives the user's DefenseClaw data directory and
 // its hooks directory back their owner-only mode (0700, the mode Install
 // leaves them in) before Install inspects them. A user who made either
 // unreadable (chmod 000 ~/.defenseclaw) or loosened it otherwise stopped
 // every repair of their hooks, and the guardian had to wait for them to
-// undo it. Only a real directory inside the home that the user owns is
-// changed; a link, a non-directory or a directory someone else owns is left
-// for the validation that follows to refuse and report. The worker runs as
-// the owner, so the chmod grants nothing the user could not do.
+// undo it. Only a directory ownedDataDirMode accepts is changed. The worker
+// runs as the owner, so the chmod grants nothing the user could not do.
 func restoreOwnedDataDirModes(home, dataDir string, uid int) {
 	if !standalonePerUserRepair(uid) {
 		return
 	}
 	home = filepath.Clean(home)
-	for _, dir := range []string{filepath.Clean(dataDir), filepath.Join(filepath.Clean(dataDir), "hooks")} {
-		if dir == home || !pathInside(home, dir) {
+	for _, dir := range ownedDataDirs(dataDir) {
+		mode, ok := ownedDataDirMode(home, dir, uid)
+		if !ok {
 			return
 		}
-		info, err := os.Lstat(dir)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return
-		}
-		if owned, _ := fileOwnerMatches(dir, uid); !owned {
-			return
-		}
-		if info.Mode().Perm() == 0o700 {
+		if mode == 0o700 {
 			continue
 		}
 		if err := os.Chmod(dir, 0o700); err != nil {
 			return
 		}
 	}
+}
+
+// verifyOwnedDataDirModes fails verification of the standalone per-user
+// worker when the user's DefenseClaw data directory or its hooks directory
+// is no longer 0700. Verification did not look at these modes, so the
+// guardian's interval reconcile reported no change and a loosened folder
+// (chmod 755 ~/.defenseclaw/hooks) stayed loose until some other change
+// started a repair (rel-1-0-4 GAP-2341). The failure makes the guardian's
+// verify-or-repair pass run Install, which restores 0700 within a minute.
+func verifyOwnedDataDirModes(home, dataDir string, uid int) error {
+	if !standalonePerUserRepair(uid) {
+		return nil
+	}
+	home = filepath.Clean(home)
+	for _, dir := range ownedDataDirs(dataDir) {
+		mode, ok := ownedDataDirMode(home, dir, uid)
+		if !ok {
+			return nil
+		}
+		if mode != 0o700 {
+			return fmt.Errorf("enterprise hooks: %s has mode %04o, want 0700", dir, mode)
+		}
+	}
+	return nil
 }
 
 // standaloneOwnedHookConfigConnectors are the connectors whose hook config

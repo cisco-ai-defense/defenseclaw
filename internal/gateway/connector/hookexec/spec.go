@@ -224,6 +224,21 @@ func cursorFallbackOutput(event string, closed bool, reason string) string {
 	return cursorActionOutput(event, "allow", reason)
 }
 
+// cursorClosedOutput is a Cursor hook's closed answer. A strict failure
+// before the event could be decoded (an unreadable payload) may be any event,
+// a tool call included, so outside Secure Client it denies in the fields of
+// every Cursor event, as the Windows adapter's own closed answer does:
+// cursor-agent 2026.10.22 ran the call on "{}" with exit 2, so a decoy whose
+// payload the hook could not read was not blocked (GAP-2449). A decoded event
+// and a Secure Client hook keep cursorFallbackOutput.
+func cursorClosedOutput(opts Options, reason string) string {
+	if strings.TrimSpace(opts.Event) != "" || opts.SecureClient || secureClientHook(opts) {
+		return cursorFallbackOutput(opts.Event, true, reason)
+	}
+	message := mustJSONString(reason)
+	return `{"continue":false,"permission":"deny","user_message":` + message + `,"agent_message":` + message + `}`
+}
+
 func cursorActionOutput(event, action, reason string) string {
 	event = strings.ToLower(strings.TrimSpace(event))
 	if action != "block" {

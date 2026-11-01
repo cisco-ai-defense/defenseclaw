@@ -157,11 +157,14 @@ type BundleRef struct {
 	ID          string
 	Version     uint64
 	SignerKeyID string
+	// Dir is the store version directory name of the bundle, recorded as
+	// bundle_dir ("" records none). Only Bundle records it.
+	Dir string
 }
 
 func (o Options) writer() cfgtxn.Writer {
 	return cfgtxn.Writer{GenerationFloor: o.GenerationFloor, Actor: o.Actor, LocalActor: o.LocalActor, Reason: o.Reason,
-		BundleID: o.Bundle.ID, BundleVersion: o.Bundle.Version, SignerKeyID: o.Bundle.SignerKeyID,
+		BundleID: o.Bundle.ID, BundleVersion: o.Bundle.Version, SignerKeyID: o.Bundle.SignerKeyID, BundleDir: o.Bundle.Dir,
 		TransactionActor: o.TransactionActor, TransactionBundleID: o.TransactionBundle.ID,
 		TransactionBundleVersion: o.TransactionBundle.Version,
 		TransactionSignerKeyID:   o.TransactionBundle.SignerKeyID, TransactionSummary: o.TransactionSummary}
@@ -583,7 +586,8 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 		bundleTransition := (opt.Lifecycle || opt.Actor == ActorLifecycle) &&
 			(opt.Bundle.ID != "" || state.BundleID != "") &&
 			(stateErr != nil || state.ConfigSHA256 != sum || state.BundleID != opt.Bundle.ID ||
-				state.BundleVersion != opt.Bundle.Version || state.SignerKeyID != opt.Bundle.SignerKeyID)
+				state.BundleVersion != opt.Bundle.Version || state.SignerKeyID != opt.Bundle.SignerKeyID ||
+				(opt.Bundle.Dir != "" && state.BundleDir != opt.Bundle.Dir))
 		if !bundleTransition {
 			return Result{Generation: state.Generation, SHA256: sum}, nil
 		}
@@ -634,6 +638,7 @@ var restartKeys = []string{
 	"guardrail.host", "guardrail.port", "guardrail.enabled", "guardrail.connector",
 	"guardrail.scanner_mode", "guardrail.retain_judge_bodies",
 	"guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
+	"guardrail.protected_files",
 	"claw", "agent", "routing", "plugin_dir",
 	"deployment_mode", "enterprise.profile", "enterprise.network", "enterprise.openshell",
 	"environment", "tenant_id", "workspace_id", "discovery_source",
@@ -817,14 +822,27 @@ var ErrMultipleDocuments = errors.New("configwrite: config.yaml holds more than 
 	"starts another); DefenseClaw reads only the first and does not rewrite the file. Merge the documents into one " +
 	"or remove the later one, then try again")
 
+// ErrInvalidDocument marks a config.yaml the writer cannot edit as it is: a
+// second YAML document (ErrMultipleDocuments), a YAML syntax error or a root
+// that is not a mapping. The operator fixes the file, not the request, so the
+// REST API answers 409 for it, not 500 (GAP-1421).
+var ErrInvalidDocument = errors.New("configwrite: config.yaml cannot be edited as it is")
+
+// invalidDocument keeps the cause's text and matches both the cause and
+// ErrInvalidDocument with errors.Is.
+type invalidDocument struct{ cause error }
+
+func (e invalidDocument) Error() string   { return e.cause.Error() }
+func (e invalidDocument) Unwrap() []error { return []error{ErrInvalidDocument, e.cause} }
+
 func parseDocument(current []byte) (*yaml.Node, error) {
 	var doc yaml.Node
 	if len(bytes.TrimSpace(current)) > 0 {
 		if err := yaml.Unmarshal(current, &doc); err != nil {
-			return nil, fmt.Errorf("configwrite: parse config.yaml: %w", err)
+			return nil, invalidDocument{fmt.Errorf("configwrite: parse config.yaml: %w", err)}
 		}
 		if err := singleDocument(current); err != nil {
-			return nil, err
+			return nil, invalidDocument{err}
 		}
 	}
 	if doc.Kind == 0 {
@@ -834,7 +852,7 @@ func parseDocument(current []byte) (*yaml.Node, error) {
 		doc.Content = []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}
 	}
 	if doc.Content[0].Kind != yaml.MappingNode {
-		return nil, errors.New("configwrite: config.yaml root must be a mapping")
+		return nil, invalidDocument{errors.New("configwrite: config.yaml root must be a mapping")}
 	}
 	return &doc, nil
 }

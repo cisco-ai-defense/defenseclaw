@@ -51,3 +51,26 @@ func writeFile(t *testing.T, path, body string) {
 		t.Fatal(err)
 	}
 }
+
+// A /proc mounted with subset=pid has no /proc/net, only each process's
+// net directory: the holder is still found (GAP-1909).
+func TestProcPortHolderReadsSelfNetWithoutProcNet(t *testing.T) {
+	root := t.TempDir()
+	header := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+	writeFile(t, filepath.Join(root, "self", "net", "tcp"),
+		header+"   0: 0100007F:1F40 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 111 1\n")
+	writeFile(t, filepath.Join(root, "10", "comm"), "defenseclaw-gateway\n")
+	if err := os.MkdirAll(filepath.Join(root, "10", "fd"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("socket:[111]", filepath.Join(root, "10", "fd", "3")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "net")); !os.IsNotExist(err) {
+		t.Fatalf("fixture has a net directory: %v", err)
+	}
+	holder, err := findProcPortHolder(root, "127.0.0.1", 8000)
+	if err != nil || holder.PID != 10 || holder.UID != 1000 || holder.Command != "defenseclaw-gateway" {
+		t.Fatalf("holder = %+v, %v; want PID 10 uid 1000", holder, err)
+	}
+}

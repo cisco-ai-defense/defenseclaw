@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// OpenCode's native edit and multiedit tools take Claude Code's edit
-// arguments in camelCase, and the Copilot CLI edit and create tools take
-// path with old_str/new_str or file_text. Each dialect parses as a complete
-// write call with one target, like Claude Code's (GAP-0655).
+// OpenCode V2 edit takes path with camelCase replacement keys. Shared
+// filePath-based formats and Copilot CLI path/old_str/new_str or file_text
+// remain covered independently of connector version admission. Each dialect
+// parses as a complete write call with one target, like Claude Code's (GAP-0655).
 func TestExtractOpenCodeEditArgs(t *testing.T) {
 	const keys = "/sandbox/.ssh/authorized_keys"
 	for _, test := range []struct {
@@ -19,10 +19,10 @@ func TestExtractOpenCodeEditArgs(t *testing.T) {
 		want            ParseStatus
 		path            string
 	}{
-		{name: "edit", tool: "edit", raw: `{"filePath":"` + keys + `","oldString":"# a","newString":"# a\nk"}`, want: StatusComplete, path: keys},
-		{name: "edit replace all", tool: "edit", raw: `{"filePath":"` + keys + `","oldString":"# a","newString":"k","replaceAll":true}`, want: StatusComplete, path: keys},
+		{name: "edit", tool: "edit", raw: `{"path":"` + keys + `","oldString":"# a","newString":"# a\nk"}`, want: StatusComplete, path: keys},
+		{name: "edit replace all", tool: "edit", raw: `{"path":"` + keys + `","oldString":"# a","newString":"k","replaceAll":true}`, want: StatusComplete, path: keys},
 		{name: "multiedit", tool: "multiedit", raw: `{"filePath":"` + keys + `","edits":[{"oldString":"# a","newString":"k"}]}`, want: StatusComplete, path: keys},
-		// Each item repeats filePath; OpenCode applies the call's own one.
+		// The shared camelCase multiedit format applies the call's own path.
 		{name: "multiedit item path", tool: "multiedit", raw: `{"filePath":"` + keys + `","edits":[{"filePath":"/work/app/a.txt","oldString":"# a","newString":"k","replaceAll":false}]}`, want: StatusComplete, path: keys},
 		{name: "copilot edit", tool: "edit", raw: `{"path":"` + keys + `","old_str":"# a","new_str":"k"}`, want: StatusComplete, path: keys},
 		{name: "copilot create", tool: "create", raw: `{"path":"` + keys + `","file_text":"k"}`, want: StatusComplete, path: keys},
@@ -31,6 +31,9 @@ func TestExtractOpenCodeEditArgs(t *testing.T) {
 		// is judged by UnknownKeyWriteTargetViews.
 		{name: "create unknown field", tool: "create", raw: `{"path":"` + keys + `","file_text":"k","mode":"0600"}`, want: StatusPartial},
 		{name: "snake edit unchanged", tool: "Edit", raw: `{"file_path":"` + keys + `","old_string":"# a","new_string":"k"}`, want: StatusComplete, path: keys},
+		{name: "v2 mixed path keys", tool: "edit", raw: `{"path":"` + keys + `","file_path":"/other","oldString":"# a","newString":"k"}`, want: StatusPartial},
+		{name: "v2 mixed replacement keys", tool: "edit", raw: `{"path":"` + keys + `","old_string":"# a","newString":"k"}`, want: StatusPartial},
+		{name: "v2 invalid replace all", tool: "edit", raw: `{"path":"` + keys + `","oldString":"# a","newString":"k","replaceAll":"yes"}`, want: StatusPartial},
 		{name: "mixed dialect", tool: "edit", raw: `{"filePath":"` + keys + `","old_string":"# a","newString":"k"}`, want: StatusPartial},
 		{name: "snake item path", tool: "MultiEdit", raw: `{"file_path":"` + keys + `","edits":[{"filePath":"` + keys + `","old_string":"# a","new_string":"k"}]}`, want: StatusPartial},
 		{name: "missing new text", tool: "edit", raw: `{"filePath":"` + keys + `","oldString":"# a"}`, want: StatusPartial},

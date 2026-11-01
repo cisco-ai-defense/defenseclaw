@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"golang.org/x/sys/windows"
 )
 
 // GAP-0856: a standalone rollback whose per-user runtime cleanup failed goes
@@ -88,5 +89,41 @@ func TestWindowsHotConfigDroppedTargetsNamesWhoLostAHook(t *testing.T) {
 	want := "bob (S-1-5-21-1-2-3-1002) claudecode, bob (S-1-5-21-1-2-3-1002) codex, an account (S-1-5-21-1-2-3-1003) codex"
 	if got != want {
 		t.Fatalf("dropped = %q, want %q", got, want)
+	}
+}
+
+// GAP-2571: a dropped target the enumerator published with its SID only
+// (the targets.yaml rows real Windows writes) is named DOMAIN\user (SID),
+// as the other Windows notices do (GAP-2290); "an account (SID)" is left
+// for a SID that does not resolve.
+func TestWindowsHotConfigTargetLabelsResolveASIDOnlyTarget(t *testing.T) {
+	tokenUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("token user: %v", err)
+	}
+	sid := tokenUser.User.Sid.String()
+	// GAP-2630: the label is the SID's own DOMAIN\account. user.Current
+	// cannot be the oracle: as LocalSystem on a domain-joined host it names
+	// the machine account (DOMAIN\HOST$) while the SID resolves to
+	// NT AUTHORITY\SYSTEM, so read the account from the SID itself.
+	account, domain, _, err := tokenUser.User.Sid.LookupAccount("")
+	if err != nil || account == "" {
+		t.Fatalf("lookup account of the token SID: %v", err)
+	}
+	name := account
+	if domain != "" {
+		name = domain + `\` + account
+	}
+	got := strings.Join(windowsHotConfigTargetLabels([]enterprisehooks.ManifestTarget{
+		{SID: sid, UserHome: `C:\Users\someone`, Connector: "opencode"},
+		{SID: "S-1-5-21-1-2-3-1003", Connector: "codex"},
+		{User: "bob", SID: "S-1-5-21-1-2-3-1002", Connector: "codex"},
+	}), ", ")
+	want := name + " (" + sid + ") opencode, an account (S-1-5-21-1-2-3-1003) codex, bob (S-1-5-21-1-2-3-1002) codex"
+	if !strings.EqualFold(got, want) {
+		t.Fatalf("labels = %q, want %q", got, want)
+	}
+	if strings.Contains(strings.SplitN(got, ",", 2)[0], "an account") {
+		t.Fatalf("a resolvable SID is still named as an account: %q", got)
 	}
 }

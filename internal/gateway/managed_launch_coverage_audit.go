@@ -18,7 +18,10 @@ import (
 var managedLaunchReasons = map[string]map[string]bool{
 	"opencode": {"opencode_pure": true, "opencode_managed_config_relocated": true,
 		"opencode_user_config_relocated": true,
-		"launch_arguments_unverified":    true, "launch_environment_unverified": true},
+		"launch_arguments_unverified":    true, "launch_environment_unverified": true,
+		// An OpenCode V1 copy, which cannot run the V2 plugin (rel-1-0-6
+		// GAP-0037, GAP-0057).
+		"unsupported_installed_version": true, "installed_version_unverified": true},
 	"amp": {"amp_plugin_config_relocated": true, "launch_arguments_unverified": true,
 		"launch_environment_unverified": true},
 	"kiro": {"kiro_hook_config_relocated": true, "kiro_alternate_agent": true,

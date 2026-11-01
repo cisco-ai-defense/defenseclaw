@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +19,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -48,7 +48,7 @@ import (
 // windowsCodexStandaloneReleaseName matches install.ps1's release folder
 // "<version>-<target>", with the versions its Assert-ValidReleaseVersion
 // admits and the two Windows targets it installs.
-var windowsCodexStandaloneReleaseName = regexp.MustCompile(
+var windowsCodexStandaloneReleaseName = lazyregexp.New(
 	`^([0-9]+\.[0-9]+\.[0-9]+(?:-alpha(?:\.[0-9]+){0,2}|-beta(?:\.[0-9]+)?)?)-(?:x86_64|aarch64)-pc-windows-msvc$`)
 
 // windowsReadInstallJunction reads a junction's target without following it;

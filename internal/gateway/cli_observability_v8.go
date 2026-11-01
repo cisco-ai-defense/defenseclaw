@@ -104,6 +104,10 @@ type cliObservabilityV8Scan struct {
 	// scanned (skill scan --connector claudecode), so scan.completed and
 	// finding.observed say which agent the asset belongs to (GAP-1381).
 	Connector string `json:"connector,omitempty"`
+	// Verdict is the admission decision the CLI printed for this scan
+	// (clean, warn or block), so the audit row reads what the user saw
+	// instead of the findings' severity alone (GAP-0156).
+	Verdict string `json:"verdict,omitempty"`
 }
 
 // cliObservabilityV8Finding deliberately mirrors Finding.to_dict in the
@@ -310,6 +314,11 @@ func (scan cliObservabilityV8Scan) validate() error {
 		!cliObservabilityV8Text(scan.Error, cliObservabilityV8MaxTitleBytes, false) {
 		return errors.New("invalid scan fields")
 	}
+	switch scan.Verdict {
+	case "", "clean", "warn", "block":
+	default:
+		return errors.New("invalid scan verdict")
+	}
 	duration := time.Duration(scan.DurationMS) * time.Millisecond
 	if scan.Timestamp.Add(duration).Year() > 9999 {
 		return errors.New("invalid scan interval")
@@ -498,7 +507,7 @@ func (a *APIServer) emitCLIObservabilityV8(
 		if connector == "" {
 			connector = scan.Connector
 		}
-		return a.logger.LogScanWithCorrelation(ctx, result, "", audit.ScanCorrelation{
+		return a.logger.LogScanWithCorrelation(ctx, result, scan.Verdict, audit.ScanCorrelation{
 			RunID: envelope.RunID, RequestID: envelope.RequestID,
 			SessionID: envelope.SessionID, TraceID: envelope.TraceID,
 			AgentID: envelope.AgentID, AgentName: envelope.AgentName,

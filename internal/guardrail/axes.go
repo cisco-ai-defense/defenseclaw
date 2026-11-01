@@ -297,11 +297,14 @@ var ruleAxes = map[string][]DataAxis{
 	// Command rules that open an outbound channel (curl/wget upload,
 	// pipe-to-shell from the network). These read no secret on their
 	// own but provide the egress leg of an exfil flow.
-	"CMD-CURL-UPLOAD": {AxisEgressExternal},
-	"CMD-WGET-POST":   {AxisEgressExternal},
-	"CMD-PIPE-CURL":   {AxisEgressExternal},
-	"CMD-PIPE-WGET":   {AxisEgressExternal},
-	"CMD-ENV-DUMP":    {AxisSensitiveAccess, AxisEgressExternal},
+	"CMD-CURL-UPLOAD":           {AxisEgressExternal},
+	"CMD-WGET-POST":             {AxisEgressExternal},
+	"CMD-PIPE-CURL":             {AxisEgressExternal},
+	"CMD-PIPE-WGET":             {AxisEgressExternal},
+	"CMD-WRAPPED-DOWNLOAD-EXEC": {AxisEgressExternal},
+	"CMD-SUBST-DOWNLOAD-EXEC":   {AxisEgressExternal},
+	"CMD-PYTHON-SOCKET-CONNECT": {AxisEgressExternal},
+	"CMD-ENV-DUMP":              {AxisSensitiveAccess, AxisEgressExternal},
 
 	// Cloud metadata C2 endpoints read instance credentials (sensitive)
 	// over an outbound call (egress) — both axes. The C2- prefix

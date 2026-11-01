@@ -27,7 +27,11 @@
 # sandboxes through the sandbox daemon first, whoever stops the unit: an
 # administrator, an OpenShell package upgrade or the account. The leading "-"
 # keeps a daemon that cannot answer from holding the stop up. Upgrades wait
-# until the account's sandboxes have stopped.
+# until the account's sandboxes have stopped. The daemon stops only the
+# sandboxes it knows, as they were when it listed them, so the second
+# ExecStop then syncs the disk of every MicroVM OpenShell still lists ready
+# (one a raw openshell client created or started meanwhile) before the
+# gateway goes down (GAP-0380). systemd gives each ExecStop TimeoutStopSec.
 
 [Unit]
 Description=OpenShell gateway for DefenseClaw sandboxes
@@ -39,6 +43,7 @@ StartLimitBurst=5
 Type=simple
 ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway sandbox-openshell-exec
 ExecStop=-/opt/defenseclaw/bin/defenseclaw-gateway sandbox-daemon stop-sandboxes
+ExecStop=-/opt/defenseclaw/bin/defenseclaw-gateway sandbox-daemon sync-sandboxes --managed
 Restart=on-failure
 RestartSec=5s
 RestartPreventExitStatus=78

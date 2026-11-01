@@ -142,6 +142,21 @@ func TestGatewayStatusMissingDestinationKeyGivesOneRemedy(t *testing.T) {
 	}
 }
 
+// GAP-2213: the unset ("") choice of a per-connector enum is not listed as
+// a value to type.
+func TestGatewayConfigLoadErrorLeavesOutTheUnsetEnumChoice(t *testing.T) {
+	writeGatewayMessageConfig(t, "guardrail:\n  connectors:\n    codex:\n      hook_fail_mode: OPEN\n")
+	loadErr := loadGatewayCommandConfigFor(statusCmd)
+	if loadErr == nil {
+		t.Fatal("config with an invalid connector hook_fail_mode loaded")
+	}
+	msg := gatewayStatusConfigLoadError(loadErr).Error()
+	if !strings.Contains(msg, `guardrail.connectors.codex.hook_fail_mode is "OPEN"; allowed values: open, closed`) ||
+		strings.Contains(msg, "allowed values: ,") {
+		t.Fatalf("status error = %q", msg)
+	}
+}
+
 // GAP-1914: restart and status name the bad enum value and the allowed
 // values, as config validate does, not the raw schema diagnostic.
 func TestGatewayConfigLoadErrorNamesTheBadEnumValue(t *testing.T) {

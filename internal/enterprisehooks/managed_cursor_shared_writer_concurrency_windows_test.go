@@ -348,12 +348,6 @@ func TestWindowsCursorSharedWriterKeepsConcurrentAdministratorChanges(t *testing
 					continue // there is no file to change yet
 				}
 				t.Run(op.name+"/"+string(change)+" "+timing, func(t *testing.T) {
-					if op.steady {
-						// About 1 run in 20 the steady watch reads a complete
-						// hooks.json whose machine-guard registration lacks some
-						// Cursor events.
-						t.Skip("GAP-1838: known 1.0.4 issue, fixed in 1.0.5")
-					}
 					paths, run := op.prepare(t)
 					admin := windowsCursorSharedWriterAdmin(paths)
 					var failNext func()

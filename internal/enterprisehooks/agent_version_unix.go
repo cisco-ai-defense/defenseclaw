@@ -23,7 +23,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -31,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -56,7 +56,7 @@ const (
 // discovery searches, e.g. an MDM-managed /opt/agents.
 const TrustedBinPrefixesEnv = "DEFENSECLAW_TRUSTED_BIN_PREFIXES"
 
-var unixAgentSemver = regexp.MustCompile(`^[0-9]+\.[0-9]+(\.[0-9]+)?([.+-][0-9A-Za-z.+-]*)?$`)
+var unixAgentSemver = lazyregexp.New(`^[0-9]+\.[0-9]+(\.[0-9]+)?([.+-][0-9A-Za-z.+-]*)?$`)
 
 // unixAgentProbe describes where a connector's CLI leaves metadata.
 type unixAgentProbe struct {
@@ -84,7 +84,7 @@ var unixAgentProbes = map[string]unixAgentProbe{
 	"claudecode": {npmPackages: []string{"@anthropic-ai/claude-code"}, versionDirs: []string{".local/share/claude/versions"}, binaries: []string{"claude"}},
 	"cursor":     {versionDirs: []string{".local/share/cursor-agent/versions"}, binaries: []string{"cursor-agent", "agent"}},
 	"copilot":    {npmPackages: []string{"@github/copilot"}, binaries: []string{"copilot"}},
-	"opencode":   {npmPackages: []string{"opencode-ai"}, binaries: []string{"opencode"}},
+	"opencode":   {npmPackages: []string{"@opencode/cli"}, binaries: []string{"opencode"}},
 	"amp":        {npmPackages: []string{"@ampcode/cli"}, binaries: []string{"amp"}},
 	"devin":      {binaries: []string{"devin"}},
 	"hermes":     {binaries: []string{"hermes"}, stateEnv: "HERMES_HOME", stamp: ".hermes/hermes-agent/install-stamp.json"},
@@ -694,17 +694,8 @@ var unixAdminGroupMember = func(uid, gid uint32) bool {
 	if err != nil {
 		return false
 	}
-	groups, err := unixidentity.AccountGroupIDs(context.Background(), account)
-	if err != nil {
-		return false
-	}
-	want := strconv.FormatUint(uint64(gid), 10)
-	for _, group := range groups {
-		if group == want {
-			return true
-		}
-	}
-	return false
+	member, err := unixidentity.AccountInGroup(context.Background(), account, int(gid))
+	return err == nil && member
 }
 
 // UnixPathTrustedFor is unixPathTrustedFor for callers outside this package.

@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,12 @@ import (
 // within a few seconds. A second delivery that finds no finished verdict in
 // time is evaluated normally: deduplication never lets a call through
 // unevaluated.
+//
+// A verdict is reused only under the policy it was decided by: the keys
+// carry the decision generation and guardrail profile (copilotDedupePolicy),
+// and an allow is replayed only while the live gates still pass
+// (copilotDedupeReplayable). A native toolCalls delivery and any call the
+// gateway could not read take no keys: each is decided on its own.
 
 const (
 	copilotDedupeExactTTL   = 30 * time.Second
@@ -92,8 +99,15 @@ func copilotDedupeScope(ctx context.Context) string {
 // copilotDedupeKeys includes the effective working directory and the hook's
 // resolved write evidence. Identical relative arguments in another directory
 // can name a different protected target and must be evaluated again.
-func copilotDedupeKeys(ctx context.Context, connectorName string, req agentHookRequest) (exact, content, dialect, request string) {
-	if connectorName != "copilot" || isSandboxHookRequest(ctx) {
+//
+// policy is copilotDedupePolicy of the delivery. A native toolCalls
+// delivery (a third envelope, not one of the two paired CLI dialects) and a
+// call the gateway could not read take no keys.
+func copilotDedupeKeys(ctx context.Context, connectorName string, req agentHookRequest, policy string) (exact, content, dialect, request string) {
+	if connectorName != "copilot" || isSandboxHookRequest(ctx) || req.ToolCallUnparsed {
+		return "", "", "", ""
+	}
+	if _, native := req.Payload["toolCalls"]; native {
 		return "", "", "", ""
 	}
 	phase := canonicalEvent(req.HookEventName)
@@ -122,7 +136,9 @@ func copilotDedupeKeys(ctx context.Context, connectorName string, req agentHookR
 	evidenceHash := sha256.Sum256(evidence)
 	// Both keys carry the call itself, so a reused or colliding id never
 	// answers a different call or a different resolved write target.
-	call := scope + "\x00" + session + "\x00" + phase + "\x00" + tool + "\x00" + digest + "\x00" + cwd + "\x00" + hex.EncodeToString(evidenceHash[:])
+	policyHash := sha256.Sum256([]byte(policy))
+	call := scope + "\x00" + session + "\x00" + phase + "\x00" + tool + "\x00" + digest + "\x00" + cwd + "\x00" + hex.EncodeToString(evidenceHash[:]) +
+		"\x00" + hex.EncodeToString(policyHash[:])
 	if id := firstString(req.Payload, "tool_use_id", "toolUseId"); id != "" {
 		request = scope + "\x00" + session + "\x00" + id
 		exact = "id\x00" + request + "\x00" + call
@@ -155,9 +171,9 @@ func copilotToolArgsDigest(raw json.RawMessage) (string, bool) {
 // begin looks up this delivery's keys. On a hit it returns the earlier
 // verdict; otherwise it claims the free keys and returns a ticket whose
 // complete stores the verdict (release frees the claim on every path).
-func (d *copilotHookDedupe) begin(ctx context.Context, connectorName string, req agentHookRequest) (agentHookResponse, bool, *copilotDedupeTicket) {
+func (d *copilotHookDedupe) begin(ctx context.Context, connectorName string, req agentHookRequest, policy string) (agentHookResponse, bool, *copilotDedupeTicket) {
 	ticket := &copilotDedupeTicket{d: d}
-	exact, content, dialect, request := copilotDedupeKeys(ctx, connectorName, req)
+	exact, content, dialect, request := copilotDedupeKeys(ctx, connectorName, req, policy)
 	ticket.request = request
 	if exact == "" && content == "" {
 		return agentHookResponse{}, false, ticket
@@ -272,6 +288,46 @@ func (t *copilotDedupeTicket) release() {
 			close(entry.done)
 		}
 	})
+}
+
+// copilotDedupePolicy names the policy a delivery decides under: the
+// generation it pins (counter and digest) and the guardrail profile it
+// resolved. A config, bundle, asset or profile change between two
+// deliveries of one call puts them under different keys.
+func (a *APIServer) copilotDedupePolicy(ctx context.Context) string {
+	parts := []string{"", ""}
+	if g := a.decisionGeneration(ctx); g != nil {
+		parts = []string{strconv.FormatUint(g.N, 10), g.Digest}
+	}
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil {
+		parts = append(parts, resolved.decision.Name, resolved.decision.Digest, resolved.decision.Refused)
+	}
+	return strings.Join(parts, "\x00")
+}
+
+// copilotDedupeReplayable reports whether an earlier delivery's verdict may
+// answer this delivery without its own evaluation. A block always may. Any
+// other verdict only while the gates that run before evaluation pass now: a
+// refused guardrail profile or a require-sandbox floor that refuses this
+// host run (read live) sends the delivery through the whole hook path. A
+// gate that panics here sends it there too.
+func (a *APIServer) copilotDedupeReplayable(ctx context.Context, connectorName string, req agentHookRequest, surface string, earlier agentHookResponse) (ok bool) {
+	if earlier.Action == "block" {
+		return true
+	}
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	if a.profileRefused(ctx) != "" {
+		return false
+	}
+	cwd := req.ReportedCWD
+	if cwd == "" {
+		cwd = req.CWD
+	}
+	return !a.requireSandboxDecision(ctx, connectorName, req.HookEventName, cwd, surface).refuses()
 }
 
 // copilotDedupedResponse re-renders an earlier delivery's verdict for this

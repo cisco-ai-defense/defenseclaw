@@ -18,15 +18,7 @@ import (
 // users instead of forgetting all of them, and a user seen for the first time
 // still gets its record: the oldest mark makes room for it.
 func TestIdentityObservedThrottleKeepsRecentUsersAtItsBound(t *testing.T) {
-	identityObservedState.Lock()
-	saved, savedPending := identityObservedState.last, identityObservedState.pending
-	identityObservedState.last, identityObservedState.pending = map[string]identityObservedMark{}, map[string]bool{}
-	identityObservedState.Unlock()
-	t.Cleanup(func() {
-		identityObservedState.Lock()
-		identityObservedState.last, identityObservedState.pending = saved, savedPending
-		identityObservedState.Unlock()
-	})
+	isolateIdentityObservedThrottle(t)
 	now := time.Now()
 	facts := useridentity.DirectoryFacts{Domain: "corp.example"}
 	for i := 0; i < identityObservedMaxUsers; i++ {
@@ -220,4 +212,22 @@ func TestLocalGroupSIDResolvesWhileDirectoryLookupsStall(t *testing.T) {
 	if _, ok := sids.sid(`CORP\other`); ok {
 		t.Fatal("a directory lookup started past its bound")
 	}
+}
+
+// isolateIdentityObservedThrottle gives a test an empty process-wide
+// identity.observed throttle and restores the previous one after it, so a
+// mark one run (or another test) left never suppresses a record the test
+// expects; -count>1 reran the retry test against its own last success
+// (GAP-1109).
+func isolateIdentityObservedThrottle(t *testing.T) {
+	t.Helper()
+	identityObservedState.Lock()
+	saved, savedPending := identityObservedState.last, identityObservedState.pending
+	identityObservedState.last, identityObservedState.pending = map[string]identityObservedMark{}, map[string]bool{}
+	identityObservedState.Unlock()
+	t.Cleanup(func() {
+		identityObservedState.Lock()
+		identityObservedState.last, identityObservedState.pending = saved, savedPending
+		identityObservedState.Unlock()
+	})
 }

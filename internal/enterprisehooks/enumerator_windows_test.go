@@ -587,7 +587,7 @@ func TestWriteTargetsManifestAtomicRejectsHardLinkedDestination(t *testing.T) {
 // per-user CLI is present.
 func TestApplyPreviousRowStateRefreshesVersionAndPreservesAuthorization(t *testing.T) {
 	// Secure Client follows the discovered version (#1163).
-	setStandaloneProfileForTest(t, false)
+	useWindowsSecureClientForTest(t)
 	enabled := true
 	previous := map[string]ManifestTarget{
 		previousManifestKey("S-1-5-21-1000-2000-3000-1001", "codex"): {
@@ -683,7 +683,7 @@ func TestApplyPreviousRowStateAutoAuthorizesNewRowWithDiscoverableCLI(t *testing
 
 func TestApplyPreviousRowStateCursorHomeStateWithoutVersion(t *testing.T) {
 	// Presence-only admission is the Secure Client fallback (#1163).
-	setStandaloneProfileForTest(t, false)
+	useWindowsSecureClientForTest(t)
 	isolateWindowsCursorMachineVersion(t)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".cursor", "extensions"), 0o700); err != nil {
@@ -1403,8 +1403,9 @@ func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenASessionIsUnidentifie
 	}
 	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
 	stubActiveSessions(t, map[string][]string{})
-	// After stubActiveSessions, which stubs the signed-in reader too: the
-	// sessions are read from the stubbed session API (GAP-0606).
+	// stubActiveSessions stubs the signed-in reader too; this test reads the
+	// sessions through the real reader over the stubbed session API
+	// (GAP-0921).
 	windowsSignedInSessionUsers = readWindowsSignedInSessionUsers
 	for _, tc := range []struct {
 		name     string
@@ -1417,6 +1418,7 @@ func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenASessionIsUnidentifie
 		stubWindowsSessionAPI(t, []windowsSession{{id: 2, state: windows.WTSDisconnected}}, nil, map[uint32]error{2: tc.tokenErr}, nil)
 		var reported []UnprotectedAgent
 		if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+			Logger:            func(subject, reason string) { t.Logf("%s: %s: %s", tc.name, subject, reason) },
 			ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
 		}); err != nil {
 			t.Fatal(err)

@@ -58,12 +58,17 @@ type observabilityV8EventHistoryObservation struct {
 	active             bool
 	lastFailureClass   string
 	lastFailurePrimary uint8
+	lastFailureAt      time.Time
 }
 
 type observabilityV8EventHistorySnapshot struct {
 	activeCode         string
 	lastFailureClass   string
 	lastFailurePrimary uint8
+	// lastFailureAt is when the last write failure happened (the recovery
+	// time of a failure episode that has ended), so a reader can tell a
+	// recent one from one long recovered (GAP-1627, GAP-1752).
+	lastFailureAt time.Time
 }
 
 type SubsystemState string
@@ -242,6 +247,7 @@ type SidecarHealth struct {
 	observabilityV8RetentionState         string
 	observabilityV8RetentionFailure       string
 	observabilityV8RetentionDays          int64
+	observabilityV8RetentionMaxStoreMB    int64
 	observabilityV8EventHistoryGeneration uint64
 	observabilityV8EventHistory           map[string]observabilityV8EventHistoryObservation
 	// observabilityV8LastChange is when the latest event-history or
@@ -992,6 +998,17 @@ func validObservabilityV8FailureCode(code string) bool {
 	}
 }
 
+// setObservabilityV8RetentionCap records the audit store size cap the next
+// setObservabilityV8Retention publishes with the retention (GAP-0141).
+func (h *SidecarHealth) setObservabilityV8RetentionCap(maxStoreMB int64) {
+	if h == nil || maxStoreMB < 0 {
+		return
+	}
+	h.mu.Lock()
+	h.observabilityV8RetentionMaxStoreMB = maxStoreMB
+	h.mu.Unlock()
+}
+
 func (h *SidecarHealth) setObservabilityV8Retention(state string, days int64, failure string) {
 	if h == nil || days < 0 || !validObservabilityV8RetentionState(state) ||
 		!validObservabilityV8RetentionFailure(failure) {
@@ -1042,10 +1059,17 @@ func (h *SidecarHealth) observeObservabilityV8EventHistory(
 		generation: transition.Generation, sequence: transition.Sequence,
 		active:           transition.State == audit.EventHistoryHealthFailed,
 		lastFailureClass: current.lastFailureClass, lastFailurePrimary: current.lastFailurePrimary,
+		lastFailureAt: current.lastFailureAt,
 	}
 	if observation.active && transition.Code == audit.EventHistoryHealthWriteFailed {
 		observation.lastFailureClass = string(transition.SQLiteClass)
 		observation.lastFailurePrimary = transition.SQLitePrimaryCode
+		observation.lastFailureAt = transition.OccurredAt
+	} else if current.active && transition.Code == audit.EventHistoryHealthWriteFailed {
+		// The audit store reports one failed transition per episode, so the
+		// writes kept failing until this recovery: the last failed write was
+		// just before it, not at the start of the episode (GAP-1752).
+		observation.lastFailureAt = transition.OccurredAt
 	}
 	h.observabilityV8EventHistory[code] = observation
 	h.noteObservabilityV8ChangeLocked(transition.OccurredAt)
@@ -1105,6 +1129,7 @@ func snapshotObservabilityV8EventHistory(
 	if write.generation != 0 && write.generation <= generation {
 		result.lastFailureClass = write.lastFailureClass
 		result.lastFailurePrimary = write.lastFailurePrimary
+		result.lastFailureAt = write.lastFailureAt
 	}
 	for code, observation := range observations {
 		if observation.generation == 0 || observation.generation > generation || !observation.active ||
@@ -1623,6 +1648,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	retentionState := h.observabilityV8RetentionState
 	retentionFailure := h.observabilityV8RetentionFailure
 	retentionDays := h.observabilityV8RetentionDays
+	retentionMaxStoreMB := h.observabilityV8RetentionMaxStoreMB
 	eventHistoryGeneration := h.observabilityV8EventHistoryGeneration
 	eventHistoryObservations := make(
 		map[string]observabilityV8EventHistoryObservation,
@@ -1702,6 +1728,10 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 				snap.Telemetry.Since,
 				retentionState, retentionFailure, retentionDays, eventHistory,
 			)
+		}
+		if _, reported := snap.Telemetry.Details["retention_days"]; reported && retentionMaxStoreMB > 0 {
+			// The size cap goes with the retention it bounds (GAP-0141).
+			snap.Telemetry.Details["retention_max_store_mb"] = retentionMaxStoreMB
 		}
 		snap.Telemetry.Since = h.telemetrySince(snap.Telemetry.State, snap.Telemetry.Since)
 	}
@@ -2021,6 +2051,9 @@ func appendObservabilityV8EventHistoryDetails(
 		details["event_history_last_sqlite_class"] = eventHistory.lastFailureClass
 		if eventHistory.lastFailurePrimary != 0 {
 			details["event_history_last_sqlite_primary_code"] = eventHistory.lastFailurePrimary
+		}
+		if !eventHistory.lastFailureAt.IsZero() {
+			details["event_history_last_failure_at"] = eventHistory.lastFailureAt.UTC().Format(time.RFC3339Nano)
 		}
 	}
 }

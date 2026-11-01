@@ -323,61 +323,64 @@ func managedHookBody(session, event string) string {
 	return `{"hook_event_name":"PreToolUse","session_id":"` + session + `","cwd":"/tmp","tool_name":"Bash","tool_use_id":"` + session + `-tool","tool_input":{"command":"echo ok"}}`
 }
 
+// offer makes a receipt-channel PreToolUse call, checks the gateway offers
+// an allow, and answers it with receipt ("" lets the hook time out).
+func (f managedHookAuditFixture) offer(t *testing.T, session, receipt string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	reader, writer := io.Pipe()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, f.server.URL+"/api/v1/claudecode/hook", reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := managedHookBody(session, "PreToolUse")
+	request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
+	request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
+	request.Header.Set("Content-Type", "application/json")
+	responseCh := make(chan *http.Response, 1)
+	errorCh := make(chan error, 1)
+	go func() {
+		response, requestErr := f.server.Client().Do(request)
+		if requestErr != nil {
+			errorCh <- requestErr
+			return
+		}
+		responseCh <- response
+	}()
+	if _, err := io.WriteString(writer, body); err != nil {
+		t.Fatal(err)
+	}
+	var response *http.Response
+	select {
+	case response = <-responseCh:
+	case err := <-errorCh:
+		t.Fatalf("gateway did not offer the hook a decision: %v", err)
+	case <-ctx.Done():
+		t.Fatal("gateway waited for the hook to finish before offering its decision")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", response.StatusCode)
+	}
+	line, err := bufio.NewReader(response.Body).ReadString('\n')
+	if err != nil || !strings.Contains(line, `"action":"allow"`) {
+		t.Fatalf("proposed answer %q: %v", line, err)
+	}
+	if receipt != "" {
+		if _, err := io.WriteString(writer, receipt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = writer.Close()
+	_, _ = io.Copy(io.Discard, response.Body)
+}
+
 // GAP-0286: a managed hook can receive a proposed allow, then give no receipt.
 // Audit and hook_decision record a known block or an unconfirmed result, never
 // an allow the gateway cannot prove the hook gave to the agent.
 func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	f := newManagedHookAuditFixture(t, nil)
-	call := func(session, receipt string) {
-		t.Helper()
-		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-		defer cancel()
-		reader, writer := io.Pipe()
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, f.server.URL+"/api/v1/claudecode/hook", reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body := managedHookBody(session, "PreToolUse")
-		request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
-		request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
-		request.Header.Set("Content-Type", "application/json")
-		responseCh := make(chan *http.Response, 1)
-		errorCh := make(chan error, 1)
-		go func() {
-			response, requestErr := f.server.Client().Do(request)
-			if requestErr != nil {
-				errorCh <- requestErr
-				return
-			}
-			responseCh <- response
-		}()
-		if _, err := io.WriteString(writer, body); err != nil {
-			t.Fatal(err)
-		}
-		var response *http.Response
-		select {
-		case response = <-responseCh:
-		case err := <-errorCh:
-			t.Fatalf("gateway did not offer the hook a decision: %v", err)
-		case <-ctx.Done():
-			t.Fatal("gateway waited for the hook to finish before offering its decision")
-		}
-		defer response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			t.Fatalf("status %d", response.StatusCode)
-		}
-		line, err := bufio.NewReader(response.Body).ReadString('\n')
-		if err != nil || !strings.Contains(line, `"action":"allow"`) {
-			t.Fatalf("proposed answer %q: %v", line, err)
-		}
-		if receipt != "" {
-			if _, err := io.WriteString(writer, receipt); err != nil {
-				t.Fatal(err)
-			}
-		}
-		_ = writer.Close()
-		_, _ = io.Copy(io.Discard, response.Body)
-	}
 	legacy := func(session, event string, ctx context.Context) string {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", strings.NewReader(managedHookBody(session, event))).WithContext(ctx)
 		reply := httptest.NewRecorder()
@@ -385,9 +388,9 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 		return reply.Body.String()
 	}
 
-	call("timeout", "")
-	call("delivered", hookexec.HookDeliveryReceiptAck)
-	call("rejected", hookexec.HookDeliveryReceiptBlock)
+	f.offer(t, "timeout", "")
+	f.offer(t, "delivered", hookexec.HookDeliveryReceiptAck)
+	f.offer(t, "rejected", hookexec.HookDeliveryReceiptBlock)
 	gone, hangUp := context.WithCancel(t.Context())
 	hangUp()
 	legacy("disconnected", "PreToolUse", gone)
@@ -399,7 +402,7 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	// decision is what the agent got.
 	legacy("prompt", "UserPromptSubmit", t.Context())
 	f.api.scannerCfg.Guardrail.HookFailMode = "open"
-	call("open-timeout", "")
+	f.offer(t, "open-timeout", "")
 
 	sessions := []string{"timeout", "delivered", "rejected", "disconnected", "legacy-no-receipt", "prompt", "open-timeout"}
 	want := map[string]string{
@@ -670,15 +673,15 @@ func TestUnreceiptedManagedHookDecisions(t *testing.T) {
 		{"opencode", "tool.execute.before", true, "unconfirmed"},
 		{"claudecode", "UserPromptSubmit", true, "unconfirmed"},
 	} {
-		if got := api.unreceiptedHookDecision(tc.hungUp, tc.connector, tc.event, allow).Action; got != tc.want {
+		if got := api.unreceiptedHookDecision(false, tc.hungUp, tc.connector, tc.event, allow).Action; got != tc.want {
 			t.Errorf("%s %s (hung up %v) = %q, want %q", tc.connector, tc.event, tc.hungUp, got, tc.want)
 		}
 	}
-	if got := api.unreceiptedHookDecision(false, "codex", "PreToolUse", agentHookResponse{Action: "block", Reason: "policy"}); got.Action != "block" || got.Reason != "policy" {
+	if got := api.unreceiptedHookDecision(false, false, "codex", "PreToolUse", agentHookResponse{Action: "block", Reason: "policy"}); got.Action != "block" || got.Reason != "policy" {
 		t.Errorf("policy block = %+v, want it kept", got)
 	}
 	secureClient := &APIServer{scannerCfg: &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "secure_client"}}}
-	if got := secureClient.unreceiptedHookDecision(true, "codex", "PreToolUse", allow).Action; got != "allow" {
+	if got := secureClient.unreceiptedHookDecision(false, true, "codex", "PreToolUse", allow).Action; got != "allow" {
 		t.Errorf("Secure Client = %q, want its response contract unchanged", got)
 	}
 }
@@ -697,7 +700,7 @@ func TestManagedHangupWithoutReceiptDoesNotClaimAnEnforcedBlock(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, got := range []agentHookResponse{
-				api.unreceiptedHookDecision(true, "claudecode", "PreToolUse", tc.resp),
+				api.unreceiptedHookDecision(false, true, "claudecode", "PreToolUse", tc.resp),
 				api.deliveredHookDecision("claudecode", tc.resp, ""),
 			} {
 				if got.Action != hookActionUnconfirmed || got.Mode != tc.resp.Mode || got.RawAction != tc.resp.RawAction {
@@ -740,5 +743,35 @@ func TestManagedHookMissingReceiptRecordsOnlyKnownEnforcement(t *testing.T) {
 				t.Fatalf("policy block reason = %q, want policy", got.Reason)
 			}
 		})
+	}
+}
+
+// A managed shell hook post (GAP-2614: the Linux and macOS Antigravity bridge)
+// sends no receipt because it has no answer watchdog: the agent got the
+// answer the gateway sent. Its verdict keeps the evaluated decision; a caller
+// that hung up first and a native hook without a receipt stay unconfirmed.
+func TestUnreceiptedShellBridgeKeepsTheAnswerTheGatewaySent(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	cfg.Guardrail.HookFailMode = "closed"
+	api := &APIServer{scannerCfg: cfg}
+	allow := agentHookResponse{Action: "allow", RawAction: "allow", Mode: "observe"}
+	observed := agentHookResponse{Action: "allow", RawAction: "block", Mode: "observe", WouldBlock: true, Reason: "matched: marker"}
+	if got := api.unreceiptedHookDecision(true, false, "antigravity", "PreToolUse", allow); got.Action != "allow" || got.Reason == hookexec.ManagedGatewayNoAnswerReason {
+		t.Errorf("shell bridge allow = %+v, want allow", got)
+	}
+	if got := api.unreceiptedHookDecision(true, false, "antigravity", "PreToolUse", observed); got.Action != "allow" || got.RawAction != "block" || !got.WouldBlock || got.Reason != "matched: marker" {
+		t.Errorf("shell bridge observe marker = %+v, want allow raw_action=block would_block", got)
+	}
+	if got := api.unreceiptedHookDecision(true, false, "copilot", "preToolUse", allow); got.Action != "allow" {
+		t.Errorf("copilot shell bridge allow = %+v, want allow", got)
+	}
+	if got := api.unreceiptedHookDecision(true, true, "antigravity", "PreToolUse", allow); got.Action != hookActionUnconfirmed {
+		t.Errorf("shell bridge caller hung up = %+v, want unconfirmed", got)
+	}
+	if got := api.unreceiptedHookDecision(false, false, "antigravity", "PreToolUse", allow); got.Action != hookActionUnconfirmed {
+		t.Errorf("native hook without a receipt = %+v, want unconfirmed", got)
+	}
+	if got := api.unreceiptedHookDecision(true, false, "antigravity", "PreToolUse", agentHookResponse{Action: "block", Reason: "policy"}); got.Action != "block" || got.Reason != "policy" {
+		t.Errorf("shell bridge policy block = %+v, want it kept", got)
 	}
 }

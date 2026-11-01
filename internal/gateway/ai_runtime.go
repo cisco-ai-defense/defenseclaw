@@ -338,7 +338,10 @@ func (s *Sidecar) aiRuntimeOwnerLookups(activeConfig *config.Config) sensor.Owne
 			for _, account := range enrolled {
 				accounts = append(accounts, sensor.Account{Name: account.Name, SID: account.SID, Home: account.Home})
 			}
-			return accounts
+			// Off Windows the scan's profile list is empty: the enrolled
+			// accounts are the hook guardian's identity records
+			// (p0-round GAP-1389).
+			return append(accounts, aiRuntimeSpoolAccounts()...)
 		},
 	}
 }

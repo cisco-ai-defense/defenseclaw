@@ -21,6 +21,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,7 +63,11 @@ func (admin Admin) Apply(t testing.TB, change Change) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(admin.Path, admin.Edit(data), 0o600); err != nil {
+		edited := admin.Edit(data)
+		adminSaves.Add(1)
+		err = os.WriteFile(admin.Path, edited, 0o600)
+		adminSaves.Add(1)
+		if err != nil {
 			t.Fatal(err)
 		}
 	case AccessList:
@@ -179,14 +184,27 @@ func ReadShared(path string) ([]byte, bool, error) {
 	return data, true, err
 }
 
+// adminSaves is odd while an Admin's in-place Content save is being written
+// and counts every save. A save in place truncates the file and writes it
+// again, so a reader that reads the file while it is written can get the
+// start of one version and the rest of another: a torn read that any reader
+// (Cursor, Codex) would get from that administrator, whatever DefenseClaw
+// does (GAP-1838).
+var adminSaves atomic.Uint64
+
 // Watch runs a check over and over from another goroutine and keeps the
-// first failure.
+// first failure. A poll that overlapped an Admin's in-place Content save
+// read a file the administrator was still writing; its result says nothing
+// about DefenseClaw and is not kept. Every other poll is judged. DefenseClaw
+// writes nothing during that save: the tests run it in the writer's own
+// goroutine, before or after DefenseClaw's write.
 type Watch struct {
 	stop  chan struct{}
 	done  sync.WaitGroup
 	mu    sync.Mutex
 	err   error
 	polls int
+	torn  int
 }
 
 // StartWatch starts checking. check is called about every 50 microseconds
@@ -203,9 +221,15 @@ func StartWatch(check func() error) *Watch {
 				return
 			default:
 			}
+			saves := adminSaves.Load()
 			err := check()
+			torn := saves%2 == 1 || adminSaves.Load() != saves
 			watch.mu.Lock()
 			watch.polls++
+			if torn {
+				watch.torn++
+				err = nil
+			}
 			if err != nil && watch.err == nil {
 				watch.err = fmt.Errorf("poll %d: %w", watch.polls, err)
 			}
@@ -223,6 +247,14 @@ func (watch *Watch) Stop() error {
 	watch.mu.Lock()
 	defer watch.mu.Unlock()
 	return watch.err
+}
+
+// Polls returns how many polls ran and how many of them overlapped an
+// administrator's in-place save and were not judged.
+func (watch *Watch) Polls() (polls, torn int) {
+	watch.mu.Lock()
+	defer watch.mu.Unlock()
+	return watch.polls, watch.torn
 }
 
 // Busy reports a read refused because another handle holds the file.

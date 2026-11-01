@@ -21,6 +21,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -62,7 +63,7 @@ func ExtractExactPOSIXUnboundedCPUFanout(source string) (UnboundedCPUFanoutFact,
 	}
 
 	parser := syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
-	file, err := parser.Parse(strings.NewReader(source), "")
+	file, err := parser.Parse(shellparse.Reader(source), "")
 	if err != nil {
 		return UnboundedCPUFanoutFact{}, false
 	}

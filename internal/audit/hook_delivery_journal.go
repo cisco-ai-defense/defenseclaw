@@ -177,11 +177,11 @@ func (s *Store) execHookDeliveryJournal(ctx context.Context, insert bool, query 
 		}
 	}
 	if insert {
-		if _, err := db.ExecContext(ctx, hookDeliveryJournalSchema); err != nil {
+		if _, err := execHookDeliveryJournalRetryingBusy(ctx, db, hookDeliveryJournalSchema); err != nil {
 			return nil, fmt.Errorf("create the hook delivery journal: %w", err)
 		}
 	}
-	result, err := db.ExecContext(ctx, query, args...)
+	result, err := execHookDeliveryJournalRetryingBusy(ctx, db, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -192,6 +192,46 @@ func (s *Store) execHookDeliveryJournal(ctx context.Context, insert bool, query 
 		}
 	}
 	return result, nil
+}
+
+// hookDeliveryJournalBusyWait bounds how long one journal write retries a
+// store that answers SQLITE_BUSY. A journal write runs on the durable
+// connection, beside the store pool connection that the hook records,
+// retention and the planner refresh use: when that connection holds the write
+// lock past the busy timeout (0.75 s; a cold first start after an upgrade with
+// a multi-GB store), the journal insert failed at once, the managed hook was
+// answered 503 and its benign call denied about 1.2 s into a 3.5 s answer
+// budget (rel-1-0-4 GAP-1790, T11 managed RHEL). Each attempt still waits the
+// busy timeout inside SQLite, so the last one can end up to 0.75 s after this
+// window; a call whose hook gives up first is refused by the hook at its
+// budget, as for any late answer.
+var hookDeliveryJournalBusyWait = 2500 * time.Millisecond
+
+// hookDeliveryJournalBusyPause is the longest pause between two attempts.
+const hookDeliveryJournalBusyPause = 100 * time.Millisecond
+
+// execHookDeliveryJournalRetryingBusy runs one autocommit journal statement
+// and runs it again while it meets SQLITE_BUSY, until it lands,
+// hookDeliveryJournalBusyWait has passed or ctx is done. A busy statement
+// changed nothing (it never got the write lock), so running it again cannot
+// write a row twice. The last error is returned as it is.
+func execHookDeliveryJournalRetryingBusy(ctx context.Context, db *sql.DB, query string, args ...any) (sql.Result, error) {
+	deadline := time.Now().Add(hookDeliveryJournalBusyWait)
+	pause := 10 * time.Millisecond
+	for {
+		result, err := db.ExecContext(ctx, query, args...)
+		if err == nil || !isSQLiteBusy(err) || ctx.Err() != nil || !time.Now().Add(pause).Before(deadline) {
+			return result, err
+		}
+		timer := time.NewTimer(pause)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return result, err
+		case <-timer.C:
+		}
+		pause = min(2*pause, hookDeliveryJournalBusyPause)
+	}
 }
 
 // HookDelivery returns the still-journaled occurrence with id. The sandbox

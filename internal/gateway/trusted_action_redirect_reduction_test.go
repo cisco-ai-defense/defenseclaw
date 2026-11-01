@@ -459,6 +459,12 @@ func TestTrustedActionBlocksBuiltInRuleInEachStatementOfCompoundCommand(t *testi
 		{"for i in $(rm -rf /); do :; done", true},
 		{"case $(rm -rf /) in *) true;; esac", true},
 		{"f() { rm -rf /; }; f", true},
+		// A program word bound to a function name calls it (GAP-0934).
+		{"f() { rm -rf /; }; x=f; $x", true},
+		{"x=f; f() { rm -rf /; }; \"${x}\"", true},
+		{"f() { echo ok; }; x=rm; $x -rf /", true},
+		{"f() { rm -rf /; }; x=f; echo $x", false},
+		{"f() { rm -rf /; }; g() { echo hi; }; x=g; $x", false},
 		{"cat <<'EOF'\nhello\nEOF\nrm -rf /", true},
 		{"rm -rf /tmp/dc-x; echo $HOME", false},
 		{"(rm -rf /tmp/dc-x) 2>&1", false},
@@ -834,9 +840,9 @@ func TestTrustedActionArgvRuleBlocksAfterSourcedFile(t *testing.T) {
 		". .env && echo dynamodb":                    false,
 		// A later PATH change can only make the match over-block.
 		"source .env && export PATH=/opt/bin && aws dynamodb scan --table-name T": true,
-		// A prefix assignment leaves the twin partial, so the view declines
-		// (as without the sourced file, GAP-1581).
-		"source .env && PATH=/x aws dynamodb scan --table-name T": false,
+		// A PATH prefix can only pick another aws: the call is also
+		// judged without it (GAP-1200).
+		"source .env && PATH=/x aws dynamodb scan --table-name T": true,
 		"source .env && PATH=/x echo dynamodb":                    false,
 	} {
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
@@ -854,6 +860,86 @@ func TestTrustedActionArgvRuleBlocksAfterSourcedFile(t *testing.T) {
 		finding := findingWithID(findings, "CUSTOM-DYNAMODB-CLI")
 		if got := finding != nil && finding.contributesToEnforcement(); got != blocks {
 			t.Errorf("%q: blocks=%t, want %t; findings=%v", command, got, blocks, FindingStrings(findings))
+		}
+	}
+}
+
+// GAP-1200 (#1189): a prefix assignment that can change which program runs
+// (PATH=/x aws ...) and an env wrapper that sets a variable or splits a
+// string (env NAME=v aws ..., env -S "aws ...") kept the call out of the
+// action's argv, so a custom argv rule never ran and only its regex fallback
+// could record a detection-only finding. The argv is static, so the call is
+// also judged alone; a match can only over-block.
+func TestTrustedActionArgvRuleBlocksBehindPrefixOrEnvWrapper(t *testing.T) {
+	const connector = "prefix-env-wrapper-argv-test"
+	installRedirectReductionRules(t, connector,
+		redirectReductionRule("CUSTOM-DYNAMODB-CLI", `a^`,
+			`f.commands.exists(c, c.program == "aws" && "dynamodb" in c.argv)`),
+	)
+	for command, blocks := range map[string]bool{
+		"PATH=/x aws dynamodb scan --table-name T":                true,
+		"LD_PRELOAD=/x.so aws dynamodb scan --table-name T":       true,
+		"cd /tmp && PATH=/x aws dynamodb scan --table-name T":     true,
+		"env AWS_PROFILE=p aws dynamodb scan --table-name T":      true,
+		"env -i PATH=/x aws dynamodb scan --table-name T":         true,
+		`env -S "aws dynamodb scan --table-name T"`:               true,
+		`env -S "AWS_PROFILE=p aws dynamodb scan --table-name T"`: true,
+		"nohup aws dynamodb scan --table-name T":                  true,
+		"timeout 5 aws dynamodb scan --table-name T":              true,
+		"PATH=/x echo dynamodb":                                   false,
+		"AWS_PROFILE=dynamodb aws s3 ls":                          false,
+		"env X=1 echo dynamodb":                                   false,
+		`env -S "echo dynamodb"`:                                  false,
+		"PATH=/opt/bin:$PATH aws s3 ls":                           false,
+	} {
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: actionfacts.Input{Tool: "shell", Command: command, CWD: "/home/alice/project",
+				ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX},
+			LegacyText:         command,
+			Connector:          connector,
+			EnforcementCapable: true,
+		})
+		finding := findingWithID(findings, "CUSTOM-DYNAMODB-CLI")
+		if got := finding != nil && finding.contributesToEnforcement(); got != blocks {
+			t.Errorf("%q: blocks=%t, want %t; findings=%v", command, got, blocks, FindingStrings(findings))
+		}
+	}
+}
+
+// GAP-0935: a PowerShell if, elseif or while body under a condition that is
+// not a literal ($true/$false) was never judged, so the delete in it ran
+// with no finding. The body is judged as one that runs, as a POSIX if body
+// is, and a plain condition is a statement of its own. Benign bodies and
+// conditions stay quiet.
+func TestTrustedActionJudgesPowerShellConditionalBodies(t *testing.T) {
+	const connector = "powershell-conditional-body-test"
+	installDefaultProfileConnector(t, connector)
+	for _, test := range []struct {
+		command, rule string
+		blocks        bool
+	}{
+		{"if (Test-Path x) { Remove-Item -Recurse -Force C:/ }", "CMD-RM-RF", true},
+		{"if ($env:CI) { Remove-Item -Recurse -Force C:/ }", "CMD-RM-RF", true},
+		{"if (Test-Path x) { Get-ChildItem } elseif (Test-Path y) { Remove-Item -Recurse -Force C:/ }", "CMD-RM-RF", true},
+		{"while ($i -lt 3) { Remove-Item -Recurse -Force C:/ }", "CMD-RM-RF", true},
+		{"if (Get-Content ~/.ssh/id_rsa) { Write-Output ok }", "PATH-SSH-KEY", true},
+		{"if (Test-Path x) { Remove-Item -Recurse -Force C:/tmp/dc-x }", "CMD-RM-RF", false},
+		{"if (Test-Path C:/x) { Write-Output yes } else { Write-Output no }", "CMD-RM-RF", false},
+		{"if ($env:CI) { npm test }", "CMD-RM-RF", false},
+		{"while ($i -lt 3) { $i++ }", "CMD-RM-RF", false},
+	} {
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: actionfacts.Input{Tool: "powershell", Command: test.command, CWD: `C:/Users/alice/project`,
+				ActiveHome: `C:/Users/alice`, DialectHint: actionfacts.DialectPowerShell},
+			LegacyText:         test.command,
+			Connector:          connector,
+			EnforcementCapable: true,
+		})
+		if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != test.blocks {
+			t.Errorf("%q: block = %t, want %t; findings=%v", test.command, got, test.blocks, FindingStrings(findings))
+		}
+		if finding := findingWithID(findings, test.rule); test.blocks && (finding == nil || !finding.contributesToEnforcement()) {
+			t.Errorf("%q: %s does not block; findings=%v", test.command, test.rule, FindingStrings(findings))
 		}
 	}
 }

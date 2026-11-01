@@ -148,7 +148,7 @@ func TestScannersContainDetachedChildren(t *testing.T) {
 	}
 }
 
-// A scanner may start ordinary subprocesses: skill-scanner 2.2.1 does on
+// A scanner may start ordinary subprocesses: skill-scanner 2.3.2 does on
 // every scan. The macOS no-fork launcher failed every such gateway scan.
 func TestScannersRunForkingChildren(t *testing.T) {
 	fixture := filepath.Join(t.TempDir(), "scanner-fixture")

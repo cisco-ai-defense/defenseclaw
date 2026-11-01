@@ -183,6 +183,20 @@ func TestStandaloneUnenrolledAccountGetsEnrollmentDecision(t *testing.T) {
 	}
 }
 
+// identity-round GAP-1181: an account the policy excludes is not told to
+// wait for its enrollment and try again; it is told the policy excludes it.
+func TestStandaloneExcludedAccountIsToldThePolicyExcludesIt(t *testing.T) {
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
+	startStandaloneHookServer(t, socket, `{"enrollment":"excluded","error":"forbidden","reason":"enterprise_managed_uid_unregistered"}`, http.StatusForbidden)
+	result := standaloneRun(t, socket, os.Getuid())
+	if result.code != 0 || !strings.Contains(result.stdout, "policy excludes this account on this computer") ||
+		!strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
+		strings.Contains(result.stdout, "within about five minutes") || strings.Contains(result.stdout, "try again then") ||
+		strings.Contains(result.stdout+result.stderr, "HTTP 403") {
+		t.Fatalf("excluded refusal: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
 // GAP-0556: root's call under enrollment.root: deny said "the DefenseClaw
 // gateway returned an answer DefenseClaw could not use". It names the policy
 // and the code.
@@ -410,5 +424,50 @@ func TestStandaloneTransportRequiresSocketAndServiceUID(t *testing.T) {
 	}
 	if _, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid()); err != nil {
 		t.Fatalf("trusted socket refused: %v", err)
+	}
+}
+
+// GAP-2405: a hook socket directory that is not owned by root or the gateway
+// account is a peer failure the hook names: the guard's session exchange and
+// the native hook both say the directory is the cause, in the words of the
+// managed shell hooks.
+func TestUntrustedHookSocketDirectoryIsNamed(t *testing.T) {
+	dir := shortSocketDir(t)
+	socket := filepath.Join(dir, "hook.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	gatewayUID := os.Getuid() + 1 // the directory belongs to this test's account, not the gateway's
+	if os.Getuid() == 0 {
+		t.Skip("root owns a directory every hook trusts")
+	}
+	_, err = managedStandaloneHTTPClient(time.Second, socket, gatewayUID)
+	if !errors.Is(err, errManagedGatewayPeerUnverified) || !ManagedHookSocketDirectoryUntrusted(err) {
+		t.Fatalf("foreign-owned socket directory: %v; want a peer failure that names the directory", err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid()); !ManagedHookSocketDirectoryUntrusted(err) {
+		t.Fatalf("world-writable socket directory: %v; want it named", err)
+	}
+	if reason := managedPeerFailureReason(Options{ManagedEnterprise: true, ManagedStandalone: true}, err); reason != managedHookSocketDirectoryUntrustedReason {
+		t.Fatalf("peer failure reason = %q", reason)
+	}
+	text, ok := ManagedTransportFailureText("PreToolUse", managedHookSocketDirectoryUntrustedReason)
+	if !ok || !strings.Contains(text, "hook socket directory is not owned by root or the gateway account") ||
+		strings.Contains(text, managedGatewayPeerUnverifiedReason) || strings.Contains(text, "not available") {
+		t.Fatalf("block text = %q", text)
+	}
+	// A socket that is missing in a trusted directory is still a stopped gateway.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener.Close()
+	_ = os.Remove(socket)
+	if _, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid()); ManagedHookSocketDirectoryUntrusted(err) || !errors.Is(err, errManagedGatewayNotRunning) {
+		t.Fatalf("missing socket in a trusted directory: %v; want the stopped-gateway error", err)
 	}
 }

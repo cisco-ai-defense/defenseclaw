@@ -40,6 +40,7 @@ from defenseclaw.connector_contracts import (
     has_native_approval_prompt,
     known_broken_entry,
     known_warning_entry,
+    openclaw_lacks_plugin_approvals,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
 )
@@ -134,6 +135,12 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertTrue(openclaw_needs_interception_advisory("2026.6.8"))
         self.assertTrue(openclaw_needs_interception_advisory("2026.6.11"))
         self.assertFalse(openclaw_needs_interception_advisory(""))
+
+    def test_openclaw_plugin_approvals_start_at_2026_3_28(self) -> None:
+        self.assertTrue(openclaw_lacks_plugin_approvals("OpenClaw 2026.3.24 (cff6dc9)"))
+        self.assertFalse(openclaw_lacks_plugin_approvals("2026.3.28"))
+        self.assertFalse(openclaw_lacks_plugin_approvals("2026.6.8"))
+        self.assertFalse(openclaw_lacks_plugin_approvals(""))
 
     def test_codex_version_range_matches_contract(self) -> None:
         expected = (
@@ -338,6 +345,34 @@ class TestConnectorContractManifest(unittest.TestCase):
                     _print_connector_observability_banner(connector)
                 rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
                 self.assertIn(f"→ {route}", rendered)
+
+    def test_observe_banner_states_the_outage_fail_mode(self) -> None:
+        # rel-1-0-6 GAP-0011: "a failed hook can block" contradicted the per-user
+        # default (fail open) that status and doctor show.
+        for connector in ("opencode", "codex", "amp"):
+            for outage, expected in (
+                ("open", "run with a warning (hook fail mode open)"),
+                ("closed", "blocked (hook fail mode closed)"),
+            ):
+                with self.subTest(connector=connector, outage=outage):
+                    with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
+                        _print_connector_observability_banner(connector, outage_fail_mode=outage)
+                    rendered = " ".join(str(call.args[0]).strip() for call in echo.call_args_list if call.args)
+                    self.assertIn(expected, rendered)
+                    self.assertNotIn("failed hook can block", rendered)
+                    self.assertNotIn("can still block", rendered)
+
+    def test_setup_outage_fail_mode_follows_the_flags_of_the_run(self) -> None:
+        from defenseclaw.commands.cmd_setup import _setup_outage_fail_mode
+        from defenseclaw.config import Config
+
+        cfg = Config()  # per-user, nothing saved: the default tier is fail open
+        self.assertEqual(_setup_outage_fail_mode(cfg, "opencode", fail_mode=None, rule_pack=None), "open")
+        self.assertEqual(_setup_outage_fail_mode(cfg, "opencode", fail_mode="closed", rule_pack=None), "closed")
+        self.assertEqual(_setup_outage_fail_mode(cfg, "opencode", fail_mode=None, rule_pack="strict"), "closed")
+        cfg.guardrail.hook_fail_mode = "open"
+        cfg.guardrail._hook_fail_mode_saved = True  # a saved mode wins over the strict tier
+        self.assertEqual(_setup_outage_fail_mode(cfg, "opencode", fail_mode=None, rule_pack="strict"), "open")
 
     def test_claude_aliases_resolve_to_claudecode(self) -> None:
         compat = resolve_connector_contract("claude-code", "Claude Code 2.1.154")
@@ -565,12 +600,17 @@ class TestConnectorContractManifest(unittest.TestCase):
             "2026.9.24",
             "Hermes Agent vgit.5bba024 (2026.9.24)",
             "Hermes Agent vgit.5bba024",
+            "Hermes Agent vunknown (2026.9.24)",
         ):
             compat = resolve_connector_contract("hermes", raw)
             self.assertEqual(compat.status, STATUS_KNOWN, raw)
             self.assertEqual(compat.contract.contract_id, "hermes-hooks-v2", raw)
             self.assertEqual(compat.warning, "", raw)
             self.assertEqual(known_broken_entry("hermes", raw), (None, ""), raw)
+        # GAP-2052: a git install release date resolves like the bare date,
+        # and only in the Hermes form (mirrors Go hermesGitReleaseRE).
+        for raw in ("Hermes Agent vunknown (2026.6.1)", "Other Agent vunknown (2026.9.24)"):
+            self.assertNotEqual(resolve_connector_contract("hermes", raw).status, STATUS_KNOWN, raw)
         # Below the first reviewed release keeps its own "upgrade" answer.
         self.assertNotIn("known broken", resolve_connector_contract("hermes", "0.18.2").reason)
 
@@ -835,15 +875,15 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")
         self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
-    def test_opencode_11819_is_exactly_supported(self) -> None:
-        resolved = resolve_connector_contract("opencode", "opencode 1.18.19")
+    def test_opencode_v2_is_exactly_supported(self) -> None:
+        resolved = resolve_connector_contract("opencode", "opencode 2.1.4")
         self.assertEqual(resolved.status, STATUS_KNOWN)
-        self.assertEqual(resolved.contract.contract_id, "opencode-hooks-v1")
+        self.assertEqual(resolved.contract.contract_id, "opencode-hooks-v2")
 
         with (
             patch(
                 "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-                return_value=_discovery("opencode", installed=True, version="opencode 1.18.19"),
+                return_value=_discovery("opencode", installed=True, version="opencode 2.1.4"),
             ),
             patch(
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",
@@ -862,14 +902,24 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.save_calls, 1)
         self.assertEqual(self.app.cfg.guardrail.connector, "opencode")
 
-    def test_opencode_version_guidance_distinguishes_old_from_new(self) -> None:
-        old = _connector_contract_upgrade_guidance("opencode", "OpenCode", "1.18.9")
-        current = _connector_contract_upgrade_guidance("opencode", "OpenCode", "1.19.0")
+    def test_opencode_guidance_only_offers_v2(self) -> None:
+        for version in ("1.18.9", "1.19.0", "3.0.0"):
+            guidance = _connector_contract_upgrade_guidance("opencode", "OpenCode", version)
+            self.assertIn("Install OpenCode V2", guidance)
+            self.assertIn("@opencode/cli@2", guidance)
 
-        self.assertIn("Upgrade OpenCode", old)
-        self.assertIn("older than the validated minimum", old)
-        self.assertNotIn("Upgrade OpenCode", current)
-        self.assertIn("newer than DefenseClaw's validated range", current)
+    def test_opencode_v1_is_refused_even_with_the_drift_override(self) -> None:
+        for mode in ("observe", "action"):
+            with (
+                patch("defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                      return_value=_discovery("opencode", installed=True, version="1.18.33")),
+                patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="linux"),
+                patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "1"}),
+            ):
+                ok = _apply_hook_connector_setup(self.app, connector="opencode", mode=mode, restart=False)
+            self.assertFalse(ok)
+            self.assertEqual(self.save_calls, 0)
+            self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
     def test_opencode_below_floor_is_refused_before_save_and_roster_mutation(self) -> None:
         with (

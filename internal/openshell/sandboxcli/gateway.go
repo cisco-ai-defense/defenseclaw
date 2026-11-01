@@ -46,6 +46,9 @@ type GatewayService interface {
 	Rollback(ctx context.Context, res *openshell.GatewayApplyResult) error
 	Restart(ctx context.Context) error
 	NoService(ctx context.Context) bool
+	// StopSync gives the gateway service the stop sync of its MicroVMs
+	// with no restart (openshell.GatewayConfigurator.EnsureStopSync).
+	StopSync(ctx context.Context) (*openshell.GatewayApplyResult, error)
 }
 
 type gatewayService struct {
@@ -61,7 +64,14 @@ func (g *gatewayService) configurator() *openshell.GatewayConfigurator {
 			d.Gateway = g.app.Cfg.OpenShell.Gateway.Name
 			cli = g.app.Cfg.OpenShell.EffectiveBinary()
 		}
-		g.cfg = &openshell.GatewayConfigurator{Discover: d, CLI: cli}
+		g.cfg = &openshell.GatewayConfigurator{Discover: d, CLI: cli, StopSync: g.app.stopSyncSpec(), Out: g.app.IO.Err,
+			StopSyncWritten: func(res *openshell.GatewayApplyResult) {
+				// A restart gave the service the stop sync: teardown removes it.
+				if err := g.app.recordGatewayApply(res); err != nil {
+					g.app.warn("could not record the gateway change for teardown: " + err.Error())
+				}
+				g.app.ok(openshell.StopSyncSummary)
+			}}
 	}
 	return g.cfg
 }
@@ -92,6 +102,10 @@ func (g *gatewayService) Restart(ctx context.Context) error {
 
 func (g *gatewayService) NoService(ctx context.Context) bool {
 	return g.configurator().NoService(ctx)
+}
+
+func (g *gatewayService) StopSync(ctx context.Context) (*openshell.GatewayApplyResult, error) {
+	return g.configurator().EnsureStopSync(ctx)
 }
 
 // setupReceipt records what setup changed outside DefenseClaw, so

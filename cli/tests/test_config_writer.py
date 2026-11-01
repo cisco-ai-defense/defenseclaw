@@ -193,6 +193,28 @@ def test_a_field_of_an_unlisted_destination_names_the_range(tmp_path, monkeypatc
     assert open(path, encoding="utf-8").read() == before
 
 
+def test_a_field_under_a_scalar_shorthand_names_the_whole_key_form(tmp_path, monkeypatch):
+    # GAP-0943: admission.skill.actions.high stored as "block" has no install field to set.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path, "admission:\n  skill:\n    actions:\n      high: block\n")
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(config_writer.ConfigWriteError) as caught:
+        config_writer.apply([Change("admission.skill.actions.high.install", "none")], "cli:test", "t", path=path)
+    message = str(caught.value)
+    assert 'admission.skill.actions.high is stored as the single value "block"' in message
+    assert (
+        "defenseclaw config set --json admission.skill.actions.high "
+        '\'{"install": "none", "file": "none", "runtime": "disable"}\'' in message
+    )
+    assert open(path, encoding="utf-8").read() == before
+    # The suggested form is one the writer accepts.
+    config_writer.apply(
+        [Change("admission.skill.actions.high", {"install": "none", "file": "none", "runtime": "disable"})],
+        "cli:test", "t", path=path,
+    )
+    assert "install: none" in open(path, encoding="utf-8").read()
+
+
 def test_every_write_re_renders_custom_providers_from_llm_providers(tmp_path, monkeypatch):
     import json
 
@@ -565,6 +587,37 @@ def test_relative_trusted_ca_refusal_names_the_path_requirement(tmp_path, monkey
     assert "absolute path" in message and "~/" in message
     assert (tmp_path / "config.yaml").read_bytes() == before
     assert not os.path.exists(config_writer.generation_path(path))
+
+
+def test_plain_error_names_the_stray_folder_in_a_rule_pack_by_its_full_path() -> None:
+    """p0-round:GAP-1566: a nested copy of another pack is named by its full path, with the pack, not the check."""
+    from defenseclaw.config_inspect import ConfigInspectError
+
+    for quoted, pack, stray in (
+        ('"C:\\\\Users\\\\u\\\\teampack"', "C:\\Users\\u\\teampack", "C:\\Users\\u\\teampack\\default"),
+        ('"/home/u/teampack"', "/home/u/teampack", "/home/u/teampack/default"),
+    ):
+        reason = (
+            f"[config_semantic_invalid] config rule pack {quoted}: rule pack inventory_unexpected at "
+            "default/judge/injection.yaml: unexpected YAML component: the folder default does not belong in a rule pack "
+            "(a copy of another pack placed inside this one?); move default out of the rule-pack folder or remove it, "
+            "then run the command or installer again; expected rule packs, custom pack digests and rule IDs the gateway "
+            "can load; fix the reference, then retry"
+        )
+        inspected = ConfigInspectError("rejected", field_path="$.guardrail", reason=reason)
+        message = config_writer.plain_error(inspected)
+        assert message.startswith(f"guardrail: the rule pack {pack} holds the folder {stray},"), message
+        assert f"Move {stray} out of the rule-pack folder or remove it" in message
+        assert "inventory_unexpected" not in message
+
+    # A stray file in the pack's own judge folder names the file, as before.
+    own = (
+        '[config_semantic_invalid] config rule pack "/home/u/teampack": rule pack inventory_unexpected at '
+        "judge/custom.yaml: unexpected YAML component: move judge/custom.yaml out of the rule-pack folder or remove it, "
+        "then run the command or installer again; fix the reference, then retry"
+    )
+    message = config_writer.plain_error(ConfigInspectError("rejected", field_path="$.guardrail", reason=own))
+    assert "holds the folder" not in message and "judge/custom.yaml" in message
 
 
 def test_plain_error_reports_length_and_write_directory() -> None:
@@ -965,3 +1018,370 @@ def test_schema_length_error_names_the_fields_limit() -> None:
     assert config_writer.plain_error(caught.value, value="a" * 513) == (
         "openshell.admin.request_access is longer than 512 characters (it has 513)"
     )
+
+
+def test_a_write_over_the_legacy_default_keeps_what_it_decides(tmp_path, monkeypatch):
+    """GAP-1488: the pre-1.0.4 default MCP compatibility (HIGH, MEDIUM, LOW
+    warn) covers only an untouched preset. A write that decides an MCP
+    severity, also with the preset's own value, compiles it as written; one
+    it did not decide keeps its warn. internal/policy compiles the same
+    admission blocks in Go (TestWritesOverTheLegacyDefaultCompileInGo)."""
+    import json
+    from pathlib import Path
+
+    from defenseclaw.config import _merge_admission, default_config
+    from defenseclaw.enforce.admission import action_blocks, compile_admission
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(config_writer, "_use_go_validator", lambda: False)
+    # Not about managed devices: a test host with a machine-managed config
+    # must not refuse these writes.
+    monkeypatch.setattr(config_writer, "managed_refuses", lambda current, actor: False)
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[2] / "testdata" / "admission_legacy_default_writes.json").read_text()
+    )
+
+    def verdicts(admission):
+        cfg = default_config()
+        cfg.admission = _merge_admission(admission)
+        actions = compile_admission(cfg, "mcp").actions
+        return {sev: "rejected" if action_blocks(actions[sev][0]) else "warning"
+                for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
+
+    assert verdicts(fixture["legacy"]) == {"CRITICAL": "rejected", "HIGH": "warning", "MEDIUM": "warning", "LOW": "warning"}
+    for index, case in enumerate(fixture["cases"]):
+        folder = tmp_path / str(index)
+        folder.mkdir()
+        legacy = yaml.safe_dump({"admission": json.loads(json.dumps(fixture["legacy"]))}, sort_keys=False)
+        path = _config(folder, legacy)
+        changes = [Change(w[0], w[1]) if len(w) == 2 else Change(w[0], unset=True) for w in case["writes"]]
+        config_writer.apply(changes, "cli:test", "test", path=path)
+        written = yaml.safe_load(open(path, encoding="utf-8"))["admission"]
+        assert written == case["admission"], case["name"]
+        assert verdicts(written) == case["verdicts"], case["name"]
+
+
+def _live_edit_over_the_legacy_default(folder, case, legacy_admission):
+    """Run one ``fixture["live_edits"]`` case on a config.yaml holding the
+    pre-1.0.4 default preset and return (written admission, Config)."""
+    from click.testing import CliRunner
+    from defenseclaw import config as config_module
+    from defenseclaw.commands.cmd_policy import policy
+    from defenseclaw.context import AppContext
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    path = _config(folder, yaml.safe_dump({"admission": legacy_admission}, sort_keys=False))
+    cfg = config_module.load(data_dir=str(folder))
+    if "cli" in case:
+        app = AppContext()
+        app.cfg = cfg
+        result = CliRunner().invoke(policy, [*case["cli"], "--no-reload"], obj=app, catch_exceptions=False)
+        assert result.exit_code == 0, (case["name"], result.output)
+    else:
+        for key, value in case["tui"]:
+            apply_config_field(cfg, key, value)
+        cfg.save()
+    with open(path, encoding="utf-8") as stream:
+        return yaml.safe_load(stream)["admission"], cfg
+
+
+def _chosen_old_default_shape(folder, case):
+    """Run one ``fixture["chosen"]`` case and return (written admission,
+    active policy name). *base* is the admission block before it (None: no
+    admission); the case runs config_writer.apply *writes*, policy *cli*
+    arguments, TUI Setup *tui* rows, or activates the policy file *activate*
+    (repo relative) saved as the named policy ``mine``."""
+    import json
+    from pathlib import Path
+
+    from click.testing import CliRunner
+    from defenseclaw import config as config_module
+    from defenseclaw import policy_catalog
+    from defenseclaw.commands.cmd_policy import policy
+    from defenseclaw.context import AppContext
+
+    base = case["base"]
+    if "writes" in case or "activate" in case:
+        text = "" if base is None else yaml.safe_dump({"admission": json.loads(json.dumps(base))}, sort_keys=False)
+        path = _config(folder, text)
+    if "writes" in case:
+        changes = [Change(w[0], w[1]) if len(w) == 2 else Change(w[0], unset=True) for w in case["writes"]]
+        config_writer.apply(changes, "cli:test", "test", path=path)
+    elif "activate" in case:
+        policy_dir = folder / "policies"
+        policy_dir.mkdir()
+        text = (Path(__file__).resolve().parents[2] / case["activate"]).read_text(encoding="utf-8")
+        (policy_dir / "mine.yaml").write_text(text.replace("name: default", "name: mine", 1), encoding="utf-8")
+        app = AppContext()
+        app.cfg = config_module.load(data_dir=str(folder))
+        app.cfg.policy_dir = str(policy_dir)
+        result = CliRunner().invoke(policy, ["activate", "mine", "--no-reload"], obj=app, catch_exceptions=False)
+        assert result.exit_code == 0, (case["name"], result.output)
+        loaded = config_module.load(data_dir=str(folder))
+        with open(path, encoding="utf-8") as stream:
+            return yaml.safe_load(stream)["admission"], policy_catalog.active_policy_name(str(policy_dir), loaded)
+    else:
+        return _live_edit_over_the_legacy_default(folder, case, json.loads(json.dumps(base)))[0], None
+    with open(path, encoding="utf-8") as stream:
+        return yaml.safe_load(stream)["admission"], None
+
+
+def test_a_chosen_old_default_shape_compiles_as_written(tmp_path, monkeypatch):
+    """GAP-1488, review round d: only an untouched 1.0.0-1.0.3 config holds
+    the pre-1.0.4 default preset's MCP shape without having chosen it in this
+    release. A block that a 1.0.4 command writes with that shape compiles as
+    written, MCP HIGH, MEDIUM and LOW refused as on rel/1.0.4: ``policy
+    activate`` of a named policy with the 1.0.3 default actions (on a config
+    with no admission and over the upgraded preset; it stays the active
+    policy), and a config, ``policy edit`` or TUI Setup write that turns
+    another block into that shape. internal/policy compiles the same blocks
+    in Go (TestWritesOverTheLegacyDefaultCompileInGo)."""
+    import json
+    from pathlib import Path
+
+    from defenseclaw.config import _merge_admission, default_config
+    from defenseclaw.enforce.admission import action_blocks, compile_admission
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(config_writer, "_use_go_validator", lambda: False)
+    # Not about managed devices: a test host with a machine-managed config
+    # must not refuse these writes.
+    monkeypatch.setattr(config_writer, "managed_refuses", lambda current, actor: False)
+    monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: False)
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[2] / "testdata" / "admission_legacy_default_writes.json").read_text()
+    )
+
+    def verdicts(admission):
+        cfg = default_config()
+        cfg.admission = _merge_admission(admission)
+        actions = compile_admission(cfg, "mcp").actions
+        return {sev: "rejected" if action_blocks(actions[sev][0]) else "warning"
+                for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
+
+    assert len(fixture["chosen"]) >= 6
+    for index, case in enumerate(fixture["chosen"]):
+        # A base other than the upgraded preset compiles unlike it.
+        base = case["base"]
+        assert base is None or base == fixture["legacy"] or verdicts(base) != verdicts(fixture["legacy"]), case["name"]
+        folder = tmp_path / str(index)
+        folder.mkdir()
+        written, active = _chosen_old_default_shape(folder, case)
+        assert written == case["admission"], case["name"]
+        assert verdicts(written) == case["verdicts"], case["name"]
+        if "activate" in case:
+            assert active == "mine", case["name"]
+
+
+def test_a_live_policy_edit_over_the_legacy_default_keeps_what_it_decides(tmp_path, monkeypatch):
+    """GAP-1488, the write paths other than config_writer.apply: ``policy edit
+    actions`` and ``policy edit scanner`` (and its --remove) and a TUI Setup
+    admission row save through Config.save. Over the pre-1.0.4 default
+    preset, the severity they decide compiles as written, also when the
+    value equals the preset's (``policy edit actions --severity high --file
+    quarantine``), and the MCP severities they leave keep their warn. The
+    saved Config reads as the file it wrote. internal/policy compiles the
+    same written blocks in Go (TestWritesOverTheLegacyDefaultCompileInGo)."""
+    import json
+    from pathlib import Path
+
+    from defenseclaw.config import _merge_admission, default_config
+    from defenseclaw.enforce.admission import action_blocks, compile_admission
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(config_writer, "_use_go_validator", lambda: False)
+    # Not about managed devices: a test host with a machine-managed config
+    # must not refuse these writes.
+    monkeypatch.setattr(config_writer, "managed_refuses", lambda current, actor: False)
+    monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: False)
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[2] / "testdata" / "admission_legacy_default_writes.json").read_text()
+    )
+
+    def verdicts(cfg):
+        actions = compile_admission(cfg, "mcp").actions
+        return {sev: "rejected" if action_blocks(actions[sev][0]) else "warning"
+                for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
+
+    def of(admission):
+        cfg = default_config()
+        cfg.admission = _merge_admission(admission)
+        return cfg
+
+    assert len(fixture["live_edits"]) >= 10
+    for index, case in enumerate(fixture["live_edits"]):
+        folder = tmp_path / str(index)
+        folder.mkdir()
+        written, cfg = _live_edit_over_the_legacy_default(folder, case, json.loads(json.dumps(fixture["legacy"])))
+        assert written == case["admission"], case["name"]
+        assert verdicts(of(written)) == case["verdicts"], case["name"]
+        assert verdicts(cfg) == case["verdicts"], case["name"]
+
+
+def test_every_policy_source_compiles_a_chosen_quarantine_as_written(tmp_path, monkeypatch):
+    """GAP-1488, review round e: the one choke point. The Go and Python
+    compilers build their verdict tables only from config.yaml (Go
+    CompileAdmission callers: gateway startup load and reload, the watcher,
+    the policy CLI; a managed bundle installs a config.yaml), and every
+    DefenseClaw write of config.yaml commits through
+    config_writer._keep_chosen_admission (write_with callers: apply,
+    Config.save, write_config_yaml_secure, replace_document). Each source
+    below runs through its real entry point, and the written block is
+    compiled. A block any source chooses never compiles through the pre-1.0.4
+    default MCP compatibility, so a chosen quarantine at any severity is
+    never a warning. Only an untouched upgraded preset (startup load, an
+    unrelated write, a whole-document writer that leaves admission alone, a
+    restore) keeps it. The TUI bypass row and the whole-document writer rows
+    fail before the choke point; the activation rows guard named policy
+    activation."""
+    import copy
+    import json
+    from pathlib import Path
+
+    from click.testing import CliRunner
+    from defenseclaw import config as config_module
+    from defenseclaw.commands.cmd_policy import policy
+    from defenseclaw.config import _merge_admission, default_config, write_config_yaml_secure
+    from defenseclaw.context import AppContext
+    from defenseclaw.enforce.admission import _legacy_balanced_default_mcp, action_blocks, compile_admission
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(config_writer, "_use_go_validator", lambda: False)
+    # Not about managed devices: a test host with a machine-managed config
+    # must not refuse these writes.
+    monkeypatch.setattr(config_writer, "managed_refuses", lambda current, actor: False)
+    monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: False)
+    root = Path(__file__).resolve().parents[2]
+    legacy = json.loads((root / "testdata" / "admission_legacy_default_writes.json").read_text())["legacy"]
+    policy_1_0_3 = yaml.safe_load((root / "testdata" / "legacy_default_1_0_3.yaml").read_text(encoding="utf-8"))
+
+    def variant(**defaults):
+        block = copy.deepcopy(legacy)
+        block["defaults"].update(defaults)
+        return block
+
+    no_bypass = variant(allow_list_bypass_scan=False)
+    chosen_high = copy.deepcopy(legacy)
+    chosen_high["mcp"]["actions"]["high"] = "warn"
+
+    def verdicts(admission):
+        cfg = default_config()
+        cfg.admission = _merge_admission(admission)
+        actions = compile_admission(cfg, "mcp").actions
+        return "".join("R" if action_blocks(actions[sev][0]) else "w" for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW"))
+
+    def writes(*changes):
+        def run(folder, path):
+            config_writer.apply(
+                [Change(c[0], c[1]) if len(c) == 2 else Change(c[0], unset=True) for c in changes],
+                "cli:test", "test", path=path,
+            )
+        return run
+
+    def policy_cli(*args, mine=None):
+        def run(folder, path):
+            app = AppContext()
+            app.cfg = config_module.load(data_dir=str(folder))
+            if mine is not None:
+                policy_dir = folder / "policies"
+                policy_dir.mkdir()
+                data = copy.deepcopy(policy_1_0_3)
+                data["name"] = "mine"
+                mine(data)
+                (policy_dir / "mine.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+                app.cfg.policy_dir = str(policy_dir)
+            result = CliRunner().invoke(policy, [*args, "--no-reload"], obj=app, catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+        return run
+
+    def tui(*rows):
+        def run(folder, path):
+            cfg = config_module.load(data_dir=str(folder))
+            for key, value in rows:
+                apply_config_field(cfg, key, value)
+            cfg.save()
+        return run
+
+    def whole_document(edit):
+        def run(folder, path):
+            with open(path, encoding="utf-8") as stream:
+                document = yaml.safe_load(stream)
+            edit(document["admission"])
+            write_config_yaml_secure(path, document)
+        return run
+
+    def restore(admission):
+        def run(folder, path):
+            other = folder / "snapshot"
+            other.mkdir()
+            raw = Path(_config(other, yaml.safe_dump({"admission": admission}, sort_keys=False))).read_bytes()
+            config_writer.replace_document(raw, "cli:test", "setup rollback", path=path)
+        return run
+
+    def keep(data):
+        return None
+
+    def no_mcp_overrides(data):
+        data["scanner_overrides"].pop("mcp")
+
+    # (source, admission before, run, MCP CRITICAL/HIGH/MEDIUM/LOW, chosen)
+    sources = [
+        ("gateway startup load or reload of the untouched 1.0.3 preset", legacy, None, "Rwww", False),
+        ("config set of an unrelated key", legacy, writes(("watch.rescan_interval_min", 45)), "Rwww", False),
+        ("config set admission.defaults.actions.high quarantine", legacy,
+         writes(("admission.defaults.actions.high", "quarantine")), "RRww", True),
+        ("config unset admission.mcp.actions.high", chosen_high, writes(("admission.mcp.actions.high",)), "RRRR", True),
+        ("config set admission.defaults.allow_list_bypass_scan true", no_bypass,
+         writes(("admission.defaults.allow_list_bypass_scan", True)), "RRRR", True),
+        ("policy edit actions --severity high --file quarantine", legacy,
+         policy_cli("edit", "actions", "--severity", "high", "--file", "quarantine"), "RRww", True),
+        ("policy edit scanner --type mcp --severity medium --file quarantine", legacy,
+         policy_cli("edit", "scanner", "--type", "mcp", "--severity", "medium", "--file", "quarantine"), "RwRw", True),
+        ("policy activate of a named policy with the 1.0.3 default actions, over the 1.0.3 preset", legacy,
+         policy_cli("activate", "mine", mine=keep), "RRRR", True),
+        ("policy activate of a named policy with the 1.0.3 default actions, on no admission", None,
+         policy_cli("activate", "mine", mine=keep), "RRRR", True),
+        ("policy activate of a named policy whose MCP inherits the defaults, over the 1.0.3 preset", legacy,
+         policy_cli("activate", "mine", mine=no_mcp_overrides), "RRww", True),
+        ("TUI Setup admission.mcp.actions.high quarantine", legacy,
+         tui(("admission.mcp.actions.high", "quarantine")), "RRww", True),
+        ("TUI Setup admission.defaults.allow_list_bypass_scan on", no_bypass,
+         tui(("admission.defaults.allow_list_bypass_scan", "true")), "RRRR", True),
+        ("TUI Setup admission.defaults.allow_list_bypass_scan off", legacy,
+         tui(("admission.defaults.allow_list_bypass_scan", "false")), "Rwww", True),
+        ("whole-document writer that turns the bypass on", no_bypass,
+         whole_document(lambda adm: adm["defaults"].update(allow_list_bypass_scan=True)), "RRRR", True),
+        ("whole-document writer that leaves admission alone", legacy, whole_document(lambda adm: None), "Rwww", False),
+        ("restore (setup rollback) of the untouched 1.0.3 preset", chosen_high, restore(legacy), "Rwww", False),
+    ]
+    failures = []
+    for index, (name, base, run, expected, chosen) in enumerate(sources):
+        folder = tmp_path / str(index)
+        folder.mkdir()
+        path = _config(folder, "" if base is None else yaml.safe_dump({"admission": copy.deepcopy(base)}, sort_keys=False))
+        if run is not None:
+            run(folder, path)
+        with open(path, encoding="utf-8") as stream:
+            written = yaml.safe_load(stream).get("admission")
+        compat = _legacy_balanced_default_mcp(_merge_admission(written))
+        got = verdicts(written)
+        if got != expected or compat == chosen or (not chosen and written != legacy):
+            failures.append(f"{name}: MCP {got}, expected {expected}; compatibility {'on' if compat else 'off'}")
+    assert not failures, "\n".join(failures)
+
+
+@pytest.mark.parametrize("value", ["http://127.0.0.1:8765/defenseclaw", "mirror.example.com/dc", "ftp://mirror.example/dc"])
+def test_update_source_refusal_asks_for_an_https_url(tmp_path, monkeypatch, value):
+    # GAP-1065: the refusal said only "not in the expected format". https:// stays accepted.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path)
+    before = (tmp_path / "config.yaml").read_bytes()
+    with pytest.raises(V8ConfigError) as refused:
+        config_writer.apply([Change("update.source", value)], "cli:test", "t", path=path)
+    message = config_writer.plain_error(refused.value, value=value)
+    assert message.startswith("update.source must be an https:// URL")
+    assert "https://mirror.example.com/defenseclaw" in message
+    assert (tmp_path / "config.yaml").read_bytes() == before
+
+    config_writer.apply([Change("update.source", "https://mirror.example.com/defenseclaw")], "cli:test", "t", path=path)

@@ -33,12 +33,13 @@ import (
 	"fmt"
 	"net/netip"
 	"path"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Profile selects how much egress a sandbox gets.
@@ -203,10 +204,10 @@ type Input struct {
 }
 
 var (
-	ruleNameRE  = regexp.MustCompile(`^[a-z0-9][a-z0-9_]{0,62}$`)
-	harnessRE   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
-	principalRE = regexp.MustCompile(`^(?:[0-9]{1,10}|[a-z_][a-z0-9_-]{0,31})$`)
-	hostRE      = regexp.MustCompile(`^(?:\*\*\.|\*\.)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
+	ruleNameRE  = lazyregexp.New(`^[a-z0-9][a-z0-9_]{0,62}$`)
+	harnessRE   = lazyregexp.New(`^[a-z][a-z0-9-]{0,31}$`)
+	principalRE = lazyregexp.New(`^(?:[0-9]{1,10}|[a-z_][a-z0-9_-]{0,31})$`)
+	hostRE      = lazyregexp.New(`^(?:\*\*\.|\*\.)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 )
 
 // Render builds the typed policy for in. The result is validated and

@@ -149,8 +149,8 @@ func TestApplyRefusesASecondYAMLDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = Apply(context.Background(), path, []Change{{Path: "gateway.api_port", Value: 18971}}, Options{Actor: "cli:test"})
-	if !errors.Is(err, ErrMultipleDocuments) {
-		t.Fatalf("Apply error = %v, want ErrMultipleDocuments", err)
+	if !errors.Is(err, ErrMultipleDocuments) || !errors.Is(err, ErrInvalidDocument) {
+		t.Fatalf("Apply error = %v, want ErrMultipleDocuments and ErrInvalidDocument", err)
 	}
 	if after, _ := os.ReadFile(path); string(after) != string(before) {
 		t.Fatalf("a refused write changed config.yaml:\n%s", after)

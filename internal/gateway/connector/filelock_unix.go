@@ -46,21 +46,49 @@ func withFileLockMode(path string, _ bool, fn func() error) error {
 		}
 	}
 
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	lockFile, err := openHeldLockFile(lockPath)
 	if err != nil {
-		return fmt.Errorf("open lock file %s: %w", lockPath, err)
+		return err
 	}
 	defer lockFile.Close()
-
-	if err := lockFileExclusive(lockFile, lockPath); err != nil {
-		return fmt.Errorf("acquire lock %s: %w", lockPath, err)
-	}
 	defer func() {
 		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 		_ = os.Remove(lockPath)
 	}()
 
 	return fn()
+}
+
+// openHeldLockFile opens lockPath and takes its exclusive flock. A holder
+// (this release, or an older one) removes the lock file when it releases
+// it, so a writer that waited on the file it opened can wake up holding an
+// inode the pathname no longer names, while another writer locks the new
+// file (GAP-0344). After each acquisition the held file must still be the
+// one lockPath names; otherwise it is released and the pathname opened
+// again.
+func openHeldLockFile(lockPath string) (*os.File, error) {
+	for {
+		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("open lock file %s: %w", lockPath, err)
+		}
+		if err := lockFileExclusive(lockFile, lockPath); err != nil {
+			_ = lockFile.Close()
+			return nil, fmt.Errorf("acquire lock %s: %w", lockPath, err)
+		}
+		held, err := lockFile.Stat()
+		if err == nil {
+			var named os.FileInfo
+			if named, err = os.Stat(lockPath); err == nil && os.SameFile(held, named) {
+				return lockFile, nil
+			}
+		}
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect lock file %s: %w", lockPath, err)
+		}
+	}
 }
 
 // fileLockContendedHookForTest, when set, is told that a lock acquisition

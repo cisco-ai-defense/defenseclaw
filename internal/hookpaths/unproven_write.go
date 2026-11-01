@@ -5,12 +5,13 @@ package hookpaths
 
 import (
 	"io"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -50,26 +51,26 @@ func IsUnprovenWriteTitle(title string) bool {
 }
 
 var (
-	unprovenPathToken  = regexp.MustCompile(`[A-Za-z0-9_./~*?\[\]-]+`)
+	unprovenPathToken  = lazyregexp.New(`[A-Za-z0-9_./~*?\[\]-]+`)
 	unprovenQuotedPath = []*regexp.Regexp{
 		regexp.MustCompile(`'([^']+)'`),
 		regexp.MustCompile(`"([^"]+)"`),
 	}
-	unprovenWriter          = regexp.MustCompile(`\b(?:open|openSync|sysopen|FileIO|writeFile\w*|appendFile\w*|File\.write|File\.binwrite|IO\.write|write_text|write_bytes|copy\w*|createWriteStream|truncate|rename|replace|move|unlink|remove)\s*\(`)
-	safeNodeRead            = regexp.MustCompile(`^require\(['"]fs['"]\)\.readFile(?:Sync)?\(['"][^'"]+['"](?:,\s*\(\)=>\{\})?\)$`)
-	safeNodeCopy            = regexp.MustCompile(`^require\(['"]fs['"]\)\.copyFile(?:Sync)?\(['"][^'"]+['"],\s*['"]([^'"]+)['"](?:,\s*\(\)=>\{\})?\)$`)
-	safeNodeWriteData       = regexp.MustCompile(`^require\(['"]fs['"]\)\.(?:writeFileSync|appendFileSync)\((['"][^'"]+['"]),\s*(['"][^'"]+['"])\)$`)
-	safePythonRead          = regexp.MustCompile(`^(?:import io;\s*)?(?:io\.)?(?:FileIO|open)\(['"][^'"]+['"],\s*['"]r['"]\)\.read\(\)$`)
-	safePythonOSRead        = regexp.MustCompile(`^import os;\s*os\.open\((['"][^'"]+['"]),\s*os\.O_RDONLY\)$`)
-	safePythonOpenWrite     = regexp.MustCompile(`^open\(`)
-	safePythonSeparate      = regexp.MustCompile(`^open\((['"][^'"]+['"]),\s*['"]r['"]\);\s*open\((['"][^'"]+['"]),\s*['"]a['"]\)$`)
-	safePythonPathWrite     = regexp.MustCompile(`^(?:from\s+pathlib\s+import\s+Path;\s*|import\s+pathlib;\s*)?(?:pathlib\.)?Path\(\s*['"]([^'"]+)['"]\s*\)\.write_(?:text|bytes)\s*\(`)
-	literalPathHomeJoinOpen = regexp.MustCompile(`\b(?:pathlib\.)?Path\.home\(\)\.joinpath\(\s*['"]([^'"]+)['"]\s*\)\.open\s*\(`)
-	awkBoundedAssignPrefix  = regexp.MustCompile(`^\s*BEGIN\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"\\]+)"\s*;\s*print\s+"(?:\\.|[^"\\])*"\s*>>\s*$`)
-	safePythonPrint         = regexp.MustCompile(`^print\((.+)\)$`)
-	safeRubyRead            = regexp.MustCompile(`^File\.read\(['"][^'"]+['"]\)$`)
-	safeRubyOpenRead        = regexp.MustCompile(`^File\.open\((['"][^'"]+['"]),\s*['"]r['"]\)\s*\{\s*\|f\|\s*puts f\.read\s*\}$`)
-	safePerlLocalCopy       = regexp.MustCompile(`^sub copy \{ return 1 \};\s*copy\(['"][^'"]+['"],\s*['"][^'"]+['"]\)$`)
+	unprovenWriter          = lazyregexp.New(`\b(?:open|openSync|sysopen|FileIO|writeFile\w*|appendFile\w*|File\.write|File\.binwrite|IO\.write|write_text|write_bytes|copy\w*|createWriteStream|truncate|rename|replace|move|unlink|remove)\s*\(`)
+	safeNodeRead            = lazyregexp.New(`^require\(['"]fs['"]\)\.readFile(?:Sync)?\(['"][^'"]+['"](?:,\s*\(\)=>\{\})?\)$`)
+	safeNodeCopy            = lazyregexp.New(`^require\(['"]fs['"]\)\.copyFile(?:Sync)?\(['"][^'"]+['"],\s*['"]([^'"]+)['"](?:,\s*\(\)=>\{\})?\)$`)
+	safeNodeWriteData       = lazyregexp.New(`^require\(['"]fs['"]\)\.(?:writeFileSync|appendFileSync)\((['"][^'"]+['"]),\s*(['"][^'"]+['"])\)$`)
+	safePythonRead          = lazyregexp.New(`^(?:import io;\s*)?(?:io\.)?(?:FileIO|open)\(['"][^'"]+['"],\s*['"]r['"]\)\.read\(\)$`)
+	safePythonOSRead        = lazyregexp.New(`^import os;\s*os\.open\((['"][^'"]+['"]),\s*os\.O_RDONLY\)$`)
+	safePythonOpenWrite     = lazyregexp.New(`^open\(`)
+	safePythonSeparate      = lazyregexp.New(`^open\((['"][^'"]+['"]),\s*['"]r['"]\);\s*open\((['"][^'"]+['"]),\s*['"]a['"]\)$`)
+	safePythonPathWrite     = lazyregexp.New(`^(?:from\s+pathlib\s+import\s+Path;\s*|import\s+pathlib;\s*)?(?:pathlib\.)?Path\(\s*['"]([^'"]+)['"]\s*\)\.write_(?:text|bytes)\s*\(`)
+	literalPathHomeJoinOpen = lazyregexp.New(`\b(?:pathlib\.)?Path\.home\(\)\.joinpath\(\s*['"]([^'"]+)['"]\s*\)\.open\s*\(`)
+	awkBoundedAssignPrefix  = lazyregexp.New(`^\s*BEGIN\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"\\]+)"\s*;\s*print\s+"(?:\\.|[^"\\])*"\s*>>\s*$`)
+	safePythonPrint         = lazyregexp.New(`^print\((.+)\)$`)
+	safeRubyRead            = lazyregexp.New(`^File\.read\(['"][^'"]+['"]\)$`)
+	safeRubyOpenRead        = lazyregexp.New(`^File\.open\((['"][^'"]+['"]),\s*['"]r['"]\)\s*\{\s*\|f\|\s*puts f\.read\s*\}$`)
+	safePerlLocalCopy       = lazyregexp.New(`^sub copy \{ return 1 \};\s*copy\(['"][^'"]+['"],\s*['"][^'"]+['"]\)$`)
 )
 
 // UnprovenProtectedWrite is the boundary between exact write extraction and
@@ -385,10 +386,10 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 // Recoverable syntax errors may leave executable calls and redirects in the
 // syntax tree. Check those effects before discarding the failed parse.
 func unprovenShellParseWrite(command, cwd, home string) bool {
-	if len(command) > MaxPayloadBytes {
+	if len(command) > MaxPayloadBytes || shellparse.TooDeep(command) {
 		return true // Beyond the command proof bound, effects are unknown.
 	}
-	file, _ := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.RecoverErrors(8)).Parse(strings.NewReader(command), "")
+	file, _ := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.RecoverErrors(8)).Parse(shellparse.Reader(command), "")
 	if file == nil {
 		return strings.Contains(command, ">") ||
 			unprovenWriter.MatchString(command) && protectedReachFromText(command, cwd, home)
@@ -624,6 +625,25 @@ func awkDynamicOptionName(word *syntax.Word) string {
 // shell expansion. A shell word's outer quotes are syntax, not AWK source.
 // Exposed file output is unproved because the expansion can change its target.
 func awkDynamicProgram(word *syntax.Word, cwd, home string) (string, bool) {
+	text, ok := awkRenderedProgram(word)
+	if !ok {
+		return "", false
+	}
+	if !strings.Contains(text, "{") || !strings.Contains(text, "}") {
+		return "", false
+	}
+	output, unsafe, _ := awkOutputProof(text, cwd, home)
+	if output || unsafe || awkCommandEffect(text) {
+		return "", false
+	}
+	return text, true
+}
+
+// awkRenderedProgram is the awk source of a double-quoted program word with
+// each shell expansion replaced by X. A literal print target in it is still
+// a target whatever the expansion holds (GAP-2197: awk "BEGIN {print $1 >>
+// \"alias\"}").
+func awkRenderedProgram(word *syntax.Word) (string, bool) {
 	if word == nil || len(word.Parts) != 1 {
 		return "", false
 	}
@@ -653,15 +673,7 @@ func awkDynamicProgram(word *syntax.Word, cwd, home string) (string, bool) {
 			return "", false
 		}
 	}
-	text := rendered.String()
-	if !strings.Contains(text, "{") || !strings.Contains(text, "}") {
-		return "", false
-	}
-	output, unsafe, _ := awkOutputProof(text, cwd, home)
-	if output || unsafe || awkCommandEffect(text) {
-		return "", false
-	}
-	return text, true
+	return rendered.String(), true
 }
 
 // awkCommandEffect reports awk code that runs a command (a pipe, system(),
@@ -1287,8 +1299,8 @@ func interpreterCodeOperand(call *syntax.CallExpr, program, home string) (string
 }
 
 var (
-	pythonReceiverName   = regexp.MustCompile(`(?:^|[^\w.])([A-Za-z_]\w*)\s*\.\s*write_(?:text|bytes)\s*\($`)
-	pythonPathAssignment = regexp.MustCompile(`^([A-Za-z_]\w*)\s*=\s*(?:pathlib\.)?Path(?:\.home\(\)(?:\s*/\s*['"][^'"\\]*['"])*|\(\s*['"]([^'"\\]+)['"]\s*\))$`)
+	pythonReceiverName   = lazyregexp.New(`(?:^|[^\w.])([A-Za-z_]\w*)\s*\.\s*write_(?:text|bytes)\s*\($`)
+	pythonPathAssignment = lazyregexp.New(`^([A-Za-z_]\w*)\s*=\s*(?:pathlib\.)?Path(?:\.home\(\)(?:\s*/\s*['"][^'"\\]*['"])*|\(\s*['"]([^'"\\]+)['"]\s*\))$`)
 )
 
 // pythonStringWriterText reports writer call text outside executable code.
@@ -1437,7 +1449,7 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 				continue
 			}
 			api := strings.TrimSuffix(code[location[0]:location[1]], "(")
-			if api != "shutil.copy" && api != "shutil.copy2" {
+			if api != "shutil.copy" && api != "shutil.copy2" && api != "shutil.move" {
 				continue
 			}
 			call, ok := literalBoundedCall(code, location[1]-1)
@@ -1450,7 +1462,7 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 			if !ok {
 				return "interpreter-path", true
 			}
-			if info, err := os.Stat(OperandPath(name, cwd)); err == nil && info.IsDir() {
+			if info, err := pathStat(OperandPath(name, cwd)); err == nil && info.IsDir() {
 				destination := OperandPath(name, cwd)
 				protected := newProtectedFiles(home)
 				ssh := filepath.Join(home, ".ssh")
@@ -1459,7 +1471,7 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 					if protectedReachPath(destination, protected, ssh) {
 						return "copy-directory", true
 					}
-					directory, err := os.Open(destination)
+					directory, err := pathOpen(destination)
 					if err != nil {
 						return "copy-directory", true
 					}
@@ -1475,7 +1487,7 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 					}
 					continue
 				}
-				// shutil.copy/copy2 choose the basename of src when dst is
+				// shutil.copy/copy2/move choose the basename of src when dst is
 				// a directory. Inspect that child, including a linked dst.
 				child := OperandPath(filepath.Base(source), destination)
 				if protectedReachPath(child, protected, ssh) {
@@ -1681,7 +1693,7 @@ func protectedReachFromText(command, cwd, home string) bool {
 			}
 			candidate := match[1]
 			if candidate == "~" || strings.HasPrefix(candidate, "~/") {
-				candidate = filepath.Join(home, strings.TrimPrefix(candidate, "~/"))
+				candidate = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(candidate, "~"), "/"))
 			}
 			if protectedReachTextPath(OperandPath(candidate, cwd), protected, ssh) {
 				return true
@@ -1704,7 +1716,8 @@ func protectedReachFromText(command, cwd, home string) bool {
 			continue
 		}
 		if token == "~" || strings.HasPrefix(token, "~/") {
-			token = filepath.Join(home, strings.TrimPrefix(token, "~/"))
+			// A bare ~ is the home itself (GAP-1093).
+			token = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(token, "~"), "/"))
 		}
 		if protectedReachTextPath(OperandPath(token, cwd), protected, ssh) {
 			return true
@@ -1721,7 +1734,7 @@ func boundedProtectedGlobReach(pattern, cwd string, protected protectedFiles, ss
 	if strings.ContainsAny(parent, "*?[") {
 		return true
 	}
-	directory, err := os.Open(OperandPath(parent, cwd))
+	directory, err := pathOpen(OperandPath(parent, cwd))
 	if err != nil {
 		return false
 	}
@@ -1771,7 +1784,7 @@ func cdPathProtectedReach(call *syntax.CallExpr, file *syntax.File, cwd, home st
 		return false
 	}
 	selected := OperandPath(path, filepath.Join(home, ".ssh"))
-	info, err := os.Stat(selected)
+	info, err := pathStat(selected)
 	if err != nil || !info.IsDir() {
 		return false
 	}

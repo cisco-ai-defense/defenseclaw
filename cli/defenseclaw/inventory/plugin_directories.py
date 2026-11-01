@@ -39,6 +39,7 @@ from defenseclaw.file_permissions import (
     reject_reparse_path,
 )
 from defenseclaw.inventory.plugin_identity import (
+    MANIFEST_FILES,
     AmbiguousPluginIdentityError,
     PluginIdentityError,
     canonical_plugin_id,
@@ -1161,6 +1162,49 @@ def _claude_enabled(
     return default_enabled if isinstance(default_enabled, bool) else True
 
 
+def _is_cache_plugin_copy(path: str) -> bool:
+    """A folder directly in a plugin cache that holds a plugin manifest."""
+    for rel in MANIFEST_FILES:
+        candidate = os.path.join(path, *rel.split("/"))
+        if os.path.isfile(candidate) and not is_symlink(candidate):
+            return True
+    return False
+
+
+def discover_claude_cache_copies(cache_root: str) -> list[PluginDirectory]:
+    """Plugins that ``plugin install`` copied whole into a Claude cache (GAP-0017).
+
+    ``plugin install`` writes ``<cache>/<name>`` with the plugin manifest at
+    its root. Claude Code loads only plugins in its own registry, so the copy
+    is never enabled, but it is still installed and plugin list shows it with
+    its install verdict.
+    """
+    if not os.path.isdir(cache_root) or is_link_or_reparse(cache_root):
+        return []
+    copies: list[PluginDirectory] = []
+    for name, path in _child_directories(cache_root):
+        if name.startswith(".") or not _is_cache_plugin_copy(path):
+            continue
+        manifest_path = os.path.join(path, _CLAUDE_MANIFEST)
+        manifest_present = os.path.isfile(manifest_path) and not is_symlink(manifest_path)
+        manifest = (_read_bounded_json(manifest_path) if manifest_present else None) or {}
+        copies.append(
+            PluginDirectory(
+                id=name,
+                name=str(manifest.get("name") or name),
+                path=path,
+                enabled=False,
+                version=str(manifest.get("version") or ""),
+                description=str(manifest.get("description") or ""),
+                origin=cache_root,
+                manifest=_CLAUDE_MANIFEST if manifest_present else "",
+                cached=True,
+                activation_verified=False,
+            )
+        )
+    return copies
+
+
 def _discover_claude_cache(
     cache_root: str,
     *,
@@ -1197,6 +1241,14 @@ def _discover_claude_cache(
             continue
 
         parts = Path(relative).parts
+        if len(parts) == 1 and _is_cache_plugin_copy(current):
+            # A whole plugin copied into the cache (``plugin install`` writes
+            # cache/<name>): its skills/<skill> and .git/<...> folders are
+            # part of it, not <marketplace>/<plugin>/<version> folders
+            # (GAP-0017). Claude Code does not load it; plugin list shows it
+            # through discover_claude_cache_copies.
+            dirs[:] = []
+            continue
         # The documented cache layout is
         # <marketplace>/<plugin>/<version>. A manifest at the plugin root is
         # optional, so directory shape -- not manifest presence -- establishes
@@ -1383,31 +1435,33 @@ def discover_plugin_directories(
     claimed = PluginInstallClaims()
     for plugin in plugins:
         claimed.add_directory(plugin, root)
-    if (connector or "").casefold().replace("-", "") != "opencode":
-        for entry, path in _child_directories(root):
-            if entry in {"cache", "__pycache__"} or entry.startswith(".") or (
-                claude_root and entry == "marketplaces"
+    # V2 auto-loads every immediate directory alongside direct JS/TS files.
+    # Keep the shared no-follow discovery and manifest validation for both.
+    opencode_root = (connector or "").casefold().replace("-", "") == "opencode"
+    for entry, path in _child_directories(root):
+        if (
+            not opencode_root and (entry in {"cache", "__pycache__"} or entry.startswith("."))
+        ) or (claude_root and entry == "marketplaces"):
+            continue
+        try:
+            plugin_id, manifest = canonical_plugin_id(path)
+        except PluginIdentityError as exc:
+            if not str(exc).startswith(
+                ("invalid plugin manifest", "could not read plugin manifest")
             ):
-                continue
-            try:
-                plugin_id, manifest = canonical_plugin_id(path)
-            except PluginIdentityError as exc:
-                if not str(exc).startswith(
-                    ("invalid plugin manifest", "could not read plugin manifest")
-                ):
-                    raise
-                plugin_id, manifest = entry, ""
-            if not claimed.add(plugin_id, path, root):
-                continue
-            plugins.append(
-                PluginDirectory(
-                    id=plugin_id,
-                    name=plugin_id,
-                    path=path,
-                    origin=root,
-                    manifest=manifest,
-                )
+                raise
+            plugin_id, manifest = entry, ""
+        if not claimed.add(plugin_id, path, root):
+            continue
+        plugins.append(
+            PluginDirectory(
+                id=plugin_id,
+                name=plugin_id,
+                path=path,
+                origin=root,
+                manifest=manifest,
             )
+        )
     for plugin_id, path in _amp_plugin_files(root, connector):
         if not claimed.add(plugin_id, path, root):
             continue

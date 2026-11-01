@@ -155,6 +155,9 @@ func snapshotCodexSetupRuntime(opts SetupOpts, connector *CodexConnector) (codex
 	}
 	for _, path := range []string{
 		filepath.Join(hookDir, ".token"),
+		// The per-user hook writer records the gateway helper path here; a
+		// failed Setup puts it back as found like every other runtime file.
+		filepath.Join(hookDir, ".gateway-helper"),
 		filepath.Join(hookDir, hookConfigSidecarName),
 		filepath.Join(hookDir, hookConfigSidecarName+".lock"),
 		filepath.Join(hookDir, hookConfigSidecarName+".codex"),
@@ -378,6 +381,11 @@ func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 		return nil
 	}
 	path := codexConfigPath()
+	// The config writer refuses a Codex home through a link on Windows; say so
+	// before Setup moves the hooks from an earlier home (GAP-2339).
+	if err := codexHomeLinkRefusal(filepath.Dir(path)); err != nil {
+		return err
+	}
 	// Match the writer's boundary: an OSS account may keep its dotfiles on a
 	// user-owned volume, while an enterprise per-user home binding is confined.
 	if home := activeUserHomeOverride(); home != "" && runtime.GOOS != "windows" {
@@ -405,7 +413,7 @@ func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 	}
 	cfg := map[string]interface{}{}
 	if err := parseCodexTOML(data, &cfg); err != nil {
-		return refuseForAgentConfig(fmt.Errorf("Codex config %s does not parse (%v); fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+		return refuseForAgentConfig(fmt.Errorf("Codex config %s does not parse (%v); fix the file, then run: defenseclaw-gateway restart", codexTOMLErrorLocation(path, err), err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if raw, exists := cfg["hooks"]; exists {
 		if _, ok := raw.(map[string]interface{}); !ok {
@@ -509,6 +517,14 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			)
 		}
 	}
+	// A config.toml that went missing after DefenseClaw managed it gets the
+	// account's settings back before the hooks go in (GAP-0581). The
+	// runtime snapshot was taken before, so a rollback removes it again.
+	if err := seedMissingPerUserSettings(c.Name(), opts); err != nil {
+		return c.rollbackSetupAfterSnapshot(
+			opts, runtimeSnapshot, fmt.Errorf("codex config.toml put back: %w", err), false, false,
+		)
+	}
 	if err := c.patchCodexConfig(opts, hookScript); err != nil {
 		return c.rollbackSetupAfterSnapshot(
 			opts,
@@ -543,6 +559,8 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			)
 		}
 	}
+	// The file as it is now is the last known good copy.
+	recordPerUserSettingsCopy(c.Name(), opts)
 
 	return nil
 }
@@ -591,6 +609,9 @@ func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) err
 	}
 	if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
 		return fmt.Errorf("codex teardown: revoke scoped OTLP token: %w", err)
+	}
+	if err := removePerUserSettingsCopies(c.Name(), opts.DataDir); err != nil {
+		return fmt.Errorf("codex teardown: remove the config copy: %w", err)
 	}
 	return nil
 }
@@ -1539,6 +1560,12 @@ type codexConfigBackup struct {
 	// [otel] block.
 	HadOtelBlock bool            `json:"had_otel_block"`
 	OriginalOtel json.RawMessage `json:"original_otel,omitempty"`
+	// OperatorOtel records the [otel] entries the last per-user Setup left,
+	// all of them the operator values once its own entries are gone. A
+	// rollback starts an older release that writes its whole [otel] table
+	// over them; the roll forward takes that render out and puts these back
+	// (GAP-2461).
+	OperatorOtel json.RawMessage `json:"operator_otel,omitempty"`
 	// HadNotify / OriginalNotify back up the operator's pristine
 	// notify = [...] entry.
 	HadNotify      bool            `json:"had_notify"`
@@ -1714,6 +1741,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	var transformed []byte
 	var backupToSave codexConfigBackup
 	adoptedNotify := false
+	otelRecordChanged := false
 	render := func(raw []byte) error {
 		cfg := map[string]interface{}{}
 		if len(raw) > 0 {
@@ -1858,7 +1886,21 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 					return fmt.Errorf("load original Codex OTel config: %w", err)
 				}
 			}
+			// An older release that a rollback started wrote its whole [otel]
+			// table, with its own exporter, over the operator entries (GAP-2461).
+			earlierReleaseTable := codexOtelBlockLooksManaged(cfg["otel"], opts)
 			restoreCodexOtelEntries(cfg, original, opts)
+			if earlierReleaseTable {
+				putBackCodexOperatorOtel(cfg, original.OperatorOtel, opts)
+			}
+			otelRecordChanged = false
+			if record, changed := codexOperatorOtelRecord(cfg, original.OperatorOtel, opts); changed {
+				if backupExists && !adoptedNotify {
+					backupToSave = original
+				}
+				backupToSave.OperatorOtel = record
+				otelRecordChanged = true
+			}
 		}
 
 		// Codex hands its notify program the turn record (prompt, reply and
@@ -2003,7 +2045,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if err := verifyTrustedCodexHookMatrix(persistedHooks, configPath, hooksDir, opts); err != nil {
 			return fmt.Errorf("verify persisted trusted DefenseClaw Codex hooks: %w", err)
 		}
-		if !backupExists || adoptedNotify {
+		if !backupExists || adoptedNotify || otelRecordChanged {
 			if err := c.saveConfigBackup(opts.DataDir, backupToSave); err != nil {
 				return fmt.Errorf("save codex config backup: %w", err)
 			}
@@ -2131,7 +2173,7 @@ func windowsCodexHookCommand() string {
 }
 
 func windowsCodexHookCommandForEvent(event, contractID string) string {
-	return windowsNativePowerShellHookCommandForCodexEvent(event, contractID, defenseclawHookBinary())
+	return windowsCodexHookCommandForBinaryEvent(event, contractID, defenseclawHookBinary())
 }
 
 func codexHookCommandForPlatform(
@@ -2568,35 +2610,58 @@ func codexNotifyIsCurrent(v interface{}, opts SetupOpts) bool {
 	return argv[0] == "bash" && pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh"))
 }
 
-// codexNotifyLooksManaged recognizes both the current platform command and the
-// legacy Bash bridge. Native matching is strict on argv shape and DefenseClaw
-// executable basename so teardown never removes an unrelated user notifier
-// that happens to contain the word "notify".
+// codexNotifyLooksManaged recognizes the legacy Bash bridge and every notify
+// entry that runs one of DefenseClaw's own launchers (codexNotifyRunsDefenseClaw).
+// Matching is strict on the program and its notify subcommand, so teardown
+// never removes an unrelated user notifier that happens to contain the word
+// "notify".
 func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	if codexValueMatches(v, codexShellNotifyCommand(opts)) {
 		return true
 	}
 	argv, ok := codexNotifyArgv(v)
-	if !ok || len(argv) != 2 {
+	if !ok {
 		return false
 	}
-	if argv[0] == "bash" {
-		// Older Windows releases serialized this path with either slash style.
-		// Treat lexical spellings of the same bound data-root bridge alike, and a
-		// notify-bridge* script edited in place inside the data root, but never
-		// claim a script elsewhere merely because its basename matches.
-		if pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh")) {
-			return true
-		}
-		return strings.TrimSpace(opts.DataDir) != "" &&
-			strings.HasPrefix(strings.ToLower(filepath.Base(argv[1])), "notify-bridge") &&
-			pathidentity.Same(filepath.Dir(argv[1]), opts.DataDir)
+	if codexNotifyRunsDefenseClaw(argv) {
+		return true
 	}
-	// A launcher name edited in place next to DefenseClaw's own launcher keeps
-	// our exact argv, so teardown removes it instead of leaving Codex pointing at
-	// a program that does not exist (GAP-1248).
-	return argv[1] == "notify" &&
-		(isDefenseClawHookExecutable(argv[0]) || isRenamedDefenseClawHookExecutable(argv[0]))
+	if len(argv) != 2 || argv[0] != "bash" {
+		return false
+	}
+	// Older Windows releases serialized this path with either slash style.
+	// Treat lexical spellings of the same bound data-root bridge alike, and a
+	// notify-bridge* script edited in place inside the data root, but never
+	// claim a script elsewhere merely because its basename matches.
+	if pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh")) {
+		return true
+	}
+	return strings.TrimSpace(opts.DataDir) != "" &&
+		strings.HasPrefix(strings.ToLower(filepath.Base(argv[1])), "notify-bridge") &&
+		pathidentity.Same(filepath.Dir(argv[1]), opts.DataDir)
+}
+
+// codexNotifySubcommands are the subcommands a DefenseClaw launcher was given
+// in Codex's notify: "notify" for the hook launcher, and "codex-notify" for
+// the gateway executable that Windows pre-publish installs named (GAP-0376).
+var codexNotifySubcommands = map[string]bool{"notify": true, "codex-notify": true}
+
+// codexNotifyRunsDefenseClaw reports whether a notify argv runs DefenseClaw's
+// own hook launcher or gateway with a DefenseClaw notify subcommand, with or
+// without more arguments after it, in any spelling of the program: absolute
+// path with either slash style, the bare executable name, one pair of
+// surrounding double quotes, or a launcher renamed in place next to ours
+// (GAP-1248). An uninstall removes that program, so teardown removes the
+// entry rather than leave Codex calling a program that is gone (GAP-0376).
+func codexNotifyRunsDefenseClaw(argv []string) bool {
+	if len(argv) < 2 || !codexNotifySubcommands[strings.TrimSpace(argv[1])] {
+		return false
+	}
+	program := strings.TrimSpace(argv[0])
+	if len(program) >= 2 && program[0] == '"' && program[len(program)-1] == '"' {
+		program = strings.TrimSpace(program[1 : len(program)-1])
+	}
+	return isDefenseClawHookExecutable(program) || isRenamedDefenseClawHookExecutable(program)
 }
 
 func restoreCodexNotify(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) error {
@@ -4511,6 +4576,68 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	} else {
 		cfg["otel"] = current
 	}
+}
+
+// putBackCodexOperatorOtel puts the recorded operator [otel] entries back
+// after restoreCodexOtelEntries took the render of an older release out of the
+// table. A recorded entry the table no longer has comes back; an entry it
+// still has (an operator value, also one set while the older release ran)
+// stays as it is, and a recorded entry that carries a product credential
+// never comes back.
+func putBackCodexOperatorOtel(cfg map[string]interface{}, record json.RawMessage, opts SetupOpts) {
+	if len(record) == 0 {
+		return
+	}
+	var saved map[string]interface{}
+	if err := json.Unmarshal(record, &saved); err != nil || len(saved) == 0 {
+		return
+	}
+	dropCodexOtelCredentials(saved, otlpKnownProductTokens(opts, OTLPScopeCodex))
+	current, ok := cfg["otel"].(map[string]interface{})
+	if _, exists := cfg["otel"]; exists && !ok {
+		return
+	}
+	if current == nil {
+		current = map[string]interface{}{}
+	}
+	for key, value := range saved {
+		if _, exists := current[key]; !exists {
+			current[key] = value
+		}
+	}
+	if len(current) > 0 {
+		cfg["otel"] = current
+	}
+}
+
+// codexOperatorOtelRecord returns the record of the [otel] entries cfg holds
+// after Setup removed its own, and whether it differs from stored. No [otel]
+// table records nothing, so an operator who removes the table later does not
+// get it back.
+func codexOperatorOtelRecord(cfg map[string]interface{}, stored json.RawMessage, opts SetupOpts) (json.RawMessage, bool) {
+	var kept map[string]interface{}
+	if current, ok := cfg["otel"].(map[string]interface{}); ok && len(current) > 0 {
+		kept = maps.Clone(current)
+		dropCodexOtelCredentials(kept, otlpKnownProductTokens(opts, OTLPScopeCodex))
+	}
+	var previous map[string]interface{}
+	if len(stored) > 0 && json.Unmarshal(stored, &previous) != nil {
+		previous = nil
+	}
+	if len(kept) == 0 && len(previous) == 0 {
+		return nil, len(stored) > 0
+	}
+	if len(kept) > 0 && len(previous) > 0 && codexValueMatches(kept, previous) {
+		return stored, false
+	}
+	if len(kept) == 0 {
+		return nil, true
+	}
+	raw, err := json.Marshal(kept)
+	if err != nil {
+		return stored, false
+	}
+	return raw, true
 }
 
 // dropCodexOtelCredentials deletes every [otel] entry whose value carries a

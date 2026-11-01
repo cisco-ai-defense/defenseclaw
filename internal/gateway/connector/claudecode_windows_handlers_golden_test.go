@@ -66,7 +66,10 @@ func TestClaudeCodeWindowsHandlersMatchTheSharedGolden(t *testing.T) {
 	t.Setenv("SystemRoot", `C:\Windows`)
 	opts := SetupOpts{HookExecutable: golden.Launcher}
 	command, args := claudeCodeWindowsHookInvocation(opts, golden.Launcher)
-	if command != golden.Guard.Command || !reflect.DeepEqual(args, golden.Guard.Args) {
+	// cmd.exe comes from the system directory API, whose spelling (case)
+	// can differ from the golden's.
+	if normalizeWindowsHookExecutable(command) != normalizeWindowsHookExecutable(golden.Guard.Command) ||
+		!reflect.DeepEqual(args, golden.Guard.Args) {
 		t.Errorf("per-user Windows invocation = %q %q, golden guard = %q %q", command, args, golden.Guard.Command, golden.Guard.Args)
 	}
 	guard := map[string]interface{}{"type": "command", "command": command, "args": stringsToInterfaces(args)}

@@ -760,7 +760,7 @@ func TestReadMCPServersForConnector_OpenCode(t *testing.T) {
 	}
 }
 
-func TestReadMCPServersOpenCode_V11810PrecedenceJSONCAndDisabled(t *testing.T) {
+func TestReadMCPServersOpenCodeV2PrecedenceJSONCAndUnsupportedLegacyOverride(t *testing.T) {
 	home := t.TempDir()
 	testenv.SetHome(t, home)
 	t.Setenv("OPENCODE_CONFIG", "")
@@ -817,11 +817,11 @@ func TestReadMCPServersOpenCode_V11810PrecedenceJSONCAndDisabled(t *testing.T) {
 		t.Fatalf("entries = %+v, want one merged server", entries)
 	}
 	entry := entries[0]
-	if entry.Command != "custom-directory" || !entry.Disabled {
-		t.Fatalf("entry = %+v, want custom-directory preserved and disabled", entry)
+	if entry.Command != "custom-directory" || entry.Disabled {
+		t.Fatalf("entry = %+v, want V2 to ignore the unsupported legacy enabled-only override", entry)
 	}
-	if entry.Source != "OPENCODE_CONFIG_CONTENT" || entry.SourceScope != "inline" {
-		t.Fatalf("provenance = (%q, %q), want inline content", entry.Source, entry.SourceScope)
+	if entry.Source != filepath.Join(customDir, "opencode.json") || entry.SourceScope != "custom-directory" {
+		t.Fatalf("provenance = (%q, %q), want the last supported server declaration", entry.Source, entry.SourceScope)
 	}
 
 	resolution := resolveOpenCodeConfig(workspace)

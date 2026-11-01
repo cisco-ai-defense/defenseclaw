@@ -6,10 +6,14 @@ package hookpaths
 import (
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -31,12 +35,46 @@ func ActionCommandDecision(command, cwd, home string) string {
 // facts is the managed hook client's evidence map; its GlobFactPrefix
 // answers stand in only for a pattern the gateway cannot expand itself.
 func ActionCommandDecisionWithGlobFacts(command, cwd, home string, facts map[string]string) string {
+	return ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, "", facts)
+}
+
+// ActionCommandDecisionWithDialectAndGlobFacts is
+// ActionCommandDecisionWithGlobFacts with the gateway's shell dialect hint.
+// A hint only adds a reading, it never drops one (lead decision on GAP-1504):
+// a native Windows home is always read with the Windows grammars, and a
+// POSIX hint (Claude Code's Bash tool, Git Bash, MSYS) also reads the
+// command with the POSIX grammar on the Windows file system, which is how
+// Git Bash runs it. A protected target any reading finds is the decision
+// (GAP-1717, the route 0 cases of TestR104ProtectedWriteRefix3 natively on
+// Windows; TestR104WindowsActionExplicitDialect).
+//
+// dialect is an explicit hint, set by the tool that runs the command.
+func ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) string {
+	return actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts)
+}
+
+// ActionCommandDecisionInShell is ActionCommandDecisionWithGlobFacts for a
+// call with no dialect hint that the gateway's parse reads as POSIX
+// (posixShell). That guess adds the POSIX reading and drops none.
+func ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
+	return actionTargetDecision(command, cwd, home, "", posixShell, facts)
+}
+
+func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string) string {
 	var globs *actionGlobs
 	if facts != nil {
 		globs = &actionGlobs{facts: facts}
 	}
-	if actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs) {
+	if !actionGitBashReadsAlone(command, home, dialect) &&
+		actionProtectedTargetMentionIn(command, cwd, home, 0, false, globs, dialect) {
 		return "protected-target"
+	}
+	if posixShell && actionWindowsHome(home) && command != "" && len(command) <= MaxPayloadBytes {
+		if actionWindowsLiteralHereDocumentTarget(command, home) ||
+			actionPosixTargetMention(command, cwd, home, 0, false, globs.forCommand(command)) ||
+			runtime.GOOS == "windows" && actionConcreteProtectedWriteOn(command, cwd, home, true) {
+			return "protected-target"
+		}
 	}
 	if actionPureMake(command, home) {
 		if actionMakeProtectedRecipe(command, cwd, home) {
@@ -54,8 +92,17 @@ func ActionCommandDecisionWithGlobFacts(command, cwd, home string, facts map[str
 }
 
 func actionConcreteProtectedWrite(command, cwd, home string) bool {
-	if command == "" || home == "" || actionWindowsHome(home) || !filepath.IsAbs(cwd) {
+	return actionConcreteProtectedWriteOn(command, cwd, home, false)
+}
+
+// actionConcreteProtectedWriteOn reads POSIX write operands; windowsHome
+// allows a Windows home (a POSIX shell on a native Windows host).
+func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool) bool {
+	if command == "" || home == "" || actionWindowsHome(home) && !windowsHome || !filepath.IsAbs(cwd) {
 		return false
+	}
+	if !windowsHome && actionMoveProtectedEntry(command, cwd, home) {
+		return true
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
@@ -70,10 +117,39 @@ func actionConcreteProtectedWrite(command, cwd, home string) bool {
 	}
 	patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
 	writes = append(writes, patches...)
-	for _, target := range writes {
-		if protectedReachPath(OperandPath(target, cwd), protected, ssh) {
+	msys := func(value string) string {
+		if windowsHome && runtime.GOOS == "windows" {
+			return actionMSYSDrivePath(value) // Git Bash /c/... (GAP-0781 RV8-1)
+		}
+		return value
+	}
+	// The new name of a disk link to the keys file that the command moves
+	// does not exist on the disk yet (rel-1-0-6:GAP-0045), nor does the
+	// backup name of a link a mv with a backup option replaces
+	// (rel-1-0-6:GAP-0144). A POSIX shell on a native Windows host (Git
+	// Bash) renames the link as on Linux, so the same reading holds there,
+	// on the Windows file system.
+	if !windowsHome || runtime.GOOS == "windows" {
+		moveWrites := writes
+		if windowsHome {
+			moveWrites = make([]string, len(writes))
+			for i, write := range writes {
+				moveWrites[i] = msys(write)
+			}
+		}
+		if actionMovedDiskLinkWrite(command, cwd, home, moveWrites) {
 			return true
 		}
+	}
+	for _, target := range writes {
+		if protectedReachPath(OperandPath(msys(target), cwd), protected, ssh) {
+			return true
+		}
+	}
+	// A cd or path through a disk link and up with .. is read from the
+	// link target; a managed gateway cannot see the link (GAP-2600).
+	if !windowsHome && (len(writes) > 0 || strings.Contains(command, ">")) && diskLinkDotDotReachesState(command, cwd, home) {
+		return true
 	}
 	if file, ok := parseShell(command); ok {
 		values := actionValues{"HOME": home, "PWD": cwd}
@@ -84,7 +160,7 @@ func actionConcreteProtectedWrite(command, cwd, home string) bool {
 					continue
 				}
 				if value, known := actionWordValue(redirect.Word, values, cwd, home); known &&
-					protectedReachPath(OperandPath(value, cwd), protected, ssh) {
+					protectedReachPath(OperandPath(msys(value), cwd), protected, ssh) {
 					return true
 				}
 			}
@@ -123,8 +199,18 @@ func actionConcreteProtectedWrite(command, cwd, home string) bool {
 // ActionCommandAuditReason keeps the bounded parser's uncertainty class for
 // the hook audit header. It must not be used as a deny decision.
 func ActionCommandAuditReason(command, cwd, home string) string {
+	return ActionCommandAuditReasonWithDialect(command, cwd, home, "")
+}
+
+// ActionCommandAuditReasonWithDialect is ActionCommandAuditReason with the
+// gateway's shell dialect hint: a POSIX shell's call on a native Windows
+// host (Git Bash) gets the POSIX grammar's class, as on Linux (GAP-1717).
+func ActionCommandAuditReasonWithDialect(command, cwd, home string, dialect actionfacts.Dialect) string {
 	if strings.TrimSpace(command) == "" {
 		return ""
+	}
+	if dialect == actionfacts.DialectPOSIX && runtime.GOOS == "windows" && actionWindowsHome(home) {
+		return actionPosixCommandDecision(command, cwd, home, 0)
 	}
 	return actionCommandDecision(command, cwd, home, 0)
 }
@@ -132,52 +218,194 @@ func ActionCommandAuditReason(command, cwd, home string) string {
 // ActionPrivateKeyRead recognizes a command that reads an active SSH private
 // key. It is separate from the authorized-keys persistence decision.
 func ActionPrivateKeyRead(command, cwd, home string) bool {
+	return ActionPrivateKeyReadWithDialect(command, cwd, home, "")
+}
+
+// ActionPrivateKeyReadWithDialect uses the executing shell to distinguish
+// PowerShell pipeline path binding from POSIX stdin readers.
+func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfacts.Dialect) bool {
 	if command == "" || home == "" {
 		return false
 	}
+	if dialect == "" {
+		if actionWindowsHome(home) {
+			dialect = actionfacts.DialectPowerShell
+		} else {
+			dialect = actionfacts.DialectPOSIX
+		}
+	}
 	if actionWindowsHome(home) {
-		words, ok := actionWindowsWords(command)
-		if !ok {
-			return false
+		// A Git Bash call the POSIX grammar reads alone is read by the
+		// POSIX reader, on the Windows file system; another POSIX shell
+		// call on this host is read by both readers (GAP-1717).
+		if actionGitBashReadsAlone(command, home, dialect) {
+			return actionPosixPrivateKeyRead(command, cwd, home, dialect)
 		}
-		start := 0
-		for i, word := range words {
-			switch word {
-			case ";", "&", "&&", "|", "||":
-				if actionPrivateKeyReadWords(words[start:i], cwd, home, true, 0) {
-					return true
-				}
-				start = i + 1
-			}
-		}
-		return actionPrivateKeyReadWords(words[start:], cwd, home, true, 0)
+		return actionWindowsPrivateKeyReadIn(command, cwd, home, dialect == actionfacts.DialectPOSIX) ||
+			actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect) ||
+			dialect == actionfacts.DialectPOSIX && runtime.GOOS == "windows" &&
+				actionPosixPrivateKeyRead(command, cwd, home, dialect)
+	}
+	return actionPosixPrivateKeyRead(command, cwd, home, dialect)
+}
+
+// actionPosixPrivateKeyRead is the POSIX shell's private-key reader.
+func actionPosixPrivateKeyRead(command, cwd, home string, dialect actionfacts.Dialect) bool {
+	if actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect) {
+		return true
 	}
 	file, ok := parseShell(command)
 	if !ok {
 		return false
 	}
-	found := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 {
-			return !found
+	var mode keyReadMode
+	if strings.Contains(command, "dotglob") || strings.Contains(command, "globdots") {
+		mode = keyReadDotglob
+	}
+	values := actionValues{"HOME": home, "PWD": cwd}
+	wordValue := func(arg *syntax.Word) (string, bool) {
+		value, known := StaticWord(arg, home)
+		if !known && actionWordHasUnquotedGlob(arg, command) {
+			// The shell expands the pattern before the reader runs.
+			value, known = actionWordValueWithGlob(arg, values, cwd, home, true)
 		}
-		words := make([]string, len(call.Args))
-		for i, arg := range call.Args {
-			value, known := StaticWord(arg, home)
-			if known {
-				words[i] = value
+		return value, known
+	}
+	// A literal for loop binds its variable to each item, patterns
+	// included (for f in ~/.ssh/id_*; do cat "$f"; done, GAP-1780).
+	loops := make(map[string][]string)
+	// A reader fed by a static stdin redirect (xxd < ~/.ssh/id_ed25519)
+	// reads the file as if it were an operand (GAP-0281).
+	stdin := make(map[*syntax.CallExpr][]string)
+	// A reader after a directory change reads relative to it (cd ~/.ssh &&
+	// grep -r . ., RV22-1). The previous directories stay candidates, as on
+	// a Windows home: the change may fail or sit in a subshell.
+	dirs := []string{cwd}
+	// A call that runs only after cd <absolute dir> succeeded reads in that
+	// directory or a later one, not in the earlier candidates (cd ~/.ssh &&
+	// cd /proj && grep -rn TODO ., GAP-2421). cdAt is where each cd call
+	// put its directory in dirs.
+	certain := actionCertainDirectoryCalls(file, home)
+	cdAt := make(map[*syntax.CallExpr]int)
+	readAt := func(call *syntax.CallExpr, words []string) bool {
+		candidates := dirs
+		if at, ok := cdAt[certain[call]]; ok {
+			candidates = dirs[at:]
+		}
+		for _, dir := range candidates {
+			if actionPrivateKeyReadWords(words, dir, home, mode, 0) {
+				return true
 			}
 		}
-		found = actionPrivateKeyReadWords(words, cwd, home, false, 0)
+		return false
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		if stmt, ok := node.(*syntax.Stmt); ok {
+			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+				for _, redirect := range stmt.Redirs {
+					if redirect.Word == nil || redirect.Op != syntax.RdrIn && redirect.Op != syntax.RdrInOut {
+						continue
+					}
+					if value, known := wordValue(redirect.Word); known {
+						stdin[call] = append(stdin[call], value)
+					}
+				}
+			}
+			return true
+		}
+		if loop, ok := node.(*syntax.ForClause); ok {
+			if iter, ok := loop.Loop.(*syntax.WordIter); ok && iter.Name != nil {
+				var items []string
+				for _, item := range iter.Items {
+					if value, known := wordValue(item); known {
+						items = append(items, value)
+					}
+				}
+				loops[iter.Name.Value] = items
+			}
+			return true
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		words := make([]string, len(call.Args))
+		bound := -1
+		for i, arg := range call.Args {
+			if value, known := wordValue(arg); known {
+				words[i] = value
+			} else if name := actionSoleParameter(arg); name != "" && len(loops[name]) != 0 && bound < 0 {
+				bound = i
+			}
+		}
+		if sources := stdin[call]; len(sources) != 0 {
+			if base := programBase(words[0]); base != "cp" && base != "gcp" {
+				words = append(words, sources...)
+			}
+		}
+		if bound < 0 {
+			found = readAt(call, words)
+			if base := programBase(words[0]); (base == "cd" || base == "pushd") && len(dirs) < 8 {
+				switch {
+				case len(words) == 1:
+					dirs = append(dirs, home)
+				case len(words) == 2 && words[1] != "" && words[1] != "-":
+					cdAt[call] = len(dirs)
+					dirs = append(dirs, OperandPath(words[1], dirs[len(dirs)-1]))
+				}
+			}
+			return !found
+		}
+		name := actionSoleParameter(call.Args[bound])
+		for _, item := range loops[name] {
+			words[bound] = item
+			if readAt(call, words) {
+				found = true
+				break
+			}
+		}
 		return !found
 	})
 	return found
 }
 
+// actionSoleParameter returns the name of a word that is exactly one
+// parameter expansion ($f, ${f}, "$f").
+func actionSoleParameter(word *syntax.Word) string {
+	parts := word.Parts
+	if len(parts) == 1 {
+		if quoted, ok := parts[0].(*syntax.DblQuoted); ok {
+			parts = quoted.Parts
+		}
+	}
+	if len(parts) != 1 {
+		return ""
+	}
+	param, ok := parts[0].(*syntax.ParamExp)
+	if !ok || param.Param == nil || param.Excl || param.Length || param.Index != nil || param.Slice != nil ||
+		param.Repl != nil || param.Exp != nil || len(param.Modifiers) != 0 {
+		return ""
+	}
+	return param.Param.Value
+}
+
+// keyReadMode is how a reader's words are read: on a Windows home, and
+// with the shell's dotglob option set.
+type keyReadMode uint8
+
+const (
+	keyReadWindows keyReadMode = 1 << iota
+	keyReadDotglob
+)
+
 // Wrapper arguments are not file reads. Resolve a bounded, literal child
 // before attributing a private-key content read to its program.
-func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, depth int) bool {
+func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMode, depth int) bool {
+	windows := mode&keyReadWindows != 0
 	if depth >= 8 || len(words) == 0 {
 		return false
 	}
@@ -185,7 +413,7 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, d
 	switch program {
 	case "cmd":
 		if windows && len(words) > 2 && strings.EqualFold(words[1], "/c") {
-			return actionPrivateKeyReadWords(words[2:], cwd, home, windows, depth+1)
+			return actionPrivateKeyReadWords(words[2:], cwd, home, mode, depth+1)
 		}
 		return false
 	case "env", "sudo":
@@ -232,7 +460,7 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, d
 				case strings.HasPrefix(word, "-"):
 					return conservativeRead()
 				default:
-					return actionPrivateKeyReadWords(words[index:], cwd, home, windows, depth+1)
+					return actionPrivateKeyReadWords(words[index:], cwd, home, mode, depth+1)
 				}
 				continue
 			}
@@ -276,10 +504,10 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, d
 			case strings.HasPrefix(word, "-") || word == "":
 				return conservativeRead()
 			default:
-				return actionPrivateKeyReadWords(words[index:], cwd, home, windows, depth+1)
+				return actionPrivateKeyReadWords(words[index:], cwd, home, mode, depth+1)
 			}
 		}
-		return actionPrivateKeyReadWords(words[index:], cwd, home, windows, depth+1)
+		return actionPrivateKeyReadWords(words[index:], cwd, home, mode, depth+1)
 	}
 	if posixShellProgram(program) {
 		if body, known := shellCommandBodyIndex(words); known && body < len(words) {
@@ -287,12 +515,29 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, d
 		}
 		return false
 	}
+	// A Windows statement the word splitter cannot structure (a Bash heredoc
+	// read through cat) carries every word of its body as an operand. Each
+	// distinct operand is checked once: its answer depends only on the value,
+	// cwd and home, and on Windows a check is a chain of file-system calls
+	// (GAP-2279).
+	answers := map[string]bool{}
 	readPath := func(value string) bool {
-		if windows {
-			protected, _ := actionWindowsProtected(value, cwd, home, true)
-			return protected
+		found, seen := answers[value]
+		if seen {
+			return found
 		}
-		return actionPrivateReadPath(value, cwd, home)
+		if actionPrivateKeyGlob(value, cwd, home, mode) {
+			answers[value] = true
+			return true
+		}
+		if windows {
+			found, _ = actionWindowsProtected(value, cwd, home, true)
+		} else {
+			found = actionPrivateReadPath(value, cwd, home)
+		}
+		actionPrivateReadChecks.Add(1)
+		answers[value] = found
+		return found
 	}
 	if program == "cp" || program == "gcp" {
 		copy := cpOperands(words[1:], makeStatic(len(words)-1))
@@ -306,8 +551,21 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, d
 		}
 		return false
 	}
+	if kind := actionInterpreterKind(words[0]); kind != "" {
+		code, ok := actionInterpreterInlineCode(words, 0)
+		return ok && actionInterpreterReadsPrivateKey(code, kind)
+	}
+	if actionRecursiveKeyDirectoryRead(words, cwd, home, windows) {
+		return true
+	}
 	switch program {
-	case "cat", "head", "tail", "type", "get-content", "gc", "base64":
+	case "cat", "head", "tail", "type", "get-content", "gc", "base64",
+		// Every program that prints its operand's content reads the key as
+		// cat does (GAP-0281).
+		"less", "more", "most", "view", "grep", "egrep", "fgrep", "zgrep", "rg",
+		"xxd", "od", "hexdump", "hd", "strings", "cut", "nl", "tac", "rev",
+		"sort", "uniq", "fold", "fmt", "pr", "paste", "diff", "comm",
+		"awk", "gawk", "mawk", "nawk", "findstr", "select-string", "sls", "format-hex", "fhx":
 		for _, arg := range words[1:] {
 			if readPath(arg) {
 				return true
@@ -356,6 +614,10 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 	if actionWindowsHome(home) {
 		return actionWindowsCommandDecision(command, cwd, home, depth)
 	}
+	return actionPosixCommandDecision(command, cwd, home, depth)
+}
+
+func actionPosixCommandDecision(command, cwd, home string, depth int) string {
 	if command == "" || !filepath.IsAbs(cwd) || home == "" {
 		return ""
 	}
@@ -638,18 +900,169 @@ func actionStmtMayWrite(stmt *syntax.Stmt, home string) bool {
 	return !known || actionProgramMayWrite(programBase(program))
 }
 
+var actionPrivateKeyNames = []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
+
+// A pathname pattern read operand reads a private key when it can select one
+// (GAP-0974, the GAP-1481 glob class): head -c N ~/.ssh/id_* in Git Bash or
+// sh expands to the key before head runs. The pattern is matched against the
+// key paths component by component, and expanded on this host with each
+// match resolved through links (GAP-1780: dirlink/id_*, keyl*). A POSIX
+// shell's * and ? do not select a leading dot without dotglob (R2-2: head
+// -n 5 */* from the home is not a key read); PowerShell's wildcards do. MSYS
+// drive spellings (/c/..., /cygdrive/c/...) map to the Windows home, and
+// darwin matches case-insensitively.
+func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
+	if !strings.ContainsAny(value, "*?[") {
+		return false
+	}
+	if mode&keyReadWindows != 0 {
+		pattern := strings.ReplaceAll(value, `\`, "/")
+		lower := strings.ToLower(pattern)
+		for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%", "$env:userprofile", "${env:userprofile}", "$home", "${home}", "~"} {
+			if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
+				pattern = strings.ReplaceAll(home, `\`, "/") + pattern[len(prefix):]
+				break
+			}
+		}
+		pattern = actionMSYSDrivePath(pattern)
+		if !actionWindowsHome(pattern) {
+			pattern = strings.TrimRight(strings.ReplaceAll(cwd, `\`, "/"), "/") + "/" + pattern
+		}
+		native := path.Clean(pattern)
+		pattern = strings.ToLower(native)
+		root := strings.ToLower(path.Clean(strings.ReplaceAll(home, `\`, "/")))
+		for _, name := range actionPrivateKeyNames {
+			if actionKeyPatternMatch(pattern, root+"/.ssh/"+name, true) {
+				return true
+			}
+		}
+		// On the Windows host itself the pattern is expanded and each match
+		// resolved through junctions and symlinks, as on POSIX (GAP-1780).
+		if runtime.GOOS == "windows" {
+			for _, match := range actionBoundedGlob(filepath.FromSlash(native), true) {
+				if actionPrivateReadPath(match, cwd, home) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if strings.HasPrefix(value, "~/") {
+		value = filepath.Join(home, value[2:])
+	}
+	pattern := OperandPath(value, cwd)
+	dotglob := mode&keyReadDotglob != 0
+	fold := runtime.GOOS == "darwin"
+	for _, name := range actionPrivateKeyNames {
+		key := filepath.Join(home, ".ssh", name)
+		if fold {
+			if actionKeyPatternMatch(strings.ToLower(pattern), strings.ToLower(key), dotglob) {
+				return true
+			}
+		} else if actionKeyPatternMatch(pattern, key, dotglob) {
+			return true
+		}
+	}
+	for _, match := range actionBoundedGlob(pattern, dotglob) {
+		if actionPrivateReadPath(match, cwd, home) {
+			return true
+		}
+	}
+	return false
+}
+
+// actionKeyPatternMatch matches a slash-separated pattern against a path
+// component by component; without dotglob a component that starts with a
+// dot is selected only by a pattern component that starts with a dot.
+func actionKeyPatternMatch(pattern, name string, dotglob bool) bool {
+	patterns := strings.Split(filepath.ToSlash(pattern), "/")
+	names := strings.Split(filepath.ToSlash(name), "/")
+	if len(patterns) != len(names) {
+		return false
+	}
+	for i := range patterns {
+		if !dotglob && strings.HasPrefix(names[i], ".") && !strings.HasPrefix(patterns[i], ".") {
+			return false
+		}
+		if matched, err := path.Match(patterns[i], names[i]); err != nil || !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// actionBoundedGlob expands an absolute pattern on this host, following
+// directory links, with the shell's leading-dot rule. It stops after a
+// bounded number of directory entries.
+func actionBoundedGlob(pattern string, dotglob bool) []string {
+	if !filepath.IsAbs(pattern) {
+		return nil
+	}
+	components := strings.Split(strings.TrimPrefix(filepath.ToSlash(pattern), "/"), "/")
+	paths := []string{string(filepath.Separator)}
+	if volume := filepath.VolumeName(pattern); volume != "" {
+		paths = []string{volume + string(filepath.Separator)}
+		components = strings.Split(strings.TrimPrefix(filepath.ToSlash(pattern[len(volume):]), "/"), "/")
+	}
+	budget := 4096
+	for _, component := range components {
+		var next []string
+		for _, dir := range paths {
+			if !strings.ContainsAny(component, "*?[") {
+				next = append(next, filepath.Join(dir, component))
+				continue
+			}
+			entries, err := pathReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, entry := range entries {
+				if budget--; budget < 0 {
+					return next
+				}
+				name := entry.Name()
+				if !dotglob && strings.HasPrefix(name, ".") && !strings.HasPrefix(component, ".") {
+					continue
+				}
+				if matched, _ := path.Match(component, name); matched {
+					next = append(next, filepath.Join(dir, name))
+				}
+			}
+		}
+		paths = next
+		if len(paths) == 0 {
+			return nil
+		}
+	}
+	return paths
+}
+
+// actionMSYSDrivePath maps /c/... and /cygdrive/c/... to c:/... (Git Bash and
+// Cygwin spellings of a Windows drive).
+func actionMSYSDrivePath(value string) string {
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "/cygdrive/") && len(value) >= 11 && asciiLetter(value[10]) &&
+		(len(value) == 11 || value[11] == '/') {
+		return value[10:11] + ":" + value[11:]
+	}
+	if len(value) >= 2 && value[0] == '/' && asciiLetter(value[1]) && (len(value) == 2 || value[2] == '/') {
+		return value[1:2] + ":" + value[2:]
+	}
+	return value
+}
+
 func actionPrivateReadPath(value, cwd, home string) bool {
 	resolved, ok := ResolveWriteTarget(OperandPath(value, cwd))
 	if !ok {
 		return false
 	}
-	for _, name := range []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"} {
+	for _, name := range actionPrivateKeyNames {
 		key := filepath.Join(home, ".ssh", name)
 		if samePathName(resolved, key) {
 			return true
 		}
-		resolvedInfo, err1 := os.Stat(resolved)
-		keyInfo, err2 := os.Stat(key)
+		resolvedInfo, err1 := pathStat(resolved)
+		keyInfo, err2 := pathStat(key)
 		if err1 == nil && err2 == nil && os.SameFile(resolvedInfo, keyInfo) {
 			return true
 		}
@@ -679,7 +1092,7 @@ func actionGeneratedPathSafe(value, cwd, home string) bool {
 		return false
 	}
 	pattern := strings.ReplaceAll(filepath.Base(target), actionGeneratedMarker, "*")
-	directory, err := os.Open(parent)
+	directory, err := pathOpen(parent)
 	if err != nil {
 		return false
 	}
@@ -824,7 +1237,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			if index >= len(words) || words[index] == "" {
 				return "nested-shell"
 			}
-			return actionCommandDecision(words[index], cwd, home, depth+1)
+			return actionPosixCommandDecision(words[index], cwd, home, depth+1)
 		}
 		for _, word := range words[1:] {
 			if word == "-c" || strings.Contains(word, "c") && strings.HasPrefix(word, "-") && len(word) <= 4 {
@@ -839,7 +1252,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			if !read {
 				return "nested-shell"
 			}
-			return actionCommandDecision(content, cwd, home, depth+1)
+			return actionPosixCommandDecision(content, cwd, home, depth+1)
 		}
 		return "nested-shell" // stdin, -s or an unrecognized option.
 	}
@@ -905,9 +1318,9 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		if !read {
 			return "eval-source"
 		}
-		return actionCommandDecision(content, cwd, home, depth+1)
+		return actionPosixCommandDecision(content, cwd, home, depth+1)
 	case "git":
-		return actionGitDecision(words, cwd, home, depth+1)
+		return actionGitDecision(words, cwd, home, depth+1, true)
 	case "command", "exec", "busybox", "time", "nohup":
 		index := 1
 		for index < len(words) && strings.HasPrefix(words[index], "-") {
@@ -955,7 +1368,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 				if index+1 >= len(words) || words[index+1] == "" {
 					return "dynamic-command"
 				}
-				return actionCommandDecision(words[index+1], cwd, home, depth+1)
+				return actionPosixCommandDecision(words[index+1], cwd, home, depth+1)
 			case strings.HasPrefix(w, "--chdir="):
 				cwd = OperandPath(strings.TrimPrefix(w, "--chdir="), cwd)
 				index++
@@ -976,7 +1389,13 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 	return ""
 }
 
-func actionGitDecision(words []string, cwd, home string, depth int) string {
+func actionGitDecision(words []string, cwd, home string, depth int, posix bool) string {
+	// git runs an alias, an ssh command, an editor or a pager with sh, Git
+	// Bash's on Windows; the POSIX reading of a Git Bash call reads them so.
+	decide := actionCommandDecision
+	if posix {
+		decide = actionPosixCommandDecision
+	}
 	if depth >= 8 {
 		return "dynamic-command"
 	}
@@ -1058,9 +1477,9 @@ func actionGitDecision(words []string, cwd, home string, depth int) string {
 	}
 	if alias, ok := aliases[subcommand]; ok {
 		if strings.HasPrefix(alias, "!") {
-			return actionCommandDecision(strings.TrimPrefix(alias, "!"), cwd, home, depth+1)
+			return decide(strings.TrimPrefix(alias, "!"), cwd, home, depth+1)
 		}
-		return actionCommandDecision("git "+alias+" "+strings.Join(words[index+1:], " "), cwd, home, depth+1)
+		return decide("git "+alias+" "+strings.Join(words[index+1:], " "), cwd, home, depth+1)
 	}
 	for name, command := range commands {
 		switch name {
@@ -1079,7 +1498,7 @@ func actionGitDecision(words []string, cwd, home string, depth int) string {
 		case "core.hookspath":
 			return "dynamic-command" // A hook script can run outside the work directory.
 		}
-		if reason := actionCommandDecision(command, cwd, home, depth+1); reason != "" {
+		if reason := decide(command, cwd, home, depth+1); reason != "" {
 			return reason
 		}
 	}
@@ -1149,7 +1568,7 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 				protectedReachPath(OperandPath(words[len(words)-1], cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 				return "dynamic-argument"
 			}
-			return actionCommandDecision(words[index+1], cwd, home, depth+1)
+			return actionPosixCommandDecision(words[index+1], cwd, home, depth+1)
 		}
 		if (program == "find" || program == "xargs") && strings.HasPrefix(word, "-exec") {
 			break
@@ -1266,3 +1685,8 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 	}
 	return actionWordsDecision(words[index:], cwd, home, depth+1)
 }
+
+// actionPrivateReadChecks counts the operand checks of the private-key read
+// scan, so a test can prove a long command checks each distinct operand
+// once (GAP-2279).
+var actionPrivateReadChecks atomic.Int64

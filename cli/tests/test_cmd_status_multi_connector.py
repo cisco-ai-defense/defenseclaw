@@ -200,6 +200,7 @@ def _render_live(cfg, health: dict) -> str:
 def test_refused_scoped_hook_credential_degrades_only_its_connector(tmp_path):
     # GAP-0821: the gateway rejects a well-formed Claude token at POSIX 0640
     # (or untrusted Windows custody), even while /status says running.
+    from defenseclaw import hook_integrity
     from defenseclaw.commands import cmd_doctor
 
     hooks = tmp_path / "hooks"
@@ -223,6 +224,10 @@ def test_refused_scoped_hook_credential_degrades_only_its_connector(tmp_path):
     with (
         patch.object(cmd_doctor, "_trusted_gateway_listener", return_value=trust),
         patch.object(cmd_doctor, "_http_probe", side_effect=gateway_verdict) as probe,
+        # The hook credential is under test. On Windows status also asks Doctor's
+        # native registration check (rel-1-0-2 GAP-0645), which has its own tests;
+        # this fixture has no ~/.claude/settings.json, so it reads healthy here.
+        patch.object(hook_integrity, "_windows_native_problem", return_value=None),
     ):
         if os.name != "nt":
             token.chmod(0o640)
@@ -1091,6 +1096,40 @@ class TestStatusJson(unittest.TestCase):
             self.assertIsNone(json.loads(uncertain_json.output)["sidecar"]["running"])
             self.assertIn("state is unconfirmed", uncertain_text.output)
             self.assertNotIn("not running; start it", uncertain_text.output)
+
+    def test_status_inside_a_sandbox_does_not_call_the_hidden_gateway_stopped(self):
+        # GAP-2206: Codex's workspace sandbox (another user namespace) hides the
+        # host's gateway process and listener; status said "not running".
+        from defenseclaw import file_permissions
+
+        for sandboxed in (True, False):
+            with (
+                patch.object(cmd_status, "sys", SimpleNamespace(platform="linux"), create=True),
+                patch.object(file_permissions, "in_child_user_namespace", return_value=sandboxed, create=True),
+                patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+                patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+                patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+                patch(
+                    "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+                    return_value=MagicMock(status="missing", pid=0, reason=""),
+                ),
+            ):
+                runner = CliRunner()
+                as_json = runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+                as_text = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+            self.assertEqual(as_json.exit_code, 0, msg=as_json.output)
+            sidecar = json.loads(as_json.output)["sidecar"]
+            if sandboxed:
+                self.assertIsNone(sidecar["running"])
+                self.assertIn("not visible from this sandbox", sidecar["reason"])
+                self.assertIn("not visible from this sandbox", as_text.output)
+                self.assertIn("outside the sandbox", as_text.output)
+                self.assertNotIn("not running; start it", as_text.output)
+                self.assertNotIn("not enforced while the sidecar is stopped", as_text.output)
+            else:
+                self.assertIs(sidecar["running"], False)
+                self.assertIn("not running; start it", as_text.output)
 
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))

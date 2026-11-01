@@ -42,7 +42,7 @@ Claude Code, Codex, Cursor and Devin can. Kiro blocks a prompt only in Kiro IDE.
 
 | Field | Source |
 | --- | --- |
-| Family | `internal/gateway/connector/*.go` (whether the connector implements `RoutingConnector`) |
+| Family | `proxyConnectors` and `IsProxyConnector()` in `internal/gateway/connector/platform_support.go` (a listed connector is proxy-backed; every other connector is hook-based) |
 | Tool inspection | `_CONNECTOR_META[<id>].tool_mode` in `cli/defenseclaw/commands/cmd_setup.py` |
 | Subprocess policy | `SetupSubprocessEnforcement` call sites in `internal/gateway/connector/*.go` |
 | Block, native ask, fail-closed | `HookCapability{}` literals in `hook_only.go` and the per-connector files |
@@ -96,17 +96,17 @@ Every listed connector can block a gateway outage: on a per-user install in the 
 
 ## Gateway outage
 
-What each connector's hooks do with a call they can't check because the gateway is not running, is still restarting or gives no answer in time. This table is the only place the docs give it per connector, and it is checked against the hook code on every change.
+What each connector's hooks do with a call they can't check because the gateway is not running, is still restarting or refuses the connection before accepting the call. This table is the only place the docs give it per connector, and it is checked against the hook code on every change.
 
 <OutageMatrix />
 
-- **Per-user** is an install without a managed deployment. Its outage mode follows the connector's policy tier (rule pack): the default (balanced) and permissive policies let the call run with a warning and a `hook-failures.jsonl` record, the strict policy blocks it. Every other failure blocks in every tier ([Fail modes](/docs/reference/fail-modes)).
+- **Per-user** is an install without a managed deployment. An explicitly saved `guardrail.hook_fail_mode` chooses its outage mode. When that setting is absent, the connector's policy tier (rule pack) decides: the default (balanced) and permissive policies let the call run with one warning and a `hook-failures.jsonl` record, and the strict policy blocks it. Input over the 1 MiB hook cap is not an outage: in the default and permissive policies the hook sends the gateway a bounded review of it and follows the verdict, and the strict policy blocks it. Every other failure blocks in every tier ([Fail modes](/docs/reference/fail-modes#per-user-installs)).
 - **Managed standalone** is an enterprise host outside Secure Client. Its fail mode is the administrator's `hook_fail_mode`: `closed`, the default, blocks the outage on every connector, and the two managed columns give `open`. A managed connector runs either through vendor [machine policy](/docs/enterprise/machine-policy) (the administrator-owned `defenseclaw-hook --enterprise-managed`) or through a hook or plugin the guardian writes into the user's home (the per-user route, for the connectors without machine policy and for one whose machine policy is off).
 - **Default foreign-hook guard**: with `foreign_hooks: remove`, the machine policy default, the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) checks each call of a connector it covers against the agent session's hook record, which only the gateway holds. While the gateway cannot answer, the guard blocks that call in every fail mode, before the hook's own fail mode applies. With `foreign_hooks: report` or `allow` the guard does not ask the gateway, and the next column applies.
 - **Secure Client** hooks let an outage run in `open`, which is also their default when no fail mode is set.
 - **`DEFENSECLAW_STRICT_AVAILABILITY=1`** makes an outage block on a hook that reads it, whatever the fail mode.
 - **`DEFENSECLAW_FAIL_MODE`** is not read by any 1.0.4 hook: the installed mode is the fail mode ([Fail modes](/docs/reference/fail-modes)).
 - A proxy-backed connector has no hooks: its requests are blocked while the gateway is down.
-- `status --json` reports the administrator's resolved value as `effective_hook_fail_mode`, also for a hook that blocks the outage anyway.
+- `status --json` and `verify --json` report as `effective_hook_fail_mode` the mode a managed connector's hook works in. That is the administrator's resolved value, except on the per-user route of a standalone install, where the Amp plugin, OpenCode and Copilot CLI (on Windows the Amp and OpenCode plugins) read `closed`, as their row in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) shows. A connector on vendor machine policy reads the administrator's value, and the guard column still applies to it.
 
-Refusals that are not an outage block in every fail mode: an unapproved hook the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) finds, an invalid managed runtime, a refused credential, and, on a managed standalone host, input over the size limit and an answer DefenseClaw cannot use. See [Fail modes](/docs/reference/fail-modes).
+Refusals that are not an outage block in every fail mode: an unapproved hook the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) finds, an invalid managed runtime, a refused credential (outside Secure Client, where an HTTP 401 or 403 follows the effective fail mode), and, on a managed standalone host, input over the size limit and an answer DefenseClaw cannot use. See [Fail modes](/docs/reference/fail-modes).

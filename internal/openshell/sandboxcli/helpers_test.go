@@ -72,6 +72,9 @@ type fakeDaemon struct {
 	managed bool
 	// errors maps "METHOD path" to the error the fake answers with.
 	errors map[string]*sandboxapi.Error
+	// unsynced names the MicroVMs whose disk the daemon cannot sync: it
+	// refuses their stop (CodeUnsynced) unless the request accepts the loss.
+	unsynced map[string]bool
 	// onGet runs before a sandbox is returned (hook counters move during
 	// a session).
 	onGet func(sb *sandboxapi.Sandbox)
@@ -474,6 +477,15 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			delete(d.runLogs, name)
 			reply(sandboxapi.DeleteResponse{Name: name, Deleted: true})
 		case verb == "stop":
+			if d.unsynced[name] && !strings.Contains(string(body), `"discard_unsynced":true`) {
+				e := &sandboxapi.Error{Code: sandboxapi.CodeUnsynced,
+					Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first (sync(1) did not finish), so a stop now would lose what it wrote since its last sync; it keeps running",
+					Detail:  "save the work you need and stop it again, or stop it anyway, losing that: `defenseclaw sandbox stop " + name + " --discard-unsynced`"}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(e.HTTPStatus())
+				_ = json.NewEncoder(w).Encode(e)
+				return
+			}
 			if kept, ok := d.stopRunLogs[name]; ok && sb.Phase == "ready" {
 				log := *kept
 				log.Name, log.KeptAt = name, time.Now()
@@ -558,7 +570,7 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 				u.Summary = "1 file restored"
 			}
 			reply(u)
-		case verb == "workspace":
+		case verb == "workspace", verb == "disk":
 			reply(map[string]string{"status": "recorded"})
 		default:
 			fail(sandboxapi.CodeNotFound, "unknown verb")
@@ -1000,6 +1012,16 @@ type fakeGateway struct {
 	// upToDate has Plan find nothing to change, as it does for a gateway
 	// whose configuration already says what a change would write.
 	upToDate bool
+	// stopSyncs counts StopSync calls; stopSyncRes and stopSyncErr are
+	// their answer.
+	stopSyncs   int
+	stopSyncRes *openshell.GatewayApplyResult
+	stopSyncErr error
+}
+
+func (f *fakeGateway) StopSync(context.Context) (*openshell.GatewayApplyResult, error) {
+	f.stopSyncs++
+	return f.stopSyncRes, f.stopSyncErr
 }
 
 func (f *fakeGateway) Restart(context.Context) error { f.restarts++; return nil }

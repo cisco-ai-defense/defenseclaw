@@ -139,7 +139,10 @@ def _lookup_latest() -> str:
     from defenseclaw.upgrade_shim import _latest_from_redirect, release_source
 
     found: list[str] = []
-    repo = release_source()
+    try:
+        repo = release_source()
+    except Exception:  # noqa: BLE001 - a notice never reports a bad DEFENSECLAW_REPO; upgrade does
+        return ""
 
     def lookup() -> None:
         # A notice is best effort: nothing from the network may reach the terminal.

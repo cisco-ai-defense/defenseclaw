@@ -122,6 +122,9 @@ func createPipe(name string, attributes *windows.SecurityAttributes, first bool)
 		windows.PIPE_UNLIMITED_INSTANCES, pipeBufferBytes, pipeBufferBytes, 0, attributes)
 }
 
+// connectPipeWaiting runs once per wait while a connect is pending (a test seam).
+var connectPipeWaiting = func() {}
+
 // connectPipe waits for a client on pipe until ctx ends.
 func connectPipe(ctx context.Context, pipe windows.Handle) error {
 	event, err := windows.CreateEvent(nil, 1, 0, nil)
@@ -129,7 +132,17 @@ func connectPipe(ctx context.Context, pipe windows.Handle) error {
 		return err
 	}
 	defer windows.CloseHandle(event)
-	overlapped := &windows.Overlapped{HEvent: event}
+	// The kernel writes the completion status into overlapped after
+	// ConnectNamedPipe returns pending, so it must not live on this
+	// goroutine's stack, which can move: a moved stack leaves the kernel
+	// writing into freed memory and this function reading a copy that still
+	// says pending. Keep it pinned on the heap; every return below follows the
+	// connect's completion.
+	overlapped := new(windows.Overlapped)
+	var pinner runtime.Pinner
+	pinner.Pin(overlapped)
+	defer pinner.Unpin()
+	overlapped.HEvent = event
 	err = windows.ConnectNamedPipe(pipe, overlapped)
 	if err == nil || errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
 		return nil
@@ -137,22 +150,23 @@ func connectPipe(ctx context.Context, pipe windows.Handle) error {
 	if !errors.Is(err, windows.ERROR_IO_PENDING) {
 		return err
 	}
+	var count uint32
 	for {
+		connectPipeWaiting()
 		wait, waitErr := windows.WaitForSingleObject(event, 100)
 		if waitErr != nil {
 			_ = windows.CancelIoEx(pipe, overlapped)
+			_ = windows.GetOverlappedResult(pipe, overlapped, &count, true)
 			return waitErr
 		}
 		if wait == windows.WAIT_OBJECT_0 {
-			var count uint32
 			return windows.GetOverlappedResult(pipe, overlapped, &count, false)
 		}
 		if ctx.Err() != nil {
 			_ = windows.CancelIoEx(pipe, overlapped)
-			_, _ = windows.WaitForSingleObject(event, windows.INFINITE)
+			_ = windows.GetOverlappedResult(pipe, overlapped, &count, true)
 			return ctx.Err()
 		}
-		runtime.KeepAlive(overlapped)
 	}
 }
 

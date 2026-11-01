@@ -31,6 +31,41 @@ WINDOWS_POWERSHELL = pytest.mark.skipif(
 )
 
 
+def _managed_computer() -> str | None:
+    """Name the enterprise refusal Invoke-Install gives on this computer, if any.
+
+    install.ps1 refuses a per-user install where an enterprise turned
+    self-update off or a managed deployment is installed. Those are the
+    refusals the installer must give there, so the preflight cases below that
+    run Invoke-Install can only run on a computer without them (GAP-2572).
+    """
+    if os.name != "nt":
+        return None
+    import winreg
+
+    def value(path: str, name: str) -> object | None:
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                return winreg.QueryValueEx(key, name)[0] if name else True
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            return f"unreadable ({exc})"
+
+    policy = value(r"SOFTWARE\Policies\Cisco\DefenseClaw", "DisableSelfUpdate")
+    if policy not in (None, 0):
+        return "DefenseClaw self-update is disabled by enterprise policy on this computer"
+    if value(r"SOFTWARE\Cisco\DefenseClaw\Enterprise", "") is not None:
+        return "a managed DefenseClaw enterprise deployment is installed on this computer"
+    return None
+
+
+PER_USER_INSTALL_HOST = pytest.mark.skipif(
+    _managed_computer() is not None,
+    reason=f"Invoke-Install refuses a per-user install here by design: {_managed_computer()}",
+)
+
+
 def _function(name: str) -> str:
     source = INSTALLER.read_text(encoding="utf-8")
     match = re.search(rf"^function {re.escape(name)}[ (]", source, re.M)
@@ -58,7 +93,17 @@ def _helpers() -> str:
         "Clear-SetupDataDir",
         "Invoke-Quietly",
         "Assert-NoActiveConnectorRecovery",
+        # Assert-GatewayQuiescent filters launcher guards through it (GAP-2053, GAP-2138).
+        "Get-GatewayProcessesUnder",
         "Assert-GatewayQuiescent",
+        # Convert-HooksForRollback makes backups\ private first (GAP-1891, GAP-2138).
+        "Protect-BackupsFolder",
+        # Invoke-Rollback reads the older install's recorded Codex program first (GAP-2299).
+        "Get-StaleAgentEvidence",
+        # A rollback or downgrade asks the installed CLI whether the older
+        # release can guard the agents set up here (rel-1-0-6 GAP-0028,
+        # GAP-0128). These fixtures have no installed CLI, so it allows.
+        "Assert-OlderReleaseGuardsAgents",
     )
     return "\n".join(_function(name) for name in names)
 
@@ -79,6 +124,10 @@ function Remove-Tree([string]$Path) {{
 # No OpenCode or Amp process runs in these fixtures. The plugin-agent refusal
 # and its place before every gateway stop are tested in test_install_ps1.py.
 function Assert-NoLoadedPluginAgents {{ }}
+# Restore-Slot rewrites a newer gateway's hook entries before an older
+# release goes back; no gateway runs here, and that rewrite is tested in
+# test_install_ps1.py (rel-1-0-5 GAP-0020, GAP-2138).
+function Convert-HooksForRestore([string]$Slot) {{ }}
 {_helpers()}
 {body}
 exit 0
@@ -208,6 +257,8 @@ try {{ Assert-NoActiveConnectorRecovery 'Downgrade' {_literal(root)}; throw 'gua
 _SWAP_PHASE_STUBS = (
     """
 function Die([string]$Message) { throw $Message }
+# A downgrade's hook conversion has its own tests in test_install_ps1.py.
+function Convert-HooksForOlderRelease { return $false }
 function Start-HookFailModeHold { return $true }
 function Complete-HookFailModeHold { return $true }
 function Stop-HookFailModeHold {}
@@ -221,6 +272,9 @@ function Clear-StagedRelease {}
 function Test-RecoveryPending { return $false }
 function Get-RestoredNote { return 'Your previous install is back.' }
 function Get-UnchangedNote { return 'nothing was changed' }
+# The hook-file copy of a refused install (GAP-0009) has its own tests there.
+function Save-HookFiles {}
+function Restore-HookFiles {}
 """
     + _function("Start-SwapHookFailModes")
 )
@@ -234,6 +288,7 @@ def _handoff_stubs(version: str, exit_code: int, marker: str | None = "1") -> st
     return f"""
 {_function('Test-Version')}
 {_function('Invoke-ReleaseInstaller')}
+{_function('Convert-HooksForOlderRelease')}
 $ReleaseBase = 'https://release.invalid'
 $OfficialReleaseBase = $ReleaseBase
 $BinDir = Join-Path $DataDir 'bin'
@@ -1119,6 +1174,10 @@ def _local_install_stubs(data: Path, assets: Path, target: str, installed: str =
         "Get-ListedSha256",
         "Test-Checksum",
         "Get-Asset",
+        # Invoke-Install reads the lock owner through it (GAP-1465) and runs
+        # the staged checks below normal priority (GAP-0008); GAP-2138.
+        "Get-InstallLockLiveOwner",
+        "Invoke-BelowNormal",
         "Invoke-Install",
     )
     # The C# here-string has its own column-zero braces; retain the complete
@@ -1141,6 +1200,9 @@ $RunByUpgrade = $false
 $Run = @{{ Owner = [IntPtr]::Zero; Lock = $false; Transcript = $false; Log = '' }}
 $Version = '{target}'
 $DcVersion = '1.0.2'
+# The installer's top level sets $Repo to the default owner/name when
+# DEFENSECLAW_REPO is unset; Invoke-Install refuses any other shape (GAP-1065).
+$Repo = 'cisco-ai-defense/defenseclaw'
 $Local = {_literal(assets)}
 $LocalGiven = $true
 $BinDir = {_literal(data / 'bin')}
@@ -1209,6 +1271,7 @@ def _local_assets(assets: Path, target: str) -> Path:
 
 
 @WINDOWS_POWERSHELL
+@PER_USER_INSTALL_HOST
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize("case", ["verified", "missing", "mismatched", "tampered", "pending", "newer_target"])
 def test_current_stamped_controller_verifies_explicit_older_local_assets_before_downgrade(tmp_path, case) -> None:
@@ -1254,6 +1317,7 @@ if ($script:gatewayChecks -ne {1 if case == 'verified' else 0} -or
 
 
 @WINDOWS_POWERSHELL
+@PER_USER_INSTALL_HOST
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize("phase", ["early", "watchdog"])
 def test_forward_upgrade_refuses_active_recovery_before_a_snapshot_can_copy_it(tmp_path, phase) -> None:
@@ -1341,6 +1405,7 @@ try {{
 
 
 @WINDOWS_POWERSHELL
+@PER_USER_INSTALL_HOST
 @pytest.mark.allow_subprocess
 @pytest.mark.parametrize("installed", ["1.0.1", "1.0.2"])
 def test_clean_forward_install_and_active_same_version_repair_pass_preflight(tmp_path, installed) -> None:
@@ -1400,11 +1465,12 @@ def test_setup_cleanup_archives_opaque_receipts_with_file_identity_and_private_a
 Clear-SetupDataDir {_literal(failed)}
 $keep = @(Get-ChildItem -LiteralPath (Join-Path $DataDir 'backups') -Directory)[0].FullName
 $acl = (New-Object IO.DirectoryInfo $keep).GetAccessControl()
-$expected = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18')
+# As LocalSystem the user is S-1-5-18 itself: one rule then (GAP-2572).
+$expected = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18' | Select-Object -Unique)
 if (-not $acl.AreAccessRulesProtected) {{ throw 'Recovery archive inherits its DACL' }}
 if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $expected[0]) {{ throw 'Wrong recovery archive owner' }}
 $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-if ($rules.Count -ne 2) {{ throw 'Unexpected recovery archive access rules' }}
+if ($rules.Count -ne $expected.Count) {{ throw 'Unexpected recovery archive access rules' }}
 foreach ($rule in $rules) {{
     if ($expected -notcontains $rule.IdentityReference.Value -or $rule.AccessControlType -ne 'Allow') {{
         throw 'Recovery archive grants unexpected access'

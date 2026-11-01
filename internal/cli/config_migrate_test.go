@@ -272,6 +272,33 @@ func TestConfigMigrateDryRunAckWritesNothing(t *testing.T) {
 	}
 }
 
+// --ack with no migration record has nothing to acknowledge: a plain
+// sentence and success, not a raw open error (GAP-1677).
+func TestConfigMigrateAckWithoutARecordHasNothingToAcknowledge(t *testing.T) {
+	previousPath, previousTo, previousDry, previousAck := configMigratePath, configMigrateTo, configMigrateDryRun, configMigrateAck
+	t.Cleanup(func() {
+		configMigratePath, configMigrateTo, configMigrateDryRun, configMigrateAck = previousPath, previousTo, previousDry, previousAck
+		configMigrateCmd.SetOut(nil)
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("config_version: 9\ndata_dir: "+dir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	configMigrateCmd.SetOut(&out)
+	configMigratePath, configMigrateTo, configMigrateDryRun, configMigrateAck = path, config.ConfigVersionV9, false, true
+	if err := configMigrateCmd.RunE(configMigrateCmd, nil); err != nil {
+		t.Fatalf("config migrate --ack with no record = %v, want success", err)
+	}
+	if !strings.Contains(out.String(), "nothing to acknowledge") {
+		t.Fatalf("config migrate --ack output = %q", out.String())
+	}
+	if _, err := os.Stat(config.MigrationRecordPath(path)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("config migrate --ack created a record: %v", err)
+	}
+}
+
 // A v8 policy_dir under the login home must be read by the CLI migration,
 // just as the gateway's in-memory migration reads it.
 func TestConfigMigrateReadsTildePolicyData(t *testing.T) {

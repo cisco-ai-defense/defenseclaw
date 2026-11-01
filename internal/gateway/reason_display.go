@@ -17,13 +17,13 @@
 package gateway
 
 import (
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -56,7 +56,7 @@ func trustedBuiltInMatchReason(reason string) bool {
 }
 
 // matchLabelStart opens every "<rule-id>:<title>" label of a matched reason.
-var matchLabelStart = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:`)
+var matchLabelStart = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:`)
 
 // splitMatchLabels splits the body of a "matched: " reason into its labels.
 // Labels are joined with ", ", and a rule title may hold ", " too ("P0 marker,
@@ -86,7 +86,8 @@ func trustedBuiltInFindingLabel(label string) bool {
 		}
 	}
 	// The authorized-keys block after an archive extraction (GAP-1555).
-	if label == "persistence.ssh_authorized_keys_command:"+archiveBeforeWriteTitle {
+	if label == "persistence.ssh_authorized_keys_command:"+archiveBeforeWriteTitle ||
+		label == "persistence.ssh_authorized_keys_command:"+unresolvedWriteTargetTitle {
 		return true
 	}
 	if title, ok := strings.CutPrefix(label, "persistence.ssh_authorized_keys_command:"); ok {
@@ -104,6 +105,23 @@ func trustedBuiltInFindingLabel(label string) bool {
 	return false
 }
 
+// trustedShipAuthoredReason reports a reason DefenseClaw wrote from its own
+// text only: catalog rule labels, CodeGuard counts, the unparsed and
+// oversize refusals, the install-window refusal and the session-start gate
+// refusals. Such a reason is guidance (what happened, what to run), and
+// redacting it left the agent with hashes instead of the repair (GAP-2643).
+func trustedShipAuthoredReason(reason string) bool {
+	return trustedRefusalReason(reason) || trustedSessionStartGateReason(reason)
+}
+
+// trustedRefusalReason is trustedShipAuthoredReason without the session-start
+// wrapper, so the reason a blocked start recorded is checked once.
+func trustedRefusalReason(reason string) bool {
+	return trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) ||
+		trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason) ||
+		trustedHookSideRefusalReason(reason) || trustedCodexStartRegistrationRefusal(reason)
+}
+
 // agentDisplayReason keeps exact, ship-authored catalog metadata readable on
 // agent surfaces under the default compatibility policy while retaining the
 // existing scrub for every free-form or scanner-authored reason. Explicit
@@ -112,7 +130,7 @@ func agentDisplayReason(reason string, policy redaction.SinkPolicy) string {
 	if policy != redaction.SinkPolicyDefault {
 		return redaction.ReasonForSink(reason, policy)
 	}
-	if trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) || trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason) {
+	if trustedShipAuthoredReason(reason) {
 		return reason
 	}
 	return redaction.ReasonForAgent(reason)
@@ -125,7 +143,7 @@ func agentDisplayReason(reason string, policy redaction.SinkPolicy) string {
 // ("LLM judge: personal data or credentials"), not as raw judge labels with
 // redaction tokens (GAP-1981).
 func notificationDisplayReason(reason string, policy redaction.SinkPolicy) string {
-	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) || trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason)) {
+	if policy == redaction.SinkPolicyDefault && trustedShipAuthoredReason(reason) {
 		return reason
 	}
 	if policy == redaction.SinkPolicyDefault && !managedEnterpriseActive.Load() {
@@ -145,7 +163,7 @@ func notificationDisplayReason(reason string, policy redaction.SinkPolicy) strin
 // defaultSinkDisplayReason applies the catalog carve-out to compatibility
 // response bodies only when no managed override is active.
 func defaultSinkDisplayReason(reason string, policy redaction.SinkPolicy) string {
-	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) || trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason)) {
+	if policy == redaction.SinkPolicyDefault && trustedShipAuthoredReason(reason) {
 		return reason
 	}
 	return redaction.ReasonForSink(reason, policy)
@@ -159,7 +177,7 @@ var standaloneEnterpriseActive atomic.Bool
 func setStandaloneEnterpriseActive(v bool) { standaloneEnterpriseActive.Store(v) }
 
 // agentRuleIDPattern is the shape of a rule ID an agent message may name.
-var agentRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var agentRuleIDPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // agentBlockNoRetry ends every policy block the agent receives. An agent that
 // got only the rule name sometimes rewrote the blocked command to get the
@@ -203,19 +221,7 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 			return sentence
 		}
 	}
-	subject := agentBlockListSubject(sourceReason)
-	if subject == "" {
-		subject = agentAssetPolicySubject(sourceReason)
-	}
-	if subject == "" {
-		subject = agentMCPAdmissionSubject(sourceReason)
-	}
-	if subject == "" {
-		subject = agentJudgeSubject(sourceReason)
-	}
-	if subject == "" {
-		subject = agentRuleAndJudgeSubject(sourceReason)
-	}
+	subject := agentReasonSubject(sourceReason)
 	if action == "block" && subject != "" {
 		return agentBlockSentence(subject)
 	}
@@ -268,19 +274,46 @@ func agentConfirmSentence(subject string) string {
 	return "DefenseClaw policy needs your confirmation for this action" + detail + "."
 }
 
+// agentReasonSubject words a ship-authored reason that is not a plain local
+// rule match (a block-list entry, an asset-policy decision, an MCP install
+// admission verdict, an LLM judge verdict alone or after a rule match) the way
+// the agent reads it, or returns "" for any other reason. agentVerdictReason
+// puts it in the block sentence and agentObservedReason in the observe notice,
+// so both modes name the same thing.
+func agentReasonSubject(sourceReason string) string {
+	for _, word := range []func(string) string{
+		agentBlockListSubject,
+		agentAssetPolicySubject,
+		agentMCPAdmissionSubject,
+		agentJudgeSubject,
+		agentRuleAndJudgeSubject,
+	} {
+		if subject := word(sourceReason); subject != "" {
+			return subject
+		}
+	}
+	return ""
+}
+
 // agentObservedReason names the rules of a finding DefenseClaw lets through
 // (observe mode, or an alert) the way agentVerdictReason names them in a
 // block: "rule R1: Title". The observe notice used to show a rule pack's
 // title as a "<redacted len=N sha=...>" token while the action-mode block
-// printed it (GAP-1187). The gates are agentVerdictReason's: a managed
+// printed it (GAP-1187), and an MCP server its install admission rejected
+// read as a row of redacted spans while the block named the server
+// (rel-1-0-6:GAP-0198): the notice words every reason the block words
+// (agentReasonSubject). The gates are agentVerdictReason's: a managed
 // deployment or an explicit redaction directive keeps displayReason, and so
-// does any reason that is not a plain local rule match.
+// does any other reason.
 func agentObservedReason(action, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
 	if action == "block" || action == "confirm" || action == agentReviewAction {
 		return displayReason
 	}
 	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
 		return displayReason
+	}
+	if subject := agentReasonSubject(sourceReason); subject != "" {
+		return subject
 	}
 	if displayReason == sourceReason && !trustedBuiltInMatchReason(sourceReason) {
 		return displayReason
@@ -295,7 +328,7 @@ func agentObservedReason(action, sourceReason, displayReason string, policy reda
 // reasons (inspect.go): `tool "<name>" is on the static block list` and
 // `mcp server "<name>" is blocked`. The name is the tool or server the agent
 // itself called; any other text fails the match and stays redacted.
-var agentBlockListReasonPattern = regexp.MustCompile(
+var agentBlockListReasonPattern = lazyregexp.New(
 	`^(tool|mcp server) "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" (?:is on the static block list|is blocked)$`)
 
 // agentJudgeKinds words the LLM judge reasons (llm_judge.go) for the agent.
@@ -372,20 +405,20 @@ var agentAssetPolicyKeys = []string{
 
 // agentAssetPolicyValuePattern is the shape of a value an asset-policy reason
 // may show the agent: the asset name the agent itself asked for, or an enum.
-var agentAssetPolicyValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`)
+var agentAssetPolicyValuePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`)
 
 // agentAssetPolicyNamePattern is the shape of an asset_name the agent may be
 // shown: the plain shape, with letters, marks and digits of any script, so a
 // denied skill named "epa-café" reads as a sentence like an ASCII one instead
 // of the redacted key=value reason (GAP-0572). Spaces, quotes, controls and
 // format characters still fail the match and stay redacted.
-var agentAssetPolicyNamePattern = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{M}\p{N}._:@/-]{0,127}$`)
+var agentAssetPolicyNamePattern = lazyregexp.New(`^[\p{L}\p{N}][\p{L}\p{M}\p{N}._:@/-]{0,127}$`)
 
 // Only the fixed runtime-disable template and known admission verdict kinds
 // may become an agent sentence. Scanner errors and finding titles can contain
 // untrusted text, so the subject names their category without copying them.
-var agentMCPAdmissionPattern = regexp.MustCompile(`^mcp server "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" is disabled because its install admission rejected it \(([^\r\n]{1,512})\); asset_policy\.mode does not apply to admission verdicts$`)
-var agentMCPFindingPattern = regexp.MustCompile(`^auto-block: watch detected (LOW|MEDIUM|HIGH|CRITICAL) findings \(scanner=[A-Za-z0-9._-]{1,64}\)(?:: [^\r\n]{1,512})?(?:; rescan retained block)?$`)
+var agentMCPAdmissionPattern = lazyregexp.New(`^mcp server "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" is disabled because its install admission rejected it \(([^\r\n]{1,512})\); asset_policy\.mode does not apply to admission verdicts$`)
+var agentMCPFindingPattern = lazyregexp.New(`^auto-block: watch detected (LOW|MEDIUM|HIGH|CRITICAL) findings \(scanner=[A-Za-z0-9._-]{1,64}\)(?:: [^\r\n]{1,512})?(?:; rescan retained block)?$`)
 
 func agentMCPAdmissionSubject(reason string) string {
 	m := agentMCPAdmissionPattern.FindStringSubmatch(reason)

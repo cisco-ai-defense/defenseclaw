@@ -111,6 +111,11 @@ internal/gateway/connector/hookexec/
 internal/config/config.go
 internal/config/migrate_v9.go
 
+# The shared OpenCode adapter is embedded into the managed plugin too.
+internal/opencodebridge/
+internal/gateway/connector/hooks/opencode-plugin.js
+scripts/generate_opencode_plugins.py
+
 # Workflows that define or feed the managed lanes.
 .github/workflows/ci.yml
 .github/workflows/windows-native.yml

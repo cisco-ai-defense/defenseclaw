@@ -1845,3 +1845,99 @@ func TestRetentionVacuumStepStopsAtTheReserve(t *testing.T) {
 		}
 	}
 }
+
+// A correlation retention batch that holds the store connection gives it back
+// to a hook write that waits for it; the run still deletes every eligible row
+// and keeps the hook row. On managed RHEL with a 6.8 GB store and a cold page
+// cache, one batch held the connection for about 18 s after a gateway start
+// and benign hook calls were denied as a gateway no-answer (GAP-1790).
+func TestCorrelationRetentionBatchYieldsToAWaitingHookWrite(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Now().UTC()
+	old := now.Add(-91 * 24 * time.Hour)
+	seedRetentionCorrelationHistory(t, store, old)
+
+	const target = "retention-queued-hook"
+	hookWait := make(chan time.Duration, 1)
+	calls := 0
+	reaper, err := newRetentionReaperWithHooks(store, judge, 90, RetentionOptions{}, retentionHooks{
+		inCorrelationDelete: func(ctx context.Context) {
+			calls++
+			if calls != 1 {
+				return
+			}
+			base := store.db.Stats().WaitCount
+			go func() {
+				started := time.Now()
+				if err := store.LogEvent(Event{Action: "hook_decision", Target: target, Severity: "INFO", SessionID: "s"}); err != nil {
+					t.Errorf("queued hook write: %v", err)
+				}
+				hookWait <- time.Since(started)
+			}()
+			for store.db.Stats().WaitCount == base {
+				time.Sleep(time.Millisecond)
+			}
+			// Hold the batch like a cold-page DELETE until it is interrupted.
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := RetentionRunResult{RowsDeleted: newRetentionCounts()}
+	if err := reaper.drainCorrelationState(t.Context(), old.Add(24*time.Hour), now, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Backlog {
+		t.Fatal("a run with its whole budget left reported a backlog")
+	}
+	if waited := <-hookWait; waited > time.Second {
+		t.Fatalf("a hook write waited %s behind a correlation retention batch, want under 1s", waited)
+	}
+	if calls < 2 {
+		t.Fatalf("correlation delete attempts=%d, want the yielded batch taken again", calls)
+	}
+	if got := countRetentionRows(t, store.db, "correlation_relationships"); got != 0 {
+		t.Fatalf("relationship rows left after the run=%d, want 0", got)
+	}
+	var hookRows int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE target = ?`, target).Scan(&hookRows); err != nil {
+		t.Fatal(err)
+	}
+	if hookRows != 1 {
+		t.Fatalf("hook rows=%d, want the queued hook write kept", hookRows)
+	}
+}
+
+// Secure Client keeps its pre-1.0 retention batches: they are never
+// interrupted for waiting hooks, and outside the first half of the budget no
+// batch is either.
+func TestCorrelationRetentionYieldsOnlyInTheFirstHalfOfTheBudgetOutsideSecureClient(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	at := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	until := at.Add(RetentionCorrelationRunBudget / 2)
+	for _, tc := range []struct {
+		secureClient bool
+		now          time.Time
+		want         bool
+	}{
+		{false, at, true},
+		{false, until, false},
+		{true, at, false},
+	} {
+		now := tc.now
+		reaper, err := newRetentionReaperWithHooks(store, judge, 90, RetentionOptions{SecureClient: tc.secureClient}, retentionHooks{
+			now: func() time.Time { return now },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := reaper.yieldsToHooks(until); got != tc.want {
+			t.Fatalf("secureClient=%t now=%s yieldsToHooks=%t want %t", tc.secureClient, tc.now, got, tc.want)
+		}
+	}
+}

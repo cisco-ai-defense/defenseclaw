@@ -23,6 +23,8 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/spf13/cobra"
+
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -173,6 +175,101 @@ func TestWindowsAnchorPreflightRefusalRecordsOneChangeEvent(t *testing.T) {
 	assertOneRefusedAnchorInstall(t, spool, "bundle_required")
 }
 
+func TestWindowsChangeSyntaxRefusalsAreAudited(t *testing.T) {
+	root := t.TempDir()
+	layout := managed.StandaloneLayout{ConfigDir: filepath.Join(root, "etc"), LifecycleDir: filepath.Join(root, "install")}
+	stubWindowsSecretHost(t, layout)
+	spool := stubWindowsChangeSpool(t)
+	savedSecure := bundleSecureClient
+	bundleSecureClient = func() bool { return false }
+	t.Cleanup(func() { bundleSecureClient = savedSecure })
+	for _, tc := range []struct {
+		action string
+		args   []string
+	}{
+		{"set", []string{"--name", "BAD_NAME", "--unknown"}},
+		{"set", []string{"--name"}},
+		{"set", []string{"--from-stdin"}},
+		{"remove", []string{"--name", "qa-token", "extra"}},
+		{"remove", []string{"--lock-wait=invalid"}},
+		{"ensure", []string{"--trust-anchors", "unread-input.json", "--unknown"}},
+		{"ensure", []string{"--unknown", "--trust-anchors=unread-input.json"}},
+		{"ensure", []string{"--trust-anchors"}},
+		{"ensure", []string{"--trust-anchors=unread-input.json", "extra"}},
+		{"ensure", []string{"--unknown", "--config", "--", "--trust-anchors=unread-input.json"}},
+	} {
+		t.Run(tc.action+"/"+strings.Join(tc.args, " "), func(t *testing.T) {
+			before := windowsChangeEvents(t, spool)
+			cmd := newEnterpriseSecretCommand(tc.action, "")
+			kind, action := enterprisestatus.ChangeKindSecret, tc.action
+			if tc.action == "ensure" {
+				cmd = newWindowsEnterpriseLifecycleCommand(tc.action)
+				kind, action = enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall
+			}
+			cmd.RunE = func(*cobra.Command, []string) error {
+				t.Fatal("syntax error reached the change implementation")
+				return nil
+			}
+			secretRawArgs = func() []string { return tc.args }
+			cmd.SetArgs(tc.args)
+			input := strings.NewReader("credential-value-marker\n")
+			cmd.SetIn(input)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			if err := cmd.Execute(); commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+				t.Fatalf("syntax error = %v", err)
+			}
+			if input.Len() != len("credential-value-marker\n") {
+				t.Fatal("a syntax refusal read the credential")
+			}
+			events := windowsChangeEvents(t, spool)
+			if len(events) != len(before)+1 {
+				t.Fatalf("got %d change events, want %d", len(events), len(before)+1)
+			}
+			ev := events[len(events)-1]
+			if ev.Kind != kind || ev.Action != action || ev.Outcome != enterprisestatus.ChangeRefused ||
+				ev.ReasonCode != "invalid_arguments" || ev.Actor == "" || ev.Validate() != nil || ev.SecretName == "BAD_NAME" {
+				t.Fatalf("syntax refusal = %+v", ev)
+			}
+			assertNoWindowsChangeReservations(t, spool)
+		})
+	}
+	before := windowsChangeEvents(t, spool)
+	for _, mode := range []string{"per-user", "standard-account", "secure-client", "status", "after-separator", "flag-value", "flag-value-stray"} {
+		windowsSecretIsElevated = func() bool { return mode != "standard-account" }
+		windowsSecretDeploymentInstalled = func() (bool, error) { return mode != "per-user", nil }
+		bundleSecureClient = func() bool { return mode == "secure-client" }
+		cmd := newEnterpriseSecretCommand("set", "")
+		if mode == "status" {
+			cmd = newEnterpriseSecretCommand("status", "")
+		}
+		args := []string{"--unknown"}
+		switch mode {
+		case "after-separator":
+			args = []string{"--", "--trust-anchors=unread-input.json"}
+		case "flag-value":
+			// --config takes "--trust-anchors" as its value.
+			args = []string{"--profile", "standalone", "--config", "--trust-anchors", "--unknown"}
+		case "flag-value-stray":
+			args = []string{"--bundle", "--trust-anchors", "extra"}
+		}
+		if strings.HasPrefix(mode, "after-") || strings.HasPrefix(mode, "flag-") {
+			cmd = newWindowsEnterpriseLifecycleCommand("ensure")
+		}
+		raw := append([]string{"enterprise", "windows", "ensure"}, args...)
+		secretRawArgs = func() []string { return raw }
+		cmd.SetArgs(args)
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		if err := cmd.Execute(); commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+			t.Fatalf("%s syntax error = %v", mode, err)
+		}
+	}
+	if after := windowsChangeEvents(t, spool); len(after) != len(before) {
+		t.Fatal("a per-user, unprivileged, Secure Client, read-only, literal-argument or flag-value error wrote a managed event")
+	}
+}
+
 // An ensure with TRUSTANCHORS= whose BUNDLE= is rejected after the anchors
 // were staged installs no anchors and records one refused anchor install
 // with the bundle's refusal code. Before, the run staged the anchors and
@@ -195,6 +292,42 @@ func TestWindowsStagedAnchorsOfARejectedBundleRecordOneRefusal(t *testing.T) {
 	assertWindowsBundleInstalledAnchors(t, layout, nil, "after the rejected bundle")
 	assertOneRefusedAnchorInstall(t, spool, "")
 	assertNoWindowsChangeReservations(t, spool)
+}
+
+func TestWindowsAnchorArgumentConflictRecordsOnlyElevatedInstalledStandaloneRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		installed, elevated bool
+		profile             string
+		want                int
+	}{
+		{"installed", true, true, managed.ProfileStandalone, 1},
+		{"unelevated", true, false, managed.ProfileStandalone, 0},
+		{"not installed", false, true, managed.ProfileStandalone, 0},
+		{"secure client", true, true, managed.ProfileSecureClient, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubWindowsBundleHost(t)
+			spool := stubWindowsChangeSpool(t)
+			saved := windowsSecretIsElevated
+			windowsSecretIsElevated = func() bool { return tc.elevated }
+			t.Cleanup(func() { windowsSecretIsElevated = saved })
+			cmd, _ := windowsBundleCommand()
+			opts := &windowsEnterpriseLifecycleOptions{trustAnchors: "delivered-anchors.json", configPath: "delivered-config.yaml",
+				profile: tc.profile, installedBeforeRun: tc.installed, jsonOutput: true}
+			done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts)
+			if !done || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+				t.Fatalf("conflict accepted: done=%v err=%v", done, err)
+			}
+			if events := windowsChangeEvents(t, spool); len(events) != tc.want {
+				t.Fatalf("refusal events=%v, want %d", events, tc.want)
+			}
+			if tc.want == 1 {
+				assertOneRefusedAnchorInstall(t, spool, "bundle_required")
+			}
+			assertNoWindowsChangeReservations(t, spool)
+		})
+	}
 }
 
 // A run that returns after prepare without finish installed none of the

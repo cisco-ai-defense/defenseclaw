@@ -595,27 +595,27 @@ def test_agent360_aggregates_model_and_tool_work_with_clickable_totals() -> None
         assert expression.startswith("max by (")
         assert "sum by (" in expression
         assert "observation_source" in expression
-        assert "largest source total" in expression
+        assert "largest source total" in expression.lower()
 
     for ref_id in ("edgesToolSummary", "nodesToolSummary"):
         assert (
             'body_gen_ai_tool_name!~"(?i)collaboration[._]*send[._]*message"'
             in expressions[ref_id]
         )
-        assert "excluding send_message requests represented by message nodes" in expressions[ref_id]
+        assert "without send_message" in expressions[ref_id]
     for ref_id in ("edgesMessages", "nodesMessages"):
         message_expression = expressions[ref_id]
         assert "message_target_group" in message_expression
         assert 'hasPrefix "/root/" .body_gen_ai_tool_call_arguments_target' in message_expression
         assert "/root and /root/* (grouped)" in message_expression
-        assert "non-root targets remain exact" in message_expression
+        assert "/root/* is one group" in message_expression
     assert "Messages to root" in expressions["nodesMessages"]
 
     root_anchor = expressions["nodesRootAnchor"]
     assert 'event_name="session_start"' in root_anchor
     assert 'id=`agent:{{.body_gen_ai_agent_id}}`' in root_anchor
     assert 'detail__node_type=`root_agent_anchor`' in root_anchor
-    assert "matching 24-hour session anchor" in root_anchor
+    assert "recovered from its 24h session anchor" in root_anchor
     assert "unless on (id)" in root_anchor
     assert 'label_format id=`agent:{{.body_gen_ai_agent_id}}` [$__range]' in root_anchor
 
@@ -626,7 +626,7 @@ def test_agent360_aggregates_model_and_tool_work_with_clickable_totals() -> None
     assert 'body_defenseclaw_correlation_relationship_source_kind="agent"' in spawn_parent_anchor
     assert 'body_defenseclaw_correlation_relationship_target_kind="agent"' in spawn_parent_anchor
     assert 'body_defenseclaw_correlation_relationship_type=~"parent_of|delegated_by"' in spawn_parent_anchor
-    assert "Parent endpoint recovered from typed parent_of or inverse delegated_by" in spawn_parent_anchor
+    assert "Parent recovered from parent_of or delegated_by" in spawn_parent_anchor
     assert "body_defenseclaw_agent_parent_id" not in spawn_parent_anchor
     assert "[24h]" in spawn_parent_anchor
     assert "[$__range]" in spawn_parent_anchor
@@ -648,7 +648,7 @@ def test_agent360_aggregates_model_and_tool_work_with_clickable_totals() -> None
     assert agent_nodes.startswith("((topk by (id) (1,")
     assert agent_nodes.count("topk by (id) (1,") == 2
     assert 'defenseclaw_event_name=~`session_start|subagent_start`' in agent_nodes
-    assert "Canonical 24-hour session_start or subagent_start identity" in agent_nodes
+    assert "Identity from the 24h session_start or subagent_start" in agent_nodes
     assert "and on (id)" in agent_nodes
     assert "unless on (id)" in agent_nodes
 
@@ -1397,8 +1397,8 @@ def _loki_queries(node: object, datasource: object = None):
         for key, value in node.items():
             if key == "expr" and isinstance(value, str) and is_loki:
                 yield node.get("refId", "?"), value
-            elif key == "query" and isinstance(value, dict) and is_loki and isinstance(value.get("query"), str):
-                yield node.get("name", "?"), value["query"]
+            elif key == "query" and isinstance(value, dict) and is_loki and "stream" in value:
+                yield node.get("name", "?"), f"label_values({value['stream']}, {value['label']})"
             else:
                 yield from _loki_queries(value, datasource)
     elif isinstance(node, list):
@@ -1442,6 +1442,39 @@ BODY_FIELD_TEXT_BOXES = {
 _LABEL_VALUES = re.compile(r"^label_values\((\{[^{}|]*\}), ([A-Za-z_][A-Za-z0-9_]*)\)$")
 
 
+def _loki_variable_query(selector: str, label: str) -> dict[str, object]:
+    # The query Grafana's own Loki variable editor saves: type 1 is
+    # LokiVariableQueryType.LabelValues. Grafana 11 reads only this form.
+    return {
+        "label": label,
+        "refId": "LokiVariableQueryEditor-VariableQuery",
+        "stream": selector,
+        "type": 1,
+    }
+
+
+def test_loki_boxes_use_the_query_form_grafana_runs() -> None:
+    # GAP-0221: a Loki variable saved as {"query": "label_values(...)"} makes
+    # Grafana 11.3 send no request at all, so the Environment box on the
+    # Sandboxes board listed only All although Loki indexed local-dev. Only the
+    # structured form (type, label, stream) is run. `definition` keeps the text
+    # for the inventory scripts and the variable editor.
+    checked = 0
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        board = json.loads(path.read_text(encoding="utf-8"))
+        for variable in board.get("templating", {}).get("list", []):
+            if (variable.get("datasource") or {}).get("type") != "loki" or variable.get("type") != "query":
+                continue
+            query = variable["query"]
+            assert isinstance(query, dict), f"{path.name} ${variable['name']}: query must be an object"
+            assert set(query) == {"type", "label", "stream", "refId"}, f"{path.name} ${variable['name']}"
+            assert query["type"] == 1, f"{path.name} ${variable['name']}: type 1 lists label values"
+            assert query["refId"] == "LokiVariableQueryEditor-VariableQuery"
+            assert variable["definition"] == f"label_values({query['stream']}, {query['label']})"
+            checked += 1
+    assert checked == 7
+
+
 def test_loki_boxes_list_index_labels_with_a_matcher_only_selector() -> None:
     # Grafana sends label_values(selector, label) to Loki's label API. Loki
     # refuses a selector with a pipeline (HTTP 400, "only label matchers are
@@ -1453,15 +1486,15 @@ def test_loki_boxes_list_index_labels_with_a_matcher_only_selector() -> None:
         for variable in board.get("templating", {}).get("list", []):
             if (variable.get("datasource") or {}).get("type") != "loki" or variable.get("type") != "query":
                 continue
-            query = variable["query"]["query"] if isinstance(variable["query"], dict) else variable["query"]
+            query = variable["definition"]
             match = _LABEL_VALUES.match(query)
             assert match, f"{path.name} ${variable['name']}: {query} is not label_values(<matchers>, <label>)"
             selector, label = match.groups()
-            assert variable.get("definition") == query, f"{path.name} ${variable['name']}"
+            assert variable["query"] == _loki_variable_query(selector, label), f"{path.name} ${variable['name']}"
             assert label in SHIPPED_LOKI_INDEX_LABELS, f"{path.name} ${variable['name']}: {label}"
             assert set(_MATCHER.findall(selector)) <= SHIPPED_LOKI_INDEX_LABELS, f"{path.name} ${variable['name']}"
             checked += 1
-    assert checked == 6
+    assert checked == 7
 
 
 def test_loki_body_field_boxes_are_regex_text_boxes() -> None:
@@ -1506,14 +1539,14 @@ def test_sandbox_board_filters_environment_after_the_selector() -> None:
             assert '{service_name="defenseclaw"} | deployment_environment_name' in query, where
     boxes = {variable["name"]: variable for variable in board["templating"]["list"]}
     selector = 'service_name="defenseclaw", deployment_environment_name=~"$environment"'
-    assert boxes["environment"]["query"]["query"] == (
-        'label_values({service_name="defenseclaw"}, deployment_environment_name)'
+    assert boxes["environment"]["query"] == _loki_variable_query(
+        '{service_name="defenseclaw"}', "deployment_environment_name"
     )
-    assert boxes["host"]["query"]["query"] == f"label_values({{{selector}}}, host_name)"
-    assert boxes["sandbox"]["query"]["query"] == (
-        f'label_values({{{selector}, host_name=~"$host"}}, defenseclaw_sandbox_name)'
+    assert boxes["host"]["query"] == _loki_variable_query(f"{{{selector}}}", "host_name")
+    assert boxes["sandbox"]["query"] == _loki_variable_query(
+        f'{{{selector}, host_name=~"$host"}}', "defenseclaw_sandbox_name"
     )
-    assert boxes["os"]["query"]["query"] == f'label_values({{{selector}, host_name=~"$host"}}, os_type)'
+    assert boxes["os"]["query"] == _loki_variable_query(f'{{{selector}, host_name=~"$host"}}', "os_type")
 
 
 def test_live_inventory_does_not_report_non_finite_samples_as_zero() -> None:
@@ -1611,6 +1644,42 @@ def test_live_inventory_checks_tempo_before_search(monkeypatch: pytest.MonkeyPat
     assert errors == []
     assert call_order == ["ready", "search"]
     assert inventory[0]["panels"][0]["status"] == "data"
+
+
+def test_live_audit_sends_log_line_tables_to_query_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1028: Loki refuses a log query as an instant query (HTTP 400), so a
+    # table that lists log lines must be compiled like a logs panel.
+    audit = _load_audit_module()
+    endpoints: dict[str, str] = {}
+
+    def fake_request(
+        url: str,
+        params: dict[str, str] | None = None,
+        *,
+        timeout_seconds: float = 0,
+    ) -> dict[str, object]:
+        if url.endswith("/api/health"):
+            return {"database": "ok"}
+        assert params is not None
+        endpoints[params["query"]] = url
+        return {"status": "success", "data": {"result": []}}
+
+    datasource = {"type": "loki", "uid": "defenseclaw-loki"}
+    dashboard = {
+        "uid": "log-table-fixture",
+        "title": "Log table fixture",
+        "panels": [
+            {"type": "table", "title": "Lines", "datasource": datasource, "targets": [{"expr": "{a=\"1\"} | json", "queryType": "range", "maxLines": 1000}]},
+            {"type": "stat", "title": "Count", "datasource": datasource, "targets": [{"expr": "sum(count_over_time({a=\"1\"} [5m]))", "instant": True}]},
+        ],
+    }
+    monkeypatch.setattr(audit, "request_json", fake_request)
+    monkeypatch.setattr(audit, "tempo_readiness_error", lambda: None)
+
+    assert audit.live_audit([(Path("fixture.json"), dashboard)]) == []
+
+    assert endpoints['{a="1"} | json'].endswith("/loki/api/v1/query_range")
+    assert endpoints['sum(count_over_time({a="1"} [5m]))'].endswith("/loki/api/v1/query")
 
 
 def test_live_inventory_caps_each_query_by_shared_deadline(
@@ -2575,7 +2644,7 @@ def _golden_backend_responses(
                     "detail__node_type=`tool_summary`": "tool:",
                     "detail__node_type=`approval_request`": "approval:",
                     "detail__node_type=`agent_messages`": "message:",
-                    "Session/subagent terminal observation": "outcome:",
+                    "Terminal outcomes; turn_end grouped": "outcome:",
                 }
                 node_prefix = next(
                     (
@@ -2869,7 +2938,7 @@ def test_live_golden_executes_authored_agent360_target_semantics(
     assert any(
         'detail__node_type=`agent`' in query
         and query.startswith("((topk by (id) (1,")
-        and "Canonical 24-hour session_start or subagent_start identity" in query
+        and "Identity from the 24h session_start or subagent_start" in query
         and "unless on (id)" in query
         for query in topology_queries
     )
@@ -3970,6 +4039,20 @@ def test_identity_dashboard_counts_acp_only_agents_and_sessions() -> None:
     ):
         expression = _panel(dashboard, title)["targets"][0]["expr"]
         assert "guardrail[.]evaluation[.]completed" in expression, title
+
+
+def test_identity_assurance_panels_count_acp_only_users() -> None:
+    # GAP-1019: the guardrail.evaluation.completed rows of an ACP-only
+    # session carry the verified assurance, so every query of the assurance
+    # panels (numerator, denominator, each leg) reads them too.
+    dashboard = _dashboard("defenseclaw-identity.json")
+    acp_aware = 'event_name=~"hook_decision|tool[.]invocation[.].*|guardrail[.]evaluation[.]completed"'
+    for title in ("Verified principal share", "Verified vs claimed identity"):
+        for target in _panel(dashboard, title)["targets"]:
+            expression = target["expr"]
+            filters = expression.count("| event_name=~")
+            assert filters, title
+            assert expression.count(acp_aware) == filters, title
 
 
 def test_verified_principal_share_is_zero_for_claimed_only_activity() -> None:

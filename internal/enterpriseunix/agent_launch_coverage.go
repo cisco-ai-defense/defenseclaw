@@ -81,7 +81,7 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 	if err != nil {
 		message := "could not inspect running agent launches: " + err.Error()
 		result.AddWarning("managed_launch_scan_unknown", message)
-		result.CoverageComplete, result.SecurityComplete = false, false
+		result.MarkCoverageIncomplete("managed_launch_scan_unknown")
 		if l.opts.Action == ActionVerify {
 			result.AddError("managed_launch_scan_unknown", message)
 		}
@@ -94,6 +94,7 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 		}
 	}
 	enrolled := env.launchEnrollment(cfg)
+	sandboxed := map[string]bool{}
 	for _, session := range sessions {
 		name := pluginLaunchConnectorName(session.Agent)
 		if session.UID == 0 || session.UID == record.ServiceUID || !enabled[name] ||
@@ -105,6 +106,9 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 		}
 		if !enrolled.covers(session.UID, func() (string, string) { return env.pluginLaunchAccount(ctx, session.UID) }) {
 			continue // excluded, exempt or not admitted: DefenseClaw does not protect this account
+		}
+		if env.registeredSandboxLaunch(ctx, session, sandboxed) {
+			continue // runs in a sandbox the managed gateway registered: its sandbox policy and hooks cover it
 		}
 		l.describePluginLaunchSession(ctx, session, name)
 	}
@@ -127,7 +131,7 @@ func (l *lifecycle) describePluginLaunchSession(ctx context.Context, session age
 	}
 	message := fmt.Sprintf("user %s runs %s (pid %d): %s; its managed hook or plugin load is not proven, so tool calls in this session may be uninspected. Close this session and restart without the bypass", who, name, session.PID, launchCoverageExplanation(reason))
 	result.AddWarning(codeManagedLaunchUninspected, message)
-	result.CoverageComplete, result.SecurityComplete = false, false
+	result.MarkCoverageIncomplete(codeManagedLaunchUninspected)
 	if l.opts.Action == ActionVerify {
 		result.AddError(codeManagedLaunchUninspected, message)
 	}
@@ -136,7 +140,7 @@ func (l *lifecycle) describePluginLaunchSession(ctx context.Context, session age
 			UID: session.UID, StartedAt: session.Started.UTC().Format("2006-01-02T15:04:05.999999999Z07:00")}
 		if err := env.ReportLaunchCoverage(ctx, report); err != nil {
 			result.AddWarning(codeManagedLaunchAuditUnavailable, "could not audit the uninspected "+name+" session (pid "+strconv.Itoa(session.PID)+"): "+err.Error())
-			result.SecurityComplete = false
+			result.MarkSecurityIncomplete(codeManagedLaunchAuditUnavailable)
 		}
 	}
 }

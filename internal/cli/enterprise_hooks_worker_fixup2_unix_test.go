@@ -238,7 +238,7 @@ func TestEnterpriseHookWorkerMatcherCoversInstallAndRemovalByConnector(t *testin
 	setupOnly := map[string]bool{"openclaw": true, "zeptoclaw": true}
 	versions := map[string]string{
 		"amp": "0.0.1785334225", "codex": "codex-cli 0.142.0",
-		"claudecode": "2.1.187 (Claude Code)", "opencode": "1.18.33",
+		"claudecode": "2.1.187 (Claude Code)", "opencode": "2.1.4",
 		"kiro":        "kiro-cli 2.27.1",
 		"antigravity": "1.2.11",
 		"hermes":      "0.21.3", "cursor": "cursor 3.19.13",

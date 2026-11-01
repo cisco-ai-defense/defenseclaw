@@ -659,6 +659,7 @@ func codexNativeCommandsForLauncher(oldLauncher string) map[string]struct{} {
 	for _, contract := range builtinHookContracts["codex"] {
 		for _, event := range contract.Events {
 			add(windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, oldLauncher))
+			add(windowsCodexHookCommandForBinaryEvent(event, contract.ContractID, oldLauncher))
 		}
 	}
 	return commands

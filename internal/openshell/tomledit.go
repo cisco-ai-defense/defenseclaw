@@ -20,11 +20,12 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"regexp"
 	"strconv"
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // ErrTOMLEdit means a TOML document could not be edited without risking
@@ -179,7 +180,7 @@ func tomlString(s string) string {
 	return b.String()
 }
 
-var bareTOMLKey = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+var bareTOMLKey = lazyregexp.New(`^[A-Za-z0-9_-]+$`)
 
 func formatTOMLKey(k string) string {
 	if bareTOMLKey.MatchString(k) {
