@@ -3004,6 +3004,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				AllowMissingHookConfigRepair:       previousProtection.PreviouslyProtected,
 				RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
 				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
+				WindowsDeferredFirstEnrollment:     enterpriseHookDeferredFirstEnrollment(target, previousProtection),
 				// Standalone Amp and OpenCode only; empty on Secure Client.
 				ForeignHookGuardBinary:  standaloneForeignHookGuardBinary(target.Connector),
 				ManagedHookBinary:       standaloneManagedHookBinary(),
@@ -3527,23 +3528,9 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// protected path inside the settle window, leaving the
 			// destination present just like the guardian's own atomic
 			// rename tail.
-			actionable := enterpriseHookWatchOwnedEventActionable(event, exclusiveOwned, sharedOwned)
-			settling := actionable && enterpriseHookWatchEventInSettleWindow(time.Now(), settleUntil, event.Op)
-			// A Write or Chmod dropped by either rule still counts when
-			// the owned file no longer holds what the last reconcile left
-			// there: an in-place overwrite of the scoped token right after
-			// a pass waited for the interval pass (GAP-0044), as did an
-			// in-place rewrite of a shared agent config (GAP-0045).
-			// A Create, Remove or Rename of an exclusive-writer file in the
-			// settle window that left the file as the pass found it and as
-			// it left it is the pass's own make-and-drop tail (a backup
-			// receipt a failed repair rolled back): it does not arm another
-			// pass, so the repair backoff applies (GAP-0030).
-			if !settling && actionable && enterpriseHookWatchExclusiveTailUnchanged(time.Now(), settleUntil, event, exclusiveOwned, foundSnapshot, ownedSnapshot, enterpriseHookOwnedFileFingerprint) {
-				settling = true
-			}
-			if (!actionable || settling) &&
-				!enterpriseHookWatchOwnedFileChanged(event.Name, exclusiveOwned, sharedOwned, ownedSnapshot, enterpriseHookOwnedFileFingerprint) {
+			drop, settling := enterpriseHookWatchEventDropped(time.Now(), settleUntil, event, repairRetryNeeded,
+				exclusiveOwned, sharedOwned, foundSnapshot, ownedSnapshot, enterpriseHookOwnedFileFingerprint)
+			if drop {
 				if settling {
 					droppedInSettle++
 				}
@@ -3892,6 +3879,46 @@ func enterpriseHookWatchExclusiveTailUnchanged(now, settleUntil time.Time, event
 		return false
 	}
 	return fingerprint(cleaned) == after
+}
+
+// enterpriseHookWatchEventDropped reports whether the watch loop drops a
+// filesystem event instead of arming a pass (drop), and whether it counts as
+// a settle-window tail of the last pass (settling). lastPassFailed says the
+// last pass ended with a failed repair (it schedules the repair backoff).
+//
+// A Write or Chmod in the settle window is the tail of the pass's own writes,
+// and an event on an unowned path is noise, unless the owned file no longer
+// holds what the last pass left there: an in-place overwrite of the scoped
+// token right after a pass waited for the interval pass (GAP-0044), as did an
+// in-place rewrite of a shared agent config (GAP-0045).
+//
+// A Create, Remove or Rename of an exclusive-writer file in the settle window
+// that left the file as the pass found it and as it left it is the pass's own
+// make-and-drop tail (a backup receipt a failed repair rolled back): it does
+// not arm another pass, so the repair backoff applies (GAP-0030). That holds
+// only after a failed pass. After a pass that succeeded, both snapshots of a
+// hook file deleted again right after the pass repaired it say "absent" (the
+// delete landed before the snapshot), so the delete was dropped as the pass's
+// tail and the file stayed missing until the interval pass, 20-70 s after a
+// held delete ended (GAP-0256).
+func enterpriseHookWatchEventDropped(
+	now, settleUntil time.Time,
+	event fsnotify.Event,
+	lastPassFailed bool,
+	exclusiveOwned, sharedOwned map[string]struct{},
+	found, left map[string]string,
+	fingerprint func(string) string,
+) (drop, settling bool) {
+	actionable := enterpriseHookWatchOwnedEventActionable(event, exclusiveOwned, sharedOwned)
+	settling = actionable && enterpriseHookWatchEventInSettleWindow(now, settleUntil, event.Op)
+	if !settling && actionable && lastPassFailed &&
+		enterpriseHookWatchExclusiveTailUnchanged(now, settleUntil, event, exclusiveOwned, found, left, fingerprint) {
+		settling = true
+	}
+	if (!actionable || settling) && !enterpriseHookWatchOwnedFileChanged(event.Name, exclusiveOwned, sharedOwned, left, fingerprint) {
+		return true, settling
+	}
+	return false, settling
 }
 
 // enterpriseHookReconcileRowsHash is a content fingerprint over the
@@ -4539,6 +4566,15 @@ type enterpriseHookPreviousProtection struct {
 	PreviouslyProtected        bool
 	HookContractLockUpdatedAt  string
 	HookContractEntryUpdatedAt string
+}
+
+// enterpriseHookDeferredFirstEnrollment reports the first enrollment of a
+// deferred row the guardian never protected: an account that stayed pending
+// while it was signed out. Only that enrollment may move aside the
+// account's own link at its DefenseClaw folder (GAP-0193); a repair of a
+// protected account and any row that is not deferred refuse it.
+func enterpriseHookDeferredFirstEnrollment(target enterprisehooks.ManifestTarget, previous enterpriseHookPreviousProtection) bool {
+	return target.IsDeferred() && !previous.PreviouslyProtected
 }
 
 func previousEnterpriseHookProtection(

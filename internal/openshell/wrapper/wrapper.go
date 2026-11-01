@@ -38,9 +38,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Shell is a supported interactive shell.
@@ -122,7 +123,7 @@ type Wrap struct {
 	Harness string
 }
 
-var commandPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+var commandPattern = lazyregexp.New(`^[a-z][a-z0-9_-]{0,31}$`)
 
 func (w Wrap) validate() error {
 	if !commandPattern.MatchString(w.Command) || !commandPattern.MatchString(w.Harness) {
@@ -287,9 +288,9 @@ func split(data []byte) (before, block, after []byte, found bool, err error) {
 }
 
 var (
-	posixFunc = regexp.MustCompile(`^([a-z][a-z0-9_-]{0,31})\(\) \{$`)
-	fishFunc  = regexp.MustCompile(`^function ([a-z][a-z0-9_-]{0,31}) `)
-	runLine   = regexp.MustCompile(`^\s*(.+) sandbox run ([a-z][a-z0-9_-]{0,31}) -- `)
+	posixFunc = lazyregexp.New(`^([a-z][a-z0-9_-]{0,31})\(\) \{$`)
+	fishFunc  = lazyregexp.New(`^function ([a-z][a-z0-9_-]{0,31}) `)
+	runLine   = lazyregexp.New(`^\s*(.+) sandbox run ([a-z][a-z0-9_-]{0,31}) -- `)
 )
 
 // parse reads the wraps and binary out of a block written by Render.

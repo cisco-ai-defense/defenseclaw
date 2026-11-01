@@ -19,6 +19,15 @@ const (
 	// session (the Kerberos credential cache, SSH_CONNECTION, the logon
 	// session). They are attribution only and never select a profile.
 	AssuranceClaimed Assurance = "claimed"
+	// AssuranceVerifiedByConnector marks the directory facts of a person a
+	// trusted connector (enterprise.identity.trusted_connectors) said it
+	// acts for: the gateway verified the connector's service account and
+	// resolved the person's facts itself, but did not see the person's own
+	// process. The facts select a guardrail profile and nothing else: a
+	// check that needs proof of the person's own process (the session-start
+	// gate, sandbox ownership, per-user secret paths, require-sandbox) never
+	// takes it as verified.
+	AssuranceVerifiedByConnector Assurance = "verified_by_connector"
 )
 
 // Directory names the directory that owns an account. It is the Go side of

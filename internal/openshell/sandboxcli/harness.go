@@ -24,7 +24,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -458,7 +458,7 @@ func readSmallFile(p string, max int64) ([]byte, error) {
 	return os.ReadFile(p)
 }
 
-var credentialNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+var credentialNamePattern = lazyregexp.New(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 
 // ParseCredential parses --credential NAME=host[:port]. The secret is the
 // value of the variable NAME in this environment.

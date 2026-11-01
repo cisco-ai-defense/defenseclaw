@@ -193,6 +193,28 @@ def test_a_field_of_an_unlisted_destination_names_the_range(tmp_path, monkeypatc
     assert open(path, encoding="utf-8").read() == before
 
 
+def test_a_field_under_a_scalar_shorthand_names_the_whole_key_form(tmp_path, monkeypatch):
+    # GAP-0943: admission.skill.actions.high stored as "block" has no install field to set.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path, "admission:\n  skill:\n    actions:\n      high: block\n")
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(config_writer.ConfigWriteError) as caught:
+        config_writer.apply([Change("admission.skill.actions.high.install", "none")], "cli:test", "t", path=path)
+    message = str(caught.value)
+    assert 'admission.skill.actions.high is stored as the single value "block"' in message
+    assert (
+        "defenseclaw config set --json admission.skill.actions.high "
+        '\'{"install": "none", "file": "none", "runtime": "disable"}\'' in message
+    )
+    assert open(path, encoding="utf-8").read() == before
+    # The suggested form is one the writer accepts.
+    config_writer.apply(
+        [Change("admission.skill.actions.high", {"install": "none", "file": "none", "runtime": "disable"})],
+        "cli:test", "t", path=path,
+    )
+    assert "install: none" in open(path, encoding="utf-8").read()
+
+
 def test_every_write_re_renders_custom_providers_from_llm_providers(tmp_path, monkeypatch):
     import json
 
@@ -565,6 +587,37 @@ def test_relative_trusted_ca_refusal_names_the_path_requirement(tmp_path, monkey
     assert "absolute path" in message and "~/" in message
     assert (tmp_path / "config.yaml").read_bytes() == before
     assert not os.path.exists(config_writer.generation_path(path))
+
+
+def test_plain_error_names_the_stray_folder_in_a_rule_pack_by_its_full_path() -> None:
+    """p0-round:GAP-1566: a nested copy of another pack is named by its full path, with the pack, not the check."""
+    from defenseclaw.config_inspect import ConfigInspectError
+
+    for quoted, pack, stray in (
+        ('"C:\\\\Users\\\\u\\\\teampack"', "C:\\Users\\u\\teampack", "C:\\Users\\u\\teampack\\default"),
+        ('"/home/u/teampack"', "/home/u/teampack", "/home/u/teampack/default"),
+    ):
+        reason = (
+            f"[config_semantic_invalid] config rule pack {quoted}: rule pack inventory_unexpected at "
+            "default/judge/injection.yaml: unexpected YAML component: the folder default does not belong in a rule pack "
+            "(a copy of another pack placed inside this one?); move default out of the rule-pack folder or remove it, "
+            "then run the command or installer again; expected rule packs, custom pack digests and rule IDs the gateway "
+            "can load; fix the reference, then retry"
+        )
+        inspected = ConfigInspectError("rejected", field_path="$.guardrail", reason=reason)
+        message = config_writer.plain_error(inspected)
+        assert message.startswith(f"guardrail: the rule pack {pack} holds the folder {stray},"), message
+        assert f"Move {stray} out of the rule-pack folder or remove it" in message
+        assert "inventory_unexpected" not in message
+
+    # A stray file in the pack's own judge folder names the file, as before.
+    own = (
+        '[config_semantic_invalid] config rule pack "/home/u/teampack": rule pack inventory_unexpected at '
+        "judge/custom.yaml: unexpected YAML component: move judge/custom.yaml out of the rule-pack folder or remove it, "
+        "then run the command or installer again; fix the reference, then retry"
+    )
+    message = config_writer.plain_error(ConfigInspectError("rejected", field_path="$.guardrail", reason=own))
+    assert "holds the folder" not in message and "judge/custom.yaml" in message
 
 
 def test_plain_error_reports_length_and_write_directory() -> None:
@@ -1316,3 +1369,19 @@ def test_every_policy_source_compiles_a_chosen_quarantine_as_written(tmp_path, m
         if got != expected or compat == chosen or (not chosen and written != legacy):
             failures.append(f"{name}: MCP {got}, expected {expected}; compatibility {'on' if compat else 'off'}")
     assert not failures, "\n".join(failures)
+
+
+@pytest.mark.parametrize("value", ["http://127.0.0.1:8765/defenseclaw", "mirror.example.com/dc", "ftp://mirror.example/dc"])
+def test_update_source_refusal_asks_for_an_https_url(tmp_path, monkeypatch, value):
+    # GAP-1065: the refusal said only "not in the expected format". https:// stays accepted.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path)
+    before = (tmp_path / "config.yaml").read_bytes()
+    with pytest.raises(V8ConfigError) as refused:
+        config_writer.apply([Change("update.source", value)], "cli:test", "t", path=path)
+    message = config_writer.plain_error(refused.value, value=value)
+    assert message.startswith("update.source must be an https:// URL")
+    assert "https://mirror.example.com/defenseclaw" in message
+    assert (tmp_path / "config.yaml").read_bytes() == before
+
+    config_writer.apply([Change("update.source", "https://mirror.example.com/defenseclaw")], "cli:test", "t", path=path)

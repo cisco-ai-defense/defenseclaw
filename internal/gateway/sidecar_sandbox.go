@@ -323,8 +323,9 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 			openshell.ClientOptions{Workspace: cfg.OpenShell.Gateway.Workspace},
 		),
 		Bindings: store,
+		// A managed Linux daemon builds where its gateway looks (#1195).
 		Images: manager.BuilderImages{Builder: &image.Builder{
-			Docker: image.CLI{}, Store: images, Log: io.Discard,
+			Docker: image.ManagedCLI(opts.Managed, runtime.GOOS), Store: images, Log: io.Discard,
 		}},
 		Profiles: manager.CLIProfileImporter{BinaryFunc: func() string {
 			if c := deps.config(); c != nil {

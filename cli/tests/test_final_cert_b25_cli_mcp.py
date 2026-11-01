@@ -66,5 +66,7 @@ class TestFinalCertB25McpSet(MCPCommandTestBase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         mock_scan.assert_called_once()
-        self.assertIn("[mcp] Added 'r4wiki' (claudecode).", result.output)
+        # The line also names the Claude profile (GAP-1390): the default one, or the
+        # CLAUDE_CONFIG_DIR folder where the suite sets it.
+        self.assertRegex(result.output, r"\[mcp\] Added 'r4wiki' \(claudecode, (default profile|profile .+)\)\.")
         mock_hint.assert_not_called()

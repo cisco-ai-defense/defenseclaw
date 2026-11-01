@@ -2024,6 +2024,24 @@ def build_setup_sections(
             "Deprecated v4 block. Edit the Unified LLM section instead.",
         ),
         ConfigSection(
+            "Decision Model",
+            (
+                _field(cfg, "Enabled", "decision_model.enabled", "bool", hint="Off by default. Runs in front of the LLM judge."),
+                _field(cfg, "Model", "decision_model.model", hint="Model name the System One endpoint serves."),
+                _field(cfg, "Endpoint URL", "decision_model.base_url", hint="https, or http to loopback only."),
+                _field(cfg, "Token Env", "decision_model.api_key_env", hint="Env var NAME; default DEFENSECLAW_DECISION_MODEL_KEY."),
+                _field(cfg, "Timeout (s)", "decision_model.timeout", hint="Blank = 1. The judge runs when it is late."),
+                _field(cfg, "Allow At", "decision_model.allow_threshold", hint="Risk at or below skips the judge. Blank = 0.30."),
+                _field(cfg, "Block At", "decision_model.block_threshold", hint="Risk at or above is a confident block. Blank = 0.75."),
+                _field(
+                    cfg, "Confident Block", "decision_model.on_confident_block", "choice", ("escalate", "decide"),
+                    "escalate: the judge still checks it (default). decide: it stands.",
+                ),
+            ),
+            "Fast first pass in front of the LLM judge; skill scans record its advisory score.",
+            "Token value: defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY. Check: setup decision-model --ping.",
+        ),
+        ConfigSection(
             "Cisco AI Defense", tuple(_cisco_ai_defense_fields(cfg)), "Cloud-hosted prompt/response moderation."
         ),
         ConfigSection("Firewall", tuple(_firewall_fields(cfg)), "Host firewall anchor paths. Read-only in the TUI."),
@@ -8959,7 +8977,7 @@ def _v8_observability_fields(
             how_to,
         )
 
-    retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+    retention = status.retention_label
     fields: list[ConfigField] = [
         _header("Plan Digest", "observability.plan_digest", status.plan_digest[:12]),
         _header("Bucket Catalog", "observability.bucket_catalog_version", str(status.bucket_catalog_version)),

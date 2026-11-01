@@ -256,7 +256,9 @@ func TestPerUserShellHookOutageFollowsTheConfigNow(t *testing.T) {
 
 // outageOpenWarningForTest is the one outage warning a connector's shell
 // hook shows: Claude Code and Codex show it as their user-visible
-// systemMessage, the others on stderr.
+// systemMessage, the others on stderr (Copilot on every call, for logs; its
+// visible warning is the postToolUse additionalContext,
+// TestPerUserCopilotOutageNoticeIsPostToolUseAdditionalContext).
 func outageOpenWarningForTest(connector string) string {
 	if connector == "claudecode" || connector == "codex" {
 		return "DefenseClaw is not checking this session"

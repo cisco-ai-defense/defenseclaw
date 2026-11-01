@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -178,6 +179,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			if judge := a.judgeFor(ctx); judge != nil {
 				judge.ObserveSessionPrompt(ctx, req.Prompt)
 			}
+			a.observeUserDownloadRequest(ctx, req.Prompt)
 		}
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodePromptContent(req), "prompt",
@@ -201,19 +203,23 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			callerCWD:     req.CWD,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, toolName, actionTool, toolArgs)
+		actionInput := actionfacts.Input{
+			Tool:                                     actionTool,
+			Args:                                     toolArgs,
+			CWD:                                      req.CWD,
+			ActiveHome:                               hookActiveHome(ctx),
+			ToolResourceIdentity:                     resourceIdentity,
+			CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
+			ActiveAgentFiles:                         activeAgentContext.files,
+			ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
+			ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
+			ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
+		}
+		if a.agentHookWindowsDialectHint(ctx) {
+			actionInput.DialectHint = claudeCodeWindowsShellDialect(actionInput)
+		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input: actionfacts.Input{
-				Tool:                                     actionTool,
-				Args:                                     toolArgs,
-				CWD:                                      req.CWD,
-				ActiveHome:                               hookActiveHome(ctx),
-				ToolResourceIdentity:                     resourceIdentity,
-				CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
-				ActiveAgentFiles:                         activeAgentContext.files,
-				ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
-				ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
-				ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
-			},
+			Input:                         actionInput,
 			LegacyText:                    string(toolArgs),
 			Connector:                     "claudecode",
 			EnforcementCapable:            true,
@@ -333,6 +339,15 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		action = "block"
 	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	// The alert-only SQL rule says so in the chat, as on the Codex and generic
+	// hook paths, so block_at is not read as a way to turn it into a block
+	// (GAP-0914). Secure Client keeps the plain finding line.
+	if action == "alert" && hasAlertOnlySQLFinding(verdict.Findings) {
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			resp.AdditionalContext = strings.TrimSpace(resp.AdditionalContext + sqlAlertOnlyHookNotice)
+			resp.ClaudeCodeOutput = claudeCodeOutput(req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext)
+		}
+	}
 	resp.SourceReason = verdict.Reason
 	// Stamp the unified-pipeline correlation keys so the agent-hook
 	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
@@ -1394,4 +1409,28 @@ func (a *APIServer) scanClaudeCodeComponent(ctx context.Context, component, targ
 		_ = a.logger.LogScanWithCorrelation(ctx, result, "", ScanCorrelationFromContext(ctx))
 	}
 	return true
+}
+
+// claudeCodeWindowsShellDialect is the shell Claude Code runs a Windows tool
+// call in, where the call leaves no doubt (GAP-0147, GAP-1717): its
+// PowerShell tool runs PowerShell, and its Bash tool runs Git Bash, so a Bash
+// call whose text the POSIX grammar reads alone (no Windows or PowerShell
+// spelling, hookpaths.GitBashReadsAlone) is read as POSIX. Any other Bash
+// call keeps no hint and every reading counts, as before: PowerShell or cmd
+// text sent to the Bash tool, an MSYS drive path
+// (TestWindowsConnectorContractCompoundRegistryPersistencePerDialect,
+// TestR105GAP0768WindowsGitBashWriteToLoadedClaudeMD).
+func claudeCodeWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
+	switch input.Tool {
+	case "PowerShell":
+		return actionfacts.DialectPowerShell
+	case "Bash":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal(input.Args, &args) == nil && hookpaths.GitBashReadsAlone(args.Command, input.ActiveHome) {
+			return actionfacts.DialectPOSIX
+		}
+	}
+	return ""
 }

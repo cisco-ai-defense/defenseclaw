@@ -116,6 +116,8 @@ Per-user registrations differ by OS. On Windows every one runs the same hook bin
   </Tab>
 </Tabs>
 
+On Linux and macOS, only root may write the folders that hold these files. `verify` and `status` report a folder above them that another account can write (group or other write in the mode, or a POSIX or macOS ACL entry that grants write), and the connector does not count as covered. `ensure`, `repair` and the guardian remove those ACL entries and the write bits; read-only entries stay.
+
 For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode.json`, as long as it holds no comments. The Cascade refusal goes into the pre-rename Cascade hooks file when only that file exists; see [Cascade on older builds](/docs/connectors/devin). Cascade is published while `devin` is protected and is not a connector of its own: it enrolls no user.
 
 ## Who writes machine policy
@@ -135,7 +137,7 @@ On Windows, the guardian keeps Cursor's `hooks.json` and protected PowerShell ad
 
 ## Managed OpenCode plugin
 
-The standalone payload ships a managed OpenCode plugin at `<InstallRoot>/share/opencode/defenseclaw.js`: `/opt/defenseclaw/share/opencode/defenseclaw.js` on Linux, `/opt/cisco/defenseclaw/share/opencode/defenseclaw.js` on macOS, `C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js` on Windows. The Linux and macOS lifecycle installs it with the deployment's files; on Windows the guardian writes it. DefenseClaw adds it to the `plugin` list of OpenCode's managed config, so it runs in every user's OpenCode and users cannot edit or delete it.
+The standalone payload ships a managed OpenCode plugin at `<InstallRoot>/share/opencode/index.js`: `/opt/defenseclaw/share/opencode/index.js` on Linux, `/opt/cisco/defenseclaw/share/opencode/index.js` on macOS, `C:\Program Files\Cisco\DefenseClaw\share\opencode\index.js` on Windows. The Linux and macOS lifecycle installs it with the deployment's files; on Windows the guardian writes it. DefenseClaw adds its directory to the `plugins` list, or the compatible `plugin` list, of OpenCode's managed config, so it runs in every user's OpenCode and users cannot edit or delete it.
 
 - The plugin is the same file on every host and holds no credential. Each event runs the administrator-owned `defenseclaw-hook` beside it, which reaches the gateway the same way the other machine-policy hooks do and applies the foreign-plugin guard.
 - With the default fail mode `closed` it blocks a tool call when the hook binary cannot run, answers with an error, or the gateway is unreachable. With the administrator's `hook_fail_mode: open`, a stopped gateway service depends on `foreign_hooks`: with `remove` (the default) the foreign-plugin guard needs the gateway's session record, so `open` does not apply; with `report` or `allow` it does. A restarting gateway, or one that gives no answer in time, blocks the call in every mode. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage). After uninstall it allows calls again.
@@ -147,7 +149,7 @@ The standalone payload ships a managed OpenCode plugin at `<InstallRoot>/share/o
 
 ## What DefenseClaw writes on Linux and macOS
 
-- **Its own entries only.** Claude Code and Copilot: DefenseClaw owns the whole `90-defenseclaw.json` drop-in. An edit inside it is put back by the next `ensure` or `repair`, and uninstall removes the file. Put your own settings in another drop-in. Codex: two marked blocks in `requirements.toml` plus single marked lines inside your own tables (for example `hooks = true # defenseclaw-managed` in an existing `[features]` table); the rest of the file is left byte for byte. Cursor: one entry per event merged into `hooks.json`, every other key kept. OpenCode: one entry, the managed plugin's path, added to the `plugin` list.
+- **Its own entries only.** Claude Code and Copilot: DefenseClaw owns the whole `90-defenseclaw.json` drop-in. An edit inside it is put back by the next `ensure` or `repair`, and uninstall removes the file. Put your own settings in another drop-in. Codex: two marked blocks in `requirements.toml` plus single marked lines inside your own tables (for example `hooks = true # defenseclaw-managed` in an existing `[features]` table); every line of your own is kept as written, with its comments, blank lines and order; the blank lines inside DefenseClaw's two blocks are DefenseClaw's. On Windows the file is parsed and written back whole ([Windows differences](#windows-differences)). Cursor: one entry per event merged into `hooks.json`, every other key kept. OpenCode: one entry, the managed plugin's path, added to the `plugin` list.
 - **Ownership records and preimages** are kept in the `machine-policy` directory under the lifecycle directory (`/var/lib/defenseclaw-enterprise` on Linux, `/opt/cisco/defenseclaw/lifecycle` on macOS). Uninstall removes exactly what DefenseClaw added, keeps edits you made later, and does not bring back content you deleted.
 - **Root-owned files that users can read** (`0644`). Copilot ignores a policy file that is not root-owned or that group or others can write.
 - **Removal of policy it no longer publishes.** When you remove a connector's name from both `guardrail.connectors` and `enterprise.machine_policy.connectors`, or set its `ownership` to `"off"`, the next `ensure` removes DefenseClaw's entries for it and says so: DefenseClaw no longer inspects that agent on the computer. `guardrail.connectors.claudecode.enabled: false` also removes Claude Code machine policy and hooks. For other connectors, check the machine-policy ownership map.
@@ -299,7 +301,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --c
 | `claudecode` | `json` (default): the drop-in. `claude-hklm-json`, `reg`, `intune-settings-catalog`: the same content as a `HKLM\SOFTWARE\Policies\ClaudeCode` `Settings` value. `plist`: a macOS managed-preferences payload. `version-floor`: the [version floor](#claude-code-version-floor) drop-in. |
 | `cursor` | `json`: the enterprise `hooks.json` |
 | `copilot` | `json`: the `policy.d` drop-in |
-| `opencode` | `json`: a managed OpenCode config that loads `<install root>/share/opencode/defenseclaw.js`. Deploy it only where that plugin is installed. |
+| `opencode` | `json`: a managed OpenCode config that loads `<install root>/share/opencode/index.js`. Deploy it only where that plugin is installed. |
 | `devincascade` | `json`: the Cascade `hooks.json` that turns Cascade off |
 | `wsl` | Windows. `reg` (default), `json`, `intune`: the Claude Desktop `disableWslSessions` gate and, with `platform: disable`, `AllowWSL=0`. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl) |
 

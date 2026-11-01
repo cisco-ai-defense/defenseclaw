@@ -56,6 +56,9 @@ WHEEL_SECURITY_FLOOR_CONTRACT = {
     "pyjwt": (">=2.15.0", None),
     "starlette": (">=1.3.1,<1.4", None),
     "fastapi": (">=0.137.1,<0.138", None),
+    # GHSA-6v7p-g79w-8964 is fixed in 1.2.1; msgpack comes in through
+    # mcp-scanner 4.8 -> pip-audit -> cachecontrol.
+    "msgpack": (">=1.2.1,<2", None),
 }
 
 # CVE-2026-112906/112907/112913/112914/112937/112940 are fixed in filelock
@@ -63,17 +66,17 @@ WHEEL_SECURITY_FLOOR_CONTRACT = {
 # Python 3.10 so no supported wheel installs a vulnerable filelock (GAP-1715).
 FILELOCK_SECURITY_FLOOR = ">=4.2.1"
 
-SKILL_SCANNER_VERSION = "2.2.1"
-# 2.2.1 ships only platform wheels (each bundles a CEL helper): no
+SKILL_SCANNER_VERSION = "2.3.2"
+# 2.3.2 ships only platform wheels (each bundles a CEL helper): no
 # py3-none-any, Windows arm64 or musl wheel, and Python >=3.11.
 SKILL_SCANNER_WHEELS = {
-    "macosx_13_0_arm64": "233189ed423e343448d0e324979c521d65cfba69cf8a07f8f0207170161ed6fa",
-    "macosx_13_0_x86_64": "e09940589bb93b7b49f131352b1581a030d180fa3775cee676442cf0aebffa59",
-    "manylinux_2_17_aarch64": "e5e6a3d7f956afccae73c7326e3a1a2d43203a431b7cbd598333f6098b3190e6",
-    "manylinux_2_17_x86_64": "cd6ab22b72c4c8124c7a20f8d0b10582408336f17d340ace1fe7d9e3ba256680",
-    "win_amd64": "d1bf7bb295f314627c7f6a58d9debba05dce72e9251d65aaad48ca77736e8655",
+    "macosx_13_0_arm64": "dcc22928431cf570285b3de874adec9f5e43b7dfa207a9b259b6f9e9489f34e4",
+    "macosx_13_0_x86_64": "2e85840899fe98e116d0e93da08f83c0c58843b4adf1a0ef388c6da92cf7a9a2",
+    "manylinux_2_17_aarch64": "e97e9a9cb9bd0ca71116c1b5185dffc3ad7b20c9bec25468fdffa6720f959557",
+    "manylinux_2_17_x86_64": "0222d84c9c98419623d1e2a1b56a52af4b9ca07a6e9767cb6241dc7a16f0efa5",
+    "win_amd64": "cd4d17147604b1623c5caec6e21d093741fb95ab9ee112741e12b60fe758a611",
 }
-MCP_SCANNER_VERSION = "4.3.0"
+MCP_SCANNER_VERSION = "4.8.7"
 LITELLM_PLATFORM_WHEELS = (
     "macosx_11_0_arm64",
     "macosx_10_12_x86_64",
@@ -81,7 +84,7 @@ LITELLM_PLATFORM_WHEELS = (
     "manylinux_2_28_x86_64",
     "win_amd64",
 )
-MCP_SCANNER_SHA256 = "ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812"
+MCP_SCANNER_SHA256 = "55142609f3519b8fd80ec491c1c3bb9e17c2370fb65d6052a07022d4a8906350"
 TEXTUAL_LOCKED_VERSION = "8.2.8"
 MAGIKA_MINIMUM_VERSION = Version("1.0.2")
 WINDOWS_PYTHON_313_ONNXRUNTIME_MINIMUM = Version("1.21.0")
@@ -122,13 +125,12 @@ def test_runtime_and_security_contracts_are_direct_and_synchronized_with_uv_over
     for contract in (RUNTIME_CONTRACT, WHEEL_SECURITY_FLOOR_CONTRACT):
         _assert_requirement_contract(direct, contract)
         _assert_requirement_contract(overrides, contract)
-    assert "msgpack" not in direct
-    assert "msgpack" not in overrides
     mcp_scanner = direct["cisco-ai-mcp-scanner"]
     assert str(mcp_scanner.url).endswith(
         f"cisco_ai_mcp_scanner-{MCP_SCANNER_VERSION}-py3-none-any.whl#sha256={MCP_SCANNER_SHA256}"
     )
-    assert str(direct["cisco-ai-mcp-scanner"].marker) == 'python_version >= "3.11"'
+    # 4.8.x requires Python >=3.11.4.
+    assert str(direct["cisco-ai-mcp-scanner"].marker) == 'python_full_version >= "3.11.4"'
     _assert_skill_scanner_wheels(document["project"]["dependencies"])
     # The scanner version doctor reports is the pinned one.
     from defenseclaw.scanner import settings
@@ -215,7 +217,6 @@ def test_lock_records_the_same_runtime_and_security_contracts() -> None:
     overrides = {entry["name"]: (entry["specifier"], entry.get("marker")) for entry in lock["manifest"]["overrides"]}
     expected = RUNTIME_CONTRACT | WHEEL_SECURITY_FLOOR_CONTRACT
     assert {name: overrides[name] for name in expected} == expected
-    assert "msgpack" not in overrides
 
     project = next(package for package in lock["package"] if package["name"] == "defenseclaw")
     locked_requirements = {
@@ -228,11 +229,12 @@ def test_lock_records_the_same_runtime_and_security_contracts() -> None:
     } == WHEEL_SECURITY_FLOOR_CONTRACT
 
     locked = {package["name"]: package["version"] for package in lock["package"]}
-    assert "msgpack" not in locked
     assert locked["cisco-ai-skill-scanner"] == SKILL_SCANNER_VERSION
     assert locked["cisco-ai-mcp-scanner"] == MCP_SCANNER_VERSION
     assert locked["textual"] == TEXTUAL_LOCKED_VERSION
     assert Version(locked["litellm"]) >= Version("1.103.10")
+    assert Version(locked["msgpack"]) >= Version("1.2.1")
+    assert Version(locked["mcp"]) >= Version("2.2.0")
     assert Version(locked["importlib-metadata"]) >= Version("8.7.1")
     assert Version(locked["rich"]) in Requirement("rich>=14.2,<15").specifier
 
@@ -296,16 +298,16 @@ def test_windows_python_313_dependency_lock_has_supported_onnxruntime_wheel() ->
 
 def test_scanner_metadata_intersection_is_satisfiable() -> None:
     # Authoritative Requires-Dist fields from the shipped scanner wheels:
-    # skill scanner 2.2.1: rich>=14.0,<15, textual>=7.0,<9, litellm>=1.89.7,<2;
-    # Textual 8.2.8: rich>=14.2; MCP scanner 4.3.0: litellm>=1.77.0;
+    # skill scanner 2.3.2: rich>=14.0,<15, textual>=7.0,<9, litellm>=1.89.7,<2
+    # (the litellm bound is the 2.2.1 value; 2.3.2 metadata no longer lists it);
+    # Textual 8.2.8: rich>=14.2; MCP scanner 4.8.7 declares litellm==1.93.2,
+    # which DefenseClaw overrides (GAP-0020; test_mcp_scanner_litellm_override.py);
     # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.103.10,<1.104.
-    # MCP scanner 4.8.x pins litellm==1.93.0 (CVE-2026-84377), so 4.3.0 stays.
     intersections = {
         "rich": [Requirement("rich<15,>=14.0"), Requirement("rich>=14.2"), Requirement("rich>=14.2,<15")],
         "textual": [Requirement("textual<9,>=7.0"), Requirement("textual>=8.2.8,<9")],
         "litellm": [
             Requirement("litellm<2,>=1.89.7"),
-            Requirement("litellm>=1.77.0"),
             Requirement("litellm>=1.103.10,<1.104.0"),
         ],
         "importlib-metadata": [
@@ -346,7 +348,7 @@ def test_production_textual_behavior_has_a_packaging_floor() -> None:
     assert hasattr(App, "ansi_color")
 
 
-@pytest.mark.skipif(sys.version_info < (3, 11), reason="skill-scanner 2.2.1 requires Python 3.11+")
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="skill-scanner 2.3.2 requires Python 3.11+")
 def test_pinned_skill_scanner_api_and_local_scan(tmp_path: Path) -> None:
     """Exercise every upstream API entry point used by the production wrapper."""
     assert importlib_metadata.version("cisco-ai-skill-scanner") == SKILL_SCANNER_VERSION

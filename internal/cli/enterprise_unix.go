@@ -98,7 +98,8 @@ deployment reads:
     or bearer_credential (http_jsonl).
 
 Values are read from standard input or a file and are never printed.
-Status shows only presence, modification time and a digest prefix.`,
+Status shows only presence, modification time and a digest prefix. Check
+proves the Cisco AI Defense key before the first prompt.`,
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 	}
 )
@@ -146,6 +147,7 @@ arguments, 75 another lifecycle run holds the lock.`,
 		group.AddCommand(newUnixLifecycleCommand(name, action, summaries[action]))
 	}
 	group.AddCommand(newUnixDiscoveryCommand(name))
+	group.AddCommand(newUnixTransactionWatchCommand(name))
 	group.AddCommand(newEnterpriseIdentityViewCommands(name)...)
 	if name == "linux" {
 		group.AddCommand(newUnixTetragonCommand())
@@ -155,6 +157,28 @@ arguments, 75 another lifecycle run holds the lock.`,
 	policy, _, _, _ := newEnterprisePolicyGroup(name)
 	group.AddCommand(policy)
 	return group
+}
+
+// newUnixTransactionWatchCommand is the hidden action a lifecycle run starts
+// before it stops any service: when the run is killed with its transaction
+// still pending, it starts the apply trigger, which rolls the transaction
+// back and starts the stopped services again (GAP-0276). Not for operators.
+func newUnixTransactionWatchCommand(platform string) *cobra.Command {
+	var pid int
+	var snapshot string
+	cmd := &cobra.Command{
+		Use:          "watch-transaction",
+		Short:        "Recover the transaction of a lifecycle run that is killed (started by the lifecycle itself)",
+		Hidden:       true,
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runUnixTransactionWatch(cmd, platform, pid, snapshot)
+		},
+	}
+	cmd.Flags().IntVar(&pid, "pid", 0, "process id of the lifecycle run")
+	cmd.Flags().StringVar(&snapshot, "snapshot", "", "snapshot directory of its transaction")
+	return cmd
 }
 
 // sandboxRowsHelp documents the sandbox rows of status and verify.
@@ -168,7 +192,7 @@ const sandboxRowsHelp = "\n\nWhen sandboxes are on (openshell.enabled), the serv
 
 // lockWaitUsage documents --lock-wait on every action that takes the
 // lifecycle lock.
-const lockWaitUsage = "wait up to this long for another lifecycle run (default 5s, at most 15m) before exiting 75"
+const lockWaitUsage = "wait up to this long for another lifecycle run (default 5s; 10m for ensure --reason path, as the config-apply trigger passes; at most 15m) before exiting 75"
 
 // lockWaitValue is --lock-wait: a duration that keeps the text as typed, so
 // the cap error names "1h", not "60m", and whose malformed-value error gives
@@ -242,7 +266,7 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	case "verify":
 		cmd.Long = summary + ".\n\nverify first waits up to 5s for another lifecycle run to finish. If that run is still going, it checks nothing and exits 75 (lifecycle_busy)."
 	case "status":
-		cmd.Long = summary + ".\n\nRun as root, status first waits up to 5s for another lifecycle run to finish. If that run is still going, it reports the installed version, checks nothing else and exits 75 (lifecycle_busy)."
+		cmd.Long = summary + ".\n\nRun as root, status first waits up to 5s for another lifecycle run to finish. If that run is still going, the change is pending apply, which is not a failure: status reports ok with pending_apply and the installed version, names the run in a lifecycle_busy warning, checks nothing else and exits 75 so you run it again."
 	}
 	if action == "status" || action == "verify" {
 		cmd.Long += sandboxRowsHelp
@@ -429,6 +453,7 @@ func init() {
 		newEnterpriseSecretCommand("set", "Store a protected credential and apply it"),
 		newEnterpriseSecretCommand("status", "List protected credentials without revealing values"),
 		newEnterpriseSecretCommand("remove", "Remove a protected credential and apply the change"),
+		newEnterpriseSecretCheckCommand(),
 	)
 	enterpriseCmd.AddCommand(enterpriseLinuxCmd, enterpriseMacOSCmd, enterpriseSecretCmd)
 }

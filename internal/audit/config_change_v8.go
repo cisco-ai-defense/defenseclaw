@@ -18,13 +18,13 @@ package audit
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
@@ -70,9 +70,9 @@ const (
 )
 
 var (
-	configChangeIDPattern     = regexp.MustCompile(`^c-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
-	configChangeSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	configChangeSecretPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	configChangeIDPattern     = lazyregexp.New(`^c-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	configChangeSHA256Pattern = lazyregexp.New(`^[0-9a-f]{64}$`)
+	configChangeSecretPattern = lazyregexp.New(`^[a-z0-9][a-z0-9-]{0,62}$`)
 )
 
 // configChangeV8Fields are the typed attributes of a change record.

@@ -80,6 +80,22 @@ func TestStopManagedSandboxes(t *testing.T) {
 	if err := stopManagedSandboxes(context.Background(), f, &out); err != nil {
 		t.Fatalf("daemon not running: %v", err)
 	}
+	// GAP-0137: after an uninstall (and before the package's files go), the
+	// daemon answers with the managed gateway's refusal of its settings: it
+	// runs no sandbox, so its ExecStop succeeds and the unit ends inactive.
+	for _, code := range []string{sandboxapi.CodeAdminViolation, sandboxapi.CodeDisabled} {
+		out.Reset()
+		f = &fakeSandboxStopper{listErr: &sandboxapi.Error{Code: code, Message: sandboxapi.AdminMessage, Detail: "enterprise_managed_uid_unregistered"}}
+		if err := stopManagedSandboxes(context.Background(), f, &out); err != nil || len(f.stopped) != 0 ||
+			!strings.Contains(out.String(), "runs no sandbox") {
+			t.Fatalf("%s refusal: %v, stopped %v, out %q", code, err, f.stopped, out.String())
+		}
+	}
+	// Any other failure to list still fails the stop.
+	f = &fakeSandboxStopper{listErr: &sandboxapi.Error{Code: sandboxapi.CodeInternal, Message: "broken"}}
+	if err := stopManagedSandboxes(context.Background(), f, &out); err == nil {
+		t.Fatal("an internal list failure passed")
+	}
 }
 
 // unsyncedStopper answers each stop of a name in unsynced with

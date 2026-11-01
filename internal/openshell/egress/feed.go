@@ -24,12 +24,12 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
-	"regexp"
 	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	feeds "github.com/defenseclaw/defenseclaw/policies/sandbox/egress"
 )
 
@@ -136,8 +136,8 @@ var feedCategories = map[string]map[Category]bool{
 }
 
 var (
-	feedVersionPattern = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$`)
-	feedNamePattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	feedVersionPattern = lazyregexp.New(`^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$`)
+	feedNamePattern    = lazyregexp.New(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 )
 
 // ErrInvalidFeed reports a feed file that fails schema validation.

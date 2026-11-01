@@ -22,10 +22,13 @@
 package image
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -67,5 +70,38 @@ func TestDockerBinaryOffThePath(t *testing.T) {
 	}
 	if bin, _ := DockerBinary("windows", missing, stat); bin != "docker" {
 		t.Fatalf("no installs known: %q", bin)
+	}
+}
+
+// A managed Linux computer builds, lists and removes the harness images in
+// the system engine its OpenShell gateway boots them from, whatever the
+// account's Docker environment or context names (#1195); everywhere else
+// docker keeps the account's own.
+func TestManagedCLIPinsTheGatewaysEngine(t *testing.T) {
+	fake := filepath.Join(t.TempDir(), "docker")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho \"host=$DOCKER_HOST context=${DOCKER_CONTEXT-unset}\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HOST", "unix:///run/user/1000/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "rootless")
+	run := func(c CLI) string {
+		c.Binary = fake
+		var out bytes.Buffer
+		if err := c.Run(context.Background(), nil, &out, &out, "version"); err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(out.String())
+	}
+	pinned := ManagedCLI(true, "linux")
+	if got := run(pinned); got != "host="+SystemDockerHost+" context=unset" {
+		t.Fatalf("managed Linux: %q", got)
+	}
+	if pinned.Getenv("DOCKER_HOST") != SystemDockerHost || pinned.Getenv("DOCKER_CONTEXT") != "" {
+		t.Fatalf("managed Linux Getenv: %q %q", pinned.Getenv("DOCKER_HOST"), pinned.Getenv("DOCKER_CONTEXT"))
+	}
+	for _, c := range []CLI{ManagedCLI(false, "linux"), ManagedCLI(true, "darwin")} {
+		if got := run(c); got != "host=unix:///run/user/1000/docker.sock context=rootless" {
+			t.Fatalf("the account's own engine: %q", got)
+		}
 	}
 }

@@ -18,12 +18,13 @@ package image
 
 import (
 	"bytes"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // A failed docker build is reported with the end of what docker printed:
@@ -235,7 +236,7 @@ func tailOf(lines []string, maxLines int) string {
 
 // ansiEscapeRE matches CSI and OSC sequences and the other two-byte ESC
 // sequences.
-var ansiEscapeRE = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|[@-Z\\-_])`)
+var ansiEscapeRE = lazyregexp.New(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|[@-Z\\-_])`)
 
 func displayRune(r rune) rune {
 	switch {
@@ -252,18 +253,18 @@ var (
 	// Known token formats: OpenAI and Anthropic keys, GitHub, GitLab,
 	// Slack, AWS access key IDs, Google API keys, Hugging Face and npm
 	// tokens, and JWTs.
-	knownTokenRE = regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|glpat-[A-Za-z0-9_-]{20,}|` +
+	knownTokenRE = lazyregexp.New(`\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|glpat-[A-Za-z0-9_-]{20,}|` +
 		`xox[abprs]-[A-Za-z0-9-]{10,}|(?:AKIA|ASIA)[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|hf_[A-Za-z0-9]{30,}|npm_[A-Za-z0-9]{36}|` +
 		`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b`)
 	// The password of a URL's user information.
-	urlPasswordRE = regexp.MustCompile(`(://[^\s:/@]+:)[^\s/@]+@`)
+	urlPasswordRE = lazyregexp.New(`(://[^\s:/@]+:)[^\s/@]+@`)
 	// Bearer and Basic credentials, as in an Authorization header.
-	authSchemeRE = regexp.MustCompile(`(?i)(\b(?:bearer|basic)\s+)[A-Za-z0-9._~+/-]{8,}=*`)
+	authSchemeRE = lazyregexp.New(`(?i)(\b(?:bearer|basic)\s+)[A-Za-z0-9._~+/-]{8,}=*`)
 	// NAME=value where NAME names a secret (NPM_TOKEN=…, ?password=…).
-	secretAssignRE = regexp.MustCompile(`(?i)(\b[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)["']?=["']?)[^\s"'&;,]{4,}`)
+	secretAssignRE = lazyregexp.New(`(?i)(\b[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)["']?=["']?)[^\s"'&;,]{4,}`)
 	// NAME: value with a token-shaped value: 16 or more characters with a
 	// digit, so prose such as "oauth token: unexpected status" stays.
-	secretFieldRE = regexp.MustCompile(`(?i)(\b[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)["']?:\s*["']?)([A-Za-z0-9_./+=-]{16,})`)
+	secretFieldRE = lazyregexp.New(`(?i)(\b[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)["']?:\s*["']?)([A-Za-z0-9_./+=-]{16,})`)
 )
 
 const redacted = "[redacted]"

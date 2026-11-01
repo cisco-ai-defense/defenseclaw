@@ -7,15 +7,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
 // GAP-2569: the client header names where each link-walk spelling of a
 // command lies, so a managed gateway that cannot walk the home places it.
 func TestR105GAP2569ClientLinkWalkFacts(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shell forms")
+	if !hookWriteEvidenceHost() {
+		t.Skip("the managed hook sends write evidence on Linux and macOS only")
 	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")

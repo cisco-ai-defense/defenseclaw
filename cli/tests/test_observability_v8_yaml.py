@@ -572,3 +572,14 @@ def test_flow_delete_after_commented_separator_preserves_valid_yaml(
     parsed = yaml.safe_load(candidate)["observability"]
     actual = parsed["local"] if "local" in parsed else parsed["destinations"]
     assert actual == expected
+
+
+def test_local_max_store_mb_is_a_supported_change() -> None:
+    """#1384: the opt-in size cap can be set and removed like retention_days."""
+    source = b"config_version: 8\nobservability:\n  local:\n    retention_days: 7\n"
+    prepared = prepare_v8_yaml_write(source, [V8YAMLMutation.set(("observability", "local", "max_store_mb"), 2048)])
+    assert yaml.safe_load(prepared.candidate)["observability"]["local"] == {"retention_days": 7, "max_store_mb": 2048}
+    removed = prepare_v8_yaml_write(
+        prepared.candidate, [V8YAMLMutation.delete(("observability", "local", "max_store_mb"))]
+    )
+    assert yaml.safe_load(removed.candidate)["observability"]["local"] == {"retention_days": 7}

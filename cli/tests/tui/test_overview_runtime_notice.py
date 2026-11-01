@@ -97,7 +97,9 @@ async def test_stopped_gateway_recovery_is_whole_on_the_80x24_overview(tmp_path)
         )
         app.overview_model.set_gateway_probe("stopped")
         app.action_switch_panel("overview")
-        await pilot.pause()
+        # The switch renders the Overview on a deferred lane; one pause can
+        # read the frame before it on a slow runner.
+        await fixtures.settle_panel(app, pilot)
         screen = fixtures.screen_text(app)
         notices = app.overview_model.build_notices()
     recovery = next(notice.message for notice in notices if "Gateway is not running" in notice.message)
@@ -108,9 +110,14 @@ async def test_initial_audit_loading_notice_is_whole_on_the_80x24_overview(tmp_p
     app = fixtures.snapshot_app(tmp_path)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
+        # The first audit read clears the loading flag when it lands; let it
+        # land first so it cannot clear the flag this test sets.
+        await fixtures.settle_layout(pilot, lambda: not app.audit_model.loading)
         app.overview_model.history_loading = True
         app.action_switch_panel("overview")
-        await pilot.pause()
+        # Windows shard 12 (rel-1-0-6:GAP-0208): one pause read the frame
+        # before the deferred Overview render landed.
+        await fixtures.settle_panel(app, pilot)
         notices = app.overview_model.build_notices()
         loading = next(notice.message for notice in notices if "Loading the audit history" in notice.message)
         screen = fixtures.screen_text(app)

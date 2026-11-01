@@ -5,11 +5,12 @@
 package scanner
 
 import (
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
-var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
+var nonSlug = lazyregexp.New(`[^a-z0-9]+`)
 
 // SynthesizeRuleID builds "<scanner>.<category>.<slug>" when upstream
 // scanners omit rule_id. Never returns an empty string.

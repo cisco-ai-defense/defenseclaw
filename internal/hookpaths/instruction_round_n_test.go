@@ -60,9 +60,6 @@ func TestResolveNamesEveryInstructionNameOfTheFile(t *testing.T) {
 // GAP-1432: a call that moves a directory sights it before it goes, as a
 // plain directory with its identity.
 func TestReachedEvidenceSightsTheDirectoryAMoveMoves(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX mv")
-	}
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

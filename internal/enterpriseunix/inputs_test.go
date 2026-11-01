@@ -187,7 +187,7 @@ func TestConfigMadeWritableAfterPlanningIsRefused(t *testing.T) {
 }
 
 // GAP-1535: removing the ACL entries can fail before the transaction gets
-// to the entry on config.yaml: chmod -N fails on config.yaml or on a path
+// to the entry on config.yaml: chmod -a# fails on config.yaml or on a path
 // listed before it, ls fails, or an entry on a folder above a vendor
 // machine-policy folder refuses the run first. Bytes written through the
 // entry on config.yaml are still not kept for a follow-up, for a --config
@@ -202,10 +202,10 @@ func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
 		kept  bool
 	}{
 		{"chmod-config", "user:standard allow write", func(h *testHost, config, _ string) {
-			h.runner.replies["chmod -h -N "+config] = denied
+			h.runner.replies["chmod -h -a# 0 "+config] = denied
 		}, false},
 		{"chmod-earlier", "user:standard allow write", func(h *testHost, _, binDir string) {
-			h.runner.replies["chmod -h -N "+binDir] = denied
+			h.runner.replies["chmod -h -a# 0 "+binDir] = denied
 		}, false},
 		{"ls", "user:standard allow write", func(h *testHost, config, _ string) {
 			h.env.Runner = failingLsRunner{Runner: h.runner, path: config}
@@ -214,7 +214,7 @@ func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
 			h.runner.acls[h.env.P("/Library/Application Support")] = []string{"user:developer allow add_subdirectory"}
 		}, false},
 		{"read-entry", "user:standard allow read", func(h *testHost, config, _ string) {
-			h.runner.replies["chmod -h -N "+config] = denied
+			h.runner.replies["chmod -h -a# 0 "+config] = denied
 		}, true},
 	} {
 		for _, configFlag := range []bool{true, false} {
@@ -295,9 +295,9 @@ func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
 				}
 				switch failure {
 				case "chmod-config":
-					h.runner.replies["chmod -h -N "+config] = denied
+					h.runner.replies["chmod -h -a# 0 "+config] = denied
 				case "chmod-etc":
-					h.runner.replies["chmod -h -N "+etc] = denied
+					h.runner.replies["chmod -h -a# 0 "+etc] = denied
 				case "ls-recheck":
 					h.env.Runner = &failingACLRecheckRunner{Runner: h.runner, path: config}
 				}
@@ -310,8 +310,8 @@ func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
 						}
 					} else {
 						target := map[string]string{"chmod-config": config, "chmod-etc": etc}[failure]
-						if !strings.Contains(strings.Join(h.runner.calls, " "), "chmod -h -N "+target) {
-							t.Fatal("the intended chmod -N failure was not reached")
+						if !strings.Contains(strings.Join(h.runner.calls, " "), "chmod -h -a# 0 "+target) {
+							t.Fatal("the intended chmod -a# failure was not reached")
 						}
 					}
 				}
@@ -330,7 +330,7 @@ func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
 	}
 }
 
-// failingACLRecheckRunner fails the first ls of config.yaml after chmod -N.
+// failingACLRecheckRunner fails the first ls of config.yaml after chmod -a#.
 type failingACLRecheckRunner struct {
 	Runner
 	path    string
@@ -344,7 +344,7 @@ func (r *failingACLRecheckRunner) Run(ctx context.Context, name string, args ...
 		return CommandResult{ExitCode: 1}, errors.New("ls: permission denied")
 	}
 	result, err := r.Runner.Run(ctx, name, args...)
-	if name == "chmod" && err == nil && len(args) >= 2 && args[1] == "-N" {
+	if name == "chmod" && err == nil && len(args) >= 2 && args[1] == "-a#" {
 		r.removed = true
 	}
 	return result, err
@@ -859,5 +859,66 @@ func TestAFollowUpTransactionReportsEachWarningOnce(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("unit_failed reported %d times: %+v", count, r.Warnings)
+	}
+}
+
+// lookupHookedAccounts runs onLookup before each account lookup.
+type lookupHookedAccounts struct {
+	AccountManager
+	onLookup func()
+}
+
+func (a *lookupHookedAccounts) Lookup(ctx context.Context, name string) (Account, bool, error) {
+	if a.onLookup != nil {
+		a.onLookup()
+	}
+	return a.AccountManager.Lookup(ctx, name)
+}
+
+// rel-1-0-3 GAP-0142: a second config push that lands while the first run
+// verifies the services it just started (after the run last looked for a
+// newer input) failed that verify with "config.yaml changed since it was
+// applied", rolled the first push back and reverted the second for another
+// run. The run now verifies again without the replaced input, commits the
+// first push and applies the second in its follow-up transaction.
+func TestConfigPushedWhileTheRunVerifiesIsTheFollowUpNotARollback(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			second := []byte(strings.Replace(string(DefaultConfig(h.env.Layout)), "mode: observe", "mode: action", 1))
+			armed, done := false, false
+			hooked := &hookedServices{fakeServices: h.services}
+			hooked.onStart = func(unit string) {
+				if unit == unitOf(goos, "gateway") {
+					armed = true
+				}
+			}
+			h.env.Services = hooked
+			h.env.Accounts = &lookupHookedAccounts{AccountManager: h.env.Accounts, onLookup: func() {
+				if !armed || done {
+					return
+				}
+				done = true
+				if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), second, 0o640); err != nil {
+					t.Errorf("write config: %v", err)
+				}
+			}}
+			r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")})
+			if !done {
+				t.Fatal("the second push was not written during the run")
+			}
+			requireOK(t, r)
+			if hasMessageCode(r.Errors, codeVerify) || hasMessageCode(r.Warnings, codeConfigReverted) {
+				t.Fatalf("the push during verify failed or reverted the run: errors %+v warnings %+v", r.Errors, r.Warnings)
+			}
+			record, _ := h.env.loadDeployment()
+			if record.ConfigSHA256 != sha256Bytes(second) || record.ProductVersion != "1.0.1" {
+				t.Fatalf("the second push is not applied: config %s version %s", record.ConfigSHA256[:8], record.ProductVersion)
+			}
+			if !hasWarning(r, codeInputChanged) {
+				t.Fatalf("the result does not say a follow-up applied the second push: %+v", r.Warnings)
+			}
+		})
 	}
 }

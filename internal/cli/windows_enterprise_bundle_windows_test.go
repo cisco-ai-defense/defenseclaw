@@ -951,6 +951,11 @@ func TestWindowsBundleRetryProtectsInstalledUnconfirmedVersion(t *testing.T) {
 		t.Fatalf("retry prepare ended: done=%v err=%v", done, err)
 	}
 	cleanupPreparedWindowsBundle(t, retry)
+	// The installed config was never confirmed, so it is not the rollback
+	// target of the retry (mgmt-p1:GAP-0018): a rollback must not reinstall it.
+	if len(retry.bundle.previous) != 0 {
+		t.Fatalf("the never-confirmed installed config is kept as the rollback target (%d bytes)", len(retry.bundle.previous))
+	}
 	if retry.bundle.prepared.Receipt.Dir == first.bundle.prepared.Receipt.Dir {
 		t.Fatal("retry reused the installed receipt's version directory")
 	}

@@ -304,6 +304,13 @@ func TestR105WindowsCMDHeredocReceiverReadIsLinear(t *testing.T) {
 				Input: input, LegacyText: string(args), Connector: connectorName,
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
 			})
+			// Over 128 statements an ordinary call is over the statement
+			// budget and blocks with ACTION-COMPOUND-LIMIT (GAP-0146); its
+			// rows check that no here-document reader over-blocks it, so
+			// that finding is left out there.
+			if !tc.block {
+				findings = withoutStatementBudget(findings)
+			}
 			return findings, time.Since(start)
 		}
 		findings, took := judge(size)
@@ -338,7 +345,7 @@ func TestR105WindowsCMDHeredocDelimiterSearchIsLinear(t *testing.T) {
 		resolved[value] = value
 	}
 	const write = "cmd /c type nul > %USERPROFILE%\\.defenseclaw\\config.yaml"
-	decide := func(command string, runs int) (bool, time.Duration) {
+	decide := func(command string, runs int, want bool) (bool, time.Duration) {
 		args, _ := json.Marshal(map[string]string{"command": command})
 		input := actionfacts.Input{Tool: "Bash", Args: args, CWD: home + `\project`, ActiveHome: home}
 		input.DialectHint = agentHookWindowsShellDialect(input)
@@ -352,6 +359,11 @@ func TestR105WindowsCMDHeredocDelimiterSearchIsLinear(t *testing.T) {
 			})
 			if took := time.Since(start); best < 0 || took < best {
 				best = took
+			}
+			// An ordinary call is over the statement budget (GAP-0146); its
+			// row checks that the delimiter search does not over-block it.
+			if !want {
+				findings = withoutStatementBudget(findings)
 			}
 			block = buildVerdict(findings, "tool_call").Action == "block"
 		}
@@ -388,8 +400,8 @@ func TestR105WindowsCMDHeredocDelimiterSearchIsLinear(t *testing.T) {
 			return strings.Repeat("x=$(cat <<'A'\n", size/14) + write
 		}, true},
 	} {
-		smallBlock, small := decide(tc.build(16<<10), 3)
-		bigBlock, big := decide(tc.build(256<<10), 1)
+		smallBlock, small := decide(tc.build(16<<10), 3, tc.block)
+		bigBlock, big := decide(tc.build(256<<10), 1, tc.block)
 		t.Logf("%s: 16 KB %s, 256 KB %s", tc.name, small, big)
 		if smallBlock != tc.block || bigBlock != tc.block {
 			t.Errorf("%s: block %t at 16 KB, %t at 256 KB, want %t", tc.name, smallBlock, bigBlock, tc.block)

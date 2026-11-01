@@ -714,3 +714,61 @@ def test_windows_rollback_docs_name_the_hermes_fail_closed_limit_of_older_releas
     bullet = roll_back.split("Windows rollback to 1.0.0–1.0.3 with Hermes users", 1)[1].split("- **", 1)[0]
     for phrase in ("fail_closed: true", "pre_tool_call", "signed out", "1603", "signs in", "uninstall the newer release"):
         assert phrase in bullet, phrase
+
+
+# Display names the enterprise docs use for each connector route.
+_ROUTE_DOC_NAMES = {
+    "amp": "Amp", "antigravity": "Antigravity", "devin": "Devin", "hermes": "Hermes", "kiro": "Kiro",
+    "opencode": "OpenCode", "codex": "Codex", "claudecode": "Claude Code", "cursor": "Cursor", "copilot": "Copilot",
+}
+
+
+def _route_connectors(route: str) -> set[str]:
+    """Connectors enterprisepolicy.RouteFor gives route, read from the Go switch."""
+    source = (ROOT / "internal/enterprisepolicy/types.go").read_text(encoding="utf-8")
+    body = source.split("func RouteFor(connector, goos string) string {", 1)[1].split("\n}\n", 1)[0]
+    names: set[str] = set()
+    for case, returned in re.findall(r"case ([^:]+):(?:\s*//[^\n]*)*\s*return (Route\w+)", body):
+        if returned != route:
+            continue
+        for item in case.split(","):
+            item = item.strip()
+            if item.startswith('"'):
+                names.add(item.strip('"'))
+            elif item == "ConnectorCodex":
+                names.add("codex")
+            elif item == "ConnectorClaudeCode":
+                names.add("claudecode")
+            elif item == "ConnectorCursor":
+                names.add("cursor")
+            elif item == "ConnectorCopilot":
+                names.add("copilot")
+            elif item == "ConnectorDevinCascade":
+                continue  # the Cascade refusal bridge enrolls nobody (devin_cascade.go)
+            else:
+                raise AssertionError(f"unmapped RouteFor case {item}")
+    return names
+
+
+def test_defenseclaw_folder_rule_names_the_accounts_it_holds_for() -> None:
+    # guard p0-round GAP-1078: the guardian repairs and reports ~/.defenseclaw only
+    # in an account it has a per-user target for. An account that runs only
+    # machine-policy agents (Claude Code and Codex on the rc4 AD account) has
+    # no target, so the folder rule must say which accounts it covers and what
+    # status shows for the others.
+    per_user = _route_connectors("RoutePerUser")
+    machine = _route_connectors("RouteMachinePolicy")
+    assert {"amp", "hermes", "kiro"} <= per_user and {"codex", "claudecode"} <= machine
+    page = _flat("enterprise/operations.mdx")
+    rule = page.split("`~/.defenseclaw` and `~/.defenseclaw/hooks` follow one rule", 1)[1].split("## ", 1)[0]
+    per_user_text, machine_text = rule.split("get DefenseClaw's hooks from vendor machine policy", 1)
+    for name in per_user:
+        assert _ROUTE_DOC_NAMES[name] in per_user_text, name
+    for name in machine - {"opencode"}:
+        assert _ROUTE_DOC_NAMES[name] in per_user_text.rsplit(".", 1)[-1], name
+    assert "OpenCode through its managed plugin" in per_user_text.rsplit(".", 1)[-1]
+    assert "within a minute" in per_user_text and "`guardian_target_user_path`" in per_user_text
+    assert "has no per-user target" in machine_text
+    assert "reports no `guardian_target_user_path`" in machine_text
+    assert "`agent_install_scan_incomplete`" in machine_text
+    assert "`enterprise hooks status`" in machine_text

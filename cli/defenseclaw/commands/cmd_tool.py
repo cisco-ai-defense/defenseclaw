@@ -631,6 +631,7 @@ def list_tools(
             effective_connector=connector,
             title=f"Tools (connector={connector})",
         )
+        _echo_untimed_note(decorated)
         return
 
     audit_rows = _tool_source_audit_rows(entries)
@@ -658,6 +659,7 @@ def list_tools(
 
     label = "blocked " if filter_blocked else "allowed " if filter_allowed else ""
     shown_any = False
+    shown: list[tuple[object, str, str, str]] = []
     for c in connectors:
         rows = _tool_rows_for_connector(entries, c)
         title = f"Tools (connector={c})"
@@ -665,6 +667,7 @@ def list_tools(
             click.echo(f"{title}: No {label}tools in the block/allow list.")
             continue
         _print_tool_rows(rows, effective_connector=c, title=title)
+        shown.extend(rows)
         shown_any = True
 
     if audit_rows:
@@ -672,7 +675,9 @@ def list_tools(
             audit_rows,
             title="Tool audit rows (source-scoped; not runtime-enforced)",
         )
+        shown.extend(audit_rows)
         shown_any = True
+    _echo_untimed_note(shown)
 
     if not shown_any and not connectors:
         click.echo(f"No {label}tools in the block/allow list.")
@@ -770,6 +775,15 @@ def _print_tool_rows(
             click.echo(ux._style(line_core, fg=color))
         else:
             click.echo(line_core)
+
+
+def _echo_untimed_note(rows: list[tuple[object, str, str, str]]) -> None:
+    """Say once what a "-" in UPDATED means. config.yaml stores no time for a
+    rule, so a block made on 1.0 or moved there by the 0.8.x upgrade shows "-"
+    before and after every upgrade (GAP-0309, GAP-1343)."""
+    if any(e.updated_at is None for (e, _conn, _disp, _scope) in rows):
+        click.echo(ux.dim("UPDATED -: config.yaml records no time for a block or allow entry; "
+                          "none is kept on upgrade."))
 
 
 # ---------------------------------------------------------------------------

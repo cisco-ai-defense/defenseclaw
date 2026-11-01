@@ -300,6 +300,49 @@ func TestHermesPutBackHooksOnlyCopyIsReportedAsHooksOnly(t *testing.T) {
 	}
 }
 
+// rel-1-0-2 GAP-0612 (1): the guardian verifies right after its repair, and
+// that verify dropped the hooks-only report, so status and verify never
+// showed it. It stays until the account has settings in the file again.
+func TestHermesHooksOnlyPutBackStaysReportedAcrossVerifies(t *testing.T) {
+	conn, opts, configPath := hermesRestoreFixture(t, "")
+	if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != "" {
+		t.Fatalf("status after first setup: %q", status)
+	}
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	if got := hermesTopKeys(t, configPath); got != "hooks" {
+		t.Fatalf("put-back config.yaml keys = %s, want hooks only", got)
+	}
+	for pass := 1; pass <= 3; pass++ {
+		if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != AgentConfigRecreatedHooksOnly {
+			t.Fatalf("verify %d: status = %q, want %q", pass, status, AgentConfigRecreatedHooksOnly)
+		}
+	}
+	if _, err := os.Stat(hermesSpec.noticePath(opts.DataDir)); err != nil {
+		t.Fatalf("the hooks-only notice did not survive the verifies: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append([]byte(hermesAccountSettings), data...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != "" {
+		t.Fatalf("status with the account's settings back = %q, want none", status)
+	}
+	if _, err := os.Stat(hermesSpec.noticePath(opts.DataDir)); !os.IsNotExist(err) {
+		t.Fatalf("the notice stayed after the settings came back: %v", err)
+	}
+	if text, ok := AgentConfigNotice("hermes", "alice", AgentConfigRecreatedHooksOnly); !ok || !strings.Contains(text, "hooks only") || strings.Contains(text, "with that user's settings, and") {
+		t.Fatalf("hooks-only notice text = %q", text)
+	}
+}
+
 // rel-1-0-2 GAP-0612 (2): with the backup record gone, a copy that is there
 // but no longer reads is settings DefenseClaw saw: the file is recreated with
 // the hooks and reported as settings lost, not silently.

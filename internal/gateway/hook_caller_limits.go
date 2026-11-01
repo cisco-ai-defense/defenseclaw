@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // Per-caller limits on a standalone gateway.
@@ -291,22 +293,34 @@ func hookCallerBudgetKey(identity, path string) string {
 
 // hookCallerSandboxRead is the budget of an account's read-only sandbox
 // requests (GET under the sandbox policy class: status, sandboxes, packs,
-// current policy). They are an operator's CLI and TUI reads, not policy
-// writes or hook traffic: in the sandbox policy class's 20-request burst
-// about nine back-to-back "defenseclaw sandbox pack list" calls were refused
-// for 20 s (GAP-1693). Reads take the ordinary caller limits under their own
-// key, so they neither wait on nor use up the policy writes' or the host
-// hooks' budgets.
+// current policy; and the two views a POST carries the question of, policy
+// explain and policy test). They are an operator's CLI and TUI reads, not
+// policy writes or hook traffic: in the sandbox policy class's 20-request
+// burst about nine back-to-back "defenseclaw sandbox pack list" calls were
+// refused for 20 s (GAP-1693), and a few back-to-back "defenseclaw sandbox
+// policy explain" calls were refused the same way, with or without a
+// sandbox's hooks running (es:GAP-0023). Reads take the ordinary caller
+// limits under their own key, so they neither wait on nor use up the policy
+// writes' or the host hooks' budgets.
 const hookCallerSandboxRead = "|sandbox-read"
 
 // hookCallerAdmissionKey is hookCallerBudgetKey with the method: a read of
 // the sandbox policy class gets the read budget.
 func hookCallerAdmissionKey(identity, method, path string) string {
 	key := hookCallerBudgetKey(identity, path)
-	if method == http.MethodGet && strings.HasSuffix(key, "|"+sandboxBudgetPolicy) {
+	if !strings.HasSuffix(key, "|"+sandboxBudgetPolicy) {
+		return key
+	}
+	if method == http.MethodGet || method == http.MethodPost && sandboxPolicyView(path) {
 		return identity + hookCallerSandboxRead
 	}
 	return key
+}
+
+// sandboxPolicyView reports whether path is a read-only policy view asked
+// with a POST body: policy explain and policy test change nothing.
+func sandboxPolicyView(path string) bool {
+	return path == sandboxrelay.PathPolicyExplain || path == sandboxrelay.PathPolicyTest
 }
 
 // admitHookCaller applies the per-caller limits to one request for path and

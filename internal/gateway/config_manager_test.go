@@ -798,28 +798,27 @@ func TestStandaloneStartupReconcilesLifecycleGenerationCommittedAfterBootRead(t 
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
 				}
+				// With trust anchors the bytes must be what a stored signed
+				// bundle renders (private #7): write stores one per generation.
+				var store *signedStore
 				if signed {
-					anchorDir := filepath.Join(dir, "trust")
-					if err := os.MkdirAll(anchorDir, 0o700); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(filepath.Join(anchorDir, "bundle-anchors.json"), []byte("present"), 0o600); err != nil {
-						t.Fatal(err)
-					}
+					store = newSignedStore(t, dir)
 				}
-				write := func(raw []byte, generation uint64) uint64 {
+				write := func(raw []byte, generation uint64) ([]byte, uint64) {
 					t.Helper()
 					opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Lifecycle: true, Reason: "enterprise ensure"}
 					if signed {
-						opt.Bundle = configwrite.BundleRef{ID: fmt.Sprintf("b-01J9ZZZZZZZZZZZZZZZZZZZZZ%d", generation), Version: generation, SignerKeyID: "k1"}
+						id := fmt.Sprintf("b-01J9ZZZZZZZZZZZZZZZZZZZZZ%d", generation)
+						opt.Bundle = configwrite.BundleRef{ID: id, Version: generation, SignerKeyID: "k1"}
+						raw = store.store(t, id, generation, raw)
 					}
 					result, err := configwrite.ReplaceDocument(t.Context(), path, raw, opt)
 					if err != nil {
 						t.Fatal(err)
 					}
-					return result.Generation
+					return raw, result.Generation
 				}
-				bootGeneration := write(bootRaw, 1)
+				bootRaw, bootGeneration := write(bootRaw, 1)
 				initial, err := config.LoadRuntimeV8File(path)
 				if err != nil {
 					t.Fatal(err)
@@ -837,7 +836,7 @@ func TestStandaloneStartupReconcilesLifecycleGenerationCommittedAfterBootRead(t 
 				if commentOnly {
 					nextRaw = append([]byte("# lifecycle update\n"), bootRaw...)
 				}
-				nextGeneration := write(nextRaw, 2)
+				nextRaw, nextGeneration := write(nextRaw, 2)
 				if nextGeneration <= bootGeneration {
 					t.Fatalf("next generation %d did not advance past boot generation %d", nextGeneration, bootGeneration)
 				}
@@ -1085,19 +1084,17 @@ func TestStandaloneConfigManagerAPIReloadLoadsOnlyTheRecordedGeneration(t *testi
 	if err := os.WriteFile(path, action, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	anchorDir := filepath.Join(dir, "trust")
-	if err := os.MkdirAll(anchorDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(anchorDir, "bundle-anchors.json"), []byte("present"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	store := newSignedStore(t, dir)
 	write(append([]byte("# unsigned\n"), action...), lifecycle)
 	refused("unsigned record with trust anchors")
+	// A record that names a bundle the store does not hold signed (private #7).
+	write(append([]byte("# named only\n"), action...), configwrite.Options{Actor: "control-plane:t1/alice", Reason: "bundle", Lifecycle: true,
+		Bundle: configwrite.BundleRef{ID: "b-01J9ZZZZZZZZZZZZZZZZZZZZZY", Version: 6, SignerKeyID: "k1"}})
+	refused("record naming an unstored bundle")
 	if proofs != 1 {
 		t.Fatalf("refused requests rebuilt the generation: proofs=%d", proofs)
 	}
-	signed := bytes.Replace(action, []byte("mode: action"), []byte("mode: observe"), 1)
+	signed := store.store(t, "b-01J9ZZZZZZZZZZZZZZZZZZZZZZ", 7, bytes.Replace(action, []byte("mode: action"), []byte("mode: observe"), 1))
 	signedGeneration := write(signed, configwrite.Options{Actor: "control-plane:t1/alice", Reason: "bundle", Lifecycle: true,
 		Bundle: configwrite.BundleRef{ID: "b-01J9ZZZZZZZZZZZZZZZZZZZZZZ", Version: 7, SignerKeyID: "k1"}})
 	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil {

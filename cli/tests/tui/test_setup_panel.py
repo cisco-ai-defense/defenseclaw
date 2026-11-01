@@ -120,6 +120,7 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Watch",
         "OpenShell Sandboxes",
         "Inspect LLM (legacy - read-only)",
+        "Decision Model",
         "Cisco AI Defense",
         "Firewall",
         "Trusted Paths",

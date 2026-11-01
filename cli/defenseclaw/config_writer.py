@@ -112,6 +112,7 @@ RESTART_KEYS = (
     "guardrail.retain_judge_bodies",
     "guardrail.hook_self_heal",
     "guardrail.hook_self_heal_debounce_ms",
+    "guardrail.protected_files",
     "claw",
     "agent",
     "routing",
@@ -834,11 +835,39 @@ def validate_candidate(target: str, candidate: bytes) -> None:
 
 
 _REASON_CODE = re.compile(r"^\[(?P<code>[A-Za-z0-9_-]+)\]\s*(?P<text>.*)$", re.S)
-_RULE_PACK_PREFIX = re.compile(r'^config rule pack (?:"[^"]*"|\S+): ')
+_RULE_PACK_PREFIX = re.compile(r'^config rule pack (?P<dir>"[^"]*"|\S+): ')
+# The loader's reason for a YAML file below a folder that is neither rules nor
+# judge (a copy of another pack placed inside this one): the folder, relative.
+_STRAY_PACK_FOLDER = re.compile(r"^rule pack inventory_unexpected at (?P<first>[^/\\:]+)/")
 _SCHEMA_WORDS = (
     ("correct the field using the configuration schema and reference", "check the value and its documented format"),
     ("use the value type documented by the configuration schema", "use the value type the reference documents"),
 )
+
+
+def _stray_pack_folder(reason: str) -> tuple[str, str] | None:
+    """The pack folder and the full path of the stray folder in it, from a loader reason.
+
+    The reason names the stray folder relative to the pack (``default/judge/x.yaml``)
+    after a ``config rule pack "<dir>": `` prefix; None when it names no such folder.
+    """
+    prefix = _RULE_PACK_PREFIX.match(reason)
+    if not prefix:
+        return None
+    stray = _STRAY_PACK_FOLDER.match(reason[prefix.end() :])
+    if not stray or stray.group("first") in {"rules", "judge", ".", ".."}:
+        return None
+    pack = prefix.group("dir")
+    if pack.startswith('"'):
+        try:
+            pack = json.loads(pack)
+        except ValueError:
+            pack = pack.strip('"')
+    pack = pack.rstrip("/\\")
+    if not pack:
+        return None
+    separator = "\\" if "\\" in pack else "/"
+    return pack, pack + separator + stray.group("first")
 
 
 def pack_pin_repair(message: str, *, files_digest: str = "<files digest>") -> str:
@@ -896,6 +925,14 @@ def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -
         return f"{name} is {bound} (it has {len(value)})"
     parts = [part.strip() for part in text.split("; ") if part.strip()]
     if code == "config_semantic_invalid" and parts:
+        stray = _stray_pack_folder(parts[0])
+        if stray:
+            # GAP-1566: lead with the folder to move or remove, by its full path, not the check name.
+            return (
+                f"{name}: the rule pack {stray[0]} holds the folder {stray[1]}, which does not belong in a rule pack "
+                f"(a copy of another pack placed inside this one?). Move {stray[1]} out of the rule-pack folder "
+                "or remove it, then run the command or installer again."
+            )
         detail = _RULE_PACK_PREFIX.sub("", parts[0])
         sentence = detail if detail.startswith(name) else f"{name}: {detail}"
         actions = [part for part in parts[1:] if not part.startswith("expected ")]
@@ -910,6 +947,12 @@ def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -
     if code == "pattern":
         if name == "openshell.trusted_ca_bundle":
             return f"{name} must be an absolute path or start with ~/ (for example, ~/proxy-root-ca.pem)."
+        if name == "update.source":
+            # http:// is refused on purpose: release files come over TLS only (GAP-1065).
+            return (
+                f"{name} must be an https:// URL (for example, https://mirror.example.com/defenseclaw), "
+                "or empty for the official releases."
+            )
         hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
         # A pattern of plain words (block_at) names them in the corrective action.
         allowed = text if text.startswith("use one of ") else ""
@@ -1018,6 +1061,47 @@ def _check_destination_index(document: Any, path: str, parts: tuple[str | int, .
         )
 
 
+def _check_scalar_parent(document: Any, path: str, parts: tuple[str | int, ...], value: Any) -> None:
+    """Refuse a field under a key that config.yaml stores as one value.
+
+    ``admission.skill.actions.high: block`` is a shorthand, not a set of
+    fields, so ``admission.skill.actions.high.install`` has nowhere to go.
+    The YAML patcher refused it with unreachable_mutation_path and named
+    neither the stored value nor the form that works (GAP-0943): setting the
+    whole key with --json.
+    """
+    current = document
+    for depth, part in enumerate(parts[:-1]):
+        if isinstance(part, int):
+            if not isinstance(current, list) or part >= len(current):
+                return
+        elif not isinstance(current, dict) or part not in current:
+            return
+        current = current[part]
+        if isinstance(current, (dict, list)):
+            continue
+        parent = format_path(parts[: depth + 1])
+        rest = parts[depth + 1 :]
+        from defenseclaw.enforce.admission import shorthand_fields
+
+        fields = shorthand_fields(current) if len(rest) == 1 else None
+        if fields is not None and rest[0] in fields:
+            # The shorthand's own install/file/runtime, with this one changed.
+            example: Any = {**fields, rest[0]: value}
+            leftover = ""
+        else:
+            example = value
+            for item in reversed(rest):
+                example = {item: example} if isinstance(item, str) else [example]
+            leftover = " (the fields you leave out take their defaults)"
+        stored = "an empty value" if current is None else f"the single value {json.dumps(current)}"
+        raise ConfigWriteError(
+            f"{parent} is stored as {stored}, not as separate fields, so {path} cannot be set on its own. "
+            f"Set the whole {parent} instead{leftover}: "
+            f"defenseclaw config set --json {parent} '{json.dumps(example)}'"
+        )
+
+
 def _same_config_value(before: Any, after: Any) -> bool:
     """Treat a value as unchanged only when its types match throughout."""
     if type(before) is not type(after):
@@ -1095,6 +1179,7 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
             if before is not _MISSING and _same_config_value(before, change.value):
                 continue
             _check_destination_index(document, change.path, parts)
+            _check_scalar_parent(document, change.path, parts, change.value)
             mutations.append(V8YAMLMutation.set(parts, change.value))
             # A later unset of this batch prunes against the document as this
             # set leaves it: 'guardrail rule enable R' sets rules.enable and

@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
@@ -50,7 +51,7 @@ var antigravityReleases = map[string]map[string]antigravityRelease{
 	},
 }
 
-var sha512RE = regexp.MustCompile(`^[0-9a-f]{128}$`)
+var sha512RE = lazyregexp.New(`^[0-9a-f]{128}$`)
 
 // Antigravity is Google's Antigravity CLI (agy). It is a single native
 // binary; the network binary is the binary itself.

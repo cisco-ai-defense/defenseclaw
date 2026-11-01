@@ -4,24 +4,28 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // removeWindowsManagedClaudeCommands removes only handlers whose executable
 // is the exact per-user DefenseClaw launcher, run directly (0.8.x, managed)
 // or through the cmd.exe launcher guard 1.0.0-1.0.3 per-user Setup wrote
 // (GAP-0587). It preserves other handlers in a shared matcher group and
-// leaves all unrelated settings intact.
+// leaves all unrelated settings intact. A leading UTF-8 byte order mark
+// (Windows PowerShell 5.1 Set-Content -Encoding utf8 writes one; Claude
+// Code reads such a file) is accepted and kept on a rewrite (GAP-0171).
 func removeWindowsManagedClaudeCommands(raw []byte, executable string) ([]byte, int, error) {
+	bom, body := splitWindowsClaudeSettingsBOM(raw)
 	var settings map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &settings); err != nil || settings == nil {
+	if err := json.Unmarshal(body, &settings); err != nil || settings == nil {
 		return nil, 0, fmt.Errorf("the Claude settings must be a JSON object: %v", err)
 	}
 	var events map[string]json.RawMessage
@@ -87,7 +91,21 @@ func removeWindowsManagedClaudeCommands(raw []byte, executable string) ([]byte, 
 		settings["hooks"], _ = json.Marshal(events)
 	}
 	out, err := json.MarshalIndent(settings, "", "  ")
-	return append(out, '\n'), removed, err
+	return append(append(bom, out...), '\n'), removed, err
+}
+
+// windowsClaudeSettingsBOM is the UTF-8 byte order mark a Windows editor or
+// Windows PowerShell 5.1 puts at the start of a "UTF-8" file.
+var windowsClaudeSettingsBOM = []byte{0xef, 0xbb, 0xbf}
+
+// splitWindowsClaudeSettingsBOM returns the leading byte order mark of raw
+// (a fresh slice, nil when there is none) and the JSON after it, as the
+// per-user Claude settings readers do (enterprisepolicy, connector).
+func splitWindowsClaudeSettingsBOM(raw []byte) (bom, body []byte) {
+	if bytes.HasPrefix(raw, windowsClaudeSettingsBOM) {
+		return append([]byte(nil), windowsClaudeSettingsBOM...), raw[len(windowsClaudeSettingsBOM):]
+	}
+	return nil, raw
 }
 
 // windowsClaudeHooksNamingDefenseClaw describes, in a stable order, each
@@ -100,8 +118,9 @@ func removeWindowsManagedClaudeCommands(raw []byte, executable string) ([]byte, 
 // JSON object are an error, so a caller never reports "none" for a file it
 // could not inspect.
 func windowsClaudeHooksNamingDefenseClaw(raw []byte) ([]string, error) {
+	_, body := splitWindowsClaudeSettingsBOM(raw)
 	var settings map[string]any
-	if err := json.Unmarshal(raw, &settings); err != nil || settings == nil {
+	if err := json.Unmarshal(body, &settings); err != nil || settings == nil {
 		return nil, errors.New("the Claude settings must be a JSON object")
 	}
 	events, _ := settings["hooks"].(map[string]any)
@@ -122,7 +141,7 @@ func windowsClaudeHooksNamingDefenseClaw(raw []byte) ([]string, error) {
 
 // windowsClaudeHookEventNamePattern is the shape of a Claude Code hook event
 // name. Another key is user text and is not repeated.
-var windowsClaudeHookEventNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
+var windowsClaudeHookEventNamePattern = lazyregexp.New(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
 
 func windowsClaudeHookEventLabel(event string) string {
 	if windowsClaudeHookEventNamePattern.MatchString(event) {

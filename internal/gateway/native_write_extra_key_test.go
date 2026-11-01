@@ -10,10 +10,10 @@ package gateway
 func nativeWriteExtraKeyCalls() []nativeWriteCall {
 	return []nativeWriteCall{
 		{"opencode", "edit", func(p string) map[string]any {
-			return map[string]any{"filePath": p, "oldString": "# base", "newString": "# base\n# k", "description": "add a line"}
+			return map[string]any{"path": p, "oldString": "# base", "newString": "# base\n# k", "description": "add a line"}
 		}},
 		{"opencode", "write", func(p string) map[string]any {
-			return map[string]any{"filePath": p, "content": "# k\n", "description": "add a line"}
+			return map[string]any{"path": p, "content": "# k\n", "description": "add a line"}
 		}},
 		{"copilot", "edit", func(p string) map[string]any {
 			return map[string]any{"path": p, "old_str": "# base", "new_str": "# base\n# k", "description": "add a line"}

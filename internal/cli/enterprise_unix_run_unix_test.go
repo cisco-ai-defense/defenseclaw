@@ -227,12 +227,13 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 		t.Fatalf("config_refused: %q, want no repair advice", err)
 	}
 	// GAP-2246: a status that found another run in progress checked nothing.
+	// GAP-0129: it is a pending apply that still exits 75.
 	busy := enterprisestatus.New(enterpriseunix.ActionStatus, "standalone", "darwin", "1.0.0")
-	busy.Installed = true
-	busy.AddError("lifecycle_busy", "another DefenseClaw enterprise lifecycle run is in progress")
+	busy.Installed, busy.PendingApply = true, true
+	busy.AddWarning("lifecycle_busy", "another DefenseClaw enterprise lifecycle run is in progress")
 	busy.Finish("darwin", enterprisestatus.UnixExitBusy)
-	if err := lifecycleFailure(busy, false, repair); strings.Contains(err.Error(), "repair") {
-		t.Fatalf("busy status: %q, want no repair advice", err)
+	if err := lifecycleFailure(busy, false, repair); err == nil || strings.Contains(err.Error(), "repair") || commandExitCode(err) != 75 || !busy.OK {
+		t.Fatalf("busy status: %v (ok=%v), want exit 75 and no repair advice", err, busy.OK)
 	}
 	// GAP-0265: a config that enables no connector is fixed in config.yaml
 	// and with ensure, as its line says, not by repair.
@@ -564,12 +565,14 @@ func TestSecretSetUpToDateHeadlineMatchesTheChange(t *testing.T) {
 // they wait 5s and exit 75.
 func TestLifecycleBusyStatusShowsTheInstalledVersion(t *testing.T) {
 	busy := enterprisestatus.New(enterpriseunix.ActionStatus, "standalone", "darwin", "1.0.0")
-	busy.Installed, busy.InstalledVersion = true, "1.0.24"
-	busy.AddError("lifecycle_busy", "another DefenseClaw enterprise lifecycle run is in progress; waited 5s for it")
+	busy.Installed, busy.InstalledVersion, busy.PendingApply = true, "1.0.24", true
+	busy.AddWarning("lifecycle_busy", "another DefenseClaw enterprise lifecycle run is in progress; waited 5s for it")
 	busy.Finish("darwin", 75)
 	var out bytes.Buffer
 	_ = printLifecycleResult(&out, busy, false)
-	if !strings.Contains(out.String(), "installed=true version=1.0.24") || strings.Contains(out.String(), "gateway_ready") {
+	// GAP-0129: a pending apply, neither "done" nor "failed".
+	if !strings.Contains(out.String(), "installed=true version=1.0.24") || strings.Contains(out.String(), "gateway_ready") ||
+		!strings.Contains(out.String(), "! status: pending apply: ") || strings.Contains(out.String(), "failed") || strings.Contains(out.String(), "done") {
 		t.Fatalf("busy status output:\n%s", out.String())
 	}
 	for _, action := range []string{"status", "verify"} {

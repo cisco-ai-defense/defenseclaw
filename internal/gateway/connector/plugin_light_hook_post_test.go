@@ -102,7 +102,7 @@ func TestPerUserPluginsPostThroughTheLightHelper(t *testing.T) {
 				marker := filepath.Join(root, "calls")
 				ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
 				defer cancel()
-				cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, rendered)
+				cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", withOpenCodeV2Fixture(t, harness), rendered)
 				cmd.Env = append(os.Environ(), "HOME="+root, "DC_PEER_MARKER="+marker)
 				output, err := cmd.CombinedOutput()
 				if err != nil {

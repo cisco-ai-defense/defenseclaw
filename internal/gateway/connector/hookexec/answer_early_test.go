@@ -71,24 +71,38 @@ func TestEarlyAnswerWatchdogAnswersWhileTheWorkBeforeRunIsHeld(t *testing.T) {
 }
 
 // Run adopts the watchdog the command armed: the call answered in time
-// gets the gateway's decision, once, and the watchdog never fires.
+// gets the gateway's decision, once, and the watchdog never fires. The
+// watchdog is armed once the test's fixtures exist (the temporary home and
+// its token), as the hook command arms it once it has read the call, under a
+// budget no runner outlasts, so the call is answered in time on a starved
+// runner too. Whether Run stood the watchdog down is read from the watchdog,
+// not from a sleep that raced a 400 ms deadline against fixture writes and
+// the scheduler (Windows CI pk0 at e5c04823b6).
 func TestEarlyAnswerWatchdogIsAdoptedByRun(t *testing.T) {
-	shortAnswerBudget(t, 400*time.Millisecond)
+	shortAnswerBudget(t, time.Minute)
 	for _, body := range []string{`{"action":"allow"}`, `{"action":"block","reason":"policy rule"}`} {
 		answer := &firstWriteRecorder{}
 		exited := make(chan int, 1)
-		started := time.Now()
-		watchdog := ArmAnswerWatchdog(Options{
-			Connector: "claudecode", ManagedEnterprise: true, StartedAt: started,
-			Stdout: answer, Stderr: answer, Exit: func(code int) { exited <- code },
-		}, []byte(preToolUsePayload))
+		var watchdog *AnswerWatchdog
 		result := run(t, "claudecode", &stubRT{status: http.StatusOK, body: body}, func(opts *Options) {
 			managedCodex(opts)
+			started := time.Now()
+			watchdog = ArmAnswerWatchdog(Options{
+				Connector: "claudecode", ManagedEnterprise: true, StartedAt: started,
+				Stdout: answer, Stderr: answer, Exit: func(code int) { exited <- code },
+			}, []byte(preToolUsePayload))
+			if watchdog == nil {
+				t.Fatal("no watchdog for a managed PreToolUse call")
+			}
 			opts.StartedAt = started
 			opts.Stdin = strings.NewReader(preToolUsePayload)
 			opts.AnswerWatchdog = watchdog
 		})
-		time.Sleep(600 * time.Millisecond)
+		select {
+		case <-watchdog.waiter.done:
+		default:
+			t.Fatalf("%s: Run returned the call's answer with the watchdog still armed", body)
+		}
 		select {
 		case code := <-exited:
 			t.Fatalf("%s: the watchdog ended the process (%d) after the call was answered", body, code)
@@ -101,6 +115,54 @@ func TestEarlyAnswerWatchdogIsAdoptedByRun(t *testing.T) {
 		if strings.Contains(body, "block") != (result.code == blockExit && strings.Contains(out, "policy rule")) {
 			t.Fatalf("%s: code %d output %q does not carry the gateway's decision", body, result.code, out)
 		}
+	}
+}
+
+// The deadline can wake the watchdog in the instant Run commits the call's
+// answer (its wait returned before Run stood it down). The committed answer
+// stands: the watchdog writes nothing, does not end the process and does not
+// change the exit status the agent got. The wake is driven directly, so the
+// race is checked every run, not only when a runner's scheduler happens to
+// hit it.
+func TestDeadlineThatWakesAsTheAnswerIsCommittedChangesNothing(t *testing.T) {
+	const decision = `{"decision":"block","reason":"policy rule"}` + "\n"
+	answer := &firstWriteRecorder{}
+	exited := make(chan int, 1)
+	w := &answerWatchdog{
+		stdout: answer, stderr: answer, exit: func(code int) { exited <- code },
+		waiter:      newAnswerDeadlineWaiter(),
+		fallbackOut: []byte(managedGatewayNoAnswerReason + "\n"), fallbackCode: 1,
+		logFailure: func() { t.Error("the watchdog logged a failure for an answered call") },
+	}
+	_, _ = w.out.WriteString(decision)
+	if code := w.finish(blockExit); code != blockExit {
+		t.Fatalf("finish returned %d, want the call's own %d", code, blockExit)
+	}
+	// The wake that lost the race: its wait already saw the deadline pass.
+	w.waiter = newAnswerDeadlineWaiter()
+	woke := make(chan struct{})
+	go func() {
+		defer close(woke)
+		w.watch(time.Now().Add(-time.Millisecond))
+	}()
+	select {
+	case <-woke:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the late watchdog wake did not return")
+	}
+	select {
+	case code := <-exited:
+		t.Fatalf("the watchdog ended the process (%d) after the answer was committed", code)
+	default:
+	}
+	if out, _ := answer.read(); out != decision {
+		t.Fatalf("output %q, want the committed answer alone %q", out, decision)
+	}
+	w.mu.Lock()
+	fired := w.fired
+	w.mu.Unlock()
+	if fired {
+		t.Fatal("the watchdog marked an answered call as answered by its deadline")
 	}
 }
 

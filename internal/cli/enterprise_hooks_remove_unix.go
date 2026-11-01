@@ -92,10 +92,22 @@ type enterpriseHooksRemoveAllReport struct {
 	// their own Claude Code hook needs `defenseclaw setup claude-code`
 	// again (GAP-1828).
 	ClaudeHookUnblocked []string `json:"claude_hook_unblocked,omitempty"`
+	// ClaudeHookRestored names the accounts of ClaudeHookUnblocked whose own
+	// Claude Code hook script the unblock put back (rel-1-0-6 GAP-0178).
+	ClaudeHookRestored []string `json:"claude_hook_restored,omitempty"`
+	// OwnInstallRestored names the accounts whose own per-user install
+	// files the enrollment had changed and the uninstall put back;
+	// OwnInstallKeptChanged is "user: path" for each agent config of such an
+	// install that changed while the computer was managed and stays as it is
+	// (rel-1-0-6 GAP-0178).
+	OwnInstallRestored    []string `json:"own_install_restored,omitempty"`
+	OwnInstallKeptChanged []string `json:"own_install_kept_changed,omitempty"`
 }
 
 // enterpriseHookClaudeUnblockedNote is what the uninstall says about an
 // account whose Claude Code blocker it removed.
+const enterpriseHookClaudeRestoredNote = "its own Claude Code hook script (~/.defenseclaw/hooks/claude-code-hook.sh), which the enrollment had replaced, is back as it was"
+
 const enterpriseHookClaudeUnblockedNote = "its Claude Code hook script (~/.defenseclaw/hooks/claude-code-hook.sh), which the enrollment had replaced, was removed, so its own Claude Code hook reports a missing script and does not guard Claude Code; run `defenseclaw setup claude-code` as that user to restore it"
 
 const (
@@ -127,7 +139,11 @@ func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "not purged %s\n", entry)
 		}
 		for _, user := range report.ClaudeHookUnblocked {
-			fmt.Fprintf(cmd.OutOrStdout(), "unblocked %s: %s\n", user, enterpriseHookClaudeUnblockedNote)
+			note := enterpriseHookClaudeUnblockedNote
+			if slices.Contains(report.ClaudeHookRestored, user) {
+				note = enterpriseHookClaudeRestoredNote
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "unblocked %s: %s\n", user, note)
 		}
 	}
 	if err != nil {
@@ -194,7 +210,9 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	purgeSkip := runEnterpriseHookPendingCleanups(cmd, &report, jobs, enterpriseHookRehomedRowCleanups(rows)...)
 	if enterpriseHooksRemoveAllPurge {
 		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, rows, purgeSkip)...)
+		addEnterpriseHookLegacyStatePurges(jobs, rows, accounts, purgeSkip)
 	}
+	addEnterpriseHookOwnInstallRestores(jobs, purgeSkip)
 	runs := retryTimedOutWorkers(cmd.Context(), runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism))
 	addEnterpriseHookRemoveRuns(&report, runs)
 	sort.Strings(report.Pending)
@@ -202,6 +220,9 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	sort.Strings(report.Purged)
 	sort.Strings(report.StateFailed)
 	sort.Strings(report.ClaudeHookUnblocked)
+	sort.Strings(report.ClaudeHookRestored)
+	sort.Strings(report.OwnInstallRestored)
+	sort.Strings(report.OwnInstallKeptChanged)
 	report.OK = len(report.Failed) == 0
 	if report.OK && len(report.Pending) == 0 && recordErr == nil {
 		if err := removeEnterpriseHookCopilotVSCodeAccounts(vscodeRecordPath, manifestPath); err != nil {
@@ -223,6 +244,25 @@ func addEnterpriseHookRemoveRuns(report *enterpriseHooksRemoveAllReport, runs []
 		for _, target := range run.Job.Request.Targets {
 			label := run.Job.Account.User + "/" + target.Options.ConnectorName
 			result, ok := answered[target.Index]
+			if target.Mode == enterpriseHookWorkerModeRestoreOwnInstall {
+				switch {
+				case ok && result.OK:
+					if result.Removed {
+						report.OwnInstallRestored = append(report.OwnInstallRestored, run.Job.Account.User)
+					}
+					if result.Remaining != "" {
+						for _, path := range strings.Split(result.Remaining, ", ") {
+							report.OwnInstallKeptChanged = append(report.OwnInstallKeptChanged, run.Job.Account.User+": "+path)
+						}
+					}
+				case ok && result.Pending:
+				case ok:
+					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": "+boundedWorkerError(result.Error))
+				case run.Err != nil:
+					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": "+boundedWorkerError(run.Err.Error()))
+				}
+				continue
+			}
 			if target.Mode == enterpriseHookWorkerModePurge {
 				switch {
 				case ok && result.OK:
@@ -264,6 +304,11 @@ func addEnterpriseHookRemoveRuns(report *enterpriseHooksRemoveAllReport, runs []
 			case target.Mode == enterpriseHookWorkerModeUnblockPersonalClaude:
 				report.Removed++
 				report.ClaudeHookUnblocked = append(report.ClaudeHookUnblocked, run.Job.Account.User)
+				if result.Restored {
+					report.ClaudeHookRestored = append(report.ClaudeHookRestored, run.Job.Account.User)
+				}
+			case target.Mode == enterpriseHookWorkerModeRemove && result.OwnInstall:
+				// The account's own install keeps its registration.
 			case target.Mode == enterpriseHookWorkerModeRemove && result.Remaining != "":
 				// The teardown ran, but the agent still loads a DefenseClaw
 				// entry (a copied home's plugin, say): not removed (GAP-0632).
@@ -1131,6 +1176,104 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []
 	}
 	sort.Strings(out)
 	return out
+}
+
+// addEnterpriseHookLegacyStatePurges ends the job of every eligible account
+// the manifest does not name (the machine policy covered it without a
+// per-user enrollment) with the purge of its ~/.defenseclaw, when that
+// folder holds no DefenseClaw install of the account's own: only what
+// DefenseClaw wrote there, such as the hook script, hook token, hook config
+// and connector backups an earlier failed install left (rel-1-0-2
+// GAP-0576). The purge, as the account, first restores the files those
+// backups belong to. A folder with the account's own per-user install
+// (enterprisehooks.HoldsPerUserInstall), one that is not a plain folder, or
+// one that cannot be read is left as it is, and the uninstall names it
+// (rel-1-0-6 GAP-0178).
+func addEnterpriseHookLegacyStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []enterpriseHookRemoveRow, accounts []enterprisehooks.UnixEligibleAccount, skip map[int]string) {
+	named := map[int]bool{}
+	for _, row := range rows {
+		if row.target.UID != nil {
+			named[*row.target.UID] = true
+		}
+	}
+	index := 0
+	for _, job := range jobs {
+		for _, target := range job.Request.Targets {
+			index = max(index, target.Index+1)
+		}
+	}
+	for _, account := range accounts {
+		if account.UID <= 0 || named[account.UID] {
+			continue
+		}
+		if _, skipped := skip[account.UID]; skipped {
+			continue
+		}
+		job := jobs[account.UID]
+		home := filepath.Clean(strings.TrimSpace(account.Home))
+		if job == nil || job.Account.Home != home || slices.ContainsFunc(job.Request.Targets, func(target enterpriseHookWorkerTarget) bool {
+			return target.Mode == enterpriseHookWorkerModePurge
+		}) {
+			continue
+		}
+		dataDir := filepath.Join(home, ".defenseclaw")
+		if !enterpriseHookLegacyStateOnly(dataDir) {
+			continue
+		}
+		job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
+			Index: index,
+			Mode:  enterpriseHookWorkerModePurge,
+			Options: enterpriseHookWorkerOptions{
+				UserHome: job.Account.Home,
+				OwnerUID: job.Account.UID,
+				OwnerGID: job.Account.GID,
+				DataDir:  dataDir,
+			},
+		})
+		index++
+	}
+}
+
+// addEnterpriseHookOwnInstallRestores ends the job of every account, purge
+// or not, with the put-back of the own per-user install files the
+// enrollment changed (enterprisehooks.RestoreOwnInstall); a job without a
+// kept snapshot changes nothing. An account whose pending cleanup keeps its
+// state (skip) keeps the managed changes too, for that cleanup.
+func addEnterpriseHookOwnInstallRestores(jobs map[int]*enterpriseHookWorkerJob, skip map[int]string) {
+	index := 0
+	for _, job := range jobs {
+		for _, target := range job.Request.Targets {
+			index = max(index, target.Index+1)
+		}
+	}
+	for uid, job := range jobs {
+		if _, skipped := skip[uid]; skipped {
+			continue
+		}
+		job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
+			Index: index,
+			Mode:  enterpriseHookWorkerModeRestoreOwnInstall,
+			Options: enterpriseHookWorkerOptions{
+				UserHome: job.Account.Home,
+				OwnerUID: job.Account.UID,
+				OwnerGID: job.Account.GID,
+				DataDir:  filepath.Join(job.Account.Home, ".defenseclaw"),
+			},
+		})
+		index++
+	}
+}
+
+// enterpriseHookLegacyStateOnly reports whether dataDir is a plain folder
+// that holds no per-user DefenseClaw install. The worker checks the folder
+// again as the account before it removes anything.
+func enterpriseHookLegacyStateOnly(dataDir string) bool {
+	info, err := os.Lstat(dataDir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	own, err := enterprisehooks.HoldsPerUserInstall(dataDir)
+	return err == nil && !own
 }
 
 // workerErrorMaxBytes bounds one worker error in the remove-all report.

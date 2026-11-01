@@ -87,7 +87,14 @@ func run(args []string, input io.Reader, output io.Writer) error {
 	} else if request, err = hookexec.DecodePerUserPluginRequest(data); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout(*maxTime))
+	timeout := requestTimeout(*maxTime)
+	if request.Headers == nil {
+		request.Headers = map[string]string{}
+	}
+	// Tell the gateway how long this request waits for its answer, so a
+	// tool-call judge answers inside it (#1395).
+	request.Headers[hookexec.HookAnswerWithinHeader] = strconv.FormatInt(timeout.Milliseconds(), 10)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	response, err := hookexec.PostPerUserHook(ctx, *apiAddr, request.Path, request.Headers, []byte(request.Body))
 	if err != nil {

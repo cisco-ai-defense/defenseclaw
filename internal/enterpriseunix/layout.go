@@ -46,6 +46,10 @@ func compilerInstallPath(l managed.StandaloneLayout) string {
 	return filepath.Join(l.InstallRoot, "lib", "defenseclaw", compilerFileName)
 }
 
+// bundleStoreDirMode keeps the bundle store unlistable for other accounts
+// while they can still read the public receipt by name (GAP-0082).
+const bundleStoreDirMode = enterprisebundle.StoreDirMode
+
 // desiredDir is a directory the lifecycle owns or must be able to rely on.
 type desiredDir struct {
 	Path  string
@@ -93,7 +97,7 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 			{Path: l.VendorPolicyDir, Mode: 0o755, Owner: root},
 			{Path: openCodePluginDir(l), Mode: 0o755, Owner: root},
 			{Path: l.ConfigDir, Mode: 0o755, Owner: root},
-			{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName), Mode: 0o755, Owner: root},
+			{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName), Mode: bundleStoreDirMode, Owner: root},
 			{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName, bundleInboxDirName), Mode: 0o700, Owner: root},
 			{Path: l.PolicyDir, Mode: 0o750, Owner: rootService},
 			{Path: l.SecretsDir, Mode: secretsMode, Owner: secretsOwner},
@@ -114,7 +118,7 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 		{Path: l.VendorPolicyDir, Mode: 0o755, Owner: root},
 		{Path: openCodePluginDir(l), Mode: 0o755, Owner: root},
 		{Path: l.ConfigDir, Mode: 0o755, Owner: root},
-		{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName), Mode: 0o755, Owner: root},
+		{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName), Mode: bundleStoreDirMode, Owner: root},
 		{Path: filepath.Join(l.ConfigDir, enterprisebundle.BundlesDirName, bundleInboxDirName), Mode: 0o700, Owner: root},
 		{Path: l.PolicyDir, Mode: 0o750, Owner: rootService},
 		{Path: l.SecretsDir, Mode: secretsMode, Owner: secretsOwner},

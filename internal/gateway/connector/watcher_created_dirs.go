@@ -301,3 +301,69 @@ func writeWatcherCreatedDirs(path string, dirs []string) error {
 	}
 	return safefile.Write(path, append(data, '\n'))
 }
+
+// RemoveCreatedDirsOf removes, once conn's registration is gone, the folders
+// below the home that DefenseClaw recorded as created for conn's agent
+// files (watcher-created-dirs.json: ~/.config/amp/plugins for Amp, say) and
+// that are still empty, deepest first, and conn's connector_backups folder
+// when it is empty. An administrator who removes a connector then gets each
+// enrolled home back as it was before the connector was added (rel-1-0-6
+// GAP-0207). A folder with anything in it, one reached through a link, and
+// every other recorded folder stay; only removed folders leave the list.
+func RemoveCreatedDirsOf(conn Connector, opts SetupOpts) {
+	home := strings.TrimSpace(userHomeDir())
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if conn == nil || home == "" || dataDir == "" || !filepath.IsAbs(home) {
+		return
+	}
+	home, dataDir = filepath.Clean(home), filepath.Clean(dataDir)
+	paths := HookConfigPathsForConnector(conn, opts)
+	if provider, ok := conn.(AgentPathProvider); ok {
+		paths = append(paths, provider.AgentPaths(opts).PatchedFiles...)
+	}
+	paths = append(paths, ManagedPluginArtifacts(conn, opts)...)
+	recordPath := filepath.Join(dataDir, watcherCreatedDirsFile)
+	record := readWatcherCreatedDirs(recordPath)
+	var candidates []string
+	for _, dir := range record.Dirs {
+		dir = filepath.Clean(dir)
+		if !belowDir(home, dir) || (dir == dataDir || belowDir(dataDir, dir)) {
+			continue
+		}
+		for _, path := range paths {
+			if filepath.IsAbs(path) && belowDir(dir, filepath.Clean(path)) {
+				candidates = append(candidates, dir)
+				break
+			}
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool { return len(candidates[i]) > len(candidates[j]) })
+	removed := map[string]bool{}
+	for _, dir := range candidates {
+		if !realDirectoryChain(home, dir) {
+			continue
+		}
+		if err := os.Remove(dir); err == nil {
+			removed[dir] = true
+		}
+	}
+	if len(removed) > 0 {
+		var kept []string
+		for _, dir := range record.Dirs {
+			if !removed[filepath.Clean(dir)] {
+				kept = append(kept, dir)
+			}
+		}
+		if len(kept) == 0 {
+			_ = os.Remove(recordPath)
+		} else {
+			_ = writeWatcherCreatedDirs(recordPath, kept)
+		}
+	}
+	if name := strings.TrimSpace(conn.Name()); name != "" && !strings.ContainsAny(name, `/\`) {
+		backups := filepath.Join(dataDir, "connector_backups", name)
+		if info, err := os.Lstat(backups); err == nil && info.Mode().Type() == fs.ModeDir {
+			_ = os.Remove(backups) // only when empty
+		}
+	}
+}

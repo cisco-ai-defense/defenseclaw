@@ -237,6 +237,12 @@ type ManagedStatus struct {
 	// HostRunGate, when present, is the caller's gateway decision carried
 	// from a managed explain into a launch banner.
 	HostRunGate string `json:"host_run_gate,omitempty"`
+	// RequiredOnHost names the configured sandbox agents the managed
+	// gateway refuses to run on this computer outside a sandbox for the
+	// caller (ManagedExplain.HostRunRefused). Doctor's Docker access row
+	// says what the docker group means for them (GAP-0554). Empty from a
+	// daemon before DefenseClaw 1.0.6.
+	RequiredOnHost []string `json:"required_on_host,omitempty"`
 	// Provisional says the directory could not be reached and the default
 	// profile applies until it can.
 	Provisional bool `json:"provisional,omitempty"`
@@ -1298,6 +1304,11 @@ type ManagedExplain struct {
 	// default_lookup_failed, none) and MatchedGroup the caller's group
 	// that matched.
 	Profile string `json:"profile"`
+	// PinnedProfile is, for a registered sandbox, the profile it was created
+	// under while its floor is still pinned to it
+	// (sandboxrelay.CurrentPolicy.PinnedProfile); Description is then that
+	// profile's (GAP-0285).
+	PinnedProfile string `json:"pinned_profile,omitempty"`
 	// Workspace is the copy policy of a new run, as the managed gateway
 	// resolves it with the organization's pack (nil for a registration).
 	Workspace    *WorkspacePolicy `json:"workspace,omitempty"`

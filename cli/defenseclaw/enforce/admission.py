@@ -101,6 +101,19 @@ def triple_shorthand(triple: Any) -> str:
     return ""
 
 
+def shorthand_fields(value: Any) -> dict[str, str] | None:
+    """The ``{install, file, runtime}`` fields an action shorthand stands for,
+    or None when *value* is no shorthand or one the fields cannot spell
+    (``allow`` also skips the scan verdict, which a mapping cannot say)."""
+    if not isinstance(value, str):
+        return None
+    name = value.strip().lower()
+    if name not in _SHORTHANDS or name == "allow":
+        return None
+    action, _allow = _SHORTHANDS[name]
+    return {"install": action.install, "file": action.file, "runtime": action.runtime}
+
+
 def action_label(action: tuple[SeverityAction, bool]) -> object:
     """A compiled action as config.yaml writes it: its shorthand, else the
     ``{install, file, runtime}`` triple."""

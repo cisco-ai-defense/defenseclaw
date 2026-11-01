@@ -80,39 +80,50 @@ func TestManagedHookReceiptWaitDoesNotHoldCallerRunSlot(t *testing.T) {
 	slotHeldBeforeReceipt := len(run) != 0
 	f.api.hookCallerLimits.mu.Unlock()
 
+	// The receipt is sent from its own goroutine: on a red run the first
+	// handler may already have given up on it, and the write must not hang
+	// the test.
+	acked := make(chan struct{})
+	ack := func() {
+		go func() {
+			defer close(acked)
+			_, _ = io.WriteString(writer, hookexec.HookDeliveryReceiptAck)
+			_ = writer.Close()
+		}()
+	}
+	if slotHeldBeforeReceipt {
+		ack()
+		t.Fatal("first hook held its caller run slot while waiting for the delivery receipt")
+	}
+
 	second, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/api/v1/claudecode/hook",
 		strings.NewReader(managedHookBody("second-while-first-waits", "PreToolUse")))
 	if err != nil {
+		ack()
 		t.Fatal(err)
 	}
 	second.Header.Set("Content-Type", "application/json")
-	secondAnswer := make(chan answer, 1)
-	go func() {
-		response, requestErr := server.Client().Do(second)
-		secondAnswer <- answer{response, requestErr}
-	}()
-	// Release the first hook even if the assertion failed, so the test does
-	// not leave a live handler behind on its red run.
-	if _, err := io.WriteString(writer, hookexec.HookDeliveryReceiptAck); err != nil {
-		t.Fatal(err)
+	// The second hook is answered while the first still waits for its
+	// receipt: the receipt is sent only after that answer. The first
+	// hook's audit writes after its receipt then never contend with the
+	// second hook's (a starved Windows runner refused the second on an
+	// audit SQLITE_BUSY when both ran at once, rel-1-0-6 GAP-0216).
+	next, requestErr := server.Client().Do(second)
+	var result []byte
+	if requestErr == nil {
+		result, err = io.ReadAll(next.Body)
+		_ = next.Body.Close()
 	}
-	_ = writer.Close()
-	_, _ = io.Copy(io.Discard, offered.response.Body)
-	if slotHeldBeforeReceipt {
-		t.Fatal("first hook held its caller run slot while waiting for the delivery receipt")
-	}
-	var next answer
+	ack()
 	select {
-	case next = <-secondAnswer:
+	case <-acked:
 	case <-ctx.Done():
-		t.Fatal("second hook did not answer")
 	}
-	if next.err != nil {
-		t.Fatal(next.err)
+	_, _ = io.Copy(io.Discard, offered.response.Body)
+	if requestErr != nil {
+		t.Fatalf("second hook while the first waits for its receipt: %v", requestErr)
 	}
-	defer next.response.Body.Close()
-	result, err := io.ReadAll(next.response.Body)
-	if err != nil || next.response.StatusCode != http.StatusOK || !strings.Contains(string(result), `"action":"allow"`) {
-		t.Fatalf("second hook = status %d, body %q, err %v", next.response.StatusCode, result, err)
+	if err != nil || next.StatusCode != http.StatusOK || !strings.Contains(string(result), `"action":"allow"`) {
+		t.Fatalf("second hook = status %d, body %q, err %v", next.StatusCode, result, err)
 	}
 }

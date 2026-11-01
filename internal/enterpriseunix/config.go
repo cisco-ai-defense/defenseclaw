@@ -224,6 +224,17 @@ func (e *Env) loadConfigCandidate(raw []byte) (*config.Config, error) {
 	return config.LoadRuntimeV8InspectionCandidateFromBytes(e.Layout.ConfigPath, raw)
 }
 
+// InstalledConfig loads the installed config.yaml as the gateway does, for
+// the read-only commands that need what it enables (`enterprise secret
+// check`). A missing file is fs.ErrNotExist.
+func (e *Env) InstalledConfig() (*config.Config, error) {
+	raw, err := readBounded(e.P(e.Layout.ConfigPath), maxInputBytes)
+	if err != nil {
+		return nil, err
+	}
+	return e.loadConfigCandidate(raw)
+}
+
 // validateConfig checks the installed config.yaml bytes; see
 // validateConfigSource.
 func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
@@ -236,6 +247,8 @@ func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
 // installed config.yaml; source, when set, is the file the administrator
 // supplied (--config), and errors name it instead of the installed path.
 func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig, error) {
+	original := raw
+	raw = config.V8ManagedChecksView(raw)
 	if plain, ok := e.managedEnvReferenceProblem(raw, source); ok {
 		return nil, &plainConfigError{msg: plain, err: errManagedEnvReference}
 	}
@@ -252,6 +265,7 @@ func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig,
 		}
 	}
 	validated.Source = source
+	validated.Raw, validated.SHA = append([]byte(nil), original...), sha256Bytes(original)
 	return validated, nil
 }
 

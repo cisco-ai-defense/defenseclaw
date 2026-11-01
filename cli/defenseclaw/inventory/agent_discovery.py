@@ -497,6 +497,15 @@ def _configured_manager_prefix_from_output(output: bytes | str | None) -> str:
     return absolute
 
 
+def _run_probe(argv: list[str], *, timeout: float, **kwargs) -> subprocess.CompletedProcess:
+    """Run one bounded probe; on Windows a timeout ends its whole process tree."""
+    if os.name != "nt":
+        return subprocess.run(argv, timeout=timeout, **kwargs)
+    from defenseclaw.tui.windows_process import run_in_job
+
+    return run_in_job(argv, timeout=timeout, **kwargs)
+
+
 def _windows_manager_probe_environment(
     executable: str,
     folders: _WindowsPackageManagerFolders,
@@ -576,7 +585,9 @@ def _probe_windows_configured_package_manager_bin_prefixes() -> tuple[str, ...]:
             if not _trusted_windows_package_manager_path(manager, executable):
                 continue
             try:
-                result = subprocess.run(
+                # npm.cmd runs node.exe under cmd.exe: run_in_job ends both on
+                # a timeout (rel-1-0-6:GAP-0059).
+                result = _run_probe(
                     [executable, *query],
                     shell=False,
                     timeout=PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS,
@@ -921,6 +932,7 @@ _SPECS: dict[str, _AgentSpec] = {
         ),
         "opencode",
         ("--version",),
+        binary_names=("opencode", "opencode2"),
     ),
     "amp": _AgentSpec(
         (
@@ -2314,7 +2326,7 @@ def _version_for_binary(
         os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
     ):
         timeout = 8.0
-    elif binary_name == "opencode":
+    elif binary_name in {"opencode", "opencode2"}:
         # The official WinGet binary is a packaged Bun executable. Windows
         # Defender inspection routinely makes its otherwise trivial
         # ``--version`` probe take 6-8 seconds on first and subsequent runs.
@@ -2331,7 +2343,7 @@ def _version_for_binary(
         # picker back to line mode (keys echoed, read only on Enter) or left
         # raw output behind (GAP-0057, GAP-0065). A new session also has no
         # controlling terminal, so /dev/tty cannot be opened either.
-        result = subprocess.run(
+        result = _run_probe(
             [binary_path, *(version_args or ("--version",))],
             shell=False,
             timeout=timeout,

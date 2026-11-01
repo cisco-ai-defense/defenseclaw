@@ -20,7 +20,6 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -28,6 +27,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -82,7 +82,7 @@ const (
 
 // sandboxNamePattern accepts the names of sandbox directories the scan
 // records live in (DefenseClaw sandbox names are shorter and stricter).
-var sandboxNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+var sandboxNamePattern = lazyregexp.New(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 // SandboxScanDirForConfig is <data_dir>/sandboxes while sandboxes are on, and
 // empty otherwise and on Windows, where sandboxes do not run.

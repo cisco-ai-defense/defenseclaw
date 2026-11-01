@@ -8,6 +8,8 @@ package cli
 import (
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // The standalone enumerator is told which agent sessions run now, so a
@@ -43,6 +46,28 @@ var (
 		return sid.String()
 	}
 )
+
+// enterpriseWindowsEnumeratePreviousUnprotected reads the record the last
+// cycle published; tests replace it.
+var enterpriseWindowsEnumeratePreviousUnprotected = enterprisehooks.ReadWindowsUnprotectedAgents
+
+// enterpriseWindowsEnumerateLastRunning keeps, for the life of the enumerator
+// process (the interval loop), what the last readable snapshot of the agent
+// sessions found. A cycle whose snapshot cannot be read uses it, so the
+// running agents of that cycle do not drop out of the unprotected record
+// (rel-1-0-2:GAP-0672).
+var enterpriseWindowsEnumerateLastRunning = struct {
+	sync.Mutex
+	read    bool
+	running map[string]map[string]string
+	unknown []enterprisehooks.UnprotectedAgent
+}{}
+
+// enterpriseWindowsRunningAgentEntryReason is the start of the reason of
+// every running-agent entry the enumerator writes: the session label
+// ("codex (pid 4242)") and "runs". An entry found by an install has another
+// reason.
+var enterpriseWindowsRunningAgentEntryReason = lazyregexp.New(`^[a-z0-9][a-z0-9._-]{0,63} \(pid [0-9]{1,10}\) runs\b`)
 
 // enterpriseWindowsEnumerateKnownSIDs keeps, for the life of the enumerator
 // process (the interval loop), the SID each account resolved to. A lookup that
@@ -82,11 +107,27 @@ func enterpriseWindowsEnumerateResolveSID(account, key string, remaining time.Du
 // account resolves to no SID this cycle or earlier is returned as an
 // owner-unknown unprotected agent instead:
 // no row can be matched to it, so it is not known to be protected.
-func enterpriseWindowsEnumerateRunningAgents(stderr io.Writer, connectors []string) (map[string]map[string]string, []enterprisehooks.UnprotectedAgent) {
+//
+// A snapshot that cannot be read used to return nothing, and the cycle then
+// rewrote the record without a single running-agent entry, so an unenrolled
+// running agent read as covered until the next readable cycle
+// (rel-1-0-2:GAP-0672). The cycle now keeps what the last readable snapshot
+// of this process found; a process with none (the first cycle) keeps the
+// running-agent entries of the record manifestPath's last cycle published.
+func enterpriseWindowsEnumerateRunningAgents(stderr io.Writer, connectors []string, manifestPath string) (map[string]map[string]string, []enterprisehooks.UnprotectedAgent) {
 	processes, err := enterpriseWindowsEnumerateAgentProcesses()
 	if err != nil {
-		fmt.Fprintf(stderr, "[hook-enumerator] WARN running agent sessions are unreadable this cycle; only installs are checked for unenrolled agents: %v\n", err)
-		return nil, nil
+		last := &enterpriseWindowsEnumerateLastRunning
+		last.Lock()
+		read, running, unknown := last.read, cloneEnterpriseWindowsRunningAgents(last.running), slices.Clone(last.unknown)
+		last.Unlock()
+		if read {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN running agent sessions are unreadable this cycle; the running agents of the last readable cycle are kept: %v\n", err)
+			return running, unknown
+		}
+		kept := enterpriseWindowsEnumeratePreviousRunningEntries(manifestPath)
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN running agent sessions are unreadable this cycle; the %d running-agent entries of the previous record are kept: %v\n", len(kept), err)
+		return nil, kept
 	}
 	enabled := make(map[string]bool, len(connectors))
 	for _, name := range connectors {
@@ -140,7 +181,42 @@ func enterpriseWindowsEnumerateRunningAgents(stderr io.Writer, connectors []stri
 			out[sid][connector] = label
 		}
 	}
+	last := &enterpriseWindowsEnumerateLastRunning
+	last.Lock()
+	last.read, last.running, last.unknown = true, cloneEnterpriseWindowsRunningAgents(out), slices.Clone(unknown)
+	last.Unlock()
 	return out, unknown
+}
+
+// enterpriseWindowsEnumeratePreviousRunningEntries returns the running-agent
+// entries of the unprotected record manifestPath's last cycle published, or
+// nothing when it cannot be read. A stale record still names its entries.
+func enterpriseWindowsEnumeratePreviousRunningEntries(manifestPath string) []enterprisehooks.UnprotectedAgent {
+	if manifestPath == "" {
+		return nil
+	}
+	previous, err := enterpriseWindowsEnumeratePreviousUnprotected(manifestPath)
+	if err != nil && len(previous) == 0 {
+		return nil
+	}
+	var kept []enterprisehooks.UnprotectedAgent
+	for _, agent := range previous {
+		if enterpriseWindowsRunningAgentEntryReason.MatchString(agent.Reason) {
+			kept = append(kept, agent)
+		}
+	}
+	return kept
+}
+
+func cloneEnterpriseWindowsRunningAgents(running map[string]map[string]string) map[string]map[string]string {
+	if running == nil {
+		return nil
+	}
+	out := make(map[string]map[string]string, len(running))
+	for sid, agents := range running {
+		out[sid] = maps.Clone(agents)
+	}
+	return out
 }
 
 // enterpriseWindowsEnumerateLookupWithin resolves account to its SID, or ""

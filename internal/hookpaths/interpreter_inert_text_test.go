@@ -36,14 +36,16 @@ func r104Loop2Check(t *testing.T, command, cwd, home, reason string) {
 	if got := UnprovenProtectedWrite(command, cwd, home); got != reason {
 		t.Fatalf("class = %q, want %q", got, reason)
 	}
-	payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
-		"tool_input": map[string]string{"command": command}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	targets, ok := Decode(Resolve(payload))
-	if !ok || targets[UnprovenReasonKey] != reason {
-		t.Fatalf("hook evidence class = %q, want %q", targets[UnprovenReasonKey], reason)
+	if hookWriteEvidenceHost() {
+		payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+			"tool_input": map[string]string{"command": command}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		targets, ok := Decode(Resolve(payload))
+		if !ok || targets[UnprovenReasonKey] != reason {
+			t.Fatalf("hook evidence class = %q, want %q", targets[UnprovenReasonKey], reason)
+		}
 	}
 }
 
@@ -52,7 +54,6 @@ func r104Loop2Check(t *testing.T, command, cwd, home, reason string) {
 // are data, so a "print > file" inside one is not an output. The same lexer
 // must not hide a real computed output after such data.
 func TestR104Loop2AWKProgramTextOnly(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home, cwd := r104Loop2Home(t)
 	for _, tc := range []struct {
 		name, command, reason string
@@ -104,7 +105,6 @@ func TestR104Loop2AWKProgramTextOnly(t *testing.T) {
 // t-string with a field evaluates code and stays under write analysis, and a
 // protected destination is never proved by its data.
 func TestR104Loop2PythonInertPrefixedData(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home, cwd := r104Loop2Home(t)
 	for _, tc := range []struct {
 		name, command, reason string

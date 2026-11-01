@@ -25,6 +25,8 @@ type bundleApplyOptions struct {
 	inbox, json          bool
 	refuseCapabilityLoss bool
 	deferRestart         bool
+	trustAnchors         string
+	deviceGroup          string
 	lockWait             time.Duration
 }
 
@@ -58,6 +60,12 @@ If the current-version directory is damaged, ensure and repair on Linux and
 macOS keep the installed config, warn bundle_state_unreadable and still repair
 the host. On Windows they stop with bundle_restore_failed and repair nothing.
 Either way, deliver a new signed bundle to replace it.
+--trust-anchors <file> (Linux and macOS) installs that trust anchor file in the
+same transaction, as Windows ensure --trust-anchors does: the file is checked
+like enterprise bundle anchors install checks it, the bundle is verified
+against it, and it stays only when the bundle is confirmed or applied and
+waiting for the gateway; a bundle that fails puts the previous file back, or
+removes the new one when there was none. Give it with --bundle, not --inbox.
 --defer-restart refuses a bundle whose config change restarts the gateway
 before anything changes (restart_deferred, exit 75, Windows 1618): the
 restart_prediction of bundle verify. --delivery-id records an opaque caller id (1 to 128 of A-Z a-z 0-9 . _ : -)
@@ -89,6 +97,10 @@ Exit codes: 0, 1 (errors[].code names the refusal), 75 busy, 2 usage. With
 	f.BoolVar(&opts.deferRestart, "defer-restart", false, "refuse, before anything changes, a bundle whose config change restarts the gateway (restart_deferred, retry exit code)")
 	f.StringVar(&opts.reason, "reason", "bundle", "annotate the run (recorded in the lifecycle result)")
 	f.StringVar(&opts.deliveryID, "delivery-id", "", "opaque id of this delivery, recorded on its receipt (1 to 128 of A-Z a-z 0-9 . _ : -)")
+	if runtime.GOOS != "windows" {
+		f.StringVar(&opts.trustAnchors, "trust-anchors", "", "install this trust anchor file in the same transaction (Linux and macOS): the bundle is verified against it, it stays only when the bundle does, and the previous file is put back when the bundle fails")
+		f.StringVar(&opts.deviceGroup, "device-group", "", "with --trust-anchors, pin this device to one device group (see enterprise bundle anchors install)")
+	}
 	addLockWaitFlag(f, &opts.lockWait)
 	if runtime.GOOS == "windows" {
 		f.Lookup("lock-wait").Usage = windowsApplyLockWaitUsage

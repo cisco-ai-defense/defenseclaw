@@ -17,9 +17,6 @@ import (
 // unquoted tilde, a body that expands it, eval, sudo -s/-i and an option
 // that changes the directory or starts a shell stay protected-named.
 func TestR104RoundMQuotedTildeThroughEveryWrapper(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("native POSIX fixture")
-	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	ssh := filepath.Join(home, ".ssh")
@@ -61,7 +58,7 @@ func TestR104RoundMQuotedTildeThroughEveryWrapper(t *testing.T) {
 		`env -S "cp payload '~/.ssh/authorized_keys'"`,
 	} {
 		t.Run("allow/"+command, func(t *testing.T) {
-			if got := ActionCommandDecision(command, cwd, home); got != "" {
+			if got := posixShellDecision(command, cwd, home); got != "" {
 				t.Fatalf("ActionCommandDecision = %q, want allow", got)
 			}
 		})
@@ -93,7 +90,7 @@ func TestR104RoundMQuotedTildeThroughEveryWrapper(t *testing.T) {
 		`env -S 'cp payload ~/.ssh/authorized_keys'`,
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 				t.Fatalf("ActionCommandDecision = %q, want protected-target", got)
 			}
 		})

@@ -6,8 +6,10 @@ package connector
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -139,6 +141,90 @@ func TestPerUserPluginHelperACLCheckCallsNoCmdlet(t *testing.T) {
 				if strings.Count(check, want) != 1 {
 					t.Errorf("ACL check lacks %q", want)
 				}
+			}
+		})
+	}
+}
+
+// rel-1-0-6 GAP-0025: the per-user plugins' helper ACL check called every
+// failure an untrusted owner or DACL, a PowerShell that took longer than the
+// 5 s budget to start included. Only an owner or another writer the script
+// found keeps that refusal; a timeout, a PowerShell that does not start, a
+// path that went away and any other script failure name their own cause and
+// next step. Every case still refuses the call. A POSIX stand-in plays the
+// system PowerShell; the native run is
+// TestWindowsPerUserPluginRejectsWritableHelperPaths.
+func TestPerUserPluginHelperACLCheckNamesItsOwnFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a POSIX shell script stands in for PowerShell")
+	}
+	node := nodeForTest(t)
+	dir := testenv.PrivateTempDir(t)
+	fake := filepath.Join(dir, "powershell")
+	script := "#!/bin/sh\ncat >/dev/null\ncase \"$DC_FAKE_ACL\" in\n" +
+		"  slow) sleep 8 ;;\n" +
+		"  owner|writable|missing) printf 'failed %s' \"$DC_FAKE_ACL\"; exit 3 ;;\n" +
+		"  other) printf 'failed Attempted to perform an unauthorized operation.'; exit 3 ;;\n" +
+		"  short) printf 'checked 1' ;;\n" +
+		"  *) printf 'checked 2' ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const dacl = "per-user gateway helper path has an untrusted Windows owner or DACL"
+	cases := []struct{ name, powershell, want string }{
+		{"ok", fake, "allowed"},
+		{"owner", fake, dacl},
+		{"writable", fake, dacl},
+		{"short", fake, dacl},
+		{"slow", fake, "the per-user gateway helper ACL check did not finish within 5 s (Windows PowerShell was slow to start); retry the call"},
+		{"missing", fake, "a per-user gateway helper path went missing during its ACL check"},
+		{"other", fake, "the per-user gateway helper ACL check failed (Attempted to perform an unauthorized operation.); retry the call"},
+		{"absent", filepath.Join(dir, "no-powershell"), "did not start for the per-user gateway helper ACL check (ENOENT); run defenseclaw doctor"},
+	}
+	extract := func(t *testing.T, body, name string) string {
+		t.Helper()
+		start := strings.Index(body, "function "+name+"(")
+		if start < 0 {
+			t.Fatalf("rendered plugin has no %s", name)
+		}
+		fn := body[start:]
+		return fn[:strings.Index(fn, "\n}\n")+3]
+	}
+	for _, tc := range []struct{ asset, module, check, failure, constant string }{
+		{"opencode-plugin.js", "acl.mjs", "defenseclawCheckWindowsHelperACL", "defenseclawWindowsACLCheckFailure", "let DC_WINDOWS_POWERSHELL = \"\";"},
+		{"amp-plugin.ts", "acl.mts", "checkWindowsHelperACL", "windowsACLCheckFailure", "let DC_WINDOWS_POWERSHELL: string = \"\""},
+	} {
+		t.Run(tc.asset, func(t *testing.T) {
+			body := renderPluginAssetForTest(t, tc.asset, templateData{
+				TokenFileJS:         javaScriptStringContent(`C:\Users\dev\.defenseclaw\hooks\.token`),
+				WindowsPowerShellJS: javaScriptStringContent(`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`),
+			})
+			module := "import { execFileSync } from \"node:child_process\"\nimport { dirname, join } from \"node:path\"\n" +
+				tc.constant + "\nexport function setPowerShell(path" + map[bool]string{true: ": string", false: ""}[strings.HasSuffix(tc.module, ".mts")] + ") { DC_WINDOWS_POWERSHELL = path }\n" +
+				"export " + extract(t, body, tc.check) + extract(t, body, tc.failure)
+			modulePath := filepath.Join(t.TempDir(), tc.module)
+			if err := os.WriteFile(modulePath, []byte(module), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range cases {
+				t.Run(c.name, func(t *testing.T) {
+					harness := "const m = await import(process.argv[1]); m.setPowerShell(process.argv[2]); process.env.DC_FAKE_ACL = process.argv[3];" +
+						"try { m." + tc.check + "([\"/x\"]); console.log(\"allowed\") } catch (error) { console.log(error.message) }"
+					ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
+					defer cancel()
+					out, err := exec.CommandContext(ctx, node, "--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", harness, modulePath, c.powershell, c.name).CombinedOutput()
+					if err != nil {
+						t.Fatalf("node: %v\n%s", err, out)
+					}
+					got := strings.TrimSpace(string(out))
+					if !strings.Contains(got, c.want) {
+						t.Fatalf("%s: got %q, want it to contain %q", c.name, got, c.want)
+					}
+					if c.want != dacl && strings.Contains(got, "DACL") {
+						t.Fatalf("%s: a non-ACL failure still reads as a DACL refusal: %q", c.name, got)
+					}
+				})
 			}
 		})
 	}

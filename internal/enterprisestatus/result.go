@@ -178,6 +178,14 @@ type Result struct {
 	SecurityComplete   bool                          `json:"security_complete"`
 	Errors             []Message                     `json:"errors"`
 	Warnings           []Message                     `json:"warnings,omitempty"`
+	// PendingApply marks a Linux or macOS status that found another
+	// lifecycle run applying a change (the apply trigger applying a pushed
+	// config.yaml, secret or policy file, or an ensure, repair or upgrade
+	// that holds the lifecycle lock). Such a status checked nothing but the
+	// installed version, which is not a failure: it is ok, names the run in
+	// a lifecycle_busy warning and still exits 75, so a management agent
+	// asks again (GAP-0129). Omitted otherwise.
+	PendingApply bool `json:"pending_apply,omitempty"`
 	// Changes lists, in plain words, what a Linux or macOS repair or ensure
 	// changed on a deployment that was already installed (files rewritten,
 	// services started, per-account hooks rewritten), which key a
@@ -194,6 +202,10 @@ type Result struct {
 	// enforces; nil (omitted) when neither exists.
 	Bundle      *BundleState   `json:"bundle,omitempty"`
 	LastRefusal *BundleRefusal `json:"last_refusal,omitempty"`
+	// EnforcementPending counts the running agent sessions this result
+	// names as not enforced until they restart, with their connector names;
+	// omitted when there are none (enforcement_pending.go).
+	EnforcementPending *EnforcementPending `json:"enforcement_pending,omitempty"`
 	// Scanners is the standalone Windows scanner runtime (skill, MCP and
 	// plugin scanners); nil (omitted) everywhere else.
 	Scanners *ScannerRuntime `json:"scanners,omitempty"`
@@ -201,6 +213,10 @@ type Result struct {
 	// installed config.yaml with their effective redaction profiles, from the
 	// compiler `defenseclaw observability plan` uses (GAP-1105).
 	Destinations []Destination `json:"destinations,omitempty"`
+	// AuditStore is, for Linux and macOS status, the local audit store of
+	// the installed config.yaml: retention, size cap and size on disk; nil
+	// when the config does not compile (GAP-0141).
+	AuditStore *AuditStore `json:"audit_store,omitempty"`
 	// Connectors, OpenShell and Identity are the status v2 blocks of status
 	// and verify on the standalone profile (connector_block.go,
 	// openshell_block.go, identity_block.go); nil (omitted) elsewhere.
@@ -221,6 +237,9 @@ type Result struct {
 	// coverage_complete are false (MarkSecurityIncomplete,
 	// MarkCoverageIncomplete); Finish names them on Linux and macOS.
 	securityBy, coverageBy []string
+	// pendingSessions are the sessions NotePendingSession recorded, by
+	// process id.
+	pendingSessions map[int]string
 }
 
 // CodeSecurityIncomplete is the warning that names why security_complete
@@ -506,9 +525,15 @@ func (r *Result) AddWarning(code, message string) {
 // not verify an enrolled target's hooks, so a script that read the flag
 // was told the host was protected (GAP-0664).
 func (r *Result) Finish(goos string, failureCode int) int {
+	var scan *SessionRestartStatus
 	if r.Bundle != nil && r.Bundle.SessionsRestartRequired != nil && r.Bundle.SessionsRestartRequired.Count > 0 {
-		code, _ := SessionWarning(*r.Bundle.SessionsRestartRequired)
+		scan = r.Bundle.SessionsRestartRequired
+		code, _ := SessionWarning(*scan)
 		r.MarkCoverageIncomplete(code)
+	}
+	// A result read back from another process keeps the summary it carried.
+	if pending := summarizePending(r.pendingSessions, scan); pending != nil {
+		r.EnforcementPending = pending
 	}
 	r.OK = len(r.Errors) == 0
 	if !r.OK {
@@ -518,6 +543,11 @@ func (r *Result) Finish(goos string, failureCode int) int {
 		r.nameIncompleteFields()
 	}
 	switch {
+	case r.OK && r.PendingApply:
+		// A status that found a change being applied is not a failure, but
+		// its caller asks again for the full state: 75, as before
+		// pending_apply existed.
+		r.ExitCode = BusyExitCode(goos)
 	case r.OK:
 		r.ExitCode = ExitOK
 	case failureCode != 0:

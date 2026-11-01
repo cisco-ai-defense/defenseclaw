@@ -70,10 +70,13 @@ func (env *Env) sessionFactsAccounts() []sessionFactsAccount {
 // accounts the manifest enrolls, left the cache there (GAP-1186). An account
 // whose per-user state the purge kept (a pending cleanup still needs it, or
 // its home was not available) keeps its cache with that state (GAP-0582).
+// An account whose ~/.defenseclaw holds its own per-user install keeps the
+// cache too: that install's hooks write and read it, and a machine purge
+// leaves the account's own install byte for byte (rel-1-0-6 GAP-0178).
 func (l *lifecycle) purgeSessionFactsCaches(accounts []sessionFactsAccount) {
 	cache := "~/.defenseclaw/" + useridentity.SessionFactsCacheFileName
 	for _, account := range accounts {
-		if l.perUserStateKept[account.user] {
+		if l.perUserStateKept[account.user] || holdsOwnInstall(l.env.P(account.home)) {
 			continue
 		}
 		removed, err := removeSessionFactsCache(l.env.P(account.home), account.uid)

@@ -35,7 +35,9 @@ import (
 // DEFENSECLAW_HOME come from the agent and never choose it or its data
 // directory (loadHookRuntimeConfig), so an agent that points them at another
 // default-tier config cannot reopen a strict outage. A config kept outside
-// its data directory closes the outage.
+// its data directory closes the outage, except the account's own config when
+// the data directory holds none (hookRuntimeConfigPath): `defenseclaw config
+// set data_dir` moves the hooks and leaves config.yaml in the account's home.
 //
 // An install or upgrade of this account's DefenseClaw is not an outage
 // either: while any folder an installer of this account may hold carries its
@@ -57,7 +59,7 @@ func hookOutageFailModeFor(connectorName, hookDir string, installWindow bool) st
 		return "closed"
 	}
 	dataDir := filepath.Dir(filepath.Clean(hookDir))
-	loaded, ownDataDir, err := loadHookRuntimeConfig(filepath.Join(dataDir, config.DefaultConfigName))
+	loaded, ownDataDir, err := loadHookRuntimeConfig(hookRuntimeConfigPath(dataDir))
 	if err != nil || loaded == nil || managed.IsManagedEnterprise(loaded.DeploymentMode) || loaded.SecureClientIntegration() {
 		return "closed"
 	}
@@ -95,6 +97,39 @@ func hookOutageFailModeFor(connectorName, hookDir string, installWindow bool) st
 		return "open"
 	}
 	return "closed"
+}
+
+// hookRuntimeConfigPath is the config file of the per-user hook runtime
+// whose data directory is dataDir: config.yaml in dataDir, or, when dataDir
+// has none, the account's own config, found from the account database
+// (outageAccountHome, and on Windows the installed runtime's protected data
+// root first), never from HOME, USERPROFILE, DEFENSECLAW_HOME or
+// DEFENSECLAW_CONFIG. A custom data_dir (`defenseclaw config set data_dir`)
+// keeps config.yaml in ~/.defenseclaw while the gateway renders the hooks
+// into <data_dir>/hooks, so that config is the one those hooks run under.
+// hookOutageFailModeFor still opens an outage only when the config's data_dir
+// is dataDir; before this a custom data_dir closed every outage (rel-1-0-6
+// GAP-0224). A config.yaml in dataDir that exists in any form, or cannot be
+// shown absent, stays the answer, so a broken one still closes.
+func hookRuntimeConfigPath(dataDir string) string {
+	own := filepath.Join(dataDir, config.DefaultConfigName)
+	if _, err := os.Lstat(own); !errors.Is(err, fs.ErrNotExist) {
+		return own
+	}
+	var roots []string
+	if root, recognized := outageInstalledDataRoot(); recognized && filepath.IsAbs(root) {
+		roots = append(roots, root)
+	}
+	if home := outageAccountHome(); home != "" {
+		roots = append(roots, filepath.Join(home, config.DefaultDataDirName))
+	}
+	for _, root := range roots {
+		candidate := filepath.Join(filepath.Clean(root), config.DefaultConfigName)
+		if _, err := os.Lstat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return own
 }
 
 // hookOutageInstallHeld reports whether an installer may hold this

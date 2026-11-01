@@ -6,8 +6,9 @@ package connector
 import (
 	"encoding/base64"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Native OTLP exporter ownership is decided by the secret, never by where an
@@ -33,7 +34,7 @@ import (
 // otlpBasicCredentialRE finds the credential of an HTTP Basic Authorization
 // value (RFC 7617), whose user:password is base64. The scheme is
 // case-insensitive.
-var otlpBasicCredentialRE = regexp.MustCompile(`(?i)(?:^|[^0-9A-Za-z])basic[ \t]+([0-9A-Za-z+/_-]{4,}=*)`)
+var otlpBasicCredentialRE = lazyregexp.New(`(?i)(?:^|[^0-9A-Za-z])basic[ \t]+([0-9A-Za-z+/_-]{4,}=*)`)
 
 // otlpMinKnownTokenLen keeps a short configured value from matching ordinary
 // text by accident.

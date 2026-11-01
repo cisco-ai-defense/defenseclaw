@@ -12,9 +12,6 @@ import (
 )
 
 func TestR103B36ReviewRealClientCopyFact(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX copy command")
-	}
 	project := t.TempDir()
 	t.Setenv("HOME", project)
 	if err := os.Symlink("source-target", filepath.Join(project, "source")); err != nil {
@@ -45,9 +42,6 @@ func TestR103B36ReviewRealClientCopyFact(t *testing.T) {
 }
 
 func TestR103B36ReviewCopyScopeOwnership(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX path fixture")
-	}
 	root := t.TempDir()
 	path := filepath.Join(root, "copied")
 	other := filepath.Join(root, "outside")

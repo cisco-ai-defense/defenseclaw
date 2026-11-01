@@ -4,7 +4,6 @@
 package hookpaths
 
 import (
-	"runtime"
 	"strings"
 	"testing"
 
@@ -17,9 +16,6 @@ import (
 // (Copy-Item, Out-File, Add-Content, a redirect, a substitution that runs a
 // writer, a later cp) keeps the protected-target decision (GAP-2417 rows).
 func TestActionPwshCommandPrintBodyQuotedTildeIsText(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX home")
-	}
 	home := t.TempDir()
 	cwd := home + "/proj"
 	q := func(s string) string { return strings.ReplaceAll(s, "@", string(rune(39))) }

@@ -13,7 +13,6 @@ import "testing"
 // function body checked; plain $name expansions still leave an uncalled body
 // unscanned (GAP-1535).
 func TestActionRuntimeEvaluatedNameKeepsFunctionBodyChecked(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := home
 	body := "foo() { dd of=~/.ssh/authorized_keys if=k.pub; }; "
@@ -50,8 +49,8 @@ func TestActionRuntimeEvaluatedNameKeepsFunctionBodyChecked(t *testing.T) {
 		`p='*(.e:f""oo:)'; print -l ${(~)p}`,
 	} {
 		command := body + call
-		if got := ActionCommandDecision(command, cwd, home); got == "" {
-			t.Errorf("ActionCommandDecision(%q) = allow, want a protected decision", command)
+		if got := posixShellDecision(command, cwd, home); got == "" {
+			t.Errorf("posixShellDecision(%q) = allow, want a protected decision", command)
 		}
 	}
 	for _, call := range []string{
@@ -64,8 +63,8 @@ func TestActionRuntimeEvaluatedNameKeepsFunctionBodyChecked(t *testing.T) {
 		`p='notes (draft).md'; echo "$p"`,
 		`ls *.go; echo "see (e.g. README)"`,
 	} {
-		if got := ActionCommandDecision(body+call, cwd, home); got != "" {
-			t.Errorf("ActionCommandDecision(%q) = %q, want allow", body+call, got)
+		if got := posixShellDecision(body+call, cwd, home); got != "" {
+			t.Errorf("posixShellDecision(%q) = %q, want allow", body+call, got)
 		}
 	}
 }

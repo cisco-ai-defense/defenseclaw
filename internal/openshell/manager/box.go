@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -44,6 +44,13 @@ type box struct {
 	// op serializes lifecycle operations (create, start, stop, delete,
 	// undo) on this sandbox. It is taken before Manager.mu, never under it.
 	op sync.Mutex
+	// resolveMu serializes the policy resolutions of this sandbox
+	// (Manager.resolveBoxViolations): the configuration read, the resolve
+	// and the store of eff, decider and violations, so a caller that read an
+	// older configuration (an unblock, an approval, a hook) cannot store its
+	// view over a newer one a refresh already stored (GAP-0616). It may be
+	// taken under op, and is taken before Manager.mu, never under it.
+	resolveMu sync.Mutex
 
 	// The fields below are guarded by Manager.mu.
 	rec record
@@ -384,7 +391,7 @@ func (m *Manager) keepHookCounts() {
 	}
 }
 
-var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var imageDigestPattern = lazyregexp.New(`^sha256:[0-9a-f]{64}$`)
 
 // identity is the correlation.sandbox group for the box. Callers hold
 // Manager.mu.
@@ -548,6 +555,9 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	if phase == audit.SandboxPhaseStopped || phase == audit.SandboxPhaseCompleted || phase == audit.SandboxPhaseError {
 		// The session is over: keep what it reached.
 		m.flushDestinations(rec.Name)
+	}
+	if phase == audit.SandboxPhaseStopped {
+		m.endStoppedAsks(ctx, b, rec.Name, rec.BindingID)
 	}
 	if !unchanged {
 		msg := lifecycleMessage(rec.Name, phase)

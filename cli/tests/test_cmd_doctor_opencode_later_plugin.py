@@ -14,10 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""GAP-0469 (follow-up of GAP-0465): doctor names another OpenCode plugin
-beside defenseclaw.js in action mode, where the bridge refuses every tool
-call while a later plugin is loaded and OpenCode shows only that the command
-was blocked."""
+"""V2 argument pinning makes a V1 plugin-order refusal obsolete."""
 
 from __future__ import annotations
 
@@ -54,21 +51,15 @@ def _hook_rows(monkeypatch: pytest.MonkeyPatch, own: Path, mode: str) -> list[di
     return result.checks
 
 
-def test_action_mode_warns_and_names_the_plugin_beside_defenseclaw(
+def test_v2_action_mode_has_no_obsolete_plugin_order_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     own = _plugins(tmp_path, "plugins/mine.js", "plugin/other.ts", "plugins/notes.txt")
 
     rows = _hook_rows(monkeypatch, own, "action")
 
-    assert [row["label"] for row in rows] == ["OpenCode hooks", "OpenCode plugin order"]
-    order = rows[1]
-    assert order["status"] == "warn"
-    assert "mine.js" in order["detail"] and "other.ts" in order["detail"]
-    assert "notes.txt" not in order["detail"]
-    assert "later plugin argument mutations are not observable" in order["detail"]
-    assert str(own.parent / "mine.js") in order["remediation"]
-    assert "defenseclaw guardrail mode observe --connector opencode" in order["remediation"]
+    assert [row["label"] for row in rows] == ["OpenCode hooks"]
+    assert all("later plugin argument mutations" not in row["detail"] for row in rows)
 
 
 def test_observe_mode_and_a_lone_plugin_add_no_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

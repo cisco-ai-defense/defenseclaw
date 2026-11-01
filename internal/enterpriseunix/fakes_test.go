@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -59,7 +61,9 @@ type fakeServices struct {
 	restarting map[string]string
 	// activating units are running a oneshot start (systemd "activating").
 	activating map[string]bool
-	reloads    int
+	// pids are the main process ids Status reports for active units.
+	pids    map[string]int
+	reloads int
 	// failReloadOnce makes the next Reload fail (a failure before the services start).
 	failReloadOnce bool
 	inner          ServiceManager // definition paths and unit list
@@ -245,8 +249,12 @@ func (f *fakeServices) Status(_ context.Context, u Unit) (enterprisestatus.Servi
 	if f.activating[u.Name] {
 		state = "activating/start"
 	}
+	pid := 0
+	if f.active[u.Name] {
+		pid = f.pids[u.Name]
+	}
 	f.mu.Unlock()
-	return enterprisestatus.Service{Name: u.Name, Kind: u.Kind, State: state, Required: u.Required}, nil
+	return enterprisestatus.Service{Name: u.Name, Kind: u.Kind, State: state, PID: pid, Required: u.Required}, nil
 }
 
 func (f *fakeServices) PlannedRestart(_ context.Context, u Unit) bool {
@@ -320,7 +328,7 @@ type fakeRunner struct {
 	// replies answer a command by filepath.Base(name) and its joined args.
 	replies map[string]fakeReply
 	// acls are the macOS ACL entries of rooted paths, as ls -le prints them;
-	// chmod -h -N removes them.
+	// chmod -h -a# <index> removes one of them.
 	acls map[string][]string
 }
 
@@ -377,7 +385,19 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 	case "chmod":
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		delete(r.acls, args[len(args)-1])
+		path := args[len(args)-1]
+		if len(args) == 4 && args[0] == "-h" && args[1] == "-a#" {
+			index, err := strconv.Atoi(args[2])
+			if entries := r.acls[path]; err == nil && index >= 0 && index < len(entries) {
+				r.acls[path] = slices.Delete(slices.Clone(entries), index, index+1)
+				if len(r.acls[path]) == 0 {
+					delete(r.acls, path)
+				}
+				return CommandResult{}, nil
+			}
+			return CommandResult{ExitCode: 1}, fmt.Errorf("chmod: no ACL entry %s on %s", args[2], path)
+		}
+		delete(r.acls, path)
 		return CommandResult{}, nil
 	case "dpkg", "rpm":
 		return CommandResult{ExitCode: 1}, errors.New("not owned")

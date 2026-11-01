@@ -413,15 +413,15 @@ func usesClosedCodingAgentArgumentSchema(raw json.RawMessage, tool string) bool 
 }
 
 // codingAgentEditKeys names the arguments of a coding-agent edit tool in one
-// dialect: Claude Code's snake_case, OpenCode's camelCase (its native edit
-// and multiedit tools take filePath, oldString, newString and replaceAll), or
-// the Copilot CLI edit tool's path, old_str and new_str (no replace-all).
+// dialect: snake_case, filePath-based camelCase, OpenCode V2's path-based
+// camelCase, or Copilot CLI's path, old_str and new_str (no replace-all).
 type codingAgentEditKeys struct{ path, old, new, all string }
 
 var (
-	snakeCaseEditKeys = codingAgentEditKeys{"file_path", "old_string", "new_string", "replace_all"}
-	camelCaseEditKeys = codingAgentEditKeys{"filePath", "oldString", "newString", "replaceAll"}
-	copilotEditKeys   = codingAgentEditKeys{path: "path", old: "old_str", new: "new_str"}
+	snakeCaseEditKeys  = codingAgentEditKeys{"file_path", "old_string", "new_string", "replace_all"}
+	camelCaseEditKeys  = codingAgentEditKeys{"filePath", "oldString", "newString", "replaceAll"}
+	openCodeV2EditKeys = codingAgentEditKeys{"path", "oldString", "newString", "replaceAll"}
+	copilotEditKeys    = codingAgentEditKeys{path: "path", old: "old_str", new: "new_str"}
 )
 
 // codingAgentEditDialect picks the dialect of an edit call by its arguments.
@@ -430,6 +430,13 @@ var (
 func codingAgentEditDialect(object map[string]any) codingAgentEditKeys {
 	if _, ok := object[camelCaseEditKeys.path]; ok {
 		return camelCaseEditKeys
+	}
+	if _, ok := object[openCodeV2EditKeys.path]; ok {
+		for _, key := range []string{openCodeV2EditKeys.old, openCodeV2EditKeys.new, openCodeV2EditKeys.all} {
+			if _, exists := object[key]; exists {
+				return openCodeV2EditKeys
+			}
+		}
 	}
 	for _, key := range []string{copilotEditKeys.old, copilotEditKeys.new} {
 		if _, ok := object[key]; ok {
@@ -485,11 +492,17 @@ func extractClosedCodingAgentArgs(raw json.RawMessage, tool string) extractedInp
 
 	switch strings.ToLower(tool) {
 	case "read":
-		allowed["file_path"] = stringField
+		pathKey := "file_path"
+		if _, ok := object["path"]; ok {
+			pathKey = "path"
+		}
+		allowed[pathKey] = stringField
 		allowed["limit"] = nonNegativeInteger
 		allowed["offset"] = nonNegativeInteger
-		allowed["pages"] = metadataString
-		require["file_path"] = true
+		if pathKey == "file_path" {
+			allowed["pages"] = metadataString
+		}
+		require[pathKey] = true
 	case "edit":
 		allowed[edit.path] = stringField
 		allowed[edit.old] = literalText
@@ -541,10 +554,9 @@ func extractClosedCodingAgentArgs(raw json.RawMessage, tool string) extractedInp
 							return false
 						}
 					case camelCaseEditKeys.path:
-						// OpenCode's multiedit items repeat the edit tool's
-						// arguments, filePath included, but it applies every
-						// item to the call's own filePath, which is the write
-						// target judged here. The item's copy is metadata.
+						// This shared multiedit format repeats filePath in
+						// each item but applies it to the call's own target.
+						// The item's copy is metadata.
 						text, ok := value.(string)
 						if edit != camelCaseEditKeys || !ok || validateScalar(text, maxScalarBytes) != "" {
 							return false

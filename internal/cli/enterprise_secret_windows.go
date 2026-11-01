@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -217,7 +218,9 @@ func windowsSecretElevation(action string, opts *enterpriseSecretOptions) error 
 	if _, standalone := managedHostWindowsStandalone(); standalone {
 		// Every other standard-account refusal of an enterprise command
 		// on a managed computer exits 5 elevation_required with one
-		// sentence; this one exited 1603 (GAP-0931).
+		// sentence; this one exited 1603 (GAP-0931). It is audited like
+		// them (GAP-2639).
+		reportManagedCommandRefusal("enterprise secret "+action, refusalpipe.ReasonElevationRequired)
 		return withExitCode(&managedViewRefusal{code: "elevation_required", message: windowsSecretStandardUserAnswer(action, opts)},
 			enterprisestatus.WindowsExitAccessDenied)
 	}

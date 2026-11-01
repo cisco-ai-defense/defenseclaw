@@ -411,23 +411,30 @@ func TestHookCallerLimiterAdmitsTenCallsASecondOfOneAccount(t *testing.T) {
 }
 
 // GAP-1693: a burst of an operator's read-only sandbox CLI reads is not
-// refused; the sandbox policy writes keep their own small budget.
+// refused; the sandbox policy writes keep their own small budget. The reads
+// include the views a POST asks (policy explain, policy test): a few
+// back-to-back `sandbox policy explain` calls were refused (es:GAP-0023).
 func TestSandboxCLIReadBurstIsNotThrottled(t *testing.T) {
 	api := &APIServer{}
 	for i := range 40 {
-		rec := httptest.NewRecorder()
-		_, release := api.admitHookCaller(rec,
-			httptest.NewRequest(http.MethodGet, "/api/v1/sandbox/policy/packs", nil), "1001", "/api/v1/sandbox/policy/packs")
-		if release == nil {
-			t.Fatalf("read %d of a sandbox CLI burst refused: %d %s", i, rec.Code, rec.Body.String())
+		for _, read := range []struct{ method, path string }{
+			{http.MethodGet, "/api/v1/sandbox/policy/packs"},
+			{http.MethodPost, "/api/v1/sandbox/policy/explain"},
+			{http.MethodPost, "/api/v1/sandbox/policy/test"},
+		} {
+			rec := httptest.NewRecorder()
+			_, release := api.admitHookCaller(rec, httptest.NewRequest(read.method, read.path, nil), "1001", read.path)
+			if release == nil {
+				t.Fatalf("%s %s %d of a sandbox CLI burst refused: %d %s", read.method, read.path, i, rec.Code, rec.Body.String())
+			}
+			release()
 		}
-		release()
 	}
 	refused := false
 	for range 40 {
 		rec := httptest.NewRecorder()
 		_, release := api.admitHookCaller(rec,
-			httptest.NewRequest(http.MethodPost, "/api/v1/sandbox/policy/test", nil), "1001", "/api/v1/sandbox/policy/test")
+			httptest.NewRequest(http.MethodPost, "/api/v1/sandbox/decisions", nil), "1001", "/api/v1/sandbox/decisions")
 		if release == nil {
 			refused = true
 			break

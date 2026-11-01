@@ -416,6 +416,12 @@ func TestSandboxAuthorityRegistrationFollowsTheSandbox(t *testing.T) {
 	if rec := decide(sandboxrelay.DecisionEgressBlock, sandboxrelay.DecisionScopeAlways); rec.Code != http.StatusOK {
 		t.Fatalf("saved decision of a stopped sandbox: %d %s", rec.Code, rec.Body.String())
 	}
+	// A report only moves it toward stopped; a start registers it again
+	// (GAP-0673).
+	if code, _ := f.report(sbxBob, id, true); code != http.StatusForbidden {
+		t.Fatalf("running report after a reported stop: %d", code)
+	}
+	id = restartedRegistration(t, f, sbxBob, id)
 	if code, _ := f.report(sbxBob, id, true); code != http.StatusOK {
 		t.Fatalf("running report: %d", code)
 	}

@@ -160,6 +160,12 @@ stop_user_units() {
             # shellcheck disable=SC2086 # unit names have no spaces or globs
             user_systemctl "$dir" "$uid" "$gid" "$name" stop $user_units >/dev/null 2>&1
             if user_units_stopped "$dir" "$uid" "$gid" "$name"; then
+                # A unit that ended failed (a daemon that exited 78 once the
+                # uninstall removed the deployment, or an ExecStop the removed
+                # deployment refused) leaves with the package as inactive, not
+                # failed (GAP-0137).
+                # shellcheck disable=SC2086 # unit names have no spaces or globs
+                user_systemctl "$dir" "$uid" "$gid" "$name" reset-failed $user_units >/dev/null 2>&1 || true
                 break
             fi
             tries=$((tries + 1))

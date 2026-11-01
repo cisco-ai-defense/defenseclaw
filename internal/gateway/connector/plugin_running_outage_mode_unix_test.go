@@ -34,7 +34,8 @@ const openCodeRunningSessionHarness = `
 import { pathToFileURL } from "node:url";
 import { writeFileSync } from "node:fs";
 const href = pathToFileURL(process.argv[1]).href;
-const plugin = await (await import(href)).DefenseClaw({ directory: "", client: { tui: { showToast: async () => ({ data: true }) } } });
+console.warn = () => {};
+const plugin = await fixtureBridge(await import(href), { directory: "/work/repo" });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 const verdicts = [];
 for (const [i, callID] of ["C1", "C2"].entries()) {
@@ -83,7 +84,7 @@ func TestOpenCodeRunningSessionFollowsASavedOutageModeChange(t *testing.T) {
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", openCodeRunningSessionHarness, path)
+			cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", withOpenCodeV2Fixture(t, openCodeRunningSessionHarness), path)
 			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0",
 				"DC_CONFIG_PATH="+filepath.Join(dataDir, "config.yaml"), "DC_CONFIG_NEXT="+tc.next)
 			out, err := cmd.Output()

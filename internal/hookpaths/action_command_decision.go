@@ -65,7 +65,8 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 	if facts != nil {
 		globs = &actionGlobs{facts: facts}
 	}
-	if actionProtectedTargetMentionIn(command, cwd, home, 0, false, globs, dialect) {
+	if !actionGitBashReadsAlone(command, home, dialect) &&
+		actionProtectedTargetMentionIn(command, cwd, home, 0, false, globs, dialect) {
 		return "protected-target"
 	}
 	if posixShell && actionWindowsHome(home) && command != "" && len(command) <= MaxPayloadBytes {
@@ -121,6 +122,24 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 			return actionMSYSDrivePath(value) // Git Bash /c/... (GAP-0781 RV8-1)
 		}
 		return value
+	}
+	// The new name of a disk link to the keys file that the command moves
+	// does not exist on the disk yet (rel-1-0-6:GAP-0045), nor does the
+	// backup name of a link a mv with a backup option replaces
+	// (rel-1-0-6:GAP-0144). A POSIX shell on a native Windows host (Git
+	// Bash) renames the link as on Linux, so the same reading holds there,
+	// on the Windows file system.
+	if !windowsHome || runtime.GOOS == "windows" {
+		moveWrites := writes
+		if windowsHome {
+			moveWrites = make([]string, len(writes))
+			for i, write := range writes {
+				moveWrites[i] = msys(write)
+			}
+		}
+		if actionMovedDiskLinkWrite(command, cwd, home, moveWrites) {
+			return true
+		}
 	}
 	for _, target := range writes {
 		if protectedReachPath(OperandPath(msys(target), cwd), protected, ssh) {
@@ -180,8 +199,18 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 // ActionCommandAuditReason keeps the bounded parser's uncertainty class for
 // the hook audit header. It must not be used as a deny decision.
 func ActionCommandAuditReason(command, cwd, home string) string {
+	return ActionCommandAuditReasonWithDialect(command, cwd, home, "")
+}
+
+// ActionCommandAuditReasonWithDialect is ActionCommandAuditReason with the
+// gateway's shell dialect hint: a POSIX shell's call on a native Windows
+// host (Git Bash) gets the POSIX grammar's class, as on Linux (GAP-1717).
+func ActionCommandAuditReasonWithDialect(command, cwd, home string, dialect actionfacts.Dialect) string {
 	if strings.TrimSpace(command) == "" {
 		return ""
+	}
+	if dialect == actionfacts.DialectPOSIX && runtime.GOOS == "windows" && actionWindowsHome(home) {
+		return actionPosixCommandDecision(command, cwd, home, 0)
 	}
 	return actionCommandDecision(command, cwd, home, 0)
 }
@@ -206,9 +235,22 @@ func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfa
 		}
 	}
 	if actionWindowsHome(home) {
+		// A Git Bash call the POSIX grammar reads alone is read by the
+		// POSIX reader, on the Windows file system; another POSIX shell
+		// call on this host is read by both readers (GAP-1717).
+		if actionGitBashReadsAlone(command, home, dialect) {
+			return actionPosixPrivateKeyRead(command, cwd, home, dialect)
+		}
 		return actionWindowsPrivateKeyReadIn(command, cwd, home, dialect == actionfacts.DialectPOSIX) ||
-			actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect)
+			actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect) ||
+			dialect == actionfacts.DialectPOSIX && runtime.GOOS == "windows" &&
+				actionPosixPrivateKeyRead(command, cwd, home, dialect)
 	}
+	return actionPosixPrivateKeyRead(command, cwd, home, dialect)
+}
+
+// actionPosixPrivateKeyRead is the POSIX shell's private-key reader.
+func actionPosixPrivateKeyRead(command, cwd, home string, dialect actionfacts.Dialect) bool {
 	if actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect) {
 		return true
 	}
@@ -572,6 +614,10 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 	if actionWindowsHome(home) {
 		return actionWindowsCommandDecision(command, cwd, home, depth)
 	}
+	return actionPosixCommandDecision(command, cwd, home, depth)
+}
+
+func actionPosixCommandDecision(command, cwd, home string, depth int) string {
 	if command == "" || !filepath.IsAbs(cwd) || home == "" {
 		return ""
 	}
@@ -966,7 +1012,7 @@ func actionBoundedGlob(pattern string, dotglob bool) []string {
 				next = append(next, filepath.Join(dir, component))
 				continue
 			}
-			entries, err := os.ReadDir(dir)
+			entries, err := pathReadDir(dir)
 			if err != nil {
 				continue
 			}
@@ -1015,8 +1061,8 @@ func actionPrivateReadPath(value, cwd, home string) bool {
 		if samePathName(resolved, key) {
 			return true
 		}
-		resolvedInfo, err1 := os.Stat(resolved)
-		keyInfo, err2 := os.Stat(key)
+		resolvedInfo, err1 := pathStat(resolved)
+		keyInfo, err2 := pathStat(key)
 		if err1 == nil && err2 == nil && os.SameFile(resolvedInfo, keyInfo) {
 			return true
 		}
@@ -1046,7 +1092,7 @@ func actionGeneratedPathSafe(value, cwd, home string) bool {
 		return false
 	}
 	pattern := strings.ReplaceAll(filepath.Base(target), actionGeneratedMarker, "*")
-	directory, err := os.Open(parent)
+	directory, err := pathOpen(parent)
 	if err != nil {
 		return false
 	}
@@ -1191,7 +1237,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			if index >= len(words) || words[index] == "" {
 				return "nested-shell"
 			}
-			return actionCommandDecision(words[index], cwd, home, depth+1)
+			return actionPosixCommandDecision(words[index], cwd, home, depth+1)
 		}
 		for _, word := range words[1:] {
 			if word == "-c" || strings.Contains(word, "c") && strings.HasPrefix(word, "-") && len(word) <= 4 {
@@ -1206,7 +1252,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			if !read {
 				return "nested-shell"
 			}
-			return actionCommandDecision(content, cwd, home, depth+1)
+			return actionPosixCommandDecision(content, cwd, home, depth+1)
 		}
 		return "nested-shell" // stdin, -s or an unrecognized option.
 	}
@@ -1272,9 +1318,9 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		if !read {
 			return "eval-source"
 		}
-		return actionCommandDecision(content, cwd, home, depth+1)
+		return actionPosixCommandDecision(content, cwd, home, depth+1)
 	case "git":
-		return actionGitDecision(words, cwd, home, depth+1)
+		return actionGitDecision(words, cwd, home, depth+1, true)
 	case "command", "exec", "busybox", "time", "nohup":
 		index := 1
 		for index < len(words) && strings.HasPrefix(words[index], "-") {
@@ -1322,7 +1368,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 				if index+1 >= len(words) || words[index+1] == "" {
 					return "dynamic-command"
 				}
-				return actionCommandDecision(words[index+1], cwd, home, depth+1)
+				return actionPosixCommandDecision(words[index+1], cwd, home, depth+1)
 			case strings.HasPrefix(w, "--chdir="):
 				cwd = OperandPath(strings.TrimPrefix(w, "--chdir="), cwd)
 				index++
@@ -1343,7 +1389,13 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 	return ""
 }
 
-func actionGitDecision(words []string, cwd, home string, depth int) string {
+func actionGitDecision(words []string, cwd, home string, depth int, posix bool) string {
+	// git runs an alias, an ssh command, an editor or a pager with sh, Git
+	// Bash's on Windows; the POSIX reading of a Git Bash call reads them so.
+	decide := actionCommandDecision
+	if posix {
+		decide = actionPosixCommandDecision
+	}
 	if depth >= 8 {
 		return "dynamic-command"
 	}
@@ -1425,9 +1477,9 @@ func actionGitDecision(words []string, cwd, home string, depth int) string {
 	}
 	if alias, ok := aliases[subcommand]; ok {
 		if strings.HasPrefix(alias, "!") {
-			return actionCommandDecision(strings.TrimPrefix(alias, "!"), cwd, home, depth+1)
+			return decide(strings.TrimPrefix(alias, "!"), cwd, home, depth+1)
 		}
-		return actionCommandDecision("git "+alias+" "+strings.Join(words[index+1:], " "), cwd, home, depth+1)
+		return decide("git "+alias+" "+strings.Join(words[index+1:], " "), cwd, home, depth+1)
 	}
 	for name, command := range commands {
 		switch name {
@@ -1446,7 +1498,7 @@ func actionGitDecision(words []string, cwd, home string, depth int) string {
 		case "core.hookspath":
 			return "dynamic-command" // A hook script can run outside the work directory.
 		}
-		if reason := actionCommandDecision(command, cwd, home, depth+1); reason != "" {
+		if reason := decide(command, cwd, home, depth+1); reason != "" {
 			return reason
 		}
 	}
@@ -1516,7 +1568,7 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 				protectedReachPath(OperandPath(words[len(words)-1], cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 				return "dynamic-argument"
 			}
-			return actionCommandDecision(words[index+1], cwd, home, depth+1)
+			return actionPosixCommandDecision(words[index+1], cwd, home, depth+1)
 		}
 		if (program == "find" || program == "xargs") && strings.HasPrefix(word, "-exec") {
 			break

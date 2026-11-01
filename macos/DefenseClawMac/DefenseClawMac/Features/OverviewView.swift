@@ -1090,7 +1090,11 @@ struct OverviewView: View {
     /// AppState.overviewEnforcementMetrics so they reconcile with the menu bar.
     private func loadData() async {
         let installationGeneration = appState.installationGeneration
-        let freshSummary = await appState.audit.enforcementSummary()
+        // read_repository.py: get_enforcement_counts(cfg=config) — the
+        // operator block/allow decisions live in config.yaml asset_policy on
+        // runtime 1.0.x; the journal alone shows 0 after every decision.
+        let operatorLists = OperatorAssetLists.read(raw: appState.config.raw)
+        let freshSummary = await appState.audit.enforcementSummary(operatorLists: operatorLists)
         guard installationGeneration == appState.installationGeneration else { return }
         let freshHourly = await appState.audit.hourlyEnforcement24h()
             .map { HourlyPoint(hour: $0.hour, klass: $0.action, count: $0.count) }

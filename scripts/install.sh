@@ -328,6 +328,12 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+# DEFENSECLAW_REPO is a GitHub owner/name or an https:// mirror base URL. Any
+# other value (an http:// URL) would be appended to github.com and end in a
+# 404 (GAP-1065). The value is not echoed: a mirror URL can carry credentials.
+if [[ ! "${REPO}" =~ ^https://[^[:space:]]+$ && ! "${REPO}" =~ ^[^[:space:]/:@]+/[^[:space:]/:@]+$ ]]; then
+    usage_error "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL (an http:// URL is not accepted)"
+fi
 if [[ "${NO_OPENCLAW}" == true ]]; then
     [[ "${CONNECTOR}" != openclaw ]] || die "--no-openclaw cannot be combined with --connector openclaw"
     CONNECTOR="${CONNECTOR:-none}"
@@ -399,11 +405,30 @@ latest_release() {
     printf '%s' "${location}"
 }
 
+# refuse_unguarding_move rollback|downgrade VERSION: the installed CLI says
+# whether DefenseClaw VERSION can guard the agents set up here (OpenCode V2
+# before 1.0.6: rel-1-0-6 GAP-0028 for a rollback, GAP-0128 for a downgrade)
+# and stops before anything changes. A CLI without the check (1.0.5 and
+# earlier, or a newer target) answers 2 and is not shown: no refusal.
+refuse_unguarding_move() {
+    local kind="$1" version="$2" out rc=0
+    [[ -x "${BIN_DIR}/defenseclaw" ]] || return 0
+    out="$("${BIN_DIR}/defenseclaw" migrate "--check-${kind}-to" "${version}" 2>&1)" || rc=$?
+    [[ ${rc} -eq 1 ]] || return 0
+    printf '%s\n' "${out}" >&2
+    if [[ "${kind}" == rollback ]]; then
+        die "Rollback cancelled; nothing was changed (see above)"
+    fi
+    die "Downgrade cancelled; nothing was changed (see above)"
+}
+
 # run_release_installer VERSION ARGS...: download VERSION's installer, verify it,
 # and run it. Used for --version and for an unstamped (source) copy.
 run_release_installer() {
     local version="$1"; shift
     local tmp base="${TMPDIR:-/tmp}"
+    # An older release's installer has no check for what it cannot guard.
+    refuse_unguarding_move downgrade "${version}"
     tmp="$(mktemp -d "${base%/}/defenseclaw-upgrade-XXXXXX")"
     info "Fetching the installer for DefenseClaw ${version}"
     curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/install.sh" \
@@ -835,9 +860,18 @@ installed_version() {
 
 # Older OpenCode and Amp processes retain their plugin in memory. Refuse a
 # gateway swap only when the process is the exact entry installed for that
-# agent. Unproven candidates are audited and do not block the upgrade.
+# agent. Unproven candidates are audited and do not block the upgrade. The
+# audit line goes to the install log only: the console shows the installer's
+# own steps, and a process that exits between the listing and the lookup (the
+# listing's own ps, say) is not something the user can act on (GAP-0103).
+# Without a log (a unit test, a sourced call) it falls back to stderr.
 agent_identity_audit() {
-    printf 'audit: live-agent identity unproven for PID %s: %s\n' "$1" "$2" >&2
+    local line
+    printf -v line 'audit: live-agent identity unproven for PID %s: %s' "$1" "$2"
+    if [[ -n "${LOG:-}" ]] && printf '%s\n' "${line}" >> "${LOG}" 2>/dev/null; then
+        return 0
+    fi
+    printf '%s\n' "${line}" >&2
 }
 
 # resolved_agent_path FILE: the file's real path, with no PATH search.
@@ -884,10 +918,12 @@ npm_config_prefixes() {
 
 # The installer's entry evidence: native fixed locations and npm/Bun
 # launcher symlinks to their exact entry: the Node script, or the native
-# bin/opencode.exe that current opencode-ai links (GAP-1356). The links are
-# looked for in the usual prefixes, npm's configured prefix and each PATH
-# folder. A folder name, manifest or plain command on PATH is not an entry
-# record: only a launcher link to the package's own entry is.
+# bin/opencode.exe the package links (GAP-1356). The links are looked for in
+# the usual prefixes, npm's configured prefix and each PATH folder. A folder
+# name, manifest or plain command on PATH is not an entry record: only a
+# launcher link to the package's own entry is. The V1 opencode-ai entries
+# remain only to stop a running V1 install safely during an upgrade
+# (setup requires V2); remove them with the 1.0.x upgrade path.
 installed_agent_programs() {
     local agent name path target base link prefix seen=":"
     local -a bases folders
@@ -913,7 +949,8 @@ installed_agent_programs() {
             [[ -L "${link}" ]] || continue
             target="$(resolved_agent_path "${link}")" || continue
             case "${agent}:${target}" in
-                OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+                OpenCode:*/node_modules/@opencode/cli/bin/opencode | OpenCode:*/node_modules/@opencode/cli/bin/opencode.exe | \
+                    OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
                     Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                     printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
             esac
@@ -933,7 +970,8 @@ runtime_agent_programs() {
         [[ -L "${link}" ]] || continue
         target="$(resolved_agent_path "${link}")" || continue
         case "${agent}:${target}" in
-            OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+            OpenCode:*/node_modules/@opencode/cli/bin/opencode | OpenCode:*/node_modules/@opencode/cli/bin/opencode.exe | \
+                OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
                 Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                 printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
         esac
@@ -947,14 +985,11 @@ runtime_agent_programs() {
 # Only the launcher npm put in <prefix>/bin, resolving to exactly that entry,
 # is evidence, as for a configured prefix (GAP-1761).
 entry_prefix_agent_programs() {
-    local pid="$1" entry="${2% (deleted)}" word agent prefix link target
+    local pid="$1" entry="${2% (deleted)}" agent prefix link target
     local -a argv=()
     case "${entry##*/}" in
         node | nodejs)
-            while IFS= read -r -d '' word; do
-                argv+=("${word}")
-                [[ ${#argv[@]} -ge 2 ]] && break
-            done < <(process_argv "${pid}" 2>/dev/null)
+            argv_head "${pid}"
             [[ ${#argv[@]} -ge 2 && "${argv[1]}" == /* ]] || return 0
             entry="$(resolved_agent_path "${argv[1]}")" || return 0
             ;;
@@ -1012,26 +1047,76 @@ for line in sys.stdin:
     printf '%s\n' "${rows}"
 }
 
-# process_argv PID: kernel argument boundaries, never the flattened ps text.
-process_argv() {
+# process_argv_heads PID...: the first two kernel argument words of each PID
+# (their boundaries, never the flattened ps text), one line per readable PID:
+# PID<TAB>COUNT<TAB>=WORD0<TAB>=WORD1, with %, tab and newline %-escaped. One
+# call reads every PID, with one perl on macOS: a <(...) per process kept one
+# descriptor each in macOS /bin/bash 3.2, which then ran out of them or
+# aborted (rel-1-0-6 GAP-0203, the class of GAP-0185).
+process_argv_heads() {
+    local pid n w0 w1 tab=$'\t' nl=$'\n'
+    [[ $# -gt 0 ]] || return 0
     if [[ "${OSTYPE:-}" == linux* ]]; then
-        cat "/proc/$1/cmdline" 2>/dev/null
-        return
+        for pid in ${1+"$@"}; do
+            [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+            n=0 w0="" w1=""
+            { IFS= read -r -d '' w0 && n=1 && IFS= read -r -d '' w1 && n=2; } 2>/dev/null < "/proc/${pid}/cmdline" || true
+            (( n > 0 )) || continue
+            (( n > 1 )) || w1=""
+            w0="${w0//[%]/%25}"; w0="${w0//"${tab}"/%09}"; w0="${w0//"${nl}"/%0A}"
+            w1="${w1//[%]/%25}"; w1="${w1//"${tab}"/%09}"; w1="${w1//"${nl}"/%0A}"
+            printf '%s\t%s\t=%s\t=%s\n' "${pid}" "${n}" "${w0}" "${w1}"
+        done
+        return 0
     fi
-    [[ "${OSTYPE:-}" == darwin* && -x /usr/bin/perl ]] || return 1
+    [[ "${OSTYPE:-}" == darwin* && -x /usr/bin/perl ]] || return 0
     /usr/bin/perl -e '
-        my $mib = pack("i3", 1, 49, $ARGV[0]); my $len = pack("Q", 0);
-        syscall(202, $mib, 3, 0, $len, 0, 0) == 0 or exit 1;
-        my $buf = "\0" x unpack("Q", $len);
-        syscall(202, $mib, 3, $buf, $len, 0, 0) == 0 or exit 1;
-        $buf = substr($buf, 0, unpack("Q", $len));
-        my $argc = unpack("i", $buf);
-        my @words = split(/\0/, substr($buf, 4), -1);
-        shift @words;
-        shift @words while @words && $words[0] eq "";
-        $argc = @words if $argc > @words;
-        print map { "$_\0" } @words[0 .. $argc - 1];
-    ' "$1"
+        for my $pid (@ARGV) {
+            next unless $pid =~ /^[0-9]+$/;
+            my $mib = pack("i3", 1, 49, $pid); my $len = pack("Q", 0);
+            syscall(202, $mib, 3, 0, $len, 0, 0) == 0 or next;
+            my $buf = "\0" x unpack("Q", $len);
+            syscall(202, $mib, 3, $buf, $len, 0, 0) == 0 or next;
+            $buf = substr($buf, 0, unpack("Q", $len));
+            my $argc = unpack("i", $buf);
+            my @words = split(/\0/, substr($buf, 4), -1);
+            shift @words;
+            shift @words while @words && $words[0] eq "";
+            $argc = @words if $argc > @words;
+            $argc = 2 if $argc > 2;
+            next if $argc < 1;
+            my @head = @words[0 .. $argc - 1];
+            s/%/%25/g, s/\t/%09/g, s/\n/%0A/g for @head;
+            print join("\t", $pid, $argc, "=" . $head[0], "=" . ($argc > 1 ? $head[1] : "")), "\n";
+        }
+    ' "$@" 2>/dev/null || true
+}
+
+# argv_heads_load PID...: read the first two words of every PID once
+# (process_argv_heads) into the caller's head_n, head_w0 and head_w1, indexed
+# by PID, so each lookup after it is one array read.
+argv_heads_load() {
+    local pid n w0 w1 heads tab=$'\t' nl=$'\n'
+    heads="$(process_argv_heads ${1+"$@"})"
+    while IFS="${tab}" read -r pid n w0 w1; do
+        [[ "${pid}" =~ ^[0-9]+$ && ( "${n}" == 1 || "${n}" == 2 ) ]] || continue
+        w0="${w0#=}"; w1="${w1#=}"
+        w0="${w0//[%]0A/${nl}}"; w0="${w0//[%]09/${tab}}"; w0="${w0//[%]25/%}"
+        w1="${w1//[%]0A/${nl}}"; w1="${w1//[%]09/${tab}}"; w1="${w1//[%]25/%}"
+        head_n[pid]="${n}"; head_w0[pid]="${w0}"; head_w1[pid]="${w1}"
+    done <<< "${heads}"
+    return 0
+}
+
+# argv_head PID: set the caller's argv to PID's words argv_heads_load read;
+# empty when none were readable.
+argv_head() {
+    argv=()
+    case "${head_n[$1]:-0}" in
+        1) argv=("${head_w0[$1]}") ;;
+        2) argv=("${head_w0[$1]}" "${head_w1[$1]}") ;;
+    esac
+    return 0
 }
 
 # A relative Node entry is resolved from the process's own cwd on Linux.
@@ -1069,11 +1154,16 @@ agent_of() {
 }
 
 loaded_plugin_agents() {
-    local pids installed rows runtime prefixed pid program agent word fresh
-    local -a argv
+    local pids installed rows runtime prefixed pid program agent word fresh nodes=""
+    local -a argv head_n head_w0 head_w1
     installed="$(installed_agent_programs)"
     pids="$(ps -u "$(id -u)" -o pid= 2>/dev/null)" || { [[ -z "${installed}" ]] || agent_identity_audit 0 'process list unreadable'; return 0; }
     rows="$(process_programs "${pids}")"
+    while IFS=$'\t' read -r pid program; do
+        program="${program% (deleted)}"
+        case "${program##*/}" in node | nodejs) [[ "${pid}" =~ ^[0-9]+$ ]] && nodes+="${nodes:+ }${pid}" ;; esac
+    done <<< "${rows}"
+    argv_heads_load ${nodes}
     runtime="$(while IFS=$'\t' read -r pid program; do runtime_agent_programs "${program}"; done <<< "${rows}")"
     [[ -z "${runtime}" ]] || installed+="${installed:+$'\n'}${runtime}"
     prefixed="$(while IFS=$'\t' read -r pid program; do [[ -z "${program}" ]] || entry_prefix_agent_programs "${pid}" "${program}"; done <<< "${rows}")"
@@ -1089,10 +1179,7 @@ loaded_plugin_agents() {
         word="${program% (deleted)}"
         case "${word##*/}" in
             node | nodejs)
-                while IFS= read -r -d '' word; do
-                    argv+=("${word}")
-                    [[ ${#argv[@]} -ge 2 ]] && break
-                done < <(process_argv "${pid}" 2>/dev/null)
+                argv_head "${pid}"
                 [[ ${#argv[@]} -gt 0 ]] || { agent_identity_audit "${pid}" 'arguments unreadable'; continue; }
                 ;;
         esac
@@ -1112,7 +1199,7 @@ loaded_plugin_agents() {
 assert_no_loaded_plugin_agents() {
     local agents
     agents="$(loaded_plugin_agents)"
-    [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: ${agents//$'\n'/, }"
+    [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw (OpenCode V2 keeps a background server after its window closes: stop it with 'opencode service stop'), then run this installer again; gateway still running: ${agents//$'\n'/, }"
 }
 
 stop_gateway() {
@@ -1408,6 +1495,11 @@ if [[ "${ROLLBACK}" == true ]]; then
     # the saved data before anything of this install changes.
     AUDIT_DAMAGED=""
     if version_lt "${back_to}" 1.0.0; then check_rollback_data; fi
+    # rel-1-0-6 GAP-0028: a release that cannot guard an agent here (OpenCode
+    # V2 before 1.0.6) says so before anything changes.
+    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}"; then
+        refuse_unguarding_move rollback "${back_to}"
+    fi
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true
     # The swap overwrites previous/GATEWAY_WAS_RUNNING with this install's state.
@@ -1432,10 +1524,13 @@ if [[ "${ROLLBACK}" == true ]]; then
         fi
         die "Rollback failed part-way; see ${LOG}"
     fi
-    # rel-1-0-4:GAP-2503: going back to an older release, drop the hook
-    # helper the newer install left in the restored hooks, so the older
-    # gateway writes its own when it starts.
-    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}"; then
+    # rel-1-0-4:GAP-2503: going back to 1.0.4 or older, drop the hook helper
+    # the newer install left in the restored hooks, so the older gateway
+    # writes its own when it starts. 1.0.5 and later ship the same helper,
+    # and with only plugin connectors (OpenCode) set up their gateway never
+    # writes one: it refused to start without it and the rollback undid
+    # itself (rel-1-0-6:GAP-0047).
+    if [[ -n "${current}" ]] && version_lt "${back_to}" "${current}" && version_lt "${back_to}" 1.0.5; then
         drop_newer_hook_helper "${PREVIOUS}/data"
     fi
     # GAP-0009: a connector set up after the upgrade is not configured in the
@@ -1879,6 +1974,13 @@ except Exception:
     pass
 PY
 }
+openshell_floor_notice() {
+    # Sandboxes on and the OpenShell gateway older than 0.1.5: this release
+    # starts no sandbox on it and doctor fails its Gateway check, so the
+    # upgrade names the floor and the fix (GAP-0059).
+    [[ -x "${VENV}/bin/python" ]] || return 0
+    "${VENV}/bin/python" -I -c 'from defenseclaw import config; from defenseclaw.commands.cmd_doctor import openshell_floor_upgrade_notice as notice; print(notice(config.load()))' 2>/dev/null || true
+}
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then
     changed="Upgraded from ${PREV_VERSION}"
@@ -1888,6 +1990,8 @@ if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then
     if version_lt "${PREV_VERSION}" 1.0.4 && version_lt "${PREV_VERSION}" "${VERSION}" && [[ "$(outage_open_notice)" == notice ]]; then
         printf '  %s\n' 'Gateway outages now let calls run with a warning (the default and permissive policies). Run `defenseclaw guardrail fail-mode closed` to keep blocking them.'
     fi
+    FLOOR_NOTICE="$(openshell_floor_notice)"
+    [[ -z "${FLOOR_NOTICE}" ]] || warn "${FLOOR_NOTICE}"
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
         printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
     fi
@@ -2148,6 +2252,7 @@ snapshot() {
         [[ -L "${BIN_DIR}/${link}" ]] && { cp -P "${BIN_DIR}/${link}" "${SNAP}/bin/${link}" || return 1; }
     done
     write_busy_shim
+    wait_cli_calls_done
     while IFS= read -r name; do
         cp -Rp "${DEFENSECLAW_HOME}/${name}" "${SNAP}/data/" || return 1
     done < <(data_entries)
@@ -2264,15 +2369,26 @@ undo_snapshot() {
 write_busy_shim() {
     local shim="${BIN_DIR}/.defenseclaw.busy"
     mkdir -p "${BIN_DIR}" 2>/dev/null || return 0
+    # sh and Python both run it: a call that started from the old Python
+    # entry has Python read this path again by name and so may get the shim;
+    # its Python part hands the path to sh (rel-1-0-6 GAP-0105).
     if cat > "${shim}" 2>/dev/null <<EOF
 #!/bin/sh
 ${BUSY_SHIM_MARK} (pid $$).
+""":"
 if kill -0 $$ 2>/dev/null; then
     echo "defenseclaw: a DefenseClaw install is running (pid $$); run the command again when it has finished" >&2
 else
     echo "defenseclaw: a DefenseClaw install (pid $$) stopped before it finished; run the installer again to finish or undo it: ${INSTALL_AGAIN:-the install command}" >&2
 fi
 exit 1
+":"""
+import os, sys
+try:
+    os.execv("/bin/sh", ["/bin/sh", __file__] + sys.argv[1:])
+except OSError:
+    sys.stderr.write("defenseclaw: a DefenseClaw install is running; run the command again when it has finished\\n")
+    sys.exit(1)
 EOF
     then
         chmod 755 "${shim}" && mv -f "${shim}" "${BIN_DIR}/defenseclaw" && return 0
@@ -2281,12 +2397,87 @@ EOF
     return 0
 }
 
+# shell_runnable_entry FILE: let sh run the venv's Python entry script too.
+# The kernel starts a script's interpreter with the path the caller named,
+# and the interpreter opens that path again: a call that started from the
+# busy shim (#!/bin/sh) read the new Python entry there once the link was
+# published, and sh ran it (import: command not found, rel-1-0-6 GAP-0105).
+# Lines 2-4 are a string to Python and, to sh, a no-op and an exec of the
+# entry's own interpreter. uv's #!/bin/sh form (long or spaced paths) is
+# already both, and an interpreter with arguments or quotes is left alone.
+shell_runnable_entry() {
+    local entry="$1" first second interp tmp
+    [[ -f "${entry}" && ! -L "${entry}" ]] || return 0
+    { IFS= read -r first && IFS= read -r second; } < "${entry}" || return 0
+    [[ "${second}" != '""":"' ]] || return 0
+    case "${first}" in
+        '#!/bin/sh'*) return 0 ;;
+        '#!/'*) ;;
+        *) return 0 ;;
+    esac
+    interp="${first#??}"
+    case "${interp}" in *[[:space:]\'\"\\\$\`]*) return 0 ;; esac
+    tmp="${entry%/*}/.${entry##*/}.sh-runnable"
+    { printf '%s\n' "${first}" '""":"' "exec '${interp}' \"\$0\" \"\$@\"" '":"""' \
+        && tail -n +2 "${entry}"; } > "${tmp}" && chmod 755 "${tmp}" && mv -f "${tmp}" "${entry}" \
+        || { rm -f "${tmp}"; return 1; }
+}
+
+# publish_link TARGET NAME: point BIN_DIR/NAME at TARGET with one rename.
+# `ln -sfn` over the busy shim removes it first, and a command run in that
+# moment found no CLI; with the rename it finds the old entry, the busy shim
+# or the new one, never a missing or partly written one (rel-1-0-6 GAP-0105).
+publish_link() {
+    local new="${BIN_DIR}/.$2.new"
+    rm -f "${new}" && ln -s "$1" "${new}" && mv -f "${new}" "${BIN_DIR}/$2"
+}
+
+# wait_cli_calls_done: with the busy shim in place, wait (at most 15 s) for
+# CLI calls of this account that already started from the old venv. Moving the
+# venv under a call that was still importing failed it with
+# ModuleNotFoundError, or had the shell run the entry script (rel-1-0-6
+# GAP-0105). A process that keeps running (the TUI) is not waited for longer.
+# One ps and one awk per poll, no process substitution and no command per
+# process: macOS /bin/bash 3.2 keeps the descriptor of every <(...) a function
+# opens and aborts (Abort trap: 6) once it holds a few hundred of them
+# (rel-1-0-6 GAP-0185). -ww: ps cuts the command at $COLUMNS otherwise. The
+# shells this installer runs in (its parents) are not waited for.
+wait_cli_calls_done() {
+    local deadline=$((SECONDS + 15)) uid busy
+    [[ -d "${VENV}" ]] || return 0
+    uid="$(id -u)"
+    while (( SECONDS < deadline )); do
+        busy="$(ps -A -ww -o uid= -o pid= -o ppid= -o command= 2>/dev/null | awk \
+            -v uid="${uid}" -v self="$$" -v prefix="${VENV}/bin/" '
+            {
+                cmd = $0
+                sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+[0-9]+[ \t]+/, "", cmd)
+                parent[$2] = $3
+                if ($1 == uid && index(cmd, prefix) == 1) found[$2] = 1
+            }
+            END {
+                for (p = self; p in parent && !(p in seen); p = parent[p]) {
+                    seen[p] = 1
+                    delete found[p]
+                }
+                for (p in found) { print "busy"; exit }
+            }')" || true
+        [[ -z "${busy}" ]] && return 0
+        sleep 0.2
+    done
+    return 0
+}
+
 # restore_links SLOT: put back the CLI links SLOT saved, over the busy shim.
+# The entry a restored defenseclaw link names (an earlier release's venv) is
+# made runnable by sh first, as swap_in does for a new one (rel-1-0-6 GAP-0105).
 restore_links() {
-    local link
+    local link new
     for link in ${MANAGED_LINKS}; do
         if [[ -L "$1/bin/${link}" ]]; then
-            rm -f "${BIN_DIR:?}/${link}" && cp -P "$1/bin/${link}" "${BIN_DIR}/${link}" || true
+            [[ "${link}" != defenseclaw ]] || shell_runnable_entry "$(readlink "$1/bin/${link}")" || true
+            new="${BIN_DIR}/.${link}.new"
+            { rm -f "${new}" && cp -P "$1/bin/${link}" "${new}" && mv -f "${new}" "${BIN_DIR}/${link}"; } || true
         elif [[ -f "${BIN_DIR}/${link}" && ! -L "${BIN_DIR}/${link}" ]] \
             && [[ "$(head -n 2 "${BIN_DIR}/${link}" 2>/dev/null)" == *"${BUSY_SHIM_MARK}"* ]]; then
             rm -f "${BIN_DIR:?}/${link}"
@@ -2362,10 +2553,14 @@ swap_in() {
         && chmod 700 "${INSTALLER_DIR}/.defenseclaw-hook-post.new" \
         && mv -f "${INSTALLER_DIR}/.defenseclaw-hook-post.new" "${INSTALLER_DIR}/defenseclaw-hook-post" \
         && record_binaries || return 1
+    # The CLI the links name must start before any link names it: until
+    # then the busy shim answers (rel-1-0-6 GAP-0105).
+    shell_runnable_entry "${VENV}/bin/defenseclaw" || { warn "Could not prepare the new DefenseClaw CLI entry"; return 1; }
+    "${VENV}/bin/defenseclaw" --version >/dev/null 2>&1 || { warn "The new DefenseClaw CLI does not start"; return 1; }
     for link in ${MANAGED_LINKS}; do
         target="${VENV}/bin/${link}"
         [[ -x "${target}" ]] || continue
-        ln -sfn "${target}" "${BIN_DIR}/${link}" || return 1
+        publish_link "${target}" "${link}" || return 1
     done
     if [[ -n "${APP_PATH}" ]]; then
         swap_app || return 1
@@ -2870,6 +3065,7 @@ stash_live() {
         [[ -L "${BIN_DIR}/${link}" ]] && { cp -P "${BIN_DIR}/${link}" "${slot}/bin/${link}" || return 1; }
     done
     write_busy_shim
+    wait_cli_calls_done
     while IFS= read -r name; do
         mv "${DEFENSECLAW_HOME}/${name}" "${slot}/data/" || return 1
     done < <(data_entries)

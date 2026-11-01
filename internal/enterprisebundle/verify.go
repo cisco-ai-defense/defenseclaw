@@ -177,6 +177,10 @@ type VerifyResult struct {
 	// with a store that could not be read, or on a refusal before that step.
 	SecretRefsMissing  []string
 	SecretRefsMismatch []string
+	// SecretRefs is the state of every secret_refs entry, in manifest
+	// order, set exactly when SecretRefsMissing is. It carries names and
+	// booleans only, never a value or a digest of one.
+	SecretRefs []SecretRefState
 	// Rendered is the config.yaml Verify validated, rendered for the device
 	// layout against the private stage directory. The apply renders the
 	// same file against its version directory, so the two differ only in
@@ -262,12 +266,14 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 		// value, and the result lists all of them: the caller stores them
 		// in one pass.
 		unchecked, missing, mismatch := false, []string{}, []string{}
+		states := make([]SecretRefState, 0, len(m.SecretRefs))
 		var refusal error
 		for _, ref := range m.SecretRefs {
 			value, err := in.SecretValue(ref.Name())
 			bound := err == nil && ref.Binds(m.TenantID, value)
 			stored := len(value) > 0
 			clear(value)
+			states = append(states, SecretRefState{Name: ref.Name(), Required: ref.Required, Present: stored, ValueMatch: stored && bound})
 			switch {
 			case err != nil:
 				unchecked = true
@@ -294,7 +300,7 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 		if unchecked {
 			res.Warnings = append(res.Warnings, Warning{Code: WarnSecretPresenceUnchecked, Message: "the enterprise secret store could not be read; credential presence and values were not checked"})
 		} else {
-			res.SecretRefsMissing, res.SecretRefsMismatch = missing, mismatch
+			res.SecretRefsMissing, res.SecretRefsMismatch, res.SecretRefs = missing, mismatch, states
 		}
 		if refusal != nil {
 			return res, refusal

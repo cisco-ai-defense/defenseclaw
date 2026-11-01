@@ -19,7 +19,6 @@ package gateway
 import (
 	"encoding/base64"
 	"path"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -27,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -1513,7 +1513,19 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	commandText := strings.ToLower(input.Command)
-	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(request, facts)
+	overBudget, unresolved := false, false
+	evidence := request
+	evidence.overBudgetOmission = &overBudget
+	evidence.unresolvedTarget = &unresolved
+	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
+	if symlinkWrite && overBudget {
+		// The only write found is an operand the client's full bounded map
+		// left out. The call still blocks, as over the evaluation budget,
+		// not as a key write it does not name (GAP-0146); a protected target
+		// the client found is its ActionDecisionKey and is proved above.
+		symlinkWrite = false
+		findings = withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+	}
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
 		!strings.Contains(commandText, "base64") && !symlinkWrite &&
@@ -1534,21 +1546,39 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
+			// A file tool write whose every target is a sudoers file keeps
+			// this block (a managed gateway cannot verify a target the user
+			// cannot read) and its severity, but names the sudoers rule of
+			// the pack, not the SSH keys rule (GAP-0190).
+			named := rule
+			if commandText == "" && trustedSudoersOnlyWrite(facts) {
+				if _, sudoers, found := trustedActionCatalogRule(generation, "PATH-ETC-SUDOERS"); found {
+					named = sudoers
+				}
+			}
 			kept := findings[:0]
 			for _, finding := range findings {
 				if finding.RuleID != "PATH-SSH-DIR" &&
-					finding.RuleID != "persistence.ssh_authorized_keys_command" {
+					finding.RuleID != "persistence.ssh_authorized_keys_command" &&
+					finding.RuleID != named.ID {
 					kept = append(kept, finding)
 				}
 			}
-			title := rule.Title
+			title := named.Title
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
+			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
+				!trustedAuthorizedKeysWriteProof(input, facts, false, clientGlobFacts(request)) &&
+				!trustedSandboxGuestAuthorizedKeysWrite(request) {
+				// The only write found is one the hook client and this
+				// gateway could not resolve: it still fails closed, named as
+				// what it is, not as a key write (rel-1-0-2:GAP-0690).
+				title = unresolvedWriteTargetTitle
 			}
 			return append(kept, adjustConfidence(input.Tool, RuleFinding{
-				RuleID: rule.ID, Title: title, Severity: rule.Severity,
+				RuleID: named.ID, Title: title, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
-				Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
+				Tags: append([]string(nil), named.Tags...), LineNumber: 1,
 				enforcement: findingEnforcementAllowed,
 			}))
 		}
@@ -1557,6 +1587,24 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
 		generation, request, input,
 	)
+}
+
+// trustedSudoersOnlyWrite reports a call that writes, appends or deletes at
+// least one path and only sudoers files (/etc/sudoers, /etc/sudoers.d/...).
+func trustedSudoersOnlyWrite(facts actionfacts.Facts) bool {
+	written := false
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+		default:
+			continue
+		}
+		if !matchesSudoersCandidate(semanticPathValue(candidate)) {
+			return false
+		}
+		written = true
+	}
+	return written
 }
 
 // trustedAuthorizedKeysWriteProof reports a bounded positive proof that the
@@ -1660,6 +1708,11 @@ func trustedAwkOutputAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	}
 	return false
 }
+
+// unresolvedWriteTargetTitle is the title of the authorized-keys block of a
+// write whose target neither the managed hook client nor the gateway could
+// resolve (rel-1-0-2:GAP-0690).
+const unresolvedWriteTargetTitle = "A write target could not be resolved (unreadable folder or link loop) and may be a protected file"
 
 // archiveBeforeWriteTitle is the title of an authorized-keys block whose
 // write follows an archive extraction. It is ship-authored, so it reaches
@@ -2053,7 +2106,7 @@ func matchesActiveSudoers(
 		integritySingleChild(value, "/etc/sudoers.d")
 }
 
-var unrestrictedSudoersGrantLine = regexp.MustCompile(
+var unrestrictedSudoersGrantLine = lazyregexp.New(
 	`^(%?[A-Za-z_][A-Za-z0-9_.-]*|ALL)[\t ]+ALL[\t ]*=[\t ]*\([\t ]*ALL(?:[\t ]*:[\t ]*ALL)?[\t ]*\)[\t ]+NOPASSWD[\t ]*:[\t ]*ALL[\t ]*$`,
 )
 

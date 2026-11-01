@@ -6,7 +6,6 @@ package hookpaths
 import (
 	"errors"
 	"io/fs"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -31,7 +30,7 @@ const StateRootSiblingsPrefix = "\x00state-root-siblings:"
 func StateRootSiblings(root string) string {
 	root = filepath.Clean(root)
 	name := strings.ToLower(filepath.Base(root))
-	entries, err := os.ReadDir(filepath.Dir(root))
+	entries, err := pathReadDir(filepath.Dir(root))
 	if err != nil || name == "." || name == string(filepath.Separator) {
 		return "1"
 	}
@@ -85,7 +84,7 @@ func StateRootSiblingsForFinds(root string, facts actionfacts.Facts) string {
 	}
 	root = filepath.Clean(root)
 	name := strings.ToLower(filepath.Base(root))
-	entries, err := os.ReadDir(filepath.Dir(root))
+	entries, err := pathReadDir(filepath.Dir(root))
 	if err != nil || name == "." || name == string(filepath.Separator) {
 		return "1"
 	}
@@ -163,7 +162,7 @@ func StateTreeHasName(root, pattern string, fold bool) string {
 		matched, err := path.Match(pattern, name)
 		return err != nil || matched
 	}
-	entries, err := os.ReadDir(root)
+	entries, err := pathReadDir(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "0"
 	}

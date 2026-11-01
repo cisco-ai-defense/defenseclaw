@@ -688,6 +688,9 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			// for a user whose installed agent the enumerator discovered.
 			_, perUserStandalone := windowsStandalonePerUserConnector(target.conn.Name())
 			allowMissingConfig := opts.AllowMissingHookConfigRepair || perUserStandalone
+			if err := moveWindowsTargetOwnedDataDirLinksAside(target.home, target.dataDir, target.sid, opts.WindowsDeferredFirstEnrollment); err != nil {
+				return err
+			}
 			if err := prepareWindowsGenericFootprint(target, configPaths, footprint, allowMissingConfig); err != nil {
 				return err
 			}
@@ -1123,6 +1126,82 @@ var errWindowsManagedHardlink = errors.New("managed regular file has more than o
 
 func windowsManagedObstructionQuarantinePath(path string) string {
 	return path + windowsManagedObstructionQuarantineSuffix
+}
+
+// moveWindowsTargetOwnedDataDirLinksAside runs once per enrollment, under
+// the target's own token, before the account's DefenseClaw folder
+// (<home>\.defenseclaw) or its hooks folder is checked. Only on the first
+// enrollment of a standalone deferred account (deferredFirstEnrollment, the
+// account stayed pending while it was signed out) is a link or junction the
+// account itself made at either name moved aside (the rename moves the
+// link, never what it names), so the enrollment that follows creates and
+// protects the folder as it does for an account that has none. Any other
+// install, a repair of an account that was protected before, and every
+// Secure Client process refuse the link as before.
+// Refusing it failed that account's guardian reconcile, and that refused
+// every administrator ensure, repair and uninstall on the computer until the
+// account removed the link (GAP-0193). The quarantine slot is purged by
+// handle after the enrollment, so the link is removed as a link. Any other
+// object, a link another account or an administrator owns, and a data dir
+// that is not the canonical one are left to the checks that follow, which
+// refuse them as before.
+func moveWindowsTargetOwnedDataDirLinksAside(home, dataDir string, target *windows.SID, deferredFirstEnrollment bool) error {
+	if !deferredFirstEnrollment || !windowsEnterpriseStandaloneProcess() {
+		return nil
+	}
+	path := windowsTargetOwnedDataDirLink(home, dataDir, target)
+	if path == "" {
+		return nil
+	}
+	if err := quarantineWindowsTargetOwnedObstruction(home, path, target, false, "DefenseClaw folder"); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr,
+		"[enterprise-hooks] moved the account's own link at %s aside to %s; what it names was not opened or changed\n",
+		path, windowsManagedObstructionQuarantinePath(path))
+	return nil
+}
+
+// windowsTargetOwnedDataDirLink returns the link or junction the account
+// (target) itself made at its canonical DefenseClaw folder (<home>\.defenseclaw)
+// or at that folder's hooks folder, or "" when there is none. It only reads
+// the names and the links' owners, never what a link names. The enrollment
+// moves such a link aside (moveWindowsTargetOwnedDataDirLinksAside); while
+// the account is signed out, the guardian's pending proof and the
+// Upgrade/Repair plan leave that account pending instead of failing the
+// lifecycle for the computer (GAP-0193). A link another account or an
+// administrator owns, a link anywhere else and a data dir that is not the
+// canonical one report "".
+func windowsTargetOwnedDataDirLink(home, dataDir string, target *windows.SID) string {
+	if target == nil || !sameWindowsEnterprisePath(dataDir, filepath.Join(home, ".defenseclaw")) {
+		return ""
+	}
+	for _, path := range []string{filepath.Clean(dataDir), filepath.Join(filepath.Clean(dataDir), "hooks")} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return ""
+		}
+		ptr, err := winpath.UTF16Ptr(path)
+		if err != nil {
+			return ""
+		}
+		attributes, err := windows.GetFileAttributes(ptr)
+		if err != nil {
+			return ""
+		}
+		if info.Mode()&os.ModeSymlink == 0 && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+			if !info.IsDir() {
+				return ""
+			}
+			continue
+		}
+		owner, err := windowsPathOwnerNoFollow(path)
+		if err != nil || owner == nil || !owner.Equals(target) {
+			return ""
+		}
+		return path
+	}
+	return ""
 }
 
 func quarantineWindowsTargetOwnedObstruction(home, path string, target *windows.SID, recreateDirectory bool, label string) error {

@@ -99,3 +99,31 @@ def test_build_errors_in_json_are_printed(tmp_path: Path) -> None:
     assert "FAIL\tp [build failed]" in out
     assert "::error title=shard 1 failed::No named failing test was reported" in out
     assert timings == [{"Action": "fail", "Package": "p", "Elapsed": 0}]
+
+
+def test_a_test_of_parallel_subtests_weighs_its_wall_time(tmp_path: Path) -> None:
+    # go test reports a parent without its parallel subtests (1.0 s here),
+    # and a parallel top-level test without its wait for t.Parallel.
+    def at(seconds: float) -> str:
+        return f"2026-10-31T05:00:{seconds:09.6f}123Z"
+
+    _, timings = _run(
+        [
+            {"Action": "run", "Package": "p", "Test": "TestParent", "Time": at(0)},
+            {"Action": "run", "Package": "p", "Test": "TestParent/a", "Time": at(1)},
+            {"Action": "pass", "Package": "p", "Test": "TestParent/a", "Elapsed": 20.0, "Time": at(21)},
+            {"Action": "pass", "Package": "p", "Test": "TestParent", "Elapsed": 1.0, "Time": at(21.5)},
+            {"Action": "run", "Package": "p", "Test": "TestParallel", "Time": at(22)},
+            {"Action": "pause", "Package": "p", "Test": "TestParallel", "Time": at(22)},
+            {"Action": "cont", "Package": "p", "Test": "TestParallel", "Time": at(50)},
+            {"Action": "pass", "Package": "p", "Test": "TestParallel", "Elapsed": 2.0, "Time": at(52)},
+            {"Action": "pass", "Package": "p", "Test": "TestNoTime", "Elapsed": 3.0},
+        ],
+        tmp_path,
+    )
+
+    assert timings == [
+        {"Action": "pass", "Package": "p", "Test": "TestParent", "Elapsed": 21.5},
+        {"Action": "pass", "Package": "p", "Test": "TestParallel", "Elapsed": 2.0},
+        {"Action": "pass", "Package": "p", "Test": "TestNoTime", "Elapsed": 3.0},
+    ]

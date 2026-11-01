@@ -2927,7 +2927,7 @@ class TestOpenCodeWrites:
         assert "demo" not in json.loads(global_path.read_text())["mcp"]
         assert "demo" not in json.loads(custom_jsonc.read_text())["mcp"]
 
-    def test_project_enabled_only_override_preserves_global_local_entry(
+    def test_v2_ignores_unsupported_project_enabled_only_override(
         self, tmp_path, monkeypatch
     ):
         home = tmp_path / "home"
@@ -2960,7 +2960,7 @@ class TestOpenCodeWrites:
         assert entry.env == {"API_KEY": "secret"}
         assert entry.disabled is False
 
-    def test_custom_enabled_only_override_disables_global_remote_entry(
+    def test_v2_ignores_unsupported_custom_enabled_only_override(
         self, tmp_path, monkeypatch
     ):
         home = tmp_path / "home"
@@ -2990,7 +2990,7 @@ class TestOpenCodeWrites:
 
         assert entry.url == "https://example.test/mcp"
         assert entry.transport == "remote"
-        assert entry.disabled is True
+        assert entry.disabled is False
 
     def test_set_fails_closed_on_unparseable_existing(self, tmp_path, monkeypatch):
         """A config we can't safely parse must NOT be clobbered — the

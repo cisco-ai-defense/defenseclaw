@@ -79,8 +79,10 @@ try {
                 Write-SmokeStartupRecord -State $script:SmokeRecordState -UpdatedAt $script:SmokeStart -ProcessId $script:SmokeRecordPid
             }
         }
+        $script:SmokeProbeTimeouts = [Collections.Generic.List[object]]::new()
         function script:Get-DefenseClawGuardianStatusReport {
-            param($Layout, $GatewayServiceName)
+            param($Layout, $GatewayServiceName, $TimeoutSeconds)
+            $script:SmokeProbeTimeouts.Add($TimeoutSeconds)
             return $null
         }
         function script:Get-DefenseClawGuardianStateIdentity { param($Layout) return $null }
@@ -177,8 +179,16 @@ try {
             & $expect $result 2.5 7.0 @()
 
             # One still running at the hard limit names the cause and the log.
+            $script:SmokeProbeTimeouts.Clear()
             $result = & $run -Name 'hard limit'
             & $expect $result 11.5 15.5 @("first reconcile is still running after", '3 of 10 targets done', $log, 'last_status=hook guardian has not completed a reconcile')
+            # Each status command is bounded by the time left to the hard
+            # limit plus a 30 s floor, not the command's 300 s default
+            # (rel-1-0-2:GAP-0535).
+            $unbounded = @($script:SmokeProbeTimeouts | Where-Object { $null -eq $_ -or [int]$_ -lt 30 -or [int]$_ -gt 43 })
+            if ($script:SmokeProbeTimeouts.Count -eq 0 -or $unbounded.Count -gt 0) {
+                $failures.Add("hard limit: status command timeouts '$(@($script:SmokeProbeTimeouts) -join ',')', want each 30-43 s")
+            }
 
             # A guardian that stops fails at the usual time, well before the limit
             # (the bounds leave room for a busy host).

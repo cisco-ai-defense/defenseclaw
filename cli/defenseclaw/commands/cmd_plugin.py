@@ -486,7 +486,16 @@ def _scan_one_plugin_dir(
         click.echo(f"error: scan failed: {exc}", err=True)
         raise SystemExit(1)
 
-    _record_scan(app.logger, result, connector=connector or None)
+    try:
+        audit_name = plugin_id or canonical_plugin_id(scan_dir)[0]
+    except Exception:  # noqa: BLE001 - the identity error is reported below.
+        audit_name = plugin_id or os.path.basename(scan_dir.rstrip("/\\"))
+    _record_scan(
+        app.logger, result, connector=connector or None,
+        **_scan_ui.verdict_kwargs(
+            _plugin_scan_audit_verdict(app, result, name=audit_name, path=scan_dir, connector=connector)
+        ),
+    )
 
     if as_json:
         # Preserve the ScanResult keys automation already parses, while adding
@@ -565,6 +574,24 @@ def _scan_one_plugin_dir(
         findings=len(result.findings),
         duration_ms=int(result.duration.total_seconds() * 1000),
     )
+
+
+def _plugin_scan_audit_verdict(
+    app: AppContext, result: Any, *, name: str, path: str, connector: str,
+) -> str:
+    """The audit verdict of a plugin scan: what its scan line and policy say (GAP-0156).
+
+    ``block`` for a plugin the policy rejects, ``clean`` for informational
+    findings only, ``warn`` otherwise. Empty for a clean scan.
+    """
+    from defenseclaw.commands import _scan_ui
+
+    if result.is_clean():
+        return ""
+    verdict, rejects = _plugin_scan_findings_verdict(app, result, name=name, path=path, connector=connector)
+    if rejects or verdict == _scan_ui.VERDICT_BLOCKED:
+        return "block"
+    return "clean" if verdict == _scan_ui.VERDICT_INFO else "warn"
 
 
 def _plugin_scan_findings_verdict(
@@ -1232,7 +1259,12 @@ def _scan_all_plugins(
                 if not as_json:
                     click.echo(f"  error: scan failed for {pid!r}: {exc}", err=True)
                 continue
-            _record_scan(app.logger, result, connector=connector or None)
+            _record_scan(
+                app.logger, result, connector=connector or None,
+                **_scan_ui.verdict_kwargs(
+                    _plugin_scan_audit_verdict(app, result, name=pid, path=scan_dir, connector=connector)
+                ),
+            )
             if as_json:
                 payload = json.loads(result.to_json())
                 payload["connector"] = connector
@@ -2595,6 +2627,8 @@ def _plugin_status(p: dict[str, Any], action_entry: Any = None) -> str:
             return "blocked"
         if a.runtime == "disable":
             return "disabled"
+    if p.get("activation_unverified"):
+        return "unverified"
     if not p.get("enabled"):
         return "disabled"
     return "enabled"
@@ -2609,6 +2643,8 @@ def _plugin_status_display(p: dict[str, Any], action_entry: Any = None) -> str:
             return "\u2717 quarantined"
         if a.runtime == "disable":
             return "\u2717 disabled"
+    if p.get("activation_unverified"):
+        return "? activation unverified"
     if p.get("enabled"):
         return "\u2713 enabled"
     return "\u2717 disabled"
@@ -2644,6 +2680,9 @@ def _plugin_list_json_items(
         }
         if connector:
             item["connector"] = connector
+        if p.get("activation_unverified"):
+            item["activation_verified"] = False
+            item["activation_reason"] = p.get("activation_reason", "Plugin activation is unverified.")
         for field in (
             "scope",
             "project_path",

@@ -51,7 +51,7 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 			subject.cachedFactsAge.Round(time.Second)))
 	}
 	if runtime.GOOS == "windows" && subject != nil {
-		if note := spoolRecordNote(subject.UserID, time.Now()); note != "" {
+		if note := spoolRecordNote(subject.UserID, time.Now(), decision.Assignment > 0); note != "" {
 			warnings = append(warnings, note)
 		}
 	}
@@ -662,6 +662,15 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 					continue
 				}
 				known, err := exists(ctx, norm.NFC.String(group))
+				if err == nil && !known && platform != "windows" {
+					// The matcher folds case; a host whose lookup does not
+					// still knows the group by its lower-case name (GAP-0495).
+					if lower := strings.ToLower(norm.NFC.String(group)); lower != norm.NFC.String(group) {
+						if folded, ferr := exists(ctx, lower); ferr == nil && folded {
+							known = true
+						}
+					}
+				}
 				if err != nil && ctx.Err() != nil {
 					// The lookup ran out of time: not an answer, so the group
 					// is named as not checked (GAP-2434).
@@ -834,6 +843,20 @@ func unmatchedUserEntries(ctx context.Context, assignments []config.ProfileAssig
 		}
 	}
 	return warnings
+}
+
+// ProfileUserEntryWarnings names the users entries of assignments that do
+// not select the account this host resolves them to, with the spelling that
+// does (unmatchedUserEntries): a bare name of a local account, which a bare
+// name never selects (GAP-0305), and a DOMAIN\user whose domain the host does
+// not confirm. The running gateway reports the same sentences to status and
+// verify (profile_assignment_unmatched); `config validate` reports them for a
+// candidate before it is applied (GAP-0197). The lookups are the host's
+// account database, bounded like the gateway's background check.
+func ProfileUserEntryWarnings(ctx context.Context, assignments []config.ProfileAssignment) []string {
+	ctx, cancel := context.WithTimeout(ctx, profileGroupCheckBudget)
+	defer cancel()
+	return unmatchedUserEntries(ctx, assignments, profileUserEntryUnmatched())
 }
 
 // userEntryNeedsAccountCheck reports a users entry that names an account by

@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -102,7 +103,58 @@ const (
 	// removals and only when every one of them succeeded: the state holds
 	// the backups a failed removal needs when it is retried.
 	enterpriseHookWorkerModePurge = "purge"
+	// enterpriseHookWorkerModeRestoreOwnInstall puts back, after the
+	// uninstall's removals, the account's own per-user install files the
+	// enrollment changed (enterprisehooks.RestoreOwnInstall, rel-1-0-6
+	// GAP-0178). It runs only when every removal of the job succeeded.
+	enterpriseHookWorkerModeRestoreOwnInstall = "restore_own_install"
 )
+
+// enterpriseHookWorkerWritingModes are the target modes that write into the
+// account's ~/.defenseclaw or agent configs while the computer is managed:
+// a job with one keeps the account's own per-user install files first
+// (enterprisehooks.PreserveOwnInstall).
+var enterpriseHookWorkerWritingModes = map[string]bool{
+	enterpriseHookWorkerModeInstall:                   true,
+	enterpriseHookWorkerModeVerifyOrRepair:            true,
+	enterpriseHookWorkerModeBlockPersonalClaude:       true,
+	enterpriseHookWorkerModeRepairManagedCodexFeature: true,
+	enterpriseHookWorkerModeRemoveUserNativeOTLP:      true,
+}
+
+// preserveOwnInstallForJob runs enterprisehooks.PreserveOwnInstall for each
+// data folder of a job that writes. A failure is reported and does not stop
+// the job: the account's protection comes first.
+func preserveOwnInstallForJob(request enterpriseHookWorkerRequest) {
+	if !request.Standalone || !filepath.IsAbs(strings.TrimSpace(request.Home)) {
+		return
+	}
+	writes := false
+	seen := map[string]bool{}
+	var dirs []string
+	for _, target := range request.Targets {
+		if !enterpriseHookWorkerWritingModes[target.Mode] {
+			continue
+		}
+		writes = true
+		dataDir := strings.TrimSpace(target.Options.DataDir)
+		if dataDir == "" {
+			dataDir = filepath.Join(request.Home, ".defenseclaw")
+		}
+		if filepath.IsAbs(dataDir) && !seen[filepath.Clean(dataDir)] {
+			seen[filepath.Clean(dataDir)] = true
+			dirs = append(dirs, filepath.Clean(dataDir))
+		}
+	}
+	if !writes {
+		return
+	}
+	for _, dataDir := range dirs {
+		if err := enterprisehooks.PreserveOwnInstall(filepath.Clean(request.Home), dataDir); err != nil {
+			fmt.Fprintf(os.Stderr, "[enterprise-hooks] WARNING: could not keep the own per-user install files of %s before the managed changes: %v\n", request.User, err)
+		}
+	}
+}
 
 // enterpriseHookWorkerForeignCleanupModes are the target modes a
 // foreign_cleanup worker takes: every mode the guardian's foreign cleanup
@@ -272,13 +324,19 @@ type enterpriseHookWorkerCleanupReport struct {
 }
 
 type enterpriseHookWorkerTargetResult struct {
-	Index    int                            `json:"index"`
-	OK       bool                           `json:"ok"`
-	Repaired bool                           `json:"repaired,omitempty"`
-	Removed  bool                           `json:"removed,omitempty"`
-	Pending  bool                           `json:"pending,omitempty"`
-	Error    string                         `json:"error,omitempty"`
-	Result   *enterprisehooks.InstallResult `json:"result,omitempty"`
+	Index    int  `json:"index"`
+	OK       bool `json:"ok"`
+	Repaired bool `json:"repaired,omitempty"`
+	Removed  bool `json:"removed,omitempty"`
+	// Restored: the unblock put the account's own Claude Code hook script
+	// back from the copy the enrollment kept (rel-1-0-6 GAP-0178).
+	Restored bool `json:"restored,omitempty"`
+	// OwnInstall: the removal left a registration the enrollment reused
+	// from the account's own per-user install in place (rel-1-0-6 GAP-0178).
+	OwnInstall bool                           `json:"own_install,omitempty"`
+	Pending    bool                           `json:"pending,omitempty"`
+	Error      string                         `json:"error,omitempty"`
+	Result     *enterprisehooks.InstallResult `json:"result,omitempty"`
 	// AgentConfig is the result's connector.AgentConfigStatus code (a
 	// Hermes or Devin config put back or recreated, GAP-0564). It is kept
 	// out of the result, which the guardian state stores.
@@ -308,6 +366,9 @@ type enterpriseHookPurgeDetail struct {
 	// RemovedConnectorBackups names the folders the OpenHands/OmniGent
 	// backups were moved to, comma separated (GAP-2015).
 	RemovedConnectorBackups string `json:"removed_connector_backups,omitempty"`
+	// UnrestorableConnectorBackups names the folders the purge moved the
+	// connector backup records that name no file to (rel-1-0-2 GAP-0576).
+	UnrestorableConnectorBackups string `json:"unrestorable_connector_backups,omitempty"`
 }
 
 type enterpriseHookWorkerResponse struct {
@@ -621,6 +682,10 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 	recheckWindow := time.Duration(request.RecheckMillis) * time.Millisecond
 	var rechecks []enterpriseHookWorkerRecheck
 	var recheckedAt []time.Time
+	preserveOwnInstallForJob(request)
+	restoresOwnInstall := request.Standalone && slices.ContainsFunc(request.Targets, func(target enterpriseHookWorkerTarget) bool {
+		return target.Mode == enterpriseHookWorkerModeRestoreOwnInstall
+	})
 	removeRetiredConnectorsForAccount(ctx, request)
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
@@ -681,6 +746,16 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				restorePreviousHome()
 				break
 			}
+			// An uninstall that puts the account's own per-user install back
+			// leaves a registration the enrollment reused from that install
+			// in place: its agent configs are as the install had them
+			// (rel-1-0-6 GAP-0178).
+			if outcome.PathsReported && restoresOwnInstall &&
+				enterprisehooks.OwnInstallRegistrationUnchanged(setupOpts.DataDir, outcome.CleanedPaths) {
+				restorePreviousHome()
+				outcome.OwnInstall = true
+				break
+			}
 			// A report is needed only for a re-homed row. An unreadable
 			// receipt must not prevent ordinary teardown.
 			if err = enterpriseHookWorkerRemover(ctx, opts); err != nil {
@@ -716,7 +791,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			if dataDir == "" {
 				dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
 			}
-			outcome.Removed, err = enterprisehooks.RemovePersonalClaudeHookBlocker(dataDir)
+			outcome.Removed, outcome.Restored, err = enterprisehooks.UnblockPersonalClaudeHook(dataDir)
 		case enterpriseHookWorkerModeRepairManagedCodexFeature:
 			if !request.Standalone {
 				err = errors.New("managed Codex feature repair requires the standalone guardian")
@@ -737,13 +812,34 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				break
 			}
 			var stopped bool
-			if stopped, err = enterpriseHookWorkerStopPerUser(opts); err != nil {
-				break
+			purgeDir := strings.TrimSpace(opts.DataDir)
+			if purgeDir == "" {
+				purgeDir = filepath.Join(opts.UserHome, ".defenseclaw")
+			}
+			// The purge keeps a folder with the account's own per-user
+			// install as it is, so that install's gateway keeps running
+			// (rel-1-0-6 GAP-0178).
+			if own, ownErr := enterprisehooks.HoldsPerUserInstall(purgeDir); ownErr != nil || !own {
+				if stopped, err = enterpriseHookWorkerStopPerUser(opts); err != nil {
+					break
+				}
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", ")}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", "), UnrestorableConnectorBackups: strings.Join(summary.KeptUnrestorableConnectorBackups, ", ")}
 			}
+		case enterpriseHookWorkerModeRestoreOwnInstall:
+			if purgeBlocked != "" {
+				err = errors.New("kept the managed changes to its own per-user install: " + purgeBlocked)
+				break
+			}
+			dataDir := strings.TrimSpace(opts.DataDir)
+			if dataDir == "" {
+				dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+			}
+			var changed []string
+			outcome.Removed, changed, err = enterprisehooks.RestoreOwnInstall(filepath.Clean(opts.UserHome), filepath.Clean(dataDir))
+			outcome.Remaining = strings.Join(changed, ", ")
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
 		}
@@ -761,7 +857,8 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		} else {
 			outcome.OK = true
 			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover &&
-				target.Mode != enterpriseHookWorkerModePurge && target.Mode != enterpriseHookWorkerModeUnblockPersonalClaude {
+				target.Mode != enterpriseHookWorkerModePurge && target.Mode != enterpriseHookWorkerModeUnblockPersonalClaude &&
+				target.Mode != enterpriseHookWorkerModeRestoreOwnInstall {
 				outcome.Result = &result
 				outcome.AgentConfig = result.AgentConfig
 			}
@@ -960,6 +1057,12 @@ func blockPersonalClaudeHook(opts enterprisehooks.InstallOptions) error {
 	}
 	if string(body) == enterprisehooks.PersonalClaudeHookBlocker {
 		return nil
+	}
+	// The account's own script is kept beside its install, bytes and mode,
+	// so the uninstall puts it back instead of leaving a missing script
+	// (rel-1-0-6 GAP-0178).
+	if err := configwrite.WriteFileDurable(filepath.Join(dataDir, enterprisehooks.PersonalClaudeHookCopyName), body, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("keep the personal Claude Code hook before blocking it: %w", err)
 	}
 	return configwrite.WriteFileDurable(path, []byte(enterprisehooks.PersonalClaudeHookBlocker), 0o700)
 }

@@ -424,8 +424,9 @@ type floodWrite struct {
 	took    time.Duration
 }
 
-// floodTheStore commits an audit row every millisecond until the returned stop
-// runs, so the store never has an idle gap. writes returns every write made.
+// floodTheStore commits an audit row every walFloodInterval until the
+// returned stop runs, so the store never has an idle gap. writes returns
+// every write made.
 func floodTheStore(t *testing.T, store *Store) (stop func(), writes func() []floodWrite) {
 	t.Helper()
 	done := make(chan struct{})
@@ -450,7 +451,7 @@ func floodTheStore(t *testing.T, store *Store) (stop func(), writes func() []flo
 			mu.Lock()
 			made = append(made, floodWrite{started: started, took: took})
 			mu.Unlock()
-			time.Sleep(time.Millisecond)
+			time.Sleep(walFloodInterval)
 		}
 	}()
 	var once sync.Once
@@ -460,6 +461,13 @@ func floodTheStore(t *testing.T, store *Store) (stop func(), writes func() []flo
 		return append([]floodWrite(nil), made...)
 	}
 }
+
+// walFloodInterval paces floodTheStore at about 100 commits a second, with
+// commits well inside walIdleWindow (20 ms) apart, so no idle gap opens. One
+// flood commit is one audit row, about 17 WAL frames; a hook call writes
+// about 163 (hookAuditWALFramesPerCall), so this flood writes about as much
+// log a second as the 10 Hz hook flood GAP-1303 sizes the emergency hold for.
+const walFloodInterval = 10 * time.Millisecond
 
 // longestFloodWrite is the longest of writes that started in [from, to].
 func longestFloodWrite(writes []floodWrite, from, to time.Time) time.Duration {
@@ -472,15 +480,64 @@ func longestFloodWrite(writes []floodWrite, from, to time.Time) time.Duration {
 	return longest
 }
 
+// withoutDiskFlushes turns SQLite's syncs off (PRAGMA synchronous = OFF) on
+// the store's writer and checkpoint connections, the two a WAL guard pass and
+// the hooks use, for a test that times a pass against the fixed 1 s
+// emergency hold. With them on, the hold also contained the runner's own
+// flushes: the copy under the writer syncs the log and the database file, and
+// the first commit after the restart syncs the new log header. A Windows disk
+// gives those flushes the time the other processes' I/O sets, not the time of
+// this store's pages: natively under concurrent disk load they took 0.9-5.4 s
+// after the modelled copy, also with every page synced beforehand, so the
+// hold deferred on every pass (r106 CI, GAP-0024). The modelled copy
+// (walWriterPhaseHook) is the slow final copy and sync the hold is sized for;
+// a disk too slow even for the hold is GAP-1303's documented limit. Each pool
+// has one connection, so requireNoDiskFlushes can confirm the setting held.
+func withoutDiskFlushes(t *testing.T, store *Store) {
+	t.Helper()
+	for _, db := range walGuardConns(t, store) {
+		if _, err := db.Exec(`PRAGMA synchronous = OFF`); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// requireNoDiskFlushes fails when a connection withoutDiskFlushes set up was
+// replaced by one that syncs again.
+func requireNoDiskFlushes(t *testing.T, store *Store) {
+	t.Helper()
+	for _, db := range walGuardConns(t, store) {
+		var level int
+		if err := db.QueryRow(`PRAGMA synchronous`).Scan(&level); err != nil {
+			t.Fatal(err)
+		}
+		if level != 0 {
+			t.Fatalf("a WAL guard connection runs with synchronous=%d; want the fixture's OFF through the pass", level)
+		}
+	}
+}
+
+func walGuardConns(t *testing.T, store *Store) []*sql.DB {
+	t.Helper()
+	checkpointDB, err := store.checkpointConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []*sql.DB{store.db, checkpointDB}
+}
+
 // GAP-1303: a persistent final copy three times slower than the ordinary hold
 // must restart the WAL under continuous hook writes before the hard limit.
+// The copy is modelled; the runner's disk flushes are kept out of the timed
+// hold (withoutDiskFlushes).
 func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
+	withoutDiskFlushes(t, store)
 	// What an ordinary commit takes on this runner under this flood, before
-	// any WAL pass runs.
+	// any WAL pass runs, over about a hundred commits.
 	stopOrdinary, ordinaryWrites := floodTheStore(t, store)
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(time.Second)
 	stopOrdinary()
 	ordinary := longestFloodWrite(ordinaryWrites(), time.Time{}, time.Now())
 	logWALGuardEvents(t, store, 200)
@@ -522,6 +579,7 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	}
 	passEnded := time.Now()
 	stop()
+	requireNoDiskFlushes(t, store)
 	if err != nil || !pass.Bounded || !pass.Restarted || pass.WriterDeferred {
 		t.Fatalf("log over the limit under a flood: %+v, %v; want a bounded catch-up that restarts the log", pass, err)
 	}

@@ -1905,7 +1905,7 @@ func reportWindowsProfileScan(ctx context.Context, report func(UnprotectedAgent)
 	// The connectors the home walk and the WinGet pass cover.
 	var scanned []string
 	for _, conn := range connectors {
-		if conn == "claudecode" || conn == "codex" || conn == "copilot" {
+		if conn == "claudecode" || conn == "codex" || conn == "copilot" || conn == "opencode" {
 			scanned = append(scanned, conn)
 		}
 	}

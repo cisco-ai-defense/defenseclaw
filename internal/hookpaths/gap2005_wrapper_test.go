@@ -17,7 +17,6 @@ import (
 // parts and writes was allowed through a wrapper program (env, command,
 // timeout, nice, ...) or behind another interpreter option.
 func TestActionInterpreterKeyPathThroughWrapperOrOption(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	py := `'h="` + home + `"; open("{}/.ssh/{}".format(h, "authorized_keys"),"a").write("x")'`
@@ -54,8 +53,8 @@ func TestActionInterpreterKeyPathThroughWrapperOrOption(t *testing.T) {
 		"ruby -r json -e " + ruby,
 		"env ruby -e " + ruby,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
-			t.Errorf("ActionCommandDecision(%q) = %q, want protected-target", command, got)
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("posixShellDecision(%q) = %q, want protected-target", command, got)
 		}
 	}
 	for _, command := range []string{
@@ -70,8 +69,8 @@ func TestActionInterpreterKeyPathThroughWrapperOrOption(t *testing.T) {
 		`ruby -w -e 'File.write("notes.txt", "x")'`,
 		`env FOO=1 make test`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "" {
-			t.Errorf("ActionCommandDecision(%q) = %q, want allow", command, got)
+		if got := posixShellDecision(command, cwd, home); got != "" {
+			t.Errorf("posixShellDecision(%q) = %q, want allow", command, got)
 		}
 	}
 }

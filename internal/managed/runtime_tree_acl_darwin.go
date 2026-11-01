@@ -10,10 +10,11 @@ import (
 	"bufio"
 	"bytes"
 	"os/exec"
-	"regexp"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
-var darwinACLEntryLine = regexp.MustCompile(`^\s+\d+: `)
+var darwinACLEntryLine = lazyregexp.New(`^\s+\d+: `)
 
 // runtimeTreeHasNoACL reports whether no entry below root carries a macOS
 // ACL, from one recursive `ls -le` listing. The per-entry check runs

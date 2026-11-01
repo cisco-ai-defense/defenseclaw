@@ -17,7 +17,6 @@ import (
 )
 
 func TestR104ExistingProtectedLinkWriters(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {

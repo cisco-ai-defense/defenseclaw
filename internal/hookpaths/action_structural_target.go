@@ -6,11 +6,12 @@ package hookpaths
 import (
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // The mention scan follows the same effective working directory the shell
@@ -250,7 +251,7 @@ func (c *actionKeyComponent) selects(fold bool) bool {
 	return false
 }
 
-var actionNestedToken = regexp.MustCompile(`[A-Za-z0-9_.*?\[\]]+`)
+var actionNestedToken = lazyregexp.New(`[A-Za-z0-9_.*?\[\]]+`)
 
 func actionNestedTextNamesKey(node syntax.Node, fold bool) bool {
 	var raw strings.Builder

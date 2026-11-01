@@ -166,8 +166,6 @@ type metricsSet struct {
 	telemetryExporterErrs metric.Int64Counter
 	exporterLastExportSec metric.Float64Gauge
 	tuiFilterApplied      metric.Int64Counter
-	judgeSemDepth         metric.Int64UpDownCounter
-	judgeSemDrops         metric.Int64Counter
 	// Judge-body persistence (Phase 3 of the SQLite write-lock fix):
 	// the authoritative async queue replaces the removed synchronous
 	// callback that used to fire two sequential SQLite writes on the
@@ -823,18 +821,6 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.tuiFilterApplied, err = m.Int64Counter("defenseclaw.tui.filter.applied",
 		metric.WithUnit("{filter}"),
 		metric.WithDescription("TUI panel filter applications (operator changed a filter chip or search)"))
-	if err != nil {
-		return nil, err
-	}
-	ms.judgeSemDepth, err = m.Int64UpDownCounter("defenseclaw.judge.semaphore.depth",
-		metric.WithUnit("{slot}"),
-		metric.WithDescription("Judge concurrency semaphore: slots currently held"))
-	if err != nil {
-		return nil, err
-	}
-	ms.judgeSemDrops, err = m.Int64Counter("defenseclaw.judge.semaphore.drops",
-		metric.WithUnit("{drop}"),
-		metric.WithDescription("Judge semaphore drops (queue full)"))
 	if err != nil {
 		return nil, err
 	}

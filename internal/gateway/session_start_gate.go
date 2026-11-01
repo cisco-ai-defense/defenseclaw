@@ -49,6 +49,10 @@ type sessionStartEntry struct {
 	blocked bool
 	reason  string
 	at      time.Time
+	// inPlace marks a start judged in a call's place (judgeMissingStart):
+	// there is no start payload, only the checks a start runs and a call
+	// does not. A call does not wait for it past its answer window.
+	inPlace bool
 }
 
 // sessionStartTicket is one session start being judged.
@@ -76,6 +80,17 @@ const (
 // start verdict (a variable for tests).
 var sessionStartGateMaxWait = 10 * time.Second
 
+// sessionStartAnswerReserve is kept from a bounded call's answer window
+// (hookJudgeAnswerEnd) for the rest of its decision and the answer's way
+// back: a call waits for its session's start at most until the window less
+// this, so the start's refusal, or the call's own verdict, reaches the
+// agent before its hook gives up (rel-1-0-6 GAP-0127, rel-1-0-3 GAP-0327).
+var sessionStartAnswerReserve = 1400 * time.Millisecond
+
+// sessionStartInPlaceCheckTimeout bounds a start check judged in a call's
+// place. It runs on after the call that started it has its answer.
+const sessionStartInPlaceCheckTimeout = 30 * time.Second
+
 // sessionStartArrivalWait is how long a call of a session whose start this
 // process has not seen waits for that start to arrive. The gateway tests
 // set it to zero (TestMain); the gate's own tests set it.
@@ -98,7 +113,9 @@ func sessionStartGateKey(ctx context.Context, connectorName, sessionID string) s
 // (a per-user gateway has one user).
 func verifiedSessionCaller(ctx context.Context) string {
 	if peer, ok := managedHookPeerFromContext(ctx); ok {
-		return "uid:" + strconv.Itoa(peer.UID)
+		// A trusted connector's calls are scoped to the person too, so two
+		// people behind one connector never share a session's state.
+		return "uid:" + strconv.Itoa(peer.UID) + actingForSessionCaller(ctx)
 	}
 	if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
 		return "user:" + identity
@@ -227,6 +244,13 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 	if g == nil || key == "" {
 		return "", false
 	}
+	// A call whose hook bounds its wait for the answer waits for the start
+	// only inside that bound. It used to wait half of the hook's transport
+	// timeout (5 s for Codex), past the 3.5 s the native hook waits, and the
+	// hook denied the benign call as a gateway that did not answer.
+	if end, bounded := hookJudgeAnswerEnd(ctx); bounded {
+		wait = max(min(wait, time.Until(end.Add(-sessionStartAnswerReserve))), 0)
+	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	for {
@@ -303,6 +327,13 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 			resume()
 		case <-timer.C:
 			resume()
+			if entry.inPlace {
+				// A start judged in a call's place that has no verdict in
+				// the call's window: the call goes on with its own verdict.
+				// The check runs on, and its verdict holds the session's
+				// later calls.
+				return "", false
+			}
 			return sessionStartPendingReason, true
 		case <-ctx.Done():
 			resume()
@@ -315,6 +346,15 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 // arrive, unless one arrived meanwhile, and records the verdict as that
 // start's. A check that is missing or does not finish blocks, as a start
 // without a verdict does.
+//
+// The check runs apart from the call, with the call's values but not its
+// end, bounded by sessionStartInPlaceCheckTimeout: the calls of the session
+// wait for its verdict in await, a bounded call only inside its answer
+// window. A Codex registration repair that hashed the hook binary, or waited
+// for the hook guard of a gateway still starting its connectors, held the
+// first call after a gateway start past its hook's 3.5 s and the hook denied
+// the benign call (rel-1-0-3 GAP-0327); a check cut off when its call ended
+// would record a sticky block for a live session.
 func (g *sessionStartGate) judgeMissingStart(ctx context.Context, key string, startCheck func(context.Context) (bool, string)) {
 	g.mu.Lock()
 	if _, seen := g.started[key]; seen || g.entries[key] != nil {
@@ -322,15 +362,25 @@ func (g *sessionStartGate) judgeMissingStart(ctx context.Context, key string, st
 		return
 	}
 	ticket := g.beginLocked(key)
+	ticket.entry.inPlace = true
 	g.mu.Unlock()
-	blocked, reason := true, sessionStartUnfinishedReason
-	defer func() {
-		_ = recover()
-		ticket.finish(blocked, reason)
-	}()
-	if startCheck != nil {
-		blocked, reason = startCheck(ctx)
+	if startCheck == nil {
+		ticket.finish(true, sessionStartUnfinishedReason)
+		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionStartInPlaceCheckTimeout)
+	go func() {
+		defer cancel()
+		blocked, reason := true, sessionStartUnfinishedReason
+		defer func() {
+			_ = recover()
+			ticket.finish(blocked, reason)
+		}()
+		blocked, reason = startCheck(checkCtx)
+	}()
 }
 
 // sessionStartArrival is how long a call of a session whose start the gate
@@ -453,6 +503,12 @@ func (a *APIServer) sessionStartCheck(connectorName string) func(context.Context
 	}
 }
 
+// The sentence a call of a blocked session gets around its start's reason.
+const (
+	sessionStartBlockedPrefix = "DefenseClaw blocked this agent session when it started ("
+	sessionStartBlockedSuffix = "), so it blocks this call. Restart the agent."
+)
+
 func sessionStartBlockedReason(reason string) string {
 	reason = strings.TrimSpace(reason)
 	if len(reason) > 400 {
@@ -461,7 +517,35 @@ func sessionStartBlockedReason(reason string) string {
 	if reason == "" {
 		reason = sessionStartUnfinishedReason
 	}
-	return "DefenseClaw blocked this agent session when it started (" + reason + "), so it blocks this call. Restart the agent."
+	return sessionStartBlockedPrefix + reason + sessionStartBlockedSuffix
+}
+
+// trustedSessionStartGateReason reports a session-start gate refusal made
+// of DefenseClaw text only: the pending refusal, or the blocked-start
+// sentence around an unfinished check or a ship-authored start reason (a
+// Codex registration refusal after a Codex update, a catalog rule match).
+// A start reason with free-form text (a path, a scanner title) fails the
+// match and stays redacted (GAP-2643).
+func trustedSessionStartGateReason(reason string) bool {
+	if reason == sessionStartPendingReason {
+		return true
+	}
+	inner, ok := strings.CutPrefix(reason, sessionStartBlockedPrefix)
+	if !ok {
+		return false
+	}
+	if inner, ok = strings.CutSuffix(inner, sessionStartBlockedSuffix); !ok {
+		return false
+	}
+	return inner == sessionStartUnfinishedReason || trustedRefusalReason(inner)
+}
+
+// trustedCodexStartRegistrationRefusal reports the two refusals
+// codexStartRegistrationRefusal writes without a path or digest: the
+// generic setup step and the Codex self-update cause (GAP-1884).
+func trustedCodexStartRegistrationRefusal(reason string) bool {
+	return reason == codexStartRegistrationUnavailable+codexStartRegistrationSetupStep ||
+		reason == codexStartRegistrationUnavailable+": "+connector.ErrCodexExecutableChanged.Error()
 }
 
 // sessionStartVerdictBlocks reports a start verdict that blocks the session:

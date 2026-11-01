@@ -968,28 +968,83 @@ func TestUninstallKeepsTheBinariesWhenRegistrationsWereNotChecked(t *testing.T) 
 // GAP-1440: the uninstall removed the lifecycle state, the deployment record
 // with it, before it knew every state folder was gone; when one could not be
 // removed, the rerun found no record and was a not_installed no-op. The
-// record stays until the removal is complete.
+// pre-check (uninstall_state_blockers_test.go) refuses what it can see before
+// anything changes; this is a failure it cannot see (an append-only file, a
+// race, ENOSPC, EBUSY): the log folder's parent turns read-only after the
+// check, while the per-user hooks are removed, so the state removal itself
+// fails. The deployment record stays until the removal is complete, the
+// error says so, and the rerun finishes.
 func TestUninstallKeepsTheRecordWhenAStateFolderStays(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can remove a folder from a read-only parent")
 	}
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, purge := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/purge=%v", goos, purge), func(t *testing.T) {
+				h := newTestHost(t, goos)
+				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+				parent := filepath.Dir(h.env.P(h.env.Layout.LogDir))
+				t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+				lockedAfterCheck := false
+				h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+					if err := os.Chmod(parent, 0o555); err != nil {
+						t.Fatal(err)
+					}
+					lockedAfterCheck = true
+					return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+				}}
+				failed := h.run(Options{Action: ActionUninstall, Purge: purge})
+				requireError(t, failed, codeUninstall)
+				got := messagesOf(failed.Errors, codeUninstall)
+				if !lockedAfterCheck || strings.Contains(got, "nothing was changed") {
+					t.Fatalf("the uninstall did not reach the state removal (remove-all ran: %v): %s", lockedAfterCheck, got)
+				}
+				command := h.env.lifecycleCommand(ActionUninstall)
+				if purge {
+					command += " --purge"
+				}
+				if !strings.Contains(got, h.env.Layout.LogDir) || !strings.Contains(got, "the deployment record is kept: fix the cause and rerun `"+command+"`") {
+					t.Fatalf("the late state-removal failure does not name the folder, the kept record and the rerun: %s", got)
+				}
+				if !exists(h.env.deploymentPath()) {
+					t.Fatal("the failed uninstall removed the deployment record")
+				}
+				if err := os.Chmod(parent, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				retry := h.run(Options{Action: ActionUninstall, Purge: purge})
+				requireOK(t, retry)
+				if retry.Noop || exists(h.env.deploymentPath()) || exists(h.env.P(h.env.Layout.LogDir)) {
+					t.Fatalf("the rerun did not finish the removal (noop %v)", retry.Noop)
+				}
+			})
+		}
+	}
+}
+
+// A failure before the machine state (here the service manager's reload)
+// keeps the record, the config and the state, and says so: the rerun
+// finishes, or ensure restores the deployment (GAP-1440).
+func TestUninstallKeepsTheRecordAndTheStateWhenAStepBeforeTheStateFails(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	parent := filepath.Dir(h.env.P(h.env.Layout.LogDir))
-	if err := os.Chmod(parent, 0o555); err != nil {
-		t.Fatal(err)
+	h.services.failReloadOnce = true
+	failed := h.run(Options{Action: ActionUninstall})
+	requireError(t, failed, codeUninstall)
+	if got := messagesOf(failed.Errors, codeUninstall); !strings.Contains(got, "the deployment record is kept: fix the cause and rerun uninstall") {
+		t.Fatalf("the failure does not say the record is kept for a rerun: %s", got)
 	}
-	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
-	requireError(t, h.run(Options{Action: ActionUninstall}), codeUninstall)
-	if !exists(h.env.deploymentPath()) {
-		t.Fatal("the failed uninstall removed the deployment record")
+	for _, path := range []string{h.env.deploymentPath(), h.env.P(h.env.Layout.ConfigPath), h.env.P(h.env.Layout.DataDir), h.env.P(h.env.Layout.LogDir)} {
+		if !exists(path) {
+			t.Fatalf("the failed uninstall removed %s", path)
+		}
 	}
-	if err := os.Chmod(parent, 0o755); err != nil {
-		t.Fatal(err)
+	if _, ok, _ := h.accounts.Lookup(context.Background(), h.env.Layout.ServiceUser); !ok {
+		t.Fatal("the failed uninstall removed the service account")
 	}
 	retry := h.run(Options{Action: ActionUninstall})
 	requireOK(t, retry)
-	if retry.Noop || exists(h.env.deploymentPath()) || exists(h.env.P(h.env.Layout.LogDir)) {
+	if retry.Noop || exists(h.env.deploymentPath()) || exists(h.env.P(h.env.Layout.DataDir)) {
 		t.Fatalf("the rerun did not finish the removal (noop %v)", retry.Noop)
 	}
 }

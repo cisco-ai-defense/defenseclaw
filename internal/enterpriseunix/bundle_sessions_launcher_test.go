@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // npmCodexProc writes a fake /proc with one npm Codex session (the node
@@ -62,7 +64,7 @@ func TestBundleSessionsCountAnNpmCodexSessionOnce(t *testing.T) {
 
 // The agent_sessions_restart_required scan of status, verify and ensure
 // names one pid per session for an agent with a launcher (OpenCode from npm
-// here; Codex itself reads its requirements per turn), and keeps the Codex
+// here), and keeps the Codex
 // background server and another user apart.
 func TestAgentSessionsStartedBeforeNameALauncherSessionOnce(t *testing.T) {
 	if os.Geteuid() == 0 {
@@ -100,16 +102,83 @@ func TestAgentSessionsStartedBeforeNameALauncherSessionOnce(t *testing.T) {
 	}
 }
 
-// macOS matches the bundle scan on the process name, which is node for the
-// launcher, so only the native codex counts; that stays as it was.
-func TestDarwinBundleSessionScanLeavesTheLauncherOut(t *testing.T) {
+// rel-1-0-6 GAP-0183: two npm Codex TUIs of one macOS user that started
+// before their connector's hooks were counted four times in the lifecycle
+// result's enforcement_pending (an ensure, a bundle apply, status) and twice
+// in bundle status. The lifecycle named each session by its node launcher and
+// the bundle scan, which matched the process name, by its native codex child,
+// so the two lists merged into four pids. Both scans now read the same
+// processes and name one session by the same launcher pid: both surfaces
+// count two sessions.
+func TestDarwinEnforcementPendingCountsAnNpmCodexSessionOnce(t *testing.T) {
 	h := newTestHost(t, "darwin")
+	const vendor = "/opt/homebrew/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex"
 	started := time.Now().Add(-48 * time.Hour).Format("Mon Jan 2 15:04:05 2006")
-	ps := strings.Join([]string{"701", "dcm-std1", started, "/opt/homebrew/bin/node"}, " ") + "\n" +
-		strings.Join([]string{"702", "dcm-std1", started, "/opt/homebrew/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex"}, " ") + "\n"
-	h.runner.replies = map[string]fakeReply{"ps -axww -o pid=,user=,lstart=,comm=": {result: CommandResult{Stdout: []byte(ps)}}}
-	processes, err := h.env.bundleDarwinProcesses(context.Background(), map[string]string{"codex": "codex"})
-	if err != nil || len(processes) != 1 || processes[0].PID != 702 {
-		t.Fatalf("darwin bundle processes = %+v, %v; want only the native codex 702", processes, err)
+	type process struct {
+		pid, ppid int
+		argv      []string
+		comm      string
+	}
+	processes := []process{
+		{58467, 1, []string{"node", "/opt/homebrew/bin/codex"}, "/opt/homebrew/bin/node"},
+		{58519, 58467, []string{vendor}, vendor},
+		{71042, 1, []string{"node", "/opt/homebrew/bin/codex", "resume"}, "/opt/homebrew/bin/node"},
+		{71043, 71042, []string{vendor, "resume"}, vendor},
+	}
+	argv, parents := map[int][]string{}, map[int]int{}
+	byArgs, byName := "", ""
+	for _, p := range processes {
+		argv[p.pid], parents[p.pid] = p.argv, p.ppid
+		byArgs += fmt.Sprintf("%d 502 2-00:00:00 %s\n", p.pid, strings.Join(p.argv, " "))
+		byName += fmt.Sprintf("%d lane1 %s %s\n", p.pid, started, p.comm)
+	}
+	// Both ps forms are answered, so the test also runs against the scan that
+	// read process names.
+	h.runner.replies = map[string]fakeReply{
+		"ps -axww -o pid=,uid=,etime=,args=":   {result: CommandResult{Stdout: []byte(byArgs)}},
+		"ps -axww -o pid=,user=,lstart=,comm=": {result: CommandResult{Stdout: []byte(byName)}},
+	}
+	setDarwinProcessArgv(t, func(pid int) ([]string, error) {
+		if a, ok := argv[pid]; ok {
+			return a, nil
+		}
+		return nil, fmt.Errorf("no process %d", pid)
+	})
+	setDarwinProcessParent(t, func(pid int) (int, error) {
+		if ppid, ok := parents[pid]; ok {
+			return ppid, nil
+		}
+		return 0, fmt.Errorf("no process %d", pid)
+	})
+	enabled := time.Now()
+	lifecycle := h.env.agentSessionsStartedBefore(context.Background(), enabled, -1)
+	listed, err := h.env.bundleDarwinProcesses(context.Background(), map[string]string{"codex": "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := enterprisestatus.UnprotectedSessions(listed, map[string]time.Time{"codex": enabled})
+
+	result := enterprisestatus.New("ensure", "standalone", "darwin", "1.0.6")
+	for _, session := range lifecycle {
+		result.NotePendingSession("codex", session.PID)
+	}
+	result.Bundle = &enterprisestatus.BundleState{}
+	result.SetBundleSessions(scan)
+	result.Finish("darwin", 0)
+	bundleStatus := enterprisestatus.PendingFromScan(scan)
+
+	var lifecyclePIDs, scanPIDs []int
+	for _, session := range lifecycle {
+		lifecyclePIDs = append(lifecyclePIDs, session.PID)
+	}
+	for _, entry := range scan.Entries {
+		scanPIDs = append(scanPIDs, entry.PID)
+	}
+	if result.EnforcementPending == nil || bundleStatus == nil || result.EnforcementPending.Count != 2 || bundleStatus.Count != 2 {
+		t.Fatalf("enforcement_pending: lifecycle result %+v, bundle status %+v; want 2 sessions in both (lifecycle pids %v, bundle scan pids %v)",
+			result.EnforcementPending, bundleStatus, lifecyclePIDs, scanPIDs)
+	}
+	if fmt.Sprint(lifecyclePIDs) != "[58467 71042]" || fmt.Sprint(scanPIDs) != "[58467 71042]" {
+		t.Fatalf("sessions named by lifecycle pids %v and bundle scan pids %v, want both the launchers [58467 71042]", lifecyclePIDs, scanPIDs)
 	}
 }

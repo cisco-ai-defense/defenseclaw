@@ -170,6 +170,11 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// entry point for tool-call telemetry on every install. The hook
 	// can return "allow" (observability) or "deny" based on the policy
 	// decision returned by the gateway.
+	// A settings.json that went missing after DefenseClaw managed it gets
+	// the account's settings back before the hooks go in (GAP-0581).
+	if err := seedMissingPerUserSettings(c.Name(), opts); err != nil {
+		return fmt.Errorf("claudecode settings put back: %w", err)
+	}
 	if err := c.patchClaudeCodeHooks(opts, hookScript); err != nil {
 		return fmt.Errorf("claudecode settings hooks: %w", err)
 	}
@@ -191,6 +196,8 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 			return fmt.Errorf("claude CodeGuard plugin install: %w", err)
 		}
 	}
+	// The file as it is now is the last known good copy.
+	recordPerUserSettingsCopy(c.Name(), opts)
 
 	return nil
 }
@@ -296,6 +303,11 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 	if len(errs) == 0 {
 		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeClaude); err != nil {
 			errs = append(errs, fmt.Sprintf("revoke scoped OTLP token: %v", err))
+		}
+	}
+	if len(errs) == 0 {
+		if err := removePerUserSettingsCopies(c.Name(), opts.DataDir); err != nil {
+			errs = append(errs, fmt.Sprintf("remove the settings copy: %v", err))
 		}
 	}
 	if len(errs) == 0 {

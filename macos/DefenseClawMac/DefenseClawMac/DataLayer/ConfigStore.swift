@@ -124,6 +124,38 @@ indirect enum YAMLNode: Sendable {
     }
 }
 
+/// tui/app.py _config_error_summary: the actionable config failure, kept
+/// short for the status line — "<file> line N is invalid; run defenseclaw
+/// config validate".
+enum ConfigValidation {
+    /// The banner for a `defenseclaw config validate` run that reports a
+    /// parse error, or nil when the file loads (or the check could not run:
+    /// no CLI, a usage error on an older runtime, a missing file).
+    /// Load failures the runtime reports (config.py _unreadable_config_message
+    /// and the 1.0.x validate line "X line N, column M: invalid YAML (…)");
+    /// a semantic issue the file still loads with is not one.
+    /// `deployment_mode is "…"` is the one key the 1.0.x loader refuses outright
+    /// that `config validate` reports without the YAML wording.
+    static let loadFailureMarkers = ["invalid yaml", "parse error", "cannot read the defenseclaw configuration", "not valid utf-8", "deployment_mode is \""]
+
+    static func invalidConfigSummary(fileName: String, exitCode: Int32, output: String, cancelled: Bool = false) -> String? {
+        guard !cancelled, exitCode == 1 else { return nil }
+        let lowered = output.lowercased()
+        guard loadFailureMarkers.contains(where: { lowered.contains($0) }) else { return nil }
+        return summary(fileName: fileName, problem: output)
+    }
+
+    static func summary(fileName: String, problem: String) -> String {
+        var line = ""
+        if let regex = try? NSRegularExpression(pattern: #"\bline (\d+)\b"#),
+           let match = regex.matches(in: problem, range: NSRange(problem.startIndex..., in: problem)).last,
+           let range = Range(match.range(at: 1), in: problem) {
+            line = " line \(problem[range])"
+        }
+        return "\(fileName)\(line) is invalid; run defenseclaw config validate"
+    }
+}
+
 enum MiniYAML {
     private static let maximumSourceBytes = 4 * 1024 * 1024
     private static let maximumNodes = 65_536

@@ -1148,10 +1148,15 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		}
 		// The feed names the port as the approval does, the reply says what
 		// the reject leaves, and the agent's next hook says the user
-		// declined, not a network error (GAP-0236, GAP-0260).
+		// declined, not a network error (GAP-0236, GAP-0260). Only a
+		// host-port ask is a port on this machine; the egress proxy's ask
+		// (proxyAsk, also local) is a destination outside it (GAP-0415).
 		target := host
-		if local {
+		switch {
+		case local && !proxyAsk:
 			target = fmt.Sprintf("port %d on your machine (%s:%d)", port, host, port)
+		case port > 0:
+			target = fmt.Sprintf("%s:%d", host, port)
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 			Host: host, Port: port, Reason: "rejected", Message: "rejected " + target})
@@ -1245,6 +1250,39 @@ func persistError(err error) error {
 	return &sandboxapi.Error{Code: sandboxapi.CodeInternal, Message: "save the decision to config.yaml", Detail: err.Error()}
 }
 
+// endStoppedAsks ends the asks of a sandbox that stopped. Its session's
+// asks can't be answered any more (a managed gateway refuses the answer as
+// sandbox_registration_stopped, an unmanaged one has no gateway to apply it
+// to), yet status and approvals went on saying they waited for the user
+// (GAP-0508). Each ends as expired, in the audit and the activity feed; the
+// next session asks again if it still needs the destination.
+func (m *Manager) endStoppedAsks(ctx context.Context, b *box, sandbox, bindingID string) {
+	m.mu.Lock()
+	var ended []*approval
+	for id, a := range m.approvals {
+		if a.sandbox == sandbox && a.status == sandboxapi.ApprovalPending {
+			a.status, a.resolvedAt = sandboxapi.ApprovalFailed, m.now().UTC()
+			ended = append(ended, a)
+			delete(m.approvals, id)
+		}
+	}
+	ident := b.identity()
+	m.mu.Unlock()
+	for _, a := range ended {
+		m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalExpired, actorAutomatic)
+		target := a.decision.Host
+		if a.decision.Port > 0 {
+			target = fmt.Sprintf("%s:%d", a.decision.Host, a.decision.Port)
+		}
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: sandbox, ApprovalID: a.id,
+			Host: a.decision.Host, Port: a.decision.Port, Reason: "expired",
+			Message: "the ask for " + target + " ended: sandbox " + sandbox + " stopped"})
+		if bindingID != "" {
+			m.refusals.forgetNote(bindingID, triage.NormalizeHost(a.decision.Host), a.decision.Port, NoteAsked)
+		}
+	}
+}
+
 func (m *Manager) dropApprovals(sandbox string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1325,6 +1363,23 @@ func (m *Manager) registrationOf(b *box) string {
 	}
 	m.mu.Unlock()
 	return registration
+}
+
+// SetRegistration records registration as the managed registration of
+// sandbox name in place of the one its record keeps: a start runs a
+// stopped sandbox under a new registration (GAP-0673).
+func (m *Manager) SetRegistration(name, registration string) {
+	m.mu.Lock()
+	b, ok := m.boxes[name]
+	if !ok || b.deleted || b.rec.RegistrationID == registration {
+		m.mu.Unlock()
+		return
+	}
+	b.rec.RegistrationID = registration
+	m.mu.Unlock()
+	if err := m.saveRecord(b); err != nil {
+		m.logf("record the registration of sandbox %s: %v", name, err)
+	}
 }
 
 // liveBoxes are the sandboxes the manager holds that are neither deleted

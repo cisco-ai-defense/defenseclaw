@@ -84,8 +84,8 @@ func TestGoldenTwoUsersMixedInstalls(t *testing.T) {
 	// One file_open entry (GAP-0218): NoPost exemption, then the ssh,
 	// profile and autostart PID selectors.
 	hooks := selectorsOf(t, p)
-	if len(hooks) != 1 {
-		t.Fatalf("hooks = %d, want one file_open entry", len(hooks))
+	if len(hooks) != 4 || p.tp.Spec.LsmHooks[0].Hook != "file_open" {
+		t.Fatalf("hooks = %d, want one file_open entry, then path_link, path_rename and path_symlink", len(hooks))
 	}
 	if len(hooks[0]) != 4 {
 		t.Fatalf("%d selectors, want 4", len(hooks[0]))
@@ -168,8 +168,8 @@ func TestSixtyFiveRootsAnchorOnePIDGroupInOneHook(t *testing.T) {
 	}
 	// One file_open entry: Tetragon 1.7.0 runs only the last entry of a
 	// hook name (GAP-0218), so the PID group cannot spill into a second one.
-	if hooks := len(p.tp.Spec.LsmHooks); hooks != 1 {
-		t.Fatalf("%d LSM hook instances, want 1", hooks)
+	if hooks := hookCount(p, "file_open"); hooks != 1 || len(p.tp.Spec.LsmHooks) != 4 {
+		t.Fatalf("%d file_open entries of %d hooks, want 1 of 4", hooks, len(p.tp.Spec.LsmHooks))
 	}
 }
 

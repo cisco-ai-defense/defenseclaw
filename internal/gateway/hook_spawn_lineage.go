@@ -7,12 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"path"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -51,7 +51,7 @@ type scoredHookSpawnIntent struct {
 	ready bool
 }
 
-var hookSpawnTaskPattern = regexp.MustCompile(`(?i)(?:task[_-]?name|agent[_-]?name|child[_-]?(?:name|role))\s*[:=]\s*["']?([A-Za-z0-9_./:-]{1,512})`)
+var hookSpawnTaskPattern = lazyregexp.New(`(?i)(?:task[_-]?name|agent[_-]?name|child[_-]?(?:name|role))\s*[:=]\s*["']?([A-Za-z0-9_./:-]{1,512})`)
 
 func hookSpawnIntentToolKey(meta llmEventMeta) string {
 	source := strings.ToLower(strings.TrimSpace(meta.Source))
@@ -340,7 +340,7 @@ type hookChildThread struct {
 	createdAt time.Time
 }
 
-var codexThreadIDPattern = regexp.MustCompile(`"threadId"\s*:\s*"([A-Za-z0-9][A-Za-z0-9._-]{7,127})"`)
+var codexThreadIDPattern = lazyregexp.New(`"threadId"\s*:\s*"([A-Za-z0-9][A-Za-z0-9._-]{7,127})"`)
 
 // isCodexThreadSpawnTool reports whether tool is the Codex TUI's
 // create_thread. Codex 0.160 runs a spawned agent as a thread of its own: it
@@ -450,6 +450,38 @@ const (
 	copilotSubagentMaxPending = 256
 )
 
+// copilotAgentNodeID maps an agent id a Copilot hook reports to the agent
+// node DefenseClaw gives that agent. Copilot CLI names every agent by the
+// session it runs in: subagentStart, subagentStop and the hooks of a
+// sub-agent report agentId as the child's session UUID and parentAgentId as
+// the parent's session UUID (Copilot CLI 1.0.105, GAP-0721). DefenseClaw
+// names the agent of a session agentNodeID(identity, "copilot", session,
+// "root"), the id that session's own hooks get, so a raw session id becomes
+// that node. An id that already is a node is kept.
+func copilotAgentNodeID(agentIdentityID, reported string) string {
+	reported = strings.TrimSpace(reported)
+	if reported == "" || strings.HasPrefix(reported, "agent-") {
+		return reported
+	}
+	return agentNodeID(agentIdentityID, "copilot", reported, "root")
+}
+
+// copilotReportedParent maps a parentAgentId a Copilot hook reports (the
+// parent's session UUID) to the parent's agent node, and names that session
+// as the parent session when the hook named none. A hook of a session's own
+// agent that names its own session as parent is not a child: the report is
+// dropped.
+func copilotReportedParent(agentIdentityID, sessionID, agentID, reportedParent, parentSessionID string) (string, string) {
+	raw := strings.TrimSpace(reportedParent)
+	if raw == "" || strings.HasPrefix(raw, "agent-") {
+		return raw, parentSessionID
+	}
+	if raw == strings.TrimSpace(sessionID) && (agentID == "" || agentID == agentNodeID(agentIdentityID, "copilot", sessionID, "root")) {
+		return "", parentSessionID
+	}
+	return agentNodeID(agentIdentityID, "copilot", raw, "root"), firstNonEmpty(parentSessionID, raw)
+}
+
 type copilotPendingSubagent struct {
 	identity  string
 	parent    llmEventMeta
@@ -468,11 +500,29 @@ func (a *APIServer) applyCopilotSubagentLineage(ctx context.Context, meta llmEve
 	now := time.Now().UTC()
 	switch meta.LifecycleEvent {
 	case "subagent_start":
-		a.noteCopilotSubagentStart(meta, now)
+		// The start row is the child's: one level under the agent that
+		// started it, also when the start names no child (Copilot 1.0.90)
+		// and a pending spawn intent cleared the session-root fallback
+		// (rel-1-0-6:GAP-0223).
+		if parent, ok := a.noteCopilotSubagentStart(meta, firstString(payload, "agentId", "agent_id"), now); ok &&
+			meta.LineageProvenance != "reported" && parent.AgentID != meta.AgentID {
+			return linkHookChildToParent(meta, parent)
+		}
 		return meta
 	case "subagent_stop":
 		return a.noteCopilotSubagentStop(meta, firstString(payload, "agentId", "agent_id"), now)
 	case "session_start":
+		return meta
+	}
+	if meta.ParentAgentReported && meta.LineageProvenance != "reported" && !meta.ParentLineageResolved &&
+		meta.ParentSessionID != "" && meta.ParentAgentID == agentNodeID(meta.AgentIdentityID, "copilot", meta.ParentSessionID, "root") {
+		// The hook named its parent (parentAgentId): the parent's retained
+		// lineage gives the root and the depth, so a sub-agent of a
+		// sub-agent roots at the main agent.
+		if parent, ok := a.hookSessionStateSnapshotMatching("copilot", meta.ParentSessionID, meta.ParentAgentID, &meta); ok &&
+			parent.meta.AgentDepth >= 0 && parent.meta.AgentDepth < 64 {
+			return linkHookChildToParent(meta, parent.meta)
+		}
 		return meta
 	}
 	if linked := a.applyHookChildThreadLineage(meta); linked.ParentLineageResolved || meta.AgentDepth != 0 ||
@@ -541,18 +591,20 @@ func (a *APIServer) hookSessionInHistory(ctx context.Context, meta llmEventMeta)
 	return err == nil && found
 }
 
-func (a *APIServer) noteCopilotSubagentStart(meta llmEventMeta, now time.Time) {
+// noteCopilotSubagentStart records a pending sub-agent start under the
+// retained agent of the start's session and returns that parent.
+func (a *APIServer) noteCopilotSubagentStart(meta llmEventMeta, child string, now time.Time) (llmEventMeta, bool) {
 	// Session IDs are caller-supplied and can repeat across accounts: the
 	// parent is a session of the same agent identity and user (GAP-1047).
 	parent, ok := a.hookSessionStateSnapshotMatching("copilot", meta.SessionID,
 		agentNodeID(meta.AgentIdentityID, "copilot", meta.SessionID, "root"), &meta)
 	if !ok {
 		if parent, ok = a.hookSessionStateSnapshotMatching("copilot", meta.SessionID, "", &meta); !ok {
-			return
+			return llmEventMeta{}, false
 		}
 	}
 	if strings.TrimSpace(parent.meta.AgentID) == "" || parent.meta.AgentDepth < 0 || parent.meta.AgentDepth >= 64 {
-		return
+		return llmEventMeta{}, false
 	}
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
@@ -566,9 +618,15 @@ func (a *APIServer) noteCopilotSubagentStart(meta llmEventMeta, now time.Time) {
 	if len(a.copilotSubagents) >= copilotSubagentMaxPending {
 		a.copilotSubagents = a.copilotSubagents[1:]
 	}
+	// A start that names the child session (agentId) is that session's
+	// already: another session that starts meanwhile is a chat of its own.
+	if child = strings.TrimSpace(child); child == meta.SessionID {
+		child = ""
+	}
 	a.copilotSubagents = append(a.copilotSubagents, copilotPendingSubagent{
-		identity: meta.AgentIdentityID, parent: parent.meta, createdAt: now,
+		identity: meta.AgentIdentityID, parent: parent.meta, child: child, createdAt: now,
 	})
+	return parent.meta, true
 }
 
 // noteCopilotSubagentStop ends the pending start the child session belongs

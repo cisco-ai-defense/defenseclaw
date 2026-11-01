@@ -247,6 +247,7 @@ type SidecarHealth struct {
 	observabilityV8RetentionState         string
 	observabilityV8RetentionFailure       string
 	observabilityV8RetentionDays          int64
+	observabilityV8RetentionMaxStoreMB    int64
 	observabilityV8EventHistoryGeneration uint64
 	observabilityV8EventHistory           map[string]observabilityV8EventHistoryObservation
 	// observabilityV8LastChange is when the latest event-history or
@@ -997,6 +998,17 @@ func validObservabilityV8FailureCode(code string) bool {
 	}
 }
 
+// setObservabilityV8RetentionCap records the audit store size cap the next
+// setObservabilityV8Retention publishes with the retention (GAP-0141).
+func (h *SidecarHealth) setObservabilityV8RetentionCap(maxStoreMB int64) {
+	if h == nil || maxStoreMB < 0 {
+		return
+	}
+	h.mu.Lock()
+	h.observabilityV8RetentionMaxStoreMB = maxStoreMB
+	h.mu.Unlock()
+}
+
 func (h *SidecarHealth) setObservabilityV8Retention(state string, days int64, failure string) {
 	if h == nil || days < 0 || !validObservabilityV8RetentionState(state) ||
 		!validObservabilityV8RetentionFailure(failure) {
@@ -1636,6 +1648,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	retentionState := h.observabilityV8RetentionState
 	retentionFailure := h.observabilityV8RetentionFailure
 	retentionDays := h.observabilityV8RetentionDays
+	retentionMaxStoreMB := h.observabilityV8RetentionMaxStoreMB
 	eventHistoryGeneration := h.observabilityV8EventHistoryGeneration
 	eventHistoryObservations := make(
 		map[string]observabilityV8EventHistoryObservation,
@@ -1715,6 +1728,10 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 				snap.Telemetry.Since,
 				retentionState, retentionFailure, retentionDays, eventHistory,
 			)
+		}
+		if _, reported := snap.Telemetry.Details["retention_days"]; reported && retentionMaxStoreMB > 0 {
+			// The size cap goes with the retention it bounds (GAP-0141).
+			snap.Telemetry.Details["retention_max_store_mb"] = retentionMaxStoreMB
 		}
 		snap.Telemetry.Since = h.telemetrySince(snap.Telemetry.State, snap.Telemetry.Since)
 	}

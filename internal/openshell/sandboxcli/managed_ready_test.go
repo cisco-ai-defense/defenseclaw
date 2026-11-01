@@ -193,7 +193,7 @@ func TestManagedMacDockerHostOfTheShellIsNamed(t *testing.T) {
 	ta := newTestApp(t, "")
 	m := managedStatusFixture()
 	ta.DockerEngine = func(context.Context) (string, error) { return "Ubuntu 24.04.4 LTS", nil }
-	c := ta.managedDockerCheck(bg, m)
+	c := ta.managedDockerCheck(bg, m, false)
 	if c.Status != openshell.StatusWarn || c.Fix == nil {
 		t.Fatalf("doctor row with the shell's DOCKER_HOST: %+v", c)
 	}
@@ -218,14 +218,32 @@ func TestManagedMacDoctorChecksDocker(t *testing.T) {
 	ta := newTestApp(t, "")
 	m := managedStatusFixture()
 	ta.DockerEngine = func(context.Context) (string, error) { return "", errors.New("Cannot connect to the Docker daemon") }
-	c := ta.managedDockerCheck(bg, m)
+	c := ta.managedDockerCheck(bg, m, false)
 	if c.Status != openshell.StatusFail || c.Fix == nil {
 		t.Fatalf("no Docker: %+v", c)
 	}
 	has(t, c.Fix.Summary, "start Docker Desktop", "contact it-security@example.com")
 	ta.DockerEngine = func(context.Context) (string, error) { return "Docker Desktop", nil }
-	if c := ta.managedDockerCheck(bg, m); c.Status != openshell.StatusPass {
+	if c := ta.managedDockerCheck(bg, m, false); c.Status != openshell.StatusPass {
 		t.Fatalf("Docker answers: %+v", c)
+	}
+}
+
+// GAP-0515: an account signed out of the Mac's desktop, while another
+// account's sandboxes hold this computer's ports, was told to start Docker
+// Desktop. It can run no sandbox until that account's stop, whatever its
+// Docker does: the Docker row names that cause and gives no Docker fix.
+func TestManagedMacDoctorDockerWhileAnotherAccountHoldsSandboxes(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "")
+	ta := newTestApp(t, "")
+	ta.DockerEngine = func(context.Context) (string, error) { return "", errors.New("Cannot connect to the Docker daemon") }
+	c := ta.managedDockerCheck(bg, managedStatusFixture(), true)
+	if c.Status != openshell.StatusSkip || c.Fix != nil {
+		t.Fatalf("Docker row while another account holds the sandboxes: %+v", c)
+	}
+	has(t, c.Detail, "another account is using sandboxes", "signed in to this Mac's desktop")
+	if strings.Contains(c.Detail, "start Docker Desktop") {
+		t.Fatalf("Docker row tells this account to start Docker Desktop: %+v", c)
 	}
 }
 

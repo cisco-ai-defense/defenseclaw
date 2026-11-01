@@ -2051,6 +2051,140 @@ if (-not [bool]$status.ok -or [bool]$status.installed -or
     throw 'module Status did not remain a read-only absent deployment under the restricted environment'
 }
 
+
+# A compiler scratch folder that answers Access denied until its finalizer
+# retires it (the Windows PowerShell 5.1 Add-Type CodeDom folder retires only
+# from a finalizer) must not fail the exact cleanup: the cleanup runs the
+# pending finalizers and treats the folder as absent once it is gone. A folder
+# that still answers Access denied after the finalizers ran is refused. A
+# token whose backup privilege is enabled lists any folder whatever its DACL
+# (an elevated OpenSSH session); there the unreadable folder cannot be made
+# and the case is skipped (a CI runner token has the privilege disabled).
+Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+namespace DefenseClawSmoke
+{
+    public sealed class RetiringScratch
+    {
+        private readonly string path;
+        public RetiringScratch(string path) { this.path = path; }
+        public string Path { get { return path; } }
+        ~RetiringScratch()
+        {
+            try { Directory.Delete(path, false); } catch { }
+        }
+    }
+}
+"@
+function New-UnreadableScratch {
+    param([Parameter(Mandatory)][string]$Root)
+    $path = [IO.Path]::Combine($Root, 'abcdefgh')
+    [void][IO.Directory]::CreateDirectory($path)
+    $security = Get-DefenseClawBootstrapDirectorySecurity `
+        -Directory ([IO.DirectoryInfo]::new($path)) `
+        -Sections ([Security.AccessControl.AccessControlSections]::Access)
+    $security.AddAccessRule(
+        [Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+            [Security.AccessControl.FileSystemRights]::ListDirectory,
+            [Security.AccessControl.AccessControlType]::Deny
+        )
+    )
+    $security.AddAccessRule(
+        [Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.WindowsIdentity]::GetCurrent().User,
+            [Security.AccessControl.FileSystemRights]::ListDirectory,
+            [Security.AccessControl.AccessControlType]::Deny
+        )
+    )
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [IO.FileSystemAclExtensions]::SetAccessControl(
+            [IO.DirectoryInfo]::new($path),
+            $security
+        )
+    }
+    else {
+        [IO.DirectoryInfo]::new($path).SetAccessControl($security)
+    }
+    return $path
+}
+function Test-ScratchListable {
+    param([Parameter(Mandatory)][string]$Path)
+    $enumerator = $null
+    try {
+        $enumerator = [IO.Directory]::EnumerateFileSystemEntries($Path).GetEnumerator()
+        [void]$enumerator.MoveNext()
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($null -ne $enumerator) {
+            $enumerator.Dispose()
+        }
+    }
+}
+function Invoke-RetiringScratchCleanup {
+    param([bool]$KeepScratch)
+    $scratchContext = New-DefenseClawBootstrapEnvironment
+    $holder = $null
+    $failure = $null
+    $listable = $false
+    try {
+        $scratch = New-UnreadableScratch -Root ([string]$scratchContext.Path)
+        $listable = Test-ScratchListable -Path $scratch
+        $holder = [DefenseClawSmoke.RetiringScratch]::new($scratch)
+        if (-not $KeepScratch) {
+            $holder = $null
+        }
+        try {
+            Remove-DefenseClawBootstrapEnvironment -Context $scratchContext
+        }
+        catch {
+            $failure = $_.Exception.Message
+        }
+        if ($KeepScratch) {
+            [GC]::KeepAlive($holder)
+            $holder = $null
+            $retire = [Diagnostics.Stopwatch]::StartNew()
+            while ([IO.Directory]::Exists($scratch) -and
+                $retire.ElapsedMilliseconds -lt 10000) {
+                [GC]::Collect()
+                [Threading.Thread]::Sleep(50)
+            }
+            if ($null -ne $failure) {
+                Remove-DefenseClawBootstrapEnvironment -Context $scratchContext
+            }
+        }
+    }
+    finally {
+        Restore-DefenseClawBootstrapEnvironment -Context $scratchContext
+    }
+    return [pscustomobject]@{
+        Failure = $failure
+        Root = [string]$scratchContext.Path
+        Listable = $listable
+    }
+}
+$retired = Invoke-RetiringScratchCleanup -KeepScratch $false
+if ($retired.Listable) {
+    # Skipped on this token (backup privilege enabled); see above.
+    $retiringScratchCaseSkipped = $true
+}
+elseif ($null -ne $retired.Failure -or
+    (Test-DefenseClawBootstrapPathExists -Path $retired.Root)) {
+    throw "compiler scratch retiring through its finalizer failed the exact cleanup: $($retired.Failure)"
+}
+$kept = if ($retired.Listable) { $null } else { Invoke-RetiringScratchCleanup -KeepScratch $true }
+if ($null -ne $kept -and -not $kept.Listable) {
+    if ($null -eq $kept.Failure -or
+        $kept.Failure -notmatch 'denied' -or
+        (Test-DefenseClawBootstrapPathExists -Path $kept.Root)) {
+        throw "an unreadable bootstrap entry that did not retire was not refused (or not removed after it retired): $($kept.Failure)"
+    }
+}
 $single = Invoke-ProtectedEnvironmentProbe
 $collisionRejected = Invoke-CollisionNoSeizeProbe
 $suppliedBootstrapParent = Invoke-SuppliedBootstrapParentProbe

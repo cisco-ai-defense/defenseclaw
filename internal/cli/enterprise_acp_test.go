@@ -235,13 +235,13 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	// entry points at this data directory's token copy and lock.
 	doneLock := acpContractLockPath(userData, "zed", "kiro")
 	editorFile := filepath.Join(userHome, ".config", "zed", "settings.json")
-	guardPath := filepath.Join(userHome, "defenseclaw-acp")
+	agentBinary, agentSHA, guardPath, guardSHA := testACPExecutables(t, userHome)
 	if err := os.MkdirAll(filepath.Dir(editorFile), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	entry, _ := json.Marshal(map[string]any{"agent_servers": map[string]any{
 		acpManagedEntryName("kiro"): map[string]any{"command": guardPath,
-			"args": []string{"--token-file", tokenPath, "--contract-lock", doneLock}},
+			"args": []string{"--token-file", tokenPath, "--contract-lock", doneLock, "--", agentBinary, "acp"}},
 	}})
 	if err := os.WriteFile(editorFile, entry, 0o600); err != nil {
 		t.Fatal(err)
@@ -256,7 +256,8 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		t.Helper()
 		lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile,
 			"config_sha256": acp.EntryDigestPrefix + entryDigest},
-			"guard": map[string]any{"path": guardPath}, "profile": profile, "mode": mode})
+			"agent": map[string]any{"id": "kiro", "path": agentBinary, "sha256": agentSHA},
+			"guard": map[string]any{"path": guardPath, "sha256": guardSHA}, "profile": profile, "mode": mode})
 		if err := os.WriteFile(doneLock, lock, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -285,6 +286,23 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		t.Fatalf("a moved pair is not flagged: list %v, verify %v", row, verified)
 	}
 	cfg.ACP.Clients["zed"], cfg.ACP.Agents["kiro"] = config.ACPBinding{Enabled: true, Profile: "locked"}, config.ACPBinding{Enabled: true, Profile: "locked"}
+	// A profile whose allow-list no longer names the client, while the
+	// binding stays, is refused by the gateway; verify and list say so with
+	// the gateway's rule (GAP-1155).
+	allowed := cfg.ACP.Profiles["locked"]
+	narrowed := allowed
+	narrowed.AllowedClients = []string{"vscode"}
+	cfg.ACP.Profiles["locked"] = narrowed
+	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
+	verified = run(runEnterpriseACPVerify)
+	if row, _ := listed[0].(map[string]any); !strings.Contains(fmt.Sprint(row["note"]), "acp.profiles.locked.allowed_clients does not name zed") ||
+		!strings.Contains(fmt.Sprint(verified["central_note"]), "no longer allows zed/kiro in profile locked") {
+		t.Fatalf("a pair outside the profile allow-list is not flagged: list %v, verify %v", row, verified)
+	}
+	cfg.ACP.Profiles["locked"] = allowed
+	if verified = run(runEnterpriseACPVerify); verified["central_note"] != nil {
+		t.Fatalf("verify flags an allowed pair: %v", verified)
+	}
 	// After an account rename the recorded data directory names the old
 	// home; list reads the default one of the new home (GAP-0869).
 	renamedHome := t.TempDir()

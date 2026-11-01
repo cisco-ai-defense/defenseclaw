@@ -194,8 +194,8 @@
     {
       "id": "opencode",
       "label": "OpenCode",
-      "windowsSupport": "supported",
-      "windowsNote": "Direct native Windows x64 execution is supported for the admitted WinGet CLI.",
+      "windowsSupport": "preview",
+      "windowsNote": "Native Windows x64 uses the reviewed @opencode/cli V2 image or an admitted V2 WinGet CLI.",
       "summary": "Auto-loaded bridge plugin with tool-execution blocking.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -215,11 +215,12 @@
         "status": "artifacts",
         "tamperTier": "user",
         "hookConfig": "/etc/opencode/opencode.json",
-        "harnessPin": "1.18.31",
-        "verified": "verified"
+        "harnessPin": "2.1.4",
+        "verified": "unverified",
+        "unverifiedReason": "V2-only image and bridge; previous V1 sandbox certification does not apply. A fresh V2 OpenShell ingress, block, and egress verification is required."
       },
       "hilt": "No native human-approval surface; blocks by throwing in the bridge plugin's tool.execute.before. confirm verdicts fall back to allow.",
-      "notes": "Native Windows setup is supported; validation metadata remains empty and live=false. Governed by a DefenseClaw JS bridge plugin auto-loaded from OPENCODE_CONFIG_DIR/plugins/defenseclaw.js or the default ~/.config/opencode/plugins/defenseclaw.js (no opencode.json edit). tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) to abort the tool on a block decision; tool.execute.after is best-effort observe-only. Fail-closed applies only to the awaited before hook: the bridge throws there when the gateway is unreachable and FAIL_MODE=closed."
+      "notes": "V2-only dependency-free plugin with a default id/setup definition. Awaited execute.before rejects blocked tool calls; execute.after and session subscriptions report outcomes. Native Windows uses the reviewed @opencode/cli image or a V2 WinGet executable. Live validation metadata remains empty; preview limits are documented on the connector page."
     },
     {
       "id": "amp",
@@ -260,7 +261,7 @@
       "notes": "A managed TypeScript plugin at ~/.config/amp/plugins/defenseclaw.ts forwards session.start, agent.start, tool.call, tool.result, and agent.end to /api/v1/amp/hook. tool.call is synchronously enforceable before execution, and tool.result can be replaced before model delivery but cannot undo completed side effects. Execute mode must use --plugin-ready-timeout 30 for lifecycle capture and guard readiness. Amp's reported custom-agent definition or built-in mode enriches Agent360 without being treated as a stable ID, request trace, or parent link. Delegation tools such as Task and oracle are governed at launch, and any emitted child-thread events remain independently correlated unless Amp supplies canonical parent evidence. No native OTLP or W3C traceparent channel is advertised."
     },
     {
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "blocks", "secureClientClosed": "blocks", "strictAvailability": "no" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "per-user-route-blocks-linux-macos", "secureClientClosed": "runs", "strictAvailability": "yes" },
       "id": "copilot",
       "label": "GitHub Copilot CLI",
       "windowsSupport": "supported",
@@ -293,7 +294,6 @@
           "defenseclaw-copilot-github"
         ]
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "per-user-route-blocks-linux-macos", "secureClientClosed": "runs", "strictAvailability": "yes" },
       "hilt": "Copilot CLI confirmations block because its hook does not prove an approval prompt is available; VS Code Local uses its separate native ask.",
       "notes": "Native Windows setup is supported. Provider authentication remains required; HITL and official-client live evidence are unverified and unclaimed, validation metadata remains empty, and live=false. Global hooks live under ~/.copilot/hooks by default with optional workspace hooks under <workspace>/.github/hooks."
     },
@@ -320,7 +320,6 @@
         "scope": "user",
         "blocksDeliveryFailures": true
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "runs", "managedOpenNoGuard": "runs", "secureClientClosed": "runs", "strictAvailability": "yes" },
       "sandbox": {
         "status": "artifacts",
         "tamperTier": "user",

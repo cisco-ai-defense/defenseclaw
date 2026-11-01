@@ -30,7 +30,10 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-const windowsGatewayProfileRefusal = "the managed gateway runs as LocalSystem and does not read inside user profiles; scan the folder as the signed-in user (defenseclaw ... from the user session) or move it outside the profile"
+// windowsGatewayProfileRefusal says only why: it told a standard account to
+// scan as itself, which managed scans refuse (GAP-0526). The scan routes add
+// the administrator's next step (gateway windowsProfileScanNextStep).
+const windowsGatewayProfileRefusal = "the managed gateway runs as LocalSystem and does not read inside user profiles"
 
 var (
 	windowsGatewayPathIsService = WindowsCurrentProcessIsGatewayService

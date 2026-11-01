@@ -86,12 +86,21 @@ func TestWindowsWSLClaudeDesktopGate(t *testing.T) {
 		if verify, err := VerifyWindowsWSL(opts, nil); err != nil || !verify.Covered {
 			t.Fatalf("verify after publish: %+v %v", verify, err)
 		}
-		// Once DefenseClaw's gate is the only machine policy it overrides
-		// account policy: kept, but not covered.
+		// Once DefenseClaw's gate is the only machine policy it is judged
+		// by what it overrides (GAP-1072): kept and covered while nothing
+		// depends on the key, kept but a conflict once an account has HKCU
+		// policy it overrides.
 		reg.machine[ClaudeDesktopPolicyKey] = []RegValue{*claudeGate(reg)}
-		if verify, _ := VerifyWindowsWSL(opts, nil); verify.Covered || claudeGate(reg) == nil {
-			t.Fatalf("a gate that is the only machine policy must be a conflict: %+v", verify)
+		if verify, _ := VerifyWindowsWSL(opts, nil); !verify.Covered || claudeGate(reg) == nil ||
+			!strings.Contains(strings.Join(verify.Details, "\n"), "is DefenseClaw's own value and the only machine policy") {
+			t.Fatalf("a lone DefenseClaw gate that overrides nothing must stay and be covered: %+v", verify)
 		}
+		reg.users = map[string]map[string][]RegValue{ClaudeDesktopPolicyKey: {"S-1-5-21-1-2-3-1001": {adminPolicy}}}
+		if verify, _ := VerifyWindowsWSL(opts, nil); verify.Covered || claudeGate(reg) == nil ||
+			!strings.Contains(strings.Join(verify.Conflicts, "\n"), "HKCU Claude Desktop policy") {
+			t.Fatalf("a lone gate over an account's HKCU policy must be a conflict: %+v", verify)
+		}
+		reg.users = nil
 		reg.machine[ClaudeDesktopPolicyKey] = append(reg.machine[ClaudeDesktopPolicyKey], adminPolicy)
 		if _, err := RemoveWindowsWSL(opts); err != nil {
 			t.Fatal(err)
@@ -138,6 +147,22 @@ func TestWindowsWSLClaudeDesktopGate(t *testing.T) {
 		reg.homes = nil
 		if state, err := PublishWindowsWSL(opts); err != nil || !state.Covered || claudeGate(reg) == nil {
 			t.Fatalf("create with nothing to lose must write the gate: %+v %v", state, err)
+		}
+		// GAP-1072: create removed from the config afterwards. DefenseClaw
+		// knows the gate as its own (its record): it stays, verify and
+		// publish stay covered, and the conflict does not blame it.
+		opts.WSL.ClaudeDesktopKey = ""
+		for name, reconcile := range map[string]func() (State, error){
+			"verify":  func() (State, error) { return VerifyWindowsWSL(opts, nil) },
+			"publish": func() (State, error) { return PublishWindowsWSL(opts) },
+		} {
+			state, err := reconcile()
+			if err != nil || !state.Covered || len(state.Conflicts) != 0 || claudeGate(reg) == nil {
+				t.Fatalf("%s after create was removed: %+v %v", name, state, err)
+			}
+		}
+		if _, err := RemoveWindowsWSL(opts); err != nil || claudeGate(reg) != nil {
+			t.Fatalf("uninstall must still take DefenseClaw's gate back: %+v %v", reg.machine, err)
 		}
 	})
 

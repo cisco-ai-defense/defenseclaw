@@ -9,9 +9,11 @@ package connector
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -19,12 +21,35 @@ import (
 
 const hookAPIACLInspectionTimeout = 5 * time.Second
 
+// hookAPIDarwinACLVerdicts keeps the clean ACL verdicts of the directories
+// above the hook API token (hookAPIACLVerdicts, rel-1-0-6 GAP-0129).
+var hookAPIDarwinACLVerdicts hookAPIACLVerdicts
+
 func hookAPIValidateDirectoryACL(path string) error {
-	return hookAPIValidateDirectoryACLWithInspector(path, hookAPIACLInspectionTimeout, func(ctx context.Context, path string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, "/bin/ls", "-lde", "--", path)
-		cmd.Env = []string{"LANG=C", "LC_ALL=C"}
-		return cmd.Output()
+	return hookAPIDarwinACLVerdicts.check(path, hookAPIDarwinDirectoryIdentity(path), func() error {
+		return hookAPIValidateDirectoryACLWithInspector(path, hookAPIACLInspectionTimeout, func(ctx context.Context, path string) ([]byte, error) {
+			cmd := exec.CommandContext(ctx, "/bin/ls", "-lde", "--", path)
+			cmd.Env = []string{"LANG=C", "LC_ALL=C"}
+			return cmd.Output()
+		})
 	})
+}
+
+// hookAPIDarwinDirectoryIdentity is the identity a clean ACL verdict of path
+// is kept under: device, inode, mode, owner, group and status-change time
+// (chmod +a and every other ACL change set the status-change time). "" when
+// path cannot be read.
+func hookAPIDarwinDirectoryIdentity(path string) string {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return ""
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d:%o:%d:%d:%d.%09d", stat.Dev, stat.Ino, stat.Mode, stat.Uid, stat.Gid,
+		stat.Ctimespec.Sec, stat.Ctimespec.Nsec)
 }
 
 func hookAPIValidateDirectoryACLWithInspector(path string, timeout time.Duration, inspect func(context.Context, string) ([]byte, error)) error {

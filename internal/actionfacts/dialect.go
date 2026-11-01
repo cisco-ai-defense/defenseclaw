@@ -72,6 +72,25 @@ func genericRawExecutionTool(name string) bool {
 	}
 }
 
+// IsImmediateShellExecutionTool identifies tool calls that run their command
+// now. Stored command payloads, including persistence entries, are excluded.
+func IsImmediateShellExecutionTool(tool string) bool {
+	if tool == "" || strings.TrimSpace(tool) != tool {
+		return false
+	}
+	name := strings.ToLower(tool)
+	if genericRawExecutionTool(name) {
+		return true
+	}
+	switch name {
+	case "bash_command", "bash", "sh", "zsh", "dash", "ksh", "mksh", "fish",
+		"powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe":
+		return true
+	default:
+		return false
+	}
+}
+
 // InferredRawCommandDialect is the dialect inferRawCommandDialect reads from
 // the grammar of source, as for a generic execution tool, or DialectNone when
 // its signals are mixed.

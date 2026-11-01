@@ -116,7 +116,6 @@ func TestR104BoundRedirectPatternIsUnknown(t *testing.T) {
 // The agent's shell may hold a CDPATH that the hook cannot see. Only a cd
 // operand that bypasses CDPATH names a proven directory for the link.
 func TestR104ChangedDirectoryLinkNeedsProvenDirectory(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	cwd, home := t.TempDir(), t.TempDir()
 	if err := os.Mkdir(filepath.Join(cwd, "sub"), 0o700); err != nil {
 		t.Fatal(err)

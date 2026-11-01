@@ -23,11 +23,19 @@ struct AIRuntimeView: View {
     @State private var search = ""
     @State private var scanning = false
     @State private var error: String?
+    @State private var setupError: String?
+    @State private var awaitingEnableCoverage = false
     @State private var loaded = false
     @State private var unsupported = false
     @State private var activeLoadID: UUID?
+    @State private var activeEnableID: UUID?
 
     private var loading: Bool { activeLoadID != nil }
+    private var enabling: Bool { activeEnableID != nil }
+    private var canOfferEnable: Bool {
+        loaded && !unsupported && !snapshot.enabled
+            && appState.runtimeDiscoveryCommands?.contains("enable") == true
+    }
 
     private var filtered: [AIRuntimeFinding] {
         guard !search.isEmpty else { return snapshot.findings }
@@ -58,6 +66,11 @@ struct AIRuntimeView: View {
                     .font(.callout)
                     .foregroundStyle(.orange)
             }
+            if let setupError {
+                Label(setupError, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            }
             content
         }
         .padding(16)
@@ -67,18 +80,24 @@ struct AIRuntimeView: View {
             loaded = false
             unsupported = false
             activeLoadID = nil
+            activeEnableID = nil
             error = nil
+            setupError = nil
+            awaitingEnableCoverage = false
             await load()
         }
         .onChange(of: appState.gatewayReachable) { _, reachable in
             if reachable {
-                Task { await load() }
+                if !enabling { Task { await load() } }
             } else {
                 error = "Gateway offline; any displayed coverage is stale."
             }
         }
+        .task(id: appState.health.fetchedAt) {
+            if !enabling && (error != nil || !loaded || awaitingEnableCoverage) { await load() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in
-            Task { await load() }
+            if !enabling { Task { await load() } }
         }
     }
 
@@ -95,18 +114,29 @@ struct AIRuntimeView: View {
             TextField("Filter", text: $search)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 200)
+            if canOfferEnable {
+                Button {
+                    enableRuntime()
+                } label: {
+                    Label(enabling ? "Enabling…" : "Enable Runtime", systemImage: "power")
+                }
+                .disabled(enabling || scanning || appState.scanInFlight || loading || error != nil
+                          || !appState.gatewayReachable || !appState.installationMutationsAllowed)
+                .help("Enable the configured runtime planes and restart the gateway. "
+                      + "The optional host plane needs elevated permissions.")
+            }
             Button {
                 Task { await load() }
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
-            .disabled(!appState.gatewayReachable)
+            .disabled(!appState.gatewayReachable || enabling)
             Button {
                 scan()
             } label: {
                 Label("Poll now", systemImage: "bolt")
             }
-            .disabled(scanning || appState.scanInFlight || loading || !loaded || unsupported || error != nil
+            .disabled(scanning || enabling || appState.scanInFlight || loading || !loaded || unsupported || error != nil
                       || !snapshot.enabled || !appState.gatewayReachable || !appState.installationMutationsAllowed)
             .disabled(appState.runtimeDiscoveryCommands?.contains("scan") != true)
         }
@@ -119,7 +149,9 @@ struct AIRuntimeView: View {
         if !loaded { return loading ? "Loading runtime coverage…" : "Runtime coverage has not been read." }
         if error != nil { return "STALE — the last successful coverage snapshot is shown." }
         guard snapshot.enabled else {
-            return "Disabled — enable with: defenseclaw agent discovery runtime enable"
+            return canOfferEnable
+                ? "Disabled — select Enable Runtime to start monitoring."
+                : "Disabled — enable with: defenseclaw agent discovery runtime enable"
         }
         var parts = ["\(filtered.count) of \(snapshot.findings.count) findings"]
         parts.append(snapshot.coverageSummary)
@@ -191,7 +223,9 @@ struct AIRuntimeView: View {
             ContentUnavailableView(
                 "Runtime planes are disabled",
                 systemImage: "waveform.path.ecg",
-                description: Text("Enable with: defenseclaw agent discovery runtime enable")
+                description: Text(canOfferEnable
+                    ? "Select Enable Runtime above to activate the configured planes and restart the gateway. The optional host plane needs elevated permissions."
+                    : "Enable with: defenseclaw agent discovery runtime enable")
             )
         } else if snapshot.scannedAt == nil {
             ContentUnavailableView(
@@ -336,6 +370,10 @@ struct AIRuntimeView: View {
             snapshot = fresh
             loaded = true
             unsupported = false
+            if fresh.enabled {
+                awaitingEnableCoverage = false
+                setupError = nil
+            }
             // A selection whose finding is gone must clear, or the detail pane
             // keeps showing a process that has exited.
             if let selection, !snapshot.findings.contains(where: { $0.id == selection }) {
@@ -361,7 +399,7 @@ struct AIRuntimeView: View {
     }
 
     private func scan() {
-        guard !scanning, !loading, !appState.scanInFlight else { return }
+        guard !scanning, !enabling, !loading, !appState.scanInFlight else { return }
         guard appState.installationMutationsAllowed else {
             error = appState.installationReadOnlyReason ?? "This installation is read only."
             return
@@ -389,6 +427,51 @@ struct AIRuntimeView: View {
                 return
             }
             await load()
+        }
+    }
+
+    private func enableRuntime() {
+        guard !enabling, !scanning, !loading, !appState.scanInFlight else { return }
+        guard appState.installationMutationsAllowed else {
+            setupError = appState.installationReadOnlyReason ?? "This installation is read only."
+            return
+        }
+        guard canOfferEnable, error == nil, appState.gatewayReachable else { return }
+        let enableID = UUID()
+        let generation = appState.installationGeneration
+        activeEnableID = enableID
+        appState.scanInFlight = true
+        setupError = nil
+        awaitingEnableCoverage = false
+        Task {
+            defer {
+                if activeEnableID == enableID { activeEnableID = nil }
+                if generation == appState.installationGeneration { appState.scanInFlight = false }
+            }
+            let result = await appState.runCommand(
+                title: "Enable AI Runtime",
+                arguments: ["agent", "discovery", "runtime", "enable", "--yes"],
+                mutation: true,
+                category: "setup",
+                origin: "AI Runtime",
+                successEffects: ["AI Discovery Runtime enabled", "Gateway restarted to apply runtime planes"],
+                suggestedNextAction: "Review runtime plane coverage and poll once.",
+                refreshOnSuccess: true
+            )
+            guard generation == appState.installationGeneration,
+                  activeEnableID == enableID else { return }
+            guard result.succeeded else {
+                setupError = "Runtime setup did not complete. Settings may have been saved; see Activity, then Refresh."
+                return
+            }
+            awaitingEnableCoverage = true
+            await appState.pulse()
+            guard generation == appState.installationGeneration,
+                  activeEnableID == enableID else { return }
+            await load()
+            if !loaded || !snapshot.enabled {
+                setupError = "Runtime setup completed. Waiting for the gateway to report coverage; Refresh after it reconnects."
+            }
         }
     }
 }

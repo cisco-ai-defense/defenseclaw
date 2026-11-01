@@ -120,9 +120,26 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			r.InstalledVersion = record.ProductVersion
 		}
 		if busyMessage == "" {
-			busyMessage = errLockBusy.Error() + "; " + readOnlyBusyNextStep(env.LockTimeout, ActionStatus)
+			holder := errLockBusy.Error()
+			if pending != nil && pending.Action != "" {
+				// Name the run and how far it got, from its intent record.
+				detail := pending.Action
+				if pending.Phase != "" {
+					detail += ", phase " + pending.Phase
+				}
+				holder += " (" + detail + ")"
+			}
+			busyMessage = holder + "; " + readOnlyBusyNextStep(env.LockTimeout, ActionStatus)
 		}
-		r.AddError(codeBusy, busyMessage)
+		// A change being applied is a pending apply, not an unhealthy
+		// deployment: rapid config pushes read ok false with a
+		// lifecycle_busy error until each apply ended (GAP-0129). The code
+		// stays (as a warning) and so does exit 75, which detect.sh and
+		// management agents read as busy and retry; verify, which checks
+		// health, still fails busy.
+		r.PendingApply = true
+		r.AddWarning(codeBusy, busyMessage)
+		r.MarkCoverageIncomplete(codeBusy)
 		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if record == nil {
@@ -166,6 +183,12 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// result stays until a later run succeeds.
 		r.AddWarning(codePackageInstallFailed, "the last package install, reinstall or upgrade did not apply: "+failure+
 			"; the deployment keeps running as it was. Fix that, then apply the package with `"+env.lifecycleCommand(ActionEnsure)+" --from-package`")
+	}
+	// A release below the confirmed bundle's floor (installed by a package
+	// that had no floor check) is reported, never repaired: a warning
+	// starts no repair, reinstall or fail-mode change.
+	if warning := env.bundleStore().ProductBelowFloorWarning(record.ProductVersion); warning != nil {
+		r.AddWarning(warning.Code, warning.Message)
 	}
 	strict := l.opts.Action == ActionVerify
 	if strict && pending == nil {
@@ -332,7 +355,8 @@ func (l *lifecycle) clearSupersededUnitFailures(ctx context.Context) {
 }
 
 // interruptedTransactionProblem names a transaction a reset or a killed run
-// left pending, and the commands that finish it.
+// left pending, and the commands that finish it: the config it was applying
+// when the intent records one (GAP-0098).
 func (e *Env) interruptedTransactionProblem(pending *Pending) string {
 	action, phase, started := pending.Action, pending.Phase, pending.StartedAt
 	if action == "" {
@@ -344,9 +368,22 @@ func (e *Env) interruptedTransactionProblem(pending *Pending) string {
 	if started == "" {
 		started = "an unknown time"
 	}
+	finish := "to apply the config it was applying run `" + e.lifecycleCommand(ActionEnsure) + " --config <file>` again"
+	if pending.ConfigFile != "" {
+		finish = "to apply the config it was applying (" + pending.ConfigFile + ") run `" +
+			e.lifecycleCommand(ActionEnsure) + " --config " + shellWord(pending.ConfigFile) + "` again"
+	}
 	return fmt.Sprintf("a lifecycle %s that started at %s was interrupted in its %s phase (a reset or a killed run), so files differ from the deployment record; "+
-		"`%s` rolls it back to the last committed deployment, and to apply the config it was applying run `%s --config <file>` again",
-		action, started, phase, e.lifecycleCommand("repair"), e.lifecycleCommand(ActionEnsure))
+		"`%s` rolls it back to the last committed deployment, and %s",
+		action, started, phase, e.lifecycleCommand("repair"), finish)
+}
+
+// shellWord is value as one POSIX shell word, quoted only when it needs it.
+func shellWord(value string) string {
+	if value != "" && strings.Trim(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-+=:@,") == "" {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 // withoutTransactionDrift drops the file and config drift an interrupted
@@ -373,13 +410,7 @@ func (l *lifecycle) recoverPendingFromVerify(ctx context.Context) string {
 	if env.Geteuid() != 0 {
 		return "the next mutating run recovers it"
 	}
-	var err error
-	if env.GOOS == "darwin" {
-		_, err = env.Runner.Run(ctx, "launchctl", "kickstart", "system/"+labelApply)
-	} else {
-		_, err = env.Runner.Run(ctx, "systemctl", "start", "--no-block", unitApplyService)
-	}
-	if err != nil {
+	if err := env.startApplyTrigger(ctx); err != nil {
 		return "run `" + env.lifecycleCommand("repair") + "` to roll it back"
 	}
 	return "started the apply trigger, which rolls it back and starts the stopped services again"
@@ -570,7 +601,8 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 
 	if !record.NoStart {
 		for _, unit := range env.Services.Units() {
-			if unit.Required && !env.Services.Active(ctx, unit) && !l.backFromRestart(ctx, unit) {
+			if unit.Required && !env.Services.Active(ctx, unit) && !l.backFromRestart(ctx, unit) &&
+				(unit.Name != unitApplyPath || !l.packageHoldsApplyTrigger()) {
 				add("%s is not active", unit.Name)
 			}
 		}
@@ -1034,6 +1066,16 @@ func (l *lifecycle) ledgerProblem() string {
 // removes it after its ensure.
 const packageTransactionMarker = "/run/defenseclaw-enterprise-apply-path.held"
 
+// packageHoldsApplyTrigger reports the package's own ensure (--from-package
+// --reason package) while the package scripts hold the config-apply trigger
+// (packageTransactionMarker): the postinstall starts it again after this
+// run, so it being stopped is not drift. It made an identical reinstall
+// (dpkg -i, dnf reinstall of the installed package) run a transaction that
+// restarted the gateway and reported noop false (GAP-0542).
+func (l *lifecycle) packageHoldsApplyTrigger() bool {
+	return l.opts.FromPackage && l.opts.Reason == "package" && l.env.packageTransactionInProgress()
+}
+
 // packageTransactionInProgress reports a package transaction that started
 // less than half an hour ago (an older marker is from an interrupted one).
 func (e *Env) packageTransactionInProgress() bool {
@@ -1335,6 +1377,13 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		case "busy_locked", "deadline", "full", "io", "readonly_cantopen", "constraint_corrupt", "unavailable", "other":
 			message += "; last SQLite failure class: " + class
 		}
+		// A call whose audit record cannot be written is blocked on a
+		// managed install (rel-1-0-6 GAP-0174): say so, and for a full
+		// disk where to free space.
+		message += "; until it can, managed hooks block the agent prompts and tool calls whose records fail (fail closed)"
+		if class == "full" {
+			message += "; the filesystem holding " + l.env.Layout.DataDir + " is full: free space on it, and agent work resumes by itself"
+		}
 		l.result.AddWarning(codeAuditWriteFailed, message+"; inspect the gateway /health telemetry details")
 	} else if class := health.Telemetry.Details.LastSQLiteClass; class != "" && class != "busy_locked" && class != "deadline" &&
 		!auditWriteFailureRecovered(health.Telemetry.Details.LastFailureAt, l.env.Now()) {
@@ -1351,7 +1400,7 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		}
 		l.gatewayAuditFailure = true
 		l.result.AddWarning(codeAuditWriteFailed, "the gateway failed to write a mandatory audit record since it started (last SQLite failure class: "+class+
-			"); later records were written, but a failure that hits only some records can still refuse those calls; inspect the gateway /health telemetry details. The warning clears "+
+			"); later records were written, but a failure that hits only some records can still block those calls (managed hooks fail closed when a call's audit record cannot be written); inspect the gateway /health telemetry details. The warning clears "+
 			auditWriteFailureWindow.String()+" after the last failed write")
 	}
 	// A judge that stops answering silently downgrades detection to the

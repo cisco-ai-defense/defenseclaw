@@ -39,7 +39,7 @@ var windowsStandaloneNPMPackages = map[string][]string{
 	"claudecode": {filepath.Join("@anthropic-ai", "claude-code")},
 	"codex":      {filepath.Join("@openai", "codex")},
 	"copilot":    {filepath.Join("@github", "copilot")},
-	"opencode":   {"opencode-ai"},
+	"opencode":   {filepath.Join("@opencode", "cli")},
 	"amp":        {filepath.Join("@ampcode", "cli"), filepath.Join("@sourcegraph", "amp")},
 }
 

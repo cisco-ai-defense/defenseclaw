@@ -211,7 +211,7 @@ func windowsClaudeUserSettingsMigrationError(target enterprisehooks.TargetCreden
 	switch {
 	case err != nil:
 		return fmt.Errorf("DefenseClaw cannot check %s for its older per-user hooks (%w); "+
-			"until the file is valid JSON (UTF-8 without a byte order mark) or removed, Copilot CLI in a project "+
+			"until the file is valid JSON or removed, Copilot CLI in a project "+
 			"under the home and Cursor block their tool calls on it", settings, err)
 	case present:
 		return fmt.Errorf("%s still holds DefenseClaw's older per-user Claude Code hooks; the guardian removes them "+

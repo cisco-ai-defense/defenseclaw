@@ -27,7 +27,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -36,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
@@ -55,13 +55,13 @@ const (
 )
 
 var (
-	endpointInventoryMCPHostPattern = regexp.MustCompile(
+	endpointInventoryMCPHostPattern = lazyregexp.New(
 		`^([A-Za-z0-9][A-Za-z0-9._:-]*|\[[0-9A-Fa-f:.]+\](:[0-9]+)?)$`,
 	)
-	endpointInventoryExecutableBasenamePattern = regexp.MustCompile(
+	endpointInventoryExecutableBasenamePattern = lazyregexp.New(
 		`^[A-Za-z0-9][A-Za-z0-9._+@-]*$`,
 	)
-	endpointInventoryVersionPattern = regexp.MustCompile(
+	endpointInventoryVersionPattern = lazyregexp.New(
 		`^[A-Za-z0-9][A-Za-z0-9 .,_+@():-]*$`,
 	)
 )

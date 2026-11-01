@@ -4,6 +4,7 @@
 package hookexec
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -128,5 +129,37 @@ func TestManagedRuntimeStateRefusalNamesTheUpgradeDuringALifecycleRun(t *testing
 	// Only the transport layer.
 	if got := managedFailClosedText(opts, "response", runtimeState[0]); strings.Contains(got, upgrade) {
 		t.Fatalf("response layer: %q", got)
+	}
+}
+
+// GAP-0509: a Setup killed mid-upgrade leaves the transaction pending and the
+// gateway service disabled, so the lifecycle marker stays with no run left to
+// start the gateway. The install-window text said "its gateway starts again
+// when that is done ... contact your administrator", with no code and no
+// pointer to status or Setup recovery. It names the upgrade still, does not
+// promise a restart, points the administrator at the platform's status
+// command and ends with the documented outage code.
+func TestManagedInstallWindowTextNamesStatusForAStoppedRun(t *testing.T) {
+	previous := managedLifecycleHeld
+	t.Cleanup(func() { managedLifecycleHeld = previous })
+	managedLifecycleHeld = func(Options) bool { return true }
+	opts := Options{ManagedEnterprise: true, Event: "UserPromptSubmit"}
+	status := "`" + managedStatusCommand(runtime.GOOS) + "` names what to do."
+	for _, reason := range []string{managedGatewayNotRunningReason, managedGatewayRestartingReason, managedGatewayNoAnswerReason} {
+		got := managedFailClosedText(opts, "transport", reason)
+		for _, want := range []string{"DefenseClaw blocked this prompt: DefenseClaw is being installed or upgraded on this computer",
+			"until that run finishes or is recovered", "ask your administrator to check DefenseClaw on this computer: " + status,
+			" (" + reason + ")"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("%s: %q does not contain %q", reason, got, want)
+			}
+		}
+		if strings.Contains(got, "starts again when that is done") || strings.Contains(got, "start the DefenseClaw gateway service") {
+			t.Fatalf("%s: the text promises a restart or tells to start the service: %q", reason, got)
+		}
+	}
+	// A plain transport error has no documented code to add.
+	if got := managedFailClosedText(opts, "transport", "gateway unreachable"); !strings.HasSuffix(got, status) {
+		t.Fatalf("plain transport error: %q", got)
 	}
 }

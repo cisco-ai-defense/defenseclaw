@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -22,6 +23,11 @@ type renameOp struct {
 	targetDir   string
 	noTargetDir bool
 	wd          string
+	// backup: -b, --backup or a backup suffix keeps a replaced
+	// destination as a backup entry beside it, named with suffix ("~"
+	// unless -S or --suffix names another one, or .~N~ when numbered).
+	backup bool
+	suffix string
 }
 
 // parseRename reads the arguments of mv or gmv. ok is false for an option
@@ -44,7 +50,9 @@ func parseRename(args []string, cwd string) (op renameOp, ok bool) {
 		if strings.HasPrefix(arg, "--") {
 			name, value, hasValue := strings.Cut(arg[2:], "=")
 			switch name {
-			case "backup", "update", "context":
+			case "backup":
+				op.backup = op.backup || value != "none" && value != "off"
+			case "update", "context":
 			case "force", "interactive", "no-clobber", "strip-trailing-slashes", "verbose", "no-copy", "debug":
 				if hasValue {
 					return op, false
@@ -66,6 +74,8 @@ func parseRename(args []string, cwd string) (op renameOp, ok bool) {
 						return op, false
 					}
 					op.targetDir = value
+				} else {
+					op.backup, op.suffix = true, value
 				}
 			default:
 				// --exchange swaps the names; an abbreviation is not read.
@@ -75,7 +85,9 @@ func parseRename(args []string, cwd string) (op renameOp, ok bool) {
 		}
 		for j := 1; j < len(arg); j++ {
 			switch flag := arg[j : j+1]; flag {
-			case "b", "f", "i", "n", "u", "v", "Z", "h":
+			case "b":
+				op.backup = true
+			case "f", "i", "n", "u", "v", "Z", "h":
 			case "T":
 				op.noTargetDir = true
 			case "t", "S":
@@ -91,6 +103,8 @@ func parseRename(args []string, cwd string) (op renameOp, ok bool) {
 						return op, false
 					}
 					op.targetDir = value
+				} else {
+					op.backup, op.suffix = true, value
 				}
 				j = len(arg)
 			default:
@@ -126,9 +140,39 @@ func (op renameOp) destinations(source string) []string {
 		return []string{filepath.Join(absolutePath(op.dest, op.wd), base)}
 	case op.noTargetDir:
 		return []string{absolutePath(op.dest, op.wd)}
+	case op.dest != "" && (strings.HasSuffix(op.dest, "/") || os.IsPathSeparator(op.dest[len(op.dest)-1])):
+		// A destination written with a trailing separator must be a
+		// directory: the move goes inside it or fails, and never takes
+		// its name (mv bin build/, rel-1-0-6:GAP-0219).
+		return []string{filepath.Join(absolutePath(op.dest, op.wd), base)}
 	}
 	dest := absolutePath(op.dest, op.wd)
+	if info, err := pathLstat(dest); err == nil && info.IsDir() {
+		// A move onto an existing directory (not a link to one) goes inside
+		// it; the name itself is not replaced.
+		return []string{filepath.Join(dest, base)}
+	}
 	return []string{dest, filepath.Join(dest, base)}
+}
+
+// plainRenameSource reports a move source that cannot make a link target
+// reach another file: a name the command links (its alias moves with it and
+// is judged at its new name), an existing regular file, or a name that does
+// not exist (the move fails). A disk link, a junction, a directory (it may
+// hold links) or a name this process cannot read is not one. So
+// ln -s build/out bin; mv bin build/ in a project without build/ keeps the
+// links known (rel-1-0-6:GAP-0219, the GAP-0091 shape W07).
+func (l *shellLinks) plainRenameSource(from string) bool {
+	for _, alias := range l.aliases {
+		if samePathName(from, alias.name) {
+			return true
+		}
+	}
+	info, err := pathLstat(from)
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	return info.Mode().IsRegular()
 }
 
 func pathsOverlap(a, b string) bool {
@@ -149,15 +193,41 @@ func pathAtOrUnder(path, prefix string) bool {
 // followRenames gives every link a static mv moves its new name, with the
 // target a relative symbolic link has in its new directory. It reports
 // false when a move lands on or around a link name or target (the move may
-// replace what a link names) or moves a name through a link.
+// replace what a link names) or moves a name through a link. A plain move
+// of one entry onto the name of a link the command makes (ln -s README.md
+// p && mv a.txt p) replaces that link entry, or moves the entry into the
+// directory the link names: the link keeps its alias, so the caller still
+// judges its target, and nothing else changes name (rel-1-0-6:GAP-0195).
 func (l *shellLinks) followRenames(ops []renameOp) bool {
 	for _, op := range ops {
 		before := append([]linkAlias(nil), l.aliases...)
+		// onto is the destination of a one-source move onto a name a link
+		// of the command has. The other aliases at or under it are the
+		// reading of ln into an existing directory of that name.
+		onto := ""
+		if op.targetDir == "" && len(op.sources) == 1 && op.dest != "" {
+			for _, alias := range before {
+				if dest := absolutePath(op.dest, op.wd); samePathName(dest, alias.name) {
+					onto = dest
+					break
+				}
+			}
+		}
 		for _, source := range op.sources {
 			from := absolutePath(source, op.wd)
 			for _, dest := range op.destinations(source) {
 				for _, alias := range before {
-					if pathsOverlap(dest, alias.name) || pathsOverlap(dest, alias.target) {
+					switch {
+					case onto != "" && pathAtOrUnder(alias.name, onto) && samePathName(dest, onto):
+						// The link entry is replaced, or the move goes into
+						// the directory it names.
+					case onto != "" && pathAtOrUnder(alias.name, onto) && samePathName(filepath.Dir(dest), onto):
+						if pathsOverlap(dest, alias.target) {
+							return false
+						}
+					case pathsOverlap(dest, alias.name):
+						return false
+					case pathsOverlap(dest, alias.target) && !l.plainRenameSource(from):
 						return false
 					}
 					if _, through := cutPathPrefix(from, alias.name); through && !samePathName(from, alias.name) {
@@ -317,7 +387,7 @@ func diskLinkDotDotReachesState(command, cwd, home string) bool {
 				continue
 			}
 			path = filepath.Join(path, part)
-			info, err := os.Lstat(path)
+			info, err := pathLstat(path)
 			if err != nil {
 				break
 			}
@@ -451,7 +521,7 @@ func logicalDirExists(path, cwd string) bool {
 	if pathAtOrUnder(cwd, path) {
 		return true
 	}
-	info, err := os.Stat(path)
+	info, err := pathStat(path)
 	return err == nil && info.IsDir()
 }
 
@@ -542,7 +612,7 @@ func (l shellLinks) linkedTreesClear(command, cwd, home string, wrapped bool, mo
 				}
 				return false
 			}
-			if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+			if info, err := pathStat(resolved); err == nil && info.IsDir() {
 				dirs = append(dirs, resolved)
 			}
 		}
@@ -586,7 +656,7 @@ func diskLinkSteps(base, word string) (link bool, dirs []string) {
 			continue
 		}
 		path = filepath.Join(path, part)
-		info, err := os.Lstat(path)
+		info, err := pathLstat(path)
 		if err != nil {
 			return false, dirs
 		}
@@ -709,6 +779,64 @@ func commandWords(text string) []string {
 	})
 }
 
+// movedEntriesAwayFromState reports that no entry a followed move takes is a
+// disk link to SSH or DefenseClaw state, a directory that holds one, or an
+// entry of state: the links of the command follow a move, a disk link moved
+// to a new name does not. A find -exec mv takes the entries of its start
+// trees that match its pattern. A tree too large to read is not clear.
+// The moves after a directory change are read so (GAP-2602).
+func movedEntriesAwayFromState(ops []renameOp, moves []findMove, home string) bool {
+	state := newStateReach(home)
+	entryClear := func(path string) bool {
+		if parent, ok := ResolveWriteTarget(filepath.Dir(path)); !ok || state.within(parent) {
+			return false
+		}
+		info, err := pathLstat(path)
+		switch {
+		case os.IsNotExist(err):
+			return true
+		case err != nil:
+			return false
+		case info.Mode()&os.ModeSymlink != 0:
+			resolved, ok := ResolveWriteTarget(path)
+			return ok && !state.hits(resolved)
+		case info.IsDir():
+			return treesAwayFromState([]string{path}, state)
+		}
+		return true
+	}
+	for _, op := range ops {
+		for _, source := range op.sources {
+			if !entryClear(absolutePath(source, op.wd)) {
+				return false
+			}
+		}
+	}
+	entries := 0
+	deadline := time.Now().Add(linkedTreeBudget)
+	for _, move := range moves {
+		for _, start := range move.starts {
+			clear := true
+			err := filepath.WalkDir(start, func(path string, entry fs.DirEntry, err error) error {
+				entries++
+				if err != nil || entries > maxLinkedTreeEntries || entries%256 == 0 && time.Now().After(deadline) {
+					clear = false
+					return filepath.SkipAll
+				}
+				if matched, _ := filepath.Match(move.pattern, entry.Name()); matched && !entryClear(path) {
+					clear = false
+					return filepath.SkipAll
+				}
+				return nil
+			})
+			if err != nil || !clear {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // treesAwayFromState walks dirs and the directories their disk links reach,
 // and reports that no disk link reaches state.
 func treesAwayFromState(dirs []string, state stateReach) bool {
@@ -738,7 +866,7 @@ func treesAwayFromState(dirs []string, state stateReach) bool {
 				clear = false
 				return filepath.SkipAll
 			}
-			if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+			if info, err := pathStat(resolved); err == nil && info.IsDir() {
 				queue = append(queue, resolved)
 			}
 			return nil
@@ -757,7 +885,7 @@ func hasDotDotStep(path string) bool {
 // findExecCommands returns the source text of every child command a find
 // call runs with -exec, -execdir, -ok or -okdir.
 func findExecCommands(command, program string, args []*syntax.Word, words []string, static []bool) []string {
-	if program != "find" && program != "gfind" {
+	if program != "find" && program != "gfind" || findRunsNoChild(words, static) {
 		return nil
 	}
 	var children []string
@@ -777,6 +905,19 @@ func findExecCommands(command, program string, args []*syntax.Word, words []stri
 	return children
 }
 
+// findRunsNoChild reports a find call that no ; or + word ends: bash ends
+// the statement at an unescaped ;, so an -exec, -execdir, -ok or -okdir
+// action of the call is incomplete. find then refuses the whole expression
+// before it visits an entry and runs no child; the next statement runs on
+// its own (GAP-0189). A word that expands at run time may be the
+// terminator, so only an all-static call is read so.
+func findRunsNoChild(words []string, static []bool) bool {
+	if slices.Contains(static, false) {
+		return false
+	}
+	return !slices.ContainsFunc(words[1:], func(word string) bool { return word == ";" || word == "+" })
+}
+
 // throughFile reports a path whose nearest existing parent is not a
 // directory: no file can be written there.
 func throughFile(path string) bool {
@@ -785,7 +926,7 @@ func throughFile(path string) bool {
 	}
 	path = filepath.Clean(path)
 	for dir := filepath.Dir(path); dir != path; path, dir = dir, filepath.Dir(dir) {
-		if info, err := os.Stat(dir); err == nil {
+		if info, err := pathStat(dir); err == nil {
 			return !info.IsDir()
 		} else if !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR) {
 			return false
@@ -799,6 +940,9 @@ func throughFile(path string) bool {
 func wrapperChangesDirectory(program string, words []string, static []bool) bool {
 	switch program {
 	case "find", "gfind":
+		if findRunsNoChild(words, static) {
+			return false
+		}
 		for i, word := range words {
 			if static[i] && (word == "-execdir" || word == "-okdir") {
 				return true
@@ -903,7 +1047,7 @@ func parseFindMove(program string, words []string, static []bool, cwd string) (f
 			if dest == "" {
 				dest = op.dest
 				move.dir = !op.noTargetDir && strings.HasSuffix(dest, "/")
-				if info, err := os.Stat(absolutePath(dest, cwd)); !op.noTargetDir && err == nil && info.IsDir() {
+				if info, err := pathStat(absolutePath(dest, cwd)); !op.noTargetDir && err == nil && info.IsDir() {
 					move.dir = true
 				}
 			}
@@ -989,9 +1133,161 @@ func resolveMissingDotDot(path string) (string, bool) {
 			continue
 		}
 		before := filepath.FromSlash(strings.Join(parts[:i], "/"))
-		if _, err := os.Lstat(before); !os.IsNotExist(err) {
+		if _, err := pathLstat(before); !os.IsNotExist(err) {
 			return "", false
 		}
 	}
 	return ResolveWriteTarget(filepath.Clean(path))
+}
+
+// enteredOnlyLinkNames keeps the names of the link calls that no other word of
+// command names, but for a cd or pushd operand that enters them: the call
+// writes the name where the statement walk placed it. The rest of the command
+// must be known readers alone, so nothing it runs after the entering cd can
+// write through the link. A command with an expansion, a pattern or a tilde
+// word keeps none, nor does a link to SSH or DefenseClaw state (GAP-0091).
+func enteredOnlyLinkNames(file *syntax.File, command, cwd, home string, names []string, aliases []linkAlias, linkTexts []string, placed map[*syntax.CallExpr]bool) map[string]bool {
+	if len(names) == 0 || strings.ContainsAny(command, "$`*?[{\\") || !readersBesides(file, home, placed, 0) {
+		return nil
+	}
+	words, programs := commandWordPrograms(command)
+	for _, text := range linkTexts {
+		for _, word := range commandWords(text) {
+			if i := slices.Index(words, word); i >= 0 {
+				words = slices.Delete(words, i, i+1)
+				programs = slices.Delete(programs, i, i+1)
+			}
+		}
+	}
+	cdOperand := func(i int) bool {
+		return i > 0 && (words[i-1] == "cd" || words[i-1] == "pushd") && (programs[i] == "cd" || programs[i] == "pushd")
+	}
+	for i, word := range words {
+		// A tilde word may name any path; as the operand of the cd that
+		// enters it nothing is written through it.
+		if strings.HasPrefix(word, "~") && !cdOperand(i) {
+			return nil
+		}
+	}
+	// A link that names SSH or DefenseClaw state is never exempt.
+	state := newStateReach(home)
+	var kept map[string]bool
+	for _, name := range names {
+		entered := true
+		for _, alias := range aliases {
+			if alias.name != name {
+				continue
+			}
+			if state.within(filepath.Clean(alias.target)) {
+				entered = false
+			} else if resolved, ok := ResolveWriteTarget(alias.target); ok && state.within(resolved) {
+				entered = false
+			}
+		}
+		for i, word := range words {
+			named := slices.Contains(strings.Split(filepath.ToSlash(word), "/"), filepath.Base(name))
+			if !named && !filepath.IsAbs(word) {
+				continue
+			}
+			if !named {
+				_, named = cutPathPrefix(filepath.Clean(word), name)
+			}
+			if named && !cdOperand(i) {
+				entered = false
+				break
+			}
+		}
+		if entered {
+			if kept == nil {
+				kept = make(map[string]bool)
+			}
+			kept[filepath.Clean(name)] = true
+		}
+	}
+	return kept
+}
+
+// readerPrograms only read their operands; none has an output file option
+// once actionReadOptionMayWrite has refused the output spellings.
+var readerPrograms = []string{
+	"cat", "head", "tail", "ls", "dir", "stat", "grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath",
+}
+
+// readerDirectories are the places a reader program may be named from.
+var readerDirectories = []string{"/bin", "/usr/bin", "/usr/local/bin"}
+
+// readersBesides reports that file holds nothing but the skipped link calls,
+// directory changes and known reader programs, also inside a literal shell
+// body: no redirect, assignment, expansion, loop or function, and a program
+// named by a path only from a standard directory.
+func readersBesides(file *syntax.File, home string, skip map[*syntax.CallExpr]bool, depth int) bool {
+	if depth > 2 {
+		return false
+	}
+	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
+	safe := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if !safe {
+			return false
+		}
+		switch n := node.(type) {
+		case nil:
+		case *syntax.File, *syntax.BinaryCmd, *syntax.Subshell, *syntax.Lit, *syntax.SglQuoted, *syntax.DblQuoted:
+		case *syntax.Stmt:
+			if n.Coprocess || len(n.Redirs) > 0 {
+				safe = false
+			}
+		case *syntax.Word:
+		case *syntax.CallExpr:
+			if len(n.Assigns) > 0 || len(n.Args) == 0 {
+				safe = false
+				return false
+			}
+			if skip[n] {
+				return true
+			}
+			words := make([]string, len(n.Args))
+			static := make([]bool, len(n.Args))
+			for i, arg := range n.Args {
+				words[i], static[i] = staticShellWord(arg, env, home != "")
+			}
+			if !static[0] {
+				safe = false
+				return false
+			}
+			program := programBase(words[0])
+			if slices.Contains(cdPrograms, program) || program == "dirs" {
+				// A directory change writes nothing, whatever it names (a
+				// tilde word of an unknown user is not static).
+				safe = len(words) <= 3
+				return false
+			}
+			if slices.Contains(static, false) {
+				safe = false
+				return false
+			}
+			if strings.Contains(words[0], "/") && !slices.Contains(readerDirectories, filepath.Dir(words[0])) {
+				safe = false
+				return false
+			}
+			switch {
+			case slices.Contains(readerPrograms, program):
+				for _, option := range words[1:] {
+					if actionReadOptionMayWrite(option) {
+						safe = false
+					}
+				}
+			case literalShellBody(program, words, static) != "":
+				inner, parsed := parseShell(literalShellBody(program, words, static))
+				safe = parsed && readersBesides(inner, home, nil, depth+1)
+			default:
+				safe = false
+			}
+			return false
+		default:
+			safe = false
+		}
+		return safe
+	})
+	return safe
 }

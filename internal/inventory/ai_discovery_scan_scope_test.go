@@ -83,6 +83,77 @@ func TestPackageRootThroughALinkIntoAProtectedFolderIsSkipped(t *testing.T) {
 	}
 }
 
+// A package root behind a link to an ancestor of the home, as
+// /Volumes/<disk> is a link to / and a link may name /Users, walks the home
+// by the root's spelling: its Documents and Desktop are skipped at their
+// resolved place without Full Disk Access, while an unprotected project in
+// the home is still found (rel-1-0-2 GAP-0109).
+func TestPackageRootThroughALinkToAnAncestorOfTheHomeSkipsItsProtectedFolders(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("macOS privacy rule; symbolic links need privileges on Windows")
+	}
+	restoreGOOS, restoreAccess := discoveryGOOS, macOSFullDiskAccess
+	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = restoreGOOS, restoreAccess })
+	discoveryGOOS = "darwin"
+	macOSFullDiskAccess = func() bool { return false }
+
+	for _, tc := range []struct {
+		name string
+		// link is created in a folder outside the home; root is the scan
+		// root below that folder.
+		target func(home string) string
+		root   func(link, home string) string
+	}{
+		{"link to the parent of the home", filepath.Dir, func(link, home string) string {
+			return filepath.Join(link, filepath.Base(home))
+		}},
+		{"link to the root of the disk", func(string) string { return "/" }, func(link, home string) string {
+			return link + home
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			outside, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, filepath.Join(home, "Documents", "project", "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+			mustWrite(t, filepath.Join(home, "Desktop", "project", "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+			mustWrite(t, filepath.Join(home, "work", "app", "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+			link := filepath.Join(outside, "disk")
+			if err := os.Symlink(tc.target(home), link); err != nil {
+				t.Fatal(err)
+			}
+			catalog, err := LoadAISignatures()
+			if err != nil {
+				t.Fatalf("LoadAISignatures: %v", err)
+			}
+			svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+				Enabled: true, Mode: "enhanced", DataDir: filepath.Join(outside, "data"), HomeDir: home,
+				ScanRoots:       []string{tc.root(link, home)},
+				MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+			}, catalog)
+			cleanupPreparedDiscoveryService(t, svc)
+			signals, _, err := svc.detectPackageManifests(context.Background())
+			if err != nil {
+				t.Fatalf("detectPackageManifests: %v", err)
+			}
+			projects := 0
+			for _, sig := range signals {
+				if sig.Component != nil && sig.Component.Name == "ai" {
+					projects++
+				}
+			}
+			if projects != 1 || !svc.tccSkipped {
+				t.Fatalf("%d manifest projects, privacy skip recorded %v; want only work/app and a recorded skip", projects, svc.tccSkipped)
+			}
+		})
+	}
+}
+
 // A per-user install that also scans another folder keeps its account on
 // the findings in its own home; a finding in the other folder gets none, and
 // no raw path is kept when raw paths are not stored (GAP-1278).

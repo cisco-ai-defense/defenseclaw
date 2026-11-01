@@ -605,6 +605,7 @@ func TestNativeOTLPCodexResponseLinksUniqueDurablePromptWithoutCollapse(t *testi
 		"conversation-native-1", prompt.TurnID, prompt.AgentID).Scan(&nativeProjection); err != nil {
 		t.Fatal(err)
 	}
+	// The relationship is exported, not stored again in audit_events (#1384).
 	if err := database.QueryRow(`SELECT COUNT(*) FROM audit_events
 		WHERE event_name='correlation.relationship.changed'
 		  AND session_id=? AND turn_id=? AND agent_id=?`,
@@ -612,7 +613,7 @@ func TestNativeOTLPCodexResponseLinksUniqueDurablePromptWithoutCollapse(t *testi
 		t.Fatal(err)
 	}
 	if events != 3 || groups != 3 || causedBy != 1 || exactMerges != 0 || derivedMembership != 2 ||
-		nativeProjection == 0 || relationshipProjection == 0 {
+		nativeProjection == 0 || relationshipProjection != 0 {
 		t.Fatalf("durable prompt join events=%d groups=%d caused_by=%d exact_merges=%d derived_membership=%d native_projection=%d relationship_projection=%d",
 			events, groups, causedBy, exactMerges, derivedMembership, nativeProjection, relationshipProjection)
 	}

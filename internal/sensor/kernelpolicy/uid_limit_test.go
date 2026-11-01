@@ -75,7 +75,7 @@ func TestControlsLoadWithMoreThanFourUsers(t *testing.T) {
 		seenPIDs := map[int]bool{}
 		for _, hook := range p.tp.Spec.LsmHooks {
 			for _, sel := range hook.Selectors {
-				if len(sel.MatchPIDs) == 0 {
+				if len(sel.MatchPIDs) == 0 || hook.Hook != "file_open" {
 					continue
 				}
 				pidSelectors++
@@ -91,7 +91,7 @@ func TestControlsLoadWithMoreThanFourUsers(t *testing.T) {
 				}
 			}
 		}
-		if len(p.tp.Spec.LsmHooks) != 1 || pidSelectors != 3 || len(seenPIDs) != MaxPIDs {
+		if hookCount(p, "file_open") != 1 || pidSelectors != 3 || len(seenPIDs) != MaxPIDs {
 			t.Fatalf("%s: %d hooks, %d pid selectors covering %d roots, want one hook with three selectors covering %d",
 				name, len(p.tp.Spec.LsmHooks), pidSelectors, len(seenPIDs), MaxPIDs)
 		}

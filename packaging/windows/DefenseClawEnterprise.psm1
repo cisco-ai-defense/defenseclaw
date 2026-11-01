@@ -3051,9 +3051,9 @@ namespace $nativeNamespace
             }
         }
 
-        // The Win32 error opening a folder for one right with every sharing
-        // mode allowed, or 0 when it opens: 5 is a missing right, 19 a
-        // read-only volume, 32 a handle that does not share the folder.
+        // The Win32 error opening a folder (or a file) for one right with
+        // every sharing mode allowed, or 0 when it opens: 5 is a missing
+        // right, 19 a read-only volume, 32 a handle that does not share it.
         public static int GetDirectoryOpenError(string path, uint desiredAccess)
         {
             const uint FILE_SHARE_ALL = 0x00000007;
@@ -6890,6 +6890,7 @@ function Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
     $openCodePlugin = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $Layout
     if ($null -ne $openCodePlugin) {
         $files += [string]$openCodePlugin.PluginPath
+        $files += [string]$openCodePlugin.LegacyPluginPath
     }
     foreach ($path in $files) {
         if ([string]::IsNullOrWhiteSpace([string]$path)) {
@@ -11422,7 +11423,10 @@ function ConvertFrom-DefenseClawDeploymentMetadataText {
     catch {
         $reason = $_.Exception.Message
     }
-    if ($metadata -isnot [pscustomobject]) {
+    # [pscustomobject] is [psobject], which also matches $null (an empty
+    # record) and a wrapped number or array: test the parsed object's own
+    # type, so every record that is not a JSON object is unreadable (GAP-0164).
+    if ($metadata -isnot [Management.Automation.PSCustomObject]) {
         throw "$($script:UnreadableMetadataMessage) $Path ($reason); run Setup /repair to rebuild it"
     }
     return $metadata
@@ -19376,6 +19380,10 @@ function Assert-DefenseClawHookNotHeld {
         retryable hook_in_use (exit 1618) before the transaction stopped or
         replaced anything. A failed query counts as no holder: the swap's own
         retry and refusal then apply as before.
+        GAP-0789: only a holder whose handle does not share delete counts. A
+        well-behaved scanner that opens the hook with FileShare ReadWrite and
+        Delete deferred every repair with hook_in_use, although File.Replace
+        swaps a file opened that way and the backup it leaves is deleted.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -19392,6 +19400,9 @@ function Assert-DefenseClawHookNotHeld {
         if ($holders.Count -eq 0) {
             return
         }
+        if (Test-DefenseClawHookSharesDelete -Path ([string]$Layout.HookPath)) {
+            return
+        }
         if ([DateTime]::UtcNow -ge $deadline) {
             break
         }
@@ -19402,6 +19413,24 @@ function Assert-DefenseClawHookNotHeld {
             else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
         })
     throw ("hook_in_use: {0} has {1} open, so Setup could not replace it; this run stopped and replaced nothing. Next step: close that program (for example an antivirus scan or an editor), then run the same Setup command again (an MDM retries exit 1618 on its own)" -f ($named -join ', '), $Layout.HookPath)
+}
+
+function Test-DefenseClawHookSharesDelete {
+    <#
+        GAP-0789: whether every open handle of the file shares delete, so
+        File.Replace can swap it: an open for DELETE with every sharing mode
+        allowed succeeds (the probe handle is closed at once). A sharing
+        violation, any other refusal or a failed probe answers $false, so the
+        holder is waited for and named as before.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $native = Initialize-DefenseClawNativeSecurity
+        return ([int]$native::GetDirectoryOpenError($Path, [uint32]0x00010000) -eq 0)
+    }
+    catch {
+        return $false
+    }
 }
 
 function Restore-DefenseClawEarlyHook {
@@ -26751,7 +26780,10 @@ function Get-DefenseClawGuardianStatusReport {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         # The authenticated replacement gateway a Repair or Upgrade staged,
         # used when the installed one cannot run (GAP-1417).
-        [hashtable]$GatewaySource
+        [hashtable]$GatewaySource,
+        # A caller with its own deadline bounds the status command by it
+        # (rel-1-0-2:GAP-0535).
+        [ValidateRange(1, 1800)][int]$TimeoutSeconds = 300
     )
     try {
         $probe = Invoke-DefenseClawGatewayCommand `
@@ -26760,7 +26792,8 @@ function Get-DefenseClawGuardianStatusReport {
             -GatewaySource $GatewaySource `
             -Arguments @('enterprise', 'hooks', 'status', '--manifest', $Layout.ManifestPath, '--json') `
             -Capture `
-            -AllowFailure
+            -AllowFailure `
+            -TimeoutSeconds $TimeoutSeconds
         foreach ($line in @($probe.output)) {
             $text = ([string]$line).Trim()
             if (-not $text.StartsWith('{')) {
@@ -27357,7 +27390,8 @@ function Wait-DefenseClawFreshGuardianReconcile {
     }
     $priorReport = Get-DefenseClawGuardianStatusReport `
         -Layout $Layout `
-        -GatewayServiceName $GatewayServiceName
+        -GatewayServiceName $GatewayServiceName `
+        -TimeoutSeconds ([Math]::Max(30, [Math]::Min(300, $TimeoutSeconds + 30)))
     $priorReconcileID = [string](Get-DefenseClawGuardianReconcileID `
         -Report $priorReport)
     $priorGeneration = [string](Get-DefenseClawGuardianGeneration `
@@ -27392,9 +27426,15 @@ function Wait-DefenseClawFreshGuardianReconcile {
     $guardianGone = ''
     $lastStatus = 'guardian status report unavailable'
     while ($true) {
+        # One status command may not outlast the hard limit by more than
+        # its own 30 s floor: with the command's 300 s default the 600 s
+        # limit was not a bound (rel-1-0-2:GAP-0535).
+        $probeTimeout = [int][Math]::Ceiling(($limit - [DateTime]::UtcNow).TotalSeconds) + 30
+        $probeTimeout = [Math]::Max(30, [Math]::Min(300, $probeTimeout))
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName
+            -GatewayServiceName $GatewayServiceName `
+            -TimeoutSeconds $probeTimeout
         $currentStateIdentity = [string](
             Get-DefenseClawGuardianStateIdentity -Layout $Layout
         )
@@ -27521,7 +27561,7 @@ function Get-DefenseClawSecureClientSensorHelperSocketLeaves {
 function Get-DefenseClawStandaloneOpenCodePluginPaths {
     <#
         The managed OpenCode plugin a standalone deployment carries at
-        <InstallRoot>\share\opencode\defenseclaw.js (enterprisepolicy
+        <InstallRoot>\share\opencode\index.js (enterprisepolicy
         OpenCodeManagedPluginPath) and its two directories. The guardian
         writes it from the payload binaries before it publishes OpenCode's
         managed config. Secure Client returns nothing and keeps its own
@@ -27538,7 +27578,9 @@ function Get-DefenseClawStandaloneOpenCodePluginPaths {
     return @{
         ShareDirectory = $share
         PluginDirectory = $directory
-        PluginPath = [IO.Path]::Combine($directory, 'defenseclaw.js')
+        PluginPath = [IO.Path]::Combine($directory, 'index.js')
+        # Retained for upgrades from the v1-only bridge throughout 1.x.
+        LegacyPluginPath = [IO.Path]::Combine($directory, 'defenseclaw.js')
     }
 }
 
@@ -27557,6 +27599,7 @@ function Remove-DefenseClawStandaloneOpenCodeManagedPlugin {
         return
     }
     $plugin = [string]$paths.PluginPath
+    $legacy = [string]$paths.LegacyPluginPath
     # Every check runs before anything is deleted, so a refusal removes
     # nothing.
     $expected = @(
@@ -27575,11 +27618,14 @@ function Remove-DefenseClawStandaloneOpenCodeManagedPlugin {
         }
         foreach ($child in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force)) {
             $full = [IO.Path]::GetFullPath([string]$child.FullName)
-            if (-not [string]::Equals($full, [string]$pair[1], [StringComparison]::OrdinalIgnoreCase)) {
+            $isPlugin = [string]::Equals($full, $plugin, [StringComparison]::OrdinalIgnoreCase) -or
+                [string]::Equals($full, $legacy, [StringComparison]::OrdinalIgnoreCase)
+            $isExpectedPlugin = $isPlugin -and [string]::Equals($directory, [string]$paths.PluginDirectory, [StringComparison]::OrdinalIgnoreCase)
+            if (-not $isExpectedPlugin -and -not [string]::Equals($full, [string]$pair[1], [StringComparison]::OrdinalIgnoreCase)) {
                 throw "refusing to remove unexpected managed OpenCode content: $full"
             }
             $plain = ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0
-            if ([string]::Equals($full, $plugin, [StringComparison]::OrdinalIgnoreCase) -and
+            if ($isPlugin -and
                 ($child.PSIsContainer -or -not $plain)) {
                 throw "refusing to remove managed OpenCode plugin that is not a plain file: $full"
             }
@@ -27588,8 +27634,8 @@ function Remove-DefenseClawStandaloneOpenCodeManagedPlugin {
             }
         }
     }
-    if ([IO.File]::Exists($plugin)) {
-        [IO.File]::Delete($plugin)
+    foreach ($file in @($plugin, $legacy)) {
+        if ([IO.File]::Exists($file)) { [IO.File]::Delete($file) }
     }
     foreach ($directory in @([string]$paths.PluginDirectory, [string]$paths.ShareDirectory)) {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory) {
@@ -27813,6 +27859,7 @@ function Assert-DefenseClawManagedInstallTree {
     $refuseUnexpected = (Test-DefenseClawTrustStrictAncestors) -or
         (Test-DefenseClawStandaloneProfile)
     $retiredLibRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($Layout.InstallRoot, 'lib')).TrimEnd('\')
+    $retiredLibDirectories = @($retiredLibRoot, [IO.Path]::Combine($retiredLibRoot, 'defenseclaw'))
     $allowedDirectories = @(
         $Layout.BinDirectory,
         $Layout.LibexecDirectory,
@@ -27854,6 +27901,7 @@ function Assert-DefenseClawManagedInstallTree {
         $allowedDirectories += [string]$openCodePlugin.ShareDirectory
         $allowedDirectories += [string]$openCodePlugin.PluginDirectory
         $allowedFiles += [string]$openCodePlugin.PluginPath
+        $allowedFiles += [string]$openCodePlugin.LegacyPluginPath
     }
     # A Fleet-enabled 1.0.2 host keeps its compiler (GAP-0274). Only the
     # recorded, unchanged compiler and its two directories are accepted; an
@@ -27918,6 +27966,14 @@ function Assert-DefenseClawManagedInstallTree {
                 # item DefenseClaw did not install there stops the uninstall
                 # before anything changes.
                 if ($refuseUnexpected -or $inRetiredLib) {
+                    # lib and lib\defenseclaw are directories 1.0.2 installed.
+                    # When one still holds something, the walk goes on to that
+                    # content, so the refusal names the item DefenseClaw did
+                    # not install instead of lib (rel-1-0-3 GAP-0283).
+                    if ($full.TrimEnd('\') -in $retiredLibDirectories -and
+                        @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $full -Force).Count -gt 0) {
+                        continue
+                    }
                     throw "refusing to remove unexpected directory from managed install root: $full"
                 }
                 Write-DefenseClawAclSelfHealAdvisory `
@@ -27965,51 +28021,87 @@ function Assert-DefenseClawStandaloneUninstallInstallTree {
     }
 }
 
-function Assert-DefenseClawUninstallStateTreeNoReparse {
+function Get-DefenseClawUninstallStateLinkRefusal {
+    param(
+        [Parameter(Mandatory)]$Item,
+        [string]$Reason = ''
+    )
+    $path = [string]$Item.FullName
+    $removal = if ($Item.PSIsContainer) {
+        'remove only the link with: cmd /c rmdir "' + $path + '"'
+    }
+    else {
+        'remove only the link with: cmd /c del /a "' + $path + '"'
+    }
+    $why = if ([string]::IsNullOrWhiteSpace($Reason)) { '' } else { " ($Reason)" }
+    return (
+        "state_invalid: managed state contains a reparse point: $path. The uninstall stopped before it changed the " +
+        "deployment, which is still installed. DefenseClaw does not follow links in its state folder and could not " +
+        "remove this one as a link${why}: " + $removal + ' (the folder it points to is not changed), then run the ' +
+        'uninstall again'
+    )
+}
+
+function Remove-DefenseClawUninstallStateTreeLinks {
     <#
         The uninstall reads, re-ACLs and (with purge) deletes everything under
-        StateRoot, and refuses a reparse point anywhere there. That refusal
-        came after the services and the payload were already removed, so a
-        junction an administrator left at StateRoot\secrets ended a committed
-        uninstall with 1603 and installed:false (GAP-0145). This check runs
-        before the uninstall changes anything: the deployment stays installed
-        and the refusal names the link and how to remove only the link.
-        StateRoot holds no AF_UNIX socket (those live under InstallRoot), so no
-        reparse point is exempt.
+        StateRoot and never follows a link out of it (GAP-0145). After the
+        refusal checks and before it changes the state tree, it removes each
+        junction or symbolic link below StateRoot (for example one an
+        administrator left at secrets) as a link: the folder or file it points
+        to keeps its content and permissions (mgmt-agent-api GAP-1317). The
+        walk never enters a link. A link at StateRoot itself, or one Windows
+        does not let Setup remove, stops the uninstall while the deployment is
+        still installed and names the link and how to remove only the link.
+        StateRoot holds no AF_UNIX socket (those live under InstallRoot), so
+        no reparse point is kept.
     #>
     param([Parameter(Mandatory)][hashtable]$Layout)
     $stateRoot = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $stateRoot)) {
         return
     }
-    $found = $null
     $root = Microsoft.PowerShell.Management\Get-Item -LiteralPath $stateRoot -Force
     if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        $found = $root
+        throw (Get-DefenseClawUninstallStateLinkRefusal -Item $root)
     }
-    else {
-        foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $stateRoot -Recurse -Force) {
+    $links = [Collections.Generic.List[object]]::new()
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($stateRoot)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force) {
             if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                $found = $item
-                break
+                $links.Add($item)
+            }
+            elseif ($item.PSIsContainer) {
+                $pending.Push([string]$item.FullName)
             }
         }
     }
-    if ($null -eq $found) {
-        return
+    foreach ($link in $links) {
+        $path = [string]$link.FullName
+        try {
+            if ($link.PSIsContainer) {
+                # Non-recursive: RemoveDirectory deletes the junction or
+                # directory link itself and never enters it.
+                [IO.Directory]::Delete($path, $false)
+            }
+            else {
+                [IO.File]::Delete($path)
+            }
+        }
+        catch {
+            throw (Get-DefenseClawUninstallStateLinkRefusal -Item $link -Reason $_.Exception.Message)
+        }
+        if ($null -ne (Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)) {
+            throw (Get-DefenseClawUninstallStateLinkRefusal -Item $link -Reason 'it is still there')
+        }
+        Microsoft.PowerShell.Utility\Write-Warning -Message (
+            "the uninstall removed the link $path from the DefenseClaw state folder; " +
+            'the folder or file it pointed to was not changed'
+        )
     }
-    $path = [string]$found.FullName
-    $removal = if ($found.PSIsContainer) {
-        'remove only the link with: cmd /c rmdir "' + $path + '"'
-    }
-    else {
-        'remove only the link with: cmd /c del /a "' + $path + '"'
-    }
-    throw (
-        "state_invalid: managed state contains a reparse point: $path. The uninstall stopped before it changed anything " +
-        "and the deployment is still installed. DefenseClaw does not follow or remove links in its state folder: " +
-        $removal + ' (the folder it points to is not changed), then run the uninstall again'
-    )
 }
 
 function Assert-DefenseClawManagedTreeNoReparse {
@@ -28956,12 +29048,12 @@ function Assert-DefenseClawInstallTreeRetirementState {
         -RetiredRoot $root
     if ($AllowUnretiredAcls -and (Test-DefenseClawStandaloneProfile)) {
         # The pre-finalization check runs after commit but before managed-hook
-        # teardown. Admit only the exact OpenCode plugin still installed at
-        # that boundary; the later check and retired-tree cleanup require it
-        # to be gone.
+        # teardown. Admit only the exact current and supported V1 OpenCode
+        # artifacts still installed at that boundary; the later check and
+        # retired-tree cleanup require both to be gone.
         $plugin = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $Layout
         $allowlist.directories += @([string]$plugin.ShareDirectory, [string]$plugin.PluginDirectory)
-        $allowlist.files += [string]$plugin.PluginPath
+        $allowlist.files += @([string]$plugin.PluginPath, [string]$plugin.LegacyPluginPath)
     }
     Assert-DefenseClawManagedTreeNoReparse `
         -Root $root `
@@ -37689,7 +37781,7 @@ function Invoke-DefenseClawUninstallLifecycle {
         -Metadata $metadata `
         -Layout $Layout `
         -Action 'Uninstall'
-    Assert-DefenseClawUninstallStateTreeNoReparse -Layout $Layout
+    Remove-DefenseClawUninstallStateTreeLinks -Layout $Layout
     # A standalone uninstall removes the hooks after its tombstone commits
     # (pending.json keeps them registered until then) when the installed
     # helper can prepare that removal against the tombstone. An older

@@ -16,7 +16,9 @@ import (
 // home spelling, for a directory login (user@domain) that is the home's
 // base name and for one that is not (sssd /home/%d/%u).
 func TestResolveListsActiveLoginTildeTargetsUnderTheHome(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
+	if !hookWriteEvidenceHost() {
+		t.Skip("the managed hook sends write evidence on Linux and macOS only")
+	}
 	for _, tc := range []struct{ name, base, login, spelling string }{
 		{"base name", "eng1@dclab.test", "", "~eng1@dclab.test"},
 		{"base name without case", "eng1@dclab.test", "", "~ENG1@DCLAB.TEST"},

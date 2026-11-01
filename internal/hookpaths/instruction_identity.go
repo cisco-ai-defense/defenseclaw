@@ -84,7 +84,7 @@ func reachedEvidence(directories []string) string {
 		}
 		sighting.Directories[directory] = DirectoryIdentity(directory)
 		read = append(read, directory)
-		if info, err := os.Lstat(directory); err == nil && info.IsDir() &&
+		if info, err := pathLstat(directory); err == nil && info.IsDir() &&
 			info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 			sighting.Plain = append(sighting.Plain, directory)
 		}
@@ -96,7 +96,7 @@ func reachedEvidence(directories []string) string {
 		if sighting.Directories[directory] == "" {
 			continue
 		}
-		if real, err := filepath.EvalSymlinks(directory); err == nil && filepath.IsAbs(real) {
+		if real, err := pathEvalSymlinks(directory); err == nil && filepath.IsAbs(real) {
 			add(real)
 		}
 	}
@@ -174,7 +174,7 @@ func decodeReached(targets map[string]string) (reachedInstructions, bool) {
 // DirectoryIdentity is the identity of the directory path reaches,
 // following links. It is empty when the directory is missing.
 func DirectoryIdentity(path string) string {
-	info, err := os.Stat(path)
+	info, err := pathStat(path)
 	if err != nil || !info.IsDir() {
 		return ""
 	}
@@ -278,7 +278,7 @@ func FileIdentities(targets map[string]string) []string {
 // FileIdentity is the identity of the regular file that path reaches,
 // following symlinks. It is empty when the file is missing or not regular.
 func FileIdentity(path string) string {
-	info, err := os.Stat(path)
+	info, err := pathStat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return ""
 	}
@@ -379,7 +379,7 @@ func (f *InstructionFiles) identify() {
 			return
 		}
 		seen[path] = true
-		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		if info, err := pathStat(path); err == nil && info.Mode().IsRegular() {
 			f.files = append(f.files, instructionFile{path: path, info: info})
 		}
 	}
@@ -406,10 +406,10 @@ func (f *InstructionFiles) Identities(path string) []string {
 	}
 	path = filepath.Clean(path)
 	real := path
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+	if resolved, err := pathEvalSymlinks(path); err == nil {
 		real = resolved
 	}
-	info, err := os.Stat(real)
+	info, err := pathStat(real)
 	if err != nil || !info.Mode().IsRegular() {
 		return nil
 	}
@@ -459,12 +459,12 @@ func (f *InstructionFiles) Located(path string) string {
 	if !named {
 		return ""
 	}
-	directory, err := os.Stat(filepath.Dir(path))
+	directory, err := pathStat(filepath.Dir(path))
 	if err != nil || !directory.IsDir() {
 		return ""
 	}
 	sameDirectory := func(candidate string) bool {
-		info, err := os.Stat(candidate)
+		info, err := pathStat(candidate)
 		return err == nil && os.SameFile(info, directory)
 	}
 	for _, loaded := range f.loaded {

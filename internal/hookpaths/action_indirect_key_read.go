@@ -30,7 +30,9 @@ func actionLiteralIndirectPrivateKeyRead(command, cwd, home string, dialect acti
 		return false
 	}
 	mode := keyReadMode(0)
-	if actionWindowsHome(home) {
+	// A Git Bash call the POSIX grammar reads alone matches its patterns as
+	// the POSIX shell does: * and ? skip a dot name (GAP-1717).
+	if actionWindowsHome(home) && !actionGitBashReadsAlone(command, home, dialect) {
 		mode = keyReadWindows
 	}
 	for _, grammar := range []actionWindowsGrammar{actionWindowsLiteralDollar, actionWindowsPlainGrammar | actionWindowsLiteralDollar} {

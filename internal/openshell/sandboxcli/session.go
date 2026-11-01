@@ -222,6 +222,21 @@ type session struct {
 	policyStop string
 }
 
+// openShellClientMissingError is a probe that could not run the OpenShell
+// command at all (not installed for the account, or not on its PATH): the
+// sandbox may run fine, only this command cannot reach it. It happened
+// after an administrator switched the sandbox setup away and back, until
+// the account's sandbox service installed its copy again (GAP-0196).
+type openShellClientMissingError struct {
+	sandbox string
+	err     error
+}
+
+func (e *openShellClientMissingError) Error() string {
+	return "the OpenShell command that reaches your sandboxes is not installed for your account right now, so " + e.sandbox + " can't be reached"
+}
+func (e *openShellClientMissingError) Unwrap() error { return e.err }
+
 // probe runs a trivial command in workdir until the sandbox answers; ""
 // is the sandbox's default directory. The harness's workdir exists only
 // once a copy-mode project is uploaded, so a probe there comes after the
@@ -237,6 +252,11 @@ func (s *session) probe(ctx context.Context, workdir string) error {
 		code, err := s.app.Streamer.Stream(ctx, inv, &out, &out)
 		if err == nil && code == 0 {
 			return nil
+		}
+		if errors.Is(err, exec.ErrNotFound) {
+			// The OpenShell command is not there to reach the sandbox with:
+			// retrying finds it no more (GAP-0196).
+			return &openShellClientMissingError{sandbox: s.sb.Name, err: err}
 		}
 		last = err
 		if err == nil {

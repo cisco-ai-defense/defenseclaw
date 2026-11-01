@@ -15,7 +15,6 @@ import (
 // the same dynamic values still fail closed when the program has an
 // unproved file or command effect.
 func TestR104Loop1DynamicOperandWriteProof(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -101,14 +100,16 @@ func TestR104Loop1DynamicOperandWriteProof(t *testing.T) {
 			if got := UnprovenProtectedWrite(tc.command, cwd, home); got != tc.reason {
 				t.Fatalf("class = %q, want %q", got, tc.reason)
 			}
-			payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
-				"tool_input": map[string]string{"command": tc.command}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			targets, ok := Decode(Resolve(payload))
-			if !ok || targets[UnprovenReasonKey] != tc.reason {
-				t.Fatalf("hook evidence class = %q, want %q", targets[UnprovenReasonKey], tc.reason)
+			if hookWriteEvidenceHost() {
+				payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+					"tool_input": map[string]string{"command": tc.command}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				targets, ok := Decode(Resolve(payload))
+				if !ok || targets[UnprovenReasonKey] != tc.reason {
+					t.Fatalf("hook evidence class = %q, want %q", targets[UnprovenReasonKey], tc.reason)
+				}
 			}
 		})
 	}

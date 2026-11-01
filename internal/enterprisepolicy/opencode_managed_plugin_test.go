@@ -281,7 +281,7 @@ func TestOpenCodeManagedPluginRoute(t *testing.T) {
 		t.Fatalf("state: %+v", state)
 	}
 	merged := readFile(t, configPath)
-	if !strings.Contains(merged, `"company-audit",`) || !strings.Contains(merged, opts.OpenCodePluginPath) || strings.Index(merged, "$schema") > strings.Index(merged, "plugin") {
+	if !strings.Contains(merged, `"company-audit",`) || !strings.Contains(merged, openCodePluginSpec(opts)) || strings.Index(merged, "$schema") > strings.Index(merged, "plugin") {
 		t.Fatalf("merge must keep the administrator's keys and order:\n%s", merged)
 	}
 	again, err := opencodeTarget{}.Reconcile(opts)

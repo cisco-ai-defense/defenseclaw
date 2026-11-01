@@ -55,6 +55,13 @@ const (
 	// writer connection keep at least two thirds of it while a prune runs.
 	retentionPauseFactor = 2
 	retentionPauseMax    = 250 * time.Millisecond
+	// RetentionMaxStoreMB is the largest observability.local.max_store_mb.
+	RetentionMaxStoreMB = 1 << 20
+	// RetentionSizeCapKeep is the newest history the size cap never deletes.
+	RetentionSizeCapKeep = time.Hour
+	// retentionSizeCapTargetDivisor: a size-capped run deletes down to nine
+	// tenths of the cap, so the next inserts do not cross it again at once.
+	retentionSizeCapTargetDivisor = 10
 )
 
 // RetentionTableClass is a fixed metric/reporting label. Values can only come
@@ -119,7 +126,10 @@ const (
 // RetentionRunResult is bounded by the fixed class registry. RowsDeleted always
 // has exactly the registry's keys and contains counts only.
 type RetentionRunResult struct {
-	Disabled    bool
+	Disabled bool
+	// SizeCapped is set when the store was over observability.local.max_store_mb
+	// and the run moved its cutoff forward to bring it under the cap.
+	SizeCapped  bool
 	Cutoff      time.Time
 	CompletedAt time.Time
 	Duration    time.Duration
@@ -212,6 +222,7 @@ type RetentionReaper struct {
 	store             *Store
 	judgeBodies       *JudgeBodyStore
 	retentionDays     atomic.Int64
+	maxStoreBytes     atomic.Int64
 	reporter          RetentionReporter
 	healthReporter    RetentionHealthReporter
 	passiveCheckpoint bool
@@ -326,6 +337,27 @@ func validateRetentionDays(days int64) error {
 	if days < 0 || days > math.MaxInt64/day {
 		return errors.New("retention_days is outside the supported range")
 	}
+	return nil
+}
+
+// MaxStoreMB is the opt-in audit.db size cap in MiB; zero is days only.
+func (reaper *RetentionReaper) MaxStoreMB() int64 {
+	if reaper == nil {
+		return 0
+	}
+	return reaper.maxStoreBytes.Load() >> 20
+}
+
+// UpdateMaxStoreMB changes the next run's size cap (observability.local.max_store_mb).
+// Zero keeps retention by days only.
+func (reaper *RetentionReaper) UpdateMaxStoreMB(mb int64) error {
+	if reaper == nil {
+		return errors.New("audit: retention is not initialized")
+	}
+	if mb < 0 || mb > RetentionMaxStoreMB {
+		return errors.New("audit: max_store_mb is outside the supported range")
+	}
+	reaper.maxStoreBytes.Store(mb << 20)
 	return nil
 }
 
@@ -449,13 +481,16 @@ var retentionAuditMigrationCatalog = map[string]retentionOwnership{
 	"actions": retentionOwnedProtected, "target_snapshots": retentionOwnedProtected,
 	"finding_scopes": retentionOwnedProtected, "finding_states": retentionOwnedProtected,
 	"schema_version": retentionOwnedProtected, "observability_store_readiness": retentionOwnedProtected,
-	"alert_acknowledgement_projection":   retentionOwnedProtected,
-	"alert_acknowledgement_operations":   retentionOwnedProtected,
-	"alert_acknowledgement_baselines":    retentionOwnedProtected,
-	"alert_acknowledgement_health":       retentionOwnedProtected,
-	"quarantine_records":                 retentionOwnedProtected,
-	"quarantine_record_connectors":       retentionOwnedProtected,
-	"runtime_asset_state":                retentionOwnedProtected,
+	"alert_acknowledgement_projection": retentionOwnedProtected,
+	"alert_acknowledgement_operations": retentionOwnedProtected,
+	"alert_acknowledgement_baselines":  retentionOwnedProtected,
+	"alert_acknowledgement_health":     retentionOwnedProtected,
+	"quarantine_records":               retentionOwnedProtected,
+	"quarantine_record_connectors":     retentionOwnedProtected,
+	"runtime_asset_state":              retentionOwnedProtected,
+	// Field class sets are named by the rows retention keeps; bounded by
+	// maxFieldClassSets, never pruned (field_class_sets.go).
+	"audit_field_class_sets":             retentionOwnedProtected,
 	"guardrail_chain_deny_receipts":      retentionOwnedGraph,
 	"guardrail_chain_events":             retentionOwnedGraph,
 	"guardrail_chain_partitions":         retentionOwnedGraph,
@@ -546,22 +581,38 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 
 	started := reaper.hooks.now().UTC()
 	days := reaper.retentionDays.Load()
-	if days == 0 {
+	capBytes := reaper.maxStoreBytes.Load()
+	if days == 0 && capBytes == 0 {
 		result.Disabled = true
 		result.CompletedAt = started
 		reaper.finishTiming(&result, started)
 		reaper.report(result, nil)
 		return result, nil
 	}
-	cutoff := started.Add(-time.Duration(days) * 24 * time.Hour)
-	result.Cutoff = cutoff
+	// With days 0 and a size cap only, no row is old enough by age.
+	cutoff := time.Unix(0, 0).UTC()
+	if days > 0 {
+		cutoff = started.Add(-time.Duration(days) * 24 * time.Hour)
+	}
 
 	var runErr error
+	if capBytes > 0 {
+		sizeCutoff, over, err := reaper.storeSizeCutoff(ctx, started, capBytes)
+		if err != nil {
+			runErr = retentionRunFailure(RetentionFailureAuditStore, err)
+		} else if over && sizeCutoff.After(cutoff) {
+			cutoff = sizeCutoff
+			result.SizeCapped = true
+		}
+	}
+	result.Cutoff = cutoff
 	judgeSourceKey := ""
-	if err := ctx.Err(); err != nil {
-		runErr = err
-	} else {
-		judgeSourceKey, runErr = reaper.preflightJudgeRetention(ctx, cutoff)
+	if runErr == nil {
+		if err := ctx.Err(); err != nil {
+			runErr = err
+		} else {
+			judgeSourceKey, runErr = reaper.preflightJudgeRetention(ctx, cutoff)
+		}
 	}
 	if runErr == nil {
 		for _, spec := range retentionAuditRegistry {
@@ -600,6 +651,10 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 	if runErr == nil {
 		runErr = reaper.drainJudgeBodies(ctx, cutoff, judgeSourceKey, &result)
 	}
+	if runErr == nil && result.SizeCapped && sumRetentionRows(result.RowsDeleted) > 0 {
+		// The next run, a minute later, checks the size again.
+		result.Backlog = true
+	}
 	if runErr == nil {
 		result.ProtectedRows, runErr = reaper.readProtectedCapacity(ctx)
 		if runErr != nil {
@@ -622,6 +677,60 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 	reaper.finishTiming(&result, started)
 	reaper.report(result, runErr)
 	return result, runErr
+}
+
+// storeSizeCutoff returns the cutoff that brings the used pages of audit.db
+// under nine tenths of capBytes when they are over capBytes, and whether
+// they are (false too when audit_events has no dated rows). Rows are deleted oldest first and rowids grow with time, so the
+// cutoff is the time of the audit_events row at that fraction of the rowid
+// range: the same cutoff then also prunes the other history tables and the
+// correlation graph, as day retention does. It never reaches into the last
+// RetentionSizeCapKeep.
+func (reaper *RetentionReaper) storeSizeCutoff(ctx context.Context, now time.Time, capBytes int64) (time.Time, bool, error) {
+	var pageCount, freePages, pageSize int64
+	if err := reaper.store.db.QueryRowContext(ctx, `SELECT
+		(SELECT page_count FROM pragma_page_count()),
+		(SELECT freelist_count FROM pragma_freelist_count()),
+		(SELECT page_size FROM pragma_page_size())`).Scan(&pageCount, &freePages, &pageSize); err != nil {
+		return time.Time{}, false, fmt.Errorf("audit: read store size: %w", err)
+	}
+	used := (pageCount - freePages) * pageSize
+	if used <= capBytes {
+		return time.Time{}, false, nil
+	}
+	var first, last sql.NullInt64
+	if err := reaper.store.db.QueryRowContext(ctx,
+		`SELECT MIN(rowid), MAX(rowid) FROM audit_events`).Scan(&first, &last); err != nil {
+		return time.Time{}, false, fmt.Errorf("audit: read audit row range: %w", err)
+	}
+	if !first.Valid || !last.Valid {
+		return time.Time{}, false, nil
+	}
+	target := capBytes - capBytes/retentionSizeCapTargetDivisor
+	fraction := float64(used-target) / float64(used)
+	at := first.Int64 + int64(fraction*float64(last.Int64-first.Int64))
+	var stamp sql.NullInt64
+	err := reaper.store.db.QueryRowContext(ctx, `SELECT retention_timestamp_unix_nano FROM audit_events
+		WHERE rowid >= ? AND retention_timestamp_unix_nano IS NOT NULL ORDER BY rowid LIMIT 1`, at).Scan(&stamp)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, fmt.Errorf("audit: read size cutoff: %w", err)
+	}
+	if !stamp.Valid {
+		return time.Time{}, false, nil
+	}
+	cutoff := time.Unix(0, stamp.Int64).UTC()
+	if keepFrom := now.Add(-RetentionSizeCapKeep); cutoff.After(keepFrom) {
+		cutoff = keepFrom
+	}
+	return cutoff, true, nil
+}
+
+func sumRetentionRows(rows map[RetentionTableClass]int64) int64 {
+	var total int64
+	for _, count := range rows {
+		total += count
+	}
+	return total
 }
 
 func newRetentionCounts() map[RetentionTableClass]int64 {
@@ -769,24 +878,42 @@ func (reaper *RetentionReaper) drainCorrelationState(
 	now time.Time,
 	result *RetentionRunResult,
 ) error {
-	stages := [...]struct {
+	type correlationStage struct {
 		class RetentionTableClass
 		args  []any
-	}{
-		{RetentionGuardrailChainReceipts, []any{unixNano(now)}},
+		// root runs the stage on the root-scope chain tables (issue #1391),
+		// counted under the session class.
+		root bool
+	}
+	chainStages := []correlationStage{
+		{RetentionGuardrailChainReceipts, []any{unixNano(now)}, false},
 		{RetentionGuardrailChainEvents, []any{
 			unixNano(now.Add(-guardrail.ToolChainMaxHorizon)),
 			guardrail.ToolChainMaxEvents, guardrail.ToolChainMaxEvents,
-		}},
+		}, false},
 		{RetentionGuardrailChainPartitions, []any{
 			unixNano(now.Add(-guardrail.ToolChainMaxHorizon)),
-		}},
-		{RetentionCorrelationReceipts, []any{unixNano(now)}},
-		{RetentionCorrelationCursors, []any{unixNano(cutoff)}},
-		{RetentionCorrelationPending, []any{unixNano(cutoff)}},
-		{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}},
-		{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}},
+		}, false},
 	}
+	stages := append([]correlationStage(nil), chainStages...)
+	root, err := toolChainRootTablesExist(reaper.store.db)
+	if err != nil {
+		return err
+	}
+	if root {
+		// The root set has the same bounds as the session set, kept apart.
+		for _, stage := range chainStages {
+			stage.root = true
+			stages = append(stages, stage)
+		}
+	}
+	stages = append(stages,
+		correlationStage{RetentionCorrelationReceipts, []any{unixNano(now)}, false},
+		correlationStage{RetentionCorrelationCursors, []any{unixNano(cutoff)}, false},
+		correlationStage{RetentionCorrelationPending, []any{unixNano(cutoff)}, false},
+		correlationStage{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}, false},
+		correlationStage{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}, false},
+	)
 	deadline := reaper.hooks.now().Add(reaper.correlationBudget())
 	// A batch gives the connection back to the hooks waiting for it during
 	// the first half of the budget, and runs to its end in the second half:
@@ -807,7 +934,7 @@ func (reaper *RetentionReaper) drainCorrelationState(
 				result.Backlog = true
 				return nil
 			}
-			deleted, err := reaper.deleteCorrelationBatch(ctx, stage.class, reaper.yieldsToHooks(yieldUntil), stage.args...)
+			deleted, err := reaper.deleteCorrelationBatch(ctx, stage.class, stage.root, reaper.yieldsToHooks(yieldUntil), stage.args...)
 			for errors.Is(err, errRetentionYielded) {
 				// The batch was rolled back, nothing was deleted: let the
 				// waiting hooks run, then take it again with the pages it
@@ -819,7 +946,7 @@ func (reaper *RetentionReaper) drainCorrelationState(
 					result.Backlog = true
 					return nil
 				}
-				deleted, err = reaper.deleteCorrelationBatch(ctx, stage.class, reaper.yieldsToHooks(yieldUntil), stage.args...)
+				deleted, err = reaper.deleteCorrelationBatch(ctx, stage.class, stage.root, reaper.yieldsToHooks(yieldUntil), stage.args...)
 			}
 			if err != nil {
 				return err
@@ -860,12 +987,19 @@ func (reaper *RetentionReaper) yieldsToHooks(until time.Time) bool {
 func (reaper *RetentionReaper) deleteCorrelationBatch(
 	ctx context.Context,
 	class RetentionTableClass,
+	root bool,
 	yieldToHooks bool,
 	args ...any,
 ) (int64, error) {
 	statement, err := correlationRetentionDeleteStatement(class)
 	if err != nil {
 		return 0, err
+	}
+	if root {
+		statement, err = toolChainRootRetentionStatement(class, statement)
+		if err != nil {
+			return 0, err
+		}
 	}
 	args = append(args, reaper.batchSize())
 	if err := reaper.store.awaitWALHeadroom(ctx); err != nil {
@@ -923,6 +1057,17 @@ func (reaper *RetentionReaper) deleteCorrelationBatch(
 		return nil
 	})
 	return deleted, err
+}
+
+// toolChainRootRetentionStatement is a chain class's statement on the
+// root-scope tables (tool_chain_root.go).
+func toolChainRootRetentionStatement(class RetentionTableClass, statement string) (string, error) {
+	switch class {
+	case RetentionGuardrailChainReceipts, RetentionGuardrailChainEvents, RetentionGuardrailChainPartitions:
+		return toolChainRootTables.rewrite.Replace(statement), nil
+	default:
+		return "", errors.New("retention registry contains an unsupported root chain class")
+	}
 }
 
 func correlationRetentionDeleteStatement(class RetentionTableClass) (string, error) {

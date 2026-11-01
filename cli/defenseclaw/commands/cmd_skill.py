@@ -838,6 +838,8 @@ def _build_actions_map(store, connector: str = "", cfg=None) -> dict[str, Any]:
     except Exception:
         quarantine_records = []
     for record in quarantine_records:
+        if not _quarantine_copy_present(record):
+            continue
         current = actions_map.get(record.target_name)
         if record.state == "pending" and current is not None and str(current.reason or "").startswith(
             "quarantine failed"
@@ -1421,6 +1423,31 @@ def _mark_pending_admissions(app: AppContext, skills: list[dict[str, Any]]) -> N
             s["admission"] = state
 
 
+def _quarantine_copy_present(record: Any) -> bool:
+    """False for a quarantine record whose held copy was deleted by hand.
+
+    The record stays as restore provenance, but the skill is no longer held:
+    ``skill list`` and the TUI Skills panel must not keep a quarantined row
+    for it. A restore in progress keeps its row until it is finalized.
+    """
+    return record.state == "restoring" or os.path.lexists(record.quarantine_path)
+
+
+def _lost_quarantine_names(app: AppContext) -> set[str]:
+    """Skills whose quarantine records all lost their held copy (deleted by hand)."""
+    if app.store is None:
+        return set()
+    try:
+        records = [
+            record for record in app.store.list_quarantine_records("skill")
+            if record.state in ("pending", "active")
+        ]
+    except Exception:
+        return set()
+    present = {record.target_name for record in records if _quarantine_copy_present(record)}
+    return {record.target_name for record in records} - present
+
+
 def _mark_quarantined_phantoms(app: AppContext, skills: list[dict[str, Any]]) -> None:
     """Flag off-disk skills whose files are held in quarantine.
 
@@ -1434,7 +1461,7 @@ def _mark_quarantined_phantoms(app: AppContext, skills: list[dict[str, Any]]) ->
         held = {
             record.target_name
             for record in app.store.list_quarantine_records("skill")
-            if record.state in ("pending", "active")
+            if record.state in ("pending", "active") and _quarantine_copy_present(record)
         }
     except Exception:
         return
@@ -1459,7 +1486,22 @@ def _collect_skills_for_connector(
     skills = [dict(s) for s in oc_list.get("skills", [])] if oc_list else []
 
     known_names = {s.get("name", "") for s in skills}
+    # A quarantine whose held copy was deleted by hand holds nothing: it is
+    # neither a quarantined row nor a disabled skill (GAP-2606).
+    import dataclasses
+
+    from defenseclaw.models import ActionState
+
+    lost = _lost_quarantine_names(app) - known_names
+    for name in lost:
+        ae = actions_map.get(name)
+        if ae is not None and ae.actions.file == "quarantine":
+            actions_map[name] = dataclasses.replace(
+                ae, actions=ActionState(install=ae.actions.install),
+            )
     for name, ae in actions_map.items():
+        if name in lost:
+            continue
         # Non-OpenClaw connectors normally trust their connector-specific
         # filesystem walk.  A physically quarantined copy is necessarily
         # absent from that walk, so retain only that connector-owned phantom;
@@ -1725,12 +1767,15 @@ def _build_skill_scanner(
     if cfg.use_llm != effective:
         cfg = dataclasses.replace(cfg, use_llm=effective)
 
+    from defenseclaw.decision_model import skill_scanner_options
+
     scanner = SkillScannerWrapper(
         cfg,
         app.cfg.effective_inspect_llm(),
         app.cfg.cisco_ai_defense,
         llm=llm,
         secure_client=secure_client,
+        decision_model=None if secure_client else skill_scanner_options(app.cfg),
     )
     # R4: overlay the guardrail rule pack (and guardrail.rules) so `skill scan`
     # flags what the gateway's rule lanes would catch, and what the install
@@ -1787,6 +1832,43 @@ def _print_skill_scan_policy(
     ux.echo(f"        policy: {label}" + (f" — {first}" if first else ""))
     for step in steps:
         click.echo(f"          {step}")
+
+
+def _skill_scan_audit_verdict(
+    app: AppContext, pe: Any, name: str, path: str, result: Any, *, connector: str = "",
+) -> str:
+    """The audit verdict of a skill scan: what its "policy:" line says (GAP-0156).
+
+    ``block`` for a skill the policy rejects (or the block list holds),
+    ``clean`` for informational findings only, ``warn`` for other findings
+    that are allowed. Empty (the gateway infers it from the findings) when
+    the scan is clean or the policy cannot be read.
+    """
+    if result.is_clean():
+        return ""
+    severity = str(result.max_severity()).upper()
+    try:
+        if pe is not None and pe.is_blocked_for_connector("skill", name, connector or ""):
+            return "block"
+        label, _, _ = _skill_policy_verdict(
+            app,
+            name,
+            skill={"baseDir": path},
+            scan_entry={
+                "target": path,
+                "finding_count": len(result.findings),
+                "max_severity": severity,
+            },
+            connector=connector or "",
+            pe=pe,
+        )
+    except Exception:  # noqa: BLE001 - the audit row falls back to the findings' severity.
+        return ""
+    if label in ("rejected", "blocked"):
+        return "block"
+    if label in ("-", "clean"):
+        return ""
+    return "clean" if severity == "INFO" else "warn"
 
 
 def _skill_scan_findings_verdict(result: Any, *, blocked: bool = False) -> str:
@@ -2393,7 +2475,12 @@ def _scan_one_local_skill(
 
     # A path scan belongs to no connector, so its audit record, alert and
     # finding.observed carry none either (GAP-1919).
-    _record_scan(app.logger, result, connector=json_connector or None)
+    _record_scan(
+        app.logger, result, connector=json_connector or None,
+        **_scan_ui.verdict_kwargs(
+            _skill_scan_audit_verdict(app, pe, name, scan_dir, result, connector=connector)
+        ),
+    )
 
     payload: dict[str, Any] | None = None
     if as_json:
@@ -2977,7 +3064,12 @@ def _scan_all(
         telemetry_error: Exception | None = None
         if app.logger:
             try:
-                app.logger.log_scan(result, connector=resolved_connector)
+                app.logger.log_scan(
+                    result, connector=resolved_connector,
+                    **_scan_ui.verdict_kwargs(
+                        _skill_scan_audit_verdict(app, pe, name, base_dir, result, connector=connector)
+                    ),
+                )
             except Exception as exc:
                 telemetry_error = exc
                 telemetry_errors += 1
@@ -3945,6 +4037,15 @@ def _safe_tar_extract(
                             dst.write(chunk)
 
 
+def _decision_model_line(dm: dict) -> str:
+    """One line for the decision model's advisory skill score."""
+    model = dm.get("model") or "decision model"
+    if dm.get("status") == "ok" and isinstance(dm.get("probability"), (int, float)):
+        return f"{model} scored {float(dm['probability']):.2f} unsafe (advisory only; it does not change the verdict)"
+    reason = dm.get("reason") or dm.get("status") or "no answer"
+    return f"{model} gave no score ({reason}); the verdict is unchanged"
+
+
 def _print_result(name: str, result) -> None:
     click.echo(f"  {ux._style('Skill:', fg='bright_black', bold=True)}    {name}")
     click.echo(f"  {ux._style('Target:', fg='bright_black', bold=True)}   {result.target}")
@@ -3956,6 +4057,9 @@ def _print_result(name: str, result) -> None:
             f"  {ux._style('Scanner:', fg='bright_black', bold=True)}  "
             f"policy {ran_with.get('policy', '')}, judge {ran_with.get('judge', 'off')}"
         )
+        dm = ran_with.get("decision_model")
+        if isinstance(dm, dict):
+            click.echo(f"  {ux._style('Decision model:', fg='bright_black', bold=True)} {_decision_model_line(dm)}")
 
     if result.is_clean():
         ux.ok("Verdict:  CLEAN", indent="  ")
@@ -4440,6 +4544,8 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     _, physical_records = _skill_quarantine_records(
         app, pe, skill_name, connector_flag,
     )
+    # A held copy that was deleted by hand is not "still quarantined".
+    physical_records = [record for record in physical_records if _quarantine_copy_present(record)]
 
     # SK-4 connector-scoped unblock: EXACT-match on the targeted peer so a
     # connector unblock never falsely reports (or clears) the global block.

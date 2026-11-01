@@ -38,6 +38,16 @@ import (
 
 var managedHookDirectoryNeedsFresh = runtime.GOOS == "darwin"
 
+// managedHookReadsFreshFacts reports a managed Mac whose hooks read each
+// call's directory facts fresh (identityCache.getFresh) and get none while
+// the directory does not answer: Open Directory gives no notice when a
+// secondary group is removed, so cached groups could select a looser
+// profile (TestManagedMacHookRefreshesSecondaryGroupsBeforeDecision).
+// Explain reads them the same way for every spelling it accepts (GAP-0551).
+func managedHookReadsFreshFacts() bool {
+	return managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load()
+}
+
 // managedHookPeerHomeTTL bounds how long a resolved home is reused, so a
 // moved or recreated account is picked up without restarting the gateway.
 const managedHookPeerHomeTTL = 5 * time.Minute
@@ -786,7 +796,7 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	if !ok {
 		return useridentity.DirectoryFacts{}, false
 	}
-	if managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load() {
+	if managedHookReadsFreshFacts() {
 		if !block {
 			return cache.getNonblocking(key)
 		}
@@ -808,7 +818,7 @@ func (c *managedHookPeerHomeCache) currentDirectory(uid int) (useridentity.Direc
 	if !ok {
 		return useridentity.DirectoryFacts{}, false
 	}
-	if managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load() {
+	if managedHookReadsFreshFacts() {
 		return cache.getFresh(key, identityDirectoryBudget)
 	}
 	return cache.getCurrent(key, identityDirectoryBudget)
@@ -892,7 +902,7 @@ func (c *managedHookPeerHomeCache) explainDirectory(uid int) (useridentity.Direc
 	c.noteHolder(uid, key)
 	cache := c.directoryCache()
 	forgetOnSpoolAccountChange(cache, key, time.Now())
-	if managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load() {
+	if managedHookReadsFreshFacts() {
 		if facts, ok := cache.getFresh(key, identityDirectoryBudget); ok {
 			return facts, nil
 		}
@@ -1077,6 +1087,7 @@ func (c *managedHookPeerHomeCache) cachedHolderFor(name string) (int, string, er
 	if !useridentity.QualifiedAccountName(name) {
 		return 0, "", errNoCachedHolder
 	}
+	accountName := false
 	for uid, holder := range holders {
 		if holder.name == "" {
 			continue
@@ -1089,9 +1100,22 @@ func (c *managedHookPeerHomeCache) cachedHolderFor(name string) (int, string, er
 			return 0, "", errNoCachedHolder
 		}
 		foundUID, foundName = uid, holder.name
+		accountName = cachedFactsQualifyName(name, holder.name, facts)
 	}
 	if foundName == "" {
 		return 0, "", errNoCachedHolder
+	}
+	if accountName {
+		// DOMAIN\name or name@domain of the account's own name, in a domain
+		// its facts name, spells the holder as its account name does, and is
+		// served as that name is: through an outage, until the account
+		// database names another holder (GAP-0551). Only an alias the facts
+		// alone tie to the uid (a UPN or principal with another account
+		// part) needs the holder and incarnation confirmed now.
+		if c.holderChanged(foundUID, holders[foundUID]) {
+			return 0, "", errNoCachedHolder
+		}
+		return foundUID, foundName, nil
 	}
 	if err := c.confirmCachedSpelling(name, foundUID, holders[foundUID]); err != nil {
 		return 0, "", err
@@ -1203,6 +1227,13 @@ func cachedFactsSpell(name, holder string, facts useridentity.DirectoryFacts) bo
 			return true
 		}
 	}
+	return cachedFactsQualifyName(name, holder, facts)
+}
+
+// cachedFactsQualifyName reports whether name is the bare account name of
+// holder qualified with a domain its facts name (DNS domain, NetBIOS domain
+// or realm): CORP\alice or alice@corp.example for alice.
+func cachedFactsQualifyName(name, holder string, facts useridentity.DirectoryFacts) bool {
 	bare, domain := useridentity.SplitQualifiedName(name)
 	holderBare, _ := useridentity.SplitQualifiedName(holder)
 	if domain == "" || !useridentity.EqualFold(bare, holderBare) {

@@ -21,6 +21,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // HermesUnverifiedPatchArgs is the projection of a Hermes patch call whose
@@ -325,8 +327,8 @@ const hermesSpace = `[\t\n\v\f\r\x1c-\x1f \x{85}\x{a0}\x{1680}\x{2000}-\x{200a}\
 // The Hermes V4A markers (tools/patch_parser.py), matched at the start of a
 // line as Python's re.match does.
 var (
-	hermesV4ABegin = regexp.MustCompile(`^\*\*\*` + hermesSpace + `*Begin` + hermesSpace + `+Patch` + hermesSpace + `*$`)
-	hermesV4AEnd   = regexp.MustCompile(`^\*\*\*` + hermesSpace + `*End` + hermesSpace + `+Patch` + hermesSpace + `*$`)
+	hermesV4ABegin = lazyregexp.New(`^\*\*\*` + hermesSpace + `*Begin` + hermesSpace + `+Patch` + hermesSpace + `*$`)
+	hermesV4AEnd   = lazyregexp.New(`^\*\*\*` + hermesSpace + `*End` + hermesSpace + `+Patch` + hermesSpace + `*$`)
 	hermesV4AOps   = []struct {
 		re    *regexp.Regexp
 		write bool

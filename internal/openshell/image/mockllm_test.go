@@ -277,12 +277,14 @@ func TestMockLLMToolLoops(t *testing.T) {
 		want             []interface{} // key, value pairs the answer holds
 		says, lacks      string        // text the answer does and does not contain
 	}{
-		// Anthropic Messages: Claude Code's Bash, OpenCode's and the Copilot
-		// CLI's bash (Bash wins when both are advertised).
+		// Anthropic Messages: Claude Code's Bash, Copilot's bash and
+		// OpenCode V2's shell (Bash wins when both are advertised).
 		{"messages", "/v1/messages?beta=true", `{"model":"claude-x","max_tokens":1024,"messages":[` + messages + `],` + anthropicTools + `}`,
 			[]interface{}{"stop_reason", "tool_use", "model", "claude-x", "name", "Bash", "command", blockCmd}, "", ""},
 		{"messages lowercase bash", "/v1/messages", `{"model":"m","messages":[{"role":"user","content":` + allow + `}],"tools":[{"name":"read"},{"name":"bash"},{"name":"edit"}]}`,
 			[]interface{}{"stop_reason", "tool_use", "name", "bash", "description", "DefenseClaw hook-fire probe", "command", allowCmd}, "", ""},
+		{"messages opencode v2 shell", "/v1/messages", `{"model":"m","messages":[{"role":"user","content":` + allow + `}],"tools":[{"name":"read"},{"name":"shell"},{"name":"edit"}]}`,
+			[]interface{}{"stop_reason", "tool_use", "name", "shell", "command", allowCmd}, "", `"description"`},
 		{"messages mixed bash", "/v1/messages", `{"model":"m","messages":[{"role":"user","content":` + block + `}],"tools":[{"name":"bash"},{"name":"Bash"}]}`,
 			[]interface{}{"name", "Bash"}, "", ""},
 		{"messages follow-up", "/v1/messages", `{"model":"claude-x","messages":[` + messages + `,{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]},` +
@@ -298,6 +300,8 @@ func TestMockLLMToolLoops(t *testing.T) {
 			[]interface{}{"name", "exec_command", "cmd", allowCmd}, "", ""},
 		{"responses shell", "/v1/responses", `{"input":[` + responses + `],"tools":[{"type":"function","name":"shell"}]}`,
 			[]interface{}{"name", "shell", "command", []interface{}{"bash", "-lc", allowCmd}}, "", ""},
+		{"responses opencode v2 shell", "/v1/responses", `{"input":[` + responses + `],"tools":[{"type":"function","name":"shell","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}]}`,
+			[]interface{}{"name", "shell", "command", allowCmd}, "", `timeout_ms`},
 		{"responses local_shell", "/v1/responses", `{"input":[` + responses + `],"tools":[{"type":"local_shell"}]}`,
 			[]interface{}{"type", "local_shell_call"}, "", ""},
 		{"responses follow-up", "/responses", `{"input":[` + responses + `,{"type":"function_call","name":"shell_command","call_id":"c1","arguments":"{}"},` +
@@ -338,7 +342,7 @@ func TestMockLLMToolLoops(t *testing.T) {
 			}
 		})
 	}
-	want := map[string]int{builtinBlockMarker: 4, "write the marker file": 5}
+	want := map[string]int{builtinBlockMarker: 4, "write the marker file": 7}
 	if served := m.toolCallsServed(); !reflect.DeepEqual(served, want) {
 		t.Fatalf("tool calls served = %v, want %v", served, want)
 	}

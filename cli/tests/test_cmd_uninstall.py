@@ -35,7 +35,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import click
+import pytest
 from click.testing import CliRunner
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_agent_configs(monkeypatch):
+    # The sweep also reads the real Codex and Claude Code configs of the account (GAP-0376).
+    monkeypatch.setattr(cmd_uninstall, "_agent_config_wiring_files", lambda: [])
 
 
 @contextlib.contextmanager
@@ -1326,6 +1333,59 @@ class RenderPlanConnectorTests(unittest.TestCase):
                 include_openclaw=True,
             )
         self.assertEqual(got, ("openclaw", "codex"))
+
+    def test_teardown_connectors_include_an_inactive_agent_config_that_names_defenseclaw(self):
+        # GAP-0376: Codex inactive, no backup marker, but config.toml still
+        # runs DefenseClaw's notify launcher: uninstall tears Codex down too.
+        with tempfile.TemporaryDirectory() as data_dir, tempfile.TemporaryDirectory() as home:
+            codex = os.path.join(home, "config.toml")
+            claude = os.path.join(home, "settings.json")
+            with open(codex, "w") as fh:
+                fh.write("notify = ['C:/Users/u/.local/bin/defenseclaw-hook.exe', 'notify']\nmodel = 'keep'\n")
+            with open(claude, "w") as fh:
+                fh.write('{"model": "keep"}')
+            with patch.object(
+                cmd_uninstall, "_agent_config_wiring_files", return_value=[("codex", codex), ("claudecode", claude)]
+            ):
+                got = cmd_uninstall._teardown_connectors(
+                    "claudecode", data_dir=data_dir, openclaw_config_file="", include_openclaw=False
+                )
+                with open(codex, "w") as fh:
+                    fh.write("model = 'keep'\n")
+                clean = cmd_uninstall._teardown_connectors(
+                    "claudecode", data_dir=data_dir, openclaw_config_file="", include_openclaw=False
+                )
+        self.assertEqual(got, ("claudecode", "codex"))
+        self.assertEqual(clean, ("claudecode",))
+
+    def test_teardown_connectors_include_an_inactive_codex_notify_on_the_gateway(self):
+        # GAP-0376 (L-win-J10-005): a notify entry that names DefenseClaw's
+        # gateway executable, in any Windows spelling, makes uninstall tear
+        # Codex down; a user's own notifier and a project path do not.
+        spellings = (
+            'notify = ["C:\\\\Users\\\\u\\\\.local\\\\bin\\\\defenseclaw-gateway.exe", "codex-notify"]\n',
+            "notify = ['C:/Users/u/.local/bin/defenseclaw-gateway.exe', 'codex-notify']\n",
+            "notify = ['\"C:\\\\Users\\\\u\\\\.local\\\\bin\\\\DefenseClaw-Gateway.EXE\"', 'codex-notify']\n",
+            "notify = ['defenseclaw-gateway.exe', 'codex-notify']\n",
+        )
+        with tempfile.TemporaryDirectory() as data_dir, tempfile.TemporaryDirectory() as home:
+            codex = os.path.join(home, "config.toml")
+            claude = os.path.join(home, "settings.json")
+            with open(claude, "w") as fh:
+                fh.write('{"model": "keep"}')
+            got = {}
+            for text in spellings + ("notify = ['C:/Tools/notify.exe', 'codex-notify']\n",):
+                with open(codex, "w") as fh:
+                    fh.write(text + "model = 'keep'\n")
+                with patch.object(
+                    cmd_uninstall, "_agent_config_wiring_files", return_value=[("codex", codex), ("claudecode", claude)]
+                ):
+                    got[text] = cmd_uninstall._teardown_connectors(
+                        "claudecode", data_dir=data_dir, openclaw_config_file="", include_openclaw=False
+                    )
+        for text in spellings:
+            self.assertEqual(got[text], ("claudecode", "codex"), text)
+        self.assertEqual(list(got.values())[-1], ("claudecode",))
 
     def test_teardown_connectors_include_inactive_amp_backup(self):
         with tempfile.TemporaryDirectory() as data_dir:

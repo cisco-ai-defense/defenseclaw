@@ -245,7 +245,17 @@ func TestExactRemoteArtifactDownloadIntent(t *testing.T) {
 		{name: "single exact", command: "curl http://8.8.8.8/runner -o /tmp/runner", want: "/tmp/runner"},
 		{name: "unrelated siblings", command: "pwd; curl http://8.8.8.8/runner -o /tmp/runner; whoami", want: "/tmp/runner"},
 		{name: "conditional", command: "true && curl http://8.8.8.8/runner -o /tmp/runner"},
-		{name: "hostname", command: "curl https://example.com/runner -o /tmp/runner"},
+		// #1390: an external hostname and a relative output are remote
+		// downloads; local, internal and reserved names are not.
+		{name: "hostname", command: "curl https://example.com/runner -o /tmp/runner", want: "/tmp/runner"},
+		{name: "relative output", command: "curl -o runner https://example.net/r", want: "/repo/runner"},
+		{name: "wget relative output", command: "wget -O ./bin/runner https://dl.example.org/r", want: "/repo/bin/runner"},
+		{name: "internal mirror", command: "curl https://mirror.corp/runner -o /tmp/runner"},
+		{name: "internal zone", command: "curl https://artifacts.internal/runner -o runner"},
+		{name: "short name", command: "curl http://mirror/runner -o /tmp/runner"},
+		{name: "localhost", command: "curl http://localhost:8080/runner -o /tmp/runner"},
+		{name: "mdns host", command: "curl http://build.local/runner -o /tmp/runner"},
+		{name: "private ip", command: "curl http://10.0.0.5/runner -o /tmp/runner"},
 		{name: "multiple downloads", command: "curl http://8.8.8.8/a -o /tmp/a; curl http://1.1.1.1/b -o /tmp/b"},
 		{name: "later overwrite", command: "curl http://8.8.8.8/a -o /tmp/a; printf x > /tmp/a"},
 	} {
@@ -266,7 +276,8 @@ func TestBoundedRemoteArtifactDownloadIntent(t *testing.T) {
 		want    string
 	}{
 		{name: "short circuit candidate", command: "curl -sf http://52.84.125.33/init -o /tmp/init && echo fetched || echo unavailable", want: "/tmp/init"},
-		{name: "hostname rejected", command: "curl -sf https://example.com/init -o /tmp/init && echo fetched"},
+		{name: "hostname", command: "curl -sf https://example.com/init -o /tmp/init && echo fetched", want: "/tmp/init"},
+		{name: "relative and executed", command: "curl -o runner https://example.net/r && bash ./runner", want: "/repo/runner"},
 		{name: "dynamic output rejected", command: "curl -sf http://52.84.125.33/init -o \"$target\" && echo fetched"},
 		{name: "later overwrite rejected", command: "curl -sf http://52.84.125.33/init -o /tmp/init || true; printf x > /tmp/init"},
 	} {

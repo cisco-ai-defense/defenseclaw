@@ -549,6 +549,7 @@ function checkWindowsHelperACL(paths: string[]): void {
 	// non-ASCII path is not mangled by the console code page.
 	const script = [
 		"$ErrorActionPreference='Stop'",
+		"try {",
 		"$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
 		"$trusted=@($current,'S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')",
 		"$writers=$trusted+@('S-1-3-4')",
@@ -568,6 +569,7 @@ function checkWindowsHelperACL(paths: string[]): void {
 		"  $count++",
 		"}",
 		"[Console]::Out.Write('checked ' + $count)",
+		"} catch { [Console]::Out.Write('failed ' + $_.Exception.Message); exit 3 }",
 	].join("\n")
 	const env: Record<string, string> = {}
 	for (const [name, value] of Object.entries(process.env)) {
@@ -575,15 +577,34 @@ function checkWindowsHelperACL(paths: string[]): void {
 	}
 	env.PSModulePath = join(dirname(DC_WINDOWS_POWERSHELL), "Modules")
 	let output = ""
+	let failure = ""
 	try {
 		output = execFileSync(DC_WINDOWS_POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
 			input: entries.map(([mask, path]) => mask + " " + Buffer.from(path, "utf8").toString("base64")).join("\n"),
 			env, timeout: 5000, windowsHide: true, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
 		})
-	} catch {
-		output = ""
+	} catch (error) {
+		failure = windowsACLCheckFailure(error)
 	}
+	// Only an owner or another writer the script found is a DACL refusal;
+	// a timeout or any other failure says what it was (rel-1-0-6 GAP-0025).
+	if (failure) throw new Error(failure)
 	if (output.trim() !== "checked " + entries.length) throw new Error("per-user gateway helper path has an untrusted Windows owner or DACL")
+}
+
+function windowsACLCheckFailure(error: unknown): string {
+	const failed = (error || {}) as { code?: string; signal?: string | null; status?: number | null; stdout?: string }
+	const reason = String(failed.stdout || "").trim().replace(/^failed /, "")
+	if (failed.status === 3 && (reason === "owner" || reason === "writable")) return ""
+	if (failed.code === "ETIMEDOUT") {
+		return "the per-user gateway helper ACL check did not finish within 5 s (Windows PowerShell was slow to start); retry the call, and run defenseclaw doctor if it repeats"
+	}
+	if (failed.signal) return "the per-user gateway helper ACL check was stopped (" + failed.signal + "); retry the call"
+	if (typeof failed.status !== "number") {
+		return "Windows PowerShell (" + DC_WINDOWS_POWERSHELL + ") did not start for the per-user gateway helper ACL check (" + (failed.code || "unknown error") + "); run defenseclaw doctor"
+	}
+	if (reason === "missing") return "a per-user gateway helper path went missing during its ACL check; retry the call, or run defenseclaw doctor"
+	return "the per-user gateway helper ACL check failed (" + (reason.slice(0, 200) || "exit " + failed.status) + "); retry the call, or run defenseclaw doctor"
 }
 // gatewayFetch posts over the verified managed hook socket when one is
 // configured (Bun's unix fetch option). A per-user post goes through the

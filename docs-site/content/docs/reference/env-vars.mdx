@@ -100,6 +100,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 | Variable | What it does |
 | --- | --- |
 | `DEFENSECLAW_CMID_BROKER_AUTH_KEY`<br/>Impact: **HIGH**<br/>Default: `unset` (legacy in-process provider path)<br/>Values: `absolute installer-owned broker-auth.key path`, `unset`<br/>Managed host: `allow` | Select the protected 32-byte key used by the Windows gateway to authenticate credential broker responses.<br/>**Security:** Authentication material path — the key bytes never belong in an environment variable, log, event, or diagnostic; the environment contains only its protected path.<br/>**Read by:** `internal/managed/cmidbroker/broker.go` |
+| `DEFENSECLAW_DECISION_MODEL_KEY`<br/>Impact: **medium**<br/>Default: `unset`<br/>Values: `bearer token string`, `unset`<br/>Managed host: `ignore` | Canonical env-var name for the decision model bearer token (decision_model.api_key_env when empty).<br/>**Read by:** `internal/config/decision_model.go`, `cli/defenseclaw/credentials.py` |
 | `DEFENSECLAW_GATEWAY_TOKEN`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `bearer-token`, `unset`<br/>Managed host: `allow` | Bearer token hooks present to the gateway API.<br/>**Read by:** `internal/gateway/connector/hooks/inspect-tool.sh`, `internal/cli/sidecar.go` |
 | `DEFENSECLAW_INIT_CISCO_API_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `secret-value`, `unset`<br/>Managed host: `allow` | Secret transport for 'defenseclaw init' (--cisco-api-key).<br/>**Read by:** `cli/defenseclaw/commands/cmd_init.py` |
 | `DEFENSECLAW_INIT_LLM_API_KEY`<br/>Impact: **HIGH**<br/>Default: `unset`<br/>Values: `secret-value`, `unset`<br/>Managed host: `allow` | Secret transport for 'defenseclaw init' (--llm-api-key).<br/>**Read by:** `cli/defenseclaw/commands/cmd_init.py` |
@@ -355,7 +356,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 147 test-only variables">
+<Accordion title="Show the 149 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -422,6 +423,8 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_JUDGE_BENCHMARK_RESUME`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Resumes an opt-in judge benchmark from a validated output prefix.<br/>**Read by:** `internal/gateway/llm_judge_corpus_benchmark_test.go` |
 | `DEFENSECLAW_JUDGE_BENCHMARK_RETRY_FAILURES`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Drops the first failed prediction and its suffix before resuming an opt-in judge benchmark.<br/>**Read by:** `internal/gateway/llm_judge_corpus_benchmark_test.go` |
 | `DEFENSECLAW_JUDGE_BENCHMARK_RULE_PACK`<br/>Default: policies/guardrail/default<br/>Values: `rule-pack directory`, `unset`<br/>Managed host: `ignore` | Overrides the rule-pack directory loaded by the opt-in production-path judge benchmark.<br/>**Read by:** `internal/gateway/llm_judge_corpus_benchmark_test.go` |
+| `DEFENSECLAW_JUDGE_PRIORITY_DELAY`<br/>Default: `unset` (200ms)<br/>Values: `Go duration, for example 2s`, `unset`<br/>Managed host: `ignore` | Sets the per-call delay of the stand-in judge model in the tool-judge priority latency test (#1395), so a manual run can measure a slower model.<br/>**Read by:** `internal/gateway/judge_priority_latency_test.go` |
+| `DEFENSECLAW_JUDGE_PRIORITY_TURNS`<br/>Default: `unset` (6)<br/>Values: `positive integer`, `unset`<br/>Managed host: `ignore` | Sets how many prompt-and-tool turns the tool-judge priority latency test (#1395) runs, so a manual run can measure a longer queue.<br/>**Read by:** `internal/gateway/judge_priority_latency_test.go` |
 | `DEFENSECLAW_LAUNCHER_LOGICAL_CWD`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries the expected logical working directory to the long-CWD launcher fixture.<br/>**Read by:** `cmd/defenseclaw-launcher/long_cwd_windows_test.go` |
 | `DEFENSECLAW_LAUNCHER_LONG_CWD_HELPER`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Selects the isolated long-CWD launcher helper subprocess.<br/>**Read by:** `cmd/defenseclaw-launcher/long_cwd_windows_test.go` |
 | `DEFENSECLAW_LEAK`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marker a test sets in its own environment to prove that Unix agent discovery does not run the agent executable, or pass the caller's environment to it, without allowExec.<br/>**Read by:** `internal/enterprisehooks/enumerator_unix_test.go` |

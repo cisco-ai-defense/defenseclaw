@@ -5,9 +5,10 @@ package copilotargs
 
 import (
 	"encoding/json"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // PermissionToolArgs projects the toolInput of Copilot CLI's native
@@ -25,7 +26,7 @@ func PermissionToolArgs(toolName string, value any) json.RawMessage {
 	return CLIToolArgs(toolName, value)
 }
 
-var permissionEditHunk = regexp.MustCompile(`^@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@(?: .*)?$`)
+var permissionEditHunk = lazyregexp.New(`^@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@(?: .*)?$`)
 
 // PermissionEditArgs projects Copilot CLI's native PermissionRequest edit
 // input onto the same reviewed edit call as PreToolUse. The diff must prove

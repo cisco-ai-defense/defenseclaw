@@ -1646,7 +1646,8 @@ func TestTrustedActionDynamicExecutableQuietControls(t *testing.T) {
 	}{
 		{command: dangerous, wantEnforce: true},
 		{command: "command " + dangerous, wantEnforce: true},
-		{command: "env MODE=check " + dangerous},
+		// env NAME=v rm is judged as NAME=v rm is (GAP-1200).
+		{command: "env MODE=check " + dangerous, wantEnforce: true},
 		{command: "exec " + dangerous, wantEnforce: true},
 		{command: "sudo -n " + dangerous, wantEnforce: true},
 		{command: "sudo -h remote " + dangerous, wantEnforce: true},
@@ -2244,9 +2245,12 @@ func TestTrustedActionBashStaticExpansionUsesExecutionDialect(t *testing.T) {
 			wantFinding: true,
 		},
 		{
-			name:    "path assignment makes executable resolution uncertain",
-			command: `PATH=/definitely/missing $'rm' -rf /`,
-			ruleID:  "CMD-RM-RF",
+			// A PATH prefix can only pick another rm: the call is also
+			// judged without it, so a match over-blocks at worst (GAP-1200).
+			name:        "path assignment is judged without the prefix too",
+			command:     `PATH=/definitely/missing $'rm' -rf /`,
+			ruleID:      "CMD-RM-RF",
+			wantFinding: true,
 		},
 		{
 			name:    "dynamic option before static suffix is not omitted",

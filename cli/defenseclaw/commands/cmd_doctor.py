@@ -1133,6 +1133,44 @@ def sandbox_doctor_report(binary: str) -> tuple[dict | None, str]:
     return report, ""
 
 
+# The Gateway row's words for an OpenShell release DefenseClaw starts no
+# sandbox on (openshell.ErrSandboxRelease: older than 0.1.5, or a prerelease).
+_SANDBOX_RELEASE_REFUSED = "runs no DefenseClaw sandbox"
+_OPENSHELL_UPGRADE_COMMAND = "defenseclaw sandbox setup --install-openshell"
+
+
+def openshell_floor_upgrade_notice(cfg) -> str:
+    """The line an upgrade prints while sandboxes are on and OpenShell is below the floor.
+
+    install.sh prints it after ``Upgraded from`` (GAP-0059): DefenseClaw
+    starts no sandbox on an OpenShell older than 0.1.5, and the Gateway row
+    of ``defenseclaw doctor`` fails until OpenShell is upgraded, so the
+    upgrade names the floor and the fix right away. "" when sandboxes are
+    off, on Windows, or when the gateway's OpenShell runs sandboxes.
+    """
+    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.platform_support import host_os
+
+    if host_os() == "windows" or getattr(getattr(cfg, "openshell", None), "enabled", False) is not True:
+        return ""
+    binary = resolve_gateway_binary()
+    report = sandbox_doctor_report(binary)[0] if binary else None
+    row = next(
+        (c for c in (report or {}).get("checks", []) if isinstance(c, dict) and c.get("id") == "gateway-version"),
+        {},
+    )
+    detail = str(row.get("detail") or "").strip()
+    if str(row.get("status") or "").strip().lower() != "fail" or _SANDBOX_RELEASE_REFUSED not in detail:
+        return ""
+    fix = row.get("fix") if isinstance(row.get("fix"), dict) else {}
+    # An OpenShell installed another way names no command: its upgrade is the user's.
+    command = str(fix.get("command") or "").strip() or _OPENSHELL_UPGRADE_COMMAND
+    return (
+        f"Sandboxes: {detail}. Until then DefenseClaw starts no sandbox and `defenseclaw doctor` fails its "
+        f"Gateway check. Stop running sandboxes first, then run: {command}"
+    )
+
+
 _SANDBOX_GATEWAY_DEPENDENCY = "depends on: OpenShell gateway"
 # Services that are simply not running; an install or policy problem stays a
 # failure even before the first sandbox run.
@@ -1710,6 +1748,87 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
         check_id="doctor.state.sudo-leftovers",
         reason_code="sudo-runtime-leftovers",
         remediation=remediation,
+    )
+
+
+# Vendor machine-policy folders agents read administrator policy from. An
+# agent treats the folder's presence as policy: Codex pauses every launch with
+# "Organization settings could not be loaded" when /etc/codex exists but it
+# cannot read it. A gateway run as root (the Mac app's administrator mode, or
+# sudo) used to create /etc/codex with mode 0700 for its /etc/codex/skills
+# watch; the watcher no longer creates vendor folders and a root gateway
+# removes the empty ones it recorded, but a folder left by an older release
+# needs an administrator. Keyed by platform so tests can substitute paths.
+_VENDOR_POLICY_DIRS: dict[str, tuple[str, ...]] = {
+    "darwin": (
+        "/etc/codex",
+        "/etc/cursor",
+        "/etc/github-copilot",
+        "/Library/Application Support/ClaudeCode",
+        "/Library/Application Support/opencode",
+    ),
+    "linux": (
+        "/etc/codex",
+        "/etc/cursor",
+        "/etc/github-copilot",
+        "/etc/claude-code",
+        "/etc/opencode",
+    ),
+}
+
+
+def _vendor_policy_dirs(platform_name: str | None = None) -> tuple[str, ...]:
+    platform_name = platform_name or sys.platform
+    if platform_name.startswith("linux"):
+        return _VENDOR_POLICY_DIRS["linux"]
+    if platform_name == "darwin":
+        return _VENDOR_POLICY_DIRS["darwin"]
+    return ()
+
+
+def _unreadable_vendor_policy_dirs(paths: tuple[str, ...]) -> list[str]:
+    """Vendor policy folders that exist but this account cannot traverse."""
+
+    unreadable: list[str] = []
+    for path in paths:
+        try:
+            if not os.path.isdir(path) or os.path.islink(path):
+                continue
+        except OSError:
+            continue
+        if not os.access(path, os.R_OK | os.X_OK):
+            unreadable.append(path)
+    return unreadable
+
+
+def _check_vendor_policy_dirs(cfg, r: _DoctorResult, *, platform_name: str | None = None) -> None:
+    """Name vendor policy folders this account cannot read (an agent would pause)."""
+
+    paths = _vendor_policy_dirs(platform_name)
+    if not paths:
+        return
+    unreadable = _unreadable_vendor_policy_dirs(paths)
+    if not unreadable:
+        _emit(
+            "pass",
+            "Vendor policy folders",
+            "no unreadable agent policy folder on this computer",
+            r=r,
+            check_id="doctor.state.vendor-policy-folders",
+        )
+        return
+    _emit(
+        "fail",
+        "Vendor policy folders",
+        "unreadable by this account (an agent treats the folder as administrator "
+        "policy and pauses when it cannot read it; Codex: \"Organization settings "
+        "could not be loaded\"): " + ", ".join(unreadable),
+        r=r,
+        check_id="doctor.state.vendor-policy-folders",
+        reason_code="vendor-policy-folder-unreadable",
+        remediation="as an administrator, remove a folder that only holds empty folders "
+        "a root gateway's watcher created (sudo rm -rf <folder>), or make real policy "
+        "readable (sudo chmod -R a+rX <folder>); then relaunch the agent",
     )
 
 
@@ -3684,8 +3803,8 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         else:
             size_remediation = (
                 f"nothing to reclaim yet; the {retention_days}-day retention deletes older events as they "
-                "age out. To keep less history, lower observability.local.retention_days in config.yaml "
-                "and run 'defenseclaw-gateway restart'"
+                "age out. To keep less history, lower observability.local.retention_days (or set an "
+                "observability.local.max_store_mb size cap) in config.yaml and run 'defenseclaw-gateway restart'"
             )
         _emit(
             "warn",
@@ -7032,6 +7151,11 @@ def _check_windows_native_hooks(
     if _hermes_passive_unverified(check, r):
         _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_HERMES_PASSIVE_STEP)
         return
+    if not check.healthy and check.state == "missing" and _hook_runtime_file_problems(cfg, connector):
+        # The registered adapter is gone with the hooks folder: the Hook
+        # runtime files row names the one repair (p0-round GAP-0402).
+        _emit("skip", label, f"{check.state}: {check.detail.split('; run ')[0]}: covered by Hook runtime files", r=r)
+        return
     status = "pass" if check.healthy else "fail"
     _emit(status, label, f"{check.state}: {check.detail}", r=r, remediation=check.repair)
 
@@ -7868,6 +7992,11 @@ def _check_codex_hooks(
             "`defenseclaw-gateway start`",
             r=r,
         )
+    elif _hook_runtime_file_problems(cfg, "codex"):
+        # The Hook runtime files row reports the missing script with its one
+        # repair (doctor --fix renders it again); a second next step here
+        # was printed for the same cause (p0-round GAP-0402).
+        _emit("skip", "Codex hooks", f"hook script {hook_script} is missing: covered by Hook runtime files", r=r)
     else:
         _emit(
             "fail",
@@ -9101,6 +9230,38 @@ def _cursor_health_row(document: str) -> dict[str, object] | None:
     return _connector_health_row(document, "cursor")
 
 
+_OPENCODE_V1_REMEDY = (
+    "install OpenCode V2 (`npm uninstall -g opencode-ai && npm install -g @opencode/cli@2`), "
+    "then run `opencode service restart`"
+)
+
+
+def _opencode_v1_problem(cfg) -> str:
+    """Why the registered OpenCode plugin protects nothing: the account runs OpenCode V1.
+
+    The V2 plugin file stays after OpenCode is downgraded, and OpenCode V1
+    loads it without ever registering its hooks, so every tool call runs
+    unchecked. That is a failure, not a skipped row (rel-1-0-6 GAP-0069).
+    Empty when the installed OpenCode is V2 or cannot be determined.
+    """
+    from defenseclaw.connector_contracts import opencode_requires_v2_upgrade
+    from defenseclaw.migrations import _installed_opencode
+
+    try:
+        found = _installed_opencode(str(getattr(cfg, "data_dir", "") or ""))
+    except Exception:  # noqa: BLE001 - no answer is no verdict; the other rows still report
+        return ""
+    if found is None:
+        return ""
+    raw, executable = found
+    if not opencode_requires_v2_upgrade(raw):
+        return ""
+    return (
+        f"OpenCode {raw.strip() or '(unknown version)'} at {executable} is OpenCode V1, which cannot run the "
+        "DefenseClaw OpenCode V2 plugin, so its tool calls run unchecked; the hooks are NOT protected"
+    )
+
+
 def _opencode_runtime_remediation(status: str, runtime_detail: str) -> str:
     """Next step for the OpenCode hooks row's runtime-load warning."""
     if status != "warn":
@@ -9113,62 +9274,6 @@ def _opencode_runtime_remediation(status: str, runtime_detail: str) -> str:
 
 # OpenCode loads every {plugin,plugins}/*.{js,ts} file of a config folder.
 _OPENCODE_PLUGIN_SUFFIXES = (".js", ".ts")
-
-
-def _opencode_sibling_plugins(path: str) -> list[str]:
-    """Other OpenCode plugin files in the config folder of DefenseClaw's plugin *path*."""
-    own = os.path.realpath(path)
-    config_dir = os.path.dirname(os.path.dirname(os.path.abspath(path)))
-    found: list[str] = []
-    for folder in ("plugin", "plugins"):
-        directory = os.path.join(config_dir, folder)
-        try:
-            names = sorted(os.listdir(directory))
-        except OSError:
-            continue
-        for name in names:
-            candidate = os.path.join(directory, name)
-            if (
-                name.endswith(_OPENCODE_PLUGIN_SUFFIXES)
-                and os.path.realpath(candidate) != own
-                and os.path.isfile(candidate)
-            ):
-                found.append(candidate)
-    return found
-
-
-def _check_opencode_later_plugins(cfg, path: str, r: _DoctorResult) -> None:
-    """Warn in action mode when another plugin can load after DefenseClaw's.
-
-    OpenCode runs plugin hooks in load order and a later plugin can change a
-    tool call's arguments after DefenseClaw checked them, so in action mode
-    the bridge refuses every tool call while one is loaded (bridge v7). The
-    refusal reason is in the plugin's toast and in the failed tool, but
-    OpenCode's TUI shows only that the command was blocked (GAP-0469,
-    GAP-0465).
-    """
-
-    if _doctor_effective_guardrail_mode(getattr(cfg, "guardrail", None), "opencode") != "action":
-        return
-    others = _opencode_sibling_plugins(path)
-    if not others:
-        return
-    names = ", ".join(os.path.basename(other) for other in others)
-    _emit(
-        "warn",
-        "OpenCode plugin order",
-        f"other OpenCode plugins beside {path}: {names}. When OpenCode loads one after "
-        "defenseclaw.js, action mode refuses every tool call (\"later plugin argument mutations "
-        "are not observable\") and OpenCode shows only that the command was blocked",
-        r=r,
-        remediation=(
-            "move "
-            + " ".join(shlex.quote(other) for other in others)
-            + " out of the OpenCode plugin folder (a project's .opencode/plugins counts too), "
-            "or keep them and use `defenseclaw guardrail mode observe --connector opencode`; "
-            "then restart OpenCode"
-        ),
-    )
 
 
 def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
@@ -10416,7 +10521,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     probe_runtime=not r.passive,
                 )
             elif connector == "opencode":
-                if drift := _managed_plugin_drift(cfg, path):
+                if v1 := _opencode_v1_problem(cfg):
+                    _emit("fail", label, v1, r=r, remediation=_OPENCODE_V1_REMEDY)
+                elif drift := _managed_plugin_drift(cfg, path):
                     _emit("fail", label, drift, r=r)
                 else:
                     status, runtime_detail = _opencode_load_heartbeat_status(cfg)
@@ -10439,7 +10546,6 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                             r=r,
                             remediation=_opencode_runtime_remediation(status, runtime_detail),
                         )
-                _check_opencode_later_plugins(cfg, path, r)
             elif connector == "hermes":
                 problem = _hermes_registered_execution_problem(cfg, path)
                 refused = problem == _HERMES_PROOF_NAMESPACE_REFUSED
@@ -11789,6 +11895,42 @@ def _llm_identity(llm) -> tuple[str, str, str, str]:
     )
 
 
+def _check_decision_model(cfg, r: _DoctorResult) -> None:
+    """``Decision model`` row: one benign System One request when
+    ``decision_model`` is on. Silent while it is off (the default). An
+    unreachable model warns, never fails: the LLM judge then decides alone,
+    as it does without one."""
+    dm = getattr(cfg, "decision_model", None)
+    if dm is None or not dm.enabled:
+        return
+    from defenseclaw import decision_model as dmod
+
+    problem = dm.validation_error()
+    if problem:
+        _emit("fail", "Decision model", problem, r=r, remediation="defenseclaw setup decision-model")
+        return
+    if dmod.managed_host(cfg) and dm.credential:
+        detail = f"{dm.model}: token from the managed credential {dm.credential} (the gateway checks it)"
+        _emit("pass", "Decision model", detail, r=r)
+        return
+    result = dmod.ping(dm, cfg.data_dir, send_token=not dmod.managed_host(cfg))
+    if not result.ok:
+        _emit(
+            "warn",
+            "Decision model",
+            f"{dm.model}: {result.detail}; the LLM judge decides alone until it is reachable",
+            r=r,
+            remediation="defenseclaw setup decision-model --show --ping",
+        )
+        return
+    detail = f"{dm.model}: {result.detail}"
+    note = dmod.judge_note(cfg)
+    if note:
+        _emit("warn", "Decision model", detail + "; " + note, r=r)
+        return
+    _emit("pass", "Decision model", detail, r=r)
+
+
 def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     """One-shot ``llm.ping`` against the guardrail's resolved LLM.
 
@@ -12018,14 +12160,24 @@ def _check_judge_calls(cfg, r: _DoctorResult) -> None:
         _emit("skip", label, "no judge calls since the gateway started", r=r)
         return
     errors: list[str] = []
+    total = 0
     for (raw,) in rows:
         try:
             payload = json.loads(raw or "{}")
         except ValueError:
             continue
-        if isinstance(payload, dict) and str(payload.get("defenseclaw.judge.action", "")).lower() == "error":
+        if not isinstance(payload, dict):
+            continue
+        # The decision model logs its own rows (kind decision_model); its
+        # health has its own "Decision model" row and is not the judge's.
+        if payload.get("defenseclaw.judge.kind") == "decision_model":
+            continue
+        total += 1
+        if str(payload.get("defenseclaw.judge.action", "")).lower() == "error":
             errors.append(str(payload.get("defenseclaw.judge.error_summary") or "no error summary"))
-    total = len(rows)
+    if not total:
+        _emit("skip", label, "no judge calls since the gateway started", r=r)
+        return
     if not errors:
         _emit("pass", label, f"last {total} judge call(s) completed", r=r)
         return
@@ -12064,7 +12216,13 @@ def _check_regional_provider_config(cfg, r: _DoctorResult) -> None:
         b = llm.bedrock
         region = (b.region or llm.region or "").strip()
         if not region:
-            _emit("fail", label, "bedrock configured without a region", r=r)
+            _emit(
+                "fail",
+                label,
+                "bedrock configured without a region",
+                r=r,
+                remediation="defenseclaw setup llm --provider bedrock --bedrock-region <region>",
+            )
             return
         mode = (b.auth_mode or "").strip().lower() or "api_key"
         if mode == "iam_credentials" and not (b.access_key_env and b.secret_key_env):
@@ -13636,7 +13794,7 @@ def _check_observability_v8_status(
         retention_health_from_gateway,
     )
 
-    retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+    retention = status.retention_label
     local_path = status.local_path or "built-in data directory"
     write_failure, write_next_step, disk_freed = _audit_write_failure(live_health, audit_db)
     local_detail = f"retention={retention}; path={local_path}"
@@ -14296,6 +14454,7 @@ def doctor(
     _check_config(cfg, r)
     _check_ignored_dotenv_keys(cfg, r)
     _check_sudo_runtime_leftovers(cfg, r)
+    _check_vendor_policy_dirs(cfg, r)
     _check_audit_db(cfg, r)
     _check_inventory_storage(cfg, r)
     _check_device_identity(cfg, r)
@@ -14478,6 +14637,7 @@ def doctor(
     r.set_section("credentials")
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
+    _check_decision_model(cfg, r)
     _check_private_upstream_refusals(cfg, r)
     if not _check_judge_running(sidecar_health, r):
         _check_judge_calls(cfg, r)
@@ -15538,7 +15698,10 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             "disruptive",
             _fix_hook_script_drift,
             ("doctor.gateway.service.reconcile",),
-            ("restart the gateway so it renders the hook scripts setup sealed again, replacing an edited copy",),
+            (
+                "restart the gateway so it renders the hook scripts setup sealed again,"
+                " replacing an edited or deleted copy",
+            ),
             True,
             False,
         ),
@@ -16098,6 +16261,16 @@ def _run_fixers(
                                     or ("repair postcondition did not converge",),
                                     state_key=verified.state_key,
                                 )
+                except click.exceptions.Abort:
+                    # A confirmation prompt with no answer (stdin closed or not
+                    # a terminal) is a declined repair, not a failed one: DV18
+                    # showed "[FAIL] ... fixer raised unexpectedly" for
+                    # doctor --fix without --yes (p0-round GAP-0402).
+                    decision = RepairDecision(
+                        "declined",
+                        "declined: no answer to the confirmation prompt; run `defenseclaw doctor --fix --yes`",
+                        effects=spec.effects,
+                    )
                 except Exception as exc:  # defensive — one fixer shouldn't abort the rest
                     # ``error`` is not a Doctor schema status and used to fall
                     # through as a skipped check, allowing a broken repair to
@@ -16710,43 +16883,8 @@ def _emit_rule_pack_row(
     )
 
 
-def _check_connector_inventory(
-    cfg,
-    connector: str,
-    r: _DoctorResult,
-    *,
-    rule_pack_validation_cache: dict[str, object] | None = None,
-    live_health: dict | None = None,
-) -> None:
-    """Surface one connector and everything it resolves to.
-
-    Each connector has its own conventions for where skills, plugins,
-    and MCP server registrations live. ``Config.skill_dirs()`` /
-    ``plugin_dirs()`` / ``mcp_servers()`` are now polymorphic per
-    connector (S4.1), so this check makes that mapping visible to the
-    operator: if Codex is active but skill_dirs() still points at
-    ``~/.openclaw/skills``, that's a config bug doctor should flag.
-
-    Rendered identically for every active connector (the caller tags each
-    block with a "[<connector>]" suffix) so the output reads the same
-    whether one or many connectors are active — there is no separate
-    single- vs multi-connector layout. Alongside the path inventory this
-    also surfaces the connector's effective guardrail mode and rule pack.
-    """
-    label = _CONNECTOR_LABELS.get(connector, connector)
-    if connector not in _CONNECTOR_LABELS:
-        _emit(
-            "warn",
-            "Connector",
-            f"unknown connector {connector!r} — known: " + ", ".join(sorted(_CONNECTOR_LABELS)),
-            r=r,
-        )
-    else:
-        _emit("pass", "Connector", label, r=r)
-
-    # Effective guardrail mode for this connector (falls back to the
-    # global guardrail.mode when the connector sets no override).
-    gc = getattr(cfg, "guardrail", None)
+def _check_connector_mode(cfg, gc, connector: str, r: _DoctorResult) -> None:
+    """The Mode row: the connector's guardrail mode and the fail mode its hooks run."""
     if gc is not None and hasattr(gc, "effective_mode"):
         try:
             mode = (gc.effective_mode(connector) or "").strip()
@@ -16821,6 +16959,19 @@ def _check_connector_inventory(
                             f"`{setup_command(connector)}`"
                         ),
                     )
+                elif (
+                    rendered_missing
+                    # On Windows a hook with no installed mode runs closed,
+                    # so the runtime differs for the same cause.
+                    and (not runtime_mismatch or fail_mode.get("provenance") == "no-installed-mode")
+                    and desired in {"open", "closed"}
+                    and _hook_runtime_file_problems(cfg, connector)
+                ):
+                    # A missing or changed hook script has no readable fail
+                    # mode; the Hook runtime files row names its one repair
+                    # (doctor --fix), so this row adds no second next step
+                    # for the same cause (p0-round GAP-0402).
+                    _emit("skip", "Mode", f"{detail}; the hook script is covered by Hook runtime files", r=r)
                 elif desired in {"open", "closed"} and (runtime_mismatch or rendered_open or rendered_missing):
                     # The hooks run another fail mode than config.yaml asks
                     # for (GAP-0009): an open hook while config says closed
@@ -16855,6 +17006,46 @@ def _check_connector_inventory(
                         f"set guardrail.mode to observe or action, or run `{setup_command(connector)} --mode action`"
                     ),
                 )
+
+
+def _check_connector_inventory(
+    cfg,
+    connector: str,
+    r: _DoctorResult,
+    *,
+    rule_pack_validation_cache: dict[str, object] | None = None,
+    live_health: dict | None = None,
+) -> None:
+    """Surface one connector and everything it resolves to.
+
+    Each connector has its own conventions for where skills, plugins,
+    and MCP server registrations live. ``Config.skill_dirs()`` /
+    ``plugin_dirs()`` / ``mcp_servers()`` are now polymorphic per
+    connector (S4.1), so this check makes that mapping visible to the
+    operator: if Codex is active but skill_dirs() still points at
+    ``~/.openclaw/skills``, that's a config bug doctor should flag.
+
+    Rendered identically for every active connector (the caller tags each
+    block with a "[<connector>]" suffix) so the output reads the same
+    whether one or many connectors are active — there is no separate
+    single- vs multi-connector layout. Alongside the path inventory this
+    also surfaces the connector's effective guardrail mode and rule pack.
+    """
+    label = _CONNECTOR_LABELS.get(connector, connector)
+    if connector not in _CONNECTOR_LABELS:
+        _emit(
+            "warn",
+            "Connector",
+            f"unknown connector {connector!r} — known: " + ", ".join(sorted(_CONNECTOR_LABELS)),
+            r=r,
+        )
+    else:
+        _emit("pass", "Connector", label, r=r)
+
+    # Effective guardrail mode for this connector (falls back to the
+    # global guardrail.mode when the connector sets no override).
+    gc = getattr(cfg, "guardrail", None)
+    _check_connector_mode(cfg, gc, connector, r)
 
     workspace = _workspace_dir(cfg)
     if workspace:
@@ -17012,6 +17203,16 @@ def _check_connector_inventory(
                 )
         if judge_enabled and judge_failing:
             detail += "; judge failing: all recent calls failed, so only the rules decide"
+        by_connector = judge_details.get("judge_fallbacks_by_connector") if isinstance(judge_details, dict) else None
+        fallbacks = by_connector.get(connector) if isinstance(by_connector, dict) else None
+        if judge_enabled and isinstance(fallbacks, int) and not isinstance(fallbacks, bool) and fallbacks > 0:
+            # Hook checks the rules decided without a judge verdict (#1395).
+            detail += f"; the rules decided {fallbacks} hook check(s) because the judge gave no verdict in time"
+            from defenseclaw.commands.cmd_status import judge_max_parallel_hint
+
+            hint = judge_max_parallel_hint(cfg)
+            if hint:
+                detail += f" ({hint})"
         _emit("warn" if judge_enabled and judge_failing else "pass", "Detection", detail, r=r)
 
 
@@ -17282,6 +17483,15 @@ def _check_hook_contract_lock(
         _emit("warn", "Hook contract", detail, r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
     elif _hermes_passive_unverified(native_runtime, r) and status in {"known", "unversioned"}:
         _emit("warn", "Hook contract", detail, r=r, remediation=_HERMES_PASSIVE_STEP)
+    elif (
+        native_runtime is not None
+        and not native_runtime.healthy
+        and native_runtime.state == "missing"
+        and _hook_runtime_file_problems(cfg, connector)
+    ):
+        # The adapter went with the hooks folder; one finding, one step
+        # (p0-round GAP-0402).
+        _emit("skip", "Hook contract", f"{detail}; the hook adapter is covered by Hook runtime files", r=r)
     elif native_runtime is not None and not native_runtime.healthy:
         _emit("fail", "Hook contract", detail, r=r, remediation=native_runtime.repair)
     elif status == "unknown":
@@ -17302,6 +17512,22 @@ def _check_hook_contract_lock(
         _emit("warn", "Hook contract", detail, r=r)
 
 
+def _hook_runtime_file_problems(cfg, connector: str) -> list[str]:
+    """The drifted or missing hook scripts the Hook runtime files row reports for ``connector``.
+
+    Token problems are reported once, by the Connector hook credential row,
+    with the repair doctor --fix applies (GAP-1436). Rows that a missing hook
+    script also trips (Mode, Codex hooks) defer to this one finding.
+    """
+    from defenseclaw.hook_integrity import hook_runtime_problems
+
+    try:
+        problems = hook_runtime_problems(cfg, connector)
+    except Exception:  # noqa: BLE001 - the hook rows still report what they can read.
+        return []
+    return [problem for problem in problems if not problem.startswith("hook token ")]
+
+
 def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None:
     """FAIL when a generated hook script or its token sidecar drifted.
 
@@ -17309,11 +17535,7 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
     missing token blocks every call, while the other hook rows stay green
     (GAP-1141, GAP-1138). Both are repaired by rerunning setup.
     """
-    from defenseclaw.hook_integrity import hook_runtime_problems
-
-    # Token problems are reported once, by the Connector hook credential row,
-    # with the repair doctor --fix applies (GAP-1436).
-    problems = [problem for problem in hook_runtime_problems(cfg, connector) if not problem.startswith("hook token ")]
+    problems = _hook_runtime_file_problems(cfg, connector)
     if problems:
         # A hook file another account can change carries its own repair
         # (rel-1-0-4 GAP-0600); doctor --fix re-renders the others.
@@ -19549,17 +19771,20 @@ def _drifted_hook_connectors(cfg) -> list[str]:
         agent_hook_switch_problems,
         edited_hook_problems,
         hook_runtime_problems,
+        missing_hook_scripts,
         unguarded_tool_call_hooks,
     )
 
     # Codex hook entries left without a command may leave Codex running unguarded, and
     # an edited hook entry fails or runs unguarded; the restart re-runs the
     # gateway's setup of the connector, which removes or replaces them
-    # (GAP-1102, GAP-0906, GAP-0907, rel-1-0-4 GAP-0538).
+    # (GAP-1102, GAP-0906, GAP-0907, rel-1-0-4 GAP-0538). A deleted script or hooks
+    # folder is rendered again by the same restart (p0-round GAP-0402).
     return [
         connector
         for connector in _doctor_active_connectors(cfg)
         if any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector))
+        or missing_hook_scripts(cfg, connector)
         or edited_hook_problems(cfg, connector)
         or unguarded_tool_call_hooks(cfg, connector)
         or (
@@ -19575,7 +19800,7 @@ def _fix_hook_script_drift(
     assume_yes: bool,
     plan_only: bool = False,
 ) -> tuple[str, str]:
-    """Render a hand-edited generated hook script again (GAP-0098).
+    """Render a hand-edited or deleted generated hook script again (GAP-0098, GAP-0402).
 
     The script is derived from config.yaml: the gateway renders it, with its
     digest sealed in hook_contract_lock.json, each time it starts. So the

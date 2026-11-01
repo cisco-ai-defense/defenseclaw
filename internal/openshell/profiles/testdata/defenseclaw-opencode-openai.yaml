@@ -16,4 +16,4 @@ endpoints:
     protocol: rest
     access: full
     enforcement: enforce
-binaries: ["/opt/defenseclaw-harness/opencode/lib/node_modules/opencode-ai/bin/opencode.exe"]
+binaries: ["/opt/defenseclaw-harness/opencode/lib/node_modules/@opencode/cli/node_modules/@opencode/cli-linux-arm64/bin/opencode"]

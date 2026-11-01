@@ -196,6 +196,12 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 			if goos := enterprisePlatformGOOS(platform); runtime.GOOS != goos {
 				return invalidLifecycleArguments(fmt.Errorf("`enterprise %s %s` reads %s hosts; this host is %s", platform, view.use, goos, runtime.GOOS))
 			}
+			if view.use == "profile-explain" {
+				if refusal := refuseEnterpriseIdentityViewForStandardUser(cmd); refusal != nil {
+					// A standard user explains their own profile (GAP-0431, GAP-0422).
+					return explainOwnGuardrailProfile(cmd, values[0], values[1], values[2], refusal, refusal, asJSON)
+				}
+			}
 			query := url.Values{}
 			for i, flag := range view.flags {
 				if values[i] != "" {

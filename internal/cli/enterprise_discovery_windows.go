@@ -112,6 +112,9 @@ deployment does not run the skill or MCP scanners.`,
 	return cmd
 }
 
+// platformDiscoveryUIDName: Windows accounts are named by SID, not uid.
+func platformDiscoveryUIDName(int) string { return "" }
+
 // platformDiscoveryAccountIDs resolves a qualified --user (DOMAIN\name,
 // .\name, COMPUTER\name, a UPN) to the SID the LSA names it, as
 // profile-explain and policy show do.

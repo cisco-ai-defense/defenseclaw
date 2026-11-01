@@ -19,8 +19,9 @@ import (
 // running without them while status and verify read complete. Status and
 // verify now name the account's Hermes sessions started before the restore
 // and report security_complete false; a session started after the restore
-// and a Codex session (Codex reads the managed requirements per turn) are
-// not named.
+// is not named. A Codex session started before its per-user hooks were put
+// back is named too: Codex keeps the requirements it read at start
+// (private #12).
 func TestStatusNamesSessionsStartedBeforeAGuardianRestore(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -44,7 +45,7 @@ func TestStatusNamesSessionsStartedBeforeAGuardianRestore(t *testing.T) {
 	hermes := "/home/u/.hermes/tools/python/bin/python3\x00-I\x00-c\x00import os\nfrom hermes_cli.main import main\x00"
 	agent("6001", hermes, 2*60*100)      // after the activation, before the restore
 	agent("6002", hermes, 20*60*100)     // after the restore
-	agent("6003", "codex\x00", 2*60*100) // Codex reads the requirements per turn
+	agent("6003", "codex\x00", 2*60*100) // after the activation, before the restore
 	baseline := h.run(Options{Action: ActionStatus})
 	if got := messagesOf(baseline.Warnings, codeAgentSessionsRestart); got != "" {
 		t.Fatalf("sessions started after the activation are named without a restore: %q", got)
@@ -57,18 +58,20 @@ func TestStatusNamesSessionsStartedBeforeAGuardianRestore(t *testing.T) {
 	for _, action := range []string{ActionStatus, ActionVerify} {
 		result := h.run(Options{Action: action})
 		got := messagesOf(result.Warnings, codeAgentSessionsRestart)
-		if !strings.Contains(got, "hermes (pid 6001)") ||
+		if !strings.Contains(got, "hermes (pid 6001)") || !strings.Contains(got, "codex (pid 6003)") ||
 			!strings.Contains(got, "put back the account's changed or removed hermes hooks at "+restoredAt.Format(time.RFC3339)) ||
-			strings.Contains(got, "6002") || strings.Contains(got, "6003") {
-			t.Fatalf("%s does not name exactly the Hermes session started before the restore: %q", action, got)
+			strings.Contains(got, "6002") {
+			t.Fatalf("%s does not name exactly the sessions started before the restore: %q", action, got)
 		}
 		if result.SecurityComplete {
 			t.Fatalf("%s reports security_complete with a session started before the restore", action)
 		}
 	}
-	// The user restarted Hermes: nothing is named.
-	if err := os.RemoveAll(h.env.P("/proc/6001")); err != nil {
-		t.Fatal(err)
+	// The user restarted Hermes and Codex: nothing is named.
+	for _, pid := range []string{"6001", "6003"} {
+		if err := os.RemoveAll(h.env.P("/proc/" + pid)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart); got != "" {
 		t.Fatalf("a restarted session is still named: %q", got)
@@ -102,7 +105,7 @@ func TestStatusReportsUnknownRestartStatusForAnUnreadableRestoreRecord(t *testin
 	}
 	h.env.Now = func() time.Time { return activated.Add(30 * time.Minute) }
 	agent("6101", "/home/u/.hermes/tools/python/bin/python3\x00-I\x00-c\x00import os\nfrom hermes_cli.main import main\x00", 2*60*100)
-	agent("6102", "codex\x00", 2*60*100) // Codex reads the requirements per turn
+	agent("6102", "codex\x00", 2*60*100)
 	path := filepath.Join(h.env.Layout.DataDir, guardianRestoresFile)
 	for name, body := range map[string]string{
 		"invalid JSON": "not json",
@@ -112,8 +115,8 @@ func TestStatusReportsUnknownRestartStatusForAnUnreadableRestoreRecord(t *testin
 		for _, action := range []string{ActionStatus, ActionVerify} {
 			result := h.run(Options{Action: action})
 			got := messagesOf(result.Warnings, codeAgentSessionsRestart)
-			if !strings.Contains(got, "restart status unknown") || !strings.Contains(got, "hermes (pid 6101)") || strings.Contains(got, "6102") {
-				t.Fatalf("%s, %s: warnings %q, want the Hermes session named with an unknown restart status", name, action, got)
+			if !strings.Contains(got, "restart status unknown") || !strings.Contains(got, "hermes (pid 6101)") || !strings.Contains(got, "codex (pid 6102)") {
+				t.Fatalf("%s, %s: warnings %q, want the Hermes and Codex sessions named with an unknown restart status", name, action, got)
 			}
 			if result.SecurityComplete {
 				t.Fatalf("%s, %s: security_complete with an unreadable restore record", name, action)
@@ -121,8 +124,10 @@ func TestStatusReportsUnknownRestartStatusForAnUnreadableRestoreRecord(t *testin
 		}
 	}
 	// No session to name: the unknown status is still reported.
-	if err := os.RemoveAll(h.env.P("/proc/6101")); err != nil {
-		t.Fatal(err)
+	for _, pid := range []string{"6101", "6102"} {
+		if err := os.RemoveAll(h.env.P("/proc/" + pid)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	result := h.run(Options{Action: ActionStatus})
 	if got := messagesOf(result.Warnings, codeAgentSessionsRestart); !strings.Contains(got, "restart status unknown") || result.SecurityComplete {

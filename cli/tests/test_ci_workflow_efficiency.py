@@ -154,19 +154,24 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "name: Go Test (remaining packages / shard ${{ matrix.shard }})" in workflow
     assert "GO_PACKAGE_SHARD: ${{ matrix.shard }}" in workflow
     assert "GO_PACKAGE_SHARDS: 12" in workflow
-    assert "GO_TEST_SHARDS: 24" in workflow
+    assert "GO_TEST_SHARDS: 36" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
     assert workflow.count("--timings scripts/test-timings/go-linux.json") == 3
-    # 24 gateway + 4 audit + 12 remaining-package shards, one profile each.
-    assert 'test "${#coverage_parts[@]}" -eq 40' in workflow
+    # 36 gateway + 4 audit + 12 remaining-package shards, one profile each.
+    assert 'test "${#coverage_parts[@]}" -eq 52' in workflow
     # checkptr in the transpiled SQLite doubled the cost of every race shard.
     # A hang fails at go test's -timeout, well inside the job's budget, and
     # go_test_report.py names the test still running.
     race = "go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m "
     assert workflow.count("go test -race") == 0
     assert workflow.count(race) == 3
-    assert workflow.count("python3 scripts/go_test_report.py --timings") == 3
+    # The three Linux race jobs and the darwin connector parts.
+    assert workflow.count("python3 scripts/go_test_report.py --timings") == 4
+    assert workflow.count("label: macos-latest darwin connector ") == 4
+    assert "--timings scripts/test-timings/go-darwin.json \\\n            --shard-count 4 \\" in workflow
+    assert "name: go-test-timings-darwin-connector-${{ matrix.shard }}" in workflow
+    assert "DC_TEST_NATIVE_GATEWAY" in workflow
     assert "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]" in workflow
     assert 'test "$AUDIT_RESULT" = success' in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow

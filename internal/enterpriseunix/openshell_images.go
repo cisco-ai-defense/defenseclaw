@@ -20,7 +20,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +27,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 )
 
@@ -39,12 +39,12 @@ const (
 )
 
 var (
-	sandboxImageOwnerRE = regexp.MustCompile(`^[0-9a-f]{16}$`)
-	sandboxImageIDRE    = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	sandboxImageRefRE   = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
-	dockerAddressRE     = regexp.MustCompile(`(?:[0-9]{1,3}\.){3}[0-9]{1,3}`)
-	dockerUnixSocketRE  = regexp.MustCompile(`unix:///[a-zA-Z0-9_./-]+`)
-	dockerUnixQueryRE   = regexp.MustCompile(`unix:///[a-zA-Z0-9_./-]+[?#]`)
+	sandboxImageOwnerRE = lazyregexp.New(`^[0-9a-f]{16}$`)
+	sandboxImageIDRE    = lazyregexp.New(`^sha256:[0-9a-f]{64}$`)
+	sandboxImageRefRE   = lazyregexp.New(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+	dockerAddressRE     = lazyregexp.New(`(?:[0-9]{1,3}\.){3}[0-9]{1,3}`)
+	dockerUnixSocketRE  = lazyregexp.New(`unix:///[a-zA-Z0-9_./-]+`)
+	dockerUnixQueryRE   = lazyregexp.New(`unix:///[a-zA-Z0-9_./-]+[?#]`)
 )
 
 type sandboxImageStore struct {

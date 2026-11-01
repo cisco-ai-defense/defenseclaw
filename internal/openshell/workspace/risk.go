@@ -20,9 +20,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // Flag is a change that can run code on the host (or signals an attempt to
@@ -152,7 +153,7 @@ type packageJSON struct {
 	Bin             json.RawMessage   `json:"bin"`
 }
 
-var remoteDependencyRE = regexp.MustCompile(`^(git(\+[a-z]+)?:|https?:|file:|link:|[\w.-]+/[\w.-]+(#.*)?$)`)
+var remoteDependencyRE = lazyregexp.New(`^(git(\+[a-z]+)?:|https?:|file:|link:|[\w.-]+/[\w.-]+(#.*)?$)`)
 
 // lifecycleScriptFiles flags the changed files a changed npm lifecycle
 // script of package.json change c runs ("postinstall": "node
@@ -262,7 +263,7 @@ func packageScriptFlags(c TreeChange, content contentFunc) []Flag {
 	return flags
 }
 
-var gitattrDriverRE = regexp.MustCompile(`(^|\s)(filter|diff|merge)=([^\s]+)`)
+var gitattrDriverRE = lazyregexp.New(`(^|\s)(filter|diff|merge)=([^\s]+)`)
 
 func gitattributesFlag(c TreeChange, content contentFunc) (Flag, bool) {
 	after, ok := content(c, true)
@@ -289,8 +290,8 @@ func gitattributesFlag(c TreeChange, content contentFunc) (Flag, bool) {
 }
 
 var (
-	gitmodulesSectionRE = regexp.MustCompile(`^\s*\[\s*submodule\s+"([^"]*)"\s*\]`)
-	gitmodulesURLRE     = regexp.MustCompile(`^\s*url\s*=\s*(.*?)\s*$`)
+	gitmodulesSectionRE = lazyregexp.New(`^\s*\[\s*submodule\s+"([^"]*)"\s*\]`)
+	gitmodulesURLRE     = lazyregexp.New(`^\s*url\s*=\s*(.*?)\s*$`)
 )
 
 // parseGitmodules maps submodule name to URL.

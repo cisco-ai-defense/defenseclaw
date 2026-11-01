@@ -280,27 +280,30 @@ type bundleSignResult struct {
 // is set when the presence of every secret_refs credential was checked;
 // RestartPrediction for a verified bundle on this device.
 type bundleVerifyResult struct {
-	SchemaVersion         int                        `json:"schema_version"`
-	Command               string                     `json:"command"`
-	OK                    bool                       `json:"ok"`
-	Result                string                     `json:"result"`
-	Platform              string                     `json:"platform"`
-	Anchors               string                     `json:"anchors,omitempty"`
-	AnchorTrust           string                     `json:"anchor_trust,omitempty"`
-	Bundle                *bundleSummary             `json:"bundle,omitempty"`
-	SignerKeyID           string                     `json:"signer_key_id,omitempty"`
-	Alg                   string                     `json:"alg,omitempty"`
-	Floor                 uint64                     `json:"floor"`
-	FloorSource           string                     `json:"floor_source,omitempty"`
-	EffectivePolicyDigest string                     `json:"effective_policy_digest,omitempty"`
-	ExpectedDigest        string                     `json:"expected_digest,omitempty"`
-	DigestVerified        bool                       `json:"digest_verified"`
-	SecretRefsMissing     *[]string                  `json:"secret_refs_missing,omitempty"`
-	SecretRefsMismatch    *[]string                  `json:"secret_refs_mismatch,omitempty"`
-	RestartPrediction     *bundleRestartPrediction   `json:"restart_prediction,omitempty"`
-	ConfigDrift           *bool                      `json:"config_drift,omitempty"`
-	Warnings              []enterprisebundle.Warning `json:"warnings"`
-	Errors                []bundleError              `json:"errors"`
+	SchemaVersion         int            `json:"schema_version"`
+	Command               string         `json:"command"`
+	OK                    bool           `json:"ok"`
+	Result                string         `json:"result"`
+	Platform              string         `json:"platform"`
+	Anchors               string         `json:"anchors,omitempty"`
+	AnchorTrust           string         `json:"anchor_trust,omitempty"`
+	Bundle                *bundleSummary `json:"bundle,omitempty"`
+	SignerKeyID           string         `json:"signer_key_id,omitempty"`
+	Alg                   string         `json:"alg,omitempty"`
+	Floor                 uint64         `json:"floor"`
+	FloorSource           string         `json:"floor_source,omitempty"`
+	EffectivePolicyDigest string         `json:"effective_policy_digest,omitempty"`
+	ExpectedDigest        string         `json:"expected_digest,omitempty"`
+	DigestVerified        bool           `json:"digest_verified"`
+	SecretRefsMissing     *[]string      `json:"secret_refs_missing,omitempty"`
+	SecretRefsMismatch    *[]string      `json:"secret_refs_mismatch,omitempty"`
+	// SecretRefs is every secret_refs entry with its state (names and
+	// booleans only), present exactly when SecretRefsMissing is.
+	SecretRefs        *[]enterprisebundle.SecretRefState `json:"secret_refs,omitempty"`
+	RestartPrediction *bundleRestartPrediction           `json:"restart_prediction,omitempty"`
+	ConfigDrift       *bool                              `json:"config_drift,omitempty"`
+	Warnings          []enterprisebundle.Warning         `json:"warnings"`
+	Errors            []bundleError                      `json:"errors"`
 
 	// manifest is the verified manifest, for secret set --bundle.
 	manifest *enterprisebundle.Manifest
@@ -647,8 +650,8 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 	res.EffectivePolicyDigest, res.ExpectedDigest, res.DigestVerified = out.EffectivePolicyDigest, out.ExpectedDigest, out.DigestVerified
 	res.Warnings = append(res.Warnings, out.Warnings...)
 	if out.SecretRefsMissing != nil {
-		missing, mismatch := out.SecretRefsMissing, out.SecretRefsMismatch
-		res.SecretRefsMissing, res.SecretRefsMismatch = &missing, &mismatch
+		missing, mismatch, states := out.SecretRefsMissing, out.SecretRefsMismatch, out.SecretRefs
+		res.SecretRefsMissing, res.SecretRefsMismatch, res.SecretRefs = &missing, &mismatch, &states
 	}
 	if err != nil {
 		return err

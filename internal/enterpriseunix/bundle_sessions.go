@@ -218,37 +218,46 @@ func (e *Env) bundleLinuxProcesses(ctx context.Context, aliases map[string]strin
 	return out, nil
 }
 
+// bundleDarwinProcesses lists the agent processes of the bundle scan from the
+// lifecycle's own macOS process scan (darwinAgentSessionsWithError: the
+// kern.procargs2 arguments and the parent pid), so bundle status and the
+// lifecycle's agent_sessions_restart_required name one session by the same
+// pid. This scan matched the process name instead, which is node for the npm
+// Codex launcher, so it named the native codex child while the lifecycle
+// named the launcher, and enforcement_pending of an ensure, a bundle apply or
+// status counted each such session twice (rel-1-0-6 GAP-0183). A process
+// whose arguments cannot be read still counts when its name is an agent's,
+// as before.
 func (e *Env) bundleDarwinProcesses(ctx context.Context, aliases map[string]string) ([]enterprisestatus.SessionProcess, error) {
-	result, err := e.Runner.Run(ctx, "ps", "-axww", "-o", "pid=,user=,lstart=,comm=")
+	sessions, err := e.darwinAgentSessionsWithError(ctx)
+	if err == nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}
+	if len(sessions) > bundleSessionProcessCap {
+		return nil, errors.New("process cap reached")
+	}
+	names := map[int]string{}
 	var out []enterprisestatus.SessionProcess
-	for i, line := range strings.Split(string(result.Stdout), "\n") {
-		if i > bundleSessionProcessCap {
-			return nil, errors.New("process cap reached")
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 8 {
+	for _, session := range sessions {
+		if session.Unknown && !agentCLINames[session.Agent] {
 			continue
 		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
+		connector := bundleAgentName(session.Agent, aliases)
+		if connector == "" {
 			continue
 		}
-		started, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", strings.Join(fields[2:7], " "), time.Local)
-		if err != nil {
-			continue
+		who, ok := names[session.UID]
+		if !ok {
+			who = strconv.Itoa(session.UID)
+			if account, err := user.LookupId(who); err == nil {
+				who = account.Username
+			}
+			names[session.UID] = who
 		}
-		if !agentCLINames[filepath.Base(fields[7])] {
-			continue
-		}
-		if connector := bundleAgentName(fields[7], aliases); connector != "" {
-			out = append(out, enterprisestatus.SessionProcess{PID: pid, User: fields[1], Agent: connector, StartedAt: started})
-		}
+		out = append(out, enterprisestatus.SessionProcess{PID: session.PID, PPID: session.PPID, User: who, Agent: connector, StartedAt: session.Started})
 	}
 	return out, nil
 }

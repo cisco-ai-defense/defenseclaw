@@ -138,7 +138,7 @@ func TestInstructionProtectionInspectSharesHookSnapshot(t *testing.T) {
 			command = "Add-Content -LiteralPath '" + file + "' -Value new"
 		}
 		body := mustJSON(t, map[string]interface{}{
-			"tool": "bash", "direction": "tool_call", "session_id": "live",
+			"tool": "shell", "direction": "tool_call", "session_id": "live",
 			"args": map[string]interface{}{"command": command, "workdir": workdir},
 		})
 		_, verdict := postInspectForConnector(t, api, "opencode", string(body))

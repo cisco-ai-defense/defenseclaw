@@ -756,6 +756,9 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyShellInvocation(out, command)
 	case "python", "python2", "python3", "perl", "ruby":
 		classifyPOSIXStdinScriptInterpreter(out, command)
+		if exactPythonExternalSocketCommand(*command) {
+			addOperation(command, OperationConnect)
+		}
 	case "history":
 		classifyPOSIXHistory(out, command)
 	case "unset":

@@ -1680,6 +1680,54 @@ def _wait_for_gateway_acp(app: AppContext, profile: str, mode: str, show: bool) 
         client.close()
 
 
+def _remove_editor_setup_lock(client: str, data_dir: str) -> bool:
+    """Remove the empty lock enterprise ACP setup keeps next to an editor file (GAP-2632).
+
+    Setup keeps ``<editor file>.defenseclaw.lock`` while it may write entries
+    there. Once no DefenseClaw entry of this runtime is left in that editor's
+    file it is litter. A lock another process holds, a link, a file with
+    content or one another account owns stays. Returns whether it went.
+    """
+    if any(pair_client == client for pair_client, _ in _managed_pairs(data_dir)):
+        return False
+    lock = Path(str(_client_path(client)) + ".defenseclaw.lock")
+    try:
+        info = lock.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode) or info.st_size != 0:
+        return False
+    if os.name == "nt":
+        try:
+            lock.unlink()  # an open handle (a running setup) refuses the delete
+        except OSError:
+            return False
+        return True
+    if info.st_uid != os.geteuid():
+        return False
+    import fcntl
+
+    try:
+        fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False  # a setup holds it
+        # A setup that waited on this inode re-checks the name after it gets
+        # the lock and refuses once the name is gone.
+        if not os.path.samestat(os.fstat(fd), lock.lstat()):
+            return False
+        lock.unlink()
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
 @acp_cmd.command("remove")
 @click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True, help="Editor that runs the agent.")
 @click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True, help="ACP agent to guard.")
@@ -1719,6 +1767,8 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
     had_policy = not managed and app.cfg.acp.binding_key(client, agent) in app.cfg.acp.bindings
     if not (had_entry or had_policy or had_lock or remaining_records != records):
         click.echo(f"Nothing to remove: no DefenseClaw {agent} entry is configured for {client} ({path})")
+        if not redirected and _remove_editor_setup_lock(client, data_dir):
+            click.echo(f"Removed the empty DefenseClaw editor lock next to {path}")
         _warn_left_entries(left, path, client, agent, own=None)
         _warn_redirected_acp_dir(redirected, data_dir)
         return
@@ -1787,6 +1837,8 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
     _log_acp_change(app, "acp-remove", f"scope={client}/{agent} entry=removed previous=configured")
     _warn_left_entries(left, path, client, agent, own=None)
     _warn_redirected_acp_dir(redirected, data_dir)
+    if not redirected:
+        _remove_editor_setup_lock(client, data_dir)
     if had_entry:
         click.echo(f"Removed the DefenseClaw {agent} entry from {path}")
     else:

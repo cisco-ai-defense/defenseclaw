@@ -22,6 +22,13 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+# Import LiteLLM before the patch.dict("sys.modules") block in _scan. The scan
+# imports LiteLLM, and the block drops every module first imported inside it on
+# exit, pydantic.root_model among them. pydantic keeps the lazily resolved
+# RootModel on its package, so the next LiteLLM import in the same worker
+# raised KeyError: pydantic.root_model (Windows shard 7, rel/1.0.6).
+import litellm  # noqa: F401
+
 from defenseclaw.config import BedrockKeyConfig, LLMConfig, SkillScannerConfig
 from defenseclaw.models import Finding, ScanResult
 from defenseclaw.scanner import skill as skill_mod

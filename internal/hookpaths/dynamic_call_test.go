@@ -11,7 +11,6 @@ import "testing"
 // another spelling. A call through a built, escaped, indirect or run-time
 // name keeps the protected write in the body a target.
 func TestActionDynamicCallKeepsFunctionBodyChecked(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := home
 	// Writers whose operand roles only the mention scan reads.
@@ -40,8 +39,8 @@ func TestActionDynamicCallKeepsFunctionBodyChecked(t *testing.T) {
 			`echo ok; for n in fo; do "${n}o"; done`,
 		} {
 			command := body + call
-			if got := ActionCommandDecision(command, cwd, home); got == "" {
-				t.Errorf("ActionCommandDecision(%q) = allow, want a protected decision", command)
+			if got := posixShellDecision(command, cwd, home); got == "" {
+				t.Errorf("posixShellDecision(%q) = allow, want a protected decision", command)
 			}
 		}
 		// Benign: every program word static, the body never called (GAP-1535).
@@ -51,8 +50,8 @@ func TestActionDynamicCallKeepsFunctionBodyChecked(t *testing.T) {
 			`echo "$HOME"; printf '%s\n' done`,
 			`trap 'rm -f tmp.txt' EXIT; echo ok`,
 		} {
-			if got := ActionCommandDecision(body+call, cwd, home); got != "" {
-				t.Errorf("ActionCommandDecision(%q) = %q, want allow", body+call, got)
+			if got := posixShellDecision(body+call, cwd, home); got != "" {
+				t.Errorf("posixShellDecision(%q) = %q, want allow", body+call, got)
 			}
 		}
 	}

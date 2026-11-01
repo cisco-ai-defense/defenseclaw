@@ -90,7 +90,7 @@ import { createInterface } from "node:readline";
 const plugins = [];
 for (const path of process.argv.slice(1)) {
   const loaded = await import(pathToFileURL(path).href);
-  plugins.push(await loaded.DefenseClaw({ directory: "" }));
+  plugins.push(await fixtureBridge(loaded, { directory: "" }));
 }
 console.log("` + nodeHarnessReady + `");
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });

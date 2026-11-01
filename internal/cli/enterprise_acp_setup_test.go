@@ -17,6 +17,27 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 )
 
+// testACPExecutables writes a stand-in agent and guard in dir, as setup pins
+// them: the guard refuses a lock whose executables do not match (GAP-1156).
+func testACPExecutables(t *testing.T, dir string) (agent, agentSHA, guard, guardSHA string) {
+	t.Helper()
+	agent, guard = filepath.Join(dir, "kiro-cli"), filepath.Join(dir, "defenseclaw-acp")
+	for _, path := range []string{agent, guard} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n# "+filepath.Base(path)+"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agentSHA, err := acpFileSHA256(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardSHA, err = acpFileSHA256(guard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agent, agentSHA, guard, guardSHA
+}
+
 // A program of that name in the current folder is refused in words, not as
 // "not found" (GAP-0734).
 func TestResolveACPExecutableNamesTheCurrentFolder(t *testing.T) {
@@ -50,13 +71,13 @@ func TestEnterpriseACPSetupStateRejectsChangedEditorCommand(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	guard := filepath.Join(home, "defenseclaw-acp")
+	agentBinary, agentSHA, guard, guardSHA := testACPExecutables(t, home)
 	writeEntry := func(command string) {
 		t.Helper()
 		document := map[string]any{"agent_servers": map[string]any{
 			acpManagedEntryName("kiro"): map[string]any{
 				"command": command,
-				"args":    []string{"--token-file", tokenPath, "--contract-lock", lockPath},
+				"args":    []string{"--token-file", tokenPath, "--contract-lock", lockPath, "--", agentBinary, "acp"},
 			},
 		}}
 		body, err := json.Marshal(document)
@@ -75,7 +96,8 @@ func TestEnterpriseACPSetupStateRejectsChangedEditorCommand(t *testing.T) {
 	lock := acp.RuntimeContractLock{}
 	lock.Client.ConfigPath = settings
 	lock.Client.ConfigSHA256 = acp.EntryDigestPrefix + digest
-	lock.Guard.Path = guard
+	lock.Agent.Path, lock.Agent.SHA256 = agentBinary, agentSHA
+	lock.Guard.Path, lock.Guard.SHA256 = guard, guardSHA
 	lock.Profile, lock.Mode = "locked", "action"
 	body, err := json.Marshal(lock)
 	if err != nil {
@@ -150,7 +172,7 @@ func TestEnterpriseACPSetupStateRejectsAChangedAgentCommandTheGuardRefuses(t *te
 			t.Fatal(err)
 		}
 	}
-	guard := filepath.Join(home, "defenseclaw-acp")
+	agentBinary, agentSHA, guard, guardSHA := testACPExecutables(t, home)
 	writeEntry := func(agentCommand string, extra map[string]any) {
 		t.Helper()
 		entry := map[string]any{
@@ -168,7 +190,7 @@ func TestEnterpriseACPSetupStateRejectsAChangedAgentCommandTheGuardRefuses(t *te
 			t.Fatal(err)
 		}
 	}
-	writeEntry("/opt/agents/kiro-cli", nil)
+	writeEntry(agentBinary, nil)
 	digest, err := acp.ClientEntrySHA256(settings, "zed", "kiro", lockPath)
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +198,8 @@ func TestEnterpriseACPSetupStateRejectsAChangedAgentCommandTheGuardRefuses(t *te
 	lock := acp.RuntimeContractLock{}
 	lock.Client.ConfigPath = settings
 	lock.Client.ConfigSHA256 = acp.EntryDigestPrefix + digest
-	lock.Guard.Path = guard
+	lock.Agent.Path, lock.Agent.SHA256 = agentBinary, agentSHA
+	lock.Guard.Path, lock.Guard.SHA256 = guard, guardSHA
 	lock.Profile, lock.Mode = "locked", "action"
 	body, err := json.Marshal(lock)
 	if err != nil {
@@ -188,7 +211,7 @@ func TestEnterpriseACPSetupStateRejectsAChangedAgentCommandTheGuardRefuses(t *te
 	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); !done {
 		t.Fatalf("unmodified setup is stale: %s", note)
 	}
-	writeEntry("/opt/agents/kiro-cli", map[string]any{"default_mode": "accept-edits"})
+	writeEntry(agentBinary, map[string]any{"default_mode": "accept-edits"})
 	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); !done {
 		t.Fatalf("an editor-owned key made setup stale: %s", note)
 	}
@@ -196,6 +219,75 @@ func TestEnterpriseACPSetupStateRejectsAChangedAgentCommandTheGuardRefuses(t *te
 	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done ||
 		!strings.Contains(note, "changed after setup") {
 		t.Fatalf("changed agent command reported as setup done: done=%v note=%q", done, note)
+	}
+}
+
+// The guard refuses to start when the agent executable the contract lock
+// pins was changed after setup, or the user-owned guard was; list and verify
+// said setup was done (GAP-1156). Putting the agent back makes it done again.
+func TestEnterpriseACPSetupStateRejectsAChangedAgentExecutableTheGuardRefuses(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	settings := filepath.Join(home, ".config", "zed", "settings.json")
+	lockPath := acpContractLockPath(dataDir, "zed", "kiro")
+	tokenPath, err := acp.EnterpriseUserTokenPath(dataDir, "zed", "kiro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{filepath.Dir(settings), filepath.Dir(lockPath)} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agentBinary, agentSHA, guard, guardSHA := testACPExecutables(t, home)
+	body, err := json.Marshal(map[string]any{"agent_servers": map[string]any{acpManagedEntryName("kiro"): map[string]any{
+		"command": guard,
+		"args":    []string{"--token-file", tokenPath, "--contract-lock", lockPath, "--", agentBinary, "acp"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := acp.ClientEntrySHA256(settings, "zed", "kiro", lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := acp.RuntimeContractLock{}
+	lock.Client.ConfigPath = settings
+	lock.Client.ConfigSHA256 = acp.EntryDigestPrefix + digest
+	lock.Agent.Path, lock.Agent.SHA256 = agentBinary, agentSHA
+	lock.Guard.Path, lock.Guard.SHA256 = guard, guardSHA
+	lock.Profile, lock.Mode = "locked", "action"
+	if body, err = json.Marshal(lock); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); !done {
+		t.Fatalf("unmodified setup is stale: %s", note)
+	}
+	for _, changed := range []string{agentBinary, guard} {
+		original, err := os.ReadFile(changed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(changed, append(append([]byte{}, original...), "# changed\n"...), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done ||
+			!strings.Contains(note, "executable digest does not match the runtime contract") ||
+			!strings.Contains(note, "the guard refuses to start it") {
+			t.Fatalf("a changed %s reported as setup done: done=%v note=%q", filepath.Base(changed), done, note)
+		}
+		if err := os.WriteFile(changed, original, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); !done {
+			t.Fatalf("the restored %s is still stale: %s", filepath.Base(changed), note)
+		}
 	}
 }
 

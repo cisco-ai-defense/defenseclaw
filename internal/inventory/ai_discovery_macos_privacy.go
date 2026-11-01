@@ -126,6 +126,44 @@ func (s *ContinuousDiscoveryService) macOSTCCSkipped(path string) bool {
 	return true
 }
 
+// macOSResolvedScanRoot is a package scan root with its links resolved, on
+// macOS: "" elsewhere, when it does not resolve, or when it resolves to
+// itself. scanRoots has already checked the root element by element
+// (macOSPrivacyPathSkipped), so resolving it opens nothing protected.
+func macOSResolvedScanRoot(root string) string {
+	if discoveryGOOS != "darwin" {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || filepath.Clean(resolved) == filepath.Clean(root) {
+		return ""
+	}
+	return filepath.Clean(resolved)
+}
+
+// macOSTCCSkippedBelow reports a directory the package walk reached under
+// root that is a protected folder at its resolved place below realRoot
+// (macOSResolvedScanRoot). The walk names directories by the root's own
+// spelling, so a root behind a link to an ancestor of a home, such as
+// /Volumes/<disk>/Users/<name> or a link to /Users, named the home's
+// Documents by a path macOSTCCSkipped does not recognise, and the walk
+// opened it without Full Disk Access (rel-1-0-2 GAP-0109). The lexical path
+// is recorded as skipped too, so the signals it once gave are kept.
+func (s *ContinuousDiscoveryService) macOSTCCSkippedBelow(root, realRoot, path string) bool {
+	if realRoot == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	if !s.macOSTCCSkipped(filepath.Join(realRoot, rel)) {
+		return false
+	}
+	s.tccSkippedPaths[hashPath(filepath.Clean(path))] = true
+	return true
+}
+
 // notePrivacyEvidencePath keeps only hashes of protected ancestors. It is
 // called as evidence is discovered, including when raw-path storage is off.
 func (s *ContinuousDiscoveryService) notePrivacyEvidencePath(path string) {

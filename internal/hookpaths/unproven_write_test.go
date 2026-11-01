@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -27,8 +28,19 @@ func TestLiteralInterpreterCodeSurvivesDynamicTrailingArguments(t *testing.T) {
 	}
 }
 
+// windowsPathSemanticsAuditRows are audit-class rows (UnprovenProtectedWrite
+// names no deny decision) whose Windows class follows the Windows path
+// functions, which the POSIX reading of a Git Bash call uses on that host
+// (rel-1-0-4 GAP-1717): cd ~ before unmodelled Ruby code does not place the
+// home, and an IPv6 bracket after a scheme colon reads as a pattern. The
+// value is the Windows class; the decision of these calls is the same on
+// every host (none), which the rows check too.
+var windowsPathSemanticsAuditRows = map[string]string{
+	"home directory reaches unmodelled Ruby code": "",
+	"IPv6 URL brackets are not file globs":        "dynamic-argument",
+}
+
 func TestUnprovenProtectedWriteEvidence(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh", "sub"), 0o700); err != nil {
@@ -113,29 +125,40 @@ func TestUnprovenProtectedWriteEvidence(t *testing.T) {
 					t.Fatalf("function redirect reachability = %q", operands)
 				}
 			}
-			if got := UnprovenProtectedWrite(tc.command, cwd, home); got != tc.reason {
-				t.Fatalf("class = %q, want %q", got, tc.reason)
+			want := tc.reason
+			if windowsClass, audit := windowsPathSemanticsAuditRows[tc.name]; audit {
+				if runtime.GOOS == "windows" {
+					want = windowsClass
+				}
+				if decision := posixShellDecision(tc.command, cwd, home); decision != "" {
+					t.Fatalf("audit-class row decided %q", decision)
+				}
 			}
-			payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
-				"tool_input": map[string]string{"command": tc.command}})
-			if err != nil {
-				t.Fatal(err)
+			if got := UnprovenProtectedWrite(tc.command, cwd, home); got != want {
+				t.Fatalf("class = %q, want %q", got, want)
 			}
-			targets, ok := Decode(Resolve(payload))
-			// The action resolver closes write-capable unknowns even when the
-			// narrower historical UnprovenProtectedWrite proof returns empty.
-			hookReason := tc.reason
-			if extra := map[string]string{
-				"eval mentions dormant function":            "eval-source",
-				"glob redirect with read-only link mention": "dynamic-argument",
-				"unrelated executable glob":                 "dynamic-command",
-				"unrelated wrapped executable glob":         "dynamic-command",
-				"unrelated dynamic log path":                "dynamic-argument",
-			}[tc.name]; extra != "" {
-				hookReason = extra
-			}
-			if !ok || targets[UnprovenReasonKey] != hookReason {
-				t.Fatalf("hook evidence class = %q, want %q", targets[UnprovenReasonKey], hookReason)
+			if hookWriteEvidenceHost() {
+				payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+					"tool_input": map[string]string{"command": tc.command}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				targets, ok := Decode(Resolve(payload))
+				// The action resolver closes write-capable unknowns even when the
+				// narrower historical UnprovenProtectedWrite proof returns empty.
+				hookReason := tc.reason
+				if extra := map[string]string{
+					"eval mentions dormant function":            "eval-source",
+					"glob redirect with read-only link mention": "dynamic-argument",
+					"unrelated executable glob":                 "dynamic-command",
+					"unrelated wrapped executable glob":         "dynamic-command",
+					"unrelated dynamic log path":                "dynamic-argument",
+				}[tc.name]; extra != "" {
+					hookReason = extra
+				}
+				if !ok || targets[UnprovenReasonKey] != hookReason {
+					t.Fatalf("hook evidence class = %q, want %q", targets[UnprovenReasonKey], hookReason)
+				}
 			}
 		})
 	}

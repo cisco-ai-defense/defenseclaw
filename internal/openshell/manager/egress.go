@@ -153,10 +153,6 @@ func (m *Manager) Decider() (*egress.Decider, error) {
 	return m.egressDecider(cfg, base)
 }
 
-// A daemon has one active manager. Keep overlapping refreshes ordered even
-// when a configuration check and an explicit adoption arrive together.
-var refreshEgressMu sync.Mutex
-
 // refreshEgress re-resolves every sandbox's policy, re-registers its proxy
 // credential with its rebuilt decider, and swaps in a new default decider,
 // which also retires the proxy's pooled upstream connections. It runs after
@@ -165,8 +161,8 @@ func (m *Manager) refreshEgress() {
 	// The config loop can still be resolving the closed floor when a
 	// managed daemon confirms a registration. Serialize the refreshes so
 	// an older resolution cannot overwrite the confirmed sandbox view.
-	refreshEgressMu.Lock()
-	defer refreshEgressMu.Unlock()
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
 	cfg := m.opts.Config()
 	m.mu.Lock()
 	m.cfgSeen = cfg

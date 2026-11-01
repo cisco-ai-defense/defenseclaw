@@ -20,11 +20,11 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -89,14 +89,14 @@ const (
 )
 
 var (
-	policyBundleIDPattern        = regexp.MustCompile(`^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
-	policyBundleReceiptIDPattern = regexp.MustCompile(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	policyBundleIDPattern        = lazyregexp.New(`^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+	policyBundleReceiptIDPattern = lazyregexp.New(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
 	// policyBundleDeliveryIDPattern is the --delivery-id of bundle apply
 	// (enterprisestatus.CheckDeliveryID).
-	policyBundleDeliveryIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
-	policyBundleKeyIDPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	policyBundleCodePattern       = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
-	policyBundleDigestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	policyBundleDeliveryIDPattern = lazyregexp.New(`^[A-Za-z0-9._:-]{1,128}$`)
+	policyBundleKeyIDPattern      = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	policyBundleCodePattern       = lazyregexp.New(`^[a-z][a-z0-9_]{0,63}$`)
+	policyBundleDigestPattern     = lazyregexp.New(`^sha256:[0-9a-f]{64}$`)
 )
 
 // policyBundleV8Fields are the typed bundle attributes of a record.

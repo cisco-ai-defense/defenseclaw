@@ -277,7 +277,9 @@ func sandboxSessionStateKey(ctx context.Context, sessionID string) string {
 	if binding, ok := sandboxauth.FromContext(ctx); ok {
 		return "sandbox\x00" + sandboxBindingScope(binding) + "\x00" + sessionID
 	}
-	return sessionID
+	// A trusted connector's call for a person keeps its state under the
+	// connector account and the person (trusted_connector.go).
+	return actingForSessionStateScope(ctx) + sessionID
 }
 
 // sandboxBindingScope names the trust domain of a sandbox's state: its
@@ -333,6 +335,12 @@ func resolveConnectorInstanceForRequest(
 ) (audit.ConnectorInstance, error) {
 	binding, sandboxed := sandboxauth.FromContext(ctx)
 	if !sandboxed {
+		if af, ok := actingForFromContext(ctx); ok {
+			// One instance per (trusted connector account, person): their
+			// cursors, pending operations and chain partitions never mix.
+			return repo.ResolveScopedConnectorInstance(ctx, trustedConnectorInstanceID(af),
+				connectorName, profileVersion, custody)
+		}
 		return repo.ResolveConnectorInstance(ctx, connectorName, profileVersion, custody)
 	}
 	if sandboxauth.CanonicalConnector(connectorName) != binding.Connector {

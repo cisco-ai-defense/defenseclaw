@@ -692,6 +692,17 @@ audit log of your Codex version before you write the rule. Codex has no `Read`
 or `Skill` tool name. Write these exact names, including capitals, in
 `asset_policy.tool.denied`; a lower-case spelling does not match.
 
+| Connector | Names the hook reports on managed Windows |
+| --- | --- |
+| Claude Code | `Bash`, `Read`, `Skill` |
+| Codex | `Bash`; `apply_patch` only on a build that edits files with its own patch tool |
+
+A rule whose name never matches is not reported anywhere: DefenseClaw shows no
+warning, notice or alert, and the call runs. For example, `name: bash` for Codex
+never matches, because Codex reports `Bash`; write `name: Bash` with
+`connector: codex`. After you add a rule, run one call that it should stop and
+check that it is refused.
+
 ## Change the lists
 
 | Writer | Use it for |

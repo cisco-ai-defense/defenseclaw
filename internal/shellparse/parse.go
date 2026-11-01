@@ -20,26 +20,29 @@ import (
 // so the whole gateway exited (GAP-2537). No real command nests this deep.
 const MaxNestingDepth = 512
 
-// TooDeep reports whether command nests (, { or [ deeper than
-// MaxNestingDepth, in one linear pass over every byte (quotes and escapes
-// count too, so the bound holds whatever the grammar). A command it reports
-// is past the reading bounds: callers take their over-limit path and never
-// hand it to a recursive parser.
+// TooDeep reports whether command is past the reading bounds: it nests (, {
+// or [ deeper than MaxNestingDepth (counted in one linear pass over every
+// byte, quotes and escapes too, so the bound holds whatever the grammar), or
+// its brace expansions would produce more than MaxBraceFields words or
+// MaxBraceBytes bytes (BraceExpansionTooLarge, GAP-0187). Callers take
+// their over-limit path and never hand such a command to a recursive parser
+// or an expander.
 func TooDeep(command string) bool {
-	depth := 0
+	depth, braces := 0, false
 	for i := 0; i < len(command); i++ {
 		switch command[i] {
 		case '(', '{', '[':
 			if depth++; depth > MaxNestingDepth {
 				return true
 			}
+			braces = braces || command[i] == '{'
 		case ')', '}', ']':
 			if depth > 0 {
 				depth--
 			}
 		}
 	}
-	return false
+	return braces && BraceExpansionTooLarge(command)
 }
 
 // Reader is the reader to hand a recursive shell parser
@@ -66,11 +69,21 @@ func (tooDeepReader) Read([]byte) (int, error) { return 0, ErrTooDeep }
 // command proofs. Callers bound their inputs before parsing; a command past
 // MaxNestingDepth is not parsed.
 func Parse(command string) (*syntax.File, bool) {
+	return parse(command, false)
+}
+
+// ParseWithComments is Parse with the comments kept in the tree, for a
+// reader that must know which bytes the shell skips as a comment.
+func ParseWithComments(command string) (*syntax.File, bool) {
+	return parse(command, true)
+}
+
+func parse(command string, comments bool) (*syntax.File, bool) {
 	if TooDeep(command) {
 		return nil, false
 	}
 	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
-		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(Reader(command), "")
+		file, err := syntax.NewParser(syntax.Variant(variant), syntax.KeepComments(comments)).Parse(Reader(command), "")
 		if err == nil {
 			return file, true
 		}

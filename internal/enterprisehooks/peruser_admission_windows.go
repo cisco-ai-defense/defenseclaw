@@ -43,11 +43,11 @@ var windowsStandaloneManagedExecutableRelative = map[string][][]string{
 	},
 	// The connector's executable admission accepts the official SST WinGet
 	// image and the native image npm's opencode.cmd launches from the
-	// opencode-ai package. WinGet wins when both exist.
+	// @opencode/cli V2 package. WinGet wins when both exist.
 	"opencode": {
 		{"AppData", "Local", "Microsoft", "WinGet", "Packages",
 			"SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe", "opencode.exe"},
-		{"AppData", "Roaming", "npm", "node_modules", "opencode-ai", "bin", "opencode.exe"},
+		{"AppData", "Roaming", "npm", "node_modules", "@opencode", "cli", "bin", "opencode.exe"},
 	},
 }
 
@@ -76,13 +76,13 @@ func windowsStandalonePerUserManagedExecutable(profileHome, connectorName string
 				continue
 			}
 			if connectorName == "opencode" && !connector.OpenCodeWindowsPackageIdentityVerified(path) {
-				last = "the npm opencode-ai package identity could not be verified"
+				last = "the npm @opencode/cli V2 package identity could not be verified"
 				continue
 			}
 			return path, ""
 		}
 		if connectorName == "opencode" {
-			return "", "managed OpenCode requires the SST WinGet package or the npm opencode-ai package with its native opencode.exe; " + last
+			return "", "managed OpenCode requires the SST WinGet package or the npm @opencode/cli V2 package with its native opencode.exe; " + last
 		}
 		return "", "no native amp.exe was found under the user's npm global prefix; " + last
 	default:

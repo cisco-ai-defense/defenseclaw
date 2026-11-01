@@ -83,8 +83,32 @@ if [[ $current_supplementary != "$wanted_supplementary_set" ]]; then
   echo "updated: $GROUP_NAME (${#MEMBERS[@]} requested member(s))"
 fi
 if [[ ${#unwanted_primary[@]} -gt 0 ]]; then
+  # An account whose primary group is this group stays a member after it
+  # leaves MEMBERS (gpasswd changes only the supplementary list). It moves to
+  # its own group, the one named after it that useradd makes, which is created
+  # when it is missing. A same-name group that is not local, is a system group
+  # (gid below 1000: admin, sudo, wheel) or has other members is not taken.
+  left=0
   for member in "${unwanted_primary[@]}"; do
-    echo "warning: $member remains in $GROUP_NAME because its primary group must be changed" >&2
+    own=$(getent -s files group "$member" || true)
+    if [[ -z $own ]]; then
+      if getent group "$member" > /dev/null; then
+        echo "warning: $member remains in $GROUP_NAME: the group $member is not a local group; change its primary group with usermod -g" >&2
+        left=1
+        continue
+      fi
+      groupadd -- "$member"
+      own=$(getent -s files group "$member")
+    fi
+    own_gid=$(cut -d: -f3 <<< "$own")
+    own_members=$(cut -d: -f4 <<< "$own")
+    if [[ $own_gid == "$gid" || ! $own_gid =~ ^[0-9]+$ || $own_gid -lt 1000 || ( -n $own_members && $own_members != "$member" ) ]]; then
+      echo "warning: $member remains in $GROUP_NAME: the group $member is a system group or has other members; change its primary group with usermod -g" >&2
+      left=1
+      continue
+    fi
+    usermod -g "$member" -- "$member"
+    echo "moved: the primary group of $member from $GROUP_NAME to $member (sessions open now keep the old group until the next sign-in)"
   done
-  exit 1
+  [[ $left == 0 ]] || exit 1
 fi

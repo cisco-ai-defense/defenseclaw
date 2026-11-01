@@ -32,7 +32,10 @@ def test_floor_fields_mirror_go():
     profile = {f.name: f.default for f in dataclasses.fields(cfgmod.GuardrailProfile)}
     assert profile["sandbox"] is None
     ent = {f.name for f in dataclasses.fields(cfgmod.EnterpriseOpenShellConfig)}
-    assert ent == {"install", "driver", "driver_fallback", "version", "gateway_port", "e2fsprogs_dir"}
+    # Python reads only the driver; the rest of enterprise.openshell is Go's.
+    # None of it is a per-user openshell.* key (GAP-0094).
+    assert ent == {"driver"}
+    assert "gateway_port" not in {f.name for f in dataclasses.fields(cfgmod.OpenShellConfig)}
 
 
 def test_unset_floor_keys_are_never_written(tmp_path, monkeypatch):

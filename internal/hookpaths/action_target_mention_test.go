@@ -352,7 +352,6 @@ func TestR104WindowsNestedProtectedMention(t *testing.T) {
 }
 
 func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -365,20 +364,22 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 		`cd ~/.ssh && ls -la`,
 		`ls -la ~/.ssh`,
 		`stat ~/.ssh`,
+		// A find that only lists reads (rel-1-0-6:GAP-0119).
+		`find ~/.ssh -name '*.pub'`,
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := ActionCommandDecision(command, cwd, home); got != "" {
+			if got := posixShellDecision(command, cwd, home); got != "" {
 				t.Fatalf("directory-only decision = %q, want allow", got)
 			}
 		})
 	}
 	for _, command := range []string{
 		`ls -la ~/.ssh; pwd`,
-		`find ~/.ssh -name '*.pub'`,
+		`find ~/.ssh -name '*.pub' -delete`,
 		`cd ~/.ssh && pwd`,
 		`ls ~/.ssh && echo done`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("directory named outside read-only list %q: %q", command, got)
 		}
 	}
@@ -422,9 +423,6 @@ func TestR104LessOutputProtectedMention(t *testing.T) {
 }
 
 func TestR104DirectoryScopedWriteSurvivesDirectoryMentionExemption(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX directory write proof uses native POSIX paths")
-	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	ssh := filepath.Join(home, ".ssh")
@@ -444,15 +442,64 @@ func TestR104DirectoryScopedWriteSurvivesDirectoryMentionExemption(t *testing.T)
 		"cd dirlink && echo marker >> authorized_keys",
 		"env -C dirlink python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"marker\")\nPY",
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			writes, unknown := ShellDirectoryWriteOperands(command, cwd, home, nil, false, false)
 			t.Errorf("directory-scoped write %q decision = %q, directory writes=%v unknown=%v", command, got, writes, unknown)
 		}
 	}
-	if got := ActionCommandDecision("cd dirlink && cat authorized_keys", cwd, home); got != "" {
+	if got := posixShellDecision("cd dirlink && cat authorized_keys", cwd, home); got != "" {
 		t.Errorf("read-only directory command decision = %q", got)
 	}
-	if got := ActionCommandDecision("env -C build python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"marker\")\nPY", cwd, home); got != "" {
+	if got := posixShellDecision("env -C build python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"marker\")\nPY", cwd, home); got != "" {
 		t.Errorf("ordinary directory write decision = %q", got)
+	}
+}
+
+// du, readlink and realpath print sizes and resolved names: the read-only
+// statement list takes them, with no redirect (GAP-0091).
+func TestActionKnownReadOnlyWindowsSizeReaders(t *testing.T) {
+	for _, words := range [][]string{
+		{"du", "-sh", "/c/Users/a/.ssh/"},
+		{"readlink", "-f", "/c/Users/a/.ssh"},
+		{"realpath", "/c/Users/a/.ssh"},
+		{"du", "-sh", "/c/Users/a/.ssh/", "&&", "ls"},
+	} {
+		if !actionKnownReadOnlyWindows(words) {
+			t.Errorf("%v: want read-only", words)
+		}
+	}
+	for _, words := range [][]string{
+		{"du", "-sh", "/c/Users/a/.ssh/", ">", "/c/Users/a/.ssh/authorized_keys"},
+		{"du", "--output=x", "/c/Users/a/.ssh/"},
+		{"du", "-sh", "/c/Users/a/.ssh/", "&&", "rm", "x"},
+	} {
+		if actionKnownReadOnlyWindows(words) {
+			t.Errorf("%v: want not read-only", words)
+		}
+	}
+}
+
+// A find that only lists reads its operands on a Windows home too; one that
+// deletes, runs a program or writes a file does not (rel-1-0-6:GAP-0119).
+func TestActionKnownReadOnlyWindowsFindListing(t *testing.T) {
+	for _, words := range [][]string{
+		{"find", "/c/Users/a/.ssh", "-maxdepth", "1", "-type", "f"},
+		{"find", "/c/Users/a/.ssh", "-name", "*.pub"},
+		{"find.exe", "/c/Users/a/.ssh", "-type", "f", "-print"},
+	} {
+		if !actionKnownReadOnlyWindows(words) {
+			t.Errorf("%v: want read-only", words)
+		}
+	}
+	for _, words := range [][]string{
+		{"find", "/c/Users/a/.ssh", "-name", "authorized_keys", "-delete"},
+		{"find", "/c/Users/a/.ssh", "-exec", "rm", "{}", ";"},
+		{"find", "/c/Users/a/.ssh", "-fprint", "/c/Users/a/.ssh/authorized_keys"},
+		{"find", "/c/Users/a/.ssh", "-fls", "x"},
+		{"find", "/c/Users/a/.ssh", ">", "/c/Users/a/.ssh/authorized_keys"},
+	} {
+		if actionKnownReadOnlyWindows(words) {
+			t.Errorf("%v: want not read-only", words)
+		}
 	}
 }

@@ -207,7 +207,9 @@ func TestR104IndirectWriterControls(t *testing.T) {
 }
 
 func TestR104IndirectFileReadStaysWithinProject(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
+	if !hookWriteEvidenceHost() {
+		t.Skip("the managed hook sends write evidence on Linux and macOS only")
+	}
 	parent := t.TempDir()
 	cwd := filepath.Join(parent, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -299,7 +301,6 @@ func TestR104RecursiveFunctionWithoutFileEffects(t *testing.T) {
 // reach the protected keys file in the hook client's proof; the same
 // writes to an ordinary project file do not.
 func TestInterpreterLiteralWritesThroughLinksReachTheKeysFile(t *testing.T) {
-	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {

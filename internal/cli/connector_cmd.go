@@ -114,7 +114,7 @@ gateway token, or the audit DB. It is the idempotent inverse of
 Connector.Setup() for a single connector. It marks that connector inactive in
 the runtime state before removing files so a still-running hook guard cannot
 immediately reinstall the configuration being deliberately torn down.`,
-	Annotations: map[string]string{auditOptionalAnnotation: "true"},
+	Annotations: map[string]string{auditOptionalAnnotation: "true", configOptionalAnnotation: "true"},
 	RunE:        runConnectorTeardown,
 }
 
@@ -164,7 +164,7 @@ Exit codes:
   0   connector is clean
   1   connector has residual state (details printed to stderr)
   2   connector unknown / config error`,
-	Annotations:       map[string]string{auditOptionalAnnotation: "true"},
+	Annotations:       map[string]string{auditOptionalAnnotation: "true", configOptionalAnnotation: "true"},
 	PersistentPreRunE: runConnectorVerifyPersistentPreRunE,
 	RunE:              runConnectorVerify,
 }
@@ -748,6 +748,9 @@ func reconcileConnectorRuntime(
 		opts.AgentVersion = previous.RawAgentVersion
 	}
 	resolution := connector.ResolveHookContract(name, opts.AgentVersion)
+	if err := connector.RequireOpenCodeV2(name, opts.AgentVersion); err != nil {
+		return err
+	}
 	opts.HookContractID = resolution.Contract.ContractID
 	actionMode := cfg != nil && strings.EqualFold(
 		strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name)), "action",

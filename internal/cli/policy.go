@@ -28,7 +28,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +37,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -593,7 +593,7 @@ func policyReloadMessage(body []byte) string {
 
 // customPackPinMismatch matches the rebuild error for a custom rule pack whose
 // files no longer match its guardrail.custom_packs pin.
-var customPackPinMismatch = regexp.MustCompile(`rule pack "([^"]+)": digest (sha256:[0-9a-f]{64}) does not match guardrail\.custom_packs\.`)
+var customPackPinMismatch = lazyregexp.New(`rule pack "([^"]+)": digest (sha256:[0-9a-f]{64}) does not match guardrail\.custom_packs\.`)
 
 // policyReloadError says a refused /policy/reload in plain words: no HTTP
 // status, no JSON body and no internal stage names. A rebuild that fails leaves

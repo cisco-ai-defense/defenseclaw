@@ -21,10 +21,10 @@ package pfctl
 import (
 	"fmt"
 	"net"
-	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/firewall"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const anchorName = firewall.DefaultAnchorName
@@ -36,7 +36,7 @@ func New() *Compiler { return &Compiler{} }
 
 func (c *Compiler) Platform() string { return "pfctl" }
 
-var safeArgPattern = regexp.MustCompile(`^[a-zA-Z0-9._:/%\-]+$`)
+var safeArgPattern = lazyregexp.New(`^[a-zA-Z0-9._:/%\-]+$`)
 
 func (c *Compiler) ValidateArg(arg string) error {
 	if strings.ContainsAny(arg, ";|&`$(){}[]<>!~*?'\"\\") {

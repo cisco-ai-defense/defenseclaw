@@ -21,10 +21,21 @@ from defenseclaw.commands import cmd_doctor
 REPO = Path(__file__).resolve().parents[2]
 
 
+def _free(pid: int) -> bool:
+    """No process has pid now (none runs and the system keeps nothing of one)."""
+    return cmd_doctor._process_identity(pid) is None and not cmd_doctor._pid_running(pid)
+
+
 def _exited_pid() -> int:
-    proc = subprocess.Popen([sys.executable, "-c", ""])
-    proc.wait()
-    return proc.pid
+    """The pid of a process that exited, which no other process has now."""
+    for _ in range(20):
+        proc = subprocess.Popen([sys.executable, "-c", ""])
+        proc.wait()
+        pid = proc.pid
+        del proc  # Windows: drop the handle that keeps the exited process and its pid
+        if _free(pid):
+            return pid
+    raise AssertionError("every exited pid was taken again at once")
 
 
 def _lock(folder: Path, pid: str | None, age: float = 0, deadline: str | None = None, pid_age: float = 0) -> Path:
@@ -53,14 +64,29 @@ def account(tmp_path, monkeypatch):
     return SimpleNamespace(data=data, home=home, cfg=SimpleNamespace(data_dir=str(data), deployment_mode=""))
 
 
+# Windows soon gives a freed pid to a new process: a pid read when the file
+# is collected named a live process minutes later in a CI shard (r106 CI
+# GAP-0056). Each test checks DEAD names no process and else takes a new
+# one; parameters say "DEAD" and the tests put the pid in (_dead).
 DEAD = _exited_pid()
+
+
+@pytest.fixture(autouse=True)
+def _dead_names_no_process():
+    global DEAD
+    if not _free(DEAD):
+        DEAD = _exited_pid()
+
+
+def _dead(pid: str | None) -> str | None:
+    return pid.replace("DEAD", str(DEAD)) if pid else pid
 
 
 @pytest.mark.parametrize(
     ("pid", "age", "record", "want"),
     [
-        (f"{DEAD}\n", 0, None, "stale"),
-        (f"{DEAD}\r\n", 0, None, "stale"),
+        ("DEAD\n", 0, None, "stale"),
+        ("DEAD\r\n", 0, None, "stale"),
         (f"{os.getppid()}\n", 0, None, "held"),
         (None, 0, None, "held"),
         (" ", 0, None, "held"),
@@ -68,15 +94,15 @@ DEAD = _exited_pid()
         (None, 11 * 60, None, "held"),
         ("abc", 0, None, "held"),
         ("99999999999", 0, None, "held"),
-        (f"{DEAD}\n", 0, "previous.new", "recovery"),
-        (f"{DEAD}\n", 0, ".repair", "recovery"),
-        (f"{DEAD}\n", 0, ".rollback-hold", "recovery"),
-        (f"{DEAD}\n", 0, ".lifecycle-txn.json", "recovery"),
+        ("DEAD\n", 0, "previous.new", "recovery"),
+        ("DEAD\n", 0, ".repair", "recovery"),
+        ("DEAD\n", 0, ".rollback-hold", "recovery"),
+        ("DEAD\n", 0, ".lifecycle-txn.json", "recovery"),
     ],
     ids=lambda value: _stable_id(value),
 )
 def test_install_lock_state_follows_the_plugin_rule(account, pid, age, record, want):
-    _lock(account.data, pid, age)
+    _lock(account.data, _dead(pid), age)
     if record:
         (account.data / record).mkdir()
     assert cmd_doctor._install_lock_state(str(account.data))[0] == want
@@ -89,7 +115,7 @@ def _stable_id(value):
     """Test ids that do not carry the clock or a pid (pytest-xdist workers collect the same ids)."""
     if value == PAST:
         return "past"
-    if value in (f"{DEAD}\n", f"{DEAD}\r\n"):
+    if value in ("DEAD\n", "DEAD\r\n"):
         return "dead-crlf" if value.endswith("\r\n") else "dead"
     if value in (str(os.getppid()), str(os.getpid())):
         return "parent" if value == str(os.getppid()) else "self"
@@ -106,14 +132,14 @@ def _stable_id(value):
         (str(os.getppid()), 0, PAST, 0, None, "held"),
         # Loop round 2 P2: a lock naming doctor's own pid is a reused pid.
         (str(os.getpid()), 0, None, 0, None, "stale"),
-        (f"{DEAD}\n", 3600, None, 3600, None, "stale"),
-        (f"{DEAD}\n", 0, PAST, 0, "previous.new", "recovery"),
+        ("DEAD\n", 3600, None, 3600, None, "stale"),
+        ("DEAD\n", 0, PAST, 0, "previous.new", "recovery"),
         (str(os.getppid()), 0, "soon", 0, None, "held"),
     ],
     ids=_stable_id,
 )
 def test_install_lock_state_holds_while_its_owner_runs(account, pid, age, deadline, pid_age, record, want):
-    _lock(account.data, pid, age, deadline, pid_age)
+    _lock(account.data, _dead(pid), age, deadline, pid_age)
     if record:
         (account.data / record).mkdir()
     assert cmd_doctor._install_lock_state(str(account.data))[0] == want

@@ -35,6 +35,7 @@ type anchorsInstallDoc struct {
 	SHA256         string                     `json:"sha256"`
 	PreviousSHA256 string                     `json:"previous_sha256"`
 	TenantID       string                     `json:"tenant_id"`
+	DeviceGroups   []string                   `json:"device_groups"`
 	KeyIDs         []string                   `json:"key_ids"`
 	Warnings       []enterprisebundle.Warning `json:"warnings"`
 	Errors         []bundleError              `json:"errors"`
@@ -171,6 +172,47 @@ func TestEnterpriseBundleAnchorsInstallReportsTheInstalledFile(t *testing.T) {
 	busy, code := runAnchorsInstall(t, "--file", testAnchorsFile(t, "active"), "--lock-wait", "1s", "--json")
 	if code != 75 || busy.OK || len(busy.Errors) != 1 || busy.Errors[0].Code != "lifecycle_busy" || busy.SHA256 != doc.SHA256 {
 		t.Fatalf("busy: exit %d %+v", code, busy)
+	}
+}
+
+// #1316: --device-group pins the device to one group. The result names the
+// group the installed file lists; a file that does not allow it, a malformed
+// name, and --device-group without --trust-anchors on apply are refused.
+func TestEnterpriseBundleAnchorsInstallPinsTheDeviceGroup(t *testing.T) {
+	root, layout, _ := anchorsInstallDevice(t)
+	file := testAnchorsFile(t, "active")
+	doc, code := runAnchorsInstall(t, "--file", file, "--device-group", "eng", "--json")
+	if code != 0 || !doc.OK || doc.Result != "installed" || len(doc.DeviceGroups) != 1 || doc.DeviceGroups[0] != "eng" {
+		t.Fatalf("pinned install: exit %d %+v", code, doc)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, layout.ConfigDir, "trust", enterprisebundle.AnchorsName))
+	if err != nil || !regexp.MustCompile(`"device_groups": \[\s*"eng"\s*\]`).Match(raw) {
+		t.Fatalf("installed file: %v\n%s", err, raw)
+	}
+
+	if doc, code := runAnchorsInstall(t, "--file", file, "--device-group", "-eng", "--json"); code != 2 || len(doc.Errors) != 1 || doc.Errors[0].Code != "invalid_arguments" {
+		t.Fatalf("bad group name: exit %d %+v", code, doc)
+	}
+	listed := filepath.Join(t.TempDir(), enterprisebundle.AnchorsName)
+	source, _ := os.ReadFile(file)
+	if err := os.WriteFile(listed, []byte(regexp.MustCompile(`"device_groups":\[\]`).ReplaceAllString(string(source), `"device_groups":["sales"]`)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if doc, code := runAnchorsInstall(t, "--file", listed, "--device-group", "eng", "--json"); code != 1 || len(doc.Errors) != 1 || doc.Errors[0].Code != "anchor_invalid" {
+		t.Fatalf("group not in the file: exit %d %+v", code, doc)
+	}
+
+	for _, args := range [][]string{
+		{"apply", "--bundle", "/nonexistent.dcbundle", "--device-group", "eng", "--json"},
+		{"apply", "--inbox", "--trust-anchors", file, "--json"},
+	} {
+		out, code := runBundle(t, args...)
+		var refusal struct {
+			Errors []bundleError `json:"errors"`
+		}
+		if err := json.Unmarshal([]byte(out), &refusal); err != nil || code != 2 || len(refusal.Errors) != 1 || refusal.Errors[0].Code != "invalid_arguments" {
+			t.Fatalf("%v: exit %d %s", args, code, out)
+		}
 	}
 }
 

@@ -129,6 +129,9 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		if err != nil {
 			return err
 		}
+		if err := moveWindowsTargetOwnedDataDirLinksAside(home, setup.DataDir, targetSID, opts.WindowsDeferredFirstEnrollment); err != nil {
+			return err
+		}
 		if err := prepareWindowsGenericPath(
 			home,
 			setup.DataDir,

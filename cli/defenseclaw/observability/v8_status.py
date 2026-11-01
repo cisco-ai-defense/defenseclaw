@@ -239,10 +239,20 @@ class V8OperatorStatus:
     # observability.defaults.redaction_profile as config.yaml sets it
     # ("none" when it does not), for summaries that name the global default.
     default_redaction_profile: str = "none"
+    # observability.local.max_store_mb, the opt-in audit.db size cap (0: none).
+    max_store_mb: int = 0
 
     @property
     def unbounded_retention(self) -> bool:
         return self.retention_days == 0
+
+    @property
+    def retention_label(self) -> str:
+        """Retention as the status views show it, with the size cap when set."""
+        if self.max_store_mb > 0:
+            cap = f"size cap {self.max_store_mb} MiB"
+            return cap if self.unbounded_retention else f"{self.retention_days} days, {cap}"
+        return "unbounded" if self.unbounded_retention else f"{self.retention_days} days"
 
 
 def source_is_v8(config_path: str | Path) -> bool:
@@ -419,6 +429,7 @@ def operator_status_from_effective(
     )
     local = _mapping(effective.get("local"), "local")
     retention_days = _required_integer(local, "retention_days", minimum=0)
+    max_store_mb = _optional_integer(local, "max_store_mb", minimum=0) or 0
     catalog_version = _required_integer(effective, "bucket_catalog_version", minimum=1)
     warnings = tuple(
         (
@@ -434,6 +445,7 @@ def operator_status_from_effective(
         plan_digest=plan_digest,
         bucket_catalog_version=catalog_version,
         retention_days=retention_days,
+        max_store_mb=max_store_mb,
         local_path=_optional_string(local.get("path")),
         judge_bodies_path=_optional_string(local.get("judge_bodies_path")),
         destinations=destinations,

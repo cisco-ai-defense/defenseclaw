@@ -514,7 +514,19 @@ func foreignHookTestIdentities(n int) []string {
 }
 
 func foreignHookAllowRequest(identity, session string) *http.Request {
-	body := `{"key":{"connector":"claudecode","session":"` + session + `","process":"` + runtime.GOOS + `:b:4242:100"},"session_start":true,"decision":{"deny":false}}`
+	return foreignHookAllowRequestWith(identity, session, "")
+}
+
+// foreignHookAllowRequestFromHook is foreignHookAllowRequest as the shipped
+// hook sends it: with retry_until (hookexec sets it on every exchange), so the
+// gateway applies a try it held up past an allow's hold again (GAP-1813).
+func foreignHookAllowRequestFromHook(identity, session string) *http.Request {
+	return foreignHookAllowRequestWith(identity, session,
+		`,"retry_until":"`+time.Now().Add(3*time.Second).UTC().Format(time.RFC3339Nano)+`"`)
+}
+
+func foreignHookAllowRequestWith(identity, session, extra string) *http.Request {
+	body := `{"key":{"connector":"claudecode","session":"` + session + `","process":"` + runtime.GOOS + `:b:4242:100"},"session_start":true,"decision":{"deny":false}` + extra + `}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", strings.NewReader(body))
 	ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")
 	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
@@ -597,25 +609,9 @@ func TestForeignHookSessionSlowAllowsOfOtherIdentitiesDoNotRefuseAnExchange(t *t
 	}
 }
 
-// slowForeignHookResponse takes delay to write each response, as a client
-// that reads slowly but within the write deadline does.
-type slowForeignHookResponse struct {
-	http.ResponseWriter
-	delay   time.Duration
-	written *time.Time
-}
-
-func (w slowForeignHookResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
-func (w slowForeignHookResponse) Write(data []byte) (int, error) {
-	time.Sleep(w.delay)
-	n, err := w.ResponseWriter.Write(data)
-	*w.written = time.Now()
-	return n, err
-}
-
-// sequencedForeignHookResponse is slowForeignHookResponse that marks the
-// write with the next value of seq instead of a clock reading.
+// sequencedForeignHookResponse takes delay to write each response, as a
+// client that reads slowly but within the write deadline does, and marks the
+// write with the next value of seq.
 type sequencedForeignHookResponse struct {
 	http.ResponseWriter
 	delay   time.Duration
@@ -703,7 +699,11 @@ func TestForeignHookSessionRemovalCommitLandsUnderSustainedExchanges(t *testing.
 				var written int64
 				w := sequencedForeignHookResponse{ResponseWriter: deadlineRecorder{recorder}, delay: 80 * time.Millisecond, seq: &seq, written: &written}
 				started := seq.Add(1)
-				api.handleForeignHookSession(w, foreignHookAllowRequest(identity, "s-"+strconv.Itoa(n)))
+				// As the shipped hook sends it: a try that a slow runner held
+				// up past the hold (a cold first exchange of an account) is
+				// applied again, as it is in the field, instead of answering
+				// an old hook's first denial (rel-1-0-6:GAP-0006).
+				api.handleForeignHookSession(w, foreignHookAllowRequestFromHook(identity, "s-"+strconv.Itoa(n)))
 				body := recorder.Body.String()
 				mu.Lock()
 				outcomes = append(outcomes, outcome{

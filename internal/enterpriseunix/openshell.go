@@ -134,6 +134,10 @@ type openshellSettings struct {
 	E2fsprogsDir        string
 	// TelemetryAllowed is openshell.admin.allow_upstream_telemetry.
 	TelemetryAllowed bool
+	// RequiredFor says openshell.admin or a profile's sandbox section sets
+	// required_for, which the docker_group_members advisory then covers
+	// (GAP-0554).
+	RequiredFor bool
 }
 
 // openshellSettingsOf applies the defaults: prerequisite mode, the macOS
@@ -161,7 +165,25 @@ func openshellSettingsOf(goos string, cfg *config.Config) openshellSettings {
 	}
 	s.E2fsprogsDir = o.E2fsprogsDir
 	s.TelemetryAllowed = cfg.OpenShell.Admin.AllowUpstreamTelemetry != nil && *cfg.OpenShell.Admin.AllowUpstreamTelemetry
+	s.RequiredFor = requiredForConfigured(cfg)
 	return s
+}
+
+// requiredForConfigured reports whether openshell.admin or any guardrail
+// profile's sandbox section sets required_for.
+func requiredForConfigured(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if len(cfg.OpenShell.Admin.RequiredFor) > 0 {
+		return true
+	}
+	for _, p := range cfg.Guardrail.Profiles {
+		if p.Sandbox != nil && len(p.Sandbox.RequiredFor) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // rendered is the gateway configuration these settings render to. driverDir

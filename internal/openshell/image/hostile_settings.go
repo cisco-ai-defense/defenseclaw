@@ -20,13 +20,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
 
@@ -59,7 +59,7 @@ type hostileSettings struct {
 
 // refusalLabelRE is the shape of a hostileRefusal label, which the probe
 // script echoes unquoted.
-var refusalLabelRE = regexp.MustCompile(`^[a-z0-9-]+$`)
+var refusalLabelRE = lazyregexp.New(`^[a-z0-9-]+$`)
 
 // hostileRefusal is one planting the launcher must refuse.
 type hostileRefusal struct {

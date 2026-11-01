@@ -64,7 +64,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -73,6 +72,7 @@ import (
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -605,7 +605,7 @@ func classifyEndpoints(ctx context.Context, p Proposal, pol Policy, decider *egr
 // denied connection (allow_<host>_<port>). DefenseClaw's own rules
 // (defenseclaw_*) and the provider rules (_provider_*) never match it, so a
 // triaged approval can only add to rules of the same kind.
-var mechanisticRuleName = regexp.MustCompile(`^allow_[a-z0-9][a-z0-9_.-]{0,200}$`)
+var mechanisticRuleName = lazyregexp.New(`^allow_[a-z0-9][a-z0-9_.-]{0,200}$`)
 
 // judgeRule refuses proposals whose rule is not a plain host-and-port
 // allow: approving merges the proposal into network_policies[RuleName], so

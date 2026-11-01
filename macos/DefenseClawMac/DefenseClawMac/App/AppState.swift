@@ -199,6 +199,13 @@ final class AppState {
     var updateRestartsApp: Bool {
         availableUpdate.map { UpdateChecker.isNewer($0.version, than: UpdateChecker.currentVersion) } ?? false
     }
+    /// Bumped each time config.yaml is re-read from disk (a rotation, a
+    /// setup command, the TUI editing it): open editors rebase on it.
+    var configDiskGeneration = 0
+    /// Detection-only findings of the last 24 hours (a rule matched but could
+    /// not decide the call): not alerts, so the Alerts panel says how many
+    /// there are and where to read them (GAP-0314).
+    var detectionOnlyFindings24h = 0
 
     var updateOperationInProgress: Bool {
         updateCheckInProgress || installerState.isBusy
@@ -320,12 +327,16 @@ final class AppState {
     private var wasReachable: Bool?
     @ObservationIgnored private var lastConfigSignature = ""
 
-    init(installationContext: InstallationContext = .resolve()) {
+    init(
+        installationContext: InstallationContext = .resolve(),
+        gatewayListenerTrust: @escaping @Sendable (URL) -> Bool = { GatewayListenerTrust.isTrusted($0) }
+    ) {
         self.installationContext = installationContext
         configStore = ConfigStore(context: installationContext)
         gateway = GatewayClient(
             mutationsAllowed: installationContext.permitsMutation,
-            mutationDenialReason: installationContext.accessMode.reason ?? "This installation is read only."
+            mutationDenialReason: installationContext.accessMode.reason ?? "This installation is read only.",
+            listenerTrust: gatewayListenerTrust
         )
         audit = AuditStore(url: installationContext.auditDBURL)
         stream = EventStreamReader(
@@ -707,12 +718,36 @@ final class AppState {
                 await bindSelectedInstallation(resolved: rebound)
                 return
             }
-            let cfg = await configStore.reload()
-            guard installationSnapshotIsCurrent(generation) else { return }
-            await gateway.update(config: cfg)
-            guard installationSnapshotIsCurrent(generation) else { return }
-            config = cfg
-            lastConfigSignature = signature
+            // tui/app.py _poll_config_once: a config.yaml the runtime cannot
+            // load keeps the last valid snapshot and raises a banner naming
+            // the line, rather than rendering a lenient parser's guesses.
+            // The first read (launch, rebind) must not hold the health read
+            // behind a CLI start, so it validates in the background.
+            let firstRead = lastConfigSignature.isEmpty
+            var problem: String?
+            if !firstRead {
+                let validation = await cli.run(arguments: ["config", "validate"], mutation: false)
+                guard installationSnapshotIsCurrent(generation) else { return }
+                problem = ConfigValidation.invalidConfigSummary(
+                    fileName: installationContext.configURL.lastPathComponent,
+                    exitCode: validation.exitCode, output: validation.output, cancelled: validation.cancelled
+                )
+            }
+            if let problem {
+                // Keep the last valid snapshot; the health and alert reads
+                // below still run this pulse.
+                if config.loadError != problem { config.loadError = problem }
+                lastConfigSignature = signature
+            } else {
+                let cfg = await configStore.reload()
+                guard installationSnapshotIsCurrent(generation) else { return }
+                await gateway.update(config: cfg)
+                guard installationSnapshotIsCurrent(generation) else { return }
+                config = cfg
+                lastConfigSignature = signature
+                configDiskGeneration += 1
+                if firstRead { validateConfigInBackground(generation: generation, signature: signature) }
+            }
         }
         await resolveProbePaths(generation: generation) // no-op after the first pulse
         guard installationSnapshotIsCurrent(generation) else { return }
@@ -841,6 +876,8 @@ final class AppState {
         guard installationSnapshotIsCurrent(generation) else { return }
         let blockCount = await activeAudit.overviewBlockCount()
         guard installationSnapshotIsCurrent(generation) else { return }
+        let detectionOnly = await activeAudit.countDetectionOnlyFindings(since: Date().addingTimeInterval(-24 * 3600))
+        guard installationSnapshotIsCurrent(generation) else { return }
 
         // count_recent_silent_bypass: allow-decision LLM-shaped bypasses in
         // the last 300s (passthrough+looks_like_llm, or the shape branch).
@@ -909,6 +946,7 @@ final class AppState {
         if fresh != unackedAlerts {
             unackedAlerts = fresh
         }
+        if detectionOnly != detectionOnlyFindings24h { detectionOnlyFindings24h = detectionOnly }
         overviewEnforcementMetrics = nextMetrics
     }
 
@@ -949,6 +987,11 @@ final class AppState {
         // Any user mutation during the startup probe supersedes that probe,
         // including an explicit Stop that finishes before the probe returns.
         if mutation { commandGeneration += 1 }
+        // `keys set` secrets: use the runtime's documented stdin flag when the
+        // installed runtime accepts it (see SecretStandardInputTransport).
+        let arguments = SecretStandardInputTransport.arguments(
+            arguments, binary: binary, standardInput: standardInput, runtimeVersion: installedRuntimeVersion
+        )
         let result = await activity.run(
             id: runID,
             title: title,
@@ -2322,6 +2365,22 @@ final class AppState {
         if !fromHealth.isEmpty { return fromHealth }
         if !config.connectors.isEmpty { return config.connectors }
         return Self.knownConnectors
+    }
+
+    /// The launch-time counterpart of the blocking check in pulse(): run
+    /// `config validate` off the pulse path and raise the banner if the file
+    /// does not load. Only this signature's verdict is applied.
+    private func validateConfigInBackground(generation: Int, signature: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            let validation = await self.cli.run(arguments: ["config", "validate"], mutation: false)
+            guard self.installationSnapshotIsCurrent(generation), self.lastConfigSignature == signature else { return }
+            guard let problem = ConfigValidation.invalidConfigSummary(
+                fileName: self.installationContext.configURL.lastPathComponent,
+                exitCode: validation.exitCode, output: validation.output, cancelled: validation.cancelled
+            ) else { return }
+            if self.config.loadError.isEmpty { self.config.loadError = problem }
+        }
     }
 
     func reloadConfig() {

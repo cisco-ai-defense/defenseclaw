@@ -20,6 +20,8 @@ import (
 // generation check or the Hermes footprint check (no group 1, GAP-2516). Keep it equal to $script:SignedOutUntrustedFolderPattern
 // in packaging/windows/DefenseClawEnterprise.psm1 (a contract test compares
 // them).
+// Compiled at start, not lazily: a contract test reads this declaration from
+// the source (cli/tests/test_windows_enterprise_standalone_contract.py).
 var enterpriseHookSignedOutUntrustedFolderPattern = regexp.MustCompile(
 	`^enterprise hooks: protected target requires repair but its exact active Windows session is unavailable ` +
 		`\(verification: enterprise hooks: (?:managed (data|hook) directory verification failed|managed runtime generation directory is untrusted|footprint directory trust check failed): enterprise hooks: (?:` +

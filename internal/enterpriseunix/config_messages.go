@@ -17,17 +17,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"gopkg.in/yaml.v3"
 )
 
 // settingsReferenceURL is the enterprise settings reference.
 const settingsReferenceURL = config.EnterpriseSettingsReferenceURL
 
-var configHeaderPattern = regexp.MustCompile(`headers(?:\["([^"]+)"\]|\.([A-Za-z0-9_.-]+))$`)
+var configHeaderPattern = lazyregexp.New(`headers(?:\["([^"]+)"\]|\.([A-Za-z0-9_.-]+))$`)
 
 // plainConfigProblem renders an invalid enum value or an unstored protected
 // credential as one plain sentence: the file and line, the field, the value
@@ -84,6 +84,9 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 		reason := "has an invalid value"
 		if schemaErr.Keyword == "additionalProperties" {
 			reason = "is an unknown setting"
+			if hint, moved := schemaErr.MovedKeyHint(); moved {
+				reason += "; " + hint
+			}
 		} else if schemaErr.Keyword == "pattern" {
 			switch {
 			case strings.HasSuffix(field, ".rule_pack"), strings.Contains(field, ".custom_packs.") && !strings.HasSuffix(field, ".digest"):

@@ -5,7 +5,9 @@ package connector
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -72,5 +74,85 @@ func TestRemoveUnusedSharedHookRuntimeKeepsTheRuntimeWhenTheSidecarIsUnreadable(
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("%s was removed over an unreadable hook config sidecar: %v", path, err)
 		}
+	}
+}
+
+// r102 GAP-0430: with no connector left, Hermes' lifecycle lock, its setup
+// record and its empty backup folder go too, and so does its disabled
+// tombstone unless a Hermes process of the account may still have the
+// fail-closed hook cached. A tombstone that blocks on purpose, a script that
+// is not a tombstone and a backup folder with a receipt stay.
+func TestRemoveUnusedSharedHookRuntimeRemovesIdleConnectorLeftovers(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		dataDir, _ := writeUnusedSharedHookRuntime(t)
+		hookDir := filepath.Join(dataDir, "hooks")
+		files := map[string]string{
+			filepath.Join(hookDir, "hermes-hook.sh"):                                 disabledHookTombstone("hermes"),
+			filepath.Join(hookDir, "devin-hook.sh"):                                  "#!/bin/sh\n# defenseclaw-managed-hook v0 (disabled tombstone)\necho restart >&2\nexit 2\n",
+			filepath.Join(hookDir, "user-hook.sh"):                                   "#!/bin/sh\nexit 0\n",
+			filepath.Join(dataDir, ".hermes-lifecycle.lock"):                         "",
+			filepath.Join(dataDir, hermesHomeSetUpFileName):                          `{"home":"/h/.hermes"}`,
+			filepath.Join(dataDir, "connector_backups", "codex", "config.toml.json"): "{}",
+		}
+		if err := os.MkdirAll(filepath.Join(dataDir, "connector_backups", "hermes"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(dataDir, "connector_backups", "codex"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		files[filepath.Join(dataDir, "connector_backups", "hermes")] = ""
+		for path, body := range files {
+			if filepath.Base(path) == "hermes" {
+				continue // the empty backup folder
+			}
+			if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		agentProcessMayRun = func(string, string) bool { return running }
+		err := RemoveUnusedSharedHookRuntime(dataDir)
+		agentProcessMayRun = accountAgentProcessMayRun
+		if err != nil {
+			t.Fatalf("RemoveUnusedSharedHookRuntime: %v", err)
+		}
+		for path := range files {
+			var want bool // gone after the removal
+			switch filepath.Base(path) {
+			case "hermes-hook.sh":
+				want = !running
+			case ".hermes-lifecycle.lock", hermesHomeSetUpFileName, "hermes":
+				want = true
+			}
+			_, statErr := os.Stat(path)
+			if gone := os.IsNotExist(statErr); gone != want {
+				t.Fatalf("hermes running=%t: %s gone=%t (%v)", running, path, gone, statErr)
+			}
+		}
+	}
+}
+
+func TestAccountAgentProcessMayRunSeesTheAgentsProcess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the account's processes are read from /proc on Linux only")
+	}
+	dataDir := t.TempDir()
+	if accountAgentProcessMayRun(dataDir, "dcagentprobe") {
+		t.Fatal("a process was found for an agent nothing runs")
+	}
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep")
+	}
+	link := filepath.Join(t.TempDir(), "dcagentprobe")
+	if err := os.Symlink(sleep, link); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(link, "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	if !accountAgentProcessMayRun(dataDir, "dcagentprobe") {
+		t.Fatal("the running agent process was not found")
 	}
 }

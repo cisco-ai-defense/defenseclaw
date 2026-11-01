@@ -58,6 +58,12 @@ const (
 	// ObservabilityV8MaxRetentionDays is the largest whole-day retention
 	// period that can be represented as a time.Duration without overflow.
 	ObservabilityV8MaxRetentionDays = int((1<<63 - 1) / int64(24*time.Hour))
+
+	// ObservabilityV8MinStoreMB and ObservabilityV8MaxStoreMB bound a set
+	// observability.local.max_store_mb (0, the default, is no size cap).
+	// The maximum matches audit.RetentionMaxStoreMB.
+	ObservabilityV8MinStoreMB = 64
+	ObservabilityV8MaxStoreMB = 1 << 20
 )
 
 const (
@@ -179,6 +185,9 @@ type ObservabilityV8LocalSource struct {
 	Path            string `json:"path,omitempty" mapstructure:"path" yaml:"path,omitempty"`
 	JudgeBodiesPath string `json:"judge_bodies_path,omitempty" mapstructure:"judge_bodies_path" yaml:"judge_bodies_path,omitempty"`
 	RetentionDays   *int   `json:"retention_days,omitempty" mapstructure:"retention_days" yaml:"retention_days,omitempty"`
+	// MaxStoreMB is the opt-in audit.db size cap in MiB (#1384); unset or
+	// 0 keeps retention by days only.
+	MaxStoreMB *int `json:"max_store_mb,omitempty" mapstructure:"max_store_mb" yaml:"max_store_mb,omitempty"`
 }
 
 // ObservabilityV8ConnectorSource preserves the v7 notification-only webhook

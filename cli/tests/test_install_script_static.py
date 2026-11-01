@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -1469,7 +1470,7 @@ def _install_sh_functions(*names: str) -> str:
     return helpers + "".join(bodies)
 
 
-_AGENT_SCAN = ("loaded_plugin_agents", "process_argv", "process_cwd", "process_programs", "resolved_agent_path",
+_AGENT_SCAN = ("loaded_plugin_agents", "process_argv_heads", "argv_heads_load", "argv_head", "process_cwd", "process_programs", "resolved_agent_path",
                "agent_identity_audit", "npm_config_prefixes", "installed_agent_programs", "runtime_agent_programs", "entry_prefix_agent_programs", "agent_of",
                "assert_no_loaded_plugin_agents")
 
@@ -1992,24 +1993,61 @@ def test_only_the_installed_node_entry_is_a_live_agent(tmp_path: Path, script_na
 
 @pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")
 def test_the_arguments_are_read_with_their_boundaries(tmp_path: Path) -> None:
-    # Review loop 2: process_argv gives each argument whole, as the kernel
-    # keeps it; ps would join "a b" and "c  d" into one line of words.
-    words = ["-c", "sleep 60; :", "a b", "c  d", "", "e"]
-    proc = subprocess.Popen([BASH, *words], start_new_session=True)
+    # Review loop 2: the lookup gets each argument whole, as the kernel keeps
+    # it; ps would join "a b" and "c  d" into one line of words. The first two
+    # words of every PID come back from one call (rel-1-0-6 GAP-0203), escaped
+    # so a tab, newline or % in a word survives the round trip.
+    word0 = "a b\tc%09 %0A x\ny%"
+    script_path = tmp_path / "s p\tq%25.sh"
+    script_path.write_text("sleep 60\n", encoding="utf-8")
+    proc = subprocess.Popen([word0, str(script_path), "c  d", "", "e"], executable=BASH, start_new_session=True)
     try:
         for _ in range(500):
-            if Path(f"/proc/{proc.pid}/cmdline").read_bytes().count(b"\0") == len(words) + 1:
+            if Path(f"/proc/{proc.pid}/cmdline").read_bytes().count(b"\0") == 5:
                 break
             time.sleep(0.01)
-        script = _install_sh_functions("process_argv") + 'OSTYPE=linux-gnu\nprocess_argv "$1"'
-        own = subprocess.run([BASH, "-c", script, "argv", str(proc.pid)], capture_output=True, timeout=30, check=False)
+        script = (_install_sh_functions("process_argv_heads", "argv_heads_load", "argv_head")
+                  + 'OSTYPE=linux-gnu\nprocess_argv_heads 999999999 "$1" x > "$2"\n'
+                  + 'argv_heads_load 999999999 "$1" x; argv_head "$1"; printf "%s\\0" "${#argv[@]}" "${argv[@]}"')
+        own = subprocess.run([BASH, "-c", script, "argv", str(proc.pid), str(tmp_path / "heads")],
+                             capture_output=True, timeout=30, check=False)
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
     assert own.returncode == 0, own.stderr
-    assert own.stdout.split(b"\0")[1:-1] == [w.encode() for w in words]
-    gone = subprocess.run([BASH, "-c", script, "argv", str(proc.pid)], capture_output=True, timeout=30, check=False)
-    assert (gone.returncode != 0, gone.stdout) == (True, b"")
+    assert own.stdout.split(b"\0")[:-1] == [b"2", word0.encode(), str(script_path).encode()]
+    assert (tmp_path / "heads").read_text(encoding="utf-8").count("\n") == 1
+    gone = subprocess.run([BASH, "-c", script, "argv", str(proc.pid), str(tmp_path / "heads")],
+                          capture_output=True, timeout=30, check=False)
+    assert (gone.returncode, gone.stdout) == (0, b"0\0")
+
+
+def test_argv_heads_keep_each_pids_own_words() -> None:
+    # PID 12 must not take the words of PID 112 or 123; an empty word stays a
+    # word; an unreadable PID has none.
+    heads = "112\t2\t=wrong\t=wrong\n123\t2\t=also\t=wrong\n12\t1\t=node%25%09\t=\n7\t2\t=\t=/x%0Ay\n9\t0\t=\t=\n"
+    script = (_install_sh_functions("argv_heads_load", "argv_head")
+              + 'process_argv_heads() { printf "%s" "$HEADS"; }\nlocal_test() { local -a argv head_n head_w0 head_w1\n'
+              + 'argv_heads_load 112 123 12 7 9; for p in 12 7 9 1; do argv_head "$p"; printf "%s:%s|" "$p" "${#argv[@]}"; '
+              + 'for w in ${argv[@]+"${argv[@]}"}; do printf "[%s]" "$w"; done; printf "\\n"; done; }\nlocal_test')
+    out = subprocess.run([BASH, "-c", "set -euo pipefail\n" + script], env={"HEADS": heads, "PATH": "/usr/bin:/bin"},
+                         capture_output=True, text=True, timeout=30, check=False)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout == "12:1|[node%\t]\n7:2|[][/x\ny]\n9:0|\n1:0|\n"
+
+
+def test_the_agent_lookup_opens_no_descriptor_per_process() -> None:
+    """rel-1-0-6 GAP-0203: macOS bash 3.2 keeps the descriptor of every <(...)
+    a function opens; the running-agent lookup read each node process's argv
+    through one. It now reads every node process's first words in one call."""
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    for name in ("loaded_plugin_agents", "entry_prefix_agent_programs", "process_argv_heads", "argv_heads_load", "argv_head", "agent_of"):
+        body = _install_sh_functions(name).split(f"{name}() {{", 1)[1]
+        assert "<(" not in body, name
+    lookup = _install_sh_functions("loaded_plugin_agents").split("loaded_plugin_agents() {", 1)[1]
+    assert lookup.count("argv_heads_load") == 1 and "process_argv " not in source
+    heads = _install_sh_functions("process_argv_heads").split("process_argv_heads() {", 1)[1]
+    assert heads.count("/usr/bin/perl") == 2 and 'for my $pid (@ARGV)' in heads
 
 
 def test_a_relative_script_is_the_process_folders_not_the_installers(tmp_path: Path) -> None:
@@ -2066,6 +2104,26 @@ def test_a_process_gone_since_ps_listed_it_is_skipped_without_lsof(tmp_path: Pat
         assert "audit:" not in result.stderr
     assert not marker.exists()
     assert time.monotonic() - started < 10
+
+
+@pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")
+def test_the_audit_line_goes_to_the_install_log_not_the_console(tmp_path: Path) -> None:
+    # GAP-0103: install.sh printed "audit: live-agent identity unproven ... process vanished during
+    # lookup" in the console. With the install log open (LOG) the line is written there only.
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    stubs, log = tmp_path / "stubs", tmp_path / "install.log"
+    stubs.mkdir()
+    (stubs / "ps").write_text(f"#!/bin/sh\necho '{gone.pid}'\n", encoding="utf-8")
+    (stubs / "ps").chmod(0o755)
+    home = tmp_path / "home"
+    entry = home / ".opencode" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    result = _agent_scan(home, [stubs], LOG=str(log))
+    assert result.returncode == 0 and "scan-passed" in result.stdout, (result.stdout, result.stderr)
+    assert "audit:" not in result.stderr and "audit:" not in result.stdout
+    assert f"audit: live-agent identity unproven for PID {gone.pid}: process vanished during lookup" in log.read_text()
 
 
 @pytest.mark.parametrize("installed", [False, True])
@@ -2698,6 +2756,12 @@ def test_a_rollback_to_an_older_release_drops_the_hook_helper_the_newer_install_
     # After the swap brought the older data back, before its gateway starts.
     assert rollback.index("swap_with_previous || swapped=$?") < drop < rollback.index("start_gateway || rollback_rc=$?")
     assert "version_lt \"${back_to}\" \"${current}\"" in rollback[drop - 200 : drop]
+    # rel-1-0-6:GAP-0047: only back to 1.0.4 or older. 1.0.5 and later ship
+    # the same helper, and their gateway with only OpenCode set up never
+    # writes one, so it refused to start and the rollback undid itself.
+    assert 'version_lt "${back_to}" "${current}" && version_lt "${back_to}" 1.0.5; then' in rollback[drop - 200 : drop]
+    helper = (ROOT / "internal" / "gateway" / "connector" / "hooks" / "_hardening.sh").read_text(encoding="utf-8")
+    assert helper.splitlines()[1] == "# defenseclaw-managed-hook v10", "a new helper schema must revisit the 1.0.5 floor"
 
 
 def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_path: Path) -> None:
@@ -3734,3 +3798,207 @@ def test_a_rollback_to_an_older_release_waits_until_its_gateway_lets_go_of_the_a
 def _audit_lock_free_py() -> str:
     text = INSTALL_SH.read_text(encoding="utf-8")
     return re.search(r'^AUDIT_LOCK_FREE_PY="([^"]+)"$', text, re.M).group(1)
+
+
+@pytest.mark.parametrize("script", [INSTALL_SH, HANDOFF_SH])
+@pytest.mark.parametrize("value", ["http://127.0.0.1:8765/defenseclaw", "ftp://mirror.example/dc", "justaname"])
+def test_a_bad_defenseclaw_repo_is_refused_before_anything_downloads(tmp_path: Path, script: Path, value: str) -> None:
+    # GAP-1065: an http:// mirror built https://github.com/http://... and ended
+    # in a 404. It is refused with the https:// requirement, value not echoed.
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    curl_log = tmp_path / "curl.log"
+    (fake / "curl").write_text(f'#!/bin/sh\necho "$*" >> "{curl_log}"\nexit 22\n', encoding="utf-8")
+    (fake / "curl").chmod(0o755)
+    args = [str(script), "--yes", "--version", "1.0.8200"] if script == INSTALL_SH else [str(script), "--version", "1.0.8200"]
+
+    result = _run(args, tmp_path, PATH=f"{fake}:/usr/bin:/bin", DEFENSECLAW_REPO=value)
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in result.stderr
+    assert value not in result.stdout + result.stderr
+    assert not curl_log.exists()
+
+
+def test_the_windows_installer_refuses_a_bad_defenseclaw_repo_too() -> None:
+    # GAP-1065: the same rule as install.sh (the PowerShell cannot run here).
+    text = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL" in text
+    assert "'^https://\\S+$'" in text and "'^[^\\s/:@]+/[^\\s/:@]+$'" in text
+
+
+def test_cli_links_are_published_by_rename_after_the_new_cli_starts() -> None:
+    """rel-1-0-6 GAP-0105: a CLI call during the upgrade found a missing or
+    partly written entry. Every link switch is one rename, made after the new
+    CLI ran, so the call finds the old entry, the busy shim or the new one."""
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    swap = script[script.index("swap_in() {"):]
+    swap = swap[: swap.index("\n}\n")]
+    assert 'ln -sfn "${target}"' not in script
+    assert swap.index('"${VENV}/bin/defenseclaw" --version') < swap.index('publish_link "${target}" "${link}"')
+    publish = script[script.index("publish_link() {"):]
+    publish = publish[: publish.index("\n}\n")]
+    assert 'ln -s "$1" "${new}" && mv -f "${new}" "${BIN_DIR}/$2"' in publish
+    restore = script[script.index("restore_links() {"):]
+    restore = restore[: restore.index("\n}\n")]
+    assert 'rm -f "${BIN_DIR:?}/${link}" && cp -P' not in restore
+    assert 'mv -f "${new}" "${BIN_DIR}/${link}"' in restore
+
+
+def test_the_old_venv_moves_only_after_running_cli_calls_finish() -> None:
+    """rel-1-0-6 GAP-0105: a CLI call that started from the old venv crashed
+    (ModuleNotFoundError) when the snapshot moved the venv under it."""
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    snapshot = script[script.index("\nsnapshot() {"):]
+    snapshot = snapshot[: snapshot.index("\n}\n")]
+    assert snapshot.index("write_busy_shim") < snapshot.index("wait_cli_calls_done") < snapshot.index('mv "${VENV}" "${SNAP}/venv"')
+    helper = script[script.index("wait_cli_calls_done() {"):]
+    helper = helper[: helper.index("\n}\n")]
+    assert "SECONDS + 15" in helper and 'prefix="${VENV}/bin/"' in helper
+
+
+def _wait_cli_calls_done_source() -> str:
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    helper = script[script.index("wait_cli_calls_done() {"):]
+    return helper[: helper.index("\n}\n") + 3]
+
+
+def test_waiting_for_cli_calls_opens_no_descriptor_per_process() -> None:
+    """rel-1-0-6 GAP-0185: macOS bash 3.2 keeps the descriptor of every <(...)
+    a function opens; one per process of the account made install.sh abort
+    (Abort trap: 6) in the macOS install-and-upgrade job. The wait reads one ps
+    listing per poll through one awk."""
+    helper = _wait_cli_calls_done_source()
+    assert "<(" not in helper and "<<<" not in helper
+    assert "process_argv" not in helper and "pgrep" not in helper
+    assert helper.count("ps -A -ww -o uid= -o pid= -o ppid= -o command=") == 1
+    assert helper.count("awk") == 1
+    for bash4 in ("mapfile", "readarray", "declare -A", "local -A", ",,}", "^^}"):
+        assert bash4 not in helper
+
+
+def _run_wait(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
+    script = tmp_path / "wait.sh"
+    script.write_text(
+        "set -euo pipefail\n" + _wait_cli_calls_done_source() + body,
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, timeout=60, check=False
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="install.sh runs on macOS and Linux")
+def test_waiting_for_cli_calls_waits_for_a_call_from_the_old_venv(tmp_path: Path) -> None:
+    """rel-1-0-6 GAP-0105: a call that started from the old venv is waited for
+    (bounded); with none the wait returns at once; under set -euo pipefail."""
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    sleeper = venv / "bin" / "defenseclaw-sleep"
+    sleeper.symlink_to(shutil.which("sleep"))
+    body = f"""
+VENV={shlex.quote(str(venv))}
+t0=$SECONDS; wait_cli_calls_done; echo "idle=$((SECONDS - t0))"
+"$VENV/bin/defenseclaw-sleep" 3 & pid=$!
+sleep 0.5; t0=$SECONDS; wait_cli_calls_done; waited=$((SECONDS - t0))
+kill -0 "$pid" 2>/dev/null && echo still-running || echo finished
+echo "busy=$waited"
+"$VENV/bin/defenseclaw-sleep" 40 & long=$!
+sleep 0.5; t0=$SECONDS; wait_cli_calls_done; echo "bounded=$((SECONDS - t0))"; kill "$long"
+VENV={shlex.quote(str(tmp_path / "absent"))}; wait_cli_calls_done; echo no-venv
+"""
+    out = _run_wait(tmp_path, body)
+    assert out.returncode == 0, out.stderr
+    lines = dict(line.split("=", 1) for line in out.stdout.split() if "=" in line)
+    assert int(lines["idle"]) <= 1
+    assert "finished" in out.stdout and 2 <= int(lines["busy"]) <= 5
+    assert 14 <= int(lines["bounded"]) <= 17
+    assert "no-venv" in out.stdout
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="install.sh runs on macOS and Linux")
+def test_waiting_for_cli_calls_skips_the_installers_own_parents(tmp_path: Path) -> None:
+    """A CLI from the old venv that started this installer (a parent) is not
+    waited for: it waits for the installer, so the wait would only run out."""
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "defenseclaw-bash").symlink_to(shutil.which("bash"))
+    inner = tmp_path / "inner.sh"
+    inner.write_text(
+        "set -euo pipefail\n" + _wait_cli_calls_done_source()
+        + f"VENV={shlex.quote(str(venv))}\nt0=$SECONDS; wait_cli_calls_done; echo \"waited=$((SECONDS - t0))\"\n",
+        encoding="utf-8",
+    )
+    out = subprocess.run(
+        [str(venv / "bin" / "defenseclaw-bash"), "-c", f"bash {shlex.quote(str(inner))}; true"],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert out.returncode == 0, out.stderr
+    assert int(out.stdout.strip().split("=", 1)[1]) <= 1
+
+
+def _shell_and_shim_functions() -> str:
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    out = []
+    for name in ("shell_runnable_entry", "write_busy_shim"):
+        start = script.index(f"\n{name}() {{") + 1
+        out.append(script[start : script.index("\n}\n", start) + 3])
+    mark = script[script.index('readonly BUSY_SHIM_MARK="') + len("readonly ") :].split("\n", 1)[0]
+    return mark + "\n" + "".join(out)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="install.sh runs on macOS and Linux")
+def test_the_cli_entry_and_the_busy_shim_run_under_sh_and_python(tmp_path: Path) -> None:
+    """rel-1-0-6 GAP-0105: the interpreter the kernel picked opens the CLI path
+    again by name. A call that started from the busy shim (sh) read the new
+    Python entry there, and one that started from the old Python entry read
+    the shim. Both files now run the same under either interpreter."""
+    python = shutil.which("python3")
+    assert python
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(python)
+    entry = venv / "bin" / "defenseclaw"
+    entry.write_text(f"#!{venv}/bin/python\n# -*- coding: utf-8 -*-\nimport sys\nprint('entry', sys.argv[1:])\nsys.exit(3)\n", encoding="utf-8")
+    entry.chmod(0o755)
+    sh_form = venv / "bin" / "long"
+    uv_sh_form = "#!/bin/sh\n'''exec' \"/a b/python\" \"$0\" \"$@\"\n' '''\nimport sys\n"
+    sh_form.write_text(uv_sh_form, encoding="utf-8")
+    spaced = venv / "bin" / "spaced"
+    spaced.write_text("#!/usr/bin/env python3 -E\nimport sys\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    files = " ".join(shlex.quote(str(f)) for f in (entry, entry, sh_form, spaced))
+    script = ("set -euo pipefail\n" + _shell_and_shim_functions()
+              + f"BIN_DIR={shlex.quote(str(bin_dir))}\n"
+              + f'for f in {files}; do shell_runnable_entry "$f"; done\n'
+              + "write_busy_shim\n")
+    done = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60, check=False)
+    assert done.returncode == 0, done.stderr
+    lines = entry.read_text(encoding="utf-8").splitlines()
+    assert lines[:4] == [f"#!{venv}/bin/python", '""":"', f"exec '{venv}/bin/python' \"$0\" \"$@\"", '":"""']
+    assert lines.count('""":"') == 1 and lines[4] == "# -*- coding: utf-8 -*-"
+    assert sh_form.read_text(encoding="utf-8") == uv_sh_form
+    assert spaced.read_text(encoding="utf-8") == "#!/usr/bin/env python3 -E\nimport sys\n"
+    for runner in ("/bin/sh", python):
+        ran = subprocess.run([runner, str(entry), "a b", "c"], capture_output=True, text=True, timeout=30, check=False)
+        assert (ran.returncode, ran.stdout.strip()) == (3, "entry ['a b', 'c']"), (runner, ran.stderr)
+    shim = bin_dir / "defenseclaw"
+    head = shim.read_text(encoding="utf-8").splitlines()
+    assert head[0] == "#!/bin/sh" and "Written by the DefenseClaw installer" in head[1] and head[2] == '""":"'
+    outputs = set()
+    for runner in ("/bin/sh", python):
+        ran = subprocess.run([runner, str(shim), "keys", "list"], capture_output=True, text=True, timeout=30, check=False)
+        assert ran.returncode == 1 and "defenseclaw: a DefenseClaw install" in ran.stderr, (runner, ran.stderr)
+        outputs.add(ran.stderr)
+    assert len(outputs) == 1
+
+
+def test_the_new_entry_runs_under_sh_before_any_link_names_it() -> None:
+    script = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    swap = script[script.index("swap_in() {"):]
+    swap = swap[: swap.index("\n}\n")]
+    assert swap.index('shell_runnable_entry "${VENV}/bin/defenseclaw"') < swap.index('"${VENV}/bin/defenseclaw" --version')
+    assert swap.index('"${VENV}/bin/defenseclaw" --version') < swap.index('publish_link "${target}" "${link}"')
+    restore = script[script.index("restore_links() {"):]
+    restore = restore[: restore.index("\n}\n")]
+    assert restore.index("shell_runnable_entry") < restore.index('mv -f "${new}" "${BIN_DIR}/${link}"')

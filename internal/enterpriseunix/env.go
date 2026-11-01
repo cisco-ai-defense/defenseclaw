@@ -289,6 +289,10 @@ type Env struct {
 	// a bundle whose config change restarts the gateway (restart_deferred,
 	// the retry exit code).
 	DeferRestart bool
+	// AnchorsDeviceGroup pins the trust anchors an install writes (`bundle
+	// anchors install --device-group`, `bundle apply --device-group`) to this
+	// one device group; "" writes the file's own device_groups.
+	AnchorsDeviceGroup string
 	// bundleFault is a test seam: it runs at each named phase of a bundle
 	// apply (received, verified, staged, transaction, applied, committed)
 	// and an error fails the apply there; at committed the run stops before
@@ -296,6 +300,11 @@ type Env struct {
 	// runs before the bundle store creates its private directory <name>
 	// (receipts). Production leaves it nil.
 	bundleFault func(phase string) error
+
+	// StartTransactionWatch starts the watcher that recovers a transaction
+	// whose run pid is killed (txwatch.go, GAP-0276). NewEnv sets it; nil
+	// (tests) starts none.
+	StartTransactionWatch func(ctx context.Context, pid int, snapshotDir string) error
 
 	// SelfUnit names the service unit or launchd job this lifecycle run
 	// executes inside (the config-apply trigger). The lifecycle never stops
@@ -342,6 +351,7 @@ func NewEnv(goos, productVersion string) (*Env, error) {
 	}
 	env.fillDefaults()
 	env.SelfUnit = selfUnitFromEnv(env.Services, os.Getenv(LifecycleUnitEnv))
+	env.StartTransactionWatch = env.startTransactionWatch
 	return env, nil
 }
 
@@ -350,6 +360,19 @@ func NewEnv(goos, productVersion string) (*Env, error) {
 // they get the answer promptly; the config-apply trigger passes a longer
 // --lock-wait so a change made during another run is applied after it.
 const DefaultLockWait = 5 * time.Second
+
+// ApplyTriggerLockWait is the wait of an ensure run for the config-apply
+// trigger (--reason path): the launchd apply job and the systemd apply
+// service pass it as --lock-wait, so a change made during another run is
+// applied once that run ends. An ensure --reason path started any other way
+// (configuration management that runs what the trigger runs) waits as long
+// unless --lock-wait says otherwise; with the MDM default a second push five
+// seconds after the first exited lifecycle_busy after 5 s instead of being
+// applied (rel-1-0-3 GAP-0142).
+const ApplyTriggerLockWait = 10 * time.Minute
+
+// ApplyTriggerReason is the --reason of the config-apply trigger.
+const ApplyTriggerReason = "path"
 
 // MaxLockWait bounds --lock-wait.
 const MaxLockWait = 15 * time.Minute

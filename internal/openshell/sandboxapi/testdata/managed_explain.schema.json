@@ -17,6 +17,7 @@
   ],
   "properties": {
     "profile": {"type": "string"},
+    "pinned_profile": {"type": "string"},
     "description": {"type": "string"},
     "match": {"type": "string"},
     "matched_group": {"type": "string"},

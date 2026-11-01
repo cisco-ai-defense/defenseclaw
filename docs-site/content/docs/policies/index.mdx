@@ -33,7 +33,7 @@ A policy is what turns a finding into an action. DefenseClaw checks each prompt,
   <Edge from="levels" to="verdict" label="returns" />
 </Flow>
 
-- **Rule pack.** A folder of YAML rules, judge prompts and suppressions. Three ship with DefenseClaw: `permissive`, `default` and `strict`. The pack also sets the default [block and alert levels](/docs/policies/thresholds). The balanced/default enabled catalog currently contains 239 local rules. Regexes compile during [rule-pack validation](/docs/policies/rulepack-validation); an invalid expression rejects the complete candidate.
+- **Rule pack.** A folder of YAML rules, judge prompts and suppressions. Three ship with DefenseClaw: `permissive`, `default` and `strict`. The pack also sets the default [block and alert levels](/docs/policies/thresholds). The balanced/default enabled catalog currently contains 242 local rules. Regexes compile during [rule-pack validation](/docs/policies/rulepack-validation); an invalid expression rejects the complete candidate.
 - **Structured tool calls.** For a shell command or file write, the gateway first extracts the commands, paths and network targets, and CEL rules match those facts. A regex match on its own is recorded as detection only and does not block. See [deterministic detection](/docs/policies/deterministic-detection).
 - **LLM judge.** Off until you turn it on. It reads prompts, replies and tool calls for subtle injection, personal data and exfiltration. See [set up an LLM key](/docs/guardrail/unified-llm-key).
 - **Suppressions.** Three lists in the pack drop known noise from the judge. They never silence a regex or CEL rule. See [tune the LLM judge](/docs/policies/suppression-cookbook).

@@ -28,17 +28,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
-// openCodePin is the reviewed OpenCode release (opencode-hooks-v1 covers
-// >=1.18.10,<1.19.0). The community base image's OpenCode 1.2.18 is outside
-// every contract and is removed.
+// openCodePin is the reviewed V2-only release. The V1 base-image package
+// is removed. The x64 baseline binary avoids an additional CPU requirement.
 var openCodePin = npmPin{
-	Package:   "opencode-ai",
-	Version:   "1.18.31",
-	Integrity: "sha512-J95feefeWwtIaw3irx76WjzWcgQXxmuHmDVphvs5ep9X30fBJ6T6bFhw50i9Kx50MG/xPn5w2pafXIfNtdry9w==",
-	// The package's postinstall copies the platform package's binary here.
+	Package:   "@opencode/cli",
+	Version:   "2.1.4",
+	Integrity: "sha512-vtHFa/1frSylpx1cZRuzmM2ecHWn6YB8cNvhw8eWKPvSFvDnckZXugDbi3LJYD9TGjRx2U6JRo725qwqtwMUfQ==",
+	// Pin the actual platform package rather than postinstall's CPU-selected copy.
 	Native: map[string]npmNative{
-		"aarch64": {Path: "lib/node_modules/opencode-ai/bin/opencode.exe", SHA256: "82ab43b7e8b7d931c26ba170c90de6082a2e2af8fc84a9ce9a506357b91160d7"},
-		"x86_64":  {Path: "lib/node_modules/opencode-ai/bin/opencode.exe", SHA256: "f9dab32248695e9ebd56b16a1921798fd85112cf5a69c7dfd0cabc1e17be4a11"},
+		"aarch64": {Path: "lib/node_modules/@opencode/cli/node_modules/@opencode/cli-linux-arm64/bin/opencode", SHA256: "7f32303fcd2d41e54c9ea36d4e4d4029b916901f3fbe5ad3fcee8f1b877b8bba"},
+		"x86_64":  {Path: "lib/node_modules/@opencode/cli/node_modules/@opencode/cli-linux-x64-baseline/bin/opencode", SHA256: "ca9b3ee262e33bb4e7aa0e1230dc61086a474c8c8016b980081d0719712fd2e7"},
 	},
 }
 
@@ -67,8 +66,8 @@ var OpenCode = register(&Spec{
 	TamperTier:     connector.SandboxTamperTierUser,
 	TamperNote:     "the hook plugin and the managed config that loads it are root-owned; another plugin or custom tool would run beside them, so the launcher refuses to start while one is present",
 	verification: Verification{
-		Status: VerifiedLive,
-		Note:   "hook-fire probe (built-in mock LLM through OpenCode's bundled Anthropic SDK): the managed plugin loads, tool.execute.before/after reach the ingress with the sandbox token and an idempotency key, a BLOCKME tool call is denied and has no side effect, user and project config plugin:[] cannot remove it, and the launcher refuses to start, naming the file, with a planted fetch-replacing project plugin, a planted user plugin or a project config entry naming one (its unit tests also cover ancestor, ~/.opencode and OPENCODE_CONFIG_DIR plugins, custom tools, JSONC, TUI and OPENCODE_CONFIG_CONTENT plugin entries, unbundled provider SDKs and wellknown remote-config logins); live OpenShell 0.1.1 run (TestLiveSandboxHookOnlyHarness) with the DefenseClaw ingress and egress proxy: every hook reaches the ingress authenticated and keyed, an allowed tool call runs, with the shell tool on DefenseClaw's block list the DCBLOCK tool call gets the real gateway's block verdict, has no side effect and OpenCode shows the reason and passes it to the model, a tool call's plain curl reaches example.org through the proxy the launcher exports, the proxy blocks webhook.site, a connection around the proxy is refused",
+		Status: Unverified,
+		Note:   "V2-only image and bridge; previous V1 sandbox certification does not apply. A fresh V2 OpenShell ingress, block, and egress verification is required.",
 	},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/opencode", "--version"},
@@ -83,14 +82,14 @@ var OpenCode = register(&Spec{
 		if err != nil {
 			return nil, err
 		}
+		// npm's postinstall chooses by CPU features. Launch only the exact
+		// platform binary whose digest installRun checked above.
+		run = strings.Replace(run, `ln -sfn "$root/bin/opencode" /usr/local/bin/opencode`, `ln -sfn "$bin" /usr/local/bin/opencode`, 1)
 		check := `h="$(mktemp -d)"; got="$(HOME="$h" OPENCODE_DISABLE_AUTOUPDATE=1 /usr/local/bin/opencode --version 2>/dev/null | head -n 1)"; rm -rf "$h"; ` +
 			`[ "$got" = ` + shellQuote(version) + ` ] || { echo "OpenCode '$got' is not the pinned ` + version + `" >&2; exit 1; }`
 		return []InstallStep{{
 			Comment: "Replace the base image's OpenCode with the pinned " + version + " in a root-owned prefix (registry integrity and native sha256 checked)",
 			Run:     run + "; " + check,
-		}, {
-			Comment: "Record OpenCode " + version + "'s plugin package as installed in the image HOME's config directory, so a new sandbox does not download it at every start",
-			Run:     openCodePluginRecordRun(OpenCodeGlobalConfigDir, version),
 		}}, nil
 	},
 	launcher: openCodeLauncher,
@@ -101,6 +100,9 @@ var OpenCode = register(&Spec{
 		if opts.Mode == Headless {
 			argv = append(argv, "run")
 		}
+		// V2 otherwise connects to a persistent background server. Every
+		// sandbox session must own its server and its plugin registrations.
+		argv = append(argv, "--standalone")
 		if opts.Yolo {
 			// Auto-approve every permission not explicitly denied; the
 			// DefenseClaw plugin still gates every tool call.
@@ -139,7 +141,7 @@ var OpenCode = register(&Spec{
 		// need it) but never let it pull an auto-update.
 		"OPENCODE_DISABLE_AUTOUPDATE": "1",
 	},
-	// OpenCode 1.18.31 asks models.opencode.ai for the model catalog at
+	// OpenCode 2.1.4 asks models.opencode.ai for the model catalog at
 	// every start, through the egress proxy, which an allowlist pack
 	// refuses; it goes on with the catalog it ships with.
 	directFetches: []DirectFetch{{
@@ -155,32 +157,7 @@ const OpenCodeLauncherPath = LauncherDir + "/opencode-launch"
 // image HOME (the sandbox sets no XDG_CONFIG_HOME).
 const OpenCodeGlobalConfigDir = connector.SandboxHomeDir + "/.config/opencode"
 
-// openCodePluginRecordRun records OpenCode's plugin package,
-// @opencode-ai/plugin at version, as installed in the config directory dir.
-//
-// At every start OpenCode 1.18.31 installs that package into each writable
-// config directory, in the background (Npm.install): about 29 packages and
-// 20 MiB from registry.npmjs.org into ~/.config/opencode for every new
-// sandbox, outside the pinned image. It skips the install when the
-// directory has a node_modules and its package-lock.json lists, in the root
-// package, every package.json dependency and @opencode-ai/plugin (it
-// compares names, not versions or files). Nothing in the sandbox imports the
-// package: the DefenseClaw plugin imports only node: builtins, and the
-// launcher refuses every other plugin and custom tool, the code that would.
-// So the image writes that record and an empty node_modules, pinned to the
-// harness version, rather than the packages. HOME's final chown makes them
-// the workload's, like the rest of HOME: removing them only brings back
-// OpenCode's own install.
-func openCodePluginRecordRun(dir, version string) string {
-	deps := `{"@opencode-ai/plugin":"` + version + `"}`
-	pkg := `{"dependencies":` + deps + `}`
-	lock := `{"name":"opencode","lockfileVersion":3,"requires":true,"packages":{"":{"dependencies":` + deps + `}}}`
-	return `set -eu; d=` + shellQuote(dir) + `; install -d -m 0755 "$d/node_modules"; ` +
-		`printf '%s\n' ` + shellQuote(pkg) + ` >"$d/package.json"; ` +
-		`printf '%s\n' ` + shellQuote(lock) + ` >"$d/package-lock.json"`
-}
-
-// openCodeBundledProviderSDKs are the provider SDK packages OpenCode 1.18.31
+// openCodeBundledProviderSDKs are the provider SDK packages OpenCode 2.1.4
 // ships inside its executable. A provider (in config or the model catalog)
 // that names any other package, or a file:// URL, makes OpenCode install and
 // import that code into its own process.
@@ -204,7 +181,7 @@ func jsonStringArray(values []string) string {
 }
 
 // openCodeLauncher refuses to start OpenCode when it would load code other
-// than the DefenseClaw plugin. OpenCode 1.18 imports every plugin and custom
+// than the DefenseClaw plugin. OpenCode V2 imports every plugin and custom
 // tool into one process: the files matching {plugin,plugins}/*.{js,ts} and
 // {tool,tools}/*.{js,ts} in each config directory (the global
 // ~/.config/opencode, every .opencode from the working directory up to the
@@ -251,6 +228,10 @@ set -u
       echo "defenseclaw: opencode --pure runs without the DefenseClaw policy plugin; refusing" >&2
       exit ` + strconv.Itoa(LauncherRefusedExitCode) + `
       ;;
+    --server|--server=*)
+      echo "defenseclaw: opencode --server would run tools on a server outside this sandbox's managed plugin; refusing" >&2
+      exit ` + strconv.Itoa(LauncherRefusedExitCode) + `
+      ;;
   esac
 done
 # OPENCODE_TEST_HOME moves the home OpenCode reads ~/.opencode from.
@@ -283,10 +264,10 @@ config_verdict() {
     gsub("\\{env:(?<n>[^}]+)\\}"; ($ENV[.n] // "")) as $t
     | (try ($t | outside_strings("//[^\n]*|/\\*(?:[^*]|\\*+[^*/])*\\*+/") | outside_strings(",(?=\\s*[\\]}])") | fromjson) catch null) as $doc
     | if ($doc | type) == "object" then
-        if (($doc.plugin // []) | length) > 0 then "plugin"
-        elif any($doc | .. | objects | select(has("npm")) | .npm; (type != "string") or (. as $n | any($bundled[]; . == $n) | not)) then "npm"
+        if ((($doc.plugin // []) | length) > 0 or (($doc.plugins // []) | length) > 0) then "plugin"
+        elif any($doc | .. | objects | select(has("npm") or has("package")) | (.package // .npm); (type != "string") or (. as $n | any($bundled[]; . == $n) | not)) then "npm"
         else "ok" end
-      elif ($t | test("plugin|npm|\\\\u"; "i")) then "unchecked"
+      elif ($t | test("plugin|package|npm|\\\\u"; "i")) then "unchecked"
       else "ok" end' 2>/dev/null || echo error
 }
 config_refuse() {
@@ -315,14 +296,14 @@ check_config_dir() {
       fi
     done
   done
-  for name in opencode.json opencode.jsonc tui.json tui.jsonc; do
+  for name in opencode.json opencode.jsonc cli.json tui.json tui.jsonc; do
     check_config_file "$1/$name"
   done
 }
 check_tree() {
   local d="$1" name
   while :; do
-    for name in opencode.json opencode.jsonc tui.json tui.jsonc; do
+    for name in opencode.json opencode.jsonc cli.json tui.json tui.jsonc; do
       check_config_file "${d%/}/$name"
     done
     check_config_dir "${d%/}/.opencode"

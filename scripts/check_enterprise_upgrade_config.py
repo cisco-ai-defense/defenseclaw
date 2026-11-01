@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Check that an enterprise upgrade kept the administrator's config intent.
 
-The enterprise upgrade lanes install the previous 1.x release with a version 9
-administrator config, then upgrade to this build. Every value must stay at its
-path with the same value, and the upgraded config must still be version 9.
+The enterprise upgrade lanes install the previous 1.x release with its
+administrator config (version 9, or version 8 for a release older than the first
+that reads 9), then upgrade to this build. Every value must stay at its path
+with the same value, and the upgraded config must be version 9.
 
 It needs PyYAML (CI runs it with `uv run --with pyyaml`).
 
@@ -45,8 +46,8 @@ def lookup(document: Any, path: str) -> Any:
 
 def problems(before: Any, after: Any) -> list[str]:
     source_version = lookup(before, "config_version")
-    if source_version != 9:
-        return [f"source config_version is {source_version!r}, want 9 (the lanes upgrade from 1.x)"]
+    if source_version not in (8, 9):
+        return [f"source config_version is {source_version!r}, want 8 or 9 (the lanes upgrade from 1.x)"]
     found = []
     if lookup(after, "config_version") != 9:
         found.append(f"config_version is {lookup(after, 'config_version')!r}, want 9")

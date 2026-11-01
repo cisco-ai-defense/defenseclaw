@@ -839,6 +839,146 @@ rules:
 	}
 }
 
+// GAP-1526: a scope the preload did not list loads its rules on first use
+// (GAP-1508), but connectorRulePack, which feeds the hook judge's
+// suppressions, read only the preloaded packs: such a request scanned with
+// the profile's rules and judged with the base pack's suppressions. Loaded
+// eagerly or lazily, judge first or rules first, or through the lazy retry,
+// a profile request applies its own pack's suppressions and not the base
+// pack's; a request with no profile keeps the base pack's.
+func TestLazyProfileScopeAppliesTheProfileJudgeSuppressions(t *testing.T) {
+	stubProfileSources(t)
+	resetConnectorRuleCategories(t)
+	withLocalPatternsRestored(t)
+	priorManaged := ManagedEnterpriseActive()
+	setManagedEnterpriseRedactionPosture(false)
+	t.Cleanup(func() { setManagedEnterpriseRedactionPosture(priorManaged) })
+	writeProfilePack := func(dir string) {
+		writeRulePackFixtureFile(t, dir, "rules/marker.yaml", `version: 1
+category: secret
+rules:
+  - id: LAZY-PROFILE-MARKER
+    pattern: "lazy_profile_marker_token"
+    title: lazy profile scope fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+		writeRulePackFixtureFile(t, dir, "suppressions.yaml", `version: 1
+pre_judge_strips: []
+finding_suppressions:
+  - id: PROFILE-ONLY-SUPPRESSION
+    finding_pattern: "LAZY-PROFILE-MARKER"
+    entity_pattern: "lazy_profile_marker_token"
+    reason: allowed in this profile
+tool_suppressions: []
+`)
+	}
+	basePack := &guardrail.RulePack{Suppressions: &guardrail.SuppressionsConfig{Version: 1,
+		FindingSupps: []guardrail.FindingSuppression{{ID: "BASE-ONLY-SUPPRESSION"}}}}
+	baseGeneration := &Generation{Config: &config.Config{}, activeRules: &compiledRulePackCategories{},
+		RulePacks: map[string]*guardrail.RulePack{"global": basePack}}
+	newAPI := func(packDir string) (*APIServer, *guardrailProfileSet) {
+		inspect := true
+		cfg := &config.Config{}
+		cfg.ApplicationProtection.Enabled = true
+		cfg.ApplicationProtection.Guardrail.Rules = &config.GuardrailRulesConfig{
+			SensitiveTools: []config.GuardrailSensitiveTool{{Name: "crm_export", ResultInspection: &inspect}},
+		}
+		cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action", RulePackDir: packDir}}
+		cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}}}
+		api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+		set := api.guardrailProfileSet()
+		if set == nil {
+			t.Fatal("profile set was not built")
+		}
+		return api, set
+	}
+	// unlist drops the scope from the preload, as for a scope it never
+	// listed (a plugin connector under application protection).
+	unlist := func(set *guardrailProfileSet, connector string) {
+		key := effectiveRulePackKey(set.profiles["strict"].Config, connector)
+		delete(set.rules, key)
+		delete(set.packs, key)
+		delete(set.missing, key)
+	}
+	request := func(api *APIServer, user, connector string) context.Context {
+		ctx := withPinnedGeneration(t.Context(), baseGeneration)
+		ctx = context.WithValue(ctx, testVerifiedSubjectKey{}, profileSubject{UserID: user})
+		return api.withGuardrailProfileDecision(ctx, connector)
+	}
+	scan := func(api *APIServer, connector string) []string {
+		return findingIDs(scanAllRulesForConnectorFor(request(api, "1001", connector), connector, "lazy_profile_marker_token", "exec"))
+	}
+	// judged is what the hook judge applies: runHookJudge's pack on a judge
+	// built with the base pack.
+	judged := func(api *APIServer, user, connector string) (*guardrail.RulePack, []string) {
+		ctx := request(api, user, connector)
+		pack := api.connectorRulePack(ctx, connector)
+		applied := (&LLMJudge{rp: basePack}).suppressionPack(withJudgeSuppressionPack(ctx, pack))
+		var ids []string
+		if applied != nil && applied.Suppressions != nil {
+			for _, s := range applied.Suppressions.FindingSupps {
+				ids = append(ids, s.ID)
+			}
+		}
+		return pack, ids
+	}
+	wantProfile := func(label string, api *APIServer, connector string) {
+		t.Helper()
+		if _, ids := judged(api, "1001", connector); !slices.Contains(ids, "PROFILE-ONLY-SUPPRESSION") || slices.Contains(ids, "BASE-ONLY-SUPPRESSION") {
+			t.Fatalf("%s: profile request judged with suppressions %v, want the profile pack's only", label, ids)
+		}
+	}
+	wantBase := func(label string, api *APIServer, connector string) {
+		t.Helper()
+		if pack, ids := judged(api, "2002", connector); pack != basePack || !slices.Contains(ids, "BASE-ONLY-SUPPRESSION") || slices.Contains(ids, "PROFILE-ONLY-SUPPRESSION") {
+			t.Fatalf("%s: request with no profile judged with suppressions %v, want the base pack's", label, ids)
+		}
+	}
+	packDir := filepath.Join(t.TempDir(), "strict")
+	writeProfilePack(packDir)
+
+	eager, _ := newAPI(packDir)
+	wantProfile("eager", eager, "claudecode")
+	wantBase("eager", eager, "claudecode")
+
+	judgeFirst, set := newAPI(packDir)
+	unlist(set, "claudecode")
+	wantProfile("lazy, judge before any rule scan", judgeFirst, "claudecode")
+	if ids := scan(judgeFirst, "claudecode"); !containsRuleID(ids, "LAZY-PROFILE-MARKER") {
+		t.Fatalf("lazy scope scanned without the profile rule: %v", ids)
+	}
+	wantBase("lazy", judgeFirst, "claudecode")
+
+	rulesFirst, set := newAPI(packDir)
+	unlist(set, "claudecode")
+	if ids := scan(rulesFirst, "claudecode"); !containsRuleID(ids, "LAZY-PROFILE-MARKER") {
+		t.Fatalf("lazy scope scanned without the profile rule: %v", ids)
+	}
+	wantProfile("lazy, rules first", rulesFirst, "claudecode")
+	wantBase("lazy, rules first", rulesFirst, "claudecode")
+
+	latePackDir := filepath.Join(t.TempDir(), "late")
+	late, set := newAPI(latePackDir)
+	unlist(set, "claudecode")
+	if pack, _ := judged(late, "1001", "claudecode"); pack != basePack {
+		t.Fatal("a lazy scope whose pack has not loaded must judge with the base pack until it loads")
+	}
+	writeProfilePack(latePackDir)
+	key := effectiveRulePackKey(set.profiles["strict"].Config, "claudecode")
+	value, ok := set.lazy.Load(key)
+	if !ok || value.(*profileLazyScope).retry == nil {
+		t.Fatal("the lazy scope kept no retry")
+	}
+	retry := value.(*profileLazyScope).retry
+	retry.mu.Lock()
+	retry.nextTry = time.Time{}
+	retry.mu.Unlock()
+	wantProfile("lazy retry", late, "claudecode")
+	wantBase("lazy retry", late, "claudecode")
+}
+
 // GAP-0094: a local account's groups count once each. macOS listed every
 // gid and then its name, so explain and identity.observed doubled the count.
 func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
@@ -924,7 +1064,7 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 	previous := currentIdentitySpoolDir()
 	t.Cleanup(func() { setIdentitySpoolDir(previous) })
 	setIdentitySpoolDir(t.TempDir())
-	if note := spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()); !strings.Contains(note, "no identity record for this account yet") {
+	if note := spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now(), false); !strings.Contains(note, "no identity record for this account yet") {
 		t.Fatalf("spool note = %q", note)
 	}
 	if !awaitingSpool(useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}) ||
@@ -950,7 +1090,7 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 		t.Fatal("Open Directory facts without a UPN or a directory must await the guardian record; a local node account and facts the record named must not")
 	}
 	setIdentitySpoolDir("")
-	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()) != "" {
+	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now(), false) != "" {
 		t.Fatal("a gateway without a spool has no record to wait for")
 	}
 	named := &profileSubject{Groups: []string{"S-1-1-0", "Everyone", "S-1-5-21-1-2-3-9001", "S-1-5-21-1-2-3-9002"}}
@@ -2482,5 +2622,40 @@ func TestWindowsSIDGroupAssignmentIgnoresSIDShapedNames(t *testing.T) {
 		Groups: []string{assignedSID}}
 	if got := set.match(member, profileSubjectVerified, "codex", ""); got.Name != "tooling" || got.Match != profileMatchGroup {
 		t.Fatalf("assigned SID selected %+v, want tooling group assignment", got)
+	}
+}
+
+// GAP-0495: the policy matcher compares group names without case, so an
+// assignment written DC-R102-OKTA-DEV selects the members of dc-r102-okta-dev.
+// A host whose group lookup is case-sensitive (an Okta LDAP domain in SSSD)
+// answers "no such group" for the uppercase spelling; the advisory must not
+// say the assignment selects nobody then.
+func TestUnknownAssignmentGroupsAgreeWithCaseInsensitiveMatcher(t *testing.T) {
+	previousHealth := directoryCacheHealth
+	t.Cleanup(func() { directoryCacheHealth = previousHealth })
+	directoryCacheHealth = func() identityCacheHealth { return identityCacheHealth{} }
+	assignments := []config.ProfileAssignment{
+		{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"DC-R102-OKTA-DEV"}}},
+		{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"DC-R102-GONE"}}},
+	}
+	exists := func(_ context.Context, name string) (bool, error) { return name == "dc-r102-okta-dev", nil }
+	got := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, nil, nil, "linux")
+	if len(got) != 1 || !strings.HasPrefix(got[0], `assignment 2: group "DC-R102-GONE" is not known`) {
+		t.Fatalf("warnings = %q, want only the group no spelling of which exists", got)
+	}
+}
+
+// GAP-0507: the signed-out note names the strict default as the safety net
+// only when no assignment chose the profile; a users, SID or agent assignment
+// ahead of the groups selects it without the token groups.
+func TestSignedOutNoteClaimsTheStrictDefaultOnlyWhenNoAssignmentSelected(t *testing.T) {
+	if got := spoolSignedOutNote(false); !strings.Contains(got, "a strict default profile protects this gap") ||
+		!strings.Contains(got, "group assignments cannot match") {
+		t.Fatalf("default-profile note = %q", got)
+	}
+	got := spoolSignedOutNote(true)
+	if strings.Contains(got, "strict default") || !strings.Contains(got, "group assignments cannot match") ||
+		!strings.Contains(got, "chosen by an assignment") {
+		t.Fatalf("selected-profile note = %q", got)
 	}
 }

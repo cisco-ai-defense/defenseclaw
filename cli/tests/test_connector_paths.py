@@ -2100,7 +2100,7 @@ class TestOpenCodeMCPReader:
         assert set(entries) == {"shared", "global-only"}
         assert entries["shared"].command == "custom-command"
 
-    def test_v11810_precedence_content_disabled_and_provenance(self, tmp_path, monkeypatch):
+    def test_v2_precedence_ignores_unsupported_enabled_only_override(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -2142,9 +2142,9 @@ class TestOpenCodeMCPReader:
 
         assert len(entries) == 1
         assert entries[0].command == "custom-directory"
-        assert entries[0].disabled is True
-        assert entries[0].source == "OPENCODE_CONFIG_CONTENT"
-        assert entries[0].source_scope == "inline"
+        assert entries[0].disabled is False
+        assert entries[0].source == str(custom / "opencode.json")
+        assert entries[0].source_scope == "custom-directory"
 
         resolution = connector_paths._resolve_opencode_config(str(workspace))
         first_scope = {}

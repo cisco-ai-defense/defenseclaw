@@ -75,8 +75,14 @@ func TestManagedPluginProofStaysOnTheProvenConnection(t *testing.T) {
 			if !strings.HasPrefix(verdict, "block:") {
 				t.Errorf("replacement listener verdict = %q, want block", verdict)
 			}
-			if seen := peerSeen.snapshot(); len(seen) != 0 {
-				t.Errorf("replacement listener received credential or tool payload: %+v", seen)
+			// V2 setup sends a load heartbeat before the tool probe. After
+			// that connection is replaced, the tool may ask the new peer for
+			// an anonymous proof, but must send no credential or tool event.
+			for _, request := range peerSeen.snapshot() {
+				if request.method != http.MethodGet || request.path != UserScopedListenerProofPath ||
+					request.authorization != "" || request.body != "" {
+					t.Errorf("replacement listener received credential or tool payload: %+v", request)
+				}
 			}
 		})
 	}
@@ -161,9 +167,18 @@ func TestManagedOpenModeRejectsMalformedListenerProof(t *testing.T) {
 				t.Fatalf("malformed proof under outage-open = %q, want identity block", verdict)
 			}
 			requests := seen.snapshot()
-			if len(requests) != 1 || requests[0].path != UserScopedListenerProofPath ||
-				requests[0].authorization != "" || requests[0].body != "" {
-				t.Fatalf("malformed proof caused a hook request or credential disclosure: %+v", requests)
+			wantChallenges := 1
+			if tc.scope == "opencode" {
+				wantChallenges = 2 // V2 setup heartbeat, then the tool probe.
+			}
+			if len(requests) != wantChallenges {
+				t.Fatalf("proof challenges = %d, want %d", len(requests), wantChallenges)
+			}
+			for _, request := range requests {
+				if request.method != http.MethodGet || request.path != UserScopedListenerProofPath ||
+					request.authorization != "" || request.body != "" {
+					t.Fatalf("malformed proof caused a hook request or credential disclosure: %+v", request)
+				}
 			}
 		})
 	}

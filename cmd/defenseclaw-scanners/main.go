@@ -49,6 +49,9 @@ const (
 	runtimeArchiveName  = "payload/runtime.zip"
 	runtimeManifestName = "payload/runtime.json"
 	completeMarker      = ".complete"
+	// compiledMarker names, inside a published runtime folder, the archive
+	// SHA-256 whose Python files prepare byte-compiled.
+	compiledMarker = ".compiled"
 	// unpackMarker names, inside a staging folder, the archive SHA-256 the
 	// unpack in it belongs to.
 	unpackMarker = ".unpack-sha256"
@@ -213,8 +216,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "defenseclaw-scanners: %v\n", err)
 			return 1
 		}
-		fmt.Fprintln(stderr, "defenseclaw-scanners: compiling the Python files")
-		compileRuntime(dir, stderr)
+		compilePreparedRuntime(dir, manifest.SHA256, stderr)
 		fmt.Fprintln(stdout, dir)
 		return 0
 	case "prune":
@@ -265,16 +267,48 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// compilePreparedRuntime byte-compiles a prepared runtime once. Every Setup
+// /ensure, also a no-op one, runs prepare; its compileall found nothing to do
+// on a compiled tree but still started a Python and one worker process per
+// CPU, about 6 s of a no-op ensure on a managed Windows host (rel-1-0-4
+// GAP-2607). A tree prepare compiled carries compiledMarker; one that prepare
+// unpacked again (a changed or untrusted tree is removed first) has none and
+// is compiled. The marker is written only after compileall ran to its end,
+// so a compile that was stopped is done again by the next prepare. It
+// reports whether it compiled. The byte-compiled caches are a speed-up only:
+// the scans run python -B, and Python recompiles in memory any cache it
+// cannot use.
+func compilePreparedRuntime(dir, sha string, stderr io.Writer) bool {
+	marker := filepath.Join(dir, compiledMarker)
+	if recorded, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(recorded)) == sha {
+		fmt.Fprintln(stderr, "defenseclaw-scanners: the Python files are already compiled")
+		return false
+	}
+	fmt.Fprintln(stderr, "defenseclaw-scanners: compiling the Python files")
+	if compileRuntime(dir, stderr) {
+		if err := os.WriteFile(marker, []byte(sha), 0o644); err != nil {
+			fmt.Fprintf(stderr, "defenseclaw-scanners: record the compiled runtime: %v\n", err)
+		}
+	}
+	return true
+}
+
 // compileRuntime byte-compiles the unpacked runtime so the read-only scans
-// start fast. A file that does not compile only costs its own speed-up.
-func compileRuntime(dir string, stderr io.Writer) {
+// start fast. A file that does not compile only costs its own speed-up. It
+// reports whether compileall ran to its end: exit status 0, or 1, which
+// compileall returns when some file did not compile (the runtime always has
+// a few). A variable so a test can count the compiles.
+var compileRuntime = func(dir string, stderr io.Writer) bool {
 	pythonDir := filepath.Join(dir, "python")
 	cmd := exec.Command(filepath.Join(pythonDir, "python.exe"), "-I", "-m", "compileall", "-q", "-j", "0",
 		filepath.Join(pythonDir, "Lib", "site-packages"))
 	cmd.Env = pythonEnv(os.Environ(), pythonDir)
-	if out, err := cmd.CombinedOutput(); err != nil && len(out) > 0 {
+	out, err := cmd.CombinedOutput()
+	if err != nil && len(out) > 0 {
 		fmt.Fprintf(stderr, "defenseclaw-scanners: compile: %d bytes of warnings\n", len(out))
 	}
+	var exitErr *exec.ExitError
+	return err == nil || (errors.As(err, &exitErr) && exitErr.ExitCode() == 1)
 }
 
 func loadManifest() (runtimeManifest, error) {

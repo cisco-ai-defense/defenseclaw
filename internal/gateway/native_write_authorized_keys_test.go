@@ -32,16 +32,14 @@ func nativeWriteCalls() []nativeWriteCall {
 	}
 	return []nativeWriteCall{
 		{"opencode", "edit", func(p string) map[string]any {
-			return map[string]any{"filePath": p, "oldString": "# base", "newString": "# base\n# k"}
+			return map[string]any{"path": p, "oldString": "# base", "newString": "# base\n# k"}
 		}},
 		{"opencode", "edit", func(p string) map[string]any {
-			return map[string]any{"filePath": p, "oldString": "# base", "newString": "# k", "replaceAll": true}
+			return map[string]any{"path": p, "oldString": "# base", "newString": "# k", "replaceAll": true}
 		}},
-		{"opencode", "multiedit", func(p string) map[string]any {
-			return map[string]any{"filePath": p, "edits": []any{map[string]any{"filePath": p, "oldString": "# base", "newString": "# k"}}}
-		}},
-		{"opencode", "write", func(p string) map[string]any { return map[string]any{"filePath": p, "content": "# k\n"} }},
-		{"opencode", "apply_patch", func(p string) map[string]any { return map[string]any{"patchText": patch(p)} }},
+
+		{"opencode", "write", func(p string) map[string]any { return map[string]any{"path": p, "content": "# k\n"} }},
+		{"opencode", "patch", func(p string) map[string]any { return map[string]any{"patchText": patch(p)} }},
 		{"claudecode", "Write", func(p string) map[string]any { return map[string]any{"file_path": p, "content": "# k\n"} }},
 		{"claudecode", "Edit", func(p string) map[string]any {
 			return map[string]any{"file_path": p, "old_string": "# base", "new_string": "# base\n# k"}

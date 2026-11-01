@@ -462,6 +462,26 @@ func projectPOSIXStatement(
 		out.markPartial(IssueDynamicWord)
 	}
 	projectPOSIXRedirects(stmt.Redirs, &command, out)
+	if command.Program == "exec" && command.ParentCommandID == 0 {
+		if len(command.Argv) != 1 || command.ControlFlowUncertain ||
+			command.PipelineID != 0 || command.Background {
+			clear(out.posixOpenFDs)
+		} else {
+			for _, redirect := range command.Redirects {
+				if redirect.FD < 3 {
+					continue
+				}
+				if !redirect.Expands && strings.HasPrefix(redirect.Target, "/dev/tcp/") {
+					if out.posixOpenFDs == nil {
+						out.posixOpenFDs = make(map[int64]string)
+					}
+					out.posixOpenFDs[redirect.FD] = redirect.Target
+				} else {
+					delete(out.posixOpenFDs, redirect.FD)
+				}
+			}
+		}
+	}
 	classifyPOSIXGitConfigEnvironmentOutput(out, &command, call.Assigns)
 	return command, true
 }
@@ -826,6 +846,16 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			}
 			target := projectPOSIXWord(redirection.Word)
 			targetFD, targetFDErr := strconv.ParseInt(target.Value, 10, 64)
+			if !target.Expands && targetFDErr == nil &&
+				target.Value == strconv.FormatInt(targetFD, 10) &&
+				command.ParentCommandID == 0 && !command.ControlFlowUncertain {
+				if path := out.posixOpenFDs[targetFD]; path != "" {
+					if !out.appendRedirects(command, RedirectFact{FD: fd, Access: access, Target: path}) {
+						return
+					}
+					continue
+				}
+			}
 			if redirection.Op == syntax.DplOut && !target.Expands &&
 				targetFDErr == nil &&
 				target.Value == strconv.FormatInt(targetFD, 10) &&
@@ -1337,7 +1367,7 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 						return nil, false, true
 					}
 					if posixShellProgram(commandProgram(argv[i+1])) {
-						if terminalPOSIXShellArgv(argv[i+1:]) {
+						if sudoStdinPOSIXShellArgv(argv[i+1:]) {
 							return nil, false, false
 						}
 						if !staticPOSIXShellCommandArgv(argv[i+1:]) {
@@ -1393,7 +1423,7 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 				return nil, false, true
 			}
 			if posixShellProgram(commandProgram(argv[i])) {
-				if terminalPOSIXShellArgv(argv[i:]) {
+				if sudoStdinPOSIXShellArgv(argv[i:]) {
 					return nil, false, false
 				}
 				if !staticPOSIXShellCommandArgv(argv[i:]) {
@@ -1482,6 +1512,24 @@ func posixSudoChangesExecutionRoot(arg string) bool {
 		arg == "--chdir" || arg == "--chroot" ||
 		strings.HasPrefix(arg, "--chdir=") ||
 		strings.HasPrefix(arg, "--chroot=")
+}
+
+// sudoStdinPOSIXShellArgv reports whether a shell that sudo starts reads its
+// commands from stdin and names no command of its own: a bare shell (`sudo
+// bash`) or one with an explicit stdin operand (`sudo bash -`, `sudo sh -s`).
+// Like the bare shell, it has no nested command to analyze, so the action
+// stays authoritative (rel-1-0-6 GAP-0221).
+func sudoStdinPOSIXShellArgv(argv []string) bool {
+	if terminalPOSIXShellArgv(argv) {
+		return true
+	}
+	program := commandProgram(argv[0])
+	switch program {
+	case "sh", "bash", "zsh", "dash", "ksh":
+		return exactPOSIXShellStdinArguments(program, argv)
+	default:
+		return false
+	}
 }
 
 func terminalPOSIXShellArgv(argv []string) bool {

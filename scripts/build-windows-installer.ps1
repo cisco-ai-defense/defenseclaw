@@ -91,6 +91,7 @@ $WindowsArtifactHelper = Join-Path $PSScriptRoot 'windows_installer_artifacts.py
 $WindowsAuthenticodeHelper = Join-Path $PSScriptRoot 'windows-authenticode.ps1'
 $WindowsBinaryIdentityHelper = Join-Path $PSScriptRoot 'windows-binary-identity.ps1'
 $PackagedV8ResourceValidator = Join-Path $PSScriptRoot 'validate_packaged_v8_resources.py'
+$DependencyMetadataChecker = Join-Path $PSScriptRoot 'check_python_dependency_metadata.py'
 $HookLauncherName = 'defenseclaw-hook-launcher.exe'
 $HookLauncherMaxUnsignedBytes = 8MB
 
@@ -1094,6 +1095,12 @@ $validationPython = Join-Path $validationRuntime 'python.exe'
 Invoke-CheckedProcess $validationPython @(
     '-I', $WindowsArtifactHelper, 'normalize-site', '--root', $sitePackages
 )
+# Setup installs Windows x64 only and refuses any other PE in its payload.
+# Drop the reviewed non-x64 launchers pip vendors; any other non-x64 PE
+# fails the build here.
+Invoke-CheckedProcess $validationPython @(
+    '-I', $WindowsArtifactHelper, 'prune-foreign-pe', '--root', $sitePackages
+)
 $validationSite = Join-Path $validationRuntime 'Lib\site-packages'
 [IO.Directory]::CreateDirectory($validationSite) | Out-Null
 foreach ($item in Get-ChildItem -LiteralPath $sitePackages -Force) {
@@ -1105,34 +1112,17 @@ Invoke-CheckedProcess $validationPython @(
     '--runtime-root', $validationRuntime,
     '--label', 'staged'
 )
+# Every embedded distribution's requirements are met, apart from the one
+# reviewed LiteLLM override the checker names (GAP-0020).
+Invoke-CheckedProcess $validationPython @('-I', $DependencyMetadataChecker)
 $dependencyCheck = @'
 import importlib.metadata as metadata
 import ctypes
-import platform
 import sys
 from pathlib import Path
-from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 
 installed = {canonicalize_name(dist.metadata['Name']): dist.version for dist in metadata.distributions() if dist.metadata.get('Name')}
-problems = []
-for dist in metadata.distributions():
-    requires_python = dist.metadata.get('Requires-Python')
-    if requires_python and not SpecifierSet(requires_python).contains(platform.python_version(), prereleases=True):
-        problems.append(f'{dist.metadata.get("Name")}: Python {platform.python_version()} violates Requires-Python {requires_python}')
-    for raw in dist.requires or ():
-        requirement = Requirement(raw)
-        if requirement.marker and not requirement.marker.evaluate({'extra': ''}):
-            continue
-        key = canonicalize_name(requirement.name)
-        version = installed.get(key)
-        if version is None:
-            problems.append(f'{dist.metadata.get("Name")}: missing {requirement.name}')
-        elif requirement.specifier and not requirement.specifier.contains(version, prereleases=True):
-            problems.append(f'{dist.metadata.get("Name")}: {requirement.name} {version} violates {requirement.specifier}')
-if problems:
-    raise SystemExit('\n'.join(problems))
 for module in ('defenseclaw', 'skill_scanner', 'mcpscanner', 'yara'):
     __import__(module)
 from skill_scanner.core.scan_policy import ScanPolicy

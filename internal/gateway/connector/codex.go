@@ -517,6 +517,14 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			)
 		}
 	}
+	// A config.toml that went missing after DefenseClaw managed it gets the
+	// account's settings back before the hooks go in (GAP-0581). The
+	// runtime snapshot was taken before, so a rollback removes it again.
+	if err := seedMissingPerUserSettings(c.Name(), opts); err != nil {
+		return c.rollbackSetupAfterSnapshot(
+			opts, runtimeSnapshot, fmt.Errorf("codex config.toml put back: %w", err), false, false,
+		)
+	}
 	if err := c.patchCodexConfig(opts, hookScript); err != nil {
 		return c.rollbackSetupAfterSnapshot(
 			opts,
@@ -551,6 +559,8 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			)
 		}
 	}
+	// The file as it is now is the last known good copy.
+	recordPerUserSettingsCopy(c.Name(), opts)
 
 	return nil
 }
@@ -599,6 +609,9 @@ func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) err
 	}
 	if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
 		return fmt.Errorf("codex teardown: revoke scoped OTLP token: %w", err)
+	}
+	if err := removePerUserSettingsCopies(c.Name(), opts.DataDir); err != nil {
+		return fmt.Errorf("codex teardown: remove the config copy: %w", err)
 	}
 	return nil
 }
@@ -2597,35 +2610,58 @@ func codexNotifyIsCurrent(v interface{}, opts SetupOpts) bool {
 	return argv[0] == "bash" && pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh"))
 }
 
-// codexNotifyLooksManaged recognizes both the current platform command and the
-// legacy Bash bridge. Native matching is strict on argv shape and DefenseClaw
-// executable basename so teardown never removes an unrelated user notifier
-// that happens to contain the word "notify".
+// codexNotifyLooksManaged recognizes the legacy Bash bridge and every notify
+// entry that runs one of DefenseClaw's own launchers (codexNotifyRunsDefenseClaw).
+// Matching is strict on the program and its notify subcommand, so teardown
+// never removes an unrelated user notifier that happens to contain the word
+// "notify".
 func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	if codexValueMatches(v, codexShellNotifyCommand(opts)) {
 		return true
 	}
 	argv, ok := codexNotifyArgv(v)
-	if !ok || len(argv) != 2 {
+	if !ok {
 		return false
 	}
-	if argv[0] == "bash" {
-		// Older Windows releases serialized this path with either slash style.
-		// Treat lexical spellings of the same bound data-root bridge alike, and a
-		// notify-bridge* script edited in place inside the data root, but never
-		// claim a script elsewhere merely because its basename matches.
-		if pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh")) {
-			return true
-		}
-		return strings.TrimSpace(opts.DataDir) != "" &&
-			strings.HasPrefix(strings.ToLower(filepath.Base(argv[1])), "notify-bridge") &&
-			pathidentity.Same(filepath.Dir(argv[1]), opts.DataDir)
+	if codexNotifyRunsDefenseClaw(argv) {
+		return true
 	}
-	// A launcher name edited in place next to DefenseClaw's own launcher keeps
-	// our exact argv, so teardown removes it instead of leaving Codex pointing at
-	// a program that does not exist (GAP-1248).
-	return argv[1] == "notify" &&
-		(isDefenseClawHookExecutable(argv[0]) || isRenamedDefenseClawHookExecutable(argv[0]))
+	if len(argv) != 2 || argv[0] != "bash" {
+		return false
+	}
+	// Older Windows releases serialized this path with either slash style.
+	// Treat lexical spellings of the same bound data-root bridge alike, and a
+	// notify-bridge* script edited in place inside the data root, but never
+	// claim a script elsewhere merely because its basename matches.
+	if pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh")) {
+		return true
+	}
+	return strings.TrimSpace(opts.DataDir) != "" &&
+		strings.HasPrefix(strings.ToLower(filepath.Base(argv[1])), "notify-bridge") &&
+		pathidentity.Same(filepath.Dir(argv[1]), opts.DataDir)
+}
+
+// codexNotifySubcommands are the subcommands a DefenseClaw launcher was given
+// in Codex's notify: "notify" for the hook launcher, and "codex-notify" for
+// the gateway executable that Windows pre-publish installs named (GAP-0376).
+var codexNotifySubcommands = map[string]bool{"notify": true, "codex-notify": true}
+
+// codexNotifyRunsDefenseClaw reports whether a notify argv runs DefenseClaw's
+// own hook launcher or gateway with a DefenseClaw notify subcommand, with or
+// without more arguments after it, in any spelling of the program: absolute
+// path with either slash style, the bare executable name, one pair of
+// surrounding double quotes, or a launcher renamed in place next to ours
+// (GAP-1248). An uninstall removes that program, so teardown removes the
+// entry rather than leave Codex calling a program that is gone (GAP-0376).
+func codexNotifyRunsDefenseClaw(argv []string) bool {
+	if len(argv) < 2 || !codexNotifySubcommands[strings.TrimSpace(argv[1])] {
+		return false
+	}
+	program := strings.TrimSpace(argv[0])
+	if len(program) >= 2 && program[0] == '"' && program[len(program)-1] == '"' {
+		program = strings.TrimSpace(program[1 : len(program)-1])
+	}
+	return isDefenseClawHookExecutable(program) || isRenamedDefenseClawHookExecutable(program)
 }
 
 func restoreCodexNotify(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) error {

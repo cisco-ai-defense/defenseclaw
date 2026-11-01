@@ -8,8 +8,9 @@ import (
 	"encoding/xml"
 	"io"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -24,7 +25,7 @@ const (
 // visualStudioInstanceDir matches %LOCALAPPDATA%\Microsoft\VisualStudio
 // instance folders such as 17.0_1a2b3c4d (and the 17.0_1a2b3c4dExp
 // experimental hive).
-var visualStudioInstanceDir = regexp.MustCompile(`^(\d+)\.(\d+)_[0-9A-Za-z]+$`)
+var visualStudioInstanceDir = lazyregexp.New(`^(\d+)\.(\d+)_[0-9A-Za-z]+$`)
 
 // visualStudioEnabledLookup returns the enabled extension ids of one
 // instance (from its privateregistry.bin hive), and false when the hive

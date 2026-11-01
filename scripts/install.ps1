@@ -636,6 +636,21 @@ function Test-ReleaseSignature([string]$Cosign, [string]$Bundle, [string]$Checks
         "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", $Checksums) -Quiet
 }
 
+function Assert-OlderReleaseGuardsAgents([string]$Kind, [string]$Target) {
+    # The installed CLI says whether DefenseClaw $Target can guard the agents
+    # set up here (OpenCode V2 before 1.0.6: rel-1-0-6 GAP-0028 for a
+    # rollback, GAP-0128 for a downgrade) and stops before anything changes.
+    # A CLI without the check (1.0.5 and earlier) answers 2 and is not shown.
+    $venv = Get-Variable -Name Venv -ValueOnly -ErrorAction SilentlyContinue
+    $cli = if ($venv) { Join-Path $venv "Scripts\defenseclaw.exe" } else { "" }
+    if (-not ($cli -and (Test-Path -LiteralPath $cli))) { return }
+    $probe = Get-NativeProbe $cli @("migrate", "--check-$Kind-to", $Target)
+    if ($probe.Exit -ne 1) { return }
+    Write-Host ($probe.Output.TrimEnd())
+    $what = if ($Kind -eq "rollback") { "Rollback" } else { "Downgrade" }
+    Die "$what cancelled; nothing was changed (see above)"
+}
+
 function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     # Download that release's installer, verify it, and run it (-Version, or
     # an unstamped copy from the source tree). Named like the directories of
@@ -645,6 +660,8 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     $versionChange = (Test-Version $installed) -and (Test-Version $target) -and [version]$target -ne [version]$installed
     if ($versionChange) { Assert-NoActiveConnectorRecovery "Version change to $target" }
     $downgrade = $versionChange -and [version]$target -lt [version]$installed
+    # An older release's installer has no check for what it cannot guard.
+    if ($downgrade) { Assert-OlderReleaseGuardsAgents "downgrade" $target }
     $restartCurrent = $false
     $hooksConverted = $false
     $childCode = $null
@@ -911,8 +928,15 @@ function Get-GatewayProcess {
 # Older OpenCode and Amp processes retain their plugin in memory. Only the
 # exact installed entry may defer a gateway swap. Unproven candidates are
 # audited and the upgrade proceeds with the configured hook outage behavior.
+# The line goes to a log beside the install log, not the console, which shows
+# only the installer's own steps (GAP-0103).
 function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) {
-    Write-Warn "audit: live-agent identity unproven for PID ${ProcessId}: $Reason"
+    $line = "audit: live-agent identity unproven for PID ${ProcessId}: $Reason"
+    $file = if ($Run.Log) { [IO.Path]::ChangeExtension($Run.Log, $null).TrimEnd(".") + "-audit.log" } else { "" }
+    if ($file) {
+        try { Add-Content -LiteralPath $file -Value $line -ErrorAction Stop; return } catch { }
+    }
+    Write-Verbose $line
 }
 
 # Resolve a file link without consulting PATH. Get-Item sees Windows file
@@ -971,13 +995,18 @@ function Get-InstalledAgentPrograms([object[]]$Processes = @()) {
     $roaming = [string]$env:APPDATA
     if ($roaming) {
         $npm = Join-Path $roaming "npm"
-        $native = Resolve-AgentPath (Join-Path $npm "node_modules\opencode-ai\bin\opencode.exe")
-        if ($native) { $installed[$native.ToLowerInvariant()] = "opencode" }
+        # Recognize a previous V1 process only so upgrades can stop it; setup admits V2 only.
+        foreach ($relative in @("node_modules\@opencode\cli\bin\opencode.exe", "node_modules\opencode-ai\bin\opencode.exe")) {
+            $native = Resolve-AgentPath (Join-Path $npm $relative)
+            if ($native) { $installed[$native.ToLowerInvariant()] = "opencode" }
+        }
         foreach ($name in @("opencode", "amp")) {
-            $relative = if ($name -eq "opencode") { "node_modules\opencode-ai\bin\opencode" } else { "node_modules\@sourcegraph\amp\dist\main.js" }
+            $relatives = if ($name -eq "opencode") { @("node_modules\@opencode\cli\bin\opencode", "node_modules\opencode-ai\bin\opencode") } else { @("node_modules\@sourcegraph\amp\dist\main.js") }
             if (-not (Test-Path -LiteralPath (Join-Path $npm ($name + ".cmd")) -PathType Leaf)) { continue }
-            $entry = Resolve-AgentPath (Join-Path $npm $relative)
-            if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+            foreach ($relative in $relatives) {
+                $entry = Resolve-AgentPath (Join-Path $npm $relative)
+                if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+            }
         }
     }
     foreach ($process in $Processes) {
@@ -987,9 +1016,11 @@ function Get-InstalledAgentPrograms([object[]]$Processes = @()) {
         if (-not $folder) { continue }
         foreach ($name in @("opencode", "amp")) {
             if (-not (Test-Path -LiteralPath (Join-Path $folder ($name + ".cmd")) -PathType Leaf)) { continue }
-            $relative = if ($name -eq "opencode") { "node_modules\opencode-ai\bin\opencode" } else { "node_modules\@sourcegraph\amp\dist\main.js" }
-            $entry = Resolve-AgentPath (Join-Path $folder $relative)
-            if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+            $relatives = if ($name -eq "opencode") { @("node_modules\@opencode\cli\bin\opencode", "node_modules\opencode-ai\bin\opencode") } else { @("node_modules\@sourcegraph\amp\dist\main.js") }
+            foreach ($relative in $relatives) {
+                $entry = Resolve-AgentPath (Join-Path $folder $relative)
+                if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+            }
         }
     }
     try {
@@ -1140,7 +1171,7 @@ function Assert-NoLoadedPluginAgents {
         if (("$($owner.Domain)\$($owner.User)") -ieq $current) { $loaded += "$agent (PID $($process.ProcessId))" }
     }
     if ($loaded.Count) {
-        Die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: $($loaded -join ', ')"
+        Die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw (OpenCode V2 keeps a background server after its window closes: stop it with 'opencode service stop'), then run this installer again; gateway still running: $($loaded -join ', ')"
     }
 }
 
@@ -5182,6 +5213,9 @@ function Invoke-Rollback {
     }
     Assert-NoActiveConnectorRecovery "Rollback to $backTo"
     if (-not $rollForward) {
+        # rel-1-0-6 GAP-0028: a release that cannot guard an agent here
+        # (OpenCode V2 before 1.0.6) says so before anything changes.
+        Assert-OlderReleaseGuardsAgents "rollback" $backTo
         Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
         $stale = @(Get-StaleAgentEvidence (Join-Path $Previous "data"))
         if ($stale.Count -and $backTo -match '^(?:0\.8\.10|1\.0\.[0-3])$') {
@@ -5374,6 +5408,12 @@ function Invoke-Install {
     $TargetVersion = $Version -replace '^v', ''
     if ($VersionGiven -and -not $TargetVersion) { Stop-Usage "-Version needs a value such as 1.2.3" }
     if ($TargetVersion -and -not (Test-Version $TargetVersion)) { Stop-Usage "-Version must look like 1.2.3, got '$Version'" }
+    # DEFENSECLAW_REPO is a GitHub owner/name or an https:// mirror base URL. Any
+    # other value (an http:// URL) would be appended to github.com and end in a
+    # 404 (GAP-1065). The value is not echoed: a mirror URL can carry credentials.
+    if ($Repo -notmatch '^https://\S+$' -and $Repo -notmatch '^[^\s/:@]+/[^\s/:@]+$') {
+        Stop-Usage "DEFENSECLAW_REPO must be a GitHub owner/name or an https:// mirror URL (an http:// URL is not accepted)"
+    }
     $LocalDir = ""
     if ($LocalGiven -and -not $Local.Trim()) { Stop-Usage "-Local needs the folder that holds the release assets" }
     if ($Local) {
@@ -5457,6 +5497,7 @@ function Invoke-Install {
         if (-not (Test-Path -LiteralPath $targetWheel -PathType Leaf)) {
             Die "-Local $LocalDir has no wheel for the requested DefenseClaw $TargetVersion"
         }
+        Assert-OlderReleaseGuardsAgents "downgrade" $TargetVersion
         $Ver = $TargetVersion
     }
     if ($TargetVersion -and $TargetVersion -ne $Ver -and -not $Rollback) {

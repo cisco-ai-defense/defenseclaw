@@ -129,6 +129,61 @@ func TestEnterpriseDiscoveryListsEachAccountsInventory(t *testing.T) {
 	}
 }
 
+// --user <uid> lists the runtime findings of the account that holds the uid,
+// as --user <name> does, and none of another account; Linux and macOS
+// findings carry the account name only (rel-1-0-6 GAP-0159).
+func TestEnterpriseDiscoveryUIDUserListsThatAccountsRuntimeFindings(t *testing.T) {
+	dir := t.TempDir()
+	record := inventory.UserScanRecord{Version: inventory.UserScanRecordVersion, UID: 1013, User: "r106fs7b", UpdatedAt: time.Now().UTC(),
+		Report: inventory.AIDiscoveryReport{Summary: inventory.AIDiscoverySummary{Result: "ok"}}}
+	data, _ := json.Marshal(record)
+	if err := os.WriteFile(filepath.Join(dir, "1013.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousIDs, previousName, previousRead := enterpriseDiscoveryAccountIDs, enterpriseDiscoveryUIDName, enterpriseDiscoveryReadRecord
+	t.Cleanup(func() {
+		enterpriseDiscoveryAccountIDs, enterpriseDiscoveryUIDName, enterpriseDiscoveryReadRecord = previousIDs, previousName, previousRead
+	})
+	enterpriseDiscoveryAccountIDs = func(string) []string { return nil }
+	enterpriseDiscoveryReadRecord = func(path string) (inventory.UserScanRecord, error) {
+		var record inventory.UserScanRecord
+		data, err := os.ReadFile(path)
+		if err == nil {
+			err = json.Unmarshal(data, &record)
+		}
+		return record, err
+	}
+	previousRuntime := enterpriseDiscoveryRuntime
+	t.Cleanup(func() { enterpriseDiscoveryRuntime = previousRuntime })
+	enterpriseDiscoveryRuntime = func() (*enterpriseRuntimeView, error) {
+		return &enterpriseRuntimeView{Enabled: true, Findings: []enterpriseRuntimeFinding{
+			{PID: 41, Process: "python3", User: "r106fs7b", Attribution: "process_owner", Score: 40, Severity: "medium"},
+			{PID: 42, Process: "python3", User: "r106fs7c", Attribution: "process_owner", Score: 40, Severity: "medium"},
+		}}, nil
+	}
+	for _, tc := range []struct {
+		name   string
+		lookup func(int) string
+	}{
+		{"the account database names the uid", func(uid int) string { return map[int]string{1013: "r106fs7b"}[uid] }},
+		{"only the record names the uid", func(int) string { return "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enterpriseDiscoveryUIDName = tc.lookup
+			for _, spelling := range []string{"r106fs7b", "1013"} {
+				var out bytes.Buffer
+				var report enterpriseDiscoveryReport
+				if err := writeEnterpriseDiscovery(&out, dir, spelling, true); err != nil || json.Unmarshal(out.Bytes(), &report) != nil {
+					t.Fatalf("--user %s = %v:\n%s", spelling, err, out.String())
+				}
+				if report.Runtime == nil || len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].PID != 41 {
+					t.Fatalf("--user %s runtime = %+v, want only pid 41 of r106fs7b", spelling, report.Runtime)
+				}
+			}
+		})
+	}
+}
+
 func stubEnterpriseDiscoveryRuntime(t *testing.T, view *enterpriseRuntimeView, err error) {
 	t.Helper()
 	previous := enterpriseDiscoveryRuntime
@@ -262,7 +317,7 @@ func TestGatewayStatusShowsTheKernelSensor(t *testing.T) {
 	if got, want := kernelSensorStatusLine(&snap), "Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing"; got != want {
 		t.Fatalf("line %q, want %q", got, want)
 	}
-	if out := captureStdout(t, func() { printSubsystems(&snap) }); !strings.Contains(out, "Kernel sensor: Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing") {
+	if out := captureStdout(t, func() { printSubsystems(&snap, 0) }); !strings.Contains(out, "Kernel sensor: Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing") {
 		t.Fatalf("subsystems:\n%s", out)
 	}
 	var native gateway.HealthSnapshot
@@ -272,7 +327,7 @@ func TestGatewayStatusShowsTheKernelSensor(t *testing.T) {
 	}
 	var plain gateway.HealthSnapshot
 	_ = json.Unmarshal([]byte(`{"ai_runtime":{"details":{"planes":{"c":{"running":true}}}}}`), &plain)
-	if out := captureStdout(t, func() { printSubsystems(&plain) }); strings.Contains(out, "Kernel sensor") || kernelSensorStatusLine(&plain) != "" {
+	if out := captureStdout(t, func() { printSubsystems(&plain, 0) }); strings.Contains(out, "Kernel sensor") || kernelSensorStatusLine(&plain) != "" {
 		t.Fatalf("a gateway without a backend prints a kernel line:\n%s", out)
 	}
 }

@@ -43,6 +43,8 @@ struct InventoryView: View {
     @State private var error: String?
     @State private var warning: String?
     @State private var lastScan: Date?
+    /// The IDE plugin inventory stopped at its bound (the tab reads "N+").
+    @State private var idePluginsPartial = false
 
     init(initialCategory: InventoryCategory? = nil) {
         _tab = State(initialValue: initialCategory?.rawValue ?? "Summary")
@@ -57,8 +59,14 @@ struct InventoryView: View {
         return items.filter { item in
             guard item.category == category else { return false }
             guard item.category == .idePlugins || appState.connectorFilterAllows(item.connector) else { return false }
-            let state = "\(item.status) \(item.verdict) \(item.detail)".lowercased()
-            if statusFilter != "all", !state.contains(statusFilter) { return false }
+            // IDE plugin chips match the worded enabled state exactly: the
+            // "unknown" chip must not also catch "client side".
+            if item.category == .idePlugins, statusFilter != "all", statusFilter != "ai extension" {
+                if item.status != statusFilter { return false }
+            } else {
+                let state = "\(item.status) \(item.verdict) \(item.detail)".lowercased()
+                if statusFilter != "all", !state.contains(statusFilter) { return false }
+            }
             guard !search.isEmpty else { return true }
             let fields = item.fields.map { "\($0.label) \($0.value)" }.joined(separator: " ")
             return "\(item.name) \(item.path) \(item.connector) \(fields)"
@@ -87,7 +95,7 @@ struct InventoryView: View {
         switch category {
         case .skills: [("All", "all"), ("Eligible", "eligible"), ("Warning", "warning"), ("Blocked", "blocked")]
         case .plugins: [("All", "all"), ("Loaded", "loaded"), ("Disabled", "disabled"), ("Blocked", "blocked")]
-        case .idePlugins: [("All", "all"), ("Enabled", "enabled"), ("Disabled", "disabled"), ("Unknown", "unknown"), ("AI", "ai extension")]
+        case .idePlugins: [("All", "all"), ("Enabled", "yes"), ("Disabled", "no"), ("Client side", "client side"), ("Unknown", "unknown"), ("AI", "ai extension")]
         default: [("All", "all")]
         }
     }
@@ -98,7 +106,8 @@ struct InventoryView: View {
                 Picker("View", selection: $tab) {
                     Text("Summary").tag("Summary")
                     ForEach(InventoryCategory.allCases) { category in
-                        Text("\(category.rawValue) (\(scopedItems.filter { $0.category == category }.count))")
+                        let count = scopedItems.filter { $0.category == category }.count
+                        Text("\(category.rawValue) (\(count)\(category == .idePlugins && idePluginsPartial ? "+" : ""))")
                             .tag(category.rawValue)
                     }
                 }
@@ -216,6 +225,13 @@ struct InventoryView: View {
                 StatCard(title: "Connectors", value: "\(scopedSummaries.count)", tint: .secondary)
                 StatCard(title: "Errors", value: "\(scopedSummaries.reduce(0) { $0 + $1.errors })",
                          tint: scopedSummaries.contains { $0.errors > 0 } ? Cisco.red : .secondary)
+                // inventory_state._ide_count_summary: "N (X AI, Y disabled, Z users)".
+                let ideCount = scopedItems.filter { $0.category == .idePlugins }.count
+                let ideSummary = RuntimeV1Inventory.ideCountSummary(scopedItems)
+                // Without rows the banner carries the scan's note (ide_plugins_note).
+                StatCard(title: "IDE Plugins" + (ideCount > 0 && ideSummary.contains("(") ? " · " + ideSummary.drop(while: { $0 != "(" }).dropFirst().dropLast() : ""),
+                         value: "\(ideCount)\(idePluginsPartial ? "+" : "")",
+                         tint: .secondary)
             }
             Text("Connector snapshots below; IDE extensions and observed agent identities are included in the total and their inventory tabs.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -315,6 +331,7 @@ struct InventoryView: View {
             var seen = Set<String>()
             let ideRows = parsed.documents.flatMap(RuntimeV1Inventory.ideRows).filter { seen.insert($0.id).inserted }
             items += ideRows
+            idePluginsPartial = parsed.documents.contains(where: RuntimeV1Inventory.idePluginsPartial)
             summaries = parsed.documents.map(Self.summary(from:))
             warning = InventoryOutputParser.userFacingDiagnostics(from: parsed).nonEmpty
             let identityResult = await appState.runCommand(title: "Load agent identities",
@@ -329,6 +346,9 @@ struct InventoryView: View {
             }
             let ideNotes = parsed.documents.compactMap { $0["ide_plugins_note"] as? String }.filter { !$0.isEmpty }
             if !ideNotes.isEmpty { warning = [warning, Array(Set(ideNotes)).sorted().joined(separator: "\n")].compactMap { $0 }.joined(separator: "\n") }
+            if idePluginsPartial {
+                warning = [warning, "IDE plugin inventory is partial: the scan stopped at its bound."].compactMap { $0 }.joined(separator: "\n")
+            }
             lastScan = Date()
         }
     }
@@ -779,8 +799,9 @@ struct AIDiscoveryView: View {
         let detector = [
             signal.detector.isEmpty ? "" : "detector=\(signal.detector)",
             signal.source.isEmpty ? "" : "source=\(signal.source)",
+            signal.sandboxName.isEmpty ? "" : "sandbox=\(signal.sandboxName)",
         ].filter { !$0.isEmpty }.joined(separator: " ")
-        let runtime = signal.runtime.map(AIDiscoveryGrouping.runtimeDetail) ?? ""
+        let runtime = signal.runtime.map { AIDiscoveryGrouping.runtimeDetail($0, sandboxName: signal.sandboxName) } ?? ""
         let activity = AIDiscoveryGrouping.activityDetail(signal)
 
         return VStack(alignment: .leading, spacing: 3) {

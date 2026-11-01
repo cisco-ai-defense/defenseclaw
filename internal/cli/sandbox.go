@@ -172,7 +172,7 @@ with --output json it prints the pull's result.`
 
 func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 	if err := sandboxHostRefusal(runtime.GOOS, runtime.GOARCH, cmd.Annotations[sandboxConfigOptional] == "true"); err != nil {
-		return withExitCode(err, 3)
+		return withExitCode(managedWindowsSandboxRefusal(err), 3)
 	}
 	// A nested `sandbox run` inside a sandbox runs the harness natively and
 	// needs no configuration (there is none inside the sandbox).
@@ -267,6 +267,17 @@ func sandboxHostRefusal(goos, goarch string, cleanup bool) error {
 			strings.TrimPrefix(err.Error(), "openshell: "))
 	}
 	return nil
+}
+
+// managedWindowsSandboxRefusal adds to the platform refusal on a managed
+// Windows computer the one sandbox view there is, the administrator's list
+// of the account's registrations: it named no next step (GAP-0523).
+func managedWindowsSandboxRefusal(err error) error {
+	if _, managed := managedHostWindowsStandalone(); !managed {
+		return err
+	}
+	return fmt.Errorf("%w. %s", err, windowsManagedStandardUserViewAnswer("The sandbox registrations",
+		"enterprise windows sandbox list --user "+managedHostCurrentAccountName()))
 }
 
 // sandboxRunE adapts a command to cobra: it prints the error once, styled,

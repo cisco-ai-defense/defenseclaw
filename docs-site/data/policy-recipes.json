@@ -919,6 +919,93 @@
       ]
     },
     {
+      "id": "RECIPE-CMD-WRAPPED-DOWNLOAD-EXEC",
+      "title": "Download piped through a privilege wrapper to a shell",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-WRAPPED-DOWNLOAD-EXEC",
+        "tool_call_only": true,
+        "expression": "false",
+        "pattern": "a^",
+        "title": "Download piped through a privilege wrapper to a shell",
+        "severity": "CRITICAL",
+        "confidence": 0.99,
+        "tags": [
+          "execution",
+          "download-exec"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "download-exec"
+      ],
+      "data_axis": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-SUBST-DOWNLOAD-EXEC",
+      "title": "Downloaded command substitution evaluated by a shell",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-SUBST-DOWNLOAD-EXEC",
+        "tool_call_only": true,
+        "expression": "false",
+        "pattern": "a^",
+        "title": "Downloaded command substitution evaluated by a shell",
+        "severity": "CRITICAL",
+        "confidence": 0.99,
+        "tags": [
+          "execution",
+          "download-exec"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "download-exec"
+      ],
+      "data_axis": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-PYTHON-SOCKET-CONNECT",
+      "title": "Python code connects to a nonlocal socket",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-PYTHON-SOCKET-CONNECT",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.program in ['python', 'python2', 'python3'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations)",
+        "pattern": "a^",
+        "title": "Python code connects to a nonlocal socket",
+        "severity": "CRITICAL",
+        "confidence": 0.99,
+        "tags": [
+          "execution",
+          "network"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "network"
+      ],
+      "data_axis": [
+        "egress_external"
+      ]
+    },
+    {
       "id": "RECIPE-CMD-PIPE-BASE64",
       "title": "base64 decode piped to shell",
       "kind": "rule:command",

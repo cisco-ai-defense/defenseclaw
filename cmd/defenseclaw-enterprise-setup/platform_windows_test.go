@@ -369,7 +369,7 @@ func TestRemoveStaleEnterpriseSetupStagesSkipsYoungAndBusyFolders(t *testing.T) 
 		}
 	}
 	var progress, diagnostics bytes.Buffer
-	removeStaleEnterpriseSetupStages(programData, time.Now(), &progress, &diagnostics)
+	removeStaleEnterpriseSetupStages(programData, time.Now(), enterpriseSetupStageStaleAge, &progress, &diagnostics)
 	for _, dir := range []string{stale, busy, other} {
 		if _, err := os.Stat(dir); err != nil {
 			t.Fatalf("a young folder was taken: %v", err)
@@ -385,7 +385,7 @@ func TestRemoveStaleEnterpriseSetupStagesSkipsYoungAndBusyFolders(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer windows.CloseHandle(handle)
-	removeStaleEnterpriseSetupStages(programData, time.Now().Add(time.Hour), &progress, &diagnostics)
+	removeStaleEnterpriseSetupStages(programData, time.Now().Add(time.Hour), enterpriseSetupStageStaleAge, &progress, &diagnostics)
 	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the stale folder stayed: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestRemoveStaleEnterpriseSetupStagesReportsRemovalOffStderr(t *testing.T) {
 	t.Cleanup(func() { cleanupStaleEnterpriseSetupStage = previous })
 	cleanupStaleEnterpriseSetupStage = func(stage, _ string) error { return os.RemoveAll(stage) }
 	var progress, diagnostics bytes.Buffer
-	removeStaleEnterpriseSetupStages(programData, time.Now().Add(time.Hour), &progress, &diagnostics)
+	removeStaleEnterpriseSetupStages(programData, time.Now().Add(time.Hour), enterpriseSetupStageStaleAge, &progress, &diagnostics)
 	if diagnostics.Len() != 0 || !strings.Contains(progress.String(), "removed the staging folder") {
 		t.Fatalf("progress = %q, diagnostics = %q", progress.String(), diagnostics.String())
 	}
@@ -500,5 +500,68 @@ func TestEnterpriseLifecycleArgumentsHandEnsureTheSetupTimeout(t *testing.T) {
 		if got := enterpriseLifecycleArguments(stage, opts); value(got) != "" {
 			t.Fatalf("%s (standalone %v) passed --timeout-seconds: %#v", opts.Action, opts.Standalone, got)
 		}
+	}
+}
+
+// GAP-0165: the recovering /ensure after a killed Setup kept the killed run's
+// staging folder (about 700 MB of payload), because it was younger than the
+// 30-minute bar. With a pending transaction the bar is not waited for; a
+// folder a live Setup holds (holdEnterpriseSetupStage, or a lifecycle's
+// working directory) is still kept, and without a pending transaction a young
+// folder is kept as before.
+func TestRecoveringSetupTakesTheStoppedRunsYoungStage(t *testing.T) {
+	previous := standaloneSetupTransactionPending
+	t.Cleanup(func() { standaloneSetupTransactionPending = previous })
+	pending := false
+	standaloneSetupTransactionPending = func() bool { return pending }
+	if got := enterpriseSetupStageSweepAge(); got != enterpriseSetupStageStaleAge {
+		t.Fatalf("no pending transaction: sweep age %s", got)
+	}
+	pending = true
+	if got := enterpriseSetupStageSweepAge(); got != 0 {
+		t.Fatalf("pending transaction: sweep age %s", got)
+	}
+
+	previousCleanup := cleanupStaleEnterpriseSetupStage
+	t.Cleanup(func() { cleanupStaleEnterpriseSetupStage = previousCleanup })
+	cleanupStaleEnterpriseSetupStage = func(stage, _ string) error { return os.RemoveAll(stage) }
+	programData := t.TempDir()
+	killed := filepath.Join(programData, enterpriseSetupStagePrefix+strings.Repeat("d", 32))
+	live := filepath.Join(programData, enterpriseSetupStagePrefix+strings.Repeat("e", 32))
+	for _, dir := range []string{killed, live} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hold, err := holdEnterpriseSetupStage(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A file can still be written into a held stage.
+	if err := os.WriteFile(filepath.Join(live, "payload.bin"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write into a held stage: %v", err)
+	}
+	var progress, diagnostics bytes.Buffer
+	removeStaleEnterpriseSetupStages(programData, time.Now(), enterpriseSetupStageStaleAge, &progress, &diagnostics)
+	if _, err := os.Stat(killed); err != nil {
+		t.Fatalf("a young folder was taken without a pending transaction: %v", err)
+	}
+	removeStaleEnterpriseSetupStages(programData, time.Now(), enterpriseSetupStageSweepAge(), &progress, &diagnostics)
+	if _, err := os.Stat(killed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the stopped run's stage stayed after the recovering run: %v", err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("a stage a running Setup holds was taken: %v", err)
+	}
+	if !strings.Contains(progress.String(), "removed the staging folder an interrupted Setup run left") {
+		t.Fatalf("progress = %q", progress.String())
+	}
+	// Released, it is an ordinary stopped run's stage.
+	if err := windows.CloseHandle(hold); err != nil {
+		t.Fatal(err)
+	}
+	removeStaleEnterpriseSetupStages(programData, time.Now(), 0, &progress, &diagnostics)
+	if _, err := os.Stat(live); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a released stage stayed: %v", err)
 	}
 }

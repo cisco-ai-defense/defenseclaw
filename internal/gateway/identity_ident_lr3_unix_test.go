@@ -26,7 +26,8 @@ import (
 // is now served only while the account database names the holder and the
 // incarnation the facts were cached for; a uid that changed hands drops
 // them for every spelling. The bare name and the uid keep the outage
-// behavior of rel/1.0.4 (GAP-0899).
+// behavior of rel/1.0.4 (GAP-0899), and so do CORP\alice and
+// alice@corp.example, which spell the account name (GAP-0551).
 func TestACachedQualifiedSpellingNeedsTheHolderOfTheUIDNow(t *testing.T) {
 	const uid = 1_870_400_552
 	const id = "1870400552"
@@ -75,6 +76,8 @@ func TestACachedQualifiedSpellingNeedsTheHolderOfTheUIDNow(t *testing.T) {
 		return resolver
 	}
 	qualified := []string{"alice.smith@corp.example", `CORP\alice`, "alice@corp.example"}
+	const alias = "alice.smith@corp.example"
+	names := []string{"alice", id, `CORP\alice`, "alice@corp.example"}
 	served := func(t *testing.T, spelled string) {
 		t.Helper()
 		subject, err := profileExplainUnresolved(spelled, unixidentity.ErrNotFound)
@@ -105,21 +108,20 @@ func TestACachedQualifiedSpellingNeedsTheHolderOfTheUIDNow(t *testing.T) {
 	t.Run("the directory names no incarnation now", func(t *testing.T) {
 		fresh(t)
 		holds("", false)
-		for _, spelled := range qualified {
-			notServed(t, spelled, "cannot confirm that the account that holds uid "+id)
+		notServed(t, alias, "cannot confirm that the account that holds uid "+id)
+		for _, spelled := range names {
+			served(t, spelled)
 		}
-		served(t, "alice")
-		served(t, id)
 	})
 	t.Run("the account database does not name the uid now", func(t *testing.T) {
 		resolver := fresh(t)
 		resolver.mu.Lock()
 		delete(resolver.accounts, uid)
 		resolver.mu.Unlock()
-		for _, spelled := range qualified {
-			notServed(t, spelled, "does not name the account that holds uid "+id)
+		notServed(t, alias, "does not name the account that holds uid "+id)
+		for _, spelled := range names {
+			served(t, spelled)
 		}
-		served(t, "alice")
 	})
 	t.Run("the uid and the UPN went to another account", func(t *testing.T) {
 		resolver := fresh(t)

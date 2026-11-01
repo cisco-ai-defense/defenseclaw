@@ -178,7 +178,7 @@ func seedOpenCodeSelectionForTestAt(t *testing.T, dataDir string, now time.Time)
 		t.Fatalf("create OpenCode selection fixture folder: %v", err)
 	}
 	executable := filepath.Join(packageDir, "opencode.exe")
-	body := []byte("MZ OpenCode 1.18.19 CLI reconcile fixture")
+	body := []byte("MZ OpenCode 2.1.4 CLI reconcile fixture")
 	if err := os.WriteFile(executable, body, 0o700); err != nil {
 		t.Fatalf("write OpenCode selection fixture: %v", err)
 	}
@@ -191,8 +191,8 @@ func seedOpenCodeSelectionForTestAt(t *testing.T, dataDir string, now time.Time)
 				"connector":          "opencode",
 				"source":             "setup-selected",
 				"executable":         executable,
-				"raw_version":        "1.18.19",
-				"normalized_version": "1.18.19",
+				"raw_version":        "2.1.4",
+				"normalized_version": "2.1.4",
 				"sha256":             fmt.Sprintf("%x", digest[:]),
 				"selected_at":        now.Format(time.RFC3339),
 				"expires_at":         now.Add(15 * time.Minute).Format(time.RFC3339),
@@ -793,7 +793,7 @@ func TestConnectorReconcileOpenCodePublishesCompleteActivation(t *testing.T) {
 		t.Fatalf("OpenCode custody receipt missing after reconcile: %v", err)
 	}
 	lock := connector.LoadHookContractLockEntry(dataDir, "opencode")
-	if lock.Connector != "opencode" || lock.ContractID != "opencode-hooks-v1" {
+	if lock.Connector != "opencode" || lock.ContractID != "opencode-hooks-v2" {
 		t.Fatalf("OpenCode contract lock = %+v", lock)
 	}
 	if got := connector.LoadActiveConnector(dataDir); got != "opencode" {

@@ -126,3 +126,78 @@ func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) 
 		}
 	}
 }
+
+// enterprise acp verify and list check the executables with the guard's own
+// rule: a changed agent or a changed user-owned guard fails both, and the
+// unchanged pair passes both (GAP-1156).
+func TestLockedExecutablesMatchAgreesWithTheGuard(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	agent := filepath.Join(dir, "agent")
+	if err := os.WriteFile(agent, []byte("agent-v1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientConfig := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(clientConfig, []byte(`{"agent_servers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clientDigest, _ := fileSHA256(clientConfig)
+	agentDigest, _ := fileSHA256(agent)
+	guardDigest, _ := fileSHA256(guard)
+	var lock RuntimeContractLock
+	lock.Version = 1
+	lock.Protocol.SchemaVersion, lock.Protocol.SchemaSHA256 = SchemaVersion, SchemaSHA256
+	lock.Client.ID, lock.Client.ConfigPath, lock.Client.ConfigSHA256 = "zed", clientConfig, clientDigest
+	lock.Agent.ID, lock.Agent.Path, lock.Agent.SHA256 = "kiro", agent, agentDigest
+	lock.Guard.Path, lock.Guard.SHA256 = guard, guardDigest
+	lock.Profile, lock.Mode = "default", "action"
+	path := filepath.Join(dir, "contract-lock.json")
+	write := func() {
+		t.Helper()
+		body, _ := json.Marshal(lock)
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := safefile.ProtectFile(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err != nil {
+		t.Fatalf("guard refused an unchanged contract: %v", err)
+	}
+	if err := LockedExecutablesMatch(lock, agent, guard); err != nil {
+		t.Fatalf("verify refused an unchanged contract: %v", err)
+	}
+	if err := os.WriteFile(agent, []byte("agent-v1\n# changed\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	guardErr := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent)
+	verifyErr := LockedExecutablesMatch(lock, agent, guard)
+	if guardErr == nil || verifyErr == nil || guardErr.Error() != verifyErr.Error() {
+		t.Fatalf("a changed agent: guard %v, verify %v; want the same refusal", guardErr, verifyErr)
+	}
+	if err := os.WriteFile(agent, []byte("agent-v1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock.Guard.SHA256 = strings.Repeat("0", 64)
+	write()
+	guardErr = ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent)
+	verifyErr = LockedExecutablesMatch(lock, agent, guard)
+	if guardErr == nil || verifyErr == nil || guardErr.Error() != verifyErr.Error() {
+		t.Fatalf("a changed user-owned guard: guard %v, verify %v; want the same refusal", guardErr, verifyErr)
+	}
+	if err := LockedExecutablesMatch(lock, filepath.Join(dir, "other-agent"), guard); err == nil ||
+		!strings.Contains(err.Error(), "agent executable path does not match") {
+		t.Fatalf("another agent command passed: %v", err)
+	}
+	if got := EntryAgentCommand([]any{"--contract-lock", path, "--", agent, "acp"}, "kiro"); got != agent {
+		t.Fatalf("EntryAgentCommand = %q, want %q", got, agent)
+	}
+	if got := EntryAgentCommand([]any{"--contract-lock", path}, "kiro"); got != "kiro-cli" {
+		t.Fatalf("EntryAgentCommand without a command = %q, want the catalog command", got)
+	}
+}

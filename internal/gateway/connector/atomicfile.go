@@ -69,28 +69,6 @@ func atomicWriteFileNoFollow(path string, data []byte, perm os.FileMode) error {
 	return atomicWriteFileAt(path, path, data, perm, atomicFilePublish, false)
 }
 
-// atomicReplaceFileNoFollow is atomicWriteFileNoFollow that renames a new
-// file over path even when path already holds data and perm: path then names
-// a new file, apart from every other name (hard link) of the old one. until
-// 1.1: only the removed connectors' teardown (removed.go repairStub and
-// restoreStubForRegistration) uses it.
-func atomicReplaceFileNoFollow(path string, data []byte, perm os.FileMode) error {
-	info, err := os.Lstat(path)
-	switch {
-	case err == nil && !info.Mode().IsRegular():
-		return fmt.Errorf("%s is not a regular file", path)
-	case err != nil && !errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("lstat %s: %w", path, err)
-	}
-	return atomicWriteFileAt(path, path, data, perm, atomicFilePublish, true)
-}
-
-// atomicCreateFileNoFollow publishes a new private file without replacing any
-// directory entry already at path. A collision remains the caller's to handle.
-func atomicCreateFileNoFollow(path string, data []byte, perm os.FileMode) error {
-	return atomicWriteFileAt(path, path, data, perm, atomicFilePublishNoReplace, true)
-}
-
 // atomicWriteFileAt writes data to writePath, path or the file a link at path
 // leads to. A writePath that already holds data and perm is left as it is,
 // unless always is set.

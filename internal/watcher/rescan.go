@@ -1733,6 +1733,10 @@ func (w *InstallWatcher) probeScannerBinaryVersion(binary string) string {
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	cmd.WaitDelay = time.Second
+	if w.cfg == nil || !w.cfg.SecureClientIntegration() {
+		// The scan allowlist, not the service environment (GAP-0246).
+		cmd.Env = scanner.VersionProbeEnv()
+	}
 	if err := processutil.RunTracked(cmd); err != nil {
 		return ""
 	}

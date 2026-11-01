@@ -23,8 +23,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -46,7 +47,7 @@ const (
 	MaxDeliveryIDBytes = 128
 )
 
-var receiptIDPattern = regexp.MustCompile(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
+var receiptIDPattern = lazyregexp.New(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
 
 // PublicReceipt is receipt.json. Decoding is lenient so an older gateway
 // reads the file of a newer lifecycle; readers validate every field again.
@@ -59,6 +60,10 @@ type PublicReceipt struct {
 	BundleID    string `json:"bundle_id,omitempty"`
 	Version     uint64 `json:"version,omitempty"`
 	SignerKeyID string `json:"signer_key_id,omitempty"`
+	// Seq is the delivery sequence of this device (1.0.6): one more for each
+	// new delivery, so receipts order without a clock. Absent on a receipt
+	// written by an earlier build.
+	Seq uint64 `json:"seq,omitempty"`
 	// Principal is the manifest created_by (control-plane:<tenant>/<admin>
 	// or operator:<os-admin>).
 	Principal string `json:"principal,omitempty"`

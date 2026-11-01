@@ -71,7 +71,7 @@ Platform and software requirements are at the end of the page ([Requirements and
   connector name (`claudecode`, `kiro`, `antigravity`), or by its display name.
   Setup and the
   image commands default to `openshell.harnesses`, then to Claude Code and Codex;
-  `image rm` removes only the harnesses you name. Amp, Cursor Agent, and Devin CLI are not verified
+  `image rm` removes only the harnesses you name. OpenCode, Amp, Cursor Agent, and Devin CLI are not verified
   end to end yet: their images build, but they never pass the hook check, so
   no sandbox runs them. The
   [capability matrix](/docs/connectors/capability-matrix) says why for each harness.
@@ -641,7 +641,7 @@ go to the harness. The step-by-step version is
 | Interrupts | Before the harness runs, Ctrl-C or a closed terminal ends the run and deletes the sandbox it created. While it runs, they end the harness and the session ends normally. At an end-of-session question they leave the changes where they are and `run` exits `130`. |
 | End of session | The sandbox the session started is stopped first. The summary counts tool calls and blocks, new sites contacted, sites blocked and files changed, then names notices and changes that can run code. A mounted folder asks to keep, undo or show the diff. A copy asks to apply, branch, patch or skip. Without a terminal, or with `--yes`, a mount keeps the changes and a copy skips ([review, undo or pull](/docs/sandboxes/guide)). |
 | `--rm` | On a mounted folder it keeps the undo point when the review failed or nobody accepted the changes. In copy mode it is not honored while changes are left in the sandbox. |
-| Full disk | A pull that fails because a MicroVM's own disk is full leaves the MicroVM running: free space (`sandbox connect NAME --shell`), `sandbox pull NAME`, then `sandbox stop NAME`. |
+| Full disk | A pull that fails because a MicroVM's own disk is full leaves the MicroVM running: free space (`sandbox connect NAME --shell`), `sandbox pull NAME --apply` (or `--branch`, `--patch-out FILE`), then `sandbox stop NAME`. |
 
 #### The run banner
 
@@ -1108,7 +1108,7 @@ the destinations by kind (`AI: 1 model provider, 2 shadow AI`):
 
 ### `sandbox stop`
 
-Stops a sandbox. It is kept, so `start` or `connect` can resume it. On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, the command says what a stop would lose and, on a terminal, asks whether to stop it anyway (`--yes` does not answer that question); `--discard-unsynced` stops it anyway without asking. Or save the work you need (`defenseclaw sandbox pull NAME` for a copy run) and run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either, and neither does one it makes on its own for repeated foreign network rules or a lost sandbox listener: DefenseClaw contains it instead (it closes its egress proxy, withdraws its network rules and providers, reports it not protected and refuses new DefenseClaw runs), `sandbox status` names it, and it keeps running until you stop it with `--discard-unsynced` or delete it. When a
+Stops a sandbox. It is kept, so `start` or `connect` can resume it. On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, the command says what a stop would lose and, on a terminal, asks whether to stop it anyway (`--yes` does not answer that question); `--discard-unsynced` stops it anyway without asking. Or save the work you need (`defenseclaw sandbox pull NAME --apply` for a copy run, or `--branch` or `--patch-out FILE`) and run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either, and neither does one it makes on its own for repeated foreign network rules or a lost sandbox listener: DefenseClaw contains it instead (it closes its egress proxy, withdraws its network rules and providers, reports it not protected and refuses new DefenseClaw runs), `sandbox status` names it, and it keeps running until you stop it with `--discard-unsynced` or delete it. When a
 detached run is still going, or a session runs in it from another terminal
 (a harness session, or `connect --shell`), `stop` names it and asks first on
 a terminal (`--yes` skips the question; without a terminal it warns), and
@@ -1127,7 +1127,7 @@ instead of starting the sandbox.
 
 A copy-mode MicroVM with a full disk keeps running if its copy holds work not
 yet pulled (exit `5`), even with `--yes`: check it with
-`sandbox exec <name> -- df -h /`, free space, run `sandbox pull <name>`, then
+`sandbox exec <name> -- df -h /`, free space, run `sandbox pull <name> --apply` (or `--branch`, `--patch-out FILE`), then
 stop. `sandbox delete <name>` gives up that work. If its disk does not answer
 within 15 seconds, stop asks first; `--yes` skips that question.
 
@@ -1989,7 +1989,7 @@ With the MicroVM driver, every run works on a copy, `--context` is refused, `--c
 
 ### One OpenShell gateway per machine (Linux)
 
-OpenShell's packaged gateway listens on the fixed port `127.0.0.1:17670` and runs as the `openshell-gateway` user service of the account that started it. A machine runs one gateway, so only that account can run sandboxes. In a second account, `sandbox setup` and `sandbox doctor` say that the port is held by another account's process, and setup installs and starts nothing.
+OpenShell's packaged gateway listens on the fixed port `127.0.0.1:17670` and runs as the `openshell-gateway` user service of the account that started it. A machine runs one gateway, so only that account can run sandboxes. In a second account, `sandbox setup` and `sandbox doctor` say that the port is held by another account's process, and setup installs and starts nothing. There is no per-account port setting: `openshell.gateway_port` is not a key (the config is refused with it), and an administrator's `enterprise.openshell.gateway_port` applies to managed computers only.
 
 To hand sandboxes to another account, stop the gateway in the account that runs it, then run `defenseclaw sandbox setup` in the other one. `disable --now` also keeps the gateway from starting again at the next login:
 
@@ -2055,7 +2055,7 @@ Limits on a Mac: there is no live mount and no pre-session snapshot, `sandbox un
 
 ### One OpenShell gateway per Mac
 
-OpenShell's gateway listens on the fixed port `127.0.0.1:17670` and runs as the Homebrew service of the account that started it. A Mac runs one gateway, so only that account can run sandboxes. In a second account, `defenseclaw sandbox doctor` says that the port is held by another account's process, skips the checks that follow from it, and setup installs and starts nothing.
+OpenShell's gateway listens on the fixed port `127.0.0.1:17670` and runs as the Homebrew service of the account that started it. A Mac runs one gateway, so only that account can run sandboxes. In a second account, `defenseclaw sandbox doctor` says that the port is held by another account's process, skips the checks that follow from it, and setup installs and starts nothing. There is no per-account port setting: `openshell.gateway_port` is not a key (the config is refused with it), and an administrator's `enterprise.openshell.gateway_port` applies to managed computers only.
 
 To hand sandboxes to another account, stop the gateway in the account that runs it, then run `defenseclaw sandbox setup` in the other one (add `--install-openshell` if OpenShell is not installed there). Several users on one machine are tracked upstream in [NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
 

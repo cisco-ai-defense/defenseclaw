@@ -167,6 +167,55 @@ func TestManagedInstallCoverageAuditAcceptsAnUnenrolledHermes(t *testing.T) {
 	t.Fatal("no unprotected Hermes install audit row")
 }
 
+// rel-1-0-6 GAP-0057: status and verify audit each OpenCode V1 copy the
+// enumerator found (opencode_v1_unprotected) as an unprotected install, as
+// for Claude Code, Codex, Copilot and Hermes; the gateway refused that
+// report for OpenCode (HTTP 400), so no HIGH alert row was written.
+func TestManagedInstallCoverageAuditAcceptsOpenCodeV1(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	handler := api.managedHookPeerAuth(newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{}, nil, nil), api.managedHookSocketMux())
+	send := func(uid int, body string) int {
+		request := httptest.NewRequest(http.MethodPost, managed.LaunchCoverageReportPath, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-DefenseClaw-Client", "enterprise-lifecycle")
+		request = request.WithContext(withManagedHookPeer(request.Context(), managedHookPeer{UID: uid}))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+	v1Path := coverageAuditInstallPath("/home/alice/.npm-global/lib/node_modules/opencode-ai")
+	valid := `{"connector":"opencode","reason":"unsupported_installed_version","uid":1001,"install_path":"` + v1Path + `","version":"1.18.34"}`
+	if got := send(1001, valid); got != http.StatusForbidden {
+		t.Fatalf("user submitted an OpenCode install audit: HTTP %d", got)
+	}
+	if got := send(0, `{"connector":"opencode","reason":"unsupported_installed_version","uid":1001,"install_path":"../opencode-ai","version":"1.18.34"}`); got != http.StatusBadRequest {
+		t.Fatalf("relative OpenCode install path accepted: HTTP %d", got)
+	}
+	if got := send(0, valid); got != http.StatusNoContent {
+		t.Fatalf("root OpenCode V1 install audit: HTTP %d", got)
+	}
+	if got := send(0, `{"connector":"opencode","reason":"installed_version_unverified","uid":1001,"install_path":"`+v1Path+`"}`); got != http.StatusNoContent {
+		t.Fatalf("root OpenCode V1 unknown-version install audit: HTTP %d", got)
+	}
+	events, err := fixture.store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := 0
+	for _, event := range events {
+		if event.Structured["defenseclaw.schema.error_code"] == "managed_agent_install_unprotected" &&
+			strings.Contains(event.Details, `"connector":"opencode"`) && strings.Contains(event.Details, `"agent_install_path":"`+v1Path+`"`) {
+			rows++
+			if event.Severity != "HIGH" || event.Structured["defenseclaw.health.subsystem"] != "managed-install-coverage" {
+				t.Fatalf("OpenCode V1 install audit row: %+v", event)
+			}
+		}
+	}
+	if rows != 2 {
+		t.Fatalf("recorded %d unprotected OpenCode install rows, want 2", rows)
+	}
+}
+
 func TestManagedHermesSessionHomeLimitAudit(t *testing.T) {
 	fixture, api, _ := newCLIObservabilityV8Fixture(t)
 	handler := api.managedHookPeerAuth(newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{}, nil, nil), api.managedHookSocketMux())

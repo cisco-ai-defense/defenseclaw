@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -258,6 +259,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			if judge := a.judgeFor(ctx); judge != nil {
 				judge.ObserveSessionPrompt(ctx, req.Prompt)
 			}
+			a.observeUserDownloadRequest(ctx, req.Prompt)
 		}
 		// Secure Client keeps the prompt of main, so AI Defense is sent the
 		// text it was sent before (issue #1092).
@@ -449,7 +451,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 // prompt. It tells the model to name the task and "Do not answer the request",
 // so the injection judge read it, next to the user prompt after it, as an
 // instruction override and blocked a benign prompt (GAP-0230).
-var codexTitleHelperPreamble = regexp.MustCompile(`^\s*` +
+var codexTitleHelperPreamble = lazyregexp.New(`^\s*` +
 	regexp.QuoteMeta("Generate a concise, single-line task title of at most ") + `\d+` +
 	regexp.QuoteMeta(" characters and under five words where possible. Start with an imperative verb."+
 		" Capitalize only the first word unless the user's language, proper nouns, acronyms, or code terms require otherwise."+

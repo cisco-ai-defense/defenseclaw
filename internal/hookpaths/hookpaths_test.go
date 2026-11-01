@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestRedirectOnlyStatementsDoNotPanic(t *testing.T) {
@@ -136,12 +137,24 @@ func TestApplyPatchBoundEnvelopeInputs(t *testing.T) {
 		}
 	}
 	if runtime.GOOS == "windows" {
-		for _, path := range []string{"C:/tmp/notes.txt", "\\\\server\\share\\notes.txt"} {
+		unc := "\\\\server\\share\\notes.txt"
+		// The scans read below a network share once it has answered
+		// (rel-1-0-6 GAP-0127); this share answers at once.
+		fakeNetworkShare(t, `\\server\share`, time.Second, time.Second, func(string) {})
+		for _, path := range []string{"C:/tmp/notes.txt", unc} {
 			envelope := "*** Begin Patch\n*** Update File: " + path + "\n@@\n+x\n*** End Patch"
 			targets, ok := ApplyPatchWriteTargets("apply_patch", nil, envelope, "", "")
 			if !ok || len(targets) != 1 || targets[0] != filepath.Clean(path) {
 				t.Errorf("%q: targets %v, known %v", path, targets, ok)
 			}
+		}
+		// A write below a share that does not answer cannot be placed.
+		release := make(chan struct{})
+		defer close(release)
+		fakeNetworkShare(t, `\\server\share`, 20*time.Millisecond, 10*time.Millisecond, func(string) { <-release })
+		unanswered := "*** Begin Patch\n*** Update File: " + unc + "\n@@\n+x\n*** End Patch"
+		if targets, ok := ApplyPatchWriteTargets("apply_patch", nil, unanswered, "", ""); ok || len(targets) != 0 {
+			t.Errorf("%q below a share that does not answer: targets %v, known %v; want unknown", unc, targets, ok)
 		}
 		// A drive-relative path depends on per-drive process state, not cwd.
 		envelope := "*** Begin Patch\n*** Update File: C:notes.txt\n@@\n+x\n*** End Patch"
@@ -186,7 +199,12 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 		{"cp --link ~/.ssh/authorized_keys notes.txt; echo k >> notes.txt", "notes.txt", keys},
 		{"ln ~/.ssh/authorized_keys notes.txt; mv notes.txt n2; echo k >> n2", "n2", ""},
 		{"ln \"$SRC\" notes.txt; echo k >> notes.txt", "notes.txt", ""},
-		{"python3 -c \"import os; os.link('a', 'notes.txt')\"; echo k >> notes.txt", "notes.txt", ""},
+		// An interpreter link call with a computed argument stays unknown; one
+		// with two string literals is read as link reads them: an ordinary file
+		// keeps its own name, the keys file is the keys file (rel-1-0-6:GAP-0157).
+		{"python3 -c \"import os; s='a'; os.link(s, 'notes.txt')\"; echo k >> notes.txt", "notes.txt", ""},
+		{"python3 -c \"import os; os.link('a', 'notes.txt')\"; echo k >> notes.txt", "notes.txt", notes},
+		{"python3 -c \"import os; os.link('.ssh/authorized_keys', 'notes.txt')\"; echo k >> notes.txt", "notes.txt", keys},
 		{"echo k >> notes.txt", "notes.txt", notes},
 		// A multicall binary runs its applet; archive and sync tools that
 		// link files make the write targets unknown (GAP-1521).

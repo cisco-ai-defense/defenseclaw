@@ -14,6 +14,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,7 +71,8 @@ func renderListenerProofPlugin(t *testing.T, asset, addr, tokenPath string) []by
 const openCodeGatewayProofHarness = `
 import { pathToFileURL } from "node:url";
 const loaded = await import(pathToFileURL(process.argv[1]).href);
-const plugin = await loaded.DefenseClaw({ directory: "" });
+const { fixtureBridge } = await import(pathToFileURL("../opencodebridge/testdata/fixture.mjs"));
+const plugin = await fixtureBridge(loaded, { directory: "/work/repo" });
 try {
   await plugin["tool.execute.before"](
     { tool: "Bash", sessionID: "S", messageID: "M", callID: "C" },
@@ -168,8 +170,12 @@ func TestInAgentPluginsProveTheGatewayListener(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			want := tc.hookPath + " user=" + uid + " connector=" + tc.connectorName + " marker=true"
-			if verdict := strings.TrimSpace(string(out)); verdict != "allow" || len(served) != 1 || served[0] != want {
+			base := tc.hookPath + " user=" + uid + " connector=" + tc.connectorName
+			want := []string{base + " marker=true"}
+			if tc.connectorName == "opencode" {
+				want = append([]string{base + " marker=false"}, want...) // V2 setup heartbeat.
+			}
+			if verdict := strings.TrimSpace(string(out)); verdict != "allow" || !slices.Equal(served, want) {
 				t.Fatalf("verdict %q, served %q; want allow and %q", verdict, served, want)
 			}
 		})

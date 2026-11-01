@@ -3353,6 +3353,7 @@ $script:children = 0
 {_ps1_function("Test-Version")}
 {_ps1_function("Get-LifecycleNextStep")}
 {_ps1_function("Invoke-ReleaseInstaller")}
+{_ps1_function("Assert-OlderReleaseGuardsAgents")}
 {_ps1_function("Convert-HooksForOlderRelease")}
 function Write-Warn([string]$Message) {{ Write-Host $Message }}
 function Write-Info([string]$Message) {{ Write-Host $Message }}
@@ -3429,6 +3430,7 @@ $script:events = @()
 {_ps1_function("Test-Version")}
 {_ps1_function("Get-LifecycleNextStep")}
 {_ps1_function("Invoke-ReleaseInstaller")}
+{_ps1_function("Assert-OlderReleaseGuardsAgents")}
 {_ps1_function("Convert-HooksForOlderRelease")}
 function Test-HookRollbackRestoreAvailable {{ {reader} }}
 function Convert-HooksForRollback([string]$From, [string]$BackTo) {{ $script:events += 'convert' }}
@@ -3466,6 +3468,68 @@ Write-Output "EVENTS=$($script:events -join ',') CODE=$code"
     out = completed.stdout + completed.stderr
     assert completed.returncode == 0, out
     assert f"EVENTS={expected} CODE={0 if child_installs else 1}" in out, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("kind", "answer", "expected"),
+    [
+        ("downgrade", 1, "REFUSED: Downgrade cancelled; nothing was changed (see above)"),
+        ("rollback", 1, "REFUSED: Rollback cancelled; nothing was changed (see above)"),
+        ("downgrade", 0, "ALLOWED"),
+        ("rollback", 2, "ALLOWED"),
+        ("downgrade", None, "ALLOWED"),
+    ],
+    ids=["downgrade-refused", "rollback-refused", "downgrade-guarded", "rollback-old-cli", "no-cli"],
+)
+def test_an_older_release_that_cannot_guard_an_agent_here_is_refused(
+    tmp_path: Path, kind: str, answer: int | None, expected: str
+) -> None:
+    # rel-1-0-6 GAP-0028 (rollback) and GAP-0128 (downgrade): the installed
+    # CLI's `migrate --check-<kind>-to X.Y.Z` answers 1 when DefenseClaw X.Y.Z
+    # cannot guard an agent set up here (OpenCode V2 before 1.0.6), and the
+    # installer stops with that reason. A CLI without the check (1.0.5 and
+    # earlier) answers 2, and no installed CLI means nothing to ask.
+    reason = "OpenCode V2 is set up here and DefenseClaw 1.0.5 cannot guard it."
+    make_cli = "" if answer is None else (
+        "$cli = Join-Path $Venv 'Scripts\\defenseclaw.exe'\n"
+        "New-Item -ItemType File -Path $cli -Force | Out-Null\n"
+    )
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$Venv = '{tmp_path / ".venv"}'
+{make_cli}$script:probes = @()
+function Die([string]$Message) {{ throw $Message }}
+function Get-NativeProbe([string]$FilePath, [string[]]$Arguments = @()) {{
+    $script:probes += ($Arguments -join ' ')
+    return [pscustomobject]@{{ Exit = {0 if answer is None else answer}; Output = "{reason}`n" }}
+}}
+{_ps1_function("Assert-OlderReleaseGuardsAgents")}
+try {{ Assert-OlderReleaseGuardsAgents '{kind}' '1.0.5'; Write-Output 'ALLOWED' }} catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
+Write-Output "PROBES=$($script:probes -join '|')"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert expected in out, out
+    assert (reason in out) == expected.startswith("REFUSED"), out
+    probes = "" if answer is None else f"migrate --check-{kind}-to 1.0.5"
+    assert f"PROBES={probes}\n" in out.replace("\r\n", "\n"), out
+
+
+def test_a_rollback_or_downgrade_asks_whether_the_older_release_guards_agents_before_anything_changes() -> None:
+    # The check runs before the handoff fetches an older installer, before a
+    # rollback stops the gateway, and before a local downgrade takes the
+    # older version (rel-1-0-6 GAP-0028, GAP-0128).
+    handoff = _ps1_function("Invoke-ReleaseInstaller")
+    check = handoff.index('if ($downgrade) { Assert-OlderReleaseGuardsAgents "downgrade" $target }')
+    assert check < handoff.index("Save-Url") and check < handoff.index("Stop-Gateway")
+    rollback = _ps1_function("Invoke-Rollback")
+    assert rollback.index('Assert-OlderReleaseGuardsAgents "rollback" $backTo') < rollback.index("Stop-Gateway")
+    install = _ps1_function("Invoke-Install")
+    local = install.index('Assert-OlderReleaseGuardsAgents "downgrade" $TargetVersion')
+    assert local < install.index("$Ver = $TargetVersion", local)
 
 
 def test_a_local_downgrade_converts_the_hooks_after_the_gateway_stops_and_restores_them_with_this_release() -> None:
@@ -6886,7 +6950,8 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
         "function Wait-LifecycleProof { if ($script:case -eq 'not-proven') { return @('the gateway is not running') }; return @() }\n"
         "function Undo-Rollback { param($Reason) $script:undone++; Write-Host \"undo: $Reason\"; return 1 }\n"
         + _ps1_function("Get-Field") + _ps1_function("Get-StaleAgentEvidence") + _ps1_function("Read-Text")
-        + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
+        + _ps1_function("Test-Version") + _ps1_function("Assert-OlderReleaseGuardsAgents")
+        + _ps1_function("Invoke-Rollback")
         + "\n$rc = Invoke-Rollback\nWrite-Host \"rc: $rc undone: $script:undone removed: $script:removed\"\n",
         encoding="utf-8",
     )
@@ -6945,7 +7010,8 @@ def test_a_codex_update_refuses_only_a_rollback_whose_gateway_would_not_start(tm
         "function Undo-Rollback { param($Reason) Write-Host \"undo: $Reason\"; return 1 }\n"
         + "function Select-UpdatedAgents([string]$Data) { }\n"
         + _ps1_function("Get-Field") + _ps1_function("Get-StaleAgentEvidence") + _ps1_function("Test-FreshAgentSelection")
-        + _ps1_function("Read-Text") + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
+        + _ps1_function("Read-Text") + _ps1_function("Test-Version") + _ps1_function("Assert-OlderReleaseGuardsAgents")
+        + _ps1_function("Invoke-Rollback")
         + "\ntry { $rc = Invoke-Rollback } catch { Write-Host \"refused: $($_.Exception.Message)\"; $rc = 'refused' }\n"
         + "Write-Host \"rc: $rc stops: $script:stops removed: $script:removed\"\n",
         encoding="utf-8",

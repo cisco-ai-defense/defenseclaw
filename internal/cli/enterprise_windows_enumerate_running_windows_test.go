@@ -31,6 +31,27 @@ func stubEnumerateRunningAgents(t *testing.T, processes []inventory.AgentProcess
 	enterpriseWindowsEnumerateAgentProcesses = func() ([]inventory.AgentProcess, error) { return processes, processErr }
 	enterpriseWindowsEnumerateAccountSID = func(account string) string { return sids[account] }
 	resetEnumerateKnownSIDs(t)
+	resetEnumerateLastRunning(t)
+}
+
+// resetEnumerateLastRunning forgets the last readable snapshot and reads no
+// previous record, for one test.
+func resetEnumerateLastRunning(t *testing.T) {
+	t.Helper()
+	previousRecord := enterpriseWindowsEnumeratePreviousUnprotected
+	enterpriseWindowsEnumeratePreviousUnprotected = func(string) ([]enterprisehooks.UnprotectedAgent, error) {
+		return nil, errors.New("no record")
+	}
+	last := &enterpriseWindowsEnumerateLastRunning
+	last.Lock()
+	last.read, last.running, last.unknown = false, nil, nil
+	last.Unlock()
+	t.Cleanup(func() {
+		enterpriseWindowsEnumeratePreviousUnprotected = previousRecord
+		last.Lock()
+		last.read, last.running, last.unknown = false, nil, nil
+		last.Unlock()
+	})
 }
 
 func resetEnumerateKnownSIDs(t *testing.T) {
@@ -57,7 +78,7 @@ func TestEnterpriseWindowsEnumerateRunningAgentsBySID(t *testing.T) {
 		{PID: 13, Connector: "codex", User: `DCLAB\gone`},
 		{PID: 14, Connector: "codex", User: ""},
 	}, nil, map[string]string{`AzureAD\EntraAlice`: alice, `DCLAB\bob`: bob})
-	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex", "claudecode"})
+	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex", "claudecode"}, "")
 	if len(got) != 2 || got[alice]["codex"] != "codex (pid 10)" || got[bob]["claudecode"] != "claudecode (pid 12)" {
 		t.Fatalf("running agents = %+v", got)
 	}
@@ -71,9 +92,13 @@ func TestEnterpriseWindowsEnumerateRunningAgentsBySID(t *testing.T) {
 		t.Fatalf("empty-account agent was dropped: %+v", unknown)
 	}
 
+	// A first cycle whose snapshot cannot be read has no earlier snapshot
+	// and, here, no previous record: it names the failure and finds nothing.
+	// Later cycles keep what a readable one found (rel-1-0-2:GAP-0672,
+	// TestEnterpriseWindowsEnumerateUnreadableSnapshotKeepsRunningAgents).
 	stderr := new(bytes.Buffer)
 	stubEnumerateRunningAgents(t, nil, errors.New("snapshot denied"), nil)
-	if got, unknown := enterpriseWindowsEnumerateRunningAgents(stderr, []string{"codex"}); got != nil || unknown != nil || !strings.Contains(stderr.String(), "running agent sessions are unreadable") {
+	if got, unknown := enterpriseWindowsEnumerateRunningAgents(stderr, []string{"codex"}, ""); got != nil || unknown != nil || !strings.Contains(stderr.String(), "running agent sessions are unreadable") {
 		t.Fatalf("unreadable sessions: %+v %+v, log %q", got, unknown, stderr.String())
 	}
 }
@@ -83,7 +108,7 @@ func TestEnterpriseWindowsEnumerateRunningAgentWithoutOwner(t *testing.T) {
 		{PID: 14, Connector: "codex"},
 		{PID: 15, Connector: "opencode"},
 	}, nil, nil)
-	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}, "")
 	if len(got) != 0 || len(unknown) != 1 || unknown[0].User != "(unknown account)" ||
 		unknown[0].Connector != "codex" || unknown[0].Code != enterprisehooks.UnprotectedCodeAgentUnprotected ||
 		!strings.Contains(unknown[0].Reason, "codex (pid 14)") {
@@ -99,7 +124,7 @@ func TestEnterpriseWindowsEnumerateRunningAgentUsesSnapshotSIDWithoutAccountName
 		calls.Add(1)
 		return ""
 	}
-	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}, "")
 	if len(got) != 1 || got[sid]["codex"] != "codex (pid 14)" || len(unknown) != 0 || calls.Load() != 0 {
 		t.Fatalf("snapshot SID was not used directly: %+v %+v, lookups %d", got, unknown, calls.Load())
 	}
@@ -116,7 +141,7 @@ func TestEnterpriseWindowsEnumerateRunningAgentUsesSnapshotSIDWhenNameLookupStal
 		<-release
 		return ""
 	}
-	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}, "")
 	if len(got) != 1 || got[sid]["codex"] != "codex (pid 14)" || len(unknown) != 0 || calls.Load() != 0 {
 		t.Fatalf("snapshot SID waited for a name lookup: %+v %+v, lookups %d", got, unknown, calls.Load())
 	}
@@ -124,7 +149,7 @@ func TestEnterpriseWindowsEnumerateRunningAgentUsesSnapshotSIDWhenNameLookupStal
 
 func TestEnterpriseWindowsEnumerateRunningAgentUnknownOwnerSurvivesRecord(t *testing.T) {
 	stubEnumerateRunningAgents(t, []inventory.AgentProcess{{PID: 14, Connector: "codex"}}, nil, nil)
-	_, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	_, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}, "")
 	data, err := enterprisehooks.MarshalUnprotectedAgents(unknown)
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +170,7 @@ func TestEnterpriseWindowsEnumerateRunningAgentsDeduplicatesUnknownOwner(t *test
 		{PID: 14, Connector: "codex"},
 		{PID: 15, Connector: "codex"},
 	}, nil, nil)
-	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}, "")
 	if len(got) != 0 || len(unknown) != 1 || unknown[0].User != "(unknown account)" {
 		t.Fatalf("duplicate owner-unknown entries: %+v %+v", got, unknown)
 	}
@@ -159,12 +184,12 @@ func TestEnterpriseWindowsEnumerateRunningAgentLookupFailureFailsClosed(t *testi
 	const alice = "S-1-12-1-3570884736-1162376387-1447295907-1452683434"
 	processes := []inventory.AgentProcess{{PID: 10, Connector: "codex", User: `AzureAD\EntraAlice`}}
 	stubEnumerateRunningAgents(t, processes, nil, map[string]string{`AzureAD\EntraAlice`: alice})
-	if got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}); got[alice]["codex"] != "codex (pid 10)" || len(unknown) != 0 {
+	if got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}, ""); got[alice]["codex"] != "codex (pid 10)" || len(unknown) != 0 {
 		t.Fatalf("first cycle: %+v %+v", got, unknown)
 	}
 	// The domain controller stops answering: the cached SID keeps the row.
 	enterpriseWindowsEnumerateAccountSID = func(string) string { return "" }
-	if got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}); got[alice]["codex"] != "codex (pid 10)" || len(unknown) != 0 {
+	if got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}, ""); got[alice]["codex"] != "codex (pid 10)" || len(unknown) != 0 {
 		t.Fatalf("failed lookup dropped the running agent: %+v %+v", got, unknown)
 	}
 
@@ -178,7 +203,7 @@ func TestEnterpriseWindowsEnumerateRunningAgentLookupFailureFailsClosed(t *testi
 			{PID: 12, Connector: "opencode", User: `AzureAD\EntraAlice`},
 		}, nil
 	}
-	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}, "")
 	if len(got) != 0 || len(unknown) != 1 || unknown[0].User != `AzureAD\EntraAlice` || unknown[0].Connector != "codex" ||
 		!strings.Contains(unknown[0].Message(), "codex for user AzureAD\\EntraAlice is not protected") {
 		t.Fatalf("never-resolved account: %+v %+v", got, unknown)
@@ -197,7 +222,7 @@ func TestEnterpriseWindowsEnumerateRunningAgentLookupIsBounded(t *testing.T) {
 		return "S-1-5-21-1-2-3-1009"
 	}
 	started := time.Now()
-	if got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}); len(got) != 0 || len(unknown) != 1 {
+	if got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}, ""); len(got) != 0 || len(unknown) != 1 {
 		t.Fatalf("a lookup that does not answer must name no SID and report the owner unknown: %+v %+v", got, unknown)
 	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
@@ -227,12 +252,12 @@ func TestEnterpriseWindowsEnumerateRunningAgentBudgetExhaustedForLaterAccount(t 
 		<-release
 		return ""
 	}
-	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}, "")
 	if got[knownSID]["codex"] != "codex (pid 2)" || len(unknown) != 1 || unknown[0].User != `DCLAB\slow` {
 		t.Fatalf("budget exhausted with a cached later account: rows %+v, unknown %+v", got, unknown)
 	}
 	resetEnumerateKnownSIDs(t)
-	got, unknown = enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	got, unknown = enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"}, "")
 	if len(got) != 0 || len(unknown) != 2 || unknown[1].User != `DCLAB\later` {
 		t.Fatalf("budget exhausted without a cached later account: rows %+v, unknown %+v", got, unknown)
 	}

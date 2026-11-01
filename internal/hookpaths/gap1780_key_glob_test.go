@@ -17,9 +17,6 @@ import (
 // expanded on this host with each match resolved through links, with MSYS
 // drive spellings mapped and case folded on darwin.
 func TestActionPrivateKeyGlobFollowsTheShell(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX home rows")
-	}
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -51,8 +48,8 @@ func TestActionPrivateKeyGlobFollowsTheShell(t *testing.T) {
 		{"public keys", "cat ~/.ssh/id_*.pub", project, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ActionPrivateKeyRead(tc.command, tc.cwd, home); got != tc.want {
-				t.Fatalf("ActionPrivateKeyRead(%q) = %t, want %t", tc.command, got, tc.want)
+			if got := posixShellPrivateKeyRead(tc.command, tc.cwd, home); got != tc.want {
+				t.Fatalf("posixShellPrivateKeyRead(%q) = %t, want %t", tc.command, got, tc.want)
 			}
 		})
 	}
@@ -64,14 +61,14 @@ func TestActionPrivateKeyGlobFollowsTheShell(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, command := range []string{"head -c 4096 dirlink/id_*", "cat keyl*"} {
-		if !ActionPrivateKeyRead(command, project, home) {
-			t.Errorf("ActionPrivateKeyRead(%q) = false, want a key read through the alias", command)
+		if !posixShellPrivateKeyRead(command, project, home) {
+			t.Errorf("posixShellPrivateKeyRead(%q) = false, want a key read through the alias", command)
 		}
 	}
-	if runtime.GOOS == "darwin" && !ActionPrivateKeyRead("cat ~/.SSH/id_*", project, home) {
+	if runtime.GOOS == "darwin" && !posixShellPrivateKeyRead("cat ~/.SSH/id_*", project, home) {
 		t.Error("darwin: a case variant of the key glob reads the key")
 	}
-	if ActionPrivateKeyRead("cat note*", project, home) {
+	if posixShellPrivateKeyRead("cat note*", project, home) {
 		t.Error("a project glob is not a key read")
 	}
 	// Windows home: MSYS drive spellings and comments.
@@ -81,8 +78,8 @@ func TestActionPrivateKeyGlobFollowsTheShell(t *testing.T) {
 		"head -c 4096 /cygdrive/c/Users/u/.ssh/id_*",
 		"head -c 4096 ~/.ssh/id_* # it's",
 	} {
-		if !ActionPrivateKeyRead(command, winCWD, winHome) {
-			t.Errorf("ActionPrivateKeyRead(%q) = false on a Windows home", command)
+		if !posixShellPrivateKeyRead(command, winCWD, winHome) {
+			t.Errorf("posixShellPrivateKeyRead(%q) = false on a Windows home", command)
 		}
 	}
 }

@@ -222,6 +222,12 @@ func inferProvider(model string, apiKey string) string {
 	if strings.HasPrefix(apiKey, "ABSK") {
 		return "bedrock"
 	}
+	// A Bedrock id without the bedrock/ prefix ("us.anthropic.claude-...")
+	// with an AWS credential chain instead of a Bedrock API key was sent to
+	// OpenAI (GAP-2640).
+	if config.IsBedrockModelID(model) {
+		return "bedrock"
+	}
 	if strings.HasPrefix(model, "claude") {
 		return "anthropic"
 	}

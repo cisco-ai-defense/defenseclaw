@@ -23,7 +23,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -32,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -40,7 +40,7 @@ const rulePackWireVersion = 1
 const rulePackLongIntro = `Inspect a guardrail rule pack without starting the gateway or reading its
 config. Administrators validate a custom pack with this command before`
 
-var safeRulePackWireCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+var safeRulePackWireCode = lazyregexp.New(`^[a-z][a-z0-9_]{0,63}$`)
 
 // These IDs use the shipped regex fallback without a semantic expression.
 // List IDs here so a copied pack can distinguish its own new rules from them.

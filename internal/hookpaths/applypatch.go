@@ -6,10 +6,10 @@ package hookpaths
 import (
 	"encoding/json"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -190,7 +190,7 @@ func ApplyPatchToolWithoutText(tool string, args json.RawMessage) bool {
 
 // patchTextNamesSSH matches an authorized-keys name or a .ssh path component
 // in raw call text (JSON escapes included).
-var patchTextNamesSSH = regexp.MustCompile(`(?i)authorized_keys|(?:^|[^A-Za-z0-9_.-])\.ssh(?:$|[^A-Za-z0-9_.-])`)
+var patchTextNamesSSH = lazyregexp.New(`(?i)authorized_keys|(?:^|[^A-Za-z0-9_.-])\.ssh(?:$|[^A-Za-z0-9_.-])`)
 
 func jsonStringRaw(value string) json.RawMessage {
 	encoded, _ := json.Marshal(value)
@@ -375,13 +375,13 @@ func patchEnvelopePaths(text string) (paths []string, envelopes int, ok bool) {
 // supplied to that invocation. In particular, a quoted envelope printed by
 // another command cannot explain a later file-fed apply_patch.
 var (
-	patchProgramWord  = regexp.MustCompile(`(?i)\b(?:apply_patch|applypatch|apply-patch)\b`)
-	patchDirectInput  = regexp.MustCompile(`\b(?:apply_patch|applypatch|apply-patch)\s*(?:<<<\s*|<<\s*|@)?['"]`)
-	patchHeredocInput = regexp.MustCompile(`\b(?:apply_patch|applypatch|apply-patch)\s*<<-?\s*[A-Za-z_][A-Za-z0-9_]*\s*$`)
-	patchPipedHeredoc = regexp.MustCompile(`\bcat\s+<<[^\n|]*\|\s*(?:apply_patch|applypatch|apply-patch)\b`)
-	patchPipeCall     = regexp.MustCompile(`^\s*['"]?@?\s*\|\s*(?:apply_patch|applypatch|apply-patch)\b`)
-	patchPrinter      = regexp.MustCompile(`(?i)\b(?:echo|printf|write-output)\b|@['"]`)
-	heredocOperator   = regexp.MustCompile(`<<(-?)\s*(?:'([^'\s]+)'|"([^"\s]+)"|([A-Za-z_][A-Za-z0-9_]*))(?:[\s|;&)>]|$)`)
+	patchProgramWord  = lazyregexp.New(`(?i)\b(?:apply_patch|applypatch|apply-patch)\b`)
+	patchDirectInput  = lazyregexp.New(`\b(?:apply_patch|applypatch|apply-patch)\s*(?:<<<\s*|<<\s*|@)?['"]`)
+	patchHeredocInput = lazyregexp.New(`\b(?:apply_patch|applypatch|apply-patch)\s*<<-?\s*[A-Za-z_][A-Za-z0-9_]*\s*$`)
+	patchPipedHeredoc = lazyregexp.New(`\bcat\s+<<[^\n|]*\|\s*(?:apply_patch|applypatch|apply-patch)\b`)
+	patchPipeCall     = lazyregexp.New(`^\s*['"]?@?\s*\|\s*(?:apply_patch|applypatch|apply-patch)\b`)
+	patchPrinter      = lazyregexp.New(`(?i)\b(?:echo|printf|write-output)\b|@['"]`)
+	heredocOperator   = lazyregexp.New(`<<(-?)\s*(?:'([^'\s]+)'|"([^"\s]+)"|([A-Za-z_][A-Za-z0-9_]*))(?:[\s|;&)>]|$)`)
 )
 
 // patchShellInvocationsKnown reports whether every apply_patch that a shell

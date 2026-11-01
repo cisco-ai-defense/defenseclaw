@@ -62,7 +62,9 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	wanted := privateInstallConnectors(names, func(name string) bool { return name == "claudecode" || name == "codex" || name == "copilot" })
+	wanted := privateInstallConnectors(names, func(name string) bool {
+		return name == "claudecode" || name == "codex" || name == "copilot" || name == "opencode"
+	})
 	if len(wanted) == 0 {
 		return nil
 	}
@@ -108,6 +110,11 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 			return scan.result()
 		}
 		packages := windowsStandaloneNPMPackages[name]
+		if name == "opencode" {
+			// Only OpenCode V1, which cannot run the V2 plugin (opencode_v1.go);
+			// the version probe and enrollment judge V2 copies.
+			packages = []string{openCodeV1Package}
+		}
 		packageRoots := append([]string(nil), roots...)
 		for _, packageName := range packages {
 			// Volta gives each package an image below AppData\Local, outside
@@ -227,6 +234,43 @@ var windowsPrivateWalkLate = make(chan struct{}, 1)
 // WindowsPrivateWalkCompletedLate returns the channel the enumerator's
 // interval loop waits on for that extra cycle.
 func WindowsPrivateWalkCompletedLate() <-chan struct{} { return windowsPrivateWalkLate }
+
+// WaitWindowsPrivateWalksReported waits, until ctx ends, for every profile
+// walk a scan stopped waiting for and reported incomplete, and reports
+// whether one of them finished complete. The installer's single cycle
+// (enumerate --once) exits after it publishes, so the extra cycle of
+// WindowsPrivateWalkCompletedLate never ran for it: on a slow first install
+// the account stayed agent_install_scan_incomplete in the install result
+// although its walk finished seconds later (rel-1-0-6 r106 CI). A walk that
+// ends incomplete, or still runs when ctx ends, leaves the account
+// incomplete.
+func WaitWindowsPrivateWalksReported(ctx context.Context) bool {
+	windowsPrivateWalks.Lock()
+	var runs []*windowsPrivateWalkRunState
+	for _, state := range windowsPrivateWalks.homes {
+		if state.running != nil && state.running.reported {
+			runs = append(runs, state.running)
+		}
+	}
+	windowsPrivateWalks.Unlock()
+	finished := false
+	for _, run := range runs {
+		select {
+		case <-run.done:
+			finished = finished || run.complete
+		case <-ctx.Done():
+			return finished
+		}
+	}
+	// A reported walk that finished complete before the lock above has
+	// already signalled the extra cycle.
+	select {
+	case <-windowsPrivateWalkLate:
+		finished = true
+	default:
+	}
+	return finished
+}
 
 // windowsPrivateWalkWait is the part of ctx the scan waits for its walk:
 // a quarter of what is left, at least 2 s, stays for the rest of the scan.

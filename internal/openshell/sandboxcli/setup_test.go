@@ -1763,22 +1763,22 @@ func TestSetupCredentialFollowsOpenShellLLM(t *testing.T) {
 // TestSetupHarnessAddsToTheConfiguredOnes pins that --harness adds to
 // openshell.harnesses instead of replacing it (manual test R2-72).
 func TestSetupHarnessAddsToTheConfiguredOnes(t *testing.T) {
-	ta := setupApp(t, "", "  harnesses: [opencode, copilot, kiro]\n", true)
+	ta := setupApp(t, "", "  harnesses: [codex, copilot, kiro]\n", true)
 	ta.IO.TTY = false
-	ta.Cfg.OpenShell.Harnesses = []string{"opencode", "copilot", "kiro"}
+	ta.Cfg.OpenShell.Harnesses = []string{"codex", "copilot", "kiro"}
 	for _, step := range []struct {
 		harness string
 		want    []string
 	}{
-		{"opencode", []string{"opencode", "copilot", "kiro"}},
-		{"claude", []string{"opencode", "copilot", "kiro", "claudecode"}},
+		{"codex", []string{"codex", "copilot", "kiro"}},
+		{"claude", []string{"codex", "copilot", "kiro", "claudecode"}},
 	} {
 		ta.ok(t, ta.fresh().Setup(bg, SetupOptions{NonInteractive: true, SkipImages: true, NoWrappers: true, Harnesses: []string{step.harness}}))
 		if c := loadConfig(t, ta); !slices.Equal(c.OpenShell.Harnesses, step.want) {
 			t.Fatalf("after setup --harness %s, openshell.harnesses = %v, want %v", step.harness, c.OpenShell.Harnesses, step.want)
 		}
 	}
-	has(t, ta.output(), "  Set up before: copilot, kiro, opencode\n")
+	has(t, ta.output(), "  Set up before: codex, copilot, kiro\n")
 }
 
 // TestSetupNamesKiroAsTyped pins that setup names a harness the way the
@@ -2509,7 +2509,7 @@ func TestSetupHarnessLines(t *testing.T) {
 		"  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):\n"+
 			"    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓\n"+
 			"    Codex (codex)         model credential none found: before the first run, set OPENAI_API_KEY, or set AWS_BEARER_TOKEN_BEDROCK for Amazon Bedrock; or log in inside the sandbox\n"+
-			"  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, opencode\n",
+			"  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, opencode (not verified yet)\n",
 		"Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]",
 		"Build the Codex image now?",
 		"skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)")

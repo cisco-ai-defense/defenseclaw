@@ -54,11 +54,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // RemovedConnectorNotice is the one line every surface prints for a host an
@@ -98,7 +99,7 @@ type removedOnlyConnector struct {
 // removedOpenHandsLauncherFlag is how a Windows hooks.json command names the
 // OpenHands connector of the native launcher (defenseclaw-hook --connector
 // openhands).
-var removedOpenHandsLauncherFlag = regexp.MustCompile(`(?i)--connector(?:\s*=\s*|\s+)["']?open[-_]?hands\b`)
+var removedOpenHandsLauncherFlag = lazyregexp.New(`(?i)--connector(?:\s*=\s*|\s+)["']?open[-_]?hands\b`)
 
 var (
 	removedOpenHands = removedOnlyConnector{

@@ -221,6 +221,9 @@ func kernelBlockSentence(block sensor.KernelBlock, earlier bool) string {
 	case block.Control == "kernel.persistence_write":
 		sentence = fmt.Sprintf("DefenseClaw blocked %s from changing your shell startup or autostart file (%s) under your organization's policy (%s, a kernel control).",
 			process, target, firstNonEmpty(block.RuleID, "persistence.shell_profile_write"))
+	case block.Control == "kernel.ssh_authorized_keys_write":
+		sentence = fmt.Sprintf("DefenseClaw blocked %s from changing your SSH authorized keys (%s) under your organization's policy (%s, a kernel control).",
+			process, target, firstNonEmpty(block.RuleID, "persistence.ssh_authorized_keys_write"))
 	default:
 		sentence = fmt.Sprintf("DefenseClaw blocked %s from opening %s under your organization's policy (a kernel control).", process, target)
 	}

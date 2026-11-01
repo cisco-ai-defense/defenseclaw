@@ -335,6 +335,7 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 	}}
 	health := NewSidecarHealth()
 	health.bindObservabilityV8HealthSource(source)
+	health.setObservabilityV8RetentionCap(64)
 	health.setObservabilityV8Retention("healthy", 90, "")
 	health.observeObservabilityV8Failure("all-signals", 3, "stale_failure", now.Add(time.Hour))
 
@@ -345,6 +346,7 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 	details := snapshot.Telemetry.Details
 	if details["generation"] != uint64(4) || details["destination_count"] != 3 ||
 		details["retention_state"] != "healthy" || details["retention_days"] != int64(90) ||
+		details["retention_max_store_mb"] != int64(64) ||
 		details["optional_destination_state"] != "degraded" ||
 		details["optional_destination_failure_count"] != 1 ||
 		details["optional_destination_failure_summary"] != "all-signals:degraded:http_authentication" {

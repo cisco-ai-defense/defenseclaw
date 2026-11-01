@@ -6,6 +6,8 @@ package gateway
 import (
 	"context"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,12 +40,65 @@ type hookProgressWriter struct {
 // withHookProgress returns w and r ready to report progress when r asks for
 // it, and the function the handler defers to close the window.
 func withHookProgress(w http.ResponseWriter, r *http.Request) (http.ResponseWriter, *http.Request, func()) {
+	start := time.Now()
+	r = r.WithContext(context.WithValue(r.Context(), hookRequestStartKey{}, start))
 	if r.Header.Get(hookexec.HookProgressHeader) != "1" {
 		return w, r, func() {}
 	}
-	progress := &hookProgressWriter{ResponseWriter: w, start: time.Now()}
+	progress := &hookProgressWriter{ResponseWriter: w, start: start}
 	ctx := context.WithValue(r.Context(), hookProgressContextKey{}, progress)
 	return progress, r.WithContext(ctx), progress.close
+}
+
+type hookRequestStartKey struct{}
+
+type shellToolGateKey struct{}
+
+// shellHookBoundsToolGate reports a tool-gate call of a per-user shell hook
+// that bounds its wait without asking for progress reports: the Claude Code
+// and Codex shell hooks give PreToolUse and PermissionRequest 4 s in all
+// (curl --max-time, _hardening.sh defenseclaw_tool_gate_max_time).
+func shellHookBoundsToolGate(connector, event string, r *http.Request) bool {
+	if r.Header.Get(hookexec.HookProgressHeader) == "1" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(connector)) {
+	case "claudecode", "codex":
+	default:
+		return false
+	}
+	event = strings.TrimSpace(event)
+	return event == "PreToolUse" || event == "PermissionRequest"
+}
+
+// shellToolGateDefaultWindow is how long such a call's judge may hold the
+// answer when the hook did not say how long it waits (the curl transport,
+// an older helper): the 4 s of the hook less its own start, the helper's
+// 1 s reserve and the answer's way back.
+const shellToolGateDefaultWindow = 2 * time.Second
+
+// shellToolGateAnswerMargin is kept from the wait the hook names for the
+// rest of the decision and the answer's way back.
+const shellToolGateAnswerMargin = 300 * time.Millisecond
+
+// withShellToolGateBound marks ctx as such a call. Its hook-lane judge then
+// answers inside the hook's wait (HookAnswerWithinHeader less a margin,
+// shellToolGateDefaultWindow without it, never over hookJudgeAnswerWindow),
+// as for a bounded native hook. It used to hold the answer for the judge's
+// whole hook_timeout (8 s), past the hook's own 4 s, and the hook then failed
+// the benign call closed whenever a slow or queued judge took longer than
+// the hook waited (#1395).
+func withShellToolGateBound(ctx context.Context, r *http.Request) context.Context {
+	start, ok := ctx.Value(hookRequestStartKey{}).(time.Time)
+	if !ok || start.IsZero() {
+		start = time.Now()
+	}
+	window := shellToolGateDefaultWindow
+	if ms, err := strconv.Atoi(strings.TrimSpace(r.Header.Get(hookexec.HookAnswerWithinHeader))); err == nil && ms > 0 {
+		window = time.Duration(ms)*time.Millisecond - shellToolGateAnswerMargin
+	}
+	window = min(max(window, 0), hookJudgeAnswerWindow)
+	return context.WithValue(ctx, shellToolGateKey{}, start.Add(window))
 }
 
 // reportHookProgress sends the request's 102 report, if it asked for one.
@@ -76,10 +131,13 @@ func hookJudgeAnswerEnd(ctx context.Context) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	progress, ok := ctx.Value(hookProgressContextKey{}).(*hookProgressWriter)
-	if !ok || progress == nil || progress.start.IsZero() {
-		return time.Time{}, false
+	if ok && progress != nil && !progress.start.IsZero() {
+		return progress.start.Add(hookJudgeAnswerWindow), true
 	}
-	return progress.start.Add(hookJudgeAnswerWindow), true
+	if end, ok := ctx.Value(shellToolGateKey{}).(time.Time); ok && !end.IsZero() {
+		return end, true
+	}
+	return time.Time{}, false
 }
 
 func (w *hookProgressWriter) report() {

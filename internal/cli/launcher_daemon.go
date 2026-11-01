@@ -185,7 +185,7 @@ func launcherStartDaemon(ctx context.Context, goos string, uid int) error {
 	case "darwin":
 		domain, listing := launcherLaunchDomain(ctx, uid)
 		label, _ := launcherAgent()
-		if _, err := launcherInspectAndReload(ctx, domain, listing, true); err != nil {
+		if _, err := launcherInspectAndReload(ctx, domain, listing, true, false); err != nil {
 			return err
 		}
 		return launcherRunChecked(ctx, launcherLaunchctl, "kickstart", domain+"/"+label)
@@ -201,7 +201,7 @@ func launcherRestartDaemon(ctx context.Context, goos string, uid int) error {
 	case "darwin":
 		domain, listing := launcherLaunchDomain(ctx, uid)
 		label, _ := launcherAgent()
-		if _, err := launcherInspectAndReload(ctx, domain, listing, false); err != nil {
+		if _, err := launcherInspectAndReload(ctx, domain, listing, false, true); err != nil {
 			return err
 		}
 		return launcherRunChecked(ctx, launcherLaunchctl, "kickstart", "-k", domain+"/"+label)
@@ -216,17 +216,30 @@ func launcherRestartDaemon(ctx context.Context, goos string, uid int) error {
 // plist is gone, and the sandbox job of the current label is bootstrapped in
 // its place (GAP-0206). One that runs is left to the lifecycle, which stops
 // it when its sandboxes have stopped. listing is `launchctl print domain`.
-func launcherInspectAndReload(ctx context.Context, domain, listing string, bootstrapSandbox bool) (bool, error) {
+//
+// With restart (the daemon waits for a restart and no sandbox of the
+// account runs: launcherEnsureDaemon), a sandbox job of an earlier label
+// that runs is the daemon to restart when the installed label is not
+// loaded: a package upgrade renamed the job while that daemon ran a
+// sandbox, and a kickstart of the installed label found no job ("Could not
+// find service", GAP-0049). It is booted out and the installed label is
+// bootstrapped in its place, as its own exit and the next start would.
+func launcherInspectAndReload(ctx context.Context, domain, listing string, bootstrapSandbox, restart bool) (bool, error) {
 	reloaded := false
 	for _, base := range openshell.LaunchAgentBases {
 		label, plist := openshell.FindLaunchAgent(launcherAgentsDir, base)
 		sandbox := base == openshell.SandboxAgentBase
+		var runningOld []string
 		for _, old := range openshell.LaunchAgentLabelsIn([]byte(listing), base) {
 			if old == label {
 				continue
 			}
 			out, err := launcherRun(ctx, launcherLaunchctl, "print", domain+"/"+old)
-			if err != nil || openshell.ParseLaunchAgentState([]byte(out)).State == "running" {
+			if err != nil {
+				continue
+			}
+			if openshell.ParseLaunchAgentState([]byte(out)).State == "running" {
+				runningOld = append(runningOld, old)
 				continue
 			}
 			_, _ = launcherRun(ctx, launcherLaunchctl, "bootout", domain+"/"+old)
@@ -235,7 +248,12 @@ func launcherInspectAndReload(ctx context.Context, domain, listing string, boots
 		target := domain + "/" + label
 		out, err := launcherRun(ctx, launcherLaunchctl, "print", target)
 		if err != nil {
-			if bootstrapSandbox && sandbox {
+			if restart && sandbox {
+				for _, old := range runningOld {
+					_, _ = launcherRun(ctx, launcherLaunchctl, "bootout", domain+"/"+old)
+				}
+			}
+			if (bootstrapSandbox || restart) && sandbox {
 				if err := launcherRunChecked(ctx, launcherLaunchctl, "bootstrap", domain, plist); err != nil {
 					return false, err
 				}
@@ -264,7 +282,7 @@ func launcherAwaitWithRecovery(ctx context.Context, client launcherStatusClient,
 		return status, awaitErr
 	}
 	domain, listing := launcherLaunchDomain(ctx, uid)
-	reloaded, err := launcherInspectAndReload(ctx, domain, listing, false)
+	reloaded, err := launcherInspectAndReload(ctx, domain, listing, false, false)
 	if err != nil {
 		return nil, err
 	}

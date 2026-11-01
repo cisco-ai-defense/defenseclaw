@@ -19,12 +19,12 @@ package gateway
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -49,7 +49,7 @@ const (
 )
 
 // sandboxRuleIDPattern is the shape of a rule ID a reason may name.
-var sandboxRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$`)
+var sandboxRuleIDPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$`)
 
 // sandboxFlaggedNote closes the reason of a verdict that let the action run
 // (an alert, or a block the hook event cannot enforce): telling the agent

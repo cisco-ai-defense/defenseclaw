@@ -224,7 +224,7 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 				rep.Checks = append(rep.Checks, *c)
 			}
 			if a.GOOS == "darwin" {
-				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed))
+				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed, st.elsewhere))
 			}
 			if c := managedDockerGroupCheck(a.GOOS, st.managed, dockerGroup); c != nil {
 				rep.Checks = append(rep.Checks, *c)
@@ -244,7 +244,15 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	if a.Cfg != nil || managed {
 		rep.Checks = append(rep.Checks, a.tlsTrustCheck(ctx, managed), a.hostGitCheck(ctx, managed, a.everyRunCopies(managed, string(rep.Driver))))
 	}
+	if managed && rep.Driver == openshell.DriverVM {
+		// The MicroVM driver's disks need room on the account's volume; the
+		// managed report has no machine checks of its own (GAP-0259).
+		rep.Checks = append(rep.Checks, d.ManagedVMDiskCheck())
+	}
 	if managed && a.GOOS == "darwin" {
+		if rep.Driver == openshell.DriverDocker {
+			managedDockerPlatform(rep)
+		}
 		if rep.Driver == openshell.DriverVM || (st.managed != nil && rep.Driver != openshell.DriverDocker) {
 			rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
 		}
@@ -256,6 +264,23 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		}
 	}
 	return rep
+}
+
+// managedDockerPlatform makes the Platform row of a managed Mac whose
+// administrator chose the docker driver say so: the row's MicroVM note
+// (the vm driver, experimental upstream) is not this computer's setup, and
+// the doctor and the exec shim name the same driver in every state
+// (GAP-0249).
+func managedDockerPlatform(rep *openshell.DoctorReport) {
+	for i := range rep.Checks {
+		c := &rep.Checks[i]
+		if c.ID != openshell.CheckIDPlatform || c.Status != openshell.StatusWarn {
+			continue
+		}
+		platform, _, _ := strings.Cut(c.Detail, ":")
+		c.Status = openshell.StatusPass
+		c.Detail = platform + ": your organization runs sandboxes on this Mac with the docker driver (in Docker's Linux VM)"
+	}
 }
 
 func managedRenderedDoctorDriver(paths *openshell.RenderedPaths) (openshell.ComputeDriver, error) {
@@ -294,7 +319,10 @@ type statusProbe struct {
 	daemonUID *int
 	// managed is the managed part of the daemon's status (managed computers).
 	managed *sandboxapi.ManagedStatus
-	check   openshell.Check
+	// elsewhere: another account holds this computer's sandbox ports
+	// (sandboxapi.Status.GatewayElsewhere).
+	elsewhere bool
+	check     openshell.Check
 }
 
 // isAre is " is" for one name, " are" for more.
@@ -687,6 +715,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			p.ingressListening = st.IngressAddr != ""
 			p.egressListening = st.EgressAddr != ""
 			p.listenersProven = st.ListenersProven
+			p.elsewhere = st.GatewayElsewhere != ""
 		}
 		managed = managed || (serr == nil && st.Managed != nil)
 		switch {

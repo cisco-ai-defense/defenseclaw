@@ -485,7 +485,7 @@ func TestWindowsClaudeMigrationRunsBeforeTheMachinePolicyIsPublished(t *testing.
 }
 
 // GAP-1540 (LEAD DECISION 03:34): a migration that cannot finish (a settings
-// file DefenseClaw cannot read, such as one saved with a byte order mark) or
+// file DefenseClaw cannot read, such as one that is not valid JSON) or
 // has not run yet makes the Copilot row's enterprise verify fail with the file
 // and the reason, instead of the guard silently blocking every call. Setup's
 // readiness reports it as a warning, so one account's file never rolls back
@@ -696,7 +696,7 @@ func TestWindowsStatusWarnsAnUnmigratableClaudeSettingsFile(t *testing.T) {
 		}
 	}
 	bom := filepath.Join(homes["bom"], ".claude", "settings.json")
-	if !strings.Contains(result.Warnings[0].Message, "cannot check "+bom) || !strings.Contains(result.Warnings[0].Message, "without a byte order mark") {
+	if !strings.Contains(result.Warnings[0].Message, "cannot check "+bom) || !strings.Contains(result.Warnings[0].Message, "until the file is valid JSON or removed") {
 		t.Fatalf("the unreadable file's warning must name the file and the fix: %s", result.Warnings[0].Message)
 	}
 	readonly := filepath.Join(homes["readonly"], ".claude", "settings.json")

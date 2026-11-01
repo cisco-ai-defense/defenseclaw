@@ -23,7 +23,9 @@ import (
 // list and verify said setup was done while the entry pointed at the old
 // home and could not start (GAP-0693); after a re-enrollment under another
 // profile they said so while the entry still had the replaced profile
-// (GAP-0833). note says what does not match.
+// (GAP-0833); after the agent executable the lock pins changed, they said so
+// while the guard refused to start (GAP-1156). note says what does not
+// match.
 func enterpriseACPSetupState(dataDir, home, client, agent, profile, mode string) (done bool, note string) {
 	lockPath := acpContractLockPath(dataDir, client, agent)
 	if info, err := os.Lstat(lockPath); err != nil || !info.Mode().IsRegular() {
@@ -102,6 +104,11 @@ func enterpriseACPSetupState(dataDir, home, client, agent, profile, mode string)
 	}
 	if mode != "" && lock.Mode != mode {
 		return false, fmt.Sprintf("the editor entry is set up for %s mode, but profile %s is in %s mode", lock.Mode, profile, mode)
+	}
+	if err := acp.LockedExecutablesMatch(lock, acp.EntryAgentCommand(args, agent), command); err != nil {
+		// The guard refuses to start when the agent or guard executable the
+		// lock pins moved or changed after setup (GAP-1156).
+		return false, fmt.Sprintf("the agent or guard executable it pins changed after setup (%v), so the guard refuses to start it", err)
 	}
 	return true, ""
 }

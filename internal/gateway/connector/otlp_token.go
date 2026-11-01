@@ -23,9 +23,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // OTLPPathTokenScope identifies a connector-bound OTLP token used in
@@ -81,7 +82,7 @@ func OTLPPathTokenScopeForConnector(connectorName string) (OTLPPathTokenScope, b
 // or a scope that collides with the master `expected` token route
 // through the on-disk filename. Matches the same allow-list as
 // parseOTLPPathToken's source segment.
-var otlpScopeRE = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+var otlpScopeRE = lazyregexp.New(`^[a-zA-Z0-9._-]+$`)
 
 // otlpTokenLen is the unencoded byte length of a path-token. 32 bytes
 // (64 hex chars) matches EnsureGatewayToken so the strength is at
@@ -91,7 +92,7 @@ const otlpTokenLen = 32
 
 const otlpPathTokenMaxReadBytes = 4096
 
-var otlpTokenHexRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var otlpTokenHexRE = lazyregexp.New(`^[0-9a-f]{64}$`)
 
 // otlpTokenMu serializes EnsureOTLPPathToken across goroutines. The
 // guard is per-process; each token file is independently atomic via

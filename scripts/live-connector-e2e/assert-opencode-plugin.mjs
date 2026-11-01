@@ -58,61 +58,62 @@ childProcess.execFileSync = function (file, args, options) {
   return nativeExecFileSync.apply(this, arguments);
 };
 syncBuiltinESMExports();
+let cleanup;
+let lifecycle;
 try {
   const module = await import(moduleURL);
-  if (typeof module.DefenseClaw !== "function") {
-    throw new Error("installed OpenCode plugin does not export DefenseClaw");
+  if (module.default?.id !== "cisco.defenseclaw" || typeof module.default.setup !== "function" || Object.keys(module).join() !== "default") {
+    throw new Error("installed OpenCode plugin must export only its V2 setup definition");
   }
-  const hooks = await module.DefenseClaw({
-    directory: process.cwd(),
-    worktree: process.cwd(),
+  const hooks = new Map();
+  const location = { directory: process.cwd() };
+  cleanup = await module.default.setup({
+    location,
+    session: { get: async ({ sessionID }) => ({ id: sessionID, location }) },
+    mcp: { list: async () => ({ location, data: [] }) },
+    tool: { hook: async (name, callback) => {
+      hooks.set(name, callback);
+      return { dispose: async () => hooks.delete(name) };
+    } },
+    event: { subscribe: async function* ({ signal }) {
+      const event = await new Promise((resolve) => {
+        lifecycle = resolve;
+        signal.addEventListener("abort", () => resolve(null), { once: true });
+      });
+      if (event) yield event;
+    } },
   });
   if (
-    typeof hooks.config !== "function" ||
-    typeof hooks["tool.execute.before"] !== "function" ||
-    typeof hooks["tool.execute.after"] !== "function" ||
-    typeof hooks.event !== "function"
+    typeof hooks.get("execute.before") !== "function" ||
+    typeof hooks.get("execute.after") !== "function"
   ) {
-    throw new Error("installed OpenCode plugin is missing required hook functions");
+    throw new Error("installed OpenCode V2 plugin is missing awaited tool callbacks");
   }
 
-  // OpenCode invokes every plugin's config hook after resolving the complete
-  // plugin list. The synthetic contract must model that official loader step
-  // so the managed plugin can prove it is last and therefore authoritative
-  // over the final tool arguments. Omitting this call correctly forces action
-  // mode to refuse the operation.
-  await hooks.config({
-    plugin_origins: [{ spec: moduleURL }],
-    mcp: {},
-  });
-
   if (expected === "load") {
-    // Setup convergence only needs the authenticated config-load heartbeat.
+    // Setup convergence only needs the authenticated V2 setup heartbeat.
     // Avoid spending its bounded readiness window on unrelated tool hooks.
   } else if (expected === "lifecycle") {
-    await hooks.event({
-      event: {
-        type: command,
-        properties: {
-          info: {
-            id: `defenseclaw-windows-contract-lifecycle-${probeID}`,
-            title: "DefenseClaw Windows lifecycle contract",
-          },
-        },
-      },
+    const nativeType = {
+      "session.status": "session.execution.started",
+      "session.idle": "session.execution.succeeded",
+      "session.error": "session.execution.failed",
+    }[command] || command;
+    lifecycle({
+      type: nativeType, location,
+      data: { sessionID: `defenseclaw-windows-contract-lifecycle-${probeID}` },
     });
+    // Give the asynchronous subscription one turn to post the lifecycle event.
+    await new Promise((resolve) => setImmediate(resolve));
   } else {
     let blocked = false;
     let reason = "";
     try {
-      await hooks["tool.execute.before"](
-        {
-          tool: "bash",
-          sessionID: `defenseclaw-windows-contract-${probeID}`,
-          callID: `defenseclaw-windows-contract-${probeID}-call`,
-        },
-        { args: { command } },
-      );
+      await hooks.get("execute.before")({
+        tool: "shell", input: { command },
+        sessionID: `defenseclaw-windows-contract-${probeID}`,
+        id: `defenseclaw-windows-contract-${probeID}-call`,
+      });
     } catch (error) {
       blocked = true;
       reason = error instanceof Error ? error.message : String(error);
@@ -127,24 +128,20 @@ try {
     // This hook is intentionally observe-only. Awaiting its returned promise
     // proves the handler itself completes without turning telemetry failure into
     // a tool failure; the plugin does not await its internal POST.
-    await hooks["tool.execute.after"](
-      {
-        tool: "bash",
-        sessionID: `defenseclaw-windows-contract-${probeID}`,
-        callID: `defenseclaw-windows-contract-${probeID}-call`,
-        args: { command },
+    await hooks.get("execute.after")({
+      tool: "shell", input: { command },
+      sessionID: `defenseclaw-windows-contract-${probeID}`,
+      id: `defenseclaw-windows-contract-${probeID}-call`,
+      status: "completed", result: {
+        output: { output: "synthetic OpenCode output", exit: 0 },
+        content: [{ type: "text", text: "synthetic OpenCode output" }],
       },
-      {
-        title: "synthetic OpenCode tool result",
-        output: "synthetic OpenCode output",
-        metadata: { source: "DefenseClaw contract fixture" },
-      },
-    );
+    });
     if (
       observedAfterPayload?.tool_input?.command !== command ||
-      observedAfterPayload?.tool_result?.title !== "synthetic OpenCode tool result" ||
-      observedAfterPayload?.tool_result?.output !== "synthetic OpenCode output" ||
-      observedAfterPayload?.tool_result?.metadata?.source !== "DefenseClaw contract fixture"
+      observedAfterPayload?.tool_result?.output?.output !== "synthetic OpenCode output" ||
+      observedAfterPayload?.tool_result?.output?.exit !== 0 ||
+      observedAfterPayload?.tool_result?.opencode_v2_status !== "completed"
     ) {
       throw new Error(
         `OpenCode after payload does not preserve official input args and result output: ${JSON.stringify(observedAfterPayload)}`,
@@ -152,6 +149,7 @@ try {
     }
   }
 } finally {
+  await cleanup?.();
   globalThis.fetch = nativeFetch;
   childProcess.execFileSync = nativeExecFileSync;
   syncBuiltinESMExports();

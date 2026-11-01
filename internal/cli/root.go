@@ -93,6 +93,9 @@ type machineVersionReport struct {
 	// member: an older build refuses the flag, and the MDM wrappers store a
 	// credential without it there.
 	SecretSetBundle bool `json:"secret_set_bundle,omitempty"`
+	// IdentityRefresh reports `enterprise identity refresh` (from 1.0.6).
+	// An optional member: an older build has no such command.
+	IdentityRefresh bool `json:"identity_refresh,omitempty"`
 }
 
 func writeMachineVersion(w io.Writer) error {
@@ -104,6 +107,7 @@ func writeMachineVersion(w io.Writer) error {
 		Built:              appBuildDate,
 		ManagementContract: managementContract,
 		SecretSetBundle:    true,
+		IdentityRefresh:    true,
 	})
 }
 
@@ -168,6 +172,9 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 			if answer := managedWindowsConfigLoadError(cmd, err); answer != err {
 				return answer
 			}
+			if continueWithoutConfig(cmd, cfgPath, err) {
+				return nil
+			}
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 		cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
@@ -230,6 +237,51 @@ func auditStoreOptions(cfg *config.Config) []audit.StoreOption {
 // auditOptionalAnnotation marks a subcommand that writes no audit events, so
 // an audit store that does not open is a warning instead of an error.
 const auditOptionalAnnotation = "defenseclaw.audit-optional"
+
+// configOptionalAnnotation marks a subcommand that only removes or checks what
+// DefenseClaw wrote into the agents' files (connector teardown and verify).
+// Uninstall runs them; a config.yaml that does not load (a config_version 8
+// file whose config_version 9 migration fails, say) aborted the uninstall
+// before any connector was torn down (rel-1-0-6 GAP-0153). For these commands
+// the load error is printed and the command goes on.
+const configOptionalAnnotation = "defenseclaw.config-optional"
+
+// continueWithoutConfig reports whether cmd goes on after the strict config
+// load failed with loadErr, and sets it up to. Only a configOptionalAnnotation
+// command on a host that is not managed does: a managed host keeps its
+// administrator's config strict. The command reads what it can of the file
+// without the migration or the policy inputs (the ports, the workspace, the
+// environment and the gateway token, which it needs to find DefenseClaw's
+// entries), or runs on the data directory alone when even that fails. Neither
+// opens the audit store: these commands write no audit events.
+func continueWithoutConfig(cmd *cobra.Command, cfgPath string, loadErr error) bool {
+	if cmd == nil || cmd.Annotations[configOptionalAnnotation] != "true" || managedEnterpriseFromPin() {
+		return false
+	}
+	lenient, lenientErr := config.LoadManagedFileForLifecycleRecovery(cfgPath)
+	if lenientErr == nil && managed.IsManagedEnterprise(lenient.DeploymentMode) {
+		return false
+	}
+	w := cmd.ErrOrStderr()
+	fmt.Fprintf(w, "warning: failed to load config: %v\n", loadErr)
+	if lenientErr == nil {
+		cfg = lenient
+		fmt.Fprintf(w, "warning: %s goes on with the paths and ports config.yaml names; fix the config error afterwards\n", cmd.CommandPath())
+	} else {
+		cfg = nil
+		fmt.Fprintf(w, "warning: %s goes on with the data directory only; fix the config error afterwards\n", cmd.CommandPath())
+	}
+	activeObservabilityV8Startup = nil
+	auditStore, auditLog = nil, nil
+	version.SetBinaryVersion(appVersion)
+	if cfg != nil {
+		useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
+		if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
+			loadDotEnvIntoOS(resolved)
+		}
+	}
+	return true
+}
 
 // openCommandAuditStore opens and initializes the audit store for a CLI
 // subcommand (the daemon uses audit.OpenDaemonStore instead).

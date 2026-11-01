@@ -18,7 +18,9 @@ import (
 // every audit write of every hook call stands in (GAP-1489, GAP-1211). They
 // are prepared once when the store is ready and run in each caller's
 // transaction.
-var preparedStatementQueries = []string{eventHistoryInsertSQL, correlationObservationInsertSQL}
+// The field class set insert runs once per row too (field_class_sets.go); on
+// a Secure Client store it has no table, does not prepare and is never run.
+var preparedStatementQueries = []string{eventHistoryInsertSQL, correlationObservationInsertSQL, fieldClassSetInsertSQL}
 
 // prepareStatements prepares the repeated inserts on the store's connection.
 // A statement that does not prepare runs as text, as before.

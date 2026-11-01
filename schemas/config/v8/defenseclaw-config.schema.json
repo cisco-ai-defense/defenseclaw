@@ -59,6 +59,9 @@
     "llm_providers": {
       "$ref": "#/$defs/llmProviders"
     },
+    "decision_model": {
+      "$ref": "#/$defs/decisionModel"
+    },
     "data_dir": {
       "$ref": "#/$defs/pathString"
     },
@@ -214,6 +217,9 @@
     },
     "fleet": {
       "$ref": "#/$defs/fleet"
+    },
+    "connectors": {
+      "$ref": "#/$defs/connectors"
     }
   },
   "$defs": {
@@ -418,6 +424,57 @@
         },
         "extra_headers": {
           "$ref": "#/$defs/stringMap"
+        }
+      }
+    },
+    "decisionModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Unified decision model (System One protocol): a fast first pass in front of the LLM judge on tool calls, and the skill scanner's advisory score. Off by default.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "model": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "base_url": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "api_key_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        },
+        "credential": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "timeout": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 30,
+          "default": 1
+        },
+        "allow_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.3
+        },
+        "block_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.75
+        },
+        "on_confident_block": {
+          "type": "string",
+          "enum": [
+            "",
+            "escalate",
+            "decide"
+          ],
+          "default": "escalate"
         }
       }
     },
@@ -1513,6 +1570,13 @@
           "minimum": 0,
           "maximum": 86400
         },
+        "max_parallel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256,
+          "default": 0,
+          "description": "Most LLM judge calls sent to the judge model at once; 0 = no limit. With a limit, tool-call judging goes first and keeps one slot, so a slow local model does not queue it behind prompt checks. Releases before 1.0.6 refuse this key."
+        },
         "llm": {
           "$ref": "#/$defs/llm"
         },
@@ -1847,6 +1911,18 @@
           ],
           "default": "full"
         },
+        "internal_domains": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 254,
+            "pattern": "^\\.?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.?$"
+          },
+          "description": "The organization's own domains. A download from a host equal to or under one does not start the download-then-execute alert."
+        },
         "detection_strategy": {
           "$ref": "#/$defs/detectionStrategy"
         },
@@ -1938,6 +2014,44 @@
           "pattern": "^(|[a-z0-9][a-z0-9_-]{0,63})$",
           "default": "",
           "description": "Profile for subjects no assignment selects. Empty keeps the guardrail.* configuration."
+        },
+        "protected_files": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Protected-file watch. Unset alerts on a change to an SSH authorized keys file, shell startup file or user autostart entry made while an agent tool call ran for that user; restore also puts back the last accepted content (opt-in, strict); off turns the watch off.",
+          "properties": {
+            "on_change": {
+              "type": "string",
+              "enum": [
+                "",
+                "alert",
+                "restore",
+                "off"
+              ],
+              "default": "alert"
+            },
+            "paths": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            }
+          }
+        },
+        "chains": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Tool-call chain evaluation settings.",
+          "properties": {
+            "root_scope": {
+              "type": "boolean",
+              "default": false,
+              "description": "Managed only, off by default: also evaluate chains across the sessions of one root_session_id a trusted connector sends. Honoured only from a signed bundle. Requires min_product_version 1.0.6 in a bundle."
+            }
+          }
         }
       }
     },
@@ -3422,7 +3536,14 @@
           "minimum": 0,
           "maximum": 106751,
           "default": 7,
-          "description": "Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff after startup readiness and every six hours. The same window bounds AI discovery scan history in <data_dir>/inventory.db, which the gateway prunes about hourly (always keeping the latest scan) and compacts. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the audit database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration."
+          "description": "Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff a minute after startup readiness and every six hours. The same window bounds AI discovery scan history in <data_dir>/inventory.db, which the gateway prunes about hourly (always keeping the latest scan) and compacts. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the audit database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration."
+        },
+        "max_store_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "default": 0,
+          "description": "Opt-in size cap for the audit database in MiB. 0 (the default) keeps retention by days only. A value from 64 to 1048576 (1 to 63 are refused) makes each retention run also delete the oldest history, through the same path as retention_days, until the used pages of the audit database are under the cap; the newest hour is always kept. Releases before 1.0.6 refuse this key: remove it before going back with defenseclaw upgrade --version (defenseclaw rollback restores the previous configuration)."
         }
       },
       "x-defenseclaw-semantic-constraint": "The two database paths must be distinct from each other and every other configured file after lexical, real-path, symlink, hard-link, and inode checks."
@@ -5231,6 +5352,67 @@
               "maxLength": 4096
             }
           }
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Standalone only. Trusted connectors: service accounts that may name the person they act for on the agent-gateway route. Empty by default (off); honoured only when the live configuration is a signed bundle. Requires min_product_version 1.0.6 in a bundle.",
+          "properties": {
+            "trusted_connectors": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "account",
+                  "may_act_for"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+                  },
+                  "account": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "route": {
+                    "type": "string",
+                    "enum": [
+                      "agent-gateway"
+                    ]
+                  },
+                  "may_act_for": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "groups": {
+                        "type": "array",
+                        "maxItems": 256,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        }
+                      },
+                      "users": {
+                        "type": "array",
+                        "maxItems": 256,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -5936,6 +6118,29 @@
         "policy_compiler_path": {
           "type": "string",
           "maxLength": 4096
+        }
+      }
+    },
+    "connectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Connectors that install nothing into an agent. Off by default.",
+      "properties": {
+        "agent_gateway": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The agent-gateway hook route (/api/v1/agent-gateway/hook) for gateways that call DefenseClaw for an agent. Off by default; on a managed device only the lifecycle or a signed bundle sets it. Requires min_product_version 1.0.6 in a bundle.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "instance_name": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+              "description": "Label of the calling gateway in audit on a per-user install."
+            }
+          }
         }
       }
     }

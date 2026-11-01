@@ -4,7 +4,6 @@
 package hookpaths
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -179,7 +178,7 @@ func moveEntries(call *syntax.CallExpr, values actionValues, cwd, home string, r
 		if !ok {
 			return entries, "", true
 		}
-		info, err := os.Stat(resolved)
+		info, err := pathStat(resolved)
 		if noTarget || err != nil || !info.IsDir() {
 			if entry, ok := entryOf(resolved); ok {
 				entries = append(entries, entry)

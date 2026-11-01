@@ -278,7 +278,7 @@ func TestIdentityDirectoryFailureMessagesDescribeRefusal(t *testing.T) {
 		{name: "cached facts", entry: identityCacheEntry[useridentity.DirectoryFacts]{ok: true, fetchedAt: now}, want: "keeps its last facts for at most 1h0m0s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			message := cache.noteResultLocked("1201", &tc.entry, errors.New("directory unavailable"), now)
+			message := cache.noteResultLocked("1201", &tc.entry, errors.New("directory unavailable"), false, now)
 			for _, want := range []string{"directory lookup for 1201 failed", tc.want,
 				"requests whose assignments need missing identity facts are refused",
 				"refusal names the missing fact"} {

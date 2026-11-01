@@ -13,7 +13,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -21,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/spf13/cobra"
@@ -309,7 +309,7 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 
 // enterpriseACPProfileNameRE is the form of a profile name an enrollment
 // accepts when acp.profiles does not define it.
-var enterpriseACPProfileNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var enterpriseACPProfileNameRE = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // enterpriseACPShortName bounds a name echoed in a refusal.
 func enterpriseACPShortName(name string) string {
@@ -588,6 +588,19 @@ func enterpriseACPCentralNote(client, agent, profile string) string {
 	if resolved != profile {
 		return fmt.Sprintf("central ACP policy now binds %s/%s to profile %s, so the guard refuses this %s enrollment; "+
 			"enroll the user again with --profile %s", client, agent, resolved, profile, resolved)
+	}
+	// The gateway's next checks: the pins of the pair, then the profile's
+	// allow-lists. A binding the profile no longer allows verified green
+	// while the guard was refused (GAP-1155).
+	if refusals := cfg.ACP.ACPPairBindingRefusals(client, agent, profile); len(refusals) > 0 {
+		return fmt.Sprintf("central ACP policy no longer binds %s/%s to profile %s (%s), so the guard refuses it",
+			client, agent, profile, strings.Join(refusals, "; "))
+	}
+	if settings, ok := cfg.ACP.Profiles[profile]; ok {
+		if refusals := settings.AllowListRefusals(profile, client, agent); len(refusals) > 0 {
+			return fmt.Sprintf("central ACP policy no longer allows %s/%s in profile %s (%s), so the guard refuses it",
+				client, agent, profile, strings.Join(refusals, "; "))
+		}
 	}
 	return ""
 }

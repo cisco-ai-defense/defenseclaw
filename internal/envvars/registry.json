@@ -309,6 +309,46 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_JUDGE_PRIORITY_DELAY",
+      "category": "test_fixture",
+      "purpose": "Sets the per-call delay of the stand-in judge model in the tool-judge priority latency test (#1395), so a manual run can measure a slower model. The tool deadline scales with it.",
+      "default": "unset (200ms)",
+      "accepted_values": [
+        "Go duration, for example 2s",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/judge_priority_latency_test.go",
+          "description": "TestJudgeToolCallStaysInsideItsDeadlineUnderPromptLoad reads it to size the stand-in judge delay and the tool deadline"
+        }
+      ],
+      "since": "1.0.6"
+    },
+    {
+      "name": "DEFENSECLAW_JUDGE_PRIORITY_TURNS",
+      "category": "test_fixture",
+      "purpose": "Sets how many prompt-and-tool turns the tool-judge priority latency test (#1395) runs, so a manual run can measure a longer queue.",
+      "default": "unset (6)",
+      "accepted_values": [
+        "positive integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/judge_priority_latency_test.go",
+          "description": "TestJudgeToolCallStaysInsideItsDeadlineUnderPromptLoad reads it to size the workload"
+        }
+      ],
+      "since": "1.0.6"
+    },
+    {
       "name": "DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY",
       "category": "test_fixture",
       "purpose": "Marks the child process of the Windows gateway priority-class test (GAP-0050), so the class checks run in a child and the test binary keeps its own priority class.",
@@ -3321,6 +3361,30 @@
         }
       ],
       "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_DECISION_MODEL_KEY",
+      "category": "credential",
+      "purpose": "Canonical env-var name for the decision model bearer token (decision_model.api_key_env when empty). Optional: a local System One server needs none. Value MUST live in env / .env, not in config.yaml.",
+      "default": "unset",
+      "accepted_values": [
+        "bearer token string",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/config/decision_model.go",
+          "description": "ResolvedDecisionModelKey: key store, then environment; a standalone managed host reads decision_model.credential instead"
+        },
+        {
+          "location": "cli/defenseclaw/credentials.py",
+          "description": "Credentials registry entry for decision_model.api_key_env"
+        }
+      ],
+      "since": "1.0.6"
     },
     {
       "name": "DEFENSECLAW_LLM_KEY",

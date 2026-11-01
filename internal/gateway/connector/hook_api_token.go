@@ -19,10 +19,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 const (
@@ -32,7 +33,7 @@ const (
 
 var (
 	hookAPITokenMu      sync.Mutex
-	hookAPITokenScopeRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	hookAPITokenScopeRE = lazyregexp.New(`^[a-z0-9][a-z0-9_-]*$`)
 	// errHookAPITokenMalformed marks a trusted token file (location, owner and
 	// permissions checked) whose content is not a token.
 	errHookAPITokenMalformed = errors.New("malformed hook API token")

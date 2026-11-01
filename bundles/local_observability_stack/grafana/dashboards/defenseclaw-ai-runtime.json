@@ -38,8 +38,10 @@
         },
         "definition": "label_values({service_name=\"defenseclaw\"}, host_name)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\"}, host_name)",
-          "refId": "LokiVariableQueryEditor-VariableQuery"
+          "label": "host_name",
+          "refId": "LokiVariableQueryEditor-VariableQuery",
+          "stream": "{service_name=\"defenseclaw\"}",
+          "type": 1
         },
         "refresh": 2,
         "sort": 1,
@@ -1847,10 +1849,10 @@
     {
       "type": "bargauge",
       "title": "Would-block in monitor mode, by control",
-      "description": "Distinct host-plane findings per control in the selected range while running in monitor mode.",
+      "description": "Would-block events per kernel control in the selected range while running in monitor mode, every user on the selected hosts: each kernel event counts once under its own control, so the bars add up to the Would-block (monitor) tile, except in a denial storm where the host plane drops events past its cap. From the defenseclaw_kernel_events_total counter, not from the per-tactic activity records, which keep one control per tactic. The counter is cumulative and starts with its first event, so the bar is the last value in the range minus the last value before it (zero for a control first seen in the range); increase() would skip that first batch. The Collector restarts a cumulative series after 24 hours without an event (max_stale) and when it restarts, so the look-back is 24 hours and a negative difference counts the last value in the range instead. A Collector restart inside the range can make the bars lower than the tile.",
       "datasource": {
-        "type": "loki",
-        "uid": "defenseclaw-loki"
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
       },
       "gridPos": {
         "x": 12,
@@ -1860,13 +1862,12 @@
       },
       "targets": [
         {
-          "expr": "count by (control) (sum by (host_name, body_defenseclaw_ai_runtime_finding_id, control, body_defenseclaw_ai_runtime_kernel_target) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.activity\" | body_user_id=~\"$user\" | body_defenseclaw_ai_runtime_kernel_outcome=\"would_block\" | body_defenseclaw_ai_runtime_finding_id!=\"\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\")[$__range])) > 0)",
+          "expr": "sum by (control) (((last_over_time(defenseclaw_kernel_events_total{host_name=~\"$host\", owner=\"defenseclaw\", outcome=\"would_block\"}[$__range]) - (last_over_time(defenseclaw_kernel_events_total{host_name=~\"$host\", owner=\"defenseclaw\", outcome=\"would_block\"}[24h] offset $__range) or (last_over_time(defenseclaw_kernel_events_total{host_name=~\"$host\", owner=\"defenseclaw\", outcome=\"would_block\"}[$__range]) * 0))) >= 0) or last_over_time(defenseclaw_kernel_events_total{host_name=~\"$host\", owner=\"defenseclaw\", outcome=\"would_block\"}[$__range])) > 0",
           "refId": "A",
           "instant": true,
-          "queryType": "instant",
           "datasource": {
-            "type": "loki",
-            "uid": "defenseclaw-loki"
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
           },
           "legendFormat": "{{control}}"
         }

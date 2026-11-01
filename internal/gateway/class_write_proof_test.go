@@ -56,7 +56,6 @@ func TestGAP0655InterpreterWriteGuidanceReachesAgent(t *testing.T) {
 }
 
 func TestR104UnprovenProtectedReachDecisions(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "spaced link name")); err != nil {
 		t.Fatal(err)

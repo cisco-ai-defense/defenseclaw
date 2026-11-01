@@ -17,7 +17,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +24,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 )
 
@@ -87,8 +87,8 @@ type enterpriseSetupInvalidArguments struct{ error }
 
 func (err enterpriseSetupInvalidArguments) Unwrap() error { return err.error }
 
-var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var sourceCommitPattern = lazyregexp.New(`^[0-9a-f]{40}$`)
+var sha256Pattern = lazyregexp.New(`^[0-9a-f]{64}$`)
 
 var requiredPayloadFiles = []string{
 	"DefenseClawEnterprise.psm1",
@@ -186,6 +186,9 @@ type enterpriseSetupOptions struct {
 	Bundle               string
 	TrustAnchors         string
 	RefuseCapabilityLoss bool
+	// DeviceGroup (DEVICEGROUP=) pins the anchors TRUSTANCHORS= installs to
+	// one device group; the lifecycle checks it (rel-1-0-6:GAP-0036).
+	DeviceGroup string
 
 	// Set from the embedded payload, never from the command line.
 	Standalone         bool
@@ -396,6 +399,7 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 		flags.BoolVar(&opts.Force, "force", false, "standalone /uninstall: remove the deployment without recovering a pending transaction (last resort)")
 		flags.StringVar(&opts.Bundle, "bundle", "", "standalone /ensure: signed policy bundle (.dcbundle) to apply")
 		flags.StringVar(&opts.TrustAnchors, "trust-anchors", "", "standalone /ensure: bundle trust anchor file to install first")
+		flags.StringVar(&opts.DeviceGroup, "device-group", "", "standalone /ensure with TRUSTANCHORS=: pin the installed anchors to this device group")
 		flags.BoolVar(&opts.RefuseCapabilityLoss, "refuse-capability-loss", false, "standalone /ensure: refuse a bundle that disables an enforced capability")
 	}
 	timeoutSeconds := int(defaultLifecycleTimeout / time.Second)
@@ -518,8 +522,12 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 		if (strings.TrimSpace(opts.Bundle) != "" || strings.TrimSpace(opts.TrustAnchors) != "") && opts.Action != "ensure" {
 			return opts, false, errors.New("BUNDLE= and TRUSTANCHORS= are valid only with /ensure")
 		}
-		if strings.TrimSpace(opts.Bundle) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
-			return opts, false, errors.New("BUNDLE= cannot be combined with CONFIG= (or --mode/--connector): the signed bundle carries the config")
+		// CONFIG= with BUNDLE= is the single-app form: CONFIG= stages a
+		// first install that no service runs on, and the bundle is the first
+		// enforced policy (first_bundle.go). The --mode shorthand renders a
+		// config to enforce, so it stays refused.
+		if strings.TrimSpace(opts.Bundle) != "" && modeSupplied {
+			return opts, false, errors.New("BUNDLE= cannot be combined with --mode/--connector: the signed bundle carries the config")
 		}
 		if opts.RefuseCapabilityLoss && strings.TrimSpace(opts.Bundle) == "" {
 			return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE=; nothing was changed: deliver both with Setup /ensure")
@@ -607,7 +615,7 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 	}
 	if standalone {
 		// Only the standalone Setup has the ensure action and signer pins.
-		for name, canonical := range map[string]string{"allowedsigners": "allowed-signers", "bundle": "bundle", "trustanchors": "trust-anchors"} {
+		for name, canonical := range map[string]string{"allowedsigners": "allowed-signers", "bundle": "bundle", "trustanchors": "trust-anchors", "devicegroup": "device-group"} {
 			valueNames[name] = canonical
 		}
 		boolNames["force"] = "force"
@@ -1017,6 +1025,7 @@ func standaloneSetupRetryCommand(opts enterpriseSetupOptions, timeoutSeconds int
 	value("MANIFEST", opts.Manifest)
 	value("BUNDLE", opts.Bundle)
 	value("TRUSTANCHORS", opts.TrustAnchors)
+	value("DEVICEGROUP", opts.DeviceGroup)
 	value("MODE", opts.Mode)
 	value("CONNECTOR", opts.Connector)
 	flag("REFUSECAPABILITYLOSS", opts.RefuseCapabilityLoss)
@@ -1060,7 +1069,7 @@ func writeEnterpriseSetupUsageForFlavor(output io.Writer, standalone bool) {
 
 // standaloneSetupUsageProperty matches a property row of
 // writeStandaloneSetupUsage: its name and the value it shows.
-var standaloneSetupUsageProperty = regexp.MustCompile(`(?m)^  ([A-Z]+)=(\S*)`)
+var standaloneSetupUsageProperty = lazyregexp.New(`(?m)^  ([A-Z]+)=(\S*)`)
 
 // standaloneSetupPropertyHint lists the properties /? prints, read from
 // writeStandaloneSetupUsage itself, so the unknown-property hint cannot miss
@@ -1091,8 +1100,9 @@ func writeStandaloneSetupUsage(output io.Writer) {
 	fmt.Fprintln(output, "Properties (case-insensitive, dashes ignored):")
 	fmt.Fprintln(output, "  CONFIG=<path>                  administrator config; required for the first install")
 	fmt.Fprintln(output, "  MANIFEST=<path>                target manifest you publish yourself; required for /install")
-	fmt.Fprintln(output, "  BUNDLE=<path>                  with /ensure on an installed computer: apply this signed policy bundle (not with CONFIG=)")
-	fmt.Fprintln(output, "  TRUSTANCHORS=<path>            with /ensure: install this administrator-only bundle trust anchor file first (not with CONFIG=)")
+	fmt.Fprintln(output, "  BUNDLE=<path>                  with /ensure: apply this signed policy bundle; with CONFIG= on a new computer, the first install starts on the bundle")
+	fmt.Fprintln(output, "  TRUSTANCHORS=<path>            with /ensure BUNDLE=: install this administrator-only bundle trust anchor file with the bundle")
+	fmt.Fprintln(output, "  DEVICEGROUP=<group>            with TRUSTANCHORS=: pin the installed anchors to this one device group")
 	fmt.Fprintln(output, "  REFUSECAPABILITYLOSS=1         with /ensure: refuse a bundle that disables an enforced capability")
 	fmt.Fprintln(output, "  JSON=1                         print the result document on standard output")
 	fmt.Fprintln(output, "  NOSTART=1                      install or update with the services stopped and disabled")

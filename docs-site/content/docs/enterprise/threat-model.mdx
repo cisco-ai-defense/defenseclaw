@@ -329,7 +329,7 @@ These risks remain by design or because of how an agent vendor works.
 ### Application control must allow DefenseClaw files
 
 Agents load DefenseClaw's hook binary and, for OpenCode, the managed plugin
-`<install root>/share/opencode/defenseclaw.js`. Application control that refuses
+`<install root>/share/opencode/index.js`. Application control that refuses
 one takes DefenseClaw out of that agent's sessions. OpenCode skips a plugin it
 cannot read and runs tool calls without DefenseClaw, and `status` and `verify`
 stay green because they cannot see inside the session.

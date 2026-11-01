@@ -155,8 +155,77 @@ def test_the_real_sdk_reports_custom_rule_names_the_check_expects() -> None:
     tool = SimpleNamespace(
         name="ping",
         description="Returns a harmless ping response.",
-        model_dump_json=lambda: '{"name": "ping", "description": "Returns a harmless ping response."}',
+        model_dump_json=lambda **_kwargs: '{"name": "ping", "description": "Returns a harmless ping response."}',
     )
     result = asyncio.run(scanner._analyze_tool(tool, [AnalyzerEnum.YARA]))
+    # 4.8 folds a custom name equal to a built-in value into the built-in
+    # entry, so the bundled pack must carry its own name to be seen.
+    assert [r.name for r in rules] == ["DefenseClaw YARA"]
     assert all(getattr(r, "name", "") in [str(getattr(a, "value", a)) for a in result.analyzers] for r in rules)
     mcp._raise_if_analysis_incomplete("benign", [], [result], scanner)
+
+
+@pytest.mark.parametrize(
+    ("message", "label"),
+    [
+        # MCP Scanner 4.8 log lines (enum value or custom analyzer name).
+        ("api analysis failed on description: TimeoutError", "Cisco AI Defense API analyzer"),
+        ("yara analysis failed on description: Error", "YARA analyzer"),
+        ("readiness analysis failed on description: ValueError", "readiness analyzer"),
+        ("DefenseClaw YARA analysis failed on description: Error", "DefenseClaw YARA rules"),
+        ("DefenseClaw YARA extra analysis failed on prompt: Error", "DefenseClaw YARA rules"),
+    ],
+)
+def test_scanner_4_8_failure_logs_have_no_verdict(message: str, label: str) -> None:
+    with pytest.raises(mcp.MCPScanIncompleteError, match=label):
+        mcp._raise_if_analysis_incomplete("decoy", [(_SDK_LOGGER, message)], [], SimpleNamespace())
+
+
+def test_llm_failure_logs_of_both_scanner_lines_degrade() -> None:
+    assert mcp._is_llm_failure_log("LLM analysis failed: tool=x")
+    assert mcp._is_llm_failure_log("llm analysis failed on description: APIConnectionError")
+    mcp._raise_if_analysis_incomplete(
+        "benign", [(_SDK_LOGGER, "llm analysis failed on description: APIConnectionError")], [], SimpleNamespace()
+    )
+
+
+def test_defenseclaw_yara_findings_keep_the_yara_scanner_label() -> None:
+    finding = SimpleNamespace(severity="HIGH", analyzer="DefenseClaw YARA", summary="x", details={})
+    result = mcp.MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))._convert([finding], "t", 0.1)
+    assert [f.scanner for f in result.findings] == ["mcp-scanner/YARA"]
+
+
+def _rpc_error(code: int, message: str, data: object = None) -> Exception:
+    error = Exception(message)
+    error.error = SimpleNamespace(code=code, message=message, data=data)  # type: ignore[attr-defined]
+    return error
+
+
+def test_legacy_http_version_rejection_falls_back_to_initialize() -> None:
+    # mcp.deepwiki.com (MCP TypeScript SDK before 2026-07-28) answers
+    # server/discover this way and still accepts initialize() (GAP-0020).
+    pytest.importorskip("mcpscanner")
+    from mcpscanner import Scanner
+
+    class Probe(Scanner):
+        pass
+
+    mcp._accept_legacy_http_version_rejection(Probe)
+    mcp._accept_legacy_http_version_rejection(Probe)  # idempotent
+    rejection = _rpc_error(
+        -32600,
+        "Bad Request: Unsupported protocol version: 2026-07-28. "
+        "Supported versions: 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25",
+    )
+    assert Probe._should_fallback_to_initialize(rejection, legacy_http=True)
+    assert not Probe._should_fallback_to_initialize(rejection)
+    assert not Probe._should_fallback_to_initialize(
+        _rpc_error(-32600, "Bad Request: Unsupported Content-Type"), legacy_http=True
+    )
+    assert not Probe._should_fallback_to_initialize(
+        _rpc_error(-32600, "Bad Request: Unsupported protocol version: x", data={"why": 1}), legacy_http=True
+    )
+    # The upstream shapes keep working.
+    assert Probe._should_fallback_to_initialize(
+        _rpc_error(-32600, "Bad Request: Missing session ID"), legacy_http=True
+    )

@@ -13,13 +13,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -31,8 +31,8 @@ const (
 	maxEnterpriseIndexBytes      = 1 << 10
 )
 
-var credentialScopeRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@\\-]{0,255}$`)
-var credentialRecordNameRE = regexp.MustCompile(`^[a-f0-9]{64}\.json$`)
+var credentialScopeRE = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:@\\-]{0,255}$`)
+var credentialRecordNameRE = lazyregexp.New(`^[a-f0-9]{64}\.json$`)
 var enterpriseCredentialMutationMu sync.Mutex
 
 // EnterpriseCredential is an administrator-owned, per-user and per-binding

@@ -484,7 +484,7 @@ func TestPrintSubsystemsHidesUnusedFleetUplink(t *testing.T) {
 		Guardrail:  gateway.SubsystemHealth{State: gateway.StateRunning, Since: now},
 		Connectors: []gateway.ConnectorHealth{{Name: "claudecode", State: gateway.StateRunning, Since: now}},
 	}
-	out := captureStdout(t, func() { printSubsystems(snap) })
+	out := captureStdout(t, func() { printSubsystems(snap, 0) })
 	if strings.Contains(out, "Gateway:") || strings.Contains(out, "OpenClaw") {
 		t.Fatalf("hook-only roster shows the unused fleet uplink:\n%s", out)
 	}
@@ -492,7 +492,7 @@ func TestPrintSubsystemsHidesUnusedFleetUplink(t *testing.T) {
 		t.Fatalf("label runs into the state:\n%s", out)
 	}
 	snap.Connectors = []gateway.ConnectorHealth{{Name: "openclaw", State: gateway.StateRunning, Since: now}}
-	if out := captureStdout(t, func() { printSubsystems(snap) }); !strings.Contains(out, "Gateway:") {
+	if out := captureStdout(t, func() { printSubsystems(snap, 0) }); !strings.Contains(out, "Gateway:") {
 		t.Fatalf("OpenClaw roster must still show the fleet uplink:\n%s", out)
 	}
 }
@@ -506,12 +506,28 @@ func TestPrintSubsystemExplainsAuditWriteFailure(t *testing.T) {
 		"event_history_last_sqlite_primary_code": float64(13),
 		"generation":                             float64(2),
 	}}
-	out := captureStdout(t, func() { printSubsystem("Telemetry", h) })
+	out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) })
 	if !strings.Contains(out, "disk holding the audit database is full") || strings.Contains(out, "event_history_") {
 		t.Fatalf("audit write failure not in plain words:\n%s", out)
 	}
 	if !strings.Contains(out, "generation:") {
 		t.Fatalf("other details dropped:\n%s", out)
+	}
+}
+
+// The gateway status names the audit store size cap with the retention, in
+// the words of the per-user status: on a managed computer that status is
+// refused and the gateway status showed only retention_days (GAP-0141).
+func TestPrintSubsystemShowsTheAuditStoreSizeCap(t *testing.T) {
+	h := gateway.SubsystemHealth{State: gateway.StateRunning, Details: map[string]interface{}{
+		"retention_days": float64(7), "retention_state": "healthy", "retention_max_store_mb": float64(64),
+	}}
+	if out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) }); !strings.Contains(out, "retention: 7 days, size cap 64 MiB") {
+		t.Fatalf("no size cap in the telemetry lines:\n%s", out)
+	}
+	delete(h.Details, "retention_max_store_mb")
+	if out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) }); !strings.Contains(out, "retention: 7 days\n") {
+		t.Fatalf("retention without a cap:\n%s", out)
 	}
 }
 
@@ -525,7 +541,7 @@ func TestPrintSubsystemExplainsFailingJudge(t *testing.T) {
 		"judge_last_error":   "failed to retrieve aws credentials",
 		"mode":               "action",
 	}}
-	out := captureStdout(t, func() { printSubsystem("Guardrail", h) })
+	out := captureStdout(t, func() { printSubsystem("Guardrail", h, 0) })
 	if !strings.Contains(out, "the LLM judge failed all of its last 10 calls") ||
 		!strings.Contains(out, "failed to retrieve aws credentials") || strings.Contains(out, "judge_state") {
 		t.Fatalf("judge failure not in plain words:\n%s", out)
@@ -673,5 +689,31 @@ func TestNotStartedConnectorRefusedByAgentSettingsNamesTheFix(t *testing.T) {
 				t.Errorf("%s %T: output %q points at a setup rerun that cannot help", label, refused, out)
 			}
 		}
+	}
+}
+
+// TestJudgeFallbackNoteSuggestsMaxParallelOnlyWhenOff pins GAP-0088: the
+// max_parallel hint is for a judge with no bound (0), not one that has it set.
+func TestJudgeFallbackNoteSuggestsMaxParallelOnlyWhenOff(t *testing.T) {
+	details := map[string]interface{}{
+		"judge_fallbacks":              float64(3),
+		"judge_fallbacks_by_connector": map[string]interface{}{"codex": float64(3)},
+	}
+	off := judgeFallbackNote(details, 0)
+	if !strings.Contains(off, "3 hook check(s)") || !strings.Contains(off, "set guardrail.judge.max_parallel") {
+		t.Fatalf("max_parallel 0 should carry the hint:\n%s", off)
+	}
+	for _, limit := range []int{1, 2} {
+		on := judgeFallbackNote(details, limit)
+		if !strings.Contains(on, "3 hook check(s)") || strings.Contains(on, "max_parallel") {
+			t.Fatalf("max_parallel %d should report without the hint:\n%s", limit, on)
+		}
+	}
+	h := gateway.SubsystemHealth{State: gateway.StateRunning, Details: details}
+	if out := captureStdout(t, func() { printSubsystem("Guardrail", h, 1) }); strings.Contains(out, "max_parallel") {
+		t.Fatalf("gateway status still hints with max_parallel 1:\n%s", out)
+	}
+	if out := captureStdout(t, func() { printSubsystem("Guardrail", h, 0) }); !strings.Contains(out, "set guardrail.judge.max_parallel") {
+		t.Fatalf("gateway status lost the hint with max_parallel 0:\n%s", out)
 	}
 }

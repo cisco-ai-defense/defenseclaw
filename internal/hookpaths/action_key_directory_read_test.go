@@ -6,7 +6,6 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -16,9 +15,6 @@ import (
 // operand is the key directory is a key read; a named file stays a plain
 // read.
 func TestActionRecursiveReadOfTheKeyDirectoryIsAKeyRead(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX home")
-	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	for _, dir := range []string{filepath.Join(home, ".ssh", "old"), cwd} {
@@ -43,8 +39,8 @@ func TestActionRecursiveReadOfTheKeyDirectoryIsAKeyRead(t *testing.T) {
 		"rg . ~/.ssh", "rg -uu BEGIN ~/.ssh", "cd ~/.ssh && rg BEGIN", "sudo grep -r . ~/.ssh",
 		`grep -r . ~/.ssh; status=$?; printf '\n[exit status] %s\n' "$status"; exit "$status"`,
 	} {
-		if !ActionPrivateKeyRead(command, cwd, home) {
-			t.Errorf("ActionPrivateKeyRead(%q) = false, want a key read", command)
+		if !posixShellPrivateKeyRead(command, cwd, home) {
+			t.Errorf("posixShellPrivateKeyRead(%q) = false, want a key read", command)
 		}
 	}
 	for _, command := range []string{
@@ -54,8 +50,8 @@ func TestActionRecursiveReadOfTheKeyDirectoryIsAKeyRead(t *testing.T) {
 		"cd ~/.ssh && grep -r Host config", "cd /tmp && grep -r . .", "grep -r ssh ~/.sshrc",
 		"ls -la ~/.ssh", "grep -c marker ~/.ssh/authorized_keys", "wc -l ~/.ssh/authorized_keys",
 	} {
-		if ActionPrivateKeyRead(command, cwd, home) {
-			t.Errorf("ActionPrivateKeyRead(%q) = true, want no key read", command)
+		if posixShellPrivateKeyRead(command, cwd, home) {
+			t.Errorf("posixShellPrivateKeyRead(%q) = true, want no key read", command)
 		}
 	}
 }
@@ -95,11 +91,10 @@ func TestActionWindowsListedKeyDirectoryPipedToAReaderIsAKeyRead(t *testing.T) {
 // needs cd <absolute dir> to succeed reads there; a failed, relative,
 // subshell or undone directory change keeps the earlier candidates.
 func TestActionKeyReadAfterACertainDirectoryChange(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX home")
-	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
+	// The shell spells the directory with slashes (C:/... on Git Bash).
+	dir := filepath.ToSlash(cwd)
 	for _, dir := range []string{filepath.Join(home, ".ssh"), cwd} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
@@ -109,32 +104,32 @@ func TestActionKeyReadAfterACertainDirectoryChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, command := range []string{
-		"cd ~/.ssh && cd " + cwd + " && grep -rn TODO .",
+		"cd ~/.ssh && cd " + dir + " && grep -rn TODO .",
 		"cd ~/.ssh && cd ~/proj && grep -rn TODO .",
-		"cd ~/.ssh; cd " + cwd + " && grep -rn TODO .",
-		"cd ~/.ssh && cd " + cwd + " && grep -rn TODO . | head",
-		"pushd ~/.ssh && pushd " + cwd + " && rg TODO",
-		"cd ~/.ssh && ls && cd " + cwd + " && grep -rn TODO .",
-		"cd ~/.ssh && cd " + cwd + " && { ls; grep -rn TODO .; }",
-		"cd ~/.ssh && cd " + cwd + " && (make test; grep -rn TODO .)",
+		"cd ~/.ssh; cd " + dir + " && grep -rn TODO .",
+		"cd ~/.ssh && cd " + dir + " && grep -rn TODO . | head",
+		"pushd ~/.ssh && pushd " + dir + " && rg TODO",
+		"cd ~/.ssh && ls && cd " + dir + " && grep -rn TODO .",
+		"cd ~/.ssh && cd " + dir + " && { ls; grep -rn TODO .; }",
+		"cd ~/.ssh && cd " + dir + " && (make test; grep -rn TODO .)",
 	} {
-		if ActionPrivateKeyRead(command, cwd, home) {
-			t.Errorf("ActionPrivateKeyRead(%q) = true, want no key read", command)
+		if posixShellPrivateKeyRead(command, cwd, home) {
+			t.Errorf("posixShellPrivateKeyRead(%q) = true, want no key read", command)
 		}
 	}
 	for _, command := range []string{
 		"cd ~/.ssh; cd /nonexistent; grep -r . .",
-		"cd ~/.ssh && (cd " + cwd + ") && grep -r . .",
-		"cd " + cwd + " && cd ~/.ssh && grep -r . .",
-		"cd ~/.ssh; (cd " + cwd + " && true); grep -r . .",
-		"cd ~/.ssh; cd " + cwd + " && true; grep -r . .",
-		"cd ~/.ssh && cd " + cwd + " || grep -r . .",
-		"cd ~/.ssh && { cd " + cwd + " && true; }; grep -r . .",
-		"cd ~/.ssh && cd " + cwd + " && cd - && grep -r . .",
-		"pushd ~/.ssh && pushd " + cwd + " && popd && grep -r . .",
-		"cd ~/.ssh && cd " + cwd + " && cd .. && grep -r . .ssh",
-		"cd ~/.ssh && ! cd " + cwd + " && grep -r . .",
-		"cd " + cwd + " && (cd ~/.ssh && grep -r . .)",
+		"cd ~/.ssh && (cd " + dir + ") && grep -r . .",
+		"cd " + dir + " && cd ~/.ssh && grep -r . .",
+		"cd ~/.ssh; (cd " + dir + " && true); grep -r . .",
+		"cd ~/.ssh; cd " + dir + " && true; grep -r . .",
+		"cd ~/.ssh && cd " + dir + " || grep -r . .",
+		"cd ~/.ssh && { cd " + dir + " && true; }; grep -r . .",
+		"cd ~/.ssh && cd " + dir + " && cd - && grep -r . .",
+		"pushd ~/.ssh && pushd " + dir + " && popd && grep -r . .",
+		"cd ~/.ssh && cd " + dir + " && cd .. && grep -r . .ssh",
+		"cd ~/.ssh && ! cd " + dir + " && grep -r . .",
+		"cd " + dir + " && (cd ~/.ssh && grep -r . .)",
 		// RV26-1: a later step that goes back to an earlier directory.
 		"cd ~/.ssh; cd /tmp && { cd -; grep -r . .; }",
 		"cd ~/.ssh; cd /tmp && (cd -; grep -r . .)",
@@ -163,8 +158,8 @@ func TestActionKeyReadAfterACertainDirectoryChange(t *testing.T) {
 		"cd ~/.ssh; cd /tmp && (c''d - && grep -r . .)",
 		"cd ~/.ssh; cd /tmp && { {cd,} -; grep -r . .; }",
 	} {
-		if !ActionPrivateKeyRead(command, cwd, home) {
-			t.Errorf("ActionPrivateKeyRead(%q) = false, want a key read", command)
+		if !posixShellPrivateKeyRead(command, cwd, home) {
+			t.Errorf("posixShellPrivateKeyRead(%q) = false, want a key read", command)
 		}
 	}
 }

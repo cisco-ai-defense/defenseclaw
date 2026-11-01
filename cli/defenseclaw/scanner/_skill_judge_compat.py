@@ -35,6 +35,7 @@ still fails the scan, and a judge failure is never turned into a clean result.
 
 from __future__ import annotations
 
+import functools
 import importlib.metadata
 import logging
 import sys
@@ -145,6 +146,8 @@ def install() -> bool:
     if getattr(original, _MARKER, False):
         return True
 
+    # __wrapped__ keeps the scanner's own method reachable (tests check it).
+    @functools.wraps(original)
     def _repair_optional_taxonomy(self: Any, analysis_result: dict[str, Any]) -> None:
         changes = normalize_primary_answer(analysis_result)
         if changes:

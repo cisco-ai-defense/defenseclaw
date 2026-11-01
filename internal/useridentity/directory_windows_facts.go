@@ -19,6 +19,8 @@ import (
 //   - The identity store, HKLM\SOFTWARE\Microsoft\IdentityStore\Cache\<SID>\
 //     IdentityCache\<SID>, holds the UPN of a cloud sign-in (UserName) and
 //     the provider that issued it (ProviderName, "AzureAD" for Entra ID).
+//     It is the UPN of an Entra ID account only; for a hybrid AD account it
+//     says only that the account signed in to the device's tenant.
 //   - CloudDomainJoin\JoinInfo\<thumbprint> (TenantId) and TenantInfo say the
 //     device is Entra joined, and the LSA primary-domain policy says it is
 //     AD joined; both together is a hybrid join.
@@ -147,12 +149,19 @@ func resolveWindowsDirectoryFacts(
 		facts.Directory = DirectoryActiveDirectory
 		facts.Domain = strings.ToLower(domain)
 		if upn != "" && strings.EqualFold(provider, entraProviderName) {
-			// A hybrid user signed in to Entra: the identity store has the
-			// cloud UPN, which is the synced AD UPN.
-			facts.UPN = upn
+			// A hybrid user signed in to Entra: the device's tenant is theirs.
 			facts.TenantID = join.TenantID
-			facts.Source = SourceWindowsIdentityStore
-		} else if adUPN != nil && account != "" {
+		}
+		// Only the domain controller's answer (TranslateNameW) is the AD
+		// account's UPN. The identity store keeps the cloud UPN of the user's
+		// last Entra sign-in, which an AD UPN rename leaves stale, so it never
+		// stands in for it: the managed gateway's write-restricted service
+		// token gets no TranslateNameW answer, and a stand-in became the
+		// account's UPN for good, also after `enterprise identity refresh`
+		// (identity-round GAP-1238). Until the directory answers here or in the
+		// SYSTEM enumerator's identity record, the principal is the account's
+		// own (AccountPrincipal below).
+		if adUPN != nil && account != "" {
 			facts.UPN = NormalizeUPN(adUPN(sid, domain+`\`+account))
 		}
 		if join.DNSDomain != "" && strings.EqualFold(domain, join.ADDomain) {
@@ -302,6 +311,21 @@ func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
 		return c.entries[key].upn
 	case <-timer.C:
 		return entry.upn
+	}
+}
+
+// expire makes the cached answers of sid due, so its next lookup starts a
+// translation; a translation already running answers that lookup. The last
+// good answer stays until a translation replaces it.
+func (c *adUPNCache) expire(sid string) {
+	prefix := strings.ToUpper(strings.TrimSpace(sid)) + "\x00"
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, entry := range c.entries {
+		if strings.HasPrefix(key, prefix) && entry.done == nil {
+			entry.expires = time.Time{}
+			c.entries[key] = entry
+		}
 	}
 }
 

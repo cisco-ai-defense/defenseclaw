@@ -920,6 +920,10 @@ func publishedFileProblem(Options, string) string { return "" }
 // directory's protected DACL already lets every user read it.
 func publishedDirProblem(Options, string) string { return "" }
 
+// publishedDirWriteProblem is "" on Windows for the same reason: the
+// protected DACL gives standard users no write.
+func publishedDirWriteProblem(Options, string) string { return "" }
+
 func restorePublishedDirs(Options, string) ([]string, error)         { return nil, nil }
 func restoreWritablePublishedDirs(Options, string) ([]string, error) { return nil, nil }
 
