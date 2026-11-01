@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -45,6 +46,14 @@ type snapshotEntry struct {
 	// Store is the managed root whose per-filesystem store holds Blob, when
 	// the file could not be linked into the snapshot directory itself.
 	Store string `json:"store,omitempty"`
+	// Empty marks a directory that held no state (nothing but empty
+	// directories, as the package's tmpfiles.d entry creates them before
+	// its postinstall ensure), and EmptyDirs lists those subdirectories,
+	// relative to it. A rollback empties such a state directory back to
+	// them, so a failed install from a package leaves nothing the retry
+	// would take for an unmanaged layout (rel-1-0-6:GAP-0286).
+	Empty     bool     `json:"empty,omitempty"`
+	EmptyDirs []string `json:"empty_dirs,omitempty"`
 }
 
 type snapshot struct {
@@ -124,6 +133,9 @@ func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err er
 				return nil, fmt.Errorf("snapshot %s: %w", canonical, ownerErr)
 			}
 			entry.Present, entry.Mode, entry.UID, entry.GID = true, mode.Perm(), uid, gid
+			if dirs, ok := stateFreeSubdirs(e.P(canonical)); ok {
+				entry.Empty, entry.EmptyDirs = true, dirs
+			}
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("snapshot %s: %w", canonical, err)
 		}
@@ -433,13 +445,20 @@ func (e *Env) removeCreatedDirs(snap *snapshot) error {
 		managed.ForeignHookCleanDir(l.DataDir): true,
 	}
 	created := []string{}
+	var errs []error
 	for _, entry := range snap.Entries {
 		if entry.Dir && !entry.Present {
 			created = append(created, entry.Path)
 		}
+		// The two state directories the adoption guard inspects
+		// (unmanagedLeftovers): one that held no state goes back to none.
+		if entry.Dir && entry.Present && entry.Empty && (entry.Path == l.DataDir || entry.Path == l.GuardianAuthDir) {
+			if err := emptyBackTo(e.P(entry.Path), entry.EmptyDirs); err != nil {
+				errs = append(errs, fmt.Errorf("empty %s: %w", entry.Path, err))
+			}
+		}
 	}
 	sort.Slice(created, func(i, j int) bool { return len(created[i]) > len(created[j]) })
-	var errs []error
 	for _, dir := range created {
 		if state[dir] {
 			if err := os.RemoveAll(e.P(dir)); err != nil {
@@ -450,6 +469,100 @@ func (e *Env) removeCreatedDirs(snap *snapshot) error {
 		_ = removeDirIfEmpty(e.P(dir))
 	}
 	return errors.Join(errs...)
+}
+
+// stateFreeSubdirs reports whether dir holds nothing but directories and
+// lists those, relative to it. It is the snapshot's own check, strict
+// where holdsState (the adoption guard's) is lenient: a walk error at dir
+// itself or below, or any entry that is not a directory (a file, a symbolic
+// link, a socket), means not state-free, so a directory that cannot be
+// listed is never recorded empty and a rollback never empties it
+// (rel-1-0-6:GAP-0286 review).
+func stateFreeSubdirs(dir string) ([]string, bool) {
+	var dirs []string
+	ok := true
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			ok = false
+			return filepath.SkipAll
+		}
+		if path == dir {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			ok = false
+			return filepath.SkipAll
+		}
+		dirs = append(dirs, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil || !ok {
+		return nil, false
+	}
+	return dirs, true
+}
+
+// emptyBackTo removes everything under dir but the subdirectories keep
+// names (relative to dir), which it leaves in place: a state directory that
+// held no state before a rolled-back transaction holds none after it. It
+// works through an os.Root at dir, so no step follows a symbolic link out
+// of the tree (a link is removed as a link, a kept subdirectory swapped for
+// a link is removed, never listed), and it leaves an entry on another
+// filesystem (a mount point) alone.
+func emptyBackTo(dir string, keep []string) error {
+	root, err := os.OpenRoot(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	top, err := root.Lstat(".")
+	if err != nil {
+		return err
+	}
+	kept := make(map[string]bool, len(keep))
+	for _, rel := range keep {
+		kept[filepath.FromSlash(rel)] = true
+	}
+	var clear func(string) error
+	clear = func(rel string) error {
+		f, err := root.Open(rel)
+		if err != nil {
+			return err
+		}
+		entries, err := f.ReadDir(-1)
+		_ = f.Close()
+		if err != nil {
+			return err
+		}
+		var errs []error
+		for _, entry := range entries {
+			child := filepath.Join(rel, entry.Name())
+			info, err := root.Lstat(child)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if !sameDevice(top, info) {
+				continue
+			}
+			if info.IsDir() && kept[child] {
+				errs = append(errs, clear(child))
+				continue
+			}
+			if err := root.RemoveAll(child); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}
+	return clear(".")
 }
 
 func (e *Env) discardSnapshot(snap *snapshot) {
