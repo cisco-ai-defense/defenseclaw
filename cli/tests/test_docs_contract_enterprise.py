@@ -89,8 +89,9 @@ def test_managed_hook_docs_name_the_measured_burst_capacity() -> None:
 
 
 def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check() -> None:
-    """Rate limits block after the resends; a guarded call needs a current
-    gateway answer even when the administrator selects open (decision 16)."""
+    """Rate limits block after the resends; with the administrator's open, a
+    guarded call runs only on Linux or macOS for a session with a clean-session
+    note (rel-1-0-3 GAP-0352)."""
     threat_model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text(encoding="utf-8")
     r31 = next(line for line in threat_model.splitlines() if line.startswith("| R31 |"))
     assert "including for Claude Code, Codex and Devin" not in r31
@@ -116,8 +117,9 @@ def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check()
     assert "in observe mode | Open" not in per_layer
     assert "Managed Claude Code and Codex hooks | Always closed" not in per_layer
     assert "observe and action mode alike" in per_layer and "outage only" in per_layer
-    # Decision 16: the administrator open never covers a guarded call.
-    assert "not for a connector whose foreign-hook guard checks the session" in per_layer
+    # GAP-0352: the administrator open covers a guarded call only on Linux and macOS, for a session with a clean-session note.
+    assert "covers a gateway outage only. For a connector whose foreign-hook guard checks the session with the gateway, it covers only a Linux or macOS session with a clean-session note" in per_layer
+    assert "and not for a connector whose foreign-hook guard checks the session" not in per_layer
     assert "observe mode fails open" not in coverage
 
     troubleshooting = (DOCS / "enterprise/troubleshooting.mdx").read_text(encoding="utf-8")
