@@ -13,11 +13,13 @@ param(
     [string]$ArtifactLeaf = '',
     # Put the state root (and so TEMP/TMP, which
     # Initialize-WindowsNativeTestEnvironment points below it) on the runner
-    # work disk, RUNNER_TEMP, instead of the profile on C:. Hosted runners
-    # whose C: is slow made Go test file flushes miss the package timeout
-    # (rel-1-0-6:GAP-0443). Such a root is a RUNNER_TEMP child, which
-    # Assert-SafeStateRoot accepts; no DC_WINDOWS_NATIVE_BASE_ROOT is set.
-    [switch]$StateOnRunnerTemp
+    # work drive (the drive of RUNNER_TEMP, D: on hosted runners) instead of
+    # the profile on C:. Hosted runners whose C: is slow made Go test file
+    # flushes miss the package timeout (rel-1-0-6:GAP-0443). The base is
+    # <drive>\dc-ci, directly below the drive root: the RUNNER_TEMP chain
+    # has a NETWORK SERVICE owner, which the audit store rightly refuses as an
+    # ancestor owner.
+    [switch]$StateOnRunnerDrive
 )
 
 Set-StrictMode -Version Latest
@@ -31,10 +33,12 @@ if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
     throw 'RUNNER_TEMP is required to isolate Windows-native diagnostics and artifacts.'
 }
 
-if ($StateOnRunnerTemp) {
-    $stateBase = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'dc-ci')).TrimEnd('\')
-    if (-not (Test-PathWithin $stateBase $env:RUNNER_TEMP)) {
-        throw "DC_STATE_ROOT base must be a strict child of RUNNER_TEMP: $stateBase"
+if ($StateOnRunnerDrive) {
+    $stateBase = Resolve-SafeWindowsNativeBase (Get-WindowsNativeRunnerDriveBase)
+    New-Item -ItemType Directory -Force -Path $stateBase | Out-Null
+    # The owners the audit store checks, for the job log.
+    for ($path = $stateBase; $path; $path = Split-Path -Parent $path) {
+        Write-Host "state base ancestor $path owner $((Get-Acl -LiteralPath $path).Owner)"
     }
 } else {
     $stateBase = Resolve-SafeWindowsNativeBase (Join-Path $env:USERPROFILE '.dc-ci')
@@ -48,9 +52,7 @@ if ($stateRoot.Length -gt 48) {
 }
 
 $lines = [Collections.Generic.List[string]]::new()
-if (-not $StateOnRunnerTemp) {
-    $lines.Add("DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase")
-}
+$lines.Add("DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase")
 $lines.Add("DC_STATE_ROOT=$stateRoot")
 $lines.Add("DC_DIAGNOSTICS=$([IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP $DiagnosticsLeaf)))")
 if (-not [string]::IsNullOrWhiteSpace($ArtifactLeaf)) {
