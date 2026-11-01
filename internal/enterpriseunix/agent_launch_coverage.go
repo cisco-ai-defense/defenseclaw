@@ -185,9 +185,9 @@ func launchCoverageExplanation(reason string) string {
 	case "devin_config_override":
 		return "Devin selected another config file"
 	case "bash_hook_startup":
-		return "BASH_ENV is set in the agent process; Bash reads that file before the managed hook command, and it can exit before the hook runs"
+		return "BASH_ENV was set when the agent started; if still set when Bash starts, Bash reads that file before the managed hook command, and it can exit before the hook runs"
 	case "bash_hook_noexec":
-		return "SHELLOPTS contains noexec in the agent process; Bash can skip the managed hook command"
+		return "SHELLOPTS contained noexec when the agent started; if still set when Bash starts, Bash can skip the managed hook command"
 	case "hermes_safe_mode":
 		return "Hermes safe mode skips its user hooks"
 	case "hermes_config_relocated":

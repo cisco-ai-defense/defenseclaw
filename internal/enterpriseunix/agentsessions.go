@@ -345,6 +345,8 @@ func (e *Env) linuxAgentSessionsWithError() ([]agentSession, error) {
 			session.ContainerID = linuxCgroupContainer(cgroup)
 		}
 		if pluginLaunchConnector(agent) {
+			// procfs exposes the environment at execve, not later changes
+			// made by the process before this scan.
 			raw, err := readBounded(filepath.Join(dir, "environ"), 64<<10)
 			if err == nil {
 				session.Env, session.EnvKnown = pluginLaunchEnvironment(raw), true
