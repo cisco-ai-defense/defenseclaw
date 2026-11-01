@@ -499,13 +499,18 @@ func MCPScanRefused(err error) bool {
 // _stdio_scan_command_error) and the managed as-user launch (enterprisehooks
 // checkMCPAsUserDefinition) word a local server whose command or arguments
 // a scan never starts: a launcher other than the bare npx or uvx, a command
-// path, a code-running flag, no package argument, or a cmd.exe metacharacter.
+// path, a code-running flag, no package argument, or a cmd.exe metacharacter
+// in an npx argument. Each is about the definition alone. A refusal that
+// comes from the host (the npx.cmd path the user's PATH resolves holding a
+// metacharacter, a launcher not on PATH or not trusted, a folder) is not one:
+// fixing the host fixes it with no change to the definition, so it is retried
+// with backoff.
 var mcpLauncherRefusalWords = []string{
 	"allowlisted stdio launcher",
 	"a scan starts only the bare names npx or uvx",
 	"uses forbidden execution flag",
 	"requires a package/server argument",
-	"Windows command metacharacter",
+	"an npx argument contains a Windows command metacharacter",
 }
 
 // MCPLauncherRefusal reports a failed MCP scan whose text says the scanner

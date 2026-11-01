@@ -595,6 +595,14 @@ its verdict. Only the server's own process runs as the user:
 - Only `npx` or `uvx` with a package argument and no code-running flag. The
   launcher must be installed for all users under Program Files; one in the
   profile, or an earlier same-named file on `PATH`, is refused.
+- A definition the scan refuses for its own launcher (not `npx` or `uvx`, a
+  command path, a code-running flag, no package argument) stays blocked and is
+  not scanned again until the definition, the scanner or the admission settings
+  change, or an allow rule admits it. Its tool calls are refused with that
+  reason. Any other failed scan, including a launcher refusal that comes from
+  the computer's `PATH`, is retried after 2 minutes, doubling to 30. An
+  administrator unblock of a refused definition stays until the definition
+  changes.
 - The working directory must be on a local fixed drive, inside the project or the
   user's own profile, in no other user's profile, with no link or junction on the
   way. Otherwise the scan fails with the reason.
