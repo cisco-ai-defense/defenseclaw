@@ -270,12 +270,18 @@ func TestPerUserGatewayRestartProvenReadsTheConnectedPeer(t *testing.T) {
 		// peer would prove a restart if the proof ever finished.
 		previous, previousOpen := perUserRestartProofBudget, perUserStartLockOpen
 		perUserRestartProofBudget = 50 * time.Millisecond
-		release := make(chan struct{})
-		perUserStartLockOpen = func(path string) (*os.File, error) {
+		release, entered := make(chan struct{}), make(chan struct{})
+		perUserStartLockOpen = func(string) (*os.File, error) {
+			close(entered)
 			<-release
-			return previousOpen(path)
+			// The TempDir is gone by then: touch nothing of it.
+			return nil, os.ErrNotExist
 		}
-		t.Cleanup(func() { close(release); perUserRestartProofBudget, perUserStartLockOpen = previous, previousOpen })
+		t.Cleanup(func() {
+			close(release)
+			<-entered // orders the proof goroutine's read of the seam before the restore (-race, review r5)
+			perUserRestartProofBudget, perUserStartLockOpen = previous, previousOpen
+		})
 		dir := t.TempDir()
 		holdStartLock(t, dir)
 		got := make(chan bool, 1)
