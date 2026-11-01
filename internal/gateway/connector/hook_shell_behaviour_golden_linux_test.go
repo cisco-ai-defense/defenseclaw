@@ -292,7 +292,7 @@ func hookGoldenHooks() []hookGoldenHook {
 				return hookGoldenJSON(map[string]interface{}{"command": command})
 			}},
 		{name: "inspect-request", script: "inspect-request.sh", conn: func() Connector { return NewClaudeCodeConnector() }, args: none,
-			events: []string{"request"},
+			events:  []string{"request"},
 			payload: func(_, command, _ string) []byte { return []byte(command) }},
 	}
 }
@@ -480,13 +480,13 @@ func hookGoldenCases(t *testing.T, full bool) []hookGoldenCase {
 		big := strings.Repeat("A", 950*1024)
 		huge := strings.Repeat("B", 1100*1024)
 		stdins := map[string][]byte{
-			"empty":         {},
-			"not-json":      []byte("not json at all\n"),
-			"nul":           append(h.payload(event, command, "<WORK>"), 0, '{', '}'),
-			"trailing-nl":   append(h.payload(event, command, "<WORK>"), '\n', '\n'),
-			"nested-event":  []byte(`{"tool_input":{"hook_event_name":"PreToolUse"},"hook_event_name":"Stop"}`),
+			"empty":          {},
+			"not-json":       []byte("not json at all\n"),
+			"nul":            append(h.payload(event, command, "<WORK>"), 0, '{', '}'),
+			"trailing-nl":    append(h.payload(event, command, "<WORK>"), '\n', '\n'),
+			"nested-event":   []byte(`{"tool_input":{"hook_event_name":"PreToolUse"},"hook_event_name":"Stop"}`),
 			"over-transport": h.payload(event, big, "<WORK>"),
-			"over-cap":      h.payload(event, huge, "<WORK>"),
+			"over-cap":       h.payload(event, huge, "<WORK>"),
 		}
 		for _, name := range []string{"empty", "not-json", "nul", "trailing-nl", "nested-event", "over-transport", "over-cap"} {
 			for _, m := range []hookGoldenMode{modes[0], modes[1], modes[5]} {
@@ -737,6 +737,12 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 	}
 	gateway.mu.Lock()
 	for _, r := range gateway.requests {
+		// No hook sends a GET: one here is another program's health probe
+		// that reached this case's loopback port after its own gateway
+		// left it.
+		if r.Method == http.MethodGet && r.Path == "/health" {
+			continue
+		}
 		header := map[string][]string{}
 		for k, v := range r.Header {
 			for _, value := range v {
@@ -787,7 +793,7 @@ func hookGoldenRefusingPort() (int, func(), error) {
 }
 
 var (
-	hookGoldenCallID = regexp.MustCompile(`(\\?"call_id\\?":\\?")[0-9]+-[0-9]+`)
+	hookGoldenCallID   = regexp.MustCompile(`(\\?"call_id\\?":\\?")[0-9]+-[0-9]+`)
 	hookGoldenClockKey = regexp.MustCompile(`"(ts|time|timestamp|at|elapsed_ms|duration_ms)":("[^"]*"|[0-9.]+)`)
 	hookGoldenHookTmp  = regexp.MustCompile(`[^\s"':]*defenseclaw-hook\.[A-Za-z0-9]{8}`)
 	hookGoldenKrb      = regexp.MustCompile(`;(krb|cc)=[^;\s"]*`)
