@@ -429,6 +429,12 @@ type Options struct {
 
 	// MaxBody overrides the stdin cap in bytes (default defaultMaxBody).
 	MaxBody int64
+	// MaxBodyLowered marks a MaxBody the agent's environment lowered
+	// (DEFENSECLAW_HOOK_MAX_BODY). Under the per-user transport's 900 KiB, a
+	// call over it is refused, never sent as a bounded prefix review that
+	// judges too short a prefix: a lowered cap only tightens
+	// (rel-1-0-6:GAP-0337).
+	MaxBodyLowered bool
 
 	// TraceParent / TraceState are W3C trace-context candidates forwarded to
 	// the gateway after validation (invalid values are dropped, never sent).
@@ -2326,6 +2332,7 @@ func handleOversized(ctx context.Context, opts Options, sp spec, failMode string
 	// Only a gateway allow permits the call; a transport outage follows the
 	// existing per-user outage rule in sendToGateway.
 	if !opts.ManagedEnterprise && !opts.SecureClient && !opts.StrictAvailability &&
+		!(opts.MaxBodyLowered && opts.MaxBody < perUserHookMaxBody) &&
 		opts.OutageFailModeNow != nil && normalizeFailMode(opts.OutageFailModeNow()) == "open" && !perUserInstallWindow(opts) {
 		// A prefix the reducer cannot turn into one request (a duplicated
 		// key) keeps the closed oversize answer below. Every review is marked

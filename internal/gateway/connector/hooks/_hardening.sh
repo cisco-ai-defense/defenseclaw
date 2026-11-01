@@ -1503,6 +1503,12 @@ defenseclaw_per_user_oversize_open() {
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
   [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ] || return 1
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in 1|true|TRUE|yes|YES) return 1 ;; esac
+  # The review judges the call from the prefix the read kept. A cap lowered
+  # under the per-user transport's 900 KiB (DEFENSECLAW_HOOK_MAX_BODY) keeps
+  # too little to judge, so that call is refused, as in the closed tiers: a
+  # lowered cap only tightens (rel-1-0-6:GAP-0337).
+  _dc_stdin_cap
+  [ "$_DC_STDIN_CAP" -ge 921600 ] || return 1
   ! defenseclaw_install_held || return 1
   local connector="${DEFENSECLAW_HOOK_CONNECTOR:-}" record="" recorded="" mode="" source=""
   [ "$connector" != inspect ] || connector="${RUNTIME_CONNECTOR:-}"

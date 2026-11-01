@@ -283,7 +283,20 @@ emit_cursor_deny() {
     *) printf '{}\n' ;;
   esac
 }
-
+{{if and (not .SecureClient) (not .Sandbox)}}# cursor_event_unread returns 0 (true) when CURSOR_EVENT is no event this
+# hook is registered for (cursorHookEvents): cut from an oversized or bounded
+# payload, missing or unknown. Such a call has no event-native deny object,
+# so only exit 2 denies it; {} with exit 0 let it run (rel-1-0-6:GAP-0337).
+cursor_event_unread() {
+  case "$CURSOR_EVENT" in
+    sessionStart|sessionEnd|preToolUse|postToolUse|postToolUseFailure|subagentStart|subagentStop) return 1 ;;
+    beforeShellExecution|beforeMCPExecution|afterShellExecution|afterMCPExecution) return 1 ;;
+    beforeReadFile|beforeTabFileRead|afterFileEdit|afterTabFileEdit|beforeSubmitPrompt) return 1 ;;
+    afterAgentResponse|afterAgentThought|stop|preCompact|workspaceOpen) return 1 ;;
+  esac
+  return 0
+}
+{{end}}
 {{if .Managed}}
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
@@ -507,7 +520,8 @@ fail_response() {
     exit 0
   fi
   emit_cursor_deny "DefenseClaw hook failed closed"
-  exit 0
+{{if not .SecureClient}}  if cursor_event_unread; then exit 2; fi
+{{end}}  exit 0
 }
 {{end}}
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
@@ -614,6 +628,7 @@ if [ "$ACTION" = "block" ]; then
     echo "$OUTPUT"
   else
     emit_cursor_deny "Blocked by DefenseClaw Cursor policy."
+    if cursor_event_unread; then exit 2; fi
   fi
   exit 0
 {{end}}fi
