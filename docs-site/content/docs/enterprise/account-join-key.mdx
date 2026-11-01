@@ -100,7 +100,7 @@ Test vectors, with the secret bytes `00 01 02 … 1f` and tenant `contoso-prod`:
 
 ## Rotate the secret
 
-1. Store the new secret as `account-join-key-next` and sign a config with `next_generation`, its `next_secret_sha256` and `next_not_after` (at most 30 days ahead):
+1. Store the new secret as `account-join-key-next` and sign a config with `next_generation`, its `next_secret_sha256` and `next_not_after`, at most 30 days after you sign the bundle. `bundle sign` refuses a later one. The device measures the 30 days from the signing time of the confirmed bundle, not from its own clock, which it uses only for a config installed without a bundle:
 
    ```yaml
    account_join:

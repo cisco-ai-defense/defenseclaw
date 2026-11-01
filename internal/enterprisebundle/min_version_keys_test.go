@@ -7,6 +7,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
@@ -75,6 +76,36 @@ func TestOlderBundleWithRemovedConnectorRefusedByFloor(t *testing.T) {
 }
 
 // A bundle that sets enterprise.account_join needs min_product_version 1.0.7.
+// rel-1-0-6:GAP-0277: bundle sign refuses a next_not_after more than 30
+// days after the signing time, which the device would refuse.
+func TestComposeBoundsAccountJoinNextNotAfterBySigningTime(t *testing.T) {
+	for _, tc := range []struct {
+		days   int
+		refuse bool
+	}{{29, false}, {30, false}, {31, true}} {
+		block := "  account_join:\n    mode: on\n    generation: 1\n    secret_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" +
+			"    next_generation: 2\n    next_secret_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n" +
+			"    next_not_after: \"" + signedAt.Add(time.Duration(tc.days)*24*time.Hour).UTC().Format(time.RFC3339) + "\"\n"
+		config := strings.Replace(bundleConfig(t), "  profile: standalone\n", "  profile: standalone\n"+block, 1)
+		root, b := writeBundle(t, config)
+		in := enterprisebundle.ComposeInput{
+			Bundle: b, Root: root, BundleID: tamperBundleID, TenantID: "acme", DeviceGroup: "eng", Version: 5,
+			Platforms: []string{enterprisebundle.PlatformLinux}, CreatedAt: signedAt, CreatedBy: "operator:alice",
+			MinProductVersion: "1.0.7", ProductVersion: "1.0.7", HostPlatform: enterprisebundle.PlatformLinux, Digester: digester,
+		}
+		_, _, err := enterprisebundle.Compose(context.Background(), in)
+		if tc.refuse {
+			if enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(errString(err), "next_not_after") {
+				t.Errorf("%d days: got %v, want config_invalid naming next_not_after", tc.days, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%d days: %v", tc.days, err)
+		}
+	}
+}
+
 func TestComposeRequiresProductFloorForAccountJoin(t *testing.T) {
 	config := strings.Replace(bundleConfig(t), "  profile: standalone\n", "  profile: standalone\n  account_join:\n    mode: on\n    generation: 1\n    secret_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", 1)
 	for _, tc := range []struct {

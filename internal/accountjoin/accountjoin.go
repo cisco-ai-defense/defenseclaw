@@ -308,6 +308,11 @@ type Generations struct {
 	NextSecret    []byte
 	NextSHA256    string
 	NextNotAfter  time.Time
+	// SignedAt is when the administrator signed next_not_after: the
+	// created_at of the confirmed policy bundle whose config carries it.
+	// Zero when the config did not come from a confirmed bundle; the
+	// device clock then bounds next_not_after.
+	SignedAt time.Time
 	// Highest is the highest generation this device applied before.
 	Highest uint32
 }
@@ -322,11 +327,17 @@ type Slot struct {
 // the ones that are not. The current generation is reported when its
 // secret is valid and its number is not below Highest; the next one in
 // addition while its secret is valid, its number is above the current one
-// and now is before NextNotAfter, which is at most MaxNextOverlap ahead.
+// and now is before NextNotAfter, which is at most MaxNextOverlap after the
+// signing time (SignedAt; now when there is none), so a device clock that is
+// behind or ahead does not move the signed bound (rel-1-0-6:GAP-0277).
 // Removing the next secret without promotion leaves the current one as it
 // is. The returned highest is what the device records after reporting.
 func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest uint32) {
 	highest = g.Highest
+	bound := now
+	if !g.SignedAt.IsZero() {
+		bound = g.SignedAt
+	}
 	switch {
 	case g.CurrentSecret == nil:
 		reasons = append(reasons, ReasonSecretMissing)
@@ -349,7 +360,7 @@ func Plan(g Generations, now time.Time) (slots []Slot, reasons []string, highest
 		switch {
 		case g.NextSecret == nil:
 			// A next generation with no secret: nothing to report.
-		case g.Next == 0 || g.Next <= g.Current || g.NextNotAfter.IsZero() || g.NextNotAfter.After(now.Add(MaxNextOverlap)):
+		case g.Next == 0 || g.Next <= g.Current || g.NextNotAfter.IsZero() || g.NextNotAfter.After(bound.Add(MaxNextOverlap)):
 			reasons = append(reasons, ReasonGenerationInvalid)
 		case !now.Before(g.NextNotAfter):
 			reasons = append(reasons, ReasonNextGenerationExpired)

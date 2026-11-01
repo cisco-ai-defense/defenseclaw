@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,8 @@ type device struct {
 	cfg     config.EnterpriseAccountJoinConfig
 	now     time.Time
 	goos    string
+	// signedAt answers Sources.SignedAt (nil: no confirmed bundle).
+	signedAt func(int, time.Time) (time.Time, bool)
 }
 
 func newDevice(t *testing.T) *device {
@@ -90,8 +93,51 @@ func (d *device) report() *accountjoin.Report {
 			return append([]byte(nil), value...), nil
 		},
 		SpoolDir: d.spool, SpoolTrust: func(string, string) error { return nil },
-		StatePath: d.state, GOOS: d.goos, Now: d.now,
+		StatePath: d.state, GOOS: d.goos, Now: d.now, SignedAt: d.signedAt,
 	})
+}
+
+// rel-1-0-6:GAP-0277: next_not_after is bounded by the signing time of the
+// confirmed bundle that carries it. A device whose clock is three days
+// behind the signer keeps an overlap the administrator signed for 29 days,
+// and falls back to its own clock only when no confirmed bundle carries
+// this next_generation and next_not_after.
+func TestNextNotAfterIsBoundedByTheBundleSigningTime(t *testing.T) {
+	d := newDevice(t)
+	d.enroll("1001", "alice@contoso.com", enterprisehooks.UPNSourceInfoPipe, "", d.now.Add(-time.Hour))
+	signed := d.now.Add(3 * 24 * time.Hour)
+	notAfter := signed.Add(29 * 24 * time.Hour)
+	d.secrets[accountjoin.NextSecretName] = secretText(0xee)
+	d.cfg.NextGeneration, d.cfg.NextNotAfter, d.cfg.NextSecretSHA256 = 2, notAfter.Format(time.RFC3339), digest(secretText(0xee))
+	if report := d.report(); len(report.Generations) != 1 || text(report.ReasonCodes) != `["generation_invalid"]` {
+		t.Fatalf("no signing time: the device clock bounds next_not_after: %s", text(report))
+	}
+	var asked []string
+	d.signedAt = func(generation int, at time.Time) (time.Time, bool) {
+		asked = append(asked, fmt.Sprintf("%d %s", generation, at.Format(time.RFC3339)))
+		return signed, true
+	}
+	report := d.report()
+	if len(report.Generations) != 2 || report.Generations[1].Generation != 2 || len(report.ReasonCodes) != 0 {
+		t.Fatalf("signed 29 days ahead: %s", text(report))
+	}
+	if text(asked) != text([]string{"2 " + notAfter.Format(time.RFC3339)}) {
+		t.Fatalf("SignedAt was asked %v", asked)
+	}
+	d.signedAt = func(int, time.Time) (time.Time, bool) { return time.Time{}, false }
+	if report := d.report(); len(report.Generations) != 1 || text(report.ReasonCodes) != `["generation_invalid"]` {
+		t.Fatalf("config not from the confirmed bundle: %s", text(report))
+	}
+	// Without a next generation nothing is asked.
+	asked = nil
+	d.signedAt = func(generation int, at time.Time) (time.Time, bool) {
+		asked = append(asked, "called")
+		return signed, true
+	}
+	d.cfg.NextGeneration, d.cfg.NextNotAfter, d.cfg.NextSecretSHA256 = 0, "", ""
+	if report := d.report(); len(report.Generations) != 1 || len(asked) != 0 {
+		t.Fatalf("no next generation: %s, asked %v", text(report), asked)
+	}
 }
 
 func keyOf(t *testing.T, gen uint32, c string, last byte) string {

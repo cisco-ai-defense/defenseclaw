@@ -46,8 +46,17 @@ func windowsAccountJoinReport(cfg *config.Config, layout managed.StandaloneLayou
 		},
 		SpoolDir:   enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir)),
 		SpoolTrust: managed.ValidateTrustedFilePath,
-		StatePath:  filepath.Join(layout.LifecycleDir, devicekeys.StateFileName),
-		GOOS:       "windows",
-		Now:        time.Now(),
+		// next_not_after is bounded by the time the confirmed bundle that
+		// carries it was signed (rel-1-0-6:GAP-0277).
+		SignedAt: func(generation int, notAfter time.Time) (time.Time, bool) {
+			store, err := bundleStore()
+			if err != nil {
+				return time.Time{}, false
+			}
+			return store.ConfirmedAccountJoinSignedAt(generation, notAfter)
+		},
+		StatePath: filepath.Join(layout.LifecycleDir, devicekeys.StateFileName),
+		GOOS:      "windows",
+		Now:       time.Now(),
 	})
 }

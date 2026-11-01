@@ -7,6 +7,7 @@ package enterpriseunix
 
 import (
 	"path/filepath"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 	"github.com/defenseclaw/defenseclaw/internal/accountjoin/devicekeys"
@@ -62,8 +63,13 @@ func (env *Env) AccountJoinReport() *accountjoin.Report {
 		},
 		SpoolDir:   enterprisehooks.IdentitySpoolDir(env.P(env.Layout.GuardianAuthDir)),
 		SpoolTrust: func(path, _ string) error { return env.Trust(path, TrustAdminFile) },
-		StatePath:  filepath.Join(env.P(env.Layout.LifecycleDir), devicekeys.StateFileName),
-		GOOS:       env.GOOS,
-		Now:        env.Now(),
+		// next_not_after is bounded by the time the confirmed bundle that
+		// carries it was signed (rel-1-0-6:GAP-0277).
+		SignedAt: func(generation int, notAfter time.Time) (time.Time, bool) {
+			return env.bundleStore().ConfirmedAccountJoinSignedAt(generation, notAfter)
+		},
+		StatePath: filepath.Join(env.P(env.Layout.LifecycleDir), devicekeys.StateFileName),
+		GOOS:      env.GOOS,
+		Now:       env.Now(),
 	})
 }

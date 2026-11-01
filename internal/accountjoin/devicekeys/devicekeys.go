@@ -39,6 +39,10 @@ type Sources struct {
 	// SpoolDir is the identity spool and SpoolTrust its trust check.
 	SpoolDir   string
 	SpoolTrust func(path, label string) error
+	// SignedAt returns the created_at of the confirmed policy bundle when
+	// its config carries this next_generation and next_not_after (false
+	// otherwise, or nil: the device clock bounds next_not_after).
+	SignedAt func(nextGeneration int, nextNotAfter time.Time) (time.Time, bool)
 	// StatePath is the highest-generation record ("" keeps none).
 	StatePath string
 	GOOS      string
@@ -72,6 +76,11 @@ func Report(s Sources) *accountjoin.Report {
 		NextSHA256:    s.Config.NextSecretSHA256,
 		NextNotAfter:  s.Config.NextNotAfterTime(),
 		Highest:       highest,
+	}
+	if s.SignedAt != nil && s.Config.NextGeneration != 0 && !in.Generations.NextNotAfter.IsZero() {
+		if at, ok := s.SignedAt(s.Config.NextGeneration, in.Generations.NextNotAfter); ok {
+			in.Generations.SignedAt = at
+		}
 	}
 	var secretErr bool
 	if s.ReadSecret != nil {

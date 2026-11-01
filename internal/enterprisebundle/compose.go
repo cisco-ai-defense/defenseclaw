@@ -13,6 +13,8 @@ import (
 	"io"
 	"slices"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 )
 
 // ComposeInput is what bundle sign writes into a new manifest.
@@ -69,6 +71,13 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	}
 	if err := CheckKeyProductFloor(cfg, in.MinProductVersion); err != nil {
 		return nil, nil, err
+	}
+	if join := cfg.Enterprise.AccountJoin; join.On() && join.NextGeneration != 0 {
+		// The device bounds next_not_after by this signing time
+		// (ConfirmedAccountJoinSignedAt): sign refuses what it would.
+		if signed := in.CreatedAt.UTC().Truncate(time.Second); join.NextNotAfterTime().After(signed.Add(accountjoin.MaxNextOverlap)) {
+			return nil, nil, refuse(CodeConfigInvalid, ConfigName, "enterprise.account_join.next_not_after is more than 30 days after the signing time %s", signed.Format(time.RFC3339))
+		}
 	}
 	names, err := ConfigCredentials(b.Files[ConfigName])
 	if err != nil {
