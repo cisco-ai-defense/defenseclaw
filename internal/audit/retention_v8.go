@@ -1483,9 +1483,11 @@ func migrateRetentionTimestampUnixNano(ex dbExecer) error {
 		)); err != nil {
 			return fmt.Errorf("create exact retention timestamp index: %w", err)
 		}
-		// The migration installs main's form; Init then installs the
-		// store's (ensureRetentionTimestampInfrastructure).
-		if err := installRetentionTimestampTriggers(ex, spec, false); err != nil {
+		// The migration installs the bound form; Init then installs the
+		// store's (ensureRetentionTimestampInfrastructure: main's on a
+		// Secure Client store). Installing the same form again frees no
+		// schema page, so the purge's VACUUM leaves no free page behind.
+		if err := installRetentionTimestampTriggers(ex, spec, true); err != nil {
 			return err
 		}
 	}
@@ -1494,6 +1496,26 @@ func migrateRetentionTimestampUnixNano(ex dbExecer) error {
 
 func installRetentionTimestampTriggers(ex dbExecer, spec retentionTimestampSpec, bound bool) error {
 	insertTrigger, updateTrigger, insertSQL, updateSQL := retentionTimestampTriggerDDL(spec, bound)
+	// Both already as required: rewriting them would only churn the schema
+	// (and free a page of the longer bound form's text on every open).
+	installed := true
+	for _, trigger := range []struct {
+		name string
+		sql  string
+	}{{insertTrigger, insertSQL}, {updateTrigger, updateSQL}} {
+		var actual string
+		err := ex.QueryRow(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, trigger.name).Scan(&actual)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && normalizeSQLiteDDL(actual) != normalizeSQLiteDDL(trigger.sql)) {
+			installed = false
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read exact retention timestamp trigger: %w", err)
+		}
+	}
+	if installed {
+		return nil
+	}
 	if _, err := ex.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s; DROP TRIGGER IF EXISTS %s`,
 		insertTrigger, updateTrigger)); err != nil {
 		return fmt.Errorf("replace exact retention timestamp triggers: %w", err)
