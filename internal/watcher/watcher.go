@@ -565,7 +565,7 @@ func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt Instal
 // due: it is final for its definition (rel-1-0-6:GAP-0258).
 func (w *InstallWatcher) mcpScanRetryDue(path string, baseline *audit.SnapshotRow) bool {
 	return baseline != nil && !w.secureClientActive() && strings.HasSuffix(baseline.ScannerFingerprint, mcpScanFailedMark) &&
-		w.state.mcpRetryDue(path, time.Now())
+		w.state.mcpRetryDue(path)
 }
 
 // queueAddedMCP queues name for the next admission pass without waking it.

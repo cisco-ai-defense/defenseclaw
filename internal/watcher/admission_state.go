@@ -120,6 +120,8 @@ type admissionState struct {
 	// retry is when each unfinished admission runs again, and its delay.
 	retry       map[string]admissionRetry
 	addressable func(string) string
+	// now is the clock of the retry delays; tests set a fake one.
+	now func() time.Time
 }
 
 type admissionRetry struct {
@@ -136,6 +138,7 @@ func newAdmissionState(dataDir string, addressable func(string) string) *admissi
 	s := &admissionState{
 		path: filepath.Join(dataDir, AdmissionStateFile), assets: map[string]admissionStateEntry{},
 		issues: map[string]AdmissionIssue{}, retry: map[string]admissionRetry{}, addressable: addressable,
+		now: time.Now,
 	}
 	issues, _ := ReadAdmissionIssues(dataDir)
 	for _, issue := range issues {
@@ -155,13 +158,14 @@ func (s *admissionState) setIssue(issue AdmissionIssue) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	issue.Since = time.Now().UTC()
+	now := s.now()
+	issue.Since = now.UTC()
 	if prev, ok := s.issues[issue.Path]; ok && prev.Kind == issue.Kind {
 		issue.Since = prev.Since
 	}
 	s.issues[issue.Path] = issue
 	delay := min(max(s.retry[issue.Path].delay*2, admissionRetryFirst), admissionRetryLast)
-	s.retry[issue.Path] = admissionRetry{due: time.Now().Add(delay), delay: delay}
+	s.retry[issue.Path] = admissionRetry{due: now.Add(delay), delay: delay}
 	s.writeLocked()
 }
 
@@ -184,7 +188,7 @@ func (s *admissionState) clearIssue(path string) {
 // (AdmissionUnscanned) and whose retry delay has passed. The discovery poll
 // asks it; each failed admission doubles the delay (setIssue), and a
 // finished one clears the issue (rel-1-0-6:GAP-0258).
-func (s *admissionState) mcpRetryDue(path string, now time.Time) bool {
+func (s *admissionState) mcpRetryDue(path string) bool {
 	if s == nil {
 		return false
 	}
@@ -194,7 +198,7 @@ func (s *admissionState) mcpRetryDue(path string, now time.Time) bool {
 	if !ok || issue.Type != string(InstallMCP) || issue.Kind != AdmissionUnscanned {
 		return false
 	}
-	return !now.Before(s.retry[path].due)
+	return !s.now().Before(s.retry[path].due)
 }
 
 // forgetMCPIssuesNotListed forgets the problems of MCP servers that are no

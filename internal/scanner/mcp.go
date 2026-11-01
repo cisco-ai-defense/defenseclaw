@@ -673,8 +673,15 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	}
 
 	result.ExitCode = exitCode
+	outputError := ""
 	if exitCode != 0 {
 		result.ScanError = stderrStr
+		if outputError = mcpOutputError(stdout.Bytes()); outputError != "" {
+			outputError += "; "
+			if strings.TrimSpace(stderrStr) == "" {
+				result.ScanError = outputError
+			}
+		}
 	}
 
 	if stdout.Len() > 0 {
@@ -697,11 +704,41 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	// watcher and REST scan handlers. See finding "Non-zero MCP
 	// scanner exits can be treated as successful scans".
 	if exitCode != 0 {
-		scanErr = refusedMCPScan(fmt.Errorf("scanner %s exited %d (%sstderr=%s)", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr)), stderrStr, stdout.String())
+		scanErr = refusedMCPScan(fmt.Errorf("scanner %s exited %d (%s%sstderr=%s)", s.Name(), exitCode, s.workDirNote(), outputError, scannerFailureText(stderrStr)), stderrStr, stdout.String())
 		return result, scanErr
 	}
 
 	return result, nil
+}
+
+// maxMCPOutputErrorBytes bounds the stdout error a failed scan reports.
+const maxMCPOutputErrorBytes = 1000
+
+// mcpOutputError is the error `defenseclaw mcp scan --json` prints on stdout
+// for a scan it did not run (cmd_mcp.py _mcp_scan_error_json_payload), such
+// as its refusal of a launcher other than the bare npx or uvx; stderr is then
+// empty. The error read only stderr, so on the per-user gateways of every OS
+// the refusal read "exited 1 (stderr=)": it was retried with backoff instead
+// of final, and the agent never got the launcher reason
+// (rel-1-0-6:GAP-0258). The managed Windows scanner runtime reports its
+// refusal on stderr. One line, a traceback cut as scannerFailureText cuts
+// stderr, at most maxMCPOutputErrorBytes; "" when stdout holds no error.
+// Secure Client keeps the error of main (issue #1092).
+func mcpOutputError(stdout []byte) string {
+	if keepFullFailureText.Load() {
+		return ""
+	}
+	var out struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(extractJSON(ansiRe.ReplaceAll(stdout, nil)), &out) != nil {
+		return ""
+	}
+	text := strings.Join(strings.Fields(scannerFailureText(out.Error)), " ")
+	if len(text) > maxMCPOutputErrorBytes {
+		text = strings.ToValidUTF8(text[:maxMCPOutputErrorBytes], "") + "..."
+	}
+	return text
 }
 
 // mcpScanResult matches the JSON emitted by the Python CLI

@@ -417,19 +417,45 @@ var agentAssetPolicyNamePattern = lazyregexp.New(`^[\p{L}\p{N}][\p{L}\p{M}\p{N}.
 // Only the fixed runtime-disable template and known admission verdict kinds
 // may become an agent sentence. Scanner errors and finding titles can contain
 // untrusted text, so the subject names their category without copying them.
-// The reason group is bounded at 1000 bytes, the RE2 repeat limit: a scanner
-// reason with a folder note passed the old 512 and was redacted whole
-// (rel-1-0-6:GAP-0258).
-var agentMCPAdmissionPattern = lazyregexp.New(`^mcp server "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" is disabled because its install admission rejected it \(([^\r\n]{1,1000})\); asset_policy\.mode does not apply to admission verdicts$`)
+// The reason group has no length bound: it is never copied, and a scanner
+// reason with a folder note or a long refusal passed the old 512 and 1000
+// and was redacted whole (rel-1-0-6:GAP-0258).
+var agentMCPAdmissionPattern = lazyregexp.New(`^mcp server "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" is disabled because its install admission rejected it \(([^\r\n]+)\); asset_policy\.mode does not apply to admission verdicts$`)
 var agentMCPFindingPattern = lazyregexp.New(`^auto-block: watch detected (LOW|MEDIUM|HIGH|CRITICAL) findings \(scanner=[A-Za-z0-9._-]{1,64}\)(?:: [^\r\n]{1,512})?(?:; rescan retained block)?$`)
 
-// mcpLauncherRefusalVerdict is the verdict kind of an MCP server whose scan
-// refused its local launcher (scanner.MCPLauncherRefusal). It names the
-// cause and the fix without the scanner text, which can carry the server's
-// own command and arguments.
-const mcpLauncherRefusalVerdict = "scanner failure (fail-closed): a scan starts a local MCP server only as a package through the bare npx or uvx, " +
-	"and this server's command is not one; start it with npx or uvx, or serve it over HTTP and use its URL, " +
+// mcpLauncherRefusalCause says, in fixed words, why a scan refused an MCP
+// server's local launcher (scanner.MCPLauncherRefusal) and how to fix it.
+const mcpLauncherRefusalCause = "is refused because a scan starts a local MCP server only as a package through the bare npx or uvx, " +
+	"with a package argument and no code-running flag; start it with npx or uvx, or serve it over HTTP and use its URL, " +
 	"or have the reviewed definition allowed"
+
+// mcpRefusedLauncherPattern finds the launcher a refusal names after its
+// lead words ("command 'node' is not an allowlisted ...", "launcher 'npx'
+// uses ..."): a bare program name only, never a path or argument.
+var mcpRefusedLauncherPattern = lazyregexp.New(`^(?:command|launcher) ['"]([A-Za-z0-9][A-Za-z0-9._+-]{0,63})['"] `)
+
+// mcpLauncherRefusalVerdict is the verdict of an MCP server whose scan
+// refused its local launcher: "the launcher node is refused because ...",
+// a plain sentence. Only a bare launcher name is taken from the scanner
+// text, which can carry the server's command path and arguments.
+func mcpLauncherRefusalVerdict(reason string) string {
+	for _, lead := range []string{"refusing to scan local MCP server ", " is not started: "} {
+		_, after, found := strings.Cut(reason, lead)
+		if !found {
+			continue
+		}
+		if lead == "refusing to scan local MCP server " {
+			// Skip the quoted server name: "'vs9time': command ...".
+			if _, rest, ok := strings.Cut(after, ": "); ok {
+				after = rest
+			}
+		}
+		if m := mcpRefusedLauncherPattern.FindStringSubmatch(after); m != nil {
+			return "the launcher " + m[1] + " " + mcpLauncherRefusalCause
+		}
+	}
+	return "the launcher " + mcpLauncherRefusalCause
+}
 
 func agentMCPAdmissionSubject(reason string) string {
 	m := agentMCPAdmissionPattern.FindStringSubmatch(reason)
@@ -443,7 +469,7 @@ func agentMCPAdmissionSubject(reason string) string {
 		// a definition a scan starts, in fixed words. The agent saw only
 		// "still scanning" or the bare failure kind, and retried a refusal
 		// that never changes (rel-1-0-6:GAP-0258).
-		verdict = mcpLauncherRefusalVerdict
+		verdict = mcpLauncherRefusalVerdict(m[2])
 	case strings.HasPrefix(m[2], "scanner failure (fail-closed): ") && len(m[2]) > len("scanner failure (fail-closed): "):
 		verdict = "scanner failure (fail-closed)"
 	case agentMCPFindingPattern.MatchString(m[2]):
