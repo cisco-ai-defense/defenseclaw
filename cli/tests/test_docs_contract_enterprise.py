@@ -206,7 +206,11 @@ FACTS = [
         (('guardrail/user-and-group-policies.mdx',),
          'Group assignments follow the OS-verified account ID'),
         (('guardrail/user-and-group-policies.mdx',),
-         'use each uid or SID with `guardrail profile explain --user`'),
+         # rel-1-0-6:GAP-0328: a per-user install explains only its own
+         # account, so the per-account check is the managed command.
+         'an administrator uses each uid or SID with the managed `enterprise <os> profile-explain --user`'),
+        (('guardrail/user-and-group-policies.mdx',),
+         'a per-user install explains only your own account'),
     ]),
     ('gap_0528_macos_bare_group_name_selects_local_and_domain_group', [
         (('guardrail/user-and-group-policies.mdx',),

@@ -39,7 +39,7 @@ It is off unless you turn it on. It is not available under Secure Client. It nee
        secret_sha256: <hex digest only: printf '%s' "$SECRET" | sha256sum | cut -d' ' -f1>
    ```
 
-   The bundle binds the secret by a keyed digest (`secret_refs`, an optional reference), never the value. `bundle sign` refuses a value that is not the one `secret_sha256` names. A device that stores another value refuses the bundle (`secret_ref_mismatch`) and keeps the bundle it has, and `enterprise secret set` refuses a value the confirmed bundle does not sign. A device that has no `account-join-key` yet applies the bundle and reports `secret_missing`. A config installed without a bundle has no binding: a device whose stored secret has another digest then reports no key for that generation (`secret_mismatch`).
+   The bundle binds the secret by a keyed digest (`secret_refs`, an optional reference), never the value. Signing refuses a value that is not the one `secret_sha256` names. A device that stores another value refuses the bundle (`secret_ref_mismatch`) and keeps the bundle it has, and `enterprise secret set` refuses a value the confirmed bundle does not sign. A device that has no `account-join-key` yet applies the bundle and reports `secret_missing`. A config installed without a bundle has no binding: a device whose stored secret has another digest then reports no key for that generation (`secret_mismatch`).
 
 ## What the device reports
 
@@ -100,7 +100,7 @@ Test vectors, with the secret bytes `00 01 02 … 1f` and tenant `contoso-prod`:
 
 ## Rotate the secret
 
-1. Store the new secret as `account-join-key-next` and sign a config with `next_generation`, its `next_secret_sha256` and `next_not_after` (with `--secret-file` for both secrets), at most 30 days after you sign the bundle. `bundle sign` refuses a later one. The device measures the 30 days from the signing time of the confirmed bundle, not from its own clock, which it uses only for a config installed without a bundle:
+1. Store the new secret as `account-join-key-next` and sign a config with `next_generation`, its `next_secret_sha256` and `next_not_after` (with `--secret-file` for both secrets), at most 30 days after you sign the bundle. Signing refuses a later one. The device measures the 30 days from the signing time of the confirmed bundle, not from its own clock, which it uses only for a config installed without a bundle:
 
    ```yaml
    account_join:
