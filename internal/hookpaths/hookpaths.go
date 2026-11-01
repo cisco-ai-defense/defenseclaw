@@ -2375,6 +2375,9 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	// diskCopies: link-keeping copies of sources with links on disk whose
 	// texts are known (copyDiskLinks).
 	var diskCopies []linkCopy
+	// treeCopies: recursive and link-keeping copies, read at the end
+	// against the opaque scopes (copyScopedTrees).
+	var treeCopies []treeCopy
 	var renameOps []renameOp
 	var findMoves []findMove
 	// placedLinkNames: the names of plain link calls the statement walk
@@ -2576,6 +2579,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				}
 				option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
 				if copyPreservesLinks(words[1:], static[1:]) {
+					treeCopies = append(treeCopies, cpTreeCopy(words[1:], static[1:], dir, destination))
 					diskLink := cpDiskSymlink(words[1:], static[1:], dir, home, facts, record)
 					copied, readable := linkOnlyCopyOperands(words[1:], static[1:], dir)
 					readable = readable && !option && !dynamic && !nested && movedDir == "" && len(callDirs) == 1
@@ -2626,6 +2630,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				if archiveCopiesLinks(program, words[1:], static[1:]) {
 					destination := archiveDestination(program, words[1:], static[1:], dir)
 					copyScopes = append(copyScopes, destination)
+					treeCopies = append(treeCopies, archiveTreeCopy(words[1:], static[1:], dir, destination))
 					if archiveCopiesDiskSymlink(program, words[1:], static[1:], dir, home, facts, record, stackSources) {
 						links.unknownIn(destination)
 					}
@@ -2747,6 +2752,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		}
 		return true
 	})
+	links.copyScopedTrees(treeCopies)
 	if nested {
 		links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
 		links.renameOps, links.wrappedCds, links.findMoves = renameOps, wrappedCds, findMoves
@@ -4099,6 +4105,76 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 	}
 	result.sources, result.destination, result.ok = operands[:len(operands)-1], operands[len(operands)-1], true
 	return result
+}
+
+// treeCopy is a recursive or link-keeping copy: its sources and its
+// destination, absolute ("" when it may write anywhere). known is false
+// when its sources are not all read.
+type treeCopy struct {
+	sources     []string
+	destination string
+	known       bool
+}
+
+func cpTreeCopy(args []string, static []bool, dir, destination string) treeCopy {
+	parsed := cpOperands(args, static)
+	copied := treeCopy{destination: destination, known: parsed.ok}
+	for _, source := range parsed.sources {
+		copied.sources = append(copied.sources, absolutePath(source, dir))
+	}
+	return copied
+}
+
+// archiveTreeCopy reads the sources of a link-copying rsync, cpio -p or
+// pax -rw call as archiveCopiesDiskSymlink does: every static operand but
+// the last.
+func archiveTreeCopy(args []string, static []bool, dir, destination string) treeCopy {
+	copied := treeCopy{destination: destination, known: !slices.Contains(static, false)}
+	var operands []string
+	for i, arg := range args {
+		if static[i] && !strings.HasPrefix(arg, "-") {
+			operands = append(operands, arg)
+		}
+	}
+	if len(operands) < 2 {
+		copied.known = false
+		return copied
+	}
+	for _, source := range operands[:len(operands)-1] {
+		copied.sources = append(copied.sources, absolutePath(source, dir))
+	}
+	return copied
+}
+
+// copyScopedTrees makes the destination of a recursive or link-keeping copy
+// whose source holds, or lies in, an opaque scope (an extraction directory,
+// or the copy of one) an opaque copy scope too: the extracted links are
+// copied with it, so tar -xf x.tar -C d0 && cp -a d0 e0 && echo k >> e0/k
+// may write through one (rel-1-0-6:GAP-0283). The copy's own destination
+// keeps its own-copy reading, so the copy alone and reads of it stay
+// allowed. A copy whose sources are not read follows any scope.
+func (l *shellLinks) copyScopedTrees(copies []treeCopy) {
+	done := make([]bool, len(copies))
+	for changed := true; changed; {
+		changed = false
+		for i, copied := range copies {
+			if done[i] || len(l.opaqueScopes) == 0 && !l.globalOpaque {
+				continue
+			}
+			reaches := !copied.known || l.globalOpaque
+			for _, source := range copied.sources {
+				for _, scope := range l.opaqueScopes {
+					if scope.path != copied.destination && pathsOverlap(source, scope.path) {
+						reaches = true
+					}
+				}
+			}
+			if reaches {
+				done[i], changed = true, true
+				l.unknownCopyIn(copied.destination)
+			}
+		}
+	}
 }
 
 // linkCopy is a link-keeping cp call read in dir: its sources, its
