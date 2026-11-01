@@ -140,6 +140,13 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 # beyond setting env / ulimit. They MUST NOT call out to the agent or
 # the gateway.
 
+# The agent's environment cannot change how the hook runs: a function
+# nesting limit, a read timeout and ignored commands would end a check early
+# (review 2 of sandbox-visibility:GAP-0028). The hooks of this build drop them
+# before their first function call; this covers hooks an older build
+# rendered.
+unset -v FUNCNEST TMOUT EXECIGNORE 2>/dev/null || true
+
 # Windows compatibility: some agent runtimes (e.g. Codex on Windows) do
 # not set HOME when spawning hook subprocesses. Without this, `set -u`
 # causes an immediate "unbound variable" exit 1. Fall back to USERPROFILE
@@ -255,6 +262,7 @@ defenseclaw_harden_env() {
   # same name, which would copy the value into the environment of every child
   # process (curl, jq, the cold-started gateway), so drop inherited ones first.
   unset -v API_TOKEN PAYLOAD CONTENT TOOL_INPUT TOOL_OUTPUT INSPECT_BODY RESPONSE RESULT OUTPUT
+  unset -v FUNCNEST TMOUT EXECIGNORE 2>/dev/null || true
   # The values the in-shell readers keep (issue #1130), which lived in
   # subshells before: an inherited exported name would hand them to every
   # child process.
@@ -343,7 +351,7 @@ defenseclaw_harden_env() {
   # forever. Runs AFTER PATH lockdown so we don't pick up an attacker-
   # planted `find`. Orphans come only from a killed hook, so one call in 32
   # keeps them bounded without a find on every call (issue #1130).
-  [ $((RANDOM % 32)) -ne 0 ] || _defenseclaw_sweep_stale_hook_dirs
+  [ $((${RANDOM:-1} % 32)) -ne 0 ] || _defenseclaw_sweep_stale_hook_dirs
 }
 
 # Resolve optional connector identity for the shared inspect-* scripts.  The
@@ -1398,7 +1406,7 @@ defenseclaw_log_hook_failure() {
 	call_id="${call_id:0:256}"
 	tool_id="${tool_id:0:256}"
 	hook_event="${hook_event:0:64}"
-	[ -n "$call_id" ] || call_id="$$-${RANDOM}${RANDOM}"
+	[ -n "$call_id" ] || call_id="$$-${RANDOM:-0}${RANDOM:-0}"
   safe_ts="$(defenseclaw_json_escape "$ts")"
   safe_connector="$(defenseclaw_json_escape "$connector")"
   safe_hook_name="$(defenseclaw_json_escape "$hook_name")"
@@ -2030,7 +2038,7 @@ defenseclaw_gateway_cold_start() {
   ! defenseclaw_install_lock_held "$data" || return 1
   [ ! -e "${data}/.disabled" ] || return 1
   lock="${data}/.cold-start.lock"
-  token="$$.${RANDOM}${RANDOM}"
+  token="$$.${RANDOM:-0}${RANDOM:-0}"
   _dc_cold_start_lock "$lock" "$token" || return 0
   # In its own session where setsid exists, so the agent ending the hook's
   # process group does not end a start that is still running.
@@ -3103,14 +3111,25 @@ defenseclaw_missing_token_next_step() {
 #
 # Returns 0 with the body on stdout. Returns 3 (overflow, with the first cap
 # bytes on stdout) or 4 (NUL, empty stdout).
+# _dc_stdin_cap sets _DC_STDIN_CAP to the body cap in bytes:
+# DEFENSECLAW_HOOK_MAX_BODY when it is a decimal number up to 1 MiB, which it
+# can only lower, else 1 MiB. A longer number overflowed the read's bound, so
+# the hook sent an empty body (review 2 of sandbox-visibility:GAP-0028).
+_dc_stdin_cap() {
+  _DC_STDIN_CAP="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
+  case "$_DC_STDIN_CAP" in
+    '' | *[!0-9]* | ????????*) _DC_STDIN_CAP=1048576 ;;
+  esac
+  _DC_STDIN_CAP=$((10#$_DC_STDIN_CAP))
+  [ "$_DC_STDIN_CAP" -le 1048576 ] || _DC_STDIN_CAP=1048576
+}
+
 defenseclaw_read_stdin_capped() {
   # The caller passes the outcome its oversized-payload branch applies
   # (fail_open or fail_closed); an older caller without one logs unknown.
-  local overflow_outcome="${1:-unknown}"
-  local cap="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
-  case "$cap" in
-    ''|*[!0-9]*) cap=1048576 ;;
-  esac
+  local overflow_outcome="${1:-unknown}" cap
+  _dc_stdin_cap
+  cap="$_DC_STDIN_CAP"
   # bash reads at most cap+1 bytes itself: no head(1) or python3 process on
   # any host (issue #1130 / GAP-0267), and the read stays bounded when
   # neither is installed.
@@ -3140,17 +3159,22 @@ defenseclaw_read_hook_stdin() {
 # the substitution removed them, and no process starts; a refused, cut or
 # transport-sized body takes the old path in a subshell, its log included.
 defenseclaw_read_stdin_into() {
-  local _dc_rsi_var="${1:-}" _dc_rsi_outcome="${2:-unknown}" _dc_rsi_cap="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
-  local _dc_rsi_body="" _dc_rsi_status=0 LC_ALL=C
+  local _dc_rsi_var="${1:-}" _dc_rsi_outcome="${2:-unknown}" _dc_rsi_cap=""
+  local _dc_rsi_body="" _dc_rsi_status=0 _dc_rsi_read=0 LC_ALL=C
   case "$_dc_rsi_var" in
     '' | [!A-Za-z_]* | *[!A-Za-z0-9_]*) return 1 ;;
   esac
-  case "$_dc_rsi_cap" in
-    ''|*[!0-9]*) _dc_rsi_cap=1048576 ;;
-  esac
-  if IFS= read -r -d '' -n "$((_dc_rsi_cap + 1))" _dc_rsi_body && [ "${#_dc_rsi_body}" -le "$_dc_rsi_cap" ]; then
+  _dc_stdin_cap
+  _dc_rsi_cap="$_DC_STDIN_CAP"
+  IFS= read -r -d '' -n "$((_dc_rsi_cap + 1))" _dc_rsi_body || _dc_rsi_read=$?
+  if [ "$_dc_rsi_read" -eq 0 ] && [ "${#_dc_rsi_body}" -le "$_dc_rsi_cap" ]; then
     printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" nul "$_dc_rsi_outcome")"
     return 4
+  fi
+  if [ "$_dc_rsi_read" -gt 1 ]; then
+    # read could not read (_dc_read_stdin_exact): refused, never sent empty.
+    printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" unreadable "$_dc_rsi_outcome")"
+    return 5
   fi
   if [ "${#_dc_rsi_body}" -gt "$_dc_rsi_cap" ]; then
     printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" overflow "$_dc_rsi_outcome"; printf '%s' "${_dc_rsi_body:0:_dc_rsi_cap}")"
@@ -3181,13 +3205,19 @@ defenseclaw_read_stdin_into() {
 # NUL, 3 for overflow, and prints nothing). LC_ALL=C makes
 # ${#body} a byte count. See defenseclaw_read_stdin_capped.
 _dc_read_stdin_exact() {
-  local cap="$1" outcome="$2" body="" LC_ALL=C
+  local cap="$1" outcome="$2" body="" status=0 LC_ALL=C
   # -n cap+1 bounds the read (a producer streaming 1GB is cut off after
   # cap+1 bytes). read returns 0 when it stopped at a NUL or took all cap+1
-  # bytes, and non-zero at the end of input.
-  if IFS= read -r -d '' -n "$((cap + 1))" body && [ "${#body}" -le "$cap" ]; then
+  # bytes, 1 at the end of input, and more when it could not read: that body
+  # is refused (5), never sent empty.
+  IFS= read -r -d '' -n "$((cap + 1))" body || status=$?
+  if [ "$status" -eq 0 ] && [ "${#body}" -le "$cap" ]; then
     _dc_stdin_refused "$cap" nul "$outcome"
     return 4
+  fi
+  if [ "$status" -gt 1 ]; then
+    _dc_stdin_refused "$cap" unreadable "$outcome"
+    return 5
   fi
   if [ "${#body}" -gt "$cap" ]; then
     _dc_stdin_refused "$cap" overflow "$outcome"
@@ -3230,6 +3260,12 @@ _dc_stdin_refused() {
     defenseclaw_log_hook_failure "$connector" "$hook_name" \
       "stdin body has a NUL byte" transport "${FAIL_MODE:-closed}" "$3"
     echo "defenseclaw: hook payload has a NUL byte; refusing to alter it" >&2
+    return 0
+  fi
+  if [ "$2" = unreadable ]; then
+    defenseclaw_log_hook_failure "$connector" "$hook_name" \
+      "stdin body could not be read" transport "${FAIL_MODE:-closed}" "$3"
+    echo "defenseclaw: hook payload could not be read; refusing it" >&2
     return 0
   fi
   local outcome="$3" log_mode="${FAIL_MODE:-closed}"
@@ -3580,7 +3616,7 @@ _dc_session_facts_full_into() {
       # Bash 5's epoch clock is a builtin. Unproven, expired and implausibly
       # future records refresh through the native identity collector.
       re='"expires_at":([0-9]{1,11})[,}]'
-      now="$EPOCHSECONDS"
+      now="${EPOCHSECONDS:-0}"
       if [[ "$record" =~ $re ]]; then
         expires="${BASH_REMATCH[1]}"
         if [ "$expires" -gt "$now" ] && [ "$expires" -le "$((now + 300))" ]; then fresh=1; fi

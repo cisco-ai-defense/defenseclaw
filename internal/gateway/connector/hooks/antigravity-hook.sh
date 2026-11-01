@@ -5,6 +5,12 @@
 # PreToolUse blocks only through synchronous stdout {"decision":"deny"}; this
 # bridge does not rely on undocumented non-zero-exit enforcement.
 set -euo pipefail
+# The agent's environment cannot change how this script runs: a function
+# nesting limit, a read timeout, ignored commands and POSIX mode would end a
+# check early and let a blocked call run (review 2 of
+# sandbox-visibility:GAP-0028). Before the first function call.
+unset -v FUNCNEST TMOUT EXECIGNORE POSIXLY_CORRECT 2>/dev/null || true
+set +o posix
 
 HOOK_EVENT="${1:-}"
 {{if and (not .Managed) (not .Sandbox)}}# _DC_UNBOUND_TOOL_INPUT is this hook's own marker for a registration that
@@ -278,7 +284,9 @@ case "$HOOK_EVENT" in
 {{end}}    fi
     ;;
 esac
-HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
+{{if .Sandbox}}# The image's hook folder, baked: the workload's environment cannot move it.
+HOOK_DIR={{.SandboxHookDirSH}}
+{{else}}HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 HOOK_LINK_DEPTH=0
 while [ -L "$HOOK_SOURCE" ]; do
   HOOK_LINK_DEPTH=$((HOOK_LINK_DEPTH + 1))
@@ -302,7 +310,7 @@ HOOK_PARENT="${HOOK_SOURCE%/*}"
 [ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
 HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
 unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
-{{if .Managed}}
+{{end}}{{if .Managed}}
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 {{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
@@ -351,8 +359,16 @@ fi
 # DEFENSECLAW_STRICT_AVAILABILITY (matches claude-code-hook /
 # codex-hook).
 # command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
-command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
-{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
+{{if .SecureClient}}command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
+{{else}}# A helper that does not load (a path the agent's BASH_SOURCE moved, a
+# missing or broken file) is a local failure: block, whatever the fail
+# mode (review 2 of sandbox-visibility:GAP-0028).
+command . "${HOOK_DIR}/_hardening.sh" || {
+  _DC_BOOT_FAIL_MODE=closed
+  echo "defenseclaw: hook hardening helper unavailable; blocking (fail mode closed)" >&2
+  exit 2
+}
+{{end}}{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call. The registered event
 # is taken from argv again afterwards: an inherited HOOK_EVENT export would

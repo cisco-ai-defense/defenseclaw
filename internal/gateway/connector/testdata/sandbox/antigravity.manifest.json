@@ -45,44 +45,44 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 183015,
-      "sha256": "8fb3b529e023a90f55a5ec1fdacdea8c2f76a6ada6333df1aac27a9a016bbdfc"
+      "size": 184656,
+      "sha256": "16d919ab51139350e9321906e6fe6d2795514005ae41758019b6c3758243881b"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 14362,
-      "sha256": "f82e5932944c06d7e2ec8f8ecb9f5281854ad1ad82eb368fb49d01f595489bcc"
+      "size": 14972,
+      "sha256": "c0af8bee00bde883ba54c4076199bb3838cf72ca0a6ecf139b2301eb0ceaf0f2"
     },
     "/usr/local/lib/defenseclaw/hooks/antigravity-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 12412,
-      "sha256": "50f3fd45bef0b874534ef4d5372453c25aa95e6d20d753aea37b319e2438d65b"
+      "size": 12295,
+      "sha256": "52fb930d4ba9e502f1ea93ce0ed9ae7dedd715932d0e8be2b94a5794b9b24c85"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7119,
-      "sha256": "af03565aa63d92a6dee389abe34ae7958782f869f3b49350c1c254bf77a6b5d1"
+      "size": 7002,
+      "sha256": "5c0a156e989f91c6cb36bb9447ecc2a43a381b91dfc1bdca88c1b4557ce7d62a"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6310,
-      "sha256": "e2fe41467d38906766a9bb0d0aeb4831201613e1afa192789fe4dabc3b66eb3b"
+      "size": 6193,
+      "sha256": "aa8b836a5ddd7674df98986f8f6134a579bd10118ca7e0e8ed569498298b4036"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6897,
-      "sha256": "b62566a8d8bf1521e36f1f7b9063ef510e2ad811be137655dff138e242c94588"
+      "size": 6780,
+      "sha256": "d65e1d917429ee73a886c321e790efbc57e5d71c7a63f9ba1e025a5a5c329f76"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7243,
-      "sha256": "3a9329561f8655416ef7ac262cdc7e8ab61c696793f0ba8c613f2cc016fcd231"
+      "size": 7126,
+      "sha256": "80dc4fc501d7c1d5ec9e8a05f7676b830bf828f1153d8e22b185572d525d756d"
     }
   }
 }

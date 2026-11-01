@@ -321,6 +321,7 @@ func renderSandboxHookFiles(connectorName string, rt resolvedSandboxTarget) ([]S
 		SandboxMaxTime:           sandboxHookMaxTimeSeconds,
 		SandboxRetryMaxTime:      sandboxHookRetryMaxTimeSeconds,
 		SandboxSessionEndMaxTime: sandboxHookSessionEndMaxTimeSeconds,
+		SandboxHookDirSH:         shellSingleQuote(SandboxHookDir),
 	}
 	// One harness per image: the shared scripts bake the same connector.
 	scripts, err := renderHookScriptSet(data, data, extras)

@@ -133,6 +133,9 @@ func newSandboxHookHarnessFiles(t *testing.T, files []SandboxFile, systemPATH st
 		case codexSandboxNotifyScript:
 			data = bytes.Replace(data, []byte("PATH="+SandboxHookPATH+"\n"), []byte("PATH="+stubPath+"\n"), 1)
 		}
+		// The hooks bake the image's hook folder: point it at this copy.
+		data = bytes.ReplaceAll(data, []byte("HOOK_DIR="+shellSingleQuote(SandboxHookDir)+"\n"),
+			[]byte("HOOK_DIR="+shellSingleQuote(h.path(SandboxHookDir))+"\n"))
 		dest := filepath.Join(h.root, filepath.FromSlash(file.Path))
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			t.Fatal(err)
