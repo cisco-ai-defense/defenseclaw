@@ -91,6 +91,10 @@ func TestPowerShellStatementsOverBudget(t *testing.T) {
 		// Block comments are not statements (item 5c).
 		{"block comments ending each line", strings.ReplaceAll(statements(200, "Write-Output %d <# , #>"), "; ", "\n"), true},
 		{"block comments on 100 lines", strings.ReplaceAll(statements(100, "Write-Output %d <# , ; | #>"), "; ", "\n"), false},
+		{"stop parsing ends at pipe", "cmd.exe --% argument | " + statements(128, "Write-Output %d"), true},
+		{"quoted pipe stays in stop parsing span", "cmd.exe --% \"a | b\" | " + statements(128, "Write-Output %d"), true},
+		{"nested block opener does not defer close", "<# <# #> " + statements(129, "Write-Output %d") + " # #>", true},
+		{"hash after closing quote is a comment", strings.ReplaceAll(statements(129, "Write-Output 'x'# note %d"), "; ", "\n"), true},
 	} {
 		if got := PowerShellStatementsOverBudget(tc.command); got != tc.over {
 			t.Errorf("%s (%d bytes): over budget %t, want %t", tc.name, len(tc.command), got, tc.over)

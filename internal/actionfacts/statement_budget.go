@@ -3,10 +3,7 @@
 
 package actionfacts
 
-import (
-	"strings"
-	"unicode"
-)
+import "unicode"
 
 // ShellStatementsOverBudget reports whether a POSIX shell command has more
 // statements than one action evaluates (maxStatementsAlone, 128), counted
@@ -48,11 +45,11 @@ func ShellStatementTexts(command string) ([]string, bool) {
 // input bound (rel-1-0-6:GAP-0318).
 //
 // It reads the command with its own scanner, not the Windows lexer: the
-// lexer stops at the first subexpression, array, hashtable, braced
-// variable or here-string and leaves the rest unread, so a single
-// $(Get-Date) in front hid every later statement from the count
-// (rel-1-0-6:GAP-0331). Text in quotes, here-strings and comments is not
-// counted, nor are the entries of a hashtable (@{ a = 1; b = 2 }); an
+// lexer used to stop at the first subexpression, array, hashtable, braced
+// variable or here-string, so a single $(Get-Date) in front hid later
+// statements from the count (rel-1-0-6:GAP-0331). Text in quotes,
+// here-strings and comments is not counted, nor are the entries of a
+// hashtable (@{ a = 1; b = 2 }); an
 // opening bracket or brace starts a new statement count inside it, and a
 // closing one continues the statement around it, so a block never counts
 // more statements than it holds.
@@ -61,19 +58,18 @@ func PowerShellStatementsOverBudget(command string) bool {
 	return statements > maxStatementsAlone
 }
 
-// PowerShellReadingStopsEarly reports a command with a construct, outside
-// quotes, at which the Windows lexer stops reading and leaves the rest of
-// the command unread: a subexpression $( ), an array @( ), a hashtable
-// @{ }, a braced variable ${ }, a here-string, the stop-parsing token --%
-// or an & call. The split of such a reading holds only the statements before it
-// (rel-1-0-6:GAP-0331).
+// PowerShellReadingStopsEarly reports a command with a construct that can
+// leave a partial Windows lexer reading: a subexpression $( ), an array @( ),
+// a hashtable @{ }, a braced variable ${ }, a here-string, the stop-parsing
+// token --% or an & call. The separate budget scanner counts past these
+// constructs (rel-1-0-6:GAP-0331).
 func PowerShellReadingStopsEarly(command string) bool {
 	_, opaque := powerShellStatements(command, len(command)+1)
 	return opaque
 }
 
 // powerShellStatements counts the statements of command, stopping at limit,
-// and reports whether it met a construct that stops the Windows lexer.
+// and reports whether it met an opaque construct.
 func powerShellStatements(command string, limit int) (int, bool) {
 	const (
 		frameCode = iota
@@ -102,9 +98,6 @@ func powerShellStatements(command string, limit int) (int, bool) {
 	}
 	// lineStart reports that i begins a line (for a here-string end).
 	lineStart := func(i int) bool { return i == 0 || runes[i-1] == '\n' || runes[i-1] == '\r' }
-	tokenStart := func(i int) bool {
-		return i == 0 || unicode.IsSpace(runes[i-1]) || strings.ContainsRune(";|&(){}", runes[i-1])
-	}
 	for i := 0; i < len(runes) && statements < limit; i++ {
 		r := runes[i]
 		top := frames[len(frames)-1]
@@ -141,7 +134,7 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			next = runes[i+1]
 		}
 		switch {
-		case r == '#' && tokenStart(i):
+		case r == '#' && windowsPowerShellCommentStarts(runes, i):
 			// A line comment: the line goes on as the code before it ends.
 			// A comma inside the comment does not continue the line
 			// (review r3 finding 1: `Write-Output 1 # note,` lines hid
@@ -157,25 +150,21 @@ func powerShellStatements(command string, limit int) (int, bool) {
 				i++
 			}
 			commentEnd = i
-		case r == '<' && next == '#':
-			j := i + 2
-			for j+1 < len(runes) && (runes[j] != '#' || runes[j+1] != '>') {
-				j++
-			}
-			if j+1 >= len(runes) {
+		case r == '<' && next == '#' && windowsPowerShellCommentStarts(runes, i):
+			end, ok := windowsPowerShellBlockCommentEnd(runes, i)
+			if !ok {
 				return statements, opaque
 			}
 			// The comment's text never sets lastSignificant: the code
 			// before the comment decides what an & or a line end after it
 			// means (review r4 finding 1: `cmd <#c#> & cmd`).
-			i = j + 1
-			commentEnd = i
-		case r == '-' && next == '-' && i+2 < len(runes) && runes[i+2] == '%' && tokenStart(i):
-			// The stop-parsing token: the rest of the line is one argument.
+			i = end
+			commentEnd = end
+		case r == '-' && next == '-' && i+2 < len(runes) && runes[i+2] == '%' &&
+			(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) && windowsPowerShellTokenStart(runes, i):
+			// The stop-parsing arguments end at an unquoted pipe or line end.
 			opaque, inStatement = true, true
-			for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
-				i++
-			}
+			i = windowsPowerShellStopParsingEnd(runes, i+3) - 1
 		case r == '`':
 			// An escaped character, or a line continuation.
 			inStatement = true

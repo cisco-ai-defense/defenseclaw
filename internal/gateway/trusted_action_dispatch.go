@@ -492,6 +492,9 @@ func dispatchTrustedActionWith(
 					findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
 					break
 				}
+				if simple.OpaqueValueAssignment || simple.LiteralOutputOnly {
+					continue
+				}
 				child := request
 				child.Input.Command = simple.Text
 				child.Input.CWD = simple.CWD
@@ -8583,9 +8586,8 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 // PowerShell splits it (actionfacts.PowerShellStatementsOverBudget): Codex
 // on Windows ran a 3000-statement call past the 64 KiB input bound through
 // every reader and allowed it (rel-1-0-6:GAP-0318). A PowerShell reading
-// that is not complete is counted the same way: the Windows lexer stops at
-// the first subexpression, array, hashtable, braced variable or
-// here-string, so its own split saw only the statements before it
+// that is not complete is counted the same way when it has an opaque
+// subexpression, array, hashtable, braced variable or here-string
 // (rel-1-0-6:GAP-0331). A complete PowerShell or CMD reading is held to the
 // budget by its own split (SimpleCommands), and so is one the lexer read to
 // its end: an ordinary 130-statement script of a partial reading stays
