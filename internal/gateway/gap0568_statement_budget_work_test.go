@@ -99,8 +99,11 @@ func TestGAP0568StatementBudgetWork(t *testing.T) {
 		if buildVerdict(findings, "tool_call").Action != guardrailActionBlock || !slices.Equal(ids, tc.want) {
 			t.Errorf("%.40q... (%d statements): findings %v, want %v", tc.command, tc.statements, ids, tc.want)
 		}
-		if bound := 2*tc.statements + 64; memo.Work() > bound {
-			t.Errorf("%.40q... (%d statements): %d units of work over the budget, want at most %d (the whole-call state check only)", tc.command, tc.statements, memo.Work(), bound)
+		// The path walk and, on a Windows gateway, the Windows candidate
+		// checks of every word are each at most two units per statement.
+		// A POSIX host makes no candidate checks.
+		if walked, candidates := memo.WorkParts(); walked > 2*tc.statements+64 || candidates > 2*tc.statements+64 {
+			t.Errorf("%.40q... (%d statements): %d walked and %d candidate units of work over the budget, want at most %d each (the whole-call state check only)", tc.command, tc.statements, walked, candidates, 2*tc.statements+64)
 		}
 	}
 }
@@ -232,9 +235,10 @@ func TestGAP0318StatementBudgetOnEveryDialectRoute(t *testing.T) {
 			ids := findingIDs(findings)
 			slices.Sort(ids)
 			ids = slices.Compact(ids)
+			walked, candidates := memo.WorkParts()
 			switch {
-			case tc.over && (!slices.Equal(ids, tc.want) || memo.Work() > 2*3001+64):
-				t.Errorf("%s: 3000 statements: findings %v after %d units of work, want %v with linear work", route.name, ids, memo.Work(), tc.want)
+			case tc.over && (!slices.Equal(ids, tc.want) || walked > 2*3001+64 || candidates > 2*3001+64):
+				t.Errorf("%s: 3000 statements: findings %v after %d walked and %d candidate units of work, want %v with linear work", route.name, ids, walked, candidates, tc.want)
 			case !tc.over && limited:
 				t.Errorf("%s: one long statement took the statement budget: %v", route.name, findingIDs(findings))
 			}
