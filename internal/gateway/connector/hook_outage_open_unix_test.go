@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -266,32 +266,56 @@ func outageOpenWarningForTest(connector string) string {
 	return "fail mode open for an outage"
 }
 
-// freeLoopbackAddrForOutageTest is a loopback address no process listens on.
-// It comes from below the ephemeral range (Linux 32768-60999, macOS
-// 49152-65535), where no parallel subtest's httptest server (port 0) can take
-// it after this probe, and no two callers get the same port.
+// freeLoopbackAddrForOutageTest is a loopback address that refuses every
+// connection for the whole test: a gateway that is down. The test holds the
+// port with a TCP socket that is bound and never listens (closed in
+// t.Cleanup), so no other socket can bind it while the hooks run, in this
+// process or another one on the box. A port that was only probed and closed
+// could be bound again by a parallel test fake gateway, and the hook then
+// got that gateway answer instead of an outage (rel-1-0-6:GAP-0454,
+// GAP-0455). The port comes from below the ephemeral range (Linux
+// 32768-60999, macOS 49152-65535), so a port-0 listener never competes for
+// it, and no two callers in the process get the same port.
 func freeLoopbackAddrForOutageTest(t *testing.T) string {
 	t.Helper()
 	outagePortsMu.Lock()
 	defer outagePortsMu.Unlock()
-	for port := 21000 + rand.IntN(8000); ; port++ {
-		if port >= 29000 {
-			port = 21000
-		}
+	start := rand.IntN(8000)
+	for i := 0; i < 8000; i++ {
+		port := 21000 + (start+i)%8000
 		if outagePortsUsed[port] {
 			continue
 		}
-		addr := fmt.Sprintf("127.0.0.1:%d", port)
-		listener, err := net.Listen("tcp", addr)
+		fd, err := refusingLoopbackSocket(port)
 		if err != nil {
 			continue
 		}
-		if err := listener.Close(); err != nil {
-			t.Fatal(err)
-		}
 		outagePortsUsed[port] = true
-		return addr
+		t.Cleanup(func() { _ = syscall.Close(fd) })
+		return fmt.Sprintf("127.0.0.1:%d", port)
 	}
+	t.Fatal("no loopback port below the ephemeral range could be held")
+	return ""
+}
+
+// refusingLoopbackSocket binds a TCP socket to 127.0.0.1:port and never
+// listens on it. Close-on-exec is set under syscall.ForkLock, as the net
+// package does, so the hook processes the test starts do not inherit it.
+func refusingLoopbackSocket(port int) (int, error) {
+	syscall.ForkLock.RLock()
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	if err == nil {
+		syscall.CloseOnExec(fd)
+	}
+	syscall.ForkLock.RUnlock()
+	if err != nil {
+		return -1, err
+	}
+	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		_ = syscall.Close(fd)
+		return -1, err
+	}
+	return fd, nil
 }
 
 var (
