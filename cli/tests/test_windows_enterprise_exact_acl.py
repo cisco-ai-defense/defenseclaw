@@ -477,7 +477,12 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
         timeout=90,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
-    payload = json.loads(completed.stdout)
+    # The module's resilience events (defenseclaw_accept and friends) go to
+    # the warning stream, which Windows PowerShell writes to stdout under
+    # -File; the smoke's result is the last line, one compressed JSON object.
+    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    assert lines, completed.stderr or completed.stdout
+    payload = json.loads(lines[-1])
     assert payload == {
         "ok": True,
         "schema_version": 1,
