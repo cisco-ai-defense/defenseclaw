@@ -1498,6 +1498,131 @@ namespace $nativeNamespace
                     "schedule delete at restart failed: " + path);
         }
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateHardLinkW")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateHardLinkNative(
+            string fileName,
+            string existingFileName,
+            IntPtr securityAttributes);
+
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetFileInformationByHandle")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileInformationByHandleNative(
+            IntPtr file,
+            int fileInformationClass,
+            byte[] fileInformation,
+            uint bufferSize);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "DeleteFileW")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DeleteFileNative(string fileName);
+
+        // GAP-0240: publishes replacement at destination so that destination
+        // can be started at every moment. ReplaceFile moves the old file
+        // aside and holds the new one open for writing while it merges
+        // metadata; an agent starting the hook then got a sharing violation,
+        // "Access is denied" or "file not found", and ran the tool call with
+        // no DefenseClaw decision. Here the replacement first gets the
+        // destination's access list, a second name (backup) is linked to the
+        // old file, and a POSIX-semantics rename replaces destination in one
+        // step. Windows refuses to remove the last name of a running image,
+        // but the old file keeps the backup name, so the rename does not
+        // wait for running hook processes. Returns "" on success, otherwise
+        // "<stage>:<win32 error>" with stage dacl, link or rename; nothing
+        // changed then (a backup link made for the attempt is removed, or
+        // ";backup-kept" is added when it could not be).
+        public static string SwapLaunchableFile(string replacement, string destination, string backup)
+        {
+            const uint READ_CONTROL = 0x00020000;
+            const uint WRITE_DAC = 0x00040000;
+            const uint DELETE = 0x00010000;
+            const uint SYNCHRONIZE = 0x00100000;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_WRITE = 0x00000002;
+            const uint FILE_SHARE_DELETE = 0x00000004;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const int SE_FILE_OBJECT = 1;
+            const uint DACL_SECURITY_INFORMATION = 0x00000004;
+            const uint PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000;
+            const uint UNPROTECTED_DACL_SECURITY_INFORMATION = 0x20000000;
+            const ushort SE_DACL_PROTECTED = 0x1000;
+            const int FileRenameInfoEx = 22;
+            const uint FILE_RENAME_REPLACE_IF_EXISTS = 0x00000001;
+            const uint FILE_RENAME_POSIX_SEMANTICS = 0x00000002;
+            IntPtr invalid = new IntPtr(-1);
+
+            IntPtr current = CreateFileW(destination, READ_CONTROL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
+            if (current == invalid)
+                return "dacl:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
+            IntPtr owner, group, dacl, sacl;
+            IntPtr descriptor = IntPtr.Zero;
+            uint status;
+            try
+            {
+                status = GetSecurityInfo(current, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                    out owner, out group, out dacl, out sacl, out descriptor);
+            }
+            finally
+            {
+                CloseHandle(current);
+            }
+            if (status != 0)
+                return "dacl:" + status.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            try
+            {
+                ushort control;
+                uint revision;
+                if (dacl == IntPtr.Zero)
+                    return "dacl:null";
+                if (!GetSecurityDescriptorControl(descriptor, out control, out revision))
+                    return "dacl:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
+                IntPtr file = CreateFileW(replacement, READ_CONTROL | WRITE_DAC | DELETE | SYNCHRONIZE,
+                    FILE_SHARE_READ | FILE_SHARE_DELETE,
+                    IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
+                if (file == invalid)
+                    return "rename:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
+                try
+                {
+                    uint information = DACL_SECURITY_INFORMATION |
+                        ((control & SE_DACL_PROTECTED) != 0
+                            ? PROTECTED_DACL_SECURITY_INFORMATION
+                            : UNPROTECTED_DACL_SECURITY_INFORMATION);
+                    status = SetSecurityInfo(file, SE_FILE_OBJECT, information,
+                        IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
+                    if (status != 0)
+                        return "dacl:" + status.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    if (!CreateHardLinkNative(backup, destination, IntPtr.Zero))
+                        return "link:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    byte[] name = Encoding.Unicode.GetBytes(destination);
+                    int nameOffset = IntPtr.Size == 8 ? 20 : 12;
+                    byte[] rename = new byte[nameOffset + name.Length + 2];
+                    BitConverter.GetBytes(FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS).CopyTo(rename, 0);
+                    BitConverter.GetBytes((uint)name.Length).CopyTo(rename, nameOffset - 4);
+                    name.CopyTo(rename, nameOffset);
+                    if (!SetFileInformationByHandleNative(file, FileRenameInfoEx, rename, (uint)rename.Length))
+                    {
+                        string failure = "rename:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
+                        if (!DeleteFileNative(backup))
+                            failure += ";backup-kept";
+                        return failure;
+                    }
+                    return "";
+                }
+                finally
+                {
+                    CloseHandle(file);
+                }
+            }
+            finally
+            {
+                if (descriptor != IntPtr.Zero)
+                    LocalFree(descriptor);
+            }
+        }
+
         public static uint GetRegularFileLinkCountNoFollow(string path)
         {
             const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
@@ -6643,8 +6768,18 @@ function Install-DefenseClawFileAtomic {
                 throw "atomic replacement backup path unexpectedly exists: $backup"
             }
             try {
+                # GAP-0240: standalone swaps the file in one step, so an agent
+                # starting the hook during Setup finds the old or the new
+                # program, never none and never one held for writing.
+                $swapped = $false
+                if (Test-DefenseClawStandaloneProfile) {
+                    $swapped = Invoke-DefenseClawLaunchableFileSwap `
+                        -Temporary $temporary `
+                        -Destination $Destination `
+                        -Backup $backup
+                }
                 $replacementClock = [Diagnostics.Stopwatch]::StartNew()
-                while ($true) {
+                while (-not $swapped) {
                     try {
                         [IO.File]::Replace($temporary, $Destination, $backup, $true)
                         break
@@ -6734,6 +6869,54 @@ function Install-DefenseClawFileAtomic {
                 Microsoft.PowerShell.Utility\Write-Verbose "replacement backup stays: $backup"
             }
         }
+    }
+}
+
+function Invoke-DefenseClawLaunchableFileSwap {
+    <#
+        GAP-0240: puts Temporary at Destination with the native
+        SwapLaunchableFile: the access list of Destination, a Backup name
+        linked to the old file, then one POSIX-semantics rename. An agent
+        that starts Destination meanwhile starts the old program or the new
+        one. File.Replace instead held the new file open for writing and had
+        a moment with no file at the name, and a hook call that could not
+        start ran its tool call with no DefenseClaw decision (4 of 12
+        restart-required ensures on 1.0.7 b3547e66a9). Returns $true once
+        the new file is in place. Returns $false, with nothing changed, when
+        the volume or a filter driver refuses hard links or the POSIX rename;
+        the caller then uses File.Replace as before. A sharing or access
+        refusal (an antivirus scan holding the file without delete sharing)
+        is retried for 30 s and then thrown as an IOException.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Temporary,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$Backup
+    )
+    $native = Initialize-DefenseClawNativeSecurity
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $result = [string]$native::SwapLaunchableFile($Temporary, $Destination, $Backup)
+        if ($result -ceq '') {
+            return $true
+        }
+        if ($result.EndsWith(';backup-kept')) {
+            throw [IO.IOException]::new("the replacement of $Destination failed ($result) and its backup name $Backup could not be removed")
+        }
+        $stage, $code = $result.Split(':', 2)
+        $refused = ($result -ceq 'dacl:null') -or
+            ($stage -ceq 'link' -and $code -in @('1', '17', '50', '1142')) -or
+            ($stage -ceq 'rename' -and $code -in @('1', '50', '87'))
+        if ($refused) {
+            Microsoft.PowerShell.Utility\Write-Verbose "launchable swap refused for ${Destination} (${result}); using File.Replace"
+            return $false
+        }
+        $transient = $code -in @('5', '32', '33')
+        if (-not $transient -or $clock.Elapsed.TotalSeconds -ge 30) {
+            $message = ([ComponentModel.Win32Exception]::new([int]$code)).Message
+            throw [IO.IOException]::new("$message ($result)")
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 10
     }
 }
 
