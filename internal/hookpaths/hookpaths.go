@@ -1216,7 +1216,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			if direct, directOK := resolveWritePath(resolutionPath, 0); directOK {
 				resolved, ok = protected.target(direct)
 			}
-		} else if aliasKnown && links.opaque && (!links.opaqueTarget(resolutionPath) || !links.opaqueTargetExceptCopy(resolutionPath, resolutionPath) && slices.Contains(links.copyDestinations, resolutionPath)) {
+		} else if aliasKnown && links.opaque && (!links.opaqueTarget(resolutionPath) || !links.opaqueTargetExceptCopy(resolutionPath, resolutionPath) && links.placedCopyDestination(resolutionPath)) {
 			resolved, ok = links.resolve(resolutionPath, protected)
 		}
 		if aliasKnown && links.opaque {
@@ -2007,8 +2007,11 @@ type shellLinks struct {
 	// cdFrom and cdDirs: with cdScopes, the starting directory and every
 	// directory a top-level statement may stand in. A write is read against
 	// the scopes from each of them (rel-1-0-6:GAP-0260).
-	cdFrom           string
-	cdDirs           []string
+	cdFrom string
+	cdDirs []string
+	// scopedMoves: destinations of plain mv calls that land directly in an
+	// opaque scope and can only rename an entry there (scopedMoveSafe).
+	scopedMoves      map[string]bool
 	opaqueScopes     []opaqueScope
 	copyDestinations []string
 	// copyEnds: the end offset of the copy call that wrote a destination,
@@ -2091,6 +2094,99 @@ func bodyOnlyChangesDirectory(command string, call *syntax.CallExpr) bool {
 		return false
 	}
 	return !tactics.RunsProgram(command[:from]+" "+command[to:], cdPrograms...)
+}
+
+func (l shellLinks) copyDestinationCount(path string) int {
+	count := 0
+	for _, destination := range l.copyDestinations {
+		if destination == path {
+			count++
+		}
+	}
+	return count
+}
+
+// placedCopyDestination reports path is the destination of a copy, or,
+// after placed directory changes, the start-directory spelling of one the
+// statement walk placed in another directory (rel-1-0-6:GAP-0292).
+func (l shellLinks) placedCopyDestination(path string) bool {
+	if slices.Contains(l.copyDestinations, path) {
+		return true
+	}
+	if !l.cdScopes {
+		return false
+	}
+	rel, err := filepath.Rel(l.cdFrom, path)
+	if err != nil {
+		return false
+	}
+	for _, dir := range l.cdDirs {
+		if l.copyDestinationCount(filepath.Join(dir, rel)) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// readScopedMoves fills scopedMoves: a plain mv (one source, no backup, no
+// target directory option) whose destination is a direct entry of an
+// opaque scope, whose source is not under a scope below its root, and
+// whose source name is no protected file name, a dot name or a name with
+// an extension. rename(2) replaces a link at the destination or moves the
+// entry into the directory it names under the source name, so such a move
+// writes no protected file: tar -C /tmp -xzf x.tgz && mv /tmp/d /tmp/d2
+// (rel-1-0-6:GAP-0292). Any other move keeps the opaque reading.
+func (l *shellLinks) readScopedMoves(ops []renameOp) {
+	if l.globalOpaque || len(l.opaqueScopes) == 0 {
+		return
+	}
+	strictlyInScope := func(path string) bool {
+		for _, scope := range l.opaqueScopes {
+			if rest, under := cutPathPrefix(path, scope.path); under && rest != "" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, op := range ops {
+		if len(op.sources) != 1 || op.backup || op.targetDir != "" || op.dest == "" {
+			continue
+		}
+		dest := absolutePath(op.dest, op.wd)
+		source := absolutePath(op.sources[0], op.wd)
+		name := filepath.Base(source)
+		if !scopedMoveName(name) || strictlyInScope(filepath.Dir(dest)) || strictlyInScope(filepath.Dir(source)) {
+			continue
+		}
+		covered := false
+		for _, scope := range l.opaqueScopes {
+			if pathAtOrUnder(dest, scope.path) {
+				covered = true
+			}
+			if pathAtOrUnder(scope.path, dest) {
+				// The destination is a scope root or above one: the source
+				// lands under it, where the scope may hold a link.
+				covered = false
+				break
+			}
+		}
+		if covered {
+			if l.scopedMoves == nil {
+				l.scopedMoves = make(map[string]bool)
+			}
+			l.scopedMoves[dest] = true
+		}
+	}
+}
+
+// scopedMoveName reports a source name that a move into a directory an
+// archive linked cannot turn into a protected file: no dot name, no
+// extension, and no authorized-keys or SSH control file name.
+func scopedMoveName(name string) bool {
+	if name == "" || strings.Contains(name, ".") || slices.Contains(AuthorizedKeysFiles[:], name) || slices.Contains(SSHControlFiles[:], name) {
+		return false
+	}
+	return true
 }
 
 // placedShellBody reports a literal shell body with no directory change of
@@ -2192,6 +2288,7 @@ func (l shellLinks) opaqueScopeFact(path string) string {
 // see every component of path. facts is the hook client's evidence map; its
 // opaque-scope fact replaces only an incomplete walk.
 func (l shellLinks) opaqueTargetWithFacts(path, ownCopy string, facts map[string]string) bool {
+	ownArg := ownCopy
 	// A second copy to the same name may follow a link created by the first.
 	// Only one copy statement can claim the own-destination exemption.
 	if ownCopy != "" {
@@ -2209,6 +2306,9 @@ func (l shellLinks) opaqueTargetWithFacts(path, ownCopy string, facts map[string
 		return false
 	}
 	if l.linkNameOnly[filepath.Clean(path)] {
+		return false
+	}
+	if !l.globalOpaque && l.scopedMoves[filepath.Clean(path)] {
 		return false
 	}
 	if l.globalOpaque && ownCopy != "" && ownCopy == path && l.globalCopyScopesAfter(ownCopy) {
@@ -2243,13 +2343,20 @@ func (l shellLinks) opaqueTargetWithFacts(path, ownCopy string, facts map[string
 			// name itself. That walk read every placement of the operand,
 			// so only its "0" answers for another directory.
 			fact := facts[OpaqueScopeFactPrefix+path]
-			if fact != "0" && (i > 0 || fact != "c" || ownCopy == "" || ownCopy != path) {
+			ownPlaced := ownArg == path && l.placedCopyDestination(path)
+			if fact != "0" && (fact != "c" || !ownPlaced && (i > 0 || ownCopy == "" || ownCopy != path)) {
 				return true
 			}
 			forms = []string{filepath.Clean(name)}
 		}
 		for _, scope := range l.opaqueScopes {
 			if scope.copy && scope.path == ownCopy {
+				continue
+			}
+			if i > 0 && scope.copy && scope.path == name && ownArg == path && l.copyDestinationCount(name) == 1 {
+				// The start-directory spelling of a copy's own destination
+				// that a directory change placed elsewhere (cd p && cp -a d
+				// d-bak) is that copy's own write (rel-1-0-6:GAP-0292).
 				continue
 			}
 			for _, form := range forms {
@@ -2881,6 +2988,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	if len(links.opaqueScopes) > 0 && hiddenDirectoryChange(file, home, 0) {
 		links.globalOpaque, links.globalOther = true, true
 	}
+	links.readScopedMoves(renameOps)
 	links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
 	links.renameOps, links.wrappedCds, links.findMoves = renameOps, wrappedCds, findMoves
 	return links, false
@@ -3432,7 +3540,7 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 	if !linear {
 		return result
 	}
-	seenLink, index := false, 0
+	seenLink, moved, index := false, false, 0
 	for _, stmt := range statements {
 		for _, redirect := range stmt.Redirs {
 			switch redirect.Op {
@@ -3457,6 +3565,12 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 		}
 		site := commandLinksWithFacts(command[start:end], cwd, home, facts, false)
 		seenLink = seenLink || !site.known || len(site.aliases) > 0
+		// Each statement is read in the starting directory; after a
+		// directory change a copy may read another source (cd ~ && cp -a
+		// linked linked-bak copies a link the starting directory does not
+		// hold), so a copy there proves no later redirect safe.
+		seenLink = seenLink || moved && len(site.copyDestinations) > 0
+		moved = moved || tactics.RunsProgram(command[start:end], cdPrograms...)
 	}
 	return result
 }
