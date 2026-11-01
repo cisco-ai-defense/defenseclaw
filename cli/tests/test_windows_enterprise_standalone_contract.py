@@ -449,6 +449,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-guardian-first-reconcile-wait-smoke.ps1",
     "enterprise-standalone-guardian-readiness-older-gateway-smoke.ps1",
     "enterprise-standalone-guardian-state-identity-smoke.ps1",
+    "enterprise-standalone-hook-swap-launch-smoke.ps1",
     "enterprise-standalone-install-tree-smoke.ps1",
     "enterprise-standalone-machine-leftovers-purge-smoke.ps1",
     "enterprise-standalone-manifest-adoption-smoke.ps1",
@@ -1395,6 +1396,8 @@ function Assert-DefenseClawNoReparsePath {}
 function New-DefenseClawDirectory { param($Path) [void][IO.Directory]::CreateDirectory($Path) }
 function Remove-DefenseClawStaleReplacementBackups {}
 function Remove-DefenseClawReplacementBackup { param($Path) [IO.File]::Delete($Path); return $true }
+# A volume that refuses the one-step swap (GAP-0240) keeps File.Replace.
+function Invoke-DefenseClawLaunchableFileSwap { return $false }
 function ConvertTo-DefenseClawBoundedDiagnostic { param($Value, $MaxLength) return $Value }
 $script:attempts = 0
 function Invoke-TestMappedImageReplace {
@@ -1414,6 +1417,106 @@ if ([IO.File]::ReadAllText($destination) -cne 'new verified executable') { throw
 if (@(Get-ChildItem $root -Filter 'hook.exe.backup.*').Count) { throw 'replacement left a backup' }
 """, replacements=[("[IO.File]::Replace($temporary, $Destination, $backup, $true)", "Invoke-TestMappedImageReplace")])
 
+
+
+def test_standalone_replacement_swaps_the_launcher_in_one_step(tmp_path) -> None:
+    # GAP-0240: File.Replace held the new hook open for writing and had a
+    # moment with no file at the name; agents starting the hook then got a
+    # sharing violation and ran the tool call with no decision. Standalone
+    # swaps through Invoke-DefenseClawLaunchableFileSwap and never reaches
+    # File.Replace when the swap succeeds (behaviour on a real image in
+    # enterprise-standalone-hook-swap-launch-smoke.ps1).
+    _run_lifecycle_functions(tmp_path, ["Install-DefenseClawFileAtomic"], r"""
+function Test-DefenseClawStandaloneProfile { return $true }
+function Assert-DefenseClawNoReparsePath {}
+function New-DefenseClawDirectory { param($Path) [void][IO.Directory]::CreateDirectory($Path) }
+function Remove-DefenseClawStaleReplacementBackups {}
+function Remove-DefenseClawReplacementBackup { param($Path) [IO.File]::Delete($Path); return $true }
+function ConvertTo-DefenseClawBoundedDiagnostic { param($Value, $MaxLength) return $Value }
+$script:swaps = 0
+function Invoke-DefenseClawLaunchableFileSwap {
+    param($Temporary, $Destination, $Backup)
+    $script:swaps++
+    if (-not $Backup.StartsWith("$Destination.backup.")) { throw "unexpected backup name $Backup" }
+    [IO.File]::Copy($Destination, $Backup)
+    [IO.File]::Copy($Temporary, $Destination, $true)
+    [IO.File]::Delete($Temporary)
+    return $true
+}
+function Invoke-TestFileReplace { throw 'File.Replace ran although the one-step swap succeeded' }
+$root = Split-Path -Parent $PSCommandPath
+$source = Join-Path $root 'new.exe'
+$destination = Join-Path $root 'hook.exe'
+[IO.File]::WriteAllText($source, 'new verified executable')
+[IO.File]::WriteAllText($destination, 'old running executable')
+Install-DefenseClawFileAtomic -Source $source -Destination $destination
+if ($script:swaps -ne 1) { throw "the one-step swap ran $($script:swaps) times" }
+if ([IO.File]::ReadAllText($destination) -cne 'new verified executable') { throw 'replacement failed' }
+if (@(Get-ChildItem $root -Filter 'hook.exe.backup.*').Count) { throw 'replacement left a backup' }
+if (@(Get-ChildItem $root -Filter 'hook.exe.new.*').Count) { throw 'replacement left a staging copy' }
+""", replacements=[("[IO.File]::Replace($temporary, $Destination, $backup, $true)", "Invoke-TestFileReplace")])
+
+
+def test_launchable_swap_retries_busy_files_and_refuses_unsupported_volumes(tmp_path) -> None:
+    # GAP-0240: SwapLaunchableFile answers "" or "<stage>:<win32 error>".
+    # A sharing or access refusal (an antivirus scan) is retried; a volume
+    # without hard links or POSIX renames falls back to File.Replace; any
+    # other error, or a backup link it could not remove, is thrown.
+    _run_lifecycle_functions(tmp_path, ["Invoke-DefenseClawLaunchableFileSwap"], r"""
+class FakeSwapNative {
+    static [System.Collections.Generic.Queue[string]] $Answers = [System.Collections.Generic.Queue[string]]::new()
+    static [int] $Calls = 0
+    static [string] SwapLaunchableFile([string]$Replacement, [string]$Destination, [string]$Backup) {
+        [FakeSwapNative]::Calls++
+        return [FakeSwapNative]::Answers.Dequeue()
+    }
+}
+function Initialize-DefenseClawNativeSecurity { return [FakeSwapNative] }
+function Invoke-Case([string[]]$Answers) {
+    [FakeSwapNative]::Answers.Clear()
+    foreach ($answer in $Answers) { [FakeSwapNative]::Answers.Enqueue($answer) }
+    [FakeSwapNative]::Calls = 0
+    return Invoke-DefenseClawLaunchableFileSwap -Temporary 'C:\b\hook.exe.new.1' -Destination 'C:\b\hook.exe' -Backup 'C:\b\hook.exe.backup.1'
+}
+if (-not (Invoke-Case @('rename:32', 'link:5', 'rename:33', ''))) { throw 'busy files were not retried to success' }
+if ([FakeSwapNative]::Calls -ne 4) { throw "busy retry made $([FakeSwapNative]::Calls) calls" }
+foreach ($refusal in @('link:1', 'link:17', 'link:50', 'link:1142', 'rename:1', 'rename:50', 'rename:87', 'dacl:null')) {
+    if (Invoke-Case @($refusal)) { throw "$refusal did not fall back to File.Replace" }
+}
+foreach ($fatal in @('dacl:1307', 'rename:2', 'link:183', 'rename:32;backup-kept')) {
+    $thrown = $null
+    try { [void](Invoke-Case @($fatal)) } catch { $thrown = $_.Exception }
+    if ($null -eq $thrown -or $thrown -isnot [IO.IOException]) { throw "$fatal was not thrown as an IOException" }
+    if ($thrown.Message -notlike "*$($fatal.Split(';')[0])*") { throw "$fatal message lost the stage and code: $($thrown.Message)" }
+}
+""")
+
+
+def test_launchable_swap_links_the_old_file_before_one_posix_rename() -> None:
+    # GAP-0240: Windows refuses to remove the last name of a running image,
+    # so the swap gives the old file a second name first; only standalone
+    # uses it, Secure Client keeps File.Replace.
+    module = _text(MODULE)
+    native = _function_body(module, "Initialize-DefenseClawNativeSecurity")
+    swap = native[native.index("public static string SwapLaunchableFile"):]
+    swap = swap[: swap.index("\n        }\n", swap.index("return \"\";"))]
+    for needle in (
+        "GetSecurityInfo(current, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION",
+        "SetSecurityInfo(file, SE_FILE_OBJECT, information",
+        "CreateHardLinkNative(backup, destination, IntPtr.Zero)",
+        "FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS",
+        "const int FileRenameInfoEx = 22;",
+        "FILE_SHARE_READ | FILE_SHARE_DELETE,",
+    ):
+        assert needle in swap, needle
+    assert swap.index("SetSecurityInfo(file") < swap.index("CreateHardLinkNative(") < swap.index(
+        "SetFileInformationByHandleNative(file, FileRenameInfoEx"
+    )
+    atomic = _function_body(module, "Install-DefenseClawFileAtomic")
+    gate = atomic.index("if (Test-DefenseClawStandaloneProfile) {\n                    $swapped = Invoke-DefenseClawLaunchableFileSwap")
+    assert gate < atomic.index("while (-not $swapped) {") < atomic.index(
+        "[IO.File]::Replace($temporary, $Destination, $backup, $true)"
+    )
 
 
 def test_service_start_mode_refusal_names_the_modes(tmp_path) -> None:
