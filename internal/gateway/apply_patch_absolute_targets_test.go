@@ -177,3 +177,39 @@ func TestApplyPatchProjectTargetsStayAllowed(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyPatchRelativeSystemTargetsAreJudged: a relative patch target
+// that resolves to /etc/shadow or /etc/passwd from the working directory is
+// judged as the absolute path is: the strict rules read the resolved path,
+// not only the spelling (rel-1-0-6:GAP-0398). The default pack keeps its
+// regex block of the shadow file and has no passwd mutation rule.
+func TestApplyPatchRelativeSystemTargetsAreJudged(t *testing.T) {
+	for _, row := range []struct {
+		target, rule       string
+		blocksInTheDefault bool
+	}{
+		{"/etc/shadow", "PATH-ETC-SHADOW", true},
+		{"/etc/passwd", "PATH-ETC-PASSWD", false},
+	} {
+		for _, profile := range []string{"default", "strict"} {
+			for _, managed := range []bool{false, true} {
+				for _, connectorName := range []string{"codex", "copilot"} {
+					name := profile + "/" + map[bool]string{false: "per-user", true: "managed"}[managed] + "/" + connectorName + "/" + row.target
+					t.Run(name, func(t *testing.T) {
+						f := newAbsolutePatchFixture(t)
+						relative, err := filepath.Rel(f.project, row.target)
+						if err != nil {
+							t.Fatal(err)
+						}
+						got, out := postApplyPatch(t, f, connectorName, profile, managed, updatePatch(relative))
+						if profile == "strict" || row.blocksInTheDefault {
+							if got != "block" || !strings.Contains(out, row.rule) {
+								t.Fatalf("decision %s, want a block by %s: %.600s", got, row.rule, out)
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+}

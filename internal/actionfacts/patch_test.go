@@ -117,7 +117,6 @@ func TestAnalyzeApplyPatchRejectsUncertainEnvelopes(t *testing.T) {
 		{name: "duplicate aliases", fields: map[string]any{"command": valid, "patch": valid}, status: StatusAmbiguous},
 		{name: "explicit path conflict", fields: map[string]any{"patch": valid, "path": "other.go"}, status: StatusAmbiguous},
 		{name: "home path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: ~/.zshrc\n*** End Patch"}, status: StatusInvalid},
-		{name: "root-relative backslash path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: \\Windows\\win.ini\n*** End Patch"}, status: StatusInvalid},
 		{name: "drive-relative path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: C:win.ini\n*** End Patch"}, status: StatusInvalid},
 		{name: "UNC absolute path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: \\\\server\\share\\file.txt\n*** End Patch"}, status: StatusInvalid},
 		{name: "nul path", fields: map[string]any{"patch": "*** Begin Patch\n*** Add File: a\x00.go\n+x\n*** End Patch"}, status: StatusInvalid},
@@ -188,6 +187,27 @@ func TestAnalyzeApplyPatchProjectsAbsoluteTargets(t *testing.T) {
 				value, resolved string
 				access          PathAccess
 			}{{`C:\Windows\win.ini`, "C:/Windows/win.ini", PathAccessDelete}}},
+		// A root-relative target is rooted on the working directory drive,
+		// with either separator (rel-1-0-6:GAP-0398).
+		{name: "Windows root-relative backslash", cwd: `C:\workspace`, dialect: DialectPowerShell,
+			patch: "*** Begin Patch\n*** Delete File: \\Users\\alice\\.ssh\\authorized_keys\n*** End Patch",
+			want: []struct {
+				value, resolved string
+				access          PathAccess
+			}{{`\Users\alice\.ssh\authorized_keys`, "C:/Users/alice/.ssh/authorized_keys", PathAccessDelete}}},
+		{name: "Windows root-relative slash", cwd: `C:\workspace`, dialect: DialectPowerShell,
+			patch: "*** Begin Patch\n*** Delete File: /Users/alice/.ssh/authorized_keys\n*** End Patch",
+			want: []struct {
+				value, resolved string
+				access          PathAccess
+			}{{"/Users/alice/.ssh/authorized_keys", "C:/Users/alice/.ssh/authorized_keys", PathAccessDelete}}},
+		// On POSIX a backslash is part of the file name.
+		{name: "POSIX backslash name", cwd: "/repo",
+			patch: "*** Begin Patch\n*** Delete File: \\etc\\sudoers\n*** End Patch",
+			want: []struct {
+				value, resolved string
+				access          PathAccess
+			}{{`\etc\sudoers`, `/repo/\etc\sudoers`, PathAccessDelete}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			args, err := json.Marshal(map[string]string{"command": test.patch})

@@ -2116,7 +2116,7 @@ func matchesActiveShellHistory(
 }
 
 func matchesSudoersCandidate(value string) bool {
-	value = canonicalSemanticPath(value)
+	value = strings.TrimPrefix(canonicalSemanticPath(value), "/private")
 	return value == "/etc/sudoers" ||
 		strings.Contains(value, "/etc/sudoers.d/")
 }
@@ -2190,7 +2190,8 @@ func matchesActiveSudoers(
 	_ actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	value := canonicalSemanticPath(semanticPathValue(candidate))
+	// /private/etc is the real path of /etc on macOS (rel-1-0-6:GAP-0398).
+	value := strings.TrimPrefix(canonicalSemanticPath(semanticPathValue(candidate)), "/private")
 	return value == "/etc/sudoers" ||
 		integritySingleChild(value, "/etc/sudoers.d")
 }

@@ -68,15 +68,17 @@ func isPatchEnvelopeField(field string, value any) bool {
 }
 
 // isAcceptedPatchPath reports a patch target with one stable meaning: a path
-// relative to the working directory, or an absolute POSIX or drive path.
-// Codex and the Copilot CLI apply an absolute target as given, so it is a
-// write fact like a relative one, and every path rule judges it
-// (rel-1-0-6:GAP-0361). Home forms (~), root-relative backslash paths, UNC
-// shares and drive-relative paths (C:x) stay unread: the tool does not
-// expand ~, and the others depend on the current drive or a remote host.
+// relative to the working directory, an absolute POSIX or drive path, or a
+// root-relative path (/x or \x), which a Windows working directory roots on
+// its own drive as it does any other root-relative path. Codex and the
+// Copilot CLI apply such a target as given, so it is a write fact like a
+// relative one and every path rule judges it (rel-1-0-6:GAP-0361,
+// GAP-0398). Home forms (~) stay unread because the tool does not expand
+// them, and so do UNC shares (\\host) and drive-relative paths (C:x), which
+// name another host or the current directory of another drive.
 func isAcceptedPatchPath(value string) bool {
 	if value == "" || value == "~" || strings.HasPrefix(value, "~/") ||
-		strings.HasPrefix(value, `~\`) || strings.HasPrefix(value, `\`) {
+		strings.HasPrefix(value, `~\`) || strings.HasPrefix(value, `\\`) {
 		return false
 	}
 	if len(value) >= 2 && isASCIILetter(value[0]) && value[1] == ':' {

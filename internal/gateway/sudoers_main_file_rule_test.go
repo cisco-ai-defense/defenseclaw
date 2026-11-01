@@ -75,6 +75,12 @@ func sudoersMainFileWrites(t *testing.T) []sudoersHookRow {
 		{"claudecode", "Write", sudoersClaudeCall("Write", sudoersFixed(map[string]any{"file_path": target, "content": "Defaults env_reset\n"}))},
 		{"claudecode", "Write dot segment", sudoersClaudeCall("Write", sudoersFixed(map[string]any{"file_path": "/etc/./sudoers", "content": "Defaults env_reset\n"}))},
 		{"claudecode", "Write double slash", sudoersClaudeCall("Write", sudoersFixed(map[string]any{"file_path": "/etc//sudoers", "content": "Defaults env_reset\n"}))},
+		// The owner reads the path case-folded and the macOS /private/etc real
+		// path as /etc (rel-1-0-6:GAP-0398).
+		{"claudecode", "Write upper case", sudoersClaudeCall("Write", sudoersFixed(map[string]any{"file_path": "/ETC/SUDOERS", "content": "Defaults env_reset\n"}))},
+		{"claudecode", "Write macOS real path", sudoersClaudeCall("Write", sudoersFixed(map[string]any{"file_path": "/private/etc/sudoers", "content": "Defaults env_reset\n"}))},
+		{"claudecode", "Bash redirect mixed case", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "echo Defaults use_pty >> /Etc/Sudoers"}))},
+		{"hermes", "write_file macOS real path", sudoersHermesCall("write_file", sudoersFixed(map[string]any{"path": "/private/etc/sudoers", "content": "Defaults env_reset\n"}))},
 		{"claudecode", "Edit", sudoersClaudeCall("Edit", sudoersFixed(map[string]any{"file_path": target, "old_string": "Defaults env_reset", "new_string": "Defaults !env_reset"}))},
 		{"claudecode", "MultiEdit", sudoersClaudeCall("MultiEdit", sudoersFixed(map[string]any{"file_path": target,
 			"edits": []any{map[string]any{"old_string": "Defaults env_reset", "new_string": "Defaults !env_reset"}}}))},
@@ -111,6 +117,9 @@ func sudoersBenignNeighbours() []sudoersHookRow {
 	return []sudoersHookRow{
 		{"claudecode", "Read", sudoersClaudeCall("Read", sudoersFixed(map[string]any{"file_path": "/etc/sudoers"}))},
 		{"claudecode", "Bash cat", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "cat /etc/sudoers"}))},
+		{"claudecode", "Read macOS real path", sudoersClaudeCall("Read", sudoersFixed(map[string]any{"file_path": "/private/etc/sudoers"}))},
+		{"claudecode", "Write project SUDOERS", sudoersClaudeCall("Write", write(in("SUDOERS")))},
+		{"claudecode", "Write project private/etc/sudoers", sudoersClaudeCall("Write", write(in("private/etc/sudoers")))},
 		{"claudecode", "Bash visudo -c", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "visudo -c"}))},
 		{"claudecode", "Bash sudo visudo -c -f", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "sudo visudo -c -f /etc/sudoers"}))},
 		{"claudecode", "Bash grep", sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": "grep -n Defaults /etc/sudoers"}))},
@@ -145,10 +154,13 @@ func postSudoersHook(t *testing.T, row sudoersHookRow, profile string, managed b
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	project := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(project, "private", "etc"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(project, "etc"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"sudoers", "sudoers.example", "etc/sudoers"} {
+	for _, name := range []string{"sudoers", "sudoers.example", "etc/sudoers", "SUDOERS", "private/etc/sudoers"} {
 		if err := os.WriteFile(filepath.Join(project, name), []byte("a\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}

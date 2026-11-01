@@ -118,7 +118,7 @@ rules:
   - id: PATH-ETC-PASSWD
     tool_call_only: true
     expression: >-
-      f.paths.exists(p, p.normalized == '/etc/passwd' &&
+      f.paths.exists(p, (p.resolved == '/etc/passwd' || p.normalized == '/etc/passwd') &&
       (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] ||
@@ -138,7 +138,7 @@ rules:
   - id: PATH-ETC-SHADOW
     tool_call_only: true
     expression: >-
-      f.paths.exists(p, p.normalized == '/etc/shadow' &&
+      f.paths.exists(p, (p.resolved == '/etc/shadow' || p.normalized == '/etc/shadow') &&
       (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] ||
