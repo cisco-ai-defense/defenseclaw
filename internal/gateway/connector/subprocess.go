@@ -1125,7 +1125,7 @@ func readStableManagedRuntimeFileForOwner(
 			ErrManagedRuntimeFileTooLarge,
 		)
 	}
-	file, err := os.Open(path)
+	file, err := openManagedRuntimeFile(path)
 	if err != nil {
 		return nil, false, err
 	}

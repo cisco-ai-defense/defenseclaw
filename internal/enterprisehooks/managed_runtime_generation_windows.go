@@ -2534,16 +2534,20 @@ func deleteWindowsManagedRuntimeBundle(
 	if err != nil {
 		return err
 	}
-	handle, err := windows.CreateFile(
-		pathPtr,
-		windows.GENERIC_READ|windows.DELETE|windows.READ_CONTROL|
-			windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
+	// A hook still reading this generation holds it without FILE_SHARE_DELETE,
+	// so the DELETE open briefly sees a sharing violation; retry it.
+	handle, err := managed.RetryTransientOpen(func() (windows.Handle, error) {
+		return windows.CreateFile(
+			pathPtr,
+			windows.GENERIC_READ|windows.DELETE|windows.READ_CONTROL|
+				windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			nil,
+			windows.OPEN_EXISTING,
+			windows.FILE_FLAG_OPEN_REPARSE_POINT,
+			0,
+		)
+	})
 	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
 		return nil
 	}
