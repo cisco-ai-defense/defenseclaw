@@ -157,7 +157,11 @@ func refuseAuditInserts(t *testing.T, f managedHookAuditFixture, table, when str
 // it.
 func refuseAuditWrites(t *testing.T, f managedHookAuditFixture, kind, table, when string) func() {
 	t.Helper()
-	database, err := sql.Open("sqlite", f.path)
+	// The same lock wait as every audit connection (audit
+	// auditBusyTimeoutMillis): without it, creating or dropping the trigger
+	// while the gateway's recovery pass writes failed at once with
+	// SQLITE_BUSY (rel-1-0-6 GAP-0365, TestPendingHookFullJournalAnswersClosedAndDrains).
+	database, err := sql.Open("sqlite", f.path+"?_pragma=busy_timeout(750)")
 	if err != nil {
 		t.Fatal(err)
 	}
