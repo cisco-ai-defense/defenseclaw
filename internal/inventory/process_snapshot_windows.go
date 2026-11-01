@@ -57,7 +57,7 @@ func (nativeWindowsSnapshotReader) List() ([]windowsProcessEntry, error) {
 	for {
 		entries = append(entries, windowsProcessEntry{
 			PID: int(entry.ProcessID), PPID: int(entry.ParentProcessID),
-			Comm:           windows.UTF16ToString(entry.ExeFile[:]),
+			Comm:                    windows.UTF16ToString(entry.ExeFile[:]),
 			SessionOwnerID:          owners[int(entry.ProcessID)].sid,
 			SessionOwnerFromSession: owners[int(entry.ProcessID)].fromSession,
 		})
