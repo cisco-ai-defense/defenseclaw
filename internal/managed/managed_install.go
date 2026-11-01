@@ -75,6 +75,7 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 			"codex-requirements-ownership.json",
 			"codex-requirements-acl-backup.json",
 			"managed-hooks-teardown-journal.json",
+			"managed-hooks-lifecycle-journal.json",
 		} {
 			add(ObjectAdminFile, root, "install", name)
 		}

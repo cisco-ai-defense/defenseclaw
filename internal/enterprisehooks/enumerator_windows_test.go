@@ -212,6 +212,35 @@ func prepareWindowsTargetsManifestTestDirectory(t *testing.T) string {
 	return dir
 }
 
+// The trust walk keeps the named folder's verdicts fatal, so the manifest
+// folder must already be re-stamped when it runs; otherwise drift the repair
+// exists to fix would refuse the write.
+func TestWriteTargetsManifestAtomicRepairsParentBeforeTrustWalk(t *testing.T) {
+	dir := t.TempDir() // inherits the profile's descriptor: drifted
+	if validateWindowsTargetsManifestObject(dir, true) == nil {
+		t.Skip("temp folder already carries the AdminDirectory contract")
+	}
+	var canonicalAtTrust []bool
+	originalAncestorTrust := windowsTargetsManifestAncestorTrust
+	windowsTargetsManifestAncestorTrust = func(path string) error {
+		canonicalAtTrust = append(canonicalAtTrust, validateWindowsTargetsManifestObject(path, true) == nil)
+		return nil
+	}
+	t.Cleanup(func() { windowsTargetsManifestAncestorTrust = originalAncestorTrust })
+
+	if _, err := WriteTargetsManifestAtomic(filepath.Join(dir, "targets.yaml"), Manifest{Version: 1}); err != nil {
+		t.Fatalf("write manifest into a drifted folder: %v", err)
+	}
+	if len(canonicalAtTrust) == 0 {
+		t.Fatal("trust walk never ran")
+	}
+	for i, canonical := range canonicalAtTrust {
+		if !canonical {
+			t.Fatalf("trust walk %d ran before the folder was repaired", i)
+		}
+	}
+}
+
 func windowsTargetsManifestDescriptor(t *testing.T, path string) string {
 	t.Helper()
 	extended, err := winpath.Extended(path)

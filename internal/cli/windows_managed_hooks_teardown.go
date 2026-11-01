@@ -255,8 +255,11 @@ func runWindowsManagedHooksTeardown(
 		!sameWindowsEnterprisePathCLI(stateRoot, expectedStateRoot) {
 		return fail(errors.New("managed-hook teardown ownership path does not match the protected state root"))
 	}
-	if err := managed.ValidateTrustedRuntimeDir(
+	// Uninstall runs whether or not the guardian is healthy, so state-root
+	// drift is repaired here and residual drift accepted and logged.
+	if err := validateWindowsManagedHooksTrustedDir(
 		stateRoot,
+		managed.ObjectStateDirectory,
 		"Windows enterprise managed-hook teardown state root",
 	); err != nil {
 		return fail(err)
@@ -273,10 +276,9 @@ func runWindowsManagedHooksTeardown(
 	) {
 		return fail(errors.New("managed-hook teardown derived a noncanonical protected layout"))
 	}
-	if err := managed.ValidateTrustedFilePath(
-		report.ManifestPath,
-		"Windows enterprise hook target manifest",
-	); err != nil {
+	// The guardian's manifest check: repair, then accept and log what
+	// survives. The manifest is hash-bound to the deployment below.
+	if err := enterpriseHookManifestFileTrustCheck(report.ManifestPath); err != nil {
 		return fail(err)
 	}
 	manifest, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(report.ManifestPath)
@@ -1962,7 +1964,9 @@ func readWindowsManagedHooksTeardownJournal(
 			"managed-hook teardown journal is not a bounded regular non-link file",
 		)
 	}
-	if err := managed.ValidateTrustedFilePath(path, "managed-hook teardown journal"); err != nil {
+	if err := validateWindowsManagedHooksTrustedFile(
+		path, managed.ObjectAdminFile, "managed-hook teardown journal",
+	); err != nil {
 		return journal, err
 	}
 	file, err := os.Open(path)
@@ -2061,8 +2065,9 @@ func writeWindowsManagedHooksTeardownJournal(
 		)
 	}
 	parent := filepath.Dir(path)
-	if err := managed.ValidateTrustedRuntimeDir(
+	if err := validateWindowsManagedHooksTrustedDir(
 		parent,
+		managed.ObjectAdminDirectory,
 		"managed-hook teardown journal parent",
 	); err != nil {
 		return err
@@ -2071,7 +2076,9 @@ func writeWindowsManagedHooksTeardownJournal(
 		if !info.Mode().IsRegular() {
 			return errors.New("managed-hook teardown journal is not a regular non-link file")
 		}
-		if err := managed.ValidateTrustedFilePath(path, "managed-hook teardown journal"); err != nil {
+		if err := validateWindowsManagedHooksTrustedFile(
+			path, managed.ObjectAdminFile, "managed-hook teardown journal",
+		); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -2126,5 +2133,7 @@ func writeWindowsManagedHooksTeardownJournal(
 	if !bytes.Equal(persisted, body) {
 		return errors.New("managed-hook teardown journal changed during publication")
 	}
-	return managed.ValidateTrustedFilePath(path, "managed-hook teardown journal")
+	return validateWindowsManagedHooksTrustedFile(
+		path, managed.ObjectAdminFile, "managed-hook teardown journal",
+	)
 }

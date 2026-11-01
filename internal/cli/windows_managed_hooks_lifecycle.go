@@ -552,8 +552,9 @@ func resolveWindowsManagedHooksLifecycleContext() (
 		!sameWindowsEnterprisePathCLI(stateRoot, filepath.Dir(runtimeDir)) {
 		return ctx, errors.New("managed-hook lifecycle snapshot does not match the protected state root")
 	}
-	if err := managed.ValidateTrustedRuntimeDir(
+	if err := validateWindowsManagedHooksTrustedDir(
 		stateRoot,
+		managed.ObjectStateDirectory,
 		"Windows enterprise managed-hook lifecycle state root",
 	); err != nil {
 		return ctx, err
@@ -670,7 +671,7 @@ func readWindowsManagedHooksLifecycleJSON(
 		info.Size() < 0 || info.Size() > limit {
 		return false, fmt.Errorf("%s is not a bounded regular non-link file", label)
 	}
-	if err := managed.ValidateTrustedFilePath(path, label); err != nil {
+	if err := validateWindowsManagedHooksTrustedFile(path, windowsManagedHooksObjectKind(path), label); err != nil {
 		return false, err
 	}
 	file, err := os.Open(path)
@@ -1653,7 +1654,9 @@ func openWindowsManagedHooksLifecycleRecoveryJournal(
 			"committed lifecycle journal is not a bounded single-link no-follow regular file",
 		))
 	}
-	if err := managed.ValidateTrustedFilePath(path, "committed managed-hook lifecycle journal"); err != nil {
+	if err := validateWindowsManagedHooksTrustedFile(
+		path, managed.ObjectAdminFile, "committed managed-hook lifecycle journal",
+	); err != nil {
 		return fail(err)
 	}
 	body, err := io.ReadAll(io.LimitReader(file, windowsManagedHooksLifecycleJournalMax+1))
@@ -1677,8 +1680,11 @@ func openWindowsManagedHooksLifecycleRecoveryJournal(
 }
 
 func openWindowsManagedHooksLifecycleRecoveryDirectory(path string) (*os.File, error) {
-	if err := managed.ValidateTrustedRuntimeDir(
+	// A transaction directory has no canonical form of its own; its drift is
+	// accepted and logged, and the journal moved into it is hash-bound.
+	if err := validateWindowsManagedHooksTrustedDir(
 		path,
+		"",
 		"committed lifecycle recovery transaction directory",
 	); err != nil {
 		return nil, err
@@ -1792,8 +1798,9 @@ func validateWindowsManagedHooksLifecycleRecoveryRename(
 	if info.NumberOfLinks != 1 || windowsManagedHooksLifecycleFileIdentity(info) != expectedIdentity {
 		return errors.New("committed lifecycle journal identity changed during quarantine")
 	}
-	return managed.ValidateTrustedFilePath(
+	return validateWindowsManagedHooksTrustedFile(
 		quarantinePath,
+		"",
 		"quarantined committed managed-hook lifecycle journal",
 	)
 }
@@ -1819,7 +1826,9 @@ func hashWindowsManagedHooksLifecycleTrustedFile(
 		info.Size() < 0 || info.Size() > limit {
 		return "", fmt.Errorf("%s is not a bounded regular non-link file", label)
 	}
-	if err := managed.ValidateTrustedFilePath(path, label); err != nil {
+	// The caller compares the content hash with the transaction binding, so
+	// residual permission drift is accepted and logged.
+	if err := validateWindowsManagedHooksTrustedFile(path, windowsManagedHooksObjectKind(path), label); err != nil {
 		return "", err
 	}
 	file, err := os.Open(path)
@@ -2468,7 +2477,9 @@ func readWindowsManagedHooksLifecycleJournal(
 			"managed-hook lifecycle journal is not a bounded regular non-link file",
 		)
 	}
-	if err := managed.ValidateTrustedFilePath(path, "managed-hook lifecycle journal"); err != nil {
+	if err := validateWindowsManagedHooksTrustedFile(
+		path, managed.ObjectAdminFile, "managed-hook lifecycle journal",
+	); err != nil {
 		return journal, err
 	}
 	file, err := os.Open(path)
@@ -2514,8 +2525,9 @@ func writeWindowsManagedHooksLifecycleJournal(
 		)
 	}
 	parent := filepath.Dir(path)
-	if err := managed.ValidateTrustedRuntimeDir(
+	if err := validateWindowsManagedHooksTrustedDir(
 		parent,
+		managed.ObjectAdminDirectory,
 		"managed-hook lifecycle journal parent",
 	); err != nil {
 		return err
@@ -2524,7 +2536,9 @@ func writeWindowsManagedHooksLifecycleJournal(
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("managed-hook lifecycle journal is not a regular non-link file")
 		}
-		if err := managed.ValidateTrustedFilePath(path, "managed-hook lifecycle journal"); err != nil {
+		if err := validateWindowsManagedHooksTrustedFile(
+			path, managed.ObjectAdminFile, "managed-hook lifecycle journal",
+		); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -2579,5 +2593,7 @@ func writeWindowsManagedHooksLifecycleJournal(
 	if !bytes.Equal(persisted, body) {
 		return errors.New("managed-hook lifecycle journal changed during publication")
 	}
-	return managed.ValidateTrustedFilePath(path, "managed-hook lifecycle journal")
+	return validateWindowsManagedHooksTrustedFile(
+		path, managed.ObjectAdminFile, "managed-hook lifecycle journal",
+	)
 }

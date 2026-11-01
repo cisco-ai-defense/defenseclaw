@@ -683,9 +683,9 @@ func TestWindowsManagedHooksTeardownExpectedEnrollmentEmptyTargetsAreNonNil(t *t
 // Tested against the ACL-independent JSON layer so the CI runner's
 // non-Admin user identity does not trip
 // managed.ValidateTrustedFilePath's owner walk. The production entry
-// point readWindowsManagedHooksTeardownJournal still enforces owner
-// trust (SYSTEM/Admins/TrustedInstaller) before reaching this parse
-// step.
+// point readWindowsManagedHooksTeardownJournal still validates the file
+// (repairing owner and DACL drift, keeping structural checks fatal)
+// before reaching this parse step.
 func TestParseWindowsManagedHooksTeardownJournalBodyAcceptsNullConnectorArrays(t *testing.T) {
 	body := []byte(`{
   "schema_version": 6,
