@@ -49,8 +49,27 @@ func (r *Result) AddHookProcessFailureWarnings(connectors map[string]ConnectorSt
 			behavior = "a preToolUse hook timeout is non-blocking in the reviewed CLI 2.x path"
 		}
 		r.AddWarning(CodeHookProcessFailOpen, name+": "+behavior+
-			"; the tool may run without a DefenseClaw decision or pre-tool audit row if the hook never reaches the gateway. Protect the hook process from user signals with application control or EDR; see the managed connector limits")
+			"; the tool may run without a DefenseClaw decision or pre-tool audit row if the hook never reaches the gateway. "+
+			hookFailModeNote(state.EffectiveHookFailMode)+
+			"Protect the hook process from user signals with application control or EDR; see the managed connector limits")
 		r.MarkSecurityIncomplete(CodeHookProcessFailOpen)
+	}
+}
+
+// hookFailModeNote says how the warning relates to the connector's
+// effective_hook_fail_mode, which an administrator reads next to it: a
+// managed Windows host showed four of these warnings for hooks it renders
+// fail-closed, which read as a contradiction (rel-1-0-6:GAP-0411). The fail
+// mode is what a running hook does when the gateway does not answer; this
+// warning is what the agent does when the hook process itself never answers.
+func hookFailModeNote(failMode string) string {
+	switch failMode {
+	case "closed":
+		return "This is the agent's own behavior, not DefenseClaw's fail mode: the managed hook still fails closed (effective_hook_fail_mode closed) when the gateway does not answer. "
+	case "open":
+		return "This is the agent's own behavior, not DefenseClaw's fail mode: the managed hook also fails open (effective_hook_fail_mode open) when the gateway does not answer. "
+	default:
+		return ""
 	}
 }
 
