@@ -500,16 +500,16 @@ func TestManagedEnterpriseClientAwaitingStartWaitsForTheListener(t *testing.T) {
 		func(string) (uint32, error) { return 404, nil },
 		func(net.Conn) (uint32, error) { return 404, nil },
 	)
-	oldListening, oldPoll := managedEnterpriseListening, managedGatewayStartPoll
+	oldListening, oldPoll := managedEnterpriseListeningIPv4, managedGatewayStartPoll
 	t.Cleanup(func() {
 		managedTransportTestMu.Lock()
 		defer managedTransportTestMu.Unlock()
-		managedEnterpriseListening, managedGatewayStartPoll = oldListening, oldPoll
+		managedEnterpriseListeningIPv4, managedGatewayStartPoll = oldListening, oldPoll
 	})
 	managedGatewayStartPoll = 20 * time.Millisecond
 	looks := 0
 	listenAfter := 4
-	managedEnterpriseListening = func(string) (bool, bool) {
+	managedEnterpriseListeningIPv4 = func(string) (bool, bool) {
 		looks++
 		return looks > listenAfter, true
 	}
