@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -51,6 +52,11 @@ func TestNSSAccountHomeAsksAFixedTrustedGetent(t *testing.T) {
 		{name: "getent owned by another account", script: "echo \"u:*:" + me + ":1::" + home + ":/bin/sh\"", owner: uid + 1, want: ""},
 		{name: "getent is a link", script: "echo \"u:*:" + me + ":1::" + home + ":/bin/sh\"", link: true, want: ""},
 		{name: "hung lookup times out", script: "sleep 20", timeout: 300 * time.Millisecond, want: ""},
+		// Review 3 P4 rows: each reaches the check it pins.
+		{name: "home not owned by this uid", script: "echo \"u:*:" + me + ":1::/:/bin/sh\"", want: notRoot(uid, "")},
+		{name: "answer over 4 KiB", script: "printf 'u:*:" + me + ":1:" + strings.Repeat("g", 5000) + ":" + home + ":/bin/sh\\n'", want: ""},
+		{name: "answers only under the fixed environment", script: "[ \"$PATH\" = /usr/bin:/bin ] && [ \"$LC_ALL\" = C ] && [ -z \"$HOME\" ] && [ \"$(pwd)\" = / ] && echo \"u:*:" + me + ":1::" + home + ":/bin/sh\"", want: home},
+		{name: "home that exists but is not clean", script: "echo \"u:*:" + me + ":1::" + home + "/.:/bin/sh\"", want: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "bin")
@@ -94,6 +100,8 @@ func TestNSSAccountHomeAsksAFixedTrustedGetent(t *testing.T) {
 			outageGetentOwner, outageGetentTimeout = owner, timeout
 			t.Cleanup(func() { outageGetentPaths, outageGetentOwner, outageGetentTimeout = oldPaths, oldOwner, oldTimeout })
 			t.Setenv("HOME", t.TempDir())
+			t.Setenv("PATH", "/nonexistent:"+os.Getenv("PATH"))
+			t.Setenv("LC_ALL", "en_US.UTF-8")
 			start := time.Now()
 			if got := nssAccountHome(uid); got != tc.want {
 				t.Fatalf("nssAccountHome = %q, want %q", got, tc.want)
@@ -130,5 +138,42 @@ func TestNSSAccountHomeRealGetentAgreesWithTheAccountDatabase(t *testing.T) {
 	}
 	if got := nssAccountHome(os.Getuid()); got != filepath.Clean(account.HomeDir) {
 		t.Fatalf("nssAccountHome = %q, want %q", got, account.HomeDir)
+	}
+}
+
+// notRoot is want for a non-root test run; as root "/" is owned by the uid.
+func notRoot(uid int, want string) string {
+	if uid == 0 {
+		return "/"
+	}
+	return want
+}
+
+// Review 3 P3: outageAccountHome is looked up once per process, so a
+// decision that asks for it several times (stale hooks after a data_dir move
+// ask about seven times) runs at most one lookup, and every part of the
+// decision sees the same home.
+func TestOutageAccountHomeIsLookedUpOncePerProcess(t *testing.T) {
+	calls := 0
+	account := t.TempDir()
+	moved := t.TempDir()
+	oldAccount, oldRoot := outageAccountHome, outageInstalledDataRoot
+	outageAccountHome = newOutageAccountHome(func() string { calls++; return account })
+	outageInstalledDataRoot = func() (string, bool) { return "", false }
+	t.Cleanup(func() { outageAccountHome, outageInstalledDataRoot = oldAccount, oldRoot })
+	t.Setenv("HOME", account)
+	t.Setenv("DEFENSECLAW_HOME", "")
+	t.Setenv("DEFENSECLAW_CONFIG", "")
+	own := filepath.Join(account, ".defenseclaw")
+	writeOutageNowConfig(t, own, "data_dir: "+moved+"\n"+outageNowDefaultConfig)
+	mkdirAll(t, filepath.Join(own, "hooks"))
+	mkdirAll(t, filepath.Join(moved, "hooks"))
+	for i := 0; i < 3; i++ {
+		if got := hookOutageFailModeNow("claudecode", filepath.Join(own, "hooks")); got != "open" {
+			t.Fatalf("stale hooks = %q, want open", got)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("account home looked up %d times, want 1", calls)
 	}
 }

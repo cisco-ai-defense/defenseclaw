@@ -7,6 +7,7 @@ package cli
 
 import (
 	"path/filepath"
+	"sync"
 
 	"golang.org/x/sys/windows"
 
@@ -16,14 +17,14 @@ import (
 // outageAccountHome is this account's profile folder from the Profile known
 // folder, never from USERPROFILE or HOME: the folder install.ps1's default
 // DEFENSECLAW_HOME (%USERPROFILE%\.defenseclaw) is in. It is "" when the
-// lookup fails. A variable for tests.
-var outageAccountHome = func() string {
+// lookup fails. Looked up once per process. A variable for tests.
+var outageAccountHome = sync.OnceValue(func() string {
 	profile, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_Profile)
 	if err != nil || !filepath.IsAbs(profile) {
 		return ""
 	}
 	return filepath.Clean(profile)
-}
+})
 
 // outageInstalledDataRoot is the data root of the installed runtime's
 // protected install state (trustedNativeHookHome: install.ps1's

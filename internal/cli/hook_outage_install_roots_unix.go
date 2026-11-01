@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -26,9 +27,18 @@ import (
 // is not found there (rel-1-0-6 GAP-0308); the account database is then
 // asked through NSS with getent (nssAccountHome). It is "" when both
 // lookups fail (an account no database lists), and then only the folders
-// hookOutageInstallHeld reads from the environment stand in for it. A
-// variable for tests.
-var outageAccountHome = func() string {
+// hookOutageInstallHeld reads from the environment stand in for it. The
+// answer is looked up once per process (newOutageAccountHome): one decision
+// gives one answer, and a hung NSS backend costs at most one bounded getent
+// (2 s plus a 0.5 s wait). A variable for tests.
+var outageAccountHome = newOutageAccountHome(lookupOutageAccountHome)
+
+// newOutageAccountHome caches lookup's first answer for the process.
+func newOutageAccountHome(lookup func() string) func() string {
+	return sync.OnceValue(lookup)
+}
+
+func lookupOutageAccountHome() string {
 	uid := os.Getuid()
 	account, err := user.LookupId(strconv.Itoa(uid))
 	if err == nil && account != nil && filepath.IsAbs(account.HomeDir) {
@@ -186,7 +196,9 @@ var outageRecordedConfig = func(dataDir string) string {
 	if !privateOwnedDir(filepath.Dir(path), uid) {
 		return ""
 	}
-	if target, err := os.Stat(path); err != nil || !target.Mode().IsRegular() {
+	// The recorded config may be a link (a dotfiles config.yaml); the file it
+	// names must be this account's.
+	if target, err := os.Stat(path); err != nil || !target.Mode().IsRegular() || !ownedByUID(target, uid) {
 		return ""
 	}
 	return path
