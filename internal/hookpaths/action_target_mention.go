@@ -3581,7 +3581,7 @@ func actionWindowsWordNamesTarget(word, cwd, home string, stateOnly, sshDirector
 		if answer, ok := memo.word(key); ok {
 			return answer
 		}
-		memo.noteWork()
+		memo.noteCandidateWork()
 		answer := checkOnce(candidate)
 		memo.storeWord(key, answer)
 		return answer

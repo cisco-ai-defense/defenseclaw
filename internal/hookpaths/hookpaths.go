@@ -880,6 +880,23 @@ func clientStatementBudgetExceeded(connector, tool string, facts actionfacts.Fac
 	}
 }
 
+// clientPowerShellReading reports a call the hook client reads as
+// PowerShell, as clientStatementBudgetExceeded counts it: a PowerShell tool,
+// a PowerShell parse, or on Windows any shell tool not known to run POSIX.
+func clientPowerShellReading(connector, tool string, facts actionfacts.Facts) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+		return true
+	}
+	switch facts.Parse.Dialect {
+	case actionfacts.DialectPowerShell:
+		return true
+	case actionfacts.DialectPOSIX:
+		return false
+	}
+	return runtime.GOOS == "windows" && hookShellDialect(connector, tool) != actionfacts.DialectPOSIX
+}
+
 func hookShellDialect(connector, tool string) actionfacts.Dialect {
 	if strings.EqualFold(strings.TrimSpace(tool), "Bash") && !strings.EqualFold(strings.TrimSpace(connector), "codex") {
 		return actionfacts.DialectPOSIX
@@ -1157,7 +1174,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					if !MayNameState(command) {
 						return incompleteEvidence(cwd)
 					}
-					reduced, overflow, ok := StateNamingStatements(command, home)
+					reduced, overflow, ok := StateNamingReading(command, home, clientPowerShellReading(connector, tool, facts))
 					if !ok || overflow || reduced == "" {
 						// No silent drop past the bound: the map says only
 						// that it is incomplete, and the gateway judges the
@@ -5969,11 +5986,13 @@ const StateNamingStatementsMax = 128
 // StateNamingStatements reduces an over-budget POSIX call to the statements
 // a state write can come from: those that may name the state
 // (MayNameState) and the directory changes that place them, at most
-// StateNamingStatementsMax, in their order. Statements not proven read-only
-// (stateStatementReadOnly) are kept first, so a write, redirect, link or
-// delete is never the one dropped while reads fill the bound (review r4
-// finding 2: /bin/rm, unlink, find -delete and other spellings past 130
-// statements that name the state). The hook client describes only the kept
+// StateNamingStatementsMax, in their order. Statements proven read-only
+// (stateStatementReadOnly) are never kept: a read cannot write the state, so
+// a write, redirect, link or delete is never the one dropped for a read
+// (review r4 finding 2: /bin/rm, unlink, find -delete and other spellings
+// past 130 statements that name the state), and no time goes on judging
+// reads (127 state reads kept beside one writer took 3.0-3.2 s on dc-win2,
+// review r5 follow-up). The hook client describes only the kept
 // statements, so its map names the state targets the gateway proves the
 // write from at a bounded cost (describing every statement of a
 // 30,000-statement call took 2.5 s, review R2-5 of rel-1-0-2:GAP-0568), and
@@ -5992,7 +6011,7 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 	if !ok {
 		return command, false, len(command) <= 64<<10
 	}
-	var first, reads []int
+	var first []int
 	writers := 0
 	for i, text := range texts {
 		fields := strings.Fields(text)
@@ -6000,13 +6019,9 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 		switch {
 		case place:
 			first = append(first, i)
-		case MayNameState(text):
-			if stateStatementReadOnly(text, home) {
-				reads = append(reads, i)
-			} else {
-				first = append(first, i)
-				writers++
-			}
+		case MayNameState(text) && !stateStatementReadOnly(text, home):
+			first = append(first, i)
+			writers++
 		}
 	}
 	if writers == 0 {
@@ -6015,16 +6030,63 @@ func StateNamingStatements(command, home string) (reduced string, overflow, ok b
 	if len(first) > StateNamingStatementsMax {
 		first, overflow = first[:StateNamingStatementsMax], true
 	}
-	keep := first
-	if room := StateNamingStatementsMax - len(first); room > 0 {
-		keep = append(keep, reads[:min(room, len(reads))]...)
+	// A kept statement that calls a function the call defines does its
+	// work in a definition the reduced reading may not keep (the body need
+	// not name the state: f() { printf c >> "$1"; }; f <state>), so the
+	// call is not reducible: it is reported as an overflow
+	// (rel-1-0-6:GAP-0414).
+	if !overflow {
+		if defined := shellFunctionNames(command); len(defined) > 0 {
+			for _, index := range first {
+				if fields := strings.Fields(texts[index]); len(fields) > 0 && defined[fields[0]] {
+					overflow = true
+					break
+				}
+			}
+		}
 	}
-	slices.Sort(keep)
-	kept := make([]string, len(keep))
-	for i, index := range keep {
+	kept := make([]string, len(first))
+	for i, index := range first {
 		kept[i] = texts[index]
 	}
 	return strings.Join(kept, "; "), overflow, true
+}
+
+// shellFunctionNames returns the names of the functions a POSIX command
+// defines, or nil when it defines none (or does not parse).
+func shellFunctionNames(command string) map[string]bool {
+	if !strings.Contains(command, "()") && !strings.Contains(command, "function") {
+		return nil
+	}
+	file, ok := parseShell(command)
+	if !ok {
+		return nil
+	}
+	var names map[string]bool
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, isDecl := node.(*syntax.FuncDecl); isDecl && decl.Name != nil {
+			if names == nil {
+				names = map[string]bool{}
+			}
+			names[decl.Name.Value] = true
+		}
+		return true
+	})
+	return names
+}
+
+// StateNamingReading is StateNamingStatements for a call read in its own
+// dialect. A PowerShell call is never reduced: the POSIX split and
+// read-only proof are not its reading (the quoting rules differ), so a
+// "no writer" answer could come from another language
+// (rel-1-0-6:GAP-0413). It is kept whole and reported as an overflow, so
+// the hook client sends only the incomplete header and a gateway behind
+// ProtectHome holds the call when it may name the state.
+func StateNamingReading(command, home string, powershell bool) (reduced string, overflow, ok bool) {
+	if powershell {
+		return command, true, true
+	}
+	return StateNamingStatements(command, home)
 }
 
 // stateStatementReadOnly reports a statement proven to change no file: the
