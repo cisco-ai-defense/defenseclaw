@@ -306,11 +306,84 @@ func TestDecisionModelAloneConfirmOnClaudeCodeHook(t *testing.T) {
 		w := httptest.NewRecorder()
 		http.HandlerFunc(a.handleAgentHook("claudecode")).ServeHTTP(w, req)
 		got := w.Body.String()
-		if w.Code != http.StatusOK || !strings.Contains(got, tc.want) || strings.Contains(got, tc.notWant) {
+		if w.Code != http.StatusOK || !strings.Contains(got, tc.want) || strings.Contains(got, tc.notWant) ||
+			!strings.Contains(got, "needs a person") {
 			t.Fatalf("mode %s: status %d body %s; want %s and no %s", tc.mode, w.Code, got, tc.want, tc.notWant)
 		}
 	}
 	if calls.Load() == 0 {
 		t.Fatal("the decision model was never called")
+	}
+}
+
+// The decision model's own reasons stay readable on agent surfaces; a reason
+// that carries anything else keeps the scrub.
+func TestDecisionModelReasonsAreReadable(t *testing.T) {
+	for _, reason := range []string{
+		"decision-model: confirm (risk 0.70), needs a person's confirmation",
+		"decision-model: confident block (risk 0.98 >= 0.75)",
+	} {
+		if !trustedDecisionModelReason(reason) {
+			t.Fatalf("not trusted: %q", reason)
+		}
+	}
+	for _, reason := range []string{
+		"decision-model: confirm (risk 0.70), needs a person's confirmation; cat /home/u/secret.txt",
+		"decision-model: confident allow (risk 0.03 <= 0.30); judge skipped",
+		"matched: X; decision-model: confident block (risk 0.98 >= 0.75)",
+	} {
+		if trustedDecisionModelReason(reason) {
+			t.Fatalf("trusted a reason with other text: %q", reason)
+		}
+	}
+}
+
+// The request is the benchmark's Q2 single-choice format and its production
+// bound (system-one-space data/questions.json): at most 2,048 bytes of user
+// intent, 7 prior calls of 1,024 bytes and 3,072 bytes of the current call,
+// 12,288 bytes of state in all, however long the session is.
+func TestDecisionModelAloneRequestIsQ2WithinTheProductionBound(t *testing.T) {
+	var last atomic.Value
+	srv := fakeDecisionModel(t, "allow", 0.97, &last)
+	defer srv.Close()
+	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: "fake", BaseURL: srv.URL, Timeout: 1,
+		HookConnectors: []string{"codex"}}
+	j := newDecisionOnlyJudge(cfg)
+	ctx := ContextWithSessionID(context.Background(), "dm-bound-1")
+	j.ObserveSessionPrompt(ctx, strings.Repeat("list the report fixtures ", 400))
+	long := `{"command":"` + strings.Repeat("a", 6000) + `"}`
+	for i := 0; i < 10; i++ {
+		if v := j.RunToolJudge(ctx, "Bash", long); v == nil || v.JudgeFailed {
+			t.Fatalf("call %d: %+v", i, v)
+		}
+	}
+	raw, _ := last.Load().(string)
+	raw = raw[:strings.LastIndex(raw, "\nauth=")]
+	var req struct {
+		Questions map[string]map[string]any `json:"questions"`
+		State     decisionModelState        `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Questions) != 3 || req.Questions["disposition"]["type"] != "choice" ||
+		req.Questions["risk"]["type"] != "score" || req.Questions["context_sufficient"]["type"] != "noul" {
+		t.Fatalf("questions are not the Q2 set: %v", req.Questions)
+	}
+	st := req.State
+	total := len(st.SessionUserIntent) + len(st.CurrentToolCall.Arguments)
+	if len(st.SessionUserIntent) == 0 || len(st.SessionUserIntent) > 2048 || len(st.CurrentToolCall.Arguments) > 3072 ||
+		len(st.RecentToolCalls) != 7 {
+		t.Fatalf("state bounds: intent %d, current %d, recent %d", len(st.SessionUserIntent), len(st.CurrentToolCall.Arguments), len(st.RecentToolCalls))
+	}
+	for _, call := range st.RecentToolCalls {
+		if len(call.Arguments) > 1024 {
+			t.Fatalf("prior call of %d bytes", len(call.Arguments))
+		}
+		total += len(call.Arguments)
+	}
+	if total > 12288 {
+		t.Fatalf("state carries %d bytes, over the 12,288-byte production bound", total)
 	}
 }

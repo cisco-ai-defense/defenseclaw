@@ -122,7 +122,19 @@ func trustedShipAuthoredReason(reason string) bool {
 func trustedRefusalReason(reason string) bool {
 	return trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) ||
 		trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason) ||
-		trustedHookSideRefusalReason(reason) || trustedCodexStartRegistrationRefusal(reason)
+		trustedHookSideRefusalReason(reason) || trustedCodexStartRegistrationRefusal(reason) ||
+		trustedDecisionModelReason(reason)
+}
+
+// decisionModelReason is the whole of a block or confirmation reason the
+// decision model gave (runDecisionAlone, runToolDecision): DefenseClaw's own
+// words around two numbers it formatted, no tool-call text.
+var decisionModelReason = lazyregexp.New(`^decision-model: (confident block \(risk [01]\.\d\d >= [01]\.\d\d\)|(allow|confirm|block) \(risk [01]\.\d\d\), needs a person's confirmation)$`)
+
+// trustedDecisionModelReason keeps a decision-model reason readable on agent
+// surfaces: the ask showed it as two redaction tokens.
+func trustedDecisionModelReason(reason string) bool {
+	return decisionModelReason.MatchString(reason)
 }
 
 // agentDisplayReason keeps exact, ship-authored catalog metadata readable on
