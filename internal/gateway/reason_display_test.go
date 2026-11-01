@@ -157,6 +157,22 @@ func TestNotificationDisplayReasonWordsJudgeVerdicts(t *testing.T) {
 	}
 }
 
+// rel-1-0-6:GAP-0258: the desktop notice and its terminal fallback name a
+// refused MCP launcher in the sentence the agent reads, not as a row of
+// redacted spans (dc-win2 gateway.log); the scanner text stays out.
+func TestNotificationDisplayReasonNamesTheRefusedMCPLauncher(t *testing.T) {
+	reason := `mcp server "ml2loop" is disabled because its install admission rejected it (scanner failure (fail-closed): scanner mcp-scanner exited 1 ` +
+		`(scan failed: refusing to scan local MCP server 'ml2loop': command 'node' is not an allowlisted stdio launcher (allowed: npx, uvx): ` +
+		`a scan starts only npm or PyPI packages through npx or uvx, never another program; stderr=)); asset_policy.mode does not apply to admission verdicts`
+	want := "MCP server ml2loop is disabled because its install admission rejected it (the launcher node " + mcpLauncherRefusalCause + ")"
+	if got := notificationDisplayReason(reason, redaction.SinkPolicyDefault); got != want {
+		t.Fatalf("notification reason = %q\nwant %q", got, want)
+	}
+	if forced := notificationDisplayReason(reason, redaction.SinkPolicyRedact); forced == want || !strings.Contains(forced, "<redacted") {
+		t.Fatalf("forced-redact notification reason = %q, want the redact directive honoured", forced)
+	}
+}
+
 func TestAgentAndDefaultSinkDisplayReasonUseTrustedMetadataCarveOut(t *testing.T) {
 	redaction.SetAgentReasonRedactionDisabled(false)
 	t.Cleanup(func() { redaction.SetAgentReasonRedactionDisabled(false) })

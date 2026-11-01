@@ -150,6 +150,12 @@ func notificationDisplayReason(reason string, policy redaction.SinkPolicy) strin
 		if subject := agentAssetPolicySubject(reason); subject != "" {
 			return subject
 		}
+		// The MCP admission verdict, as the agent reads it: the terminal
+		// fallback showed a refused launcher as redacted spans
+		// (rel-1-0-6:GAP-0258).
+		if subject := agentMCPAdmissionSubject(reason); subject != "" {
+			return subject
+		}
 		if subject := agentJudgeSubject(reason); subject != "" {
 			return subject
 		}
