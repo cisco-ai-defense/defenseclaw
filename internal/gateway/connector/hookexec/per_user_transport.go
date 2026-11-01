@@ -144,6 +144,36 @@ const PerUserPostOutageExit = 7
 // (GAP-2083).
 const PerUserPostPeerUnverifiedExit = 8
 
+// PerUserPostNoAnswerExit is the exit status of `hook-post` for a call that
+// got no answer before its deadline and no HTTP status at all
+// (PerUserPostNoAnswer). The shell hooks read it as curl's timeout (28): a
+// call whose gateway refused it a moment before is the restart wait running
+// out of the call's budget, an outage (rel-1-0-6 GAP-0295); any other is the
+// hung-gateway refusal. An older shell hook reads it as any other failure.
+const PerUserPostNoAnswerExit = 9
+
+// PerUserPostRestartNoAnswerExit is the exit status of `hook-post` for such a
+// call while a start or restart of this account's gateway holds its start
+// lock and the process behind the call's connection changed during the call
+// (PerUserGatewayRestartProven, Linux and macOS): the gateway that took the
+// call is gone or no longer owns the port. The shell hooks read it as the
+// restart outage (7, restart waited), whatever the call's first try was
+// (rel-1-0-6 GAP-0295). A held lock alone, with the same gateway up, is
+// PerUserPostNoAnswerExit: a gateway that is up and slow stays closed.
+const PerUserPostRestartNoAnswerExit = 10
+
+// PerUserPostNoAnswer reports whether err, from PostPerUserHook, is a request
+// that ended at its deadline with no status: not an outage the transport
+// proved, not a listener it could not verify, not a cut-off or invalid answer.
+func PerUserPostNoAnswer(err error) bool {
+	if err == nil || PerUserPostOutage(err) || errors.Is(err, errPerUserPeerUnverified) ||
+		errors.Is(err, errPerUserAnswerIncomplete) || errors.Is(err, errInvalidHookRequest) {
+		return false
+	}
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errGatewayTookCallNoAnswer) ||
+		errors.Is(err, errGatewayNotConnected)
+}
+
 // PerUserPostPeerUnverified reports whether err, from PostPerUserHook, is a
 // failed connected-listener proof: nothing of the call was sent.
 func PerUserPostPeerUnverified(err error) bool {
@@ -260,6 +290,11 @@ func verifiedPerUserHTTPClient(
 				}
 				if check != nil {
 					check.pending.Store(false)
+				}
+				// hook-post reads the process behind the proven socket, for
+				// a no-answer during a restart (PerUserGatewayRestartProven).
+				if record, _ := ctx.Value(perUserPeerRecordKey{}).(*PerUserPeerRecord); record != nil {
+					record.capture(conn.LocalAddr(), conn.RemoteAddr())
 				}
 				return conn, nil
 			},

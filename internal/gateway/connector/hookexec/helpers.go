@@ -254,13 +254,24 @@ func managedOpenCodeBackgroundEvent(opts Options, sp spec) bool {
 // (loggedFailMode), so the fail-open report finds the calls that ran. Managed
 // OpenCode callbacks that cannot admit a tool are diagnostics.
 func logHookFailure(opts Options, sp spec, reason, category, failMode string, blocked bool) {
+	logHookFailureOf(opts, sp, reason, category, failMode, blocked, false)
+}
+
+// logUnreachableFailure is logHookFailure for failUnreachable, whose answer
+// for reason the watchdog can render: a managed call's answer then names the
+// reason its row names (claimFailureLog, rel-1-0-6 GAP-0294).
+func logUnreachableFailure(opts Options, sp spec, reason, failMode string, blocked bool) {
+	logHookFailureOf(opts, sp, reason, "transport", failMode, blocked, true)
+}
+
+func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, blocked, unreachableAnswer bool) {
 	if sp.failOpenOnly {
 		blocked = loggedFailMode(opts, sp, failMode) == "closed"
 	}
 	if w := opts.answerWatch; w != nil {
 		// Before anything below can block: a closed failure keeps the
 		// watchdog's answer closed (claimFailureLog).
-		done, claimed := w.claimFailureLog(opts, sp, blocked)
+		done, claimed := w.claimFailureLog(opts, sp, blocked, reason, failMode, unreachableAnswer)
 		if !claimed {
 			return
 		}

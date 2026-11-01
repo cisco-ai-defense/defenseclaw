@@ -154,7 +154,8 @@ defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 4 '{}' -H 
 // A call that was not answered is classified once and keeps the outcome the
 // send-time preflight gave: no listener is a cold start (7, the only outage),
 // a foreign or unknown listener fails closed (1), this account's listener
-// keeps the helper's failure (1), a call with no time left keeps 28. An
+// after a refusal is 75 (unsent; the restart wait decides), a call with no
+// time left keeps 28. An
 // address the helper refuses never starts it, and an impossible port stays
 // a free port.
 func TestPerUserGatewayPostClassifiesOnlyAnUnsentCall(t *testing.T) {
@@ -164,7 +165,9 @@ func TestPerUserGatewayPostClassifiesOnlyAnUnsentCall(t *testing.T) {
 		helperRuns, classifies                            bool
 	}{
 		{"refused, no listener: cold start", "127.0.0.1:18960", "defenseclaw-hook-post", "7", "2", "0", "rc=7", true, true},
-		{"refused, own listener: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "7", "1", "0", "rc=1", true, true},
+		// Unsent, and not sent again here: the restart wait decides it
+		// (75, defenseclaw_refused_while_coming_up, rel-1-0-6 GAP-0295).
+		{"refused, own listener: unsent, for the restart wait", "127.0.0.1:18960", "defenseclaw-hook-post", "7", "1", "0", "rc=75", true, true},
 		// The helper's own refusal is final: a later table read that no
 		// longer shows the foreign listener is no cold start (T12b loop 2).
 		{"peer refused, foreign: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "1", "0", "0", "rc=1", true, false},
@@ -173,6 +176,14 @@ func TestPerUserGatewayPostClassifiesOnlyAnUnsentCall(t *testing.T) {
 		{"helper panic, now free: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "2", "2", "0", "rc=1", true, false},
 		{"helper killed, now free: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "137", "2", "0", "rc=1", true, false},
 		{"helper timeout code, now free: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "28", "2", "0", "rc=1", true, false},
+		// hook-post 9: sent to the verified own listener, no status. The
+		// gateway took the call: final, no table read, even when the port is
+		// free by then (review of rel-1-0-6 GAP-0295).
+		{"helper no answer 9, now free: final", "127.0.0.1:18960", "defenseclaw-hook-post", "9", "2", "0", "rc=28", true, false},
+		{"helper no answer 9, own: final", "127.0.0.1:18960", "defenseclaw-hook-post", "9", "1", "0", "rc=28", true, false},
+		// hook-post 10: no status during a proven restart of this account's
+		// gateway: the restart outage, no table read.
+		{"helper restart no answer 10: outage", "127.0.0.1:18960", "defenseclaw-hook-post", "10", "1", "0", "rc=7", true, false},
 		{"gateway CLI fallback peer refused, now free: closed", "localhost:18960", "defenseclaw-gateway", "1", "2", "0", "rc=1", true, false},
 		{"gateway CLI fallback refused, free", "localhost:18960", "defenseclaw-gateway", "7", "2", "0", "rc=7", true, true},
 		{"helper cannot run, free", "127.0.0.1:18960", "defenseclaw-hook-post", "126", "2", "0", "rc=7", true, true},
