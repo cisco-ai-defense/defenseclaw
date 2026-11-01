@@ -190,7 +190,7 @@ func TestWindowsCorrelationKeyCrashAfterPublicationLeavesCanonicalInode(t *testi
 		_ = file.Close()
 		t.Fatal(err)
 	}
-	if err := protectWindowsCorrelationSecurity(windows.Handle(file.Fd())); err != nil {
+	if err := protectWindowsCorrelationSecurity(windows.Handle(file.Fd()), false); err != nil {
 		_ = file.Close()
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestWindowsCorrelationKeyHandleRenamePublishesNoReplace(t *testing.T) {
 		if err := file.Sync(); err != nil {
 			t.Fatalf("sync %s: %v", name, err)
 		}
-		if err := protectWindowsCorrelationSecurity(windows.Handle(file.Fd())); err != nil {
+		if err := protectWindowsCorrelationSecurity(windows.Handle(file.Fd()), false); err != nil {
 			t.Fatalf("harden %s: %v", name, err)
 		}
 		if err := validateWindowsCorrelationKeyHandle(windows.Handle(file.Fd())); err != nil {
@@ -501,7 +501,7 @@ func TestWindowsCorrelationKeyPublishesWithAdministratorsDisabled(t *testing.T) 
 		_ = probe.Close()
 		t.Fatalf("sync path-rename probe: %v", err)
 	}
-	if err := protectWindowsCorrelationSecurity(windows.Handle(probe.Fd())); err != nil {
+	if err := protectWindowsCorrelationSecurity(windows.Handle(probe.Fd()), false); err != nil {
 		_ = probe.Close()
 		t.Fatalf("harden path-rename probe: %v", err)
 	}
@@ -1422,6 +1422,148 @@ func assertWindowsCorrelationReadOpen(t *testing.T, path string) {
 	if err := windows.CloseHandle(handle); err != nil {
 		t.Fatalf("close read-only key handle: %v", err)
 	}
+}
+
+// pinWindowsCorrelationExpectedOwner makes *expected the key's expected owner
+// for the rest of the test, read on every call, and treats no principal as
+// administrator-equivalent so the test user's own SID can stand in for an
+// untrusted owner.
+func pinWindowsCorrelationExpectedOwner(t *testing.T, expected **windows.SID) {
+	t.Helper()
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawCorrelationFixture`)
+	previousSID := windowsCorrelationServiceAccountSID
+	previousRunsAs := windowsCorrelationTokenRunsAsService
+	previousAdmin := windowsCorrelationAdminEquivalent
+	t.Cleanup(func() {
+		windowsCorrelationServiceAccountSID = previousSID
+		windowsCorrelationTokenRunsAsService = previousRunsAs
+		windowsCorrelationAdminEquivalent = previousAdmin
+	})
+	windowsCorrelationServiceAccountSID = func(string) (*windows.SID, error) { return *expected, nil }
+	windowsCorrelationTokenRunsAsService = func(windows.Token, *windows.SID) (bool, error) { return true, nil }
+	windowsCorrelationAdminEquivalent = func(*windows.SID) bool { return false }
+}
+
+func stubWindowsCorrelationOwnerRecovery(
+	t *testing.T,
+	repair func(string, windows.Handle) error,
+	rotate func(string, windows.ByHandleFileInformation) error,
+) {
+	t.Helper()
+	previousRepair := windowsCorrelationOwnerRepair
+	previousRotate := windowsCorrelationKeyRotate
+	t.Cleanup(func() {
+		windowsCorrelationOwnerRepair = previousRepair
+		windowsCorrelationKeyRotate = previousRotate
+	})
+	windowsCorrelationOwnerRepair = repair
+	windowsCorrelationKeyRotate = rotate
+}
+
+// An untrusted owner is never left in place: the loader restores the
+// canonical owner, and when it cannot, rotates the key instead of using
+// material that principal can read and rewrite. Strict mode keeps it fatal.
+func TestWindowsCorrelationKeyUntrustedOwnerIsRepairedOrRotated(t *testing.T) {
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || current == nil || current.User.Sid == nil {
+		t.Fatalf("resolve current Windows user: %v", err)
+	}
+	foreign, err := windows.StringToSid("S-1-5-80-1-2-3-4-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := current.User.Sid
+	pinWindowsCorrelationExpectedOwner(t, &expected)
+
+	newKey := func(t *testing.T) (string, CorrelationKey) {
+		t.Helper()
+		expected = current.User.Sid
+		dir := t.TempDir()
+		key, err := LoadOrCreateCorrelationKey(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// From here the key's owner (the test user) is not the gateway's.
+		expected = foreign
+		return dir, key
+	}
+
+	t.Run("owner restored", func(t *testing.T) {
+		dir, original := newKey(t)
+		repairs, rotations := 0, 0
+		stubWindowsCorrelationOwnerRecovery(t,
+			func(string, windows.Handle) error {
+				repairs++
+				expected = current.User.Sid // the owner now matches
+				return nil
+			},
+			func(string, windows.ByHandleFileInformation) error {
+				rotations++
+				return nil
+			},
+		)
+		loaded, err := LoadOrCreateCorrelationKey(dir)
+		if err != nil {
+			t.Fatalf("load after owner repair: %v", err)
+		}
+		if repairs != 1 || rotations != 0 || loaded.ID() != original.ID() {
+			t.Fatalf("repairs=%d rotations=%d same key=%t; want one repair keeping the key",
+				repairs, rotations, loaded.ID() == original.ID())
+		}
+	})
+
+	t.Run("owner kept is rotated", func(t *testing.T) {
+		dir, original := newKey(t)
+		realRotate := windowsCorrelationKeyRotate
+		path := filepath.Join(dir, correlationKeyFilename)
+		var rotated string
+		stubWindowsCorrelationOwnerRecovery(t,
+			func(string, windows.Handle) error { return keyStoreError(KeyStoreErrorUnsafePermissions) },
+			func(target string, identity windows.ByHandleFileInformation) error {
+				rotated = target
+				if err := realRotate(target, identity); err != nil {
+					t.Skipf("key rotation needs administrator rights here: %v", err)
+				}
+				expected = current.User.Sid // the fresh key is installed as the gateway's
+				return nil
+			},
+		)
+		loaded, err := LoadOrCreateCorrelationKey(dir)
+		if err != nil {
+			t.Fatalf("load after rotation: %v", err)
+		}
+		if rotated != path {
+			t.Fatalf("rotated %q, want %q", rotated, path)
+		}
+		if loaded.ID() == original.ID() {
+			t.Fatal("a key owned by an untrusted principal stayed in use")
+		}
+	})
+
+	t.Run("rotation failure is fatal", func(t *testing.T) {
+		dir, _ := newKey(t)
+		stubWindowsCorrelationOwnerRecovery(t,
+			func(string, windows.Handle) error { return keyStoreError(KeyStoreErrorUnsafePermissions) },
+			func(string, windows.ByHandleFileInformation) error { return keyStoreError(KeyStoreErrorUnavailable) },
+		)
+		if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafeOwner) {
+			t.Fatalf("error = %v, want unsafe owner when the key can neither be repaired nor rotated", err)
+		}
+	})
+
+	t.Run("strict", func(t *testing.T) {
+		dir, _ := newKey(t)
+		called := false
+		stubWindowsCorrelationOwnerRecovery(t,
+			func(string, windows.Handle) error { called = true; return nil },
+			func(string, windows.ByHandleFileInformation) error { called = true; return nil },
+		)
+		t.Setenv(managed.TrustStrictAncestorsEnv, "1")
+		if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafeOwner) || called {
+			t.Fatalf("strict: error = %v, recovery called = %t; want unsafe owner without recovery", err, called)
+		}
+	})
 }
 
 func assertNoWindowsCorrelationTemps(t *testing.T, dir string) {

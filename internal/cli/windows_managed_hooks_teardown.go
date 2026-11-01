@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 )
@@ -1964,13 +1965,15 @@ func readWindowsManagedHooksTeardownJournal(
 			"managed-hook teardown journal is not a bounded regular non-link file",
 		)
 	}
-	if err := validateWindowsManagedHooksTrustedFile(
-		path, managed.ObjectAdminFile, "managed-hook teardown journal",
-	); err != nil {
+	// Hold a no-follow handle across validation and read from it, then
+	// confirm the path still names that same file: the bytes parsed are the
+	// object whose owner and DACL were just checked, not a swapped-in one.
+	file, before, err := openWindowsManagedHooksTeardownJournalNoFollow(path)
+	if err != nil {
 		return journal, err
 	}
-	file, err := os.Open(path)
-	if err != nil {
+	defer file.Close()
+	if err := validateWindowsManagedHooksTeardownJournalFile(path); err != nil {
 		return journal, err
 	}
 	body, err := io.ReadAll(io.LimitReader(
@@ -1978,17 +1981,74 @@ func readWindowsManagedHooksTeardownJournal(
 		windowsManagedHooksTeardownJournalMax+1,
 	))
 	if err != nil {
-		_ = file.Close()
 		return journal, err
 	}
 	if len(body) > windowsManagedHooksTeardownJournalMax {
-		_ = file.Close()
 		return journal, errors.New("managed-hook teardown journal exceeds its size limit")
 	}
-	if err := file.Close(); err != nil {
+	if err := sameWindowsManagedHooksTeardownJournalObject(path, before); err != nil {
 		return journal, err
 	}
 	return parseWindowsManagedHooksTeardownJournalBody(body)
+}
+
+// openWindowsManagedHooksTeardownJournalNoFollow opens the journal without
+// following a reparse point and returns its identity.
+func openWindowsManagedHooksTeardownJournalNoFollow(
+	path string,
+) (*os.File, windows.ByHandleFileInformation, error) {
+	var info windows.ByHandleFileInformation
+	pathPtr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return nil, info, err
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.GENERIC_READ,
+		windows.FILE_SHARE_READ,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return nil, info, err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, info, errors.New("wrap managed-hook teardown journal handle")
+	}
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		_ = file.Close()
+		return nil, info, err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+		info.NumberOfLinks != 1 {
+		_ = file.Close()
+		return nil, info, errors.New(
+			"managed-hook teardown journal is not a single-link no-follow regular file",
+		)
+	}
+	return file, info, nil
+}
+
+// sameWindowsManagedHooksTeardownJournalObject fails unless path still names
+// the file whose identity was taken when the journal was opened.
+func sameWindowsManagedHooksTeardownJournalObject(
+	path string,
+	opened windows.ByHandleFileInformation,
+) error {
+	current, info, err := openWindowsManagedHooksTeardownJournalNoFollow(path)
+	if err != nil {
+		return err
+	}
+	_ = current.Close()
+	if windowsManagedHooksLifecycleFileIdentity(info) !=
+		windowsManagedHooksLifecycleFileIdentity(opened) {
+		return errors.New("managed-hook teardown journal was replaced while it was read")
+	}
+	return nil
 }
 
 // parseWindowsManagedHooksTeardownJournalBody is the ACL-independent
@@ -2076,9 +2136,7 @@ func writeWindowsManagedHooksTeardownJournal(
 		if !info.Mode().IsRegular() {
 			return errors.New("managed-hook teardown journal is not a regular non-link file")
 		}
-		if err := validateWindowsManagedHooksTrustedFile(
-			path, managed.ObjectAdminFile, "managed-hook teardown journal",
-		); err != nil {
+		if err := validateWindowsManagedHooksTeardownJournalFile(path); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -2133,7 +2191,5 @@ func writeWindowsManagedHooksTeardownJournal(
 	if !bytes.Equal(persisted, body) {
 		return errors.New("managed-hook teardown journal changed during publication")
 	}
-	return validateWindowsManagedHooksTrustedFile(
-		path, managed.ObjectAdminFile, "managed-hook teardown journal",
-	)
+	return validateWindowsManagedHooksTeardownJournalFile(path)
 }

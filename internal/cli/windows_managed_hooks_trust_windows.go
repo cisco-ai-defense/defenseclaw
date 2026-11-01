@@ -43,6 +43,24 @@ func validateWindowsManagedHooksTrustedFile(path string, kind managed.ObjectKind
 	return managed.ValidateTrustedPolicyFilePath(path, label)
 }
 
+// validateWindowsManagedHooksTeardownJournalFile validates the teardown
+// journal. Unlike the lifecycle journal it carries no digest bound to
+// protected transaction state, and rollback hands its snapshot bytes and
+// descriptors to privileged restores, so drift is repaired to the canonical
+// admin-file descriptor and the strict owner/DACL check must then pass:
+// residual owner or writer drift after repair is fatal here.
+func validateWindowsManagedHooksTeardownJournalFile(path string) error {
+	const label = "managed-hook teardown journal"
+	err := windowsManagedHooksStrictFileCheck(path, label)
+	if err == nil || managed.TrustStrictAncestors() {
+		return err
+	}
+	if _, ensureErr := repairWindowsManagedHooksObject(path, managed.ObjectAdminFile); ensureErr != nil {
+		return errors.Join(err, ensureErr)
+	}
+	return windowsManagedHooksStrictFileCheck(path, label)
+}
+
 // validateWindowsManagedHooksTrustedDir is validateWindowsManagedHooksTrustedFile
 // for a protected folder (the state root, a transaction directory).
 func validateWindowsManagedHooksTrustedDir(path string, kind managed.ObjectKind, label string) error {

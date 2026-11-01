@@ -109,3 +109,80 @@ func TestWindowsManagedHooksObjectKindFollowsInstallLayout(t *testing.T) {
 		}
 	}
 }
+
+// The teardown journal has no protected digest, so drift is repaired and the
+// strict check must then pass: residual owner/writer drift stays fatal.
+func TestWindowsManagedHooksTeardownJournalRequiresStrictAfterRepair(t *testing.T) {
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	path := filepath.Join(t.TempDir(), windowsManagedHooksTeardownJournalFile)
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ensured := stubWindowsManagedHooksTrust(t, managed.CanonicalBoundary, nil)
+	if err := validateWindowsManagedHooksTeardownJournalFile(path); err == nil {
+		t.Fatal("residual teardown journal drift was accepted")
+	}
+	if got := *ensured; len(got) != 1 || got[0] != managed.ObjectAdminFile {
+		t.Fatalf("EnsureCanonical calls = %v, want one AdminFile repair", got)
+	}
+	if _, err := readWindowsManagedHooksTeardownJournal(path); err == nil {
+		t.Fatal("teardown journal with residual drift was read")
+	}
+
+	// The repair clears the drift: the strict re-check passes.
+	stubWindowsManagedHooksTrust(t, managed.CanonicalRepaired, nil)
+	repaired := false
+	windowsManagedHooksEnsureCanonical = func(p string, kind managed.ObjectKind, _ managed.CanonicalOptions) (managed.CanonicalResult, error) {
+		repaired = true
+		return managed.CanonicalResult{Path: p, Kind: kind, Outcome: managed.CanonicalRepaired}, nil
+	}
+	windowsManagedHooksStrictFileCheck = func(string, string) error {
+		if repaired {
+			return nil
+		}
+		return errors.New("owner S-1-5-21-1-2-3-1001 is not trusted")
+	}
+	if err := validateWindowsManagedHooksTeardownJournalFile(path); err != nil {
+		t.Fatalf("repaired teardown journal was refused: %v", err)
+	}
+
+	t.Setenv(managed.TrustStrictAncestorsEnv, "1")
+	repaired = false
+	if err := validateWindowsManagedHooksTeardownJournalFile(path); err == nil || repaired {
+		t.Fatalf("strict pin: err = %v, repaired = %v; want the strict refusal without repair", err, repaired)
+	}
+}
+
+// The reader parses bytes from the handle that was validated, and refuses a
+// journal that is not a single-link regular file.
+func TestReadWindowsManagedHooksTeardownJournalReadsValidatedHandle(t *testing.T) {
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, windowsManagedHooksTeardownJournalFile)
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalFile := windowsManagedHooksStrictFileCheck
+	t.Cleanup(func() { windowsManagedHooksStrictFileCheck = originalFile })
+	validated := 0
+	windowsManagedHooksStrictFileCheck = func(string, string) error {
+		validated++
+		return nil
+	}
+	// "{}" passes validation and reaches the schema layer through the handle.
+	if _, err := readWindowsManagedHooksTeardownJournal(path); err == nil ||
+		err.Error() != "managed-hook teardown journal is missing manifest_sha256" {
+		t.Fatalf("read error = %v, want the schema refusal", err)
+	}
+	if validated != 1 {
+		t.Fatalf("strict check ran %d times, want 1", validated)
+	}
+
+	if err := os.Link(path, filepath.Join(dir, "second-link.json")); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	if _, err := readWindowsManagedHooksTeardownJournal(path); err == nil {
+		t.Fatal("hard-linked teardown journal was read")
+	}
+}

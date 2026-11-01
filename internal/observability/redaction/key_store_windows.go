@@ -60,6 +60,21 @@ func loadOrCreateCorrelationKeyPlatform(dataDir string, entropy keyEntropyReader
 
 	for attempt := 0; attempt < keyInstallAttempts; attempt++ {
 		key, found, loadErr := loadExistingWindowsCorrelationKey(absolute, hooks)
+		var rotation *windowsCorrelationRotation
+		if errors.As(loadErr, &rotation) {
+			// An untrusted principal owns the key and its owner could not be
+			// restored: never keep using material that principal can read
+			// and rewrite. Retire it and install a fresh key below.
+			if err := windowsCorrelationKeyRotate(filepath.Join(absolute, correlationKeyFilename), rotation.identity); err != nil {
+				return CorrelationKey{}, keyStoreError(KeyStoreErrorUnsafeOwner)
+			}
+			managed.EmitResilienceEvent(managed.MarkerBoundary, map[string]string{
+				"object":    "redaction correlation key",
+				"principal": rotation.owner,
+				"reason":    "correlation key owned by an untrusted principal was rotated; correlation identifiers restart",
+			})
+			continue
+		}
 		if loadErr != nil {
 			return CorrelationKey{}, loadErr
 		}
@@ -274,16 +289,38 @@ func loadExistingWindowsCorrelationKey(dataDir string, hooks keyStoreHooks) (Cor
 	}
 	validate := validateWindowsCorrelationKeyHandle
 	if needsHardening {
-		if err := hardenExistingWindowsCorrelationKey(path, handle); err != nil {
+		untrustedOwner, err := windowsCorrelationUntrustedOwner(handle)
+		if err != nil {
+			return CorrelationKey{}, false, err
+		}
+		if untrustedOwner != "" {
+			// Re-stamping the DACL alone leaves an untrusted owner able to
+			// read the key and rewrite its DACL, so the owner is restored too
+			// (SeTakeOwnershipPrivilege and SeRestorePrivilege, which the
+			// LocalSystem gateway holds). If it cannot be, the key is rotated.
+			if err := windowsCorrelationOwnerRepair(path, handle); err != nil {
+				identity, infoErr := windowsCorrelationHandleInformation(handle)
+				if infoErr != nil {
+					return CorrelationKey{}, false, infoErr
+				}
+				return CorrelationKey{}, false, &windowsCorrelationRotation{owner: untrustedOwner, identity: identity}
+			}
+			managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
+				"object":    "redaction correlation key",
+				"principal": untrustedOwner,
+				"reason":    "untrusted owner of the correlation key replaced with the canonical owner",
+			})
+		} else if err := hardenExistingWindowsCorrelationKey(path, handle, false); err != nil {
 			if !windowsCorrelationHardeningFailureIsDrift(err) {
 				return CorrelationKey{}, false, err
 			}
-			// Every shape that asks for hardening is either confined to the
-			// gateway service, SYSTEM, Administrators and OWNER RIGHTS, or was
-			// already reported as a boundary finding (an untrusted owner or
-			// writer). When this process cannot re-stamp it (the gateway holds
-			// read access only), accept the drift and keep the structural
-			// checks; the guardian re-stamps the key.
+			// The owner is trusted here, and every other shape that asks for
+			// hardening is either confined to the gateway service, SYSTEM,
+			// Administrators and OWNER RIGHTS, or was already reported as a
+			// boundary finding (an untrusted writer). When this process cannot
+			// re-stamp it (the gateway holds read access only), accept the
+			// drift and keep the structural checks; a later load by a process
+			// that holds WRITE_DAC re-stamps it.
 			windowsCorrelationReportAccept("descriptor is not canonical; this process cannot re-stamp it")
 			validate = validateWindowsCorrelationKeyPhysicalHandle
 		}
@@ -306,6 +343,89 @@ func loadExistingWindowsCorrelationKey(dataDir string, hooks keyStoreHooks) (Cor
 		return CorrelationKey{}, false, err
 	}
 	return newCorrelationKey(material), true, nil
+}
+
+// windowsCorrelationRotation asks the loader to retire a key an untrusted
+// principal owns; identity pins the file that was inspected.
+type windowsCorrelationRotation struct {
+	owner    string
+	identity windows.ByHandleFileInformation
+}
+
+func (r *windowsCorrelationRotation) Error() string {
+	return "redaction correlation key is owned by untrusted principal " + r.owner
+}
+
+// windowsCorrelationUntrustedOwner returns the key's owner when it is neither
+// the expected gateway owner nor a trusted administrator principal, and ""
+// otherwise.
+func windowsCorrelationUntrustedOwner(handle windows.Handle) (string, error) {
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil || descriptor == nil {
+		return "", keyStoreError(KeyStoreErrorUnavailable)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil {
+		return "", keyStoreError(KeyStoreErrorUnsafeOwner)
+	}
+	expectedOwner, err := windowsCorrelationExpectedOwnerSID()
+	if err != nil {
+		return "", err
+	}
+	if owner.Equals(expectedOwner) || managed.IsWindowsTrustedAdminOwner(owner) || windowsCorrelationAdminEquivalent(owner) {
+		return "", nil
+	}
+	return owner.String(), nil
+}
+
+// windowsCorrelationOwnerRepair restores the canonical owner, group and DACL
+// on a key an untrusted principal owns. Overridable by tests.
+var windowsCorrelationOwnerRepair = func(path string, pinned windows.Handle) error {
+	return managed.RunWithWindowsRepairPrivileges(func() error {
+		return hardenExistingWindowsCorrelationKey(path, pinned, true)
+	})
+}
+
+// windowsCorrelationKeyRotate deletes the key file identified by identity so
+// the loader installs a fresh one. The open uses backup semantics under the
+// repair privileges, because an untrusted owner may have removed DELETE from
+// the DACL. Overridable by tests.
+var windowsCorrelationKeyRotate = func(path string, identity windows.ByHandleFileInformation) error {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return keyStoreError(KeyStoreErrorUnavailable)
+	}
+	return managed.RunWithWindowsRepairPrivileges(func() error {
+		handle, err := openWindowsCorrelationHandle(func() (windows.Handle, error) {
+			return windows.CreateFile(
+				name,
+				windows.DELETE|windows.FILE_READ_ATTRIBUTES,
+				windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE,
+				nil,
+				windows.OPEN_EXISTING,
+				windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS,
+				0,
+			)
+		}, true)
+		if err != nil {
+			return keyStoreError(KeyStoreErrorUnavailable)
+		}
+		defer func() { _ = windows.CloseHandle(handle) }()
+		current, err := windowsCorrelationHandleInformation(handle)
+		if err != nil {
+			return err
+		}
+		if !windowsCorrelationSameFile(identity, current) {
+			return keyStoreError(KeyStoreErrorUnsafeType)
+		}
+		if err := validateWindowsCorrelationKeyPhysicalHandle(handle); err != nil {
+			return err
+		}
+		if err := markWindowsCorrelationKeyForDeletion(handle); err != nil {
+			return keyStoreError(KeyStoreErrorUnavailable)
+		}
+		return nil
+	})
 }
 
 // windowsCorrelationHardeningFailureIsDrift reports a hardening failure that
@@ -466,9 +586,10 @@ func windowsCorrelationSecurityNeedsHardening(handle windows.Handle) (bool, erro
 // windowsCorrelationBoundaryAcceptable reports whether an existing key that
 // an untrusted principal owns or can write is still used. The caller has
 // already proven it is a regular, single-link, non-reparse file of the right
-// size; refusing it would stop the gateway, and the guardian re-stamps the
-// descriptor. needsHardening=true asks the loader to re-stamp it when this
-// process can, and to accept it, structure-checked, when it cannot. A freshly
+// size; refusing it would stop the gateway. needsHardening=true asks the
+// loader to repair it: an untrusted owner is replaced, or the key rotated
+// when it cannot be; an untrusted writer is re-stamped when this process can,
+// and accepted, structure-checked, when it cannot. A freshly
 // installed key goes through validateWindowsCorrelationKeyHandle, where the
 // same answer stays fatal. Strict mode keeps every deviation fatal.
 func windowsCorrelationBoundaryAcceptable() bool {
@@ -723,7 +844,10 @@ func windowsCorrelationExpectedOwnerSID() (*windows.SID, error) {
 	return expected, nil
 }
 
-func hardenExistingWindowsCorrelationKey(path string, pinned windows.Handle) error {
+// hardenExistingWindowsCorrelationKey re-stamps the canonical group and DACL
+// on the pinned key, and the canonical owner too when setOwner is set (the
+// caller then holds the repair privileges).
+func hardenExistingWindowsCorrelationKey(path string, pinned windows.Handle, setOwner bool) error {
 	pinnedInfo, err := windowsCorrelationHandleInformation(pinned)
 	if err != nil {
 		return err
@@ -763,7 +887,7 @@ func hardenExistingWindowsCorrelationKey(path string, pinned windows.Handle) err
 		return err
 	}
 	if needsHardening {
-		if err := protectWindowsCorrelationSecurity(hardening); err != nil {
+		if err := protectWindowsCorrelationSecurity(hardening, setOwner); err != nil {
 			return err
 		}
 	}
@@ -863,7 +987,7 @@ func installWindowsCorrelationKey(
 	// Install and verify the final descriptor before the destination name is
 	// published. DELETE was granted when this handle was created, so tightening
 	// the DACL does not revoke its already-authorized handle-bound rename.
-	if err := protectWindowsCorrelationSecurity(stagingHandle); err != nil {
+	if err := protectWindowsCorrelationSecurity(stagingHandle, false); err != nil {
 		return false, err
 	}
 	if err := validateWindowsCorrelationKeyHandle(stagingHandle); err != nil {
@@ -1136,7 +1260,10 @@ func validateWindowsCorrelationStagingSecurity(handle windows.Handle) error {
 	return nil
 }
 
-func protectWindowsCorrelationSecurity(handle windows.Handle) error {
+// protectWindowsCorrelationSecurity stamps the canonical group and protected
+// DACL on handle, and the canonical owner when setOwner is set. Setting an
+// owner other than the caller needs SeRestorePrivilege.
+func protectWindowsCorrelationSecurity(handle windows.Handle, setOwner bool) error {
 	descriptor, err := windowsCorrelationProtectedSecurityDescriptor()
 	if err != nil {
 		return keyStoreError(KeyStoreErrorUnsafePermissions)
@@ -1149,11 +1276,22 @@ func protectWindowsCorrelationSecurity(handle windows.Handle) error {
 	if err != nil || group == nil {
 		return keyStoreError(KeyStoreErrorUnsafePermissions)
 	}
+	information := windows.SECURITY_INFORMATION(
+		windows.GROUP_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION,
+	)
+	var owner *windows.SID
+	if setOwner {
+		owner, _, err = descriptor.Owner()
+		if err != nil || owner == nil {
+			return keyStoreError(KeyStoreErrorUnsafeOwner)
+		}
+		information |= windows.OWNER_SECURITY_INFORMATION
+	}
 	if err := windows.SetSecurityInfo(
 		handle,
 		windows.SE_FILE_OBJECT,
-		windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
+		information,
+		owner,
 		group,
 		dacl,
 		nil,
