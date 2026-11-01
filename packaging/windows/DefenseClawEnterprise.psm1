@@ -22316,36 +22316,48 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
     }
     $rebound = $false
     # The whole wait, the enumerator restart included, stays within the wait
-    # budget, and each check gets only the time left (at least 30 s). A
-    # failed restart never leaves the enumerator stopped, and the refusal
-    # given back is the first one.
+    # budget, and each check gets only the time left (at least 30 s). The
+    # enumerator is restarted once, on the first deleted-account refusal,
+    # whether that is the first refusal or one met inside the wait. A failed
+    # restart never leaves the enumerator stopped. The refusal given back at
+    # the deadline is the last deleted-account one, or the first refusal when
+    # no deleted account was seen.
     $deadline = [DateTime]::UtcNow.AddSeconds($script:UninstallDeletedAccountWaitSeconds)
-    if ($deletedAccount) {
-        $enumerator = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
-        if (-not (Test-DefenseClawServiceExists -Name $enumerator)) {
-            throw $refusal
-        }
-        Write-DefenseClawLifecyclePhase -Stage 'deleted enrolled account: running a hook enumerator pass before the uninstall'
-        try {
-            Stop-DefenseClawService -Name $enumerator
-        }
-        finally {
-            try {
-                Start-DefenseClawService -Name $enumerator
-            }
-            catch {
-                Write-DefenseClawLifecyclePhase -Stage "hook enumerator restart failed: $($_.Exception.Message)"
-            }
-        }
-    }
-    else {
+    $restartEnumerator = $deletedAccount
+    $enumeratorRestarted = $false
+    if (-not $deletedAccount) {
         # rel-1-0-6:GAP-0319: the enumerator pass already ran between the
         # lifecycle's own rebinding and this check (or the guardian had not
         # adopted its manifest yet), so the first refusal is the stale
         # binding itself. Rebind and ask again within the same wait.
         Write-DefenseClawLifecyclePhase -Stage 'hook targets changed since the activation evidence was bound: waiting for the guardian to adopt them before the uninstall'
     }
-    while ([DateTime]::UtcNow -lt $deadline) {
+    while ($true) {
+        if ($restartEnumerator -and -not $enumeratorRestarted) {
+            # rel-1-0-6:GAP-0450: also when the deleted-account refusal comes
+            # only after a stale-binding one, or the wait would rest on the
+            # scheduled pass and could give the refusal back after the budget.
+            $enumeratorRestarted = $true
+            $enumerator = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+            if (-not (Test-DefenseClawServiceExists -Name $enumerator)) {
+                throw $refusal
+            }
+            Write-DefenseClawLifecyclePhase -Stage 'deleted enrolled account: running a hook enumerator pass before the uninstall'
+            try {
+                Stop-DefenseClawService -Name $enumerator
+            }
+            finally {
+                try {
+                    Start-DefenseClawService -Name $enumerator
+                }
+                catch {
+                    Write-DefenseClawLifecyclePhase -Stage "hook enumerator restart failed: $($_.Exception.Message)"
+                }
+            }
+        }
+        if (-not ([DateTime]::UtcNow -lt $deadline)) {
+            break
+        }
         Microsoft.PowerShell.Utility\Start-Sleep -Seconds $script:UninstallDeletedAccountPollSeconds
         $left = [int][Math]::Max(30, ($deadline - [DateTime]::UtcNow).TotalSeconds)
         try {
@@ -22353,7 +22365,7 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName) {
                 $rebound = $true
-                Write-DefenseClawLifecyclePhase -Stage 'deleted enrolled account: activation evidence rebound to the targets.yaml the guardian adopted'
+                Write-DefenseClawLifecyclePhase -Stage 'hook targets changed: activation evidence rebound to the targets.yaml the guardian adopted'
             }
             [void](Invoke-DefenseClawManagedHooksTeardownCommand `
                 -Layout $Layout `
@@ -22366,14 +22378,16 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
         catch {
             $message = $_.Exception.Message
             if (Test-DefenseClawManifestCatchUpTeardownRefusal -Message $message) {
-                # The enumerator's new manifest is not adopted yet; the
-                # refusal given back at the end stays the deleted-account one.
+                # The enumerator's new manifest is not adopted yet. This
+                # in-between refusal never replaces the one kept for the
+                # deadline (the first refusal or the last deleted-account one).
                 continue
             }
             if (-not (Test-DefenseClawDeletedAccountTeardownRefusal -Message $message)) {
                 throw
             }
             $refusal = $_
+            $restartEnumerator = $true
         }
     }
     throw $refusal

@@ -1426,7 +1426,8 @@ $script:checks = [Collections.Generic.Queue[string]]::new()
 $script:syncs = [Collections.Generic.Queue[string]]::new()
 function Write-DefenseClawLifecyclePhase { param($Stage) $script:log.Add("phase: $Stage") }
 function Get-DefenseClawEnumeratorServiceName { param($GuardianServiceName) return 'Enum' }
-function Test-DefenseClawServiceExists { param($Name) return $true }
+$script:enumeratorExists = $true
+function Test-DefenseClawServiceExists { param($Name) return $script:enumeratorExists }
 function Stop-DefenseClawService { param($Name) $script:log.Add("stop $Name") }
 function Start-DefenseClawService { param($Name) $script:log.Add("start $Name") }
 function Invoke-DefenseClawManagedHooksTeardownCommand {
@@ -1476,7 +1477,7 @@ if ($result -cne 'passed') { throw "catch-up states were not asked again: $resul
 if ($script:rebound -ne $true) { throw 'the check did not report that it rebound the activation evidence' }
 $order = $script:log -join ' | '
 if ($order -notmatch 'stop Enum \| start Enum') { throw "the enumerator was not restarted: $order" }
-if ($order -notmatch 'sync rebound \| phase: deleted enrolled account: activation evidence rebound') { throw "the rebinding was not reported: $order" }
+if ($order -notmatch 'sync rebound \| phase: hook targets changed: activation evidence rebound') { throw "the rebinding was not reported: $order" }
 if (@($script:log | Where-Object { $_ -like 'sync *' }).Count -ne 4) { throw "sync did not run in every wait round: $order" }
 # The stale binding after the guardian adopted the manifest: rebound, then passes.
 $result = Invoke-Case @($deleted, $stale, 'ok') @('same', 'rebound')
@@ -1509,11 +1510,49 @@ if ($result -notlike 'refused: *no longer exists*') { throw "the deadline did no
 """)
 
 
+
+def test_uninstall_restarts_the_enumerator_on_a_later_deleted_account(tmp_path) -> None:
+    # rel-1-0-6:GAP-0450: when the first refusal is the stale binding and a
+    # deleted-account refusal comes only inside the wait, the enumerator is
+    # still restarted (once), instead of the wait resting on the scheduled pass.
+    _run_lifecycle_functions(tmp_path, [
+        "Test-DefenseClawDeletedAccountTeardownRefusal",
+        "Test-DefenseClawManifestCatchUpTeardownRefusal",
+        "Invoke-DefenseClawUninstallPrecommitHookCheck",
+    ], _PURGE_DELETED_ACCOUNT_HARNESS + r"""
+$stale = 'managed-hook teardown check failed: protected managed-hook activation evidence does not match the current manifest'
+$result = Invoke-Case @($stale, $deleted, $deleted, 'ok') @()
+$order = $script:log -join ' | '
+if ($result -cne 'passed') { throw "a later deleted account did not pass: $result / $order" }
+if ($order -notmatch "check $([regex]::Escape($deleted)) \| phase: deleted enrolled account: running a hook enumerator pass before the uninstall \| stop Enum \| start Enum") { throw "the enumerator was not restarted on the later deleted-account refusal: $order" }
+if (@($script:log | Where-Object { $_ -ceq 'stop Enum' }).Count -ne 1) { throw "the enumerator was restarted more than once: $order" }
+# A deleted account first: one restart, not one per deleted-account refusal.
+$result = Invoke-Case @($deleted, $deleted, $deleted, 'ok') @()
+if ($result -cne 'passed' -or @($script:log | Where-Object { $_ -ceq 'stop Enum' }).Count -ne 1) { throw "a first deleted account was not restarted exactly once: $result / $($script:log -join ' | ')" }
+# A stale binding that clears without a deleted account: no restart.
+$result = Invoke-Case @($stale, $stale, 'ok') @()
+if ($result -cne 'passed' -or ($script:log -join '|') -match 'stop Enum') { throw "a stale binding alone restarted the enumerator: $result" }
+# No enumerator service: the later deleted-account refusal comes back at once.
+$script:enumeratorExists = $false
+$result = Invoke-Case @($stale, $deleted, 'ok') @()
+$script:enumeratorExists = $true
+if ($result -notlike 'refused: *no longer exists*' -or ($script:log -join '|') -match 'stop Enum') { throw "a later deleted account without an enumerator was not refused at once: $result / $($script:log -join ' | ')" }
+# Still listed at the deadline after the later restart: the deleted-account refusal comes back.
+$script:UninstallDeletedAccountWaitSeconds = 1
+$script:UninstallDeletedAccountPollSeconds = 1
+$result = Invoke-Case @($stale, $deleted, $deleted, $deleted, $deleted) @()
+if ($result -notlike 'refused: *no longer exists*' -or @($script:log | Where-Object { $_ -ceq 'stop Enum' }).Count -ne 1) { throw "the deadline after a later restart did not give back the deleted-account refusal: $result / $($script:log -join ' | ')" }
+""")
+
+
 def test_uninstall_precommit_wait_rebinds_like_the_lifecycle() -> None:
     module = _text(MODULE)
     check = _function_body(module, "Invoke-DefenseClawUninstallPrecommitHookCheck")
     assert check.index("Sync-DefenseClawStandaloneManagedHooksActivationBinding") < check.index("-TimeoutSeconds $left")
     assert "Test-DefenseClawManifestCatchUpTeardownRefusal -Message $message" in check
+    # rel-1-0-6:GAP-0450: a deleted-account refusal inside the wait asks for the one restart.
+    assert check.index("Stop-DefenseClawService -Name $enumerator") > check.index("while ($true) {")
+    assert "$restartEnumerator = $true" in check
     assert "$script:UninstallDeletedAccountWaitSeconds = 180" in module
     # The tombstone is written from metadata read after a rebinding check.
     uninstall = _function_body(module, "Invoke-DefenseClawUninstallLifecycle")

@@ -787,6 +787,9 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
   enumerator, which drops the account's rows, waits up to three minutes for the guardian to take the new
   `targets.yaml`, and then goes on. No `/repair` is needed. If the rows are still listed after the wait,
   nothing was removed: run the uninstall again a few minutes later.
+  When the enumerator's scheduled pass already dropped the rows just before the uninstall, the uninstall
+  starts the same wait without a restart, and restarts the enumerator once if it then still finds the
+  deleted account.
 - **Sandboxes (Linux and macOS).** The uninstall stops the sandbox daemon and OpenShell gateway of
   each account. On Linux, `apt remove`, `dnf remove` and `rpm -e` also stop the sandbox user units
   in the user manager of every signed-in account before the package's files go. When a user manager
