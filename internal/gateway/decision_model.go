@@ -244,13 +244,18 @@ func (d *decisionModel) record(failed bool, now time.Time) string {
 		return line
 	}
 	d.failures++
+	decider := "the LLM judge decides this call as before"
+	alone := "the LLM judge decides alone"
+	if d.alone {
+		decider, alone = "no LLM judge follows, so the rule verdict stands", "the rule verdicts stand"
+	}
 	switch {
 	case d.failures == 1:
-		return "decision model unavailable; the LLM judge decides this call as before"
+		return "decision model unavailable; " + decider
 	case d.failures >= decisionBreakerFailures:
 		d.openUntil = now.Add(decisionBreakerCooldown)
 		if d.failures == decisionBreakerFailures {
-			return fmt.Sprintf("decision model failed %d times in a row; skipping it for %s, the LLM judge decides alone", d.failures, decisionBreakerCooldown)
+			return fmt.Sprintf("decision model failed %d times in a row; skipping it for %s, %s", d.failures, decisionBreakerCooldown, alone)
 		}
 	}
 	return ""
@@ -503,7 +508,7 @@ func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample 
 	res := dm.decide(ctx, j.takeDecisionState(sample, toolName, args))
 	if res.failure != "" {
 		if res.logLine != "" {
-			fmt.Fprintf(os.Stderr, "[guardrail] %s (%s); no LLM judge, the rule verdict stands\n", res.logLine, res.failureCause)
+			fmt.Fprintf(os.Stderr, "[guardrail] %s (%s)\n", res.logLine, res.failureCause)
 		}
 		if !res.skipped {
 			emitDecisionModel(ctx, dm.model, toolName, args, res, nil)
