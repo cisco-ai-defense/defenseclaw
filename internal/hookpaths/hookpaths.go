@@ -62,6 +62,14 @@ const ProtectedTargetDecision = "protected-target"
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
 const SourceLinkFactPrefix = "\x00source-link:"
 
+// TarPlainFactPrefix keys the hook client's reading of a tar archive a
+// command extracts: "1" when it read every member and each is a regular
+// file or a directory with a relative name and no .. component, so the
+// extraction makes no link (tarArchiveHoldsNoLink). A gateway that cannot
+// read the archive itself reads the extraction on this fact; a missing
+// fact keeps the opaque extraction scope (rel-1-0-6:GAP-0339).
+const TarPlainFactPrefix = "\x00tar-plain:"
+
 // CdEnterableFactPrefix keys the hook client's check that the directory a
 // leading cd names exists and that the user may enter it (search
 // permission). "1" is the only value. A gateway that cannot search the
@@ -1844,6 +1852,10 @@ func Decode(value string) (map[string]string, bool) {
 		if strings.HasPrefix(key, SourceLinkFactPrefix) && (value != "0" && value != "1" && value != "?") {
 			return nil, false
 		}
+		if strings.HasPrefix(key, TarPlainFactPrefix) &&
+			(value != "1" || !filepath.IsAbs(strings.TrimPrefix(key, TarPlainFactPrefix))) {
+			return nil, false
+		}
 		if strings.HasPrefix(key, CdEnterableFactPrefix) &&
 			(value != "1" || !filepath.IsAbs(strings.TrimPrefix(key, CdEnterableFactPrefix))) {
 			return nil, false
@@ -2813,7 +2825,8 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					// An option supplied at runtime may select extraction.
 					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 				}
-				if archiveMayLink(program, words[1:], static[1:]) {
+				if archiveMayLink(program, words[1:], static[1:]) &&
+					!tarArchiveHoldsNoLink(program, words[1:], static[1:], dir, command, facts, record) {
 					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 				}
 				if archiveCopiesLinks(program, words[1:], static[1:]) {
