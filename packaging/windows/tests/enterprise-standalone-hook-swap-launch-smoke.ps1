@@ -11,7 +11,8 @@
 # replaces it with another build many times: every start must succeed, the
 # last build must be in place, and the swap must leave no staging copy. A
 # backup of a build a started process still runs may stay (Windows deletes it
-# at the next restart). Runs elevated in a disposable directory under Windows
+# at the next restart). On a file with the protected InstallFile DACL the swap
+# leaves the same owner, group and DACL as File.Replace. Runs elevated in a disposable directory under Windows
 # PowerShell 5.1 and PowerShell 7; no service or machine root is touched.
 
 [CmdletBinding()]
@@ -183,6 +184,41 @@ try {
             foreach ($left in @(Remove-DefenseClawStaleReplacementBackups -Destination $hook)) {
                 $failures.Add("a backup no process runs could not be removed: $left")
             }
+            # Installed bin programs carry a protected DACL (InstallFile).
+            # The swap must leave the same owner, group and DACL as the
+            # File.Replace it replaces would, on a protected file too.
+            $protectedBin = [IO.Path]::Combine($Root, 'bin-protected')
+            [void][IO.Directory]::CreateDirectory($protectedBin)
+            $installFileSddl = 'O:BAG:SYD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)'
+            $swappedHook = [IO.Path]::Combine($protectedBin, 'defenseclaw-hook.exe')
+            $replacedHook = [IO.Path]::Combine($protectedBin, 'replaced-hook.exe')
+            foreach ($path in @($swappedHook, $replacedHook)) {
+                [IO.File]::Copy($builds[0], $path)
+                $security = [Security.AccessControl.FileSecurity]::new()
+                $security.SetSecurityDescriptorSddlForm($installFileSddl)
+                Microsoft.PowerShell.Security\Set-Acl -LiteralPath $path -AclObject $security
+            }
+            $sections = [Security.AccessControl.AccessControlSections]'Owner, Group, Access'
+            $want = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $builds[1] -Algorithm SHA256).Hash
+            Install-DefenseClawFileAtomic -Source $builds[1] -Destination $swappedHook -ExpectedSHA256 $want
+            $replacement = [IO.Path]::Combine($protectedBin, 'replaced-hook.exe.new')
+            $replacedBackup = [IO.Path]::Combine($protectedBin, 'replaced-hook.exe.old')
+            [IO.File]::Copy($builds[1], $replacement)
+            [IO.File]::Replace($replacement, $replacedHook, $replacedBackup, $true)
+            [IO.File]::Delete($replacedBackup)
+            $swappedSddl = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $swappedHook).GetSecurityDescriptorSddlForm($sections)
+            $replacedSddl = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $replacedHook).GetSecurityDescriptorSddlForm($sections)
+            if ($swappedSddl -cne $replacedSddl) {
+                $failures.Add("on a protected file the swap left $swappedSddl, File.Replace $replacedSddl")
+            }
+            $swappedDacl = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $swappedHook).GetSecurityDescriptorSddlForm('Access')
+            if ($swappedDacl -cne 'D:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)') {
+                $failures.Add("the swap changed the protected DACL to $swappedDacl")
+            }
+            if ((Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $swappedHook -Algorithm SHA256).Hash -cne $want) {
+                $failures.Add('the protected swap did not publish the new build')
+            }
+            Microsoft.PowerShell.Utility\Write-Output ("protected: swap {0} File.Replace {1}" -f $swappedSddl, $replacedSddl)
             Microsoft.PowerShell.Utility\Write-Output ("starts={0} swaps={1}" -f $starter.Starts, $Swaps)
         }
         finally {

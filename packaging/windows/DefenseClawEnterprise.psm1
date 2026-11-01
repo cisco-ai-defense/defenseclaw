@@ -1528,7 +1528,7 @@ namespace $nativeNamespace
         // step. Windows refuses to remove the last name of a running image,
         // but the old file keeps the backup name, so the rename does not
         // wait for running hook processes. Returns "" on success, otherwise
-        // "<stage>:<win32 error>" with stage dacl, link or rename; nothing
+        // "<stage>:<win32 error>" with stage dacl, open, link or rename; nothing
         // changed then (a backup link made for the attempt is removed, or
         // ";backup-kept" is added when it could not be).
         public static string SwapLaunchableFile(string replacement, string destination, string backup)
@@ -1583,7 +1583,7 @@ namespace $nativeNamespace
                     FILE_SHARE_READ | FILE_SHARE_DELETE,
                     IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
                 if (file == invalid)
-                    return "rename:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    return "open:" + Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture);
                 try
                 {
                     uint information = DACL_SECURITY_INFORMATION |
@@ -6757,11 +6757,14 @@ function Install-DefenseClawFileAtomic {
             }
         }
         if ([IO.File]::Exists($Destination)) {
-            # Move-Item -Force does not reliably replace an existing file on
-            # Windows PowerShell 5.1. File.Replace requires a non-empty backup
-            # path on both .NET Framework and modern .NET. Keep the prior file
-            # beside the protected destination until the replacement hash is
-            # verified, then retire only that unique recovery artifact.
+            # Standalone swaps the file in one step and keeps the prior file
+            # as a second name, the backup (GAP-0240). Secure Client, and a
+            # standalone volume that refuses that swap, use File.Replace
+            # (Move-Item -Force does not reliably replace an existing file on
+            # Windows PowerShell 5.1), which needs a non-empty backup path on
+            # both .NET Framework and modern .NET. Either way the prior file
+            # stays beside the protected destination until the replacement
+            # hash is verified; then only that unique backup is retired.
             $backup = "$Destination.backup.$([Guid]::NewGuid().ToString('N'))"
             Assert-DefenseClawNoReparsePath -Path $backup -AllowMissingLeaf
             if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $backup) {
@@ -6884,9 +6887,13 @@ function Invoke-DefenseClawLaunchableFileSwap {
         restart-required ensures on 1.0.7 b3547e66a9). Returns $true once
         the new file is in place. Returns $false, with nothing changed, when
         the volume or a filter driver refuses hard links or the POSIX rename;
-        the caller then uses File.Replace as before. A sharing or access
-        refusal (an antivirus scan holding the file without delete sharing)
-        is retried for 30 s and then thrown as an IOException.
+        the caller then uses File.Replace as before, and the lifecycle log
+        names the file and the refusal (GAP-0369: that host keeps the
+        pre-1.0.7 window). A sharing or access refusal (an antivirus scan
+        holding the file without delete sharing) is retried for 30 s and then
+        thrown as an IOException. A backup link the swap could not remove is
+        thrown as an InvalidOperationException, so the caller does not report
+        it as a file another program holds open.
     #>
     param(
         [Parameter(Mandatory)][string]$Temporary,
@@ -6901,14 +6908,16 @@ function Invoke-DefenseClawLaunchableFileSwap {
             return $true
         }
         if ($result.EndsWith(';backup-kept')) {
-            throw [IO.IOException]::new("the replacement of $Destination failed ($result) and its backup name $Backup could not be removed")
+            throw [InvalidOperationException]::new("the replacement of $Destination failed ($result) and its backup name $Backup could not be removed; the next Setup run removes it")
         }
         $stage, $code = $result.Split(':', 2)
         $refused = ($result -ceq 'dacl:null') -or
             ($stage -ceq 'link' -and $code -in @('1', '17', '50', '1142')) -or
             ($stage -ceq 'rename' -and $code -in @('1', '50', '87'))
         if ($refused) {
-            Microsoft.PowerShell.Utility\Write-Verbose "launchable swap refused for ${Destination} (${result}); using File.Replace"
+            Write-DefenseClawLifecyclePhase -Stage (
+                "one-step swap refused for $Destination ($result); replacing it with File.Replace, " +
+                'so an agent starting it in that moment can get an error (GAP-0369)')
             return $false
         }
         $transient = $code -in @('5', '32', '33')
