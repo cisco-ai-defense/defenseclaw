@@ -2061,3 +2061,37 @@ func TestRetentionInsertTriggerFormFollowsTheStoreOnEveryOpen(t *testing.T) {
 		}
 	}
 }
+
+// The retention migration installs the store's own trigger form, so a
+// Secure Client store never carries the bound form, not even between the
+// migration and Init (REVIEW-auditwal.md finding 2).
+func TestRetentionMigrationInstallsTheStoresTriggerForm(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	spec, found := retentionTimestampSpecForTable("audit_events")
+	if !found {
+		t.Fatal("audit_events retention timestamp spec is missing")
+	}
+	for _, secureClient := range []bool{true, false, true} {
+		tx, err := store.db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := migrateRetentionTimestampUnixNano(storeMigrationTx{Tx: tx, secureClient: secureClient}); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		var actual string
+		if err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name='retention_audit_events_timestamp_insert'`).Scan(&actual); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		_, _, want, _ := retentionTimestampTriggerDDL(spec, !secureClient)
+		if actual != want {
+			t.Fatalf("secure client %t: the migration installed\n%s\nwant\n%s", secureClient, actual, want)
+		}
+	}
+}

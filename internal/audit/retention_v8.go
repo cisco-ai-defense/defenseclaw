@@ -1458,6 +1458,14 @@ func materializeRetentionACKBaselines(
 }
 
 func migrateRetentionTimestampUnixNano(ex dbExecer) error {
+	// The store's form (storeMigrationTx): bound outside Secure Client,
+	// main's on a Secure Client store, which therefore never carries the
+	// bound trigger, not even until Init. An executor that does not say
+	// gets main's form; Init then installs the store's.
+	bound := false
+	if form, ok := ex.(interface{ secureClientMigration() bool }); ok {
+		bound = !form.secureClientMigration()
+	}
 	for _, spec := range retentionTimestampRegistry {
 		present, err := tableExists(ex, spec.table)
 		if err != nil {
@@ -1483,11 +1491,9 @@ func migrateRetentionTimestampUnixNano(ex dbExecer) error {
 		)); err != nil {
 			return fmt.Errorf("create exact retention timestamp index: %w", err)
 		}
-		// The migration installs the bound form; Init then installs the
-		// store's (ensureRetentionTimestampInfrastructure: main's on a
-		// Secure Client store). Installing the same form again frees no
-		// schema page, so the purge's VACUUM leaves no free page behind.
-		if err := installRetentionTimestampTriggers(ex, spec, true); err != nil {
+		// Installing the store's form here means Init finds it in place and
+		// writes no schema, so the purge's VACUUM leaves no free page behind.
+		if err := installRetentionTimestampTriggers(ex, spec, bound); err != nil {
 			return err
 		}
 	}
@@ -1505,7 +1511,9 @@ func installRetentionTimestampTriggers(ex dbExecer, spec retentionTimestampSpec,
 	}{{insertTrigger, insertSQL}, {updateTrigger, updateSQL}} {
 		var actual string
 		err := ex.QueryRow(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, trigger.name).Scan(&actual)
-		if errors.Is(err, sql.ErrNoRows) || (err == nil && normalizeSQLiteDDL(actual) != normalizeSQLiteDDL(trigger.sql)) {
+		// Exact text: the store wrote it, so anything else (also a change
+		// of whitespace inside a literal) is replaced.
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && actual != trigger.sql) {
 			installed = false
 			break
 		}

@@ -2445,6 +2445,16 @@ func (s *Store) proveDurableWrite(ctx context.Context) error {
 // applyMigration runs a single migration inside a transaction so that both the
 // DDL and the schema_version bump are atomic. On failure the transaction is
 // rolled back and the version remains unchanged, making retries safe.
+// storeMigrationTx is the transaction a store's migration runs in; it tells a
+// migration that installs a schema object whose form depends on the store
+// (the retention insert trigger) which form this store keeps.
+type storeMigrationTx struct {
+	*sql.Tx
+	secureClient bool
+}
+
+func (tx storeMigrationTx) secureClientMigration() bool { return tx.secureClient }
+
 func (s *Store) applyMigration(ver int, m migration) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -2452,7 +2462,7 @@ func (s *Store) applyMigration(ver int, m migration) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	if err := m.apply(tx); err != nil {
+	if err := m.apply(storeMigrationTx{Tx: tx, secureClient: s.secureClientSchema}); err != nil {
 		return fmt.Errorf("audit: migration %d (%s): %w", ver, m.description, err)
 	}
 	if _, err := txExecContextObserved(context.Background(), tx, "migration_version_insert", s.sqliteBusyObservabilityV8(), `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
