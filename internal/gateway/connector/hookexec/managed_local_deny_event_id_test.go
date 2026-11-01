@@ -56,17 +56,33 @@ func TestManagedLocalDenyNamesTheEventIDOfItsRecord(t *testing.T) {
 			}
 		}
 	}
-	// No diagnostic directory: no row, so no id is named.
-	missing := filepath.Join(t.TempDir(), "absent")
-	r := run(t, "claudecode", &stubRT{err: errManagedGatewayNotRunning}, func(opts *Options) {
-		opts.ManagedEnterprise = true
-		opts.ManagedStandalone = true
-		opts.ManagedUnixSocket = "/not-used-by-stub/hook.sock"
-		opts.FailMode = "closed"
-		opts.FailureLogHome = func() string { return missing }
-	})
-	if !blocked(r) || strings.Contains(r.stdout+r.stderr, "event_id=") {
-		t.Fatalf("a call without a written row named an event id: %+v", r)
+	// No diagnostic directory (rel-1-0-6 GAP-0297): the refusal still gets an
+	// event id, the answer says no row holds it, and the hook creates no
+	// folder (not the DefenseClaw folder and not its logs).
+	for _, name := range []string{"absent", "absent/nested"} {
+		resolved := filepath.Join(t.TempDir(), name)
+		r := run(t, "claudecode", &stubRT{err: errManagedGatewayNotRunning}, func(opts *Options) {
+			opts.ManagedEnterprise = true
+			opts.ManagedStandalone = true
+			opts.ManagedUnixSocket = "/not-used-by-stub/hook.sock"
+			opts.FailMode = "closed"
+			opts.FailureLogHome = func() string { return resolved }
+		})
+		var id string
+		for _, line := range strings.Split(r.stderr, "\n") {
+			if rest, ok := strings.CutPrefix(line, "defenseclaw: event_id="); ok {
+				id, _, _ = strings.Cut(rest, ":")
+			}
+		}
+		if parsed, err := uuid.Parse(id); err != nil || parsed.Version() != 7 {
+			t.Fatalf("%s: no UUIDv7 event id named (%q): %+v", name, id, r)
+		}
+		if !blocked(r) || !strings.Contains(r.stderr, "not recorded on this computer") {
+			t.Fatalf("%s: the answer must block and say no row holds the id: %+v", name, r)
+		}
+		if _, err := os.Stat(resolved); err == nil {
+			t.Fatalf("%s: the hook created %s", name, resolved)
+		}
 	}
 }
 

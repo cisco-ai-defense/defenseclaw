@@ -275,20 +275,25 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 	if home == "" {
 		return
 	}
+	eventID := managedLocalDenyEventID(opts, outcome)
 	// Never create the DefenseClaw folder for a log line: a managed hook whose
 	// protected folder was missing recreated it here, user-owned with the
 	// profile's inherited access control, and the next event's hook found a
 	// folder and no longer said it was missing (GAP-0154, rel-1-0-4
-	// GAP-0593). A managed account with no such folder writes no row.
-	// Mkdir creates only logs, so a purge that removes the folder while the
-	// call runs is not undone either (GAP-0654).
+	// GAP-0593). A managed account with no such folder writes no row; its
+	// refusal still gets an event id, which the answer names with the reason
+	// no row holds it (noteUnrecordedLocalDeny). Mkdir creates only logs, so
+	// a purge that removes the folder while the call runs is not undone
+	// either (GAP-0654).
 	if info, err := os.Stat(home); err != nil || !info.IsDir() {
+		noteUnrecordedLocalDeny(opts, eventID, "this account has no DefenseClaw folder")
 		return
 	}
 	failMode = loggedFailMode(opts, sp, failMode)
 	sessionID, callID := hookFailureCorrelation(opts.failurePayload)
 	logDir := filepath.Join(home, "logs")
 	if err := os.Mkdir(logDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		noteUnrecordedLocalDeny(opts, eventID, "the account's log folder cannot be created")
 		return
 	}
 	entry := struct {
@@ -319,7 +324,7 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		Category:  category,
 		FailMode:  failMode,
 		Outcome:   outcome,
-		EventID:   managedLocalDenyEventID(opts, outcome),
+		EventID:   eventID,
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {
@@ -328,6 +333,7 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 	f, err := os.OpenFile(filepath.Join(logDir, "hook-failures.jsonl"),
 		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
+		noteUnrecordedLocalDeny(opts, eventID, "the account's hook-failure log cannot be opened")
 		return
 	}
 	defer f.Close()
@@ -338,6 +344,20 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		fmt.Fprintf(opts.Stderr, "defenseclaw: event_id=%s: this refusal is recorded in %s\n",
 			entry.EventID, filepath.Join(logDir, "hook-failures.jsonl"))
 	}
+}
+
+// noteUnrecordedLocalDeny names the event id of a managed refusal that no
+// hook-failures row holds: the account has no DefenseClaw folder (the hook
+// never creates one, and as the invoking user it has no machine-owned place
+// to write), so the id is the one thing the user can quote and the answer
+// says plainly that no local record exists (rel-1-0-6 GAP-0297, mgmt-p1
+// GAP-0134). The line keeps the "defenseclaw: event_id=" prefix of the
+// recorded form.
+func noteUnrecordedLocalDeny(opts Options, eventID, why string) {
+	if eventID == "" || opts.Stderr == nil {
+		return
+	}
+	fmt.Fprintf(opts.Stderr, "defenseclaw: event_id=%s: this refusal is not recorded on this computer (%s); quote the id to your administrator\n", eventID, why)
 }
 
 // managedLocalDenyEventID is a new event id for a managed call the hook
