@@ -294,8 +294,9 @@ def test_hermes_user_memory_copy_is_flagged(tmp_path):
     ]
 
 
-# GAP-1312: a plain rebinding of the name hides the path only under the strict
-# rule of PySource._rebinding_hides. The cases match
+# GAP-1312: a plain rebinding of the name hides the path only in a file that
+# passes PySource._file_allows_rebinding and under the strict rule of
+# PySource._rebinding_hides. The cases match
 # TestPythonPathWriteMatchRebindingMustDominateTheWrite (internal/guardrail).
 _REBINDING_CASES = [
     (
@@ -304,58 +305,63 @@ _REBINDING_CASES = [
         False,
     ),
     (
-        "rebound in a function",
-        'def f():\n    target = Path("MEMORY.md")\n    target = Path("safe.txt")\n    with open(target, "a") as fh:\n        fh.write("x")\n',
+        "rebound before open append",
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\ntarget = Path("safe.txt")\nwith open(target, "a") as fh:\n    fh.write("x")\n',
         False,
     ),
     (
         "written in a block the rebinding dominates",
-        'target = Path("MEMORY.md")\ntarget = Path("safe.txt")\nif ok:\n    target.write_text("hello")\n',
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\ntarget = Path("safe.txt")\nif ok:\n    target.write_text("hello")\n',
+        False,
+    ),
+    (
+        "rebound to a string",
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\ntarget = "safe.txt"\nopen(target, "w").write("x")\n',
         False,
     ),
     (
         "written before the rebinding",
-        'target = Path("MEMORY.md")\ntarget.write_text("hello")\ntarget = Path("safe.txt")\n',
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\ntarget.write_text("hello")\ntarget = Path("safe.txt")\n',
         True,
     ),
     (
         "rebound only in a nested branch",
-        'target = Path("MEMORY.md")\nif other:\n    target = Path("safe.txt")\ntarget.write_text("hello")\n',
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\nif other:\n    target = Path("safe.txt")\ntarget.write_text("hello")\n',
         True,
     ),
     (
         "rebound in the else branch",
-        'if c:\n    target = Path.home() / ".claude" / "MEMORY.md"\nelse:\n    target = Path("notes.txt")\ntarget.write_text(x)\n',
+        'from pathlib import Path\nif c:\n    target = Path.home() / ".claude" / "MEMORY.md"\nelse:\n    target = Path("notes.txt")\ntarget.write_text(x)\n',
         True,
     ),
     (
         "rebound in the elif branch",
-        'if c:\n    target = Path("MEMORY.md")\nelif d:\n    target = Path("notes.txt")\ntarget.write_text(x)\n',
+        'from pathlib import Path\nif c:\n    target = Path("MEMORY.md")\nelif d:\n    target = Path("notes.txt")\ntarget.write_text(x)\n',
         True,
     ),
     (
         "dead rebinding before except",
-        'try:\n    target = Path("MEMORY.md")\n    raise E\n    target = Path("safe.txt")\nexcept E:\n    target.write_text(x)\n',
+        'from pathlib import Path\ntry:\n    target = Path("MEMORY.md")\n    raise E\n    target = Path("safe.txt")\nexcept E:\n    target.write_text(x)\n',
         True,
     ),
     (
         "written in finally",
-        'try:\n    target = Path("MEMORY.md")\n    risky()\n    target = Path("safe.txt")\nfinally:\n    target.write_text(x)\n',
+        'from pathlib import Path\ntry:\n    target = Path("MEMORY.md")\n    risky()\n    target = Path("safe.txt")\nfinally:\n    target.write_text(x)\n',
         True,
     ),
     (
         "rebound in the for else",
-        'for item in items:\n    target = Path("MEMORY.md")\n    break\nelse:\n    target = Path("safe.txt")\ntarget.write_text(x)\n',
+        'from pathlib import Path\nfor item in items:\n    target = Path("MEMORY.md")\n    break\nelse:\n    target = Path("safe.txt")\ntarget.write_text(x)\n',
         True,
     ),
     (
         "loop body rebinding after a break",
-        'while True:\n    target = Path("MEMORY.md")\n    if done:\n        break\n    target = Path("safe.txt")\ntarget.write_text(x)\n',
+        'from pathlib import Path\nwhile True:\n    target = Path("MEMORY.md")\n    if done:\n        break\n    target = Path("safe.txt")\ntarget.write_text(x)\n',
         True,
     ),
     (
         "rebound in another match case",
-        'match mode:\n    case "m":\n        target = Path("MEMORY.md")\n    case _:\n        target = Path("safe.txt")\ntarget.write_text(x)\n',
+        'from pathlib import Path\nmatch mode:\n    case "m":\n        target = Path("MEMORY.md")\n    case _:\n        target = Path("safe.txt")\ntarget.write_text(x)\n',
         True,
     ),
     (
@@ -364,90 +370,191 @@ _REBINDING_CASES = [
         True,
     ),
     (
+        "rebound in a function (gate: def)",
+        'from pathlib import Path\ndef f():\n    target = Path("MEMORY.md")\n    target = Path("safe.txt")\n    target.write_text("hello")\n',
+        True,
+    ),
+    (
         "rebound in a function, written at module level",
-        'target = Path("MEMORY.md")\ndef b():\n    target = None\ntarget.write_text(x)\n',
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\ndef b():\n    target = None\ntarget.write_text(x)\n',
         True,
     ),
     (
         "rebound after the inner block",
-        'for x in xs:\n    target = Path("MEMORY.md")\ntarget = Path("safe.txt")\ntarget.write_text("hello")\n',
+        'from pathlib import Path\nfor x in xs:\n    target = Path("MEMORY.md")\ntarget = Path("safe.txt")\ntarget.write_text("hello")\n',
         True,
     ),
     (
         "rebound from itself",
-        'target = Path.home() / "MEMORY.md"\ntarget = target.resolve()\ntarget.write_text("hello")\n',
+        'from pathlib import Path\ntarget = Path.home() / "MEMORY.md"\ntarget = target.resolve()\ntarget.write_text("hello")\n',
         True,
     ),
     (
         "rebound through an alias",
-        'target = Path("MEMORY.md")\nalias = target\ntarget = alias\ntarget.write_text(x)\n',
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\nalias = target\ntarget = alias\ntarget.write_text(x)\n',
         True,
     ),
-    ("compared, not rebound", 'target = Path("MEMORY.md")\ntarget == other\ntarget.write_text("hello")\n', True),
+    (
+        "compared, not rebound",
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\ntarget == other\ntarget.write_text("hello")\n',
+        True,
+    ),
     (
         "rebound across lines",
-        'target = Path("MEMORY.md")\ntarget = pick(\n    target)\ntarget.write_text("hello")\n',
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\ntarget = pick(\n    target)\ntarget.write_text("hello")\n',
         True,
     ),
     (
         "rebound beside another statement",
-        'target = Path("MEMORY.md")\ntarget = Path("safe.txt"); target = alias\ntarget.write_text("hello")\n',
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\ntarget = Path("safe.txt"); target = alias\ntarget.write_text("hello")\n',
         True,
     ),
     (
         "keyword argument, not a rebinding",
-        'def f():\n    target = Path("MEMORY.md")\n    configure(\n    target=None,\n    )\n    target.write_text(x)\n',
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\nconfigure(\ntarget=None,\n)\ntarget.write_text(x)\n',
         True,
     ),
     (
         "def after the rebinding",
-        'target = Path("MEMORY.md")\ntarget = Path("safe.txt")\ndef later():\n    target.write_text(x)\n',
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\ntarget = Path("safe.txt")\ndef later():\n    target.write_text(x)\n',
         True,
     ),
     (
         "lambda after the rebinding",
-        'target = Path("MEMORY.md")\ntarget = Path("safe.txt")\nsave = lambda: target.write_text(x)\n',
+        'from pathlib import Path\ntarget = Path("MEMORY.md")\ntarget = Path("safe.txt")\nsave = lambda: target.write_text(x)\n',
         True,
     ),
-    # Second review of d18f88716c (IN-bd-w2hooks2-REVIEW.md): each flags at base.
+    # Review 2 of d18f88716c (IN-bd-w2hooks2-REVIEW.md): each flags at base.
     (
         "copy back after the rebinding",
-        't = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\nt = a\nt.write_text(x)\n',
+        'from pathlib import Path\nt = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\nt = a\nt.write_text(x)\n',
         True,
     ),
-    ("str() copy back", 't = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\nt = str(a)\nt.write_text(x)\n', True),
-    ("tuple copy back", 't = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\nt, y = a, 1\nt.write_text(x)\n', True),
+    (
+        "str() copy back",
+        'from pathlib import Path\nt = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\nt = str(a)\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "tuple copy back",
+        'from pathlib import Path\nt = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\nt, y = a, 1\nt.write_text(x)\n',
+        True,
+    ),
     (
         "global restore function",
-        't = Path("MEMORY.md")\na = t\n\ndef restore():\n    global t\n    t = a\n\nt = Path("safe.txt")\nrestore()\nt.write_text(x)\n',
+        'from pathlib import Path\nt = Path("MEMORY.md")\na = t\n\ndef restore():\n    global t\n    t = a\n\nt = Path("safe.txt")\nrestore()\nt.write_text(x)\n',
         True,
     ),
     (
         "generator, then a copy back",
-        't = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\ng = (t.write_text(x) for _ in s)\nt = a\nnext(g)\n',
+        'from pathlib import Path\nt = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\ng = (t.write_text(x) for _ in s)\nt = a\nnext(g)\n',
         True,
     ),
     (
         "generator, then the path again",
-        't = Path("MEMORY.md")\nt = Path("safe.txt")\ng = (t.write_text(x) for _ in s)\nt = Path("MEMORY.md")\nnext(g)\n',
+        'from pathlib import Path\nt = Path("MEMORY.md")\nt = Path("safe.txt")\ng = (t.write_text(x) for _ in s)\nt = Path("MEMORY.md")\nnext(g)\n',
         True,
     ),
     (
         "nonlocal restore",
-        'def outer():\n    t = Path("MEMORY.md")\n    a = t\n\n    def restore():\n        nonlocal t\n        t = a\n\n    t = Path("safe.txt")\n    restore()\n    t.write_text(x)\n',
+        'from pathlib import Path\ndef outer():\n    t = Path("MEMORY.md")\n    a = t\n\n    def restore():\n        nonlocal t\n        t = a\n\n    t = Path("safe.txt")\n    restore()\n    t.write_text(x)\n',
         True,
     ),
     (
         "walrus copy back",
-        't = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\nif (t := a):\n    t.write_text(x)\n',
+        'from pathlib import Path\nt = Path("MEMORY.md")\na = t\nt = Path("safe.txt")\nif (t := a):\n    t.write_text(x)\n',
         True,
     ),
-    ("backslash-continued rebinding", 't = Path("MEMORY.md")\nt = \\\n    Path("safe.txt")\nt.write_text(x)\n', True),
-    ("walrus rebinding", 't = Path("MEMORY.md")\n(t := Path("safe.txt"))\nt.write_text(x)\n', True),
-    ("exec after the rebinding", 't = Path("MEMORY.md")\nt = Path("safe.txt")\nexec(code)\nt.write_text(x)\n', True),
+    (
+        "backslash-continued rebinding",
+        'from pathlib import Path\nt = Path("MEMORY.md")\nt = \\\n    Path("safe.txt")\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "walrus rebinding",
+        'from pathlib import Path\nt = Path("MEMORY.md")\n(t := Path("safe.txt"))\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "exec after the rebinding",
+        'from pathlib import Path\nt = Path("MEMORY.md")\nt = Path("safe.txt")\nexec(code)\nt.write_text(x)\n',
+        True,
+    ),
     (
         "import as after the rebinding",
-        't = Path("MEMORY.md")\nt = Path("safe.txt")\nfrom cfg import P as t\nt.write_text(x)\n',
+        'from pathlib import Path\nt = Path("MEMORY.md")\nt = Path("safe.txt")\nfrom cfg import P as t\nt.write_text(x)\n',
+        True,
+    ),
+    # Review 3 of 467d35466e (IN-bd-w2hooks3-REVIEW.md): each flags at base.
+    (
+        "function before the rebinding restores through globals()",
+        'from pathlib import Path\nt = Path("MEMORY.md")\ndef r():\n    globals()["t"] = Path.home() / ".claude" / "MEMORY.md"\nt = Path("safe.txt")\nr()\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "frame f_locals restore",
+        'from pathlib import Path\nimport sys\nt = Path("MEMORY.md")\nf = sys._getframe()\nt = Path("safe.txt")\nf.f_locals["t"] = Path.home() / ".claude" / "MEMORY.md"\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "__main__ restore",
+        'from pathlib import Path\nimport __main__\nt = Path("MEMORY.md")\nt = Path("safe.txt")\n__main__.t = Path.home() / ".claude" / "MEMORY.md"\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "generator frame restore",
+        'from pathlib import Path\nt = Path("MEMORY.md")\ng = (n for n in [1])\nt = Path("safe.txt")\ng.gi_frame.f_locals["t"] = Path.home() / ".claude" / "MEMORY.md"\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "__setattr__ restore",
+        'from pathlib import Path\nimport os\nt = Path("MEMORY.md")\nt = Path("safe.txt")\nm.__setattr__("t", Path.home() / ".claude" / "MEMORY.md")\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "match capture rebinding",
+        'from pathlib import Path\nt = Path("MEMORY.md")\nt = Path("safe.txt")\nmatch [Path.home() / ".claude" / "MEMORY.md"]:\n    case [t, *_]:\n        pass\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "match name capture",
+        'from pathlib import Path\nt = Path("MEMORY.md")\nt = Path("safe.txt")\nmatch Path.home() / ".claude" / "MEMORY.md":\n    case t:\n        pass\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "full-width name rebinding",
+        'from pathlib import Path\nt = Path("MEMORY.md")\nt = Path("safe.txt")\n\uff54 = Path.home() / ".claude" / "MEMORY.md"\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "full-width exec",
+        'from pathlib import Path\nt = Path("MEMORY.md")\nt = Path("safe.txt")\n\uff45\uff58\uff45\uff43(code)\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "Path shadowed by a lambda",
+        'from pathlib import Path\nt = Path("MEMORY.md")\nPath = lambda s: Path.home() / ".claude" / "MEMORY.md"\nt = Path("safe.txt")\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "Path shadowed by an assignment",
+        'from pathlib import Path\nt = Path("MEMORY.md")\nPath = make_path\nt = Path("safe.txt")\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "Path from another module",
+        'from mylib import Path\nt = Path("MEMORY.md")\nt = Path("safe.txt")\nt.write_text(x)\n',
+        True,
+    ),
+    ("Path not imported", 't = Path("MEMORY.md")\nt = Path("safe.txt")\nt.write_text(x)\n', True),
+    (
+        "module outside the gate list",
+        'from pathlib import Path\nimport subprocess\nt = Path("MEMORY.md")\nt = Path("safe.txt")\nt.write_text(x)\n',
+        True,
+    ),
+    (
+        "comprehension after the rebinding",
+        'from pathlib import Path\nt = Path("MEMORY.md")\nt = Path("safe.txt")\nitems = [n for n in range(3)]\nt.write_text(x)\n',
         True,
     ),
 ]
@@ -459,5 +566,30 @@ def test_rebound_python_path(source, flagged):
 
     py = python_source(source)
     assert py is not None
+    py.import_dir_clean = True  # the script alone in its directory
     line = next(i for i, text in enumerate(source.split("\n")) if "MEMORY.md" in text)
     assert py.path_written(line) is flagged
+
+
+def test_rebound_python_path_needs_a_clean_import_dir(tmp_path, monkeypatch):
+    """GAP-1312: unknown, or a module beside the script that may patch Path, flags as before."""
+    from defenseclaw.scanner.plugin_scanner.helpers import python_import_dir_clean, python_source
+
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("PYTHONHOME", raising=False)
+    source = _REBINDING_CASES[0][1]
+    py = python_source(source)
+    assert py is not None
+    assert py.path_written(1) is True  # import_dir_clean defaults to False
+    script = tmp_path / "w.py"
+    script.write_text(source)
+    assert python_import_dir_clean(str(script)) is True
+    assert python_import_dir_clean("w.py") is False
+    for beside in ("pathlib.py", "re.py"):
+        (tmp_path / beside).write_text("x = 1\n")
+        assert python_import_dir_clean(str(script)) is False
+        (tmp_path / beside).unlink()
+    pkg = tmp_path / "pathlib"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    assert python_import_dir_clean(str(script)) is False

@@ -36,6 +36,7 @@ var pythonName = lazyregexp.New(`[A-Za-z_][A-Za-z_0-9]*`)
 func pythonPathWriteMatch(rule *regexp.Regexp, source, script string) []int {
 	code := MaskPythonCommentsAndDocstrings(source)
 	calls := MaskPythonStrings(source)
+	masked := calls
 	dir, self := "", ""
 	if script != "" {
 		dir, self = filepath.Split(script)
@@ -51,6 +52,7 @@ func pythonPathWriteMatch(rule *regexp.Regexp, source, script string) []int {
 	}
 	var stmts []pythonStmt
 	var lineStmt []int
+	var gate, pathImported bool
 	for _, hit := range rule.FindAllStringIndex(code, -1) {
 		lineNo := strings.Count(code[:hit[0]], "\n")
 		if lineNo >= len(lines) {
@@ -72,8 +74,16 @@ func pythonPathWriteMatch(rule *regexp.Regexp, source, script string) []int {
 		// literal hides the path from the writes it dominates (GAP-1312).
 		if stmts == nil {
 			stmts, lineStmt = pythonStatements(lines, callLines)
+			// The exemption also needs an import path that loads nothing from
+			// the script's directory: a module there may patch Path.
+			if pythonImportPathOrdinary(masked, dir, self) {
+				gate, pathImported = pythonFileAllowsRebinding(masked, stmts)
+			}
 		}
-		hidden := pythonRebindingHides(stmts, lineStmt, lineNo, assign[1])
+		var hidden map[int]bool
+		if gate {
+			hidden = pythonRebindingHides(stmts, lineStmt, lineNo, assign[1], pathImported)
+		}
 		for k := lineNo + 1; k < len(lines); k++ {
 			if !hidden[k] && pythonLineWritesName(lines[k], callLines[k], assign[1]) {
 				return hit
@@ -118,33 +128,132 @@ func pythonStatements(lines, callLines []string) ([]pythonStmt, []int) {
 	return stmts, lineStmt
 }
 
-// pythonDynamicNames rebind or run code without naming the variable in code.
-var pythonDynamicNames = map[string]bool{
-	"globals": true, "locals": true, "vars": true, "setattr": true, "exec": true, "eval": true,
-	"compile": true, "__import__": true, "__dict__": true, "modules": true, "importlib": true,
-	"builtins": true, "__builtins__": true,
+// pythonGateNames are the words whose presence anywhere in the code of a
+// file turns the GAP-1312 rebinding exemption off: code that may run later
+// (def, class, lambda, async, yield, match), global and nonlocal, and every
+// way to rebind or run code without naming the variable in code.
+var pythonGateNames = map[string]bool{
+	"def": true, "class": true, "lambda": true, "async": true, "await": true, "yield": true, "match": true,
+	"global": true, "nonlocal": true,
+	"globals": true, "locals": true, "vars": true, "setattr": true, "__setattr__": true, "getattr": true,
+	"__getattribute__": true, "delattr": true, "exec": true, "eval": true, "compile": true, "breakpoint": true,
+	"__import__": true, "importlib": true, "sys": true, "inspect": true, "frame": true, "f_locals": true,
+	"f_globals": true, "f_back": true, "gi_frame": true, "cr_frame": true, "ag_frame": true, "tb_frame": true,
+	"_getframe": true, "currentframe": true, "__main__": true, "__dict__": true, "__builtins__": true,
+	"builtins": true, "modules": true, "__class__": true, "__globals__": true, "__reduce__": true,
+	"__reduce_ex__": true,
+}
+
+// pythonGateModules are the only modules a file may import for the
+// exemption to apply.
+var pythonGateModules = map[string]bool{
+	"pathlib": true, "os": true, "json": true, "re": true, "datetime": true, "time": true, "math": true,
+	"shutil": true, "glob": true, "hashlib": true, "base64": true, "textwrap": true,
+}
+
+var (
+	pythonPathlibImport  = lazyregexp.New(`^\s*from\s+pathlib\s+import\s+Path\s*$`)
+	pythonFromImportStmt = lazyregexp.New(`^\s*from\s+([A-Za-z_][A-Za-z_0-9]*)(?:\.[A-Za-z_][A-Za-z_0-9]*)*\s+import\s+[^*;]*$`)
+	pythonImportList     = lazyregexp.New(`^\s*import\s+([^;]*)$`)
+)
+
+// pythonFileAllowsRebinding is the whole-file gate of the GAP-1312
+// exemption (calls is the file with strings and comments blanked), after
+// pythonImportPathOrdinary. The exemption applies only to a file whose code
+// has no non-ASCII character,
+// none of pythonGateNames, no comprehension or generator (a for inside
+// brackets), imports only pythonGateModules (no star import, no import
+// inside another statement), and binds Path only by `from pathlib import
+// Path`. pathImported reports that import. PySource._file_allows_rebinding
+// in the Python plugin scanner is the same gate.
+func pythonFileAllowsRebinding(calls string, stmts []pythonStmt) (ok, pathImported bool) {
+	depth := 0
+	for i := 0; i < len(calls); {
+		c := calls[i]
+		switch {
+		case c >= 0x80:
+			return false, false
+		case c == '(' || c == '[' || c == '{':
+			depth++
+			i++
+		case c == ')' || c == ']' || c == '}':
+			depth--
+			i++
+		case pythonWordByte(c):
+			j := i
+			for j < len(calls) && pythonWordByte(calls[j]) {
+				j++
+			}
+			w := calls[i:j]
+			if (c < '0' || c > '9') && (pythonGateNames[w] || w == "for" && depth > 0) {
+				return false, false
+			}
+			i = j
+		default:
+			i++
+		}
+	}
+	for _, st := range stmts {
+		words := pythonName.FindAllString(st.calls, -1)
+		if !pythonImportStmt.MatchString(st.calls) {
+			if slices.Contains(words, "import") {
+				return false, false
+			}
+		} else if !pythonAllowedImport(st.calls) {
+			return false, false
+		}
+		if pythonPathlibImport.MatchString(st.calls) {
+			pathImported = true
+		} else if pythonStmtBinds(st.calls)["Path"] {
+			return false, false
+		}
+	}
+	return true, pathImported
+}
+
+func pythonWordByte(c byte) bool {
+	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+}
+
+// pythonAllowedImport reports whether an import statement imports only
+// pythonGateModules, with no star and no semicolon.
+func pythonAllowedImport(calls string) bool {
+	if m := pythonFromImportStmt.FindStringSubmatch(calls); m != nil {
+		return pythonGateModules[m[1]]
+	}
+	m := pythonImportList.FindStringSubmatch(calls)
+	if m == nil {
+		return false
+	}
+	for _, part := range strings.Split(m[1], ",") {
+		f := strings.Fields(part)
+		if len(f) == 0 || !pythonGateModules[strings.SplitN(f[0], ".", 2)[0]] {
+			return false
+		}
+		if len(f) != 1 && (len(f) != 3 || f[1] != "as") {
+			return false
+		}
+	}
+	return true
 }
 
 // pythonRebindingHides returns the physical lines whose writes through name
 // do not act on the path that the statement starting on line at assigned to
-// name (GAP-1312). It is strict on purpose. The path is hidden only when all
-// of these hold:
+// name (GAP-1312), in a file that passed pythonFileAllowsRebinding. The path
+// is hidden only when all of these hold:
 //   - the assignment is a plain `name = value` whose value does not use name;
 //   - a later statement in the same block (the same indent, no shallower
 //     statement between) rebinds name to a fresh literal on one physical
-//     line: a string, Path() of a string, or None;
+//     line: a string, Path() of a string (Path from pathlib), or None;
 //   - the write follows that rebinding in the same block (no shallower
 //     statement between);
-//   - the file has no global or nonlocal for name;
 //   - no statement after the rebinding names a name bound, before it, from
-//     name or from such an alias; binds name other than to a fresh literal;
-//     has a def or lambda; mentions name together with a for (a
-//     comprehension or generator, which may run later); or uses globals,
-//     vars, setattr, exec and the like.
+//     name or from such an alias, or binds name other than to a fresh
+//     literal.
 //
 // Otherwise it returns nil and every write counts, as before.
-// PySource.path_written in the Python plugin scanner applies the same rule.
-func pythonRebindingHides(stmts []pythonStmt, lineStmt []int, at int, name string) map[int]bool {
+// PySource._rebinding_hides in the Python plugin scanner is the same rule.
+func pythonRebindingHides(stmts []pythonStmt, lineStmt []int, at int, name string, pathImported bool) map[int]bool {
 	ai := lineStmt[at]
 	if ai < 0 || stmts[ai].first != at || !pythonPlainAssign(stmts[ai].calls, name) {
 		return nil
@@ -155,7 +264,7 @@ func pythonRebindingHides(stmts []pythonStmt, lineStmt []int, at int, name strin
 		switch {
 		case stmts[k].indent < a.indent:
 			return nil
-		case stmts[k].indent == a.indent && pythonFreshRebinding(stmts[k], name):
+		case stmts[k].indent == a.indent && pythonFreshRebinding(stmts[k], name, pathImported):
 			ri = k
 		}
 	}
@@ -176,24 +285,9 @@ func pythonRebindingHides(stmts []pythonStmt, lineStmt []int, at int, name strin
 			}
 		}
 	}
-	for _, st := range stmts {
-		if pythonDeclares(st.calls, name) {
-			return nil
-		}
-	}
+	delete(carriers, name)
 	for _, st := range stmts[ri+1:] {
-		mentions, loop := false, false
-		for _, w := range pythonName.FindAllString(st.calls, -1) {
-			switch {
-			case w == name:
-				mentions = true
-			case carriers[w] || pythonDynamicNames[w] || w == "def" || w == "lambda":
-				return nil
-			case w == "for":
-				loop = true
-			}
-		}
-		if mentions && loop || pythonStmtBinds(st.calls)[name] && !pythonFreshRebinding(st, name) {
+		if pythonMentionsAny(st.calls, carriers) || pythonStmtBinds(st.calls)[name] && !pythonFreshRebinding(st, name, pathImported) {
 			return nil
 		}
 	}
@@ -212,16 +306,17 @@ func pythonRebindingHides(stmts []pythonStmt, lineStmt []int, at int, name strin
 const pythonPlainString = `[rRbBuU]{0,2}(?:"[^"\\\n]*"|'[^'\\\n]*')`
 
 var pythonFreshLiteral = lazyregexp.New(`^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(?:None|` + pythonPlainString +
-	`|Path\s*\(\s*` + pythonPlainString + `\s*\))\s*$`)
+	`|(Path)\s*\(\s*` + pythonPlainString + `\s*\))\s*$`)
 
 // pythonFreshRebinding reports whether st is `name = <fresh literal>` on one
-// physical line: a string (not an f-string), Path() of one, or None.
-func pythonFreshRebinding(st pythonStmt, name string) bool {
+// physical line: a string (not an f-string), Path() of one when the file
+// imports Path from pathlib, or None.
+func pythonFreshRebinding(st pythonStmt, name string, pathImported bool) bool {
 	if st.first != st.last {
 		return false
 	}
 	m := pythonFreshLiteral.FindStringSubmatch(st.code)
-	return m != nil && m[1] == name
+	return m != nil && m[1] == name && (m[2] == "" || pathImported)
 }
 
 // pythonPlainAssign reports whether calls is a single `name = value`
@@ -271,7 +366,6 @@ var (
 	pythonMutated      = lazyregexp.New(`([A-Za-z_][A-Za-z_0-9]*)\s*\.\s*(?:append|extend|add|insert|update|setdefault)\s*\(`)
 	pythonForTargets   = lazyregexp.New(`^\s*(?:async\s+)?for\b([\s\S]*?)\bin\b`)
 	pythonImportStmt   = lazyregexp.New(`^\s*(?:import|from)\b`)
-	pythonDeclaration  = lazyregexp.New(`\b(?:global|nonlocal)\s+([^;]*)`)
 )
 
 // pythonStmtBinds returns the names a statement (its calls view) may bind:
@@ -315,16 +409,6 @@ func pythonStmtBinds(calls string) map[string]bool {
 		}
 	}
 	return out
-}
-
-// pythonDeclares reports whether a statement declares name global or nonlocal.
-func pythonDeclares(calls, name string) bool {
-	for _, m := range pythonDeclaration.FindAllStringSubmatch(calls, -1) {
-		if containsPythonName(m[1], name) {
-			return true
-		}
-	}
-	return false
 }
 
 // pythonBracketDepth returns the bracket depth after calls, a line with its
