@@ -70,17 +70,22 @@ async def test_degraded_notice_shows_the_n_key_on_the_80x24_overview(tmp_path, m
         app.overview_model.runtime = _standard_account_runtime().overview()
         app.overview_model.set_doctor_cache(
             DoctorCache(
-                captured_at=datetime.now(timezone.utc), failed=1, schema_version=2,
-                outcome="failed", exit_code=1,
+                captured_at=datetime.now(timezone.utc),
+                failed=1,
+                schema_version=2,
+                outcome="failed",
+                exit_code=1,
                 checks=(DoctorCheck("fail", "Hermes hook", "managed hook needs repair"),),
             )
         )
         app.action_switch_panel("overview")
-        await pilot.pause()
-        await pilot.pause()
+        # The switch renders the Overview on a deferred lane, and each resize
+        # re-renders it after the next refresh; fixed pauses read an earlier
+        # frame on a slow runner (rel-1-0-6:GAP-0241).
+        await fixtures.settle_panel(app, pilot)
         for width, height in ((80, 24), (80, 40), (120, 40), (80, 24)):
             await pilot.resize_terminal(width, height)
-            await pilot.pause()
+            await fixtures.settle_overview_layout(app, pilot, (width, height))
             screen = fixtures.screen_text(app)
             assert "defenseclaw doctor" in screen, screen
             # GAP-1274 (on the train): partial shadow-egress coverage is WATCHING, not DEGRADED.
@@ -122,6 +127,7 @@ async def test_initial_audit_loading_notice_is_whole_on_the_80x24_overview(tmp_p
         loading = next(notice.message for notice in notices if "Loading the audit history" in notice.message)
         screen = fixtures.screen_text(app)
     assert any(loading in line for line in screen.splitlines()), screen
+
 
 def test_idle_connector_notice_goes_after_the_runtime_notice() -> None:
     # GAP-2104: at 80x24 only the first notice lines are above the fold; the
