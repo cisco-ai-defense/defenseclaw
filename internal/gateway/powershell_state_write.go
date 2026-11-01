@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
@@ -709,6 +710,22 @@ func (s *psStateScan) code(i int, nested bool) int {
 	r := s.runes
 	var cur []rune
 	var last, pipedFrom string
+	var statementWordKnown, statementArgumentMode bool
+	firstScanned := 0
+	commentStarts := func(i int) bool {
+		if !statementWordKnown {
+			for firstScanned < len(cur) {
+				first := cur[firstScanned]
+				firstScanned++
+				if !unicode.IsSpace(first) {
+					statementArgumentMode = actionfacts.PowerShellStatementCommandWord(first)
+					statementWordKnown = true
+					break
+				}
+			}
+		}
+		return actionfacts.PowerShellCommentStarts(r, i, !statementArgumentMode)
+	}
 	flush := func() {
 		text := string(cur)
 		if strings.TrimSpace(text) != "" && s.account(len(cur)) {
@@ -721,9 +738,12 @@ func (s *psStateScan) code(i int, nested bool) int {
 		}
 		last, pipedFrom = text, ""
 		cur = cur[:0]
+		statementWordKnown, statementArgumentMode = false, false
+		firstScanned = 0
 	}
 	for i < len(r) && !s.parseError && s.budget.step() {
 		c := r[i]
+		comment := (c == '#' || c == '<' && i+1 < len(r) && r[i+1] == '#') && commentStarts(i)
 		switch {
 		case c == '`':
 			cur = append(cur, c)
@@ -779,11 +799,25 @@ func (s *psStateScan) code(i int, nested bool) int {
 				}
 			}
 			i = end
-		case c == '#' && s.tokenStart(i):
+		case c == '#' && comment:
 			for i < len(r) && r[i] != '\n' {
 				i++
 			}
-		case c == '<' && i+1 < len(r) && r[i+1] == '#':
+		case c == '<' && i+1 < len(r) && r[i+1] == '#' && !comment:
+			// Glued <#...#> stays inside the argument word. Read through
+			// its closing marker so its > cannot become a redirect.
+			j := i + 2
+			for j+1 < len(r) && (r[j] != '#' || r[j+1] != '>') && s.budget.step() {
+				j++
+			}
+			if j+1 < len(r) {
+				j += 2
+			} else {
+				j = len(r)
+			}
+			cur = append(cur, r[i:j]...)
+			i = j
+		case c == '<' && i+1 < len(r) && r[i+1] == '#' && comment:
 			// A block comment ends at the first #>; one pass over the
 			// runes (RV14-2). An unterminated one runs to the end.
 			j := i + 2

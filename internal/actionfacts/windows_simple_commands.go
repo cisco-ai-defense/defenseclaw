@@ -76,14 +76,15 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 			atStart = false
 			continue
 		}
-		if dialect == windowsPowerShell && char == '#' && windowsPowerShellCommentStarts(runes, i, false) {
+		if dialect == windowsPowerShell && char == '#' &&
+			windowsPowerShellCommentStarts(runes, i, windowsPowerShellTypeExpressionBeforeComment(runes, i)) {
 			for i+1 < len(runes) && runes[i+1] != '\n' && runes[i+1] != '\r' {
 				i++
 			}
 			continue
 		}
 		if dialect == windowsPowerShell && char == '<' && i+1 < len(runes) &&
-			runes[i+1] == '#' && windowsPowerShellCommentStarts(runes, i, false) {
+			runes[i+1] == '#' && windowsPowerShellCommentStarts(runes, i, windowsPowerShellTypeExpressionBeforeComment(runes, i)) {
 			end, ok := windowsPowerShellBlockCommentEnd(runes, i)
 			if !ok {
 				return "", nil, false
@@ -184,6 +185,18 @@ func windowsSimpleGroupSource(source string, dialect windowsDialect) (string, []
 			}
 			events = append(events, windowsSimpleGroupEvent{offset: i})
 			atStart = true
+			continue
+		}
+		if dialect == windowsPowerShell && char == '(' {
+			// An argument-position ( ) value may contain a command whose
+			// glued quote or bracket keeps # inside its word. Read to its
+			// balanced end before deciding whether the next ; starts a call.
+			end, ok := windowsPowerShellOpaqueEnd(runes, i)
+			if !ok {
+				return "", nil, false
+			}
+			i = end
+			atStart = false
 			continue
 		}
 		if char == '(' || char == '{' {

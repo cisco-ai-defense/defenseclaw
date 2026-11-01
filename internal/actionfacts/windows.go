@@ -644,7 +644,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 		}
 
 		if dialect == windowsPowerShell && r == '<' && i+1 < len(runes) && runes[i+1] == '#' &&
-			windowsPowerShellCommentStarts(runes, i, false) {
+			windowsPowerShellCommentStarts(runes, i, windowsPowerShellTypeExpressionBeforeComment(runes, i)) {
 			// A PowerShell block comment, <# ... #>, separates tokens like
 			// a blank. It was read as the input redirection PowerShell
 			// rejects, so a script with one read as invalid and its
@@ -663,7 +663,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			continue
 		}
 
-		if dialect == windowsPowerShell && r == '#' && windowsPowerShellCommentStarts(runes, i, false) {
+		if dialect == windowsPowerShell && r == '#' &&
+			windowsPowerShellCommentStarts(runes, i, windowsPowerShellTypeExpressionBeforeComment(runes, i)) {
 			if !flush() {
 				return lexemes, false
 			}
