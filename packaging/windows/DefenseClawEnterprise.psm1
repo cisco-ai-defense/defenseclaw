@@ -12010,6 +12010,58 @@ function Assert-DefenseClawUninstallAuthorityRawAcl {
     }
 }
 
+function Assert-DefenseClawStateRootAncestorsAdminOnly {
+    <#
+        Throws unless ProgramData and every StateRoot ancestor is a plain
+        folder owned by SYSTEM, Administrators or TrustedInstaller with no
+        replacement rights for anyone else: DELETE_CHILD or ownership rights
+        on any ancestor could replace StateRoot after its identity was
+        checked. The uninstall ACL recovery of authority-bearing metadata and
+        the forced missing-record route (p0-round:GAP-1586) share it.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    foreach ($ancestor in @(
+        [string]$script:ProgramData
+    ) + @($Layout.StateRootAncestors)) {
+        Assert-DefenseClawNoReparsePath -Path $ancestor
+        $ancestorAcl = Microsoft.PowerShell.Security\Get-Acl `
+            -LiteralPath $ancestor
+        $ancestorRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$ancestorAcl.GetSecurityDescriptorBinaryForm(), 0
+        )
+        if ($null -eq $ancestorRaw.DiscretionaryAcl) {
+            throw "refusing uninstall ACL recovery through a null DACL: $ancestor"
+        }
+        $ancestorOwner = ConvertTo-DefenseClawSID `
+            -Identity $ancestorAcl.Owner
+        if ($ancestorOwner -notin @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        )) {
+            throw "refusing uninstall ACL recovery through an untrusted ancestor owner: $ancestor"
+        }
+        foreach ($rule in $ancestorAcl.Access) {
+            if ($rule.AccessControlType -ne
+                    [Security.AccessControl.AccessControlType]::Allow -or
+                (($rule.PropagationFlags -band
+                        [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)) {
+                continue
+            }
+            $sid = ConvertTo-DefenseClawSID `
+                -Identity $rule.IdentityReference
+            if ($sid -notin @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) -and (Test-DefenseClawReplacementRights `
+                -Rights $rule.FileSystemRights)) {
+                throw "refusing uninstall ACL recovery through a replaceable ancestor: $ancestor"
+            }
+        }
+    }
+}
+
 function Repair-DefenseClawUninstallAdminFileAcl {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -12083,46 +12135,7 @@ function Repair-DefenseClawUninstallAdminFileAcl {
         # lifecycle work. A repair of authority-bearing metadata needs a
         # stricter boundary: DELETE_CHILD or ownership rights on any ancestor
         # could replace StateRoot after its identity was checked.
-        foreach ($ancestor in @(
-            [string]$script:ProgramData
-        ) + @($Layout.StateRootAncestors)) {
-            Assert-DefenseClawNoReparsePath -Path $ancestor
-            $ancestorAcl = Microsoft.PowerShell.Security\Get-Acl `
-                -LiteralPath $ancestor
-            $ancestorRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
-                [byte[]]$ancestorAcl.GetSecurityDescriptorBinaryForm(), 0
-            )
-            if ($null -eq $ancestorRaw.DiscretionaryAcl) {
-                throw "refusing uninstall ACL recovery through a null DACL: $ancestor"
-            }
-            $ancestorOwner = ConvertTo-DefenseClawSID `
-                -Identity $ancestorAcl.Owner
-            if ($ancestorOwner -notin @(
-                $script:SystemSID,
-                $script:AdministratorsSID,
-                $script:TrustedInstallerSID
-            )) {
-                throw "refusing uninstall ACL recovery through an untrusted ancestor owner: $ancestor"
-            }
-            foreach ($rule in $ancestorAcl.Access) {
-                if ($rule.AccessControlType -ne
-                        [Security.AccessControl.AccessControlType]::Allow -or
-                    (($rule.PropagationFlags -band
-                            [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)) {
-                    continue
-                }
-                $sid = ConvertTo-DefenseClawSID `
-                    -Identity $rule.IdentityReference
-                if ($sid -notin @(
-                    $script:SystemSID,
-                    $script:AdministratorsSID,
-                    $script:TrustedInstallerSID
-                ) -and (Test-DefenseClawReplacementRights `
-                    -Rights $rule.FileSystemRights)) {
-                    throw "refusing uninstall ACL recovery through a replaceable ancestor: $ancestor"
-                }
-            }
-        }
+        Assert-DefenseClawStateRootAncestorsAdminOnly -Layout $Layout
         foreach ($candidate in @(
             [string]$Layout.StateRoot,
             [string]$Layout.InstallStateDirectory
@@ -12597,7 +12610,11 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         # Its ImagePath is the gateway binary invoked with
         # `enterprise windows enumerate --manifest X --interval 5m`;
         # its ObjectName is LocalSystem, the same account as the guardian.
-        [switch]$Enumerator
+        [switch]$Enumerator,
+        # A foreign ImagePath or account refuses instead of an advisory: the
+        # standalone forced uninstall stops and disables what it checks
+        # (p0-round:GAP-1365 review). Secure Client never passes it.
+        [switch]$Strict
     )
     if (($Guardian -and ($SensorHelper -or $Enumerator)) -or
         ($SensorHelper -and $Enumerator)) {
@@ -12638,7 +12655,7 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         # Refusing to proceed strands uninstall and install both. In
         # strict mode operators who want attacker-detection semantics
         # restore the throw via DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS.
-        if (Test-DefenseClawTrustStrictAncestors) {
+        if ($Strict -or (Test-DefenseClawTrustStrictAncestors)) {
             throw "refusing to replace foreign Windows service $Name with ImagePath $image"
         }
         Write-DefenseClawTrustAdvisory `
@@ -12656,7 +12673,7 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         Test-DefenseClawGatewayServiceAccount -Account $objectName -GatewayServiceName $Name
     }
     if (-not $ownedAccount) {
-        if (Test-DefenseClawTrustStrictAncestors) {
+        if ($Strict -or (Test-DefenseClawTrustStrictAncestors)) {
             throw "refusing to replace service $Name owned by unexpected account $objectName"
         }
         Write-DefenseClawTrustAdvisory `
@@ -34732,6 +34749,89 @@ function Invoke-DefenseClawTimeoutRecovery {
     return $status
 }
 
+function Test-DefenseClawUninstallUsesUntrustedMetadataPurge {
+    <#
+        Whether an uninstall whose deployment evidence is untrusted takes the
+        metadata-free exact-scope purge. p0-round:GAP-1365: a first install
+        killed before it wrote deployment.json leaves StateRoot with its
+        pending transaction and no record. That purge refuses to bypass the
+        transaction, so the first Setup /uninstall FORCE=1 ended 1603 and
+        only a retry finished. A forced uninstall reads nothing of the
+        transaction: when the record is missing from an existing admin-only
+        StateRoot (-MetadataMissing, set only there) it goes on as the
+        forced uninstall, which the retry did. Every other untrusted case,
+        a present record that fails its owner, ACL, reparse, link or content
+        check included, keeps the metadata-free purge with FORCE as without
+        (p0-round:GAP-1585), and nothing changes without FORCE.
+    #>
+    param(
+        [string]$Reason,
+        [bool]$MetadataMissing,
+        [switch]$Force
+    )
+    if ([string]::IsNullOrWhiteSpace($Reason)) {
+        return $false
+    }
+    if ($Force -and $MetadataMissing) {
+        return $false
+    }
+    return $true
+}
+
+function Test-DefenseClawForcedUninstallStateRootAdminOnly {
+    <#
+        p0-round:GAP-1585, GAP-1586: whether ProgramData and the StateRoot
+        ancestors cannot replace StateRoot, and StateRoot and its install
+        folder when it exists are plain folders (no reparse point) that only
+        SYSTEM, Administrators and TrustedInstaller own or can write, as the
+        uninstall ACL recovery requires of them. A record missing from a
+        StateRoot someone else could write may have been deleted through
+        that weakened ACL; then the forced route is not taken.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $admins = @(
+        $script:SystemSID,
+        $script:AdministratorsSID,
+        $script:TrustedInstallerSID
+    )
+    try {
+        # The ancestors first: a user-owned or user-replaceable vendor
+        # folder could have swapped StateRoot (p0-round:GAP-1586).
+        Assert-DefenseClawStateRootAncestorsAdminOnly -Layout $Layout
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        foreach ($candidate in @(
+                [string]$Layout.StateRoot,
+                [string]$Layout.InstallStateDirectory
+            )) {
+            if ([string]::IsNullOrWhiteSpace($candidate)) {
+                continue
+            }
+            # Test-Path can misreport an ACL-denied folder as absent; the
+            # no-follow snapshot cannot.
+            if ($candidate -ne [string]$Layout.StateRoot -and
+                $null -eq $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists($candidate)) {
+                continue
+            }
+            Assert-DefenseClawNoReparsePath -Path $candidate
+            $verdicts = @(Get-DefenseClawPathAclVerdicts `
+                -Path $candidate `
+                -AllowedWriterSIDs $admins `
+                -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+                -AllowedOwnerSIDs $admins `
+                -AllowInheritance)
+            $unsafe = @($verdicts |
+                Microsoft.PowerShell.Core\Where-Object { $_.Kind -ne 'Rights' })
+            if ($unsafe.Count -gt 0) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function Invoke-DefenseClawUntrustedMetadataRecoveryPurge {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -36311,19 +36411,23 @@ function Invoke-DefenseClawForcedUninstallPreparation {
     )
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     Assert-DefenseClawOwnedServiceOrAbsent `
+        -Strict `
         -Name $GatewayServiceName `
         -ExpectedGatewayPath $Layout.GatewayPath
     Assert-DefenseClawOwnedServiceOrAbsent `
+        -Strict `
         -Name $GuardianServiceName `
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Guardian
     Assert-DefenseClawOwnedServiceOrAbsent `
+        -Strict `
         -Name $enumeratorServiceName `
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Enumerator
     Assert-DefenseClawOwnedServiceOrAbsent `
+        -Strict `
         -Name $Layout.SensorHelperServiceName `
         -ExpectedGatewayPath $Layout.SensorHelperPath `
         -ExpectedSensorHelperImage (Get-DefenseClawSensorHelperImage `
@@ -40000,6 +40104,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         if ($recoverProductionUninstallAcl) {
             $untrustedEvidenceReason = ''
             $uninstallMetadataExists = $false
+            # p0-round:GAP-1365, GAP-1585: set only where deployment.json is
+            # absent from an existing admin-only StateRoot (a first install
+            # killed before it wrote the record). A record that is present
+            # but fails authentication never sets it.
+            $uninstallMetadataMissing = $false
             $uninstallMetadata = $null
             try {
                 # Authenticate ownership and repair only recoverable ACL
@@ -40031,6 +40140,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 if ($null -ne $stateRootBefore) {
                     $untrustedEvidenceReason =
                         'deployment.json is missing from an existing StateRoot'
+                    $uninstallMetadataMissing = Test-DefenseClawForcedUninstallStateRootAdminOnly `
+                        -Layout $layout
                 }
             }
             Add-DefenseClawProductionUninstallNativeCleanupSource `
@@ -40041,8 +40152,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -NativeCleanupBinary $NativeCleanupBinary `
                 -PayloadManifest $PayloadManifest `
                 -AllowUnsigned:$AllowUnsigned
-            if (-not [string]::IsNullOrWhiteSpace(
-                    $untrustedEvidenceReason)) {
+            if (Test-DefenseClawUninstallUsesUntrustedMetadataPurge `
+                    -Reason $untrustedEvidenceReason `
+                    -MetadataMissing $uninstallMetadataMissing `
+                    -Force:$Force) {
                 return Invoke-DefenseClawUntrustedMetadataRecoveryPurge `
                     -Layout $layout `
                     -Sources $sources `
