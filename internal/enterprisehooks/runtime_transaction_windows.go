@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"golang.org/x/sys/windows"
+	"github.com/defenseclaw/defenseclaw/internal/winmutex"
 )
 
 // windowsUserRuntimeTransactionLocks serialize the complete per-SID managed
@@ -70,39 +70,22 @@ func windowsUserRuntimeTransactionMutexForSID(canonicalSID string) *sync.Mutex {
 }
 
 func acquireWindowsUserRuntimeMachineMutex(canonicalSID string) (func() error, error) {
-	name, err := windows.UTF16PtrFromString(
-		`Global\Cisco.DefenseClaw.EnterpriseHooks.` + strings.ToUpper(canonicalSID),
+	// winmutex holds the mutex on one goroutine locked to its OS thread:
+	// only the owning thread can release a Windows mutex, and callers unlock
+	// from whatever thread their goroutine has moved to.
+	release, err := winmutex.TryAcquire(
+		`Global\Cisco.DefenseClaw.EnterpriseHooks.`+strings.ToUpper(canonicalSID), nil,
 	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"enterprise hooks: encode machine-wide runtime transaction lock name: %w",
-			err,
-		)
-	}
-	handle, err := windows.CreateMutex(nil, true, name)
-	if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-		if handle != 0 {
-			_ = windows.CloseHandle(handle)
-		}
+	if errors.Is(err, winmutex.ErrBusy) {
 		return nil, errors.New(
 			"enterprise hooks: another DefenseClaw enterprise hook transaction is already in progress for this target",
 		)
 	}
 	if err != nil {
-		if handle != 0 {
-			_ = windows.CloseHandle(handle)
-		}
 		return nil, fmt.Errorf(
 			"enterprise hooks: acquire machine-wide runtime transaction lock: %w",
 			err,
 		)
 	}
-	return func() error {
-		releaseErr := windows.ReleaseMutex(handle)
-		closeErr := windows.CloseHandle(handle)
-		if releaseErr != nil {
-			return releaseErr
-		}
-		return closeErr
-	}, nil
+	return release, nil
 }

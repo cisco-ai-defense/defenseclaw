@@ -13,10 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -25,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winfolders"
+	"github.com/defenseclaw/defenseclaw/internal/winmutex"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -138,62 +137,22 @@ func setupLockName() (string, error) {
 	return `Global\Cisco.DefenseClaw.Setup.` + user.User.Sid.String(), nil
 }
 
-// acquireSetupLock takes the per-user setup mutex. A Windows mutex is owned by
-// the OS thread that acquired it, and only that thread can release it, while Go
-// moves a goroutine to another thread at any blocking call. So one goroutine,
-// locked to its OS thread for the whole hold, creates, releases and closes the
-// mutex; the returned function only asks it to release and waits for it.
+// acquireSetupLock takes the per-user setup mutex without waiting. The hold
+// lives on one goroutine locked to its OS thread (winmutex), because only the
+// owning thread can release a Windows mutex.
 func acquireSetupLock() (func() error, error) {
 	lockName, err := setupLockName()
 	if err != nil {
 		return nil, err
 	}
-	name, err := windows.UTF16PtrFromString(lockName)
+	release, err := winmutex.TryAcquire(lockName, nil)
+	if errors.Is(err, winmutex.ErrBusy) {
+		return nil, errSetupLockBusy
+	}
 	if err != nil {
-		return nil, fmt.Errorf("encode setup lock name: %w", err)
+		return nil, fmt.Errorf("acquire setup lock: %w", err)
 	}
-	acquired := make(chan error, 1)
-	releaseRequested := make(chan struct{})
-	released := make(chan error, 1)
-	go func() {
-		runtime.LockOSThread()
-		handle, err := windows.CreateMutex(nil, true, name)
-		if err != nil {
-			if handle != 0 {
-				_ = windows.CloseHandle(handle)
-			}
-			runtime.UnlockOSThread()
-			if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-				acquired <- errSetupLockBusy
-			} else {
-				acquired <- fmt.Errorf("acquire setup lock: %w", err)
-			}
-			return
-		}
-		acquired <- nil
-		<-releaseRequested
-		if err := windows.ReleaseMutex(handle); err != nil {
-			_ = windows.CloseHandle(handle)
-			// Exit still locked: Go ends this thread and Windows marks the
-			// mutex abandoned, so a waiter gets it now, not at process exit.
-			released <- fmt.Errorf("release setup lock: %w", err)
-			return
-		}
-		runtime.UnlockOSThread()
-		released <- windows.CloseHandle(handle)
-	}()
-	if err := <-acquired; err != nil {
-		return nil, err
-	}
-	var once sync.Once
-	var releaseErr error
-	return func() error {
-		once.Do(func() {
-			close(releaseRequested)
-			releaseErr = <-released
-		})
-		return releaseErr
-	}, nil
+	return release, nil
 }
 
 func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) {
