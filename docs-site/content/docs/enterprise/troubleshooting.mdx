@@ -687,6 +687,14 @@ The login shell is `nologin` or `false`. Or the user is in `exclude_users` or an
 
 **Check.** The user's agent no longer returns `enterprise_managed_uid_unregistered`.
 
+#### A user named in include_users is not enrolled (Linux and macOS)
+
+No supported agent is installed in the account. `include_users` makes the account a candidate, but a row is added only for an agent the enumerator finds installed for that user. This holds for local and directory (mobile) accounts alike. The enumerator log says `<user>: named in enterprise.enrollment.include_users but not enrolled: no installation of <agents> found for this account`.
+
+**Fix.** Install the agent in the account (for Hermes, also run its first-run setup), then run `reconcile` or wait for the next cycle.
+
+**Check.** `status` counts one more enrollment target, and the hooks of the user are installed.
+
 #### A user is not enrolled (macOS)
 
 The uid is below 501.
