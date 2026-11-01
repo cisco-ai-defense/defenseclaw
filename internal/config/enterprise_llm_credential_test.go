@@ -76,8 +76,17 @@ func TestGatewayCredentialsCannotNameTheAccountJoinSecrets(t *testing.T) {
 				t.Errorf("%s in %+v: %v, want a refusal", name, inspection, err)
 			}
 		}
-		if refusal := gatewayCredentialRefusal("observability.x.token_credential", name); !strings.Contains(refusal, name) {
-			t.Errorf("observability %s: %q", name, refusal)
+		cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}, DecisionModel: DecisionModelConfig{Credential: name}}
+		if err := validateEnterpriseConfig(&cfg); err == nil || !strings.Contains(err.Error(), "decision_model.credential") {
+			t.Errorf("decision_model.credential %s: %v, want a refusal", name, err)
+		}
+		headers := map[string]ObservabilityV8HeaderValue{"X-Api-Key": {Secret: &ObservabilityV8SecretRef{Credential: name}}}
+		if err := validateObservabilityV8Headers(headers, ObservabilityV8DestinationOTLP, "http/protobuf", "observability.destinations.x.headers"); err == nil || !strings.Contains(err.Error(), "account join tenant secret") {
+			t.Errorf("observability header credential %s: %v, want a refusal", name, err)
+		}
+		source := ObservabilityV8DestinationSource{Kind: ObservabilityV8DestinationSplunkHEC, Endpoint: "https://splunk.example.com:8088/services/collector", TokenCredential: name}
+		if _, err := compileObservabilityV8Transport(source, nil, "observability.destinations.x"); err == nil || !strings.Contains(err.Error(), "account join tenant secret") {
+			t.Errorf("observability token_credential %s: %v, want a refusal", name, err)
 		}
 	}
 	if refusal := gatewayCredentialRefusal("enterprise.inspection.llm.credential", "llm-judge"); refusal != "" {

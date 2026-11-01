@@ -1543,7 +1543,11 @@ func validateEnterpriseConfig(cfg *Config) error {
 	if name := strings.TrimSpace(e.Inspection.LLM.Credential); name != "" && !ValidEnterpriseCredentialName(name) {
 		return fmt.Errorf("config: enterprise.inspection.llm.credential %q must be a protected credential name (lowercase letters, digits and dashes)", name)
 	}
-	for _, ref := range [][2]string{{"enterprise.inspection.ai_defense.credential", ai.Credential}, {"enterprise.inspection.llm.credential", e.Inspection.LLM.Credential}} {
+	for _, ref := range [][2]string{
+		{"enterprise.inspection.ai_defense.credential", ai.Credential},
+		{"enterprise.inspection.llm.credential", e.Inspection.LLM.Credential},
+		{"decision_model.credential", cfg.DecisionModel.Credential},
+	} {
 		if refusal := gatewayCredentialRefusal(ref[0], ref[1]); refusal != "" {
 			return fmt.Errorf("config: %s", refusal)
 		}

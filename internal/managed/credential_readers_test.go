@@ -43,6 +43,9 @@ func TestTheInstallerKeepsTheAccountJoinSecretsFromTheGateway(t *testing.T) {
 			t.Errorf("the installer does not name %s", name)
 		}
 	}
+	// The same descriptor as windowsSecretAdminFileSDDL in
+	// internal/cli/enterprise_secret_windows.go (Windows-only, not importable
+	// here); the PowerShell smoke compares the module with the Go writer.
 	if !strings.Contains(body, "return 'O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)'") {
 		t.Error("the installer's account join descriptor is not LocalSystem and Administrators only")
 	}
