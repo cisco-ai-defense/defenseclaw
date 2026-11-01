@@ -18,9 +18,9 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Static
 
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 MCP_FIELD_ORDER: tuple[str, ...] = ("name", "command", "args", "url", "transport", "env", "skip_scan")
@@ -122,7 +122,7 @@ class MCPSetFormValues:
         )
 
 
-class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
+class MCPSetFormScreen(GuardedModalScreen[MCPSetResult | None]):
     """Textual MCP set form with validation before dispatch."""
 
     CSS = f"""

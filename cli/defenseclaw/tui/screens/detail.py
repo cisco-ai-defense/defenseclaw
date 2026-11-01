@@ -20,10 +20,10 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
-from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from defenseclaw.tui.markup_safe import escape as rich_escape
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 
@@ -66,7 +66,7 @@ class DetailModalModel:
         return table
 
 
-class DetailScreen(ModalScreen[None]):
+class DetailScreen(GuardedModalScreen[None]):
     """Rounded modal used by logs, audit, alerts, and catalog drill-downs."""
 
     CSS = f"""
