@@ -199,6 +199,11 @@ $script:DefenseClawQuarantinedRoots = @()
 # ran with that gateway, and why it declined one. Reset per lifecycle run.
 $script:DefenseClawRecoveryGatewayCandidate = $null
 $script:DefenseClawRecoveryGatewayRuns = @()
+# Standalone: the gateway of the running Setup payload, which puts back the
+# OWNER RIGHTS entry an owner write took out of the managed state of the
+# enrolled accounts before the installed helper prepares, collects or purges
+# it (rel-1-0-6:GAP-0303). Set per lifecycle run.
+$script:DefenseClawOwnerRightsSource = $null
 $script:DefenseClawRecoveryGatewayRefusal = $null
 # Standalone uninstall: the bundle.lock handle an uninstall holds while it
 # removes StateRoot (Enter-DefenseClawBundleStoreLock, GAP-2438). Set here so
@@ -22021,6 +22026,49 @@ function Write-DefenseClawDeploymentMetadataBytes {
     }
 }
 
+function Invoke-DefenseClawManagedUserStateOwnerRightsRestore {
+    <#
+        rel-1-0-6:GAP-0303: Windows takes the OWNER RIGHTS entry out of a DACL
+        when the owner of the object is written (icacls /setowner, takeown,
+        a profile backup and restore), and the installed helper of an older
+        release refuses the managed folders and generation bundles of an
+        enrolled account in that shape, so its uninstall stopped after the
+        commit and every later uninstall or reinstall failed the same way.
+        Before the installed helper prepares, verifies, collects or purges
+        that state, the gateway of the running Setup payload puts the entry
+        back on exactly that shape ("teardown-managed-hooks
+        restore-owner-rights"). It never fails the lifecycle: the helper
+        check that follows still decides.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $source = $script:DefenseClawOwnerRightsSource
+    if ($null -eq $source -or -not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    try {
+        [void](Invoke-DefenseClawGatewayCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GatewaySource $source `
+            -Arguments @(
+                'enterprise',
+                'windows',
+                'teardown-managed-hooks',
+                'restore-owner-rights',
+                '--json'
+            ) `
+            -Capture `
+            -AllowFailure `
+            -TimeoutSeconds 120)
+    }
+    catch {
+        Write-DefenseClawLifecyclePhase -Stage "OWNER RIGHTS restore skipped: $($_.Exception.Message)"
+    }
+}
+
 function Invoke-DefenseClawManagedHooksTeardownCommand {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -22032,6 +22080,11 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         [switch]$PurgeContractLocks
     )
     Assert-DefenseClawAdministrator
+    if ($Action -cne 'rollback') {
+        Invoke-DefenseClawManagedUserStateOwnerRightsRestore `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
+    }
     $contractCleanupReceipt = [string](
         $Layout.ManagedHookContractCleanupReceiptPath
     )
@@ -39524,6 +39577,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -ModuleSource $ModuleSource `
         -AllowUnsigned:$AllowUnsigned `
         -DeferredConfig:$DeferredConfig
+    $script:DefenseClawOwnerRightsSource = $null
+    if ((Test-DefenseClawStandaloneProfile) -and $sources.ContainsKey('gateway')) {
+        $script:DefenseClawOwnerRightsSource = [hashtable]$sources['gateway']
+    }
 
     # Secure creation is race-safe and validates every existing ancestor
     # before the first lifecycle coordination object is opened. The lock then

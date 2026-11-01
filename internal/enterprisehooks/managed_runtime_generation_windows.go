@@ -1131,18 +1131,18 @@ func collectWindowsManagedRuntimeGenerations(
 	// before enrollment, or after an enrolled account moved DefenseClaw's
 	// folder, and its selected generation with it, away. The guardian adopts
 	// it in the account's session.
+	if !classifyOnly {
+		// An owner write took the OWNER RIGHTS entry out of a root
+		// (rel-1-0-6:GAP-0303): put it back. The checks below accept that
+		// exact shape either way; a classification only reads.
+		restoreWindowsManagedRuntimeRootsOwnerRights(validated.DataDir, target)
+	}
 	accountCreated := false
 	accountLink := false
 	// relaxed is a classification over a root left in the guardian's exact
 	// setup shape: it reads, never repairs (GAP-1818).
 	relaxed := false
-	if err := validateWindowsUserPathElement(
-		validated.DataDir,
-		target,
-		true,
-		true,
-		true,
-	); err != nil {
+	if err := validateWindowsUserPathElementOrOwnerRewritten(validated.DataDir, target, true); err != nil {
 		switch {
 		case windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target):
 			accountCreated = true
@@ -1190,13 +1190,7 @@ func collectWindowsManagedRuntimeGenerations(
 			}
 			return nil
 		}
-		if err := validateWindowsUserPathElement(
-			validated.DataDir,
-			target,
-			true,
-			true,
-			true,
-		); err != nil && (!relaxed || !windowsManagedRuntimeDirSetupRelaxedPlain(validated.DataDir, target)) {
+		if err := validateWindowsUserPathElementOrOwnerRewritten(validated.DataDir, target, true); err != nil && (!relaxed || !windowsManagedRuntimeDirSetupRelaxedPlain(validated.DataDir, target)) {
 			return fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
 
@@ -1212,7 +1206,7 @@ func collectWindowsManagedRuntimeGenerations(
 		} else if err != nil {
 			return err
 		}
-		if err := validateWindowsManagedRuntimeGenerationRoots(validated.DataDir, target); err != nil && classifyOnly {
+		if err := validateWindowsManagedRuntimeGenerationCollectionRoots(validated.DataDir, target); err != nil && classifyOnly {
 			// The retire after the commit restores a root a stopped
 			// guardian left in its setup shape and then classifies its
 			// bundles, so a bundle it refuses failed an upgrade that had
@@ -1240,7 +1234,7 @@ func collectWindowsManagedRuntimeGenerations(
 			if recoverErr != nil || !recovered {
 				return errors.Join(err, recoverErr)
 			}
-			if err := validateWindowsManagedRuntimeGenerationRoots(validated.DataDir, target); err != nil {
+			if err := validateWindowsManagedRuntimeGenerationCollectionRoots(validated.DataDir, target); err != nil {
 				return err
 			}
 		}
@@ -1331,13 +1325,9 @@ func restoreWindowsManagedRuntimeBundleOwnerRights(
 	if err != nil {
 		return
 	}
-	restored, err := windowsManagedRuntimeBundleRestoreOwnerRights(path, target)
-	switch {
-	case err != nil:
-		fmt.Fprintf(os.Stderr, "[enterprise-hooks] could not restore the OWNER RIGHTS entry of %s: %v\n", path, err)
-	case restored:
-		fmt.Fprintf(os.Stderr, "[enterprise-hooks] restored the OWNER RIGHTS entry an owner change removed from %s\n", path)
-	}
+	reportWindowsOwnerRightsRestore(path, func() (bool, error) {
+		return windowsManagedRuntimeBundleRestoreOwnerRights(path, target)
+	})
 }
 
 func loadUnselectedWindowsManagedRuntimeBundle(
@@ -2939,7 +2929,7 @@ func deleteWindowsManagedRuntimeBundle(
 	target *windows.SID,
 	expected []byte,
 ) error {
-	if err := validateWindowsManagedRuntimeGenerationRoots(entry.DataDir, target); err != nil {
+	if err := validateWindowsManagedRuntimeGenerationCollectionRoots(entry.DataDir, target); err != nil {
 		return err
 	}
 	path, err := windowsManagedRuntimeBundlePath(entry.DataDir, entry.Connector, entry.GenerationID)

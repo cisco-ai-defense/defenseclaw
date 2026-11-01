@@ -445,6 +445,7 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 	}
 	command.AddCommand(newWindowsManagedHooksTeardownCapabilitiesCommand())
 	command.AddCommand(newWindowsManagedHooksUserStatePurgeCommand())
+	command.AddCommand(newWindowsManagedHooksOwnerRightsRestoreCommand())
 	return command
 }
 
@@ -567,6 +568,119 @@ func runWindowsManagedHooksUserStatePurge() (windowsManagedHooksTeardownReport, 
 	completeWindowsManagedHooksTeardownUserCleanup(&report, runtimeDir, manifest)
 	report.OK = true
 	report.FinalizationCompleted = true
+	return report, nil
+}
+
+// windowsManagedHooksOwnerRightsRestoreAction is the teardown-managed-hooks
+// action a standalone Setup runs with its own authenticated gateway before
+// the installed helper prepares, collects or purges the per-user state of
+// the enrolled accounts: it puts back the OWNER RIGHTS entry an owner write
+// (icacls /setowner, takeown, a profile backup and restore) took out of their
+// managed folders and files. The helper of an older release refuses that
+// shape, and a host that release left half-uninstalled could not finish an
+// uninstall or a reinstall (rel-1-0-6:GAP-0303).
+const windowsManagedHooksOwnerRightsRestoreAction = "restore-owner-rights"
+
+// windowsManagedHooksOwnerRightsRestorer is replaceable in tests.
+var windowsManagedHooksOwnerRightsRestorer = enterprisehooks.RestoreWindowsManagedUserStateOwnerRights
+
+func newWindowsManagedHooksOwnerRightsRestoreCommand() *cobra.Command {
+	var jsonOutput bool
+	child := &cobra.Command{
+		Use:          windowsManagedHooksOwnerRightsRestoreAction,
+		Short:        "restore the OWNER RIGHTS entry on enrolled accounts managed state after an owner change",
+		Hidden:       true,
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			report, err := runWindowsManagedHooksOwnerRightsRestore()
+			if jsonOutput {
+				if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(report); encodeErr != nil && err == nil {
+					return encodeErr
+				}
+			} else if err == nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "OWNER RIGHTS restored on %d object(s) of %d account(s)\n",
+					report.SucceededCount, report.TargetCount)
+			}
+			if err != nil {
+				return fmt.Errorf("managed-hook teardown %s failed: %w", windowsManagedHooksOwnerRightsRestoreAction, err)
+			}
+			return nil
+		},
+	}
+	child.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+	return child
+}
+
+// runWindowsManagedHooksOwnerRightsRestore restores the managed state of
+// every enrolled account the protected target manifest names. It changes
+// only objects in the exact owner-rewritten shape
+// (enterprisehooks.RestoreWindowsManagedUserStateOwnerRights). SucceededCount
+// is the number of objects restored and TargetCount the number of accounts;
+// an account it could not restore is a failed result, never an error: the
+// trust check that follows still decides.
+func runWindowsManagedHooksOwnerRightsRestore() (windowsManagedHooksTeardownReport, error) {
+	report := windowsManagedHooksTeardownReport{
+		SchemaVersion: windowsManagedHooksTeardownSchema,
+		Action:        windowsManagedHooksOwnerRightsRestoreAction,
+		Results:       []windowsManagedHooksTeardownResult{},
+	}
+	fail := func(err error) (windowsManagedHooksTeardownReport, error) {
+		report.OK = false
+		report.Error = err.Error()
+		return report, err
+	}
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return fail(errors.New("the OWNER RIGHTS restore requires the standalone profile"))
+	}
+	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+		return fail(err)
+	}
+	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
+	if err != nil {
+		return fail(err)
+	}
+	stateRoot := filepath.Dir(runtimeDir)
+	if !strings.EqualFold(filepath.Base(runtimeDir), "runtime") || stateRoot == filepath.Dir(stateRoot) {
+		return fail(errors.New("the OWNER RIGHTS restore received a noncanonical protected runtime directory"))
+	}
+	if err := managed.ValidateTrustedRuntimeDir(stateRoot, "Windows enterprise managed-hook teardown state root"); err != nil {
+		return fail(err)
+	}
+	report.ManifestPath = filepath.Join(stateRoot, "hook-guardian", "targets.yaml")
+	if _, err := os.Lstat(report.ManifestPath); errors.Is(err, os.ErrNotExist) {
+		report.OK = true
+		return report, nil
+	}
+	if err := managed.ValidateTrustedFilePath(report.ManifestPath, "Windows enterprise hook target manifest"); err != nil {
+		return fail(err)
+	}
+	manifest, _, err := enterprisehooks.LoadManifestWithSHA256(report.ManifestPath)
+	if err != nil {
+		return fail(err)
+	}
+	targets, _, _, _, err := windowsManagedHooksTeardownTargets(manifest)
+	if err != nil {
+		return fail(err)
+	}
+	seen := map[string]bool{}
+	for _, target := range targets {
+		key := strings.ToUpper(target.SID) + "\x00" + strings.ToLower(filepath.Clean(target.DataDir))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		report.TargetCount++
+		restored, err := windowsManagedHooksOwnerRightsRestorer(target.SID, target.DataDir)
+		report.SucceededCount += restored
+		result := windowsManagedHooksTeardownResult{Connector: target.Connector, SID: target.SID, OK: err == nil}
+		if err != nil {
+			result.Error = err.Error()
+			report.FailedCount++
+		}
+		report.Results = append(report.Results, result)
+	}
+	report.OK = true
 	return report, nil
 }
 

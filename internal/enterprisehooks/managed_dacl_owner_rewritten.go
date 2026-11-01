@@ -14,14 +14,18 @@ import "strings"
 // the rest of its canonical protected DACL: LocalSystem and Administrators
 // full control and the account's read, write, execute and delete.
 //
+// The same happens to the .defenseclaw folder of the account and to its
+// hooks child.
+//
 // DefenseClaw never writes that shape itself; every release from 1.0.2 on
-// creates the file with the OWNER RIGHTS entry and the same three others.
-// But an immutable managed runtime generation bundle is never rewritten,
-// so the guardian never puts the entry back, and refusing it made the
-// generation collection of every later upgrade, uninstall and reinstall
-// fail with 1603 (rel-1-0-6:GAP-0303). Only these two exact shapes are
-// accepted, for a file the account owns: one more, one less or one changed
-// entry is refused as before.
+// writes these DACLs with the OWNER RIGHTS entry. A running guardian puts the
+// entry back on the folders and on the files it rewrites, but an immutable
+// managed runtime generation bundle is never rewritten, and nothing repairs
+// anything once an uninstall stopped the services: refusing that shape made
+// the generation collection of every later upgrade, uninstall and reinstall
+// fail with 1603 and left the host half-uninstalled (rel-1-0-6:GAP-0303).
+// Only these two exact shapes are accepted, for an object the account owns:
+// one more, one less or one changed entry is refused as before.
 const (
 	windowsSIDOwnerRights    = "S-1-3-4"
 	windowsSIDLocalSystem    = "S-1-5-18"
@@ -43,10 +47,11 @@ const (
 	windowsACEManagedUserFileAccess uint32 = 0x001301bf
 )
 
-// windowsManagedFileOwnerRewrittenExpected is the canonical managed file
-// DACL of target without its OWNER RIGHTS entry, as Windows stores it.
-func windowsManagedFileOwnerRewrittenExpected(target string) []windowsDACLExpectedEntry {
+// windowsManagedFileCanonicalExpected is the canonical managed file DACL of
+// target as Windows stores it, OWNER RIGHTS entry included.
+func windowsManagedFileCanonicalExpected(target string) []windowsDACLExpectedEntry {
 	return []windowsDACLExpectedEntry{
+		{sid: windowsSIDOwnerRights, mask: windowsACEReadControlOnly},
 		{sid: windowsSIDLocalSystem, mask: windowsACEFileAllAccess},
 		{sid: windowsSIDAdministrators, mask: windowsACEFileAllAccess},
 		{sid: strings.TrimSpace(target), mask: windowsACEManagedUserFileAccess},
@@ -54,24 +59,51 @@ func windowsManagedFileOwnerRewrittenExpected(target string) []windowsDACLExpect
 }
 
 // windowsManagedFileOwnerRewrittenDACL reports whether entries are exactly
-// the canonical managed file DACL of target after an owner write: its three
-// explicit access-allowed entries with no inheritance flags, in any order,
-// and either no OWNER RIGHTS entry or that entry made inherit-only, and
-// nothing else.
+// the canonical managed file DACL of target after an owner write
+// (windowsOwnerRewrittenDACL with the file entries and no read-only extras).
 func windowsManagedFileOwnerRewrittenDACL(entries []windowsDACLEntry, target string) bool {
+	return windowsOwnerRewrittenDACL(entries, windowsManagedFileCanonicalExpected(target), target, false)
+}
+
+// windowsOwnerRewrittenDACL reports whether entries are the canonical DACL
+// canonical (OWNER RIGHTS entry included, as Windows stores it) after an
+// owner write: the explicit OWNER RIGHTS entry removed or made inherit-only,
+// every other canonical entry exactly once, in any order, the read-only
+// extra grants the strict check tolerates when tolerateReadOnly says so, and
+// nothing else. A canonical set without its plain OWNER RIGHTS entry, and a
+// target that is not an account, never match.
+func windowsOwnerRewrittenDACL(
+	entries []windowsDACLEntry,
+	canonical []windowsDACLExpectedEntry,
+	target string,
+	tolerateReadOnly bool,
+) bool {
 	target = strings.TrimSpace(target)
 	if target == "" || strings.EqualFold(target, windowsSIDLocalSystem) ||
 		strings.EqualFold(target, windowsSIDAdministrators) ||
 		strings.EqualFold(target, windowsSIDOwnerRights) {
 		return false
 	}
-	expected := windowsManagedFileOwnerRewrittenExpected(target)
-	if len(entries) == len(expected)+1 {
-		expected = append(expected, windowsDACLExpectedEntry{
-			sid:   windowsSIDOwnerRights,
-			mask:  windowsACEReadControlOnly,
-			flags: windowsACEInheritOnly,
-		})
+	stripped := make([]windowsDACLExpectedEntry, 0, len(canonical)+1)
+	found := false
+	for _, want := range canonical {
+		if !found && strings.EqualFold(want.sid, windowsSIDOwnerRights) &&
+			want.mask == windowsACEReadControlOnly && want.flags == 0 {
+			found = true
+			continue
+		}
+		stripped = append(stripped, want)
 	}
-	return matchWindowsCanonicalDACL(entries, expected, target, false).failure == windowsDACLMatched
+	if !found {
+		return false
+	}
+	if matchWindowsCanonicalDACL(entries, stripped, target, tolerateReadOnly).failure == windowsDACLMatched {
+		return true
+	}
+	inheritOnly := append(stripped, windowsDACLExpectedEntry{
+		sid:   windowsSIDOwnerRights,
+		mask:  windowsACEReadControlOnly,
+		flags: windowsACEInheritOnly,
+	})
+	return matchWindowsCanonicalDACL(entries, inheritOnly, target, tolerateReadOnly).failure == windowsDACLMatched
 }
