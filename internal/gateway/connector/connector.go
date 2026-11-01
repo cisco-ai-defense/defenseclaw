@@ -254,6 +254,8 @@ type SetupOpts struct {
 	// empty value means no command-line settings source is part of that
 	// invocation. The passive guardian cannot infer flags for future processes;
 	// callers validating a concrete launch must pass the value explicitly.
+	// Test seam: no production caller sets it, so no product check covers
+	// a --settings source.
 	ClaudeSettingsOverride string
 
 	// HookContractID optionally pins setup/profile resolution to a specific

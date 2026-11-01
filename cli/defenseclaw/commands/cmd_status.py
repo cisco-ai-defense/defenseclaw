@@ -1333,6 +1333,7 @@ def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bo
             agent_hook_switch_problems,
             hook_registration_problems,
             hook_runtime_problems,
+            pinned_workspace_dir,
             repair_command,
         )
 
@@ -1348,7 +1349,9 @@ def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bo
             # DEGRADED here as in the alert and doctor (GAP-1634).
             else hook_runtime_problems(cfg, connector)
             or hook_registration_problems(cfg, connector)
-            or agent_hook_switch_problems(cfg, connector)
+            # The same workspace as doctor and the gateway: the pinned
+            # claw.workspace_dir, else (disableAllHooks only) this folder.
+            or agent_hook_switch_problems(cfg, connector, workspace_dir=pinned_workspace_dir(cfg) or None)
         )
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""

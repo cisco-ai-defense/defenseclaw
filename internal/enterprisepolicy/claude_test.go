@@ -315,12 +315,61 @@ func TestClaudeDropInPinsHookShellEnvOutsideWindows(t *testing.T) {
 				return
 			}
 			want := map[string]any{}
-			for _, name := range []string{"BASHOPTS", "BASH_ENV", "CLAUDE_CODE_SHELL_PREFIX", "ENV", "FUNCNEST", "SHELLOPTS"} {
+			// Only what can stop the native hook command: managed env is
+			// process-wide (review finding 4).
+			for _, name := range []string{"CLAUDE_CODE_SHELL_PREFIX", "SHELLOPTS"} {
 				want[name] = ""
 			}
 			if !reflect.DeepEqual(env, want) {
 				t.Fatalf("%s drop-in env = %v, want %v", goos, env, want)
 			}
 		})
+	}
+}
+
+// rel-1-0-6:GAP-0322 review finding 4: a pinned name set by another managed
+// source is named, before the drop-in (overridden) and after it (applies),
+// and a higher-precedence source with the hooks but not the pins is named.
+func TestClaudeInspectNamesHookShellEnvOverrides(t *testing.T) {
+	withHigherSources(t)
+	opts := testOptions(t)
+	dir := claudeDir(t, opts)
+	writeFile(t, filepath.Join(dir, "managed-settings.json"), `{"env": {"CLAUDE_CODE_SHELL_PREFIX": "/usr/local/bin/audit-wrap"}}`+"\n")
+	writeFile(t, filepath.Join(dir, "managed-settings.d", "99-late.json"), `{"env": {"SHELLOPTS": "noexec"}}`+"\n")
+	state, err := claudeTarget{}.Reconcile(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	details := strings.Join(state.Details, "\n")
+	for _, want := range []string{
+		"managed-settings.json sets env CLAUDE_CODE_SHELL_PREFIX; DefenseClaw's drop-in sets it to \"\" later in merge order",
+		"99-late.json sets env SHELLOPTS after DefenseClaw's drop-in, so its value applies to the managed hook commands",
+	} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details lack %q:\n%s", want, details)
+		}
+	}
+
+	rendered, err := renderClaudeDropIn(opts, opts.PolicyFor("claudecode"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(rendered, &doc); err != nil {
+		t.Fatal(err)
+	}
+	delete(doc, "env")
+	withoutPins, _ := json.Marshal(doc)
+	withHigherSources(t, higherSource(t, "macOS managed preferences", string(withoutPins)), higherSource(t, "HKLM Settings", string(rendered)))
+	state, err = claudeTarget{}.Verify(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	details = strings.Join(state.Details, "\n")
+	if !strings.Contains(details, "macOS managed preferences carries DefenseClaw's hooks but does not set CLAUDE_CODE_SHELL_PREFIX and SHELLOPTS") {
+		t.Fatalf("details lack the unpinned higher source:\n%s", details)
+	}
+	if strings.Contains(details, "HKLM Settings carries DefenseClaw's hooks but does not set") {
+		t.Fatalf("a pinned higher source was reported:\n%s", details)
 	}
 }

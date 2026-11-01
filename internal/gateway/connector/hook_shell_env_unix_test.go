@@ -18,47 +18,86 @@ func hookShellEnvSource(name string, env map[string]interface{}) *claudeCodeSett
 	return &claudeCodeSettingsSource{name: name, path: "/x/" + name, settings: map[string]interface{}{"env": env}}
 }
 
-// rel-1-0-6:GAP-0322: the names are resolved as Claude Code merges env
-// blocks, highest source first, and only a value that takes effect counts.
+// rel-1-0-6:GAP-0322: the names are resolved as Claude Code applies env
+// blocks: the highest source with a value Claude Code keeps decides a name;
+// a dropped value (null, object, array, NUL) leaves the lower one in force.
 func TestClaudeCodeSettingsHookShellEnvFollowsEnvPrecedence(t *testing.T) {
+	type src = *claudeCodeSettingsSource
+	s := hookShellEnvSource
 	cases := []struct {
 		name    string
-		sources claudeCodeUserSourceSet
+		sources []src
 		want    []string
 		from    []string
 	}{
 		{
 			name:    "project noexec",
-			sources: claudeCodeUserSourceSet{project: hookShellEnvSource("project settings", map[string]interface{}{"SHELLOPTS": "noexec", "PATH": "/bin"})},
-			want:    []string{"SHELLOPTS"}, from: []string{"project settings"},
+			sources: []src{s("project", map[string]interface{}{"SHELLOPTS": "noexec", "PATH": "/bin"})},
+			want:    []string{"SHELLOPTS"}, from: []string{"project"},
 		},
 		{
 			name: "local empty clears project",
-			sources: claudeCodeUserSourceSet{
-				local:   hookShellEnvSource("local project settings", map[string]interface{}{"SHELLOPTS": ""}),
-				project: hookShellEnvSource("project settings", map[string]interface{}{"SHELLOPTS": "noexec"}),
+			sources: []src{
+				s("local", map[string]interface{}{"SHELLOPTS": ""}),
+				s("project", map[string]interface{}{"SHELLOPTS": "noexec"}),
 			},
 		},
 		{
-			name: "every name, two sources",
-			sources: claudeCodeUserSourceSet{
-				cli: hookShellEnvSource("CLI --settings", map[string]interface{}{"CLAUDE_CODE_SHELL_PREFIX": "/usr/bin/true"}),
-				user: hookShellEnvSource("user settings", map[string]interface{}{
-					"BASHOPTS": "extglob", "BASH_ENV": "/tmp/x", "ENV": "/tmp/y", "FUNCNEST": "1",
-					"BASH_FUNC_[%%": "() { return 0; }", "POSIXLY_CORRECT": "1", "SHELL": "/bin/zsh",
-				}),
+			name: "local null does not hide project (review finding 1)",
+			sources: []src{
+				s("local", map[string]interface{}{"SHELLOPTS": nil}),
+				s("project", map[string]interface{}{"SHELLOPTS": "noexec"}),
 			},
-			want: []string{"BASHOPTS", "BASH_ENV", "BASH_FUNC_[%%", "CLAUDE_CODE_SHELL_PREFIX", "ENV", "FUNCNEST"},
-			from: []string{"CLI --settings", "user settings"},
+			want: []string{"SHELLOPTS"}, from: []string{"project"},
 		},
 		{
-			name:    "an exported function counts with an empty value",
-			sources: claudeCodeUserSourceSet{user: hookShellEnvSource("user settings", map[string]interface{}{"BASH_FUNC_echo%%": ""})},
-			want:    []string{"BASH_FUNC_echo%%"}, from: []string{"user settings"},
+			name: "object, array and NUL values are dropped too",
+			sources: []src{
+				s("local", map[string]interface{}{"SHELLOPTS": map[string]interface{}{}, "BASH_ENV": []interface{}{""}, "FUNCNEST": "\x00"}),
+				s("user", map[string]interface{}{"SHELLOPTS": "noexec", "BASH_ENV": "/tmp/x", "FUNCNEST": "1"}),
+			},
+			want: []string{"BASH_ENV", "FUNCNEST", "SHELLOPTS"}, from: []string{"user"},
 		},
 		{
-			name:    "blank values and no env block",
-			sources: claudeCodeUserSourceSet{user: hookShellEnvSource("user settings", map[string]interface{}{"SHELLOPTS": "  ", "BASH_ENV": ""}), project: &claudeCodeSettingsSource{name: "p", settings: map[string]interface{}{}}},
+			name:    "a number and a boolean count once stringified",
+			sources: []src{s("user", map[string]interface{}{"FUNCNEST": float64(1), "BASHOPTS": false})},
+			want:    []string{"BASHOPTS", "FUNCNEST"}, from: []string{"user"},
+		},
+		{
+			name: "cli over local",
+			sources: []src{
+				s("cli", map[string]interface{}{"CLAUDE_CODE_SHELL_PREFIX": "/usr/bin/true"}),
+				s("local", map[string]interface{}{"CLAUDE_CODE_SHELL_PREFIX": ""}),
+			},
+			want: []string{"CLAUDE_CODE_SHELL_PREFIX"}, from: []string{"cli"},
+		},
+		{
+			name: "project over user",
+			sources: []src{
+				s("project", map[string]interface{}{"SHELLOPTS": ""}),
+				s("user", map[string]interface{}{"SHELLOPTS": "noexec"}),
+			},
+		},
+		{
+			name: "managed empty over every lower tier",
+			sources: []src{
+				s("managed", map[string]interface{}{"SHELLOPTS": "", "CLAUDE_CODE_SHELL_PREFIX": ""}),
+				s("local", map[string]interface{}{"SHELLOPTS": "noexec"}),
+				s("global", map[string]interface{}{"CLAUDE_CODE_SHELL_PREFIX": "/usr/bin/true"}),
+			},
+		},
+		{
+			name: "global is the lowest tier",
+			sources: []src{
+				s("user", map[string]interface{}{"BASH_ENV": "/a"}),
+				s("global", map[string]interface{}{"BASH_ENV": "", "SHELLOPTS": "noexec"}),
+			},
+			want: []string{"BASH_ENV", "SHELLOPTS"}, from: []string{"user", "global"},
+		},
+		{
+			name:    "exported function with an empty value; ENV and POSIXLY_CORRECT are not on the list",
+			sources: []src{s("user", map[string]interface{}{"BASH_FUNC_curl%%": "", "ENV": "/tmp/e", "POSIXLY_CORRECT": "1"})},
+			want:    []string{"BASH_FUNC_curl%%"}, from: []string{"user"},
 		},
 	}
 	for _, tc := range cases {
@@ -72,6 +111,29 @@ func TestClaudeCodeSettingsHookShellEnvFollowsEnvPrecedence(t *testing.T) {
 				t.Fatalf("names = %v from %v, want %v from %v", names, fromNames, tc.want, tc.from)
 			}
 		})
+	}
+}
+
+// The source order is the one Claude Code applies, read from the real
+// source set: managed, cli, local, project, user, ~/.claude.json.
+func TestClaudeCodeHookShellEnvSourceOrder(t *testing.T) {
+	conn, opts, settingsPath, managedRoot := isolatedClaudePolicyFixture(t)
+	_ = conn
+	writeClaudePolicyJSON(t, filepath.Join(filepath.Dir(settingsPath), ".claude.json"), map[string]interface{}{"env": map[string]interface{}{"SHELLOPTS": "noexec"}})
+	writeClaudePolicyJSON(t, filepath.Join(opts.WorkspaceDir, ".claude", "settings.json"), map[string]interface{}{"env": map[string]interface{}{"BASH_ENV": "/p"}})
+	writeClaudePolicyJSON(t, filepath.Join(opts.WorkspaceDir, ".claude", "settings.local.json"), map[string]interface{}{"env": map[string]interface{}{"BASH_ENV": ""}})
+	sources, err := inspectClaudeCodeUserSources(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, from := claudeCodeSettingsHookShellEnv(claudeCodeHookShellEnvSources(sources))
+	if !reflect.DeepEqual(names, []string{"SHELLOPTS"}) || len(from) != 1 || from[0].name != "global config" {
+		t.Fatalf("names %v from %v, want SHELLOPTS from the global config (local clears the project's BASH_ENV)", names, from)
+	}
+	// A managed SHELLOPTS "" (the drop-in pin) decides over ~/.claude.json.
+	writeClaudePolicyJSON(t, filepath.Join(managedRoot, "managed-settings.json"), map[string]interface{}{"env": map[string]interface{}{"SHELLOPTS": ""}})
+	if names, _ := claudeCodeSettingsHookShellEnv(claudeCodeHookShellEnvSources(sources)); len(names) != 0 {
+		t.Fatalf("names with a managed pin = %v, want none", names)
 	}
 }
 
@@ -93,7 +155,7 @@ func TestClaudeCodeHookShellEnvWarnsByDefaultAndStrictRefuses(t *testing.T) {
 			t.Fatalf("tier %q: OwnedHooksPresent = %v, %v; want the hooks kept", tier, present, err)
 		}
 		warning := HookShellEnvWarning(conn, opts)
-		for _, want := range []string{project, "SHELLOPTS", "/bin/sh", "remove SHELLOPTS"} {
+		for _, want := range []string{project, "SHELLOPTS (with noexec, /bin/sh runs none of the hook command)", "remove SHELLOPTS"} {
 			if !strings.Contains(warning, want) {
 				t.Fatalf("tier %q: warning %q lacks %q", tier, warning, want)
 			}
@@ -105,25 +167,43 @@ func TestClaudeCodeHookShellEnvWarnsByDefaultAndStrictRefuses(t *testing.T) {
 		t.Fatalf("strict tier warning = %q, want the refusal instead", warning)
 	}
 	err := CheckAgentSettings(conn, opts)
-	if !errors.Is(err, ErrAgentConfigRefusal) || !strings.Contains(err.Error(), "strict policy tier refuses it") ||
-		!strings.Contains(err.Error(), project) {
+	if !errors.Is(err, ErrAgentConfigRefusal) || !strings.Contains(err.Error(), project) {
 		t.Fatalf("strict CheckAgentSettings = %v; want an agent-settings refusal naming %s", err, project)
+	}
+	for _, want := range []string{"SHELLOPTS (with noexec", "strict policy tier refuses it", "every Claude Code session of this account fails closed", "default policy tier"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("strict refusal %q lacks %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "a value such as") {
+		t.Fatalf("strict refusal cites a variable it did not find: %v", err)
 	}
 	if present, err := OwnedHooksPresent(conn, opts); present || err == nil || !strings.Contains(err.Error(), "SHELLOPTS") {
 		t.Fatalf("strict OwnedHooksPresent = %v, %v; want the effective-policy refusal", present, err)
 	}
 
-	// A higher source that empties the name clears the finding.
-	writeClaudePolicyJSON(t, filepath.Join(opts.WorkspaceDir, ".claude", "settings.local.json"),
-		map[string]interface{}{"env": map[string]interface{}{"SHELLOPTS": ""}})
+	// A local null does not clear the project value (Claude Code drops it).
+	local := filepath.Join(opts.WorkspaceDir, ".claude", "settings.local.json")
+	writeClaudePolicyJSON(t, local, map[string]interface{}{"env": map[string]interface{}{"SHELLOPTS": nil}})
+	if err := CheckAgentSettings(conn, opts); !errors.Is(err, ErrAgentConfigRefusal) {
+		t.Fatalf("strict with a local null SHELLOPTS: %v, want the refusal", err)
+	}
+	// A local "" does.
+	writeClaudePolicyJSON(t, local, map[string]interface{}{"env": map[string]interface{}{"SHELLOPTS": ""}})
 	if err := CheckAgentSettings(conn, opts); err != nil {
 		t.Fatalf("strict with a local empty SHELLOPTS: %v", err)
+	}
+	// ENV cannot stop the launch and is not refused.
+	writeClaudePolicyJSON(t, project, map[string]interface{}{"env": map[string]interface{}{"ENV": "/tmp/e"}})
+	if err := CheckAgentSettings(conn, opts); err != nil {
+		t.Fatalf("strict with ENV only: %v", err)
 	}
 
 	// A managed install pins the names in its drop-in and is not checked here.
 	opts.ManagedEnterprise = true
 	opts.PolicyTier = ""
-	writeClaudePolicyJSON(t, filepath.Join(opts.WorkspaceDir, ".claude", "settings.local.json"), map[string]interface{}{})
+	writeClaudePolicyJSON(t, project, map[string]interface{}{"env": map[string]interface{}{"SHELLOPTS": "noexec"}})
+	writeClaudePolicyJSON(t, local, map[string]interface{}{})
 	if warning := HookShellEnvWarning(conn, opts); warning != "" {
 		t.Fatalf("managed warning = %q, want none", warning)
 	}

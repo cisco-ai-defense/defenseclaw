@@ -7,6 +7,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -87,5 +88,44 @@ func TestHookConfigGuardAlertsOnceForHookShellEnv(t *testing.T) {
 	guard.auditHookShellEnv(conn, opts)
 	if got := alerts(); len(got) != 2 {
 		t.Fatalf("strict-tier alerts = %d, want none added", len(got))
+	}
+}
+
+// Review finding 5 (mutant M11): the alert comes from the guard's periodic
+// effective-policy audit, so drive it through processPolicyAudit.
+func TestHookConfigGuardPolicyAuditRaisesTheHookShellEnvAlert(t *testing.T) {
+	root := t.TempDir()
+	previous := connector.ClaudeCodeSettingsPathOverride
+	connector.ClaudeCodeSettingsPathOverride = filepath.Join(root, "home", ".claude", "settings.json")
+	t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = previous })
+	previousManaged := connector.ClaudeCodeManagedSettingsRootOverride
+	connector.ClaudeCodeManagedSettingsRootOverride = filepath.Join(root, "managed")
+	t.Cleanup(func() { connector.ClaudeCodeManagedSettingsRootOverride = previousManaged })
+	workspace := filepath.Join(root, "repo")
+	writeHookShellEnvSettings(t, filepath.Join(workspace, ".claude", "settings.json"), map[string]string{"SHELLOPTS": "noexec"})
+
+	store, logger := testStoreAndLogger(t)
+	guard := NewHookConfigGuard(logger, nil, time.Hour)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	guard.mu.Lock()
+	guard.ctx = ctx
+	guard.conn = &stubConnector{name: "claudecode"}
+	guard.opts = connector.SetupOpts{DataDir: filepath.Join(root, "dc"), WorkspaceDir: workspace}
+	guard.mu.Unlock()
+
+	guard.processPolicyAudit()
+	events, err := store.ListEvents(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, event := range events {
+		if event.Action == string(audit.ActionGuardrailDegraded) && strings.Contains(event.Details, "agent settings can stop the hooks") {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("alerts after one policy audit = %d, want 1", found)
 	}
 }

@@ -4,12 +4,12 @@
 """Agent settings and shell variables that stop shell-form hooks (rel-1-0-6:GAP-0322).
 
 Claude Code starts a hook command through /bin/sh -c with its environment plus
-the env block of its settings files. On RHEL and macOS /bin/sh is bash, and
+the env block of its settings sources. On RHEL and macOS /bin/sh is bash, and
 SHELLOPTS=noexec in a project's .claude/settings.json made it run none of the
 registered command: no hook ran and every call went ahead. The strict tier
-refuses such settings (the hooks row fails, status shows DEGRADED); the
-default and permissive tiers warn, as does a variable the agent would inherit
-from this shell.
+refuses such settings in the sources the gateway checks (user,
+~/.claude.json, managed, the pinned claw.workspace_dir); everything else is a
+warning, as is a variable the agent would inherit from this shell.
 """
 
 from __future__ import annotations
@@ -27,15 +27,17 @@ from defenseclaw.commands import cmd_doctor, cmd_status
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="Windows runs the native launcher without /bin/sh")
 
 
-def _cfg(tmp_path: Path, monkeypatch, tier: str = "default", deployment: str = "") -> SimpleNamespace:
+def _cfg(tmp_path: Path, monkeypatch, tier: str = "default", deployment: str = "", workspace: str = ""):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "home" / ".claude"))
-    monkeypatch.delenv("SHELLOPTS", raising=False)
-    monkeypatch.delenv("CLAUDE_CODE_SHELL_PREFIX", raising=False)
+    for name in ("SHELLOPTS", "CLAUDE_CODE_SHELL_PREFIX", "BASH_ENV"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(hook_integrity, "_claude_managed_env_source", lambda: None)
     (tmp_path / "dc").mkdir(exist_ok=True)
     return SimpleNamespace(
         data_dir=str(tmp_path / "dc"),
         deployment_mode=deployment,
         guardrail=SimpleNamespace(hook_policy_tier=lambda connector="": tier),
+        claw=SimpleNamespace(workspace_dir=workspace),
     )
 
 
@@ -49,16 +51,56 @@ def test_names_follow_claude_env_precedence(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch)
     repo = tmp_path / "repo"
     project = _settings(repo / ".claude" / "settings.json", {"SHELLOPTS": "noexec", "PATH": "/bin"})
-    user = _settings(tmp_path / "home" / ".claude" / "settings.json", {"BASH_FUNC_[%%": "", "POSIXLY_CORRECT": "1"})
+    user = _settings(tmp_path / "home" / ".claude" / "settings.json", {"BASH_FUNC_[%%": "", "POSIXLY_CORRECT": "1", "ENV": "/e"})
 
     names, sources = hook_integrity.claude_settings_hook_shell_env(cfg, str(repo))
     assert names == ["BASH_FUNC_[%%", "SHELLOPTS"]
     assert sources == [project, user]
 
     # A higher file that empties the name clears it.
-    _settings(repo / ".claude" / "settings.local.json", {"SHELLOPTS": ""})
+    local = _settings(repo / ".claude" / "settings.local.json", {"SHELLOPTS": ""})
     names, sources = hook_integrity.claude_settings_hook_shell_env(cfg, str(repo))
     assert names == ["BASH_FUNC_[%%"] and sources == [user]
+
+    # Review finding 1: null, an object, an array or NUL in a higher file is
+    # dropped by Claude Code, so the lower value still applies.
+    for dropped in (None, {}, [""], "no\x00exec"):
+        local.write_text(json.dumps({"env": {"SHELLOPTS": dropped}}), encoding="utf-8")
+        names, sources = hook_integrity.claude_settings_hook_shell_env(cfg, str(repo))
+        assert names == ["BASH_FUNC_[%%", "SHELLOPTS"] and sources == [project, user], dropped
+
+
+@pytest.mark.parametrize(
+    "higher, lower, want",
+    [
+        ("project", "user", []),
+        ("user", "global", ["SHELLOPTS"]),
+        ("managed", "local", []),
+    ],
+)
+def test_same_name_conflicts_across_tiers(tmp_path, monkeypatch, higher, lower, want):
+    cfg = _cfg(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    files = {
+        "local": repo / ".claude" / "settings.local.json",
+        "project": repo / ".claude" / "settings.json",
+        "user": tmp_path / "home" / ".claude" / "settings.json",
+        "global": tmp_path / "home" / ".claude" / ".claude.json",
+    }
+    values = {"user": "noexec", "global": ""} if want else {higher: "", lower: "noexec"}
+    for tier, value in values.items():
+        if tier == "managed":
+            monkeypatch.setattr(hook_integrity, "_claude_managed_env_source", lambda v=value: ("managed", {"SHELLOPTS": v}))
+        else:
+            _settings(files[tier], {"SHELLOPTS": value})
+    names, _ = hook_integrity.claude_settings_hook_shell_env(cfg, str(repo))
+    assert names == want
+
+
+def test_numbers_and_booleans_count(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    _settings(tmp_path / "home" / ".claude" / "settings.json", {"FUNCNEST": 1, "BASHOPTS": False})
+    assert hook_integrity.claude_settings_hook_shell_env(cfg, None)[0] == ["BASHOPTS", "FUNCNEST"]
 
 
 @pytest.mark.parametrize("tier", ["default", "permissive"])
@@ -70,12 +112,13 @@ def test_default_tiers_warn_and_keep_the_hooks(tmp_path, monkeypatch, tier):
     assert hook_integrity.agent_hook_switch_problems(cfg, "claudecode", workspace_dir=str(repo)) == []
     warnings = hook_integrity.agent_hook_env_warnings(cfg, "claudecode", workspace_dir=str(repo), environ={})
     assert len(warnings) == 1
-    assert str(project) in warnings[0] and "SHELLOPTS" in warnings[0] and "/bin/sh" in warnings[0]
+    assert str(project) in warnings[0] and "SHELLOPTS (with noexec, /bin/sh runs none of the hook command)" in warnings[0]
     assert warnings[0].repair.startswith("remove SHELLOPTS from that env block")
 
     monkeypatch.chdir(repo)
     suffix = cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
     assert "WARNING" in suffix and "DEGRADED" not in suffix and str(project) in suffix
+    assert "nothing refused it" in suffix  # the folder is not the pinned workspace
 
     result = cmd_doctor._DoctorResult()
     monkeypatch.setattr(cmd_doctor, "_workspace_dir", lambda _cfg: str(repo))
@@ -84,29 +127,51 @@ def test_default_tiers_warn_and_keep_the_hooks(tmp_path, monkeypatch, tier):
     assert result.failed == 0
 
 
-def test_strict_tier_refuses_the_settings(tmp_path, monkeypatch):
-    cfg = _cfg(tmp_path, monkeypatch, "strict")
+def test_strict_tier_refuses_what_the_gateway_checks(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
+    cfg = _cfg(tmp_path, monkeypatch, "strict", workspace=str(repo))
     project = _settings(repo / ".claude" / "settings.json", {"CLAUDE_CODE_SHELL_PREFIX": "/usr/bin/true"})
 
-    problems = hook_integrity.agent_hook_switch_problems(cfg, "claudecode", workspace_dir=str(repo))
-    assert len(problems) == 1 and str(project) in problems[0] and "strict policy tier refuses it" in problems[0]
-    assert hook_integrity.agent_hook_env_warnings(cfg, "claudecode", workspace_dir=str(repo), environ={}) == []
+    problems = hook_integrity.agent_hook_switch_problems(cfg, "claudecode")
+    assert len(problems) == 1 and str(project) in problems[0]
+    for want in ("CLAUDE_CODE_SHELL_PREFIX (Claude Code runs that program", "strict policy tier refuses it",
+                 "every Claude Code session of this account fails closed"):
+        assert want in problems[0]
+    assert "default policy tier" in problems[0].repair
+    assert hook_integrity.agent_hook_env_warnings(cfg, "claudecode", environ={}) == []
 
-    monkeypatch.chdir(repo)
+    monkeypatch.chdir(tmp_path)
     assert "DEGRADED" in cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+
+    # ENV cannot stop the launch and is not refused.
+    project.write_text(json.dumps({"env": {"ENV": "/tmp/e"}}), encoding="utf-8")
+    assert hook_integrity.agent_hook_switch_problems(cfg, "claudecode") == []
+
+
+def test_strict_tier_unpinned_folder_is_a_warning_not_a_refusal(tmp_path, monkeypatch):
+    # Review finding 7: the gateway never checked this folder, so status and
+    # doctor run in it must not claim a refusal.
+    cfg = _cfg(tmp_path, monkeypatch, "strict")
+    repo = tmp_path / "repo"
+    _settings(repo / ".claude" / "settings.json", {"SHELLOPTS": "noexec"})
+    monkeypatch.chdir(repo)
+    assert hook_integrity.agent_hook_switch_problems(cfg, "claudecode") == []
+    warnings = hook_integrity.agent_hook_env_warnings(cfg, "claudecode", environ={})
+    assert len(warnings) == 1 and "refuses" not in warnings[0] and "nothing refused it" in warnings[0]
+    suffix = cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+    assert "WARNING" in suffix and "DEGRADED" not in suffix
 
 
 def test_inherited_environment_is_reported_in_every_tier(tmp_path, monkeypatch):
     for tier in ("default", "strict"):
         cfg = _cfg(tmp_path, monkeypatch, tier)
-        environ = {"SHELLOPTS": "braceexpand:hashall:noexec", "BASH_FUNC_module%%": "() { :; }", "BASH_ENV": "/x"}
-        for connector in ("claudecode", "codex"):
+        environ = {"SHELLOPTS": "braceexpand:hashall:noexec", "BASH_FUNC_module%%": "() { :; }"}
+        for connector in ("claudecode", "codex", "kiro"):
             warnings = hook_integrity.agent_hook_env_warnings(
                 cfg, connector, workspace_dir=str(tmp_path / "repo"), environ=environ
             )
             assert len(warnings) == 1, (tier, connector, warnings)
-            assert "this shell's environment sets SHELLOPTS with noexec," in warnings[0]
+            assert "this shell's environment sets SHELLOPTS with noexec" in warnings[0]
             assert warnings[0].repair.startswith("unset SHELLOPTS")
 
     cfg = _cfg(tmp_path, monkeypatch)
@@ -122,6 +187,24 @@ def test_inherited_environment_is_reported_in_every_tier(tmp_path, monkeypatch):
     # A settings env block decides the name over the inherited value.
     _settings(tmp_path / "home" / ".claude" / "settings.json", {"SHELLOPTS": ""})
     assert hook_integrity.agent_hook_env_warnings(cfg, "claudecode", environ={"SHELLOPTS": "noexec"}) == []
+
+
+@pytest.mark.parametrize("connector, reported", [
+    ("devin", True), ("copilot", True), ("codex", True),
+    ("claudecode", False), ("kiro", False), ("hermes", False), ("antigravity", False),
+])
+def test_inherited_bash_env_only_for_agents_that_start_hooks_through_bash(tmp_path, monkeypatch, connector, reported):
+    # Lead follow-up: Devin, Copilot CLI and Codex start hook commands through
+    # bash (-c or -lc), which runs BASH_ENV first, so a file that exits 0
+    # skips the hook. /bin/sh (Claude Code, Kiro) ignores BASH_ENV, and
+    # Hermes and Antigravity start the hook with no shell.
+    cfg = _cfg(tmp_path, monkeypatch)
+    found = hook_integrity.inherited_hook_shell_env({"BASH_ENV": "/tmp/exit0"}, connector)
+    assert (found == ["BASH_ENV"]) is reported
+    warnings = hook_integrity.agent_hook_env_warnings(cfg, connector, workspace_dir=str(tmp_path / "repo"), environ={"BASH_ENV": "/tmp/exit0"})
+    assert bool(warnings) is reported
+    if reported:
+        assert "BASH_ENV (the agent starts its hook commands through bash" in warnings[0]
 
 
 def test_managed_claude_code_is_pinned_by_machine_policy(tmp_path, monkeypatch):

@@ -8883,6 +8883,8 @@ def _check_devin_hooks(
     pathext: str | None = None,
 ) -> None:
     """Validate Devin's encoded native command instead of raw marker text."""
+    if (platform_name or os.name) != "nt":
+        _emit_agent_hook_env_warnings(cfg, "devin", "Devin hook environment", r)
     if (platform_name or os.name) == "nt":
         _check_windows_native_hooks(
             cfg,
@@ -11216,6 +11218,8 @@ def _check_copilot_hooks(
 ) -> None:
     from defenseclaw.hook_integrity import copilot_registration_switch_problem
 
+    if (platform_name or os.name) != "nt":
+        _emit_agent_hook_env_warnings(cfg, "copilot", "Copilot hook environment", r)
     workspace = _workspace_dir(cfg)
     data_dir = getattr(cfg, "data_dir", "") or ""
     if workspace and _path_is_inside(workspace, data_dir):
