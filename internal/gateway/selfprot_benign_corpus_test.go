@@ -7,7 +7,8 @@ import "testing"
 
 // selfProtBenignCorpus: ordinary project link, copy, move and directory-change
 // commands an action-mode gateway allows, managed and per-user (private #17:
-// GAP-2576, 2579, 2582, 2602, 2526, 2532, 2533, 2570, 1473, 2047).
+// GAP-2576, 2579, 2582, 2602, 2526, 2532, 2533, 2570, 1473, 2047;
+// rel-1-0-6 GAP-0091 MV rows).
 var selfProtBenignCorpus = []selfProtRow{
 	{"N03", `sh -c "ln -s build/out bin && cp -a build dist"`, "allow"},
 	{"N04", `ln -s build/out bin; sh -c "cp -a src dist"; echo x > notes.txt`, "allow"},
@@ -46,6 +47,10 @@ var selfProtBenignCorpus = []selfProtRow{
 	{"H01", `ln SOUL.md alias.md ; printf y >> alias.md`, "allow"},
 	{"H03", `cmd //c "mklink /H alias.md SOUL.md" ; printf y >> alias.md`, "allow"},
 	{"O03", `echo hi > notes.txt`, "allow"},
+	{"MV1", `ln -s build/out bin; mv bin build/`, "allow"},
+	{"MV2", `ln -s build/out bin; mv bin build`, "allow"},
+	{"MV3", `ln -s build/out bin; mv a.txt build`, "allow"},
+	{"MV4", `ln -s build/out bin; mv a.txt build/`, "allow"},
 }
 
 // selfProtBypassCorpus: the must-block twins of the benign corpus. A write
@@ -89,6 +94,8 @@ var selfProtBypassCorpus = []selfProtRow{
 	{"HT1", `ln ../.ssh/authorized_keys hk ; printf y >> hk`, "block"},
 	{"HT3", `cmd //c "mklink /H hk ../.ssh/authorized_keys" ; printf y >> hk`, "block"},
 	{"O04", `echo x >> keylink`, "block"},
+	{"MVT1", `ln -s ~/.ssh/authorized_keys k; mv k build; echo x >> build/k`, "block"},
+	{"MVT2", `ln -s build/keylink bin; mv keylink build; echo x >> bin`, "block"},
 }
 
 func TestSelfProtBenignCorpusAllows(t *testing.T) {
