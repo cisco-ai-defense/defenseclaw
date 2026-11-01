@@ -128,3 +128,59 @@ func BenchmarkGAP0568HookAssignmentChain(b *testing.B) {
 		}
 	}
 }
+
+// TestGAP0318StatementBudgetOnEveryDialectRoute is rel-1-0-6:GAP-0318: a
+// call that PowerShell may run (Codex on Windows sends no dialect hint; a
+// PowerShell hint or tool here, so the test reads the same on every OS)
+// past the 64 KiB analysis bound with more than 128 statements is refused
+// by the statement budget before any reader runs, as Claude Code's Bash
+// call is. Before, no reading finished, no budget applied, and the call was
+// allowed after about 4 s of reading on Windows. One long PowerShell
+// statement past the bound is not over the statement budget.
+func TestGAP0318StatementBudgetOnEveryDialectRoute(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var writes strings.Builder
+	for i := range 3000 {
+		if i > 0 {
+			writes.WriteString("; ")
+		}
+		fmt.Fprintf(&writes, "echo line%d >> ordinary/n%d.txt", i, i)
+	}
+	long := "Set-Content notes.txt -Value @'\n" + strings.Repeat("ordinary text line\n", 4000) + "'@"
+	for _, route := range []struct {
+		name, tool string
+		hint       actionfacts.Dialect
+	}{
+		{"Bash tool, PowerShell hint", "Bash", actionfacts.DialectPowerShell},
+		{"PowerShell tool", "powershell", ""},
+	} {
+		for _, tc := range []struct {
+			command string
+			over    bool
+		}{{writes.String(), true}, {long, false}} {
+			args, err := json.Marshal(map[string]string{"command": tc.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := actionfacts.Input{Tool: route.tool, Args: args, CWD: cwd, ActiveHome: home, DialectHint: route.hint}
+			if facts := actionfacts.Analyze(input); facts.Parse.Status != actionfacts.StatusLimitExceeded {
+				t.Fatalf("%s: %d-byte call analysis status %q, want limit_exceeded", route.name, len(tc.command), facts.Parse.Status)
+			}
+			memo := hookpaths.NewTargetMemo()
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: "codex", EnforcementCapable: true, targetMemo: memo,
+			})
+			limited := findingWithID(findings, "ACTION-COMPOUND-LIMIT") != nil
+			switch {
+			case tc.over && (!slices.Equal(findingIDs(findings), []string{"ACTION-COMPOUND-LIMIT"}) || memo.Work() != 0):
+				t.Errorf("%s: 3000 statements: findings %v after %d units of reader work, want ACTION-COMPOUND-LIMIT alone before any", route.name, findingIDs(findings), memo.Work())
+			case !tc.over && limited:
+				t.Errorf("%s: one long statement took the statement budget: %v", route.name, findingIDs(findings))
+			}
+		}
+	}
+}

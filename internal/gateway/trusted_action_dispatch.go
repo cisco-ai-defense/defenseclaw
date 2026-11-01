@@ -8541,26 +8541,35 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 	return bashReadingRequest(request, command, rewritten), true
 }
 
-// trustedStatementBudgetExceeded reports whether a POSIX shell call whose
-// analysis is limit-exceeded has more statements than one action evaluates
-// (actionfacts.ShellStatementsOverBudget). A PowerShell or CMD call, and a
-// call of no known dialect on a Windows gateway without a POSIX hint, is not
-// read here.
+// trustedStatementBudgetExceeded reports whether a shell call whose
+// analysis is limit-exceeded has more statements than one action evaluates.
+// A POSIX reading, and a call of no known dialect that a POSIX shell runs
+// (a POSIX hint, or no hint off Windows), are counted as the POSIX split
+// counts them (actionfacts.ShellStatementsOverBudget). A call of no known
+// dialect that PowerShell may run (a PowerShell tool, a PowerShell or CMD
+// hint, or no hint on a Windows gateway, as Codex sends) is counted as
+// PowerShell splits it (actionfacts.PowerShellStatementsOverBudget): Codex
+// on Windows ran a 3000-statement call past the 64 KiB input bound through
+// every reader and allowed it (rel-1-0-6:GAP-0318). A finished PowerShell or
+// CMD reading is held to the budget by its own split (SimpleCommands).
 func trustedStatementBudgetExceeded(input actionfacts.Input, facts actionfacts.Facts, command string) bool {
-	if facts.Parse.Status != actionfacts.StatusLimitExceeded || trustedPowerShellExecutionTool(input.Tool) {
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 		return false
 	}
 	switch facts.Parse.Dialect {
 	case actionfacts.DialectPOSIX:
+		return actionfacts.ShellStatementsOverBudget(command)
 	case actionfacts.DialectNone, "":
-		if input.DialectHint != "" && input.DialectHint != actionfacts.DialectPOSIX ||
-			input.DialectHint == "" && runtime.GOOS == "windows" {
-			return false
+		powerShell := trustedPowerShellExecutionTool(input.Tool) ||
+			input.DialectHint != "" && input.DialectHint != actionfacts.DialectPOSIX ||
+			input.DialectHint == "" && runtime.GOOS == "windows"
+		if powerShell {
+			return actionfacts.PowerShellStatementsOverBudget(command)
 		}
+		return actionfacts.ShellStatementsOverBudget(command)
 	default:
 		return false
 	}
-	return actionfacts.ShellStatementsOverBudget(command)
 }
 
 // trustedCallOverStatementBudget reports a shell call that the

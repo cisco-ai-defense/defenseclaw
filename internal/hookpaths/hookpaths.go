@@ -832,21 +832,29 @@ var clientLogin = sync.OnceValue(func() string {
 // Bash on Windows (as the gateway's private-key read proof reads it).
 // clientStatementBudgetExceeded is the gateway's statement-budget refusal
 // (trustedCallOverStatementBudget) as the hook client can read it: a call
-// the analysis reads as POSIX, or one whose analysis stopped at its input
-// bound in a shell the gateway reads as POSIX (hookShellDialect, or any
-// shell off Windows), with more than 128 statements.
+// the analysis reads as POSIX with more than 128 statements, or one whose
+// analysis stopped at its input bound, counted as the shell that may run it
+// splits it (PowerShell for a PowerShell tool and, on Windows, for a call
+// without a POSIX shell, as the gateway counts it).
 func clientStatementBudgetExceeded(connector, tool string, facts actionfacts.Facts, command string) bool {
 	switch facts.Parse.Dialect {
 	case actionfacts.DialectPOSIX:
+		return actionfacts.ShellStatementsOverBudget(command)
 	case actionfacts.DialectNone, "":
-		if facts.Parse.Status != actionfacts.StatusLimitExceeded ||
-			runtime.GOOS == "windows" && hookShellDialect(connector, tool) != actionfacts.DialectPOSIX {
+		if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 			return false
 		}
+		switch strings.ToLower(strings.TrimSpace(tool)) {
+		case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+			return actionfacts.PowerShellStatementsOverBudget(command)
+		}
+		if runtime.GOOS == "windows" && hookShellDialect(connector, tool) != actionfacts.DialectPOSIX {
+			return actionfacts.PowerShellStatementsOverBudget(command)
+		}
+		return actionfacts.ShellStatementsOverBudget(command)
 	default:
 		return false
 	}
-	return actionfacts.ShellStatementsOverBudget(command)
 }
 
 func hookShellDialect(connector, tool string) actionfacts.Dialect {
