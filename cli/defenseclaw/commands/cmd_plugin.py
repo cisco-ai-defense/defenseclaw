@@ -4680,6 +4680,36 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
         )
 
 
+def _claude_show_quarantined_disabled(plugin_name: str, quarantine_dir: str, connector: str) -> None:
+    """Claude Code lists a quarantined plugin as disabled (rel-1-0-6:GAP-0289)."""
+    if connector != "claudecode":
+        return
+    from defenseclaw.enforce import claude_plugin_enablement
+
+    try:
+        keys = claude_plugin_enablement.disable_for_quarantine(plugin_name, quarantine_dir)
+    except OSError as exc:
+        ux.warn(f"could not mark {plugin_name!r} disabled in Claude Code settings: {exc}; the hook still refuses it")
+        return
+    for key in keys:
+        click.echo(f"[plugin] {key} disabled in Claude Code settings; 'plugin restore' enables it again")
+
+
+def _claude_show_restored_enabled(plugin_name: str, quarantine_dir: str, connector: str) -> None:
+    """Restore enables again what quarantine disabled in Claude Code (GAP-0289)."""
+    if connector != "claudecode":
+        return
+    from defenseclaw.enforce import claude_plugin_enablement
+
+    try:
+        keys = claude_plugin_enablement.restore_after_quarantine(plugin_name, quarantine_dir)
+    except OSError as exc:
+        ux.warn(f"could not enable {plugin_name!r} again in Claude Code settings: {exc}")
+        return
+    for key in keys:
+        click.echo(f"[plugin] {key} enabled again in Claude Code settings")
+
+
 # ---------------------------------------------------------------------------
 # plugin quarantine
 # ---------------------------------------------------------------------------
@@ -4773,6 +4803,7 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
             for target_connector in quarantined_connectors:
                 pe.quarantine_for_connector("plugin", plugin_name, target_connector, reason)
                 click.echo(f"[plugin] {plugin_name!r} is already quarantined (connector={target_connector})")
+                _claude_show_quarantined_disabled(plugin_name, app.cfg.quarantine_dir, target_connector)
             return
         click.echo(f"error: could not locate plugin {plugin_name!r}", err=True)
         raise SystemExit(1)
@@ -4801,6 +4832,7 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
         else:
             pe.quarantine("plugin", plugin_name, reason)
             pe.set_source_path("plugin", plugin_name, plugin_path)
+        _claude_show_quarantined_disabled(plugin_name, app.cfg.quarantine_dir, target_connector)
 
         if app.logger:
             saved_change_audit(app.logger).log_action(
@@ -4960,6 +4992,7 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         else:
             pe.clear_quarantine("plugin", plugin_name)
             pe.set_source_path("plugin", plugin_name, target_restore_path)
+        _claude_show_restored_enabled(plugin_name, app.cfg.quarantine_dir, slot_connector)
 
         if app.logger:
             saved_change_audit(app.logger).log_action(
