@@ -195,8 +195,9 @@ func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *
 		empty := "  "
 		opts.AuthenticatedManagedToken = &empty
 	})
-	if result.code != blockExit {
-		t.Fatalf("Run code = %d, want fail-closed %d; stderr=%s", result.code, blockExit, result.stderr)
+	// A managed Codex hook blocks with Codex's PreToolUse deny, not a bare exit.
+	if result.code != 0 || result.stdout != codexClosedPreTool {
+		t.Fatalf("Run code = %d stdout = %q, want the Codex PreToolUse deny; stderr=%s", result.code, result.stdout, result.stderr)
 	}
 	if result.rt.requests != 0 {
 		t.Fatalf("gateway requests = %d, want 0", result.rt.requests)

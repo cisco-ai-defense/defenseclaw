@@ -1,0 +1,175 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package hookexec
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const (
+	codexClosedDecision = `{"decision":"block","reason":"DefenseClaw hook failed closed"}` + "\n"
+	codexClosedPreTool  = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}}` + "\n"
+	codexClosedPermit   = `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"DefenseClaw hook failed closed"}}}` + "\n"
+)
+
+// A managed Codex hook that fails closed must answer with Codex's own block:
+// the Windows launcher turns a bare exit 2 into 0, which Codex reads as allow.
+func TestManagedCodexFailClosedAnswersWithCodexBlock(t *testing.T) {
+	events := []struct {
+		event      string
+		wantStdout string
+		wantCode   int
+	}{
+		{"UserPromptSubmit", codexClosedDecision, 0},
+		{"PostToolUse", codexClosedDecision, 0},
+		{"Stop", codexClosedDecision, 0},
+		{"PreToolUse", codexClosedPreTool, 0},
+		{"PermissionRequest", codexClosedPermit, 0},
+		// No block control: keep the bare exit code.
+		{"SessionStart", "", blockExit},
+		{"SubagentStart", "", blockExit},
+		{"", "", blockExit},
+	}
+	paths := []struct {
+		name   string
+		rt     func() *stubRT
+		mutate func(t *testing.T, o *Options)
+		reason string
+	}{
+		{
+			name: "disabled sentinel",
+			rt:   func() *stubRT { return ok(`{"action":"allow"}`) },
+			mutate: func(t *testing.T, o *Options) {
+				if err := os.WriteFile(filepath.Join(o.Home, ".disabled"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			reason: managedRuntimeDisableSentinelReason,
+		},
+		{
+			name: "runtime state invalid",
+			rt:   func() *stubRT { return ok(`{"action":"allow"}`) },
+			mutate: func(t *testing.T, o *Options) {
+				o.ManagedRuntimeFailure = "enterprise_managed_runtime_state_invalid"
+			},
+			reason: "enterprise_managed_runtime_state_invalid",
+		},
+		{
+			name:   "transport failure, closed mode",
+			rt:     func() *stubRT { return &stubRT{err: errors.New("dial tcp: refused")} },
+			mutate: func(t *testing.T, o *Options) { o.FailMode = "closed" },
+			reason: "blocking codex tool",
+		},
+		{
+			name:   "unusable gateway answer, closed mode",
+			rt:     func() *stubRT { return ok(`not json`) },
+			mutate: func(t *testing.T, o *Options) { o.FailMode = "closed" },
+			reason: "invalid JSON response",
+		},
+	}
+	for _, path := range paths {
+		for _, tc := range events {
+			t.Run(path.name+"/"+tc.event, func(t *testing.T) {
+				payload := `{}`
+				if tc.event != "" {
+					payload = `{"hook_event_name":"` + tc.event + `","session_id":"s"}`
+				}
+				r := run(t, "codex", path.rt(), func(o *Options) {
+					o.Event = ""
+					o.ManagedEnterprise = true
+					o.Token = "target-readable-token"
+					o.Stdin = strings.NewReader(payload)
+					path.mutate(t, o)
+				})
+				if r.code != tc.wantCode {
+					t.Fatalf("code = %d, want %d; stdout=%q stderr=%q", r.code, tc.wantCode, r.stdout, r.stderr)
+				}
+				if r.stdout != tc.wantStdout {
+					t.Fatalf("stdout = %q, want %q", r.stdout, tc.wantStdout)
+				}
+				if !strings.Contains(r.stderr, path.reason) {
+					t.Fatalf("stderr = %q, want %q", r.stderr, path.reason)
+				}
+			})
+		}
+	}
+}
+
+func TestManagedCodexFailClosedPrefersExplicitEvent(t *testing.T) {
+	r := run(t, "codex", ok(`{"action":"allow"}`), func(o *Options) {
+		o.Event = "PreToolUse"
+		o.ManagedEnterprise = true
+		o.Token = "target-readable-token"
+		o.ManagedRuntimeFailure = "enterprise_managed_runtime_state_invalid"
+		o.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit"}`)
+	})
+	if r.code != 0 || r.stdout != codexClosedPreTool {
+		t.Fatalf("code=%d stdout=%q, want PreToolUse deny", r.code, r.stdout)
+	}
+}
+
+// The open paths and the per-user hook keep their answers.
+func TestCodexFailClosedReplyLeavesOtherPathsUnchanged(t *testing.T) {
+	t.Run("managed open fail mode still allows", func(t *testing.T) {
+		r := run(t, "codex", &stubRT{err: errors.New("dial tcp: refused")}, func(o *Options) {
+			o.Event = ""
+			o.ManagedEnterprise = true
+			o.Token = "target-readable-token"
+			o.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit"}`)
+		})
+		if r.code != 0 || r.stdout != "" {
+			t.Fatalf("code=%d stdout=%q, want a silent allow", r.code, r.stdout)
+		}
+	})
+	t.Run("managed unregistered account follows the open mode", func(t *testing.T) {
+		r := run(t, "codex", ok(`{"action":"allow"}`), func(o *Options) {
+			o.Event = ""
+			o.ManagedEnterprise = true
+			o.Token = "target-readable-token"
+			o.ManagedRuntimeFailure = ManagedSIDUnregisteredReason
+			o.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit"}`)
+		})
+		if r.code != 0 || r.stdout != "" {
+			t.Fatalf("code=%d stdout=%q, want a silent allow", r.code, r.stdout)
+		}
+	})
+	t.Run("per-user strict hook keeps the bare exit", func(t *testing.T) {
+		r := run(t, "codex", &stubRT{err: errors.New("dial tcp: refused")}, func(o *Options) {
+			o.Event = "UserPromptSubmit"
+			o.StrictAvailability = true
+		})
+		if r.code != blockExit || r.stdout != "" {
+			t.Fatalf("code=%d stdout=%q, want bare exit %d", r.code, r.stdout, blockExit)
+		}
+	})
+	t.Run("claude code keeps the bare exit", func(t *testing.T) {
+		r := run(t, "claudecode", ok(`{"action":"allow"}`), func(o *Options) {
+			o.Event = ""
+			o.ManagedEnterprise = true
+			o.Token = "target-readable-token"
+			o.ManagedRuntimeFailure = "enterprise_managed_runtime_state_invalid"
+			o.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit"}`)
+		})
+		if r.code != blockExit || r.stdout != "" {
+			t.Fatalf("code=%d stdout=%q, want bare exit %d", r.code, r.stdout, blockExit)
+		}
+	})
+}
