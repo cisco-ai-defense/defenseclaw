@@ -1449,6 +1449,34 @@ def _managed_hook_command(command: str, connector: str) -> bool:
     }
 
 
+def _awaited_hook_script_target(script: str, connector: str) -> str | None:
+    """Return the launcher of the current per-user EncodedCommand hook script.
+
+    The script mirrors the gateway's windowsAwaitedHookStatements: Process.Start
+    awaits the GUI-subsystem launcher, and a Constrained Language host falls
+    back to the call operator and exits 1 when the launcher never started.
+    """
+    c = re.escape(connector)
+    match = re.fullmatch(
+        r"\$ErrorActionPreference='Stop'; "
+        r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
+        r"if \(\$ExecutionContext\.SessionState\.LanguageMode -ne 'FullLanguage'\) \{ "
+        r"\$ErrorActionPreference='Continue'; "
+        r"& '(?P<target>(?:[^']|'')+)' 'hook' '--connector' '" + c + r"' \| Microsoft\.PowerShell\.Core\\Out-Host; "
+        r"if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}; exit \$LASTEXITCODE \}; "
+        r"\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\('(?P=target)','hook --connector " + c + r"'\); "
+        r"\$hookStart\.UseShellExecute=\$false; "
+        r"\$hookStart\.RedirectStandardError=\$true; "
+        r"\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); "
+        r"\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); "
+        r"\$hookProcess\.WaitForExit\(\); exit \$hookProcess\.ExitCode",
+        script,
+    )
+    if not match:
+        return None
+    return match.group("target").replace("''", "'")
+
+
 def _malformed_owned_hook_target(command: str, connector: str) -> str:
     """Recover an exact owned target while preserving malformed diagnostics."""
     value = command.strip()
@@ -1481,10 +1509,11 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                     encoded = base64.b64decode(parts[encoded_index + 1], validate=True)
                     if len(encoded) <= 16 * 1024 and len(encoded) % 2 == 0:
                         script = encoded.decode("utf-16-le")
+                        awaited = _awaited_hook_script_target(script, connector)
                         match = re.fullmatch(
                             r"\$ErrorActionPreference='Stop'; "
                             r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-                            r"\$hookProcess=Start-Process -FilePath '((?:[^']|'')+)' "
+                            r"\$hookProcess=(?:Microsoft\.PowerShell\.Management\\)?Start-Process -FilePath '((?:[^']|'')+)' "
                             r"-ArgumentList @\('hook','--connector','"
                             + re.escape(connector)
                             + r"'\) -NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode",
@@ -1499,7 +1528,9 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                                 + r"; exit \$LASTEXITCODE",
                                 script,
                             )
-                        if match:
+                        if awaited:
+                            owned_target = awaited
+                        elif match:
                             owned_target = match.group(1).replace("''", "'")
                 except (binascii.Error, UnicodeError, ValueError):
                     pass
@@ -2117,6 +2148,9 @@ def _command_target(
                 script = encoded.decode("utf-16-le")
             except (binascii.Error, UnicodeError, ValueError) as exc:
                 raise _InspectionError("malformed", f"PowerShell EncodedCommand hook is invalid: {exc}") from exc
+            awaited = _awaited_hook_script_target(script, connector)
+            if awaited:
+                return awaited, ["hook", "--connector", connector], "direct"
             match = re.fullmatch(
                 r"\$ErrorActionPreference='Stop'; "
                 r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
@@ -2128,8 +2162,11 @@ def _command_target(
                 script,
             )
             if match:
-                target = match.group(1).replace("''", "'")
-                return target, ["hook", "--connector", connector], "direct"
+                raise _InspectionError(
+                    "stale",
+                    "PowerShell EncodedCommand hook uses the Start-Process launcher, "
+                    "which can lose an immediately exiting launcher's exit status",
+                )
             unqualified = re.fullmatch(
                 r"\$ErrorActionPreference='Stop'; "
                 r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "

@@ -113,16 +113,40 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
     @staticmethod
     def _encoded_hook_command(
-        runtime: Path, connector: str = "codex", *, legacy: bool = False, unqualified: bool = False
+        runtime: Path,
+        connector: str = "codex",
+        *,
+        legacy: bool = False,
+        unqualified: bool = False,
+        start_process: bool = False,
     ) -> str:
         literal = str(runtime).replace("'", "''")
-        if legacy and unqualified:
-            raise ValueError("legacy and unqualified fixtures are mutually exclusive")
+        if legacy + unqualified + start_process > 1:
+            raise ValueError("legacy, unqualified and start_process fixtures are mutually exclusive")
         if legacy:
             script = (
                 "$ErrorActionPreference='Stop'; "
                 "$env:NoDefaultCurrentDirectoryInExePath='1'; "
                 f"& '{literal}' hook --connector {connector}; exit $LASTEXITCODE"
+            )
+        elif not (unqualified or start_process):
+            # The gateway's windowsAwaitedHookStatements form.
+            script = "; ".join(
+                [
+                    "$ErrorActionPreference='Stop'",
+                    "$env:NoDefaultCurrentDirectoryInExePath='1'",
+                    "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
+                    f"$ErrorActionPreference='Continue'; & '{literal}' 'hook' '--connector' '{connector}' "
+                    r"| Microsoft.PowerShell.Core\Out-Host; if ($null -eq $LASTEXITCODE) { exit 1 }; "
+                    "exit $LASTEXITCODE }",
+                    f"$hookStart=[System.Diagnostics.ProcessStartInfo]::new('{literal}','hook --connector {connector}')",
+                    "$hookStart.UseShellExecute=$false",
+                    "$hookStart.RedirectStandardError=$true",
+                    "$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+                    "$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError())",
+                    "$hookProcess.WaitForExit()",
+                    "exit $hookProcess.ExitCode",
+                ]
             )
         else:
             start_process = "Start-Process" if unqualified else r"Microsoft.PowerShell.Management\Start-Process"
@@ -856,6 +880,17 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(check.state, "stale", check.detail)
         self.assertIn("unqualified Start-Process launcher", check.detail)
+        self.assertIn("repair", check.detail)
+
+    def test_codex_start_process_invocation_requires_repair(self) -> None:
+        runtime = self._runtime()
+        command = self._encoded_hook_command(runtime, start_process=True)
+        config = self._config("codex", command, codex_features=False)
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("Start-Process launcher", check.detail)
         self.assertIn("repair", check.detail)
 
     def test_codex_command_windows_encoded_invocation_without_feature_override(self) -> None:

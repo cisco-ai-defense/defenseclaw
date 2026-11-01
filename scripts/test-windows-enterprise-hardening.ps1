@@ -7286,14 +7286,20 @@ function Get-CodexManagedHookFingerprint(
             $decoded = [Text.Encoding]::Unicode.GetString(
                 [Convert]::FromBase64String($encoded.Groups[1].Value)
             )
+            # Process.Start awaits the GUI-subsystem launcher; a Constrained
+            # Language host falls back to the call operator and exits 1 when
+            # the launcher never started.
             $startProcess = [regex]::Match(
                 $decoded,
-                '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])+'')\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
+                '(?i)\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\((?<file>''(?:''''|[^''])+''),''hook --connector codex''\)'
             )
             if (-not $startProcess.Success -or
                 $decoded -notmatch
                     '(?i)(?:^|;\s*)exit\s+\$hookProcess\.ExitCode(?:;|$)' -or
-                $decoded -match '(?i)\$LASTEXITCODE') {
+                $decoded -notmatch
+                    '(?i)if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}' -or
+                $decoded -match '(?i)Start-Process' -or
+                $decoded -match '(?i)hook --connector codex;\s*exit\s+\$LASTEXITCODE') {
                 throw 'Codex Windows managed hook command does not use the exact synchronous launcher contract'
             }
             $fileLiteral = $startProcess.Groups['file'].Value

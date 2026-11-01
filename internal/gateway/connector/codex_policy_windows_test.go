@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -23,6 +24,9 @@ import (
 // test user owns the folder) is accepted like the machine requirements writer
 // accepts it; structure stays fatal.
 func TestReadCodexSystemRequirementsToleratesParentPermissionDrift(t *testing.T) {
+	// The tolerance is the default trust mode; an inherited strict pin would
+	// correctly refuse the drift this test expects to be accepted.
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
 	parent := t.TempDir()
 	path := filepath.Join(parent, "requirements.toml")
 	body, exists, err := readCodexSystemRequirements(path, true)

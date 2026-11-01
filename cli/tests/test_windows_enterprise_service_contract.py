@@ -3632,8 +3632,9 @@ def test_normal_mode_live_repair_uses_an_absent_enterprise_baseline() -> None:
     assert "$managedConfig = Join-Path $codexHome 'managed_config.toml'" in live_repair
     assert "$baselineText = Read-SharedText $managedConfig" in live_repair
     assert "command_windows_count = $commandLiterals.Count" in live_repair
-    assert "Microsoft\\.PowerShell\\.Management\\\\Start-Process" in live_repair
-    assert "-ArgumentList\\s+@\\(''hook'',''--connector'',''codex''\\)" in live_repair
+    assert "\\$hookStart=\\[System\\.Diagnostics\\.ProcessStartInfo\\]::new" in live_repair
+    assert ",''hook --connector codex''\\)" in live_repair
+    assert "if \\(\\$null -eq \\$LASTEXITCODE\\) \\{ exit 1 \\}" in live_repair
     assert "$actualHook" in live_repair
     assert "$expectedCanonicalHook" in live_repair
     assert "$privateTrustHashes.Count -ne 0" in live_repair

@@ -2010,8 +2010,8 @@ private-secret-name = "DefenseClaw must remain redacted"
     ).Value
     Assert-True ($doctorContract -match 'Assert-CodexSynchronousWindowsHookCommand' -and
         $doctorSetupContract -match 'Assert-CodexSynchronousWindowsHookCommand' -and
-        $synchronousCodexHookContract -match 'Start-Process' -and
-        $synchronousCodexHookContract -match '-NoNewWindow\\s\+\-Wait\\s\+\-PassThru' -and
+        $synchronousCodexHookContract -match 'ProcessStartInfo' -and
+        $synchronousCodexHookContract -match 'exit 1' -and
         $synchronousCodexHookContract -match '\$hookProcess\\\.ExitCode' -and
         $synchronousCodexHookContract -match '\$LASTEXITCODE') `
         'Codex Doctor contracts require the synchronous native launcher and reject stale LASTEXITCODE handling'
