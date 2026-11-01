@@ -16,7 +16,15 @@
 
 package envvars
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// secretRefTextRE is a quoted "source" key followed by a colon inside braces:
+// the Python repr and the JSON form, any key order. Same pattern as
+// connector_paths.is_secret_ref_text in the Python CLI.
+var secretRefTextRE = regexp.MustCompile(`^\{.*["']source["']\s*:.*\}$`)
 
 // IsSecretRefText reports whether a gateway token value is the text of an
 // OpenClaw SecretRef object rather than a token. DefenseClaw 1.0.5 and 1.0.6
@@ -24,6 +32,5 @@ import "strings"
 // init failed on such a reference (issue #1404). That text is never a token,
 // so every gateway token reader ignores it.
 func IsSecretRefText(value string) bool {
-	text := strings.TrimSpace(value)
-	return strings.HasPrefix(text, "{") && strings.Contains(text, "source")
+	return secretRefTextRE.MatchString(strings.TrimSpace(value))
 }

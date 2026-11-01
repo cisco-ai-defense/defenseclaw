@@ -4222,10 +4222,12 @@ def _resolve_gateway_target(
     # `defenseclaw agent usage` to succeed if the Go gateway has
     # written its token to the environment. Mirrors the auto-detect
     # ladder in GatewayConfig.resolved_token so the two stay in sync.
-    if not token:
-        token = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
-    if not token:
-        token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+    # SecretRef text an earlier build saved as a token is never one (#1404).
+    from defenseclaw.connector_paths import is_secret_ref_text
+
+    for name in ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
+        if not token and not is_secret_ref_text(os.environ.get(name, "")):
+            token = os.environ.get(name, "")
 
     # The gateway bearer token authenticates to the *local* sidecar. Only
     # ever attach it to a loopback target: a non-loopback ``gw.host`` (a

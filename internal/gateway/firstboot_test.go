@@ -214,7 +214,7 @@ func TestRunGuardrail_OpenClaw_CredentialsBeforeProbe(t *testing.T) {
 // Issue #1404: DefenseClaw 1.0.5 and 1.0.6 left SecretRef text in .env as the
 // OpenClaw gateway token. It must never become the gateway token.
 func TestEnsureGatewayToken_IgnoresSecretRefText(t *testing.T) {
-	const stale = "{source: store, provider: default, id: OPENCLAW_GATEWAY_TOKEN}"
+	const stale = "{'source': 'store', 'provider': 'default', 'id': 'OPENCLAW_GATEWAY_TOKEN'}"
 	tmp := t.TempDir()
 	dotenv := filepath.Join(tmp, ".env")
 	if err := os.WriteFile(dotenv, []byte("OPENCLAW_GATEWAY_TOKEN="+stale+"\n"), 0o600); err != nil {

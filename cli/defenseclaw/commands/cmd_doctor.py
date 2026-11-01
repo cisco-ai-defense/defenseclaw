@@ -18335,18 +18335,40 @@ def _fix_gateway_token(
 
     rotate_required = bool(getattr(cfg, "_doctor_gateway_token_rotation_required", False))
     active_connector = _active_connector(cfg)
+    cleaned = ""
     if not plan_only:
         from defenseclaw.commands.cmd_setup import _drop_secret_ref_gateway_tokens
 
-        _drop_secret_ref_gateway_tokens(cfg.data_dir)
+        cleaned = _drop_secret_ref_gateway_tokens(cfg.data_dir)
+    status, detail = _fix_gateway_token_after_cleanup(
+        cfg,
+        assume_yes=assume_yes,
+        plan_only=plan_only,
+        rotate_required=rotate_required,
+        active_connector=active_connector,
+    )
+    if cleaned:
+        # Say what was removed (issue #1404); the removal itself is a fix.
+        removed = "removed a stale OpenClaw secret reference line from .env (it was not a token)"
+        return ("pass" if status == "skip" else status, f"{removed}; {detail}")
+    return status, detail
 
+
+def _fix_gateway_token_after_cleanup(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool,
+    rotate_required: bool,
+    active_connector: str,
+) -> tuple[str, str]:
     if active_connector == "openclaw" and not rotate_required:
         from defenseclaw.commands.cmd_setup import (
             _detect_openclaw_gateway_token,
             _save_secret_to_dotenv,
         )
 
-        token = _normalized_gateway_token(_detect_openclaw_gateway_token(cfg.claw.config_file))
+        token = _normalized_gateway_token(_detect_openclaw_gateway_token(cfg.claw.config_file, cfg=cfg))
         if token:
             env_var = "OPENCLAW_GATEWAY_TOKEN"
             current = _gateway_dotenv_tokens(cfg.data_dir).get(env_var, "")

@@ -388,10 +388,13 @@ def test_upgrade_retry_from_the_base_dotenv_line(setting, tmp_path, token_env, m
     assert [s for s in report.setup if s.status == "fail"] == []
     body = open(dotenv, encoding="utf-8").read()
     assert "source" not in body and "DEFENSECLAW_LLM_KEY=keep-me" in body
-    notices = [s.detail for s in report.setup if s.name == "OpenClaw token"]
-    assert len(notices) == 1 and "Removed a gateway token line" in notices[0]
-    assert STALE_VALUE not in notices[0]
+    cleanup = [s for s in report.setup if s.name == "Gateway token"]
+    assert len(cleanup) == 1 and cleanup[0].status == "pass" and cleanup[0].next_command == ""
+    assert "Removed a gateway token line" in cleanup[0].detail and STALE_VALUE not in cleanup[0].detail
+    warns = [s for s in report.setup if s.name == "OpenClaw token"]
     if setting == LITERAL:
+        # The OpenClaw token resolves, so the cleanup is the only note: no token warning.
+        assert warns == []
         assert cfg.gateway.resolved_token() == LITERAL
         assert f"OPENCLAW_GATEWAY_TOKEN={LITERAL}" in body
     else:
@@ -413,6 +416,124 @@ def test_doctor_fix_removes_the_base_dotenv_line(tmp_path, token_env, monkeypatc
     ):
         status, detail = cmd_doctor._fix_gateway_token(cfg, assume_yes=True)
     assert "already set" not in detail, (status, detail)
+    assert status == "pass" and "removed a stale OpenClaw secret reference line" in detail
+    assert STALE_VALUE not in detail
     body = open(dotenv, encoding="utf-8").read()
     assert "source" not in body and "DEFENSECLAW_LLM_KEY=keep-me" in body
     assert os.environ.get("OPENCLAW_GATEWAY_TOKEN", "") != STALE_VALUE
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["{opensource}", "{xYresourceZ}", "  {source", "{source: store}", "source", "{not-a-ref}", "0123abcd" * 8],
+)
+def test_secret_ref_text_must_not_match(value):
+    from defenseclaw.connector_paths import is_secret_ref_text
+
+    assert is_secret_ref_text(value) is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    [STALE_VALUE, "  " + STALE_VALUE + "  ", '{"source":"env","id":"X"}', '{"id": "X", "source": "store"}'],
+)
+def test_secret_ref_text_matches_the_repr_and_json(value):
+    from defenseclaw.connector_paths import is_secret_ref_text
+
+    assert is_secret_ref_text(value) is True
+
+
+def test_init_cleanup_alone_is_one_info_line(tmp_path, token_env, monkeypatch, capsys):
+    from defenseclaw.commands.cmd_init import _setup_gateway_defaults
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "dchome"))
+    token_env(None)
+    cfg = _openclaw_cfg(tmp_path, LITERAL)
+    _seed_stale_dotenv(cfg.data_dir)
+    with patch.object(type(cfg), "active_connectors", return_value=["openclaw"]):
+        _setup_gateway_defaults(cfg, MagicMock(), is_new_config=True)
+    out = capsys.readouterr().out
+    assert out.count("Removed a gateway token line") == 1
+    assert "\u26a0" not in out and "gateway.auth.token" not in out
+
+
+def test_agent_fallback_ignores_secret_ref_text(monkeypatch):
+    from defenseclaw.commands import cmd_agent
+
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_TOKEN", STALE_VALUE)
+    monkeypatch.setenv("OPENCLAW_GATEWAY_TOKEN", "real-token-gh1404")
+    with patch("defenseclaw.config.load", side_effect=RuntimeError("no config")):
+        _host, _port, token = cmd_agent._resolve_gateway_target(
+            SimpleNamespace(cfg=None), gateway_host=None, gateway_port=None, gateway_token_env=None
+        )
+    assert token == "real-token-gh1404"
+
+
+def _cfg_with_keys(tmp_path, dotenv_body: str, llm_env: str = ""):
+    from defenseclaw.config import Config, GatewayConfig, GuardrailConfig, OpenShellConfig
+
+    data_dir = tmp_path / "dc"
+    data_dir.mkdir()
+    (data_dir / ".env").write_text(dotenv_body, encoding="utf-8")
+    cfg = Config(
+        data_dir=str(data_dir),
+        audit_db=str(data_dir / "audit.db"),
+        quarantine_dir=str(data_dir / "q"),
+        plugin_dir=str(data_dir / "p"),
+        policy_dir=str(data_dir / "pol"),
+        guardrail=GuardrailConfig(),
+        gateway=GatewayConfig(),
+        openshell=OpenShellConfig(),
+    )
+    if llm_env:
+        cfg.llm.api_key_env = llm_env
+    return cfg
+
+
+def test_credential_names_are_exact(tmp_path):
+    from defenseclaw.connector_paths import defenseclaw_credential_names
+
+    cfg = _cfg_with_keys(
+        tmp_path,
+        "OPENAI_KEY=x\nexport SPLUNK_HEC_TOKEN=y\nOPENCLAW_GATEWAY_TOKEN=z\nDEFENSECLAW_GATEWAY_TOKEN=w\n# COMMENTED=1\n",
+        llm_env="MY_CUSTOM_LLM_VAR",
+    )
+    names = defenseclaw_credential_names(cfg)
+    for name in (
+        "OPENAI_KEY",
+        "SPLUNK_HEC_TOKEN",
+        "MY_CUSTOM_LLM_VAR",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "DEFENSECLAW_LLM_KEY",
+    ):
+        assert name in names, name
+    for name in ("OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN", "COMMENTED", "# COMMENTED"):
+        assert name not in names, name
+
+
+@pytest.mark.parametrize(
+    "name", ["OPENAI_KEY", "SPLUNK_HEC_TOKEN", "MY_CUSTOM_LLM_VAR", "AWS_BEARER_TOKEN_BEDROCK", "GITHUB_TOKEN"]
+)
+def test_env_ref_naming_a_stored_or_configured_credential_is_refused(name, tmp_path, monkeypatch):
+    from defenseclaw.connector_paths import defenseclaw_credential_names
+
+    cfg = _cfg_with_keys(tmp_path, "OPENAI_KEY=x\nSPLUNK_HEC_TOKEN=y\nGITHUB_TOKEN=g\n", llm_env="MY_CUSTOM_LLM_VAR")
+    monkeypatch.setenv(name, "credential-value-gh1404")
+    token = openclaw_gateway_token(
+        _openclaw_json({"source": "env", "provider": "default", "id": name}),
+        credential_names=defenseclaw_credential_names(cfg),
+    )
+    assert token.value == ""
+    _assert_plain_notice(token.notice)
+    assert "credential-value-gh1404" not in token.notice
+
+
+def test_env_ref_naming_an_unrelated_variable_still_resolves(tmp_path, monkeypatch):
+    from defenseclaw.connector_paths import defenseclaw_credential_names
+
+    cfg = _cfg_with_keys(tmp_path, "OPENAI_KEY=x\n")
+    monkeypatch.setenv("MY_OPENCLAW_TOKEN", ENV_VALUE)
+    token = openclaw_gateway_token(
+        _openclaw_json({"source": "env", "id": "MY_OPENCLAW_TOKEN"}), credential_names=defenseclaw_credential_names(cfg)
+    )
+    assert (token.value, token.notice) == (ENV_VALUE, "")
