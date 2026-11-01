@@ -147,6 +147,9 @@ type HookConfigGuard struct {
 	// alert or audit row until the contract is current or the failure changes:
 	// a Codex update raised a HIGH alert every 30 s (GAP-0132).
 	lastHealFailure string
+	// lastShellEnvWarning is the agent-settings warning last audited
+	// (connector.HookShellEnvWarning), so one finding writes one alert.
+	lastShellEnvWarning string
 	// repairObserver receives every repair outcome after audit, telemetry and
 	// the heal notifier have run. Tests use it as the repair-completed /
 	// repair-failed event instead of polling the files Setup is replacing.
@@ -1033,11 +1036,38 @@ func (g *HookConfigGuard) processPolicyAudit() {
 	if conn.Name() != "claudecode" && conn.Name() != "codex" {
 		return
 	}
+	g.auditHookShellEnv(conn, opts)
 	reason := "periodic effective-policy audit"
 	if conn.Name() == "codex" {
 		reason = "periodic registration audit"
 	}
 	_ = g.repairCurrent(g.ctx, conn.Name(), opts.DataDir, []string{reason})
+}
+
+// auditHookShellEnv writes one guardrail-degraded alert when the agent's
+// settings set a variable that stops its shell-form hooks from running and
+// the policy tier only warns about it (rel-1-0-6:GAP-0322). The strict tier
+// refuses the same settings through the effective-policy check instead. The
+// same warning again writes nothing; a changed or cleared one re-arms it.
+func (g *HookConfigGuard) auditHookShellEnv(conn connector.Connector, opts connector.SetupOpts) {
+	warning := connector.HookShellEnvWarning(conn, opts)
+	g.mu.Lock()
+	if warning == g.lastShellEnvWarning {
+		g.mu.Unlock()
+		return
+	}
+	g.lastShellEnvWarning = warning
+	logger := g.logger
+	g.mu.Unlock()
+	if warning == "" {
+		return
+	}
+	connName := conn.Name()
+	fmt.Fprintf(os.Stderr, "[hook-guard] WARNING: %s: %s\n", connName, warning)
+	if logger != nil {
+		_ = logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
+			"agent settings can stop the hooks: "+warning, "", connName)
+	}
 }
 
 func (g *HookConfigGuard) reportPolicyFailure(conn connector.Connector, err error) {

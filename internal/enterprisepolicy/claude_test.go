@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -282,5 +283,44 @@ func TestCompareVersions(t *testing.T) {
 		if got := compareVersions(tc.a, tc.b); got != tc.want {
 			t.Errorf("compareVersions(%q,%q)=%d want %d", tc.a, tc.b, got, tc.want)
 		}
+	}
+}
+
+// rel-1-0-6:GAP-0322: outside Windows the drop-in's handlers are shell-form
+// commands Claude Code starts through /bin/sh with the merged settings env,
+// so the drop-in pins the variables that stop or replace them to "" (managed
+// env outranks user, project and process values). Windows starts the
+// launcher in the exec form and keeps its drop-in unchanged.
+func TestClaudeDropInPinsHookShellEnvOutsideWindows(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			opts := testOptions(t)
+			opts.GOOS = goos
+			if goos == "windows" {
+				opts = Options{GOOS: "windows", HookBinary: `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, WindowsProgramFiles: `C:\Program Files`, WindowsProgramData: `C:\ProgramData`}
+			}
+			data, err := renderClaudeDropIn(opts, opts.PolicyFor("claudecode"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(data, &doc); err != nil {
+				t.Fatal(err)
+			}
+			env, hasEnv := doc["env"].(map[string]any)
+			if goos == "windows" {
+				if hasEnv {
+					t.Fatalf("windows drop-in carries env %v", env)
+				}
+				return
+			}
+			want := map[string]any{}
+			for _, name := range []string{"BASHOPTS", "BASH_ENV", "CLAUDE_CODE_SHELL_PREFIX", "ENV", "FUNCNEST", "SHELLOPTS"} {
+				want[name] = ""
+			}
+			if !reflect.DeepEqual(env, want) {
+				t.Fatalf("%s drop-in env = %v, want %v", goos, env, want)
+			}
+		})
 	}
 }

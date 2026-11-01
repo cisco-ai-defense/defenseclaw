@@ -1087,6 +1087,10 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
                     )
                 )
                 break
+        if not _is_windows() and _strict_policy_tier(cfg, connector):
+            names, sources = claude_settings_hook_shell_env(cfg, workspace_dir)
+            if names:
+                problems.append(_claude_hook_shell_env_problem(names, sources, strict=True))
     elif connector == "codex":
         for path in _hook_config_paths(cfg, connector):
             document = _read_agent_config(path)
@@ -1146,6 +1150,175 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
                 problems.append(problem)
                 break
     return problems
+
+
+# Agent settings and shell variables that stop a shell-form hook command
+# (rel-1-0-6:GAP-0322). Mirrors internal/gateway/connector/hook_shell_env.go:
+# Claude Code starts a hook command through /bin/sh -c with its environment
+# plus the env block of its settings files; on RHEL and macOS /bin/sh is bash,
+# and SHELLOPTS=noexec makes it run none of the command. CLAUDE_CODE_SHELL_PREFIX
+# replaces the command with a program of its choosing. The strict tier refuses
+# such settings (agent_hook_switch_problems); the other tiers warn
+# (agent_hook_env_warnings).
+HOOK_SHELL_ENV_NAMES = ("BASHOPTS", "BASH_ENV", "CLAUDE_CODE_SHELL_PREFIX", "ENV", "FUNCNEST", "SHELLOPTS")
+_HOOK_SHELL_ENV_FUNCTION_PREFIX = "BASH_FUNC_"
+
+
+def _is_hook_shell_env_name(name: str) -> bool:
+    return name in HOOK_SHELL_ENV_NAMES or name.startswith(_HOOK_SHELL_ENV_FUNCTION_PREFIX)
+
+
+def _hook_shell_env_takes_effect(name: str, value: Any) -> bool:
+    if name.startswith(_HOOK_SHELL_ENV_FUNCTION_PREFIX):
+        return True
+    if isinstance(value, str):
+        return value.strip() != ""
+    return value is not None
+
+
+def _strict_policy_tier(cfg: Any, connector: str) -> bool:
+    """Whether *connector* is in the strict policy tier (GuardrailConfig.hook_policy_tier)."""
+
+    tier = getattr(getattr(cfg, "guardrail", None), "hook_policy_tier", None)
+    try:
+        return callable(tier) and str(tier(connector) or "").strip().lower() == "strict"
+    except Exception:  # noqa: BLE001 - an unresolvable tier is the default tier
+        return False
+
+
+def _managed_install(cfg: Any) -> bool:
+    return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+
+
+def _claude_settings_sources(cfg: Any, workspace_dir: str | None) -> list[Path]:
+    """Claude Code settings files whose env block applies, highest first."""
+
+    project = Path(workspace_dir or os.getcwd(), ".claude")
+    user = list(_hook_config_paths(cfg, "claudecode"))
+    try:
+        from defenseclaw.connector_paths import connector_config_files
+
+        user.append(Path(connector_config_files("claudecode")[0]))
+    except Exception:  # noqa: BLE001 - the recorded paths still apply
+        pass
+    return list(dict.fromkeys([project / "settings.local.json", project / "settings.json", *user]))
+
+
+def _claude_settings_env_blocks(cfg: Any, workspace_dir: str | None) -> list[tuple[Path, dict]]:
+    blocks = []
+    for path in _claude_settings_sources(cfg, workspace_dir):
+        document = _read_agent_config(path)
+        env = document.get("env") if isinstance(document, dict) else None
+        if isinstance(env, dict):
+            blocks.append((path, env))
+    return blocks
+
+
+def claude_settings_hook_shell_env(cfg: Any, workspace_dir: str | None = None) -> tuple[list[str], list[Path]]:
+    """Names the effective Claude Code env sets that stop its shell-form hooks, and the files that set them.
+
+    Claude Code merges env blocks name by name: the highest file that sets a
+    name decides it, so an empty value in a higher file clears a lower one.
+    """
+
+    decided: set[str] = set()
+    names: list[str] = []
+    sources: list[Path] = []
+    for path, env in _claude_settings_env_blocks(cfg, workspace_dir):
+        set_here = False
+        for key in sorted(k for k in env if isinstance(k, str)):
+            if not _is_hook_shell_env_name(key) or key in decided:
+                continue
+            decided.add(key)
+            if _hook_shell_env_takes_effect(key, env[key]):
+                names.append(key)
+                set_here = True
+        if set_here:
+            sources.append(path)
+    return sorted(names), sources
+
+
+def _claude_hook_shell_env_problem(names: list[str], sources: list[Path], *, strict: bool) -> HookProblem:
+    listed = ", ".join(names)
+    where = " and ".join(str(path) for path in sources)
+    text = (
+        f"{where} {'sets' if len(sources) == 1 else 'set'} {listed} in the Claude Code env block, and Claude Code "
+        "starts its hook commands through /bin/sh with that environment: a value such as SHELLOPTS=noexec stops "
+        "every DefenseClaw hook from running"
+    )
+    if strict:
+        text += "; the strict policy tier refuses it"
+    return HookProblem(text, f"remove {listed} from that env block, then restart Claude Code")
+
+
+def inherited_hook_shell_env(environ: Any, connector: str) -> list[str]:
+    """Shell variables in *environ* that stop *connector*'s shell-form hooks from running.
+
+    Only what does it after the hooks start with ``bash -p``: SHELLOPTS with
+    ``noexec`` (bash as /bin/sh runs none of the registered command) and, for
+    Claude Code, CLAUDE_CODE_SHELL_PREFIX (a program that replaces it). An
+    agent inherits them from the shell that starts it; DefenseClaw cannot
+    change that environment, so this is reported, not refused.
+    """
+
+    found = []
+    options = str(environ.get("SHELLOPTS", "") or "")
+    if "noexec" in [option.strip() for option in options.split(":")]:
+        found.append("SHELLOPTS")
+    if connector == "claudecode" and str(environ.get("CLAUDE_CODE_SHELL_PREFIX", "") or "").strip():
+        found.append("CLAUDE_CODE_SHELL_PREFIX")
+    return found
+
+
+def agent_hook_env_warnings(
+    cfg: Any,
+    connector: str,
+    *,
+    workspace_dir: str | None = None,
+    environ: Any = None,
+) -> list[HookProblem]:
+    """Warnings for settings and shell variables that can stop *connector*'s hooks (rel-1-0-6:GAP-0322).
+
+    Outside the strict tier a Claude Code settings env block that sets a name
+    in HOOK_SHELL_ENV_NAMES is a warning (the strict tier refuses it, see
+    agent_hook_switch_problems). The variables this shell would hand an agent
+    it starts are a warning in every tier. A managed Claude Code install pins
+    these names in its machine policy, which outranks both. Windows runs the
+    native launcher without /bin/sh.
+    """
+
+    if _is_windows():
+        return []
+    managed_claude = connector == "claudecode" and _managed_install(cfg)
+    if managed_claude:
+        return []
+    warnings: list[HookProblem] = []
+    settings_names: set[str] = set()
+    if connector == "claudecode":
+        for _path, env in _claude_settings_env_blocks(cfg, workspace_dir):
+            settings_names.update(key for key in env if isinstance(key, str))
+        if not _strict_policy_tier(cfg, connector):
+            names, sources = claude_settings_hook_shell_env(cfg, workspace_dir)
+            if names:
+                warnings.append(_claude_hook_shell_env_problem(names, sources, strict=False))
+    # A settings env block decides a name it sets, over the inherited value.
+    inherited = [
+        name
+        for name in inherited_hook_shell_env(os.environ if environ is None else environ, connector)
+        if name not in settings_names
+    ]
+    if inherited:
+        listed = ", ".join(inherited)
+        described = " and ".join("SHELLOPTS with noexec" if name == "SHELLOPTS" else name for name in inherited)
+        warnings.append(
+            HookProblem(
+                f"this shell's environment sets {described}, and an agent started from it starts its hook commands "
+                "through /bin/sh with that environment, so no DefenseClaw hook would run; DefenseClaw cannot change "
+                "the environment an agent inherits",
+                f"unset {listed} in the shell profile that sets it, then start the agent from a new shell",
+            )
+        )
+    return warnings
 
 
 def copilot_registration_switch_problem(path: Path | str) -> str:

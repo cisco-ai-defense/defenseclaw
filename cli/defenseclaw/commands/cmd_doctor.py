@@ -7773,6 +7773,23 @@ def _agent_hook_switch_problem(cfg, connector: str) -> str:
     return problems[0] if problems else ""
 
 
+def _emit_agent_hook_env_warnings(cfg, connector: str, label: str, r: _DoctorResult) -> None:
+    """WARN for agent settings or this shell's variables that can stop the hooks (rel-1-0-6:GAP-0322).
+
+    The strict tier fails the hooks row for the settings instead
+    (agent_hook_switch_problems); the inherited environment is a warning in
+    every tier: DefenseClaw cannot change what an agent inherits.
+    """
+    try:
+        from defenseclaw.hook_integrity import agent_hook_env_warnings
+
+        warnings = agent_hook_env_warnings(cfg, connector, workspace_dir=_workspace_dir(cfg) or None)
+    except Exception:  # noqa: BLE001 - the other hook rows still report what they can read.
+        return
+    for warning in warnings:
+        _emit("warn", label, str(warning), r=r, remediation=warning.repair)
+
+
 def _check_claudecode_hooks(
     cfg,
     r: _DoctorResult,
@@ -7880,6 +7897,7 @@ def _check_claudecode_hooks(
             r,
             hook_script_paths=hook_script_paths,
         )
+        _emit_agent_hook_env_warnings(cfg, "claudecode", "Claude Code hook environment", r)
     else:
         _emit(
             "fail",
@@ -7955,6 +7973,7 @@ def _check_codex_hooks(
         _emit("fail", "Codex hooks", switched_off, r=r, remediation=switched_off.repair)
     elif os.path.isfile(hook_script):
         _check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
+        _emit_agent_hook_env_warnings(cfg, "codex", "Codex hook environment", r)
         try:
             with open(config_path, "rb") as stream:
                 document = codex_toml.loads(stream.read(1024 * 1024 + 1))

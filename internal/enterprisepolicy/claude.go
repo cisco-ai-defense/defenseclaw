@@ -88,6 +88,20 @@ func renderClaudeDropIn(opts Options, policy config.ResolvedConnectorPolicy) ([]
 	if policy.ManagedHooksOnly == config.ManagedHooksOnlyEnforce {
 		doc.set("allowManagedHooksOnly", true)
 	}
+	if opts.goos() != "windows" {
+		// Outside Windows each handler is a shell-form command Claude Code
+		// starts through /bin/sh with the merged settings env. A user or
+		// project env block with SHELLOPTS=noexec made bash run none of it,
+		// and CLAUDE_CODE_SHELL_PREFIX replaces it (rel-1-0-6:GAP-0322).
+		// Managed env outranks every user, project and process value, and ""
+		// is unset to each of these names. Windows starts the launcher in
+		// the exec form, with no shell.
+		env := newObject()
+		for _, name := range connector.HookShellEnvPins() {
+			env.set(name, "")
+		}
+		doc.set("env", env)
+	}
 	hooks := newObject()
 	for _, group := range groups {
 		entry := newObject()

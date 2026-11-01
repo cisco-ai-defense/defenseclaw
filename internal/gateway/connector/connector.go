@@ -195,6 +195,12 @@ type SetupOpts struct {
 	// force-closed override in generated hooks.
 	HookFailMode string
 
+	// PolicyTier is the connector's policy tier
+	// (cfg.HookPolicyTierForConnector: strict, default or permissive). The
+	// strict tier refuses agent settings that stop shell-form hooks from
+	// running (hook_shell_env.go); the other tiers warn. Empty is default.
+	PolicyTier string
+
 	// SecureClientHookDelivery selects the Secure Client delivery contract
 	// (#1163): an unset HookFailMode renders open and an explicit value wins
 	// for every connector, Cursor included. Callers set it from

@@ -6874,6 +6874,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		// The hooks' outage mode (config.HookOutageFailMode); Secure Client
 		// renders the resolved mode as is (#1163).
 		HookFailMode:             s.currentConfig().EffectiveHookOutageFailModeForConnector(conn.Name()),
+		PolicyTier:               s.currentConfig().HookPolicyTierForConnector(conn.Name()),
 		SecureClientHookDelivery: s.currentConfig().SecureClientIntegration(),
 		GuardrailMode:            s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
 		HILTEnabled:              s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,

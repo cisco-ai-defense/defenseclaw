@@ -1353,11 +1353,24 @@ def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bo
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""
     if not problems:
-        return ""
+        return _hook_env_warning_suffix(cfg, connector)
     step = repair_command(connector, problems[0])
     if not (step.startswith("run ") or getattr(problems[0], "repair", "")):
         step = f"run `{step}`"
     return " — " + ux._style("DEGRADED", fg="red", bold=True) + ux.dim(f" ({problems[0]}; {step})")
+
+
+def _hook_env_warning_suffix(cfg, connector: str) -> str:
+    """`` — WARNING (...)`` when agent settings or this shell's environment can stop the hooks (rel-1-0-6:GAP-0322)."""
+    try:
+        from defenseclaw.hook_integrity import agent_hook_env_warnings
+
+        warnings = agent_hook_env_warnings(cfg, connector)
+    except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
+        return ""
+    if not warnings:
+        return ""
+    return " — " + ux._style("WARNING", fg="yellow", bold=True) + ux.dim(f" ({warnings[0]}; {warnings[0].repair})")
 
 
 def _connectors_not_started(health: dict | None) -> set[str]:
