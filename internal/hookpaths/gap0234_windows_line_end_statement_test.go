@@ -40,9 +40,31 @@ func TestWindowsLineEndEndsStatement(t *testing.T) {
 				command := first + eol + writer
 				single := first + "; " + writer
 				for _, dialect := range dialects {
-					if got := ActionCommandDecisionWithDialectAndGlobFacts(single, home, home, dialect, nil); got != "protected-target" {
-						t.Fatalf("dialect %q %q = %q, want protected-target (one line)", dialect, single, got)
+					// On a native Windows host Git Bash runs a POSIX call
+					// that has no Windows or PowerShell syntax
+					// (GitBashReadsAlone), and bash passes a quoted
+					// pattern as written: there the one-line verdict is
+					// the bash one, and the line end must give the same
+					// verdict as the ; (CI 41254377573 pk1).
+					bash := dialect == actionfacts.DialectPOSIX && GitBashReadsAlone(single, home)
+					want := ActionCommandDecisionWithDialectAndGlobFacts(single, home, home, dialect, nil)
+					if !bash && want != "protected-target" {
+						t.Fatalf("dialect %q %q = %q, want protected-target (one line)", dialect, single, want)
 					}
+					if got := ActionCommandDecisionWithDialectAndGlobFacts(command, home, home, dialect, nil); got != want {
+						t.Errorf("dialect %q %q = %q, want %q (its one-line twin)", dialect, command, got, want)
+					}
+				}
+			}
+		}
+	}
+	// The exact keys path is the keys file in every reading, Git Bash
+	// included, with no glob to resolve.
+	for _, first := range []string{"echo 'x'", "echo hi"} {
+		for _, eol := range []string{"\n", "\r\n"} {
+			for _, writer := range []string{"cp a.txt .ssh/authorized_keys", "tee .ssh/authorized_keys < a.txt", "mv a.txt .ssh/authorized_keys"} {
+				command := first + eol + writer
+				for _, dialect := range dialects {
 					if got := ActionCommandDecisionWithDialectAndGlobFacts(command, home, home, dialect, nil); got != "protected-target" {
 						t.Errorf("dialect %q %q = %q, want protected-target", dialect, command, got)
 					}
