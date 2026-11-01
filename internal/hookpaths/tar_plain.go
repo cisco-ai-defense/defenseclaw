@@ -53,9 +53,10 @@ func (b *boundedReader) Read(p []byte) (int, error) {
 // >> e3/p writes a plain file. The destination must be known (tarScan),
 // the archive word must appear once in the command, and the archive must
 // be plain, gzip or bzip2. The caller also requires that no statement
-// before the extraction can write a file (onlyDirectoryStatementsBefore):
-// another name for the archive (a hard link, a symbolic link) could
-// rewrite it first (review 8). The hook client reads the archive and
+// before the extraction can write a file and that the extraction statement
+// has no redirection (onlyDirectoryStatementsBefore): another name for the
+// archive (a hard link, a symbolic link) could rewrite it before tar opens
+// it (reviews 8 and 9). The hook client reads the archive and
 // records TarPlainFactPrefix; a gateway with client evidence needs the
 // fact and its own read of the archive. Anything else keeps the opaque
 // reading. A process outside the command can still replace the archive
@@ -217,7 +218,9 @@ func onlyDirectoryStatementsBefore(file *syntax.File, call *syntax.CallExpr, hom
 	}
 	for _, stmt := range statements {
 		if stmt.Cmd == syntax.Command(call) {
-			return true
+			// A redirection is evaluated before the call and may rewrite the
+			// archive through another name, including a hard link.
+			return len(stmt.Redirs) == 0
 		}
 		if len(stmt.Redirs) != 0 || stmt.Background || stmt.Negated {
 			return false

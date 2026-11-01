@@ -7,11 +7,15 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -163,6 +167,68 @@ func TestR107Review8ForgedTarPlainFact(t *testing.T) {
 		}
 		if got := f.post(t, connector, payload, header); got != "block" {
 			t.Errorf("managed %s forged plain fact: %s, want block", connector, got)
+		}
+	}
+}
+
+// A redirection command substitution can rewrite the archive through a hard
+// link before tar opens it.
+func TestR107Review9RedirectSubstitutionRewritesArchive(t *testing.T) {
+	r106Reader2CheckWith(t, []r106Reader2Row{
+		{"redirect substitution rewrites hard-linked archive", "project",
+			`tar -xf plain.tar -C d1 > "$(cp link.tar alias.tar; echo out)" && echo k >> d1/p`, "block"},
+	}, func(t *testing.T, f b36ManagedHookFixture) {
+		r107WriteTar(t, filepath.Join(f.project, "plain.tar"), false,
+			tar.Header{Name: "p", Typeflag: tar.TypeReg})
+		r107WriteTar(t, filepath.Join(f.project, "link.tar"), false,
+			tar.Header{Name: "p", Typeflag: tar.TypeSymlink, Linkname: "../../.ssh/authorized_keys"})
+		if err := os.Link(filepath.Join(f.project, "plain.tar"), filepath.Join(f.project, "alias.tar")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(f.project, "d1"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// A redirected extraction keeps the ordinary command verdict even when its
+// archive contains only regular files. A managed gateway that can read the
+// project gives the same answer as a per-user gateway.
+func TestR107Review9RedirectedPlainExtraction(t *testing.T) {
+	f := newB36ManagedHookFixture(t)
+	r107WriteTar(t, filepath.Join(f.project, "plain.tar"), false,
+		tar.Header{Name: "p", Typeflag: tar.TypeReg})
+	if err := os.Mkdir(filepath.Join(f.project, "d1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct{ name, command string }{
+		{"stdout to project log", `tar -xf plain.tar -C d1 > extract.log`},
+		{"stderr to project log", `tar -xf plain.tar -C d1 2> extract.log`},
+		{"stdout to dev null", `tar -xf plain.tar -C d1 > /dev/null`},
+		{"stderr to dev null", `tar -xf plain.tar -C d1 2> /dev/null`},
+	} {
+		payload := f.payload(t, row.command)
+		header := f.clientHeader(t, payload)
+		for _, connector := range []string{"claudecode", "codex"} {
+			for _, managed := range []bool{false, true} {
+				cfg := &config.Config{}
+				cfg.Guardrail.Mode = "action"
+				cfg.Guardrail.Connector = connector
+				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
+				req.Header.Set(hookpaths.Header, header)
+				if connector == "codex" {
+					setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+				}
+				if managed {
+					req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: f.home}))
+				}
+				recorder := httptest.NewRecorder()
+				api.handleAgentHook(connector).ServeHTTP(recorder, req)
+				if got := recorder.Body.String(); !strings.HasPrefix(got, `{"action":"allow"`) {
+					t.Errorf("%s managed=%v %s: %s, want allow", connector, managed, row.name, got)
+				}
+			}
 		}
 	}
 }
